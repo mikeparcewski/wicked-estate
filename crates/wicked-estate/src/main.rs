@@ -309,12 +309,19 @@ fn main() -> Result<()> {
             let store = open_store_ext(&db).map_err(to_any)?;
             maybe_print_staleness(store.as_ref(), &db);
             let s = store.stats().map_err(to_any)?;
+            let db_mb = s.db_size_bytes as f64 / 1_048_576.0;
             println!(
-                "nodes={} edges={} files={}",
-                s.node_count, s.edge_count, s.file_count
+                "nodes={} edges={} files={} db={:.1}MB",
+                s.node_count, s.edge_count, s.file_count, db_mb
             );
             for (k, v) in &s.edges_by_kind {
                 println!("  edge {k} = {v}");
+            }
+            if s.db_size_bytes > 500 * 1_048_576 {
+                println!(
+                    "  hint: db is {:.0}MB — run `wicked-estate compact` to reclaim space",
+                    db_mb
+                );
             }
             // W7: print git provenance if available.
             if let Ok(Some(info)) = store.repo_info() {

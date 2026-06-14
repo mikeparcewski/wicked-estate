@@ -71,6 +71,9 @@ pub struct GraphStats {
     pub unresolved_ref_count: u64,
     pub nodes_by_kind: BTreeMap<String, u64>,
     pub edges_by_kind: BTreeMap<String, u64>,
+    /// On-disk database size in bytes. Zero for in-memory stores.
+    #[serde(default)]
+    pub db_size_bytes: u64,
 }
 
 /// Result envelope for a [`crate::RetrievalTool`] invocation. `diagnostics` carries the

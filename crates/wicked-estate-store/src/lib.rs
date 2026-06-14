@@ -690,6 +690,7 @@ impl GraphRead for MemStore {
             unresolved_ref_count: self.unresolved.len() as u64,
             nodes_by_kind,
             edges_by_kind,
+            db_size_bytes: 0,
         })
     }
 }

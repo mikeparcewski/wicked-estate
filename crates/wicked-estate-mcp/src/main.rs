@@ -12,6 +12,7 @@
 //! ```
 
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::io::Write;
 use tokio::io::AsyncBufReadExt;
 use wicked_estate_core::AsyncGraphStore as _;
@@ -81,6 +82,12 @@ async fn main() -> Result<()> {
     };
 
     // 4. Async stdin loop.
+    // Request cache: key = "tool_name/args_json", value = full MCP response.
+    // Valid for the lifetime of this server process (graph is read-only while the server runs).
+    // LLM agents routinely call the same tool with the same args multiple times per session;
+    // this turns those repeated calls into memory lookups instead of SQL round-trips.
+    let mut request_cache: HashMap<String, serde_json::Value> = HashMap::new();
+
     let stdin = tokio::io::BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
     let stdout = std::io::stdout();
@@ -109,12 +116,41 @@ async fn main() -> Result<()> {
             }
         };
 
+        // Build a cache key for tools/call requests (read-only, deterministic).
+        let cache_key = if req.get("method").and_then(|m| m.as_str()) == Some("tools/call") {
+            let tool = req["params"]["name"].as_str().unwrap_or("");
+            let args = req["params"]["arguments"].to_string();
+            Some(format!("{tool}/{args}"))
+        } else {
+            None
+        };
+
+        // Cache hit: return without touching the pool.
+        if let Some(ref key) = cache_key {
+            if let Some(cached) = request_cache.get(key) {
+                // Patch the id to match the current request before returning.
+                let mut hit = cached.clone();
+                hit["id"] = req["id"].clone();
+                let bytes = serde_json::to_vec(&hit).context("failed to serialise cached response")?;
+                let mut out = stdout.lock();
+                out.write_all(&bytes)?;
+                out.write_all(b"\n")?;
+                out.flush()?;
+                continue;
+            }
+        }
+
         let ctx_clone = ctx.clone();
         let resp = store
             .with_read(move |graph| {
                 Ok(handle_request_ctx(graph, &req, &ctx_clone))
             })
             .await?;
+
+        // Store in cache (tools/call only; skip notifications which return null).
+        if let Some(key) = cache_key {
+            request_cache.insert(key, resp.clone());
+        }
 
         // Notifications return null — emit nothing.
         if resp.is_null() {

@@ -637,7 +637,15 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
         );
     }
 
-    store.stats()
+    let stats = store.stats()?;
+    // Warn when the DB crosses 500 MB — a signal to run `compact`.
+    if stats.db_size_bytes > 500 * 1_048_576 {
+        eprintln!(
+            "wicked-estate: db is {:.0}MB — run `wicked-estate compact` to reclaim space",
+            stats.db_size_bytes as f64 / 1_048_576.0
+        );
+    }
+    Ok(stats)
 }
 
 /// Set semantic annotations on a symbol — the requirement↔functionality link API. Partial update:

@@ -217,8 +217,12 @@ impl SqliteStore {
     /// Open an on-disk store (WAL mode), creating the schema if needed.
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let conn = Connection::open(path).map_err(st)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
-            .map_err(st)?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; \
+             PRAGMA synchronous=NORMAL; \
+             PRAGMA auto_vacuum=INCREMENTAL;",
+        )
+        .map_err(st)?;
         conn.execute_batch(SCHEMA).map_err(st)?;
         // Read history_enabled flag from meta (absent → OFF, the new default).
         // Old databases that never set this key default to OFF (no history) rather than ON.
@@ -1573,6 +1577,16 @@ impl GraphRead for SqliteStore {
             }
         }
 
+        let page_count: i64 = self
+            .conn
+            .query_row("PRAGMA page_count", [], |r| r.get(0))
+            .map_err(st)?;
+        let page_size: i64 = self
+            .conn
+            .query_row("PRAGMA page_size", [], |r| r.get(0))
+            .map_err(st)?;
+        let db_size_bytes = (page_count * page_size) as u64;
+
         Ok(GraphStats {
             node_count: node_count as u64,
             edge_count: edge_count as u64,
@@ -1580,6 +1594,7 @@ impl GraphRead for SqliteStore {
             unresolved_ref_count: unresolved_ref_count as u64,
             nodes_by_kind,
             edges_by_kind,
+            db_size_bytes,
         })
     }
 }

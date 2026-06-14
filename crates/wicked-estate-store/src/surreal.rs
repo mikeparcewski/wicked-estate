@@ -670,6 +670,7 @@ impl GraphRead for SurrealStore {
             unresolved_ref_count,
             nodes_by_kind,
             edges_by_kind,
+            db_size_bytes: 0,
         })
     }
 }
