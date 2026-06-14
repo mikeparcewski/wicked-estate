@@ -238,7 +238,7 @@ The `wicked-estate-mcp` binary is an MCP stdio server (JSON-RPC 2.0 over stdin/s
 ```bash
 wicked-estate-mcp --db /path/to/graph.db
 # or: wicked-estate-mcp                   # defaults to .wicked-estate/graph.db
-# or: CODE_INTEL_DB=:memory: wicked-estate-mcp
+# or: WICKED_ESTATE_DB=:memory: wicked-estate-mcp
 ```
 
 ### The 5 tools
@@ -263,7 +263,8 @@ All tools honor the agent-behavior rules from `docs/agent-behavior-rules.md`:
 
 ### Connecting from Claude / an MCP client
 
-In your MCP client config (e.g., `~/.claude/mcp_servers.json`):
+Full per-client setup (Claude Code, Cursor, Antigravity, Codex): **[mcp-integration.md](./mcp-integration.md)**.
+Quick example — in your client's `mcpServers` config:
 
 ```json
 {
@@ -283,7 +284,7 @@ Or with the env-var form:
   "mcpServers": {
     "wicked-estate": {
       "command": "/path/to/wicked-estate-mcp",
-      "env": { "CODE_INTEL_DB": "/path/to/repo/.wicked-estate/graph.db" }
+      "env": { "WICKED_ESTATE_DB": "/path/to/repo/.wicked-estate/graph.db" }
     }
   }
 }

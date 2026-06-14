@@ -8,7 +8,7 @@
 //! ```sh
 //! wicked-estate-mcp --db /path/to/graph.db
 //! wicked-estate-mcp                       # defaults to .wicked-estate/graph.db
-//! CODE_INTEL_DB=:memory: wicked-estate-mcp
+//! WICKED_ESTATE_DB=:memory: wicked-estate-mcp
 //! ```
 
 use anyhow::{Context, Result};
@@ -23,7 +23,7 @@ use wicked_estate_store::{SqliteStore, open_store};
 const DEFAULT_DB: &str = ".wicked-estate/graph.db";
 
 fn resolve_db_path() -> String {
-    // Priority: --db <path> > CODE_INTEL_DB env > default.
+    // Priority: --db <path> > WICKED_ESTATE_DB env > default.
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--db" {
@@ -32,7 +32,7 @@ fn resolve_db_path() -> String {
             }
         }
     }
-    std::env::var("CODE_INTEL_DB").unwrap_or_else(|_| DEFAULT_DB.to_string())
+    std::env::var("WICKED_ESTATE_DB").unwrap_or_else(|_| DEFAULT_DB.to_string())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -109,9 +109,15 @@ swappable impl behind a seam:
 
 ## MCP
 
+`wicked-estate-mcp` is a stdio MCP server (JSON-RPC 2.0) — register it in **Claude Code, Cursor,
+Antigravity, or Codex**. Per-client config: **[docs/mcp-integration.md](./docs/mcp-integration.md)**.
+
 ```sh
-wicked-estate index ./my-project --db graph.db
-wicked-estate-mcp --db graph.db        # speaks MCP over stdio; point your agent at it
+wicked-estate index ./my-project --db .wicked-estate/graph.db
+# Claude Code:
+claude mcp add wicked-estate -s project -- wicked-estate-mcp --db "$PWD/.wicked-estate/graph.db"
+# Cursor / Antigravity: mcpServers in ~/.cursor/mcp.json or ~/.gemini/config/mcp_config.json
+# Codex: a [mcp_servers.wicked-estate] table in ~/.codex/config.toml
 ```
 
 ## Adding a language
