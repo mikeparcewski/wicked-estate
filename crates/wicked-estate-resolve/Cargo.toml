@@ -18,6 +18,6 @@ protobuf = "3"
 libc = "0.2"
 
 [dev-dependencies]
-wicked-estate-store = { path = "../wicked-estate-store", version = "0.1.0" }
+wicked-estate-store = { path = "../wicked-estate-store", version = "0.1.1" }
 tempfile = "3"
 
