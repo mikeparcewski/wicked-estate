@@ -46,7 +46,21 @@ for c in "${CRATES[@]}"; do
       echo "    (dry-run can't resolve not-yet-published workspace deps — validated at real publish)"
     fi
   else
-    "${PUB[@]}"
+    # Resumable + rate-limit-aware: skip crates already on crates.io (so re-running resumes a
+    # partial publish), and retry through crates.io's NEW-crate rate limit (~1 per 10 min).
+    published=0
+    for attempt in $(seq 1 30); do
+      if "${PUB[@]}" 2>/tmp/we-publish.err; then published=1; break; fi
+      if grep -qiE "already uploaded|already exists" /tmp/we-publish.err; then
+        echo "    already published — skipping"; published=1; break
+      fi
+      if grep -qi "429 Too Many Requests" /tmp/we-publish.err; then
+        echo "    rate-limited (attempt $attempt) — waiting 120s"; sleep 120
+      else
+        echo "    ERROR publishing $c:"; cat /tmp/we-publish.err; exit 1
+      fi
+    done
+    [ "$published" -eq 1 ] || { echo "    gave up on $c after 30 retries"; exit 1; }
     # Wait for the crates.io index to propagate so the next (dependent) crate resolves it.
     sleep 15
   fi
