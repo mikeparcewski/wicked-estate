@@ -1,0 +1,14 @@
+{
+  "name": "wicked-estate",
+  "owner": {
+    "name": "Michael Parcewski",
+    "url": "https://github.com/mikeparcewski"
+  },
+  "plugins": [
+    {
+      "name": "wicked-estate",
+      "source": "./plugins/wicked-estate",
+      "description": "Registers the wicked-estate MCP server — code + infrastructure estate graph tools for LLM agents (search, retrieve, blast-radius, lineage, fetch-content)."
+    }
+  ]
+}

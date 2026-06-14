@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "wicked-estate": {
+      "command": "wicked-estate-mcp",
+      "args": ["--db", "${CLAUDE_PROJECT_DIR}/.wicked-estate/graph.db"]
+    }
+  }
+}

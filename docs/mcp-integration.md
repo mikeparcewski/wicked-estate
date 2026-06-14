@@ -4,6 +4,11 @@
 `tools/list` → `tools/call`, protocol `2024-11-05`). Any MCP-capable client can drive it — below are
 copy-paste recipes for **Claude Code, Cursor, Antigravity, and Codex**.
 
+> **On "plugins":** only **Claude Code** has a distributable *plugin* package — wicked-estate ships
+> one (`plugins/wicked-estate/`, installable via the marketplace below). Cursor, Antigravity, and
+> Codex have no plugin-package format; you register the MCP server via a config file or a CLI
+> command (one step, but not a packaged plugin). All four end up running the same stdio server.
+
 ## Prerequisites (once)
 
 ```sh
@@ -50,8 +55,15 @@ claude mcp list          # verify
 }
 ```
 
-A Claude Code **plugin** may also bundle this server (declare the same `mcpServers` block in the
-plugin), so installing the plugin registers wicked-estate automatically.
+**Or install the bundled plugin** (one step — registers the MCP server for you):
+
+```
+/plugin marketplace add mikeparcewski/wicked-estate
+/plugin install wicked-estate@wicked-estate
+```
+
+The plugin lives in `plugins/wicked-estate/` (manifest + a `.mcp.json` pointing at
+`${CLAUDE_PROJECT_DIR}/.wicked-estate/graph.db`). Prereq either way: `cargo install wicked-estate`.
 
 ## Cursor
 
@@ -98,6 +110,12 @@ Codex uses **TOML**, not JSON — `~/.codex/config.toml`:
 [mcp_servers.wicked-estate]
 command = "wicked-estate-mcp"
 args = ["--db", "/abs/path/to/repo/.wicked-estate/graph.db"]
+```
+
+Or, on recent Codex, via the CLI:
+
+```sh
+codex mcp add wicked-estate -- wicked-estate-mcp --db /abs/path/to/repo/.wicked-estate/graph.db
 ```
 
 ---

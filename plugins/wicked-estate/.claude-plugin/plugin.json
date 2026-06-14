@@ -1,0 +1,12 @@
+{
+  "name": "wicked-estate",
+  "description": "Registers the wicked-estate MCP server: a code + infrastructure estate graph for agents — definitions, who-calls-X, blast-radius, scoped context, across 91 languages plus mainframe/IaC estate.",
+  "version": "0.0.1",
+  "author": {
+    "name": "Michael Parcewski",
+    "url": "https://github.com/mikeparcewski/wicked-estate"
+  },
+  "homepage": "https://github.com/mikeparcewski/wicked-estate",
+  "license": "MIT",
+  "keywords": ["code-graph", "mcp", "blast-radius", "code-intelligence"]
+}

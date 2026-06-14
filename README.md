@@ -114,7 +114,7 @@ Antigravity, or Codex**. Per-client config: **[docs/mcp-integration.md](./docs/m
 
 ```sh
 wicked-estate index ./my-project --db .wicked-estate/graph.db
-# Claude Code:
+# Claude Code (or install the plugin: /plugin marketplace add mikeparcewski/wicked-estate):
 claude mcp add wicked-estate -s project -- wicked-estate-mcp --db "$PWD/.wicked-estate/graph.db"
 # Cursor / Antigravity: mcpServers in ~/.cursor/mcp.json or ~/.gemini/config/mcp_config.json
 # Codex: a [mcp_servers.wicked-estate] table in ~/.codex/config.toml
