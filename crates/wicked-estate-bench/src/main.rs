@@ -21,10 +21,15 @@ fn main() -> Result<()> {
         if defaults.is_empty() {
             eprintln!("No paths provided and no defaults found on disk.");
             eprintln!("Pass one or more repo paths as arguments:");
-            eprintln!("  cargo run -p wicked-estate-bench --bin wicked-estate-bench -- /path/to/repo");
+            eprintln!(
+                "  cargo run -p wicked-estate-bench --bin wicked-estate-bench -- /path/to/repo"
+            );
             return Ok(());
         }
-        eprintln!("wicked-estate-bench: using {} default repo(s)", defaults.len());
+        eprintln!(
+            "wicked-estate-bench: using {} default repo(s)",
+            defaults.len()
+        );
         for p in &defaults {
             eprintln!("  - {}", p.display());
         }

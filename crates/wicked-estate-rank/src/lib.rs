@@ -29,11 +29,11 @@
 //! * [`ranked_symbols`] — convenience wrapper: runs PageRank and returns the top-N symbols
 //!   sorted by score descending.
 
-use wicked_estate_core::{EdgeKind, GraphRead, Ranker, Result, SymbolId};
 use petgraph::Direction;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use std::collections::HashMap;
+use wicked_estate_core::{EdgeKind, GraphRead, Ranker, Result, SymbolId};
 
 // ─── constants ──────────────────────────────────────────────────────────────
 

@@ -12,9 +12,9 @@
 //! ```
 
 use anyhow::{Context, Result};
+use std::io::{self, BufRead, Write};
 use wicked_estate_mcp::{McpContext, handle_request_ctx};
 use wicked_estate_store::{SqliteStore, open_store};
-use std::io::{self, BufRead, Write};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CLI / env resolution

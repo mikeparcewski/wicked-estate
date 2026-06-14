@@ -28,7 +28,8 @@ fn sqlite_store_satisfies_graph_store_contract() {
 #[test]
 fn factory_opens_sqlite_and_rejects_unbuilt_backends() {
     // The external-DB seam: SQLite works; designed-not-built backends fail loudly.
-    let store = wicked_estate_store::open_store(":memory:").expect("open sqlite memory via factory");
+    let store =
+        wicked_estate_store::open_store(":memory:").expect("open sqlite memory via factory");
     assert_eq!(store.stats().expect("stats").node_count, 0);
     assert!(
         wicked_estate_store::open_store("postgres://localhost/db").is_err(),

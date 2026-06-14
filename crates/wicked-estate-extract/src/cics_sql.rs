@@ -29,12 +29,12 @@
 //! threads — they are `Send + Sync`. The `(?i)` flag makes every pattern case-insensitive so
 //! lowercase test snippets and production SHOUTING-COBOL both match.
 
+use regex::Regex;
+use std::sync::LazyLock;
 use wicked_estate_core::{
     EdgeKind, Extraction, Extractor, Language, Location, Node, NodeKind, Result, SourceFile, Span,
     Symbol, SymbolId, UnresolvedRef,
 };
-use regex::Regex;
-use std::sync::LazyLock;
 
 // ── Compiled regexes (compiled once, shared across threads) ──────────────────
 

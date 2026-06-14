@@ -22,11 +22,11 @@
 
 use std::sync::LazyLock;
 
+use regex::Regex;
 use wicked_estate_core::{
     EdgeKind, Extraction, Extractor, Language, Location, Node, NodeKind, Result, SourceFile, Span,
     Symbol, UnresolvedRef,
 };
-use regex::Regex;
 
 // ---------------------------------------------------------------------------
 // Pre-compiled operand patterns — `KEYWORD(value)` extraction, any order.

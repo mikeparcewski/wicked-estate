@@ -16,11 +16,11 @@
 //!   wicked-estate subscribe              [--db ...] [--since <seq>]
 
 use anyhow::{Context, Result};
-use wicked_estate_store::{GraphStoreMutExt, SqliteStore, open_store, open_store_ext};
 use notify::RecursiveMode;
 use notify_debouncer_full::new_debouncer;
 use std::path::Path;
 use std::time::Duration;
+use wicked_estate_store::{GraphStoreMutExt, SqliteStore, open_store, open_store_ext};
 
 fn to_any(e: wicked_estate_core::Error) -> anyhow::Error {
     anyhow::anyhow!(e.to_string())
@@ -169,7 +169,8 @@ fn main() -> Result<()> {
             if embeddings && db != ":memory:" {
                 let mut emb_store = SqliteStore::open(&db).map_err(to_any)?;
                 let embedder = wicked_estate::default_embedder();
-                let n = wicked_estate::compute_embeddings(&mut emb_store, &*embedder).map_err(to_any)?;
+                let n = wicked_estate::compute_embeddings(&mut emb_store, &*embedder)
+                    .map_err(to_any)?;
                 println!("embedded {n} symbols");
             }
         }
@@ -223,7 +224,8 @@ fn main() -> Result<()> {
             }
 
             let mut store = open_store_ext(&db).map_err(to_any)?;
-            let count = wicked_estate::ingest_scip(store.as_mut(), root, scip_path).map_err(to_any)?;
+            let count =
+                wicked_estate::ingest_scip(store.as_mut(), root, scip_path).map_err(to_any)?;
             println!("scip: ingested {count} precise edge(s) from {scip_path_str} into {db}");
         }
         // Task B: ingest a Terraform state file (live resource nodes → estate LIVE side).
@@ -699,7 +701,9 @@ fn main() -> Result<()> {
             println!(
                 "    to have been run first. Auto-runs npx scip-typescript if index.scip absent."
             );
-            println!("  wicked-estate tfstate <file>        [--db ...]  # index live Terraform state");
+            println!(
+                "  wicked-estate tfstate <file>        [--db ...]  # index live Terraform state"
+            );
             println!(
                 "  wicked-estate drift                 [--db ...]  # IaC vs live resource diff (W10)"
             );

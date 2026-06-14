@@ -26,11 +26,11 @@
 //! server can determine that commits have landed since the last index. The server
 //! computes this once at startup via `wicked_estate::commits_behind`.
 
+use serde_json::{Value, json};
 use wicked_estate_core::{GraphRead, RetrievalTool};
 use wicked_estate_retrieve::{
     BlastRadius, FetchContent, RetrieveEntity, SearchEntity, SemanticSearch, TraverseGraph,
 };
-use serde_json::{Value, json};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Crate version (injected by Cargo at compile time)
@@ -420,12 +420,12 @@ pub fn handle_request_ctx(store: &dyn GraphRead, req: &Value, ctx: &McpContext) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use wicked_estate_core::{
         Confidence, Edge, EdgeKind, GraphWrite, Language, Location, Node, NodeKind, ResolutionTier,
         Span, SymbolId,
     };
     use wicked_estate_store::MemStore;
-    use serde_json::json;
 
     // ── Fixture ──────────────────────────────────────────────────────────────
 
@@ -492,7 +492,10 @@ mod tests {
             "protocolVersion must be a string"
         );
         assert!(result["capabilities"]["tools"].is_object());
-        assert_eq!(result["serverInfo"]["name"].as_str().unwrap(), "wicked-estate");
+        assert_eq!(
+            result["serverInfo"]["name"].as_str().unwrap(),
+            "wicked-estate"
+        );
         assert!(result["serverInfo"]["version"].is_string());
     }
 

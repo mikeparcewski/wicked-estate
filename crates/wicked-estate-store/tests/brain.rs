@@ -2,7 +2,9 @@
 //! Covers both `MemStore` and `SqliteStore` to prove the inherent methods behave
 //! identically on both backends.
 
-use wicked_estate_core::{GraphRead, GraphWrite, Language, Location, Node, NodeKind, Span, SymbolId};
+use wicked_estate_core::{
+    GraphRead, GraphWrite, Language, Location, Node, NodeKind, Span, SymbolId,
+};
 use wicked_estate_store::{MemStore, SqliteStore};
 
 // ---------------------------------------------------------------------------

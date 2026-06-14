@@ -18,14 +18,14 @@
 //! [`TreeSitterExtractor::for_language`] to build one by name, or [`extractor_for_extension`] to
 //! map a file extension → language → extractor in one step (via the `languages.toml` manifest).
 
-use wicked_estate_core::{
-    Descriptor, Edge, EdgeKind, Error, Extraction, Extractor, Language, Location, Node, NodeKind,
-    ResolutionTier, Result, SourceFile, Span, Suffix, Symbol, SymbolId, UnresolvedRef,
-};
 use serde_json;
 use std::collections::{HashMap, HashSet};
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
+use wicked_estate_core::{
+    Descriptor, Edge, EdgeKind, Error, Extraction, Extractor, Language, Location, Node, NodeKind,
+    ResolutionTier, Result, SourceFile, Span, Suffix, Symbol, SymbolId, UnresolvedRef,
+};
 
 // ── Embedded query files ──────────────────────────────────────────────────────
 const RUST_QUERY: &str = include_str!("queries/rust.scm");

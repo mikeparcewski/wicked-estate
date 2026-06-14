@@ -39,12 +39,12 @@
 //!
 //! All regexes are compiled exactly once via [`std::sync::LazyLock`] and are `Send + Sync`.
 
+use regex::Regex;
+use std::sync::LazyLock;
 use wicked_estate_core::{
     EdgeKind, Extraction, Extractor, Language, Location, Node, NodeKind, Result, SourceFile, Span,
     Symbol, UnresolvedRef,
 };
-use regex::Regex;
-use std::sync::LazyLock;
 
 // ── Compiled regexes ──────────────────────────────────────────────────────────
 

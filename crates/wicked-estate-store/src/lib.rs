@@ -32,12 +32,12 @@ fn mem_cosine_similarity(a: &[f32], b: &[f32], a_norm: f32) -> f32 {
     (dot / (a_norm * b_norm)).clamp(-1.0, 1.0)
 }
 
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use wicked_estate_core::{
     Change, ChangeOp, Direction, Edge, EdgeKind, Error, GraphRead, GraphStats, GraphStore,
     GraphWrite, HistoricalEdge, Node, NodeKind, NodeSemantics, RepoInfo, Result, StoreCapabilities,
     Subgraph, SymbolId, SymbolIndex, SymbolQuery, TraversalSpec, UnresolvedRef,
 };
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 /// In-memory graph store: reference implementation + test double for the trait contract.
 #[derive(Debug, Default)]
@@ -799,7 +799,10 @@ pub trait GraphStoreMutExt: GraphStore {
     /// shadow tables during the main write loop.
     ///
     /// For `MemStore` this is identical to `upsert_nodes` (no separate FTS structure).
-    fn upsert_nodes_skip_fts(&mut self, nodes: &[wicked_estate_core::Node]) -> wicked_estate_core::Result<()>;
+    fn upsert_nodes_skip_fts(
+        &mut self,
+        nodes: &[wicked_estate_core::Node],
+    ) -> wicked_estate_core::Result<()>;
 
     /// Bulk-rebuild the FTS index for every node that belongs to any of the given `files`.
     ///
@@ -831,7 +834,10 @@ impl GraphStoreMutExt for SqliteStore {
         self.cache_get(key).ok().flatten()
     }
 
-    fn upsert_nodes_skip_fts(&mut self, nodes: &[wicked_estate_core::Node]) -> wicked_estate_core::Result<()> {
+    fn upsert_nodes_skip_fts(
+        &mut self,
+        nodes: &[wicked_estate_core::Node],
+    ) -> wicked_estate_core::Result<()> {
         self.upsert_nodes_no_fts(nodes)
     }
 
@@ -858,7 +864,10 @@ impl GraphStoreMutExt for MemStore {
     }
 
     /// MemStore has no FTS shadow table — identical to `upsert_nodes`.
-    fn upsert_nodes_skip_fts(&mut self, nodes: &[wicked_estate_core::Node]) -> wicked_estate_core::Result<()> {
+    fn upsert_nodes_skip_fts(
+        &mut self,
+        nodes: &[wicked_estate_core::Node],
+    ) -> wicked_estate_core::Result<()> {
         use wicked_estate_core::GraphWrite;
         self.upsert_nodes(nodes)
     }

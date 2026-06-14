@@ -14,10 +14,10 @@
 //! - MQSC `QALIAS TARGET(...)`     → the target queue                   (resolves_to)
 //! - IMS `DBD`/`SEGM PARENT=`      → segment hierarchy                  (Contains + parent)
 
-use wicked_estate_core::{Node, NodeKind};
-use wicked_estate_store::SqliteStore;
 use std::fs;
 use std::path::PathBuf;
+use wicked_estate_core::{Node, NodeKind};
+use wicked_estate_store::SqliteStore;
 
 fn fresh_dir() -> PathBuf {
     let d = std::env::temp_dir().join(format!("ci_xlang_estate_{}", std::process::id()));
@@ -84,7 +84,8 @@ fn fixtures() -> Vec<(&'static str, &'static str)> {
 /// True when `name`'s blast radius (all dependents, the user-facing query) contains a node of the
 /// given kind + name — i.e. the cross-boundary edge resolved and is traversable.
 fn blast_contains(store: &SqliteStore, query: &str, kind: NodeKind, dep_name: &str) -> bool {
-    let deps: Vec<Node> = wicked_estate::blast_radius_by_name(store, query, 12).expect("blast radius");
+    let deps: Vec<Node> =
+        wicked_estate::blast_radius_by_name(store, query, 12).expect("blast radius");
     deps.iter().any(|n| n.kind == kind && n.name == dep_name)
 }
 

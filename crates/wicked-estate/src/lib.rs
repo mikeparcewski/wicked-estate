@@ -23,6 +23,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use ignore::WalkBuilder;
+use rayon::prelude::*;
 use wicked_estate_core::{
     ChangeOp, Edge, EdgeKind, Extractor, GraphRead, GraphStats, Location, Node, NodeKind,
     NodeSemantics, RepoInfo, ResolutionTier, Resolver, Result, SourceFile, Span, Symbol, SymbolId,
@@ -33,12 +35,12 @@ use wicked_estate_extract::{
     RacfExtractor, TfstateCollector,
     treesitter::{TreeSitterExtractor, extractor_for_extension, is_minified_or_huge},
 };
-use wicked_estate_resolve::{ImportMapResolver, InfraResolver, NameResolver, ScopedNameResolver, resolve_all};
+use wicked_estate_resolve::{
+    ImportMapResolver, InfraResolver, NameResolver, ScopedNameResolver, resolve_all,
+};
 use wicked_estate_retrieve::Embedder;
 use wicked_estate_store::GraphStoreMutExt;
 use wicked_estate_store::SqliteStore;
-use ignore::WalkBuilder;
-use rayon::prelude::*;
 use xxhash_rust::xxh3::xxh3_64;
 
 /// Extensions handled by the grammar-less line extractors (JCL job streams, HLASM assembler), whose
@@ -1417,7 +1419,9 @@ mod tests {
         caller_id: Option<&str>,
         caller_name: Option<&str>,
     ) {
-        use wicked_estate_core::{Edge, EdgeKind, GraphWrite, Language, Location, ResolutionTier, Span};
+        use wicked_estate_core::{
+            Edge, EdgeKind, GraphWrite, Language, Location, ResolutionTier, Span,
+        };
         use wicked_estate_store::SqliteStore;
 
         let mut store = SqliteStore::open(path).expect("open temp store");

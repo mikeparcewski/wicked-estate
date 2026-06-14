@@ -19,12 +19,12 @@
 //! * R5 — placeholder staleness note emitted (full git-rev check is the MCP layer's job).
 //! * R7 — low-confidence edges flagged in diagnostics when present in traversals.
 
+use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet};
 use wicked_estate_core::{
     Direction, EdgeKind, GraphRead, Result, RetrievalResult, RetrievalTool, SymbolId, SymbolQuery,
     TraversalSpec,
 };
-use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -1273,11 +1273,13 @@ impl FastEmbedder {
         let mut model = TextEmbedding::try_new(
             InitOptions::new(EmbeddingModel::BGESmallENV15).with_show_download_progress(false),
         )
-        .map_err(|e| wicked_estate_core::Error::Invalid(format!("fastembed: model load failed: {e}")))?;
+        .map_err(|e| {
+            wicked_estate_core::Error::Invalid(format!("fastembed: model load failed: {e}"))
+        })?;
         // Probe the output dimensionality once so `dim()` reflects the model, not a hard-coded guess.
-        let probe = model
-            .embed(vec!["probe"], None)
-            .map_err(|e| wicked_estate_core::Error::Invalid(format!("fastembed: probe embed failed: {e}")))?;
+        let probe = model.embed(vec!["probe"], None).map_err(|e| {
+            wicked_estate_core::Error::Invalid(format!("fastembed: probe embed failed: {e}"))
+        })?;
         let dim = probe.first().map_or(384, Vec::len);
         Ok(Self {
             model: std::sync::Mutex::new(model),
@@ -1354,7 +1356,9 @@ impl Model2VecEmbedder {
         // normalize = true → unit vectors, matching HashEmbedder/FastEmbedder + the cosine path.
         let model =
             StaticModel::from_pretrained(repo_or_path, None, Some(true), None).map_err(|e| {
-                wicked_estate_core::Error::Invalid(format!("model2vec: load '{repo_or_path}' failed: {e}"))
+                wicked_estate_core::Error::Invalid(format!(
+                    "model2vec: load '{repo_or_path}' failed: {e}"
+                ))
             })?;
         let dim = model.encode_single("probe").len();
         if dim == 0 {
@@ -1395,17 +1399,29 @@ impl Embedder for Model2VecEmbedder {
 /// whole struct is `Send + Sync` as required by `RetrievalTool`.
 pub trait VectorStore: Send {
     /// Retrieve the `k` nearest symbols to `query_vec` by cosine similarity.
-    fn nearest(&self, query_vec: &[f32], k: usize) -> wicked_estate_core::Result<Vec<(SymbolId, f32)>>;
+    fn nearest(
+        &self,
+        query_vec: &[f32],
+        k: usize,
+    ) -> wicked_estate_core::Result<Vec<(SymbolId, f32)>>;
 }
 
 impl VectorStore for wicked_estate_store::MemStore {
-    fn nearest(&self, query_vec: &[f32], k: usize) -> wicked_estate_core::Result<Vec<(SymbolId, f32)>> {
+    fn nearest(
+        &self,
+        query_vec: &[f32],
+        k: usize,
+    ) -> wicked_estate_core::Result<Vec<(SymbolId, f32)>> {
         wicked_estate_store::MemStore::nearest(self, query_vec, k)
     }
 }
 
 impl VectorStore for wicked_estate_store::SqliteStore {
-    fn nearest(&self, query_vec: &[f32], k: usize) -> wicked_estate_core::Result<Vec<(SymbolId, f32)>> {
+    fn nearest(
+        &self,
+        query_vec: &[f32],
+        k: usize,
+    ) -> wicked_estate_core::Result<Vec<(SymbolId, f32)>> {
         wicked_estate_store::SqliteStore::nearest(self, query_vec, k)
     }
 }
@@ -1532,7 +1548,11 @@ impl RetrievalTool for SemanticSearch {
          knows the concept but not the exact symbol name. Fuse with name results via hybrid_search."
     }
 
-    fn invoke(&self, store: &dyn GraphRead, request: &Value) -> wicked_estate_core::Result<RetrievalResult> {
+    fn invoke(
+        &self,
+        store: &dyn GraphRead,
+        request: &Value,
+    ) -> wicked_estate_core::Result<RetrievalResult> {
         let query_str = match request.get("query").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => {
@@ -1601,12 +1621,12 @@ impl RetrievalTool for SemanticSearch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use wicked_estate_core::{
         Confidence, EdgeKind, Language, Location, Node, NodeKind, ResolutionTier, Span, SymbolId,
     };
     use wicked_estate_core::{Edge, GraphWrite};
     use wicked_estate_store::MemStore;
-    use serde_json::json;
 
     // ── Fixture helpers ──────────────────────────────────────────────────────
 

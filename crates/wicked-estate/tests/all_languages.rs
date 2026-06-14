@@ -4,11 +4,11 @@
 //! integration-seam regressions (e.g. a missing extension→language mapping in `languages.toml`)
 //! that the per-extractor unit tests in `wicked-estate-extract` cannot see.
 
-use wicked_estate_core::GraphRead;
-use wicked_estate_store::SqliteStore;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
+use wicked_estate_core::GraphRead;
+use wicked_estate_store::SqliteStore;
 
 /// (filename, source) for each wired language. Each snippet has at least one definition.
 fn fixtures() -> Vec<(&'static str, &'static str)> {

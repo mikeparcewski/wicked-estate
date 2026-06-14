@@ -4,15 +4,15 @@
 //! the per-node-query BFS in prior art/prior art). Passes the same conformance suite as
 //! `MemStore`, proving the `GraphStore` trait abstraction holds across backends (the W1.5 premise).
 
+use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
+use std::collections::{BTreeMap, HashSet};
 use wicked_estate_core::{
     Change, ChangeOp, Direction, Edge, Error, GraphRead, GraphStats, GraphWrite, HistoricalEdge,
     Node, NodeKind, NodeSemantics, RepoInfo, Result, StoreCapabilities, Subgraph, SymbolId,
     SymbolIndex, SymbolQuery, TraversalSpec, UnresolvedRef,
 };
-use rusqlite::{Connection, OptionalExtension, params};
-use serde::{Deserialize, Serialize};
-use sha1::{Digest, Sha1};
-use std::collections::{BTreeMap, HashSet};
 
 const SCHEMA: &str = include_str!("schema.sql");
 

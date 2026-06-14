@@ -33,7 +33,12 @@ fn load_fixture(filename: &str, lang: &str) -> SourceFile {
 
 /// Assert that `(name, kind)` appears in the extraction's non-File nodes.
 #[track_caller]
-fn assert_def(extraction: &wicked_estate_core::Extraction, lang: &str, name: &str, kind: &NodeKind) {
+fn assert_def(
+    extraction: &wicked_estate_core::Extraction,
+    lang: &str,
+    name: &str,
+    kind: &NodeKind,
+) {
     let found = extraction
         .nodes
         .iter()

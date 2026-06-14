@@ -11,13 +11,13 @@
 
 #![cfg(feature = "surrealdb")]
 
+use std::collections::{BTreeMap, HashSet};
+use surrealdb::Surreal;
+use surrealdb::engine::local::Mem;
 use wicked_estate_core::{
     Direction, Edge, EdgeKind, Error, GraphRead, GraphStats, GraphWrite, Node, NodeKind, Result,
     StoreCapabilities, Subgraph, SymbolId, SymbolQuery, TraversalSpec, UnresolvedRef,
 };
-use std::collections::{BTreeMap, HashSet};
-use surrealdb::Surreal;
-use surrealdb::engine::local::Mem;
 
 /// Map any displayable error into our storage error.
 fn se<E: std::fmt::Display>(e: E) -> Error {

@@ -30,12 +30,12 @@
 //! "from" anchor for PSB-originated refs is `Symbol::synthetic("ims-psb", &file.path)` — PSB
 //! granularity is sufficient because a PSB always maps to a single COBOL/PL-I program.
 
+use regex::Regex;
+use std::sync::LazyLock;
 use wicked_estate_core::{
     Edge, EdgeKind, Extraction, Extractor, Language, Location, Node, NodeKind, ResolutionTier,
     Result, SourceFile, Span, Symbol, SymbolId, UnresolvedRef,
 };
-use regex::Regex;
-use std::sync::LazyLock;
 
 // ── Compiled regex ────────────────────────────────────────────────────────────
 

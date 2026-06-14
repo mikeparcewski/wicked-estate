@@ -43,13 +43,13 @@
 //! but not `iac` = to-be-destroyed; attributes differ = to-be-updated. That diff lives in W10's
 //! drift detector, not here — this module only emits the LIVE side.
 
+use serde::Deserialize;
+use serde_json::Value;
+use std::collections::HashMap;
 use wicked_estate_core::{
     Descriptor, Edge, EdgeKind, Error, Extraction, Location, Node, NodeKind, ResolutionTier,
     Result, Span, Suffix, Symbol, SymbolId, UnresolvedRef,
 };
-use serde::Deserialize;
-use serde_json::Value;
-use std::collections::HashMap;
 
 // ── serde structures matching Terraform state v4 JSON ────────────────────────
 

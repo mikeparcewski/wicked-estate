@@ -60,13 +60,13 @@
 //! which is exactly what lets the graph connect them. The `node_scheme` field is the mechanism:
 //! set it to the same value in every rule that should contribute to the same logical node pool.
 
+use regex::Regex;
+use serde::Deserialize;
+use std::collections::HashMap;
 use wicked_estate_core::{
     Edge, EdgeKind, Language, Location, Node, NodeKind, Provenance, ResolutionTier, SourceFile,
     Span, Symbol,
 };
-use regex::Regex;
-use serde::Deserialize;
-use std::collections::HashMap;
 
 // ── TOML config schema ────────────────────────────────────────────────────────
 

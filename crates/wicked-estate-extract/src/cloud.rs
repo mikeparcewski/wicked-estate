@@ -39,8 +39,8 @@
 //! a future `ci-collect` crate or as match arms in [`open_cloud_collector`]; adding one requires
 //! **zero caller changes** (identical to ADR-003 `open_store` / ADR-006 `open_telemetry_sink`).
 
-use wicked_estate_core::{Error, Language, Location, Node, NodeKind, Result, Span, Symbol};
 use serde_json::Value;
+use wicked_estate_core::{Error, Language, Location, Node, NodeKind, Result, Span, Symbol};
 
 // ── Provider discriminator ────────────────────────────────────────────
 

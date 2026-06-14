@@ -13,13 +13,13 @@
 //! P7 — A seeded node's personalized score ≥ its global score (seed weighting
 //!      never demotes the seed — SEED_WEIGHT is a positive bias, not a penalty).
 
+use proptest::prelude::*;
 use wicked_estate_core::{
     Confidence, Edge, EdgeKind, GraphWrite, Language, Location, Node, NodeKind, Provenance, Ranker,
     Span, SymbolId,
 };
 use wicked_estate_rank::{PageRank, SEED_WEIGHT};
 use wicked_estate_store::MemStore;
-use proptest::prelude::*;
 
 // ─── graph builder helpers ────────────────────────────────────────────────────
 

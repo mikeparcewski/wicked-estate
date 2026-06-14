@@ -1,9 +1,9 @@
 //! End-to-end: write real source files → index through the full pipeline → query + blast-radius.
 //! Exercises EXTRACT (tree-sitter) → RESOLVE (name resolver) → STORE (SQLite) → traverse.
 
-use wicked_estate_store::SqliteStore;
 use std::fs;
 use std::path::PathBuf;
+use wicked_estate_store::SqliteStore;
 
 fn fresh_dir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("ci_e2e_{tag}_{}", std::process::id()));
@@ -58,7 +58,9 @@ fn end_to_end_index_resolve_blast_radius() {
 
     // Cross-language: the Python function is indexed and findable.
     assert_eq!(
-        wicked_estate::search(&store, "helper").expect("search").len(),
+        wicked_estate::search(&store, "helper")
+            .expect("search")
+            .len(),
         1,
         "python helper indexed"
     );

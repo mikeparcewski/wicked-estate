@@ -13,13 +13,13 @@
 //! P3 — Serde round-trip for `AttributeValue`, `SpanData`, `Metric`, `LogRecord`:
 //!      `serde_json::from_str(&to_string(x)) == x` for all generated inputs.
 
+use proptest::prelude::*;
 use wicked_estate_core::{
     AggregationTemporality, AttributeValue, EdgeKind, KeyValue, LogRecord, Metric, MetricData,
     MetricValue, NumberDataPoint, ResolutionTier, SeverityNumber, SpanContext, SpanData, SpanEvent,
     SpanId, SpanKind, SpanLink, SpanStatus, StatusCode, SymbolId, TraceId,
 };
 use wicked_estate_core::{Confidence, Edge};
-use proptest::prelude::*;
 
 // ─── strategy helpers ────────────────────────────────────────────────────────
 

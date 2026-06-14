@@ -4,9 +4,9 @@
 //! run the benchmark logic against it, and assert that the produced metrics are sensible.
 //! They do NOT depend on external repos (prior art, prior art, prior art).
 
-use wicked_estate_bench::run_benchmark;
 use std::fs;
 use std::path::PathBuf;
+use wicked_estate_bench::run_benchmark;
 
 /// Build a small fixture repo under a temp dir and return its path.
 ///
@@ -21,8 +21,11 @@ fn create_fixture_repo() -> PathBuf {
     // every call unique within the process; the pid disambiguates across processes.
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let uniq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp =
-        std::env::temp_dir().join(format!("wicked_estate_bench_fixture_{}_{}", std::process::id(), uniq));
+    let tmp = std::env::temp_dir().join(format!(
+        "wicked_estate_bench_fixture_{}_{}",
+        std::process::id(),
+        uniq
+    ));
     fs::create_dir_all(tmp.join("src")).expect("create fixture src dir");
 
     fs::write(
@@ -79,7 +82,11 @@ pub fn double(x: i32) -> i32 {
 fn create_scaled_fixture_repo(n_files: usize) -> PathBuf {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let uniq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = std::env::temp_dir().join(format!("wicked_estate_bench_scaled_{}_{}", std::process::id(), uniq));
+    let tmp = std::env::temp_dir().join(format!(
+        "wicked_estate_bench_scaled_{}_{}",
+        std::process::id(),
+        uniq
+    ));
     fs::create_dir_all(tmp.join("src")).expect("create scaled fixture src dir");
     for f in 0..n_files {
         let mut body = String::new();

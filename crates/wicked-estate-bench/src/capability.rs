@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use wicked_estate_store::SqliteStore;
 use serde::{Deserialize, Serialize};
+use wicked_estate_store::SqliteStore;
 
 // ---------------------------------------------------------------------------
 // Public metric types
@@ -311,8 +311,8 @@ fn benchmark_repo(repo_path: &Path) -> Result<RepoMetrics> {
             let search_us = elapsed_us(t1.elapsed());
 
             let t2 = Instant::now();
-            let br_nodes =
-                wicked_estate::blast_radius_by_name(&store, &query_symbol, 3).context("blast_radius")?;
+            let br_nodes = wicked_estate::blast_radius_by_name(&store, &query_symbol, 3)
+                .context("blast_radius")?;
             let br_us = elapsed_us(t2.elapsed());
 
             (search_us, br_us, br_nodes.len())
@@ -490,7 +490,8 @@ fn benchmark_repo(repo_path: &Path) -> Result<RepoMetrics> {
     let (db_bytes, bytes_per_node) = {
         let result = (|| -> Result<(u64, f64)> {
             let mut disk_store = SqliteStore::open(&db_path).context("open on-disk store")?;
-            wicked_estate::index_path(&mut disk_store, repo_path).context("index_path for footprint")?;
+            wicked_estate::index_path(&mut disk_store, repo_path)
+                .context("index_path for footprint")?;
             // Drop the store to flush WAL before measuring.
             drop(disk_store);
             let bytes = disk_size_bytes(&db_path);
@@ -928,7 +929,10 @@ pub fn write_markdown_report(metrics: &[RepoMetrics], report_path: &Path) -> Res
         f,
         "# Default repos (workspace root + any that exist on disk):"
     )?;
-    writeln!(f, "cargo run -p wicked-estate-bench --bin wicked-estate-bench")?;
+    writeln!(
+        f,
+        "cargo run -p wicked-estate-bench --bin wicked-estate-bench"
+    )?;
     writeln!(f)?;
     writeln!(f, "# Explicit paths:")?;
     writeln!(

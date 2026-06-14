@@ -658,7 +658,10 @@ pub fn measure_synth_precision(
     synth: &dyn Resolver,
     refs: &[UnresolvedRef],
     index: &dyn SymbolIndex,
-    gold: &std::collections::HashMap<(wicked_estate_core::SymbolId, String), wicked_estate_core::SymbolId>,
+    gold: &std::collections::HashMap<
+        (wicked_estate_core::SymbolId, String),
+        wicked_estate_core::SymbolId,
+    >,
 ) -> SynthPrecision {
     // Run the synthesizer; ignore errors (a failing synthesizer has precision 0).
     let edges = match synth.resolve(refs, index) {
@@ -788,14 +791,15 @@ pub fn scip_edges(
     index_bytes: &[u8],
     nodes: &[wicked_estate_core::Node],
 ) -> wicked_estate_core::Result<Vec<wicked_estate_core::Edge>> {
-    use wicked_estate_core::{Edge, EdgeKind, Location, NodeKind, ResolutionTier, SymbolId};
     use protobuf::Message as _;
     use scip::types::Index;
     use std::collections::HashMap;
+    use wicked_estate_core::{Edge, EdgeKind, Location, NodeKind, ResolutionTier, SymbolId};
 
     // ── decode ─────────────────────────────────────────────────────────────────
-    let index = Index::parse_from_bytes(index_bytes)
-        .map_err(|e| wicked_estate_core::Error::Resolution(format!("scip: protobuf decode error: {e}")))?;
+    let index = Index::parse_from_bytes(index_bytes).map_err(|e| {
+        wicked_estate_core::Error::Resolution(format!("scip: protobuf decode error: {e}"))
+    })?;
 
     // ── build file → nodes lookup ─────────────────────────────────────────────
     // Group our nodes by their relative_path file so Phase 1+2 lookups are cheap.
