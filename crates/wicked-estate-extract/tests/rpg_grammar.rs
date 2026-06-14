@@ -28,7 +28,7 @@ const CORPUS: &[&str] = &[
 fn rpg_corpus_parses_with_zero_errors() {
     let mut parser = tree_sitter::Parser::new();
     parser
-        .set_language(&tree_sitter_rpg::LANGUAGE.into())
+        .set_language(&wicked_estate_tree_sitter_rpg::LANGUAGE.into())
         .expect("rpg grammar must load");
     for path in CORPUS {
         let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));

@@ -13,6 +13,7 @@ cd "$(dirname "$0")/.."
 
 # Topological order: every crate's internal deps appear before it.
 CRATES=(
+  wicked-estate-tree-sitter-rpg
   wicked-estate-core
   wicked-estate-store
   wicked-estate-extract
@@ -21,7 +22,6 @@ CRATES=(
   wicked-estate-retrieve
   wicked-estate
   wicked-estate-mcp
-  wicked-estate-bench
 )
 
 DRY="${1:-}"

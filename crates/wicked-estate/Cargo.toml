@@ -7,7 +7,7 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 homepage = "https://github.com/mikeparcewski/wicked-estate"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["code-graph", "llm", "tree-sitter", "code-intelligence", "mcp"]
 categories = ["development-tools", "parsing", "command-line-utilities"]
 

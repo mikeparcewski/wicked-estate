@@ -48,6 +48,7 @@ Use the script — it publishes in topological order and waits for index propaga
 The order (deps before dependents):
 
 ```
+wicked-estate-tree-sitter-rpg   # vendored RPG grammar (dep of -extract)
 wicked-estate-core
 wicked-estate-store
 wicked-estate-extract
@@ -56,8 +57,8 @@ wicked-estate-resolve
 wicked-estate-retrieve
 wicked-estate          # the CLI binary crate (this is what `cargo install wicked-estate` fetches)
 wicked-estate-mcp
-wicked-estate-bench
 ```
+(`wicked-estate-bench` is internal tooling — marked `publish = false`, not published.)
 
 ### Alternative: cargo-workspaces
 

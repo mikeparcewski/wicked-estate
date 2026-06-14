@@ -2,7 +2,7 @@
 //!
 //! Authored in-house (no upstream grammar existed for RPG) via the template-extrapolate method,
 //! validated by a corpus parse-gate + extraction-count assertions in `wicked-estate-extract`. Exposes the
-//! standard `LANGUAGE: LanguageFn` so callers use `tree_sitter_rpg::LANGUAGE.into()`.
+//! standard `LANGUAGE: LanguageFn` so callers use `wicked_estate_tree_sitter_rpg::LANGUAGE.into()`.
 
 use tree_sitter_language::LanguageFn;
 

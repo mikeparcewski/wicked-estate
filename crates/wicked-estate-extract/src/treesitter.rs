@@ -421,7 +421,7 @@ fn lang_pascal() -> tree_sitter::Language {
 
 // Free-format RPG IV via the in-house grammar (vendor/tree-sitter-rpg) — authored, not published.
 fn lang_rpg() -> tree_sitter::Language {
-    tree_sitter_rpg::LANGUAGE.into()
+    wicked_estate_tree_sitter_rpg::LANGUAGE.into()
 }
 
 // ── Data-driven registry ──────────────────────────────────────────────────────

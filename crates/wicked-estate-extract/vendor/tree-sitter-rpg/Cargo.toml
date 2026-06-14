@@ -1,8 +1,9 @@
 [package]
-name = "tree-sitter-rpg"
+name = "wicked-estate-tree-sitter-rpg"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+repository = "https://github.com/mikeparcewski/wicked-estate"
 description = "Free-format RPG IV (ILE RPG) grammar for tree-sitter — wicked_estate symbols+calls subset"
 build = "bindings/rust/build.rs"
 include = ["bindings/rust/*.rs", "grammar.js", "src/**/*"]

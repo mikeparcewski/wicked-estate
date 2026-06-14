@@ -6752,14 +6752,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tree-sitter-rpg"
-version = "0.1.0"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
 name = "tree-sitter-ruby"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7483,7 +7475,6 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-r",
  "tree-sitter-racket",
- "tree-sitter-rpg",
  "tree-sitter-ruby",
  "tree-sitter-rust",
  "tree-sitter-scala",
@@ -7493,6 +7484,7 @@ dependencies = [
  "tree-sitter-typescript",
  "tree-sitter-yaml",
  "wicked-estate-core",
+ "wicked-estate-tree-sitter-rpg",
 ]
 
 [[package]]
@@ -7555,6 +7547,14 @@ dependencies = [
  "tokio",
  "wicked-estate-core",
  "zstd",
+]
+
+[[package]]
+name = "wicked-estate-tree-sitter-rpg"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
 ]
 
 [[package]]
