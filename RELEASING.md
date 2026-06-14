@@ -42,7 +42,7 @@ Use the script — it publishes in topological order and waits for index propaga
 
 ```sh
 ./scripts/publish.sh             # real publish
-./scripts/publish.sh --dry-run   # package each crate without uploading (skips verify on dependents)
+./scripts/publish.sh --dry-run   # validates the leaf; dependents only validate at real publish (their deps must be on crates.io first)
 ```
 
 The order (deps before dependents):
