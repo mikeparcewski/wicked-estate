@@ -134,6 +134,15 @@ const FORTRAN_QUERY: &str = include_str!("queries/fortran.scm");
 const PASCAL_QUERY: &str = include_str!("queries/pascal.scm");
 const RPG_QUERY: &str = include_str!("queries/rpg.scm");
 
+// ── W13 IaC language expansion ────────────────────────────────────────────────
+// W13.1 Nix: already wired above (NIX_QUERY / lang_nix / LANG_TABLE entry).
+// W13.2 Jinja2: tree-sitter-jinja2 v0.0.14 (uros-5, crates.io).
+// W13.3 Helm/Go-template: ngalaiko/tree-sitter-go-template — C source only, no crate on
+//   crates.io. Deferred: requires vendoring C source + build.rs. Track as W13.3-needs-vendoring.
+// W13.4 ARM Templates: semantic overlay on tree-sitter-json (already wired).
+const JINJA2_QUERY: &str = include_str!("queries/jinja2.scm");
+const ARM_QUERY: &str = include_str!("queries/arm.scm");
+
 // ── Grammar language fns (one per language) ──────────────────────────────────
 // Each function returns tree_sitter::Language so it can be stored as fn() -> Language.
 fn lang_rust() -> tree_sitter::Language {
@@ -422,6 +431,16 @@ fn lang_pascal() -> tree_sitter::Language {
 // Free-format RPG IV via the in-house grammar (vendor/tree-sitter-rpg) — authored, not published.
 fn lang_rpg() -> tree_sitter::Language {
     wicked_estate_tree_sitter_rpg::LANGUAGE.into()
+}
+
+// ── W13 IaC language expansion ────────────────────────────────────────────────
+// W13.2 Jinja2 — tree-sitter-jinja2 0.0.14 (uros-5, crates.io, ABI 15 / ts-0.25).
+fn lang_jinja2() -> tree_sitter::Language {
+    tree_sitter_jinja2::LANGUAGE.into()
+}
+// W13.4 ARM Templates — reuses tree-sitter-json (already a dep); arm.scm adds ARM-specific queries.
+fn lang_arm() -> tree_sitter::Language {
+    tree_sitter_json::LANGUAGE.into()
 }
 
 // ── Data-driven registry ──────────────────────────────────────────────────────
@@ -1005,6 +1024,26 @@ static LANG_TABLE: &[LangEntry] = &[
         ext: &["rpgle", "sqlrpgle"],
         make_language: lang_rpg,
         query_src: RPG_QUERY,
+    },
+    // ── W13 IaC language expansion ────────────────────────────────────────────
+    // W13.1 Nix: already wired above (name: "nix", ext: &["nix"]).
+    // W13.3 Helm/Go-template: deferred — no crates.io Rust binding exists for
+    //   ngalaiko/tree-sitter-go-template. Requires vendoring C source + build.rs.
+    LangEntry {
+        // W13.2 Jinja2 — GCP Deployment Manager + Ansible templating.
+        name: "jinja2",
+        ext: &["j2", "jinja", "jinja2"],
+        make_language: lang_jinja2,
+        query_src: JINJA2_QUERY,
+    },
+    LangEntry {
+        // W13.4 ARM Templates — Azure IaC; semantic overlay on tree-sitter-json.
+        // Extension "arm.json" is the conventional double-extension; the extractor
+        // dispatch also matches filenames like "azuredeploy.json" via the IaCExtractor path.
+        name: "arm",
+        ext: &["arm.json"],
+        make_language: lang_arm,
+        query_src: ARM_QUERY,
     },
 ];
 
@@ -4877,5 +4916,66 @@ See the [docs](docs/).
             defs >= 1,
             "pascal: expected >=1 def (unit/procedure/function), got {defs}"
         );
+    }
+
+    // ── W13 IaC language expansion smoke tests ────────────────────────────────
+    // W13.1 Nix: smoke_nix is already wired above (see fn smoke_nix).
+
+    #[test]
+    fn smoke_jinja2() {
+        let code = concat!(
+            "{% extends \"base.j2\" %}\n",
+            "{% include \"header.j2\" %}\n",
+            "{% macro render_item(item) %}\n",
+            "  {{ item }}\n",
+            "{% endmacro %}\n",
+            "{% block content %}\n",
+            "  {{ page_title }}\n",
+            "{% endblock %}\n",
+        );
+        let ex = TreeSitterExtractor::for_language("jinja2")
+            .expect("jinja2 grammar must compile")
+            .extract(&sf("page.j2", "jinja2", code))
+            .unwrap();
+        let imports = ex.refs.iter().filter(|r| r.kind == EdgeKind::Imports).count();
+        assert!(
+            imports >= 1,
+            "jinja2: expected >=1 import edge (include/extends), got {imports}"
+        );
+        let defs = ex
+            .nodes
+            .iter()
+            .filter(|n| !matches!(n.kind, NodeKind::File))
+            .count();
+        assert!(defs >= 1, "jinja2: expected >=1 def (macro/block/variable), got {defs}");
+    }
+
+    #[test]
+    fn smoke_arm() {
+        let code = concat!(
+            "{\n",
+            "  \"resources\": [\n",
+            "    {\n",
+            "      \"type\": \"Microsoft.Storage/storageAccounts\",\n",
+            "      \"name\": \"mystorage\",\n",
+            "      \"dependsOn\": [\n",
+            "        \"[resourceId('Microsoft.Network/virtualNetworks', 'myVnet')]\"\n",
+            "      ]\n",
+            "    }\n",
+            "  ]\n",
+            "}\n",
+        );
+        let ex = TreeSitterExtractor::for_language("arm")
+            .expect("arm grammar must compile")
+            .extract(&sf("azuredeploy.arm.json", "arm", code))
+            .unwrap();
+        let defs = ex
+            .nodes
+            .iter()
+            .filter(|n| !matches!(n.kind, NodeKind::File))
+            .count();
+        assert!(defs >= 1, "arm: expected >=1 def (resource type/name), got {defs}");
+        let imports = ex.refs.iter().filter(|r| r.kind == EdgeKind::Imports).count();
+        assert!(imports >= 1, "arm: expected >=1 import edge (dependsOn), got {imports}");
     }
 }

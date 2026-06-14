@@ -6644,6 +6644,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-jinja2"
+version = "0.0.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95559f2891f7cd3a9d0e891530244971be3f8d0ecfa14290913f6b6e5fef8b2d"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-json"
 version = "0.24.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7362,7 +7372,7 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "wicked-estate"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7384,7 +7394,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-bench"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -7397,7 +7407,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "proptest",
@@ -7408,7 +7418,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-extract"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arborium-ada",
  "arborium-awk",
@@ -7484,6 +7494,7 @@ dependencies = [
  "tree-sitter-html",
  "tree-sitter-java",
  "tree-sitter-javascript",
+ "tree-sitter-jinja2",
  "tree-sitter-json",
  "tree-sitter-julia",
  "tree-sitter-kotlin-ng",
@@ -7510,7 +7521,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-mcp"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -7523,7 +7534,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-rank"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "petgraph",
  "proptest",
@@ -7533,7 +7544,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-resolve"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "libc",
  "protobuf",
@@ -7547,7 +7558,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-retrieve"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "fastembed",
  "model2vec-rs",
@@ -7559,7 +7570,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-store"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "deadpool",
@@ -7576,7 +7587,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-tree-sitter-rpg"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cc",
  "tree-sitter-language",

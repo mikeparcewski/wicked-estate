@@ -107,7 +107,7 @@ tree-sitter-bicep = "1.1"
 tree-sitter-fortran = "0.6"
 tree-sitter-pascal = "0.10"
 # In-house grammar: free-format RPG IV (a symbols+calls subset). Source in vendor/tree-sitter-rpg.
-wicked-estate-tree-sitter-rpg = { path = "vendor/tree-sitter-rpg", version = "0.1.1" }
+wicked-estate-tree-sitter-rpg = { path = "vendor/tree-sitter-rpg", version = "0.1.2" }
 # tree-sitter-abap-sqry deferred: it pins tree-sitter ^0.26 (we're on 0.25); would need another
 # runtime bump for one niche SAP fork. ABAP coverage awaits a 0.26 bump or an ABI-≤15 ABAP grammar.
 arborium-dot = "2.18"
@@ -125,3 +125,4 @@ tree-sitter-cuda = "0.21"      # C++/CUDA fork, ABI 15
 tree-sitter-arduino = "0.24"   # inherits tree-sitter-cpp node set, ABI 15
 tree-sitter-sfapex = "3.0"     # Salesforce Apex (Java-shaped); language is in the `apex` submodule
 tree-sitter-racket = "0.24"    # s-expression grammar; predicate-driven query
+tree-sitter-jinja2 = "0.0.14"

@@ -709,3 +709,22 @@ ext = ["el"]
 grammar = "arborium-elisp"
 tier = "structural"
 caps = ["symbols"]
+
+# ── W13 IaC language expansion ──────────────────────────────────────────────
+
+[[language]]
+# W13.2 Jinja2 templating — GCP Deployment Manager + Ansible templates.
+name = "jinja2"
+ext = ["j2", "jinja", "jinja2"]
+grammar = "tree-sitter-jinja2"
+tier = "structural"
+caps = ["symbols", "imports"]
+
+[[language]]
+# W13.4 ARM Templates — Azure IaC (semantic overlay on tree-sitter-json).
+# Extensions: .arm.json, azuredeploy.json (also matched via filename convention).
+name = "arm"
+ext = ["arm.json"]
+grammar = "tree-sitter-json"
+tier = "structural"
+caps = ["symbols", "imports"]
