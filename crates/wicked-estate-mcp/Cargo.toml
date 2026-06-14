@@ -4,6 +4,7 @@ description = "MCP server exposing the wicked-estate retrieval tools."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 
 [[bin]]

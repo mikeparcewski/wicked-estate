@@ -4,6 +4,7 @@ description = "Cross-file and cross-language reference resolvers for wicked-esta
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]

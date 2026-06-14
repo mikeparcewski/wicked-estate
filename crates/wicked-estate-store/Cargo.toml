@@ -3,6 +3,7 @@ name = "wicked-estate-store"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 description = "GraphStore impls. MemStore (Wave 0 reference); SQLite+FTS5+sqlite-vec & SurrealDB land at Wave 1.5."
 
