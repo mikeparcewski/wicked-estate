@@ -190,7 +190,7 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
-            let mut results = crate::scip_auto::auto_scip(root);
+            let mut results = crate::scip_auto::auto_scip(root)?;
 
             let default_scip = root.join("index.scip");
             let already_listed = results.iter().any(|r| r.path == default_scip);

@@ -49,8 +49,9 @@ Current session (v0.1.0): **W9.3 ✅** Bicep fully wired (grammar + `.scm` + LAN
 | W10 | **Live estate + drift** (read-only cloud) | ◑ **W10.1 ✅** `TfstateCollector` + `wicked-estate tfstate` (`crates/wicked-estate-extract/src/tfstate.rs`); **W10.3 ✅** `estate_drift` + `wicked-estate drift` (iac-vs-live graph diff); **W10.2 ✅** `CloudCollector` trait + `MockCloudCollector` + `open_cloud_collector` factory built — interface+mock only; real AWS/Azure/GCP SDK impls **designed-not-built** (creds-blocked; zero caller changes needed when added, per ADR-004) | 3 / 3 (W10.2 interface-only, real SDKs creds-blocked) |
 | W11 | **Brain core** (content + cache + analytics) | ✅ **complete** — W11.1 content store ✅ (content-addressed by blob-SHA, FTS5, `FetchContent` MCP tool); W11.2 versioned query cache ✅ (`versioned cache-port`); W11.3 materialized analytics ✅ (PageRank precomputed at index time, hotspots served from cache) | 3 / 3 |
 | W12 | **Cross-graph / multi-repo brain** | ✅ **complete** — W12.1 graph registry + federated ATTACH ✅; W12.2 cross-graph query by name ✅ (`wicked-estate cross-graph`, `cross_graph_search` + `cross_graph_blast_radius`); W12.3 brain tools over MCP ✅ (`SemanticSearch`, `CrossGraphQuery`, `FetchContent`, `Lineage`) | 3 / 3 |
+| W13 | **IaC language expansion** (new grammars) | 🔵 **in-flight** — W13.1 Nix 🔵; W13.2 Jinja2 🔵; W13.3 Helm/Go-template 🔵; W13.4 ARM Templates (semantic overlay on JSON) 🔵 | 0 / 4 |
 
-**Built: 55 / 55 plan tasks** — all tasks have a verdict.
+**Built: 55 / 55 plan tasks** — all tasks have a verdict. W13 in-flight (4 new IaC languages).
 ✅ fully complete waves: **W0, W2, W4, W5, W6, W7, W8, W9, W11, W12**.
 ◑ partial or qualified:
 - **W1** (6/6 tasks resolved — W1.2/W1.5 are NO-GO verdicts for SurrealDB, not gaps; ADR-003);
@@ -197,6 +198,19 @@ Current session (v0.1.0): **W9.3 ✅** Bicep fully wired (grammar + `.scm` + LAN
 - [x] **W12.1** **Federated graph registry** — SQLite `ATTACH` of per-repo dbs; `db_paths` multi-db arg (`--db a.db --db b.db` or `--dbs a,b`); each repo separable + joinable by db path. **AC:** ✅ two repos queried together; results grouped by repo.
 - [x] **W12.2** **Cross-graph query** — `cross_graph_search` + `cross_graph_blast_radius` in `wicked-estate`; `wicked-estate cross-graph` command. Name-based matching; per-repo blast-radius; package-aware cross-repo edges are a future step (noted in CLI output). **AC:** ✅ change in repo A surfaces dependents in repo B (by name).
 - [x] **W12.3** **Brain tools over MCP** — `SemanticSearch`, `CrossGraphQuery`, `FetchContent`, `Lineage` tools live in `wicked-estate-mcp`. **AC:** ✅ each tool live.
+
+---
+
+## Wave 13 — IaC LANGUAGE EXPANSION  🔵 IN-FLIGHT · Deps: W9 · research: 2026-06-14
+
+> Extend IaC coverage beyond the W9 four (Terraform/CFN/K8s/Bicep) with real tree-sitter grammars.
+> Each language follows the standard add-lang workflow: crate/C-source → `languages.toml` entry →
+> `.scm` query file → integration test. Rules-as-data, zero core change.
+
+- [ ] **W13.1** **Nix** — `tree-sitter-nix` v0.3.0 (crates.io, 633K downloads, nix-community). Extract attribute-set bindings (`identifier = expr`), `import` path edges, `let … in` scope, function applications. NixOS configs, Flakes, dev shells → `NodeKind::Other("resource")` for top-level attribute sets. **AC:** smoke test passes; `wicked-estate index` on a `.nix` file produces ≥1 node and ≥1 import edge.
+- [ ] **W13.2** **Jinja2** — `tree-sitter-jinja2` v0.0.14 (crates.io). Extract template variable refs (`{{ var }}`), `{% include %}` / `{% import %}` / `{% extends %}` as import edges, `{% macro %}` definitions. Covers GCP Deployment Manager templates + Ansible templating layer. **AC:** smoke test on a `.j2` fixture with `{% include %}` produces ≥1 import edge.
+- [ ] **W13.3** **Helm / Go templates** — `ngalaiko/tree-sitter-go-template` (C source, 136★). Compile C source as `wicked-estate-extract` build-dep. Extract `{{ template "name" }}` as call edges, `{{ .Values.x }}` variable refs as struct nodes, `{{- define "name" }}` as function nodes. File extensions: `.gotmpl`, `.tpl`, plus YAML files in `templates/`. **AC:** smoke test on a Helm `deployment.yaml` produces ≥1 template-call edge.
+- [ ] **W13.4** **ARM Templates** — no dedicated grammar; overlay on `tree-sitter-json` (already wired). Post-process string values matching `^\[.*\]$` as ARM function calls: `resourceId(...)`, `reference(...)`, `listKeys(...)`, `concat(...)` → call edges; `parameters(...)` / `variables(...)` → variable-ref edges. ARM `dependsOn` array values → depends-on edges. File extension: `.arm.json`, `azuredeploy.json`. **AC:** smoke test on an ARM template fixture produces ≥1 `dependsOn` edge and ≥1 `resourceId` call edge.
 
 ---
 

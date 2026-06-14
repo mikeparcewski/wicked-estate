@@ -1,3 +1,4 @@
+use anyhow::bail;
 use std::path::{Path, PathBuf};
 
 pub struct ScipResult {
@@ -117,14 +118,15 @@ fn detected(indexer: &Indexer, root: &Path) -> bool {
     }
 }
 
-pub fn auto_scip(root: &Path) -> Vec<ScipResult> {
+pub fn auto_scip(root: &Path) -> anyhow::Result<Vec<ScipResult>> {
     let scip_dir = root.join(".scip");
     if let Err(e) = std::fs::create_dir_all(&scip_dir) {
         eprintln!("notice: could not create {}: {e}", scip_dir.display());
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let mut results = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
 
     for indexer in INDEXERS {
         if !detected(indexer, root) {
@@ -153,12 +155,16 @@ pub fn auto_scip(root: &Path) -> Vec<ScipResult> {
                 results.push(ScipResult { lang: indexer.lang, path });
             }
             Ok(status) => {
+                // Indexer was found and ran but exited non-zero — this is a real failure,
+                // not a "not installed" case. Collect and propagate so the caller can exit non-zero.
                 eprintln!(
-                    "notice: {} SCIP indexer exited with {} — {}",
+                    "error: {} SCIP indexer exited with {} — {}",
                     indexer.lang, status, indexer.hint
                 );
+                failed.push(format!("{} (exit {})", indexer.lang, status));
             }
             Err(_) => {
+                // Indexer binary not present — advisory notice only, not an error.
                 eprintln!(
                     "notice: {} SCIP indexer not found — {}",
                     indexer.lang, indexer.hint
@@ -168,5 +174,9 @@ pub fn auto_scip(root: &Path) -> Vec<ScipResult> {
     }
 
     results.retain(|r| r.path.exists());
-    results
+
+    if !failed.is_empty() {
+        bail!("SCIP indexer(s) failed: {}", failed.join(", "));
+    }
+    Ok(results)
 }

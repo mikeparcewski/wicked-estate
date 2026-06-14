@@ -47,6 +47,27 @@ pub fn open_sqlite_pool(path: &str, max_size: usize) -> Result<SqlitePool> {
         .map_err(|e| wicked_estate_core::Error::Invalid(e.to_string()))
 }
 
+impl SqlitePool {
+    /// Look up a cached response. Returns `None` if the key is absent or from an old graph version.
+    pub async fn cache_get(&self, key: &str) -> wicked_estate_core::Result<Option<String>> {
+        let key = key.to_string();
+        let obj = self.0.get().await.map_err(|e| {
+            wicked_estate_core::Error::Invalid(format!("pool checkout failed: {e}"))
+        })?;
+        tokio::task::block_in_place(move || obj.cache_get(&key))
+    }
+
+    /// Store a response for the current graph version.
+    pub async fn cache_put(&self, key: &str, value: &str) -> wicked_estate_core::Result<()> {
+        let key = key.to_string();
+        let value = value.to_string();
+        let mut obj = self.0.get().await.map_err(|e| {
+            wicked_estate_core::Error::Invalid(format!("pool checkout failed: {e}"))
+        })?;
+        tokio::task::block_in_place(move || obj.cache_put(&key, &value))
+    }
+}
+
 #[async_trait::async_trait]
 impl AsyncGraphStore for SqlitePool {
     async fn with_read<F, T>(&self, f: F) -> Result<T>

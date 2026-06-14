@@ -821,6 +821,15 @@ pub trait GraphStoreMutExt: GraphStore {
     ///
     /// For `MemStore`: no-op (MemStore has no FTS shadow table).
     fn bulk_rebuild_fts_for_files(&mut self, files: &[&str]) -> wicked_estate_core::Result<()>;
+
+    /// Reclaim freelist pages back to the OS via `PRAGMA incremental_vacuum`.
+    ///
+    /// Only meaningful for `SqliteStore` (which sets `auto_vacuum=INCREMENTAL`).  All other
+    /// backends use the default no-op below.  Never returns an error for the NONE-mode case
+    /// — that PRAGMA is a documented no-op when `auto_vacuum=NONE`.
+    fn incremental_vacuum(&mut self) -> wicked_estate_core::Result<()> {
+        Ok(())
+    }
 }
 
 impl GraphStoreMutExt for SqliteStore {
@@ -849,6 +858,10 @@ impl GraphStoreMutExt for SqliteStore {
 
     fn bulk_rebuild_fts_for_files(&mut self, files: &[&str]) -> wicked_estate_core::Result<()> {
         self.rebuild_fts_for_files(files)
+    }
+
+    fn incremental_vacuum(&mut self) -> wicked_estate_core::Result<()> {
+        self.incremental_vacuum()
     }
 }
 

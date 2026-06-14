@@ -637,6 +637,12 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
         );
     }
 
+    // Reclaim freelist pages accumulated by PRAGMA auto_vacuum=INCREMENTAL.
+    // Non-fatal: a failure here (e.g. read-only DB) should not abort an otherwise successful index.
+    if let Err(e) = store.incremental_vacuum() {
+        eprintln!("warning: incremental_vacuum failed (non-fatal): {e}");
+    }
+
     let stats = store.stats()?;
     // Warn when the DB crosses 500 MB — a signal to run `compact`.
     if stats.db_size_bytes > 500 * 1_048_576 {

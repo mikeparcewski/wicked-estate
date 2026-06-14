@@ -83,10 +83,18 @@ async fn main() -> Result<()> {
 
     // 4. Async stdin loop.
     // Request cache: key = "tool_name/args_json", value = full MCP response.
-    // Valid for the lifetime of this server process (graph is read-only while the server runs).
     // LLM agents routinely call the same tool with the same args multiple times per session;
     // this turns those repeated calls into memory lookups instead of SQL round-trips.
+    //
+    // Cache validity: we watch graph.db's mtime. Any external write (e.g. a concurrent
+    // `wicked-estate index` run) changes the mtime and causes a full cache clear on the
+    // next request, ensuring the agent always sees the current graph state.
     let mut request_cache: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut cache_db_mtime: Option<std::time::SystemTime> = if db_path != ":memory:" {
+        std::fs::metadata(&db_path).ok().and_then(|m| m.modified().ok())
+    } else {
+        None
+    };
 
     let stdin = tokio::io::BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
@@ -116,6 +124,18 @@ async fn main() -> Result<()> {
             }
         };
 
+        // Invalidate cache if the DB file was modified since last check (external re-index).
+        if let Some(ref mut baseline) = cache_db_mtime {
+            if let Ok(current) =
+                std::fs::metadata(&db_path).and_then(|m| m.modified())
+            {
+                if current != *baseline {
+                    request_cache.clear();
+                    *baseline = current;
+                }
+            }
+        }
+
         // Build a cache key for tools/call requests (read-only, deterministic).
         let cache_key = if req.get("method").and_then(|m| m.as_str()) == Some("tools/call") {
             let tool = req["params"]["name"].as_str().unwrap_or("");
@@ -125,8 +145,9 @@ async fn main() -> Result<()> {
             None
         };
 
-        // Cache hit: return without touching the pool.
+        // Cache hit: L1 (HashMap) then L2 (SQLite).
         if let Some(ref key) = cache_key {
+            // L1 — fast in-memory hit.
             if let Some(cached) = request_cache.get(key) {
                 // Patch the id to match the current request before returning.
                 let mut hit = cached.clone();
@@ -137,6 +158,21 @@ async fn main() -> Result<()> {
                 out.write_all(b"\n")?;
                 out.flush()?;
                 continue;
+            }
+            // L2 — SQLite persistent cache.
+            if let Ok(Some(raw)) = store.cache_get(key).await {
+                if let Ok(cached) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    // Warm L1 so subsequent hits stay in-memory.
+                    request_cache.insert(key.clone(), cached.clone());
+                    let mut hit = cached;
+                    hit["id"] = req["id"].clone();
+                    let bytes = serde_json::to_vec(&hit).context("failed to serialise cached response")?;
+                    let mut out = stdout.lock();
+                    out.write_all(&bytes)?;
+                    out.write_all(b"\n")?;
+                    out.flush()?;
+                    continue;
+                }
             }
         }
 
@@ -149,7 +185,13 @@ async fn main() -> Result<()> {
 
         // Store in cache (tools/call only; skip notifications which return null).
         if let Some(key) = cache_key {
-            request_cache.insert(key, resp.clone());
+            request_cache.insert(key.clone(), resp.clone());
+            // L2 — persist to SQLite for cross-restart reuse; best-effort, ignore errors.
+            if !resp.is_null() {
+                if let Ok(raw) = serde_json::to_string(&resp) {
+                    let _ = store.cache_put(&key, &raw).await;
+                }
+            }
         }
 
         // Notifications return null — emit nothing.

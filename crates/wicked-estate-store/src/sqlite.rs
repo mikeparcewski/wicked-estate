@@ -572,6 +572,22 @@ impl SqliteStore {
         })
     }
 
+    /// Reclaim free pages accumulated by incremental-vacuum mode back to the OS.
+    ///
+    /// `PRAGMA auto_vacuum=INCREMENTAL` tracks freed pages in a freelist but does not
+    /// automatically return them to the filesystem — you must call `PRAGMA incremental_vacuum`
+    /// to do so.  This method runs that PRAGMA with no page limit, reclaiming everything
+    /// currently in the freelist.
+    ///
+    /// If the database was opened with `auto_vacuum=NONE` (mode 0, e.g. an existing DB that
+    /// predates the INCREMENTAL setting), the PRAGMA is a documented no-op — no error is
+    /// returned in that case.
+    pub fn incremental_vacuum(&mut self) -> Result<()> {
+        self.conn
+            .execute_batch("PRAGMA incremental_vacuum;")
+            .map_err(st)
+    }
+
     /// Reachable set from `start` in one direction, via a bounded recursive CTE → {sym: min depth}.
     ///
     /// The CTE traverses edges by INTEGER sid (fast integer comparisons); the start sid is looked
