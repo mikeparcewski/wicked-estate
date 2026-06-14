@@ -65,7 +65,7 @@ pub struct StoreCapabilities {
 /// readers independently of the single writer: an external DB backs this with a connection pool
 /// or read replica, while the indexer holds the writer. Rankers and retrieval tools take
 /// `&dyn GraphRead`, so they can never mutate the graph. (See `docs/adr/ADR-003-storage-backends.md`.)
-pub trait GraphRead {
+pub trait GraphRead: Send {
     /// Native capabilities of this backend (drives retrieval fallbacks).
     fn capabilities(&self) -> StoreCapabilities;
     fn get_node(&self, id: &SymbolId) -> Result<Option<Node>>;
@@ -158,6 +158,25 @@ pub trait GraphWrite {
 /// extractors, resolvers, rankers, or tools**.
 pub trait GraphStore: GraphRead + GraphWrite + Send {}
 impl<T: GraphRead + GraphWrite + Send> GraphStore for T {}
+
+/// Async serving contract — implemented by connection pools and natively-async backends.
+///
+/// `with_read` hands the caller a `&dyn GraphRead` drawn from the pool (or constructed on the
+/// fly for natively-async backends via `block_in_place`). The sync retrieval tools are unchanged;
+/// only the connection-acquisition is async.
+///
+/// # Implementing for a new backend
+/// - **Pool over a sync store** (e.g. SQLite): check out a connection, run `f` in
+///   `spawn_blocking`, return the result.
+/// - **Natively async store** (e.g. Postgres): implement a thin `GraphRead` adapter that wraps
+///   the async client with `block_in_place`, pass it to `f`.
+#[async_trait::async_trait]
+pub trait AsyncGraphStore: Send + Sync {
+    async fn with_read<F, T>(&self, f: F) -> Result<T>
+    where
+        F: for<'a> FnOnce(&'a dyn GraphRead) -> Result<T> + Send + 'static,
+        T: Send + 'static;
+}
 
 /// Assigns importance scores over the graph — personalized PageRank seeded by `seeds`
 /// (100× weight on seeds; Aider repo-map pattern). Powers context ranking (Wave 4.1).

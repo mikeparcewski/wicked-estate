@@ -43,6 +43,6 @@ pub use repo::RepoInfo;
 pub use semantics::NodeSemantics;
 pub use symbol::{Descriptor, Package, Suffix, Symbol, SymbolId};
 pub use traits::{
-    Extractor, GraphRead, GraphStore, GraphWrite, Ranker, Resolver, RetrievalTool,
+    AsyncGraphStore, Extractor, GraphRead, GraphStore, GraphWrite, Ranker, Resolver, RetrievalTool,
     StoreCapabilities, SymbolIndex,
 };

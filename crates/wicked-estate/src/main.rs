@@ -15,6 +15,8 @@
 //!   wicked-estate watch <path>           [--db ...] [--history]
 //!   wicked-estate subscribe              [--db ...] [--since <seq>]
 
+mod scip_auto;
+
 use anyhow::{Context, Result};
 use notify::RecursiveMode;
 use notify_debouncer_full::new_debouncer;
@@ -179,54 +181,49 @@ fn main() -> Result<()> {
             let root = Path::new(root_str);
             ensure_db_dir(&db)?;
 
-            // Determine the .scip file path: explicit flag wins, otherwise default to <root>/index.scip.
-            let default_scip = root.join("index.scip");
-            let scip_path_str = scip_file
-                .as_deref()
-                .unwrap_or_else(|| default_scip.to_str().unwrap_or("index.scip"));
-            let scip_path = Path::new(scip_path_str);
-
-            // If index.scip doesn't exist, try to generate it via npx (best-effort).
-            if !scip_path.exists() {
-                eprintln!(
-                    "notice: {scip_path_str} not found — attempting: npx @sourcegraph/scip-typescript@0.4.0 index"
-                );
-                let status = std::process::Command::new("npx")
-                    .args(["@sourcegraph/scip-typescript@0.4.0", "index"])
-                    .current_dir(root)
-                    .status();
-                match status {
-                    Ok(s) if s.success() => {
-                        eprintln!("notice: scip-typescript indexing complete");
-                    }
-                    Ok(s) => {
-                        eprintln!(
-                            "notice: scip-typescript exited with {s} — \
-                             ensure the project has a tsconfig.json and node_modules installed"
-                        );
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "notice: could not run npx ({e}). \
-                             Install Node.js or run `npx @sourcegraph/scip-typescript@0.4.0 index` \
-                             manually in {root_str}, then re-run `wicked-estate scip {root_str}`"
-                        );
-                        return Ok(());
-                    }
-                }
+            if let Some(explicit) = scip_file.as_deref() {
+                let scip_path = Path::new(explicit);
+                let mut store = open_store_ext(&db).map_err(to_any)?;
+                let count =
+                    wicked_estate::ingest_scip(store.as_mut(), root, scip_path).map_err(to_any)?;
+                println!("scip (explicit): ingested {count} precise edge(s) from {explicit} into {db}");
+                return Ok(());
             }
 
-            if !scip_path.exists() {
-                eprintln!(
-                    "notice: {scip_path_str} still not found after npx attempt — nothing to ingest"
+            let mut results = crate::scip_auto::auto_scip(root);
+
+            let default_scip = root.join("index.scip");
+            let already_listed = results.iter().any(|r| r.path == default_scip);
+            if default_scip.exists() && !already_listed {
+                results.insert(
+                    0,
+                    crate::scip_auto::ScipResult {
+                        lang: "pregenerated",
+                        path: default_scip.clone(),
+                    },
+                );
+            }
+
+            if results.is_empty() {
+                println!(
+                    "notice: no SCIP indexers ran — provide --scip-file or install a supported SCIP indexer"
                 );
                 return Ok(());
             }
 
             let mut store = open_store_ext(&db).map_err(to_any)?;
-            let count =
-                wicked_estate::ingest_scip(store.as_mut(), root, scip_path).map_err(to_any)?;
-            println!("scip: ingested {count} precise edge(s) from {scip_path_str} into {db}");
+            for result in &results {
+                if !result.path.exists() {
+                    continue;
+                }
+                let count =
+                    wicked_estate::ingest_scip(store.as_mut(), root, &result.path).map_err(to_any)?;
+                let path_display = result.path.display();
+                println!(
+                    "scip ({}): ingested {count} precise edge(s) from {path_display} into {db}",
+                    result.lang
+                );
+            }
         }
         // Task B: ingest a Terraform state file (live resource nodes → estate LIVE side).
         "tfstate" => {

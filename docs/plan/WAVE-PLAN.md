@@ -31,7 +31,8 @@ W3.3 LSP ✅, W3.5 precision dashboard ✅, **W3.2 TSG superseded by SCIP** — 
 ✅; W9 fully landed (HCL/Terraform W9.1, CFN+k8s W9.2, infra resolver W9.4); W10.1 tfstate ✅,
 W10.3 drift ✅, W10.2 cloud-collector interface+mock ✅ (real SDK impls creds-blocked); W11/W12 ✅.
 Prior session: live-brain (watch/subscribe/compact/WAL), footprint 357→154 MB, speed fixes,
-OTel adapter interface (ADR-006)._
+OTel adapter interface (ADR-006).
+Current session (v0.1.0): **W9.3 ✅** Bicep fully wired (grammar + `.scm` + LANG_TABLE + smoke test — was already done, plan stale); **AsyncGraphStore + SqlitePool** (`wicked-estate-core/src/traits.rs` + `wicked-estate-store/src/pool.rs`) — deadpool connection pool, 8 concurrent connections, `spawn_blocking` for CPU work, async MCP main loop; **SCIP auto-detection** (`wicked-estate/src/scip_auto.rs`) — 9 languages auto-detected by marker files, indexers run to `.scip/<lang>.scip`; **55/55 plan tasks complete.** Version bumped `0.0.1 → 0.1.0`._
 
 | Wave | Theme | Status | Tasks |
 |---|---|---|---|
@@ -44,17 +45,16 @@ OTel adapter interface (ADR-006)._
 | W6 | Extensibility & non-code edges | ✅ **complete** — W6.1 `ExtraEdgeExtractor` ✅ (`crates/wicked-estate-extract/src/extra_edge.rs`, TOML rule config, event-bus/dispatch/hook edges); W6.2 ORM-aware `.scm` queries ✅; W6.3 `add-lang` workflow ✅ (proven by adding 60+ langs, `docs/add-lang.md`) | 3 / 3 |
 | W7 | Reactivity, governance, polish | ✅ **complete** — W7.1 reactive change-log + `watch` + `subscribe` ✅ (debounced watcher, JSON-line poll, monotonic cursor); W7.2 semantic blast-radius CI gate ✅; W7.3 graph-first retrieval + `GRAPH-FALLBACK:` marker ✅; W7.4 staleness signal, minified-file guard, `compact`/VACUUM ✅ | 4 / 4 |
 | W8 | Validation & hardening | ✅ **complete** — W8.1 agent-eval benchmark ✅; W8.2 perf/size budgets + footprint+speed regression gates ✅; W8.3 language coverage matrix ✅ (`docs/language-coverage-matrix.md`); W8.4 docs ✅ (`docs/getting-started.md`, `docs/extractor-sdk.md`) | 4 / 4 |
-| W9 | **IaC / estate extraction** | ◑ **W9.1 ✅** HCL/Terraform via `arborium-hcl` (ABI-15/ts-0.25) + `IaCExtractor`; **W9.2 ✅** CloudFormation + Kubernetes/Helm YAML extractors; **W9.4 ✅** `InfraResolver` (`crates/wicked-estate-resolve/src/lib.rs`) — binds resource refs at `ResolutionTier::Parsed` (confidence 1.0), handles CFN `!Ref` + HCL `depends_on`; **W9.3** Bicep/Pulumi = add-lang-mechanism-ready (grammar rows exist, no blocker beyond adding `.scm` + LangEntry) | 3 / 4 |
+| W9 | **IaC / estate extraction** | ✅ **complete** — **W9.1 ✅** HCL/Terraform via `arborium-hcl` (ABI-15/ts-0.25) + `IaCExtractor`; **W9.2 ✅** CloudFormation + Kubernetes/Helm YAML extractors; **W9.4 ✅** `InfraResolver` — binds resource refs at `ResolutionTier::Parsed` (confidence 1.0), handles CFN `!Ref` + HCL `depends_on`; **W9.3 ✅** Bicep (`tree-sitter-bicep`, `bicep.scm`, LANG_TABLE entry, smoke test) + Pulumi (host-language extractors already wired; `Pulumi.yaml` via YAML extractor) | 4 / 4 |
 | W10 | **Live estate + drift** (read-only cloud) | ◑ **W10.1 ✅** `TfstateCollector` + `wicked-estate tfstate` (`crates/wicked-estate-extract/src/tfstate.rs`); **W10.3 ✅** `estate_drift` + `wicked-estate drift` (iac-vs-live graph diff); **W10.2 ✅** `CloudCollector` trait + `MockCloudCollector` + `open_cloud_collector` factory built — interface+mock only; real AWS/Azure/GCP SDK impls **designed-not-built** (creds-blocked; zero caller changes needed when added, per ADR-004) | 3 / 3 (W10.2 interface-only, real SDKs creds-blocked) |
 | W11 | **Brain core** (content + cache + analytics) | ✅ **complete** — W11.1 content store ✅ (content-addressed by blob-SHA, FTS5, `FetchContent` MCP tool); W11.2 versioned query cache ✅ (`versioned cache-port`); W11.3 materialized analytics ✅ (PageRank precomputed at index time, hotspots served from cache) | 3 / 3 |
 | W12 | **Cross-graph / multi-repo brain** | ✅ **complete** — W12.1 graph registry + federated ATTACH ✅; W12.2 cross-graph query by name ✅ (`wicked-estate cross-graph`, `cross_graph_search` + `cross_graph_blast_radius`); W12.3 brain tools over MCP ✅ (`SemanticSearch`, `CrossGraphQuery`, `FetchContent`, `Lineage`) | 3 / 3 |
 
-**Built: 54 / 55 plan tasks** (all tasks have a verdict except W9.3 Bicep/Pulumi — not started, no blocker).
-✅ fully complete waves: **W0, W2, W4, W5, W6, W7, W8, W11, W12**.
+**Built: 55 / 55 plan tasks** — all tasks have a verdict.
+✅ fully complete waves: **W0, W2, W4, W5, W6, W7, W8, W9, W11, W12**.
 ◑ partial or qualified:
 - **W1** (6/6 tasks resolved — W1.2/W1.5 are NO-GO verdicts for SurrealDB, not gaps; ADR-003);
 - **W3** (4/5 resolved — W3.2 TSG SUPERSEDED-BY-SCIP, ADR-007; not an omission);
-- **W9** (3/4 — W9.3 Bicep/Pulumi not started, add-lang-mechanism-ready);
 - **W10** (3/3 tasks resolved — W10.2 cloud-collector is interface+mock-only, real SDK impls creds-blocked and designed-not-built).
 
 **Not built / creds-blocked:** W10.2 real cloud SDK impls (AWS Resource Explorer / Azure Resource Graph / GCP Cloud Asset Inventory — the `CloudCollector` trait + `open_cloud_collector` factory are the seam; adding a real impl is zero caller changes per ADR-004).
@@ -169,7 +169,7 @@ OTel adapter interface (ADR-006)._
 
 - [x] **W9.1** **Terraform/HCL extractor** — `hcl.scm` via `arborium-hcl` (ABI 15 / ts 0.25); `IaCExtractor` in `wicked-estate-extract`; resource nodes + `${…}` / `depends_on` / module edges. **AC:** ✅ real TF module indexes into resource nodes + dependency edges.
 - [x] **W9.2** **CloudFormation + Kubernetes/Helm** — YAML/JSON extractors; `Ref`/`Fn::GetAtt` → resource refs; k8s kind/owner refs. **AC:** ✅ CFN template + k8s manifest index.
-- [ ] **W9.3** **Azure Bicep + Pulumi** — add-lang-mechanism-ready (languages.toml rows exist, no grammar blocker for Bicep; Pulumi via host-language extractors already wired). **AC:** a Bicep file indexes. *Not started; no critical-path blocker.*
+- [x] **W9.3** **Azure Bicep + Pulumi** — **AC:** ✅ Bicep indexes (`tree-sitter-bicep`, `bicep.scm`, LANG_TABLE + smoke test); Pulumi covered via host-language extractors (Python/TS/Go/C#/Java already wired) + `Pulumi.yaml` via YAML extractor. Both confirmed in-tree.
 - [x] **W9.4** **`InfraResolver`** — `crates/wicked-estate-resolve/src/lib.rs`: binds resource refs at `ResolutionTier::Parsed` (confidence 1.0); handles CFN `!Ref`, HCL `depends_on`, cross-module refs; guards against code/resource name collision. **AC:** ✅ cross-resource edges resolve; blast-radius works on infra.
 
 ## Wave 10 — LIVE ESTATE + DRIFT  🟡 SEMI · Deps: W9 · designed in `ADR-004`

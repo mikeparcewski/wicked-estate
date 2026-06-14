@@ -14,10 +14,11 @@ path = "src/main.rs"
 [dependencies]
 wicked-estate-core.workspace = true
 wicked-estate-store.workspace = true
-wicked-estate-retrieve = { path = "../wicked-estate-retrieve", version = "0.0.1" }
-wicked-estate = { path = "../wicked-estate", version = "0.0.1" }
+wicked-estate-retrieve = { path = "../wicked-estate-retrieve", version = "0.1.0" }
+wicked-estate = { path = "../wicked-estate", version = "0.1.0", features = ["serve"] }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std"] }
 
 [dev-dependencies]
 wicked-estate-store = { workspace = true }

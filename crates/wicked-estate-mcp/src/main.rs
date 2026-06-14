@@ -12,9 +12,11 @@
 //! ```
 
 use anyhow::{Context, Result};
-use std::io::{self, BufRead, Write};
+use std::io::Write;
+use tokio::io::AsyncBufReadExt;
+use wicked_estate_core::AsyncGraphStore as _;
 use wicked_estate_mcp::{McpContext, handle_request_ctx};
-use wicked_estate_store::{SqliteStore, open_store};
+use wicked_estate_store::SqliteStore;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CLI / env resolution
@@ -36,14 +38,16 @@ fn resolve_db_path() -> String {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Stdio loop
+// Async stdio loop
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn run() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let db_path = resolve_db_path();
-    let store =
-        open_store(&db_path).with_context(|| format!("failed to open store at '{db_path}'"))?;
-    let store_ref: &dyn wicked_estate_core::GraphRead = &*store;
+
+    // 2. Open async connection pool instead of a single connection.
+    let store = wicked_estate::open_async_store(&db_path)
+        .with_context(|| format!("failed to open async store at '{db_path}'"))?;
 
     // W7.4: compute staleness once at startup. Best-effort — None on any failure.
     let commits_behind: Option<u64> = {
@@ -70,23 +74,24 @@ fn run() -> Result<()> {
         None
     };
 
+    // 3. Build McpContext (unchanged — commits_behind, has_semantic_search).
     let ctx = McpContext {
         commits_behind,
         has_semantic_search: has_semantic,
     };
 
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    let mut out = io::BufWriter::new(stdout.lock());
+    // 4. Async stdin loop.
+    let stdin = tokio::io::BufReader::new(tokio::io::stdin());
+    let mut lines = stdin.lines();
+    let stdout = std::io::stdout();
 
-    for line in stdin.lock().lines() {
-        let line = line.context("failed to read from stdin")?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+    while let Some(line) = lines.next_line().await.context("failed to read from stdin")? {
+        let line = line.trim().to_string();
+        if line.is_empty() {
             continue;
         }
 
-        let req: serde_json::Value = match serde_json::from_str(trimmed) {
+        let req: serde_json::Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
                 // Malformed JSON — return parse error (-32700).
@@ -96,6 +101,7 @@ fn run() -> Result<()> {
                     "error": { "code": -32700, "message": format!("Parse error: {e}") }
                 });
                 let bytes = serde_json::to_vec(&error_resp).unwrap_or_default();
+                let mut out = stdout.lock();
                 out.write_all(&bytes)?;
                 out.write_all(b"\n")?;
                 out.flush()?;
@@ -103,7 +109,12 @@ fn run() -> Result<()> {
             }
         };
 
-        let resp = handle_request_ctx(store_ref, &req, &ctx);
+        let ctx_clone = ctx.clone();
+        let resp = store
+            .with_read(move |graph| {
+                Ok(handle_request_ctx(graph, &req, &ctx_clone))
+            })
+            .await?;
 
         // Notifications return null — emit nothing.
         if resp.is_null() {
@@ -111,17 +122,11 @@ fn run() -> Result<()> {
         }
 
         let bytes = serde_json::to_vec(&resp).context("failed to serialise response")?;
+        let mut out = stdout.lock();
         out.write_all(&bytes)?;
         out.write_all(b"\n")?;
         out.flush()?;
     }
 
     Ok(())
-}
-
-fn main() {
-    if let Err(e) = run() {
-        eprintln!("wicked-estate-mcp: fatal: {e:#}");
-        std::process::exit(1);
-    }
 }

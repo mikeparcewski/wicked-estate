@@ -240,6 +240,12 @@ impl SqliteStore {
         })
     }
 
+    /// Open an on-disk store from a [`std::path::Path`] — thin delegate to [`Self::open`].
+    /// Used by the connection-pool manager, which holds a `PathBuf`.
+    pub fn open_file(path: &std::path::Path) -> Result<Self> {
+        Self::open(path)
+    }
+
     /// Open an in-memory store (tests, ephemeral use).
     /// history_enabled defaults to false (opt-in, same as on-disk stores).
     pub fn in_memory() -> Result<Self> {

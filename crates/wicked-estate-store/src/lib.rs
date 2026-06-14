@@ -14,6 +14,11 @@ pub mod surreal;
 #[cfg(feature = "surrealdb")]
 pub use surreal::SurrealStore;
 
+#[cfg(feature = "pool")]
+pub mod pool;
+#[cfg(feature = "pool")]
+pub use pool::{open_sqlite_pool, SqlitePool};
+
 // ── Vector math helpers for MemStore (no external deps) ────────────────────
 
 #[inline]

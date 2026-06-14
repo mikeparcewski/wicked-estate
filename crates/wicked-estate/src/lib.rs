@@ -1107,6 +1107,19 @@ pub fn compute_embeddings(store: &mut SqliteStore, embedder: &dyn Embedder) -> R
     Ok(count)
 }
 
+/// Open an async-capable store from a spec string.
+///
+/// Supported specs:
+/// - `sqlite:<path>` or bare `<path>` — `SqlitePool` via deadpool, 8 connections
+///
+/// Returns a `SqlitePool` which implements `AsyncGraphStore`. Deadpool manages
+/// the internal `Arc`, so the pool is cheap to clone if multiple owners are needed.
+#[cfg(feature = "serve")]
+pub fn open_async_store(spec: &str) -> crate::Result<wicked_estate_store::SqlitePool> {
+    let path = if let Some(p) = spec.strip_prefix("sqlite:") { p } else { spec };
+    wicked_estate_store::open_sqlite_pool(path, 8)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1948,6 +1948,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "deadpool"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0be2b1d1d6ec8d846f05e137292d0b89133caf95ef33695424c09568bdd39b1b"
+dependencies = [
+ "deadpool-runtime",
+ "lazy_static",
+ "num_cpus",
+ "tokio",
+]
+
+[[package]]
+name = "deadpool-runtime"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
+
+[[package]]
 name = "der"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7344,15 +7362,17 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "wicked-estate"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "ignore",
  "notify",
  "notify-debouncer-full",
  "rayon",
  "serde_json",
  "tempfile",
+ "tokio",
  "wicked-estate-core",
  "wicked-estate-extract",
  "wicked-estate-rank",
@@ -7364,7 +7384,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-bench"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -7377,8 +7397,9 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-core"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
+ "async-trait",
  "proptest",
  "serde",
  "serde_json",
@@ -7387,7 +7408,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-extract"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "arborium-ada",
  "arborium-awk",
@@ -7489,10 +7510,11 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-mcp"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde_json",
+ "tokio",
  "wicked-estate",
  "wicked-estate-core",
  "wicked-estate-retrieve",
@@ -7501,7 +7523,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-rank"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "petgraph",
  "proptest",
@@ -7511,7 +7533,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-resolve"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "libc",
  "protobuf",
@@ -7525,7 +7547,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-retrieve"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "fastembed",
  "model2vec-rs",
@@ -7537,13 +7559,16 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-store"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "deadpool",
  "rusqlite",
  "serde",
  "serde_json",
  "sha1",
  "surrealdb",
+ "tempfile",
  "tokio",
  "wicked-estate-core",
  "zstd",

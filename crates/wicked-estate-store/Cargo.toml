@@ -19,9 +19,18 @@ zstd = "0.13"
 # build/test path never compiles surrealdb.
 surrealdb = { version = "2", optional = true, default-features = false, features = ["kv-mem"] }
 tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros"] }
+async-trait = { version = "0.1", optional = true }
+deadpool = { version = "0.12", features = ["managed"], optional = true }
 
 [features]
 # Enable the W1.5 SurrealDB challenger.  NOT included in the default build.
 # Usage: cargo build -p wicked-estate-store --features surrealdb
 #        cargo test  -p wicked-estate-store --features surrealdb
 surrealdb = ["dep:surrealdb", "dep:tokio"]
+# Enable SqlitePool + AsyncGraphStore impl via deadpool + tokio.
+# Usage: cargo build -p wicked-estate-store --features pool
+pool = ["dep:async-trait", "dep:deadpool", "dep:tokio"]
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
