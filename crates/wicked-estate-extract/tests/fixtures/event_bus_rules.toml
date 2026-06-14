@@ -1,0 +1,43 @@
+# Event-bus drop-in extractor rules.
+#
+# These rules wire event-bus producer/consumer relationships into the code graph without any
+# core-code change. Each matched emit/subscribe call lands on the *same* synthetic
+# `topic:<name>` node (because both rules set `node_scheme = "event-bus-topic"`), so blast-radius
+# can cross the event-bus boundary: changing topic "orders.created" shows both producers and
+# consumers as dependents in a single graph traversal.
+
+[[rule]]
+name      = "event-bus-emit"
+file_glob = "**/*.js"
+# Regex decoded: emit\(["'](?P<topic>[\w.]+)
+pattern   = "emit\\([\"'](?P<topic>[\\w.]+)"
+
+[rule.emit_node]
+id_template   = "topic:{topic}"
+label_capture = "topic"
+kind          = "synthetic"
+# CRITICAL: same node_scheme as the consume rule so emit + subscribe share one SymbolId per topic.
+node_scheme   = "event-bus-topic"
+
+[rule.emit_edge]
+kind                = "other:emits"
+target_id_template  = "topic:{topic}"
+target_node_scheme  = "event-bus-topic"
+
+
+[[rule]]
+name      = "event-bus-consume"
+file_glob = "**/*.js"
+# Regex decoded: subscribe\(["'](?P<topic>[\w.]+)
+pattern   = "subscribe\\([\"'](?P<topic>[\\w.]+)"
+
+[rule.emit_node]
+id_template   = "topic:{topic}"
+label_capture = "topic"
+kind          = "synthetic"
+node_scheme   = "event-bus-topic"
+
+[rule.emit_edge]
+kind                = "other:consumes"
+target_id_template  = "topic:{topic}"
+target_node_scheme  = "event-bus-topic"

@@ -1,0 +1,40 @@
+[package]
+name = "wicked-estate"
+description = "Code + infrastructure estate graph for LLM agents: definitions, who-calls-X, blast-radius, scoped context."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage = "https://github.com/mikeparcewski/wicked-estate"
+readme = "../../README.md"
+keywords = ["code-graph", "llm", "tree-sitter", "code-intelligence", "mcp"]
+categories = ["development-tools", "parsing", "command-line-utilities"]
+
+[[bin]]
+name = "wicked-estate"
+path = "src/main.rs"
+
+[dependencies]
+wicked-estate-core.workspace = true
+wicked-estate-store.workspace = true
+wicked-estate-extract = { path = "../wicked-estate-extract", version = "0.0.1" }
+wicked-estate-resolve = { path = "../wicked-estate-resolve", version = "0.0.1" }
+wicked-estate-rank = { path = "../wicked-estate-rank", version = "0.0.1" }
+wicked-estate-retrieve = { path = "../wicked-estate-retrieve", version = "0.0.1" }
+anyhow.workspace = true
+ignore = "0.4"
+rayon = "1"
+serde_json = { workspace = true }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+notify = "8.2.0"
+notify-debouncer-full = "0.7.0"
+
+[features]
+# Real semantic embeddings end-to-end for `index --embeddings` + `semantic`. Enable a tier
+# (both may be on; FastEmbedder wins at runtime, else model2vec, else the lexical default):
+fastembed = ["wicked-estate-retrieve/fastembed"]   # contextual ONNX/BGE — heaviest, highest quality
+model2vec = ["wicked-estate-retrieve/model2vec"]   # static distilled — light, fast, configurable
+
+[dev-dependencies]
+tempfile = "3"

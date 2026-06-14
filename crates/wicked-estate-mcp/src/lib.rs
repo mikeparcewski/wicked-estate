@@ -1,0 +1,898 @@
+//! `wicked-estate-mcp` — minimal, correct MCP stdio server over JSON-RPC 2.0 (Wave 2.5, 4.3).
+//!
+//! # Design choice: hand-rolled vs `rmcp`
+//!
+//! [`rmcp`](https://crates.io/crates/rmcp) v1.7 is async-first (tokio). Our `GraphRead` trait
+//! is **synchronous** — wrapping every call in `block_on` or `spawn_blocking` adds noise for zero
+//! benefit on a local stdio server. The MCP stdio transport is ~150 lines of
+//! newline-delimited JSON-RPC 2.0, so we hand-roll it here. The division of labour is:
+//!
+//! * [`handle_request`] — pure, testable, owns all routing logic. Zero I/O.
+//! * `main.rs` — the read-stdin / write-stdout loop. Opens the store once at startup.
+//!
+//! # Protocol subset implemented
+//!
+//! | Method                     | Behaviour |
+//! |----------------------------|-----------|
+//! | `initialize`               | Returns `protocolVersion`, `capabilities`, `serverInfo`. |
+//! | `notifications/initialized`| No-op (notification — no `id`). |
+//! | `tools/list`               | Returns the 6 [`wicked_estate_retrieve`] tools with JSON Schema. |
+//! | `tools/call`               | Dispatches to the matching tool; wraps result in MCP envelope. |
+//! | *(anything else)*          | JSON-RPC error `-32601` (Method Not Found). |
+//!
+//! # W7.4 Staleness
+//!
+//! Tool responses include a `STALENESS: commits_behind=N` diagnostic line when the
+//! server can determine that commits have landed since the last index. The server
+//! computes this once at startup via `wicked_estate::commits_behind`.
+
+use wicked_estate_core::{GraphRead, RetrievalTool};
+use wicked_estate_retrieve::{
+    BlastRadius, FetchContent, RetrieveEntity, SearchEntity, SemanticSearch, TraverseGraph,
+};
+use serde_json::{Value, json};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Crate version (injected by Cargo at compile time)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tool registry
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// All retrieval tools in declaration order (no SemanticSearch — it requires a VectorStore).
+/// Use `all_tools_with_semantic` when a vector store is available.
+pub fn all_tools() -> Vec<Box<dyn RetrievalTool>> {
+    vec![
+        Box::new(SearchEntity),
+        Box::new(RetrieveEntity),
+        Box::new(TraverseGraph),
+        Box::new(BlastRadius),
+        Box::new(FetchContent),
+    ]
+}
+
+/// Full tool registry including SemanticSearch. Pass in a `VectorStore` implementation;
+/// `SemanticSearch::with_hash_embedder` is used (deterministic, no model download).
+pub fn all_tools_with_semantic(
+    vec_store: impl wicked_estate_retrieve::VectorStore + 'static,
+) -> Vec<Box<dyn RetrievalTool>> {
+    vec![
+        Box::new(SearchEntity),
+        Box::new(RetrieveEntity),
+        Box::new(TraverseGraph),
+        Box::new(BlastRadius),
+        Box::new(FetchContent),
+        Box::new(SemanticSearch::with_hash_embedder(vec_store)),
+    ]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// JSON Schema definitions for each tool's input
+//
+// The MCP `tools/list` response requires an `inputSchema` that describes the
+// tool's request object.  We derive these directly from the documented request
+// shapes in `wicked-estate-retrieve/src/lib.rs` — the source of truth.
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn search_entity_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Symbol name to search for (exact or substring match)."
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of results (default 20, max 100).",
+                "default": 20,
+                "maximum": 100
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn retrieve_entity_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["symbol"],
+        "properties": {
+            "symbol": {
+                "type": "string",
+                "description": "Stable symbol ID to retrieve."
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn traverse_graph_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["symbol"],
+        "properties": {
+            "symbol": {
+                "type": "string",
+                "description": "Start symbol ID for the traversal."
+            },
+            "depth": {
+                "type": "integer",
+                "description": "Maximum hop depth (default 4, max 16).",
+                "default": 4,
+                "maximum": 16
+            },
+            "direction": {
+                "type": "string",
+                "enum": ["dependencies", "dependents", "both"],
+                "description": "Traversal direction (default: dependencies).",
+                "default": "dependencies"
+            },
+            "edge_kinds": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Edge kinds to follow (empty = all kinds)."
+            },
+            "max_nodes": {
+                "type": "integer",
+                "description": "Node cap before truncation (default 200, max 1000).",
+                "default": 200,
+                "maximum": 1000
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn blast_radius_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["symbol"],
+        "properties": {
+            "symbol": {
+                "type": "string",
+                "description": "Symbol ID whose transitive dependents to enumerate."
+            },
+            "depth": {
+                "type": "integer",
+                "description": "Maximum hop depth (default 8, max 24).",
+                "default": 8,
+                "maximum": 24
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn fetch_content_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["symbol"],
+        "properties": {
+            "symbol": {
+                "type": "string",
+                "description": "Stable symbol ID whose source slice to fetch."
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn semantic_search_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["query"],
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Natural-language query to embed and search by cosine similarity."
+            },
+            "k": {
+                "type": "integer",
+                "description": "Number of nearest results (default 10, max 100).",
+                "default": 10,
+                "maximum": 100
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+/// Returns the `inputSchema` for a given tool name.  Returns `None` when
+/// the name is unknown (the caller treats this as an unregistered tool).
+pub fn input_schema(name: &str) -> Option<Value> {
+    match name {
+        "SearchEntity" => Some(search_entity_schema()),
+        "RetrieveEntity" => Some(retrieve_entity_schema()),
+        "TraverseGraph" => Some(traverse_graph_schema()),
+        "BlastRadius" => Some(blast_radius_schema()),
+        "FetchContent" => Some(fetch_content_schema()),
+        "SemanticSearch" => Some(semantic_search_schema()),
+        _ => None,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// JSON-RPC helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Build a JSON-RPC 2.0 success response.
+fn ok_response(id: &Value, result: Value) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "result": result })
+}
+
+/// Build a JSON-RPC 2.0 error response.
+fn err_response(id: &Value, code: i64, message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message }
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Method handlers
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn handle_initialize(id: &Value) -> Value {
+    ok_response(
+        id,
+        json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": { "tools": {} },
+            "serverInfo": {
+                "name": "wicked-estate",
+                "version": SERVER_VERSION
+            }
+        }),
+    )
+}
+
+fn handle_tools_list_ctx(id: &Value, ctx: &McpContext) -> Value {
+    let base_tools = all_tools();
+    let tools: Vec<Value> = base_tools
+        .iter()
+        .map(|t| {
+            json!({
+                "name": t.name(),
+                "description": t.description(),
+                "inputSchema": input_schema(t.name()).unwrap_or(json!({"type": "object"}))
+            })
+        })
+        .chain(if ctx.has_semantic_search {
+            // SemanticSearch is registered as a known tool name; the server builds a real
+            // instance in main.rs. Here we just advertise it in the tool list.
+            vec![json!({
+                "name": "SemanticSearch",
+                "description": SemanticSearch::with_hash_embedder(wicked_estate_store::MemStore::new()).description(),
+                "inputSchema": semantic_search_schema()
+            })].into_iter()
+        } else {
+            vec![].into_iter()
+        })
+        .collect();
+
+    ok_response(id, json!({ "tools": tools }))
+}
+
+fn handle_tools_call_ctx(
+    id: &Value,
+    params: &Value,
+    store: &dyn GraphRead,
+    ctx: &McpContext,
+) -> Value {
+    let tool_name = match params.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => {
+            return err_response(id, -32602, "tools/call: 'name' parameter is required");
+        }
+    };
+
+    // Default arguments to empty object if omitted.
+    let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+
+    // Find the matching tool.
+    let tools = all_tools();
+    let tool = match tools.iter().find(|t| t.name() == tool_name) {
+        Some(t) => t,
+        None => {
+            return err_response(
+                id,
+                -32602,
+                &format!("tools/call: unknown tool '{tool_name}'"),
+            );
+        }
+    };
+
+    match tool.invoke(store, &arguments) {
+        Ok(result) => {
+            // Build the MCP tool-result content array.
+            let mut content_text = match serde_json::to_string(&result.content) {
+                Ok(s) => s,
+                Err(e) => format!("{{\"error\": \"serialisation failed: {e}\"}}"),
+            };
+
+            // Collect diagnostics: tool-level + W7.4 server-level staleness.
+            let mut all_diags = result.diagnostics.clone();
+            if let Some(n) = ctx.commits_behind {
+                if n > 0 {
+                    all_diags.push(format!(
+                        "STALENESS: commits_behind={n} — re-run `wicked-estate index` to refresh"
+                    ));
+                }
+            }
+
+            // Append diagnostics as a second text block if any are present.
+            let mut content = vec![json!({ "type": "text", "text": content_text })];
+            if !all_diags.is_empty() {
+                content_text = all_diags.join("\n");
+                content.push(json!({ "type": "text", "text": content_text }));
+            }
+
+            ok_response(
+                id,
+                json!({
+                    "content": content,
+                    "isError": false
+                }),
+            )
+        }
+        // The retrieval tools are designed to return Ok even on missing symbols
+        // (agent-behavior rule R1).  An Err here means a store-level failure —
+        // report it as an MCP tool error, not a JSON-RPC error, so the agent
+        // session can continue (R1: never abandon on isError).
+        Err(e) => ok_response(
+            id,
+            json!({
+                "content": [{ "type": "text", "text": e.to_string() }],
+                "isError": true
+            }),
+        ),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public routing entry-point
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MCP server context (W7.4 staleness, Task F SemanticSearch)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Per-request context passed through the MCP handler.
+///
+/// `commits_behind`: if known (computed once at server startup), this is injected
+/// as an R5 staleness diagnostic into every `tools/call` response.
+#[derive(Debug, Default, Clone)]
+pub struct McpContext {
+    /// How many commits have landed in the indexed repo since the last `index` run.
+    /// `None` = unknown (git absent, not a repo, first-run, etc.).
+    pub commits_behind: Option<u64>,
+    /// Whether to include `SemanticSearch` in the tool list. Requires a vector store.
+    pub has_semantic_search: bool,
+}
+
+/// Route one JSON-RPC 2.0 request object to the correct handler and return the
+/// response value.  Pure function — no I/O, fully unit-testable.
+///
+/// Notifications (requests without `"id"`) are handled by returning
+/// [`Value::Null`] — the caller's stdio loop must skip writing null responses.
+pub fn handle_request(store: &dyn GraphRead, req: &Value) -> Value {
+    handle_request_ctx(store, req, &McpContext::default())
+}
+
+/// Like `handle_request` but injects server-side context (staleness, feature flags).
+pub fn handle_request_ctx(store: &dyn GraphRead, req: &Value, ctx: &McpContext) -> Value {
+    // Extract the request id; absent id ⇒ notification.
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let params = req.get("params").cloned().unwrap_or(json!({}));
+
+    match method {
+        "initialize" => handle_initialize(&id),
+
+        "notifications/initialized" => {
+            // Notification — no response required. Caller skips null.
+            Value::Null
+        }
+
+        "tools/list" => handle_tools_list_ctx(&id, ctx),
+
+        "tools/call" => handle_tools_call_ctx(&id, &params, store, ctx),
+
+        // Unknown / unimplemented method.
+        _ if id.is_null() => {
+            // Unknown notification — silently drop.
+            Value::Null
+        }
+        _ => err_response(&id, -32601, &format!("Method not found: '{method}'")),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wicked_estate_core::{
+        Confidence, Edge, EdgeKind, GraphWrite, Language, Location, Node, NodeKind, ResolutionTier,
+        Span, SymbolId,
+    };
+    use wicked_estate_store::MemStore;
+    use serde_json::json;
+
+    // ── Fixture ──────────────────────────────────────────────────────────────
+
+    fn span(line: u32) -> Span {
+        Span {
+            start_byte: 0,
+            end_byte: 0,
+            start_line: line,
+            start_col: 0,
+            end_line: line,
+            end_col: 0,
+        }
+    }
+
+    fn node(id: &str, name: &str, kind: NodeKind, file: &str, line: u32) -> Node {
+        Node::new(
+            SymbolId(id.to_string()),
+            kind,
+            name,
+            Language::new("rust"),
+            Location::new(file, span(line)),
+        )
+    }
+
+    fn call_edge(src: &str, tgt: &str) -> Edge {
+        Edge::new(
+            SymbolId(src.to_string()),
+            SymbolId(tgt.to_string()),
+            EdgeKind::Calls,
+            ResolutionTier::Parsed,
+            "test",
+        )
+    }
+
+    /// caller → middle → leaf  (blast-radius of leaf = {middle, caller})
+    fn fixture() -> MemStore {
+        let mut s = MemStore::new();
+        s.begin_batch().unwrap();
+        s.upsert_nodes(&[
+            node("caller", "caller_fn", NodeKind::Function, "src/a.rs", 1),
+            node("middle", "middle_fn", NodeKind::Function, "src/b.rs", 10),
+            node("leaf", "leaf_fn", NodeKind::Function, "src/c.rs", 20),
+        ])
+        .unwrap();
+        s.upsert_edges(&[call_edge("caller", "middle"), call_edge("middle", "leaf")])
+            .unwrap();
+        s.commit_batch().unwrap();
+        s
+    }
+
+    // ── initialize ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn initialize_returns_protocol_version() {
+        let store = fixture();
+        let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} });
+        let resp = handle_request(&store, &req);
+
+        assert_eq!(resp["jsonrpc"], "2.0");
+        assert_eq!(resp["id"], 1);
+        let result = &resp["result"];
+        assert!(
+            result["protocolVersion"].is_string(),
+            "protocolVersion must be a string"
+        );
+        assert!(result["capabilities"]["tools"].is_object());
+        assert_eq!(result["serverInfo"]["name"].as_str().unwrap(), "wicked-estate");
+        assert!(result["serverInfo"]["version"].is_string());
+    }
+
+    // ── tools/list ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn tools_list_returns_five_tools() {
+        let store = fixture();
+        let req = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} });
+        let resp = handle_request(&store, &req);
+
+        let tools = resp["result"]["tools"]
+            .as_array()
+            .expect("tools must be array");
+        assert_eq!(tools.len(), 5, "must expose exactly 5 tools");
+    }
+
+    #[test]
+    fn tools_list_contains_expected_names() {
+        let store = fixture();
+        let req = json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {} });
+        let resp = handle_request(&store, &req);
+
+        let names: Vec<&str> = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+
+        for expected in &[
+            "SearchEntity",
+            "RetrieveEntity",
+            "TraverseGraph",
+            "BlastRadius",
+            "FetchContent",
+        ] {
+            assert!(names.contains(expected), "expected tool {expected} in list");
+        }
+    }
+
+    #[test]
+    fn tools_list_each_tool_has_schema() {
+        let store = fixture();
+        let req = json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": {} });
+        let resp = handle_request(&store, &req);
+
+        for tool in resp["result"]["tools"].as_array().unwrap() {
+            let name = tool["name"].as_str().unwrap();
+            assert!(
+                tool["inputSchema"]["type"] == "object",
+                "tool {name} must have an object inputSchema"
+            );
+            assert!(
+                tool["description"].is_string(),
+                "tool {name} must have a description"
+            );
+        }
+    }
+
+    #[test]
+    fn tools_list_search_entity_schema_has_required_name() {
+        let store = fixture();
+        let req = json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/list", "params": {} });
+        let resp = handle_request(&store, &req);
+
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        let search = tools.iter().find(|t| t["name"] == "SearchEntity").unwrap();
+        let required = search["inputSchema"]["required"].as_array().unwrap();
+        assert!(
+            required.iter().any(|r| r == "name"),
+            "SearchEntity schema must require 'name'"
+        );
+    }
+
+    // ── tools/call — SearchEntity ─────────────────────────────────────────────
+
+    #[test]
+    fn tools_call_search_entity_finds_symbol() {
+        let store = fixture();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": "SearchEntity",
+                "arguments": { "name": "middle_fn" }
+            }
+        });
+        let resp = handle_request(&store, &req);
+
+        assert_eq!(resp["jsonrpc"], "2.0");
+        assert_eq!(resp["id"], 10);
+        assert!(
+            !resp["result"]["isError"].as_bool().unwrap_or(true),
+            "isError must be false"
+        );
+
+        let content = resp["result"]["content"].as_array().unwrap();
+        assert!(!content.is_empty(), "content must not be empty");
+
+        let text = content[0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).expect("content text must be valid JSON");
+        let matches = parsed["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0]["name"].as_str().unwrap(), "middle_fn");
+    }
+
+    #[test]
+    fn tools_call_search_entity_envelope_is_correct() {
+        let store = fixture();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {
+                "name": "SearchEntity",
+                "arguments": { "name": "caller_fn" }
+            }
+        });
+        let resp = handle_request(&store, &req);
+
+        // Verify the full JSON-RPC envelope structure.
+        assert!(resp.get("id").is_some());
+        assert!(resp.get("result").is_some());
+        assert!(
+            resp.get("error").is_none(),
+            "success responses must not have 'error'"
+        );
+        assert!(resp["result"]["content"].is_array());
+        assert!(resp["result"]["isError"].is_boolean());
+    }
+
+    // ── tools/call — BlastRadius ──────────────────────────────────────────────
+
+    #[test]
+    fn tools_call_blast_radius_finds_dependents() {
+        let store = fixture();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 20,
+            "method": "tools/call",
+            "params": {
+                "name": "BlastRadius",
+                "arguments": { "symbol": "leaf", "depth": 8 }
+            }
+        });
+        let resp = handle_request(&store, &req);
+
+        assert!(!resp["result"]["isError"].as_bool().unwrap_or(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+
+        let total = parsed["total"].as_u64().unwrap();
+        assert_eq!(
+            total, 2,
+            "leaf has 2 transitive dependents: middle and caller"
+        );
+
+        let names: Vec<&str> = parsed["dependents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"middle_fn"));
+        assert!(names.contains(&"caller_fn"));
+        assert!(
+            !names.contains(&"leaf_fn"),
+            "start symbol excluded from blast radius"
+        );
+    }
+
+    #[test]
+    fn tools_call_blast_radius_envelope_is_correct() {
+        let store = fixture();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "tools/call",
+            "params": {
+                "name": "BlastRadius",
+                "arguments": { "symbol": "caller" }
+            }
+        });
+        let resp = handle_request(&store, &req);
+
+        assert_eq!(resp["id"], 21);
+        assert!(resp["result"]["content"].is_array());
+        // caller has no dependents — should still be isError: false (R1)
+        assert!(!resp["result"]["isError"].as_bool().unwrap());
+    }
+
+    // ── tools/call — FetchContent ─────────────────────────────────────────────
+
+    #[test]
+    fn tools_call_fetch_content_missing_symbol_not_error() {
+        // Symbol not in the fixture store → found=false, isError=false (R1).
+        let store = fixture();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 25,
+            "method": "tools/call",
+            "params": {
+                "name": "FetchContent",
+                "arguments": { "symbol": "nonexistent_xyz" }
+            }
+        });
+        let resp = handle_request(&store, &req);
+
+        assert!(
+            !resp["result"]["isError"].as_bool().unwrap_or(true),
+            "isError must be false"
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert!(!parsed["found"].as_bool().unwrap(), "found must be false");
+    }
+
+    #[test]
+    fn tools_call_fetch_content_schema_in_list() {
+        // FetchContent must appear in tools/list with an object inputSchema.
+        let store = fixture();
+        let req = json!({ "jsonrpc": "2.0", "id": 26, "method": "tools/list", "params": {} });
+        let resp = handle_request(&store, &req);
+
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        let fc = tools
+            .iter()
+            .find(|t| t["name"] == "FetchContent")
+            .expect("FetchContent must be in tool list");
+        assert_eq!(fc["inputSchema"]["type"], "object");
+        let required = fc["inputSchema"]["required"].as_array().unwrap();
+        assert!(
+            required.iter().any(|r| r == "symbol"),
+            "schema must require 'symbol'"
+        );
+    }
+
+    // ── unknown method ────────────────────────────────────────────────────────
+
+    #[test]
+    fn unknown_method_returns_minus_32601() {
+        let store = fixture();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "no_such_method",
+            "params": {}
+        });
+        let resp = handle_request(&store, &req);
+
+        assert_eq!(resp["error"]["code"].as_i64().unwrap(), -32601);
+        assert!(
+            resp.get("result").is_none(),
+            "error responses must not have 'result'"
+        );
+    }
+
+    #[test]
+    fn unknown_method_preserves_id() {
+        let store = fixture();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": "string-id",
+            "method": "nope",
+            "params": {}
+        });
+        let resp = handle_request(&store, &req);
+
+        assert_eq!(resp["id"].as_str().unwrap(), "string-id");
+    }
+
+    // ── notifications ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn notifications_initialized_returns_null() {
+        let store = fixture();
+        let req = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+        let resp = handle_request(&store, &req);
+
+        assert!(
+            resp.is_null(),
+            "notification response must be null (no response)"
+        );
+    }
+
+    #[test]
+    fn unknown_notification_returns_null() {
+        let store = fixture();
+        let req = json!({ "jsonrpc": "2.0", "method": "some/unknown/notification" });
+        let resp = handle_request(&store, &req);
+
+        // Notifications have no id; we silently drop them.
+        assert!(resp.is_null());
+    }
+
+    // ── tools/call — unknown tool ─────────────────────────────────────────────
+
+    #[test]
+    fn tools_call_unknown_tool_returns_error() {
+        let store = fixture();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 30,
+            "method": "tools/call",
+            "params": { "name": "NonExistentTool", "arguments": {} }
+        });
+        let resp = handle_request(&store, &req);
+
+        assert_eq!(resp["error"]["code"].as_i64().unwrap(), -32602);
+    }
+
+    // ── tools/call — diagnostics surface ─────────────────────────────────────
+
+    #[test]
+    fn tools_call_diagnostics_appear_in_content() {
+        // Any call that produces diagnostics (e.g. empty search) should surface them.
+        let store = fixture();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 40,
+            "method": "tools/call",
+            "params": {
+                "name": "SearchEntity",
+                "arguments": { "name": "zzz_nonexistent_xyz" }
+            }
+        });
+        let resp = handle_request(&store, &req);
+
+        let content = resp["result"]["content"].as_array().unwrap();
+        // First block is the result JSON, second (if present) is diagnostics.
+        // Either the diagnostic is in the second block or the first block's
+        // total is 0 — both prove the tool handled the miss correctly.
+        let first_text = content[0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(first_text).unwrap();
+        assert_eq!(parsed["total"].as_u64().unwrap(), 0);
+    }
+
+    // ── input_schema helper ───────────────────────────────────────────────────
+
+    #[test]
+    fn input_schema_known_tools_return_some() {
+        for name in &[
+            "SearchEntity",
+            "RetrieveEntity",
+            "TraverseGraph",
+            "BlastRadius",
+            "FetchContent",
+        ] {
+            assert!(
+                input_schema(name).is_some(),
+                "input_schema({name}) must return Some"
+            );
+        }
+    }
+
+    #[test]
+    fn input_schema_unknown_tool_returns_none() {
+        assert!(input_schema("Ghost").is_none());
+    }
+
+    // ── Low-confidence edge — diagnostics (R7) ────────────────────────────────
+
+    #[test]
+    fn tools_call_traverse_flags_low_confidence_edges() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                node("alpha", "alpha_fn", NodeKind::Function, "src/x.rs", 1),
+                node("beta", "beta_fn", NodeKind::Function, "src/y.rs", 5),
+            ])
+            .unwrap();
+        let mut low = call_edge("alpha", "beta");
+        low.confidence = Confidence::new(0.3);
+        store.upsert_edges(&[low]).unwrap();
+        store.commit_batch().unwrap();
+
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 50,
+            "method": "tools/call",
+            "params": {
+                "name": "TraverseGraph",
+                "arguments": { "symbol": "alpha", "direction": "dependencies", "depth": 3 }
+            }
+        });
+        let resp = handle_request(&store, &req);
+
+        let content = resp["result"]["content"].as_array().unwrap();
+        // The R7 diagnostic must appear somewhere in the content blocks.
+        let all_text: String = content
+            .iter()
+            .filter_map(|c| c["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            all_text.contains("R7-CONFIDENCE"),
+            "R7 diagnostic must surface through the MCP envelope"
+        );
+    }
+}

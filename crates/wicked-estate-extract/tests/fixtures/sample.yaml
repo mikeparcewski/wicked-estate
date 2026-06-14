@@ -1,0 +1,7 @@
+name: wicked-estate
+version: 0.1.0
+description: Code intelligence graph engine
+license: MIT
+settings:
+  debug: false
+  workers: 4

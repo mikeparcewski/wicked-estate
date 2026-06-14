@@ -1,0 +1,28 @@
+[package]
+name = "wicked-estate-retrieve"
+description = "Agent-facing retrieval tools with hybrid and semantic search for wicked-estate."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+wicked-estate-core.workspace = true
+wicked-estate-rank = { path = "../wicked-estate-rank", version = "0.0.1" }
+wicked-estate-store.workspace = true
+serde_json.workspace = true
+# Real semantic embeddings (ONNX/BGE) — OPTIONAL + OFF BY DEFAULT. fastembed pulls ort (ONNX
+# runtime) + downloads a model on first use, so it is feature-gated to keep the default build
+# dependency-free and the default `cargo test` offline (footprint discipline). The HashEmbedder
+# default remains lexical; enabling this feature swaps in FastEmbedder for true semantic quality.
+fastembed = { version = "5", optional = true }
+# Static semantic embeddings (model2vec) — OPTIONAL + OFF BY DEFAULT. Distilled token->vector
+# lookup: real semantic quality with NO ONNX runtime (no `ort`), tiny models (~30MB), and
+# ~10-100x faster inference than a transformer. The lighter, configurable semantic tier — point
+# it at any model2vec model via CI_MODEL2VEC_MODEL. Pulls only safetensors + hf-hub.
+model2vec-rs = { version = "0.2", optional = true }
+
+[features]
+# Enable real semantic embeddings. Pick a tier (both may be enabled; FastEmbedder wins at runtime):
+fastembed = ["dep:fastembed"]       # contextual ONNX/BGE — heaviest, highest quality
+model2vec = ["dep:model2vec-rs"]    # static distilled — light, fast, configurable

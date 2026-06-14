@@ -1,0 +1,9 @@
+{
+    "name": "wicked-estate",
+    "version": "0.1.0",
+    "description": "Code intelligence graph engine",
+    "license": "MIT",
+    "dependencies": {
+        "tree-sitter": "0.24"
+    }
+}

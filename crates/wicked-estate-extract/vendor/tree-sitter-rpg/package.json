@@ -1,0 +1,12 @@
+{
+  "name": "tree-sitter-rpg",
+  "version": "0.1.0",
+  "description": "Free-format RPG IV (ILE RPG) grammar for tree-sitter — wicked_estate symbols+calls subset",
+  "license": "MIT",
+  "tree-sitter": [
+    {
+      "scope": "source.rpg",
+      "file-types": ["rpgle", "sqlrpgle"]
+    }
+  ]
+}

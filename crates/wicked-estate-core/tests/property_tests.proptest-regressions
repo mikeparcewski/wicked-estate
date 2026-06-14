@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c9b605c8dd484a78257e7da237925876e40d933034fb49bf730c66ea35005935 # shrinks to v = Double(901664592276466.1)
+cc 26e474139440cea4e95a17d9d377bf3f00b172f9e2699b44f205252a73f52c15 # shrinks to m = Metric { name: "A", description: "a", unit: "A", data: Sum { data_points: [NumberDataPoint { attributes: [], start_time_unix_nano: 0, time_unix_nano: 0, value: F64(937729629848195.9) }], temporality: Delta, is_monotonic: false } }
+cc 51227c48985f73295f87663bf11030f37b5581a83adbfbb46c79705652b23a75 # shrinks to log = LogRecord { time_unix_nano: 0, observed_time_unix_nano: 0, severity_number: Trace, severity_text: "A", body: Str(""), attributes: [KeyValue { key: "A", value: Double(-943960006107665.5) }], trace_id: None, span_id: None }
+cc faa901b49bcde5a87bf3b511cfc1bd8143d0c44228e1c2b765dad30fc01e11ff # shrinks to span = SpanData { context: SpanContext { trace_id: TraceId([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), span_id: SpanId([0, 0, 0, 0, 0, 0, 0, 0]), trace_flags: 0, is_remote: false }, parent_span_id: None, name: "A", kind: Internal, start_time_unix_nano: 0, end_time_unix_nano: 0, attributes: [], events: [], links: [SpanLink { context: SpanContext { trace_id: TraceId([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), span_id: SpanId([0, 0, 0, 0, 0, 0, 0, 0]), trace_flags: 0, is_remote: false }, attributes: [KeyValue { key: "_", value: Double(266481118923309.34) }] }], status: SpanStatus { code: Unset, message: None } }

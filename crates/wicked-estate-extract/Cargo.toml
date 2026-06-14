@@ -1,0 +1,126 @@
+[package]
+name = "wicked-estate-extract"
+description = "Tree-sitter and grammar-less source extractors for wicked-estate."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+wicked-estate-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml = "0.8"
+tree-sitter = "0.25"
+# ABI-14 grammars — compatible with tree-sitter 0.24 (ABI 13-14 supported)
+tree-sitter-rust = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-typescript = "0.23"           # provides LANGUAGE_TYPESCRIPT + LANGUAGE_TSX
+tree-sitter-javascript = "0.23.1"         # 0.23.1 = ABI 14; 0.25.x = ABI 15 (incompatible)
+tree-sitter-go = "0.23.4"                 # 0.23.4 = ABI 14; 0.25.x = ABI 15 (incompatible)
+tree-sitter-java = "0.23"
+tree-sitter-c = "0.23.4"                  # 0.23.4 = ABI 14; 0.24.x = ABI 15 (incompatible)
+tree-sitter-cpp = "0.23"
+tree-sitter-c-sharp = "0.21"              # 0.21.x = ABI 14 (old language() API); 0.23.x = ABI 15
+tree-sitter-ruby = "0.23"
+tree-sitter-bash = "0.23.3"               # 0.23.3 = ABI 14; 0.25.x = ABI 15 (incompatible)
+tree-sitter-json = "0.24"
+tree-sitter-yaml = "0.7"
+# --- W2.1 batch 2: additional languages (ABI-14 probe) ---
+tree-sitter-php = "0.23"
+tree-sitter-scala = "0.23"
+tree-sitter-html = "0.23"
+tree-sitter-css = "0.23"
+tree-sitter-ocaml = "0.23"
+tree-sitter-julia = "0.23"
+tree-sitter-lua = "0.2"
+tree-sitter-elixir = "0.3"
+# --- W2.1 batch 3 (ABI-14) ---
+tree-sitter-haskell = "0.23"
+tree-sitter-md = "0.3"
+tree-sitter-nix = "0.3"
+tree-sitter-r = "1.1"
+tree-sitter-kotlin-ng = "1.1"
+tree-sitter-toml-ng = "0.7"
+tree-sitter-swift = "0.7"                 # ABI 15 — wired now that the runtime is tree-sitter 0.25
+# Legacy mainframe (user request, "if available"): NO usable tree-sitter crate exists.
+#   - tree-sitter-cobol 0.1.0 is a STUB (only main.rs; no lib.rs / language binding / node-types).
+#   - JCL / RPG / PL-I / Natural / REXX: no crate on crates.io at all.
+# Path to cover them: VENDOR a grammar's C source + build.rs + a language() binding + <lang>.scm
+# (the "grammar without a crate" route — fits the languages-as-data design, no core change). COBOL
+# grammars exist on GitHub (e.g. yutaro-sakamoto/tree-sitter-cobol) and could be vendored on request.
+# tree-sitter-hcl + tree-sitter-swift were ABI-15-deferred under the old 0.24 runtime. Now that the
+# runtime is tree-sitter 0.25, HCL is wired via arborium-hcl and Swift via tree-sitter-swift 0.7
+# (queries/swift.scm). Other ABI-15 grammars can follow the same path.
+streaming-iterator = "0.1"
+regex = "1"
+# arborium grammar family (ABI-15, tree-sitter 0.25, uniform `language()` API) — W2.1 toward 73.
+arborium-cobol = "2.18.0"
+arborium-ada = "2.18"
+arborium-awk = "2.18"
+arborium-clojure = "2.18"
+arborium-cmake = "2.18"
+arborium-commonlisp = "2.18"
+arborium-dart = "2.18"
+arborium-dockerfile = "2.18"
+arborium-elm = "2.18"
+arborium-erlang = "2.18"
+arborium-fish = "2.18"
+arborium-fsharp = "2.18"
+arborium-gleam = "2.18"
+arborium-groovy = "2.18"
+arborium-glsl = "2.18"
+arborium-graphql = "2.18"
+arborium-hcl = "2.18"
+arborium-make = "2.18"
+arborium-matlab = "2.18"
+arborium-objc = "2.18"
+arborium-perl = "2.18"
+arborium-powershell = "2.18"
+arborium-prolog = "2.18"
+arborium-proto = "2.18"
+arborium-sql = "2.18"
+arborium-svelte = "2.18"
+arborium-vue = "2.18"
+arborium-zig = "2.18"
+# arborium batch 2 — toward ≥73 total
+arborium-hlsl = "2.18"
+arborium-idris = "2.18"
+arborium-ini = "2.18"
+arborium-jq = "2.18"
+arborium-jsdoc = "2.18"
+arborium-just = "2.18"
+arborium-kdl = "2.18"
+arborium-lean = "2.18"
+arborium-meson = "2.18"
+arborium-nginx = "2.18"
+arborium-ninja = "2.18"
+arborium-postscript = "2.18"
+arborium-regex = "2.18"
+arborium-rego = "2.18"
+arborium-rescript = "2.18"
+arborium-ron = "2.18"
+arborium-devicetree = "2.18"
+# W9.3 Bicep + legacy/mainframe (user request): Fortran, Pascal, ABAP.
+tree-sitter-bicep = "1.1"
+tree-sitter-fortran = "0.6"
+tree-sitter-pascal = "0.10"
+# In-house grammar (authored, not published): free-format RPG IV. See vendor/tree-sitter-rpg.
+tree-sitter-rpg = { path = "vendor/tree-sitter-rpg" }
+# tree-sitter-abap-sqry deferred: it pins tree-sitter ^0.26 (we're on 0.25); would need another
+# runtime bump for one niche SAP fork. ABAP coverage awaits a 0.26 bump or an ABI-≤15 ABAP grammar.
+arborium-dot = "2.18"
+arborium-elisp = "2.18"
+# Long-tail coverage sweep — previously aspirational manifest rows, now wired (queries authored
+# against each grammar's node-types.json). arborium (uniform ABI-15) preferred; dedicated
+# tree-sitter crates where no arborium grammar exists.
+arborium-solidity = "2.18"
+arborium-thrift = "2.18"
+arborium-verilog = "2.18"
+arborium-vhdl = "2.18"
+arborium-d = "2.18"
+arborium-starlark = "2.18"
+tree-sitter-cuda = "0.21"      # C++/CUDA fork, ABI 15
+tree-sitter-arduino = "0.24"   # inherits tree-sitter-cpp node set, ABI 15
+tree-sitter-sfapex = "3.0"     # Salesforce Apex (Java-shaped); language is in the `apex` submodule
+tree-sitter-racket = "0.24"    # s-expression grammar; predicate-driven query

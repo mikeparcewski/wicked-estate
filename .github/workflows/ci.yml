@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── The non-negotiable gate (CLAUDE.md §9): 0 warnings · clippy · all tests
+  #    (incl. GraphStore conformance + bench-type tests) · fmt. Runs on the DEFAULT
+  #    feature set, so it pulls no ML deps and needs no network. ─────────────────
+  gate:
+    name: gate (build · clippy · test · fmt)
+    runs-on: ubuntu-latest
+    env:
+      # 0-warnings gate. Dependencies are compiled with --cap-lints=allow by cargo,
+      # so this denies warnings in WORKSPACE crates only — exactly the bar we hold.
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt --check
+        run: cargo fmt --all -- --check
+      - name: build (0 warnings, all targets)
+        run: cargo build --workspace --all-targets
+      - name: clippy (-D warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test (workspace + conformance + bench)
+        run: cargo test --workspace
+
+  # ── Feature-gated semantic embedders. These tests download an embedding model on
+  #    first run, so they CANNOT live in the default `gate` job (which must stay
+  #    offline + dependency-free). This lane proves the semantic tiers keep working:
+  #      * model2vec  — static distilled embeddings (light, no ONNX)
+  #      * fastembed  — contextual ONNX/BGE embeddings (heavy)
+  #    Each asserts related-but-zero-shared-token text embeds closer than unrelated
+  #    text — the property the lexical default cannot satisfy. ────────────────────
+  semantic-embedders:
+    name: semantic embedders (model2vec · fastembed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cache downloaded embedding models
+        uses: actions/cache@v4
+        with:
+          # model2vec-rs uses hf-hub (~/.cache/huggingface); fastembed caches under
+          # ~/.cache/fastembed and/or a local .fastembed_cache. Models are immutable,
+          # so a static key avoids re-downloading on every run.
+          path: |
+            ~/.cache/huggingface
+            ~/.cache/fastembed
+            .fastembed_cache
+          key: embedding-models-v1
+      - name: model2vec semantic tests
+        run: cargo test -p wicked-estate-retrieve --features model2vec
+      - name: fastembed semantic tests
+        run: cargo test -p wicked-estate-retrieve --features fastembed

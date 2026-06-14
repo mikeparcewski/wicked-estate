@@ -1,0 +1,2840 @@
+//! `wicked-estate-retrieve` — RetrievalTool impls: 4-tool agent API + RRF hybrid (Wave 4.3, 5.3).
+//!
+//! # Tools
+//!
+//! | Tool name        | Purpose                                               |
+//! |------------------|-------------------------------------------------------|
+//! | `SearchEntity`   | Find symbols by exact / substring name                |
+//! | `RetrieveEntity` | Full detail for a single symbol id                    |
+//! | `TraverseGraph`  | Bounded multi-hop walk from a start symbol            |
+//! | `BlastRadius`    | Transitive dependents (reverse-reachability on Calls) |
+//! | `Lineage`        | Transitive dependencies (what a symbol depends on)    |
+//! | `ContextPack`    | Token-budgeted ranked elided-stub context (W4.2)      |
+//! | `SemanticSearch` | Embedding-based ANN search (W5.2)                     |
+//!
+//! Agent-behavior rules honored:
+//! * R1 — never `isError: true`; empty results come back as empty `content` + diagnostic.
+//! * R3 — coverage noted in `diagnostics` when a MemStore has no FTS support.
+//! * R4 — output capped via `limit` / `max_nodes` / `token_budget`.
+//! * R5 — placeholder staleness note emitted (full git-rev check is the MCP layer's job).
+//! * R7 — low-confidence edges flagged in diagnostics when present in traversals.
+
+use wicked_estate_core::{
+    Direction, EdgeKind, GraphRead, Result, RetrievalResult, RetrievalTool, SymbolId, SymbolQuery,
+    TraversalSpec,
+};
+use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Parse an optional `u64` field from the request JSON.
+fn opt_u64(v: &Value, key: &str) -> Option<u64> {
+    v.get(key)?.as_u64()
+}
+
+/// Emit a staleness note reminding the MCP layer to embed `commits_behind`.
+fn staleness_note() -> String {
+    "STALENESS: commits_behind not available at this layer — embed git rev-list delta in the MCP response".to_string()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SearchEntity
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Search symbols by exact or substring name.
+///
+/// **Request shape**
+/// ```json
+/// { "name": "foo", "limit": 20 }
+/// ```
+/// * `name` (required) — searched as both an exact match and a substring match against `name +
+///   signature`.  If the store has native FTS the text field drives it; otherwise the in-process
+///   filter is used.
+/// * `limit` (optional, default 20, max 100) — max results.
+///
+/// **Response `content` shape**
+/// ```json
+/// { "matches": [ { "symbol": "…", "name": "foo", "kind": "function", "file": "src/lib.rs",
+///                  "line": 12, "signature": "fn foo() -> u32" }, … ], "total": 3 }
+/// ```
+#[derive(Debug, Default)]
+pub struct SearchEntity;
+
+impl RetrievalTool for SearchEntity {
+    fn name(&self) -> &str {
+        "SearchEntity"
+    }
+
+    fn description(&self) -> &str {
+        "Search the code graph for symbols matching a name (exact or substring). \
+         Returns ranked matches with name, kind, file:line, and signature."
+    }
+
+    fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
+        let name_val = match request.get("name").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                return Ok(RetrievalResult {
+                    content: json!({ "matches": [], "total": 0 }),
+                    diagnostics: vec![
+                        "SearchEntity: 'name' field is required and must be a non-empty string"
+                            .to_string(),
+                    ],
+                });
+            }
+        };
+
+        let raw_limit = opt_u64(request, "limit").unwrap_or(20).min(100) as usize;
+
+        // Two-pass: exact first, then substring (deduplicated).
+        let exact_query = SymbolQuery {
+            exact_name: Some(name_val.clone()),
+            limit: Some(raw_limit),
+            ..Default::default()
+        };
+        let mut exact_hits = store.find_symbols(&exact_query)?;
+
+        let text_query = SymbolQuery {
+            text: Some(name_val.clone()),
+            limit: Some(raw_limit),
+            ..Default::default()
+        };
+        let text_hits = store.find_symbols(&text_query)?;
+
+        // Merge: exact first, then text hits not already present.
+        let exact_ids: std::collections::HashSet<_> =
+            exact_hits.iter().map(|n| n.symbol.clone()).collect();
+        for n in text_hits {
+            if !exact_ids.contains(&n.symbol) {
+                exact_hits.push(n);
+            }
+        }
+        exact_hits.truncate(raw_limit);
+
+        let mut diag = Vec::new();
+
+        if exact_hits.is_empty() {
+            diag.push(format!(
+                "SearchEntity: no symbols found matching '{name_val}'"
+            ));
+        }
+        if !store.capabilities().full_text_search {
+            diag.push(
+                "COVERAGE: store does not support native FTS; using in-process substring filter"
+                    .to_string(),
+            );
+        }
+        diag.push(staleness_note());
+
+        let matches: Vec<Value> = exact_hits
+            .iter()
+            .map(|n| {
+                json!({
+                    "symbol": n.symbol.as_str(),
+                    "name": n.name,
+                    "kind": serde_json::to_value(&n.kind).unwrap_or(Value::Null),
+                    "file": n.location.file,
+                    "line": n.location.span.start_line,
+                    "signature": n.signature.as_deref().unwrap_or(""),
+                })
+            })
+            .collect();
+
+        let total = matches.len();
+        Ok(RetrievalResult {
+            content: json!({ "matches": matches, "total": total }),
+            diagnostics: diag,
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RetrieveEntity
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Full detail for a single symbol id.
+///
+/// **Request shape**
+/// ```json
+/// { "symbol": "<id>" }
+/// ```
+///
+/// **Response `content` shape**
+/// ```json
+/// { "found": true, "symbol": "…", "name": "foo", "kind": "function",
+///   "language": "rust", "file": "src/lib.rs", "line": 12,
+///   "signature": "fn foo() -> u32", "doc": "…" }
+/// ```
+/// When the symbol is not found `found` is `false` and the other fields are absent; a diagnostic
+/// is emitted instead of an error (R1).
+#[derive(Debug, Default)]
+pub struct RetrieveEntity;
+
+impl RetrievalTool for RetrieveEntity {
+    fn name(&self) -> &str {
+        "RetrieveEntity"
+    }
+
+    fn description(&self) -> &str {
+        "Retrieve full detail for a single symbol by its stable id. \
+         Returns name, kind, language, file:line, signature, and doc comment."
+    }
+
+    fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
+        let id_str = match request.get("symbol").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                return Ok(RetrievalResult {
+                    content: json!({ "found": false }),
+                    diagnostics: vec!["RetrieveEntity: 'symbol' field is required".to_string()],
+                });
+            }
+        };
+
+        let id = SymbolId(id_str.clone());
+        let mut diag = vec![staleness_note()];
+
+        match store.get_node(&id)? {
+            None => {
+                diag.push(format!(
+                    "RetrieveEntity: symbol '{id_str}' not found in graph"
+                ));
+                Ok(RetrievalResult {
+                    content: json!({ "found": false, "symbol": id_str }),
+                    diagnostics: diag,
+                })
+            }
+            Some(node) => Ok(RetrievalResult {
+                content: json!({
+                    "found": true,
+                    "symbol": node.symbol.as_str(),
+                    "name": node.name,
+                    "kind": serde_json::to_value(&node.kind).unwrap_or(Value::Null),
+                    "language": node.language.as_str(),
+                    "file": node.location.file,
+                    "line": node.location.span.start_line,
+                    "signature": node.signature.as_deref().unwrap_or(""),
+                    "doc": node.doc.as_deref().unwrap_or(""),
+                }),
+                diagnostics: diag,
+            }),
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TraverseGraph
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Bounded multi-hop traversal from a start symbol.
+///
+/// **Request shape**
+/// ```json
+/// { "symbol": "<id>", "depth": 4, "direction": "dependencies",
+///   "edge_kinds": ["calls", "imports"], "max_nodes": 200 }
+/// ```
+/// * `depth`      — optional, default 4, max 16.
+/// * `direction`  — `"dependencies"` (default) | `"dependents"` | `"both"`.
+/// * `edge_kinds` — optional array of edge-kind strings; empty = all kinds.
+/// * `max_nodes`  — optional, default 200, max 1 000.
+///
+/// **Response `content` shape**
+/// ```json
+/// { "nodes": […], "edges": […], "depths": { "<id>": 1, … }, "truncated": false }
+/// ```
+#[derive(Debug, Default)]
+pub struct TraverseGraph;
+
+fn parse_direction(v: &Value) -> Direction {
+    match v.get("direction").and_then(|d| d.as_str()) {
+        Some("dependents") => Direction::Dependents,
+        Some("both") => Direction::Both,
+        _ => Direction::Dependencies,
+    }
+}
+
+fn parse_edge_kinds(v: &Value) -> Vec<EdgeKind> {
+    let Some(arr) = v.get("edge_kinds").and_then(|a| a.as_array()) else {
+        return vec![];
+    };
+    arr.iter()
+        .filter_map(|item| {
+            let s = item.as_str()?;
+            // Deserialize from a quoted JSON string so serde_json handles the snake_case mapping.
+            serde_json::from_str::<EdgeKind>(&format!("\"{s}\"")).ok()
+        })
+        .collect()
+}
+
+impl RetrievalTool for TraverseGraph {
+    fn name(&self) -> &str {
+        "TraverseGraph"
+    }
+
+    fn description(&self) -> &str {
+        "Bounded multi-hop walk from a start symbol. Returns the subgraph (nodes, edges, depths) \
+         reachable within the given depth and node caps. Supports forward (dependencies), \
+         reverse (dependents), and bidirectional traversal."
+    }
+
+    fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
+        let id_str = match request.get("symbol").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                return Ok(RetrievalResult {
+                    content: json!({ "nodes": [], "edges": [], "depths": {}, "truncated": false }),
+                    diagnostics: vec!["TraverseGraph: 'symbol' field is required".to_string()],
+                });
+            }
+        };
+
+        let max_depth = opt_u64(request, "depth").unwrap_or(4).min(16) as u32;
+        let max_nodes = opt_u64(request, "max_nodes").unwrap_or(200).min(1_000) as usize;
+        let direction = parse_direction(request);
+        let edge_kinds = parse_edge_kinds(request);
+
+        let spec = TraversalSpec {
+            direction,
+            edge_kinds,
+            max_depth,
+            max_nodes,
+            min_confidence: 0.0,
+        };
+
+        let start = SymbolId(id_str.clone());
+        let mut diag = vec![staleness_note()];
+
+        let subgraph = store.traverse(&start, &spec)?;
+
+        if subgraph.nodes.is_empty() {
+            diag.push(format!(
+                "TraverseGraph: no nodes reachable from '{id_str}' under given spec"
+            ));
+        }
+        if subgraph.truncated {
+            diag.push(format!(
+                "TraverseGraph: result truncated (max_depth={max_depth}, max_nodes={max_nodes})"
+            ));
+        }
+
+        // R7 — flag any low-confidence edges.
+        let low_conf: usize = subgraph
+            .edges
+            .iter()
+            .filter(|e| e.confidence.get() < 0.5)
+            .count();
+        if low_conf > 0 {
+            diag.push(format!(
+                "R7-CONFIDENCE: {low_conf} edge(s) below 0.5 confidence in result set"
+            ));
+        }
+
+        let nodes_json: Vec<Value> = subgraph
+            .nodes
+            .iter()
+            .map(|n| {
+                json!({
+                    "symbol": n.symbol.as_str(),
+                    "name": n.name,
+                    "kind": serde_json::to_value(&n.kind).unwrap_or(Value::Null),
+                    "file": n.location.file,
+                    "line": n.location.span.start_line,
+                })
+            })
+            .collect();
+
+        let edges_json: Vec<Value> = subgraph
+            .edges
+            .iter()
+            .map(|e| {
+                json!({
+                    "source": e.source.as_str(),
+                    "target": e.target.as_str(),
+                    "kind": serde_json::to_value(&e.kind).unwrap_or(Value::Null),
+                    "confidence": e.confidence.get(),
+                })
+            })
+            .collect();
+
+        Ok(RetrievalResult {
+            content: json!({
+                "nodes": nodes_json,
+                "edges": edges_json,
+                "depths": subgraph.depths,
+                "truncated": subgraph.truncated,
+            }),
+            diagnostics: diag,
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BlastRadius
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Transitive dependents (reverse-reachability on `Calls` edges).
+///
+/// **Request shape**
+/// ```json
+/// { "symbol": "<id>", "depth": 8 }
+/// ```
+/// * `depth` — optional, default 8, max 24.
+///
+/// **Response `content` shape**
+/// ```json
+/// { "dependents": [ { "symbol": "…", "name": "…", "depth": 1 }, … ],
+///   "total": 5, "truncated": false,
+///   "unresolved_callers": 2,
+///   "confidence": { "min": 0.6, "avg": 0.9, "edge_count": 3 } }
+/// ```
+/// The start symbol itself is excluded from `dependents`.
+/// `unresolved_callers` counts call-site references to the symbol's name that the resolver
+/// could not bind — potential dependents that may be missing from `dependents`.  Always
+/// present, even when zero.
+#[derive(Debug, Default)]
+pub struct BlastRadius;
+
+impl RetrievalTool for BlastRadius {
+    fn name(&self) -> &str {
+        "BlastRadius"
+    }
+
+    fn description(&self) -> &str {
+        "Transitive dependents of a symbol (reverse-reachability on Calls edges). \
+         Answers 'what breaks if I change this symbol?' \
+         Reports coverage: resolved dependents plus the count of unresolved call-site \
+         references that could not be bound (potential missing dependents)."
+    }
+
+    fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
+        let id_str = match request.get("symbol").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                return Ok(RetrievalResult {
+                    content: json!({
+                        "dependents": [],
+                        "total": 0,
+                        "truncated": false,
+                        "unresolved_callers": 0,
+                        "confidence": { "min": null, "avg": null, "edge_count": 0 },
+                    }),
+                    diagnostics: vec!["BlastRadius: 'symbol' field is required".to_string()],
+                });
+            }
+        };
+
+        let max_depth = opt_u64(request, "depth").unwrap_or(8).min(24) as u32;
+
+        let spec = TraversalSpec::blast_radius(max_depth);
+        let start = SymbolId(id_str.clone());
+        let mut diag = vec![staleness_note()];
+
+        let subgraph = store.traverse(&start, &spec)?;
+
+        // Resolve the symbol's simple name (for unresolved-ref lookup).  If the symbol is in
+        // the graph, use its recorded name; otherwise fall back to the last segment of the id.
+        let symbol_name: String = store
+            .get_node(&start)?
+            .map(|n| n.name.clone())
+            .unwrap_or_else(|| {
+                // Best-effort: strip package prefix and use the last "."-delimited segment.
+                id_str
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(id_str.as_str())
+                    .to_string()
+            });
+
+        // Unresolved-ref coverage: calls/imports to `symbol_name` the resolver could not bind.
+        let unresolved_callers = store.unresolved_refs_for_name(&symbol_name)?.len();
+
+        // Exclude the start node itself from the dependent list.
+        let dependents: Vec<Value> = subgraph
+            .nodes
+            .iter()
+            .filter(|n| n.symbol.as_str() != id_str)
+            .map(|n| {
+                let depth = subgraph.depths.get(n.symbol.as_str()).copied().unwrap_or(0);
+                json!({
+                    "symbol": n.symbol.as_str(),
+                    "name": n.name,
+                    "kind": serde_json::to_value(&n.kind).unwrap_or(Value::Null),
+                    "file": n.location.file,
+                    "line": n.location.span.start_line,
+                    "depth": depth,
+                })
+            })
+            .collect();
+
+        // Confidence stats over the traversal's edges (edges entering the blast-radius set).
+        let (conf_min, conf_avg, edge_count) = {
+            let confs: Vec<f32> = subgraph.edges.iter().map(|e| e.confidence.get()).collect();
+            if confs.is_empty() {
+                (None, None, 0usize)
+            } else {
+                let min = confs.iter().cloned().fold(f32::INFINITY, f32::min);
+                let avg = confs.iter().sum::<f32>() / confs.len() as f32;
+                (Some(min), Some(avg), confs.len())
+            }
+        };
+
+        let conf_json = json!({
+            "min": conf_min,
+            "avg": conf_avg,
+            "edge_count": edge_count,
+        });
+
+        let total = dependents.len();
+
+        if dependents.is_empty() {
+            diag.push(format!(
+                "BlastRadius: no dependents found for '{id_str}' (it may be a leaf or not yet indexed)"
+            ));
+        }
+        if subgraph.truncated {
+            diag.push(format!(
+                "BlastRadius: result truncated at depth={max_depth} / max_nodes=5000"
+            ));
+        }
+
+        // Coverage note — always emitted (even when unresolved_callers == 0) so callers always
+        // know the completeness posture of the result.
+        diag.push(format!(
+            "coverage: {total} dependent(s) via resolved calls; \
+             {unresolved_callers} unresolved call(s) reference '{symbol_name}' — \
+             blast-radius is best-effort static resolution and MAY be incomplete \
+             (precise tier pending)."
+        ));
+
+        Ok(RetrievalResult {
+            content: json!({
+                "dependents": dependents,
+                "total": total,
+                "truncated": subgraph.truncated,
+                "unresolved_callers": unresolved_callers,
+                "confidence": conf_json,
+            }),
+            diagnostics: diag,
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Lineage  (W12 — transitive dependencies; complement of BlastRadius)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Transitive **dependencies** of a symbol (what it depends on — forward-reachability on
+/// `Calls` + `Imports` edges).
+///
+/// This is the directional complement of [`BlastRadius`]: where `BlastRadius` walks
+/// *Dependents* (who calls *me*?), `Lineage` walks *Dependencies* (what do *I* call?).
+/// The full transitive closure lets agents understand the dependency chain before a refactor.
+///
+/// **Request shape**
+/// ```json
+/// { "symbol": "<id>", "depth": <n> }
+/// ```
+/// * `symbol` (required) — stable [`SymbolId`] of the start symbol.
+/// * `depth`  (optional, default 8, max 24) — maximum traversal hops.
+///
+/// **Response `content` shape**
+/// ```json
+/// { "dependencies": [ { "symbol": "…", "name": "…", "kind": "…",
+///                        "file": "…", "line": 0, "depth": 1 }, … ],
+///   "total": 5, "truncated": false,
+///   "confidence": { "min": 0.6, "avg": 0.9, "edge_count": 3 } }
+/// ```
+/// The start symbol itself is **excluded** from `dependencies`.
+/// Agent-behavior rules honored: R1 (no error on empty), R5 (staleness note), R7 (low-confidence
+/// flag), R4 (depth + node caps).
+#[derive(Debug, Default)]
+pub struct Lineage;
+
+impl RetrievalTool for Lineage {
+    fn name(&self) -> &str {
+        "Lineage"
+    }
+
+    fn description(&self) -> &str {
+        "Transitive dependencies of a symbol (forward-reachability on Calls+Imports edges). \
+         Answers 'what does this symbol depend on?' — the complement of BlastRadius. \
+         Use to understand the full dependency chain before a refactor or to build a \
+         change-impact picture from the dependency side."
+    }
+
+    fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
+        let id_str = match request.get("symbol").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                return Ok(RetrievalResult {
+                    content: json!({
+                        "dependencies": [],
+                        "total": 0,
+                        "truncated": false,
+                        "confidence": { "min": null, "avg": null, "edge_count": 0 },
+                    }),
+                    diagnostics: vec!["Lineage: 'symbol' field is required".to_string()],
+                });
+            }
+        };
+
+        let max_depth = opt_u64(request, "depth").unwrap_or(8).min(24) as u32;
+
+        // Walk forward (Dependencies) along Calls + Imports edges — bounded.
+        let spec = TraversalSpec {
+            direction: Direction::Dependencies,
+            edge_kinds: vec![EdgeKind::Calls, EdgeKind::Imports],
+            max_depth,
+            max_nodes: 5_000,
+            min_confidence: 0.0,
+        };
+
+        let start = SymbolId(id_str.clone());
+        let mut diag = vec![staleness_note()];
+
+        let subgraph = store.traverse(&start, &spec)?;
+
+        // Exclude the start node itself.
+        let dependencies: Vec<Value> = subgraph
+            .nodes
+            .iter()
+            .filter(|n| n.symbol.as_str() != id_str)
+            .map(|n| {
+                let depth = subgraph.depths.get(n.symbol.as_str()).copied().unwrap_or(0);
+                json!({
+                    "symbol": n.symbol.as_str(),
+                    "name": n.name,
+                    "kind": serde_json::to_value(&n.kind).unwrap_or(Value::Null),
+                    "file": n.location.file,
+                    "line": n.location.span.start_line,
+                    "depth": depth,
+                })
+            })
+            .collect();
+
+        // Confidence stats over the traversal's edges.
+        let (conf_min, conf_avg, edge_count) = {
+            let confs: Vec<f32> = subgraph.edges.iter().map(|e| e.confidence.get()).collect();
+            if confs.is_empty() {
+                (None, None, 0usize)
+            } else {
+                let min = confs.iter().cloned().fold(f32::INFINITY, f32::min);
+                let avg = confs.iter().sum::<f32>() / confs.len() as f32;
+                (Some(min), Some(avg), confs.len())
+            }
+        };
+
+        let conf_json = json!({
+            "min": conf_min,
+            "avg": conf_avg,
+            "edge_count": edge_count,
+        });
+
+        let total = dependencies.len();
+
+        if dependencies.is_empty() {
+            diag.push(format!(
+                "Lineage: no dependencies found for '{id_str}' \
+                 (it may be a leaf or not yet indexed)"
+            ));
+        }
+        if subgraph.truncated {
+            diag.push(format!(
+                "Lineage: result truncated at depth={max_depth} / max_nodes=5000"
+            ));
+        }
+
+        // R7 — flag any low-confidence edges.
+        let low_conf: usize = subgraph
+            .edges
+            .iter()
+            .filter(|e| e.confidence.get() < 0.5)
+            .count();
+        if low_conf > 0 {
+            diag.push(format!(
+                "R7-CONFIDENCE: {low_conf} edge(s) below 0.5 confidence in lineage"
+            ));
+        }
+
+        Ok(RetrievalResult {
+            content: json!({
+                "dependencies": dependencies,
+                "total": total,
+                "truncated": subgraph.truncated,
+                "confidence": conf_json,
+            }),
+            diagnostics: diag,
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reciprocal Rank Fusion
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Reciprocal Rank Fusion over multiple ranked lists of [`SymbolId`]s.
+///
+/// RRF score for a symbol appearing at rank `r` (1-based) in a list:
+/// `score += 1 / (k + r)`
+///
+/// The combined score is the sum across all lists.  `k` defaults to 60 (the value from the
+/// original Cormack/Clarke paper; pass `60.0` unless you have tuned data).
+///
+/// Returns a `Vec<(SymbolId, f64)>` sorted descending by score, deduplicated.  Symbols that
+/// appear high in **multiple** lists are ranked first, which is the desired property for fusing
+/// graph-hop results with name-search results.
+pub fn reciprocal_rank_fusion(lists: &[Vec<SymbolId>], k: f64) -> Vec<(SymbolId, f64)> {
+    let mut scores: HashMap<SymbolId, f64> = HashMap::new();
+    for list in lists {
+        for (idx, id) in list.iter().enumerate() {
+            let rank = (idx + 1) as f64;
+            *scores.entry(id.clone()).or_insert(0.0) += 1.0 / (k + rank);
+        }
+    }
+    let mut out: Vec<(SymbolId, f64)> = scores.into_iter().collect();
+    // Stable descending sort (higher score = better rank).
+    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// render_context  (W4.2 — token-budgeted elided-stub context)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Default token budget when the caller does not supply one.
+const DEFAULT_TOKEN_BUDGET: usize = 2_000;
+
+/// Hard cap on the token budget — R4 (output < ~25K chars).
+/// 6 000 tokens × 4 chars/token ≈ 24 000 chars — safely under the 25 K limit.
+const MAX_TOKEN_BUDGET: usize = 6_000;
+
+/// Candidate neighbourhood depth when gathering context around seeds.
+/// Small on purpose: we want immediate callers/callees, not the whole graph.
+const CONTEXT_DEPTH: u32 = 2;
+
+/// Candidate node cap for the neighbourhood traversal.
+const CONTEXT_MAX_NODES: usize = 200;
+
+/// How many candidate symbols to feed to the ranker.
+const RANK_CANDIDATE_CAP: usize = 500;
+
+/// Estimate the number of tokens in a string (chars / 4, rounding up).
+fn estimate_tokens(s: &str) -> usize {
+    s.len().div_ceil(4)
+}
+
+/// Render a single [`wicked_estate_core::Node`] as an elided stub:
+///
+/// ```text
+/// <kind> <name><signature>
+///   /// <first line of doc>
+///   // <file>:<line>
+/// ```
+///
+/// Full bodies are never included — only the signature + first doc line.
+fn render_stub(node: &wicked_estate_core::Node) -> String {
+    use wicked_estate_core::NodeKind;
+
+    let kind_str = match &node.kind {
+        NodeKind::Function => "fn",
+        NodeKind::Method => "fn",
+        NodeKind::Constructor => "fn",
+        NodeKind::Class => "class",
+        NodeKind::Struct => "struct",
+        NodeKind::Enum => "enum",
+        NodeKind::Interface => "interface",
+        NodeKind::Trait => "trait",
+        NodeKind::Module => "mod",
+        NodeKind::Namespace => "namespace",
+        NodeKind::TypeAlias => "type",
+        NodeKind::Constant => "const",
+        NodeKind::Variable => "var",
+        NodeKind::Macro => "macro",
+        NodeKind::Field => "field",
+        NodeKind::Parameter => "param",
+        NodeKind::Import => "import",
+        NodeKind::File => "file",
+        NodeKind::Synthetic => "synthetic",
+        NodeKind::Other(s) => s.as_str(),
+    };
+
+    let sig = node.signature.as_deref().unwrap_or("");
+    let header = if sig.is_empty() {
+        format!("{kind_str} {}", node.name)
+    } else {
+        format!("{kind_str} {sig}")
+    };
+
+    let mut lines = vec![header];
+
+    // First line of doc comment only — never the full body.
+    if let Some(doc) = &node.doc {
+        let first_line = doc.lines().next().unwrap_or("").trim();
+        if !first_line.is_empty() {
+            lines.push(format!("  /// {first_line}"));
+        }
+    }
+
+    lines.push(format!(
+        "  // {}:{}",
+        node.location.file, node.location.span.start_line
+    ));
+
+    lines.join("\n")
+}
+
+/// Token-budgeted, ranked, elided-stub context renderer (W4.2).
+///
+/// # Algorithm
+///
+/// 1. **Gather candidates** — the seeds themselves plus their bounded neighbourhood
+///    (both directions, depth [`CONTEXT_DEPTH`], cap [`CONTEXT_MAX_NODES`]).
+///    This pulls in immediate callers and callees.
+///
+/// 2. **Rank** — personalised PageRank via [`wicked_estate_rank::ranked_symbols`] seeded on the
+///    supplied `seeds`, capped at [`RANK_CANDIDATE_CAP`].  Seeds themselves score very
+///    high (100× teleport weight), followed by their neighbourhood symbols.
+///
+/// 3. **Render highest-rank first** — each symbol is rendered as an *elided stub*
+///    (`<kind> <name><sig>` + first doc line + `// <file>:<line>`), never a full body.
+///
+/// 4. **Pack until budget** — tokens ≈ chars / 4.  When the next stub would exceed the
+///    budget, stop and record how many symbols were omitted.
+///
+/// # Returns
+///
+/// A `String` containing the packed context.  The last line is always a comment
+/// reporting how many symbols were included and how many were omitted.
+///
+/// Empty seeds return an empty string (no panic).
+pub fn render_context(
+    store: &dyn GraphRead,
+    seeds: &[SymbolId],
+    token_budget: usize,
+) -> Result<String> {
+    if seeds.is_empty() {
+        return Ok(String::new());
+    }
+
+    let budget = token_budget.clamp(1, MAX_TOKEN_BUDGET);
+
+    // ── 1. Gather candidate set ──────────────────────────────────────────────
+    // Start with the seeds, then pull in both-direction neighbours.
+    let mut candidate_ids: HashSet<SymbolId> = seeds.iter().cloned().collect();
+
+    let neighbour_spec = TraversalSpec {
+        direction: Direction::Both,
+        edge_kinds: vec![],
+        max_depth: CONTEXT_DEPTH,
+        max_nodes: CONTEXT_MAX_NODES,
+        min_confidence: 0.0,
+    };
+
+    for seed in seeds {
+        let subgraph = store.traverse(seed, &neighbour_spec)?;
+        for node in &subgraph.nodes {
+            candidate_ids.insert(node.symbol.clone());
+        }
+    }
+
+    // ── 2. Rank ───────────────────────────────────────────────────────────────
+    // ranked_symbols returns ALL nodes in the store ranked by personalized PR.
+    // We keep only the candidates we gathered above, preserving their rank order.
+    let ranked = wicked_estate_rank::ranked_symbols(store, seeds, RANK_CANDIDATE_CAP)?;
+
+    // Build an ordered list: ranked entries that are in our candidate set.
+    let mut ordered: Vec<SymbolId> = ranked
+        .into_iter()
+        .filter_map(|(id, _score)| {
+            if candidate_ids.contains(&id) {
+                Some(id)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Append any candidates not yet in the ranked list (they scored below the cap).
+    // Seeds are guaranteed to appear in the ranked list because of their high teleport weight,
+    // but neighbourhood nodes may not be.
+    let ranked_set: HashSet<SymbolId> = ordered.iter().cloned().collect();
+    for id in &candidate_ids {
+        if !ranked_set.contains(id) {
+            ordered.push(id.clone());
+        }
+    }
+
+    // ── 3 & 4. Render highest-rank first, pack until budget ──────────────────
+    let mut output_lines: Vec<String> = Vec::new();
+    let mut chars_used: usize = 0;
+    let mut included: usize = 0;
+    let mut omitted: usize = 0;
+
+    for id in &ordered {
+        let Some(node) = store.get_node(id)? else {
+            // Node not in store (stale candidate from traversal); skip silently.
+            continue;
+        };
+
+        let stub = render_stub(&node);
+        // +1 for the newline separator between stubs.
+        let stub_tokens = estimate_tokens(&stub) + 1;
+
+        if chars_used > 0 && estimate_tokens(&stub) + chars_used.div_ceil(4) > budget {
+            omitted += 1;
+            continue;
+        }
+
+        // Check if adding this stub would exceed the budget.
+        let new_chars = chars_used + stub.len() + 1; // +1 for '\n'
+        if estimate_tokens(&"\n".repeat(new_chars)) + stub_tokens > budget && chars_used > 0 {
+            omitted += 1;
+            continue;
+        }
+
+        output_lines.push(stub);
+        chars_used += output_lines.last().unwrap().len() + 1;
+        included += 1;
+
+        // Early exit once we've clearly exceeded the budget.
+        if estimate_tokens(&" ".repeat(chars_used)) >= budget {
+            // Count remaining as omitted.
+            omitted += ordered.len().saturating_sub(included + omitted);
+            break;
+        }
+    }
+
+    // Trailing summary comment.
+    let summary = format!("// {included} symbol(s) shown; {omitted} omitted (token budget)");
+    output_lines.push(summary);
+
+    Ok(output_lines.join("\n"))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ContextPack  RetrievalTool
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Token-budgeted ranked elided-stub context pack (W4.2).
+///
+/// **Request shape**
+/// ```json
+/// { "seeds": ["<symbol-id>", …], "token_budget": 2000 }
+/// ```
+/// OR resolve by name:
+/// ```json
+/// { "name": "<symbol name>", "token_budget": 2000 }
+/// ```
+/// * `seeds` — one or more stable [`SymbolId`] strings.
+/// * `name`  — symbol name to resolve; all matching symbols become seeds (alternative to `seeds`).
+/// * `token_budget` — optional, default [`DEFAULT_TOKEN_BUDGET`], capped at [`MAX_TOKEN_BUDGET`].
+///
+/// **Response `content` shape**
+/// ```json
+/// { "context": "fn foo(x: i32) -> u32\n  // src/lib.rs:12\n…", "included": 5, "omitted": 3 }
+/// ```
+/// * `context` — the packed stub text, ready to paste into an LLM prompt.
+/// * `included` — count of symbols rendered.
+/// * `omitted`  — count of candidate symbols that did not fit in the budget.
+#[derive(Debug, Default)]
+pub struct ContextPack;
+
+impl RetrievalTool for ContextPack {
+    fn name(&self) -> &str {
+        "ContextPack"
+    }
+
+    fn description(&self) -> &str {
+        "Produce a token-budgeted, ranked, elided-stub context block for the given seed symbols. \
+         Renders signature + first doc line (never full bodies), highest-PageRank symbols first, \
+         packed within the requested token budget. \
+         Use this to efficiently fill an LLM context window with the most relevant code."
+    }
+
+    fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
+        // ── parse seeds ──────────────────────────────────────────────────────
+        let mut seeds: Vec<SymbolId> = Vec::new();
+        let mut diag: Vec<String> = Vec::new();
+
+        // Accept either explicit `seeds` array or a `name` to resolve.
+        if let Some(arr) = request.get("seeds").and_then(|v| v.as_array()) {
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    if !s.is_empty() {
+                        seeds.push(SymbolId(s.to_string()));
+                    }
+                }
+            }
+        }
+
+        if seeds.is_empty() {
+            if let Some(name) = request.get("name").and_then(|v| v.as_str()) {
+                if !name.is_empty() {
+                    let q = SymbolQuery {
+                        text: Some(name.to_string()),
+                        limit: Some(20),
+                        ..Default::default()
+                    };
+                    let hits = store.find_symbols(&q)?;
+                    for node in &hits {
+                        seeds.push(node.symbol.clone());
+                    }
+                    if seeds.is_empty() {
+                        diag.push(format!(
+                            "ContextPack: no symbols found matching name '{name}'"
+                        ));
+                    }
+                }
+            }
+        }
+
+        if seeds.is_empty() {
+            diag.push(
+                "ContextPack: provide 'seeds' (array of symbol ids) or 'name' (symbol name)"
+                    .to_string(),
+            );
+            diag.push(staleness_note());
+            return Ok(RetrievalResult {
+                content: json!({ "context": "", "included": 0, "omitted": 0 }),
+                diagnostics: diag,
+            });
+        }
+
+        // ── parse token_budget ───────────────────────────────────────────────
+        let token_budget = opt_u64(request, "token_budget")
+            .map(|v| v as usize)
+            .unwrap_or(DEFAULT_TOKEN_BUDGET)
+            .min(MAX_TOKEN_BUDGET);
+
+        // ── render ───────────────────────────────────────────────────────────
+        let context_text = render_context(store, &seeds, token_budget)?;
+
+        // Count included/omitted from the summary line in the rendered text.
+        // The last line is always "// N symbol(s) shown; M omitted (token budget)".
+        let (included, omitted) = parse_summary_line(&context_text);
+
+        // R4 size note.
+        let char_count = context_text.len();
+        if char_count > 20_000 {
+            diag.push(format!(
+                "R4-SIZE: context is {char_count} chars — approaching the ~25K agent cap"
+            ));
+        }
+        diag.push(staleness_note());
+
+        Ok(RetrievalResult {
+            content: json!({
+                "context": context_text,
+                "included": included,
+                "omitted": omitted,
+            }),
+            diagnostics: diag,
+        })
+    }
+}
+
+/// Parse `included` and `omitted` from the final summary line rendered by `render_context`.
+/// Returns `(0, 0)` on any parse failure.
+fn parse_summary_line(text: &str) -> (usize, usize) {
+    // Line format: "// N symbol(s) shown; M omitted (token budget)"
+    let Some(last) = text.lines().last() else {
+        return (0, 0);
+    };
+    let stripped = last.trim_start_matches("// ");
+    // "N symbol(s) shown; M omitted (token budget)"
+    let parts: Vec<&str> = stripped.split(';').collect();
+    if parts.len() < 2 {
+        return (0, 0);
+    }
+    let included = parts[0]
+        .split_whitespace()
+        .next()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    let omitted = parts[1]
+        .split_whitespace()
+        .next()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    (included, omitted)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FetchContent
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Return the exact source slice for a single symbol.
+///
+/// **Request shape**
+/// ```json
+/// { "symbol": "<id>" }
+/// ```
+///
+/// **Response `content` shape**
+/// ```json
+/// { "found": true, "symbol": "…", "name": "foo",
+///   "file": "src/lib.rs", "line": 12,
+///   "source": "fn foo() -> u32 { … }" }
+/// ```
+/// When the symbol is not found, or the file's source has not been stored,
+/// `found` is `false` and `source` is absent; a diagnostic is emitted instead
+/// of an error (R1).
+#[derive(Debug, Default)]
+pub struct FetchContent;
+
+impl RetrievalTool for FetchContent {
+    fn name(&self) -> &str {
+        "FetchContent"
+    }
+
+    fn description(&self) -> &str {
+        "Return the exact source slice for a symbol (requires content to have been stored \
+         during indexing). Returns the raw source text extracted from the symbol's byte span, \
+         plus file:line for provenance. Returns found=false (no error) when the symbol is \
+         absent or its file content has not been stored."
+    }
+
+    fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
+        let id_str = match request.get("symbol").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                return Ok(RetrievalResult {
+                    content: json!({ "found": false }),
+                    diagnostics: vec!["FetchContent: 'symbol' field is required".to_string()],
+                });
+            }
+        };
+
+        let id = SymbolId(id_str.clone());
+        let mut diag = vec![staleness_note()];
+
+        let node = match store.get_node(&id)? {
+            None => {
+                diag.push(format!(
+                    "FetchContent: symbol '{id_str}' not found in graph"
+                ));
+                return Ok(RetrievalResult {
+                    content: json!({ "found": false, "symbol": id_str }),
+                    diagnostics: diag,
+                });
+            }
+            Some(n) => n,
+        };
+
+        let source = store.symbol_source(&node)?;
+
+        if source.is_none() {
+            diag.push(format!(
+                "FetchContent: source not available for '{id_str}' \
+                 (file content not stored or span is zero — re-run 'index' to populate)"
+            ));
+        }
+
+        Ok(RetrievalResult {
+            content: json!({
+                "found": true,
+                "symbol": node.symbol.as_str(),
+                "name": node.name,
+                "file": node.location.file,
+                "line": node.location.span.start_line,
+                "source": source,
+            }),
+            diagnostics: diag,
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// W5.2 — Embedder abstraction + HashEmbedder + VectorStore + SemanticSearch
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Embed text into a fixed-dimensional vector for semantic (ANN) search.
+///
+/// **Object-safe**: implementations must be `Send + Sync` so the trait can be used behind `dyn`.
+///
+/// # Provided implementations
+///
+/// * [`HashEmbedder`] — deterministic, dependency-free, no model download.  Not semantic-quality
+///   but proves the wiring and passes the test suite.
+/// * (Optional, `fastembed` feature) `FastEmbedder` — real semantic quality via the
+///   `fastembed` crate; gated behind `#[cfg(feature = "fastembed")]` so the default build and
+///   test run download nothing.
+pub trait Embedder: Send + Sync {
+    /// Embed `text` into a `dim()`-dimensional L2-normalised vector.
+    fn embed(&self, text: &str) -> Vec<f32>;
+
+    /// Dimensionality of the output vector.
+    fn dim(&self) -> usize;
+}
+
+/// Forwarding impl so a `Box<dyn Embedder>` — the runtime-selected embedder (`FastEmbedder` under
+/// the `fastembed` feature, else `HashEmbedder`) — satisfies the `impl Embedder` call sites
+/// (`SemanticSearch::new`, `compute_embeddings`) without monomorphising per concrete type.
+impl Embedder for Box<dyn Embedder> {
+    fn embed(&self, text: &str) -> Vec<f32> {
+        (**self).embed(text)
+    }
+    fn dim(&self) -> usize {
+        (**self).dim()
+    }
+}
+
+// ── HashEmbedder ─────────────────────────────────────────────────────────────
+
+/// Deterministic, zero-dependency bag-of-words embedder.
+///
+/// Splits text into whitespace-delimited tokens, hashes each token into a bucket in a
+/// fixed-dimension vector via FNV-1a (no external dep), accumulates TF-style counts, then
+/// L2-normalises the result.  Output is reproducible across runs and platforms.
+///
+/// Quality: not semantically meaningful — exists to prove the wiring and serve as the default
+/// in tests and in `SemanticSearch` when no real embedder is provided.  Swap for `FastEmbedder`
+/// (feature `fastembed`) or any other `Embedder` impl for production use.
+#[derive(Debug, Clone)]
+pub struct HashEmbedder {
+    dim: usize,
+}
+
+impl HashEmbedder {
+    /// Create a `HashEmbedder` with `dim` output dimensions.
+    /// Panics if `dim` is zero.
+    pub fn new(dim: usize) -> Self {
+        assert!(dim > 0, "HashEmbedder: dim must be > 0");
+        Self { dim }
+    }
+}
+
+impl Default for HashEmbedder {
+    fn default() -> Self {
+        Self::new(128)
+    }
+}
+
+/// FNV-1a 32-bit hash of a byte slice.  No external dep, no `std::collections::HashMap`.
+fn fnv1a(bytes: &[u8]) -> u32 {
+    let mut h: u32 = 2_166_136_261;
+    for &b in bytes {
+        h ^= b as u32;
+        h = h.wrapping_mul(16_777_619);
+    }
+    h
+}
+
+impl Embedder for HashEmbedder {
+    fn embed(&self, text: &str) -> Vec<f32> {
+        let mut v = vec![0.0_f32; self.dim];
+        for token in text.split_whitespace() {
+            let h = fnv1a(token.as_bytes()) as usize;
+            v[h % self.dim] += 1.0;
+        }
+        // L2-normalise.
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for x in &mut v {
+                *x /= norm;
+            }
+        }
+        v
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+}
+
+// ── FastEmbedder (optional, feature `fastembed`) ────────────────────────────────
+
+/// Real semantic embedder backed by an ONNX model (BAAI/bge-small-en-v1.5, 384-dim) via the
+/// `fastembed` crate. Gated behind the `fastembed` feature so the default build pulls no ONNX
+/// runtime and downloads no model. The model is fetched from HuggingFace on first construction
+/// and cached on disk thereafter, so [`FastEmbedder::new`] is fallible (network / disk).
+///
+/// Output vectors are L2-normalised, matching [`HashEmbedder`], so the same cosine path applies.
+/// IMPORTANT: index-time and query-time must use the SAME embedder — this model's dimension (384)
+/// differs from `HashEmbedder`'s default (128), so a store embedded with one cannot be queried
+/// with the other. The feature flag fixes the embedder per-binary, keeping that consistent.
+///
+/// `fastembed::TextEmbedding::embed` takes `&mut self`, so the model lives behind a `Mutex` to
+/// satisfy the `&self` + `Send + Sync` contract of [`Embedder`].
+#[cfg(feature = "fastembed")]
+pub struct FastEmbedder {
+    model: std::sync::Mutex<fastembed::TextEmbedding>,
+    dim: usize,
+}
+
+#[cfg(feature = "fastembed")]
+impl FastEmbedder {
+    /// Load the default model (bge-small-en-v1.5); downloads + caches it on first use.
+    pub fn new() -> wicked_estate_core::Result<Self> {
+        use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+        let mut model = TextEmbedding::try_new(
+            InitOptions::new(EmbeddingModel::BGESmallENV15).with_show_download_progress(false),
+        )
+        .map_err(|e| wicked_estate_core::Error::Invalid(format!("fastembed: model load failed: {e}")))?;
+        // Probe the output dimensionality once so `dim()` reflects the model, not a hard-coded guess.
+        let probe = model
+            .embed(vec!["probe"], None)
+            .map_err(|e| wicked_estate_core::Error::Invalid(format!("fastembed: probe embed failed: {e}")))?;
+        let dim = probe.first().map_or(384, Vec::len);
+        Ok(Self {
+            model: std::sync::Mutex::new(model),
+            dim,
+        })
+    }
+}
+
+#[cfg(feature = "fastembed")]
+impl Embedder for FastEmbedder {
+    fn embed(&self, text: &str) -> Vec<f32> {
+        let result = self
+            .model
+            .lock()
+            .expect("FastEmbedder mutex poisoned")
+            .embed(vec![text], None);
+        match result {
+            Ok(mut batch) if !batch.is_empty() => {
+                let mut v = batch.swap_remove(0);
+                // L2-normalise (bge output is already unit-norm; enforce for cosine parity).
+                let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if norm > 0.0 {
+                    for x in &mut v {
+                        *x /= norm;
+                    }
+                }
+                v
+            }
+            // Post-load inference failure is rare; degrade visibly to a zero vector (sorts last in
+            // cosine) rather than panicking in the infallible trait method.
+            Ok(_) => vec![0.0; self.dim],
+            Err(err) => {
+                eprintln!("EMBED-FALLBACK: fastembed inference failed: {err}");
+                vec![0.0; self.dim]
+            }
+        }
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+}
+
+// ── Model2VecEmbedder (optional, feature `model2vec`) ───────────────────────────
+
+/// Static semantic embedder backed by a distilled model2vec model (default `minishlab/potion-base-8M`)
+/// via the `model2vec-rs` crate. Gated behind the `model2vec` feature. Unlike [`FastEmbedder`] it
+/// pulls NO ONNX runtime — embeddings are a token→vector lookup + pooling, so it is far lighter and
+/// ~10-100× faster, at the cost of being non-contextual (quality below BGE, well above the lexical
+/// [`HashEmbedder`]).
+///
+/// Configurable: set `CI_MODEL2VEC_MODEL` to any model2vec HF repo id or local path to swap the
+/// model without recompiling. Output is L2-normalised (`normalize = true`), matching the other
+/// embedders + the cosine path. `StaticModel` is `Send + Sync` and `encode_single` takes `&self`,
+/// so no interior mutability is needed. The model is fetched on first construction (fallible).
+#[cfg(feature = "model2vec")]
+pub struct Model2VecEmbedder {
+    model: model2vec_rs::model::StaticModel,
+    dim: usize,
+}
+
+#[cfg(feature = "model2vec")]
+impl Model2VecEmbedder {
+    /// Default model (`minishlab/potion-base-8M`), or `CI_MODEL2VEC_MODEL` if set.
+    pub fn new() -> wicked_estate_core::Result<Self> {
+        let model_id = std::env::var("CI_MODEL2VEC_MODEL")
+            .unwrap_or_else(|_| "minishlab/potion-base-8M".to_string());
+        Self::from_model(&model_id)
+    }
+
+    /// Load a specific model2vec model by HuggingFace repo id or local path.
+    pub fn from_model(repo_or_path: &str) -> wicked_estate_core::Result<Self> {
+        use model2vec_rs::model::StaticModel;
+        // normalize = true → unit vectors, matching HashEmbedder/FastEmbedder + the cosine path.
+        let model =
+            StaticModel::from_pretrained(repo_or_path, None, Some(true), None).map_err(|e| {
+                wicked_estate_core::Error::Invalid(format!("model2vec: load '{repo_or_path}' failed: {e}"))
+            })?;
+        let dim = model.encode_single("probe").len();
+        if dim == 0 {
+            return Err(wicked_estate_core::Error::Invalid(
+                "model2vec: model produced a zero-dimension embedding".into(),
+            ));
+        }
+        Ok(Self { model, dim })
+    }
+}
+
+#[cfg(feature = "model2vec")]
+impl Embedder for Model2VecEmbedder {
+    fn embed(&self, text: &str) -> Vec<f32> {
+        let v = self.model.encode_single(text);
+        // Empty/blank input can yield an empty vector; keep dim consistent for storage + cosine.
+        if v.is_empty() { vec![0.0; self.dim] } else { v }
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+}
+
+// ── VectorStore ───────────────────────────────────────────────────────────────
+
+/// Object-safe, `Send`-only wrapper around the concrete-store `nearest` method.
+///
+/// `nearest` lives as an *inherent* method on `SqliteStore` and `MemStore` (not on the
+/// `GraphRead` trait, which must stay object-safe and topology-only).  `VectorStore` is the
+/// thin bridge trait that lets `SemanticSearch` hold a `Box<dyn VectorStore>` without
+/// knowing which concrete store it has.
+///
+/// # Thread-safety note
+///
+/// `VectorStore` requires only `Send` (not `Sync`) because `rusqlite::Connection` is `Send`
+/// but not `Sync`.  `SemanticSearch` wraps the `Box<dyn VectorStore>` in a `Mutex` so the
+/// whole struct is `Send + Sync` as required by `RetrievalTool`.
+pub trait VectorStore: Send {
+    /// Retrieve the `k` nearest symbols to `query_vec` by cosine similarity.
+    fn nearest(&self, query_vec: &[f32], k: usize) -> wicked_estate_core::Result<Vec<(SymbolId, f32)>>;
+}
+
+impl VectorStore for wicked_estate_store::MemStore {
+    fn nearest(&self, query_vec: &[f32], k: usize) -> wicked_estate_core::Result<Vec<(SymbolId, f32)>> {
+        wicked_estate_store::MemStore::nearest(self, query_vec, k)
+    }
+}
+
+impl VectorStore for wicked_estate_store::SqliteStore {
+    fn nearest(&self, query_vec: &[f32], k: usize) -> wicked_estate_core::Result<Vec<(SymbolId, f32)>> {
+        wicked_estate_store::SqliteStore::nearest(self, query_vec, k)
+    }
+}
+
+// ── semantic_search free function ─────────────────────────────────────────────
+
+/// Find the `k` semantically nearest symbols to `query` text.
+///
+/// Embeds `query` with `embedder`, calls `store.nearest`, and resolves the returned
+/// `SymbolId`s to nodes by looking them up in `graph`.
+///
+/// # Design note
+///
+/// `S: VectorStore` is a concrete bound rather than `&dyn GraphRead` because the `nearest`
+/// method lives on the concrete types, not on the `GraphRead` trait.  Pass the same store
+/// for both `graph` and the `S` parameter — they just need different types since we call
+/// different method sets.  Alternatively, use [`SemanticSearch`] as a `RetrievalTool`.
+pub fn semantic_search<S: VectorStore>(
+    graph: &dyn GraphRead,
+    store: &S,
+    embedder: &dyn Embedder,
+    query: &str,
+    k: usize,
+) -> wicked_estate_core::Result<Vec<(SymbolId, f32)>> {
+    let qvec = embedder.embed(query);
+    let hits = store.nearest(&qvec, k)?;
+    // Filter to symbols that actually exist in the graph (embeddings may be stale).
+    let mut out = Vec::with_capacity(hits.len());
+    for (id, sim) in hits {
+        if graph.get_node(&id)?.is_some() {
+            out.push((id, sim));
+        }
+    }
+    Ok(out)
+}
+
+// ── hybrid_search ─────────────────────────────────────────────────────────────
+
+/// Fuse name/graph search results with semantic-nearest results via RRF.
+///
+/// # Arguments
+///
+/// * `name_results`     — ordered `SymbolId`s from a name/FTS search.
+/// * `graph_results`    — ordered `SymbolId`s from a graph-hop traversal.
+/// * `semantic_results` — ordered `SymbolId`s from [`semantic_search`] / `nearest`.
+/// * `k`                — RRF constant (60.0 per the Cormack/Clarke paper).
+///
+/// Returns the RRF-fused ranked list via [`reciprocal_rank_fusion`].
+pub fn hybrid_search(
+    name_results: Vec<SymbolId>,
+    graph_results: Vec<SymbolId>,
+    semantic_results: Vec<SymbolId>,
+    k: f64,
+) -> Vec<(SymbolId, f64)> {
+    reciprocal_rank_fusion(&[name_results, graph_results, semantic_results], k)
+}
+
+// ── SemanticSearch RetrievalTool ──────────────────────────────────────────────
+
+/// Semantic (embedding-based) search over indexed symbols.
+///
+/// **Request shape**
+/// ```json
+/// { "query": "<natural language text>", "k": 10 }
+/// ```
+/// * `query` (required) — text to embed and search.
+/// * `k`     (optional, default 10, max 100) — number of results.
+///
+/// **Response `content` shape**
+/// ```json
+/// { "matches": [ { "symbol": "…", "name": "…", "kind": "…",
+///                  "file": "…", "line": 0, "similarity": 0.92 }, … ],
+///   "total": N }
+/// ```
+///
+/// # `&dyn GraphRead` constraint
+///
+/// `RetrievalTool::invoke` receives `&dyn GraphRead`, but `nearest` lives on the *concrete*
+/// store types (not on the trait).  `SemanticSearch` therefore stores a `Mutex<Box<dyn
+/// VectorStore>>` alongside the embedder.  Construct via [`SemanticSearch::new`] passing the
+/// concrete store.  The same physical store is passed to `invoke` as `&dyn GraphRead` for
+/// node resolution.
+pub struct SemanticSearch {
+    embedder: Box<dyn Embedder>,
+    // Mutex: VectorStore is Send but not Sync (rusqlite::Connection is Send-only).
+    // Wrapping in Mutex<Box<...>> makes SemanticSearch Send + Sync as required by RetrievalTool.
+    vector_store: std::sync::Mutex<Box<dyn VectorStore>>,
+}
+
+impl std::fmt::Debug for SemanticSearch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SemanticSearch").finish_non_exhaustive()
+    }
+}
+
+impl SemanticSearch {
+    /// Create a `SemanticSearch` tool backed by `store` for vector lookup and `embedder` for
+    /// query embedding.
+    ///
+    /// Pass the same physical store to `invoke` as the `&dyn GraphRead` argument for node
+    /// resolution.  The store is wrapped in a `Mutex` internally so `invoke` can be called
+    /// from multiple threads (each call locks briefly only during the `nearest` scan).
+    pub fn new(embedder: impl Embedder + 'static, store: impl VectorStore + 'static) -> Self {
+        Self {
+            embedder: Box::new(embedder),
+            vector_store: std::sync::Mutex::new(Box::new(store)),
+        }
+    }
+
+    /// Create a `SemanticSearch` tool using the default [`HashEmbedder`] (128-dim, deterministic).
+    pub fn with_hash_embedder(store: impl VectorStore + 'static) -> Self {
+        Self::new(HashEmbedder::default(), store)
+    }
+}
+
+impl RetrievalTool for SemanticSearch {
+    fn name(&self) -> &str {
+        "SemanticSearch"
+    }
+
+    fn description(&self) -> &str {
+        "Semantic (embedding-based) symbol search. Embeds the query text and returns the \
+         k nearest symbols by cosine similarity. Complements name/FTS search when the caller \
+         knows the concept but not the exact symbol name. Fuse with name results via hybrid_search."
+    }
+
+    fn invoke(&self, store: &dyn GraphRead, request: &Value) -> wicked_estate_core::Result<RetrievalResult> {
+        let query_str = match request.get("query").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                return Ok(RetrievalResult {
+                    content: json!({ "matches": [], "total": 0 }),
+                    diagnostics: vec![
+                        "SemanticSearch: 'query' field is required and must be a non-empty string"
+                            .to_string(),
+                    ],
+                });
+            }
+        };
+
+        let k = opt_u64(request, "k").unwrap_or(10).min(100) as usize;
+        let qvec = self.embedder.embed(&query_str);
+
+        let vs = self
+            .vector_store
+            .lock()
+            .expect("VectorStore mutex poisoned");
+        let hits = vs.nearest(&qvec, k)?;
+        drop(vs); // release mutex before the graph node lookups
+
+        let mut matches = Vec::with_capacity(hits.len());
+        for (id, sim) in &hits {
+            let Some(node) = store.get_node(id)? else {
+                continue;
+            };
+            matches.push(json!({
+                "symbol": node.symbol.as_str(),
+                "name": node.name,
+                "kind": serde_json::to_value(&node.kind).unwrap_or(Value::Null),
+                "file": node.location.file,
+                "line": node.location.span.start_line,
+                "similarity": sim,
+            }));
+        }
+
+        let mut diag = vec![staleness_note()];
+        if matches.is_empty() {
+            diag.push(format!(
+                "SemanticSearch: no symbols found for query '{query_str}' \
+                 (embeddings may not have been populated yet)"
+            ));
+        }
+        if !store.capabilities().vector_search {
+            diag.push(
+                "COVERAGE: store does not advertise vector_search capability; \
+                 embeddings may not be stored"
+                    .to_string(),
+            );
+        }
+
+        let total = matches.len();
+        Ok(RetrievalResult {
+            content: json!({ "matches": matches, "total": total }),
+            diagnostics: diag,
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wicked_estate_core::{
+        Confidence, EdgeKind, Language, Location, Node, NodeKind, ResolutionTier, Span, SymbolId,
+    };
+    use wicked_estate_core::{Edge, GraphWrite};
+    use wicked_estate_store::MemStore;
+    use serde_json::json;
+
+    // ── Fixture helpers ──────────────────────────────────────────────────────
+
+    fn span(line: u32) -> Span {
+        Span {
+            start_byte: 0,
+            end_byte: 0,
+            start_line: line,
+            start_col: 0,
+            end_line: line,
+            end_col: 0,
+        }
+    }
+
+    fn make_node(id: &str, name: &str, kind: NodeKind, file: &str, line: u32) -> Node {
+        Node::new(
+            SymbolId(id.to_string()),
+            kind,
+            name,
+            Language::new("rust"),
+            Location::new(file, span(line)),
+        )
+    }
+
+    fn make_call_edge(src: &str, tgt: &str) -> Edge {
+        Edge::new(
+            SymbolId(src.to_string()),
+            SymbolId(tgt.to_string()),
+            EdgeKind::Calls,
+            ResolutionTier::Parsed,
+            "test-fixture",
+        )
+    }
+
+    /// Build a call chain: `caller` → `middle` → `leaf`
+    ///
+    ///  Blast-radius of `leaf` should include `middle` and `caller`.
+    fn fixture_store() -> MemStore {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node("caller", "caller_fn", NodeKind::Function, "src/a.rs", 1),
+                make_node("middle", "middle_fn", NodeKind::Function, "src/b.rs", 10),
+                make_node("leaf", "leaf_fn", NodeKind::Function, "src/c.rs", 20),
+            ])
+            .unwrap();
+        store
+            .upsert_edges(&[
+                make_call_edge("caller", "middle"), // caller calls middle
+                make_call_edge("middle", "leaf"),   // middle calls leaf
+            ])
+            .unwrap();
+        store.commit_batch().unwrap();
+        store
+    }
+
+    // ── SearchEntity ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn search_entity_exact_hit() {
+        let store = fixture_store();
+        let tool = SearchEntity;
+        let res = tool.invoke(&store, &json!({"name": "middle_fn"})).unwrap();
+
+        let matches = res.content["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1, "exactly one match");
+        assert_eq!(matches[0]["name"].as_str().unwrap(), "middle_fn");
+        assert_eq!(matches[0]["file"].as_str().unwrap(), "src/b.rs");
+        assert_eq!(matches[0]["line"].as_u64().unwrap(), 10);
+    }
+
+    #[test]
+    fn search_entity_substring_hit() {
+        let store = fixture_store();
+        let tool = SearchEntity;
+        let res = tool.invoke(&store, &json!({"name": "_fn"})).unwrap();
+
+        let matches = res.content["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 3, "all three *_fn symbols match substring");
+    }
+
+    #[test]
+    fn search_entity_no_results_returns_empty_not_error() {
+        let store = fixture_store();
+        let tool = SearchEntity;
+        let res = tool
+            .invoke(&store, &json!({"name": "does_not_exist_xyz"}))
+            .unwrap();
+
+        assert_eq!(res.content["total"].as_u64().unwrap(), 0);
+        assert!(
+            !res.diagnostics.is_empty(),
+            "diagnostic expected for no results"
+        );
+    }
+
+    #[test]
+    fn search_entity_missing_name_field_returns_diagnostic() {
+        let store = fixture_store();
+        let tool = SearchEntity;
+        let res = tool.invoke(&store, &json!({})).unwrap();
+
+        assert_eq!(res.content["total"].as_u64().unwrap_or(0), 0);
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("'name' field")),
+            "should explain missing field"
+        );
+    }
+
+    #[test]
+    fn search_entity_respects_limit() {
+        let store = fixture_store();
+        let tool = SearchEntity;
+        let res = tool
+            .invoke(&store, &json!({"name": "_fn", "limit": 2}))
+            .unwrap();
+
+        let matches = res.content["matches"].as_array().unwrap();
+        assert!(matches.len() <= 2, "limit must be respected");
+    }
+
+    // ── RetrieveEntity ───────────────────────────────────────────────────────
+
+    #[test]
+    fn retrieve_entity_found() {
+        let store = fixture_store();
+        let tool = RetrieveEntity;
+        let res = tool.invoke(&store, &json!({"symbol": "leaf"})).unwrap();
+
+        assert!(res.content["found"].as_bool().unwrap());
+        assert_eq!(res.content["name"].as_str().unwrap(), "leaf_fn");
+        assert_eq!(res.content["file"].as_str().unwrap(), "src/c.rs");
+    }
+
+    #[test]
+    fn retrieve_entity_not_found_returns_found_false_not_error() {
+        let store = fixture_store();
+        let tool = RetrieveEntity;
+        let res = tool
+            .invoke(&store, &json!({"symbol": "nonexistent"}))
+            .unwrap();
+
+        assert!(!res.content["found"].as_bool().unwrap());
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("not found")),
+            "should note symbol not found"
+        );
+    }
+
+    #[test]
+    fn retrieve_entity_missing_field_returns_diagnostic() {
+        let store = fixture_store();
+        let tool = RetrieveEntity;
+        let res = tool.invoke(&store, &json!({})).unwrap();
+
+        assert!(!res.content["found"].as_bool().unwrap());
+        assert!(!res.diagnostics.is_empty());
+    }
+
+    // ── TraverseGraph ────────────────────────────────────────────────────────
+
+    #[test]
+    fn traverse_graph_dependencies() {
+        let store = fixture_store();
+        let tool = TraverseGraph;
+        // Follow dependencies (forward): caller → middle → leaf
+        let res = tool
+            .invoke(
+                &store,
+                &json!({"symbol": "caller", "depth": 4, "direction": "dependencies"}),
+            )
+            .unwrap();
+
+        let nodes = res.content["nodes"].as_array().unwrap();
+        let names: Vec<&str> = nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"middle_fn"), "middle reachable from caller");
+        assert!(
+            names.contains(&"leaf_fn"),
+            "leaf reachable from caller via middle"
+        );
+    }
+
+    #[test]
+    fn traverse_graph_dependents_from_middle() {
+        let store = fixture_store();
+        let tool = TraverseGraph;
+        let res = tool
+            .invoke(
+                &store,
+                &json!({"symbol": "middle", "direction": "dependents", "depth": 4}),
+            )
+            .unwrap();
+
+        let nodes = res.content["nodes"].as_array().unwrap();
+        let names: Vec<&str> = nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
+        assert!(
+            names.contains(&"caller_fn"),
+            "caller is a dependent of middle"
+        );
+    }
+
+    #[test]
+    fn traverse_graph_depths_recorded() {
+        let store = fixture_store();
+        let tool = TraverseGraph;
+        let res = tool
+            .invoke(
+                &store,
+                &json!({"symbol": "caller", "direction": "dependencies", "depth": 4}),
+            )
+            .unwrap();
+
+        let depths = &res.content["depths"];
+        // middle is at depth 1, leaf at depth 2
+        assert_eq!(depths["middle"].as_u64().unwrap_or(99), 1);
+        assert_eq!(depths["leaf"].as_u64().unwrap_or(99), 2);
+    }
+
+    #[test]
+    fn traverse_graph_missing_symbol_returns_empty_not_error() {
+        let store = fixture_store();
+        let tool = TraverseGraph;
+        let res = tool.invoke(&store, &json!({"symbol": "ghost"})).unwrap();
+
+        let nodes = res.content["nodes"].as_array().unwrap();
+        assert!(nodes.is_empty());
+        assert!(!res.diagnostics.is_empty());
+    }
+
+    // ── BlastRadius ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn blast_radius_of_leaf_includes_callers() {
+        let store = fixture_store();
+        let tool = BlastRadius;
+        let res = tool
+            .invoke(&store, &json!({"symbol": "leaf", "depth": 8}))
+            .unwrap();
+
+        let deps = res.content["dependents"].as_array().unwrap();
+        let names: Vec<&str> = deps.iter().map(|d| d["name"].as_str().unwrap()).collect();
+
+        // Both middle (direct) and caller (transitive) call leaf.
+        assert!(names.contains(&"middle_fn"), "middle calls leaf directly");
+        assert!(
+            names.contains(&"caller_fn"),
+            "caller transitively reaches leaf"
+        );
+
+        // Leaf itself should NOT appear in its own blast radius.
+        assert!(
+            !names.contains(&"leaf_fn"),
+            "start symbol excluded from blast radius"
+        );
+
+        // Total matches.
+        assert_eq!(res.content["total"].as_u64().unwrap(), 2);
+
+        // Coverage fields are always present.
+        assert!(
+            res.content.get("unresolved_callers").is_some(),
+            "unresolved_callers field present"
+        );
+        assert!(
+            res.content.get("confidence").is_some(),
+            "confidence field present"
+        );
+    }
+
+    #[test]
+    fn blast_radius_leaf_fn_depth_field() {
+        let store = fixture_store();
+        let tool = BlastRadius;
+        let res = tool.invoke(&store, &json!({"symbol": "leaf"})).unwrap();
+
+        let deps = res.content["dependents"].as_array().unwrap();
+        let middle = deps
+            .iter()
+            .find(|d| d["name"].as_str().unwrap() == "middle_fn")
+            .unwrap();
+        assert_eq!(middle["depth"].as_u64().unwrap(), 1);
+    }
+
+    #[test]
+    fn blast_radius_of_top_level_caller_is_empty() {
+        let store = fixture_store();
+        let tool = BlastRadius;
+        let res = tool.invoke(&store, &json!({"symbol": "caller"})).unwrap();
+
+        assert_eq!(res.content["total"].as_u64().unwrap(), 0);
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("no dependents")),
+            "diagnostic expected for empty blast radius"
+        );
+        // Coverage note emitted even when there are zero dependents.
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("coverage:")),
+            "coverage diagnostic always emitted"
+        );
+    }
+
+    #[test]
+    fn blast_radius_missing_field() {
+        let store = fixture_store();
+        let tool = BlastRadius;
+        let res = tool.invoke(&store, &json!({})).unwrap();
+
+        assert_eq!(res.content["total"].as_u64().unwrap_or(0), 0);
+        assert!(!res.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn blast_radius_reports_unresolved_callers_and_coverage_diagnostic() {
+        use wicked_estate_core::{EdgeKind, Location, Span, UnresolvedRef};
+
+        // Build: resolved call chain AND an unresolved ref to the same target name.
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node(
+                    "target",
+                    "target_fn",
+                    NodeKind::Function,
+                    "src/target.rs",
+                    1,
+                ),
+                make_node(
+                    "known_caller",
+                    "known_caller_fn",
+                    NodeKind::Function,
+                    "src/a.rs",
+                    5,
+                ),
+            ])
+            .unwrap();
+        // Resolved edge: known_caller → target
+        store
+            .upsert_edges(&[make_call_edge("known_caller", "target")])
+            .unwrap();
+        // Unresolved ref: something called "target_fn" from a site that the resolver could not bind.
+        let unresolved = UnresolvedRef::new(
+            SymbolId("mystery_caller".to_string()),
+            "target_fn",
+            EdgeKind::Calls,
+            Location::new("src/mystery.rs", Span::ZERO),
+        );
+        store.upsert_unresolved_refs(&[unresolved]).unwrap();
+        store.commit_batch().unwrap();
+
+        let tool = BlastRadius;
+        let res = tool.invoke(&store, &json!({"symbol": "target"})).unwrap();
+
+        // Resolved callers appear in dependents.
+        let deps = res.content["dependents"].as_array().unwrap();
+        let names: Vec<&str> = deps.iter().map(|d| d["name"].as_str().unwrap()).collect();
+        assert!(
+            names.contains(&"known_caller_fn"),
+            "resolved caller in dependents"
+        );
+
+        // unresolved_callers >= 1 (the mystery ref).
+        let unresolved_callers = res.content["unresolved_callers"].as_u64().unwrap();
+        assert!(
+            unresolved_callers >= 1,
+            "at least one unresolved caller reported"
+        );
+
+        // Coverage diagnostic is present.
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("coverage:")),
+            "coverage diagnostic emitted"
+        );
+
+        // The diagnostic names the symbol and mentions unresolved callers.
+        let cov_diag = res
+            .diagnostics
+            .iter()
+            .find(|d| d.contains("coverage:"))
+            .unwrap();
+        assert!(
+            cov_diag.contains("target_fn"),
+            "coverage note names the symbol"
+        );
+        assert!(
+            cov_diag.contains("unresolved"),
+            "coverage note mentions unresolved"
+        );
+
+        // Confidence stats are present and non-null (there is at least one edge).
+        let conf = &res.content["confidence"];
+        assert!(conf["edge_count"].as_u64().unwrap() >= 1, "edge count >= 1");
+        assert!(conf["min"].as_f64().is_some(), "min confidence populated");
+        assert!(conf["avg"].as_f64().is_some(), "avg confidence populated");
+    }
+
+    #[test]
+    fn blast_radius_coverage_note_present_when_zero_unresolved() {
+        // Even with no unresolved refs, a coverage note must be emitted.
+        let store = fixture_store();
+        let tool = BlastRadius;
+        let res = tool.invoke(&store, &json!({"symbol": "leaf"})).unwrap();
+
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("coverage:")),
+            "coverage diagnostic emitted even when unresolved_callers == 0"
+        );
+        assert_eq!(
+            res.content["unresolved_callers"].as_u64().unwrap(),
+            0,
+            "zero unresolved callers for a well-known fixture"
+        );
+    }
+
+    // ── Lineage ───────────────────────────────────────────────────────────────
+
+    /// Build a chain with imports too: `root` calls `mid`, `mid` imports `leaf`.
+    fn lineage_fixture() -> MemStore {
+        use wicked_estate_core::ResolutionTier;
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node("root", "root_fn", NodeKind::Function, "src/root.rs", 1),
+                make_node("mid", "mid_fn", NodeKind::Function, "src/mid.rs", 10),
+                make_node("leaf", "leaf_fn", NodeKind::Function, "src/leaf.rs", 20),
+            ])
+            .unwrap();
+        // root --calls--> mid --imports--> leaf
+        let call_edge = Edge::new(
+            SymbolId("root".to_string()),
+            SymbolId("mid".to_string()),
+            EdgeKind::Calls,
+            ResolutionTier::Parsed,
+            "test-fixture",
+        );
+        let import_edge = Edge::new(
+            SymbolId("mid".to_string()),
+            SymbolId("leaf".to_string()),
+            EdgeKind::Imports,
+            ResolutionTier::Parsed,
+            "test-fixture",
+        );
+        store.upsert_edges(&[call_edge, import_edge]).unwrap();
+        store.commit_batch().unwrap();
+        store
+    }
+
+    #[test]
+    fn lineage_of_root_includes_mid_and_leaf() {
+        let store = lineage_fixture();
+        let tool = Lineage;
+        let res = tool
+            .invoke(&store, &json!({"symbol": "root", "depth": 8}))
+            .unwrap();
+
+        let deps = res.content["dependencies"].as_array().unwrap();
+        let names: Vec<&str> = deps.iter().map(|d| d["name"].as_str().unwrap()).collect();
+
+        assert!(
+            names.contains(&"mid_fn"),
+            "direct call target must be in lineage"
+        );
+        assert!(
+            names.contains(&"leaf_fn"),
+            "transitive import target must be in lineage"
+        );
+        // Root itself must NOT appear.
+        assert!(
+            !names.contains(&"root_fn"),
+            "start symbol excluded from lineage"
+        );
+        assert_eq!(res.content["total"].as_u64().unwrap(), 2);
+    }
+
+    #[test]
+    fn lineage_depth_field_is_accurate() {
+        let store = lineage_fixture();
+        let tool = Lineage;
+        let res = tool.invoke(&store, &json!({"symbol": "root"})).unwrap();
+
+        let deps = res.content["dependencies"].as_array().unwrap();
+        let mid = deps
+            .iter()
+            .find(|d| d["name"].as_str().unwrap() == "mid_fn")
+            .unwrap();
+        let leaf = deps
+            .iter()
+            .find(|d| d["name"].as_str().unwrap() == "leaf_fn")
+            .unwrap();
+        assert_eq!(mid["depth"].as_u64().unwrap(), 1, "mid is at depth 1");
+        assert_eq!(leaf["depth"].as_u64().unwrap(), 2, "leaf is at depth 2");
+    }
+
+    #[test]
+    fn lineage_of_leaf_is_empty() {
+        let store = lineage_fixture();
+        let tool = Lineage;
+        let res = tool.invoke(&store, &json!({"symbol": "leaf"})).unwrap();
+
+        assert_eq!(res.content["total"].as_u64().unwrap(), 0);
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.contains("no dependencies")),
+            "diagnostic expected for leaf with no dependencies"
+        );
+    }
+
+    #[test]
+    fn lineage_missing_symbol_returns_empty_not_error() {
+        let store = lineage_fixture();
+        let tool = Lineage;
+        let res = tool
+            .invoke(&store, &json!({"symbol": "ghost_xyz"}))
+            .unwrap();
+
+        // R1: must be Ok, never Err.
+        assert_eq!(res.content["total"].as_u64().unwrap(), 0);
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.contains("no dependencies")),
+            "diagnostic must be present for missing symbol"
+        );
+    }
+
+    #[test]
+    fn lineage_missing_field_returns_diagnostic() {
+        let store = lineage_fixture();
+        let tool = Lineage;
+        let res = tool.invoke(&store, &json!({})).unwrap();
+
+        assert_eq!(res.content["total"].as_u64().unwrap_or(0), 0);
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("Lineage")),
+            "diagnostic must name the tool"
+        );
+    }
+
+    #[test]
+    fn lineage_staleness_note_always_present() {
+        let store = lineage_fixture();
+        let tool = Lineage;
+        let res = tool.invoke(&store, &json!({"symbol": "root"})).unwrap();
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("STALENESS")),
+            "R5 staleness note must always be present"
+        );
+    }
+
+    #[test]
+    fn lineage_confidence_fields_populated() {
+        let store = lineage_fixture();
+        let tool = Lineage;
+        let res = tool.invoke(&store, &json!({"symbol": "root"})).unwrap();
+
+        let conf = &res.content["confidence"];
+        assert!(
+            conf["edge_count"].as_u64().unwrap() >= 1,
+            "at least one edge in lineage"
+        );
+        assert!(conf["min"].as_f64().is_some(), "min confidence populated");
+        assert!(conf["avg"].as_f64().is_some(), "avg confidence populated");
+    }
+
+    // ── Reciprocal Rank Fusion ───────────────────────────────────────────────
+
+    fn id(s: &str) -> SymbolId {
+        SymbolId(s.to_string())
+    }
+
+    #[test]
+    fn rrf_single_list_preserves_order() {
+        let list = vec![id("a"), id("b"), id("c")];
+        let ranked = reciprocal_rank_fusion(&[list], 60.0);
+        let ids: Vec<&str> = ranked.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["a", "b", "c"],
+            "order preserved in single-list fusion"
+        );
+    }
+
+    #[test]
+    fn rrf_item_in_multiple_lists_ranks_first() {
+        // "shared" appears rank-1 in list A and rank-2 in list B.
+        // "only_a" appears rank-2 in A; "only_b" appears rank-1 in B.
+        let list_a = vec![id("shared"), id("only_a")];
+        let list_b = vec![id("only_b"), id("shared")];
+
+        let ranked = reciprocal_rank_fusion(&[list_a, list_b], 60.0);
+        let ids: Vec<&str> = ranked.iter().map(|(s, _)| s.as_str()).collect();
+
+        // "shared" gets 1/(60+1) + 1/(60+2) > either solo entry.
+        assert_eq!(
+            ids[0], "shared",
+            "'shared' should rank first (appears in both lists)"
+        );
+    }
+
+    #[test]
+    fn rrf_scores_decrease_with_rank() {
+        let list = vec![id("first"), id("second"), id("third")];
+        let ranked = reciprocal_rank_fusion(&[list], 60.0);
+
+        // Score at rank 1 > rank 2 > rank 3 with k=60.
+        assert!(ranked[0].1 > ranked[1].1);
+        assert!(ranked[1].1 > ranked[2].1);
+    }
+
+    #[test]
+    fn rrf_empty_lists_returns_empty() {
+        let ranked = reciprocal_rank_fusion(&[], 60.0);
+        assert!(ranked.is_empty());
+    }
+
+    #[test]
+    fn rrf_deduplicates_across_lists() {
+        let list_a = vec![id("x"), id("y")];
+        let list_b = vec![id("x"), id("z")];
+        let ranked = reciprocal_rank_fusion(&[list_a, list_b], 60.0);
+
+        let ids: Vec<&str> = ranked.iter().map(|(s, _)| s.as_str()).collect();
+        let count_x = ids.iter().filter(|&&s| s == "x").count();
+        assert_eq!(count_x, 1, "x should appear exactly once after dedup");
+        assert_eq!(ranked.len(), 3, "total unique symbols = 3");
+    }
+
+    #[test]
+    fn rrf_k_affects_score_magnitude() {
+        let list = vec![id("a")];
+        let r60 = reciprocal_rank_fusion(std::slice::from_ref(&list), 60.0);
+        let r1 = reciprocal_rank_fusion(std::slice::from_ref(&list), 1.0);
+
+        // With k=1, rank-1 score = 1/(1+1)=0.5; with k=60 it's 1/(60+1)≈0.016.
+        assert!(r1[0].1 > r60[0].1, "smaller k yields larger scores");
+    }
+
+    // ── ContextPack / render_context ─────────────────────────────────────────
+
+    /// Build a richer fixture: `hub` is called by both `alpha` and `beta`; `leaf` is called
+    /// only by `alpha`.  Hub should rank higher than leaf (more in-edges in the PageRank graph).
+    fn context_fixture() -> MemStore {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+
+        let mut hub = make_node("hub", "hub_fn", NodeKind::Function, "src/hub.rs", 1);
+        hub.signature = Some("fn hub_fn(x: i32) -> u32".to_string());
+        hub.doc =
+            Some("The central hub function.\nExtra doc line that should not appear.".to_string());
+
+        let mut alpha = make_node("alpha", "alpha_fn", NodeKind::Function, "src/alpha.rs", 10);
+        alpha.signature = Some("fn alpha_fn()".to_string());
+
+        let mut beta = make_node("beta", "beta_fn", NodeKind::Function, "src/beta.rs", 20);
+        beta.signature = Some("fn beta_fn()".to_string());
+
+        let mut leaf = make_node("leaf", "leaf_fn", NodeKind::Function, "src/leaf.rs", 30);
+        leaf.signature = Some("fn leaf_fn() -> bool".to_string());
+        leaf.doc = Some("A leaf function.".to_string());
+
+        store.upsert_nodes(&[hub, alpha, beta, leaf]).unwrap();
+        store
+            .upsert_edges(&[
+                make_call_edge("alpha", "hub"),
+                make_call_edge("beta", "hub"),
+                make_call_edge("alpha", "leaf"),
+            ])
+            .unwrap();
+        store.commit_batch().unwrap();
+        store
+    }
+
+    #[test]
+    fn render_context_respects_token_budget() {
+        let store = context_fixture();
+        // A very small budget — only a few tokens.
+        let budget = 20usize;
+        let result = render_context(&store, &[SymbolId("hub".into())], budget).unwrap();
+        // chars should be roughly budget * 4.
+        assert!(
+            result.len() <= budget * 4 + 200,
+            "output chars ({}) should be within ~budget*4 ({}) chars; summary line allowed overhead",
+            result.len(),
+            budget * 4
+        );
+    }
+
+    #[test]
+    fn render_context_stubs_contain_signatures_not_bodies() {
+        let store = context_fixture();
+        let result =
+            render_context(&store, &[SymbolId("hub".into())], DEFAULT_TOKEN_BUDGET).unwrap();
+
+        // Signature present.
+        assert!(
+            result.contains("fn hub_fn(x: i32) -> u32"),
+            "hub signature must appear in output"
+        );
+        // No full body markers — stubs have no opening braces followed by bodies.
+        // The stub format is `fn sig`, `  /// doc`, `  // file:line` — no `{` body.
+        assert!(
+            !result.contains("{\n"),
+            "function bodies (opening brace + newline) must not appear in stub output"
+        );
+        // First doc line appears; second doc line does not.
+        assert!(
+            result.contains("The central hub function."),
+            "first doc line must appear"
+        );
+        assert!(
+            !result.contains("Extra doc line"),
+            "second doc line must NOT appear (elided)"
+        );
+    }
+
+    #[test]
+    fn render_context_hub_before_leaf() {
+        // hub is called by both alpha and beta; leaf is called only by alpha.
+        // When seeded on alpha, hub should appear before leaf in the output (higher rank).
+        let store = context_fixture();
+        let result =
+            render_context(&store, &[SymbolId("alpha".into())], DEFAULT_TOKEN_BUDGET).unwrap();
+
+        let hub_pos = result.find("hub_fn");
+        let leaf_pos = result.find("leaf_fn");
+
+        assert!(hub_pos.is_some(), "hub_fn must appear in context");
+        assert!(leaf_pos.is_some(), "leaf_fn must appear in context");
+        assert!(
+            hub_pos.unwrap() < leaf_pos.unwrap(),
+            "hub_fn (more-depended-upon) must appear before leaf_fn in the output"
+        );
+    }
+
+    #[test]
+    fn render_context_empty_seeds_returns_empty_no_panic() {
+        let store = context_fixture();
+        let result = render_context(&store, &[], DEFAULT_TOKEN_BUDGET).unwrap();
+        assert!(result.is_empty(), "empty seeds must return empty string");
+    }
+
+    #[test]
+    fn context_pack_tool_basic_invoke() {
+        let store = context_fixture();
+        let tool = ContextPack;
+        let res = tool
+            .invoke(&store, &json!({"seeds": ["hub"], "token_budget": 1000}))
+            .unwrap();
+
+        let context = res.content["context"].as_str().unwrap();
+        assert!(
+            !context.is_empty(),
+            "context must be non-empty for valid seeds"
+        );
+        assert!(
+            res.content["included"].as_u64().unwrap() >= 1,
+            "at least one symbol included"
+        );
+        // R5 staleness note must always appear.
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("STALENESS")),
+            "staleness diagnostic must be present"
+        );
+    }
+
+    #[test]
+    fn context_pack_tool_name_resolution() {
+        let store = context_fixture();
+        let tool = ContextPack;
+        // Resolve by name instead of by id.
+        let res = tool
+            .invoke(&store, &json!({"name": "hub_fn", "token_budget": 1000}))
+            .unwrap();
+
+        let context = res.content["context"].as_str().unwrap();
+        assert!(
+            context.contains("hub_fn"),
+            "hub_fn must appear when resolved by name"
+        );
+    }
+
+    #[test]
+    fn context_pack_tool_empty_seeds_diagnostic_no_panic() {
+        let store = context_fixture();
+        let tool = ContextPack;
+        let res = tool.invoke(&store, &json!({})).unwrap();
+
+        // Must be R1 compliant — no error, just empty content + diagnostic.
+        assert_eq!(res.content["included"].as_u64().unwrap_or(0), 0);
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("ContextPack")),
+            "diagnostic must name the tool"
+        );
+    }
+
+    #[test]
+    fn context_pack_token_budget_capped_at_max() {
+        let store = context_fixture();
+        let tool = ContextPack;
+        // Request a budget far above the cap.
+        let res = tool
+            .invoke(&store, &json!({"seeds": ["hub"], "token_budget": 999_999}))
+            .unwrap();
+        // The output chars must stay well within MAX_TOKEN_BUDGET * 4 chars.
+        let context = res.content["context"].as_str().unwrap();
+        assert!(
+            context.len() <= MAX_TOKEN_BUDGET * 4 + 500,
+            "output must not exceed cap * 4 chars (+ small overhead for summary line), got {}",
+            context.len()
+        );
+    }
+
+    // ── Agent-behavior rules (R1 / R4 / R7) ─────────────────────────────────
+
+    #[test]
+    fn r1_no_error_on_unknown_symbol_all_tools() {
+        let store = fixture_store();
+        let req = json!({"symbol": "ghost_xyz"});
+
+        // All tools must return Ok, never Err, for missing symbols.
+        assert!(RetrieveEntity.invoke(&store, &req).is_ok());
+        assert!(TraverseGraph.invoke(&store, &req).is_ok());
+        assert!(BlastRadius.invoke(&store, &req).is_ok());
+    }
+
+    #[test]
+    fn r7_low_confidence_edge_flagged_in_diagnostics() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node("alpha", "alpha_fn", NodeKind::Function, "src/x.rs", 1),
+                make_node("beta", "beta_fn", NodeKind::Function, "src/y.rs", 5),
+            ])
+            .unwrap();
+
+        // Manually create a low-confidence edge.
+        let mut low_edge = make_call_edge("alpha", "beta");
+        low_edge.confidence = Confidence::new(0.3); // below 0.5 threshold
+        store.upsert_edges(&[low_edge]).unwrap();
+        store.commit_batch().unwrap();
+
+        let tool = TraverseGraph;
+        let res = tool
+            .invoke(
+                &store,
+                &json!({"symbol": "alpha", "direction": "dependencies", "depth": 3}),
+            )
+            .unwrap();
+
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("R7-CONFIDENCE")),
+            "low-confidence edge must be flagged"
+        );
+    }
+
+    // ── FetchContent ──────────────────────────────────────────────────────────
+
+    /// Build a store with a node whose span covers a known text slice.
+    fn content_fixture() -> MemStore {
+        use wicked_estate_core::{GraphWrite, Span};
+
+        let src = "fn greet() { \"hello\" }";
+        // "greet" is at bytes 3..8 in the source above.
+        let node_span = Span {
+            start_byte: 3,
+            end_byte: 8,
+            start_line: 0,
+            start_col: 3,
+            end_line: 0,
+            end_col: 8,
+        };
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        let mut n = make_node("greet_sym", "greet", NodeKind::Function, "src/greet.rs", 0);
+        n.location.span = node_span;
+        store.upsert_nodes(&[n]).unwrap();
+        store.commit_batch().unwrap();
+        store.set_file_content("src/greet.rs", src).unwrap();
+        store
+    }
+
+    #[test]
+    fn fetch_content_returns_source_slice() {
+        let store = content_fixture();
+        let tool = FetchContent;
+        let res = tool
+            .invoke(&store, &json!({"symbol": "greet_sym"}))
+            .unwrap();
+
+        assert!(
+            res.content["found"].as_bool().unwrap(),
+            "found must be true"
+        );
+        assert_eq!(
+            res.content["source"].as_str().unwrap(),
+            "greet",
+            "source slice must match"
+        );
+        assert_eq!(res.content["file"].as_str().unwrap(), "src/greet.rs");
+    }
+
+    #[test]
+    fn fetch_content_missing_symbol_returns_found_false_not_error() {
+        let store = content_fixture();
+        let tool = FetchContent;
+        let res = tool
+            .invoke(&store, &json!({"symbol": "nonexistent"}))
+            .unwrap();
+
+        assert!(
+            !res.content["found"].as_bool().unwrap(),
+            "found must be false"
+        );
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("not found")),
+            "diagnostic must note symbol not found"
+        );
+    }
+
+    #[test]
+    fn fetch_content_missing_field_returns_diagnostic() {
+        let store = content_fixture();
+        let tool = FetchContent;
+        let res = tool.invoke(&store, &json!({})).unwrap();
+
+        assert!(
+            !res.content["found"].as_bool().unwrap(),
+            "found must be false"
+        );
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("FetchContent")),
+            "diagnostic must name the tool"
+        );
+    }
+
+    #[test]
+    fn fetch_content_zero_span_returns_found_true_source_null_with_diagnostic() {
+        // A node with Span::ZERO — symbol exists but content cannot be extracted.
+        let store = fixture_store(); // nodes have Span::ZERO
+        let tool = FetchContent;
+        let res = tool.invoke(&store, &json!({"symbol": "leaf"})).unwrap();
+
+        assert!(
+            res.content["found"].as_bool().unwrap(),
+            "found must be true (node exists)"
+        );
+        // source is null (Span::ZERO → None → JSON null)
+        assert!(
+            res.content["source"].is_null(),
+            "source must be null for zero-span node"
+        );
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("FetchContent")),
+            "diagnostic must explain missing source"
+        );
+    }
+
+    #[test]
+    fn fetch_content_r1_compliance_no_error_on_missing() {
+        let store = fixture_store();
+        let res = FetchContent.invoke(&store, &json!({"symbol": "ghost_xyz"}));
+        assert!(
+            res.is_ok(),
+            "FetchContent must return Ok, never Err, for missing symbols"
+        );
+    }
+
+    #[test]
+    fn fetch_content_staleness_note_always_present() {
+        let store = content_fixture();
+        let tool = FetchContent;
+        let res = tool
+            .invoke(&store, &json!({"symbol": "greet_sym"}))
+            .unwrap();
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("STALENESS")),
+            "R5 staleness note must always be present"
+        );
+    }
+
+    // ── HashEmbedder ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn hash_embedder_output_has_correct_dim() {
+        let emb = HashEmbedder::new(64);
+        let v = emb.embed("hello world");
+        assert_eq!(v.len(), 64);
+        assert_eq!(emb.dim(), 64);
+    }
+
+    #[test]
+    fn hash_embedder_is_deterministic() {
+        let emb = HashEmbedder::new(64);
+        let v1 = emb.embed("fn nearest cosine similarity");
+        let v2 = emb.embed("fn nearest cosine similarity");
+        assert_eq!(v1, v2, "HashEmbedder must be deterministic");
+    }
+
+    #[test]
+    fn hash_embedder_is_l2_normalised() {
+        let emb = HashEmbedder::new(32);
+        let v = emb.embed("some symbol name");
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        // Allow floating-point rounding; norm should be ~1.0.
+        assert!(
+            (norm - 1.0).abs() < 1e-5 || norm == 0.0,
+            "HashEmbedder output must be L2-normalised (norm={norm})"
+        );
+    }
+
+    #[test]
+    fn hash_embedder_empty_text_returns_zero_vector() {
+        let emb = HashEmbedder::new(16);
+        let v = emb.embed("");
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert_eq!(norm, 0.0, "empty text → zero vector");
+    }
+
+    #[test]
+    fn hash_embedder_different_text_gives_different_output() {
+        let emb = HashEmbedder::new(64);
+        let v1 = emb.embed("foo");
+        let v2 = emb.embed("bar");
+        // Not guaranteed, but astronomically unlikely to collide for short distinct tokens.
+        assert_ne!(v1, v2, "distinct tokens should embed to distinct vectors");
+    }
+
+    /// The defining property of a REAL semantic embedder vs the lexical HashEmbedder: text that is
+    /// semantically related but shares NO tokens must embed closer than unrelated text. Runs only
+    /// under `--features fastembed` (downloads the model on first use). HashEmbedder fails this by
+    /// construction (zero shared tokens → near-orthogonal), which is exactly why it isn't semantic.
+    #[cfg(feature = "fastembed")]
+    #[test]
+    fn fastembed_is_semantic_not_lexical() {
+        let e = FastEmbedder::new().expect("fastembed model load");
+        assert_eq!(e.dim(), 384, "bge-small-en-v1.5 is 384-dim");
+        let cos = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+        // "cat/mat" vs "kitten/rug" share no content words but mean nearly the same thing.
+        let anchor = e.embed("the cat sat on the mat");
+        let related = e.embed("a kitten rested on the rug");
+        let unrelated = e.embed("quarterly revenue exceeded the analyst forecast");
+        let sim_related = cos(&anchor, &related);
+        let sim_unrelated = cos(&anchor, &unrelated);
+        assert!(
+            sim_related > sim_unrelated,
+            "semantically related text must be nearer than unrelated: related={sim_related}, unrelated={sim_unrelated}"
+        );
+    }
+
+    /// model2vec must also be semantic, not lexical: zero-shared-token related text embeds closer
+    /// than unrelated text. Runs only under `--features model2vec` (downloads the model on first
+    /// use). The lexical HashEmbedder fails this; model2vec passing proves real (static) semantics.
+    #[cfg(feature = "model2vec")]
+    #[test]
+    fn model2vec_is_semantic_not_lexical() {
+        let e = Model2VecEmbedder::new().expect("model2vec model load");
+        assert!(e.dim() > 0, "model must report a positive dimension");
+        let cos = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+        let anchor = e.embed("the cat sat on the mat");
+        let related = e.embed("a kitten rested on the rug");
+        let unrelated = e.embed("quarterly revenue exceeded the analyst forecast");
+        let sim_related = cos(&anchor, &related);
+        let sim_unrelated = cos(&anchor, &unrelated);
+        assert!(
+            sim_related > sim_unrelated,
+            "model2vec: related text must be nearer than unrelated: related={sim_related}, unrelated={sim_unrelated}"
+        );
+    }
+
+    // ── semantic_search free function ────────────────────────────────────────
+
+    fn embed_fixture() -> MemStore {
+        // Three symbols; each embedded as a unit vector on a different axis.
+        // With dim=4, axis 0 → "alpha", axis 1 → "beta", axis 2 → "gamma".
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node("alpha", "alpha_fn", NodeKind::Function, "src/a.rs", 1),
+                make_node("beta", "beta_fn", NodeKind::Function, "src/b.rs", 2),
+                make_node("gamma", "gamma_fn", NodeKind::Function, "src/c.rs", 3),
+            ])
+            .unwrap();
+        store.commit_batch().unwrap();
+        // Axis-aligned unit vectors: each symbol lives in its own dimension.
+        let mut axis = |sym: &str, idx: usize| {
+            let mut v = vec![0.0f32; 4];
+            v[idx] = 1.0;
+            store.set_embedding(&SymbolId(sym.to_string()), &v).unwrap();
+        };
+        axis("alpha", 0);
+        axis("beta", 1);
+        axis("gamma", 2);
+        store
+    }
+
+    #[test]
+    fn semantic_search_returns_nearest_first() {
+        let store = embed_fixture();
+        // Query close to axis 0 → should return "alpha" first.
+        // We bypass HashEmbedder's output and directly call semantic_search with a known vec.
+        let query_vec = vec![0.99_f32, 0.01, 0.0, 0.0];
+        let results = store.nearest(&query_vec, 3).unwrap();
+        assert_eq!(results[0].0, SymbolId("alpha".to_string()));
+        assert!(results[0].1 > results[1].1, "similarity must decrease");
+
+        // Also test the free function.
+        struct FixedEmbedder(Vec<f32>);
+        impl Embedder for FixedEmbedder {
+            fn embed(&self, _: &str) -> Vec<f32> {
+                self.0.clone()
+            }
+            fn dim(&self) -> usize {
+                self.0.len()
+            }
+        }
+        let fe = FixedEmbedder(query_vec);
+        let hits = semantic_search(&store, &store, &fe, "anything", 3).unwrap();
+        assert_eq!(hits[0].0, SymbolId("alpha".to_string()));
+    }
+
+    #[test]
+    fn semantic_search_filters_out_stale_embeddings() {
+        // "orphan" has an embedding but no graph node.
+        let mut store = MemStore::new();
+        store
+            .set_embedding(&SymbolId("orphan".to_string()), &[1.0_f32, 0.0])
+            .unwrap();
+        // No node upsert for "orphan".
+
+        struct FixedEmbedder;
+        impl Embedder for FixedEmbedder {
+            fn embed(&self, _: &str) -> Vec<f32> {
+                vec![1.0, 0.0]
+            }
+            fn dim(&self) -> usize {
+                2
+            }
+        }
+        let hits = semantic_search(&store, &store, &FixedEmbedder, "query", 10).unwrap();
+        assert!(
+            hits.iter().all(|(id, _)| id.0 != "orphan"),
+            "stale embeddings (no matching node) must be filtered out"
+        );
+    }
+
+    // ── hybrid_search ────────────────────────────────────────────────────────
+    // (Note: `id` is already defined earlier in this test module; reuse it.)
+
+    #[test]
+    fn hybrid_search_promotes_symbol_in_all_three_lists() {
+        // "shared" is rank-1 in all three lists — should win.
+        let name_list = vec![id("shared"), id("name_only")];
+        let graph_list = vec![id("graph_only"), id("shared")];
+        let sem_list = vec![id("sem_only"), id("sem_only2"), id("shared")];
+
+        let fused = hybrid_search(name_list, graph_list, sem_list, 60.0);
+        assert_eq!(fused[0].0, id("shared"), "'shared' must be first after RRF");
+    }
+
+    #[test]
+    fn hybrid_search_empty_lists_returns_empty() {
+        let fused = hybrid_search(vec![], vec![], vec![], 60.0);
+        assert!(fused.is_empty());
+    }
+
+    #[test]
+    fn hybrid_search_deduplicates() {
+        let name_list = vec![id("x"), id("y")];
+        let graph_list = vec![id("x"), id("z")];
+        let sem_list = vec![id("x")];
+        let fused = hybrid_search(name_list, graph_list, sem_list, 60.0);
+        let count_x = fused.iter().filter(|(s, _)| s.0 == "x").count();
+        assert_eq!(count_x, 1, "'x' must appear exactly once");
+    }
+
+    // ── SemanticSearch RetrievalTool ─────────────────────────────────────────
+
+    #[test]
+    fn semantic_search_tool_returns_matches() {
+        let store = embed_fixture();
+        // Build a SemanticSearch with a MemStore clone for the VectorStore side.
+        let vs_store = embed_fixture(); // separate instance (same data)
+        let tool = SemanticSearch::with_hash_embedder(vs_store);
+
+        // The HashEmbedder with dim=4 will hash "alpha_fn" tokens into the 4-bucket vector.
+        // We don't care about *which* symbol ranks first here — just that the tool wires correctly.
+        let res = tool
+            .invoke(&store, &json!({"query": "alpha_fn", "k": 3}))
+            .unwrap();
+
+        assert!(res.content["total"].as_u64().unwrap() <= 3, "k=3 respected");
+        // R1: always Ok, never error.
+        // R5: staleness note present.
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("STALENESS")),
+            "R5 staleness note"
+        );
+    }
+
+    #[test]
+    fn semantic_search_tool_missing_query_returns_diagnostic() {
+        let store = embed_fixture();
+        let vs_store = embed_fixture();
+        let tool = SemanticSearch::with_hash_embedder(vs_store);
+        let res = tool.invoke(&store, &json!({})).unwrap();
+
+        assert_eq!(res.content["total"].as_u64().unwrap_or(0), 0);
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("SemanticSearch")),
+            "diagnostic must name the tool"
+        );
+    }
+
+    #[test]
+    fn semantic_search_tool_empty_store_returns_empty_not_error() {
+        let store = MemStore::new();
+        let vs_store = MemStore::new();
+        let tool = SemanticSearch::with_hash_embedder(vs_store);
+        let res = tool
+            .invoke(&store, &json!({"query": "anything", "k": 5}))
+            .unwrap();
+
+        assert_eq!(res.content["total"].as_u64().unwrap_or(0), 0);
+        // R1: must be Ok, never Err.
+    }
+}

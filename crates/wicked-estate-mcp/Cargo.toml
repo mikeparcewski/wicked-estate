@@ -1,0 +1,22 @@
+[package]
+name = "wicked-estate-mcp"
+description = "MCP server exposing the wicked-estate retrieval tools."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "wicked-estate-mcp"
+path = "src/main.rs"
+
+[dependencies]
+wicked-estate-core.workspace = true
+wicked-estate-store.workspace = true
+wicked-estate-retrieve = { path = "../wicked-estate-retrieve", version = "0.0.1" }
+wicked-estate = { path = "../wicked-estate", version = "0.0.1" }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+wicked-estate-store = { workspace = true }

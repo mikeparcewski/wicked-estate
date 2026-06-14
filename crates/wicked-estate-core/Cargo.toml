@@ -1,0 +1,15 @@
+[package]
+name = "wicked-estate-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Spine: shared graph types + the five traits every wicked_estate crate implements."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest = "1"

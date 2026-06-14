@@ -1,0 +1,16 @@
+[package]
+name = "wicked-estate-rank"
+description = "PageRank symbol-importance ranking for wicked-estate."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+wicked-estate-core.workspace = true
+petgraph = "0.6.5"
+
+[dev-dependencies]
+wicked-estate-store = { path = "../wicked-estate-store", version = "0.0.1" }
+proptest = "1"
+

@@ -1,0 +1,29 @@
+# Rust build output (matches the root target/ AND nested ones, e.g. the vendored RPG grammar)
+target/
+**/*.rs.bk
+*.pdb
+
+# Built graph databases (created by `wicked-estate index`) + SQLite WAL/SHM sidecars
+*.db
+*.db-shm
+*.db-wal
+.code-intel/
+.wicked-estate/
+
+# Embedding model caches (downloaded by the model2vec / fastembed features)
+.fastembed_cache/
+.cache/
+
+# Internal reference material (not for publication)
+/.reference
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# NOTE: Cargo.lock IS committed — wicked-estate ships as a binary (reproducible builds).
+# NOTE: crates/we-extract/vendor/tree-sitter-rpg/src/parser.c IS committed — vendored grammar source.

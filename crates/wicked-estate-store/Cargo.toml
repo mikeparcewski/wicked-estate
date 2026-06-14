@@ -1,0 +1,26 @@
+[package]
+name = "wicked-estate-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "GraphStore impls. MemStore (Wave 0 reference); SQLite+FTS5+sqlite-vec & SurrealDB land at Wave 1.5."
+
+[dependencies]
+wicked-estate-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha1 = "0.10"
+zstd = "0.13"
+# W1.5 bake-off challenger — compiled ONLY when the feature is enabled.
+# All surrealdb code is behind #[cfg(feature = "surrealdb")] so the default
+# build/test path never compiles surrealdb.
+surrealdb = { version = "2", optional = true, default-features = false, features = ["kv-mem"] }
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros"] }
+
+[features]
+# Enable the W1.5 SurrealDB challenger.  NOT included in the default build.
+# Usage: cargo build -p wicked-estate-store --features surrealdb
+#        cargo test  -p wicked-estate-store --features surrealdb
+surrealdb = ["dep:surrealdb", "dep:tokio"]
