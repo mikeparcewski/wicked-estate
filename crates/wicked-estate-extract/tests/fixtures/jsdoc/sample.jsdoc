@@ -1,0 +1,34 @@
+/**
+ * @fileoverview Utility functions for the application.
+ * @module utils
+ */
+
+/**
+ * Adds two numbers together.
+ * @param {number} a - The first operand.
+ * @param {number} b - The second operand.
+ * @returns {number} The sum of a and b.
+ */
+function add(a, b) {
+    return a + b;
+}
+
+/**
+ * @typedef {Object} User
+ * @property {number} id - Unique identifier.
+ * @property {string} name - Display name.
+ * @property {string} email - Email address.
+ */
+
+/**
+ * Fetches a user by ID.
+ * @async
+ * @param {number} id - The user ID.
+ * @returns {Promise<User>} The user object.
+ * @throws {Error} If the user is not found.
+ */
+async function fetchUser(id) {
+    const res = await fetch(`/api/users/${id}`);
+    if (!res.ok) throw new Error(`User ${id} not found`);
+    return res.json();
+}

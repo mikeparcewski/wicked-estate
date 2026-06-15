@@ -1,0 +1,13 @@
+# USB serial devices
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", SYMLINK+="ttyUSB-ftdi", MODE="0666"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="ttyUSB-cp210x", MODE="0666"
+
+# USB storage
+SUBSYSTEM=="block", ATTRS{idVendor}=="0781", ENV{ID_FS_LABEL}=="MYUSB", RUN+="/usr/local/bin/mount-usb.sh %k"
+
+# GPU devices
+KERNEL=="card[0-9]*", SUBSYSTEM=="drm", GROUP="video", MODE="0660"
+KERNEL=="renderD[0-9]*", SUBSYSTEM=="drm", GROUP="render", MODE="0660"
+
+# Network interface naming
+SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="aa:bb:cc:dd:ee:ff", NAME="eth-switch"
