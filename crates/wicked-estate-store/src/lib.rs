@@ -6,7 +6,7 @@
 //!.
 
 pub mod sqlite;
-pub use sqlite::{CompactStats, SqliteStore};
+pub use sqlite::{Annotation, CompactStats, SqliteStore};
 
 // W1.5 bake-off challenger — compiled ONLY with --features surrealdb.
 #[cfg(feature = "surrealdb")]

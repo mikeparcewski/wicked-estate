@@ -67,6 +67,17 @@ pub fn git_blob_sha(text: &str) -> String {
     format!("{:x}", h.finalize())
 }
 
+/// A single annotation row returned by [`SqliteStore::get_annotations`].
+#[derive(Debug, Clone)]
+pub struct Annotation {
+    pub key: String,
+    pub value: String,
+    pub confidence: f64,
+    pub provenance: String,
+    pub author: String,
+    pub ts: i64,
+}
+
 /// Statistics returned by [`SqliteStore::compact`] / [`MemStore::compact`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactStats {
@@ -368,6 +379,158 @@ impl SqliteStore {
             )
             .map_err(st)?;
         Ok(())
+    }
+
+    /// Returns a stable hex fingerprint for the named symbol.
+    /// The fingerprint covers: string SymbolId + name + kind + file + signature (if any).
+    /// Returns None if the symbol is not indexed.
+    pub fn node_fingerprint(&self, symbol: &SymbolId) -> Result<Option<String>> {
+        let row: Option<(String, String, String, String, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT s.sym, n.name, n.kind, n.file, json_extract(n.data, '$.signature')
+                 FROM nodes n
+                 JOIN symbols s ON s.sid = n.symbol
+                 WHERE s.sym = ?1",
+                rusqlite::params![symbol.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()
+            .map_err(st)?;
+        let Some((sym_str, name, kind, file, sig)) = row else {
+            return Ok(None);
+        };
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        sym_str.hash(&mut h);
+        name.hash(&mut h);
+        kind.hash(&mut h);
+        file.hash(&mut h);
+        sig.unwrap_or_default().hash(&mut h);
+        Ok(Some(format!("{:016x}", h.finish())))
+    }
+
+    /// Returns all nodes whose `file` column matches `file`.
+    pub fn nodes_in_file(&self, file: &str) -> Result<Vec<wicked_estate_core::Node>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT data FROM nodes WHERE file = ?1")
+            .map_err(st)?;
+        let rows = stmt
+            .query_map(rusqlite::params![file], |r| r.get::<_, String>(0))
+            .map_err(st)?
+            .filter_map(|r| r.ok())
+            .filter_map(|json| serde_json::from_str::<wicked_estate_core::Node>(&json).ok())
+            .collect();
+        Ok(rows)
+    }
+
+    // -----------------------------------------------------------------------
+    // Annotation store — inherent methods (not on the trait).
+    // External agents/tools/humans tag any indexed symbol with arbitrary
+    // key/value metadata plus optional confidence, provenance, and author.
+    // -----------------------------------------------------------------------
+
+    pub fn annotate_node(
+        &mut self,
+        symbol: &wicked_estate_core::SymbolId,
+        key: &str,
+        value: &str,
+        confidence: f64,
+        provenance: &str,
+        author: &str,
+    ) -> Result<()> {
+        let sid: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT sid FROM symbols WHERE sym = ?1",
+                rusqlite::params![symbol.0],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(st)?;
+        let sid = match sid {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        self.conn
+            .execute(
+                "INSERT INTO annotations(node_sym, key, value, confidence, provenance, author)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![sid, key, value, confidence, provenance, author],
+            )
+            .map_err(st)?;
+        Ok(())
+    }
+
+    pub fn get_annotations(
+        &self,
+        symbol: &wicked_estate_core::SymbolId,
+    ) -> Result<Vec<Annotation>> {
+        let sid: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT sid FROM symbols WHERE sym = ?1",
+                rusqlite::params![symbol.0],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(st)?;
+        let sid = match sid {
+            Some(s) => s,
+            None => return Ok(vec![]),
+        };
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT key, value, confidence, provenance, author, ts
+                 FROM annotations WHERE node_sym = ?1 ORDER BY ts ASC",
+            )
+            .map_err(st)?;
+        let rows = stmt
+            .query_map(rusqlite::params![sid], |r| {
+                Ok(Annotation {
+                    key: r.get(0)?,
+                    value: r.get(1)?,
+                    confidence: r.get(2)?,
+                    provenance: r.get(3)?,
+                    author: r.get(4)?,
+                    ts: r.get(5)?,
+                })
+            })
+            .map_err(st)?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn delete_annotation(
+        &mut self,
+        symbol: &wicked_estate_core::SymbolId,
+        key: &str,
+    ) -> Result<usize> {
+        let sid: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT sid FROM symbols WHERE sym = ?1",
+                rusqlite::params![symbol.0],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(st)?;
+        let sid = match sid {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+        let n = self
+            .conn
+            .execute(
+                "DELETE FROM annotations WHERE node_sym = ?1 AND key = ?2",
+                rusqlite::params![sid, key],
+            )
+            .map_err(st)?;
+        Ok(n)
     }
 
     // -----------------------------------------------------------------------
@@ -1628,6 +1791,109 @@ impl SymbolIndex for SqliteStore {
     }
 }
 
+// ── graph helper queries ─────────────────────────────────────────────────────
+
+impl SqliteStore {
+    /// Returns all non-file nodes that have no in-edges (no callers/importers) — i.e. entrypoints.
+    pub fn entrypoint_nodes(&self) -> Result<Vec<Node>> {
+        let file_kind = serde_json::to_string(&NodeKind::File)?;
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT n.data FROM nodes n \
+                 WHERE n.kind != ?1 \
+                   AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.target = n.symbol)",
+            )
+            .map_err(st)?;
+        let mut out = Vec::new();
+        let rows = stmt
+            .query_map(params![file_kind], |r| r.get::<_, String>(0))
+            .map_err(st)?;
+        for row in rows {
+            out.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
+        }
+        Ok(out)
+    }
+
+    /// Returns all non-file nodes that have no out-edges (call nothing / import nothing) — i.e. leaves.
+    pub fn leaf_nodes(&self) -> Result<Vec<Node>> {
+        let file_kind = serde_json::to_string(&NodeKind::File)?;
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT n.data FROM nodes n \
+                 WHERE n.kind != ?1 \
+                   AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.source = n.symbol)",
+            )
+            .map_err(st)?;
+        let mut out = Vec::new();
+        let rows = stmt
+            .query_map(params![file_kind], |r| r.get::<_, String>(0))
+            .map_err(st)?;
+        for row in rows {
+            out.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
+        }
+        Ok(out)
+    }
+
+    /// Returns all non-file nodes with no in-edges AND no out-edges — dead code candidates.
+    pub fn isolated_nodes(&self) -> Result<Vec<Node>> {
+        let file_kind = serde_json::to_string(&NodeKind::File)?;
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT n.data FROM nodes n \
+                 WHERE n.kind != ?1 \
+                   AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.target = n.symbol) \
+                   AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.source = n.symbol)",
+            )
+            .map_err(st)?;
+        let mut out = Vec::new();
+        let rows = stmt
+            .query_map(params![file_kind], |r| r.get::<_, String>(0))
+            .map_err(st)?;
+        for row in rows {
+            out.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
+        }
+        Ok(out)
+    }
+
+    /// Returns all non-file nodes whose serialized kind matches `kind`.
+    /// Pass `""` or `"all"` to return all non-file nodes.
+    pub fn nodes_by_kind(&self, kind: &str) -> Result<Vec<Node>> {
+        let all = kind.is_empty() || kind.eq_ignore_ascii_case("all");
+        let file_kind = serde_json::to_string(&NodeKind::File)?;
+        if all {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT data FROM nodes WHERE kind != ?1")
+                .map_err(st)?;
+            let mut out = Vec::new();
+            let rows = stmt
+                .query_map(params![file_kind], |r| r.get::<_, String>(0))
+                .map_err(st)?;
+            for row in rows {
+                out.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
+            }
+            Ok(out)
+        } else {
+            let kind_json = format!("\"{}\"", kind.to_lowercase());
+            let mut stmt = self
+                .conn
+                .prepare("SELECT data FROM nodes WHERE kind = ?1")
+                .map_err(st)?;
+            let mut out = Vec::new();
+            let rows = stmt
+                .query_map(params![kind_json], |r| r.get::<_, String>(0))
+                .map_err(st)?;
+            for row in rows {
+                out.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
+            }
+            Ok(out)
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests — W5.2 vector storage (SqliteStore)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2573,5 +2839,179 @@ mod tests {
             store.node_semantics(&sym("fn_d")).unwrap().is_none(),
             "all-None call must leave semantics as None"
         );
+    }
+
+    // ── node_fingerprint ────────────────────────────────────────────────────
+
+    #[test]
+    fn sqlite_node_fingerprint_returns_some_for_indexed_symbol() {
+        use wicked_estate_core::GraphWrite;
+        let mut store = open();
+        store
+            .upsert_nodes(&[make_node("fp_fn", "src/fp.rs")])
+            .unwrap();
+        let fp = store
+            .node_fingerprint(&sym("fp_fn"))
+            .unwrap()
+            .expect("fingerprint must be Some for an indexed symbol");
+        assert_eq!(fp.len(), 16, "fingerprint must be a 16-char hex string");
+        assert!(
+            fp.chars().all(|c| c.is_ascii_hexdigit()),
+            "fingerprint must contain only hex digits"
+        );
+    }
+
+    #[test]
+    fn sqlite_node_fingerprint_returns_none_for_unknown() {
+        let store = open();
+        let fp = store.node_fingerprint(&sym("does_not_exist")).unwrap();
+        assert!(fp.is_none(), "fingerprint must be None for an unknown symbol");
+    }
+
+    #[test]
+    fn sqlite_node_fingerprint_is_deterministic() {
+        use wicked_estate_core::GraphWrite;
+        let mut store = open();
+        store
+            .upsert_nodes(&[make_node("det_fn", "src/det.rs")])
+            .unwrap();
+        let fp1 = store.node_fingerprint(&sym("det_fn")).unwrap().unwrap();
+        let fp2 = store.node_fingerprint(&sym("det_fn")).unwrap().unwrap();
+        assert_eq!(fp1, fp2, "identical calls must return the same fingerprint");
+    }
+
+    // ── Annotation store ─────────────────────────────────────────────────────
+
+    #[test]
+    fn sqlite_annotation_roundtrip() {
+        use wicked_estate_core::GraphWrite;
+        let mut store = open();
+        store
+            .upsert_nodes(&[make_node("fn_ann", "src/ann.rs")])
+            .unwrap();
+
+        let id = sym("fn_ann");
+        store
+            .annotate_node(&id, "test-key", "test-val", 0.9, "ci", "agent")
+            .unwrap();
+
+        let anns = store.get_annotations(&id).unwrap();
+        assert_eq!(anns.len(), 1, "one annotation expected");
+        assert_eq!(anns[0].key, "test-key");
+        assert_eq!(anns[0].value, "test-val");
+        assert!((anns[0].confidence - 0.9).abs() < 1e-9);
+        assert_eq!(anns[0].provenance, "ci");
+        assert_eq!(anns[0].author, "agent");
+
+        let deleted = store.delete_annotation(&id, "test-key").unwrap();
+        assert_eq!(deleted, 1, "one row deleted");
+
+        let after = store.get_annotations(&id).unwrap();
+        assert!(after.is_empty(), "annotation must be gone after delete");
+    }
+
+    // ── graph helper queries ─────────────────────────────────────────────────
+
+    #[test]
+    fn sqlite_entrypoint_nodes_no_in_edges() {
+        use wicked_estate_core::{Edge, EdgeKind, GraphWrite, ResolutionTier};
+        let mut store = open();
+        store
+            .upsert_nodes(&[make_node("a", "src/a.rs"), make_node("b", "src/b.rs")])
+            .unwrap();
+        let e = Edge::new(
+            sym("a"),
+            sym("b"),
+            EdgeKind::Calls,
+            ResolutionTier::Parsed,
+            "test",
+        );
+        store.upsert_edges(&[e]).unwrap();
+
+        let entries = store.entrypoint_nodes().unwrap();
+        let names: Vec<&str> = entries.iter().map(|n| n.name.as_str()).collect();
+        assert!(names.contains(&"a"), "a has no in-edges → entrypoint");
+        assert!(!names.contains(&"b"), "b has in-edge from a → not entrypoint");
+    }
+
+    #[test]
+    fn sqlite_leaf_nodes_no_out_edges() {
+        use wicked_estate_core::{Edge, EdgeKind, GraphWrite, ResolutionTier};
+        let mut store = open();
+        store
+            .upsert_nodes(&[make_node("a", "src/a.rs"), make_node("b", "src/b.rs")])
+            .unwrap();
+        let e = Edge::new(
+            sym("a"),
+            sym("b"),
+            EdgeKind::Calls,
+            ResolutionTier::Parsed,
+            "test",
+        );
+        store.upsert_edges(&[e]).unwrap();
+
+        let leaves = store.leaf_nodes().unwrap();
+        let names: Vec<&str> = leaves.iter().map(|n| n.name.as_str()).collect();
+        assert!(names.contains(&"b"), "b has no out-edges → leaf");
+        assert!(!names.contains(&"a"), "a has out-edge to b → not leaf");
+    }
+
+    #[test]
+    fn sqlite_isolated_nodes_no_edges_at_all() {
+        use wicked_estate_core::{Edge, EdgeKind, GraphWrite, ResolutionTier};
+        let mut store = open();
+        store
+            .upsert_nodes(&[
+                make_node("a", "src/a.rs"),
+                make_node("b", "src/b.rs"),
+                make_node("c", "src/c.rs"),
+            ])
+            .unwrap();
+        let e = Edge::new(
+            sym("a"),
+            sym("b"),
+            EdgeKind::Calls,
+            ResolutionTier::Parsed,
+            "test",
+        );
+        store.upsert_edges(&[e]).unwrap();
+
+        let isolated = store.isolated_nodes().unwrap();
+        let names: Vec<&str> = isolated.iter().map(|n| n.name.as_str()).collect();
+        assert!(names.contains(&"c"), "c has no edges → isolated");
+        assert!(!names.contains(&"a"), "a has out-edge → not isolated");
+        assert!(!names.contains(&"b"), "b has in-edge → not isolated");
+    }
+
+    #[test]
+    fn sqlite_nodes_by_kind_filters_correctly() {
+        use wicked_estate_core::{GraphWrite, Language, Location, NodeKind, Span};
+        let mut store = open();
+        let fn_node = wicked_estate_core::Node::new(
+            sym("fn_x"),
+            NodeKind::Function,
+            "fn_x",
+            Language::new("rust"),
+            Location::new("src/x.rs", Span::ZERO),
+        );
+        let struct_node = wicked_estate_core::Node::new(
+            sym("Struct_y"),
+            NodeKind::Struct,
+            "Struct_y",
+            Language::new("rust"),
+            Location::new("src/y.rs", Span::ZERO),
+        );
+        store.upsert_nodes(&[fn_node, struct_node]).unwrap();
+
+        let fns = store.nodes_by_kind("function").unwrap();
+        let fn_names: Vec<&str> = fns.iter().map(|n| n.name.as_str()).collect();
+        assert!(fn_names.contains(&"fn_x"), "function node must appear");
+        assert!(!fn_names.contains(&"Struct_y"), "struct must not appear");
+
+        let all = store.nodes_by_kind("all").unwrap();
+        assert_eq!(all.len(), 2, "kind='all' returns both non-file nodes");
+
+        let none = store.nodes_by_kind("").unwrap();
+        assert_eq!(none.len(), 2, "kind='' also returns all non-file nodes");
     }
 }

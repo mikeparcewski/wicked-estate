@@ -143,3 +143,19 @@ CREATE TABLE IF NOT EXISTS edge_history (
   edge_json    TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_edge_history_file ON edge_history(file);
+
+-- Annotation store: external agents/tools/humans tag any indexed symbol.
+-- node_sym is an sid FK → symbols.sid (same integer PK used by nodes.symbol).
+-- key/value are arbitrary strings. confidence defaults 1.0, provenance/author default ''.
+CREATE TABLE IF NOT EXISTS annotations (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  node_sym   INTEGER NOT NULL,
+  key        TEXT NOT NULL,
+  value      TEXT NOT NULL,
+  confidence REAL    NOT NULL DEFAULT 1.0,
+  provenance TEXT    NOT NULL DEFAULT '',
+  author     TEXT    NOT NULL DEFAULT '',
+  ts         INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_annotations_node ON annotations(node_sym);
+CREATE INDEX IF NOT EXISTS idx_annotations_key  ON annotations(key);
