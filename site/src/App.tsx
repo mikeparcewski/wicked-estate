@@ -101,7 +101,7 @@ function Hero() {
         <div className="inline-flex items-center gap-2 font-mono text-[0.65rem] tracking-[0.22em] uppercase text-muted border border-hairline-strong rounded-full px-3 py-1.5 mb-8"
           style={{ background: 'color-mix(in oklab, var(--accent) 8%, var(--canvas))' }}>
           <span className="live-dot w-1.5 h-1.5 rounded-full bg-accent inline-block" />
-          Local-first · Single binary · Tree-sitter + SQLite
+          Local-first · Single binary · Tree-sitter + SQLite · PostgreSQL
         </div>
 
         <h1 className="font-display text-5xl sm:text-6xl lg:text-[4.2rem] font-black mb-6 text-ink" style={{ fontStretch: '115%' }}>
@@ -225,9 +225,20 @@ function UseCases() {
         </svg>
       ),
       title: 'IaC drift detection',
-      body: 'Terraform, CloudFormation, Kubernetes, Bicep — all parsed as first-class nodes. Graph-diff your live cloud state against your IaC to surface drift before it becomes an incident.',
-      cmd: 'wicked-estate drift --live aws --iac ./infra',
-      out: '3 resources drifted · 1 deleted · 2 config delta',
+      body: 'Terraform, CloudFormation, Kubernetes — parsed as first-class nodes. Pull live state from AWS or Azure directly, then graph-diff it against your IaC to surface drift before it becomes an incident.',
+      cmd: 'wicked-estate drift --db postgres://team/graph',
+      out: '3 resources drifted · 1 unmanaged · 2 undeployed',
+    },
+    {
+      icon: (
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 2.625c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125m16.5 5.625c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" />
+        </svg>
+      ),
+      title: 'Shared team graph',
+      body: 'Switch from SQLite to PostgreSQL with one flag. Multiple CI jobs and agents write concurrently. Everyone queries the same graph — no stale per-developer DBs.',
+      cmd: 'wicked-estate index . --db postgres://team/graph',
+      out: 'shared_writers=true · server_side_traversal=true',
     },
     {
       icon: (
@@ -398,7 +409,7 @@ function Pipeline() {
           <div className="flex-1 phase-box !p-4">
             <p className="font-mono text-[0.6rem] font-bold tracking-widest uppercase text-faint mb-3">Graph Store</p>
             <div className="flex flex-wrap gap-1 mb-3">
-              {['SQLite', 'FTS5', 'sqlite-vec', 'WAL'].map(t => <span key={t} className="lang-tag">{t}</span>)}
+              {['SQLite', 'FTS5', 'sqlite-vec', 'WAL', 'PostgreSQL'].map(t => <span key={t} className="lang-tag">{t}</span>)}
             </div>
             <div className="pt-2 border-t border-hairline">
               <p className="font-mono text-[0.58rem] text-faint tracking-widest uppercase mb-1.5">MCP · 5 tools</p>

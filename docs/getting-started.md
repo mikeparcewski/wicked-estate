@@ -474,7 +474,158 @@ Cross-repo matching is name-based; package-aware cross-repo edge resolution is a
 
 ---
 
-## 18. Next steps
+## 18. PostgreSQL backend
+
+The default storage backend is SQLite (`:memory:` or a file). For shared-team graphs or
+environments where multiple writers need concurrent access, build with the `postgres` feature and
+point `--db` at a PostgreSQL connection string.
+
+```bash
+# Build with Postgres support
+cargo build --release --features postgres
+
+# Use any postgres:// or postgresql:// URL as the --db value
+wicked-estate index . --db postgres://user:pass@localhost/wicked_graph
+wicked-estate query handleRequest --db postgres://user:pass@localhost/wicked_graph
+wicked-estate blast-radius handleRequest --db postgres://user:pass@localhost/wicked_graph
+```
+
+The schema is created automatically on first use. All CLI commands that accept `--db` accept a
+Postgres URL.
+
+### Capabilities
+
+| Capability | SQLite | PostgreSQL |
+|---|---|---|
+| `shared_writers` | no (WAL gives concurrent readers, single writer) | **yes** — multiple processes can write concurrently |
+| `server_side_traversal` | no | **yes** — `WITH RECURSIVE` CTE in-DB |
+| `full_text_search` | yes (FTS5) | **yes** (ILIKE) |
+
+### Running the conformance suite
+
+```bash
+TEST_POSTGRES_URL=postgres://user:pass@localhost/wicked_test \
+  cargo test -p wicked-estate-store --features postgres
+```
+
+If `TEST_POSTGRES_URL` is not set the Postgres conformance test skips gracefully; it does not
+fail the default `cargo test --workspace`.
+
+---
+
+## 19. OpenTelemetry instrumentation
+
+wicked-estate emits spans and metrics via the `wicked-estate-observe` crate's `OtlpSink` — a
+blocking OTLP HTTP/JSON exporter that fires best-effort and **never aborts the main operation**
+if the collector is unreachable.
+
+### Enable it
+
+```bash
+# Send telemetry to a local collector (e.g. Grafana Alloy, Jaeger, Honeycomb ingest)
+export WICKED_OTEL_ENDPOINT=http://localhost:4318
+
+# Optional: extra headers (e.g. auth token)
+export WICKED_OTEL_HEADERS="x-honeycomb-team=my-api-key"
+
+# Now run any command — spans and metrics flow automatically
+wicked-estate index .
+wicked-estate-mcp --db graph.db
+```
+
+If `WICKED_OTEL_ENDPOINT` is not set, the sink is a no-op `NoopSink` — zero overhead, no
+network traffic.
+
+### What is emitted
+
+| Emission site | Signal |
+|---|---|
+| `index_path` (full + incremental) | Span: file count, node/edge counts, duration |
+| `extract` per-file | Counter: files extracted by language |
+| `resolve` pass | Counter: refs resolved / unresolved, tier breakdown |
+| MCP tool calls | Span: tool name, result size, cache hit/miss |
+| MCP cache | Metric: hit rate gauge |
+| `GraphStore::store_fts` | Metric: FTS rebuild latency |
+
+The service name reported to the collector is `wicked_estate`.
+
+### Custom sink (Rust API)
+
+```rust
+use wicked_estate_observe::{open_otlp_sink, init_sink_from_env};
+
+// From env vars (production)
+let sink = init_sink_from_env();
+
+// Explicit construction
+let sink = open_otlp_sink("http://localhost:4318", &[("x-api-key", "tok")]);
+```
+
+---
+
+## 20. Cloud collectors (AWS · Azure · GCP)
+
+Live cloud state can be pulled directly from cloud provider APIs into the estate graph, feeding
+the same `drift` analysis as `tfstate` but without a local state file. Collectors are
+**observe-only** — they read resource metadata, never write to your cloud, and never persist
+credentials.
+
+### Build
+
+```bash
+# Individual provider flags
+cargo build --release --features cloud-aws
+cargo build --release --features cloud-azure
+cargo build --release --features cloud-gcp    # stub — returns Err; see below
+
+# All at once
+cargo build --release --features cloud-all
+```
+
+Cloud features are opt-in and have no effect on the default binary.
+
+### AWS (`cloud-aws`)
+
+Uses the standard AWS credential chain (env vars → `~/.aws/credentials` → IAM role). Calls
+**Resource Explorer v2** (primary — requires the explorer to be enabled in your account) plus
+EC2 and IAM supplemental APIs to resolve resource properties and types.
+
+Resource types are normalized to `aws_ec2_instance`, `aws_s3_bucket`, etc. (lower-snake, no
+`AWS::` prefix).
+
+**Prerequisites:** `aws configure` or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION`
+in environment.
+
+### Azure (`cloud-azure`)
+
+Uses `azure_identity` (DefaultAzureCredential — env, CLI, managed identity). Queries the Azure
+Resource Graph `resources` table to enumerate all resources in accessible subscriptions.
+
+**Prerequisites:** `az login` or `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID`.
+
+### GCP (`cloud-gcp`) — stub
+
+The `GcpCollector` compiles and passes its type tests, but returns `Err` at runtime. Full
+google-cloud-asset-v1 API wiring is pending a crate API migration. The seam is in place; the
+full implementation is Wave 9/10.
+
+### Programmatic usage
+
+```rust
+use wicked_estate_extract::cloud::open_cloud_collector;
+
+let collector = open_cloud_collector("aws")?;  // or "azure", "gcp"
+let nodes = collector.collect()?;
+// nodes are NodeKind::Other("resource") with origin=live
+// — pass to GraphStore to populate the live side for drift analysis
+```
+
+CLI integration (`wicked-estate collect-live --cloud aws`) is a Wave 9 task; for now use
+`wicked-estate tfstate` to ingest a downloaded state file.
+
+---
+
+## 21. Next steps
 
 - **Add a language** — see `docs/add-lang.md`. Zero core changes required.
 - **Extractor SDK** — `docs/extractor-sdk.md` (add-lang + `ExtraEdgeExtractor` for non-code edges).

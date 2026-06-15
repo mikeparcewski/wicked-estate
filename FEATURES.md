@@ -9,9 +9,9 @@ tree-sitter + SQLite.
 This document is an exhaustive inventory — no stone left unturned. Each feature is tagged:
 **✅ built+tested** · **🟡 partial / not-yet-benchmarked** · **🟦 designed, not built** (the seam exists).
 
-> **Status at time of writing:** `cargo test --workspace` = **617 passing, 0 failed, 0 ignored**;
+> **Status at time of writing:** `cargo test --workspace` = **649 passing, 0 failed, 0 ignored**;
 > `cargo build --workspace` = 0 warnings; `cargo clippy --workspace --all-targets -D warnings` clean.
-> Binary: `wicked-estate` (+ `wicked-estate-mcp`). Crates: `wicked-estate-core … wicked-estate-bench`.
+> Binary: `wicked-estate` (+ `wicked-estate-mcp`). Crates: `wicked-estate-core … wicked-estate-observe`.
 
 ---
 
@@ -169,10 +169,18 @@ SQLite + WAL. Passes the full GraphStore conformance kit on-disk and in-memory (
 ### `MemStore` (reference impl) ✅
 In-memory GraphStore; passes the same conformance kit; used as the vector store for `:memory:` and in tests.
 
-### External DB seam 🟦
-Storage lives behind `GraphRead` + `GraphWrite` + a single `open_store(spec)` factory, so an external
-DB (Postgres / server) drops in as **one module + one factory arm, zero caller changes**. SurrealDB
-is a benched challenger; IndraDB excluded (ADR-003). External-DB module is **designed, not built**.
+### `PostgresStore` (`--features postgres`) ✅
+Full `GraphRead` + `GraphWrite` + `GraphStoreMutExt` implementation backed by PostgreSQL.
+- `open_store("postgres://...")` / `open_store("postgresql://...")` — same factory arm, zero
+  caller changes vs. SQLite.
+- **`shared_writers: true`** — multiple processes write concurrently (SQLite is single-writer).
+- **`server_side_traversal: true`** — `WITH RECURSIVE` CTE traversal in-DB.
+- FTS via `ILIKE`; schema created automatically on first connect.
+- Passes the full `GraphStore` conformance suite (`TEST_POSTGRES_URL` required; skips gracefully
+  without it so `cargo test --workspace` is always offline-safe).
+- Global process-wide `OnceLock<Runtime>` keeps the connection-pool keepalive tasks alive across
+  blocking calls (important detail: per-call runtime teardown kills pool background tasks).
+- `SurrealDB` is a benched challenger; `IndraDB` excluded (ADR-003).
 
 ---
 
@@ -225,9 +233,16 @@ Treats infrastructure + mainframe as **just more languages/collectors** feeding 
 
 - **IaC as languages** ✅ — Terraform/HCL, CloudFormation, Kubernetes (+ Bicep/ARM/Pulumi as grammars):
   resources = nodes, depends-on = edges, **no schema change**. CFN/K8s sniff-dispatch on file content.
-- **Live cloud state** 🟦/🟡 — read-only `Collector` seam (AWS/Azure/GCP/tfstate). `tfstate` command
-  indexes live Terraform state today; cloud-provider collectors are **observe-only interfaces,
-  designed not fully built**. **No secret storage** — runtime auth headers never persisted.
+- **Live cloud state** 🟡 — read-only `Collector` seam (AWS/Azure/GCP/tfstate).
+  - `tfstate` command — CLI-facing, indexes a downloaded `.tfstate` file. ✅
+  - `AwsCollector` (`--features cloud-aws`) — Resource Explorer v2 + EC2/IAM supplemental; standard
+    AWS credential chain; resource types normalized `aws_ec2_instance` etc. ✅
+  - `AzureCollector` (`--features cloud-azure`) — Azure Resource Graph `resources` query;
+    `DefaultAzureCredential`. ✅
+  - `GcpCollector` (`--features cloud-gcp`) — compiles, type-tests pass, returns `Err` at runtime;
+    full google-cloud-asset-v1 wiring is pending a crate API migration (Wave 9). 🟡
+  - CLI `collect-live` command and org-wide drift sweep are Wave 9/10.
+  - **No secret storage** — runtime auth headers never persisted (ADR-004 §5).
 - **Drift** ✅(logic)/🟡 — `drift` command = graph diff by **resource identity** between `origin=iac`
   and `origin=live` (`estate_drift` → `DriftReport`).
 - **Mainframe estate** ✅ — RACF (security), IMS DBD/PSB (data), MQ MQSC (messaging) extractors (§2).
@@ -289,11 +304,21 @@ graphs, each result tagged by source DB (org-wide blast-radius across repos).
 
 ---
 
-## 13. Observability (OTel adapter) 🟦
-`wicked-estate-core/src/observability.rs` — a detailed, OpenTelemetry-standard **interface/adapter**: Resource,
-InstrumentationScope, TraceId/SpanId/SpanContext, SpanKind/Status/Event/Link/SpanData, InstrumentKind,
-AggregationTemporality, KeyValue/AttributeValue. **Designed to wire to remote cloud/vendor backends —
-the exporters themselves are not built** (the adapter seam is, per ADR-006). Service name now `wicked_estate`.
+## 13. Observability (OTel adapter + OTLP exporter) ✅
+`wicked-estate-core/src/observability.rs` — OpenTelemetry-standard adapter: Resource,
+InstrumentationScope, TraceId/SpanId/SpanContext, SpanKind/Status/Event/Link/SpanData,
+InstrumentKind, AggregationTemporality, KeyValue/AttributeValue. (ADR-006)
+
+`wicked-estate-observe` crate — OTLP HTTP/JSON exporter (`OtlpSink`) + emission sites wired ✅:
+- **`OtlpSink`** — blocking reqwest HTTP/JSON; best-effort (never aborts the main operation on
+  collector failure). Configured via `WICKED_OTEL_ENDPOINT` + optional `WICKED_OTEL_HEADERS`.
+- **`init_sink_from_env()`** — reads env vars; falls back to `NoopSink` (zero overhead) when
+  `WICKED_OTEL_ENDPOINT` is unset.
+- **`InMemorySink`** — in-process capture for tests and integration.
+- **Emission sites wired**: `index_path` span (files/nodes/edges/duration), per-file extract
+  counter (by language), resolve counter (resolved/unresolved/tier), MCP tool spans (tool name /
+  result size / cache hit), MCP cache hit-rate gauge, `store_fts` rebuild latency gauge.
+- Service name: `wicked_estate`.
 
 ---
 
@@ -335,11 +360,14 @@ not regress.
 ---
 
 ## 18. Honest gaps (not yet true — a caller may assume otherwise)
-- **External DB** (Postgres/server): seam designed, **not built**.
-- **Observability exporters**: adapter designed, **exporters not built** (no live OTel egress yet).
-- **Cloud collectors**: read-only `Collector` interface + `tfstate` work; AWS/Azure/GCP live collectors
-  are **observe-only stubs/interfaces**, not full implementations. Estate maturity (W9/W10) trails the
-  code-intelligence core.
+- **PostgresStore**: built and conformance-passes ✅. `shared_writers` and `server_side_traversal`
+  are real. Not yet benchmarked at scale vs. SQLite; no SurrealDB bake-off result.
+- **Observability**: OTLP exporter + emission sites wired ✅. Not yet a zero-to-dashboard guide;
+  semantic embedder traces not wired; no dedicated `wicked-estate observe` CLI command.
+- **Cloud collectors**: AWS + Azure functional ✅. GCP stub only (runtime `Err`) — full
+  google-cloud-asset-v1 wiring is pending a crate migration (Wave 9). CLI `collect-live` command
+  and org-wide drift sweep are Wave 9/10. GCP callers may assume `open_cloud_collector("gcp")`
+  works — it does not yet.
 - **Semantic embedder tests** are **feature-gated** (need a model download) — they run in the CI
   `semantic-embedders` lane, **not** in the default 617.
 - **Semantic retrieval quality** proven by an ordering property on small inputs, **not** a retrieval
