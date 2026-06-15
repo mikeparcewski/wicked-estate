@@ -22,6 +22,7 @@ wicked-estate-extract = { path = "../wicked-estate-extract", version = "0.1.2" }
 wicked-estate-resolve = { path = "../wicked-estate-resolve", version = "0.1.2" }
 wicked-estate-rank = { path = "../wicked-estate-rank", version = "0.1.2" }
 wicked-estate-retrieve = { path = "../wicked-estate-retrieve", version = "0.1.2" }
+wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.1.7" }
 anyhow.workspace = true
 async-trait = "0.1"
 ignore = "0.4"

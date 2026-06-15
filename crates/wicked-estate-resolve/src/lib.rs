@@ -752,7 +752,89 @@ pub fn resolve_all(
         }
     }
 
-    Ok(best.into_values().collect())
+    let resolved_edges: Vec<Edge> = best.into_values().collect();
+
+    // Emit resolution counters (best-effort; telemetry failure must never abort resolution).
+    {
+        let sink = wicked_estate_observe::init_sink_from_env();
+        let resource = wicked_estate_core::observability::Resource::service(
+            "wicked_estate_resolve",
+            env!("CARGO_PKG_VERSION"),
+        );
+        let scope =
+            wicked_estate_core::observability::InstrumentationScope::new("wicked_estate.resolve");
+        use wicked_estate_core::observability::*;
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+
+        // Counter: resolved edges by tier.
+        let mut tier_counts: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+        for edge in &resolved_edges {
+            let tier = edge.resolved_by.clone();
+            *tier_counts.entry(tier).or_insert(0) += 1;
+        }
+        for (tier, count) in &tier_counts {
+            let metric = Metric {
+                name: "wicked_estate.resolve.resolved".to_string(),
+                description: String::new(),
+                unit: "1".to_string(),
+                data: MetricData::Sum {
+                    data_points: vec![NumberDataPoint {
+                        attributes: vec![KeyValue::str("tier", tier.as_str())],
+                        start_time_unix_nano: t,
+                        time_unix_nano: t,
+                        value: MetricValue::I64(*count),
+                    }],
+                    temporality: AggregationTemporality::Delta,
+                    is_monotonic: true,
+                },
+            };
+            if let Err(e) = sink.export_metrics(&resource, &scope, &[metric]) {
+                eprintln!("telemetry: {e}");
+            }
+        }
+
+        // Counter: unresolved refs.
+        let resolved_locs: std::collections::HashSet<String> = resolved_edges
+            .iter()
+            .filter_map(|e| e.location.as_ref())
+            .map(|l| format!("{}:{}", l.file, l.span.start_line))
+            .collect();
+        let unresolved_count = refs
+            .iter()
+            .filter(|r| {
+                !resolved_locs.contains(&format!(
+                    "{}:{}",
+                    r.location.file, r.location.span.start_line
+                ))
+            })
+            .count() as i64;
+        if unresolved_count > 0 {
+            let metric = Metric {
+                name: "wicked_estate.resolve.unresolved".to_string(),
+                description: String::new(),
+                unit: "1".to_string(),
+                data: MetricData::Sum {
+                    data_points: vec![NumberDataPoint {
+                        attributes: vec![KeyValue::str("language", "unknown")],
+                        start_time_unix_nano: t,
+                        time_unix_nano: t,
+                        value: MetricValue::I64(unresolved_count),
+                    }],
+                    temporality: AggregationTemporality::Delta,
+                    is_monotonic: true,
+                },
+            };
+            if let Err(e) = sink.export_metrics(&resource, &scope, &[metric]) {
+                eprintln!("telemetry: {e}");
+            }
+        }
+    }
+
+    Ok(resolved_edges)
 }
 
 // ── scip_edges ────────────────────────────────────────────────────────────────

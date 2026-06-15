@@ -32,8 +32,8 @@ pub use history::HistoricalEdge;
 pub use node::{Language, Location, Metadata, Node, NodeKind, SourceFile, Span};
 pub use observability::{
     AggregationTemporality, AttributeValue, ExportError, ExportResult, ExporterConfig,
-    HistogramDataPoint, InstrumentKind, InstrumentationScope, KeyValue, LogRecord, Metric,
-    MetricData, MetricValue, NoopSink, NumberDataPoint, Protocol, Resource, Sampler,
+    HistogramDataPoint, InMemorySink, InstrumentKind, InstrumentationScope, KeyValue, LogRecord,
+    Metric, MetricData, MetricValue, NoopSink, NumberDataPoint, Protocol, Resource, Sampler,
     SeverityNumber, SpanContext, SpanData, SpanEvent, SpanId, SpanKind, SpanLink, SpanStatus,
     StatusCode, TelemetrySink, TraceId, open_telemetry_sink,
 };

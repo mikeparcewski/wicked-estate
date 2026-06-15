@@ -174,6 +174,7 @@ impl SqliteStore {
         if files.is_empty() {
             return Ok(());
         }
+        let t_fts = std::time::Instant::now();
         // CHUNK to stay under SQLite's bound-parameter limit (SQLITE_MAX_VARIABLE_NUMBER = 32766).
         // A monorepo with >32k changed files on first index (e.g. eliza: 33k+ files) would otherwise
         // blow the `IN (?1, …, ?N)` clause with "variable number must be between ?1 and ?32766".
@@ -221,6 +222,43 @@ impl SqliteStore {
                 ins_stmt.raw_bind_parameter(i + 1, *f).map_err(st)?;
             }
             ins_stmt.raw_execute().map_err(st)?;
+        }
+
+        // Emit FTS rebuild duration metric (best-effort).
+        {
+            let duration_ms = t_fts.elapsed().as_millis() as f64;
+            let sink = wicked_estate_observe::init_sink_from_env();
+            let resource = wicked_estate_core::observability::Resource::service(
+                "wicked_estate_store",
+                env!("CARGO_PKG_VERSION"),
+            );
+            let scope =
+                wicked_estate_core::observability::InstrumentationScope::new("wicked_estate.store");
+            use wicked_estate_core::observability::*;
+            let t = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            let metric = Metric {
+                name: "wicked_estate.store.fts_rebuild_duration_ms".to_string(),
+                description: "FTS rebuild duration".to_string(),
+                unit: "ms".to_string(),
+                data: MetricData::Histogram {
+                    data_points: vec![HistogramDataPoint {
+                        attributes: vec![],
+                        start_time_unix_nano: t,
+                        time_unix_nano: t,
+                        count: 1,
+                        sum: duration_ms,
+                        bucket_counts: vec![1],
+                        explicit_bounds: vec![],
+                    }],
+                    temporality: AggregationTemporality::Delta,
+                },
+            };
+            if let Err(e) = sink.export_metrics(&resource, &scope, &[metric]) {
+                eprintln!("telemetry: {e}");
+            }
         }
 
         Ok(())
@@ -940,6 +978,41 @@ impl GraphWrite for SqliteStore {
                     n.doc.as_deref().unwrap_or(""),
                 ])
                 .map_err(st)?;
+        }
+        // Emit write batch size histogram (best-effort).
+        if !nodes.is_empty() {
+            let sink = wicked_estate_observe::init_sink_from_env();
+            let resource = wicked_estate_core::observability::Resource::service(
+                "wicked_estate_store",
+                env!("CARGO_PKG_VERSION"),
+            );
+            let scope =
+                wicked_estate_core::observability::InstrumentationScope::new("wicked_estate.store");
+            use wicked_estate_core::observability::*;
+            let t = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            let metric = Metric {
+                name: "wicked_estate.store.write_batch_size".to_string(),
+                description: "Nodes per upsert_nodes call".to_string(),
+                unit: "1".to_string(),
+                data: MetricData::Histogram {
+                    data_points: vec![HistogramDataPoint {
+                        attributes: vec![],
+                        start_time_unix_nano: t,
+                        time_unix_nano: t,
+                        count: 1,
+                        sum: nodes.len() as f64,
+                        bucket_counts: vec![1],
+                        explicit_bounds: vec![],
+                    }],
+                    temporality: AggregationTemporality::Delta,
+                },
+            };
+            if let Err(e) = sink.export_metrics(&resource, &scope, &[metric]) {
+                eprintln!("telemetry: {e}");
+            }
         }
         Ok(())
     }

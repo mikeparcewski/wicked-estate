@@ -5140,6 +5140,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
@@ -7870,6 +7871,7 @@ dependencies = [
  "tokio",
  "wicked-estate-core",
  "wicked-estate-extract",
+ "wicked-estate-observe",
  "wicked-estate-rank",
  "wicked-estate-resolve",
  "wicked-estate-retrieve",
@@ -8013,8 +8015,18 @@ dependencies = [
  "tokio",
  "wicked-estate",
  "wicked-estate-core",
+ "wicked-estate-observe",
  "wicked-estate-retrieve",
  "wicked-estate-store",
+]
+
+[[package]]
+name = "wicked-estate-observe"
+version = "0.1.7"
+dependencies = [
+ "reqwest",
+ "serde_json",
+ "wicked-estate-core",
 ]
 
 [[package]]
@@ -8038,6 +8050,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "wicked-estate-core",
+ "wicked-estate-observe",
  "wicked-estate-store",
 ]
 
@@ -8068,6 +8081,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "wicked-estate-core",
+ "wicked-estate-observe",
  "zstd",
 ]
 

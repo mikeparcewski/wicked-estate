@@ -278,6 +278,38 @@ const STOP_NAMES: &[&str] = &[
     "aftereach",
 ];
 
+fn emit_cli_span(
+    sink: &std::sync::Arc<dyn wicked_estate_core::TelemetrySink>,
+    resource: &wicked_estate_core::observability::Resource,
+    scope: &wicked_estate_core::observability::InstrumentationScope,
+    name: &str,
+    attrs: Vec<wicked_estate_core::observability::KeyValue>,
+    start_ns: u64,
+    end_ns: u64,
+) {
+    use wicked_estate_core::observability::*;
+    let span = SpanData {
+        context: SpanContext {
+            trace_id: TraceId::INVALID,
+            span_id: SpanId::INVALID,
+            trace_flags: 0,
+            is_remote: false,
+        },
+        parent_span_id: None,
+        name: name.to_string(),
+        kind: SpanKind::Internal,
+        start_time_unix_nano: start_ns,
+        end_time_unix_nano: end_ns,
+        attributes: attrs,
+        events: vec![],
+        links: vec![],
+        status: SpanStatus::ok(),
+    };
+    if let Err(e) = sink.export_spans(resource, scope, &[span]) {
+        eprintln!("telemetry: {e}");
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (cmd, rest) = match args.split_first() {
@@ -439,6 +471,16 @@ fn main() -> Result<()> {
         }
     }
 
+    let otel_sink = wicked_estate_observe::init_sink_from_env();
+    let otel_resource = wicked_estate_core::observability::Resource::service(
+        "wicked_estate",
+        env!("CARGO_PKG_VERSION"),
+    );
+    let otel_scope = wicked_estate_core::observability::InstrumentationScope::versioned(
+        "wicked_estate",
+        env!("CARGO_PKG_VERSION"),
+    );
+
     match cmd {
         "index" => {
             let path = positional.first().map(String::as_str).unwrap_or(".");
@@ -545,7 +587,15 @@ fn main() -> Result<()> {
         // Task C: W10 drift report.
         "drift" => {
             let store = open_store(&db).map_err(to_any)?;
+            let t_cmd_start = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
             let report = wicked_estate::estate_drift(&*store).map_err(to_any)?;
+            let t_cmd_end = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
             println!("--- estate drift report ---");
             println!("managed (iac + live):   {}", report.managed.len());
             println!("undeployed (iac-only):  {}", report.undeployed.len());
@@ -574,6 +624,28 @@ fn main() -> Result<()> {
                     println!("  ... and {} more", report.managed.len() - 20);
                 }
             }
+            emit_cli_span(
+                &otel_sink,
+                &otel_resource,
+                &otel_scope,
+                "wicked_estate.drift",
+                vec![
+                    wicked_estate_core::observability::KeyValue::int(
+                        "drift.added",
+                        report.unmanaged.len() as i64,
+                    ),
+                    wicked_estate_core::observability::KeyValue::int(
+                        "drift.removed",
+                        report.undeployed.len() as i64,
+                    ),
+                    wicked_estate_core::observability::KeyValue::int(
+                        "drift.changed",
+                        report.managed.len() as i64,
+                    ),
+                ],
+                t_cmd_start,
+                t_cmd_end,
+            );
         }
         "query" => {
             let name = positional
@@ -582,11 +654,34 @@ fn main() -> Result<()> {
             let store = open_store_ext(&db).map_err(to_any)?;
             maybe_print_staleness(store.as_ref(), &db);
             maybe_warn_version_mismatch(store.as_ref(), &db);
+            let t_cmd_start = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
             let hits = wicked_estate::search(&*store, name).map_err(to_any)?;
+            let t_cmd_end = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
             println!("{} match(es) for '{name}':", hits.len());
             for n in &hits {
                 println!("  {:?} {} ({})", n.kind, n.name, loc(n));
             }
+            emit_cli_span(
+                &otel_sink,
+                &otel_resource,
+                &otel_scope,
+                "wicked_estate.query",
+                vec![
+                    wicked_estate_core::observability::KeyValue::str("symbol.name", name.as_str()),
+                    wicked_estate_core::observability::KeyValue::int(
+                        "result.count",
+                        hits.len() as i64,
+                    ),
+                ],
+                t_cmd_start,
+                t_cmd_end,
+            );
         }
         "blast-radius" => {
             let name = positional
@@ -595,8 +690,16 @@ fn main() -> Result<()> {
             let store = open_store_ext(&db).map_err(to_any)?;
             maybe_print_staleness(store.as_ref(), &db);
             maybe_warn_version_mismatch(store.as_ref(), &db);
+            let t_cmd_start = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
             let deps = wicked_estate::blast_radius_by_name(&*store, name, 12).map_err(to_any)?;
             let unresolved = store.unresolved_refs_for_name(name).map_err(to_any)?.len();
+            let t_cmd_end = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
             if deps.is_empty() {
                 println!("no resolved dependents for '{name}' (symbol may not be indexed)");
             } else {
@@ -610,6 +713,21 @@ fn main() -> Result<()> {
                 "coverage: {} resolved dependent(s); {unresolved} unresolved call(s) reference \
                  '{name}' — best-effort static resolution, MAY be incomplete (precise tier pending)",
                 deps.len()
+            );
+            emit_cli_span(
+                &otel_sink,
+                &otel_resource,
+                &otel_scope,
+                "wicked_estate.blast_radius",
+                vec![
+                    wicked_estate_core::observability::KeyValue::str("symbol.name", name.as_str()),
+                    wicked_estate_core::observability::KeyValue::int(
+                        "dependent.count",
+                        deps.len() as i64,
+                    ),
+                ],
+                t_cmd_start,
+                t_cmd_end,
             );
         }
         "stats" => {
@@ -649,11 +767,31 @@ fn main() -> Result<()> {
         }
         "rank" | "hotspots" => {
             let store = open_store_ext(&db).map_err(to_any)?;
+            let t_cmd_start = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
             let top = wicked_estate::important_symbols(store.as_ref(), 25).map_err(to_any)?;
+            let t_cmd_end = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
             println!("top {} symbols by PageRank:", top.len());
             for (n, score) in &top {
                 println!("  {score:.4}  {:?} {} ({})", n.kind, n.name, loc(n));
             }
+            emit_cli_span(
+                &otel_sink,
+                &otel_resource,
+                &otel_scope,
+                "wicked_estate.rank",
+                vec![wicked_estate_core::observability::KeyValue::int(
+                    "symbol.count",
+                    top.len() as i64,
+                )],
+                t_cmd_start,
+                t_cmd_end,
+            );
         }
         "source" => {
             let name = positional
@@ -698,12 +836,20 @@ fn main() -> Result<()> {
             };
             use wicked_estate_core::RetrievalTool;
             let req = serde_json::json!({ "query": query, "k": 20 });
+            let t_cmd_start = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
             match sem_tool.invoke(&*graph_store, &req) {
                 Ok(result) => {
                     let matches = result.content["matches"]
                         .as_array()
                         .cloned()
                         .unwrap_or_default();
+                    let t_cmd_end = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos() as u64;
                     println!("{} semantic match(es) for '{query}':", matches.len());
                     for m in &matches {
                         println!(
@@ -718,6 +864,18 @@ fn main() -> Result<()> {
                     for d in &result.diagnostics {
                         eprintln!("note: {d}");
                     }
+                    emit_cli_span(
+                        &otel_sink,
+                        &otel_resource,
+                        &otel_scope,
+                        "wicked_estate.semantic_search",
+                        vec![wicked_estate_core::observability::KeyValue::int(
+                            "result.count",
+                            matches.len() as i64,
+                        )],
+                        t_cmd_start,
+                        t_cmd_end,
+                    );
                 }
                 Err(e) => {
                     eprintln!("semantic search error: {e}");
