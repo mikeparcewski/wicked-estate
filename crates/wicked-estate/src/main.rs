@@ -85,6 +85,12 @@ fn main() -> Result<()> {
     let mut sem_description: Option<String> = None;
     let mut sem_requirement: Option<String> = None;
     let mut sem_validated: Option<bool> = None;
+    // Annotation flags for the `annotate` command.
+    let mut ann_key: Option<String> = None;
+    let mut ann_value: Option<String> = None;
+    let mut ann_confidence: f64 = 1.0;
+    let mut ann_provenance: String = String::new();
+    let mut ann_author: String = String::new();
     let mut positional: Vec<String> = Vec::new();
     let mut it = rest.iter();
     while let Some(a) = it.next() {
@@ -135,6 +141,31 @@ fn main() -> Result<()> {
             "--validated" => {
                 if let Some(v) = it.next() {
                     sem_validated = Some(matches!(v.as_str(), "true" | "1" | "yes"));
+                }
+            }
+            "--key" => {
+                if let Some(v) = it.next() {
+                    ann_key = Some(v.clone());
+                }
+            }
+            "--value" => {
+                if let Some(v) = it.next() {
+                    ann_value = Some(v.clone());
+                }
+            }
+            "--confidence" => {
+                if let Some(v) = it.next() {
+                    ann_confidence = v.parse::<f64>().unwrap_or(1.0);
+                }
+            }
+            "--provenance" => {
+                if let Some(v) = it.next() {
+                    ann_provenance = v.clone();
+                }
+            }
+            "--author" => {
+                if let Some(v) = it.next() {
+                    ann_author = v.clone();
                 }
             }
             _ => positional.push(a.clone()),
@@ -689,6 +720,378 @@ fn main() -> Result<()> {
                 );
             }
         }
+        // Agent B: community detection on the call/import graph.
+        //
+        // Usage:
+        //   wicked-estate clusters [<min-size>] [--json] [--db ...]
+        //
+        // Detects connected communities using union-find over CALLS/IMPORTS edges.
+        // Outputs community membership sorted by size descending.
+        "clusters" => {
+            let min_size = positional
+                .iter()
+                .find(|a| a.parse::<usize>().is_ok())
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(2);
+            let json_out = positional.iter().any(|a| a == "--json");
+            let store = open_store_ext(&db).map_err(to_any)?;
+            maybe_print_staleness(store.as_ref(), &db);
+            let communities =
+                wicked_estate_rank::detect_communities(store.as_ref(), min_size, false)
+                    .map_err(to_any)?;
+            if json_out {
+                let j: Vec<Vec<String>> = communities
+                    .iter()
+                    .map(|c| c.iter().map(|s| s.to_string()).collect())
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&j)?);
+            } else {
+                println!("{} communities (min_size={min_size}):", communities.len());
+                for (i, c) in communities.iter().enumerate() {
+                    println!("  cluster {}: {} symbols", i + 1, c.len());
+                    for sym in c.iter().take(5) {
+                        println!("    {sym}");
+                    }
+                    if c.len() > 5 {
+                        println!("    ... and {} more", c.len() - 5);
+                    }
+                }
+            }
+        }
+        // Agent C: budget context — ranked symbols fitting within a character budget.
+        //
+        // Usage:
+        //   wicked-estate context <name> --budget <chars> [--json] [--db ...]
+        //
+        // Returns the highest-PageRank symbols reachable from <name> that fit within
+        // the character budget, suitable for injecting into an LLM prompt.
+        "context" => {
+            let name = positional
+                .first()
+                .context("usage: wicked-estate context <name> --budget <chars>")?;
+            let mut budget = 4096usize;
+            let mut it2 = rest.iter();
+            while let Some(a) = it2.next() {
+                if a.as_str() == "--budget" {
+                    if let Some(v) = it2.next() {
+                        budget = v.parse::<usize>().unwrap_or(4096);
+                    }
+                }
+            }
+            let json_out = positional.iter().any(|a| a == "--json");
+            // open_store_ext returns Box<dyn GraphStoreMutExt> so as_ref() satisfies
+            // maybe_print_staleness's &dyn GraphStoreMutExt parameter.
+            let store = open_store_ext(&db).map_err(to_any)?;
+            maybe_print_staleness(store.as_ref(), &db);
+            let nodes =
+                wicked_estate_retrieve::budget_context(&*store, name, budget)
+                    .map_err(to_any)?;
+            if json_out {
+                let j: Vec<serde_json::Value> = nodes
+                    .iter()
+                    .map(|n| {
+                        serde_json::json!({
+                            "name": n.name,
+                            "kind": format!("{:?}", n.kind),
+                            "file": n.location.file,
+                            "line": n.location.span.start_line + 1,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&j)?);
+            } else {
+                println!(
+                    "{} symbol(s) in context for '{}' (budget={budget} chars):",
+                    nodes.len(),
+                    name
+                );
+                for n in &nodes {
+                    println!("  {:?} {} ({})", n.kind, n.name, loc(n));
+                }
+            }
+        }
+        // Agent A: annotation API — tag any indexed symbol with arbitrary key/value metadata.
+        //
+        // Usage:
+        //   wicked-estate annotate <name> --key K --value V [--confidence F] [--provenance P] [--author A] [--db ...]
+        "annotate" => {
+            let name = positional
+                .first()
+                .context("usage: wicked-estate annotate <name> --key K --value V [--db ...]")?;
+            let key = ann_key
+                .as_deref()
+                .context("--key is required for the annotate command")?;
+            let value = ann_value
+                .as_deref()
+                .context("--value is required for the annotate command")?;
+            ensure_db_dir(&db)?;
+            let mut store = SqliteStore::open(&db).map_err(to_any)?;
+            let hits = wicked_estate::search(&store, name).map_err(to_any)?;
+            let mut count = 0usize;
+            for n in &hits {
+                store
+                    .annotate_node(
+                        &n.symbol,
+                        key,
+                        value,
+                        ann_confidence,
+                        &ann_provenance,
+                        &ann_author,
+                    )
+                    .map_err(to_any)?;
+                count += 1;
+            }
+            println!("annotated {count} symbol(s) with {key}={value}");
+        }
+        // Agent A: show annotations for a symbol.
+        //
+        // Usage:
+        //   wicked-estate annotations <name> [--db ...]
+        "annotations" => {
+            let name = positional
+                .first()
+                .context("usage: wicked-estate annotations <name> [--db ...]")?;
+            let store = SqliteStore::open(&db).map_err(to_any)?;
+            let hits = wicked_estate::search(&store, name).map_err(to_any)?;
+            if hits.is_empty() {
+                println!("no symbols found for '{name}'");
+            } else {
+                for n in &hits {
+                    let anns = store.get_annotations(&n.symbol).map_err(to_any)?;
+                    println!("  [{:?}] {} ({})", n.kind, n.name, loc(n));
+                    if anns.is_empty() {
+                        println!("    (no annotations)");
+                    } else {
+                        for a in &anns {
+                            println!(
+                                "    {}={} [confidence={:.3} provenance={:?} author={:?}]",
+                                a.key, a.value, a.confidence, a.provenance, a.author
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // Agent D: stable hex fingerprint for a symbol (covers id+name+kind+file+signature).
+        //
+        // Usage:
+        //   wicked-estate fingerprint <name> [--db ...]
+        "fingerprint" => {
+            let name = positional
+                .first()
+                .context("usage: wicked-estate fingerprint <name>")?;
+            let store = open_store(&db).map_err(to_any)?;
+            let hits = wicked_estate::search(&*store, name).map_err(to_any)?;
+            drop(store);
+            if hits.is_empty() {
+                println!("no symbol found matching '{name}'");
+                return Ok(());
+            }
+            let store = SqliteStore::open(&db).map_err(to_any)?;
+            for node in &hits {
+                match store.node_fingerprint(&node.symbol).map_err(to_any)? {
+                    Some(fp) => println!("{fp}  {:?} {} ({})", node.kind, node.name, loc(node)),
+                    None => println!("(not indexed)  {} ", node.name),
+                }
+            }
+        }
+        // Agent D: symbols in files changed since a git SHA.
+        //
+        // Usage:
+        //   wicked-estate changed-since <git-sha> [--json] [--db ...]
+        "changed-since" => {
+            let sha = positional
+                .first()
+                .context("usage: wicked-estate changed-since <git-sha>")?;
+            let output = std::process::Command::new("git")
+                .args(["diff", "--name-only", &format!("{sha}..HEAD")])
+                .output()
+                .context("git diff failed — is this a git repository?")?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("git diff failed: {stderr}");
+            }
+            let changed_files: Vec<String> = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            if changed_files.is_empty() {
+                println!("no files changed since {sha}");
+                return Ok(());
+            }
+            let store = SqliteStore::open(&db).map_err(to_any)?;
+            let json_out = positional.iter().any(|a| a == "--json");
+            let mut all_nodes: Vec<wicked_estate_core::Node> = Vec::new();
+            for file in &changed_files {
+                let nodes = store.nodes_in_file(file).map_err(to_any)?;
+                all_nodes.extend(nodes);
+            }
+            if json_out {
+                let j: Vec<serde_json::Value> = all_nodes
+                    .iter()
+                    .map(|n| serde_json::json!({
+                        "name": n.name,
+                        "kind": format!("{:?}", n.kind),
+                        "file": n.location.file,
+                        "line": n.location.span.start_line + 1,
+                    }))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&j)?);
+            } else {
+                println!(
+                    "{} symbol(s) in {} changed file(s) since {sha}:",
+                    all_nodes.len(),
+                    changed_files.len()
+                );
+                for file in &changed_files {
+                    println!("  {file}:");
+                    for n in all_nodes.iter().filter(|n| n.location.file == *file) {
+                        println!("    {:?} {}", n.kind, n.name);
+                    }
+                }
+            }
+        }
+        // Agent E: entrypoints — symbols with no callers/importers.
+        //
+        // Usage:
+        //   wicked-estate entrypoints [--json] [--db ...]
+        "entrypoints" => {
+            let json_out = positional.iter().any(|a| a == "--json");
+            let store = SqliteStore::open(&db).map_err(to_any)?;
+            let nodes = store.entrypoint_nodes().map_err(to_any)?;
+            if json_out {
+                let j: Vec<serde_json::Value> = nodes
+                    .iter()
+                    .map(|n| {
+                        serde_json::json!({
+                            "name": n.name,
+                            "kind": format!("{:?}", n.kind),
+                            "file": n.location.file,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&j)?);
+            } else {
+                println!("{} entrypoint(s) (no callers/importers):", nodes.len());
+                for n in nodes.iter().take(50) {
+                    println!("  {:?} {} ({})", n.kind, n.name, loc(n));
+                }
+                if nodes.len() > 50 {
+                    println!("  ... and {} more", nodes.len() - 50);
+                }
+            }
+        }
+        // Agent E: leaves — symbols that call/import nothing.
+        //
+        // Usage:
+        //   wicked-estate leaves [--json] [--db ...]
+        "leaves" => {
+            let json_out = positional.iter().any(|a| a == "--json");
+            let store = SqliteStore::open(&db).map_err(to_any)?;
+            let nodes = store.leaf_nodes().map_err(to_any)?;
+            if json_out {
+                let j: Vec<serde_json::Value> = nodes
+                    .iter()
+                    .map(|n| {
+                        serde_json::json!({
+                            "name": n.name,
+                            "kind": format!("{:?}", n.kind),
+                            "file": n.location.file,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&j)?);
+            } else {
+                println!("{} leaf symbol(s) (no callees/imports):", nodes.len());
+                for n in nodes.iter().take(50) {
+                    println!("  {:?} {} ({})", n.kind, n.name, loc(n));
+                }
+                if nodes.len() > 50 {
+                    println!("  ... and {} more", nodes.len() - 50);
+                }
+            }
+        }
+        // Agent E: dead-code candidates — symbols with no edges at all.
+        //
+        // Usage:
+        //   wicked-estate dead-code [--json] [--db ...]
+        "dead-code" => {
+            let json_out = positional.iter().any(|a| a == "--json");
+            let store = SqliteStore::open(&db).map_err(to_any)?;
+            let nodes = store.isolated_nodes().map_err(to_any)?;
+            if json_out {
+                let j: Vec<serde_json::Value> = nodes
+                    .iter()
+                    .map(|n| {
+                        serde_json::json!({
+                            "name": n.name,
+                            "kind": format!("{:?}", n.kind),
+                            "file": n.location.file,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&j)?);
+            } else {
+                println!(
+                    "{} isolated symbol(s) (no in-edges AND no out-edges — dead code candidates):",
+                    nodes.len()
+                );
+                for n in nodes.iter().take(50) {
+                    println!("  {:?} {} ({})", n.kind, n.name, loc(n));
+                }
+                if nodes.len() > 50 {
+                    println!("  ... and {} more", nodes.len() - 50);
+                }
+            }
+        }
+        // Agent E: nodes — bulk export all symbols, optionally filtered by kind.
+        //
+        // Usage:
+        //   wicked-estate nodes [--kind K] [--json] [--db ...]
+        "nodes" => {
+            let kind = {
+                let mut k = String::new();
+                let mut it2 = positional.iter();
+                while let Some(a) = it2.next() {
+                    if a.as_str() == "--kind" {
+                        k = it2.next().cloned().unwrap_or_default();
+                    }
+                }
+                k
+            };
+            let json_out = positional.iter().any(|a| a == "--json");
+            let store = SqliteStore::open(&db).map_err(to_any)?;
+            let nodes = store.nodes_by_kind(&kind).map_err(to_any)?;
+            if json_out {
+                let j: Vec<serde_json::Value> = nodes
+                    .iter()
+                    .map(|n| {
+                        serde_json::json!({
+                            "name": n.name,
+                            "kind": format!("{:?}", n.kind),
+                            "file": n.location.file,
+                            "line": n.location.span.start_line + 1,
+                            "signature": n.signature,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&j)?);
+            } else {
+                let label = if kind.is_empty() {
+                    "all".to_string()
+                } else {
+                    kind.clone()
+                };
+                println!("{} node(s) of kind '{label}':", nodes.len());
+                for n in nodes.iter().take(100) {
+                    println!("  {:?} {} ({})", n.kind, n.name, loc(n));
+                }
+                if nodes.len() > 100 {
+                    println!("  ... and {} more", nodes.len() - 100);
+                }
+            }
+        }
         _ => {
             println!("wicked-estate {} — usage:", env!("CARGO_PKG_VERSION"));
             println!(
@@ -741,6 +1144,26 @@ fn main() -> Result<()> {
             println!(
                 "    Final line: {{\"next_seq\":N}} — pass as --since on the next call to resume."
             );
+            println!(
+                "  wicked-estate clusters [<min-size>] [--json]  # community detection on call graph"
+            );
+            println!(
+                "  wicked-estate context <name> --budget <chars> [--json]  # ranked context within char budget"
+            );
+            println!("  wicked-estate annotate <name> --key K --value V [--db ...]");
+            println!("    --key         annotation key (required)");
+            println!("    --value       annotation value (required)");
+            println!("    --confidence  confidence score 0.0–1.0 (default: 1.0)");
+            println!("    --provenance  provenance string (default: empty)");
+            println!("    --author      author string (default: empty)");
+            println!("  wicked-estate annotations <name>   [--db ...]");
+            println!("    Show all annotations for matching symbols.");
+            println!("  wicked-estate fingerprint <name>   [--db ...]  # stable hex fingerprint for symbol");
+            println!("  wicked-estate changed-since <sha>  [--json] [--db ...]  # symbols in files changed since git SHA");
+            println!("  wicked-estate entrypoints [--json]            # symbols with no callers/importers");
+            println!("  wicked-estate leaves      [--json]            # symbols that call/import nothing");
+            println!("  wicked-estate dead-code   [--json]            # symbols with no edges at all");
+            println!("  wicked-estate nodes [--kind K] [--json]       # bulk export all symbols by kind");
         }
     }
     Ok(())

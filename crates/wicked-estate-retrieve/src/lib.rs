@@ -1614,6 +1614,90 @@ impl RetrievalTool for SemanticSearch {
     }
 }
 
+// budget_context
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Returns the highest-ranked graph neighbors of `name` that fit within `max_chars`.
+///
+/// Algorithm:
+/// 1. Find all nodes matching `name` via `find_symbols`.
+/// 2. For each match, collect direct callers (in-edges) and callees (out-edges); score them 2.0.
+///    Also collect up to 10 FTS-ranked symbols from a name-based search; score them 1.0.
+/// 3. Sort candidates by score descending.
+/// 4. Pack into the budget by accumulating `node.name.len() + node.location.file.len() + 100`
+///    per node (a lightweight proxy that avoids deserializing the data field).
+/// 5. Return the packed list (seed node excluded).
+pub fn budget_context(
+    store: &dyn wicked_estate_core::traits::GraphRead,
+    name: &str,
+    max_chars: usize,
+) -> wicked_estate_core::Result<Vec<wicked_estate_core::Node>> {
+    if max_chars == 0 {
+        return Ok(Vec::new());
+    }
+
+    let seed_query = SymbolQuery {
+        text: Some(name.to_string()),
+        limit: Some(20),
+        ..Default::default()
+    };
+    let seeds = store.find_symbols(&seed_query)?;
+    if seeds.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let seed_ids: HashSet<SymbolId> = seeds.iter().map(|n| n.symbol.clone()).collect();
+
+    let mut scores: HashMap<SymbolId, f64> = HashMap::new();
+
+    for seed in &seeds {
+        let out_edges = store.neighbors(&seed.symbol, Direction::Dependencies)?;
+        for e in out_edges {
+            if !seed_ids.contains(&e.target) {
+                *scores.entry(e.target.clone()).or_insert(0.0) += 2.0;
+            }
+        }
+        let in_edges = store.neighbors(&seed.symbol, Direction::Dependents)?;
+        for e in in_edges {
+            if !seed_ids.contains(&e.source) {
+                *scores.entry(e.source.clone()).or_insert(0.0) += 2.0;
+            }
+        }
+    }
+
+    let fts_query = SymbolQuery {
+        text: Some(name.to_string()),
+        limit: Some(10),
+        ..Default::default()
+    };
+    let fts_hits = store.find_symbols(&fts_query)?;
+    for node in fts_hits {
+        if !seed_ids.contains(&node.symbol) {
+            scores.entry(node.symbol.clone()).or_insert(1.0);
+        }
+    }
+
+    let mut ranked: Vec<(SymbolId, f64)> = scores.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut out: Vec<wicked_estate_core::Node> = Vec::new();
+    let mut chars_used: usize = 0;
+
+    for (id, _) in &ranked {
+        let Some(node) = store.get_node(id)? else {
+            continue;
+        };
+        let node_size = node.name.len() + node.location.file.len() + 100;
+        if chars_used + node_size > max_chars {
+            break;
+        }
+        chars_used += node_size;
+        out.push(node);
+    }
+
+    Ok(out)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2856,5 +2940,37 @@ mod tests {
 
         assert_eq!(res.content["total"].as_u64().unwrap_or(0), 0);
         // R1: must be Ok, never Err.
+    }
+
+    // ── budget_context ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_budget_context_empty_budget() {
+        let store = fixture_store();
+        let result = budget_context(&store, "middle_fn", 0).unwrap();
+        assert!(result.is_empty(), "max_chars=0 must return empty vec");
+    }
+
+    #[test]
+    fn test_budget_context_no_symbol() {
+        let store = fixture_store();
+        let result = budget_context(&store, "does_not_exist_xyz_abc", 4096).unwrap();
+        assert!(result.is_empty(), "unknown symbol name must return empty vec");
+    }
+
+    #[test]
+    fn test_budget_context_within_budget() {
+        let store = fixture_store();
+        // "middle_fn" has caller (caller_fn) and callee (leaf_fn) — both should appear.
+        let result = budget_context(&store, "middle_fn", 4096).unwrap();
+        let names: Vec<&str> = result.iter().map(|n| n.name.as_str()).collect();
+        assert!(
+            names.contains(&"caller_fn") || names.contains(&"leaf_fn"),
+            "at least one neighbor of middle_fn must appear in context; got {names:?}"
+        );
+        assert!(
+            !names.contains(&"middle_fn"),
+            "seed node must not appear in its own context"
+        );
     }
 }
