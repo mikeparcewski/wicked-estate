@@ -1102,6 +1102,51 @@ pub fn extractor_for_extension(ext: &str) -> Option<TreeSitterExtractor> {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/// Build a map from paragraph/section header start-byte → true body end-byte for COBOL.
+///
+/// The arborium-cobol grammar has no `paragraph` wrapper node — paragraph_header and all
+/// statements are flat children of procedure_division / procedure_declaratives. A paragraph's
+/// body therefore spans from the header line to the byte before the next header (or end of
+/// parent). This fixup is applied after the query-based extraction so `source` returns the
+/// full paragraph body, not just the label line.
+fn cobol_paragraph_end_map(tree: &tree_sitter::Tree) -> std::collections::HashMap<usize, usize> {
+    const PROC_PARENTS: &[&str] = &["procedure_division", "procedure_declaratives"];
+    const HEADERS: &[&str] = &["paragraph_header", "section_header"];
+
+    let mut map = std::collections::HashMap::new();
+    let cursor = tree.root_node().walk();
+
+    // Walk the full tree looking for procedure_division / procedure_declaratives nodes.
+    let mut stack: Vec<tree_sitter::Node> = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if PROC_PARENTS.contains(&node.kind()) {
+            // Iterate children in order, extending the previous header's span.
+            let child_count = node.child_count();
+            let mut prev_header_start: Option<usize> = None;
+            for i in 0..child_count {
+                let child = node.child(i).unwrap();
+                if HEADERS.contains(&child.kind()) {
+                    if let Some(prev_start) = prev_header_start {
+                        // End the previous header just before this one starts.
+                        map.insert(prev_start, child.start_byte());
+                    }
+                    prev_header_start = Some(child.start_byte());
+                }
+            }
+            // Last header runs to end of the parent node.
+            if let Some(prev_start) = prev_header_start {
+                map.insert(prev_start, node.end_byte());
+            }
+        }
+        // Push children for DFS (procedure_division may be nested under program_definition etc.)
+        for i in 0..node.child_count() {
+            stack.push(node.child(i).unwrap());
+        }
+    }
+    drop(cursor); // suppress unused-variable warning
+    map
+}
+
 fn ts_span(n: tree_sitter::Node) -> Span {
     let s = n.start_position();
     let e = n.end_position();
@@ -1664,6 +1709,32 @@ impl Extractor for TreeSitterExtractor {
                 let pos = anchor.start_byte();
                 let span = ts_span(anchor);
                 raw_refs.push((target, EdgeKind::Implements, pos, span));
+            }
+        }
+
+        // ── COBOL paragraph span fixup ────────────────────────────────────
+        // Extend paragraph_header / section_header spans to cover the full body.
+        // The grammar has no paragraph wrapper, so we compute boundaries post-extraction.
+        if self.lang_name == "cobol" {
+            let end_map = cobol_paragraph_end_map(&tree);
+            for node in &mut def_nodes {
+                let start = node.location.span.start_byte as usize;
+                if let Some(&true_end) = end_map.get(&start) {
+                    let end_pos = tree
+                        .root_node()
+                        .descendant_for_byte_range(true_end.saturating_sub(1), true_end)
+                        .map(|n| n.end_position())
+                        .unwrap_or_else(|| {
+                            let e = node.location.span.end_byte as usize;
+                            tree.root_node()
+                                .descendant_for_byte_range(e, e)
+                                .map(|n| n.end_position())
+                                .unwrap_or(tree_sitter::Point { row: 0, column: 0 })
+                        });
+                    node.location.span.end_byte = true_end as u32;
+                    node.location.span.end_line = end_pos.row as u32;
+                    node.location.span.end_col = end_pos.column as u32;
+                }
             }
         }
 

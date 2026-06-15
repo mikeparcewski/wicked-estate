@@ -1122,11 +1122,22 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             if fp_content {
+                // Resolve paths against the stored index root so --content works
+                // regardless of CWD (the indexed path is root-relative, not CWD-relative).
+                let concrete = SqliteStore::open(&db).map_err(to_any)?;
+                let index_root: Option<std::path::PathBuf> = concrete
+                    .meta_get("indexed_root")
+                    .map_err(to_any)?
+                    .map(std::path::PathBuf::from);
                 for node in &hits {
-                    let file = &node.location.file;
+                    let rel = &node.location.file;
+                    let resolved = index_root
+                        .as_deref()
+                        .map(|r| r.join(rel))
+                        .unwrap_or_else(|| std::path::PathBuf::from(rel));
                     let start = node.location.span.start_byte as usize;
                     let end = node.location.span.end_byte as usize;
-                    match std::fs::read(file) {
+                    match std::fs::read(&resolved) {
                         Ok(bytes) => {
                             let slice = bytes.get(start..end).unwrap_or(&[]);
                             let hash = xxhash_rust::xxh3::xxh3_64(slice);
@@ -1134,7 +1145,8 @@ fn main() -> Result<()> {
                         }
                         Err(e) => {
                             println!(
-                                "(cannot read {file}: {e})  {:?} {} ({})",
+                                "(cannot read {}: {e})  {:?} {} ({})",
+                                resolved.display(),
                                 node.kind,
                                 node.name,
                                 loc(node)
