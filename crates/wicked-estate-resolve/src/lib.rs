@@ -798,17 +798,25 @@ pub fn resolve_all(
         }
 
         // Counter: unresolved refs.
-        let resolved_locs: std::collections::HashSet<String> = resolved_edges
+        // Track which refs were resolved by (source_id, kind_string) — this correctly counts
+        // edges whose `location` is `None` as resolved, fixing the inflated-unresolved bug
+        // (Finding 7): previously `.filter_map(|e| e.location.as_ref())` silently dropped
+        // None-location edges, leaving their originating refs uncancelled from the counter.
+        let resolved_ref_keys: std::collections::HashSet<(String, String)> = resolved_edges
             .iter()
-            .filter_map(|e| e.location.as_ref())
-            .map(|l| format!("{}:{}", l.file, l.span.start_line))
+            .map(|e| {
+                (
+                    e.source.0.clone(),
+                    serde_json::to_string(&e.kind).unwrap_or_default(),
+                )
+            })
             .collect();
         let unresolved_count = refs
             .iter()
             .filter(|r| {
-                !resolved_locs.contains(&format!(
-                    "{}:{}",
-                    r.location.file, r.location.span.start_line
+                !resolved_ref_keys.contains(&(
+                    r.from.0.clone(),
+                    serde_json::to_string(&r.kind).unwrap_or_default(),
                 ))
             })
             .count() as i64;

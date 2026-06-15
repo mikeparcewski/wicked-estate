@@ -297,10 +297,12 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
 
     // ── Split CHANGED/NEW from UNCHANGED ────────────────────────────────────────────────────
     let mut changed: Vec<FileWork> = Vec::new();
+    let mut unchanged_count: usize = 0;
     for fw in work {
         let stored = store.file_digest(&fw.rel)?;
         if !force_full && stored.as_deref() == Some(&fw.digest) {
             // UNCHANGED: skip extraction entirely; its nodes/edges already in the store.
+            unchanged_count += 1;
         } else {
             changed.push(fw);
         }
@@ -671,6 +673,10 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
             wicked_estate_core::observability::KeyValue::int(
                 "wicked_estate.files_changed",
                 changed.len() as i64,
+            ),
+            wicked_estate_core::observability::KeyValue::int(
+                "wicked_estate.files_unchanged",
+                unchanged_count as i64,
             ),
             wicked_estate_core::observability::KeyValue::int(
                 "wicked_estate.nodes",
