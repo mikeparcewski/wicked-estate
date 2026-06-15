@@ -37,10 +37,10 @@
   body: (compound_statement)? @code_namespace.body
 ) @code_namespace.def
 
-; Use declarations (namespace imports)
+; Use declarations (namespace imports) — qualified (Foo\Bar) or plain (RuntimeException)
 (namespace_use_declaration
   (namespace_use_clause
-    (qualified_name) @import.source
+    [(qualified_name) (name)] @import.source
   )
 ) @import
 

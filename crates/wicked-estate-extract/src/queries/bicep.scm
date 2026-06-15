@@ -46,6 +46,17 @@
 ) @call
 
 ; ── Import statements ─────────────────────────────────────────────────────────
+; import 'path'
 (import_statement
+  (string) @import.source
+) @import
+
+; import * as alias from 'path'  /  import { name } from 'path'
+(import_with_statement
+  (string) @import.source
+) @import
+
+; import functionality from 'path'
+(import_functionality
   (string) @import.source
 ) @import

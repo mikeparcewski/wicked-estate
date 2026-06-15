@@ -35,6 +35,20 @@
   (#match? @_fn_kw "^(def|defp|defdelegate|defguard|defguardp|defmacro|defmacrop)$")
 ) @code_function.def
 
+; Import-like directives: use / import / alias — produce Import nodes
+; These are syntactic calls in Elixir but semantically they are imports/aliases.
+(call
+  target: (identifier) @_kw
+  (#match? @_kw "^(use|import|alias)$")
+  (arguments . (alias) @import.source)
+) @import
+
+(call
+  target: (identifier) @_kw
+  (#match? @_kw "^(use|import|alias)$")
+  (arguments . (identifier) @import.source)
+) @import
+
 ; Function calls — local identifier call
 (call
   target: (identifier) @call.function
