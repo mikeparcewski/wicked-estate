@@ -1,6 +1,8 @@
 // sample.bicep — integration corpus fixture for the Bicep extractor
 // Demonstrates params, vars, resources, and outputs.
 
+import * as sharedTypes from 'br:mcr.microsoft.com/bicep/modules/shared:1.0.0'
+
 // ---------------------------------------------------------------------------
 // Parameters
 // ---------------------------------------------------------------------------

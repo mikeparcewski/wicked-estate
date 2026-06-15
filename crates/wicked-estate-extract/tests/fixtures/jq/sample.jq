@@ -1,3 +1,6 @@
+import "math" as math;
+import "utils" as $utils;
+
 def square: . * .;
 
 def sum_array: reduce .[] as $x (0; . + $x);

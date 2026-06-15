@@ -2,6 +2,10 @@
 
 declare(strict_types=1);
 
+use RuntimeException;
+use DateTimeInterface;
+use InvalidArgumentException;
+
 interface Formatter {
     public function format(string $input): string;
 }

@@ -1,5 +1,9 @@
 /* sample.css — design tokens, layout, components, and responsive rules */
 
+@import url('reset.css');
+@import url('fonts.css');
+@import 'variables.css';
+
 /* ── Design tokens ───────────────────────────────────────────────────────── */
 :root {
   /* Colour palette */

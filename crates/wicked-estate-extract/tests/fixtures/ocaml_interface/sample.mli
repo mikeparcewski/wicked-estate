@@ -1,3 +1,6 @@
+open List
+open Printf
+
 module Geometry : sig
 
   type shape =

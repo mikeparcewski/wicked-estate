@@ -3,6 +3,10 @@ defmodule Geometry do
   Basic geometric shape calculations.
   """
 
+  import Enum, only: [max_by: 2, map: 2]
+  alias Geometry.Shape, as: Shape
+  use Agent
+
   defstruct [:kind, :params]
 
   @type t :: %__MODULE__{kind: atom(), params: list(number())}

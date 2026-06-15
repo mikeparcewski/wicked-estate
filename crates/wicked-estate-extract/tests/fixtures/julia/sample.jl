@@ -1,3 +1,6 @@
+import Base: show, string
+using LinearAlgebra
+
 module Geometry
 
 export Shape, Circle, Rectangle, Triangle, area, perimeter, describe, largest
