@@ -3,12 +3,13 @@
 //! Sends spans, metrics, and logs to an OTLP HTTP collector endpoint
 //! using the JSON encoding format over blocking HTTP.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use wicked_estate_core::observability::{
-    AttributeValue, ExportError, ExportResult, ExporterConfig, InstrumentationScope, KeyValue,
-    LogRecord, Metric, NoopSink, Protocol, Resource, SpanData, TelemetrySink,
+    AggregationTemporality, AttributeValue, ExportError, ExportResult, ExporterConfig,
+    HistogramDataPoint, InstrumentationScope, KeyValue, LogRecord, Metric, MetricData, MetricValue,
+    NoopSink, NumberDataPoint, Protocol, Resource, SeverityNumber, SpanData, TelemetrySink,
 };
 
 /// An OTLP HTTP/JSON sink that posts telemetry to a collector endpoint.
@@ -157,19 +158,129 @@ fn span_to_json(span: &SpanData) -> serde_json::Value {
     })
 }
 
-fn metric_to_json(m: &Metric) -> serde_json::Value {
+/// Map `AggregationTemporality` to the OTLP proto enum integer.
+///
+/// OTLP proto `AggregationTemporality`:
+/// - `AGGREGATION_TEMPORALITY_DELTA` = 1
+/// - `AGGREGATION_TEMPORALITY_CUMULATIVE` = 2
+fn temporality_as_i32(t: &AggregationTemporality) -> i32 {
+    match t {
+        AggregationTemporality::Delta => 1,
+        AggregationTemporality::Cumulative => 2,
+    }
+}
+
+/// Serialize a `MetricValue` as the OTLP JSON scalar field.
+///
+/// OTLP JSON uses `"asInt"` (string-encoded) for i64 and `"asDouble"` for f64.
+fn metric_value_to_json(v: &MetricValue) -> serde_json::Value {
+    match v {
+        MetricValue::I64(i) => serde_json::json!({ "asInt": i.to_string() }),
+        MetricValue::F64(f) => serde_json::json!({ "asDouble": f }),
+    }
+}
+
+/// Serialize an OTLP `NumberDataPoint`.
+fn number_data_point_to_json(dp: &NumberDataPoint) -> serde_json::Value {
+    let mut obj = serde_json::json!({
+        "attributes": dp.attributes.iter().map(kv_to_json).collect::<Vec<_>>(),
+        "startTimeUnixNano": dp.start_time_unix_nano.to_string(),
+        "timeUnixNano": dp.time_unix_nano.to_string(),
+    });
+    // Merge the value field (asInt or asDouble) into the object.
+    let val = metric_value_to_json(&dp.value);
+    if let (Some(dst), Some(src)) = (obj.as_object_mut(), val.as_object()) {
+        dst.extend(src.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+    obj
+}
+
+/// Serialize an OTLP `HistogramDataPoint`, including explicit bucket boundaries.
+///
+/// OTLP requires both `explicitBounds` and `bucketCounts` for a valid histogram.
+/// `bucketCounts.len()` must equal `explicitBounds.len() + 1`.
+fn histogram_data_point_to_json(dp: &HistogramDataPoint) -> serde_json::Value {
     serde_json::json!({
-        "name": m.name,
-        "description": m.description,
-        "unit": m.unit,
+        "attributes": dp.attributes.iter().map(kv_to_json).collect::<Vec<_>>(),
+        "startTimeUnixNano": dp.start_time_unix_nano.to_string(),
+        "timeUnixNano": dp.time_unix_nano.to_string(),
+        "count": dp.count.to_string(),
+        "sum": dp.sum,
+        "bucketCounts": dp.bucket_counts.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+        "explicitBounds": dp.explicit_bounds,
     })
 }
 
+/// Serialize an OTLP `Metric` including its full data variant.
+///
+/// OTLP JSON uses a lowercase key named after the variant (`"sum"`, `"gauge"`,
+/// `"histogram"`) containing the data payload.
+fn metric_to_json(m: &Metric) -> serde_json::Value {
+    let data = match &m.data {
+        MetricData::Sum {
+            data_points,
+            temporality,
+            is_monotonic,
+        } => serde_json::json!({
+            "sum": {
+                "dataPoints": data_points.iter().map(number_data_point_to_json).collect::<Vec<_>>(),
+                "aggregationTemporality": temporality_as_i32(temporality),
+                "isMonotonic": is_monotonic,
+            }
+        }),
+        MetricData::Gauge { data_points } => serde_json::json!({
+            "gauge": {
+                "dataPoints": data_points.iter().map(number_data_point_to_json).collect::<Vec<_>>(),
+            }
+        }),
+        MetricData::Histogram {
+            data_points,
+            temporality,
+        } => serde_json::json!({
+            "histogram": {
+                "dataPoints": data_points.iter().map(histogram_data_point_to_json).collect::<Vec<_>>(),
+                "aggregationTemporality": temporality_as_i32(temporality),
+            }
+        }),
+    };
+
+    let mut obj = serde_json::json!({
+        "name": m.name,
+        "description": m.description,
+        "unit": m.unit,
+    });
+    // Merge the data variant key into the top-level metric object.
+    if let (Some(dst), Some(src)) = (obj.as_object_mut(), data.as_object()) {
+        dst.extend(src.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+    obj
+}
+
+/// Map `SeverityNumber` to the OTLP proto integer (low end of each range).
+///
+/// OTLP severity number ranges: Trace=1–4, Debug=5–8, Info=9–12, Warn=13–16, Error=17–20, Fatal=21–24.
+fn severity_number_as_i32(s: &SeverityNumber) -> i32 {
+    match s {
+        SeverityNumber::Trace => 1,
+        SeverityNumber::Debug => 5,
+        SeverityNumber::Info => 9,
+        SeverityNumber::Warn => 13,
+        SeverityNumber::Error => 17,
+        SeverityNumber::Fatal => 21,
+    }
+}
+
 fn log_to_json(log: &LogRecord) -> serde_json::Value {
-    serde_json::json!({
+    let mut obj = serde_json::json!({
         "timeUnixNano": log.time_unix_nano.to_string(),
+        "severityNumber": severity_number_as_i32(&log.severity_number),
         "body": attribute_value_to_json(&log.body),
-    })
+        "attributes": log.attributes.iter().map(kv_to_json).collect::<Vec<_>>(),
+    });
+    if !log.severity_text.is_empty() {
+        obj["severityText"] = serde_json::Value::String(log.severity_text.clone());
+    }
+    obj
 }
 
 fn attribute_value_to_json(v: &AttributeValue) -> serde_json::Value {
@@ -195,42 +306,55 @@ pub fn open_otlp_sink(config: &ExporterConfig) -> Result<Arc<dyn TelemetrySink>,
     Ok(Arc::new(OtlpSink::new(config)?))
 }
 
-/// Build a sink from environment variables.
+/// Process-level singleton for the OTLP sink.
+///
+/// Initialized on the first call to [`init_sink_from_env`]; subsequent calls
+/// clone the stored `Arc` without rebuilding the `reqwest::blocking::Client`.
+static GLOBAL_SINK: OnceLock<Arc<dyn TelemetrySink>> = OnceLock::new();
+
+/// Build a sink from environment variables, initializing once per process.
+///
+/// Subsequent calls return a clone of the `Arc` produced by the first call —
+/// no additional `reqwest::blocking::Client` is constructed.
 ///
 /// - `WICKED_OTEL_ENDPOINT` — if set, uses `OtlpSink`; otherwise returns `NoopSink`.
 /// - `WICKED_OTEL_HEADERS` — comma-separated `key=value` pairs.
 pub fn init_sink_from_env() -> Arc<dyn TelemetrySink> {
-    let endpoint = match std::env::var("WICKED_OTEL_ENDPOINT") {
-        Ok(v) if !v.is_empty() => v,
-        _ => {
-            return wicked_estate_core::open_telemetry_sink(None)
-                .unwrap_or_else(|_| Arc::new(NoopSink));
-        }
-    };
+    GLOBAL_SINK
+        .get_or_init(|| {
+            let endpoint = match std::env::var("WICKED_OTEL_ENDPOINT") {
+                Ok(v) if !v.is_empty() => v,
+                _ => {
+                    return wicked_estate_core::open_telemetry_sink(None)
+                        .unwrap_or_else(|_| Arc::new(NoopSink));
+                }
+            };
 
-    let headers: Vec<(String, String)> = std::env::var("WICKED_OTEL_HEADERS")
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(|pair| {
-            let mut parts = pair.splitn(2, '=');
-            let k = parts.next()?.trim().to_owned();
-            let v = parts.next()?.trim().to_owned();
-            if k.is_empty() { None } else { Some((k, v)) }
+            let headers: Vec<(String, String)> = std::env::var("WICKED_OTEL_HEADERS")
+                .unwrap_or_default()
+                .split(',')
+                .filter_map(|pair| {
+                    let mut parts = pair.splitn(2, '=');
+                    let k = parts.next()?.trim().to_owned();
+                    let v = parts.next()?.trim().to_owned();
+                    if k.is_empty() { None } else { Some((k, v)) }
+                })
+                .collect();
+
+            let config = ExporterConfig {
+                endpoint,
+                headers,
+                protocol: Protocol::OtlpHttpJson,
+                timeout_ms: 5_000,
+                compression: wicked_estate_core::observability::Compression::None,
+                resource: Resource::default(),
+                sampler: wicked_estate_core::observability::Sampler::AlwaysOn,
+            };
+
+            open_otlp_sink(&config).unwrap_or_else(|e| {
+                eprintln!("wicked-estate: telemetry init failed ({e}); using noop sink");
+                Arc::new(NoopSink)
+            })
         })
-        .collect();
-
-    let config = ExporterConfig {
-        endpoint,
-        headers,
-        protocol: Protocol::OtlpHttpJson,
-        timeout_ms: 5_000,
-        compression: wicked_estate_core::observability::Compression::None,
-        resource: Resource::default(),
-        sampler: wicked_estate_core::observability::Sampler::AlwaysOn,
-    };
-
-    open_otlp_sink(&config).unwrap_or_else(|e| {
-        eprintln!("wicked-estate: telemetry init failed ({e}); using noop sink");
-        Arc::new(NoopSink)
-    })
+        .clone()
 }

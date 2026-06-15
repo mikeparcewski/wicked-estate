@@ -46,10 +46,13 @@ fn resolve_db_path() -> String {
 // Telemetry helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Emit a cache-hit/miss counter metric as a fire-and-forget background task so that
+/// the blocking `reqwest` HTTP call in `OtlpSink::export_metrics` never stalls a Tokio
+/// worker thread in the MCP request loop.
 fn emit_cache_counter(
-    sink: &std::sync::Arc<dyn wicked_estate_core::TelemetrySink>,
-    resource: &wicked_estate_core::observability::Resource,
-    scope: &wicked_estate_core::observability::InstrumentationScope,
+    sink: std::sync::Arc<dyn wicked_estate_core::TelemetrySink>,
+    resource: wicked_estate_core::observability::Resource,
+    scope: wicked_estate_core::observability::InstrumentationScope,
     level: &str,
     hit: bool,
 ) {
@@ -78,15 +81,24 @@ fn emit_cache_counter(
             is_monotonic: true,
         },
     };
-    if let Err(e) = sink.export_metrics(resource, scope, &[metric]) {
-        eprintln!("telemetry: {e}");
-    }
+    tokio::spawn(async move {
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = sink.export_metrics(&resource, &scope, &[metric]) {
+                eprintln!("telemetry: {e}");
+            }
+        })
+        .await
+        .ok();
+    });
 }
 
+/// Emit a per-tool latency histogram metric as a fire-and-forget background task so that
+/// the blocking `reqwest` HTTP call in `OtlpSink::export_metrics` never stalls a Tokio
+/// worker thread in the MCP request loop.
 fn emit_tool_duration(
-    sink: &std::sync::Arc<dyn wicked_estate_core::TelemetrySink>,
-    resource: &wicked_estate_core::observability::Resource,
-    scope: &wicked_estate_core::observability::InstrumentationScope,
+    sink: std::sync::Arc<dyn wicked_estate_core::TelemetrySink>,
+    resource: wicked_estate_core::observability::Resource,
+    scope: wicked_estate_core::observability::InstrumentationScope,
     tool_name: &str,
     duration_ms: f64,
 ) {
@@ -112,9 +124,15 @@ fn emit_tool_duration(
             temporality: AggregationTemporality::Delta,
         },
     };
-    if let Err(e) = sink.export_metrics(resource, scope, &[metric]) {
-        eprintln!("telemetry: {e}");
-    }
+    tokio::spawn(async move {
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = sink.export_metrics(&resource, &scope, &[metric]) {
+                eprintln!("telemetry: {e}");
+            }
+        })
+        .await
+        .ok();
+    });
 }
 
 #[tokio::main]
@@ -240,7 +258,13 @@ async fn main() -> Result<()> {
             if let Some(cached) = request_cache.get(key) {
                 // Patch the id to match the current request before returning.
                 let mut hit = cached.clone();
-                emit_cache_counter(&otel_sink, &otel_resource, &otel_scope, "l1", true);
+                emit_cache_counter(
+                    std::sync::Arc::clone(&otel_sink),
+                    otel_resource.clone(),
+                    otel_scope.clone(),
+                    "l1",
+                    true,
+                );
                 hit["id"] = req["id"].clone();
                 let bytes =
                     serde_json::to_vec(&hit).context("failed to serialise cached response")?;
@@ -255,7 +279,13 @@ async fn main() -> Result<()> {
                 if let Ok(cached) = serde_json::from_str::<serde_json::Value>(&raw) {
                     // Warm L1 so subsequent hits stay in-memory.
                     request_cache.insert(key.clone(), cached.clone());
-                    emit_cache_counter(&otel_sink, &otel_resource, &otel_scope, "l2", true);
+                    emit_cache_counter(
+                        std::sync::Arc::clone(&otel_sink),
+                        otel_resource.clone(),
+                        otel_scope.clone(),
+                        "l2",
+                        true,
+                    );
                     let mut hit = cached;
                     hit["id"] = req["id"].clone();
                     let bytes =
@@ -269,7 +299,13 @@ async fn main() -> Result<()> {
             }
         }
 
-        emit_cache_counter(&otel_sink, &otel_resource, &otel_scope, "l1", false);
+        emit_cache_counter(
+            std::sync::Arc::clone(&otel_sink),
+            otel_resource.clone(),
+            otel_scope.clone(),
+            "l1",
+            false,
+        );
         let tool_name = req["params"]["name"]
             .as_str()
             .unwrap_or("unknown")
@@ -280,14 +316,15 @@ async fn main() -> Result<()> {
             .with_read(move |graph| Ok(handle_request_ctx(graph, &req, &ctx_clone)))
             .await?;
         emit_tool_duration(
-            &otel_sink,
-            &otel_resource,
-            &otel_scope,
+            std::sync::Arc::clone(&otel_sink),
+            otel_resource.clone(),
+            otel_scope.clone(),
             &tool_name,
             t_tool.elapsed().as_millis() as f64,
         );
 
-        // Emit a log record when the tool returns isError=true.
+        // Emit a log record when the tool returns isError=true — fire-and-forget so the
+        // blocking reqwest call in OtlpSink::export_logs does not stall the event loop.
         if resp
             .get("result")
             .and_then(|r| r.get("isError"))
@@ -312,9 +349,18 @@ async fn main() -> Result<()> {
                 trace_id: None,
                 span_id: None,
             };
-            if let Err(e) = otel_sink.export_logs(&otel_resource, &otel_scope, &[log]) {
-                eprintln!("telemetry: {e}");
-            }
+            let sink_clone = std::sync::Arc::clone(&otel_sink);
+            let resource_clone = otel_resource.clone();
+            let scope_clone = otel_scope.clone();
+            tokio::spawn(async move {
+                tokio::task::spawn_blocking(move || {
+                    if let Err(e) = sink_clone.export_logs(&resource_clone, &scope_clone, &[log]) {
+                        eprintln!("telemetry: {e}");
+                    }
+                })
+                .await
+                .ok();
+            });
         }
 
         // Store in cache (tools/call only; skip notifications which return null).

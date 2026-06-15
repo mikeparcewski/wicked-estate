@@ -50,16 +50,21 @@ fn global_rt() -> &'static tokio::runtime::Runtime {
 
 /// Run an async future synchronously.
 ///
-/// - Inside a Tokio runtime: uses `block_in_place` to avoid blocking the executor thread.
-/// - Outside a Tokio runtime (e.g. unit tests): uses the process-wide global runtime so the
-///   pool's keepalive tasks are not torn down between calls.
+/// - Inside a multi-thread Tokio runtime: uses `block_in_place` to avoid blocking the executor
+///   thread.
+/// - Inside a `current_thread` runtime (e.g. `#[tokio::test]`): `block_in_place` panics on
+///   single-threaded runtimes, so we fall back to the process-wide global runtime instead.
+/// - Outside any Tokio runtime: uses the process-wide global runtime directly.
 fn rt_block<F, T>(f: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
+    use tokio::runtime::RuntimeFlavor;
     match tokio::runtime::Handle::try_current() {
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f)),
-        Err(_) => global_rt().block_on(f),
+        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| handle.block_on(f))
+        }
+        _ => global_rt().block_on(f),
     }
 }
 
@@ -350,12 +355,14 @@ impl PostgresStore {
               LIMIT $4"
         );
 
+        // Fetch max_nodes + 1 rows so we can distinguish "exactly max_nodes reachable" from
+        // "truncated" — if we get more than max_nodes back, the result was cut.
         let rows = rt_block(async {
             sqlx::query(&sql)
                 .bind(&start.0)
                 .bind(spec.max_depth as i64)
                 .bind(spec.min_confidence as f64)
-                .bind(spec.max_nodes as i64)
+                .bind((spec.max_nodes as i64) + 1)
                 .fetch_all(&self.pool)
                 .await
         })
@@ -808,17 +815,37 @@ impl GraphRead for PostgresStore {
     }
 
     fn traverse(&self, start: &SymbolId, spec: &TraversalSpec) -> Result<Subgraph> {
-        let depths = match spec.direction {
+        // cte_reach fetches up to max_nodes+1 rows (fencepost probe).  More than max_nodes
+        // means the result was cut by the database LIMIT.  For Both direction we merge two
+        // such results (each capped at max_nodes+1); the combined unique set can exceed
+        // max_nodes, so we sort by depth, keep min-depth per node via the merge, then
+        // truncate to max_nodes and flag truncated if anything was dropped.
+        let (depths, truncated): (BTreeMap<String, u32>, bool) = match spec.direction {
             Direction::Both => {
-                let mut a = self.cte_reach(start, Direction::Dependents, spec)?;
+                let mut merged = self.cte_reach(start, Direction::Dependents, spec)?;
                 for (k, v) in self.cte_reach(start, Direction::Dependencies, spec)? {
-                    a.entry(k).and_modify(|e| *e = (*e).min(v)).or_insert(v);
+                    // Keep the minimum depth when a node is reachable from both directions.
+                    merged
+                        .entry(k)
+                        .and_modify(|e| *e = (*e).min(v))
+                        .or_insert(v);
                 }
-                a
+                let was_truncated = merged.len() > spec.max_nodes;
+                // Sort by depth and keep only the closest max_nodes nodes.
+                let mut pairs: Vec<(String, u32)> = merged.into_iter().collect();
+                pairs.sort_unstable_by_key(|&(_, d)| d);
+                pairs.truncate(spec.max_nodes);
+                (pairs.into_iter().collect(), was_truncated)
             }
-            d => self.cte_reach(start, d, spec)?,
+            d => {
+                let raw = self.cte_reach(start, d, spec)?;
+                // cte_reach fetches max_nodes+1; more than max_nodes means something was cut.
+                let was_truncated = raw.len() > spec.max_nodes;
+                let mut pairs: Vec<(String, u32)> = raw.into_iter().collect();
+                pairs.truncate(spec.max_nodes);
+                (pairs.into_iter().collect(), was_truncated)
+            }
         };
-        let truncated = depths.len() >= spec.max_nodes;
 
         let mut nodes = Vec::new();
         if let Some(n) = self.get_node(start)? {
