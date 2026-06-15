@@ -19,6 +19,12 @@ pub mod pool;
 #[cfg(feature = "pool")]
 pub use pool::{SqlitePool, open_sqlite_pool};
 
+// Postgres backend — compiled ONLY with --features postgres.
+#[cfg(feature = "postgres")]
+pub mod postgres;
+#[cfg(feature = "postgres")]
+pub use postgres::PostgresStore;
+
 // ── Vector math helpers for MemStore (no external deps) ────────────────────
 
 #[inline]
@@ -761,8 +767,11 @@ pub fn open_store(spec: &str) -> Result<Box<dyn GraphStore>> {
             Ok(Box::new(SqliteStore::in_memory()?))
         }
         StoreBackend::Sqlite { path } => Ok(Box::new(SqliteStore::open(path)?)),
+        #[cfg(feature = "postgres")]
+        StoreBackend::Postgres { url } => Ok(Box::new(PostgresStore::open(&url)?)),
+        #[cfg(not(feature = "postgres"))]
         StoreBackend::Postgres { .. } => Err(Error::Invalid(
-            "postgres backend is designed (ADR-003) but not yet built".into(),
+            "postgres backend requires the 'postgres' feature (ADR-003)".into(),
         )),
         StoreBackend::SurrealDb { .. } => Err(Error::Invalid(
             "surrealdb backend lands in the W1.5 bake-off".into(),
@@ -908,12 +917,52 @@ pub fn open_store_ext(spec: &str) -> wicked_estate_core::Result<Box<dyn GraphSto
             Ok(Box::new(SqliteStore::in_memory()?))
         }
         StoreBackend::Sqlite { path } => Ok(Box::new(SqliteStore::open(path)?)),
+        #[cfg(feature = "postgres")]
+        StoreBackend::Postgres { url } => Ok(Box::new(PostgresStore::open(&url)?)),
+        #[cfg(not(feature = "postgres"))]
         StoreBackend::Postgres { .. } => Err(Error::Invalid(
-            "postgres backend is designed (ADR-003) but not yet built".into(),
+            "postgres backend requires the 'postgres' feature (ADR-003)".into(),
         )),
         StoreBackend::SurrealDb { .. } => Err(Error::Invalid(
             "surrealdb backend lands in the W1.5 bake-off".into(),
         )),
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl GraphStoreMutExt for PostgresStore {
+    fn version_bump(&mut self) {
+        let _ = self.bump_version();
+    }
+    fn meta_set_key(&mut self, key: &str, value: &str) {
+        let _ = self.meta_set(key, value);
+    }
+    fn meta_get_key(&self, key: &str) -> Option<String> {
+        self.meta_get(key).ok().flatten()
+    }
+    fn cache_put_key(&mut self, key: &str, value: &str) {
+        let _ = self.cache_put(key, value);
+    }
+    fn cache_get_key(&self, key: &str) -> Option<String> {
+        self.cache_get(key).ok().flatten()
+    }
+
+    /// PostgresStore uses column-level trigram index — no separate FTS shadow table.
+    /// Identical to `upsert_nodes`.
+    fn upsert_nodes_skip_fts(
+        &mut self,
+        nodes: &[wicked_estate_core::Node],
+    ) -> wicked_estate_core::Result<()> {
+        use wicked_estate_core::GraphWrite;
+        self.upsert_nodes(nodes)
+    }
+
+    /// PostgresStore uses column-level trigram index — no separate FTS table to rebuild.
+    fn bulk_rebuild_fts_for_files(
+        &mut self,
+        _files: &[&str],
+    ) -> wicked_estate_core::Result<()> {
+        Ok(())
     }
 }
 
