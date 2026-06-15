@@ -39,7 +39,9 @@ pub struct SqlitePool(Pool<SqliteManager>);
 
 /// Open a `SqlitePool` pointing at `path` with up to `max_size` concurrent connections.
 pub fn open_sqlite_pool(path: &str, max_size: usize) -> Result<SqlitePool> {
-    let manager = SqliteManager { path: PathBuf::from(path) };
+    let manager = SqliteManager {
+        path: PathBuf::from(path),
+    };
     Pool::builder(manager)
         .max_size(max_size)
         .build()
@@ -80,7 +82,9 @@ impl AsyncGraphStore for SqlitePool {
         })?;
         tokio::task::spawn_blocking(move || f(&*obj))
             .await
-            .map_err(|e| wicked_estate_core::Error::Invalid(format!("spawn_blocking panicked: {e}")))?
+            .map_err(|e| {
+                wicked_estate_core::Error::Invalid(format!("spawn_blocking panicked: {e}"))
+            })?
     }
 }
 
@@ -113,7 +117,13 @@ mod tests {
     }
 
     fn calls_edge(a: &str, b: &str) -> Edge {
-        Edge::new(sym(a), sym(b), EdgeKind::Calls, ResolutionTier::Scip, "pool-test")
+        Edge::new(
+            sym(a),
+            sym(b),
+            EdgeKind::Calls,
+            ResolutionTier::Scip,
+            "pool-test",
+        )
     }
 
     /// Write fixture data via a plain `SqliteStore`, then verify the pool reads it back.
@@ -126,7 +136,9 @@ mod tests {
         {
             let mut store = SqliteStore::open(path_str).unwrap();
             store.begin_batch().unwrap();
-            store.upsert_nodes(&[func_node("a"), func_node("b")]).unwrap();
+            store
+                .upsert_nodes(&[func_node("a"), func_node("b")])
+                .unwrap();
             store.upsert_edges(&[calls_edge("a", "b")]).unwrap();
             store.commit_batch().unwrap();
         }

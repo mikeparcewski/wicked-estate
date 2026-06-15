@@ -680,7 +680,12 @@ mod tests {
             .unwrap();
 
         let communities = detect_communities(&store, 2, false).unwrap();
-        assert_eq!(communities.len(), 2, "expected 2 communities, got {}", communities.len());
+        assert_eq!(
+            communities.len(),
+            2,
+            "expected 2 communities, got {}",
+            communities.len()
+        );
         assert_eq!(
             communities[0].len(),
             3,
@@ -714,7 +719,11 @@ mod tests {
             .unwrap();
 
         let communities = detect_communities(&store, 3, false).unwrap();
-        assert_eq!(communities.len(), 1, "only one community should have size >= 3");
+        assert_eq!(
+            communities.len(),
+            1,
+            "only one community should have size >= 3"
+        );
         assert_eq!(communities[0].len(), 3);
         let flat: std::collections::HashSet<String> =
             communities[0].iter().map(|s| s.0.clone()).collect();

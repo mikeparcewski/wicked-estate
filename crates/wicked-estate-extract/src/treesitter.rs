@@ -4937,7 +4937,11 @@ See the [docs](docs/).
             .expect("jinja2 grammar must compile")
             .extract(&sf("page.j2", "jinja2", code))
             .unwrap();
-        let imports = ex.refs.iter().filter(|r| r.kind == EdgeKind::Imports).count();
+        let imports = ex
+            .refs
+            .iter()
+            .filter(|r| r.kind == EdgeKind::Imports)
+            .count();
         assert!(
             imports >= 1,
             "jinja2: expected >=1 import edge (include/extends), got {imports}"
@@ -4947,7 +4951,10 @@ See the [docs](docs/).
             .iter()
             .filter(|n| !matches!(n.kind, NodeKind::File))
             .count();
-        assert!(defs >= 1, "jinja2: expected >=1 def (macro/block/variable), got {defs}");
+        assert!(
+            defs >= 1,
+            "jinja2: expected >=1 def (macro/block/variable), got {defs}"
+        );
     }
 
     #[test]
@@ -4974,8 +4981,18 @@ See the [docs](docs/).
             .iter()
             .filter(|n| !matches!(n.kind, NodeKind::File))
             .count();
-        assert!(defs >= 1, "arm: expected >=1 def (resource type/name), got {defs}");
-        let imports = ex.refs.iter().filter(|r| r.kind == EdgeKind::Imports).count();
-        assert!(imports >= 1, "arm: expected >=1 import edge (dependsOn), got {imports}");
+        assert!(
+            defs >= 1,
+            "arm: expected >=1 def (resource type/name), got {defs}"
+        );
+        let imports = ex
+            .refs
+            .iter()
+            .filter(|r| r.kind == EdgeKind::Imports)
+            .count();
+        assert!(
+            imports >= 1,
+            "arm: expected >=1 import edge (dependsOn), got {imports}"
+        );
     }
 }

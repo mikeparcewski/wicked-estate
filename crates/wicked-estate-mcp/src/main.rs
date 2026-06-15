@@ -91,7 +91,9 @@ async fn main() -> Result<()> {
     // next request, ensuring the agent always sees the current graph state.
     let mut request_cache: HashMap<String, serde_json::Value> = HashMap::new();
     let mut cache_db_mtime: Option<std::time::SystemTime> = if db_path != ":memory:" {
-        std::fs::metadata(&db_path).ok().and_then(|m| m.modified().ok())
+        std::fs::metadata(&db_path)
+            .ok()
+            .and_then(|m| m.modified().ok())
     } else {
         None
     };
@@ -100,7 +102,11 @@ async fn main() -> Result<()> {
     let mut lines = stdin.lines();
     let stdout = std::io::stdout();
 
-    while let Some(line) = lines.next_line().await.context("failed to read from stdin")? {
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .context("failed to read from stdin")?
+    {
         let line = line.trim().to_string();
         if line.is_empty() {
             continue;
@@ -126,9 +132,7 @@ async fn main() -> Result<()> {
 
         // Invalidate cache if the DB file was modified since last check (external re-index).
         if let Some(ref mut baseline) = cache_db_mtime {
-            if let Ok(current) =
-                std::fs::metadata(&db_path).and_then(|m| m.modified())
-            {
+            if let Ok(current) = std::fs::metadata(&db_path).and_then(|m| m.modified()) {
                 if current != *baseline {
                     request_cache.clear();
                     *baseline = current;
@@ -152,7 +156,8 @@ async fn main() -> Result<()> {
                 // Patch the id to match the current request before returning.
                 let mut hit = cached.clone();
                 hit["id"] = req["id"].clone();
-                let bytes = serde_json::to_vec(&hit).context("failed to serialise cached response")?;
+                let bytes =
+                    serde_json::to_vec(&hit).context("failed to serialise cached response")?;
                 let mut out = stdout.lock();
                 out.write_all(&bytes)?;
                 out.write_all(b"\n")?;
@@ -166,7 +171,8 @@ async fn main() -> Result<()> {
                     request_cache.insert(key.clone(), cached.clone());
                     let mut hit = cached;
                     hit["id"] = req["id"].clone();
-                    let bytes = serde_json::to_vec(&hit).context("failed to serialise cached response")?;
+                    let bytes =
+                        serde_json::to_vec(&hit).context("failed to serialise cached response")?;
                     let mut out = stdout.lock();
                     out.write_all(&bytes)?;
                     out.write_all(b"\n")?;
@@ -178,9 +184,7 @@ async fn main() -> Result<()> {
 
         let ctx_clone = ctx.clone();
         let resp = store
-            .with_read(move |graph| {
-                Ok(handle_request_ctx(graph, &req, &ctx_clone))
-            })
+            .with_read(move |graph| Ok(handle_request_ctx(graph, &req, &ctx_clone)))
             .await?;
 
         // Store in cache (tools/call only; skip notifications which return null).

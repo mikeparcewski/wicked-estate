@@ -227,7 +227,9 @@ fn main() -> Result<()> {
                 let mut store = open_store_ext(&db).map_err(to_any)?;
                 let count =
                     wicked_estate::ingest_scip(store.as_mut(), root, scip_path).map_err(to_any)?;
-                println!("scip (explicit): ingested {count} precise edge(s) from {explicit} into {db}");
+                println!(
+                    "scip (explicit): ingested {count} precise edge(s) from {explicit} into {db}"
+                );
                 return Ok(());
             }
 
@@ -257,8 +259,8 @@ fn main() -> Result<()> {
                 if !result.path.exists() {
                     continue;
                 }
-                let count =
-                    wicked_estate::ingest_scip(store.as_mut(), root, &result.path).map_err(to_any)?;
+                let count = wicked_estate::ingest_scip(store.as_mut(), root, &result.path)
+                    .map_err(to_any)?;
                 let path_display = result.path.display();
                 println!(
                     "scip ({}): ingested {count} precise edge(s) from {path_display} into {db}",
@@ -794,8 +796,7 @@ fn main() -> Result<()> {
             let store = open_store_ext(&db).map_err(to_any)?;
             maybe_print_staleness(store.as_ref(), &db);
             let nodes =
-                wicked_estate_retrieve::budget_context(&*store, name, budget)
-                    .map_err(to_any)?;
+                wicked_estate_retrieve::budget_context(&*store, name, budget).map_err(to_any)?;
             if json_out {
                 let j: Vec<serde_json::Value> = nodes
                     .iter()
@@ -940,12 +941,14 @@ fn main() -> Result<()> {
             if json_out {
                 let j: Vec<serde_json::Value> = all_nodes
                     .iter()
-                    .map(|n| serde_json::json!({
-                        "name": n.name,
-                        "kind": format!("{:?}", n.kind),
-                        "file": n.location.file,
-                        "line": n.location.span.start_line + 1,
-                    }))
+                    .map(|n| {
+                        serde_json::json!({
+                            "name": n.name,
+                            "kind": format!("{:?}", n.kind),
+                            "file": n.location.file,
+                            "line": n.location.span.start_line + 1,
+                        })
+                    })
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&j)?);
             } else {
@@ -1168,12 +1171,24 @@ fn main() -> Result<()> {
             println!("    --author      author string (default: empty)");
             println!("  wicked-estate annotations <name>   [--db ...]");
             println!("    Show all annotations for matching symbols.");
-            println!("  wicked-estate fingerprint <name>   [--db ...]  # stable hex fingerprint for symbol");
-            println!("  wicked-estate changed-since <sha>  [--json] [--db ...]  # symbols in files changed since git SHA");
-            println!("  wicked-estate entrypoints [--json]            # symbols with no callers/importers");
-            println!("  wicked-estate leaves      [--json]            # symbols that call/import nothing");
-            println!("  wicked-estate dead-code   [--json]            # symbols with no edges at all");
-            println!("  wicked-estate nodes [--kind K] [--json]       # bulk export all symbols by kind");
+            println!(
+                "  wicked-estate fingerprint <name>   [--db ...]  # stable hex fingerprint for symbol"
+            );
+            println!(
+                "  wicked-estate changed-since <sha>  [--json] [--db ...]  # symbols in files changed since git SHA"
+            );
+            println!(
+                "  wicked-estate entrypoints [--json]            # symbols with no callers/importers"
+            );
+            println!(
+                "  wicked-estate leaves      [--json]            # symbols that call/import nothing"
+            );
+            println!(
+                "  wicked-estate dead-code   [--json]            # symbols with no edges at all"
+            );
+            println!(
+                "  wicked-estate nodes [--kind K] [--json]       # bulk export all symbols by kind"
+            );
         }
     }
     Ok(())

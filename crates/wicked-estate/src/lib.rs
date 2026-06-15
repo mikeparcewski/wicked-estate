@@ -1130,7 +1130,11 @@ pub fn compute_embeddings(store: &mut SqliteStore, embedder: &dyn Embedder) -> R
 /// the internal `Arc`, so the pool is cheap to clone if multiple owners are needed.
 #[cfg(feature = "serve")]
 pub fn open_async_store(spec: &str) -> crate::Result<wicked_estate_store::SqlitePool> {
-    let path = if let Some(p) = spec.strip_prefix("sqlite:") { p } else { spec };
+    let path = if let Some(p) = spec.strip_prefix("sqlite:") {
+        p
+    } else {
+        spec
+    };
     wicked_estate_store::open_sqlite_pool(path, 8)
 }
 

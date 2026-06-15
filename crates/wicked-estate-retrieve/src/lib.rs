@@ -2955,7 +2955,10 @@ mod tests {
     fn test_budget_context_no_symbol() {
         let store = fixture_store();
         let result = budget_context(&store, "does_not_exist_xyz_abc", 4096).unwrap();
-        assert!(result.is_empty(), "unknown symbol name must return empty vec");
+        assert!(
+            result.is_empty(),
+            "unknown symbol name must return empty vec"
+        );
     }
 
     #[test]

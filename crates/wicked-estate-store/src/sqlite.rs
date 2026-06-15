@@ -2865,7 +2865,10 @@ mod tests {
     fn sqlite_node_fingerprint_returns_none_for_unknown() {
         let store = open();
         let fp = store.node_fingerprint(&sym("does_not_exist")).unwrap();
-        assert!(fp.is_none(), "fingerprint must be None for an unknown symbol");
+        assert!(
+            fp.is_none(),
+            "fingerprint must be None for an unknown symbol"
+        );
     }
 
     #[test]
@@ -2931,7 +2934,10 @@ mod tests {
         let entries = store.entrypoint_nodes().unwrap();
         let names: Vec<&str> = entries.iter().map(|n| n.name.as_str()).collect();
         assert!(names.contains(&"a"), "a has no in-edges → entrypoint");
-        assert!(!names.contains(&"b"), "b has in-edge from a → not entrypoint");
+        assert!(
+            !names.contains(&"b"),
+            "b has in-edge from a → not entrypoint"
+        );
     }
 
     #[test]

@@ -45,7 +45,12 @@ static INDEXERS: &[Indexer] = &[
     },
     Indexer {
         lang: "python",
-        markers: &["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"],
+        markers: &[
+            "pyproject.toml",
+            "setup.py",
+            "setup.cfg",
+            "requirements.txt",
+        ],
         glob_marker: false,
         argv: &["scip-python", "index", ".", "--output", ".scip/python.scip"],
         hint: "install scip-python: pip install scip-python",
@@ -152,7 +157,10 @@ pub fn auto_scip(root: &Path) -> anyhow::Result<Vec<ScipResult>> {
         match outcome {
             Ok(status) if status.success() => {
                 let path = root.join(".scip").join(format!("{}.scip", indexer.lang));
-                results.push(ScipResult { lang: indexer.lang, path });
+                results.push(ScipResult {
+                    lang: indexer.lang,
+                    path,
+                });
             }
             Ok(status) => {
                 // Indexer was found and ran but exited non-zero — this is a real failure,
