@@ -298,25 +298,31 @@ pub fn ranked_symbols(
 // ─── community detection ─────────────────────────────────────────────────────
 
 struct UnionFind {
-    parent: HashMap<usize, usize>,
-    rank: HashMap<usize, usize>,
+    parent: Vec<usize>,
+    rank: Vec<usize>,
 }
 
 impl UnionFind {
-    fn new() -> Self {
+    fn new(n: usize) -> Self {
         Self {
-            parent: HashMap::new(),
-            rank: HashMap::new(),
+            parent: (0..n).collect(),
+            rank: vec![0; n],
         }
     }
 
     fn find(&mut self, x: usize) -> usize {
-        if self.parent.get(&x).copied().unwrap_or(x) == x {
-            return x;
+        let mut root = x;
+        while self.parent[root] != root {
+            root = self.parent[root];
         }
-        let p = self.find(self.parent[&x]);
-        self.parent.insert(x, p);
-        p
+        // Path compression
+        let mut cur = x;
+        while self.parent[cur] != root {
+            let next = self.parent[cur];
+            self.parent[cur] = root;
+            cur = next;
+        }
+        root
     }
 
     fn union(&mut self, x: usize, y: usize) {
@@ -325,15 +331,13 @@ impl UnionFind {
         if rx == ry {
             return;
         }
-        let rank_x = self.rank.get(&rx).copied().unwrap_or(0);
-        let rank_y = self.rank.get(&ry).copied().unwrap_or(0);
-        if rank_x < rank_y {
-            self.parent.insert(rx, ry);
-        } else if rank_x > rank_y {
-            self.parent.insert(ry, rx);
+        if self.rank[rx] < self.rank[ry] {
+            self.parent[rx] = ry;
+        } else if self.rank[rx] > self.rank[ry] {
+            self.parent[ry] = rx;
         } else {
-            self.parent.insert(ry, rx);
-            *self.rank.entry(rx).or_insert(0) += 1;
+            self.parent[ry] = rx;
+            self.rank[rx] += 1;
         }
     }
 }
@@ -360,7 +364,7 @@ pub fn detect_communities(
         .map(|(i, n)| (n.symbol.clone(), i))
         .collect();
 
-    let mut uf = UnionFind::new();
+    let mut uf = UnionFind::new(all_nodes.len());
     let mut has_edge: std::collections::HashSet<usize> =
         std::collections::HashSet::with_capacity(all_nodes.len());
 

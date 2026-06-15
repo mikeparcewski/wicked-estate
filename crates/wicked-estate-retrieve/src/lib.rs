@@ -1678,7 +1678,11 @@ pub fn budget_context(
     }
 
     let mut ranked: Vec<(SymbolId, f64)> = scores.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.0.cmp(&b.0.0))
+    });
 
     let mut out: Vec<wicked_estate_core::Node> = Vec::new();
     let mut chars_used: usize = 0;

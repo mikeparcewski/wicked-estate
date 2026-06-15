@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::collections::{BTreeMap, HashSet};
 use wicked_estate_core::{
-    Change, ChangeOp, Direction, Edge, Error, GraphRead, GraphStats, GraphWrite, HistoricalEdge,
-    Node, NodeKind, NodeSemantics, RepoInfo, Result, StoreCapabilities, Subgraph, SymbolId,
-    SymbolIndex, SymbolQuery, TraversalSpec, UnresolvedRef,
+    Change, ChangeOp, Direction, Edge, EdgeKind, Error, GraphRead, GraphStats, GraphWrite,
+    HistoricalEdge, Node, NodeKind, NodeSemantics, RepoInfo, Result, StoreCapabilities, Subgraph,
+    SymbolId, SymbolIndex, SymbolQuery, TraversalSpec, UnresolvedRef,
 };
 
 const SCHEMA: &str = include_str!("schema.sql");
@@ -1797,17 +1797,23 @@ impl SqliteStore {
     /// Returns all non-file nodes that have no in-edges (no callers/importers) — i.e. entrypoints.
     pub fn entrypoint_nodes(&self) -> Result<Vec<Node>> {
         let file_kind = serde_json::to_string(&NodeKind::File)?;
+        let calls_kind = serde_json::to_string(&EdgeKind::Calls)?;
+        let imports_kind = serde_json::to_string(&EdgeKind::Imports)?;
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT n.data FROM nodes n \
                  WHERE n.kind != ?1 \
-                   AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.target = n.symbol)",
+                   AND NOT EXISTS (SELECT 1 FROM edges e \
+                                   WHERE e.target = n.symbol \
+                                     AND e.kind IN (?2, ?3))",
             )
             .map_err(st)?;
         let mut out = Vec::new();
         let rows = stmt
-            .query_map(params![file_kind], |r| r.get::<_, String>(0))
+            .query_map(params![file_kind, calls_kind, imports_kind], |r| {
+                r.get::<_, String>(0)
+            })
             .map_err(st)?;
         for row in rows {
             out.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
@@ -1818,17 +1824,23 @@ impl SqliteStore {
     /// Returns all non-file nodes that have no out-edges (call nothing / import nothing) — i.e. leaves.
     pub fn leaf_nodes(&self) -> Result<Vec<Node>> {
         let file_kind = serde_json::to_string(&NodeKind::File)?;
+        let calls_kind = serde_json::to_string(&EdgeKind::Calls)?;
+        let imports_kind = serde_json::to_string(&EdgeKind::Imports)?;
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT n.data FROM nodes n \
                  WHERE n.kind != ?1 \
-                   AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.source = n.symbol)",
+                   AND NOT EXISTS (SELECT 1 FROM edges e \
+                                   WHERE e.source = n.symbol \
+                                     AND e.kind IN (?2, ?3))",
             )
             .map_err(st)?;
         let mut out = Vec::new();
         let rows = stmt
-            .query_map(params![file_kind], |r| r.get::<_, String>(0))
+            .query_map(params![file_kind, calls_kind, imports_kind], |r| {
+                r.get::<_, String>(0)
+            })
             .map_err(st)?;
         for row in rows {
             out.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
@@ -1839,18 +1851,26 @@ impl SqliteStore {
     /// Returns all non-file nodes with no in-edges AND no out-edges — dead code candidates.
     pub fn isolated_nodes(&self) -> Result<Vec<Node>> {
         let file_kind = serde_json::to_string(&NodeKind::File)?;
+        let calls_kind = serde_json::to_string(&EdgeKind::Calls)?;
+        let imports_kind = serde_json::to_string(&EdgeKind::Imports)?;
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT n.data FROM nodes n \
                  WHERE n.kind != ?1 \
-                   AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.target = n.symbol) \
-                   AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.source = n.symbol)",
+                   AND NOT EXISTS (SELECT 1 FROM edges e \
+                                   WHERE e.target = n.symbol \
+                                     AND e.kind IN (?2, ?3)) \
+                   AND NOT EXISTS (SELECT 1 FROM edges e \
+                                   WHERE e.source = n.symbol \
+                                     AND e.kind IN (?2, ?3))",
             )
             .map_err(st)?;
         let mut out = Vec::new();
         let rows = stmt
-            .query_map(params![file_kind], |r| r.get::<_, String>(0))
+            .query_map(params![file_kind, calls_kind, imports_kind], |r| {
+                r.get::<_, String>(0)
+            })
             .map_err(st)?;
         for row in rows {
             out.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
