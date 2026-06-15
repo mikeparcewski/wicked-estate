@@ -7,8 +7,6 @@ __      ___  ___| | _____  __| |______ ___  ___| |_ __ _| |_ ___
   \_/\_/ |_|\___|_|\_\___|\__,_|      \___||___/\__\__,_|\__\___|
 ```
 
-# wicked-estate
-
 **Turn a repo — and its surrounding infrastructure/mainframe estate — into one queryable graph that
 LLM agents can actually use.** Symbols, calls, imports, types, refs, and cross-domain estate links:
 definitions, who-calls-X, blast-radius, scoped context. Local-first, single static binary,
