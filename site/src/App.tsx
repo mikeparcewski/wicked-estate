@@ -56,17 +56,6 @@ function GraphMark() {
 // ── Nav ────────────────────────────────────────────────────────────────────────
 function Nav() {
   const { dark, toggle } = useDark()
-  const [open, setOpen] = useState(false)
-
-  const links = [
-    { href: '#use-cases', label: 'Use Cases' },
-    { href: '#pipeline', label: 'How It Works' },
-    { href: '#graph', label: 'The Graph' },
-    { href: '#agents', label: 'Agent Contract' },
-    { href: '#connect', label: 'Connect' },
-    { href: '#get-started', label: 'Get Started' },
-  ]
-
   return (
     <header className="topbar">
       <div className="topbar-inner">
@@ -82,17 +71,8 @@ function Nav() {
           </span>
         </a>
 
-        {/* Desktop nav */}
-        <nav className="hidden md:flex items-center gap-5">
-          {links.map(l => (
-            <a
-              key={l.href}
-              href={l.href}
-              className="font-mono text-xs tracking-wide text-muted hover:text-ink transition-colors"
-            >
-              {l.label}
-            </a>
-          ))}
+        {/* Right controls */}
+        <div className="flex items-center gap-2">
           <button onClick={toggle} className="theme-toggle !px-2.5" aria-label="Toggle theme">
             {dark ? <SunIcon /> : <MoonIcon />}
           </button>
@@ -100,44 +80,13 @@ function Nav() {
             href="https://github.com/mikeparcewski/wicked-estate"
             target="_blank"
             rel="noreferrer"
-            className="btn-outline py-[6px] px-3 text-[0.68rem]"
+            className="btn-outline !px-2.5 py-[6px]"
+            aria-label="GitHub"
           >
             <GitHubIcon />
-            GitHub
           </a>
-        </nav>
-
-        {/* Mobile toggle */}
-        <div className="flex items-center gap-2 md:hidden">
-          <button onClick={toggle} className="theme-toggle !px-2.5" aria-label="Toggle theme">
-            {dark ? <SunIcon /> : <MoonIcon />}
-          </button>
-          <button
-            className="p-2 text-muted hover:text-ink transition-colors"
-            onClick={() => setOpen(!open)}
-            aria-label="Menu"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d={open ? 'M6 18L18 6M6 6l12 12' : 'M4 6h16M4 12h16M4 18h16'} />
-            </svg>
-          </button>
         </div>
       </div>
-
-      {/* Mobile menu */}
-      {open && (
-        <div className="md:hidden border-t border-hairline bg-canvas px-6 py-4 flex flex-col gap-3">
-          {links.map(l => (
-            <a key={l.href} href={l.href} onClick={() => setOpen(false)}
-              className="font-mono text-sm text-muted hover:text-ink">
-              {l.label}
-            </a>
-          ))}
-          <a href="https://github.com/mikeparcewski/wicked-estate" target="_blank" rel="noreferrer"
-            className="font-mono text-sm text-faint">GitHub ↗</a>
-        </div>
-      )}
     </header>
   )
 }
