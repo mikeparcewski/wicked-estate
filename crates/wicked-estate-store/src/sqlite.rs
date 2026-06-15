@@ -303,6 +303,15 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Invalidate all stored file digests, causing the next `index_path` call to
+    /// treat every file as changed and re-extract it. Used by `--force`.
+    pub fn clear_file_digests(&mut self) -> Result<()> {
+        self.conn
+            .execute("UPDATE files SET digest = ''", [])
+            .map_err(st)?;
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // W11.2 — Versioned query cache (prior art versioned cache-port pattern).
     // -----------------------------------------------------------------------
@@ -503,6 +512,41 @@ impl SqliteStore {
             .filter_map(|r| r.ok())
             .collect();
         Ok(rows)
+    }
+
+    /// Return all nodes that have at least one annotation matching `key` and
+    /// optionally `value`. Nodes are returned in name order; each node appears
+    /// at most once regardless of how many annotations match.
+    pub fn find_by_annotation(
+        &self,
+        key: &str,
+        value: Option<&str>,
+    ) -> Result<Vec<wicked_estate_core::Node>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT n.data
+                 FROM nodes n
+                 JOIN annotations a ON a.node_sym = n.symbol
+                 WHERE a.key = ?1
+                   AND (?2 IS NULL OR a.value = ?2)
+                 ORDER BY n.name",
+            )
+            .map_err(st)?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![key, value],
+                |r| r.get::<_, String>(0),
+            )
+            .map_err(st)?;
+        let mut nodes = Vec::new();
+        for row in rows {
+            let data = row.map_err(st)?;
+            if let Ok(node) = serde_json::from_str::<wicked_estate_core::Node>(&data) {
+                nodes.push(node);
+            }
+        }
+        Ok(nodes)
     }
 
     pub fn delete_annotation(

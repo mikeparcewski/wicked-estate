@@ -5,7 +5,7 @@ members = ["crates/*"]
 exclude = ["crates/wicked-estate-extract/vendor/tree-sitter-rpg"]
 
 [workspace.package]
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 license = "MIT"
 rust-version = "1.85"
@@ -16,5 +16,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 anyhow = "1"
-wicked-estate-core = { path = "crates/wicked-estate-core", version = "0.1.6" }
-wicked-estate-store = { path = "crates/wicked-estate-store", version = "0.1.6" }
+wicked-estate-core = { path = "crates/wicked-estate-core", version = "0.1.7" }
+wicked-estate-store = { path = "crates/wicked-estate-store", version = "0.1.7" }

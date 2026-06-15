@@ -185,7 +185,20 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
 
     // W7.4: persist the indexed root so staleness checks can find the git repo.
     store.meta_set_key("indexed_root", &root.to_string_lossy());
+    // Read the previously-stored binary version BEFORE overwriting it so we can detect a
+    // version upgrade and force full re-extraction when the binary has changed.
+    let prev_version = store.meta_get_key("indexed_version");
+    let force_full = prev_version
+        .as_deref()
+        .is_some_and(|v| v != env!("CARGO_PKG_VERSION"));
     store.meta_set_key("indexed_version", env!("CARGO_PKG_VERSION"));
+    if force_full {
+        eprintln!(
+            "VERSION CHANGE detected (v{prev} → v{cur}): forcing full re-extraction",
+            prev = prev_version.as_deref().unwrap_or("?"),
+            cur = env!("CARGO_PKG_VERSION"),
+        );
+    }
 
     // W7: capture git provenance once per index run and persist it to the store.
     // Non-fatal: git absent / not a repo → all-None RepoInfo, which is a valid default.
@@ -295,7 +308,7 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
     let mut unchanged_count = 0usize;
     for fw in work {
         let stored = store.file_digest(&fw.rel)?;
-        if stored.as_deref() == Some(&fw.digest) {
+        if !force_full && stored.as_deref() == Some(&fw.digest) {
             // UNCHANGED: skip extraction entirely; its nodes/edges already in the store.
             unchanged_count += 1;
         } else {

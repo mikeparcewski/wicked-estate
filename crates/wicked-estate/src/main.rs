@@ -1,6 +1,6 @@
 //! `wicked-estate` — CLI over the indexing pipeline (`wicked_estate` lib).
 //!
-//!   wicked-estate index <path>           [--db <file|:memory:>] [--history] [--embeddings]
+//!   wicked-estate index <path>           [--db <file|:memory:>] [--history] [--embeddings] [--force]
 //!   wicked-estate scip  <root>           [--db ...] [--scip-file <path>]
 //!   wicked-estate tfstate <file>         [--db ...]
 //!   wicked-estate drift                  [--db ...]
@@ -25,7 +25,7 @@
 //!   wicked-estate entrypoints            [--json] [--db ...]
 //!   wicked-estate leaves                 [--json] [--db ...]
 //!   wicked-estate dead-code              [--json] [--db ...]
-//!   wicked-estate nodes [--kind K]       [--json] [--db ...]
+//!   wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json] [--db ...]
 
 mod scip_auto;
 
@@ -263,6 +263,8 @@ fn main() -> Result<()> {
     let mut history = false;
     // embeddings: OFF by default; opt-in with `--embeddings`.
     let mut embeddings = false;
+    // --force: bypass incremental digest skip; re-extract all files even if unchanged.
+    let mut force_reindex = false;
     // Semantic-annotation flags for the `semantics` command (requirement↔functionality linking).
     let mut sem_description: Option<String> = None;
     let mut sem_requirement: Option<String> = None;
@@ -282,6 +284,8 @@ fn main() -> Result<()> {
     let mut db_b: Option<String> = None;
     let mut correspond_top: usize = 20;
     let mut correspond_min_score: f64 = 0.35;
+    // --annotated-with KEY or KEY=VALUE: filter nodes by annotation.
+    let mut annotated_with: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
     let mut it = rest.iter();
     while let Some(a) = it.next() {
@@ -318,6 +322,9 @@ fn main() -> Result<()> {
             }
             "--embeddings" => {
                 embeddings = true;
+            }
+            "--force" => {
+                force_reindex = true;
             }
             "--description" => {
                 if let Some(v) = it.next() {
@@ -387,6 +394,11 @@ fn main() -> Result<()> {
                     correspond_min_score = v.parse::<f64>().unwrap_or(0.35);
                 }
             }
+            "--annotated-with" => {
+                if let Some(v) = it.next() {
+                    annotated_with = Some(v.clone());
+                }
+            }
             _ => positional.push(a.clone()),
         }
     }
@@ -395,6 +407,11 @@ fn main() -> Result<()> {
         "index" => {
             let path = positional.first().map(String::as_str).unwrap_or(".");
             ensure_db_dir(&db)?;
+            // --force: invalidate all stored digests so index_path treats every file as changed.
+            if force_reindex && db != ":memory:" {
+                let mut concrete = SqliteStore::open(&db).map_err(to_any)?;
+                concrete.clear_file_digests().map_err(to_any)?;
+            }
             let stats = if history && db != ":memory:" {
                 // Caller explicitly opted in to history — open the concrete store to call
                 // set_history_enabled(true) (inherent method, not on any trait), then box it.
@@ -1346,10 +1363,10 @@ fn main() -> Result<()> {
                 }
             }
         }
-        // Agent E: nodes — bulk export all symbols, optionally filtered by kind.
+        // Agent E: nodes — bulk export all symbols, optionally filtered by kind or annotation.
         //
         // Usage:
-        //   wicked-estate nodes [--kind K] [--json] [--db ...]
+        //   wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json] [--db ...]
         "nodes" => {
             let kind = {
                 let mut k = String::new();
@@ -1363,33 +1380,66 @@ fn main() -> Result<()> {
             };
             let json_out = positional.iter().any(|a| a == "--json");
             let store = SqliteStore::open(&db).map_err(to_any)?;
-            let nodes = store.nodes_by_kind(&kind).map_err(to_any)?;
-            if json_out {
-                let j: Vec<serde_json::Value> = nodes
-                    .iter()
-                    .map(|n| {
-                        serde_json::json!({
-                            "name": n.name,
-                            "kind": format!("{:?}", n.kind),
-                            "file": n.location.file,
-                            "line": n.location.span.start_line + 1,
-                            "signature": n.signature,
-                        })
-                    })
-                    .collect();
-                println!("{}", serde_json::to_string_pretty(&j)?);
-            } else {
-                let label = if kind.is_empty() {
-                    "all".to_string()
+
+            if let Some(ann_filter) = &annotated_with {
+                // --annotated-with KEY or KEY=VALUE
+                let (ann_key, ann_val) = if let Some((k, v)) = ann_filter.split_once('=') {
+                    (k, Some(v))
                 } else {
-                    kind.clone()
+                    (ann_filter.as_str(), None)
                 };
-                println!("{} node(s) of kind '{label}':", nodes.len());
-                for n in nodes.iter().take(100) {
-                    println!("  {:?} {} ({})", n.kind, n.name, loc(n));
+                let nodes = store.find_by_annotation(ann_key, ann_val).map_err(to_any)?;
+                if json_out {
+                    let j: Vec<serde_json::Value> = nodes
+                        .iter()
+                        .map(|n| {
+                            serde_json::json!({
+                                "name": n.name,
+                                "kind": format!("{:?}", n.kind),
+                                "file": n.location.file,
+                                "line": n.location.span.start_line + 1,
+                                "signature": n.signature,
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&j)?);
+                } else {
+                    let filter_desc = ann_val
+                        .map(|v| format!("{ann_key}={v}"))
+                        .unwrap_or_else(|| ann_key.to_string());
+                    println!("{} node(s) annotated with '{filter_desc}':", nodes.len());
+                    for n in nodes.iter().take(100) {
+                        println!("  {:?} {} ({})", n.kind, n.name, loc(n));
+                    }
+                    if nodes.len() > 100 {
+                        println!("  ... and {} more", nodes.len() - 100);
+                    }
                 }
-                if nodes.len() > 100 {
-                    println!("  ... and {} more", nodes.len() - 100);
+            } else {
+                let nodes = store.nodes_by_kind(&kind).map_err(to_any)?;
+                if json_out {
+                    let j: Vec<serde_json::Value> = nodes
+                        .iter()
+                        .map(|n| {
+                            serde_json::json!({
+                                "name": n.name,
+                                "kind": format!("{:?}", n.kind),
+                                "file": n.location.file,
+                                "line": n.location.span.start_line + 1,
+                                "signature": n.signature,
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&j)?);
+                } else {
+                    let label = if kind.is_empty() { "all".to_string() } else { kind.clone() };
+                    println!("{} node(s) of kind '{label}':", nodes.len());
+                    for n in nodes.iter().take(100) {
+                        println!("  {:?} {} ({})", n.kind, n.name, loc(n));
+                    }
+                    if nodes.len() > 100 {
+                        println!("  ... and {} more", nodes.len() - 100);
+                    }
                 }
             }
         }
@@ -1415,6 +1465,7 @@ fn main() -> Result<()> {
                 .context("--db-b <path> is required for the correspond command")?;
 
             let json_out = positional.iter().any(|a| a == "--json");
+            let explain = positional.iter().any(|a| a == "--explain");
             let filter_kind = {
                 let mut k: Option<String> = None;
                 let mut it2 = positional.iter();
@@ -1459,6 +1510,11 @@ fn main() -> Result<()> {
                 b_name: String,
                 score: f64,
                 basis: String,
+                name_j: f64,
+                sig_j: f64,
+                k_score: f64,
+                arity_sim: f64,
+                rrf_score: Option<f64>,
             }
 
             let mut pairs: Vec<Pair> = Vec::new();
@@ -1555,9 +1611,10 @@ fn main() -> Result<()> {
                         _ => 0.0,
                     };
 
+                    let rrf_score = rrf_score_map.get(sym_b.as_str()).copied();
                     let mut score = if has_embed {
                         // Hybrid: RRF score is primary; kind + arity are boosts.
-                        let rrf = rrf_score_map.get(sym_b.as_str()).copied().unwrap_or(0.0);
+                        let rrf = rrf_score.unwrap_or(0.0);
                         rrf + 0.10 * k_score + 0.05 * arity_sim
                     } else {
                         // Lexical-only weighted sum (weights from recon formula).
@@ -1595,6 +1652,11 @@ fn main() -> Result<()> {
                         b_name: node_b.name.clone(),
                         score,
                         basis,
+                        name_j,
+                        sig_j,
+                        k_score,
+                        arity_sim,
+                        rrf_score,
                     });
                 }
             }
@@ -1615,6 +1677,11 @@ fn main() -> Result<()> {
                             "b_name": p.b_name,
                             "score": p.score,
                             "basis": p.basis,
+                            "name_j": if explain { Some(p.name_j) } else { None },
+                            "sig_j": if explain { Some(p.sig_j) } else { None },
+                            "k_score": if explain { Some(p.k_score) } else { None },
+                            "arity_sim": if explain { Some(p.arity_sim) } else { None },
+                            "rrf_score": if explain { p.rrf_score } else { None },
                         })
                     })
                     .collect();
@@ -1631,18 +1698,61 @@ fn main() -> Result<()> {
                         "  {:.3}  {}  ↔  {}  [{}]  ({} ↔ {})",
                         p.score, p.a_name, p.b_name, p.basis, p.a, p.b
                     );
+                    if explain {
+                        let rrf_str = p.rrf_score.map_or("n/a".to_string(), |r| format!("{r:.4}"));
+                        println!(
+                            "        name_j={:.3}  sig_j={:.3}  kind={:.3}  arity={:.3}  rrf={}",
+                            p.name_j, p.sig_j, p.k_score, p.arity_sim, rrf_str
+                        );
+                    }
+                }
+            }
+        }
+        "export" => {
+            use wicked_estate_core::GraphRead;
+
+            let format = {
+                let mut f = "ndjson".to_string();
+                let mut it2 = positional.iter();
+                while let Some(a) = it2.next() {
+                    if a.as_str() == "--format" {
+                        f = it2.next().cloned().unwrap_or_else(|| "ndjson".to_string());
+                    }
+                }
+                f
+            };
+            let nodes_only = positional.iter().any(|a| a == "--nodes-only");
+            let edges_only = positional.iter().any(|a| a == "--edges-only");
+
+            let store = SqliteStore::open(&db).map_err(to_any)?;
+            let nodes = if !edges_only { store.all_nodes().map_err(to_any)? } else { vec![] };
+            let edges = if !nodes_only { store.all_edges().map_err(to_any)? } else { vec![] };
+
+            match format.as_str() {
+                "json" => {
+                    let out = serde_json::json!({ "nodes": nodes, "edges": edges });
+                    println!("{}", serde_json::to_string_pretty(&out)?);
+                }
+                _ => {
+                    for node in &nodes {
+                        println!("{}", serde_json::to_string(node)?);
+                    }
+                    for edge in &edges {
+                        println!("{}", serde_json::to_string(edge)?);
+                    }
                 }
             }
         }
         _ => {
             println!("wicked-estate {} — usage:", env!("CARGO_PKG_VERSION"));
             println!(
-                "  wicked-estate index <path>         [--db <file|:memory:>] [--history] [--embeddings]"
+                "  wicked-estate index <path>         [--db <file|:memory:>] [--history] [--embeddings] [--force]"
             );
             println!("    --history     opt-in to edge-history archival (default: off)");
             println!(
                 "    --embeddings  compute and store embedding vectors after indexing (default: off)"
             );
+            println!("    --force       bypass incremental digest skip; re-extract all files (use after a binary upgrade)");
             println!("  wicked-estate scip  <root>         [--db ...] [--scip-file <path>]");
             println!(
                 "    Ingest a SCIP index (precise call resolution). Requires `wicked-estate index`"
@@ -1716,7 +1826,13 @@ fn main() -> Result<()> {
                 "  wicked-estate dead-code   [--json]            # symbols with no edges at all"
             );
             println!(
-                "  wicked-estate nodes [--kind K] [--json]       # bulk export all symbols by kind"
+                "  wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json]  # filter symbols by kind or annotation"
+            );
+            println!(
+                "  wicked-estate export [--format ndjson|json] [--nodes-only] [--edges-only]  # full graph export"
+            );
+            println!(
+                "  wicked-estate correspond --db-a A.db --db-b B.db [--kind K] [--top N] [--min-score F] [--explain] [--json]"
             );
         }
     }
