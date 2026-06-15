@@ -1,0 +1,107 @@
+# sample.yaml — application configuration for the wicked-estate service
+
+app:
+  name: wicked-estate
+  version: "0.1.0"
+  environment: production
+  log_level: info
+  debug: false
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  read_timeout_secs: 30
+  write_timeout_secs: 30
+  shutdown_timeout_secs: 10
+  tls:
+    enabled: true
+    cert_path: /etc/ssl/certs/server.crt
+    key_path:  /etc/ssl/private/server.key
+
+database:
+  driver: sqlite
+  path: /var/lib/wicked-estate/graph.db
+  wal_mode: true
+  busy_timeout_ms: 5000
+  max_connections: 16
+  pragmas:
+    journal_mode: WAL
+    synchronous: NORMAL
+    cache_size: -65536   # 64 MB in kibibytes (negative = kibibytes)
+    foreign_keys: "ON"
+
+index:
+  root: /workspace
+  db:   /var/lib/wicked-estate/graph.db
+  exclude:
+    - "target/**"
+    - "node_modules/**"
+    - "**/*.min.js"
+    - "**/*.lock"
+    - ".git/**"
+  workers: 8
+  batch_size: 512
+  languages:
+    enabled:
+      - rust
+      - typescript
+      - python
+      - go
+      - java
+      - kotlin
+      - swift
+      - c
+      - cpp
+    disabled:
+      - cobol   # grammar unstable
+
+resolution:
+  tiers:
+    - tags
+    - import-map
+    - tsg
+    - scip
+  lsp:
+    on_demand: true
+    timeout_ms: 2000
+    servers:
+      rust:
+        command: rust-analyzer
+        args: []
+      typescript:
+        command: typescript-language-server
+        args: ["--stdio"]
+      python:
+        command: pylsp
+        args: []
+
+retrieval:
+  embeddings:
+    enabled: false
+    model: text-embedding-3-small
+    dimension: 1536
+    sidecar_url: http://localhost:7890
+  fts_weight:   0.6
+  graph_weight: 0.4
+  max_results:  25
+  max_context_chars: 24000
+
+observability:
+  metrics:
+    enabled: true
+    port: 9090
+    path: /metrics
+  tracing:
+    enabled: true
+    exporter: otlp
+    endpoint: http://otel-collector:4317
+    sample_rate: 0.1
+  health:
+    path: /health
+    ready_path: /ready
+
+feature_flags:
+  estate_mapping: false
+  live_cloud_state: false
+  surreal_db_challenger: false
+  embeddings_sidecar: false

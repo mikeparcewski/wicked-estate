@@ -1,0 +1,124 @@
+# sample.toml — Cargo-style manifest for wicked-estate
+
+[package]
+name        = "wicked-estate"
+version     = "0.1.0"
+edition     = "2021"
+rust-version = "1.78"
+authors     = ["Mike Parcewski <mike@example.com>"]
+license     = "MIT OR Apache-2.0"
+description = "Fast, local-first code intelligence engine — symbols, calls, and blast-radius for LLM agents."
+repository  = "https://github.com/example/wicked-estate"
+homepage    = "https://wicked-estate.dev"
+documentation = "https://docs.rs/wicked-estate"
+keywords    = ["code-intelligence", "tree-sitter", "sqlite", "llm", "graph"]
+categories  = ["development-tools", "parsing"]
+exclude     = [".github/**", "docs/**", "tests/fixtures/**"]
+
+[lib]
+name = "wicked_estate"
+path = "src/lib.rs"
+
+[[bin]]
+name = "we"
+path = "src/main.rs"
+
+[[bin]]
+name = "we-server"
+path = "src/server_main.rs"
+
+[[bin]]
+name = "we-bench"
+path = "src/bench_main.rs"
+
+[dependencies]
+# Core
+anyhow          = "1.0"
+thiserror       = "1.0"
+serde           = { version = "1.0", features = ["derive"] }
+serde_json      = "1.0"
+
+# Tree-sitter
+tree-sitter     = "0.22"
+tree-sitter-rust = "0.21"
+tree-sitter-python = "0.21"
+tree-sitter-typescript = "0.21"
+
+# Storage
+rusqlite        = { version = "0.31", features = ["bundled", "functions", "blob"] }
+serde_rusqlite  = "0.34"
+
+# Async runtime
+tokio           = { version = "1", features = ["full"] }
+
+# MCP / HTTP
+axum            = { version = "0.7", features = ["json", "tower-log"] }
+tower           = "0.4"
+hyper           = { version = "1", features = ["full"] }
+
+# Observability
+tracing         = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+opentelemetry   = "0.23"
+opentelemetry-otlp = "0.16"
+
+# CLI
+clap            = { version = "4", features = ["derive", "env"] }
+
+# Utilities
+rayon           = "1"
+dashmap         = "5"
+indexmap        = "2"
+once_cell       = "1"
+regex           = "1"
+glob            = "0.3"
+
+[dev-dependencies]
+tempfile        = "3"
+proptest        = "1"
+criterion       = { version = "0.5", features = ["html_reports"] }
+insta           = { version = "1", features = ["json"] }
+rstest          = "0.21"
+
+[build-dependencies]
+build-info-build = "0.0"
+
+[features]
+default        = []
+embeddings     = ["dep:ort"]   # ONNX runtime sidecar for vector search
+surreal        = ["dep:surrealdb"]
+full           = ["embeddings", "surreal"]
+
+[profile.dev]
+opt-level    = 0
+debug        = true
+incremental  = true
+
+[profile.release]
+opt-level    = 3
+debug        = false
+lto          = "thin"
+codegen-units = 1
+strip        = "symbols"
+
+[profile.bench]
+inherits  = "release"
+debug     = true
+strip     = "none"
+
+[profile.ci]
+inherits   = "dev"
+opt-level  = 1
+incremental = false
+
+[workspace]
+members = [
+  "crates/wicked-estate-core",
+  "crates/wicked-estate-extract",
+  "crates/wicked-estate-resolve",
+  "crates/wicked-estate-store",
+  "crates/wicked-estate-rank",
+  "crates/wicked-estate-retrieve",
+  "crates/wicked-estate-mcp",
+  "crates/wicked-estate-bench",
+]

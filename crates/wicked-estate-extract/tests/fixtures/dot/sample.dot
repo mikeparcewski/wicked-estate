@@ -1,0 +1,21 @@
+digraph Pipeline {
+    graph [rankdir=LR, fontname="Helvetica"];
+    node  [shape=box, style=filled, fillcolor=lightblue];
+    edge  [fontsize=10];
+
+    subgraph cluster_ingestion {
+        label = "Ingestion";
+        Ingest [label="Ingest\nFiles"];
+        Parse  [label="Parse\nAST"];
+    }
+
+    Extract [label="Extract\nSymbols"];
+    Resolve [label="Resolve\nRefs"];
+    Store   [label="Store\nGraph"];
+
+    Ingest  -> Parse   [label="raw bytes"];
+    Parse   -> Extract [label="AST"];
+    Extract -> Resolve [label="unresolved refs"];
+    Resolve -> Store   [label="edges"];
+    Store   -> Store   [label="index", style=dashed];
+}

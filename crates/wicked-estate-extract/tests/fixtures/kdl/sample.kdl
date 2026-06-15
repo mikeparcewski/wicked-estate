@@ -1,0 +1,23 @@
+project "wicked-estate" version="0.1.0" {
+    description "Code graph parser"
+    license "MIT"
+}
+
+server host="0.0.0.0" port=8080 {
+    timeout 30
+    max-connections 1000
+    tls enabled=true {
+        cert-file "/etc/ssl/cert.pem"
+        key-file "/etc/ssl/key.pem"
+    }
+}
+
+database url="sqlite:///data/graph.db" {
+    pool-size 10
+    wal-mode true
+    pragmas {
+        journal_mode "WAL"
+        synchronous "NORMAL"
+        cache_size 4096
+    }
+}

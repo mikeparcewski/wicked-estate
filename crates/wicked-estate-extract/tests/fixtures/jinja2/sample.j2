@@ -1,0 +1,88 @@
+{# sample.j2 — integration corpus fixture for the Jinja2 extractor          #}
+{# Demonstrates: extends, block, macro, call, set, filter, for/if logic.     #}
+
+{% extends "base.html" %}
+
+{# -------------------------------------------------------------------------  #}
+{# Macro: render_badge — emit a coloured status pill                          #}
+{# -------------------------------------------------------------------------  #}
+{% macro render_badge(status, label=none) %}
+  {% set label = label if label else status | title %}
+  {% set colour_map = {
+      "pass":    "green",
+      "fail":    "red",
+      "pending": "yellow",
+      "skip":    "gray"
+  } %}
+  {% set colour = colour_map.get(status | lower, "blue") %}
+  <span class="badge badge--{{ colour }}">{{ label }}</span>
+{% endmacro %}
+
+{# -------------------------------------------------------------------------  #}
+{# Macro: render_table — generate an HTML table from a list of dicts          #}
+{# -------------------------------------------------------------------------  #}
+{% macro render_table(rows, columns, caption=none) %}
+  <table class="data-table">
+    {% if caption %}
+      <caption>{{ caption | escape }}</caption>
+    {% endif %}
+    <thead>
+      <tr>
+        {% for col in columns %}
+          <th scope="col">{{ col.label | default(col.key) }}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+        <tr class="{{ loop.cycle('row--odd', 'row--even') }}">
+          {% for col in columns %}
+            <td>
+              {% if col.key == "status" %}
+                {{ render_badge(row[col.key]) }}
+              {% else %}
+                {{ row.get(col.key, "—") | escape }}
+              {% endif %}
+            </td>
+          {% endfor %}
+        </tr>
+      {% else %}
+        <tr><td colspan="{{ columns | length }}"><em>No data.</em></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endmacro %}
+
+{# -------------------------------------------------------------------------  #}
+{# Block: title                                                                #}
+{# -------------------------------------------------------------------------  #}
+{% block title %}{{ page_title | default("Test Report") }} — Wicked Estate{% endblock %}
+
+{# -------------------------------------------------------------------------  #}
+{# Block: content                                                              #}
+{# -------------------------------------------------------------------------  #}
+{% block content %}
+<h1>{{ page_title | default("Test Report") }}</h1>
+
+{% if summary is defined %}
+<section class="summary">
+  <dl>
+    <dt>Total</dt>   <dd>{{ summary.total }}</dd>
+    <dt>Passed</dt>  <dd>{{ render_badge("pass",    summary.passed  | string) }}</dd>
+    <dt>Failed</dt>  <dd>{{ render_badge("fail",    summary.failed  | string) }}</dd>
+    <dt>Pending</dt> <dd>{{ render_badge("pending", summary.pending | string) }}</dd>
+  </dl>
+</section>
+{% endif %}
+
+{% set columns = [
+    {"key": "id",      "label": "ID"},
+    {"key": "name",    "label": "Scenario"},
+    {"key": "status",  "label": "Status"},
+    {"key": "elapsed", "label": "Duration (s)"}
+] %}
+
+{{ render_table(scenarios, columns, caption="Scenario Results") }}
+
+{% block scripts %}{{ super() }}{% endblock %}
+{% endblock %}

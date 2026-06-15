@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Acme Store — quality products at honest prices." />
+  <title>Acme Store</title>
+  <link rel="stylesheet" href="/assets/css/main.css" />
+  <link rel="icon" type="image/svg+xml" href="/assets/icons/favicon.svg" />
+</head>
+<body>
+
+  <!-- ── Header ─────────────────────────────────────────────────────────── -->
+  <header class="site-header" role="banner">
+    <a class="brand" href="/">
+      <img src="/assets/img/logo.svg" alt="Acme Store logo" width="120" height="40" />
+    </a>
+
+    <nav class="primary-nav" aria-label="Primary navigation">
+      <ul role="list">
+        <li><a href="/products">Products</a></li>
+        <li><a href="/categories">Categories</a></li>
+        <li><a href="/deals">Deals</a></li>
+        <li><a href="/about">About</a></li>
+      </ul>
+    </nav>
+
+    <div class="header-actions">
+      <form class="search-form" role="search" action="/search" method="get">
+        <label for="q" class="sr-only">Search products</label>
+        <input id="q" type="search" name="q" placeholder="Search products…" autocomplete="off" />
+        <button type="submit" aria-label="Submit search">
+          <svg aria-hidden="true" width="16" height="16"><use href="#icon-search" /></svg>
+        </button>
+      </form>
+      <a href="/cart" class="cart-link" aria-label="Shopping cart (3 items)">
+        <svg aria-hidden="true" width="24" height="24"><use href="#icon-cart" /></svg>
+        <span class="badge" aria-hidden="true">3</span>
+      </a>
+      <a href="/account" class="account-link">Sign in</a>
+    </div>
+  </header>
+
+  <!-- ── Main ───────────────────────────────────────────────────────────── -->
+  <main id="main-content" tabindex="-1">
+
+    <!-- Hero section -->
+    <section class="hero" aria-labelledby="hero-heading">
+      <div class="hero__content">
+        <h1 id="hero-heading">Quality you can trust,<br />prices that make sense.</h1>
+        <p class="hero__sub">Free shipping on orders over $50. No membership required.</p>
+        <a href="/products" class="btn btn--primary">Shop now</a>
+        <a href="/deals" class="btn btn--secondary">Today's deals</a>
+      </div>
+      <img
+        class="hero__image"
+        src="/assets/img/hero.webp"
+        alt="Assortment of Acme products on a bright background"
+        width="780"
+        height="520"
+        loading="eager"
+      />
+    </section>
+
+    <!-- Featured categories section -->
+    <section class="categories" aria-labelledby="categories-heading">
+      <h2 id="categories-heading">Shop by category</h2>
+      <ul class="categories__grid" role="list">
+        <li>
+          <a href="/categories/electronics" class="category-card">
+            <img src="/assets/img/cat-electronics.webp" alt="" width="200" height="200" loading="lazy" />
+            <span>Electronics</span>
+          </a>
+        </li>
+        <li>
+          <a href="/categories/home-garden" class="category-card">
+            <img src="/assets/img/cat-home.webp" alt="" width="200" height="200" loading="lazy" />
+            <span>Home &amp; Garden</span>
+          </a>
+        </li>
+        <li>
+          <a href="/categories/sports" class="category-card">
+            <img src="/assets/img/cat-sports.webp" alt="" width="200" height="200" loading="lazy" />
+            <span>Sports &amp; Outdoors</span>
+          </a>
+        </li>
+        <li>
+          <a href="/categories/clothing" class="category-card">
+            <img src="/assets/img/cat-clothing.webp" alt="" width="200" height="200" loading="lazy" />
+            <span>Clothing</span>
+          </a>
+        </li>
+      </ul>
+    </section>
+
+    <!-- Featured products section -->
+    <section class="featured-products" aria-labelledby="featured-heading">
+      <h2 id="featured-heading">Featured products</h2>
+      <ul class="product-grid" role="list">
+        <li class="product-card">
+          <a href="/products/wireless-headphones">
+            <img src="/assets/img/prod-headphones.webp" alt="Wireless Headphones Pro" width="300" height="300" loading="lazy" />
+          </a>
+          <div class="product-card__body">
+            <h3 class="product-card__title">
+              <a href="/products/wireless-headphones">Wireless Headphones Pro</a>
+            </h3>
+            <p class="product-card__price">
+              <span class="sr-only">Price:</span>$79.99
+            </p>
+            <button class="btn btn--add-to-cart" data-sku="WHP-001" type="button">
+              Add to cart
+            </button>
+          </div>
+        </li>
+        <li class="product-card">
+          <a href="/products/smart-water-bottle">
+            <img src="/assets/img/prod-bottle.webp" alt="Smart Water Bottle 32oz" width="300" height="300" loading="lazy" />
+          </a>
+          <div class="product-card__body">
+            <h3 class="product-card__title">
+              <a href="/products/smart-water-bottle">Smart Water Bottle 32oz</a>
+            </h3>
+            <p class="product-card__price">
+              <span class="sr-only">Price:</span>$34.99
+            </p>
+            <button class="btn btn--add-to-cart" data-sku="SWB-032" type="button">
+              Add to cart
+            </button>
+          </div>
+        </li>
+      </ul>
+    </section>
+
+  </main>
+
+  <!-- ── Footer ─────────────────────────────────────────────────────────── -->
+  <footer class="site-footer" role="contentinfo">
+    <nav class="footer-nav" aria-label="Footer navigation">
+      <div class="footer-nav__col">
+        <h4>Company</h4>
+        <ul role="list">
+          <li><a href="/about">About us</a></li>
+          <li><a href="/careers">Careers</a></li>
+          <li><a href="/press">Press</a></li>
+        </ul>
+      </div>
+      <div class="footer-nav__col">
+        <h4>Support</h4>
+        <ul role="list">
+          <li><a href="/help">Help centre</a></li>
+          <li><a href="/returns">Returns</a></li>
+          <li><a href="/contact">Contact us</a></li>
+        </ul>
+      </div>
+      <div class="footer-nav__col">
+        <h4>Legal</h4>
+        <ul role="list">
+          <li><a href="/privacy">Privacy policy</a></li>
+          <li><a href="/terms">Terms of service</a></li>
+          <li><a href="/cookies">Cookie settings</a></li>
+        </ul>
+      </div>
+    </nav>
+    <p class="footer__copyright">&copy; 2025 Acme Store, Inc. All rights reserved.</p>
+  </footer>
+
+  <script src="/assets/js/main.js" defer></script>
+</body>
+</html>

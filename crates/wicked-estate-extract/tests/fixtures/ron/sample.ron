@@ -1,0 +1,17 @@
+(
+    name: "wicked-estate",
+    version: (major: 0, minor: 1, patch: 0),
+    config: Config(
+        host: "127.0.0.1",
+        port: 8080,
+        database: Database(
+            path: "graph.db",
+            pool_size: 10,
+            wal: true,
+        ),
+        features: ["fts5", "embeddings", "lsp"],
+        max_depth: Some(10),
+        timeout: None,
+    ),
+    tags: ["rust", "code-intel", "graph"],
+)

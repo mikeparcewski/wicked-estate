@@ -1,0 +1,38 @@
+%!PS-Adobe-3.0
+%%Title: Sample PostScript
+%%Pages: 1
+
+/inch { 72 mul } def
+
+/draw-box {
+    /h exch def
+    /w exch def
+    /y exch def
+    /x exch def
+    newpath
+    x y moveto
+    w 0 rlineto
+    0 h rlineto
+    w neg 0 rlineto
+    closepath
+    stroke
+} def
+
+/draw-label {
+    /msg exch def
+    /y exch def
+    /x exch def
+    x y moveto
+    msg show
+} def
+
+%%Page: 1 1
+/Helvetica findfont 12 scalefont setfont
+
+1 inch 1 inch 6 inch 4 inch draw-box
+
+2 inch 5 inch (Hello, PostScript!) draw-label
+2 inch 4.5 inch (Wicked Estate Sample) draw-label
+
+showpage
+%%EOF

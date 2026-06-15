@@ -1,0 +1,147 @@
+# sample.graphql — schema + operations for a blog platform
+
+# ── Scalars & Enums ──────────────────────────────────────────────────────────
+
+scalar DateTime
+scalar URL
+
+enum PostStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum Role {
+  READER
+  AUTHOR
+  ADMIN
+}
+
+# ── Interfaces ───────────────────────────────────────────────────────────────
+
+interface Node {
+  id: ID!
+}
+
+interface Timestamped {
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+# ── Types ─────────────────────────────────────────────────────────────────────
+
+type User implements Node & Timestamped {
+  id:        ID!
+  username:  String!
+  email:     String!
+  role:      Role!
+  posts:     [Post!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type Post implements Node & Timestamped {
+  id:        ID!
+  title:     String!
+  slug:      String!
+  body:      String!
+  status:    PostStatus!
+  author:    User!
+  tags:      [Tag!]!
+  comments:  [Comment!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type Comment implements Node & Timestamped {
+  id:        ID!
+  body:      String!
+  author:    User!
+  post:      Post!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type Tag implements Node {
+  id:    ID!
+  name:  String!
+  posts: [Post!]!
+}
+
+# ── Input Types ───────────────────────────────────────────────────────────────
+
+input CreatePostInput {
+  title:  String!
+  body:   String!
+  status: PostStatus = DRAFT
+  tagIds: [ID!]
+}
+
+input UpdatePostInput {
+  title:  String
+  body:   String
+  status: PostStatus
+  tagIds: [ID!]
+}
+
+input CreateCommentInput {
+  postId: ID!
+  body:   String!
+}
+
+# ── Root Types ────────────────────────────────────────────────────────────────
+
+type Query {
+  me:              User
+  user(id: ID!):   User
+  post(slug: String!): Post
+  posts(
+    status: PostStatus
+    tag:    String
+    limit:  Int = 20
+    offset: Int = 0
+  ): [Post!]!
+  tags: [Tag!]!
+}
+
+type Mutation {
+  createPost(input: CreatePostInput!):    Post!
+  updatePost(id: ID!, input: UpdatePostInput!): Post!
+  deletePost(id: ID!):                   Boolean!
+  createComment(input: CreateCommentInput!): Comment!
+  deleteComment(id: ID!):                Boolean!
+}
+
+type Subscription {
+  commentAdded(postId: ID!): Comment!
+  postPublished:             Post!
+}
+
+# ── Operations ────────────────────────────────────────────────────────────────
+
+query GetPublishedPosts($limit: Int = 10, $offset: Int = 0) {
+  posts(status: PUBLISHED, limit: $limit, offset: $offset) {
+    id
+    title
+    slug
+    status
+    author {
+      id
+      username
+    }
+    tags {
+      id
+      name
+    }
+    createdAt
+  }
+}
+
+mutation PublishPost($id: ID!, $title: String!, $body: String!) {
+  updatePost(id: $id, input: { title: $title, body: $body, status: PUBLISHED }) {
+    id
+    slug
+    status
+    updatedAt
+  }
+}

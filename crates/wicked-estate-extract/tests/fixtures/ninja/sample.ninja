@@ -1,0 +1,21 @@
+cc = clang
+cflags = -Wall -Wextra -O2
+builddir = build
+
+rule compile
+  command = $cc $cflags -c $in -o $out
+  description = Compile $in
+
+rule link
+  command = $cc $in -o $out
+  description = Link $out
+
+rule ar
+  command = ar rcs $out $in
+  description = Archive $out
+
+build $builddir/symbol.o: compile src/symbol.c
+build $builddir/graph.o: compile src/graph.c
+build $builddir/store.o: compile src/store.c
+build $builddir/libcore.a: ar $builddir/symbol.o $builddir/graph.o $builddir/store.o
+build $builddir/estate: link $builddir/main.o $builddir/libcore.a

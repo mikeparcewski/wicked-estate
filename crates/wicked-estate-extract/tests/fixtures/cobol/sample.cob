@@ -1,0 +1,32 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. SAMPLE.
+       AUTHOR. WICKED-ESTATE.
+
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 WS-COUNTER    PIC 9(4) VALUE 0.
+       01 WS-NAME       PIC X(20) VALUE SPACES.
+       01 WS-TOTAL      PIC 9(6) VALUE 0.
+
+       PROCEDURE DIVISION.
+       MAIN-PARA.
+           PERFORM INIT-PARA
+           PERFORM PROCESS-PARA
+           PERFORM DISPLAY-PARA
+           STOP RUN.
+
+       INIT-PARA.
+           MOVE 0 TO WS-COUNTER
+           MOVE "SAMPLE" TO WS-NAME.
+
+       PROCESS-PARA.
+           ADD 1 TO WS-COUNTER
+           COMPUTE WS-TOTAL = WS-COUNTER * 100.
+
+       DISPLAY-PARA.
+           DISPLAY "Counter: " WS-COUNTER
+           DISPLAY "Total:   " WS-TOTAL.

@@ -1,0 +1,65 @@
+{
+  "schema_version": "1.0.0",
+  "generated_at": "2025-06-14T00:00:00Z",
+  "service": "wicked-estate",
+
+  "config": {
+    "index": {
+      "root": "/workspace",
+      "db": "/var/lib/we/graph.db",
+      "workers": 8,
+      "batch_size": 512,
+      "exclude": [
+        "target/**",
+        "node_modules/**",
+        "**/*.min.js",
+        ".git/**"
+      ]
+    },
+    "resolution": {
+      "tiers": ["tags", "import-map", "tsg", "scip"],
+      "lsp_on_demand": true,
+      "lsp_timeout_ms": 2000
+    },
+    "retrieval": {
+      "fts_weight": 0.6,
+      "graph_weight": 0.4,
+      "max_results": 25,
+      "embeddings_enabled": false
+    }
+  },
+
+  "languages": [
+    { "id": "rust",       "grammar": "tree-sitter-rust",       "enabled": true,  "tier": "first-class" },
+    { "id": "typescript", "grammar": "tree-sitter-typescript",  "enabled": true,  "tier": "first-class" },
+    { "id": "python",     "grammar": "tree-sitter-python",      "enabled": true,  "tier": "first-class" },
+    { "id": "go",         "grammar": "tree-sitter-go",          "enabled": true,  "tier": "first-class" },
+    { "id": "java",       "grammar": "tree-sitter-java",        "enabled": true,  "tier": "first-class" },
+    { "id": "c",          "grammar": "tree-sitter-c",           "enabled": true,  "tier": "first-class" },
+    { "id": "cpp",        "grammar": "tree-sitter-cpp",         "enabled": true,  "tier": "first-class" },
+    { "id": "cobol",      "grammar": "tree-sitter-cobol",       "enabled": false, "tier": "experimental" }
+  ],
+
+  "statistics": {
+    "indexed_files": 4821,
+    "total_nodes": 152304,
+    "total_edges": 498721,
+    "resolution_rates": {
+      "tags":       0.72,
+      "import_map": 0.19,
+      "tsg":        0.07,
+      "unresolved": 0.02
+    },
+    "index_duration_ms": 14382,
+    "db_size_bytes": 52428800
+  },
+
+  "health": {
+    "status": "healthy",
+    "checks": {
+      "database": { "ok": true,  "latency_ms": 1 },
+      "index":    { "ok": true,  "staleness_secs": 42 },
+      "lsp":      { "ok": false, "error": "rust-analyzer not found in PATH" }
+    }
+  }
+}

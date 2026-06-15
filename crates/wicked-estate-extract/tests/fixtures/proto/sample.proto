@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package commerce.v1;
+
+option go_package = "github.com/example/commerce/v1;commercev1";
+option java_package = "com.example.commerce.v1";
+option java_multiple_files = true;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+// OrderStatus represents the lifecycle state of an order.
+enum OrderStatus {
+  ORDER_STATUS_UNSPECIFIED = 0;
+  ORDER_STATUS_PENDING     = 1;
+  ORDER_STATUS_CONFIRMED   = 2;
+  ORDER_STATUS_SHIPPED     = 3;
+  ORDER_STATUS_DELIVERED   = 4;
+  ORDER_STATUS_CANCELLED   = 5;
+}
+
+// Money holds an amount in the smallest currency unit (cents).
+message Money {
+  int64  amount_cents = 1;
+  string currency     = 2;  // ISO 4217, e.g. "USD"
+}
+
+// OrderItem is a single line item within an order.
+message OrderItem {
+  string product_sku = 1;
+  int32  quantity    = 2;
+  Money  unit_price  = 3;
+}
+
+// Order is the root aggregate for a purchase transaction.
+message Order {
+  string                    id         = 1;
+  string                    user_id    = 2;
+  repeated OrderItem        items      = 3;
+  Money                     total      = 4;
+  OrderStatus               status     = 5;
+  google.protobuf.Timestamp placed_at  = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+// CreateOrderRequest is the payload for placing a new order.
+message CreateOrderRequest {
+  string             user_id = 1;
+  repeated OrderItem items   = 2;
+}
+
+// GetOrderRequest carries the order identifier for a lookup.
+message GetOrderRequest {
+  string id = 1;
+}
+
+// ListOrdersRequest filters orders for a given user.
+message ListOrdersRequest {
+  string user_id    = 1;
+  int32  page_size  = 2;
+  string page_token = 3;
+}
+
+// ListOrdersResponse is a paginated collection of orders.
+message ListOrdersResponse {
+  repeated Order orders          = 1;
+  string         next_page_token = 2;
+}
+
+// CancelOrderRequest carries the identifier of the order to cancel.
+message CancelOrderRequest {
+  string id     = 1;
+  string reason = 2;
+}
+
+// OrderService manages the full lifecycle of orders.
+service OrderService {
+  // CreateOrder places a new order and returns it in PENDING status.
+  rpc CreateOrder(CreateOrderRequest) returns (Order);
+
+  // GetOrder retrieves a single order by its ID.
+  rpc GetOrder(GetOrderRequest) returns (Order);
+
+  // ListOrders returns a paginated list of orders for a user.
+  rpc ListOrders(ListOrdersRequest) returns (ListOrdersResponse);
+
+  // CancelOrder transitions an order to CANCELLED status.
+  rpc CancelOrder(CancelOrderRequest) returns (Order);
+
+  // StreamOrderUpdates pushes real-time status changes for a user's orders.
+  rpc StreamOrderUpdates(GetOrderRequest) returns (stream Order);
+}

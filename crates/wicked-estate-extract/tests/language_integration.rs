@@ -403,3 +403,77 @@ fn per_language_extraction_produces_nodes() {
         check(lang, ext, snippet);
     }
 }
+
+#[test]
+fn fixture_files_produce_nodes() {
+    let fixtures_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+
+    let mut tested = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+
+    let mut lang_dirs: Vec<_> = std::fs::read_dir(&fixtures_dir)
+        .expect("tests/fixtures dir missing")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .collect();
+    lang_dirs.sort_by_key(|e| e.path());
+
+    for lang_entry in lang_dirs {
+        let lang_dir = lang_entry.path();
+        let lang = lang_dir.file_name().unwrap().to_string_lossy().to_string();
+
+        let mut files: Vec<_> = std::fs::read_dir(&lang_dir)
+            .unwrap_or_else(|_| panic!("cannot read {lang_dir:?}"))
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
+            .collect();
+        files.sort_by_key(|e| e.path());
+
+        for file_entry in files {
+            let file_path = file_entry.path();
+            let ext = match file_path.extension() {
+                Some(e) => e.to_string_lossy().to_string(),
+                None => continue,
+            };
+
+            let Some(extractor) = extractor_for_extension(&ext) else {
+                eprintln!("SKIP {lang} (.{ext}): no extractor for extension");
+                continue;
+            };
+
+            let text = std::fs::read_to_string(&file_path)
+                .unwrap_or_else(|_| panic!("cannot read {file_path:?}"));
+
+            let file = SourceFile {
+                path: file_path.to_string_lossy().to_string(),
+                language: Language(lang.clone()),
+                text,
+            };
+
+            tested += 1;
+            match extractor.extract(&file) {
+                Err(e) => failures.push(format!(
+                    "{lang}/{}: extract error: {e:?}",
+                    file_path.file_name().unwrap().to_string_lossy()
+                )),
+                Ok(extraction) if extraction.nodes.is_empty() => failures.push(format!(
+                    "{lang}/{}: produced 0 nodes",
+                    file_path.file_name().unwrap().to_string_lossy()
+                )),
+                Ok(_) => {}
+            }
+        }
+    }
+
+    assert!(tested > 0, "no fixture files found under tests/fixtures/<lang>/");
+
+    if !failures.is_empty() {
+        panic!(
+            "{} fixture(s) failed extraction ({} total):\n{}",
+            failures.len(),
+            tested,
+            failures.join("\n")
+        );
+    }
+    println!("fixture_files_produce_nodes: {tested} files passed");
+}

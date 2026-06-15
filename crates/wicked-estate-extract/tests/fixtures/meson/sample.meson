@@ -1,0 +1,29 @@
+project('wicked-estate', 'c', 'cpp',
+  version : '0.1.0',
+  default_options : ['warning_level=3', 'cpp_std=c++17'])
+
+sqlite_dep = dependency('sqlite3', required : true)
+thread_dep = dependency('threads')
+
+core_lib = library('estate-core',
+  sources : ['src/core/symbol.c', 'src/core/graph.c'],
+  dependencies : [sqlite_dep, thread_dep],
+  install : true)
+
+extract_exe = executable('estate-extract',
+  sources : ['src/extract/main.c', 'src/extract/parser.c'],
+  link_with : core_lib,
+  dependencies : [sqlite_dep],
+  install : true)
+
+server_exe = executable('estate-server',
+  sources : ['src/server/main.cpp'],
+  link_with : core_lib,
+  dependencies : [sqlite_dep, thread_dep],
+  install : true)
+
+test('core-unit-tests',
+  executable('test-core',
+    sources : ['tests/test_core.c'],
+    link_with : core_lib,
+    dependencies : [sqlite_dep]))
