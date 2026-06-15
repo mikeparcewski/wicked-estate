@@ -534,10 +534,7 @@ impl SqliteStore {
             )
             .map_err(st)?;
         let rows = stmt
-            .query_map(
-                rusqlite::params![key, value],
-                |r| r.get::<_, String>(0),
-            )
+            .query_map(rusqlite::params![key, value], |r| r.get::<_, String>(0))
             .map_err(st)?;
         let mut nodes = Vec::new();
         for row in rows {

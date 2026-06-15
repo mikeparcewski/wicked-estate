@@ -146,25 +146,42 @@ fn token_jaccard(a: &[String], b: &[String]) -> f64 {
 /// Normalize a signature string: type normalization + lowercasing.
 fn normalize_sig(sig: &str) -> Vec<String> {
     const TYPE_MAP: &[(&str, &str)] = &[
-        ("string", "STR"), ("str", "STR"), ("varchar", "STR"),
-        ("int", "INT"), ("i32", "INT"), ("i64", "INT"), ("long", "INT"),
-        ("integer", "INT"), ("number", "INT"),
-        ("bool", "BOOL"), ("boolean", "BOOL"),
-        ("float", "FLOAT"), ("f32", "FLOAT"), ("f64", "FLOAT"), ("double", "FLOAT"),
-        ("void", "VOID"), ("unit", "VOID"), ("none", "VOID"),
+        ("string", "STR"),
+        ("str", "STR"),
+        ("varchar", "STR"),
+        ("int", "INT"),
+        ("i32", "INT"),
+        ("i64", "INT"),
+        ("long", "INT"),
+        ("integer", "INT"),
+        ("number", "INT"),
+        ("bool", "BOOL"),
+        ("boolean", "BOOL"),
+        ("float", "FLOAT"),
+        ("f32", "FLOAT"),
+        ("f64", "FLOAT"),
+        ("double", "FLOAT"),
+        ("void", "VOID"),
+        ("unit", "VOID"),
+        ("none", "VOID"),
     ];
     sig.split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty() && t.len() > 1)
         .map(|t| {
             let low = t.to_lowercase();
-            TYPE_MAP.iter().find(|(k, _)| *k == low).map_or(low, |(_, v)| v.to_string())
+            TYPE_MAP
+                .iter()
+                .find(|(k, _)| *k == low)
+                .map_or(low, |(_, v)| v.to_string())
         })
         .collect()
 }
 
 /// Approximate arity from a signature string (count commas at depth 1 in parens + 1).
 fn arity_from_sig(sig: &str) -> Option<usize> {
-    let inner = sig.find('(').and_then(|s| sig.rfind(')').map(|e| &sig[s + 1..e]))?;
+    let inner = sig
+        .find('(')
+        .and_then(|s| sig.rfind(')').map(|e| &sig[s + 1..e]))?;
     if inner.trim().is_empty() {
         return Some(0);
     }
@@ -182,10 +199,7 @@ fn arity_from_sig(sig: &str) -> Option<usize> {
 }
 
 /// Kind-match score: 1.0 exact, partial for compatible kinds, 0.0 otherwise.
-fn kind_match_score(
-    a: &wicked_estate_core::NodeKind,
-    b: &wicked_estate_core::NodeKind,
-) -> f64 {
+fn kind_match_score(a: &wicked_estate_core::NodeKind, b: &wicked_estate_core::NodeKind) -> f64 {
     use wicked_estate_core::NodeKind as K;
     match (a, b) {
         (K::Function, K::Function)
@@ -236,10 +250,32 @@ fn is_correspond_kind(k: &wicked_estate_core::NodeKind) -> bool {
 
 /// Names so common they appear in nearly every codebase — suppress name-similarity weight.
 const STOP_NAMES: &[&str] = &[
-    "init", "new", "main", "run", "start", "stop", "handle", "parse",
-    "serialize", "deserialize", "encode", "decode", "connect", "close",
-    "open", "read", "write", "log", "info", "warn", "error", "debug",
-    "setup", "teardown", "beforeeach", "aftereach",
+    "init",
+    "new",
+    "main",
+    "run",
+    "start",
+    "stop",
+    "handle",
+    "parse",
+    "serialize",
+    "deserialize",
+    "encode",
+    "decode",
+    "connect",
+    "close",
+    "open",
+    "read",
+    "write",
+    "log",
+    "info",
+    "warn",
+    "error",
+    "debug",
+    "setup",
+    "teardown",
+    "beforeeach",
+    "aftereach",
 ];
 
 fn main() -> Result<()> {
@@ -1432,7 +1468,11 @@ fn main() -> Result<()> {
                         .collect();
                     println!("{}", serde_json::to_string_pretty(&j)?);
                 } else {
-                    let label = if kind.is_empty() { "all".to_string() } else { kind.clone() };
+                    let label = if kind.is_empty() {
+                        "all".to_string()
+                    } else {
+                        kind.clone()
+                    };
                     println!("{} node(s) of kind '{label}':", nodes.len());
                     for n in nodes.iter().take(100) {
                         println!("  {:?} {} ({})", n.kind, n.name, loc(n));
@@ -1454,7 +1494,7 @@ fn main() -> Result<()> {
         //   the top-N pairs above --min-score threshold.
         "correspond" => {
             use std::collections::HashMap;
-            use wicked_estate_core::{query::SymbolQuery, GraphRead};
+            use wicked_estate_core::{GraphRead, query::SymbolQuery};
             use wicked_estate_retrieve::reciprocal_rank_fusion;
 
             let path_a = db_a
@@ -1489,9 +1529,9 @@ fn main() -> Result<()> {
                 .into_iter()
                 .filter(|n| is_correspond_kind(&n.kind))
                 .filter(|n| {
-                    filter_kind.as_deref().is_none_or(|k| {
-                        format!("{:?}", n.kind).to_lowercase() == k.to_lowercase()
-                    })
+                    filter_kind
+                        .as_deref()
+                        .is_none_or(|k| format!("{:?}", n.kind).to_lowercase() == k.to_lowercase())
                 })
                 .collect();
 
@@ -1525,8 +1565,7 @@ fn main() -> Result<()> {
                     continue;
                 }
                 let is_stop = STOP_NAMES.contains(&node_a.name.to_lowercase().as_str())
-                    || STOP_NAMES
-                        .contains(&norm_name_a.join("").as_str());
+                    || STOP_NAMES.contains(&norm_name_a.join("").as_str());
 
                 // ── Pre-filter: BM25 name candidates from B ──────────────────
                 let name_q = norm_name_a.join(" ");
@@ -1602,11 +1641,18 @@ fn main() -> Result<()> {
                         _ => 0.0,
                     };
 
-                    let arity_sim = match (arity_a, node_b.signature.as_deref().and_then(arity_from_sig)) {
+                    let arity_sim = match (
+                        arity_a,
+                        node_b.signature.as_deref().and_then(arity_from_sig),
+                    ) {
                         (Some(aa), Some(ab)) => {
                             let d = (aa as f64 - ab as f64).abs();
                             let m = aa.max(ab) as f64;
-                            if m == 0.0 { 1.0 } else { 1.0 - (d / m).min(1.0) }
+                            if m == 0.0 {
+                                1.0
+                            } else {
+                                1.0 - (d / m).min(1.0)
+                            }
                         }
                         _ => 0.0,
                     };
@@ -1638,10 +1684,18 @@ fn main() -> Result<()> {
 
                     let basis = {
                         let mut parts: Vec<&str> = Vec::new();
-                        if name_j > 0.0 { parts.push("name"); }
-                        if has_embed { parts.push("embed"); }
-                        if sig_j > 0.1 { parts.push("sig"); }
-                        if k_score == 1.0 { parts.push("kind"); }
+                        if name_j > 0.0 {
+                            parts.push("name");
+                        }
+                        if has_embed {
+                            parts.push("embed");
+                        }
+                        if sig_j > 0.1 {
+                            parts.push("sig");
+                        }
+                        if k_score == 1.0 {
+                            parts.push("kind");
+                        }
                         parts.join("+")
                     };
 
@@ -1661,11 +1715,19 @@ fn main() -> Result<()> {
                 }
             }
 
-            pairs.sort_by(|x, y| y.score.partial_cmp(&x.score).unwrap_or(std::cmp::Ordering::Equal));
+            pairs.sort_by(|x, y| {
+                y.score
+                    .partial_cmp(&x.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             pairs.dedup_by(|x, y| x.a == y.a && x.b == y.b);
             pairs.truncate(correspond_top);
 
-            let embed_note = if use_embed { " [name+embed]" } else { " [name-only]" };
+            let embed_note = if use_embed {
+                " [name+embed]"
+            } else {
+                " [name-only]"
+            };
             if json_out {
                 let j: Vec<serde_json::Value> = pairs
                     .iter()
@@ -1687,11 +1749,15 @@ fn main() -> Result<()> {
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&j)?);
             } else if pairs.is_empty() {
-                println!("no correspondences found (min-score={:.2}{embed_note})", correspond_min_score);
+                println!(
+                    "no correspondences found (min-score={:.2}{embed_note})",
+                    correspond_min_score
+                );
             } else {
                 println!(
                     "{} correspondence pair(s){embed_note} (min-score={:.2}):",
-                    pairs.len(), correspond_min_score
+                    pairs.len(),
+                    correspond_min_score
                 );
                 for p in &pairs {
                     println!(
@@ -1725,8 +1791,16 @@ fn main() -> Result<()> {
             let edges_only = positional.iter().any(|a| a == "--edges-only");
 
             let store = SqliteStore::open(&db).map_err(to_any)?;
-            let nodes = if !edges_only { store.all_nodes().map_err(to_any)? } else { vec![] };
-            let edges = if !nodes_only { store.all_edges().map_err(to_any)? } else { vec![] };
+            let nodes = if !edges_only {
+                store.all_nodes().map_err(to_any)?
+            } else {
+                vec![]
+            };
+            let edges = if !nodes_only {
+                store.all_edges().map_err(to_any)?
+            } else {
+                vec![]
+            };
 
             match format.as_str() {
                 "json" => {
@@ -1752,7 +1826,9 @@ fn main() -> Result<()> {
             println!(
                 "    --embeddings  compute and store embedding vectors after indexing (default: off)"
             );
-            println!("    --force       bypass incremental digest skip; re-extract all files (use after a binary upgrade)");
+            println!(
+                "    --force       bypass incremental digest skip; re-extract all files (use after a binary upgrade)"
+            );
             println!("  wicked-estate scip  <root>         [--db ...] [--scip-file <path>]");
             println!(
                 "    Ingest a SCIP index (precise call resolution). Requires `wicked-estate index`"

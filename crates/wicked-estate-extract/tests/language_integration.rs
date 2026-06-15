@@ -24,7 +24,11 @@ fn ext_caps() -> HashMap<String, Vec<String>> {
             let caps: Vec<String> = lang
                 .get("caps")
                 .and_then(|c| c.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
                 .unwrap_or_default();
             if let Some(exts) = lang.get("ext").and_then(|e| e.as_array()) {
                 for ext_val in exts {
@@ -516,7 +520,10 @@ fn fixture_files_produce_nodes() {
             }
 
             if caps.contains(&"imports".to_owned()) {
-                let has_import = extraction.nodes.iter().any(|n| matches!(n.kind, NodeKind::Import));
+                let has_import = extraction
+                    .nodes
+                    .iter()
+                    .any(|n| matches!(n.kind, NodeKind::Import));
                 if !has_import {
                     // Determine if import syntax IS present but the extractor doesn't pick it up,
                     // vs. the fixture simply lacking import statements.
@@ -543,11 +550,14 @@ fn fixture_files_produce_nodes() {
                 }
             }
 
-            let needs_class = caps.contains(&"extends".to_owned())
-                || caps.contains(&"implements".to_owned());
+            let needs_class =
+                caps.contains(&"extends".to_owned()) || caps.contains(&"implements".to_owned());
             if needs_class {
                 let has_class = extraction.nodes.iter().any(|n| {
-                    matches!(n.kind, NodeKind::Class | NodeKind::Interface | NodeKind::Struct)
+                    matches!(
+                        n.kind,
+                        NodeKind::Class | NodeKind::Interface | NodeKind::Struct
+                    )
                 });
                 if !has_class {
                     failures.push(format!(
@@ -559,7 +569,10 @@ fn fixture_files_produce_nodes() {
         }
     }
 
-    assert!(tested > 0, "no fixture files found under tests/fixtures/<lang>/");
+    assert!(
+        tested > 0,
+        "no fixture files found under tests/fixtures/<lang>/"
+    );
 
     if !failures.is_empty() {
         panic!(
