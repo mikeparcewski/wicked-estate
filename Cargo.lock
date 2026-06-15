@@ -4939,6 +4939,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
@@ -7372,7 +7373,7 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "wicked-estate"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7385,6 +7386,7 @@ dependencies = [
  "tokio",
  "wicked-estate-core",
  "wicked-estate-extract",
+ "wicked-estate-observe",
  "wicked-estate-rank",
  "wicked-estate-resolve",
  "wicked-estate-retrieve",
@@ -7394,7 +7396,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-bench"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "serde",
@@ -7407,7 +7409,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-core"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "async-trait",
  "proptest",
@@ -7418,7 +7420,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-extract"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "arborium-ada",
  "arborium-awk",
@@ -7521,7 +7523,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-mcp"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -7533,8 +7535,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wicked-estate-observe"
+version = "0.1.7"
+dependencies = [
+ "reqwest",
+ "serde_json",
+ "wicked-estate-core",
+]
+
+[[package]]
 name = "wicked-estate-rank"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "petgraph",
  "proptest",
@@ -7544,7 +7555,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-resolve"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "libc",
  "protobuf",
@@ -7558,7 +7569,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-retrieve"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "fastembed",
  "model2vec-rs",
@@ -7570,7 +7581,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-store"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "async-trait",
  "deadpool",

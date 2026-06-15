@@ -177,7 +177,6 @@ pub fn collect_repo_info(path: &Path) -> RepoInfo {
 /// W11.3: bumps the store version at the start (invalidating stale cache) and populates the
 ///   `pagerank.top` cache entry at the end with the top-N PageRank scores.
 pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<GraphStats> {
-    let timing = std::env::var("CI_TIMING").is_ok();
     let t = std::time::Instant::now();
 
     // W11.3: bump the graph version so any prior cache entries become stale.
@@ -294,43 +293,21 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
             let _ = store.log_change(ChangeOp::Remove, path);
         }
         store.commit_batch()?;
-        if timing {
-            eprintln!(
-                "[timing] removed {} deleted files: {:?}",
-                deleted.len(),
-                deleted
-            );
-        }
     }
 
     // ── Split CHANGED/NEW from UNCHANGED ────────────────────────────────────────────────────
     let mut changed: Vec<FileWork> = Vec::new();
-    let mut unchanged_count = 0usize;
     for fw in work {
         let stored = store.file_digest(&fw.rel)?;
         if !force_full && stored.as_deref() == Some(&fw.digest) {
             // UNCHANGED: skip extraction entirely; its nodes/edges already in the store.
-            unchanged_count += 1;
         } else {
             changed.push(fw);
         }
     }
-    if timing {
-        eprintln!(
-            "[timing] incremental scan: {} unchanged (skipped), {} changed/new",
-            unchanged_count,
-            changed.len()
-        );
-    }
 
     // If nothing changed, skip all phases.
     if changed.is_empty() {
-        if timing {
-            eprintln!(
-                "[timing] total (fully incremental, no work): {:?}",
-                t.elapsed()
-            );
-        }
         return store.stats();
     }
 
@@ -477,7 +454,6 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
     }
 
     // ── WRITE ────────────────────────────────────────────────────────────────────────────────
-    // Sub-timers (CI_TIMING): parse already happened above (par_iter extraction).
     // write-nodes: upsert nodes rows (hot path — prepare_cached, single transaction).
     // write-content: zstd-compress + upsert content/files rows.
     // write-FTS: bulk populate nodes_fts after all nodes are written (ONE INSERT SELECT).
@@ -488,7 +464,6 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
     // shadow tables and forced the FTS trie to be rebuilt incrementally rather than in one shot.
     let mut all_refs = Vec::new();
 
-    let tw_nodes = std::time::Instant::now();
     store.begin_batch()?;
     for (rel_path, extraction, text) in &extractions {
         store.upsert_nodes_skip_fts(&extraction.nodes)?;
@@ -499,47 +474,24 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
             eprintln!("warning: set_file_content({rel_path}) failed: {e}");
         }
     }
-    if timing {
-        eprintln!(
-            "[timing] write-nodes+edges+content (batch open): {:?}",
-            tw_nodes.elapsed()
-        );
-    }
 
     // Bulk-rebuild FTS for every node that belongs to a changed file in one SQL pass.
     // This is O(1) SQL statements instead of O(2 × nodes) DELETE+INSERT pairs.
-    let tw_fts = std::time::Instant::now();
     store.bulk_rebuild_fts_for_files(
         &extractions
             .iter()
             .map(|(p, _, _)| p.as_str())
             .collect::<Vec<_>>(),
     )?;
-    if timing {
-        eprintln!("[timing] write-FTS (bulk rebuild): {:?}", tw_fts.elapsed());
-    }
 
     // Record the new digest for each changed/new file so subsequent runs can skip it.
     // W7.1: emit an Upsert change-log entry here — after the new state is durably committed —
     // so the store is in a consistent state before the subscriber sees the delta.
-    let tw_digest = std::time::Instant::now();
     for fw in &changed {
         store.set_file_digest(&fw.rel, &fw.digest)?;
         let _ = store.log_change(ChangeOp::Upsert, &fw.rel);
     }
     store.commit_batch()?;
-    if timing {
-        eprintln!(
-            "[timing] write-digest+changelog+commit: {:?}",
-            tw_digest.elapsed()
-        );
-        eprintln!(
-            "[timing] extract+write total ({} files, {} refs): {:?}",
-            changed.len(),
-            all_refs.len(),
-            tw_nodes.elapsed()
-        );
-    }
 
     // ── RESOLVE (changed files only) ─────────────────────────────────────────────────────────
     // Build the in-memory index from ALL nodes (unchanged + newly written). Resolve only the refs
@@ -549,7 +501,6 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
     // by a changed file C will not have its call to S re-resolved here. F's UnresolvedRef for S
     // persists until F itself changes or a full re-index is done. Full fix: re-resolve direct
     // importers of changed files (O(fanout) pass over the import graph) — see the design notes
-    let tr = std::time::Instant::now();
     let (resolved, estate) = {
         let reader: &dyn GraphRead = &*store;
         let index = InMemoryIndex::build(reader)?;
@@ -568,13 +519,6 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
         let estate = wicked_estate_resolve::estate_edges(index.nodes());
         (resolved, estate)
     };
-    if timing {
-        eprintln!(
-            "[timing] resolve: {:?} ({} edges)",
-            tr.elapsed(),
-            resolved.len()
-        );
-    }
 
     // Compute unresolved refs (same logic as full index).
     let resolved_locations: HashSet<Location> =
@@ -585,28 +529,15 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
         .cloned()
         .collect();
 
-    let ts = std::time::Instant::now();
     store.begin_batch()?;
     store.upsert_edges(&resolved)?;
     store.upsert_edges(&estate)?;
     store.upsert_unresolved_refs(&unresolved)?;
     store.commit_batch()?;
-    if timing {
-        eprintln!(
-            "[timing] store edges+unresolved: {:?} ({} unresolved)",
-            ts.elapsed(),
-            unresolved.len()
-        );
-    }
-
-    if timing {
-        eprintln!("[timing] total: {:?}", t.elapsed());
-    }
 
     // W11.3: populate the pagerank.top cache so subsequent `rank`/`important_symbols` calls
     // can serve from cache instead of recomputing. Best-effort: failure is non-fatal.
     const PAGERANK_CACHE_N: usize = 100;
-    let t_pr = std::time::Instant::now();
     let pr_result = {
         let reader: &dyn GraphRead = &*store;
         wicked_estate_rank::ranked_symbols(reader, &[], PAGERANK_CACHE_N)
@@ -617,23 +548,14 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
             store.cache_put_key("pagerank.top", &json_val);
         }
         Err(e) => {
-            if timing {
-                eprintln!("[timing] pagerank cache population failed (non-fatal): {e}");
-            }
+            eprintln!("pagerank cache population failed (non-fatal): {e}");
         }
-    }
-    if timing {
-        eprintln!(
-            "[timing] pagerank cache (untimed-tail): {:?}",
-            t_pr.elapsed()
-        );
     }
 
     // Task D: prune dangling edges left by incremental symbol removals. After changed files
     // are removed and re-extracted, edges whose target symbol was deleted (but whose edge row
     // was not covered by the file-scoped DELETE) remain in the store. This cheap O(n_edges)
     // pass cleans them up so blast-radius never returns nodes that no longer exist.
-    let t_prune = std::time::Instant::now();
     match store.prune_dangling_edges() {
         Ok(n) if n > 0 => {
             eprintln!("GRAPH-CLEANUP: pruned {n} dangling edge(s) after incremental index");
@@ -643,12 +565,6 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
             // Non-fatal: a failure to prune is stale data, not corrupt data.
             eprintln!("warning: prune_dangling_edges failed (non-fatal): {e}");
         }
-    }
-    if timing {
-        eprintln!(
-            "[timing] prune_dangling_edges (untimed-tail): {:?}",
-            t_prune.elapsed()
-        );
     }
 
     // Reclaim freelist pages accumulated by PRAGMA auto_vacuum=INCREMENTAL.
@@ -665,6 +581,52 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
             stats.db_size_bytes as f64 / 1_048_576.0
         );
     }
+
+    // Emit a span recording the total index duration and file/node counts.
+    let sink = wicked_estate_observe::init_sink_from_env();
+    let resource = wicked_estate_core::observability::Resource::service(
+        "wicked_estate",
+        env!("CARGO_PKG_VERSION"),
+    );
+    let scope = wicked_estate_core::observability::InstrumentationScope::new("wicked_estate.index");
+    let elapsed_ns = t.elapsed().as_nanos() as u64;
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let span = wicked_estate_core::observability::SpanData {
+        context: wicked_estate_core::observability::SpanContext {
+            trace_id: wicked_estate_core::observability::TraceId::INVALID,
+            span_id: wicked_estate_core::observability::SpanId::INVALID,
+            trace_flags: 0,
+            is_remote: false,
+        },
+        parent_span_id: None,
+        name: "wicked_estate.index_path".to_string(),
+        kind: wicked_estate_core::observability::SpanKind::Internal,
+        start_time_unix_nano: now_ns.saturating_sub(elapsed_ns),
+        end_time_unix_nano: now_ns,
+        attributes: vec![
+            wicked_estate_core::observability::KeyValue::int(
+                "wicked_estate.files_changed",
+                changed.len() as i64,
+            ),
+            wicked_estate_core::observability::KeyValue::int(
+                "wicked_estate.nodes",
+                stats.node_count as i64,
+            ),
+            wicked_estate_core::observability::KeyValue::int(
+                "wicked_estate.edges",
+                stats.edge_count as i64,
+            ),
+        ],
+        events: vec![],
+        links: vec![],
+        status: wicked_estate_core::observability::SpanStatus::ok(),
+    };
+    // Best-effort: telemetry failure must never abort indexing.
+    let _ = sink.export_spans(&resource, &scope, &[span]);
+
     Ok(stats)
 }
 

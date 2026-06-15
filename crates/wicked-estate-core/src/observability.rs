@@ -24,6 +24,8 @@
 //! `dd-api-key`) and is **never persisted to the graph store** — consistent with ADR-004's
 //! no-secret-storage rule.
 
+use std::sync::{Arc, Mutex};
+
 use serde::{Deserialize, Serialize};
 
 // ────────────────────────────────────────────────────────────────────
@@ -833,14 +835,112 @@ impl TelemetrySink for NoopSink {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// § 12  Factory — open_telemetry_sink
+// § 12  InMemorySink — test/integration capture sink
+// ────────────────────────────────────────────────────────────────────
+
+/// An in-memory [`TelemetrySink`] that captures all exported records for inspection.
+///
+/// Useful for integration tests: create an `InMemorySink`, pass its `Arc` into the code
+/// under test, then call `captured_spans()` / `captured_metrics()` / `captured_logs()`
+/// to assert on what was emitted.
+#[derive(Debug, Default)]
+pub struct InMemorySink {
+    /// Captured spans.
+    pub spans: Mutex<Vec<SpanData>>,
+    /// Captured metrics.
+    pub metrics: Mutex<Vec<Metric>>,
+    /// Captured log records.
+    pub logs: Mutex<Vec<LogRecord>>,
+}
+
+impl InMemorySink {
+    /// Drain and return all captured spans.
+    pub fn captured_spans(&self) -> Vec<SpanData> {
+        self.spans.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Drain and return all captured metrics.
+    pub fn captured_metrics(&self) -> Vec<Metric> {
+        self.metrics
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Drain and return all captured log records.
+    pub fn captured_logs(&self) -> Vec<LogRecord> {
+        self.logs.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Clear all captured records.
+    pub fn clear(&self) {
+        self.spans.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.metrics
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.logs.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
+impl TelemetrySink for InMemorySink {
+    fn export_spans(
+        &self,
+        _resource: &Resource,
+        _scope: &InstrumentationScope,
+        spans: &[SpanData],
+    ) -> ExportResult {
+        self.spans
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(spans);
+        Ok(())
+    }
+
+    fn export_metrics(
+        &self,
+        _resource: &Resource,
+        _scope: &InstrumentationScope,
+        metrics: &[Metric],
+    ) -> ExportResult {
+        self.metrics
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(metrics);
+        Ok(())
+    }
+
+    fn export_logs(
+        &self,
+        _resource: &Resource,
+        _scope: &InstrumentationScope,
+        logs: &[LogRecord],
+    ) -> ExportResult {
+        self.logs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(logs);
+        Ok(())
+    }
+
+    fn force_flush(&self) -> ExportResult {
+        Ok(())
+    }
+
+    fn shutdown(&self) -> ExportResult {
+        Ok(())
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// § 13  Factory — open_telemetry_sink
 // ────────────────────────────────────────────────────────────────────
 
 /// Open a [`TelemetrySink`] from an optional [`ExporterConfig`].
 ///
 /// | `config` | Returns |
 /// |----------|---------|
-/// | `None`   | `Box<dyn TelemetrySink>` backed by [`NoopSink`] — zero overhead, observability OFF. (**Built**) |
+/// | `None`   | `Arc<dyn TelemetrySink>` backed by [`NoopSink`] — zero overhead, observability OFF. (**Built**) |
 /// | `Some(cfg)` with any [`Protocol`] | `Err(ExportError::Permanent("… designed but not built — see ADR-006"))`. (**Designed**) |
 ///
 /// # Vendor extensibility
@@ -850,9 +950,9 @@ impl TelemetrySink for NoopSink {
 /// the `wicked_estate_store::open_store` pattern from ADR-003.
 pub fn open_telemetry_sink(
     config: Option<&ExporterConfig>,
-) -> Result<Box<dyn TelemetrySink>, ExportError> {
+) -> Result<Arc<dyn TelemetrySink>, ExportError> {
     match config {
-        None => Ok(Box::new(NoopSink)),
+        None => Ok(Arc::new(NoopSink)),
         Some(cfg) => Err(ExportError::Permanent(format!(
             "OTLP exporter for {:?} is designed but not built — see ADR-006. \
              To enable: add an `opentelemetry-otlp` impl for protocol {:?} \
@@ -863,7 +963,7 @@ pub fn open_telemetry_sink(
 }
 
 // ────────────────────────────────────────────────────────────────────
-// § 13  Tests
+// § 14  Tests
 // ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -887,7 +987,7 @@ mod tests {
     #[test]
     fn configured_sink_returns_designed_not_built_error() {
         let cfg = ExporterConfig::otlp_http("http://localhost:4318");
-        // Match directly rather than `unwrap_err()` — `Box<dyn TelemetrySink>` (the Ok type) is
+        // Match directly rather than `unwrap_err()` — `Arc<dyn TelemetrySink>` (the Ok type) is
         // not `Debug`, which `unwrap_err` would require.
         let Err(ExportError::Permanent(msg)) = open_telemetry_sink(Some(&cfg)) else {
             panic!("expected a Permanent 'designed but not built' error for a configured sink");
