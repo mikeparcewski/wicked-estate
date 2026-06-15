@@ -15,10 +15,12 @@
 //!   wicked-estate watch <path>           [--db ...] [--history]
 //!   wicked-estate subscribe              [--db ...] [--since <seq>]
 //!   wicked-estate clusters [<min_size>]  [--json] [--db ...]
-//!   wicked-estate fingerprint <name>     [--db ...]
+//!   wicked-estate fingerprint <name>     [--content] [--db ...]
 //!   wicked-estate changed-since <sha>    [--json] [--db ...]
 //!   wicked-estate annotate <name>        --key K --value V [--confidence F] [--provenance P] [--author A] [--db ...]
+//!   wicked-estate annotate --symbol <id> --key K --value V [--confidence F] [--provenance P] [--author A] [--db ...]
 //!   wicked-estate annotations <name>     [--db ...]
+//!   wicked-estate annotations --symbol <id> [--db ...]
 //!   wicked-estate context <name>         [--budget <chars>] [--json] [--db ...]
 //!   wicked-estate entrypoints            [--json] [--db ...]
 //!   wicked-estate leaves                 [--json] [--db ...]
@@ -101,6 +103,10 @@ fn main() -> Result<()> {
     let mut ann_confidence: f64 = 1.0;
     let mut ann_provenance: String = String::new();
     let mut ann_author: String = String::new();
+    // --symbol <SymbolId>: target a single node by stable ID (annotate + annotations).
+    let mut ann_symbol: Option<String> = None;
+    // --content: fingerprint uses body byte-slice hash instead of identity hash.
+    let mut fp_content = false;
     let mut positional: Vec<String> = Vec::new();
     let mut it = rest.iter();
     while let Some(a) = it.next() {
@@ -177,6 +183,14 @@ fn main() -> Result<()> {
                 if let Some(v) = it.next() {
                     ann_author = v.clone();
                 }
+            }
+            "--symbol" => {
+                if let Some(v) = it.next() {
+                    ann_symbol = Some(v.clone());
+                }
+            }
+            "--content" => {
+                fp_content = true;
             }
             _ => positional.push(a.clone()),
         }
@@ -824,11 +838,9 @@ fn main() -> Result<()> {
         // Agent A: annotation API — tag any indexed symbol with arbitrary key/value metadata.
         //
         // Usage:
-        //   wicked-estate annotate <name> --key K --value V [--confidence F] [--provenance P] [--author A] [--db ...]
+        //   wicked-estate annotate <name>        --key K --value V [--confidence F] [--provenance P] [--author A] [--db ...]
+        //   wicked-estate annotate --symbol <id> --key K --value V [--confidence F] [--provenance P] [--author A] [--db ...]
         "annotate" => {
-            let name = positional
-                .first()
-                .context("usage: wicked-estate annotate <name> --key K --value V [--db ...]")?;
             let key = ann_key
                 .as_deref()
                 .context("--key is required for the annotate command")?;
@@ -837,12 +849,12 @@ fn main() -> Result<()> {
                 .context("--value is required for the annotate command")?;
             ensure_db_dir(&db)?;
             let mut store = SqliteStore::open(&db).map_err(to_any)?;
-            let hits = wicked_estate::search(&store, name).map_err(to_any)?;
             let mut count = 0usize;
-            for n in &hits {
+            if let Some(sym_str) = &ann_symbol {
+                let symbol = wicked_estate_core::symbol::SymbolId::from(sym_str.as_str());
                 store
                     .annotate_node(
-                        &n.symbol,
+                        &symbol,
                         key,
                         value,
                         ann_confidence,
@@ -850,34 +862,70 @@ fn main() -> Result<()> {
                         &ann_author,
                     )
                     .map_err(to_any)?;
-                count += 1;
+                count = 1;
+            } else {
+                let name = positional.first().context(
+                    "usage: wicked-estate annotate <name> --key K --value V [--db ...]\n       \
+                     wicked-estate annotate --symbol <id> --key K --value V [--db ...]",
+                )?;
+                let hits = wicked_estate::search(&store, name).map_err(to_any)?;
+                for n in &hits {
+                    store
+                        .annotate_node(
+                            &n.symbol,
+                            key,
+                            value,
+                            ann_confidence,
+                            &ann_provenance,
+                            &ann_author,
+                        )
+                        .map_err(to_any)?;
+                    count += 1;
+                }
             }
             println!("annotated {count} symbol(s) with {key}={value}");
         }
         // Agent A: show annotations for a symbol.
         //
         // Usage:
-        //   wicked-estate annotations <name> [--db ...]
+        //   wicked-estate annotations <name>     [--db ...]
+        //   wicked-estate annotations --symbol <id> [--db ...]
         "annotations" => {
-            let name = positional
-                .first()
-                .context("usage: wicked-estate annotations <name> [--db ...]")?;
             let store = SqliteStore::open(&db).map_err(to_any)?;
-            let hits = wicked_estate::search(&store, name).map_err(to_any)?;
-            if hits.is_empty() {
-                println!("no symbols found for '{name}'");
+            if let Some(sym_str) = &ann_symbol {
+                let symbol = wicked_estate_core::symbol::SymbolId::from(sym_str.as_str());
+                let anns = store.get_annotations(&symbol).map_err(to_any)?;
+                if anns.is_empty() {
+                    println!("(no annotations for symbol {sym_str})");
+                } else {
+                    for a in &anns {
+                        println!(
+                            "{}={} [confidence={:.3} provenance={:?} author={:?}]",
+                            a.key, a.value, a.confidence, a.provenance, a.author
+                        );
+                    }
+                }
             } else {
-                for n in &hits {
-                    let anns = store.get_annotations(&n.symbol).map_err(to_any)?;
-                    println!("  [{:?}] {} ({})", n.kind, n.name, loc(n));
-                    if anns.is_empty() {
-                        println!("    (no annotations)");
-                    } else {
-                        for a in &anns {
-                            println!(
-                                "    {}={} [confidence={:.3} provenance={:?} author={:?}]",
-                                a.key, a.value, a.confidence, a.provenance, a.author
-                            );
+                let name = positional.first().context(
+                    "usage: wicked-estate annotations <name> [--db ...]\n       \
+                     wicked-estate annotations --symbol <id> [--db ...]",
+                )?;
+                let hits = wicked_estate::search(&store, name).map_err(to_any)?;
+                if hits.is_empty() {
+                    println!("no symbols found for '{name}'");
+                } else {
+                    for n in &hits {
+                        let anns = store.get_annotations(&n.symbol).map_err(to_any)?;
+                        println!("  [{:?}] {} ({})", n.kind, n.name, loc(n));
+                        if anns.is_empty() {
+                            println!("    (no annotations)");
+                        } else {
+                            for a in &anns {
+                                println!(
+                                    "    {}={} [confidence={:.3} provenance={:?} author={:?}]",
+                                    a.key, a.value, a.confidence, a.provenance, a.author
+                                );
+                            }
                         }
                     }
                 }
@@ -886,11 +934,12 @@ fn main() -> Result<()> {
         // Agent D: stable hex fingerprint for a symbol (covers id+name+kind+file+signature).
         //
         // Usage:
-        //   wicked-estate fingerprint <name> [--db ...]
+        //   wicked-estate fingerprint <name>          [--db ...]   -- identity hash (id+name+kind+file+sig)
+        //   wicked-estate fingerprint <name> --content [--db ...]  -- body hash (xxh3 of source slice)
         "fingerprint" => {
             let name = positional
                 .first()
-                .context("usage: wicked-estate fingerprint <name>")?;
+                .context("usage: wicked-estate fingerprint <name> [--content] [--db ...]")?;
             let store = open_store(&db).map_err(to_any)?;
             let hits = wicked_estate::search(&*store, name).map_err(to_any)?;
             drop(store);
@@ -898,11 +947,34 @@ fn main() -> Result<()> {
                 println!("no symbol found matching '{name}'");
                 return Ok(());
             }
-            let store = SqliteStore::open(&db).map_err(to_any)?;
-            for node in &hits {
-                match store.node_fingerprint(&node.symbol).map_err(to_any)? {
-                    Some(fp) => println!("{fp}  {:?} {} ({})", node.kind, node.name, loc(node)),
-                    None => println!("(not indexed)  {} ", node.name),
+            if fp_content {
+                for node in &hits {
+                    let file = &node.location.file;
+                    let start = node.location.span.start_byte as usize;
+                    let end = node.location.span.end_byte as usize;
+                    match std::fs::read(file) {
+                        Ok(bytes) => {
+                            let slice = bytes.get(start..end).unwrap_or(&[]);
+                            let hash = xxhash_rust::xxh3::xxh3_64(slice);
+                            println!("{hash:016x}  {:?} {} ({})", node.kind, node.name, loc(node));
+                        }
+                        Err(e) => {
+                            println!(
+                                "(cannot read {file}: {e})  {:?} {} ({})",
+                                node.kind,
+                                node.name,
+                                loc(node)
+                            );
+                        }
+                    }
+                }
+            } else {
+                let store = SqliteStore::open(&db).map_err(to_any)?;
+                for node in &hits {
+                    match store.node_fingerprint(&node.symbol).map_err(to_any)? {
+                        Some(fp) => println!("{fp}  {:?} {} ({})", node.kind, node.name, loc(node)),
+                        None => println!("(not indexed)  {} ", node.name),
+                    }
                 }
             }
         }
@@ -927,12 +999,16 @@ fn main() -> Result<()> {
                 .map(|l| l.trim().to_string())
                 .filter(|l| !l.is_empty())
                 .collect();
+            let json_out = positional.iter().any(|a| a == "--json");
             if changed_files.is_empty() {
-                println!("no files changed since {sha}");
+                if json_out {
+                    println!("[]");
+                } else {
+                    println!("no files changed since {sha}");
+                }
                 return Ok(());
             }
             let store = SqliteStore::open(&db).map_err(to_any)?;
-            let json_out = positional.iter().any(|a| a == "--json");
             let mut all_nodes: Vec<wicked_estate_core::Node> = Vec::new();
             for file in &changed_files {
                 let nodes = store.nodes_in_file(file).map_err(to_any)?;
