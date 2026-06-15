@@ -68,6 +68,27 @@ fn maybe_print_staleness(store: &dyn wicked_estate_store::GraphStoreMutExt, db: 
     }
 }
 
+/// Warn when the database was indexed under a different binary version.
+/// Extraction fixes (e.g. COBOL paragraph spans) are not backfilled — a re-index is required.
+/// Annotations are stored separately and are preserved across re-indexes.
+fn maybe_warn_version_mismatch(store: &dyn wicked_estate_store::GraphStoreMutExt, db: &str) {
+    let current = env!("CARGO_PKG_VERSION");
+    let indexed = match store.meta_get_key("indexed_version") {
+        Some(v) => v,
+        None => return, // pre-version database — no key stored yet
+    };
+    if indexed != current {
+        let root_hint = store
+            .meta_get_key("indexed_root")
+            .unwrap_or_else(|| "<path>".to_string());
+        eprintln!(
+            "VERSION MISMATCH: {db} was indexed with v{indexed}, current binary is v{current}. \
+             Re-index to apply extraction fixes: `wicked-estate index {root_hint}` \
+             (your annotations are preserved)."
+        );
+    }
+}
+
 fn loc(n: &wicked_estate_core::Node) -> String {
     format!("{}:{}", n.location.file, n.location.span.start_line + 1)
 }
@@ -507,6 +528,7 @@ fn main() -> Result<()> {
                 .context("usage: wicked-estate query <name>")?;
             let store = open_store_ext(&db).map_err(to_any)?;
             maybe_print_staleness(store.as_ref(), &db);
+            maybe_warn_version_mismatch(store.as_ref(), &db);
             let hits = wicked_estate::search(&*store, name).map_err(to_any)?;
             println!("{} match(es) for '{name}':", hits.len());
             for n in &hits {
@@ -519,6 +541,7 @@ fn main() -> Result<()> {
                 .context("usage: wicked-estate blast-radius <name>")?;
             let store = open_store_ext(&db).map_err(to_any)?;
             maybe_print_staleness(store.as_ref(), &db);
+            maybe_warn_version_mismatch(store.as_ref(), &db);
             let deps = wicked_estate::blast_radius_by_name(&*store, name, 12).map_err(to_any)?;
             let unresolved = store.unresolved_refs_for_name(name).map_err(to_any)?.len();
             if deps.is_empty() {
@@ -539,6 +562,7 @@ fn main() -> Result<()> {
         "stats" => {
             let store = open_store_ext(&db).map_err(to_any)?;
             maybe_print_staleness(store.as_ref(), &db);
+            maybe_warn_version_mismatch(store.as_ref(), &db);
             let s = store.stats().map_err(to_any)?;
             let db_mb = s.db_size_bytes as f64 / 1_048_576.0;
             println!(
@@ -936,6 +960,7 @@ fn main() -> Result<()> {
             let json_out = positional.iter().any(|a| a == "--json");
             let store = open_store_ext(&db).map_err(to_any)?;
             maybe_print_staleness(store.as_ref(), &db);
+            maybe_warn_version_mismatch(store.as_ref(), &db);
             let communities =
                 wicked_estate_rank::detect_communities(store.as_ref(), min_size, false)
                     .map_err(to_any)?;
@@ -983,6 +1008,7 @@ fn main() -> Result<()> {
             // maybe_print_staleness's &dyn GraphStoreMutExt parameter.
             let store = open_store_ext(&db).map_err(to_any)?;
             maybe_print_staleness(store.as_ref(), &db);
+            maybe_warn_version_mismatch(store.as_ref(), &db);
             let nodes =
                 wicked_estate_retrieve::budget_context(&*store, name, budget).map_err(to_any)?;
             if json_out {

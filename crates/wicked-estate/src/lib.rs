@@ -185,6 +185,7 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
 
     // W7.4: persist the indexed root so staleness checks can find the git repo.
     store.meta_set_key("indexed_root", &root.to_string_lossy());
+    store.meta_set_key("indexed_version", env!("CARGO_PKG_VERSION"));
 
     // W7: capture git provenance once per index run and persist it to the store.
     // Non-fatal: git absent / not a repo → all-None RepoInfo, which is a valid default.
