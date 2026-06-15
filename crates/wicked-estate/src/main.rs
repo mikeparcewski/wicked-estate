@@ -72,6 +72,155 @@ fn loc(n: &wicked_estate_core::Node) -> String {
     format!("{}:{}", n.location.file, n.location.span.start_line + 1)
 }
 
+// ─── correspond helpers ───────────────────────────────────────────────────────
+
+/// Split a symbol name into lowercase tokens on camelCase, snake_case, digits, and separators.
+fn correspond_tokens(name: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let chars: Vec<char> = name.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_alphanumeric() {
+            let prev_lower = i > 0 && chars[i - 1].is_lowercase();
+            let next_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+            if c.is_uppercase() && !cur.is_empty() && (prev_lower || next_lower) {
+                tokens.push(std::mem::take(&mut cur).to_lowercase());
+            }
+            cur.push(c);
+        } else {
+            if !cur.is_empty() {
+                tokens.push(std::mem::take(&mut cur).to_lowercase());
+            }
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur.to_lowercase());
+    }
+    // Filter single-char noise and apply stop-prefix stripping.
+    // CRUD verbs (create/read/update/delete/fetch/save/load/store) are KEPT.
+    const STRIP_PREFIXES: &[&str] = &[
+        "get", "set", "is", "has", "do", "on", "to", "from", "with", "make", "build",
+    ];
+    // Strip the first token if it is a stop-prefix and there are more tokens.
+    let toks: Vec<String> = tokens.into_iter().filter(|t| t.len() > 1).collect();
+    if toks.len() > 1 && STRIP_PREFIXES.contains(&toks[0].as_str()) {
+        toks[1..].to_vec()
+    } else {
+        toks
+    }
+}
+
+/// Jaccard coefficient of two token sets.
+fn token_jaccard(a: &[String], b: &[String]) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    let sa: std::collections::HashSet<&String> = a.iter().collect();
+    let sb: std::collections::HashSet<&String> = b.iter().collect();
+    let inter = sa.intersection(&sb).count() as f64;
+    let union = sa.union(&sb).count() as f64;
+    if union == 0.0 { 0.0 } else { inter / union }
+}
+
+/// Normalize a signature string: type normalization + lowercasing.
+fn normalize_sig(sig: &str) -> Vec<String> {
+    const TYPE_MAP: &[(&str, &str)] = &[
+        ("string", "STR"), ("str", "STR"), ("varchar", "STR"),
+        ("int", "INT"), ("i32", "INT"), ("i64", "INT"), ("long", "INT"),
+        ("integer", "INT"), ("number", "INT"),
+        ("bool", "BOOL"), ("boolean", "BOOL"),
+        ("float", "FLOAT"), ("f32", "FLOAT"), ("f64", "FLOAT"), ("double", "FLOAT"),
+        ("void", "VOID"), ("unit", "VOID"), ("none", "VOID"),
+    ];
+    sig.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty() && t.len() > 1)
+        .map(|t| {
+            let low = t.to_lowercase();
+            TYPE_MAP.iter().find(|(k, _)| *k == low).map_or(low, |(_, v)| v.to_string())
+        })
+        .collect()
+}
+
+/// Approximate arity from a signature string (count commas at depth 1 in parens + 1).
+fn arity_from_sig(sig: &str) -> Option<usize> {
+    let inner = sig.find('(').and_then(|s| sig.rfind(')').map(|e| &sig[s + 1..e]))?;
+    if inner.trim().is_empty() {
+        return Some(0);
+    }
+    let mut depth = 0usize;
+    let mut commas = 0usize;
+    for c in inner.chars() {
+        match c {
+            '(' | '[' | '<' | '{' => depth += 1,
+            ')' | ']' | '>' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => commas += 1,
+            _ => {}
+        }
+    }
+    Some(commas + 1)
+}
+
+/// Kind-match score: 1.0 exact, partial for compatible kinds, 0.0 otherwise.
+fn kind_match_score(
+    a: &wicked_estate_core::NodeKind,
+    b: &wicked_estate_core::NodeKind,
+) -> f64 {
+    use wicked_estate_core::NodeKind as K;
+    match (a, b) {
+        (K::Function, K::Function)
+        | (K::Method, K::Method)
+        | (K::Class, K::Class)
+        | (K::Struct, K::Struct)
+        | (K::Trait, K::Trait)
+        | (K::Interface, K::Interface)
+        | (K::Enum, K::Enum)
+        | (K::Macro, K::Macro)
+        | (K::Module, K::Module)
+        | (K::Namespace, K::Namespace)
+        | (K::Constructor, K::Constructor) => 1.0,
+        (K::Function, K::Method)
+        | (K::Method, K::Function)
+        | (K::Constructor, K::Function)
+        | (K::Function, K::Constructor) => 0.8,
+        (K::Class, K::Struct)
+        | (K::Struct, K::Class)
+        | (K::Class, K::Trait)
+        | (K::Trait, K::Class)
+        | (K::Class, K::Interface)
+        | (K::Interface, K::Class)
+        | (K::Struct, K::Trait)
+        | (K::Trait, K::Struct)
+        | (K::Interface, K::Trait)
+        | (K::Trait, K::Interface)
+        | (K::Module, K::Namespace)
+        | (K::Namespace, K::Module) => 0.6,
+        _ => 0.0,
+    }
+}
+
+/// Returns true for node kinds that are worth including in correspondence analysis.
+fn is_correspond_kind(k: &wicked_estate_core::NodeKind) -> bool {
+    !matches!(
+        k,
+        wicked_estate_core::NodeKind::File
+            | wicked_estate_core::NodeKind::Import
+            | wicked_estate_core::NodeKind::Variable
+            | wicked_estate_core::NodeKind::Parameter
+            | wicked_estate_core::NodeKind::Field
+            | wicked_estate_core::NodeKind::Constant
+            | wicked_estate_core::NodeKind::TypeAlias
+            | wicked_estate_core::NodeKind::Synthetic
+    )
+}
+
+/// Names so common they appear in nearly every codebase — suppress name-similarity weight.
+const STOP_NAMES: &[&str] = &[
+    "init", "new", "main", "run", "start", "stop", "handle", "parse",
+    "serialize", "deserialize", "encode", "decode", "connect", "close",
+    "open", "read", "write", "log", "info", "warn", "error", "debug",
+    "setup", "teardown", "beforeeach", "aftereach",
+];
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (cmd, rest) = match args.split_first() {
@@ -107,6 +256,11 @@ fn main() -> Result<()> {
     let mut ann_symbol: Option<String> = None;
     // --content: fingerprint uses body byte-slice hash instead of identity hash.
     let mut fp_content = false;
+    // correspond command flags.
+    let mut db_a: Option<String> = None;
+    let mut db_b: Option<String> = None;
+    let mut correspond_top: usize = 20;
+    let mut correspond_min_score: f64 = 0.35;
     let mut positional: Vec<String> = Vec::new();
     let mut it = rest.iter();
     while let Some(a) = it.next() {
@@ -191,6 +345,26 @@ fn main() -> Result<()> {
             }
             "--content" => {
                 fp_content = true;
+            }
+            "--db-a" => {
+                if let Some(v) = it.next() {
+                    db_a = Some(v.clone());
+                }
+            }
+            "--db-b" => {
+                if let Some(v) = it.next() {
+                    db_b = Some(v.clone());
+                }
+            }
+            "--top" => {
+                if let Some(v) = it.next() {
+                    correspond_top = v.parse::<usize>().unwrap_or(20);
+                }
+            }
+            "--min-score" => {
+                if let Some(v) = it.next() {
+                    correspond_min_score = v.parse::<f64>().unwrap_or(0.35);
+                }
             }
             _ => positional.push(a.clone()),
         }
@@ -1178,6 +1352,247 @@ fn main() -> Result<()> {
                 }
                 if nodes.len() > 100 {
                     println!("  ... and {} more", nodes.len() - 100);
+                }
+            }
+        }
+        // Cross-repo symbol correspondence.
+        //
+        // Usage:
+        //   wicked-estate correspond --db-a A.db --db-b B.db [--kind <k>] [--top N] [--min-score F] [--json]
+        //
+        // Algorithm (lexical-only when no embeddings, RRF-fused when both DBs have embeddings):
+        //   For each non-trivial symbol in DB-A, retrieve up to 20 BM25 candidates from DB-B
+        //   (and up to 20 embedding-nearest when available), score with weighted signals, emit
+        //   the top-N pairs above --min-score threshold.
+        "correspond" => {
+            use std::collections::HashMap;
+            use wicked_estate_core::{query::SymbolQuery, GraphRead};
+            use wicked_estate_retrieve::reciprocal_rank_fusion;
+
+            let path_a = db_a
+                .as_deref()
+                .context("--db-a <path> is required for the correspond command")?;
+            let path_b = db_b
+                .as_deref()
+                .context("--db-b <path> is required for the correspond command")?;
+
+            let json_out = positional.iter().any(|a| a == "--json");
+            let filter_kind = {
+                let mut k: Option<String> = None;
+                let mut it2 = positional.iter();
+                while let Some(a) = it2.next() {
+                    if a.as_str() == "--kind" {
+                        k = it2.next().cloned();
+                    }
+                }
+                k
+            };
+
+            let store_a = SqliteStore::open(path_a).map_err(to_any)?;
+            let store_b = SqliteStore::open(path_b).map_err(to_any)?;
+
+            let use_embed =
+                store_a.capabilities().vector_search && store_b.capabilities().vector_search;
+
+            // Load all scoreable nodes from A, optionally filtered by kind.
+            let nodes_a_raw = store_a.nodes_by_kind("").map_err(to_any)?;
+            let nodes_a: Vec<wicked_estate_core::Node> = nodes_a_raw
+                .into_iter()
+                .filter(|n| is_correspond_kind(&n.kind))
+                .filter(|n| {
+                    filter_kind.as_deref().is_none_or(|k| {
+                        format!("{:?}", n.kind).to_lowercase() == k.to_lowercase()
+                    })
+                })
+                .collect();
+
+            // Build a SymbolId → Node map for B so we can look up matched nodes cheaply.
+            let nodes_b_raw = store_b.nodes_by_kind("").map_err(to_any)?;
+            let b_by_sym: HashMap<String, wicked_estate_core::Node> = nodes_b_raw
+                .into_iter()
+                .filter(|n| is_correspond_kind(&n.kind))
+                .map(|n| (n.symbol.to_string(), n))
+                .collect();
+
+            struct Pair {
+                a: String,
+                b: String,
+                a_name: String,
+                b_name: String,
+                score: f64,
+                basis: String,
+            }
+
+            let mut pairs: Vec<Pair> = Vec::new();
+
+            for node_a in &nodes_a {
+                let norm_name_a = correspond_tokens(&node_a.name);
+                if norm_name_a.is_empty() {
+                    continue;
+                }
+                let is_stop = STOP_NAMES.contains(&node_a.name.to_lowercase().as_str())
+                    || STOP_NAMES
+                        .contains(&norm_name_a.join("").as_str());
+
+                // ── Pre-filter: BM25 name candidates from B ──────────────────
+                let name_q = norm_name_a.join(" ");
+                let fts_hits = store_b
+                    .find_symbols(&SymbolQuery {
+                        text: Some(name_q.clone()),
+                        limit: Some(20),
+                        ..SymbolQuery::default()
+                    })
+                    .map_err(to_any)?;
+                let name_rank: Vec<wicked_estate_core::SymbolId> =
+                    fts_hits.iter().map(|n| n.symbol.clone()).collect();
+
+                // ── Embedding candidates from B (when available) ─────────────
+                let embed_rank: Vec<wicked_estate_core::SymbolId> = if use_embed {
+                    store_a
+                        .embedding(&node_a.symbol)
+                        .map_err(to_any)?
+                        .map(|vec| {
+                            store_b
+                                .nearest(&vec, 20)
+                                .map_err(to_any)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .map(|(s, _)| s)
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    vec![]
+                };
+
+                // ── Fuse lists (RRF when embeddings available) ───────────────
+                let has_embed = !embed_rank.is_empty();
+                let rrf_scored: Vec<(wicked_estate_core::SymbolId, f64)> = if has_embed {
+                    reciprocal_rank_fusion(&[name_rank.clone(), embed_rank], 60.0)
+                } else {
+                    vec![]
+                };
+                let rrf_score_map: HashMap<String, f64> = rrf_scored
+                    .iter()
+                    .map(|(s, sc)| (s.to_string(), *sc))
+                    .collect();
+
+                let candidates: Vec<wicked_estate_core::SymbolId> = if has_embed {
+                    rrf_scored.into_iter().take(15).map(|(s, _)| s).collect()
+                } else {
+                    name_rank
+                };
+
+                // Pre-compute per-node-a values used in the inner loop.
+                let toks_a = correspond_tokens(&node_a.name);
+                let sig_toks_a = node_a.signature.as_deref().map(normalize_sig);
+                let arity_a = node_a.signature.as_deref().and_then(arity_from_sig);
+
+                for sym_b in candidates {
+                    let node_b = match b_by_sym.get(sym_b.as_str()) {
+                        Some(n) => n,
+                        None => continue,
+                    };
+
+                    // Kind must be at least partially compatible (non-zero score).
+                    let k_score = kind_match_score(&node_a.kind, &node_b.kind);
+                    if k_score == 0.0 {
+                        continue;
+                    }
+
+                    let toks_b = correspond_tokens(&node_b.name);
+                    let name_j = token_jaccard(&toks_a, &toks_b);
+
+                    let sig_j = match (sig_toks_a.as_deref(), node_b.signature.as_deref()) {
+                        (Some(sa), Some(sb)) => token_jaccard(sa, &normalize_sig(sb)),
+                        _ => 0.0,
+                    };
+
+                    let arity_sim = match (arity_a, node_b.signature.as_deref().and_then(arity_from_sig)) {
+                        (Some(aa), Some(ab)) => {
+                            let d = (aa as f64 - ab as f64).abs();
+                            let m = aa.max(ab) as f64;
+                            if m == 0.0 { 1.0 } else { 1.0 - (d / m).min(1.0) }
+                        }
+                        _ => 0.0,
+                    };
+
+                    let mut score = if has_embed {
+                        // Hybrid: RRF score is primary; kind + arity are boosts.
+                        let rrf = rrf_score_map.get(sym_b.as_str()).copied().unwrap_or(0.0);
+                        rrf + 0.10 * k_score + 0.05 * arity_sim
+                    } else {
+                        // Lexical-only weighted sum (weights from recon formula).
+                        0.50 * name_j + 0.25 * sig_j + 0.15 * k_score + 0.10 * arity_sim
+                    };
+
+                    // Stop-name penalty: rely on sig+kind to carry the pair.
+                    if is_stop {
+                        score *= 0.6;
+                    }
+
+                    // RRF scores are in ~[0.008, 0.033] range; scale threshold for hybrid mode.
+                    let threshold = if has_embed {
+                        correspond_min_score * 0.015
+                    } else {
+                        correspond_min_score
+                    };
+                    if score < threshold {
+                        continue;
+                    }
+
+                    let basis = {
+                        let mut parts: Vec<&str> = Vec::new();
+                        if name_j > 0.0 { parts.push("name"); }
+                        if has_embed { parts.push("embed"); }
+                        if sig_j > 0.1 { parts.push("sig"); }
+                        if k_score == 1.0 { parts.push("kind"); }
+                        parts.join("+")
+                    };
+
+                    pairs.push(Pair {
+                        a: node_a.symbol.to_string(),
+                        b: node_b.symbol.to_string(),
+                        a_name: node_a.name.clone(),
+                        b_name: node_b.name.clone(),
+                        score,
+                        basis,
+                    });
+                }
+            }
+
+            pairs.sort_by(|x, y| y.score.partial_cmp(&x.score).unwrap_or(std::cmp::Ordering::Equal));
+            pairs.dedup_by(|x, y| x.a == y.a && x.b == y.b);
+            pairs.truncate(correspond_top);
+
+            let embed_note = if use_embed { " [name+embed]" } else { " [name-only]" };
+            if json_out {
+                let j: Vec<serde_json::Value> = pairs
+                    .iter()
+                    .map(|p| {
+                        serde_json::json!({
+                            "a": p.a,
+                            "b": p.b,
+                            "a_name": p.a_name,
+                            "b_name": p.b_name,
+                            "score": p.score,
+                            "basis": p.basis,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&j)?);
+            } else if pairs.is_empty() {
+                println!("no correspondences found (min-score={:.2}{embed_note})", correspond_min_score);
+            } else {
+                println!(
+                    "{} correspondence pair(s){embed_note} (min-score={:.2}):",
+                    pairs.len(), correspond_min_score
+                );
+                for p in &pairs {
+                    println!(
+                        "  {:.3}  {}  ↔  {}  [{}]  ({} ↔ {})",
+                        p.score, p.a_name, p.b_name, p.basis, p.a, p.b
+                    );
                 }
             }
         }
