@@ -75,6 +75,9 @@ function Nav() {
           <div className="wordmark-mark"><GraphMark /></div>
           <span>
             <span style={{ color: 'var(--ink)' }}>wicked</span>
+            <span className="wordmark-accent">agile</span>
+            <span style={{ color: 'var(--faint)', fontWeight: 400, margin: '0 4px' }}>/</span>
+            <span style={{ color: 'var(--ink)' }}>wicked</span>
             <span className="wordmark-accent">-estate</span>
           </span>
         </a>
@@ -1136,7 +1139,7 @@ function FeaturedTools() {
       tagline: 'The local-first toolkit for AI-native development.',
       blurb: 'One gate that reads the shape of your work and applies exactly the right rigor — evidence-gated phases, 40+ specialist agents, no black box.',
       href: 'https://wg.wickedagile.com',
-      img: '/wicked-estate/wicked-garden-hero.png',
+      img: '/wicked-garden-hero.png',
       tags: ['MIT', 'Claude plugin', '9 archetypes'],
     },
     {
@@ -1144,7 +1147,7 @@ function FeaturedTools() {
       tagline: 'If you can say it, you can make it.',
       blurb: "Describe a page, deck, or demo out loud and watch it build live in your browser. Point at what's wrong and say what to fix. Every version saved.",
       href: 'https://wi.wickedagile.com',
-      img: '/wicked-estate/wicked-interactive-hero.png',
+      img: '/wicked-interactive-hero.png',
       tags: ['MIT', 'Claude plugin', 'live builder'],
     },
   ]
