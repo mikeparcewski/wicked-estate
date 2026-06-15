@@ -31,9 +31,12 @@ fn factory_opens_sqlite_and_rejects_unbuilt_backends() {
     let store =
         wicked_estate_store::open_store(":memory:").expect("open sqlite memory via factory");
     assert_eq!(store.stats().expect("stats").node_count, 0);
+    // When the postgres feature is NOT enabled, the factory returns an error.
+    // When it IS enabled, it attempts a real connection (which may fail for other reasons).
+    #[cfg(not(feature = "postgres"))]
     assert!(
         wicked_estate_store::open_store("postgres://localhost/db").is_err(),
-        "postgres is not built yet"
+        "postgres is not built without the feature"
     );
     assert!(
         wicked_estate_store::open_store("surrealdb://localhost:8000/ns/db").is_err(),

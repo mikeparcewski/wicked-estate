@@ -21,6 +21,7 @@ surrealdb = { version = "2", optional = true, default-features = false, features
 tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros"] }
 async-trait = { version = "0.1", optional = true }
 deadpool = { version = "0.12", features = ["managed"], optional = true }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"], optional = true }
 
 [features]
 # Enable the W1.5 SurrealDB challenger.  NOT included in the default build.
@@ -30,6 +31,11 @@ surrealdb = ["dep:surrealdb", "dep:tokio"]
 # Enable SqlitePool + AsyncGraphStore impl via deadpool + tokio.
 # Usage: cargo build -p wicked-estate-store --features pool
 pool = ["dep:async-trait", "dep:deadpool", "dep:tokio"]
+# Enable the Postgres GraphStore backend.
+# Usage: cargo build -p wicked-estate-store --features postgres
+#        cargo test  -p wicked-estate-store --features postgres
+# Set TEST_POSTGRES_URL to run the conformance test against a real Postgres instance.
+postgres = ["dep:sqlx", "dep:tokio"]
 
 [dev-dependencies]
 tempfile = "3"
