@@ -14,6 +14,16 @@
 //!                                     (or --dbs a.db,b.db,c.db)
 //!   wicked-estate watch <path>           [--db ...] [--history]
 //!   wicked-estate subscribe              [--db ...] [--since <seq>]
+//!   wicked-estate clusters [<min_size>]  [--json] [--db ...]
+//!   wicked-estate fingerprint <name>     [--db ...]
+//!   wicked-estate changed-since <sha>    [--json] [--db ...]
+//!   wicked-estate annotate <name>        --key K --value V [--confidence F] [--provenance P] [--author A] [--db ...]
+//!   wicked-estate annotations <name>     [--db ...]
+//!   wicked-estate context <name>         [--budget <chars>] [--json] [--db ...]
+//!   wicked-estate entrypoints            [--json] [--db ...]
+//!   wicked-estate leaves                 [--json] [--db ...]
+//!   wicked-estate dead-code              [--json] [--db ...]
+//!   wicked-estate nodes [--kind K]       [--json] [--db ...]
 
 mod scip_auto;
 
