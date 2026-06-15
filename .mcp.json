@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "wicked-estate": {
+      "type": "stdio",
+      "command": "wicked-estate-mcp",
+      "args": [
+        "--db",
+        "/Users/michael.parcewski/Projects/code_intel/.wicked-estate/graph.db"
+      ],
+      "env": {}
+    }
+  }
+}

@@ -1,5 +1,16 @@
 {
   "enabledPlugins": {
     "rust-analyzer-lsp@claude-plugins-official": true
+  },
+  "permissions": {
+    "allow": [
+      "Bash(cargo build *)",
+      "Bash(cargo test *)",
+      "Bash(cargo clippy *)",
+      "Bash(/opt/homebrew/bin/cargo build *)",
+      "Bash(/opt/homebrew/bin/cargo test *)",
+      "Bash(/opt/homebrew/bin/cargo clippy *)",
+      "Bash(/Users/michael.parcewski/.cargo/bin/wicked-estate *)"
+    ]
   }
 }
