@@ -17,9 +17,9 @@ use sha1::{Digest as Sha1Digest, Sha1};
 use sqlx::Row;
 use std::collections::BTreeMap;
 use wicked_estate_core::{
-    Change, ChangeOp, Direction, Edge, Error, GraphRead, GraphStats, GraphWrite,
-    HistoricalEdge, Node, NodeKind, NodeSemantics, RepoInfo, Result, StoreCapabilities, Subgraph,
-    SymbolId, SymbolIndex, SymbolQuery, TraversalSpec, UnresolvedRef,
+    Change, ChangeOp, Direction, Edge, Error, GraphRead, GraphStats, GraphWrite, HistoricalEdge,
+    Node, NodeKind, NodeSemantics, RepoInfo, Result, StoreCapabilities, Subgraph, SymbolId,
+    SymbolIndex, SymbolQuery, TraversalSpec, UnresolvedRef,
 };
 
 // ── Error helper ─────────────────────────────────────────────────────────────
@@ -30,20 +30,36 @@ fn st<E: std::fmt::Display>(e: E) -> Error {
 
 // ── Sync runtime bridge ───────────────────────────────────────────────────────
 
+/// Lazily-initialised, process-wide Tokio runtime used when `PostgresStore` is called from
+/// outside any existing async context (e.g. unit tests, CLI entry points).
+///
+/// Storing the runtime *in* `PostgresStore` is tricky because dropping `Runtime` before the
+/// pool would cancel all pending async tasks.  Using a process-wide runtime means the pool's
+/// background keepalive tasks survive across multiple `PostgresStore` instances and `rt_block`
+/// calls without each call spinning up/tearing down a fresh runtime.
+fn global_rt() -> &'static tokio::runtime::Runtime {
+    use std::sync::OnceLock;
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime for PostgresStore")
+    })
+}
+
 /// Run an async future synchronously.
 ///
 /// - Inside a Tokio runtime: uses `block_in_place` to avoid blocking the executor thread.
-/// - Outside a Tokio runtime (e.g. unit tests): spins up a one-shot runtime.
+/// - Outside a Tokio runtime (e.g. unit tests): uses the process-wide global runtime so the
+///   pool's keepalive tasks are not torn down between calls.
 fn rt_block<F, T>(f: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f)),
-        Err(_) => {
-            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-            rt.block_on(f)
-        }
+        Err(_) => global_rt().block_on(f),
     }
 }
 
@@ -77,7 +93,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   data                  TEXT NOT NULL,
   description           TEXT,
   requirement           TEXT,
-  requirement_validated INTEGER NOT NULL DEFAULT 0
+  requirement_validated BIGINT NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
 CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
@@ -102,7 +118,7 @@ CREATE TABLE IF NOT EXISTS unresolved_refs (
   raw_name TEXT NOT NULL,
   kind     TEXT NOT NULL,
   file     TEXT NOT NULL DEFAULT '',
-  line     INTEGER NOT NULL DEFAULT 0
+  line     BIGINT NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_unresolved_refs_name ON unresolved_refs(raw_name);
 CREATE INDEX IF NOT EXISTS idx_unresolved_refs_file ON unresolved_refs(file);
@@ -205,11 +221,10 @@ impl PostgresStore {
     /// Read an arbitrary string value from the `meta` table. Returns `None` when absent.
     pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
         rt_block(async {
-            let row: Option<sqlx::postgres::PgRow> =
-                sqlx::query("SELECT v FROM meta WHERE k = $1")
-                    .bind(key)
-                    .fetch_optional(&self.pool)
-                    .await?;
+            let row: Option<sqlx::postgres::PgRow> = sqlx::query("SELECT v FROM meta WHERE k = $1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?;
             Ok::<Option<String>, sqlx::Error>(row.and_then(|r| r.try_get("v").ok()))
         })
         .map_err(st)
@@ -241,10 +256,8 @@ impl PostgresStore {
     /// Increment the graph version. All cache entries at prior versions become stale.
     pub fn bump_version(&mut self) -> Result<()> {
         rt_block(
-            sqlx::query(
-                "UPDATE meta SET v = (v::BIGINT + 1)::TEXT WHERE k = 'graph_version'",
-            )
-            .execute(&self.pool),
+            sqlx::query("UPDATE meta SET v = (v::BIGINT + 1)::TEXT WHERE k = 'graph_version'")
+                .execute(&self.pool),
         )
         .map_err(st)?;
         Ok(())
@@ -556,12 +569,10 @@ impl GraphWrite for PostgresStore {
         let sha = git_blob_sha(text);
         // Dedup: INSERT … ON CONFLICT DO NOTHING — identical content shares one content row.
         rt_block(
-            sqlx::query(
-                "INSERT INTO content(git_sha, body) VALUES($1, $2) ON CONFLICT DO NOTHING",
-            )
-            .bind(&sha)
-            .bind(text)
-            .execute(&self.pool),
+            sqlx::query("INSERT INTO content(git_sha, body) VALUES($1, $2) ON CONFLICT DO NOTHING")
+                .bind(&sha)
+                .bind(text)
+                .execute(&self.pool),
         )
         .map_err(st)?;
         // Upsert the files row with the git_sha pointer.
@@ -694,9 +705,10 @@ impl GraphRead for PostgresStore {
                 None => Ok::<Option<Node>, sqlx::Error>(None),
                 Some(r) => {
                     let json: String = r.try_get("data")?;
-                    Ok(Some(serde_json::from_str::<Node>(&json).map_err(|e| {
-                        sqlx::Error::Decode(Box::new(e))
-                    })?))
+                    Ok(Some(
+                        serde_json::from_str::<Node>(&json)
+                            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
+                    ))
                 }
             }
         })
@@ -725,11 +737,10 @@ impl GraphRead for PostgresStore {
             .map_err(st)?
         } else if let Some(name) = &query.exact_name {
             rt_block(async {
-                let rows =
-                    sqlx::query("SELECT data FROM nodes WHERE name = $1 ORDER BY symbol")
-                        .bind(name)
-                        .fetch_all(&self.pool)
-                        .await?;
+                let rows = sqlx::query("SELECT data FROM nodes WHERE name = $1 ORDER BY symbol")
+                    .bind(name)
+                    .fetch_all(&self.pool)
+                    .await?;
                 let mut v = Vec::new();
                 for row in rows {
                     let json: String = row.try_get("data")?;
@@ -783,10 +794,7 @@ impl GraphRead for PostgresStore {
             Direction::Both => "SELECT data FROM edges WHERE source = $1 OR target = $1",
         };
         rt_block(async {
-            let rows = sqlx::query(sql)
-                .bind(&id.0)
-                .fetch_all(&self.pool)
-                .await?;
+            let rows = sqlx::query(sql).bind(&id.0).fetch_all(&self.pool).await?;
             let mut out = Vec::new();
             for row in rows {
                 let json: String = row.try_get("data")?;
@@ -1087,11 +1095,10 @@ impl GraphRead for PostgresStore {
 
     fn find_by_requirement(&self, requirement: &str) -> Result<Vec<Node>> {
         rt_block(async {
-            let rows =
-                sqlx::query("SELECT data FROM nodes WHERE requirement = $1 ORDER BY symbol")
-                    .bind(requirement)
-                    .fetch_all(&self.pool)
-                    .await?;
+            let rows = sqlx::query("SELECT data FROM nodes WHERE requirement = $1 ORDER BY symbol")
+                .bind(requirement)
+                .fetch_all(&self.pool)
+                .await?;
             let mut out = Vec::new();
             for row in rows {
                 let json: String = row.try_get("data")?;
@@ -1117,12 +1124,11 @@ impl GraphRead for PostgresStore {
 
             let file_kind = serde_json::to_string(&NodeKind::File)
                 .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
-            let file_count: i64 =
-                sqlx::query("SELECT COUNT(*) AS c FROM nodes WHERE kind = $1")
-                    .bind(&file_kind)
-                    .fetch_one(&self.pool)
-                    .await?
-                    .try_get("c")?;
+            let file_count: i64 = sqlx::query("SELECT COUNT(*) AS c FROM nodes WHERE kind = $1")
+                .bind(&file_kind)
+                .fetch_one(&self.pool)
+                .await?
+                .try_get("c")?;
 
             let unresolved_ref_count: i64 =
                 sqlx::query("SELECT COUNT(*) AS c FROM unresolved_refs")
@@ -1132,10 +1138,9 @@ impl GraphRead for PostgresStore {
 
             let mut nodes_by_kind = BTreeMap::new();
             {
-                let rows =
-                    sqlx::query("SELECT kind, COUNT(*) AS c FROM nodes GROUP BY kind")
-                        .fetch_all(&self.pool)
-                        .await?;
+                let rows = sqlx::query("SELECT kind, COUNT(*) AS c FROM nodes GROUP BY kind")
+                    .fetch_all(&self.pool)
+                    .await?;
                 for row in rows {
                     let k: String = row.try_get("kind")?;
                     let c: i64 = row.try_get("c")?;
@@ -1144,10 +1149,9 @@ impl GraphRead for PostgresStore {
             }
             let mut edges_by_kind = BTreeMap::new();
             {
-                let rows =
-                    sqlx::query("SELECT kind, COUNT(*) AS c FROM edges GROUP BY kind")
-                        .fetch_all(&self.pool)
-                        .await?;
+                let rows = sqlx::query("SELECT kind, COUNT(*) AS c FROM edges GROUP BY kind")
+                    .fetch_all(&self.pool)
+                    .await?;
                 for row in rows {
                     let k: String = row.try_get("kind")?;
                     let c: i64 = row.try_get("c")?;

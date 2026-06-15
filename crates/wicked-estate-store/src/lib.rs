@@ -958,10 +958,7 @@ impl GraphStoreMutExt for PostgresStore {
     }
 
     /// PostgresStore uses column-level trigram index — no separate FTS table to rebuild.
-    fn bulk_rebuild_fts_for_files(
-        &mut self,
-        _files: &[&str],
-    ) -> wicked_estate_core::Result<()> {
+    fn bulk_rebuild_fts_for_files(&mut self, _files: &[&str]) -> wicked_estate_core::Result<()> {
         Ok(())
     }
 }

@@ -126,3 +126,34 @@ tree-sitter-arduino = "0.24"   # inherits tree-sitter-cpp node set, ABI 15
 tree-sitter-sfapex = "3.0"     # Salesforce Apex (Java-shaped); language is in the `apex` submodule
 tree-sitter-racket = "0.24"    # s-expression grammar; predicate-driven query
 tree-sitter-jinja2 = "0.0.14"
+
+# ── Cloud collector optional dependencies (feature-gated) ────────────────────
+# None are pulled in by default; enable via --features cloud-aws / cloud-azure / cloud-gcp.
+
+# AWS: Resource Explorer v2 (primary enumeration), EC2 + IAM (supplemental relationships).
+aws-config                = { version = "1", optional = true }
+aws-sdk-resourceexplorer2 = { version = "1", optional = true }
+aws-sdk-ec2               = { version = "1", optional = true }
+aws-sdk-iam               = { version = "1", optional = true }
+
+# Azure: identity (DefaultAzureCredential) + management (Resource Graph / resource groups).
+azure_identity            = { version = "1.0.0", optional = true }
+azure_mgmt_resources      = { version = "0.21.0", optional = true }
+
+# GCP: Cloud Asset Inventory (SearchAllResources) + Application Default Credentials.
+google-cloud-asset-v1     = { version = "1.11.0", optional = true }
+google-cloud-auth         = { version = "1.13.0", optional = true }
+
+# tokio is required by all three cloud collectors (sync wrapper around async SDK calls).
+tokio                     = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
+
+[features]
+# Enable the real AWS cloud collector (aws-config + Resource Explorer v2 + EC2 + IAM).
+cloud-aws   = ["dep:aws-config", "dep:aws-sdk-resourceexplorer2", "dep:aws-sdk-ec2",
+               "dep:aws-sdk-iam", "dep:tokio"]
+# Enable the real Azure cloud collector (azure_identity + azure_mgmt_resources).
+cloud-azure = ["dep:azure_identity", "dep:azure_mgmt_resources", "dep:tokio"]
+# Enable the real GCP cloud collector (google-cloud-asset-v1 + google-cloud-auth).
+cloud-gcp   = ["dep:google-cloud-asset-v1", "dep:google-cloud-auth", "dep:tokio"]
+# Convenience: enable all three cloud collectors.
+cloud-all   = ["cloud-aws", "cloud-azure", "cloud-gcp"]

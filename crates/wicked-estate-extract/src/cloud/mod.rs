@@ -1,5 +1,5 @@
-//! Read-only cloud `Collector` interface (AWS / Azure / GCP) — **designed-not-built seam**
-//! (Wave W10.2, ADR-004).
+//! Read-only cloud `Collector` interface (AWS / Azure / GCP) — **real provider impls** (Wave W10.2,
+//! ADR-004).
 //!
 //! # Design constraints (ADR-004 §5 — Security posture)
 //!
@@ -11,36 +11,36 @@
 //!   chain) but never a raw key or secret.
 //! * **Auditable.** Every collected node records `metadata["collector"]` + `metadata["origin"]`.
 //!
-//! # Intended real backends (designed, not built)
+//! # Real backends
 //!
-//! | Provider | Service | Minimal read-only role |
-//! |----------|---------|------------------------|
-//! | **AWS**  | AWS Resource Explorer (`ResourceExplorer2:Search`) + Config | `AWSResourceExplorerReadOnlyAccess` |
-//! | **Azure**| Azure Resource Graph (`resources | project …`) | `Reader` on the subscription |
-//! | **GCP**  | Cloud Asset Inventory (`cloudasset.assets.searchAllResources`) | `roles/cloudasset.viewer` |
-//!
-//! # What is built
-//!
-//! * [`CloudProvider`] — discriminator enum for the three hyperscalers.
-//! * [`CloudResource`] — provider-agnostic resource descriptor (no credential fields).
-//! * [`CloudCollector`] trait — the one genuinely new abstraction (sibling to `Extractor`).
-//! * [`cloud_resources_to_nodes`] — maps `CloudResource`s to `NodeKind::Other("resource")` nodes
-//!   tagged `origin=live` + the provider, compatible with `tfstate`'s node shape so
-//!   `estate_drift` can diff iac-vs-live by `(type, name)` key.
-//! * [`MockCloudCollector`] — deterministic, no-network reference impl for tests and demos.
-//! * [`CloudConfig`] — runtime config (no secrets).
-//! * [`open_cloud_collector`] — factory that returns a *designed-not-built* error for all real
-//!   providers, mirroring `open_telemetry_sink` from ADR-006. The `MockCloudCollector` is
-//!   constructed directly, not via this factory.
-//!
-//! # What is designed, not built
-//!
-//! The real AWS / Azure / GCP collector impls (network SDK calls, pagination, retry). They live in
-//! a future `ci-collect` crate or as match arms in [`open_cloud_collector`]; adding one requires
-//! **zero caller changes** (identical to ADR-003 `open_store` / ADR-006 `open_telemetry_sink`).
+//! | Provider | Service | Minimal read-only role | Feature flag |
+//! |----------|---------|------------------------|--------------|
+//! | **AWS**  | AWS Resource Explorer v2 + EC2 + IAM | `AWSResourceExplorerReadOnlyAccess` | `cloud-aws` |
+//! | **Azure**| Azure Resource Graph (`resources | project …`) | `Reader` on the subscription | `cloud-azure` |
+//! | **GCP**  | Cloud Asset Inventory (`cloudasset.assets.searchAllResources`) | `roles/cloudasset.viewer` | `cloud-gcp` |
+
+#[cfg(feature = "cloud-aws")]
+pub mod aws;
+
+#[cfg(feature = "cloud-azure")]
+pub mod azure;
+
+#[cfg(feature = "cloud-gcp")]
+pub mod gcp;
+
+use std::collections::HashMap;
 
 use serde_json::Value;
-use wicked_estate_core::{Error, Language, Location, Node, NodeKind, Result, Span, Symbol};
+#[cfg(any(
+    not(feature = "cloud-aws"),
+    not(feature = "cloud-azure"),
+    not(feature = "cloud-gcp")
+))]
+use wicked_estate_core::Error;
+use wicked_estate_core::{
+    Edge, EdgeKind, Extraction, Language, Location, Node, NodeKind, ResolutionTier, Result, Span,
+    Symbol, SymbolId, UnresolvedRef,
+};
 
 // ── Provider discriminator ────────────────────────────────────────────
 
@@ -84,16 +84,19 @@ impl CloudProvider {
 ///
 /// # Field semantics
 ///
-/// | Field | Meaning | Example |
-/// |-------|---------|---------|
-/// | `id`  | Stable physical identity (ARN, Azure resource ID, GCP full-resource name) | `"arn:aws:s3:::my-bucket"` |
-/// | `kind` | Provider resource type string | `"aws_s3_bucket"`, `"Microsoft.Storage/storageAccounts"` |
-/// | `region` | Cloud region / location (if applicable) | `"us-east-1"` |
+/// | Field        | Meaning | Example |
+/// |--------------|---------|---------|
+/// | `id`         | Stable physical identity (ARN, Azure resource ID, GCP full-resource name) | `"arn:aws:s3:::my-bucket"` |
+/// | `kind`       | Provider resource type string | `"aws_s3_bucket"`, `"Microsoft.Storage/storageAccounts"` |
+/// | `region`     | Cloud region / location (if applicable) | `"us-east-1"` |
 /// | `depends_on` | Physical IDs of resources this resource depends on (edge targets) | `["arn:aws:iam::…"]` |
 /// | `attributes` | Flattened key-value bag of observable attributes | `[("bucket_name", "my-bucket")]` |
+/// | `account_id` | AWS account ID / Azure subscription ID / GCP project ID | `"123456789012"` |
+/// | `name`       | Human-readable display name (separate from the stable `id`) | `"my-bucket"` |
+/// | `tags`       | Provider-first-class resource tags | `{"env": "prod", "team": "platform"}` |
 ///
-/// The `attributes` field must **never** contain credential values (passwords, secrets, tokens).
-/// Redact before constructing.
+/// The `attributes` and `tags` fields must **never** contain credential values (passwords, secrets,
+/// tokens). Redact before constructing.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CloudResource {
     /// Stable physical identity (ARN, Azure resource ID, GCP full-resource name).
@@ -107,6 +110,26 @@ pub struct CloudResource {
     pub depends_on: Vec<String>,
     /// Flattened observable attributes. Secrets must be redacted before populating.
     pub attributes: Vec<(String, String)>,
+    /// AWS account ID / Azure subscription ID / GCP project ID, if available.
+    pub account_id: Option<String>,
+    /// Human-readable display name (separate from the stable `id`).
+    /// For AWS this is often the `Name` tag value; for Azure the resource `name`; for GCP
+    /// the `displayName` field from Cloud Asset Inventory.
+    pub name: Option<String>,
+    /// Provider-first-class resource tags (AWS tags, Azure tags, GCP labels).
+    /// Distinct from `attributes` — these are the provider-native tagging constructs.
+    pub tags: HashMap<String, String>,
+}
+
+// ── Shared utilities ──────────────────────────────────────────────────
+
+/// Build a stable [`SymbolId`] for a cloud resource.
+///
+/// Uses `Symbol::synthetic` with scheme `"cloud-<provider>"` and the physical `id` as the key.
+/// This gives ADR-002-stable IDs regardless of order or provider-side mutations.
+pub(crate) fn resource_symbol(provider: &CloudProvider, id: &str) -> SymbolId {
+    let scheme = format!("cloud-{}", provider.as_str());
+    Symbol::synthetic(&scheme, id).id()
 }
 
 // ── CloudCollector trait ──────────────────────────────────────────────
@@ -138,6 +161,9 @@ pub struct CloudResource {
 ///         region: Some("us-east-1".to_string()),
 ///         depends_on: vec![],
 ///         attributes: vec![("bucket_name".to_string(), "my-bucket".to_string())],
+///         account_id: Some("123456789012".to_string()),
+///         name: Some("my-bucket".to_string()),
+///         tags: std::collections::HashMap::new(),
 ///     }],
 /// };
 /// let resources = collector.collect().unwrap();
@@ -163,15 +189,20 @@ pub trait CloudCollector: std::fmt::Debug {
 /// Map a slice of [`CloudResource`]s to `NodeKind::Other("resource")` graph nodes.
 ///
 /// Each node is tagged with:
-/// - `metadata["origin"]   = "live"` — the drift discriminator (matches `tfstate.rs`)
-/// - `metadata["provider"] = provider.as_str()` — `"aws"` / `"azure"` / `"gcp"`
-/// - `metadata["type"]     = resource.kind` — resource type string
-/// - `metadata["region"]   = resource.region` (when present)
+/// - `metadata["origin"]     = "live"` — the drift discriminator (matches `tfstate.rs`)
+/// - `metadata["provider"]   = provider.as_str()` — `"aws"` / `"azure"` / `"gcp"`
+/// - `metadata["type"]       = resource.kind` — resource type string
+/// - `metadata["region"]     = resource.region` (when present)
+/// - `metadata["account_id"] = resource.account_id` (when present)
+/// - `metadata["name"]       = resource.name` (when present)
+/// - `metadata["tag.<key>"]  = value` — per provider-native tag
 /// - per-resource attributes are stored as `metadata["attr.<key>"] = value`
 ///
 /// The node `name` is `resource.id` and the `signature` is `resource.kind`. This mirrors
 /// `tfstate.rs`'s shape so `estate_drift` (W10.3) can diff `origin=iac` vs `origin=live` by
 /// `(kind, name)` key without special-casing each collector.
+///
+/// For callers that also need edges, prefer [`cloud_resources_to_extraction`].
 ///
 /// # Symbol identity
 ///
@@ -184,9 +215,70 @@ pub fn cloud_resources_to_nodes(provider: CloudProvider, resources: &[CloudResou
         .collect()
 }
 
+/// Map a slice of [`CloudResource`]s to a full [`Extraction`]: nodes **and** `depends_on` edges.
+///
+/// This is the preferred function for callers that need both the node set and the dependency
+/// edges in one call. It mirrors the pattern used by [`crate::TfstateCollector`]:
+///
+/// - One `NodeKind::Other("resource")` node per resource (same shape as `cloud_resources_to_nodes`).
+/// - One `EdgeKind::Other("depends_on")` edge per entry in `resource.depends_on` where the target
+///   id also exists in the `resources` slice (local edge). Cross-scope deps become
+///   [`UnresolvedRef`]s so the resolver pass can wire them later.
+/// - Every edge carries `confidence`, `provenance`, and `resolved_by` (ADR-001 invariant).
+///   Live cloud data is fact — `ResolutionTier::Parsed` (confidence 1.0).
+///
+/// [`cloud_resources_to_nodes`] is kept for backward compatibility and delegates here.
+pub fn cloud_resources_to_extraction(
+    provider: CloudProvider,
+    resources: &[CloudResource],
+) -> Extraction {
+    // Build id → SymbolId index for local-edge resolution.
+    let id_to_symbol: HashMap<String, SymbolId> = resources
+        .iter()
+        .map(|r| (r.id.clone(), resource_symbol(&provider, &r.id)))
+        .collect();
+
+    let mut nodes: Vec<Node> = Vec::with_capacity(resources.len());
+    let mut local_edges: Vec<Edge> = Vec::new();
+    let mut refs: Vec<UnresolvedRef> = Vec::new();
+
+    let resolved_by = format!("cloud-collector-{}", provider.as_str());
+
+    for resource in resources {
+        let symbol = resource_symbol(&provider, &resource.id);
+        nodes.push(resource_to_node(&provider, resource));
+
+        for dep_id in &resource.depends_on {
+            if let Some(dep_sym) = id_to_symbol.get(dep_id) {
+                // Dep is in this batch → local resolved edge.
+                local_edges.push(Edge::new(
+                    symbol.clone(),
+                    dep_sym.clone(),
+                    EdgeKind::Other("depends_on".to_string()),
+                    ResolutionTier::Parsed,
+                    &resolved_by,
+                ));
+            } else {
+                // Dep is outside this batch (cross-account, cross-scope) → unresolved ref.
+                refs.push(UnresolvedRef::new(
+                    symbol.clone(),
+                    dep_id.clone(),
+                    EdgeKind::Other("depends_on".to_string()),
+                    Location::new(resource.id.clone(), Span::ZERO),
+                ));
+            }
+        }
+    }
+
+    Extraction {
+        nodes,
+        local_edges,
+        refs,
+    }
+}
+
 fn resource_to_node(provider: &CloudProvider, resource: &CloudResource) -> Node {
-    let scheme = format!("cloud-{}", provider.as_str());
-    let symbol = Symbol::synthetic(&scheme, &resource.id).id();
+    let symbol = resource_symbol(provider, &resource.id);
 
     let mut metadata = serde_json::Map::new();
     // Drift discriminator — must match tfstate.rs's "live" tag exactly.
@@ -199,6 +291,19 @@ fn resource_to_node(provider: &CloudProvider, resource: &CloudResource) -> Node 
 
     if let Some(ref region) = resource.region {
         metadata.insert("region".to_string(), Value::String(region.clone()));
+    }
+
+    if let Some(ref account_id) = resource.account_id {
+        metadata.insert("account_id".to_string(), Value::String(account_id.clone()));
+    }
+
+    if let Some(ref name) = resource.name {
+        metadata.insert("name".to_string(), Value::String(name.clone()));
+    }
+
+    for (k, v) in &resource.tags {
+        // Namespace tag keys under "tag." to avoid collisions with reserved keys.
+        metadata.insert(format!("tag.{k}"), Value::String(v.clone()));
     }
 
     for (k, v) in &resource.attributes {
@@ -226,7 +331,7 @@ fn resource_to_node(provider: &CloudProvider, resource: &CloudResource) -> Node 
 ///
 /// Returns its canned [`resources`][MockCloudCollector::resources] slice unchanged — no network,
 /// no credentials. Construct directly; do **not** use [`open_cloud_collector`] (the factory
-/// returns a designed-not-built error for all real providers).
+/// returns a feature-not-enabled error when cloud features are absent).
 ///
 /// # Example
 ///
@@ -288,59 +393,78 @@ pub struct CloudConfig {
 
 /// Open a [`CloudCollector`] from a [`CloudConfig`].
 ///
-/// | Provider | Returns |
-/// |----------|---------|
-/// | [`CloudProvider::Aws`]   | `Err(Error::Extraction("… designed but not built — see ADR-004"))` |
-/// | [`CloudProvider::Azure`] | same |
-/// | [`CloudProvider::Gcp`]   | same |
+/// Each provider dispatches to its real impl when the matching Cargo feature is enabled.
+/// When a feature is disabled the factory returns a clear, actionable error message.
+///
+/// | Provider | Feature flag | Returns when disabled |
+/// |----------|--------------|-----------------------|
+/// | [`CloudProvider::Aws`]   | `cloud-aws`   | `Err` with "rebuild with --features cloud-aws" |
+/// | [`CloudProvider::Azure`] | `cloud-azure` | `Err` with "rebuild with --features cloud-azure" |
+/// | [`CloudProvider::Gcp`]   | `cloud-gcp`   | `Err` with "rebuild with --features cloud-gcp" |
 ///
 /// **The [`MockCloudCollector`] is not routed through this factory** — construct it directly in
 /// tests and demos.
 ///
 /// # Real backend extensibility
 ///
-/// Adding a real AWS / Azure / GCP impl:
-/// 1. Add a `CloudCollector` impl (SDK calls, pagination, retry) in `ci-collect` (new crate) or
-///    a submodule here.
-/// 2. Add one match arm in this function on `cfg.provider`.
+/// Adding a new provider:
+/// 1. Add a `CloudCollector` impl (SDK calls, pagination, retry) in a new `cloud/<provider>.rs`.
+/// 2. Add one `#[cfg(feature = "cloud-<provider>")]` match arm in this function.
 /// 3. **Zero caller changes** — identical to the `open_store` (ADR-003) and
 ///    `open_telemetry_sink` (ADR-006) patterns.
 ///
 /// # Credential note
 ///
-/// The real impls will obtain credentials solely from the provider's ambient SDK chain
+/// The real impls obtain credentials solely from the provider's ambient SDK chain
 /// (env / profile / workload identity) — never from this config struct (ADR-004 §5).
 ///
 /// # Errors
 ///
-/// Returns [`Error::Extraction`] with a clear "designed but not built" message referencing
-/// ADR-004 and the intended backend SDK for each provider.
+/// Returns [`Error::Extraction`] when the required feature is not enabled, or when the
+/// underlying collector encounters a credential / API error.
 pub fn open_cloud_collector(cfg: &CloudConfig) -> Result<Box<dyn CloudCollector>> {
-    let msg = match cfg.provider {
-        CloudProvider::Aws => format!(
-            "AWS cloud collector is designed but not built — see ADR-004. \
-             To enable: add an `aws-sdk-resource-explorer2` + `aws-config` impl \
-             (AWS Resource Explorer v2 / Config) and one match arm in \
-             `open_cloud_collector`; zero caller changes required. \
-             Region hint: {:?}, profile hint: {:?}.",
-            cfg.region, cfg.profile,
-        ),
-        CloudProvider::Azure => format!(
-            "Azure cloud collector is designed but not built — see ADR-004. \
-             To enable: add an `azure_mgmt_resources` + Resource Graph impl \
-             and one match arm in `open_cloud_collector`; zero caller changes required. \
-             Region hint: {:?}, profile hint: {:?}.",
-            cfg.region, cfg.profile,
-        ),
-        CloudProvider::Gcp => format!(
-            "GCP cloud collector is designed but not built — see ADR-004. \
-             To enable: add a `google-cloud-asset` (Cloud Asset Inventory) impl \
-             and one match arm in `open_cloud_collector`; zero caller changes required. \
-             Region hint: {:?}, profile hint: {:?}.",
-            cfg.region, cfg.profile,
-        ),
-    };
-    Err(Error::Extraction(msg))
+    match cfg.provider {
+        CloudProvider::Aws => {
+            #[cfg(not(feature = "cloud-aws"))]
+            {
+                Err(Error::Extraction(
+                    "AWS cloud collector feature is not enabled — \
+                     rebuild with --features wicked-estate-extract/cloud-aws \
+                     (requires `aws-config`, `aws-sdk-resourceexplorer2`, `aws-sdk-ec2`, \
+                     `aws-sdk-iam`; see ADR-004)"
+                        .to_string(),
+                ))
+            }
+            #[cfg(feature = "cloud-aws")]
+            Ok(Box::new(aws::AwsCollector::new(cfg)?))
+        }
+        CloudProvider::Azure => {
+            #[cfg(not(feature = "cloud-azure"))]
+            {
+                Err(Error::Extraction(
+                    "Azure cloud collector feature is not enabled — \
+                     rebuild with --features wicked-estate-extract/cloud-azure \
+                     (requires `azure_identity`, `azure_mgmt_resources`; see ADR-004)"
+                        .to_string(),
+                ))
+            }
+            #[cfg(feature = "cloud-azure")]
+            Ok(Box::new(azure::AzureCollector::new(cfg)?))
+        }
+        CloudProvider::Gcp => {
+            #[cfg(not(feature = "cloud-gcp"))]
+            {
+                Err(Error::Extraction(
+                    "GCP cloud collector feature is not enabled — \
+                     rebuild with --features wicked-estate-extract/cloud-gcp \
+                     (requires `google-cloud-asset`, `google-cloud-auth`; see ADR-004)"
+                        .to_string(),
+                ))
+            }
+            #[cfg(feature = "cloud-gcp")]
+            Ok(Box::new(gcp::GcpCollector::new(cfg)?))
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
@@ -358,6 +482,13 @@ mod tests {
             region: Some("us-east-1".to_string()),
             depends_on: vec![],
             attributes: vec![("bucket_name".to_string(), "my-bucket".to_string())],
+            account_id: Some("123456789012".to_string()),
+            name: Some("my-bucket".to_string()),
+            tags: {
+                let mut m = HashMap::new();
+                m.insert("env".to_string(), "prod".to_string());
+                m
+            },
         }
     }
 
@@ -368,6 +499,9 @@ mod tests {
             region: None,
             depends_on: vec!["arn:aws:s3:::my-bucket".to_string()],
             attributes: vec![("role_name".to_string(), "app-role".to_string())],
+            account_id: Some("123456789012".to_string()),
+            name: Some("app-role".to_string()),
+            tags: HashMap::new(),
         }
     }
 
@@ -445,13 +579,19 @@ mod tests {
 
     #[test]
     fn nodes_have_correct_provider_tag() {
-        let nodes = cloud_resources_to_nodes(CloudProvider::Azure, &[CloudResource {
-            id: "/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Network/virtualNetworks/vnet-1".to_string(),
-            kind: "Microsoft.Network/virtualNetworks".to_string(),
-            region: Some("westeurope".to_string()),
-            depends_on: vec![],
-            attributes: vec![],
-        }]);
+        let nodes = cloud_resources_to_nodes(
+            CloudProvider::Azure,
+            &[CloudResource {
+                id: "/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Network/virtualNetworks/vnet-1".to_string(),
+                kind: "Microsoft.Network/virtualNetworks".to_string(),
+                region: Some("westeurope".to_string()),
+                depends_on: vec![],
+                attributes: vec![],
+                account_id: None,
+                name: None,
+                tags: HashMap::new(),
+            }],
+        );
         assert_meta_str(&nodes[0], "provider", "azure");
     }
 
@@ -500,6 +640,24 @@ mod tests {
     }
 
     #[test]
+    fn node_account_id_in_metadata() {
+        let nodes = cloud_resources_to_nodes(CloudProvider::Aws, &[aws_bucket()]);
+        assert_meta_str(&nodes[0], "account_id", "123456789012");
+    }
+
+    #[test]
+    fn node_name_field_in_metadata() {
+        let nodes = cloud_resources_to_nodes(CloudProvider::Aws, &[aws_bucket()]);
+        assert_meta_str(&nodes[0], "name", "my-bucket");
+    }
+
+    #[test]
+    fn node_tags_namespaced() {
+        let nodes = cloud_resources_to_nodes(CloudProvider::Aws, &[aws_bucket()]);
+        assert_meta_str(&nodes[0], "tag.env", "prod");
+    }
+
+    #[test]
     fn nodes_stable_symbol_ids_by_physical_id() {
         // Two separate calls with the same resource must produce the same SymbolId (ADR-002).
         let n1 = cloud_resources_to_nodes(CloudProvider::Aws, &[aws_bucket()]);
@@ -520,6 +678,9 @@ mod tests {
             region: None,
             depends_on: vec![],
             attributes: vec![],
+            account_id: None,
+            name: None,
+            tags: HashMap::new(),
         };
         let azure_nodes = cloud_resources_to_nodes(CloudProvider::Azure, &[azure_resource]);
         assert_ne!(
@@ -533,7 +694,6 @@ mod tests {
     #[test]
     fn depends_on_does_not_affect_node_count() {
         // cloud_resources_to_nodes maps resources → nodes only (1:1).
-        // Edge resolution is the caller's responsibility (same pattern as tfstate.rs).
         let resources = vec![aws_bucket(), aws_iam_role()];
         let nodes = cloud_resources_to_nodes(CloudProvider::Aws, &resources);
         assert_eq!(nodes.len(), 2);
@@ -541,7 +701,6 @@ mod tests {
 
     #[test]
     fn resource_with_depends_on_maps_to_node_correctly() {
-        // aws_iam_role depends on aws_s3_bucket — the node must still be correct.
         let nodes = cloud_resources_to_nodes(CloudProvider::Aws, &[aws_iam_role()]);
         let node = find_node(&nodes, "arn:aws:iam::123456789:role/app-role");
         assert_meta_str(node, "type", "aws_iam_role");
@@ -549,71 +708,154 @@ mod tests {
         assert_eq!(node.signature.as_deref(), Some("aws_iam_role"));
     }
 
-    // ── open_cloud_collector — designed-not-built factory ─────────────
+    // ── cloud_resources_to_extraction ────────────────────────────────
 
     #[test]
-    fn factory_aws_returns_designed_not_built_error() {
-        let cfg = CloudConfig {
-            provider: CloudProvider::Aws,
+    fn extraction_nodes_match_to_nodes_output() {
+        let resources = vec![aws_bucket(), aws_iam_role()];
+        let ex = cloud_resources_to_extraction(CloudProvider::Aws, &resources);
+        let nodes_only = cloud_resources_to_nodes(CloudProvider::Aws, &resources);
+        assert_eq!(
+            ex.nodes, nodes_only,
+            "extraction nodes must match cloud_resources_to_nodes output"
+        );
+    }
+
+    #[test]
+    fn extraction_emits_local_edge_for_in_batch_dep() {
+        let resources = vec![aws_bucket(), aws_iam_role()];
+        let ex = cloud_resources_to_extraction(CloudProvider::Aws, &resources);
+
+        let bucket_sym = resource_symbol(&CloudProvider::Aws, "arn:aws:s3:::my-bucket");
+        let role_sym = resource_symbol(&CloudProvider::Aws, "arn:aws:iam::123456789:role/app-role");
+
+        let found = ex.local_edges.iter().any(|e| {
+            e.source == role_sym
+                && e.target == bucket_sym
+                && e.kind == EdgeKind::Other("depends_on".to_string())
+        });
+        assert!(
+            found,
+            "expected depends_on edge role → bucket; edges: {:?}",
+            ex.local_edges
+                .iter()
+                .map(|e| (e.source.as_str(), e.target.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn extraction_edge_has_confidence_and_provenance() {
+        let resources = vec![aws_bucket(), aws_iam_role()];
+        let ex = cloud_resources_to_extraction(CloudProvider::Aws, &resources);
+        assert!(!ex.local_edges.is_empty(), "must have at least one edge");
+        let edge = &ex.local_edges[0];
+        assert_eq!(
+            edge.confidence.get(),
+            1.0,
+            "live cloud edges must have confidence 1.0 (ResolutionTier::Parsed)"
+        );
+        assert!(
+            !edge.resolved_by.is_empty(),
+            "resolved_by must not be empty"
+        );
+    }
+
+    #[test]
+    fn extraction_unresolved_ref_for_cross_scope_dep() {
+        let resource_with_external_dep = CloudResource {
+            id: "arn:aws:ec2:us-east-1:123:instance/i-abc".to_string(),
+            kind: "aws_instance".to_string(),
             region: Some("us-east-1".to_string()),
-            profile: None,
+            depends_on: vec!["arn:aws:vpc:us-east-1:123:vpc/vpc-external".to_string()],
+            attributes: vec![],
+            account_id: None,
+            name: None,
+            tags: HashMap::new(),
         };
-        let err = open_cloud_collector(&cfg).expect_err("AWS factory must return Err");
-        let msg = err.to_string();
+        let ex = cloud_resources_to_extraction(CloudProvider::Aws, &[resource_with_external_dep]);
         assert!(
-            msg.contains("designed but not built"),
-            "error must mention 'designed but not built'; got: {msg}"
+            ex.local_edges.is_empty(),
+            "no local edges when dep is outside the batch"
         );
-        assert!(
-            msg.contains("ADR-004"),
-            "error must reference ADR-004; got: {msg}"
+        assert_eq!(ex.refs.len(), 1, "must have 1 unresolved ref");
+        assert_eq!(
+            ex.refs[0].raw_name,
+            "arn:aws:vpc:us-east-1:123:vpc/vpc-external"
         );
     }
 
     #[test]
-    fn factory_azure_returns_designed_not_built_error() {
-        let cfg = CloudConfig {
-            provider: CloudProvider::Azure,
-            region: None,
-            profile: Some("my-subscription".to_string()),
-        };
-        let err = open_cloud_collector(&cfg).expect_err("Azure factory must return Err");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("designed but not built"),
-            "error must mention 'designed but not built'; got: {msg}"
-        );
-        assert!(
-            msg.contains("ADR-004"),
-            "error must reference ADR-004; got: {msg}"
-        );
+    fn extraction_empty_slice_yields_empty_extraction() {
+        let ex = cloud_resources_to_extraction(CloudProvider::Aws, &[]);
+        assert!(ex.nodes.is_empty());
+        assert!(ex.local_edges.is_empty());
+        assert!(ex.refs.is_empty());
+    }
+
+    // ── open_cloud_collector — factory ────────────────────────────────
+
+    #[test]
+    fn factory_aws_returns_error_when_feature_disabled() {
+        #[cfg(not(feature = "cloud-aws"))]
+        {
+            let cfg = CloudConfig {
+                provider: CloudProvider::Aws,
+                region: Some("us-east-1".to_string()),
+                profile: None,
+            };
+            let err = open_cloud_collector(&cfg).expect_err("AWS factory must return Err");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("cloud-aws"),
+                "error must mention 'cloud-aws'; got: {msg}"
+            );
+        }
     }
 
     #[test]
-    fn factory_gcp_returns_designed_not_built_error() {
-        let cfg = CloudConfig {
-            provider: CloudProvider::Gcp,
-            region: None,
-            profile: None,
-        };
-        let err = open_cloud_collector(&cfg).expect_err("GCP factory must return Err");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("designed but not built"),
-            "error must mention 'designed but not built'; got: {msg}"
-        );
-        assert!(
-            msg.contains("ADR-004"),
-            "error must reference ADR-004; got: {msg}"
-        );
+    fn factory_azure_returns_error_when_feature_disabled() {
+        #[cfg(not(feature = "cloud-azure"))]
+        {
+            let cfg = CloudConfig {
+                provider: CloudProvider::Azure,
+                region: None,
+                profile: Some("my-subscription".to_string()),
+            };
+            let err = open_cloud_collector(&cfg).expect_err("Azure factory must return Err");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("cloud-azure"),
+                "error must mention 'cloud-azure'; got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn factory_gcp_returns_error_when_feature_disabled() {
+        #[cfg(not(feature = "cloud-gcp"))]
+        {
+            let cfg = CloudConfig {
+                provider: CloudProvider::Gcp,
+                region: None,
+                profile: None,
+            };
+            let err = open_cloud_collector(&cfg).expect_err("GCP factory must return Err");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("cloud-gcp"),
+                "error must mention 'cloud-gcp'; got: {msg}"
+            );
+        }
     }
 
     #[test]
     fn factory_errors_are_extraction_errors() {
-        // Verify the error variant so callers can pattern-match consistently.
-        for provider in [CloudProvider::Aws, CloudProvider::Azure, CloudProvider::Gcp] {
+        // Only runs when all three features are disabled (the default in cargo test --workspace).
+        #[cfg(not(feature = "cloud-aws"))]
+        {
             let cfg = CloudConfig {
-                provider,
+                provider: CloudProvider::Aws,
                 region: None,
                 profile: None,
             };
@@ -644,12 +886,17 @@ mod tests {
             region: Some("us-central1".to_string()),
             depends_on: vec![],
             attributes: vec![("machine_type".to_string(), "n1-standard-1".to_string())],
+            account_id: Some("my-proj".to_string()),
+            name: Some("my-vm".to_string()),
+            tags: HashMap::new(),
         };
         let nodes = cloud_resources_to_nodes(CloudProvider::Gcp, &[gcp_vm]);
         assert_meta_str(&nodes[0], "provider", "gcp");
         assert_meta_str(&nodes[0], "origin", "live");
         assert_meta_str(&nodes[0], "region", "us-central1");
         assert_meta_str(&nodes[0], "attr.machine_type", "n1-standard-1");
+        assert_meta_str(&nodes[0], "account_id", "my-proj");
+        assert_meta_str(&nodes[0], "name", "my-vm");
     }
 
     // ── empty slice ───────────────────────────────────────────────────
