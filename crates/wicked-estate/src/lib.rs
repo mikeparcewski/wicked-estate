@@ -453,6 +453,67 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
         eprintln!("SKIPPED_MINIFIED: {skipped_min_count} file(s)");
     }
 
+    // ── Emit extraction counters (best-effort) ───────────────────────────────────────────────
+    {
+        let total_symbols: usize = extractions.iter().map(|(_, e, _)| e.nodes.len()).sum();
+        let files_extracted = extractions.len();
+        let sink = wicked_estate_observe::init_sink_from_env();
+        let resource = wicked_estate_core::observability::Resource::service(
+            "wicked_estate",
+            env!("CARGO_PKG_VERSION"),
+        );
+        let scope =
+            wicked_estate_core::observability::InstrumentationScope::new("wicked_estate.index");
+        use wicked_estate_core::observability::*;
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+
+        let files_metric = Metric {
+            name: "wicked_estate.extract.files_total".to_string(),
+            description: String::new(),
+            unit: "1".to_string(),
+            data: MetricData::Sum {
+                data_points: vec![NumberDataPoint {
+                    attributes: vec![],
+                    start_time_unix_nano: t,
+                    time_unix_nano: t,
+                    value: MetricValue::I64(files_extracted as i64),
+                }],
+                temporality: AggregationTemporality::Delta,
+                is_monotonic: true,
+            },
+        };
+        if let Err(e) = sink.export_metrics(&resource, &scope, &[files_metric]) {
+            eprintln!("telemetry: {e}");
+        }
+
+        if files_extracted > 0 {
+            let avg_symbols = total_symbols as f64 / files_extracted as f64;
+            let sym_metric = Metric {
+                name: "wicked_estate.extract.symbols_per_file".to_string(),
+                description: String::new(),
+                unit: "1".to_string(),
+                data: MetricData::Histogram {
+                    data_points: vec![HistogramDataPoint {
+                        attributes: vec![],
+                        start_time_unix_nano: t,
+                        time_unix_nano: t,
+                        count: files_extracted as u64,
+                        sum: avg_symbols * files_extracted as f64,
+                        bucket_counts: vec![files_extracted as u64],
+                        explicit_bounds: vec![],
+                    }],
+                    temporality: AggregationTemporality::Delta,
+                },
+            };
+            if let Err(e) = sink.export_metrics(&resource, &scope, &[sym_metric]) {
+                eprintln!("telemetry: {e}");
+            }
+        }
+    }
+
     // ── WRITE ────────────────────────────────────────────────────────────────────────────────
     // write-nodes: upsert nodes rows (hot path — prepare_cached, single transaction).
     // write-content: zstd-compress + upsert content/files rows.

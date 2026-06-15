@@ -42,6 +42,81 @@ fn resolve_db_path() -> String {
 // Async stdio loop
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Telemetry helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn emit_cache_counter(
+    sink: &std::sync::Arc<dyn wicked_estate_core::TelemetrySink>,
+    resource: &wicked_estate_core::observability::Resource,
+    scope: &wicked_estate_core::observability::InstrumentationScope,
+    level: &str,
+    hit: bool,
+) {
+    use wicked_estate_core::observability::*;
+    let name = if hit {
+        "wicked_estate.mcp.cache.hits"
+    } else {
+        "wicked_estate.mcp.cache.misses"
+    };
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let metric = Metric {
+        name: name.to_string(),
+        description: String::new(),
+        unit: "1".to_string(),
+        data: MetricData::Sum {
+            data_points: vec![NumberDataPoint {
+                attributes: vec![KeyValue::str("cache.level", level)],
+                start_time_unix_nano: t,
+                time_unix_nano: t,
+                value: MetricValue::I64(1),
+            }],
+            temporality: AggregationTemporality::Delta,
+            is_monotonic: true,
+        },
+    };
+    if let Err(e) = sink.export_metrics(resource, scope, &[metric]) {
+        eprintln!("telemetry: {e}");
+    }
+}
+
+fn emit_tool_duration(
+    sink: &std::sync::Arc<dyn wicked_estate_core::TelemetrySink>,
+    resource: &wicked_estate_core::observability::Resource,
+    scope: &wicked_estate_core::observability::InstrumentationScope,
+    tool_name: &str,
+    duration_ms: f64,
+) {
+    use wicked_estate_core::observability::*;
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let metric = Metric {
+        name: "wicked_estate.mcp.tool.duration_ms".to_string(),
+        description: "Per-tool invocation latency".to_string(),
+        unit: "ms".to_string(),
+        data: MetricData::Histogram {
+            data_points: vec![HistogramDataPoint {
+                attributes: vec![KeyValue::str("tool.name", tool_name)],
+                start_time_unix_nano: t,
+                time_unix_nano: t,
+                count: 1,
+                sum: duration_ms,
+                bucket_counts: vec![1],
+                explicit_bounds: vec![],
+            }],
+            temporality: AggregationTemporality::Delta,
+        },
+    };
+    if let Err(e) = sink.export_metrics(resource, scope, &[metric]) {
+        eprintln!("telemetry: {e}");
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let db_path = resolve_db_path();
@@ -49,6 +124,16 @@ async fn main() -> Result<()> {
     // 2. Open async connection pool instead of a single connection.
     let store = wicked_estate::open_async_store(&db_path)
         .with_context(|| format!("failed to open async store at '{db_path}'"))?;
+
+    let otel_sink = wicked_estate_observe::init_sink_from_env();
+    let otel_resource = wicked_estate_core::observability::Resource::service(
+        "wicked_estate_mcp",
+        env!("CARGO_PKG_VERSION"),
+    );
+    let otel_scope = wicked_estate_core::observability::InstrumentationScope::versioned(
+        "wicked_estate_mcp",
+        env!("CARGO_PKG_VERSION"),
+    );
 
     // W7.4: compute staleness once at startup. Best-effort — None on any failure.
     let commits_behind: Option<u64> = {
@@ -155,6 +240,7 @@ async fn main() -> Result<()> {
             if let Some(cached) = request_cache.get(key) {
                 // Patch the id to match the current request before returning.
                 let mut hit = cached.clone();
+                emit_cache_counter(&otel_sink, &otel_resource, &otel_scope, "l1", true);
                 hit["id"] = req["id"].clone();
                 let bytes =
                     serde_json::to_vec(&hit).context("failed to serialise cached response")?;
@@ -169,6 +255,7 @@ async fn main() -> Result<()> {
                 if let Ok(cached) = serde_json::from_str::<serde_json::Value>(&raw) {
                     // Warm L1 so subsequent hits stay in-memory.
                     request_cache.insert(key.clone(), cached.clone());
+                    emit_cache_counter(&otel_sink, &otel_resource, &otel_scope, "l2", true);
                     let mut hit = cached;
                     hit["id"] = req["id"].clone();
                     let bytes =
@@ -182,10 +269,53 @@ async fn main() -> Result<()> {
             }
         }
 
+        emit_cache_counter(&otel_sink, &otel_resource, &otel_scope, "l1", false);
+        let tool_name = req["params"]["name"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string();
+        let t_tool = std::time::Instant::now();
         let ctx_clone = ctx.clone();
         let resp = store
             .with_read(move |graph| Ok(handle_request_ctx(graph, &req, &ctx_clone)))
             .await?;
+        emit_tool_duration(
+            &otel_sink,
+            &otel_resource,
+            &otel_scope,
+            &tool_name,
+            t_tool.elapsed().as_millis() as f64,
+        );
+
+        // Emit a log record when the tool returns isError=true.
+        if resp
+            .get("result")
+            .and_then(|r| r.get("isError"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            use wicked_estate_core::observability::*;
+            let t = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            let err_msg = resp["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or("unknown error");
+            let log = LogRecord {
+                time_unix_nano: t,
+                observed_time_unix_nano: t,
+                severity_number: SeverityNumber::Error,
+                severity_text: "ERROR".to_string(),
+                body: AttributeValue::Str(format!("tool={tool_name} error={err_msg}")),
+                attributes: vec![KeyValue::str("tool.name", &tool_name)],
+                trace_id: None,
+                span_id: None,
+            };
+            if let Err(e) = otel_sink.export_logs(&otel_resource, &otel_scope, &[log]) {
+                eprintln!("telemetry: {e}");
+            }
+        }
 
         // Store in cache (tools/call only; skip notifications which return null).
         if let Some(key) = cache_key {

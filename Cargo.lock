@@ -7530,6 +7530,7 @@ dependencies = [
  "tokio",
  "wicked-estate",
  "wicked-estate-core",
+ "wicked-estate-observe",
  "wicked-estate-retrieve",
  "wicked-estate-store",
 ]
@@ -7564,6 +7565,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "wicked-estate-core",
+ "wicked-estate-observe",
  "wicked-estate-store",
 ]
 
@@ -7593,6 +7595,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "wicked-estate-core",
+ "wicked-estate-observe",
  "zstd",
 ]
 

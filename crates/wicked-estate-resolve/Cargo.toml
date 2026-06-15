@@ -14,6 +14,8 @@ serde = { workspace = true }
 scip = "0.8"
 protobuf = "3"
 
+wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.1.7" }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
