@@ -35,9 +35,11 @@ use petgraph::visit::EdgeRef;
 use std::collections::HashMap;
 use wicked_estate_core::{EdgeKind, GraphRead, Ranker, Result, SymbolId};
 
+pub mod cluster_summary;
 pub mod community;
 pub mod semantic_cluster;
 
+pub use cluster_summary::{CommunitySummary, summarize_communities};
 pub use community::{CommunityParams, detect_communities, max_community_fraction, modularity};
 pub use semantic_cluster::{
     ClusterAlgo, SemanticClusterParams, cosine_distance, semantic_clusters,
