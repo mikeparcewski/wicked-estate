@@ -415,9 +415,11 @@ mod tests {
         // The rendered block is independently bounded by render_context's token budget
         // (char_budget / 4), plus the small trailing summary line render_context appends.
         let rendered = res.content["rendered"].as_str().unwrap();
+        // budget=1 floors to render_context's minimum of 1 token (≈ CHARS_PER_TOKEN chars),
+        // plus the small trailing summary line render_context appends.
         assert!(
-            rendered.len() <= (1 / CHARS_PER_TOKEN).max(1) * 4 + 200,
-            "rendered block ({}) must stay within the converted token budget + summary overhead",
+            rendered.len() <= CHARS_PER_TOKEN + 200,
+            "rendered block ({}) must stay within the minimum token budget + summary overhead",
             rendered.len()
         );
     }
