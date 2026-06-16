@@ -312,3 +312,220 @@ fn c() { a(); b(); }
         "community is system-derived, not advisory"
     );
 }
+
+/// Collect every annotation across the `annotations <name> --json` (array-of-symbol) shape.
+fn anns_for_name(dir: &Path, db: &Path, name: &str) -> Vec<serde_json::Value> {
+    let out = run(dir, db, &["annotations", name, "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("annotations --json is JSON");
+    v.as_array()
+        .expect("array under <name>")
+        .iter()
+        .flat_map(|o| o["annotations"].as_array().unwrap().clone())
+        .collect()
+}
+
+#[test]
+fn annotate_replace_upserts_by_type_key() {
+    // --replace twice with the SAME (type, key) but a different value → exactly ONE row,
+    // carrying the latest value (idempotent upsert, not append).
+    let (dir, db) = index_one_fn("replace_upsert", "fn target() {}\n");
+
+    run(
+        &dir,
+        &db,
+        &[
+            "annotate",
+            "target",
+            "--type",
+            "cache",
+            "--key",
+            "k",
+            "--value",
+            "first",
+            "--replace",
+        ],
+    );
+    run(
+        &dir,
+        &db,
+        &[
+            "annotate",
+            "target",
+            "--type",
+            "cache",
+            "--key",
+            "k",
+            "--value",
+            "second",
+            "--replace",
+        ],
+    );
+
+    let anns = anns_for_name(&dir, &db, "target");
+    let cache: Vec<&serde_json::Value> = anns.iter().filter(|a| a["type"] == "cache").collect();
+    assert_eq!(
+        cache.len(),
+        1,
+        "--replace upserts by (type,key): exactly one row, got {anns:?}"
+    );
+    assert_eq!(cache[0]["key"], "k");
+    assert_eq!(cache[0]["value"], "second", "latest value wins");
+}
+
+#[test]
+fn annotate_without_replace_appends() {
+    // Two plain annotate calls with the same (type, key) → TWO rows (append unchanged).
+    let (dir, db) = index_one_fn("no_replace_append", "fn target() {}\n");
+
+    run(
+        &dir,
+        &db,
+        &[
+            "annotate", "target", "--type", "cache", "--key", "k", "--value", "first",
+        ],
+    );
+    run(
+        &dir,
+        &db,
+        &[
+            "annotate", "target", "--type", "cache", "--key", "k", "--value", "second",
+        ],
+    );
+
+    let anns = anns_for_name(&dir, &db, "target");
+    let cache: Vec<&serde_json::Value> = anns.iter().filter(|a| a["type"] == "cache").collect();
+    assert_eq!(
+        cache.len(),
+        2,
+        "append is the default: two rows survive, got {anns:?}"
+    );
+}
+
+#[test]
+fn annotate_replace_only_affects_matching_type_key() {
+    // --replace on (cache, k1) must NOT touch a different key (cache, k2) NOR a different
+    // type under the same key (note, k1) on the same symbol.
+    let (dir, db) = index_one_fn("replace_scoped", "fn target() {}\n");
+
+    // A different key, same type — must survive.
+    run(
+        &dir,
+        &db,
+        &[
+            "annotate", "target", "--type", "cache", "--key", "k2", "--value", "keepme",
+        ],
+    );
+    // Same key, different type — must survive.
+    run(
+        &dir,
+        &db,
+        &[
+            "annotate",
+            "target",
+            "--type",
+            "note",
+            "--key",
+            "k1",
+            "--value",
+            "keepme-note",
+        ],
+    );
+    // Seed (cache, k1), then replace it.
+    run(
+        &dir,
+        &db,
+        &[
+            "annotate", "target", "--type", "cache", "--key", "k1", "--value", "old",
+        ],
+    );
+    run(
+        &dir,
+        &db,
+        &[
+            "annotate",
+            "target",
+            "--type",
+            "cache",
+            "--key",
+            "k1",
+            "--value",
+            "new",
+            "--replace",
+        ],
+    );
+
+    let anns = anns_for_name(&dir, &db, "target");
+
+    // (cache, k1) collapsed to one row with the new value.
+    let cache_k1: Vec<&serde_json::Value> = anns
+        .iter()
+        .filter(|a| a["type"] == "cache" && a["key"] == "k1")
+        .collect();
+    assert_eq!(cache_k1.len(), 1, "replaced (cache,k1) is a single row");
+    assert_eq!(cache_k1[0]["value"], "new");
+
+    // (cache, k2) — different key — untouched.
+    let cache_k2: Vec<&serde_json::Value> = anns
+        .iter()
+        .filter(|a| a["type"] == "cache" && a["key"] == "k2")
+        .collect();
+    assert_eq!(cache_k2.len(), 1, "different key survives the replace");
+    assert_eq!(cache_k2[0]["value"], "keepme");
+
+    // (note, k1) — same key, different type — untouched.
+    let note_k1: Vec<&serde_json::Value> = anns
+        .iter()
+        .filter(|a| a["type"] == "note" && a["key"] == "k1")
+        .collect();
+    assert_eq!(
+        note_k1.len(),
+        1,
+        "same key under a different type survives the replace"
+    );
+    assert_eq!(note_k1[0]["value"], "keepme-note");
+}
+
+#[test]
+fn clusters_annotate_is_idempotent() {
+    // Re-running `clusters --annotate` must REPLACE (not duplicate) each member's community
+    // annotation: after two runs every annotated symbol has exactly ONE `community` row.
+    let src = "\
+fn a() { b(); c(); }
+fn b() { c(); a(); }
+fn c() { a(); b(); }
+";
+    let (dir, db) = index_one_fn("clusters_idem", src);
+
+    run(&dir, &db, &["clusters", "--annotate"]);
+    run(&dir, &db, &["clusters", "--annotate"]);
+
+    let after = run(
+        &dir,
+        &db,
+        &["nodes", "--annotated-with", "community", "--json"],
+    );
+    let after_v: serde_json::Value = serde_json::from_str(&after).unwrap();
+    let annotated = after_v.as_array().unwrap();
+    assert!(
+        !annotated.is_empty(),
+        "at least one member annotated with community after two runs"
+    );
+
+    // Each annotated symbol carries exactly one `community` annotation (no duplicate).
+    for node in annotated {
+        let sym = node["symbol_id"].as_str().unwrap();
+        let detail = run(&dir, &db, &["annotations", "--symbol", sym, "--json"]);
+        let dv: serde_json::Value = serde_json::from_str(&detail).unwrap();
+        let community_rows: Vec<&serde_json::Value> = dv["annotations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["type"] == "community")
+            .collect();
+        assert_eq!(
+            community_rows.len(),
+            1,
+            "symbol {sym} has exactly one community annotation after two runs, got {community_rows:?}"
+        );
+    }
+}

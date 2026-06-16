@@ -351,6 +351,10 @@ fn main() -> Result<()> {
     let mut ann_type: Option<String> = None;
     // --symbol <SymbolId>: target a single node by stable ID (annotate + annotations).
     let mut ann_symbol: Option<String> = None;
+    // --replace: idempotent upsert by (type, key) for the `annotate` command. Default OFF =
+    // append (today's behavior). When set, delete_annotations(sym, Some(type), key) before the
+    // append, so re-projecting a cache-class annotation replaces the row instead of duplicating it.
+    let mut ann_replace = false;
     // --content: fingerprint uses body byte-slice hash instead of identity hash.
     let mut fp_content = false;
     // correspond command flags.
@@ -470,6 +474,9 @@ fn main() -> Result<()> {
                 if let Some(v) = it.next() {
                     ann_symbol = Some(v.clone());
                 }
+            }
+            "--replace" => {
+                ann_replace = true;
             }
             "--content" => {
                 fp_content = true;
@@ -1414,6 +1421,11 @@ fn main() -> Result<()> {
             // largest-first index `source --cluster <id>` uses), `author="system"`. Default OFF:
             // `clusters` is a pure read unless `--annotate` is passed. Writes via the
             // `GraphWrite::annotate` seam; the store stamps `ts`. No-op on un-indexed symbols.
+            //
+            // This is a system-derived CACHE: re-running must REPLACE, not accumulate. Each member's
+            // (type="community", key="community") row is deleted before the append, so a second run
+            // yields exactly one `community` annotation per member instead of duplicating it. Upsert
+            // is the right default for cache-class annotations — no flag (unlike advisory `annotate`).
             if cluster_annotate {
                 use wicked_estate_core::Annotation;
                 let provenance = if semantic {
@@ -1424,6 +1436,9 @@ fn main() -> Result<()> {
                 let mut written = 0usize;
                 for (idx, members) in communities.iter().enumerate() {
                     for sym in members {
+                        store
+                            .delete_annotations(sym, Some("community"), "community")
+                            .map_err(to_any)?;
                         let ann = Annotation::new("community", "community", idx.to_string())
                             .with_provenance(provenance.clone())
                             .with_author("system");
@@ -1556,6 +1571,12 @@ fn main() -> Result<()> {
         // string — a fixed convention (note/assumption/observation/comment/question/community) OR
         // any custom type; both are stored and queried identically (rules-as-DATA). Writes via the
         // type-aware `GraphWrite::annotate` seam; the store stamps `ts` (passed 0).
+        //
+        // `--replace` makes the write an idempotent UPSERT scoped to (type, key): before appending,
+        // `delete_annotations(sym, Some(type), key)` clears the prior row(s) for that exact
+        // (type, key) on that symbol, so re-projecting a cache-class / system-derived annotation
+        // replaces rather than duplicates. Default OFF = append (advisory notes accumulate). The
+        // replace path leaves other keys (and other types under the same key) on the symbol intact.
         "annotate" => {
             use wicked_estate_core::{Annotation, DEFAULT_ANNOTATION_TYPE, GraphWrite};
             let key = ann_key
@@ -1574,23 +1595,45 @@ fn main() -> Result<()> {
                     .with_provenance(ann_provenance.clone())
                     .with_author(ann_author.clone())
             };
+            // Upsert helper: when `--replace`, delete the (type, key) row(s) first and accumulate
+            // the deleted count; then append. Returns the number of rows replaced for this symbol.
+            let upsert =
+                |store: &mut SqliteStore, symbol: &wicked_estate_core::SymbolId| -> Result<usize> {
+                    let replaced = if ann_replace {
+                        store
+                            .delete_annotations(symbol, Some(ty), key)
+                            .map_err(to_any)?
+                    } else {
+                        0
+                    };
+                    store.annotate(symbol, make(value)).map_err(to_any)?;
+                    Ok(replaced)
+                };
             let mut count = 0usize;
+            let mut replaced = 0usize;
             if let Some(sym_str) = &ann_symbol {
                 let symbol = wicked_estate_core::symbol::SymbolId::from(sym_str.as_str());
-                store.annotate(&symbol, make(value)).map_err(to_any)?;
+                replaced += upsert(&mut store, &symbol)?;
                 count = 1;
             } else {
                 let name = positional.first().context(
-                    "usage: wicked-estate annotate <name> --key K --value V [--type T] [--db ...]\n       \
-                     wicked-estate annotate --symbol <id> --key K --value V [--type T] [--db ...]",
+                    "usage: wicked-estate annotate <name> --key K --value V [--type T] [--replace] [--db ...]\n       \
+                     wicked-estate annotate --symbol <id> --key K --value V [--type T] [--replace] [--db ...]",
                 )?;
                 let hits = wicked_estate::search(&store, name).map_err(to_any)?;
                 for n in &hits {
-                    store.annotate(&n.symbol, make(value)).map_err(to_any)?;
+                    let sym = n.symbol.clone();
+                    replaced += upsert(&mut store, &sym)?;
                     count += 1;
                 }
             }
-            println!("annotated {count} symbol(s) with [{ty}] {key}={value}");
+            if ann_replace {
+                println!(
+                    "replaced [{ty}] {key}={value} on {count} symbol(s) ({replaced} prior row(s) removed)"
+                );
+            } else {
+                println!("annotated {count} symbol(s) with [{ty}] {key}={value}");
+            }
         }
         // Agent A: show TYPED annotations for a symbol.
         //
