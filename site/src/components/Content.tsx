@@ -1,93 +1,11 @@
 import { useState, useEffect } from 'react'
 
-// ── Theme ──────────────────────────────────────────────────────────────────────
-function useDark() {
-  const [dark, setDark] = useState(() => {
-    if (typeof document === 'undefined') return true
-    return document.documentElement.classList.contains('dark')
-  })
-  const toggle = () => {
-    const next = !dark
-    setDark(next)
-    document.documentElement.classList.toggle('dark', next)
-    try { localStorage.setItem('we-theme', next ? 'dark' : 'light') } catch (_) {}
-  }
-  return { dark, toggle }
-}
-
 // ── Icons ──────────────────────────────────────────────────────────────────────
 function GitHubIcon({ size = 16 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
       <path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0 1 12 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z" />
     </svg>
-  )
-}
-
-function SunIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <circle cx="12" cy="12" r="4" />
-      <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
-    </svg>
-  )
-}
-
-function MoonIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-    </svg>
-  )
-}
-
-function GraphMark() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
-      <circle cx="3" cy="3" r="2" fill="#232324" />
-      <circle cx="11" cy="3" r="2" fill="#232324" />
-      <circle cx="3" cy="11" r="2" fill="#232324" />
-      <circle cx="11" cy="11" r="2" fill="#232324" />
-      <path d="M3 3L11 3M3 3L3 11M3 11L11 11M11 3L11 11M3 3L11 11" stroke="#232324" strokeWidth="1.3" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-// ── Nav ────────────────────────────────────────────────────────────────────────
-function Nav() {
-  const { dark, toggle } = useDark()
-  return (
-    <header className="topbar">
-      <div className="topbar-inner">
-        {/* Wordmark */}
-        <a href="#" className="wordmark">
-          <div className="wordmark-mark"><GraphMark /></div>
-          <span>
-            <span style={{ color: 'var(--ink)' }}>wicked</span>
-            <span className="wordmark-accent">agile</span>
-            <span style={{ color: 'var(--faint)', fontWeight: 400, margin: '0 4px' }}>/</span>
-            <span style={{ color: 'var(--ink)' }}>wicked</span>
-            <span className="wordmark-accent">-estate</span>
-          </span>
-        </a>
-
-        {/* Right controls */}
-        <div className="flex items-center gap-2">
-          <button onClick={toggle} className="theme-toggle !px-2.5" aria-label="Toggle theme">
-            {dark ? <SunIcon /> : <MoonIcon />}
-          </button>
-          <a
-            href="https://github.com/mikeparcewski/wicked-estate"
-            target="_blank"
-            rel="noreferrer"
-            className="btn-outline !px-2.5 py-[6px]"
-            aria-label="GitHub"
-          >
-            <GitHubIcon />
-          </a>
-        </div>
-      </div>
-    </header>
   )
 }
 
@@ -1166,142 +1084,21 @@ function FeaturedTools() {
   )
 }
 
-// ── Footer ─────────────────────────────────────────────────────────────────────
-const GH = 'https://github.com/mikeparcewski'
-
-const FOOTER_COLS = [
-  {
-    label: 'The gate',
-    color: '#4ade80',
-    links: [
-      { short: 'garden',      href: 'https://wg.wickedagile.com' },
-    ],
-  },
-  {
-    label: 'The floor',
-    color: '#60a5fa',
-    links: [
-      { short: 'vault',       href: `${GH}/wicked-vault` },
-      { short: 'loom',        href: `${GH}/wicked-loom` },
-    ],
-  },
-  {
-    label: 'The layers',
-    color: '#a78bfa',
-    links: [
-      { short: 'testing',     href: `${GH}/wicked-testing` },
-      { short: 'brain',       href: `${GH}/wicked-brain` },
-      { short: 'understanding', href: `${GH}/wicked-understanding` },
-      { short: 'bus',         href: `${GH}/wicked-bus` },
-    ],
-  },
-  {
-    label: 'Solo beds',
-    color: '#fb923c',
-    links: [
-      { short: 'interactive', href: 'https://wi.wickedagile.com' },
-      { short: 'estate',      href: 'https://we.wickedagile.com' },
-    ],
-  },
-]
-
-function Footer() {
-  const year = new Date().getFullYear()
+// ── Content ──────────────────────────────────────────────────────────────────
+// Body sections only. The shared wicked-web Topbar + Footer wrap this island
+// in src/pages/index.astro; theme is driven by data-theme on <html>.
+export default function Content() {
   return (
-    <footer className="snap-start border-t border-hairline bg-canvas-2">
-      <div className="max-w-6xl mx-auto px-7 py-16">
-        <div className="flex flex-col gap-12 lg:flex-row lg:justify-between">
-
-          {/* Brand blurb */}
-          <div className="max-w-xs">
-            <span className="kicker">est. on your machine · MIT</span>
-            <p className="font-display text-5xl font-black leading-none tracking-tight mt-3">
-              wicked<br /><span style={{ color: 'var(--accent-ink)' }}>good.</span>
-            </p>
-            <p className="mt-4 text-sm text-muted leading-relaxed font-sans">
-              A garden of local-first tools for code intelligence — no cloud,
-              no black box, no checkmark you can't re-run.
-            </p>
-            <div className="mt-6 flex flex-wrap gap-2">
-              {[
-                ['GitHub ↗', `${GH}`],
-                ['npm ↗', 'https://www.npmjs.com/~mike.parcewski'],
-              ].map(([label, href]) => (
-                <a key={label} href={href} target="_blank" rel="noreferrer"
-                  className="rounded-full border border-hairline-strong px-4 py-1.5 font-mono text-[0.7rem] uppercase tracking-widest text-muted transition-colors hover:border-accent hover:text-ink">
-                  {label}
-                </a>
-              ))}
-            </div>
-          </div>
-
-          {/* Link columns */}
-          <div className="grid grid-cols-2 gap-x-10 gap-y-8 sm:grid-cols-4">
-            {FOOTER_COLS.map(col => (
-              <div key={col.label}>
-                <p className="flex items-center gap-1.5 font-mono text-[0.66rem] uppercase tracking-[0.18em] mb-4"
-                  style={{ color: col.color }}>
-                  <span className="inline-block w-1.5 h-1.5 rounded-full flex-shrink-0"
-                    style={{ background: col.color }} />
-                  {col.label}
-                </p>
-                <ul className="space-y-2.5">
-                  {col.links.map(({ short, href }) => (
-                    <li key={short}>
-                      <a href={href} target="_blank" rel="noreferrer"
-                        className="group inline-flex items-baseline gap-1 text-sm text-muted transition-colors hover:text-ink">
-                        <span className="font-mono text-[0.72rem] text-faint group-hover:text-muted">wicked-</span>
-                        <span>{short}</span>
-                      </a>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Bottom bar */}
-        <div className="mt-14 flex flex-col gap-2 border-t border-hairline pt-6 sm:flex-row sm:items-center sm:justify-between font-mono text-[0.68rem] uppercase tracking-widest text-faint">
-          <span>© {year} · MIT licensed · built local-first</span>
-          <div className="flex gap-5">
-            {[
-              ['Engine Contract', `${GH}/wicked-estate/blob/main/docs/ENGINE-CONTRACT.md`],
-              ['Design Notes',   `${GH}/wicked-estate/blob/main/docs/DESIGN-NOTES.md`],
-            ].map(([label, href]) => (
-              <a key={label} href={href} target="_blank" rel="noreferrer"
-                className="hover:text-muted transition-colors">{label}</a>
-            ))}
-          </div>
-        </div>
-      </div>
-    </footer>
-  )
-}
-
-// ── App ────────────────────────────────────────────────────────────────────────
-export default function App() {
-  useEffect(() => {
-    // Sync initial dark state (already set by inline script, just for completeness)
-    const dark = document.documentElement.classList.contains('dark')
-    document.documentElement.classList.toggle('dark', dark)
-  }, [])
-
-  return (
-    <div className="min-h-screen font-sans">
-      <Nav />
-      <main>
-        <Hero />
-        <UseCases />
-        <Pipeline />
-        <GraphModel />
-        <AgentContract />
-        <Languages />
-        <MCPConnect />
-        <GetStarted />
-        <FeaturedTools />
-      </main>
-      <Footer />
-    </div>
+    <main className="font-sans">
+      <Hero />
+      <UseCases />
+      <Pipeline />
+      <GraphModel />
+      <AgentContract />
+      <Languages />
+      <MCPConnect />
+      <GetStarted />
+      <FeaturedTools />
+    </main>
   )
 }

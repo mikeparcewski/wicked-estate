@@ -1,0 +1,12 @@
+---
+import Base from "../layouts/Base.astro";
+import Topbar from "wicked-web/components/Topbar.astro";
+import Footer from "wicked-web/components/Footer.astro";
+import Content from "../components/Content.tsx";
+---
+
+<Base>
+  <Topbar pkg="wicked-estate" repo="https://github.com/mikeparcewski/wicked-estate" />
+  <Content client:load />
+  <Footer repo="https://github.com/mikeparcewski/wicked-estate" />
+</Base>

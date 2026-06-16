@@ -1,12 +1,22 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
-/* ── Brand tokens (canonical wicked-garden) ───────────────────────────────── */
+/* Dark mode is attribute-driven: <html data-theme="dark"> — shared with the
+   wicked-web Topbar theme toggle so one switch drives tokens + Tailwind.
+   (No `dark:` utilities are used today — theme flips entirely through the CSS
+   custom properties below — but the variant is wired for parity with the
+   rest of the wicked-* family.) */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* ── Brand tokens (canonical wicked-garden) ───────────────────────────────────
+   :root is the LIGHT theme; [data-theme="dark"] overrides for night mode.
+   The shared wicked-web chrome (Topbar / Footer) reads these same custom
+   properties — keep the names in sync with wicked-web/src/styles/tokens.css.
+---------------------------------------------------------------------------- */
 :root {
   --canvas:          #faf7ec;
   --canvas-2:        #f3f0e3;
   --surface:         #fffdf5;
+  --surface-2:       #f3f0e3;
   --ink:             #232324;
   --muted:           #6f6c5f;
   --faint:           #a8a496;
@@ -15,15 +25,20 @@
   --accent:          #ffda19;
   --accent-ink:      #8a6d05;
   --on-accent:       #232324;
+  --link:            #1f6feb;
   --shadow-rgb:      60, 56, 40;
   --ease:            cubic-bezier(0.16, 1, 0.3, 1);
+  --topbar-h:        58px;
+  --font-display:    "Archivo", ui-sans-serif, sans-serif;
+  --font-mono:       "JetBrains Mono", ui-monospace, monospace;
   color-scheme: light;
 }
 
-html.dark {
+[data-theme="dark"] {
   --canvas:          #232324;
   --canvas-2:        #1e1e1f;
   --surface:         #2e2e2f;
+  --surface-2:       #1e1e1f;
   --ink:             #eae5b6;
   --muted:           #b7b3a4;
   --faint:           #6e6b60;
@@ -32,8 +47,43 @@ html.dark {
   --accent:          #ffda19;
   --accent-ink:      #ffda19;
   --on-accent:       #1e1e1f;
+  --link:            #79c0ff;
   --shadow-rgb:      0, 0, 0;
   color-scheme: dark;
+}
+
+/* Map brand tokens to Tailwind utilities. `inline` keeps them live so the
+   utilities re-resolve when data-theme flips the underlying custom properties.
+   These back the bg-canvas / text-ink / border-hairline / font-display etc.
+   classes used throughout the React content. */
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-canvas-2: var(--canvas-2);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-hairline: var(--hairline);
+  --color-hairline-strong: var(--hairline-strong);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-on-accent: var(--on-accent);
+
+  --font-display: "Archivo", ui-sans-serif, sans-serif;
+  --font-sans: "Hanken Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --animate-flow: flow 2s ease-in-out infinite;
+  --animate-blink: blink 1.05s steps(2, start) infinite;
+}
+
+@keyframes flow {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
 }
 
 @layer base {
@@ -66,7 +116,7 @@ html.dark {
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   }
 
-  html.dark body::after {
+  [data-theme="dark"] body::after {
     opacity: 0.07;
     mix-blend-mode: overlay;
   }
@@ -237,71 +287,6 @@ html.dark {
     -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 0%, #000 28%, transparent 76%);
             mask-image: radial-gradient(ellipse 80% 70% at 50% 0%, #000 28%, transparent 76%);
   }
-
-  /* ── Topbar ─────────────────────────────────────────────────────────────── */
-  .topbar {
-    position: fixed;
-    top: 0; left: 0; right: 0;
-    z-index: 80;
-    background: color-mix(in oklab, var(--canvas) 80%, transparent);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border-bottom: 1px solid var(--hairline);
-  }
-  .topbar-inner {
-    max-width: 1200px;
-    margin: 0 auto;
-    padding: 0 28px;
-    height: 58px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-
-  /* ── Wordmark ────────────────────────────────────────────────────────────── */
-  .wordmark {
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-    font-family: "Archivo", sans-serif;
-    font-weight: 900;
-    font-stretch: 115%;
-    font-size: 1rem;
-    letter-spacing: -0.01em;
-    color: var(--ink);
-    text-decoration: none;
-  }
-  .wordmark-mark {
-    width: 26px; height: 26px;
-    border-radius: 7px;
-    background: var(--accent);
-    display: grid;
-    place-items: center;
-    flex-shrink: 0;
-    box-shadow:
-      0 0 0 1px color-mix(in oklab, var(--accent) 55%, transparent),
-      0 2px 8px color-mix(in oklab, var(--accent) 28%, transparent);
-  }
-  .wordmark-accent { color: var(--accent-ink); }
-
-  /* ── Theme toggle ────────────────────────────────────────────────────────── */
-  .theme-toggle {
-    font-family: "JetBrains Mono", monospace;
-    font-size: 0.65rem;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-    color: var(--ink);
-    background: transparent;
-    border: 1px solid var(--hairline-strong);
-    padding: 6px 12px;
-    border-radius: 9999px;
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    transition: border-color 0.2s var(--ease);
-  }
-  .theme-toggle:hover { border-color: var(--accent); }
 
   /* ── CTA buttons ─────────────────────────────────────────────────────────── */
   .btn-primary {

@@ -3,23 +3,31 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "description": "Marketing site for wicked-estate — the code graph agents actually trust.",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview --host",
+    "astro": "astro"
   },
   "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "@astrojs/react": "^4.0.0",
+    "astro": "^6.1.10",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "wicked-web": "github:mikeparcewski/wicked-web"
   },
   "devDependencies": {
-    "@types/react": "^18.3.5",
-    "@types/react-dom": "^18.3.0",
-    "@vitejs/plugin-react": "^4.3.1",
-    "autoprefixer": "^10.4.20",
-    "postcss": "^8.4.47",
-    "tailwindcss": "^3.4.13",
-    "typescript": "^5.5.3",
-    "vite": "^5.4.8"
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/node": "^25.9.2",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.0.0"
+  },
+  "overrides": {
+    "esbuild": ">=0.28.1",
+    "vite": "^7.3.2"
   }
 }
