@@ -2133,7 +2133,13 @@ fn main() -> Result<()> {
                 "    Final line: {{\"next_seq\":N}} — pass as --since on the next call to resume."
             );
             println!(
-                "  wicked-estate clusters [<min-size>] [--json]  # community detection on call graph"
+                "  wicked-estate clusters [<min-size>] [--json]  # community detection / clustering"
+            );
+            println!(
+                "    graph (default): Louvain over CALLS/IMPORTS — [--resolution <γ>] [--hierarchical] [--package-bias <f>]"
+            );
+            println!(
+                "    semantic: [--weight semantic [--k <n> | --eps <d> --min-pts <n>]]  (needs an --embeddings index)"
             );
             println!(
                 "  wicked-estate context <name> --budget <chars> [--json]  # ranked context within char budget"

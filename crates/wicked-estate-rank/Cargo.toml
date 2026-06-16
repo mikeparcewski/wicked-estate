@@ -12,6 +12,6 @@ wicked-estate-core.workspace = true
 petgraph = "0.6.5"
 
 [dev-dependencies]
-wicked-estate-store = { path = "../wicked-estate-store", version = "0.1.2" }
+wicked-estate-store = { path = "../wicked-estate-store", version = "0.3.0" }
 proptest = "1"
 
