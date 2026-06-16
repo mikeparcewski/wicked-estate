@@ -15,7 +15,7 @@ Produces two binaries:
 
 | Binary | Purpose |
 |--------|---------|
-| `target/release/wicked-estate` | CLI — index, query, blast-radius, rank, source, stats, scip, semantic, watch, subscribe, compact, tfstate, drift, cross-graph |
+| `target/release/wicked-estate` | CLI — index, query, blast-radius, rank, source, stats, scip, semantic, watch, subscribe, compact, tfstate, drift, cross-graph, clusters |
 | `target/release/wicked-estate-mcp` | MCP stdio server — 5 retrieval tools for LLM agents |
 
 Zero runtime deps. Single static binary on each target.
@@ -625,7 +625,118 @@ CLI integration (`wicked-estate collect-live --cloud aws`) is a Wave 9 task; for
 
 ---
 
-## 21. Next steps
+## 21. Clusters — community detection and semantic grouping
+
+```bash
+wicked-estate clusters [<min-size>] [--json] [--db ...]
+    [--resolution <γ>] [--hierarchical] [--package-bias <f>]
+    [--weight semantic [--k <n> | --eps <d> --min-pts <n>]]
+```
+
+Partitions the indexed graph into communities of related symbols. Two modes are available:
+
+### Graph mode (default)
+
+Multi-level Louvain over `CALLS` and `IMPORTS` edges. Unlike connected components (which collapse
+any connected graph into one giant community), Louvain maximises partition modularity `Q`, so a
+codebase that is connected but has cluster structure — two cliques joined by one bridge — is split
+into the clusters. A good partition scores modularity `> 0.3`.
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--resolution <γ>` | `1.0` | `> 1.0` → finer, smaller communities; `< 1.0` → coarser. Raise γ to break up a too-large community. |
+| `--hierarchical` | off | After the flat partition, re-runs Louvain at `resolution × 2.0` inside each community that still has genuine internal substructure. Cohesive communities (cliques) are left whole. |
+| `--package-bias <f>` | `0.0` | Adds synthetic same-directory edges weighted at `f × median-real-edge-weight`, so directory structure biases — but does not force — the partition. Useful when imports alone understate package cohesion. |
+
+**Worked example — this repo:**
+
+```
+$ wicked-estate clusters 3 --db .wicked-estate/graph.db
+127 communities (graph, min_size=3, modularity=0.805):
+  cluster 1: 48 symbols
+    crates/wicked-estate-store/src/sqlite.rs::SqliteStore
+    crates/wicked-estate-store/src/sqlite.rs::open_store
+    crates/wicked-estate-store/src/sqlite.rs::compact
+    crates/wicked-estate-store/src/sqlite.rs::upsert_nodes
+    crates/wicked-estate-store/src/sqlite.rs::upsert_edges
+    ... and 43 more
+  cluster 2: 31 symbols
+  ...
+```
+
+Modularity `0.805` is well above the `> 0.3` healthy threshold.
+
+**Break up a large community:**
+
+```bash
+# Default run produces a 200-symbol mega-cluster in the store module → raise γ
+wicked-estate clusters --resolution 1.8 --hierarchical --db .wicked-estate/graph.db
+```
+
+### Semantic mode
+
+```bash
+wicked-estate clusters --weight semantic [--db ...] \
+    [--eps <d>] [--min-pts <n>]     # DBSCAN (default)
+    [--k <n>]                        # k-means instead
+```
+
+Groups symbols by **embedding proximity** rather than call-graph structure. This bridges
+vocabularies the call graph misses — a Kafka producer and a Pulsar producer embed near each other
+even with zero shared edges.
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--eps <d>` | `0.25` | DBSCAN neighbourhood radius in cosine-distance space (`0.0`–`2.0`). |
+| `--min-pts <n>` | `3` | DBSCAN: minimum points to form a dense region. Points below the threshold are noise and excluded from output. |
+| `--k <n>` | — | Switch to k-means with exactly `k` clusters. When `--k` is present, `--eps` and `--min-pts` are ignored. |
+
+**Requires:** an `--embeddings` index (pass `--embeddings` during `index`).
+
+**Quality warning:** meaningful semantic clusters require the `fastembed` build feature. Without it
+the binary falls back to `HashEmbedder` — a bag-of-words hash — and the resulting vectors are noise.
+The CLI prints a note when embeddings are absent:
+
+```
+note: no embeddings found — re-index with `--embeddings` (build with the `fastembed` feature
+for semantic quality) before `clusters --weight semantic`.
+```
+
+**Example:**
+
+```bash
+# Index with embeddings, then cluster semantically
+wicked-estate index . --embeddings
+wicked-estate clusters --weight semantic --eps 0.2 --min-pts 2 --db .wicked-estate/graph.db
+# 43 clusters (semantic, min_size=2):
+#   cluster 1: 18 symbols
+#   cluster 2: 14 symbols
+#   ...
+```
+
+### Common flags
+
+| Flag | Effect |
+|------|--------|
+| `<min-size>` | Drop communities smaller than this. Default: `2`. |
+| `--json` | Emit a JSON array-of-arrays of `SymbolId` strings for machine consumption instead of the human-readable summary. |
+
+**Machine output:**
+
+```bash
+wicked-estate clusters 5 --json --db .wicked-estate/graph.db | jq 'length'
+# 127
+```
+
+### Heavy-repo validation
+
+`scripts/community-validation/` contains `validate-clusters.sh` for benchmarking partition quality
+on large repos. Pass a repo path and optional resolution to compare modularity across parameter
+settings before committing a γ value to your workflow.
+
+---
+
+## 22. Next steps
 
 - **Add a language** — see `docs/add-lang.md`. Zero core changes required.
 - **Extractor SDK** — `docs/extractor-sdk.md` (add-lang + `ExtraEdgeExtractor` for non-code edges).
