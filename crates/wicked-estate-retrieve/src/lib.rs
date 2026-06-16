@@ -52,6 +52,16 @@ const DEFAULT_MAX_SOURCE_CHARS: usize = 2_000;
 /// pathological symbol can't blow the ~25K payload cap on its own.
 const SOURCE_CHARS_HARD_CAP: usize = 16_000;
 
+/// Default total source budget across ALL matches in one `SearchEntity` response (chars). Source is
+/// charged against this as matches are rendered and truncated first when it runs out, so match
+/// metadata (name/kind/file/signature/doc per hit) keeps headroom under the ~25K R4 cap. Tunable per
+/// request via `max_total_source_chars`; see the W15 sizing question in the changelog.
+const DEFAULT_TOTAL_SOURCE_BUDGET: usize = 12_000;
+
+/// Hard ceiling on the total source budget a caller may request via `max_total_source_chars`. Caps
+/// total inlined source so metadata + JSON structure still fit under ~25K (R4) even when maxed.
+const MAX_TOTAL_SOURCE_BUDGET: usize = 20_000;
+
 /// JSON value for `node.kind`, falling back to `null` on the (impossible) serialize failure.
 fn kind_json(kind: &wicked_estate_core::NodeKind) -> Value {
     serde_json::to_value(kind).unwrap_or(Value::Null)
@@ -121,9 +131,15 @@ fn kind_json_edge(kind: &EdgeKind) -> Value {
     serde_json::to_value(kind).unwrap_or(Value::Null)
 }
 
-/// Parse `include_source` (default `false`) and `max_source_chars` (default
-/// [`DEFAULT_MAX_SOURCE_CHARS`], clamped to [`SOURCE_CHARS_HARD_CAP`]) from a request.
-fn parse_source_opts(request: &Value) -> (bool, usize) {
+/// Parse the source-inlining options from a request:
+/// * `include_source` (default `false`),
+/// * `max_source_chars` — per-slice cap (default [`DEFAULT_MAX_SOURCE_CHARS`], clamped to
+///   [`SOURCE_CHARS_HARD_CAP`]),
+/// * `max_total_source_chars` — across-matches total budget (default
+///   [`DEFAULT_TOTAL_SOURCE_BUDGET`], clamped to [`MAX_TOTAL_SOURCE_BUDGET`]).
+///
+/// Returns `(include, per_slice_cap, total_budget)`.
+fn parse_source_opts(request: &Value) -> (bool, usize, usize) {
     let include = request
         .get("include_source")
         .and_then(|v| v.as_bool())
@@ -132,7 +148,11 @@ fn parse_source_opts(request: &Value) -> (bool, usize) {
         .map(|v| v as usize)
         .unwrap_or(DEFAULT_MAX_SOURCE_CHARS)
         .min(SOURCE_CHARS_HARD_CAP);
-    (include, max_chars)
+    let total_budget = opt_u64(request, "max_total_source_chars")
+        .map(|v| v as usize)
+        .unwrap_or(DEFAULT_TOTAL_SOURCE_BUDGET)
+        .min(MAX_TOTAL_SOURCE_BUDGET);
+    (include, max_chars, total_budget)
 }
 
 /// Attach source/provenance fields to a node's JSON payload, in place, honoring the per-node and
@@ -219,6 +239,8 @@ fn attach_source(
 /// * `include_source` (optional, default `false`) — attach each match's exact byte slice, bounded
 ///   by `max_source_chars` per match plus a total-payload budget across matches (R4).
 /// * `max_source_chars` (optional, default 2000, hard-capped at 16000) — per-match char budget.
+/// * `max_total_source_chars` (optional, default 12000, hard-capped at 20000) — total source
+///   budget across all matches; the R4 headroom control. Source is truncated first when it runs out.
 ///
 /// **Response `content` shape**
 /// ```json
@@ -299,10 +321,11 @@ impl RetrievalTool for SearchEntity {
         }
         diag.push(staleness_note());
 
-        let (include_source, max_source_chars) = parse_source_opts(request);
-        // Total source budget across all matches (R4): ~16K chars leaves headroom under the ~25K cap
-        // for names/signatures/diagnostics. Only consumed when include_source is set.
-        let mut budget_remaining: usize = SOURCE_CHARS_HARD_CAP;
+        let (include_source, max_source_chars, total_source_budget) = parse_source_opts(request);
+        // Total source budget across all matches (R4): default 12K leaves headroom under the ~25K
+        // cap for names/signatures/diagnostics; caller-tunable via max_total_source_chars (≤20K).
+        // Only consumed when include_source is set.
+        let mut budget_remaining: usize = total_source_budget;
 
         let mut matches: Vec<Value> = Vec::with_capacity(exact_hits.len());
         for n in &exact_hits {
@@ -409,7 +432,8 @@ impl RetrievalTool for RetrieveEntity {
                 })
             }
             Some(node) => {
-                let (include_source, max_source_chars) = parse_source_opts(request);
+                // Single node: the per-slice cap is the only bound (no across-matches total).
+                let (include_source, max_source_chars, _total) = parse_source_opts(request);
                 let mut budget_remaining: usize = SOURCE_CHARS_HARD_CAP;
 
                 let mut obj = serde_json::Map::new();
@@ -3197,6 +3221,29 @@ mod tests {
             .unwrap();
         let m2 = &res2.content["matches"][0];
         assert_eq!(m2["source"].as_str().unwrap(), "greet");
+    }
+
+    #[test]
+    fn search_entity_total_source_budget_caps_inlined_source() {
+        // The across-matches total budget (max_total_source_chars) is the R4 headroom control:
+        // a tiny value truncates source even though the per-slice cap would allow more.
+        let store = content_fixture();
+        let res = SearchEntity
+            .invoke(
+                &store,
+                &json!({"name": "greet", "include_source": true, "max_total_source_chars": 3}),
+            )
+            .unwrap();
+        let m = &res.content["matches"][0];
+        let src = m["source"].as_str().unwrap();
+        assert!(
+            src.chars().count() <= 3,
+            "total budget must cap source, got {src:?}"
+        );
+        assert!(
+            m["source_truncated"].as_bool().unwrap_or(false),
+            "truncation must be flagged when the total budget bites"
+        );
     }
 
     // ── Enriched payloads: denormalized edge endpoints (TraverseGraph) ─────────
