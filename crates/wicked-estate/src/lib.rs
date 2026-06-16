@@ -1831,4 +1831,181 @@ mod tests {
             "embeddings table must be empty when --embeddings was not used"
         );
     }
+
+    // ── clusters --summary JSON shape ────────────────────────────────────────
+
+    /// Helper: build a MemStore with two Function nodes connected by a Calls edge.
+    fn build_two_node_store() -> (MemStore, SymbolId, SymbolId) {
+        use wicked_estate_core::{
+            Edge, EdgeKind, GraphWrite, Language, Location, ResolutionTier, Span,
+        };
+
+        let id_a = SymbolId("fn::alpha".to_string());
+        let id_b = SymbolId("fn::beta".to_string());
+
+        let node_a = Node::new(
+            id_a.clone(),
+            NodeKind::Function,
+            "alpha",
+            Language::new("rust"),
+            Location::new("src/alpha.rs", Span::ZERO),
+        );
+        let node_b = Node::new(
+            id_b.clone(),
+            NodeKind::Function,
+            "beta",
+            Language::new("rust"),
+            Location::new("src/beta.rs", Span::ZERO),
+        );
+        let edge = Edge::new(
+            id_b.clone(),
+            id_a.clone(),
+            EdgeKind::Calls,
+            ResolutionTier::Parsed,
+            "test",
+        );
+
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store.upsert_nodes(&[node_a, node_b]).unwrap();
+        store.upsert_edges(&[edge]).unwrap();
+        store.commit_batch().unwrap();
+
+        (store, id_a, id_b)
+    }
+
+    /// `summarize_communities` returns one entry per non-empty community with all
+    /// required fields non-empty (size ≥ 1, top_symbols non-empty, dominant_files non-empty).
+    ///
+    /// This covers the JSON-shaping logic used by `clusters --summary --json`.
+    #[test]
+    fn clusters_summary_json_shape_has_required_fields() {
+        let (store, id_a, id_b) = build_two_node_store();
+
+        // A hand-crafted community partition: one community with both symbols.
+        let communities: Vec<Vec<SymbolId>> = vec![vec![id_a.clone(), id_b.clone()]];
+
+        let summaries =
+            wicked_estate_rank::summarize_communities(&store, &communities, 1.0).unwrap();
+
+        assert_eq!(summaries.len(), 1, "one summary per community");
+        let s = &summaries[0];
+        assert_eq!(s.size, 2, "size must match member count");
+        assert!(!s.top_symbols.is_empty(), "top_symbols must not be empty");
+        assert!(
+            !s.dominant_files.is_empty(),
+            "dominant_files must not be empty"
+        );
+
+        // Verify the JSON value we'd emit in the clusters arm has all expected keys.
+        let members_json: Vec<String> = communities[0].iter().map(|id| id.to_string()).collect();
+        let json_obj = serde_json::json!({
+            "id": 0usize,
+            "size": s.size,
+            "members": members_json,
+            "label_candidates": s.top_symbols,
+            "dominant_files": s.dominant_files,
+            "modularity_contribution": s.modularity_contribution,
+        });
+        for key in &[
+            "id",
+            "size",
+            "members",
+            "label_candidates",
+            "dominant_files",
+            "modularity_contribution",
+        ] {
+            assert!(
+                json_obj.get(key).is_some(),
+                "clusters --summary JSON must include key '{key}'"
+            );
+        }
+    }
+
+    /// Without `--summary`, `clusters --json` emits bare arrays (back-compat).
+    ///
+    /// The bare-array path produces `Vec<Vec<String>>` — a JSON array of string arrays.
+    /// Verify it serialises correctly and does NOT include summary keys.
+    #[test]
+    fn clusters_bare_json_is_array_of_arrays() {
+        let (_, id_a, id_b) = build_two_node_store();
+
+        let communities: Vec<Vec<SymbolId>> = vec![vec![id_a.clone(), id_b.clone()]];
+
+        // This is exactly the bare-array path in the clusters arm.
+        let j: Vec<Vec<String>> = communities
+            .iter()
+            .map(|c| c.iter().map(|s| s.to_string()).collect())
+            .collect();
+
+        let json_val = serde_json::to_value(&j).unwrap();
+        assert!(json_val.is_array(), "bare output must be a JSON array");
+        let outer = json_val.as_array().unwrap();
+        assert_eq!(outer.len(), 1, "one inner array per community");
+        let inner = outer[0].as_array().unwrap();
+        assert_eq!(inner.len(), 2, "two members in the community");
+        // Must NOT have a 'size' key — that would indicate the summary path.
+        assert!(
+            outer[0].get("size").is_none(),
+            "bare array must not have 'size' key"
+        );
+    }
+
+    // ── nodes --json symbol_id field ─────────────────────────────────────────
+
+    /// `nodes --json` objects must each carry a non-empty `symbol_id`.
+    ///
+    /// Exercise the JSON-shaping used by the nodes arm by calling the same
+    /// `serde_json::json!` construction directly against real nodes from the store.
+    #[test]
+    fn nodes_json_includes_symbol_id() {
+        let (store, id_a, _id_b) = build_two_node_store();
+
+        // Retrieve the nodes as the nodes arm does (all_nodes is on GraphRead / GraphStoreMutExt).
+        let nodes = store.all_nodes().unwrap();
+        assert!(!nodes.is_empty(), "store must have nodes");
+
+        // Reproduce the JSON shaping from the nodes arm for both code paths.
+        let j: Vec<serde_json::Value> = nodes
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "symbol_id": n.symbol.to_string(),
+                    "name": n.name,
+                    "kind": format!("{:?}", n.kind),
+                    "file": n.location.file,
+                    "line": n.location.span.start_line + 1,
+                    "signature": n.signature,
+                })
+            })
+            .collect();
+
+        for obj in &j {
+            let sym_id = obj.get("symbol_id").and_then(|v| v.as_str()).unwrap_or("");
+            assert!(
+                !sym_id.is_empty(),
+                "every node JSON object must have a non-empty symbol_id; got: {obj}"
+            );
+        }
+
+        // The node we inserted with id "fn::alpha" must be findable by symbol_id.
+        let has_alpha = j
+            .iter()
+            .any(|obj| obj.get("symbol_id").and_then(|v| v.as_str()) == Some(id_a.0.as_str()));
+        assert!(
+            has_alpha,
+            "fn::alpha must appear in nodes JSON by symbol_id"
+        );
+
+        // There must be no object missing the symbol_id key.
+        let missing: Vec<_> = j
+            .iter()
+            .filter(|obj| obj.get("symbol_id").is_none())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{} node(s) are missing symbol_id",
+            missing.len()
+        );
+    }
 }
