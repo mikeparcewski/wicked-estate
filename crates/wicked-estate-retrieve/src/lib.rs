@@ -40,6 +40,163 @@ fn staleness_note() -> String {
     "STALENESS: commits_behind not available at this layer — embed git rev-list delta in the MCP response".to_string()
 }
 
+/// Default per-node source-slice cap (chars) for the opt-in `include_source` path.
+const DEFAULT_MAX_SOURCE_CHARS: usize = 2_000;
+
+/// Hard ceiling on a single source slice regardless of `max_source_chars` — R4 guard so one
+/// pathological symbol can't blow the ~25K payload cap on its own.
+const SOURCE_CHARS_HARD_CAP: usize = 16_000;
+
+/// JSON value for `node.kind`, falling back to `null` on the (impossible) serialize failure.
+fn kind_json(kind: &wicked_estate_core::NodeKind) -> Value {
+    serde_json::to_value(kind).unwrap_or(Value::Null)
+}
+
+/// 1-based start line (the field the CLI prints as `line+1`). The on-disk span is 0-based.
+fn line_1based(node: &wicked_estate_core::Node) -> u64 {
+    node.location.span.start_line as u64 + 1
+}
+
+/// Denormalize a [`SymbolId`] endpoint into `{symbol, name, kind, file, line_1based}` so graph-tool
+/// callers don't need an N+1 `RetrieveEntity` round-trip per edge endpoint.
+///
+/// `cache` memoizes node lookups within a single tool invocation: an edge's two endpoints, and the
+/// endpoints shared across many edges, resolve with at most one `get_node` per distinct id. A
+/// `None` cache entry records a confirmed miss (id not in the graph) so we never re-query it.
+///
+/// When the id is **not** a node in the graph (e.g. a dangling edge to a symbol from another file),
+/// only `{symbol}` is emitted — the caller still gets the id, just without the denormalized detail.
+fn endpoint_json(
+    store: &dyn GraphRead,
+    id: &SymbolId,
+    cache: &mut HashMap<SymbolId, Option<wicked_estate_core::Node>>,
+) -> Result<Value> {
+    if !cache.contains_key(id) {
+        let node = store.get_node(id)?;
+        cache.insert(id.clone(), node);
+    }
+    match cache.get(id).and_then(|o| o.as_ref()) {
+        Some(node) => Ok(json!({
+            "symbol": node.symbol.as_str(),
+            "name": node.name,
+            "kind": kind_json(&node.kind),
+            "file": node.location.file,
+            "line_1based": line_1based(node),
+        })),
+        // Endpoint not in the graph — return the bare id so the edge is still traceable.
+        None => Ok(json!({ "symbol": id.as_str() })),
+    }
+}
+
+/// Provenance rendered as the serde snake_case tag (R7 — provenance visible on every edge).
+fn provenance_json(p: &wicked_estate_core::Provenance) -> Value {
+    serde_json::to_value(p).unwrap_or(Value::Null)
+}
+
+/// Denormalize one [`wicked_estate_core::Edge`] into a self-contained JSON object: both endpoints
+/// expanded (via [`endpoint_json`]) plus the edge's `{confidence, provenance, resolved_by}` inline,
+/// so an agent reading a traversal never has to look an endpoint up or guess an edge's trust (R7).
+fn edge_json(
+    store: &dyn GraphRead,
+    edge: &wicked_estate_core::Edge,
+    cache: &mut HashMap<SymbolId, Option<wicked_estate_core::Node>>,
+) -> Result<Value> {
+    Ok(json!({
+        "source": endpoint_json(store, &edge.source, cache)?,
+        "target": endpoint_json(store, &edge.target, cache)?,
+        "kind": kind_json_edge(&edge.kind),
+        "confidence": edge.confidence.get(),
+        "provenance": provenance_json(&edge.provenance),
+        "resolved_by": edge.resolved_by,
+    }))
+}
+
+/// JSON value for an [`wicked_estate_core::EdgeKind`].
+fn kind_json_edge(kind: &EdgeKind) -> Value {
+    serde_json::to_value(kind).unwrap_or(Value::Null)
+}
+
+/// Parse `include_source` (default `false`) and `max_source_chars` (default
+/// [`DEFAULT_MAX_SOURCE_CHARS`], clamped to [`SOURCE_CHARS_HARD_CAP`]) from a request.
+fn parse_source_opts(request: &Value) -> (bool, usize) {
+    let include = request
+        .get("include_source")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let max_chars = opt_u64(request, "max_source_chars")
+        .map(|v| v as usize)
+        .unwrap_or(DEFAULT_MAX_SOURCE_CHARS)
+        .min(SOURCE_CHARS_HARD_CAP);
+    (include, max_chars)
+}
+
+/// Attach source/provenance fields to a node's JSON payload, in place, honoring the per-node and
+/// total-payload char budgets (R4). Mutates `obj`, returns the number of source chars charged
+/// against the running `total_budget_remaining`.
+///
+/// Behavior:
+/// * Always adds `blob_sha` when the store has a git blob SHA for the node's file (Deliverable 5;
+///   file-granularity — see the report note). Absent otherwise.
+/// * When `include_source` and the store can produce a slice (`symbol_source`), adds:
+///   - `source` — the byte slice, truncated to `min(max_source_chars, total_budget_remaining)`;
+///   - `byte_range` — `[start_byte, end_byte]` from the span (always, when source is attempted);
+///   - `source_truncated` — `true` iff the stored slice was longer than what was emitted.
+/// * When `include_source` but no slice is available (zero span / content not stored), adds
+///   `source: null` + the `byte_range` so the caller can fetch the bytes itself, and pushes a
+///   diagnostic.
+fn attach_source(
+    obj: &mut serde_json::Map<String, Value>,
+    store: &dyn GraphRead,
+    node: &wicked_estate_core::Node,
+    include_source: bool,
+    max_source_chars: usize,
+    total_budget_remaining: &mut usize,
+    diag: &mut Vec<String>,
+) -> Result<()> {
+    // blob_sha is independent of include_source: it is a cheap, content-addressed file-version id.
+    if let Some(sha) = store.file_git_sha(&node.location.file)? {
+        obj.insert("blob_sha".to_string(), json!(sha));
+    }
+
+    if !include_source {
+        return Ok(());
+    }
+
+    let span = node.location.span;
+    let byte_range = json!([span.start_byte, span.end_byte]);
+
+    match store.symbol_source(node)? {
+        Some(src) => {
+            let per_node_cap = max_source_chars.min(*total_budget_remaining);
+            // Truncate on a char boundary so we never split a multi-byte UTF-8 scalar.
+            let (slice, truncated) = if src.chars().count() > per_node_cap {
+                let taken: String = src.chars().take(per_node_cap).collect();
+                (taken, true)
+            } else {
+                (src, false)
+            };
+            *total_budget_remaining = total_budget_remaining.saturating_sub(slice.chars().count());
+            obj.insert("source".to_string(), json!(slice));
+            obj.insert("byte_range".to_string(), byte_range);
+            if truncated {
+                obj.insert("source_truncated".to_string(), json!(true));
+            }
+        }
+        None => {
+            // Source requested but unavailable — be honest (R3/R5): emit null + the byte range so
+            // the agent can still locate the bytes, and say why once.
+            obj.insert("source".to_string(), Value::Null);
+            obj.insert("byte_range".to_string(), byte_range);
+            diag.push(format!(
+                "source unavailable for '{}' (file content not stored or zero-span span); \
+                 byte_range provided — re-run 'index' to populate content",
+                node.symbol.as_str()
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SearchEntity
 // ─────────────────────────────────────────────────────────────────────────────
@@ -54,12 +211,20 @@ fn staleness_note() -> String {
 ///   signature`.  If the store has native FTS the text field drives it; otherwise the in-process
 ///   filter is used.
 /// * `limit` (optional, default 20, max 100) — max results.
+/// * `include_source` (optional, default `false`) — attach each match's exact byte slice, bounded
+///   by `max_source_chars` per match plus a total-payload budget across matches (R4).
+/// * `max_source_chars` (optional, default 2000, hard-capped at 16000) — per-match char budget.
 ///
 /// **Response `content` shape**
 /// ```json
 /// { "matches": [ { "symbol": "…", "name": "foo", "kind": "function", "file": "src/lib.rs",
-///                  "line": 12, "signature": "fn foo() -> u32" }, … ], "total": 3 }
+///                  "line": 11, "line_1based": 12, "end_line": 14, "end_line_1based": 15,
+///                  "signature": "fn foo() -> u32",
+///                  "blob_sha": "…",                       // present iff file has a git blob SHA
+///                  "source": "fn foo() …",                // present iff include_source
+///                  "byte_range": [120, 168], "source_truncated": false }, … ], "total": 3 }
 /// ```
+/// `line` stays 0-based for compat; `line_1based` matches the CLI's printed line.
 #[derive(Debug, Default)]
 pub struct SearchEntity;
 
@@ -129,19 +294,41 @@ impl RetrievalTool for SearchEntity {
         }
         diag.push(staleness_note());
 
-        let matches: Vec<Value> = exact_hits
-            .iter()
-            .map(|n| {
-                json!({
-                    "symbol": n.symbol.as_str(),
-                    "name": n.name,
-                    "kind": serde_json::to_value(&n.kind).unwrap_or(Value::Null),
-                    "file": n.location.file,
-                    "line": n.location.span.start_line,
-                    "signature": n.signature.as_deref().unwrap_or(""),
-                })
-            })
-            .collect();
+        let (include_source, max_source_chars) = parse_source_opts(request);
+        // Total source budget across all matches (R4): ~16K chars leaves headroom under the ~25K cap
+        // for names/signatures/diagnostics. Only consumed when include_source is set.
+        let mut budget_remaining: usize = SOURCE_CHARS_HARD_CAP;
+
+        let mut matches: Vec<Value> = Vec::with_capacity(exact_hits.len());
+        for n in &exact_hits {
+            let mut obj = serde_json::Map::new();
+            obj.insert("symbol".to_string(), json!(n.symbol.as_str()));
+            obj.insert("name".to_string(), json!(n.name));
+            obj.insert("kind".to_string(), kind_json(&n.kind));
+            obj.insert("file".to_string(), json!(n.location.file));
+            // Existing 0-based `line` kept for compat; 1-based + end lines added additively.
+            obj.insert("line".to_string(), json!(n.location.span.start_line));
+            obj.insert("line_1based".to_string(), json!(line_1based(n)));
+            obj.insert("end_line".to_string(), json!(n.location.span.end_line));
+            obj.insert(
+                "end_line_1based".to_string(),
+                json!(n.location.span.end_line as u64 + 1),
+            );
+            obj.insert(
+                "signature".to_string(),
+                json!(n.signature.as_deref().unwrap_or("")),
+            );
+            attach_source(
+                &mut obj,
+                store,
+                n,
+                include_source,
+                max_source_chars,
+                &mut budget_remaining,
+                &mut diag,
+            )?;
+            matches.push(Value::Object(obj));
+        }
 
         let total = matches.len();
         Ok(RetrievalResult {
@@ -159,15 +346,24 @@ impl RetrievalTool for SearchEntity {
 ///
 /// **Request shape**
 /// ```json
-/// { "symbol": "<id>" }
+/// { "symbol": "<id>", "include_source": false, "max_source_chars": 2000 }
 /// ```
+/// * `symbol` (required) — stable [`SymbolId`].
+/// * `include_source` (optional, default `false`) — when `true`, attach the symbol's exact byte
+///   slice (bounded by `max_source_chars` + a hard cap; R4). Default-off keeps the payload small.
+/// * `max_source_chars` (optional, default 2000, hard-capped at 16000) — per-slice char budget.
 ///
 /// **Response `content` shape**
 /// ```json
 /// { "found": true, "symbol": "…", "name": "foo", "kind": "function",
-///   "language": "rust", "file": "src/lib.rs", "line": 12,
-///   "signature": "fn foo() -> u32", "doc": "…" }
+///   "language": "rust", "file": "src/lib.rs",
+///   "line": 11, "line_1based": 12, "end_line": 14, "end_line_1based": 15,
+///   "signature": "fn foo() -> u32", "doc": "…",
+///   "blob_sha": "…",                                  // present iff the file has a git blob SHA
+///   "source": "fn foo() -> u32 { … }",                // present iff include_source
+///   "byte_range": [120, 168], "source_truncated": false }
 /// ```
+/// `line` stays 0-based for backward compatibility; `line_1based` matches what the CLI prints.
 /// When the symbol is not found `found` is `false` and the other fields are absent; a diagnostic
 /// is emitted instead of an error (R1).
 #[derive(Debug, Default)]
@@ -207,20 +403,45 @@ impl RetrievalTool for RetrieveEntity {
                     diagnostics: diag,
                 })
             }
-            Some(node) => Ok(RetrievalResult {
-                content: json!({
-                    "found": true,
-                    "symbol": node.symbol.as_str(),
-                    "name": node.name,
-                    "kind": serde_json::to_value(&node.kind).unwrap_or(Value::Null),
-                    "language": node.language.as_str(),
-                    "file": node.location.file,
-                    "line": node.location.span.start_line,
-                    "signature": node.signature.as_deref().unwrap_or(""),
-                    "doc": node.doc.as_deref().unwrap_or(""),
-                }),
-                diagnostics: diag,
-            }),
+            Some(node) => {
+                let (include_source, max_source_chars) = parse_source_opts(request);
+                let mut budget_remaining: usize = SOURCE_CHARS_HARD_CAP;
+
+                let mut obj = serde_json::Map::new();
+                obj.insert("found".to_string(), json!(true));
+                obj.insert("symbol".to_string(), json!(node.symbol.as_str()));
+                obj.insert("name".to_string(), json!(node.name));
+                obj.insert("kind".to_string(), kind_json(&node.kind));
+                obj.insert("language".to_string(), json!(node.language.as_str()));
+                obj.insert("file".to_string(), json!(node.location.file));
+                // Existing 0-based `line` preserved for compat; richer line fields added additively.
+                obj.insert("line".to_string(), json!(node.location.span.start_line));
+                obj.insert("line_1based".to_string(), json!(line_1based(&node)));
+                obj.insert("end_line".to_string(), json!(node.location.span.end_line));
+                obj.insert(
+                    "end_line_1based".to_string(),
+                    json!(node.location.span.end_line as u64 + 1),
+                );
+                obj.insert(
+                    "signature".to_string(),
+                    json!(node.signature.as_deref().unwrap_or("")),
+                );
+                obj.insert("doc".to_string(), json!(node.doc.as_deref().unwrap_or("")));
+                attach_source(
+                    &mut obj,
+                    store,
+                    &node,
+                    include_source,
+                    max_source_chars,
+                    &mut budget_remaining,
+                    &mut diag,
+                )?;
+
+                Ok(RetrievalResult {
+                    content: Value::Object(obj),
+                    diagnostics: diag,
+                })
+            }
         }
     }
 }
@@ -243,8 +464,18 @@ impl RetrievalTool for RetrieveEntity {
 ///
 /// **Response `content` shape**
 /// ```json
-/// { "nodes": […], "edges": […], "depths": { "<id>": 1, … }, "truncated": false }
+/// { "nodes": [ { "symbol": "…", "name": "…", "kind": "…",
+///                "file": "…", "line": 11, "line_1based": 12 }, … ],
+///   "edges": [ { "source": { "symbol": "…", "name": "…", "kind": "…",
+///                            "file": "…", "line_1based": 12 },
+///                "target": { … }, "kind": "calls",
+///                "confidence": 1.0, "provenance": "parsed",
+///                "resolved_by": "scip-rust" }, … ],
+///   "depths": { "<id>": 1, … }, "truncated": false }
 /// ```
+/// Edge endpoints are **denormalized** (name/kind/file/line inline) so an agent never needs an
+/// N+1 `RetrieveEntity` per endpoint; each edge also carries `{confidence, provenance, resolved_by}`
+/// so heuristic edges are never mistaken for facts (R7).
 #[derive(Debug, Default)]
 pub struct TraverseGraph;
 
@@ -339,25 +570,27 @@ impl RetrievalTool for TraverseGraph {
                 json!({
                     "symbol": n.symbol.as_str(),
                     "name": n.name,
-                    "kind": serde_json::to_value(&n.kind).unwrap_or(Value::Null),
+                    "kind": kind_json(&n.kind),
                     "file": n.location.file,
                     "line": n.location.span.start_line,
+                    "line_1based": line_1based(n),
                 })
             })
             .collect();
 
-        let edges_json: Vec<Value> = subgraph
-            .edges
-            .iter()
-            .map(|e| {
-                json!({
-                    "source": e.source.as_str(),
-                    "target": e.target.as_str(),
-                    "kind": serde_json::to_value(&e.kind).unwrap_or(Value::Null),
-                    "confidence": e.confidence.get(),
-                })
-            })
-            .collect();
+        // Denormalize edge endpoints (Deliverable 1): each endpoint expands to
+        // {symbol,name,kind,file,line_1based} and the edge carries {confidence,provenance,
+        // resolved_by} inline (R7) — no N+1 RetrieveEntity follow-ups. Endpoint lookups are
+        // memoized for the whole result set.
+        let mut node_cache: HashMap<SymbolId, Option<wicked_estate_core::Node>> = HashMap::new();
+        // Seed the cache with nodes already in hand (avoids re-querying for endpoints).
+        for n in &subgraph.nodes {
+            node_cache.insert(n.symbol.clone(), Some(n.clone()));
+        }
+        let mut edges_json: Vec<Value> = Vec::with_capacity(subgraph.edges.len());
+        for e in &subgraph.edges {
+            edges_json.push(edge_json(store, e, &mut node_cache)?);
+        }
 
         Ok(RetrievalResult {
             content: json!({
@@ -385,15 +618,22 @@ impl RetrievalTool for TraverseGraph {
 ///
 /// **Response `content` shape**
 /// ```json
-/// { "dependents": [ { "symbol": "…", "name": "…", "depth": 1 }, … ],
+/// { "dependents": [ { "symbol": "…", "name": "…", "kind": "…", "file": "…",
+///                     "line": 11, "line_1based": 12, "depth": 1 }, … ],
 ///   "total": 5, "truncated": false,
 ///   "unresolved_callers": 2,
-///   "confidence": { "min": 0.6, "avg": 0.9, "edge_count": 3 } }
+///   "confidence": { "min": 0.6, "avg": 0.9, "edge_count": 3 },
+///   "summary": { "total": 5,
+///                "by_kind": { "function": 4, "method": 1 },
+///                "top_files": [ { "file": "src/a.rs", "count": 3 }, … ],
+///                "top_by_pagerank": [ { "symbol": "…", "name": "…", "score": 0.12 }, … ] } }
 /// ```
 /// The start symbol itself is excluded from `dependents`.
 /// `unresolved_callers` counts call-site references to the symbol's name that the resolver
 /// could not bind — potential dependents that may be missing from `dependents`.  Always
 /// present, even when zero.
+/// `summary` gives an at-a-glance picture (counts by kind, hottest files, highest-PageRank
+/// dependents) so an agent can triage a large blast without reading every entry (R4-friendly).
 #[derive(Debug, Default)]
 pub struct BlastRadius;
 
@@ -451,23 +691,33 @@ impl RetrievalTool for BlastRadius {
         // Unresolved-ref coverage: calls/imports to `symbol_name` the resolver could not bind.
         let unresolved_callers = store.unresolved_refs_for_name(&symbol_name)?.len();
 
-        // Exclude the start node itself from the dependent list.
-        let dependents: Vec<Value> = subgraph
+        // Dependent nodes (start excluded), kept as a Vec<&Node> so we can both render them and
+        // compute the summary without a second pass over the subgraph.
+        let dependent_nodes: Vec<&wicked_estate_core::Node> = subgraph
             .nodes
             .iter()
             .filter(|n| n.symbol.as_str() != id_str)
+            .collect();
+
+        let dependents: Vec<Value> = dependent_nodes
+            .iter()
             .map(|n| {
                 let depth = subgraph.depths.get(n.symbol.as_str()).copied().unwrap_or(0);
                 json!({
                     "symbol": n.symbol.as_str(),
                     "name": n.name,
-                    "kind": serde_json::to_value(&n.kind).unwrap_or(Value::Null),
+                    "kind": kind_json(&n.kind),
                     "file": n.location.file,
                     "line": n.location.span.start_line,
+                    "line_1based": line_1based(n),
                     "depth": depth,
                 })
             })
             .collect();
+
+        // Compact summary (Deliverable 4): counts by kind, top files by member count, and
+        // (best-effort) top members by personalized PageRank seeded on the start symbol.
+        let summary = blast_summary(store, &start, &dependent_nodes)?;
 
         // Confidence stats over the traversal's edges (edges entering the blast-radius set).
         let (conf_min, conf_avg, edge_count) = {
@@ -516,10 +766,95 @@ impl RetrievalTool for BlastRadius {
                 "truncated": subgraph.truncated,
                 "unresolved_callers": unresolved_callers,
                 "confidence": conf_json,
+                "summary": summary,
             }),
             diagnostics: diag,
         })
     }
+}
+
+/// Top-N cap for the per-file and per-PageRank lists in the blast-radius summary (R4 — keep it
+/// compact regardless of blast size).
+const BLAST_SUMMARY_TOP_N: usize = 10;
+
+/// Build the compact `summary` object for a blast radius:
+/// ```json
+/// { "total": 12,
+///   "by_kind": { "function": 9, "method": 3 },
+///   "top_files": [ { "file": "src/a.rs", "count": 4 }, … ],     // ≤ BLAST_SUMMARY_TOP_N
+///   "top_by_pagerank": [ { "symbol": "…", "name": "…", "score": 0.12 }, … ] }  // ≤ N, optional
+/// ```
+/// `top_by_pagerank` is best-effort: personalized PageRank is seeded on the changed symbol, then
+/// filtered to the dependent set. It is omitted (absent) only if ranking errors; an empty graph
+/// yields an empty array. Counts are exact over the resolved dependents.
+fn blast_summary(
+    store: &dyn GraphRead,
+    start: &SymbolId,
+    dependents: &[&wicked_estate_core::Node],
+) -> Result<Value> {
+    use std::collections::BTreeMap;
+
+    // by_kind — BTreeMap for deterministic key order in the JSON.
+    let mut by_kind: BTreeMap<String, u64> = BTreeMap::new();
+    // file -> member count.
+    let mut file_counts: HashMap<String, u64> = HashMap::new();
+    for n in dependents {
+        let kind_key = match kind_json(&n.kind) {
+            Value::String(s) => s,
+            other => other.to_string(),
+        };
+        *by_kind.entry(kind_key).or_insert(0) += 1;
+        *file_counts.entry(n.location.file.clone()).or_insert(0) += 1;
+    }
+
+    // top_files — by count desc, then path asc for determinism.
+    let mut file_vec: Vec<(String, u64)> = file_counts.into_iter().collect();
+    file_vec.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let top_files: Vec<Value> = file_vec
+        .iter()
+        .take(BLAST_SUMMARY_TOP_N)
+        .map(|(file, count)| json!({ "file": file, "count": count }))
+        .collect();
+
+    // top_by_pagerank — personalized PR seeded on the changed symbol, filtered to dependents.
+    let dependent_ids: HashSet<&str> = dependents.iter().map(|n| n.symbol.as_str()).collect();
+    let name_by_id: HashMap<&str, &str> = dependents
+        .iter()
+        .map(|n| (n.symbol.as_str(), n.name.as_str()))
+        .collect();
+    let top_by_pagerank: Value =
+        match wicked_estate_rank::ranked_symbols(store, std::slice::from_ref(start), usize::MAX) {
+            Ok(ranked) => {
+                let list: Vec<Value> = ranked
+                    .into_iter()
+                    .filter(|(id, _)| dependent_ids.contains(id.as_str()))
+                    .take(BLAST_SUMMARY_TOP_N)
+                    .map(|(id, score)| {
+                        json!({
+                            "symbol": id.as_str(),
+                            "name": name_by_id.get(id.as_str()).copied().unwrap_or(""),
+                            "score": score,
+                        })
+                    })
+                    .collect();
+                Value::Array(list)
+            }
+            // Ranking is an enrichment, not load-bearing: degrade to absent rather than failing the
+            // whole tool (R1) if PageRank errors.
+            Err(_) => Value::Null,
+        };
+
+    let mut summary = serde_json::Map::new();
+    summary.insert("total".to_string(), json!(dependents.len()));
+    summary.insert(
+        "by_kind".to_string(),
+        serde_json::to_value(&by_kind).unwrap_or(Value::Null),
+    );
+    summary.insert("top_files".to_string(), Value::Array(top_files));
+    if !top_by_pagerank.is_null() {
+        summary.insert("top_by_pagerank".to_string(), top_by_pagerank);
+    }
+    Ok(Value::Object(summary))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2710,6 +3045,273 @@ mod tests {
         assert!(
             res.diagnostics.iter().any(|d| d.contains("STALENESS")),
             "R5 staleness note must always be present"
+        );
+    }
+
+    // ── Enriched payloads: additive line fields ──────────────────────────────
+
+    #[test]
+    fn retrieve_entity_line_1based_is_zero_based_plus_one() {
+        let store = fixture_store();
+        let res = RetrieveEntity
+            .invoke(&store, &json!({"symbol": "middle"}))
+            .unwrap();
+        let line = res.content["line"].as_u64().unwrap();
+        let line_1b = res.content["line_1based"].as_u64().unwrap();
+        assert_eq!(line_1b, line + 1, "line_1based must equal line + 1");
+        // end_line fields are additive and present.
+        assert!(res.content.get("end_line").is_some(), "end_line present");
+        assert_eq!(
+            res.content["end_line_1based"].as_u64().unwrap(),
+            res.content["end_line"].as_u64().unwrap() + 1,
+            "end_line_1based == end_line + 1"
+        );
+    }
+
+    #[test]
+    fn search_entity_line_1based_present_and_correct() {
+        let store = fixture_store();
+        let res = SearchEntity
+            .invoke(&store, &json!({"name": "middle_fn"}))
+            .unwrap();
+        let m = &res.content["matches"][0];
+        assert_eq!(
+            m["line_1based"].as_u64().unwrap(),
+            m["line"].as_u64().unwrap() + 1,
+            "SearchEntity match line_1based == line + 1"
+        );
+        assert!(m.get("end_line").is_some(), "end_line present on match");
+    }
+
+    // ── Enriched payloads: opt-in bounded source ──────────────────────────────
+
+    #[test]
+    fn retrieve_entity_source_omitted_by_default() {
+        let store = content_fixture();
+        let res = RetrieveEntity
+            .invoke(&store, &json!({"symbol": "greet_sym"}))
+            .unwrap();
+        assert!(res.content["found"].as_bool().unwrap());
+        assert!(
+            res.content.get("source").is_none(),
+            "source must be ABSENT when include_source is not set (default off)"
+        );
+        // blob_sha is independent of include_source and present for a stored file.
+        assert!(
+            res.content.get("blob_sha").is_some(),
+            "blob_sha present (file content was stored → git blob sha computed)"
+        );
+    }
+
+    #[test]
+    fn retrieve_entity_source_present_when_requested() {
+        let store = content_fixture();
+        let res = RetrieveEntity
+            .invoke(
+                &store,
+                &json!({"symbol": "greet_sym", "include_source": true}),
+            )
+            .unwrap();
+        assert_eq!(
+            res.content["source"].as_str().unwrap(),
+            "greet",
+            "exact byte slice [3..8] of the stored source"
+        );
+        let range = res.content["byte_range"].as_array().unwrap();
+        assert_eq!(range[0].as_u64().unwrap(), 3);
+        assert_eq!(range[1].as_u64().unwrap(), 8);
+        // Not truncated (slice is shorter than the default cap) → flag absent.
+        assert!(
+            res.content.get("source_truncated").is_none(),
+            "source_truncated absent when not truncated"
+        );
+    }
+
+    #[test]
+    fn retrieve_entity_source_bounded_and_truncation_marked() {
+        let store = content_fixture();
+        // max_source_chars=2 forces truncation of the 5-char "greet" slice.
+        let res = RetrieveEntity
+            .invoke(
+                &store,
+                &json!({"symbol": "greet_sym", "include_source": true, "max_source_chars": 2}),
+            )
+            .unwrap();
+        let src = res.content["source"].as_str().unwrap();
+        assert_eq!(src.chars().count(), 2, "slice bounded to max_source_chars");
+        assert_eq!(src, "gr", "first 2 chars of 'greet'");
+        assert!(
+            res.content["source_truncated"].as_bool().unwrap(),
+            "source_truncated must be true when the slice was cut"
+        );
+        // byte_range always reflects the FULL span, even when the emitted slice is truncated.
+        let range = res.content["byte_range"].as_array().unwrap();
+        assert_eq!(range[0].as_u64().unwrap(), 3);
+        assert_eq!(range[1].as_u64().unwrap(), 8);
+    }
+
+    #[test]
+    fn retrieve_entity_source_requested_but_unavailable_emits_null_and_byte_range() {
+        // fixture_store nodes have Span::ZERO and no stored content → no slice.
+        let store = fixture_store();
+        let res = RetrieveEntity
+            .invoke(&store, &json!({"symbol": "leaf", "include_source": true}))
+            .unwrap();
+        assert!(res.content["found"].as_bool().unwrap());
+        assert!(
+            res.content["source"].is_null(),
+            "source is null when unavailable"
+        );
+        assert!(
+            res.content.get("byte_range").is_some(),
+            "byte_range still provided so the caller can locate bytes"
+        );
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.contains("source unavailable")),
+            "honest diagnostic when source requested but missing"
+        );
+    }
+
+    #[test]
+    fn search_entity_source_omitted_by_default_present_when_requested() {
+        let store = content_fixture();
+        // Default: no source.
+        let res = SearchEntity
+            .invoke(&store, &json!({"name": "greet"}))
+            .unwrap();
+        let m = &res.content["matches"][0];
+        assert!(
+            m.get("source").is_none(),
+            "SearchEntity source absent by default"
+        );
+        // Requested: source present + bounded.
+        let res2 = SearchEntity
+            .invoke(&store, &json!({"name": "greet", "include_source": true}))
+            .unwrap();
+        let m2 = &res2.content["matches"][0];
+        assert_eq!(m2["source"].as_str().unwrap(), "greet");
+    }
+
+    // ── Enriched payloads: denormalized edge endpoints (TraverseGraph) ─────────
+
+    #[test]
+    fn traverse_graph_edges_carry_denormalized_endpoints_and_provenance() {
+        let store = fixture_store();
+        let res = TraverseGraph
+            .invoke(
+                &store,
+                &json!({"symbol": "caller", "direction": "dependencies", "depth": 4}),
+            )
+            .unwrap();
+
+        let edges = res.content["edges"].as_array().unwrap();
+        assert!(!edges.is_empty(), "expected at least one edge");
+        // Find the caller→middle edge.
+        let e = edges
+            .iter()
+            .find(|e| e["source"]["symbol"].as_str() == Some("caller"))
+            .expect("caller edge present");
+
+        // Endpoints are denormalized objects, not bare strings.
+        assert_eq!(e["source"]["name"].as_str().unwrap(), "caller_fn");
+        assert_eq!(e["target"]["symbol"].as_str().unwrap(), "middle");
+        assert_eq!(e["target"]["name"].as_str().unwrap(), "middle_fn");
+        assert_eq!(e["target"]["kind"].as_str().unwrap(), "function");
+        assert_eq!(e["target"]["file"].as_str().unwrap(), "src/b.rs");
+        // line_1based on the endpoint == stored 0-based start_line (10) + 1.
+        assert_eq!(e["target"]["line_1based"].as_u64().unwrap(), 11);
+
+        // R7: edge carries confidence + provenance + resolved_by inline.
+        assert!(e["confidence"].as_f64().is_some(), "confidence present");
+        assert_eq!(
+            e["provenance"].as_str().unwrap(),
+            "parsed",
+            "provenance is the snake_case tier tag"
+        );
+        assert_eq!(
+            e["resolved_by"].as_str().unwrap(),
+            "test-fixture",
+            "resolved_by present"
+        );
+
+        // Nodes also gained line_1based.
+        let nodes = res.content["nodes"].as_array().unwrap();
+        let mid = nodes
+            .iter()
+            .find(|n| n["symbol"].as_str() == Some("middle"))
+            .unwrap();
+        assert_eq!(mid["line_1based"].as_u64().unwrap(), 11);
+    }
+
+    // ── Enriched payloads: BlastRadius summary ────────────────────────────────
+
+    #[test]
+    fn blast_radius_summary_present_with_correct_counts() {
+        let store = fixture_store();
+        let res = BlastRadius
+            .invoke(&store, &json!({"symbol": "leaf", "depth": 8}))
+            .unwrap();
+
+        let summary = &res.content["summary"];
+        assert!(summary.is_object(), "summary object present");
+        // leaf's dependents = {middle, caller} → total 2, both functions.
+        assert_eq!(summary["total"].as_u64().unwrap(), 2);
+        assert_eq!(
+            summary["by_kind"]["function"].as_u64().unwrap(),
+            2,
+            "both dependents are functions"
+        );
+
+        // top_files: middle in src/b.rs, caller in src/a.rs → two files, count 1 each.
+        let top_files = summary["top_files"].as_array().unwrap();
+        assert_eq!(top_files.len(), 2, "two distinct dependent files");
+        let total_in_files: u64 = top_files.iter().map(|f| f["count"].as_u64().unwrap()).sum();
+        assert_eq!(total_in_files, 2, "file counts sum to dependent total");
+
+        // top_by_pagerank present (ranking succeeds on this fixture) and bounded.
+        let pr = summary["top_by_pagerank"].as_array().unwrap();
+        assert!(pr.len() <= 2, "pagerank list bounded to dependent count");
+        // Each entry names a real dependent.
+        for entry in pr {
+            let n = entry["name"].as_str().unwrap();
+            assert!(
+                n == "middle_fn" || n == "caller_fn",
+                "pagerank entry must be a dependent, got {n}"
+            );
+        }
+    }
+
+    #[test]
+    fn blast_radius_dependents_carry_line_1based() {
+        let store = fixture_store();
+        let res = BlastRadius
+            .invoke(&store, &json!({"symbol": "leaf"}))
+            .unwrap();
+        let deps = res.content["dependents"].as_array().unwrap();
+        let middle = deps
+            .iter()
+            .find(|d| d["name"].as_str().unwrap() == "middle_fn")
+            .unwrap();
+        assert_eq!(
+            middle["line_1based"].as_u64().unwrap(),
+            middle["line"].as_u64().unwrap() + 1,
+            "dependent line_1based == line + 1"
+        );
+    }
+
+    #[test]
+    fn blast_radius_summary_empty_when_no_dependents() {
+        let store = fixture_store();
+        let res = BlastRadius
+            .invoke(&store, &json!({"symbol": "caller"}))
+            .unwrap();
+        let summary = &res.content["summary"];
+        assert_eq!(summary["total"].as_u64().unwrap(), 0, "no dependents");
+        assert!(
+            summary["top_files"].as_array().unwrap().is_empty(),
+            "no files when no dependents"
         );
     }
 
