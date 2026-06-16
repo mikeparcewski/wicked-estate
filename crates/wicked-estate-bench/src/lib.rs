@@ -8,11 +8,13 @@
 //! codebases without requiring an LLM in the loop.
 
 pub mod capability;
+pub mod community_metrics;
 
 pub use capability::{
     CapabilityReport, ConfidenceBands, LangMatrixRow, RepoMetrics, ResolverStats, run_benchmark,
     write_coverage_matrix,
 };
+pub use community_metrics::{CommunityMetrics, community_metrics};
 
 use serde::{Deserialize, Serialize};
 

@@ -354,6 +354,14 @@ fn main() -> Result<()> {
     let mut correspond_min_score: f64 = 0.35;
     // --annotated-with KEY or KEY=VALUE: filter nodes by annotation.
     let mut annotated_with: Option<String> = None;
+    // `clusters` command tuning — community detection (graph) + semantic clustering.
+    let mut cluster_resolution: f64 = 1.0;
+    let mut cluster_hierarchical = false;
+    let mut cluster_package_bias: f64 = 0.0;
+    let mut cluster_weight: String = "graph".to_string();
+    let mut cluster_k: Option<usize> = None;
+    let mut cluster_eps: f32 = 0.25;
+    let mut cluster_min_pts: usize = 3;
     let mut positional: Vec<String> = Vec::new();
     let mut it = rest.iter();
     while let Some(a) = it.next() {
@@ -465,6 +473,39 @@ fn main() -> Result<()> {
             "--annotated-with" => {
                 if let Some(v) = it.next() {
                     annotated_with = Some(v.clone());
+                }
+            }
+            "--resolution" => {
+                if let Some(v) = it.next() {
+                    cluster_resolution = v.parse::<f64>().unwrap_or(1.0);
+                }
+            }
+            "--hierarchical" => {
+                cluster_hierarchical = true;
+            }
+            "--package-bias" => {
+                if let Some(v) = it.next() {
+                    cluster_package_bias = v.parse::<f64>().unwrap_or(0.0);
+                }
+            }
+            "--weight" => {
+                if let Some(v) = it.next() {
+                    cluster_weight = v.clone();
+                }
+            }
+            "--k" => {
+                if let Some(v) = it.next() {
+                    cluster_k = Some(v.parse::<usize>().unwrap_or(16));
+                }
+            }
+            "--eps" => {
+                if let Some(v) = it.next() {
+                    cluster_eps = v.parse::<f32>().unwrap_or(0.25);
+                }
+            }
+            "--min-pts" => {
+                if let Some(v) = it.next() {
+                    cluster_min_pts = v.parse::<usize>().unwrap_or(3);
                 }
             }
             _ => positional.push(a.clone()),
@@ -1155,13 +1196,18 @@ fn main() -> Result<()> {
                 );
             }
         }
-        // Agent B: community detection on the call/import graph.
+        // Community / semantic clustering over the indexed graph.
         //
         // Usage:
         //   wicked-estate clusters [<min-size>] [--json] [--db ...]
+        //       [--resolution <γ>] [--hierarchical] [--package-bias <f>]   # graph (Louvain)
+        //       [--weight semantic [--k <n> | --eps <d> --min-pts <n>]]     # semantic (embeddings)
         //
-        // Detects connected communities using union-find over CALLS/IMPORTS edges.
-        // Outputs community membership sorted by size descending.
+        // Graph mode (default): multi-level Louvain over CALLS/IMPORTS. `--resolution` tunes
+        // granularity (>1 finer), `--hierarchical` splits communities with substructure,
+        // `--package-bias` lets directory structure inform the partition. Reports modularity.
+        // Semantic mode (`--weight semantic`): clusters by embedding proximity (DBSCAN by default;
+        // `--k` switches to k-means). Requires an `--embeddings` index.
         "clusters" => {
             let min_size = positional
                 .iter()
@@ -1172,9 +1218,55 @@ fn main() -> Result<()> {
             let store = open_store_ext(&db).map_err(to_any)?;
             maybe_print_staleness(store.as_ref(), &db);
             maybe_warn_version_mismatch(store.as_ref(), &db);
-            let params = wicked_estate_rank::CommunityParams::new(min_size, false);
-            let communities =
-                wicked_estate_rank::detect_communities(store.as_ref(), &params).map_err(to_any)?;
+
+            let semantic = cluster_weight == "semantic";
+            let (communities, modularity): (Vec<Vec<wicked_estate_core::SymbolId>>, Option<f64>) =
+                if semantic {
+                    use wicked_estate_store::SqliteStore;
+                    let embeddings = if db == ":memory:" {
+                        Vec::new()
+                    } else {
+                        SqliteStore::open(&db)
+                            .map_err(to_any)?
+                            .all_embeddings()
+                            .map_err(to_any)?
+                    };
+                    if embeddings.is_empty() {
+                        eprintln!(
+                            "note: no embeddings found — re-index with `--embeddings` (build with \
+                             the `fastembed` feature for semantic quality) before \
+                             `clusters --weight semantic`."
+                        );
+                    }
+                    let params = wicked_estate_rank::SemanticClusterParams {
+                        algorithm: if cluster_k.is_some() {
+                            wicked_estate_rank::ClusterAlgo::KMeans
+                        } else {
+                            wicked_estate_rank::ClusterAlgo::Dbscan
+                        },
+                        k: cluster_k.unwrap_or(16),
+                        eps: cluster_eps,
+                        min_pts: cluster_min_pts,
+                        ..Default::default()
+                    };
+                    let mut c = wicked_estate_rank::semantic_clusters(&embeddings, &params);
+                    c.retain(|cl| cl.len() >= min_size);
+                    (c, None)
+                } else {
+                    let params = wicked_estate_rank::CommunityParams {
+                        min_size,
+                        include_singletons: false,
+                        resolution: cluster_resolution,
+                        hierarchical: cluster_hierarchical,
+                        package_bias: cluster_package_bias,
+                    };
+                    let c = wicked_estate_rank::detect_communities(store.as_ref(), &params)
+                        .map_err(to_any)?;
+                    let q = wicked_estate_rank::modularity(store.as_ref(), &c, cluster_resolution)
+                        .map_err(to_any)?;
+                    (c, Some(q))
+                };
+
             if json_out {
                 let j: Vec<Vec<String>> = communities
                     .iter()
@@ -1182,7 +1274,17 @@ fn main() -> Result<()> {
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&j)?);
             } else {
-                println!("{} communities (min_size={min_size}):", communities.len());
+                let mode = if semantic { "semantic" } else { "graph" };
+                match modularity {
+                    Some(q) => println!(
+                        "{} communities ({mode}, min_size={min_size}, modularity={q:.3}):",
+                        communities.len()
+                    ),
+                    None => println!(
+                        "{} clusters ({mode}, min_size={min_size}):",
+                        communities.len()
+                    ),
+                }
                 for (i, c) in communities.iter().enumerate() {
                     println!("  cluster {}: {} symbols", i + 1, c.len());
                     for sym in c.iter().take(5) {

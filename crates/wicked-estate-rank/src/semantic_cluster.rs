@@ -4,13 +4,14 @@
 //! bridges vocabularies a call graph can't — a Kafka producer and a Pulsar producer embed near
 //! each other and land in one cluster even with zero shared edges.
 //!
-//! # Status / seam
+//! # Entry point
 //!
-//! [`semantic_clusters`] is the fixed entry point: it takes the full `(SymbolId, vector)` set
-//! (from `VectorStore::all_embeddings`) and a [`SemanticClusterParams`], and returns clusters. The
-//! algorithm body (k-means and DBSCAN) is owned by the semantic-clustering chunk; the **stub
-//! returns an empty `Vec`** so nothing downstream silently receives a wrong partition before the
-//! backend lands. [`cosine_distance`] is real and shared by both algorithms.
+//! [`semantic_clusters`] takes the full `(SymbolId, vector)` set (from
+//! `VectorStore::all_embeddings`) and a [`SemanticClusterParams`], and returns clusters largest
+//! first. Two backends share [`cosine_distance`]: [`ClusterAlgo::KMeans`] (exactly `k` clusters,
+//! deterministic farthest-point seeding) and [`ClusterAlgo::Dbscan`] (density-based; noise points
+//! excluded). Output is deterministic — points are processed in `SymbolId` order with id/index
+//! tie-breaks.
 //!
 //! Quality note: meaningful clusters require *semantic* embeddings (`--embeddings` with the
 //! `fastembed` feature). The zero-dependency `HashEmbedder` is a bag-of-words hash — clustering its

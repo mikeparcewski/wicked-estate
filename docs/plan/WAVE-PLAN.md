@@ -50,9 +50,10 @@ Current session (v0.1.0): **W9.3 ✅** Bicep fully wired (grammar + `.scm` + LAN
 | W11 | **Brain core** (content + cache + analytics) | ✅ **complete** — W11.1 content store ✅ (content-addressed by blob-SHA, FTS5, `FetchContent` MCP tool); W11.2 versioned query cache ✅ (`versioned cache-port`); W11.3 materialized analytics ✅ (PageRank precomputed at index time, hotspots served from cache) | 3 / 3 |
 | W12 | **Cross-graph / multi-repo brain** | ✅ **complete** — W12.1 graph registry + federated ATTACH ✅; W12.2 cross-graph query by name ✅ (`wicked-estate cross-graph`, `cross_graph_search` + `cross_graph_blast_radius`); W12.3 brain tools over MCP ✅ (`SemanticSearch`, `CrossGraphQuery`, `FetchContent`, `Lineage`) | 3 / 3 |
 | W13 | **IaC language expansion** (new grammars) | 🔵 **in-flight** — W13.1 Nix 🔵; W13.2 Jinja2 🔵; W13.3 Helm/Go-template 🔵; W13.4 ARM Templates (semantic overlay on JSON) 🔵 | 0 / 4 |
+| W14 | **Community detection v2 + framework edges** | ✅ **complete** — W14.1 ✅ multi-level **Louvain** replaces union-find (`crates/wicked-estate-rank/src/community.rs`), resolution γ + hierarchical refinement; W14.2 ✅ **package-bias** (path-derived per-directory edges); W14.3 ✅ **semantic clustering** k-means + DBSCAN (`semantic_cluster.rs`, `clusters --weight semantic`); W14.4 ✅ **framework edges** di-wired + route-handler (`Other(tag)` via data-driven capture roles, Java/Spring); W14.5 ✅ bench `community_metrics` + mega-community gate | 5 / 5 |
 
-**Built: 55 / 55 plan tasks** — all tasks have a verdict. W13 in-flight (4 new IaC languages).
-✅ fully complete waves: **W0, W2, W4, W5, W6, W7, W8, W9, W11, W12**.
+**Built: 60 / 60 plan tasks** — all tasks have a verdict. W13 in-flight (4 new IaC languages); W14 complete.
+✅ fully complete waves: **W0, W2, W4, W5, W6, W7, W8, W9, W11, W12, W14**.
 ◑ partial or qualified:
 - **W1** (6/6 tasks resolved — W1.2/W1.5 are NO-GO verdicts for SurrealDB, not gaps; ADR-003);
 - **W3** (4/5 resolved — W3.2 TSG SUPERSEDED-BY-SCIP, ADR-007; not an omission);
