@@ -5,6 +5,7 @@
 //! Read methods take `&self`; mutation takes `&mut self`. Rankers and retrieval tools receive a
 //! read-only `&dyn GraphStore`, so they cannot accidentally mutate the graph.
 
+use crate::annotation::Annotation;
 use crate::change::{Change, ChangeOp};
 use crate::edge::{Direction, Edge, ResolutionTier};
 use crate::error::Result;
@@ -108,6 +109,16 @@ pub trait GraphRead: Send {
     fn node_semantics(&self, symbol: &SymbolId) -> Result<Option<NodeSemantics>>;
     /// All symbols annotated with `requirement` — answers "which functionality satisfies R?".
     fn find_by_requirement(&self, requirement: &str) -> Result<Vec<Node>>;
+    /// All typed key/value annotations on `symbol`, oldest first (by `ts`). An entity may carry
+    /// many annotations of the same or different [`type`](Annotation::type); legacy/untyped rows
+    /// read back with `type = "note"`. Empty vec (not an error) when the symbol has none / is
+    /// absent. This is the seam that lets retrieval/MCP surface annotations from `&dyn GraphRead`.
+    fn annotations(&self, symbol: &SymbolId) -> Result<Vec<Annotation>>;
+    /// Every `(symbol, annotation)` pair whose annotation `type` equals `ty` — powers "all open
+    /// questions" / "every assumption in the repo" without scanning all nodes. `ty` is matched as
+    /// an opaque string (known convention OR custom type — identical treatment). Pairs are ordered
+    /// by symbol then `ts` for deterministic output.
+    fn annotations_by_type(&self, ty: &str) -> Result<Vec<(SymbolId, Annotation)>>;
     fn stats(&self) -> Result<GraphStats>;
 }
 
@@ -149,6 +160,21 @@ pub trait GraphWrite {
         requirement: Option<&str>,
         requirement_validated: Option<bool>,
     ) -> Result<()>;
+    /// Attach a typed annotation to `symbol`. A bare INSERT, NOT an upsert — so the same symbol can
+    /// carry MANY annotations (same or different `type`/`key`). No-op if the symbol is absent (not
+    /// indexed). The store stamps `ts` when `annotation.ts == 0`. Stable `SymbolId` keying (ADR-002):
+    /// annotations follow renames because they key on the symbol id, never line/content.
+    fn annotate(&mut self, symbol: &SymbolId, annotation: Annotation) -> Result<()>;
+    /// Delete annotations on `symbol` matching `key`, optionally scoped to a `type`. When `ty` is
+    /// `Some(t)`, only rows with that exact `type` AND `key` are removed; when `None`, ALL rows for
+    /// `key` are removed regardless of type. Returns the number of rows deleted. (Scoping by type is
+    /// what makes the staleness rewrite of a derived `community` annotation safe — see the design.)
+    fn delete_annotations(
+        &mut self,
+        symbol: &SymbolId,
+        ty: Option<&str>,
+        key: &str,
+    ) -> Result<usize>;
 }
 
 /// Convenience supertrait for the common case where one object both reads and writes (the
