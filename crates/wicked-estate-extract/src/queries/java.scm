@@ -62,3 +62,58 @@
   name: (identifier) @call.method
   arguments: (argument_list) @call.args
 ) @call
+
+; ── Framework relationships (Spring) — emitted as Other(<tag>) edges ──────────
+; These use the generic @di.* / @route.* capture roles handled by the tree-sitter
+; pipeline; the relationship is DATA here, not Rust per-language logic.
+
+; DI: @Autowired field injection.  source = the class, target = the injected type.
+; Nested under class_declaration so the injecting class is bound unambiguously.
+(class_declaration
+  name: (identifier) @di.source.name
+  body: (class_body
+    (field_declaration
+      (modifiers
+        (marker_annotation name: (identifier) @_di_field_anno))
+      type: (type_identifier) @di.target)))
+  (#eq? @_di_field_anno "Autowired")
+
+; DI: constructor injection.  Each @Autowired-constructor parameter type is an injected
+; collaborator of the enclosing class.
+(class_declaration
+  name: (identifier) @di.source.name
+  body: (class_body
+    (constructor_declaration
+      (modifiers
+        (marker_annotation name: (identifier) @_di_ctor_anno))
+      parameters: (formal_parameters
+        (formal_parameter type: (type_identifier) @di.target)))))
+  (#eq? @_di_ctor_anno "Autowired")
+
+; Route: @GetMapping("/x") / @PostMapping(...) / … with a bare string-literal path.
+; source = the route/path node, target = the handler method.
+(class_declaration
+  body: (class_body
+    (method_declaration
+      (modifiers
+        (annotation
+          name: (identifier) @_route_anno
+          arguments: (annotation_argument_list
+            (string_literal (string_fragment) @route.path))))
+      name: (identifier) @route.handler.name)))
+  (#any-of? @_route_anno
+    "GetMapping" "PostMapping" "PutMapping" "DeleteMapping" "PatchMapping" "RequestMapping")
+
+; Route: @RequestMapping(value = "/x") / (path = "/x") — element_value_pair form.
+(class_declaration
+  body: (class_body
+    (method_declaration
+      (modifiers
+        (annotation
+          name: (identifier) @_route_anno_kv
+          arguments: (annotation_argument_list
+            (element_value_pair
+              value: (string_literal (string_fragment) @route.path)))))
+      name: (identifier) @route.handler.name)))
+  (#any-of? @_route_anno_kv
+    "GetMapping" "PostMapping" "PutMapping" "DeleteMapping" "PatchMapping" "RequestMapping")

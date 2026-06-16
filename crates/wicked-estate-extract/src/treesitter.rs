@@ -24,7 +24,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
 use wicked_estate_core::{
     Descriptor, Edge, EdgeKind, Error, Extraction, Extractor, Language, Location, Node, NodeKind,
-    ResolutionTier, Result, SourceFile, Span, Suffix, Symbol, SymbolId, UnresolvedRef,
+    ResolutionTier, Result, SourceFile, Span, Suffix, Symbol, SymbolId, UnresolvedRef, edge_tags,
 };
 
 // ── Embedded query files ──────────────────────────────────────────────────────
@@ -1380,11 +1380,30 @@ enum CaptureRole<'a> {
     ImplementsAnchor,
     /// `@code_implements.target` — the target name in an implements heritage match.
     ImplementsTarget,
+    /// `@di.source.name` — the identifier of the type that receives an injected collaborator
+    /// (the injecting class). Generic framework-DI capture; any language's `.scm` may emit it.
+    DiSourceName,
+    /// `@di.target` — the injected collaborator's type name (resolved cross-file, like heritage).
+    DiTarget,
+    /// `@route.path` — the route/path string a handler is bound to by a framework annotation.
+    RoutePath,
+    /// `@route.handler.name` — the identifier of the method that handles a route.
+    RouteHandlerName,
     /// Anything else (params, body, return_type, comments, decorators, …) — ignored.
     Other,
 }
 
 fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
+    // Framework relationships (DI wiring, route handlers). Generic across languages — a `.scm`
+    // emits these captures; the relationship logic stays in the query file, not in Rust per-lang.
+    match cap_name {
+        "di.source.name" => return CaptureRole::DiSourceName,
+        "di.target" => return CaptureRole::DiTarget,
+        "route.path" => return CaptureRole::RoutePath,
+        "route.handler.name" => return CaptureRole::RouteHandlerName,
+        _ => {}
+    }
+
     // Heritage
     if cap_name == "code_extends.def" {
         return CaptureRole::ExtendsAnchor;
@@ -1529,6 +1548,13 @@ impl Extractor for TreeSitterExtractor {
         let mut defs: Vec<DefRec> = Vec::new();
         // raw_refs: (raw_name, EdgeKind, byte_pos_for_enclosing, span)
         let mut raw_refs: Vec<(String, EdgeKind, usize, Span)> = Vec::new();
+        // Framework DI: (injecting_class_name, injected_type_name, span). The source symbol is the
+        // class (built from the class name + module/scheme), NOT the enclosing def — constructor
+        // injection sits inside the constructor, whose `enclosing()` would be the constructor.
+        let mut di_pairs: Vec<(String, String, Span)> = Vec::new();
+        // Framework routes: (route_path, handler_method_name, span). Source = synthetic route node,
+        // target = the handler method symbol (same 2-descriptor scheme as the def loop).
+        let mut route_triples: Vec<(String, String, Span)> = Vec::new();
         let mut import_targets: Vec<(String, Span)> = Vec::new();
         let mut seen_imports: HashSet<String> = HashSet::new();
         // File-level import map: local name → module source (for hint injection).
@@ -1559,6 +1585,12 @@ impl Extractor for TreeSitterExtractor {
             let mut extends_target: Option<String> = None;
             let mut implements_anchor: Option<tree_sitter::Node> = None;
             let mut implements_target: Option<String> = None;
+
+            // Framework relationships (per-match).
+            let mut di_source_name: Option<String> = None; // injecting class name
+            let mut di_target: Option<(String, Span)> = None; // injected type name + site
+            let mut route_path: Option<(String, Span)> = None; // route/path string + site
+            let mut route_handler_name: Option<String> = None; // handler method name
 
             for c in m.captures {
                 let cap = names[c.index as usize];
@@ -1597,6 +1629,18 @@ impl Extractor for TreeSitterExtractor {
                     }
                     CaptureRole::ImplementsTarget => {
                         implements_target = Some(text);
+                    }
+                    CaptureRole::DiSourceName => {
+                        di_source_name = Some(text);
+                    }
+                    CaptureRole::DiTarget => {
+                        di_target = Some((text, span));
+                    }
+                    CaptureRole::RoutePath => {
+                        route_path = Some((strip_literal_quotes(&text), span));
+                    }
+                    CaptureRole::RouteHandlerName => {
+                        route_handler_name = Some(text);
                     }
                     CaptureRole::Other => {}
                 }
@@ -1709,6 +1753,20 @@ impl Extractor for TreeSitterExtractor {
                 let pos = anchor.start_byte();
                 let span = ts_span(anchor);
                 raw_refs.push((target, EdgeKind::Implements, pos, span));
+            }
+
+            // ── Process framework DI wiring ─────────────────────────────────
+            // Both the injecting class name and the injected type name come from the same
+            // `.scm` match (the pattern is nested under `class_declaration`), so the source is
+            // unambiguously the class — not `enclosing()`, which for constructor injection
+            // would resolve to the constructor.
+            if let (Some(src_name), Some((tgt, span))) = (&di_source_name, &di_target) {
+                di_pairs.push((src_name.clone(), tgt.clone(), *span));
+            }
+
+            // ── Process framework route handlers ────────────────────────────
+            if let (Some((path, span)), Some(handler)) = (&route_path, &route_handler_name) {
+                route_triples.push((path.clone(), handler.clone(), *span));
             }
         }
 
@@ -1844,6 +1902,65 @@ impl Extractor for TreeSitterExtractor {
                 }
             }
             refs.push(r);
+        }
+
+        // ── Emit framework DI-wiring refs ─────────────────────────────────
+        // source = injecting class (built with the same 2-descriptor global scheme the def loop
+        // uses for a class), target = injected type by name (resolved cross-file, like `extends`).
+        for (class_name, type_name, span) in di_pairs {
+            let from = Symbol::global(
+                &scheme,
+                None,
+                vec![
+                    Descriptor::new(module.clone(), Suffix::Namespace),
+                    Descriptor::new(class_name, Suffix::Type),
+                ],
+            )
+            .id();
+            refs.push(UnresolvedRef::new(
+                from,
+                type_name,
+                edge_tags::other(edge_tags::DI_WIRED),
+                Location::new(&file.path, span),
+            ));
+        }
+
+        // ── Emit framework route-handler nodes + edges ────────────────────
+        // source = synthetic route node (shared by path), target = the handler method symbol
+        // (same 2-descriptor scheme as the def loop). Per the engine contract for route-handler.
+        let mut seen_routes: HashSet<String> = HashSet::new();
+        for (path, handler_name, span) in route_triples {
+            let route_symbol = Symbol::synthetic("route", &path).id();
+            if seen_routes.insert(path.clone()) {
+                let mut route_node = Node::new(
+                    route_symbol.clone(),
+                    NodeKind::Synthetic,
+                    path.clone(),
+                    Language::new("synthetic"),
+                    Location::new(&file.path, span),
+                );
+                route_node.signature = Some(path.clone());
+                nodes.push(route_node);
+            }
+            let handler_symbol = Symbol::global(
+                &scheme,
+                None,
+                vec![
+                    Descriptor::new(module.clone(), Suffix::Namespace),
+                    Descriptor::new(handler_name, Suffix::Method),
+                ],
+            )
+            .id();
+            local_edges.push(
+                Edge::new(
+                    route_symbol,
+                    handler_symbol,
+                    edge_tags::other(edge_tags::ROUTE_HANDLER),
+                    ResolutionTier::Parsed,
+                    "tree-sitter",
+                )
+                .with_location(Location::new(&file.path, span)),
+            );
         }
 
         Ok(Extraction {
@@ -5064,6 +5181,238 @@ See the [docs](docs/).
         assert!(
             imports >= 1,
             "arm: expected >=1 import edge (dependsOn), got {imports}"
+        );
+    }
+
+    // ── Framework relationship edges (Java/Spring) ─────────────────────────────
+    // These prove the @di.* / @route.* generic capture roles + the java.scm patterns
+    // produce the EXACT edge (tag + source + target) the engine contract requires, with
+    // SymbolIds that match the base extractor's 2-descriptor global scheme.
+
+    /// Build the class SymbolId the base def loop produces for `module`/`class_name`.
+    fn java_class_id(file_no_ext: &str, class_name: &str) -> SymbolId {
+        Symbol::global(
+            "ts-java",
+            None,
+            vec![
+                Descriptor::new(file_no_ext.to_string(), Suffix::Namespace),
+                Descriptor::new(class_name.to_string(), Suffix::Type),
+            ],
+        )
+        .id()
+    }
+
+    /// Build the method SymbolId the base def loop produces for `module`/`method_name`.
+    fn java_method_id(file_no_ext: &str, method_name: &str) -> SymbolId {
+        Symbol::global(
+            "ts-java",
+            None,
+            vec![
+                Descriptor::new(file_no_ext.to_string(), Suffix::Namespace),
+                Descriptor::new(method_name.to_string(), Suffix::Method),
+            ],
+        )
+        .id()
+    }
+
+    #[test]
+    fn java_di_field_injection_emits_di_wired_edge() {
+        // @Service class OrderService { @Autowired PaymentService payment; }
+        let code = r#"
+@Service
+public class OrderService {
+    @Autowired
+    private PaymentService payment;
+}
+"#;
+        let ex = TreeSitterExtractor::for_language("java")
+            .unwrap()
+            .extract(&sf("OrderService.java", "java", code))
+            .unwrap();
+
+        let expected_from = java_class_id("OrderService", "OrderService");
+        let di: Vec<_> = ex
+            .refs
+            .iter()
+            .filter(|r| edge_tags::is_tag(&r.kind, edge_tags::DI_WIRED))
+            .collect();
+        assert_eq!(
+            di.len(),
+            1,
+            "exactly one di-wired ref expected; refs={:?}",
+            ex.refs
+                .iter()
+                .map(|r| (&r.raw_name, &r.kind))
+                .collect::<Vec<_>>()
+        );
+        let r = di[0];
+        assert_eq!(r.from, expected_from, "source must be the injecting class");
+        assert_eq!(r.raw_name, "PaymentService", "target = injected type name");
+        // The tag must come from the edge_tags constant, not a literal.
+        assert_eq!(r.kind, EdgeKind::Other(edge_tags::DI_WIRED.to_string()));
+    }
+
+    #[test]
+    fn java_di_constructor_injection_emits_di_wired_edge() {
+        // @Autowired constructor — source must be the CLASS, not the constructor.
+        let code = r#"
+@Service
+public class OrderService {
+    private final PaymentService payment;
+    private final InventoryService inventory;
+
+    @Autowired
+    public OrderService(PaymentService payment, InventoryService inventory) {
+        this.payment = payment;
+        this.inventory = inventory;
+    }
+}
+"#;
+        let ex = TreeSitterExtractor::for_language("java")
+            .unwrap()
+            .extract(&sf("OrderService.java", "java", code))
+            .unwrap();
+
+        let expected_from = java_class_id("OrderService", "OrderService");
+        let targets: HashSet<&str> = ex
+            .refs
+            .iter()
+            .filter(|r| edge_tags::is_tag(&r.kind, edge_tags::DI_WIRED))
+            .inspect(|r| {
+                assert_eq!(
+                    r.from, expected_from,
+                    "ctor-injection source must be the class, not the constructor"
+                );
+            })
+            .map(|r| r.raw_name.as_str())
+            .collect();
+        assert!(
+            targets.contains("PaymentService") && targets.contains("InventoryService"),
+            "both ctor-injected types expected; got {targets:?}"
+        );
+    }
+
+    #[test]
+    fn java_route_handler_get_mapping_emits_route_edge() {
+        // @GetMapping("/orders") on a handler → synthetic route node + route-handler edge.
+        let code = r#"
+@RestController
+public class OrderController {
+    @GetMapping("/orders")
+    public String listOrders() { return "ok"; }
+}
+"#;
+        let ex = TreeSitterExtractor::for_language("java")
+            .unwrap()
+            .extract(&sf("OrderController.java", "java", code))
+            .unwrap();
+
+        let route_symbol = Symbol::synthetic("route", "/orders").id();
+        let handler_symbol = java_method_id("OrderController", "listOrders");
+
+        // Synthetic route node present.
+        assert!(
+            ex.nodes
+                .iter()
+                .any(|n| n.symbol == route_symbol && matches!(n.kind, NodeKind::Synthetic)),
+            "synthetic route node for /orders expected; nodes={:?}",
+            ex.nodes
+                .iter()
+                .map(|n| (&n.name, &n.kind))
+                .collect::<Vec<_>>()
+        );
+
+        // Exactly one route-handler edge with the exact endpoints.
+        let routes: Vec<_> = ex
+            .local_edges
+            .iter()
+            .filter(|e| edge_tags::is_tag(&e.kind, edge_tags::ROUTE_HANDLER))
+            .collect();
+        assert_eq!(routes.len(), 1, "one route-handler edge expected");
+        let e = routes[0];
+        assert_eq!(e.source, route_symbol, "source = route node");
+        assert_eq!(e.target, handler_symbol, "target = handler method");
+        assert_eq!(
+            e.kind,
+            EdgeKind::Other(edge_tags::ROUTE_HANDLER.to_string())
+        );
+    }
+
+    #[test]
+    fn java_route_handler_request_mapping_value_form() {
+        // @RequestMapping(value = "/users") — element_value_pair form.
+        let code = r#"
+@RestController
+public class UserController {
+    @RequestMapping(value = "/users")
+    public String listUsers() { return "ok"; }
+}
+"#;
+        let ex = TreeSitterExtractor::for_language("java")
+            .unwrap()
+            .extract(&sf("UserController.java", "java", code))
+            .unwrap();
+
+        let route_symbol = Symbol::synthetic("route", "/users").id();
+        let handler_symbol = java_method_id("UserController", "listUsers");
+        let routes: Vec<_> = ex
+            .local_edges
+            .iter()
+            .filter(|e| edge_tags::is_tag(&e.kind, edge_tags::ROUTE_HANDLER))
+            .collect();
+        assert_eq!(
+            routes.len(),
+            1,
+            "one route-handler edge expected for value= form"
+        );
+        assert_eq!(routes[0].source, route_symbol);
+        assert_eq!(routes[0].target, handler_symbol);
+    }
+
+    #[test]
+    fn java_plain_field_no_annotation_no_di_edge() {
+        // Negative: a plain field with no @Autowired must NOT produce a di-wired edge.
+        let code = r#"
+public class PlainBean {
+    private PaymentService payment;
+    private String name;
+}
+"#;
+        let ex = TreeSitterExtractor::for_language("java")
+            .unwrap()
+            .extract(&sf("PlainBean.java", "java", code))
+            .unwrap();
+        let di = ex
+            .refs
+            .iter()
+            .filter(|r| edge_tags::is_tag(&r.kind, edge_tags::DI_WIRED))
+            .count();
+        assert_eq!(di, 0, "plain field must not emit a di-wired edge");
+    }
+
+    #[test]
+    fn java_non_mapping_annotation_no_route_edge() {
+        // Negative: a method annotated with something other than a *Mapping must not
+        // produce a route-handler edge.
+        let code = r#"
+@RestController
+public class HealthController {
+    @Override
+    public String toString() { return "health"; }
+}
+"#;
+        let ex = TreeSitterExtractor::for_language("java")
+            .unwrap()
+            .extract(&sf("HealthController.java", "java", code))
+            .unwrap();
+        let routes = ex
+            .local_edges
+            .iter()
+            .filter(|e| edge_tags::is_tag(&e.kind, edge_tags::ROUTE_HANDLER))
+            .count();
+        assert_eq!(
+            routes, 0,
+            "non-mapping annotation must not emit a route edge"
         );
     }
 }
