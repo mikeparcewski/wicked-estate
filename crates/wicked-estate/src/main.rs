@@ -359,6 +359,8 @@ fn main() -> Result<()> {
     let mut cluster_hierarchical = false;
     let mut cluster_package_bias: f64 = 0.0;
     let mut cluster_weight: String = "graph".to_string();
+    // `--summary`: emit enriched per-community objects instead of bare member-id arrays.
+    let mut cluster_summary = false;
     let mut cluster_k: Option<usize> = None;
     let mut cluster_eps: f32 = 0.25;
     let mut cluster_min_pts: usize = 3;
@@ -482,6 +484,9 @@ fn main() -> Result<()> {
             }
             "--hierarchical" => {
                 cluster_hierarchical = true;
+            }
+            "--summary" => {
+                cluster_summary = true;
             }
             "--package-bias" => {
                 if let Some(v) = it.next() {
@@ -1268,11 +1273,39 @@ fn main() -> Result<()> {
                 };
 
             if json_out {
-                let j: Vec<Vec<String>> = communities
-                    .iter()
-                    .map(|c| c.iter().map(|s| s.to_string()).collect())
-                    .collect();
-                println!("{}", serde_json::to_string_pretty(&j)?);
+                if cluster_summary && !semantic {
+                    // Enriched summary mode: emit per-community objects with metadata.
+                    let summaries = wicked_estate_rank::summarize_communities(
+                        store.as_ref(),
+                        &communities,
+                        cluster_resolution,
+                    )
+                    .map_err(to_any)?;
+                    // zip communities (largest-first) with summaries (same order).
+                    let j: Vec<serde_json::Value> = communities
+                        .iter()
+                        .zip(summaries.iter())
+                        .enumerate()
+                        .map(|(i, (members, summary))| {
+                            serde_json::json!({
+                                "id": i,
+                                "size": summary.size,
+                                "members": members.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                                "label_candidates": summary.top_symbols,
+                                "dominant_files": summary.dominant_files,
+                                "modularity_contribution": summary.modularity_contribution,
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&j)?);
+                } else {
+                    // Default bare-array output (back-compat).
+                    let j: Vec<Vec<String>> = communities
+                        .iter()
+                        .map(|c| c.iter().map(|s| s.to_string()).collect())
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&j)?);
+                }
             } else {
                 let mode = if semantic { "semantic" } else { "graph" };
                 match modularity {
@@ -1690,6 +1723,7 @@ fn main() -> Result<()> {
                         .iter()
                         .map(|n| {
                             serde_json::json!({
+                                "symbol_id": n.symbol.to_string(),
                                 "name": n.name,
                                 "kind": format!("{:?}", n.kind),
                                 "file": n.location.file,
@@ -1718,6 +1752,7 @@ fn main() -> Result<()> {
                         .iter()
                         .map(|n| {
                             serde_json::json!({
+                                "symbol_id": n.symbol.to_string(),
                                 "name": n.name,
                                 "kind": format!("{:?}", n.kind),
                                 "file": n.location.file,
