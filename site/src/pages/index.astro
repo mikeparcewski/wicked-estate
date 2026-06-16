@@ -1,11 +1,15 @@
 ---
-import Base from "../layouts/Base.astro";
+import Base from "wicked-web/layouts/Base.astro";
 import Topbar from "wicked-web/components/Topbar.astro";
 import Footer from "wicked-web/components/Footer.astro";
+import "../styles/global.css";
 import Content from "../components/Content.tsx";
 ---
 
-<Base>
+<Base
+  title="wicked-estate — the code graph agents actually trust"
+  description="Turn any repo into a queryable graph. Symbols, calls, imports, types, refs — across any language. Built for LLM agents."
+>
   <Topbar pkg="wicked-estate" repo="https://github.com/mikeparcewski/wicked-estate" />
   <Content client:load />
   <Footer repo="https://github.com/mikeparcewski/wicked-estate" />
