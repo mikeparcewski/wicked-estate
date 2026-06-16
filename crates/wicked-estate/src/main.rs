@@ -2270,6 +2270,17 @@ fn main() -> Result<()> {
                 "  wicked-estate source <name>         [--db ...]  # print source slice(s) for symbol"
             );
             println!(
+                "    Bulk selectors (mutually exclusive; precedence --symbols > --cluster > --file > <name>):"
+            );
+            println!(
+                "      --cluster <id>        all symbols in community <id> (see `clusters` output)"
+            );
+            println!("      --file <path>         all symbols whose location.file == path");
+            println!("      --symbols <ids>       comma-separated SymbolIds (exact)");
+            println!(
+                "    Output options: --json  --signatures-only  --max-total-chars <N>  --max-node-chars <N>"
+            );
+            println!(
                 "  wicked-estate semantic <query>      [--db ...]  # embedding-based symbol search (requires prior --embeddings)"
             );
             println!("  wicked-estate cross-graph <name>   --db <a.db> --db <b.db> ...");

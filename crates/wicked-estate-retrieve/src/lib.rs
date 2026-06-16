@@ -64,7 +64,7 @@ fn line_1based(node: &wicked_estate_core::Node) -> u64 {
     node.location.span.start_line as u64 + 1
 }
 
-/// Denormalize a [`SymbolId`] endpoint into `{symbol, name, kind, file, line_1based}` so graph-tool
+/// Denormalize a [`SymbolId`] endpoint into `{symbol, name, kind, file, line, line_1based}` so graph-tool
 /// callers don't need an N+1 `RetrieveEntity` round-trip per edge endpoint.
 ///
 /// `cache` memoizes node lookups within a single tool invocation: an edge's two endpoints, and the
@@ -88,6 +88,7 @@ fn endpoint_json(
             "name": node.name,
             "kind": kind_json(&node.kind),
             "file": node.location.file,
+            "line": node.location.span.start_line as u64,
             "line_1based": line_1based(node),
         })),
         // Endpoint not in the graph — return the bare id so the edge is still traceable.
@@ -489,7 +490,7 @@ impl RetrievalTool for RetrieveEntity {
 /// { "nodes": [ { "symbol": "…", "name": "…", "kind": "…",
 ///                "file": "…", "line": 11, "line_1based": 12 }, … ],
 ///   "edges": [ { "source": { "symbol": "…", "name": "…", "kind": "…",
-///                            "file": "…", "line_1based": 12 },
+///                            "file": "…", "line": 11, "line_1based": 12 },
 ///                "target": { … }, "kind": "calls",
 ///                "confidence": 1.0, "provenance": "parsed",
 ///                "resolved_by": "scip-rust" }, … ],
@@ -3281,8 +3282,12 @@ mod tests {
         assert_eq!(e["target"]["name"].as_str().unwrap(), "middle_fn");
         assert_eq!(e["target"]["kind"].as_str().unwrap(), "function");
         assert_eq!(e["target"]["file"].as_str().unwrap(), "src/b.rs");
-        // line_1based on the endpoint == stored 0-based start_line (10) + 1.
-        assert_eq!(e["target"]["line_1based"].as_u64().unwrap(), 11);
+        // Endpoints carry both 0-based `line` and `line_1based` (= line + 1).
+        let line_0 = e["target"]["line"].as_u64().unwrap();
+        let line_1b = e["target"]["line_1based"].as_u64().unwrap();
+        assert_eq!(line_0, 10, "endpoint 0-based line == stored start_line");
+        assert_eq!(line_1b, 11, "endpoint line_1based == start_line + 1");
+        assert_eq!(line_1b, line_0 + 1, "line_1based == line + 1");
 
         // R7: edge carries confidence + provenance + resolved_by inline.
         assert!(e["confidence"].as_f64().is_some(), "confidence present");
