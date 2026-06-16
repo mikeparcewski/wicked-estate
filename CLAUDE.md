@@ -93,6 +93,22 @@ copies. Scar: MQ stored object names with surrounding quotes (`'PAY.IN'`) → un
 name + broke RACF↔MQ matching; the same quote-leak was latent in COBOL `CALL 'SUB'` — fixed once
 in the tree-sitter call path, covering every language at once.
 
+### §12 — Parallel agents: per-crate builds, base-guard, lane-disjoint
+Fan-out is the point (§2), but the mechanics have scars. **(a) Per-crate builds only.** A
+fanned-out agent runs `cargo build/test/clippy -p <crate>`, NEVER `--workspace` — N agents each
+building the whole workspace once filled the disk (117 GB, `ENOSPC` everywhere) and wedged every
+build. **(b) Base-guard every isolated worktree.** Worktree isolation has branched agents from a
+*stale* HEAD (the session's start commit, not the latest); an agent silently working a stale base
+wastes the run. Make step 0 of every worktree agent: `git rev-parse HEAD` must equal the dispatch
+SHA, else `git reset --hard <sha>` (a fresh worktree has nothing to lose). **(c) Lane-disjoint or
+serialize.** In a *shared* checkout, an agent editing crate X breaks any concurrent agent whose
+crate depends on X (uncommitted-broken state compiles into the dependent). Only crate-/file-disjoint
+work is safe concurrently there; for same-crate or dependency-chain work use isolated worktrees
+(each its own target dir) and merge after. **(d) Worktree commits use `--no-verify`** (the
+`cargo fmt --all` pre-commit hook fails inside worktrees on the vendored grammar); the authoritative
+`cargo fmt --all --check` runs on `main` at integration. Establish the seam and commit it green
+*before* fan-out (§1) so every chunk builds against stable signatures.
+
 ---
 
 ## Universal Don'ts
