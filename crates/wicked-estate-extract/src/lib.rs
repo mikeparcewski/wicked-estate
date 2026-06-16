@@ -69,6 +69,11 @@ pub enum ExtractCap {
     Imports,
     Extends,
     Implements,
+    /// Framework-relationship edges carried on `EdgeKind::Other` (DI wiring, route handlers,
+    /// event pub/sub) — produced by the generic `@di.*` / `@route.*` / `@event.*` capture roles
+    /// when a language's `.scm` opts in. Advertised in the generated capability matrix so
+    /// consumers know a language surfaces framework edges, not just structural ones.
+    Framework,
 }
 
 /// One row of the language manifest.
@@ -152,6 +157,29 @@ mod tests {
         assert_eq!(ts.tier, ExtractTier::Structural);
         for c in [ExtractCap::Symbols, ExtractCap::Calls, ExtractCap::Imports] {
             assert!(ts.supports(c), "typescript should support {c:?}");
+        }
+    }
+
+    #[test]
+    fn java_advertises_framework_edges() {
+        // Java emits framework-relationship edges (DI wiring, route handlers, event pub/sub) via
+        // the generic @di.*/@route.*/@event.* capture roles, so the generated capability matrix
+        // must advertise the `Framework` cap — not just the structural ones.
+        let java = by_name("java").expect("java present");
+        assert!(
+            java.supports(ExtractCap::Framework),
+            "java must advertise framework edges; caps={:?}",
+            java.caps
+        );
+        // It still advertises the structural caps it had before.
+        for c in [
+            ExtractCap::Symbols,
+            ExtractCap::Calls,
+            ExtractCap::Imports,
+            ExtractCap::Extends,
+            ExtractCap::Implements,
+        ] {
+            assert!(java.supports(c), "java should still support {c:?}");
         }
     }
 

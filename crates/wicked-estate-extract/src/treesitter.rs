@@ -1389,6 +1389,19 @@ enum CaptureRole<'a> {
     RoutePath,
     /// `@route.handler.name` — the identifier of the method that handles a route.
     RouteHandlerName,
+    /// `@event.listener.name` — the identifier of a method that listens for an event/message
+    /// (`@EventListener`, `@KafkaListener`). The listener is the source (dependent).
+    EventListenerName,
+    /// `@event.type` — a real event *type* a listener handles (resolved cross-file like heritage).
+    EventType,
+    /// `@event.topic` — a topic/queue *string* a listener subscribes to (modeled as a synthetic
+    /// node, like a route path).
+    EventTopic,
+    /// `@event.emit.type` — a real event *type* published at a call site. Source = enclosing def.
+    EventEmitType,
+    /// `@event.emit.topic` — a topic/queue *string* published at a call site. Source = enclosing
+    /// def, target = a synthetic topic node.
+    EventEmitTopic,
     /// Anything else (params, body, return_type, comments, decorators, …) — ignored.
     Other,
 }
@@ -1401,6 +1414,11 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
         "di.target" => return CaptureRole::DiTarget,
         "route.path" => return CaptureRole::RoutePath,
         "route.handler.name" => return CaptureRole::RouteHandlerName,
+        "event.listener.name" => return CaptureRole::EventListenerName,
+        "event.type" => return CaptureRole::EventType,
+        "event.topic" => return CaptureRole::EventTopic,
+        "event.emit.type" => return CaptureRole::EventEmitType,
+        "event.emit.topic" => return CaptureRole::EventEmitTopic,
         _ => {}
     }
 
@@ -1555,6 +1573,15 @@ impl Extractor for TreeSitterExtractor {
         // Framework routes: (route_path, handler_method_name, span). Source = synthetic route node,
         // target = the handler method symbol (same 2-descriptor scheme as the def loop).
         let mut route_triples: Vec<(String, String, Span)> = Vec::new();
+        // Event listeners targeting a real type: (listener_method_name, event_type_name, span).
+        // source = listener method (known here), target = event type (resolved cross-file).
+        let mut event_listen_type_triples: Vec<(String, String, Span)> = Vec::new();
+        // Event listeners targeting a topic string: (listener_method_name, topic, span).
+        // source = listener method, target = synthetic topic node.
+        let mut event_listen_topic_triples: Vec<(String, String, Span)> = Vec::new();
+        // Event emits to a topic string: (topic, call_site_pos, span). source = enclosing def
+        // (resolved after the match loop, like a Calls ref), target = synthetic topic node.
+        let mut event_emit_topic_sites: Vec<(String, usize, Span)> = Vec::new();
         let mut import_targets: Vec<(String, Span)> = Vec::new();
         let mut seen_imports: HashSet<String> = HashSet::new();
         // File-level import map: local name → module source (for hint injection).
@@ -1591,6 +1618,11 @@ impl Extractor for TreeSitterExtractor {
             let mut di_target: Option<(String, Span)> = None; // injected type name + site
             let mut route_path: Option<(String, Span)> = None; // route/path string + site
             let mut route_handler_name: Option<String> = None; // handler method name
+            let mut event_listener_name: Option<String> = None; // listener method name
+            let mut event_type: Option<(String, Span)> = None; // handled event type + site
+            let mut event_topic: Option<(String, Span)> = None; // subscribed topic string + site
+            let mut event_emit_type: Option<(String, usize, Span)> = None; // published type + pos
+            let mut event_emit_topic: Option<(String, usize, Span)> = None; // published topic + pos
 
             for c in m.captures {
                 let cap = names[c.index as usize];
@@ -1641,6 +1673,21 @@ impl Extractor for TreeSitterExtractor {
                     }
                     CaptureRole::RouteHandlerName => {
                         route_handler_name = Some(text);
+                    }
+                    CaptureRole::EventListenerName => {
+                        event_listener_name = Some(text);
+                    }
+                    CaptureRole::EventType => {
+                        event_type = Some((text, span));
+                    }
+                    CaptureRole::EventTopic => {
+                        event_topic = Some((strip_literal_quotes(&text), span));
+                    }
+                    CaptureRole::EventEmitType => {
+                        event_emit_type = Some((text, pos, span));
+                    }
+                    CaptureRole::EventEmitTopic => {
+                        event_emit_topic = Some((strip_literal_quotes(&text), pos, span));
                     }
                     CaptureRole::Other => {}
                 }
@@ -1767,6 +1814,28 @@ impl Extractor for TreeSitterExtractor {
             // ── Process framework route handlers ────────────────────────────
             if let (Some((path, span)), Some(handler)) = (&route_path, &route_handler_name) {
                 route_triples.push((path.clone(), handler.clone(), *span));
+            }
+
+            // ── Process framework event listeners ───────────────────────────
+            // source = the listener method (known from this match, like a route handler);
+            // target = the event type (real symbol, resolved cross-file) or a topic string node.
+            if let Some(listener) = &event_listener_name {
+                if let Some((ty, span)) = &event_type {
+                    event_listen_type_triples.push((listener.clone(), ty.clone(), *span));
+                }
+                if let Some((topic, span)) = &event_topic {
+                    event_listen_topic_triples.push((listener.clone(), topic.clone(), *span));
+                }
+            }
+
+            // ── Process framework event emits ───────────────────────────────
+            // source = enclosing def (resolved like a Calls ref); target = published event type
+            // (real symbol) via raw_refs, or a synthetic topic node via event_emit_topic_sites.
+            if let Some((ty, pos, span)) = event_emit_type {
+                raw_refs.push((ty, edge_tags::other(edge_tags::EVENT_EMITS), pos, span));
+            }
+            if let Some((topic, pos, span)) = event_emit_topic {
+                event_emit_topic_sites.push((topic, pos, span));
             }
         }
 
@@ -1956,6 +2025,86 @@ impl Extractor for TreeSitterExtractor {
                     route_symbol,
                     handler_symbol,
                     edge_tags::other(edge_tags::ROUTE_HANDLER),
+                    ResolutionTier::Parsed,
+                    "tree-sitter",
+                )
+                .with_location(Location::new(&file.path, span)),
+            );
+        }
+
+        // ── Emit framework event-listens refs to real types ───────────────
+        // source = listener method (same 2-descriptor scheme), target = event type by name
+        // (resolved cross-file, like `di-wired`). Per the contract, the listener is the dependent.
+        for (listener_name, type_name, span) in event_listen_type_triples {
+            let from = Symbol::global(
+                &scheme,
+                None,
+                vec![
+                    Descriptor::new(module.clone(), Suffix::Namespace),
+                    Descriptor::new(listener_name, Suffix::Method),
+                ],
+            )
+            .id();
+            refs.push(UnresolvedRef::new(
+                from,
+                type_name,
+                edge_tags::other(edge_tags::EVENT_LISTENS),
+                Location::new(&file.path, span),
+            ));
+        }
+
+        // ── Emit framework event topic nodes + edges ──────────────────────
+        // Topics are strings with no backing symbol, so they become synthetic nodes (like routes),
+        // shared by topic name within the file. event-listens: listener → topic. event-emits:
+        // enclosing method → topic. Both keep source = dependent.
+        let mut seen_topics: HashSet<String> = HashSet::new();
+        let mut ensure_topic_node = |nodes: &mut Vec<Node>, topic: &str, span: Span| -> SymbolId {
+            let topic_symbol = Symbol::synthetic("topic", topic).id();
+            if seen_topics.insert(topic.to_string()) {
+                let mut topic_node = Node::new(
+                    topic_symbol.clone(),
+                    NodeKind::Synthetic,
+                    topic.to_string(),
+                    Language::new("synthetic"),
+                    Location::new(&file.path, span),
+                );
+                topic_node.signature = Some(topic.to_string());
+                nodes.push(topic_node);
+            }
+            topic_symbol
+        };
+
+        for (listener_name, topic, span) in event_listen_topic_triples {
+            let topic_symbol = ensure_topic_node(&mut nodes, &topic, span);
+            let listener_symbol = Symbol::global(
+                &scheme,
+                None,
+                vec![
+                    Descriptor::new(module.clone(), Suffix::Namespace),
+                    Descriptor::new(listener_name, Suffix::Method),
+                ],
+            )
+            .id();
+            local_edges.push(
+                Edge::new(
+                    listener_symbol,
+                    topic_symbol,
+                    edge_tags::other(edge_tags::EVENT_LISTENS),
+                    ResolutionTier::Parsed,
+                    "tree-sitter",
+                )
+                .with_location(Location::new(&file.path, span)),
+            );
+        }
+
+        for (topic, pos, span) in event_emit_topic_sites {
+            let topic_symbol = ensure_topic_node(&mut nodes, &topic, span);
+            let from = enclosing(&defs, pos).unwrap_or_else(|| file_symbol.clone());
+            local_edges.push(
+                Edge::new(
+                    from,
+                    topic_symbol,
+                    edge_tags::other(edge_tags::EVENT_EMITS),
                     ResolutionTier::Parsed,
                     "tree-sitter",
                 )
@@ -5413,6 +5562,322 @@ public class HealthController {
         assert_eq!(
             routes, 0,
             "non-mapping annotation must not emit a route edge"
+        );
+    }
+
+    // ── DI aliases (@Inject / @Resource) — same di-wired edge as @Autowired ─────
+
+    #[test]
+    fn java_di_inject_field_emits_di_wired_edge() {
+        // JSR-330 @Inject must wire the same di-wired edge as @Autowired.
+        let code = r#"
+@Service
+public class OrderService {
+    @Inject
+    private PaymentService payment;
+}
+"#;
+        let ex = TreeSitterExtractor::for_language("java")
+            .unwrap()
+            .extract(&sf("OrderService.java", "java", code))
+            .unwrap();
+
+        let di: Vec<_> = ex
+            .refs
+            .iter()
+            .filter(|r| edge_tags::is_tag(&r.kind, edge_tags::DI_WIRED))
+            .collect();
+        assert_eq!(di.len(), 1, "exactly one di-wired ref expected for @Inject");
+        assert_eq!(di[0].from, java_class_id("OrderService", "OrderService"));
+        assert_eq!(di[0].raw_name, "PaymentService");
+    }
+
+    #[test]
+    fn java_di_resource_field_emits_di_wired_edge() {
+        // JSR-250 @Resource must wire the same di-wired edge as @Autowired.
+        let code = r#"
+@Service
+public class OrderService {
+    @Resource
+    private InventoryService inventory;
+}
+"#;
+        let ex = TreeSitterExtractor::for_language("java")
+            .unwrap()
+            .extract(&sf("OrderService.java", "java", code))
+            .unwrap();
+
+        let di: Vec<_> = ex
+            .refs
+            .iter()
+            .filter(|r| edge_tags::is_tag(&r.kind, edge_tags::DI_WIRED))
+            .collect();
+        assert_eq!(
+            di.len(),
+            1,
+            "exactly one di-wired ref expected for @Resource"
+        );
+        assert_eq!(di[0].from, java_class_id("OrderService", "OrderService"));
+        assert_eq!(di[0].raw_name, "InventoryService");
+    }
+
+    // ── Event pub/sub (@EventListener / @KafkaListener / publishEvent / send) ───
+
+    #[test]
+    fn java_event_listener_emits_event_listens_to_type() {
+        // @EventListener handler — source = listener method, target = the event TYPE (real symbol,
+        // resolved cross-file like di-wired). Per the contract, the listener is the dependent.
+        let code = r#"
+@Component
+public class OrderEventListener {
+    @EventListener
+    public void onOrderCreated(OrderCreatedEvent event) {}
+}
+"#;
+        let ex = TreeSitterExtractor::for_language("java")
+            .unwrap()
+            .extract(&sf("OrderEventListener.java", "java", code))
+            .unwrap();
+
+        let listens: Vec<_> = ex
+            .refs
+            .iter()
+            .filter(|r| edge_tags::is_tag(&r.kind, edge_tags::EVENT_LISTENS))
+            .collect();
+        assert_eq!(
+            listens.len(),
+            1,
+            "exactly one event-listens ref expected; refs={:?}",
+            ex.refs
+                .iter()
+                .map(|r| (&r.raw_name, &r.kind))
+                .collect::<Vec<_>>()
+        );
+        let r = listens[0];
+        assert_eq!(
+            r.from,
+            java_method_id("OrderEventListener", "onOrderCreated"),
+            "source = the listener method (dependent)"
+        );
+        assert_eq!(r.raw_name, "OrderCreatedEvent", "target = the event type");
+        assert_eq!(
+            r.kind,
+            EdgeKind::Other(edge_tags::EVENT_LISTENS.to_string())
+        );
+    }
+
+    #[test]
+    fn java_kafka_listener_emits_event_listens_to_topic_node() {
+        // @KafkaListener(topics = "orders") — source = listener method, target = synthetic topic
+        // node (a topic string has no backing symbol, like a route path).
+        let code = r#"
+@Component
+public class OrderConsumer {
+    @KafkaListener(topics = "orders")
+    public void consume(String message) {}
+}
+"#;
+        let ex = TreeSitterExtractor::for_language("java")
+            .unwrap()
+            .extract(&sf("OrderConsumer.java", "java", code))
+            .unwrap();
+
+        let topic_symbol = Symbol::synthetic("topic", "orders").id();
+        let listener_symbol = java_method_id("OrderConsumer", "consume");
+
+        // Synthetic topic node present.
+        assert!(
+            ex.nodes
+                .iter()
+                .any(|n| n.symbol == topic_symbol && matches!(n.kind, NodeKind::Synthetic)),
+            "synthetic topic node for 'orders' expected; nodes={:?}",
+            ex.nodes
+                .iter()
+                .map(|n| (&n.name, &n.kind))
+                .collect::<Vec<_>>()
+        );
+
+        let listens: Vec<_> = ex
+            .local_edges
+            .iter()
+            .filter(|e| edge_tags::is_tag(&e.kind, edge_tags::EVENT_LISTENS))
+            .collect();
+        assert_eq!(listens.len(), 1, "one event-listens edge expected");
+        assert_eq!(
+            listens[0].source, listener_symbol,
+            "source = listener method"
+        );
+        assert_eq!(listens[0].target, topic_symbol, "target = topic node");
+    }
+
+    #[test]
+    fn java_publish_event_emits_event_emits_to_type() {
+        // publishEvent(new OrderShippedEvent()) — source = enclosing method, target = event type.
+        let code = r#"
+@Service
+public class ShippingService {
+    private ApplicationEventPublisher publisher;
+    public void ship() {
+        publisher.publishEvent(new OrderShippedEvent());
+    }
+}
+"#;
+        let ex = TreeSitterExtractor::for_language("java")
+            .unwrap()
+            .extract(&sf("ShippingService.java", "java", code))
+            .unwrap();
+
+        let emits: Vec<_> = ex
+            .refs
+            .iter()
+            .filter(|r| edge_tags::is_tag(&r.kind, edge_tags::EVENT_EMITS))
+            .collect();
+        assert_eq!(
+            emits.len(),
+            1,
+            "exactly one event-emits ref expected; refs={:?}",
+            ex.refs
+                .iter()
+                .map(|r| (&r.raw_name, &r.kind))
+                .collect::<Vec<_>>()
+        );
+        let r = emits[0];
+        assert_eq!(
+            r.from,
+            java_method_id("ShippingService", "ship"),
+            "source = the enclosing emitting method (dependent)"
+        );
+        assert_eq!(
+            r.raw_name, "OrderShippedEvent",
+            "target = the published type"
+        );
+        assert_eq!(r.kind, EdgeKind::Other(edge_tags::EVENT_EMITS.to_string()));
+    }
+
+    #[test]
+    fn java_kafka_template_send_emits_event_emits_to_topic_node() {
+        // kafkaTemplate.send("orders", payload) — source = enclosing method, target = topic node.
+        let code = r#"
+@Service
+public class OrderProducer {
+    private KafkaTemplate kafkaTemplate;
+    public void publish(String payload) {
+        kafkaTemplate.send("orders", payload);
+    }
+}
+"#;
+        let ex = TreeSitterExtractor::for_language("java")
+            .unwrap()
+            .extract(&sf("OrderProducer.java", "java", code))
+            .unwrap();
+
+        let topic_symbol = Symbol::synthetic("topic", "orders").id();
+        let emitter_symbol = java_method_id("OrderProducer", "publish");
+
+        assert!(
+            ex.nodes
+                .iter()
+                .any(|n| n.symbol == topic_symbol && matches!(n.kind, NodeKind::Synthetic)),
+            "synthetic topic node for 'orders' expected; nodes={:?}",
+            ex.nodes
+                .iter()
+                .map(|n| (&n.name, &n.kind))
+                .collect::<Vec<_>>()
+        );
+
+        let emits: Vec<_> = ex
+            .local_edges
+            .iter()
+            .filter(|e| edge_tags::is_tag(&e.kind, edge_tags::EVENT_EMITS))
+            .collect();
+        assert_eq!(emits.len(), 1, "one event-emits edge expected");
+        assert_eq!(
+            emits[0].source, emitter_symbol,
+            "source = enclosing emitting method"
+        );
+        assert_eq!(emits[0].target, topic_symbol, "target = topic node");
+    }
+
+    #[test]
+    fn java_topic_node_shared_across_emit_and_listen() {
+        // A topic string used by both a listener and an emitter must yield ONE synthetic node
+        // (deduped by name within the file) referenced by both edges.
+        let code = r#"
+@Component
+public class OrderHub {
+    @KafkaListener(topics = "orders")
+    public void consume(String message) {}
+    public void publish(String payload) {
+        kafkaTemplate.send("orders", payload);
+    }
+}
+"#;
+        let ex = TreeSitterExtractor::for_language("java")
+            .unwrap()
+            .extract(&sf("OrderHub.java", "java", code))
+            .unwrap();
+
+        let topic_symbol = Symbol::synthetic("topic", "orders").id();
+        let topic_nodes = ex.nodes.iter().filter(|n| n.symbol == topic_symbol).count();
+        assert_eq!(topic_nodes, 1, "topic node must be deduped to exactly one");
+
+        let listens = ex
+            .local_edges
+            .iter()
+            .filter(|e| edge_tags::is_tag(&e.kind, edge_tags::EVENT_LISTENS))
+            .count();
+        let emits = ex
+            .local_edges
+            .iter()
+            .filter(|e| edge_tags::is_tag(&e.kind, edge_tags::EVENT_EMITS))
+            .count();
+        assert_eq!(listens, 1, "one listen edge to the shared topic");
+        assert_eq!(emits, 1, "one emit edge to the shared topic");
+    }
+
+    #[test]
+    fn java_non_event_annotation_no_event_edge() {
+        // Negative: a method with a non-event annotation, and an ordinary method call, must NOT
+        // produce any event edges or refs.
+        let code = r#"
+@Component
+public class PlainListener {
+    @Override
+    public void onSomething(OrderEvent event) {}
+    public void doWork() {
+        helper.process(new OrderEvent());
+        logger.info("orders");
+    }
+}
+"#;
+        let ex = TreeSitterExtractor::for_language("java")
+            .unwrap()
+            .extract(&sf("PlainListener.java", "java", code))
+            .unwrap();
+
+        let event_refs = ex
+            .refs
+            .iter()
+            .filter(|r| {
+                edge_tags::is_tag(&r.kind, edge_tags::EVENT_LISTENS)
+                    || edge_tags::is_tag(&r.kind, edge_tags::EVENT_EMITS)
+            })
+            .count();
+        let event_edges = ex
+            .local_edges
+            .iter()
+            .filter(|e| {
+                edge_tags::is_tag(&e.kind, edge_tags::EVENT_LISTENS)
+                    || edge_tags::is_tag(&e.kind, edge_tags::EVENT_EMITS)
+            })
+            .count();
+        assert_eq!(
+            event_refs, 0,
+            "non-event constructs must not emit event refs"
+        );
+        assert_eq!(
+            event_edges, 0,
+            "non-event constructs must not emit event edges"
         );
     }
 }

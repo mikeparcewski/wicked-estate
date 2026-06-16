@@ -244,7 +244,7 @@ name = "java"
 ext = ["java"]
 grammar = "tree-sitter-java"
 tier = "structural"
-caps = ["symbols", "calls", "imports", "extends", "implements"]
+caps = ["symbols", "calls", "imports", "extends", "implements", "framework"]
 
 [[language]]
 name = "javascript"
