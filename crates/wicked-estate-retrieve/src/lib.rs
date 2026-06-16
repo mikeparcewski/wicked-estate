@@ -20,10 +20,10 @@
 //! * R7 — low-confidence edges flagged in diagnostics when present in traversals.
 
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use wicked_estate_core::{
-    Direction, EdgeKind, GraphRead, Result, RetrievalResult, RetrievalTool, SymbolId, SymbolQuery,
-    TraversalSpec,
+    Annotation, Direction, EdgeKind, GraphRead, Result, RetrievalResult, RetrievalTool, SymbolId,
+    SymbolQuery, TraversalSpec, is_advisory,
 };
 
 // W12 — one-shot context bundle tool (seed + ranked neighbours + budgeted stubs). Lives in its
@@ -214,6 +214,85 @@ fn attach_source(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Annotations in structured payloads  (Chunk 3 — typed-annotation consumer surface)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// R4 payload cap: at most this many annotation **items** are inlined per entity. When the symbol
+/// has more, advisory-class (`assumption`/`question`) are kept first, then the rest by `ts`
+/// descending; `annotation_summary.count` / `by_type` always reflect the TRUE totals so a consumer
+/// sees it was capped (mirrors the source-bundle "summary is always exact" rule). The CLI
+/// `annotations` query is **not** capped — only payloads.
+const MAX_PAYLOAD_ANNOTATIONS: usize = 20;
+
+/// Render one [`Annotation`] as the payload JSON object the consumer spec fixes:
+/// `{ type, key, value, confidence, provenance, author, ts, advisory }`. `advisory` is computed
+/// from the type via [`is_advisory`] (gate "is this a fact?" off the computed field, never the
+/// type string — a custom advisory-like type can opt in later without consumer changes).
+fn annotation_item_json(a: &Annotation) -> Value {
+    json!({
+        "type": a.r#type,
+        "key": a.key,
+        "value": a.value,
+        "confidence": a.confidence,
+        "provenance": a.provenance,
+        "author": a.author,
+        "ts": a.ts,
+        "advisory": is_advisory(&a.r#type),
+    })
+}
+
+/// Build the `(annotations, annotation_summary)` payload pair for a symbol, or `None` when the
+/// symbol has **no** annotations (so callers omit both fields — additive, R4-friendly).
+///
+/// * `annotations` — the inlined items, **capped** at [`MAX_PAYLOAD_ANNOTATIONS`]. When the symbol
+///   has more, advisory-class items come first, then by `ts` descending (newest first); within a
+///   group, input order is otherwise preserved (stable sort).
+/// * `annotation_summary` — `{ "count": N, "by_type": {…}, "has_advisory": bool }`. `count` and
+///   `by_type` reflect the **TRUE** totals over ALL annotations (not the capped slice), so a
+///   consumer can tell the inline list was truncated. `has_advisory` is true iff any annotation
+///   (capped or not) is advisory.
+fn annotation_payload(store: &dyn GraphRead, id: &SymbolId) -> Result<Option<(Value, Value)>> {
+    let anns = store.annotations(id)?;
+    if anns.is_empty() {
+        return Ok(None);
+    }
+
+    // ── summary over the TRUE totals (always exact, never the capped slice) ──
+    let total = anns.len();
+    let mut by_type: BTreeMap<String, u64> = BTreeMap::new();
+    let mut has_advisory = false;
+    for a in &anns {
+        *by_type.entry(a.r#type.clone()).or_insert(0) += 1;
+        has_advisory |= is_advisory(&a.r#type);
+    }
+    let summary = json!({
+        "count": total,
+        "by_type": by_type,
+        "has_advisory": has_advisory,
+    });
+
+    // ── capped inline list: advisory-class first, then ts desc (stable) ──
+    // Only sort/cap when over the limit; under the cap the list keeps insertion order untouched.
+    let items: Vec<Value> = if total > MAX_PAYLOAD_ANNOTATIONS {
+        let mut ranked: Vec<&Annotation> = anns.iter().collect();
+        // Stable sort: primary = advisory first (false sorts after true), secondary = ts desc.
+        ranked.sort_by(|a, b| {
+            let adv = is_advisory(&b.r#type).cmp(&is_advisory(&a.r#type)); // true (1) before false (0)
+            adv.then_with(|| b.ts.cmp(&a.ts)) // newer ts first
+        });
+        ranked
+            .into_iter()
+            .take(MAX_PAYLOAD_ANNOTATIONS)
+            .map(annotation_item_json)
+            .collect()
+    } else {
+        anns.iter().map(annotation_item_json).collect()
+    };
+
+    Ok(Some((Value::Array(items), summary)))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SearchEntity
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -382,9 +461,18 @@ impl RetrievalTool for SearchEntity {
 ///   "signature": "fn foo() -> u32", "doc": "…",
 ///   "blob_sha": "…",                                  // present iff the file has a git blob SHA
 ///   "source": "fn foo() -> u32 { … }",                // present iff include_source
-///   "byte_range": [120, 168], "source_truncated": false }
+///   "byte_range": [120, 168], "source_truncated": false,
+///   "annotations": [ { "type":"assumption", "key":"…", "value":"…", "confidence":0.7,
+///                      "provenance":"…", "author":"…", "ts":1718500000,
+///                      "advisory":true } ],            // present iff the symbol has annotations
+///   "annotation_summary": { "count": 3, "by_type": {"note":2,"assumption":1},
+///                           "has_advisory": true } }   // present iff the symbol has annotations
 /// ```
 /// `line` stays 0-based for backward compatibility; `line_1based` matches what the CLI prints.
+/// `annotations` / `annotation_summary` are additive and emitted **only when the symbol has
+/// annotations**. `annotations` is R4-capped at 20 items (advisory-class first, then `ts` desc);
+/// `annotation_summary.count` / `by_type` always reflect the TRUE totals, so a consumer can tell
+/// the inline list was capped. Per-item `advisory` is computed from the type (assumption/question).
 /// When the symbol is not found `found` is `false` and the other fields are absent; a diagnostic
 /// is emitted instead of an error (R1).
 #[derive(Debug, Default)]
@@ -459,6 +547,14 @@ impl RetrievalTool for RetrieveEntity {
                     &mut budget_remaining,
                     &mut diag,
                 )?;
+
+                // Typed annotations (Chunk 3): inline `annotations` + `annotation_summary`, but
+                // only when the symbol actually has annotations (additive — absent otherwise). The
+                // inline list is R4-capped; the summary always carries the true totals.
+                if let Some((annotations, summary)) = annotation_payload(store, &node.symbol)? {
+                    obj.insert("annotations".to_string(), annotations);
+                    obj.insert("annotation_summary".to_string(), summary);
+                }
 
                 Ok(RetrievalResult {
                     content: Value::Object(obj),
@@ -3195,6 +3291,220 @@ mod tests {
                 .any(|d| d.contains("source unavailable")),
             "honest diagnostic when source requested but missing"
         );
+    }
+
+    // ── RetrieveEntity: typed annotations (Chunk 3) ───────────────────────────
+    // `Annotation` + `GraphWrite` are already in scope via `use super::*` + the test-module imports.
+
+    /// A store with one symbol carrying the supplied annotations,
+    /// each stamped with the given `ts` so the cap-ordering test is deterministic.
+    fn annotated_store(extra: Vec<Annotation>) -> MemStore {
+        let mut store = fixture_store();
+        let id = SymbolId("leaf".to_string());
+        for a in extra {
+            store.annotate(&id, a).unwrap();
+        }
+        store
+    }
+
+    #[test]
+    fn retrieve_entity_omits_annotation_fields_when_none() {
+        // A plain fixture symbol has no annotations → both fields absent (additive).
+        let store = fixture_store();
+        let res = RetrieveEntity
+            .invoke(&store, &json!({"symbol": "leaf"}))
+            .unwrap();
+        assert!(res.content["found"].as_bool().unwrap());
+        assert!(
+            res.content.get("annotations").is_none(),
+            "annotations must be ABSENT when the symbol has none"
+        );
+        assert!(
+            res.content.get("annotation_summary").is_none(),
+            "annotation_summary must be ABSENT when the symbol has none"
+        );
+    }
+
+    #[test]
+    fn retrieve_entity_emits_annotations_and_summary_shape() {
+        let store = annotated_store(vec![
+            Annotation::new("note", "owner", "team-graph"),
+            Annotation::new("note", "perf", "hot path"),
+            Annotation::new("assumption", "thread-safety", "assumed Send+Sync")
+                .with_confidence(0.7)
+                .with_provenance("manual")
+                .with_author("alice"),
+        ]);
+        let res = RetrieveEntity
+            .invoke(&store, &json!({"symbol": "leaf"}))
+            .unwrap();
+
+        let anns = res.content["annotations"].as_array().unwrap();
+        assert_eq!(anns.len(), 3, "all 3 annotations inlined (under the cap)");
+
+        // Every item carries the full fixed shape, including the computed `advisory` field.
+        for item in anns {
+            for f in [
+                "type",
+                "key",
+                "value",
+                "confidence",
+                "provenance",
+                "author",
+                "ts",
+                "advisory",
+            ] {
+                assert!(item.get(f).is_some(), "annotation item missing field '{f}'");
+            }
+        }
+
+        // The assumption item must carry advisory:true and its fields round-trip.
+        let assumption = anns
+            .iter()
+            .find(|a| a["type"] == "assumption")
+            .expect("assumption present");
+        assert!(
+            assumption["advisory"].as_bool().unwrap(),
+            "assumption → advisory:true (computed from type, not the type string)"
+        );
+        assert_eq!(assumption["key"].as_str().unwrap(), "thread-safety");
+        assert_eq!(assumption["confidence"].as_f64().unwrap(), 0.7);
+        assert_eq!(assumption["author"].as_str().unwrap(), "alice");
+
+        // A note item is NOT advisory.
+        let note = anns
+            .iter()
+            .find(|a| a["type"] == "note")
+            .expect("note present");
+        assert!(
+            !note["advisory"].as_bool().unwrap(),
+            "note → advisory:false"
+        );
+
+        // Summary: exact totals + by_type + has_advisory.
+        let summary = &res.content["annotation_summary"];
+        assert_eq!(summary["count"].as_u64().unwrap(), 3, "true total count");
+        assert_eq!(summary["by_type"]["note"].as_u64().unwrap(), 2);
+        assert_eq!(summary["by_type"]["assumption"].as_u64().unwrap(), 1);
+        assert!(
+            summary["has_advisory"].as_bool().unwrap(),
+            "has_advisory true when an assumption is present"
+        );
+    }
+
+    #[test]
+    fn retrieve_entity_summary_has_advisory_false_without_advisory_types() {
+        let store = annotated_store(vec![
+            Annotation::new("note", "k1", "v1"),
+            Annotation::new("observation", "k2", "v2"),
+            Annotation::new("custom-thing", "k3", "v3"),
+        ]);
+        let res = RetrieveEntity
+            .invoke(&store, &json!({"symbol": "leaf"}))
+            .unwrap();
+        let summary = &res.content["annotation_summary"];
+        assert_eq!(summary["count"].as_u64().unwrap(), 3);
+        // Custom type is stored/counted identically; never advisory.
+        assert_eq!(summary["by_type"]["custom-thing"].as_u64().unwrap(), 1);
+        assert!(
+            !summary["has_advisory"].as_bool().unwrap(),
+            "no advisory types → has_advisory:false"
+        );
+        // Each non-advisory item carries advisory:false.
+        for item in res.content["annotations"].as_array().unwrap() {
+            assert!(!item["advisory"].as_bool().unwrap());
+        }
+    }
+
+    #[test]
+    fn retrieve_entity_caps_at_20_advisory_first_then_ts_desc_with_true_total() {
+        // 19 notes (ts 100..118) + 3 advisory (assumption ts 5, question ts 50, assumption ts 200)
+        // = 22 total, over the 20 cap. Expect: 3 advisory kept first (regardless of their low ts),
+        // then the 17 newest notes; summary.count shows the TRUE 22.
+        let mut extra: Vec<Annotation> = Vec::new();
+        for i in 0..19u32 {
+            extra.push(Annotation {
+                ts: 100 + i as i64,
+                ..Annotation::new("note", format!("n{i}"), "v")
+            });
+        }
+        extra.push(Annotation {
+            ts: 5,
+            ..Annotation::new("assumption", "old-assumption", "v")
+        });
+        extra.push(Annotation {
+            ts: 50,
+            ..Annotation::new("question", "mid-question", "v")
+        });
+        extra.push(Annotation {
+            ts: 200,
+            ..Annotation::new("assumption", "new-assumption", "v")
+        });
+
+        let store = annotated_store(extra);
+        let res = RetrieveEntity
+            .invoke(&store, &json!({"symbol": "leaf"}))
+            .unwrap();
+
+        let anns = res.content["annotations"].as_array().unwrap();
+        assert_eq!(anns.len(), 20, "inline list capped at 20");
+
+        // Summary reflects the TRUE total of 22, not the capped 20 (consumer sees it was capped).
+        let summary = &res.content["annotation_summary"];
+        assert_eq!(
+            summary["count"].as_u64().unwrap(),
+            22,
+            "summary.count is the TRUE total, not the capped length"
+        );
+        assert_eq!(summary["by_type"]["note"].as_u64().unwrap(), 19);
+        assert_eq!(summary["by_type"]["assumption"].as_u64().unwrap(), 2);
+        assert_eq!(summary["by_type"]["question"].as_u64().unwrap(), 1);
+        assert!(summary["has_advisory"].as_bool().unwrap());
+
+        // The 3 advisory items must ALL survive the cap — kept first regardless of their ts being
+        // among the lowest (5/50/200 vs notes at 100..118). Then exactly 17 notes fill the rest.
+        let advisory_count = anns
+            .iter()
+            .filter(|a| a["advisory"].as_bool().unwrap())
+            .count();
+        assert_eq!(
+            advisory_count, 3,
+            "all 3 advisory-class items kept first under the cap"
+        );
+        let note_count = anns.iter().filter(|a| a["type"] == "note").count();
+        assert_eq!(note_count, 17, "remaining 17 slots filled by notes");
+
+        // The first 3 items are the advisory ones, ordered by ts desc within the advisory group:
+        // new-assumption(200), question(50), old-assumption(5).
+        assert_eq!(anns[0]["key"].as_str().unwrap(), "new-assumption");
+        assert_eq!(anns[1]["key"].as_str().unwrap(), "mid-question");
+        assert_eq!(anns[2]["key"].as_str().unwrap(), "old-assumption");
+
+        // The kept notes are the NEWEST 17 (ts 102..118): the two oldest (ts 100 "n0", 101 "n1")
+        // are dropped. Verify n0/n1 are absent and the newest n18 (ts 118) is present.
+        let keys: HashSet<&str> = anns.iter().filter_map(|a| a["key"].as_str()).collect();
+        assert!(!keys.contains("n0"), "oldest note (ts 100) dropped by cap");
+        assert!(
+            !keys.contains("n1"),
+            "2nd-oldest note (ts 101) dropped by cap"
+        );
+        assert!(keys.contains("n18"), "newest note (ts 118) kept");
+        assert!(keys.contains("n2"), "note ts 102 kept (boundary)");
+    }
+
+    #[test]
+    fn retrieve_entity_annotations_r1_missing_symbol_unchanged() {
+        // Missing-symbol path is untouched: found:false, no annotation fields, no error (R1).
+        let store = annotated_store(vec![Annotation::new("assumption", "k", "v")]);
+        let res = RetrieveEntity.invoke(&store, &json!({"symbol": "ghost_xyz"}));
+        assert!(res.is_ok(), "missing symbol must never error (R1)");
+        let res = res.unwrap();
+        assert!(!res.content["found"].as_bool().unwrap(), "found:false");
+        assert!(
+            res.content.get("annotations").is_none(),
+            "no annotations on the missing-symbol path"
+        );
+        assert!(res.content.get("annotation_summary").is_none());
     }
 
     #[test]
