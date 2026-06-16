@@ -16,7 +16,7 @@
 //! |----------------------------|-----------|
 //! | `initialize`               | Returns `protocolVersion`, `capabilities`, `serverInfo`. |
 //! | `notifications/initialized`| No-op (notification — no `id`). |
-//! | `tools/list`               | Returns the 6 [`wicked_estate_retrieve`] tools with JSON Schema. |
+//! | `tools/list`               | Returns the [`wicked_estate_retrieve`] tools with JSON Schema. |
 //! | `tools/call`               | Dispatches to the matching tool; wraps result in MCP envelope. |
 //! | *(anything else)*          | JSON-RPC error `-32601` (Method Not Found). |
 //!
@@ -29,7 +29,8 @@
 use serde_json::{Value, json};
 use wicked_estate_core::{GraphRead, RetrievalTool};
 use wicked_estate_retrieve::{
-    BlastRadius, FetchContent, RetrieveEntity, SearchEntity, SemanticSearch, TraverseGraph,
+    BlastRadius, ContextBundle, FetchContent, RetrieveEntity, SearchEntity, SemanticSearch,
+    TraverseGraph,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -51,6 +52,7 @@ pub fn all_tools() -> Vec<Box<dyn RetrievalTool>> {
         Box::new(TraverseGraph),
         Box::new(BlastRadius),
         Box::new(FetchContent),
+        Box::new(ContextBundle),
     ]
 }
 
@@ -65,6 +67,7 @@ pub fn all_tools_with_semantic(
         Box::new(TraverseGraph),
         Box::new(BlastRadius),
         Box::new(FetchContent),
+        Box::new(ContextBundle),
         Box::new(SemanticSearch::with_hash_embedder(vec_store)),
     ]
 }
@@ -182,6 +185,29 @@ fn fetch_content_schema() -> Value {
     })
 }
 
+fn context_bundle_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "symbol": {
+                "type": "string",
+                "description": "Stable symbol ID of the seed (alternative to 'query')."
+            },
+            "query": {
+                "type": "string",
+                "description": "Name / FTS text to resolve the seed (alternative to 'symbol'); the top hit is used."
+            },
+            "budget": {
+                "type": "integer",
+                "description": "Character budget for the packed context (default 8000, hard-capped below the ~25K agent limit).",
+                "default": 8000,
+                "maximum": 24000
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
 fn semantic_search_schema() -> Value {
     json!({
         "type": "object",
@@ -211,6 +237,7 @@ pub fn input_schema(name: &str) -> Option<Value> {
         "TraverseGraph" => Some(traverse_graph_schema()),
         "BlastRadius" => Some(blast_radius_schema()),
         "FetchContent" => Some(fetch_content_schema()),
+        "ContextBundle" => Some(context_bundle_schema()),
         "SemanticSearch" => Some(semantic_search_schema()),
         _ => None,
     }
@@ -502,7 +529,7 @@ mod tests {
     // ── tools/list ────────────────────────────────────────────────────────────
 
     #[test]
-    fn tools_list_returns_five_tools() {
+    fn tools_list_returns_six_tools() {
         let store = fixture();
         let req = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} });
         let resp = handle_request(&store, &req);
@@ -510,7 +537,7 @@ mod tests {
         let tools = resp["result"]["tools"]
             .as_array()
             .expect("tools must be array");
-        assert_eq!(tools.len(), 5, "must expose exactly 5 tools");
+        assert_eq!(tools.len(), 6, "must expose exactly 6 tools");
     }
 
     #[test]
@@ -532,6 +559,7 @@ mod tests {
             "TraverseGraph",
             "BlastRadius",
             "FetchContent",
+            "ContextBundle",
         ] {
             assert!(names.contains(expected), "expected tool {expected} in list");
         }
@@ -735,6 +763,63 @@ mod tests {
         );
     }
 
+    // ── tools/call — ContextBundle ────────────────────────────────────────────
+
+    #[test]
+    fn tools_call_context_bundle_schema_in_list() {
+        // ContextBundle must appear in tools/list with an object inputSchema.
+        let store = fixture();
+        let req = json!({ "jsonrpc": "2.0", "id": 27, "method": "tools/list", "params": {} });
+        let resp = handle_request(&store, &req);
+
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        let cb = tools
+            .iter()
+            .find(|t| t["name"] == "ContextBundle")
+            .expect("ContextBundle must be in tool list");
+        assert_eq!(cb["inputSchema"]["type"], "object");
+        assert!(
+            cb["description"].is_string(),
+            "ContextBundle must have a description"
+        );
+    }
+
+    #[test]
+    fn tools_call_context_bundle_returns_content() {
+        // A real seed returns a bundle (seed + neighbours) with isError=false.
+        let store = fixture();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 28,
+            "method": "tools/call",
+            "params": {
+                "name": "ContextBundle",
+                "arguments": { "symbol": "middle", "budget": 8000 }
+            }
+        });
+        let resp = handle_request(&store, &req);
+
+        assert!(
+            !resp["result"]["isError"].as_bool().unwrap_or(true),
+            "isError must be false"
+        );
+        let content = resp["result"]["content"].as_array().unwrap();
+        assert!(!content.is_empty(), "content must not be empty");
+
+        let text = content[0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).expect("content text must be valid JSON");
+        assert_eq!(
+            parsed["seed"]["name"].as_str().unwrap(),
+            "middle_fn",
+            "bundle must carry the resolved seed"
+        );
+        let neighbors = parsed["neighbors"].as_array().unwrap();
+        assert!(
+            !neighbors.is_empty(),
+            "middle has a caller and a callee — neighbours must be present"
+        );
+    }
+
     // ── unknown method ────────────────────────────────────────────────────────
 
     #[test]
@@ -845,6 +930,7 @@ mod tests {
             "TraverseGraph",
             "BlastRadius",
             "FetchContent",
+            "ContextBundle",
         ] {
             assert!(
                 input_schema(name).is_some(),

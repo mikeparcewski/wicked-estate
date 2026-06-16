@@ -26,6 +26,11 @@ use wicked_estate_core::{
     TraversalSpec,
 };
 
+// W12 — one-shot context bundle tool (seed + ranked neighbours + budgeted stubs). Lives in its
+// own module; reuses `render_stub` / `render_context` below for budgeting (no reinvention).
+pub mod context_bundle;
+pub use context_bundle::ContextBundle;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
