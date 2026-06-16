@@ -9,12 +9,41 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::collections::{BTreeMap, HashSet};
 use wicked_estate_core::{
-    Change, ChangeOp, Direction, Edge, EdgeKind, Error, GraphRead, GraphStats, GraphWrite,
-    HistoricalEdge, Node, NodeKind, NodeSemantics, RepoInfo, Result, StoreCapabilities, Subgraph,
-    SymbolId, SymbolIndex, SymbolQuery, TraversalSpec, UnresolvedRef,
+    Annotation, Change, ChangeOp, DEFAULT_ANNOTATION_TYPE, Direction, Edge, EdgeKind, Error,
+    GraphRead, GraphStats, GraphWrite, HistoricalEdge, Node, NodeKind, NodeSemantics, RepoInfo,
+    Result, StoreCapabilities, Subgraph, SymbolId, SymbolIndex, SymbolQuery, TraversalSpec,
+    UnresolvedRef,
 };
 
 const SCHEMA: &str = include_str!("schema.sql");
+
+/// Apply idempotent in-place schema migrations on an opened connection.
+///
+/// `CREATE TABLE IF NOT EXISTS` in `SCHEMA` does NOT add new columns to a table that already
+/// exists from an older build — so a DB created before the `annotations.type` column was added
+/// would lack it. This adds it via `ALTER TABLE ... ADD COLUMN type TEXT NOT NULL DEFAULT 'note'`,
+/// guarded by a `PRAGMA table_info` check so it runs at most once and is a no-op on fresh DBs
+/// (where `SCHEMA` already created the column). No data rewrite: the `DEFAULT 'note'` backfills
+/// every pre-existing row on read. There is no schema-version row in this codebase, so the
+/// presence check IS the version gate.
+fn migrate_schema(conn: &Connection) -> Result<()> {
+    // Does annotations.type already exist?
+    let mut stmt = conn.prepare("PRAGMA table_info(annotations)").map_err(st)?;
+    let cols: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(1)) // column 1 = name
+        .map_err(st)?
+        .filter_map(|r| r.ok())
+        .collect();
+    if !cols.iter().any(|c| c == "type") {
+        // Idempotent: only reached when the column is absent.
+        conn.execute_batch(
+            "ALTER TABLE annotations ADD COLUMN type TEXT NOT NULL DEFAULT 'note'; \
+             CREATE INDEX IF NOT EXISTS idx_annotations_type ON annotations(type);",
+        )
+        .map_err(st)?;
+    }
+    Ok(())
+}
 
 // ── Vector math helpers (no external deps) ─────────────────────────────────
 
@@ -65,17 +94,6 @@ pub fn git_blob_sha(text: &str) -> String {
     h.update(header.as_bytes());
     h.update(bytes);
     format!("{:x}", h.finalize())
-}
-
-/// A single annotation row returned by [`SqliteStore::get_annotations`].
-#[derive(Debug, Clone)]
-pub struct Annotation {
-    pub key: String,
-    pub value: String,
-    pub confidence: f64,
-    pub provenance: String,
-    pub author: String,
-    pub ts: i64,
 }
 
 /// Statistics returned by [`SqliteStore::compact`] / [`MemStore::compact`].
@@ -273,6 +291,9 @@ impl SqliteStore {
         )
         .map_err(st)?;
         conn.execute_batch(SCHEMA).map_err(st)?;
+        // Idempotent in-place migrations for DBs created by an older build (e.g. adds the
+        // annotations.type column when missing). No-op on fresh DBs.
+        migrate_schema(&conn)?;
         // Read history_enabled flag from meta (absent → OFF, the new default).
         // Old databases that never set this key default to OFF (no history) rather than ON.
         // Callers that want history must pass `--history` (or call set_history_enabled(true)).
@@ -304,6 +325,7 @@ impl SqliteStore {
     pub fn in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().map_err(st)?;
         conn.execute_batch(SCHEMA).map_err(st)?;
+        migrate_schema(&conn)?;
         Ok(Self {
             conn,
             in_batch: false,
@@ -474,11 +496,16 @@ impl SqliteStore {
     }
 
     // -----------------------------------------------------------------------
-    // Annotation store — inherent methods (not on the trait).
-    // External agents/tools/humans tag any indexed symbol with arbitrary
-    // key/value metadata plus optional confidence, provenance, and author.
+    // Annotation store — inherent CLI-compat shims.
+    //
+    // The real logic lives on the GraphRead/GraphWrite trait impls below
+    // (`annotate` / `annotations` / `annotations_by_type` / `delete_annotations`).
+    // These inherent methods are thin wrappers the CLI still calls on a concrete
+    // `SqliteStore`; a later chunk migrates the CLI to the trait and retires them.
     // -----------------------------------------------------------------------
 
+    /// CLI shim: annotate `symbol` with a default-typed (`"note"`) key/value.
+    /// Delegates to [`GraphWrite::annotate`] — the type-aware write path.
     pub fn annotate_node(
         &mut self,
         symbol: &wicked_estate_core::SymbolId,
@@ -488,73 +515,30 @@ impl SqliteStore {
         provenance: &str,
         author: &str,
     ) -> Result<()> {
-        let sid: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT sid FROM symbols WHERE sym = ?1",
-                rusqlite::params![symbol.0],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(st)?;
-        let sid = match sid {
-            Some(s) => s,
-            None => return Ok(()),
+        let ann = Annotation {
+            key: key.to_string(),
+            value: value.to_string(),
+            confidence,
+            provenance: provenance.to_string(),
+            author: author.to_string(),
+            ts: 0,
+            r#type: DEFAULT_ANNOTATION_TYPE.to_string(),
         };
-        self.conn
-            .execute(
-                "INSERT INTO annotations(node_sym, key, value, confidence, provenance, author)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![sid, key, value, confidence, provenance, author],
-            )
-            .map_err(st)?;
-        Ok(())
+        <Self as GraphWrite>::annotate(self, symbol, ann)
     }
 
+    /// CLI shim: all annotations on `symbol`. Delegates to [`GraphRead::annotations`].
     pub fn get_annotations(
         &self,
         symbol: &wicked_estate_core::SymbolId,
     ) -> Result<Vec<Annotation>> {
-        let sid: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT sid FROM symbols WHERE sym = ?1",
-                rusqlite::params![symbol.0],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(st)?;
-        let sid = match sid {
-            Some(s) => s,
-            None => return Ok(vec![]),
-        };
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT key, value, confidence, provenance, author, ts
-                 FROM annotations WHERE node_sym = ?1 ORDER BY ts ASC",
-            )
-            .map_err(st)?;
-        let rows = stmt
-            .query_map(rusqlite::params![sid], |r| {
-                Ok(Annotation {
-                    key: r.get(0)?,
-                    value: r.get(1)?,
-                    confidence: r.get(2)?,
-                    provenance: r.get(3)?,
-                    author: r.get(4)?,
-                    ts: r.get(5)?,
-                })
-            })
-            .map_err(st)?
-            .filter_map(|r| r.ok())
-            .collect();
-        Ok(rows)
+        <Self as GraphRead>::annotations(self, symbol)
     }
 
     /// Return all nodes that have at least one annotation matching `key` and
     /// optionally `value`. Nodes are returned in name order; each node appears
-    /// at most once regardless of how many annotations match.
+    /// at most once regardless of how many annotations match. (Inherent — CLI
+    /// `nodes --annotated-with`; not on the trait, queries by key/value not type.)
     pub fn find_by_annotation(
         &self,
         key: &str,
@@ -584,32 +568,14 @@ impl SqliteStore {
         Ok(nodes)
     }
 
+    /// CLI shim: delete ALL annotations for `key` on `symbol`, any type.
+    /// Delegates to the type-scoped [`GraphWrite::delete_annotations`] with `ty = None`.
     pub fn delete_annotation(
         &mut self,
         symbol: &wicked_estate_core::SymbolId,
         key: &str,
     ) -> Result<usize> {
-        let sid: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT sid FROM symbols WHERE sym = ?1",
-                rusqlite::params![symbol.0],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(st)?;
-        let sid = match sid {
-            Some(s) => s,
-            None => return Ok(0),
-        };
-        let n = self
-            .conn
-            .execute(
-                "DELETE FROM annotations WHERE node_sym = ?1 AND key = ?2",
-                rusqlite::params![sid, key],
-            )
-            .map_err(st)?;
-        Ok(n)
+        <Self as GraphWrite>::delete_annotations(self, symbol, None, key)
     }
 
     // -----------------------------------------------------------------------
@@ -1360,6 +1326,92 @@ impl GraphWrite for SqliteStore {
         }
         Ok(())
     }
+
+    fn annotate(&mut self, symbol: &SymbolId, annotation: Annotation) -> Result<()> {
+        // Look up the sid WITHOUT interning: an un-interned symbol is not a node → no-op.
+        let sid: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT sid FROM symbols WHERE sym = ?1",
+                params![symbol.0],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(st)?;
+        let sid = match sid {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        // Bare INSERT (NOT upsert): an entity may carry many annotations, including duplicate
+        // (type, key). When ts is unset (0) let the column DEFAULT (strftime) stamp it.
+        if annotation.ts == 0 {
+            self.conn
+                .execute(
+                    "INSERT INTO annotations(node_sym, key, value, confidence, provenance, author, type)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        sid,
+                        annotation.key,
+                        annotation.value,
+                        annotation.confidence,
+                        annotation.provenance,
+                        annotation.author,
+                        annotation.r#type,
+                    ],
+                )
+                .map_err(st)?;
+        } else {
+            self.conn
+                .execute(
+                    "INSERT INTO annotations(node_sym, key, value, confidence, provenance, author, ts, type)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        sid,
+                        annotation.key,
+                        annotation.value,
+                        annotation.confidence,
+                        annotation.provenance,
+                        annotation.author,
+                        annotation.ts,
+                        annotation.r#type,
+                    ],
+                )
+                .map_err(st)?;
+        }
+        Ok(())
+    }
+
+    fn delete_annotations(
+        &mut self,
+        symbol: &SymbolId,
+        ty: Option<&str>,
+        key: &str,
+    ) -> Result<usize> {
+        let sid: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT sid FROM symbols WHERE sym = ?1",
+                params![symbol.0],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(st)?;
+        let sid = match sid {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+        // ?2 IS NULL → key-only (all types); otherwise scope to (type = ?2, key = ?3).
+        // `type` is matched as an opaque string — no per-type branching (rules-as-DATA).
+        let n = self
+            .conn
+            .execute(
+                "DELETE FROM annotations \
+                 WHERE node_sym = ?1 AND key = ?3 AND (?2 IS NULL OR type = ?2)",
+                params![sid, ty, key],
+            )
+            .map_err(st)?;
+        Ok(n)
+    }
 }
 
 impl GraphRead for SqliteStore {
@@ -1848,6 +1900,80 @@ impl GraphRead for SqliteStore {
             out.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
         }
         Ok(out)
+    }
+
+    fn annotations(&self, symbol: &SymbolId) -> Result<Vec<Annotation>> {
+        let sid: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT sid FROM symbols WHERE sym = ?1",
+                params![symbol.0],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(st)?;
+        let sid = match sid {
+            Some(s) => s,
+            None => return Ok(vec![]),
+        };
+        // Order by ts then id so identical-ts rows have a stable, insertion order.
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT key, value, confidence, provenance, author, ts, type
+                 FROM annotations WHERE node_sym = ?1 ORDER BY ts ASC, id ASC",
+            )
+            .map_err(st)?;
+        let rows = stmt
+            .query_map(params![sid], |r| {
+                Ok(Annotation {
+                    key: r.get(0)?,
+                    value: r.get(1)?,
+                    confidence: r.get(2)?,
+                    provenance: r.get(3)?,
+                    author: r.get(4)?,
+                    ts: r.get(5)?,
+                    r#type: r.get(6)?,
+                })
+            })
+            .map_err(st)?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    fn annotations_by_type(&self, ty: &str) -> Result<Vec<(SymbolId, Annotation)>> {
+        // Join annotations → symbols to resolve node_sym (sid) back to the string SymbolId.
+        // idx_annotations_type backs the WHERE; ordered by symbol then ts for determinism.
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT s.sym, a.key, a.value, a.confidence, a.provenance, a.author, a.ts, a.type
+                 FROM annotations a
+                 JOIN symbols s ON s.sid = a.node_sym
+                 WHERE a.type = ?1
+                 ORDER BY s.sym ASC, a.ts ASC, a.id ASC",
+            )
+            .map_err(st)?;
+        let rows = stmt
+            .query_map(params![ty], |r| {
+                Ok((
+                    SymbolId(r.get::<_, String>(0)?),
+                    Annotation {
+                        key: r.get(1)?,
+                        value: r.get(2)?,
+                        confidence: r.get(3)?,
+                        provenance: r.get(4)?,
+                        author: r.get(5)?,
+                        ts: r.get(6)?,
+                        r#type: r.get(7)?,
+                    },
+                ))
+            })
+            .map_err(st)?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
     }
 
     fn stats(&self) -> Result<GraphStats> {
@@ -3081,6 +3207,106 @@ mod tests {
 
         let after = store.get_annotations(&id).unwrap();
         assert!(after.is_empty(), "annotation must be gone after delete");
+    }
+
+    #[test]
+    fn sqlite_typed_annotation_roundtrip_and_filter() {
+        use wicked_estate_core::{AnnotationClass, GraphRead, GraphWrite, classify};
+        let mut store = open();
+        store
+            .upsert_nodes(&[
+                make_node("fn_a", "src/ann.rs"),
+                make_node("fn_b", "src/ann.rs"),
+            ])
+            .unwrap();
+
+        store
+            .annotate(
+                &sym("fn_a"),
+                Annotation::new("assumption", "k", "v").with_author("alice"),
+            )
+            .unwrap();
+        store
+            .annotate(&sym("fn_b"), Annotation::new("adr-ref", "k", "custom"))
+            .unwrap();
+
+        let a = store.annotations(&sym("fn_a")).unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].r#type, "assumption", "type must round-trip via SQLite");
+        assert_eq!(a[0].author, "alice");
+
+        // Type filter via the index path.
+        let assumptions = store.annotations_by_type("assumption").unwrap();
+        assert_eq!(assumptions.len(), 1);
+        assert_eq!(assumptions[0].0, sym("fn_a"));
+
+        let custom = store.annotations_by_type("adr-ref").unwrap();
+        assert_eq!(custom.len(), 1, "custom type queryable identically");
+        assert_eq!(
+            classify(&custom[0].1.r#type),
+            AnnotationClass::Custom,
+            "unknown type classifies as Custom"
+        );
+    }
+
+    #[test]
+    fn sqlite_legacy_untyped_row_backfills_to_note() {
+        // The genuine back-compat proof the conformance suite can't express (it always writes a
+        // typed annotation): a DB created by an OLDER build has an `annotations` table WITHOUT the
+        // `type` column. The idempotent migration must add it with DEFAULT 'note', so the
+        // pre-existing untyped row reads back as type='note' with NO data rewrite.
+        let conn = Connection::open_in_memory().expect("in-memory conn");
+        // Recreate the OLD annotations schema exactly (no `type` column).
+        conn.execute_batch(
+            "CREATE TABLE annotations (
+               id         INTEGER PRIMARY KEY AUTOINCREMENT,
+               node_sym   INTEGER NOT NULL,
+               key        TEXT NOT NULL,
+               value      TEXT NOT NULL,
+               confidence REAL    NOT NULL DEFAULT 1.0,
+               provenance TEXT    NOT NULL DEFAULT '',
+               author     TEXT    NOT NULL DEFAULT '',
+               ts         INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+             );",
+        )
+        .expect("create legacy annotations table");
+        // Insert an untyped legacy row.
+        conn.execute(
+            "INSERT INTO annotations(node_sym, key, value) VALUES (1, 'legacy-key', 'legacy-val')",
+            [],
+        )
+        .expect("insert legacy row");
+
+        // Pre-migration: the `type` column does not exist.
+        {
+            let mut stmt = conn.prepare("PRAGMA table_info(annotations)").unwrap();
+            let cols: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect();
+            assert!(
+                !cols.iter().any(|c| c == "type"),
+                "precondition: legacy table must lack the type column"
+            );
+        }
+
+        // Run the idempotent migration.
+        migrate_schema(&conn).expect("migration must add the type column");
+
+        // The legacy row now reads back with type='note' (backfilled by the column DEFAULT).
+        let (key, ty): (String, String) = conn
+            .query_row(
+                "SELECT key, type FROM annotations WHERE key='legacy-key'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("legacy row must be readable after migration");
+        assert_eq!(key, "legacy-key");
+        assert_eq!(ty, "note", "untyped legacy row must backfill to 'note'");
+
+        // Migration is idempotent: a second run is a no-op (must not error).
+        migrate_schema(&conn).expect("second migration run must be a no-op");
     }
 
     // ── graph helper queries ─────────────────────────────────────────────────

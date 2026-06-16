@@ -144,9 +144,13 @@ CREATE TABLE IF NOT EXISTS edge_history (
 );
 CREATE INDEX IF NOT EXISTS idx_edge_history_file ON edge_history(file);
 
--- Annotation store: external agents/tools/humans tag any indexed symbol.
+-- Annotation store: external agents/tools/humans tag any indexed symbol with typed metadata.
 -- node_sym is an sid FK → symbols.sid (same integer PK used by nodes.symbol).
 -- key/value are arbitrary strings. confidence defaults 1.0, provenance/author default ''.
+-- `type` is a plain string discriminator (NO enum): a known convention (note/assumption/
+-- observation/comment/question/community) OR an arbitrary custom type — stored/queried
+-- identically. Defaults to 'note' so legacy/untyped rows read back as a note. New DBs get the
+-- column from here; existing DBs get it via the idempotent ALTER TABLE migration in sqlite.rs.
 CREATE TABLE IF NOT EXISTS annotations (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   node_sym   INTEGER NOT NULL,
@@ -155,7 +159,9 @@ CREATE TABLE IF NOT EXISTS annotations (
   confidence REAL    NOT NULL DEFAULT 1.0,
   provenance TEXT    NOT NULL DEFAULT '',
   author     TEXT    NOT NULL DEFAULT '',
-  ts         INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+  ts         INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+  type       TEXT    NOT NULL DEFAULT 'note'
 );
 CREATE INDEX IF NOT EXISTS idx_annotations_node ON annotations(node_sym);
 CREATE INDEX IF NOT EXISTS idx_annotations_key  ON annotations(key);
+CREATE INDEX IF NOT EXISTS idx_annotations_type ON annotations(type);

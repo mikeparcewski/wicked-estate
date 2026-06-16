@@ -6,7 +6,10 @@
 //!.
 
 pub mod sqlite;
-pub use sqlite::{Annotation, CompactStats, SqliteStore};
+pub use sqlite::{CompactStats, SqliteStore};
+// `Annotation` now lives in the core spine (the typed-annotations seam); re-export it here so
+// existing callers of `wicked_estate_store::Annotation` keep compiling.
+pub use wicked_estate_core::Annotation;
 
 // W1.5 bake-off challenger — compiled ONLY with --features surrealdb.
 #[cfg(feature = "surrealdb")]
@@ -44,6 +47,7 @@ fn mem_cosine_similarity(a: &[f32], b: &[f32], a_norm: f32) -> f32 {
 }
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+// `Annotation` is brought into module scope by the `pub use wicked_estate_core::Annotation` above.
 use wicked_estate_core::{
     Change, ChangeOp, Direction, Edge, EdgeKind, Error, GraphRead, GraphStats, GraphStore,
     GraphWrite, HistoricalEdge, Node, NodeKind, NodeSemantics, RepoInfo, Result, StoreCapabilities,
@@ -85,6 +89,14 @@ pub struct MemStore {
     edge_history_files: Vec<String>,
     history_archive_seq: u64,
     history_enabled: bool,
+    // Typed annotations, kept in insertion order so per-symbol reads and type-filtered reads are
+    // deterministic. A bare push (not upsert) — many annotations per symbol, including duplicate
+    // (type, key). Mirrors the SQLite `annotations` table (no FK enforced; annotate is a no-op for
+    // absent symbols, matching the SQLite sid-lookup behaviour).
+    annotations: Vec<(SymbolId, Annotation)>,
+    // Monotonic counter used to stamp `ts` when an annotation is written with ts == 0, so ordering
+    // by ts is stable in-memory without a wall clock (the SQLite store uses strftime there).
+    annotation_seq: i64,
 }
 
 impl MemStore {
@@ -457,6 +469,38 @@ impl GraphWrite for MemStore {
         }
         Ok(())
     }
+
+    fn annotate(&mut self, symbol: &SymbolId, mut annotation: Annotation) -> Result<()> {
+        // No-op if the symbol is not a node (mirrors the SQLite sid-lookup no-op).
+        if !self.nodes.contains_key(symbol) {
+            return Ok(());
+        }
+        // Stamp ts from a monotonic counter when unset, so ordering by ts is deterministic
+        // in-memory (the SQLite store relies on the strftime column default for this).
+        if annotation.ts == 0 {
+            self.annotation_seq += 1;
+            annotation.ts = self.annotation_seq;
+        }
+        // Bare push (NOT upsert): many annotations per symbol, including duplicate (type, key).
+        self.annotations.push((symbol.clone(), annotation));
+        Ok(())
+    }
+
+    fn delete_annotations(
+        &mut self,
+        symbol: &SymbolId,
+        ty: Option<&str>,
+        key: &str,
+    ) -> Result<usize> {
+        let before = self.annotations.len();
+        // Remove rows for this symbol matching `key`, scoped to `ty` when Some.
+        // `type` is matched as an opaque string — no per-type branching (rules-as-DATA).
+        self.annotations.retain(|(s, a)| {
+            let matches = s == symbol && a.key == key && ty.is_none_or(|t| a.r#type == t);
+            !matches
+        });
+        Ok(before - self.annotations.len())
+    }
 }
 
 impl GraphRead for MemStore {
@@ -682,6 +726,29 @@ impl GraphRead for MemStore {
             .filter_map(|(sym, _)| self.nodes.get(sym).cloned())
             .collect();
         out.sort_by(|a, b| a.symbol.0.cmp(&b.symbol.0)); // deterministic
+        Ok(out)
+    }
+
+    fn annotations(&self, symbol: &SymbolId) -> Result<Vec<Annotation>> {
+        // Insertion order == ts-ascending order (ts is stamped from a monotonic counter).
+        Ok(self
+            .annotations
+            .iter()
+            .filter(|(s, _)| s == symbol)
+            .map(|(_, a)| a.clone())
+            .collect())
+    }
+
+    fn annotations_by_type(&self, ty: &str) -> Result<Vec<(SymbolId, Annotation)>> {
+        // `type` matched as an opaque string (known convention OR custom — identical treatment).
+        let mut out: Vec<(SymbolId, Annotation)> = self
+            .annotations
+            .iter()
+            .filter(|(_, a)| a.r#type == ty)
+            .map(|(s, a)| (s.clone(), a.clone()))
+            .collect();
+        // Deterministic: by symbol, then ts (insertion order within a symbol is already ts order).
+        out.sort_by(|(sa, aa), (sb, ab)| sa.0.cmp(&sb.0).then(aa.ts.cmp(&ab.ts)));
         Ok(out)
     }
 

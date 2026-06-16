@@ -11,6 +11,7 @@
 //! `wicked-estate-extract`, `wicked-estate-resolve`, `wicked-estate-store`, … without colliding. See `docs/plan/WAVE-PLAN.md`
 //! (Wave 0) and `docs/ENGINE-CONTRACT.md` (the edge-direction invariant).
 
+pub mod annotation;
 pub mod change;
 pub mod conformance;
 pub mod edge;
@@ -26,6 +27,10 @@ pub mod semantics;
 pub mod symbol;
 pub mod traits;
 
+pub use annotation::{
+    Annotation, AnnotationClass, DEFAULT_ANNOTATION_TYPE, KNOWN_ANNOTATION_TYPES, classify,
+    is_advisory, is_system_derived,
+};
 pub use change::{Change, ChangeOp};
 pub use edge::{Confidence, Direction, Edge, EdgeKind, Provenance, ResolutionTier};
 pub use error::{Error, Result};

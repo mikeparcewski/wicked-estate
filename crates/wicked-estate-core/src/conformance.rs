@@ -4,6 +4,7 @@
 //! Beyond CRUD it pins the **edge-direction invariant** and **bounded reverse-reachability**,
 //! which is the contract blast-radius depends on. Call it from a `#[test]` in the store crate.
 
+use crate::annotation::{Annotation, AnnotationClass, classify};
 use crate::change::ChangeOp;
 use crate::edge::{Direction, Edge, EdgeKind, ResolutionTier};
 use crate::node::{Language, Location, Node, NodeKind, Span};
@@ -629,4 +630,218 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
             Some(false),
         )
         .expect("set_node_semantics on absent symbol must be a no-op");
+
+    // ── Typed annotations ─────────────────────────────────────────────────────
+    // Every GraphStore must round-trip typed key/value annotations, support many per symbol,
+    // filter by type, treat custom types identically to known ones, default untyped→"note", and
+    // scope deletes by (type, key). Uses fresh nodes in files not wiped by earlier remove_file.
+    let ann_a = Node::new(
+        sym("ann_a"),
+        NodeKind::Function,
+        "ann_a",
+        Language::new("rust"),
+        Location::new("src/ann.rs", Span::ZERO),
+    );
+    let ann_b = Node::new(
+        sym("ann_b"),
+        NodeKind::Function,
+        "ann_b",
+        Language::new("rust"),
+        Location::new("src/ann.rs", Span::ZERO),
+    );
+    store
+        .upsert_nodes(&[ann_a, ann_b])
+        .expect("upsert annotation nodes");
+
+    // Before any annotation: annotations() is empty (not an error).
+    let empty = store
+        .annotations(&sym("ann_a"))
+        .expect("annotations before any write");
+    assert!(
+        empty.is_empty(),
+        "annotations must be empty before any write"
+    );
+
+    // (1) Typed round-trip: write an assumption, read it back with all fields intact.
+    store
+        .annotate(
+            &sym("ann_a"),
+            Annotation::new("assumption", "thread-safety", "assumed Send+Sync")
+                .with_confidence(0.6)
+                .with_provenance("manual")
+                .with_author("alice"),
+        )
+        .expect("annotate assumption");
+    let got = store
+        .annotations(&sym("ann_a"))
+        .expect("annotations after assumption");
+    assert_eq!(got.len(), 1, "exactly one annotation on ann_a so far");
+    assert_eq!(got[0].r#type, "assumption", "type must round-trip");
+    assert_eq!(got[0].key, "thread-safety");
+    assert_eq!(got[0].value, "assumed Send+Sync");
+    assert!(
+        (got[0].confidence - 0.6).abs() < 1e-9,
+        "confidence must round-trip"
+    );
+    assert_eq!(got[0].provenance, "manual", "provenance must round-trip");
+    assert_eq!(got[0].author, "alice", "author must round-trip");
+    assert_eq!(
+        classify(&got[0].r#type),
+        AnnotationClass::Assumption,
+        "type classifies correctly"
+    );
+
+    // (2) Multiple annotations per symbol (bare INSERT, not upsert) — including a duplicate key.
+    store
+        .annotate(
+            &sym("ann_a"),
+            Annotation::note("thread-safety", "see PR #12"),
+        )
+        .expect("annotate note with duplicate key");
+    store
+        .annotate(
+            &sym("ann_a"),
+            Annotation::new("question", "ownership", "who frees this?"),
+        )
+        .expect("annotate question");
+    let many = store
+        .annotations(&sym("ann_a"))
+        .expect("annotations after three writes");
+    assert_eq!(
+        many.len(),
+        3,
+        "three annotations must coexist on ann_a (bare INSERT, not upsert); got {}",
+        many.len()
+    );
+
+    // (3) Default type: an untyped row (via Annotation::note) reads back as "note".
+    let notes: Vec<&Annotation> = many.iter().filter(|a| a.r#type == "note").collect();
+    assert_eq!(
+        notes.len(),
+        1,
+        "exactly one note-typed annotation; got {}",
+        notes.len()
+    );
+    assert_eq!(notes[0].value, "see PR #12");
+
+    // (4) Custom / unknown type round-trips identically and classifies as Custom.
+    store
+        .annotate(
+            &sym("ann_b"),
+            Annotation::new("adr-ref", "decision", "ADR-002 stable identity").with_author("bob"),
+        )
+        .expect("annotate custom type");
+    let custom = store
+        .annotations(&sym("ann_b"))
+        .expect("annotations for custom type");
+    assert_eq!(custom.len(), 1, "one custom annotation on ann_b");
+    assert_eq!(
+        custom[0].r#type, "adr-ref",
+        "custom type string must round-trip verbatim"
+    );
+    assert_eq!(custom[0].value, "ADR-002 stable identity");
+    assert_eq!(
+        classify(&custom[0].r#type),
+        AnnotationClass::Custom,
+        "unknown type must classify as Custom"
+    );
+
+    // (5) Type filter: annotations_by_type returns the right set across symbols.
+    // Add one more assumption on ann_b so the "assumption" set spans two symbols.
+    store
+        .annotate(
+            &sym("ann_b"),
+            Annotation::new("assumption", "lifetime", "assumed 'static"),
+        )
+        .expect("annotate second assumption");
+    let assumptions = store
+        .annotations_by_type("assumption")
+        .expect("annotations_by_type assumption");
+    assert_eq!(
+        assumptions.len(),
+        2,
+        "two assumptions across ann_a + ann_b; got {}",
+        assumptions.len()
+    );
+    assert!(
+        assumptions.iter().all(|(_, a)| a.r#type == "assumption"),
+        "type filter must only return matching-type rows"
+    );
+    let assumption_syms: std::collections::HashSet<_> =
+        assumptions.iter().map(|(s, _)| s.clone()).collect();
+    assert!(
+        assumption_syms.contains(&sym("ann_a")) && assumption_syms.contains(&sym("ann_b")),
+        "assumption filter must span both annotated symbols"
+    );
+
+    // A type with no rows returns an empty vec, not an error.
+    let none = store
+        .annotations_by_type("no-such-type")
+        .expect("annotations_by_type empty");
+    assert!(none.is_empty(), "unknown type filter must return empty vec");
+
+    // Custom-type filter also works through the same path.
+    let custom_filter = store
+        .annotations_by_type("adr-ref")
+        .expect("annotations_by_type custom");
+    assert_eq!(
+        custom_filter.len(),
+        1,
+        "custom-type filter returns the one adr-ref row"
+    );
+    assert_eq!(custom_filter[0].0, sym("ann_b"));
+
+    // (6) Scoped delete: delete only (type=note, key=thread-safety) on ann_a.
+    // The assumption with the SAME key must survive (scoping by type protects it).
+    let deleted = store
+        .delete_annotations(&sym("ann_a"), Some("note"), "thread-safety")
+        .expect("scoped delete by (type,key)");
+    assert_eq!(deleted, 1, "exactly the one note row must be deleted");
+    let after_scoped = store
+        .annotations(&sym("ann_a"))
+        .expect("annotations after scoped delete");
+    assert_eq!(
+        after_scoped.len(),
+        2,
+        "two annotations remain on ann_a after scoped delete; got {}",
+        after_scoped.len()
+    );
+    assert!(
+        after_scoped
+            .iter()
+            .any(|a| a.r#type == "assumption" && a.key == "thread-safety"),
+        "the assumption sharing the key must survive a note-scoped delete"
+    );
+    assert!(
+        !after_scoped.iter().any(|a| a.r#type == "note"),
+        "no note-typed annotation may remain after deleting it"
+    );
+
+    // (7) Unscoped delete (ty=None): removes ALL rows for the key regardless of type.
+    let deleted_all = store
+        .delete_annotations(&sym("ann_a"), None, "thread-safety")
+        .expect("unscoped delete by key");
+    assert_eq!(
+        deleted_all, 1,
+        "the remaining thread-safety assumption must be deleted unscoped"
+    );
+    let after_unscoped = store
+        .annotations(&sym("ann_a"))
+        .expect("annotations after unscoped delete");
+    assert!(
+        after_unscoped.iter().all(|a| a.key != "thread-safety"),
+        "no thread-safety annotation may remain after unscoped delete"
+    );
+
+    // (8) annotate on an absent symbol is a no-op (must not error, must store nothing).
+    store
+        .annotate(&sym("annotation_ghost"), Annotation::note("k", "v"))
+        .expect("annotate on absent symbol must be a no-op");
+    let ghost = store
+        .annotations(&sym("annotation_ghost"))
+        .expect("annotations for absent symbol");
+    assert!(
+        ghost.is_empty(),
+        "absent symbol must carry no annotations after a no-op annotate"
+    );
 }
