@@ -1,0 +1,277 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e3]:
+      - link "wickedagile — home" [ref=e4] [cursor=pointer]:
+        - /url: /
+        - img [ref=e6]
+        - generic [ref=e8]: wickedagile
+        - generic [ref=e9]: / wicked-garden
+      - generic [ref=e10]:
+        - link "GitHub" [ref=e11] [cursor=pointer]:
+          - /url: https://github.com/mikeparcewski
+          - img [ref=e12]
+          - text: GitHub
+        - button "Switch to light mode" [pressed] [ref=e15]:
+          - generic [ref=e16]: Toggle theme
+  - main [ref=e17]:
+    - generic [ref=e21]:
+      - generic [ref=e22]:
+        - paragraph [ref=e23]: the garden · open-source · MIT
+        - heading "agents that are wicked smart" [level=1] [ref=e24]:
+          - generic [ref=e25]: agents that are
+          - generic [ref=e26]:
+            - text: wicked
+            - generic [ref=e29]:
+              - text: smart
+              - img [ref=e30]
+              - img [ref=e32]
+        - paragraph [ref=e34]: Your agent already plans, swarms, and ships. What it can't do alone — prove the result, remember the decision, know when it's actually done. The garden closes that gap.
+        - generic [ref=e35]:
+          - link "View on GitHub ↗" [ref=e36] [cursor=pointer]:
+            - /url: https://github.com/mikeparcewski/wicked-garden
+            - text: View on GitHub
+            - generic [ref=e37]: ↗
+          - link "More projects ↗" [ref=e38] [cursor=pointer]:
+            - /url: https://github.com/mikeparcewski
+      - generic "wicked-garden ecosystem map" [ref=e40]:
+        - generic [ref=e41]:
+          - img [ref=e42]
+          - generic [ref=e45]:
+            - generic [ref=e46]: wicked-garden
+            - generic [ref=e47]: gate · start here
+        - generic [ref=e48]:
+          - img [ref=e49]
+          - generic [ref=e52]:
+            - generic [ref=e53]: vault
+            - generic [ref=e54]: evidence
+        - generic [ref=e55]:
+          - img [ref=e56]
+          - generic [ref=e59]:
+            - generic [ref=e60]: loom
+            - generic [ref=e61]: orchestration
+        - generic [ref=e62]:
+          - img [ref=e63]
+          - generic [ref=e66]:
+            - generic [ref=e67]: testing
+            - generic [ref=e68]: QE layer
+        - generic [ref=e69]:
+          - img [ref=e70]
+          - generic [ref=e73]:
+            - generic [ref=e74]: brain
+            - generic [ref=e75]: memory
+        - generic [ref=e76]:
+          - img [ref=e77]
+          - generic [ref=e80]:
+            - generic [ref=e81]: understanding
+            - generic [ref=e82]: playbooks
+        - generic [ref=e83]:
+          - img [ref=e84]
+          - generic [ref=e87]:
+            - generic [ref=e88]: bus
+            - generic [ref=e89]: event bus
+        - generic [ref=e90]:
+          - img [ref=e91]
+          - generic [ref=e94]:
+            - generic [ref=e95]: interactive
+            - generic [ref=e96]: solo · standalone
+    - generic [ref=e101]:
+      - paragraph [ref=e102]: 01 / the manifesto
+      - generic [ref=e103]:
+        - heading "Most dev tools ask you to trust them. Ours hand you the receipts." [level=2] [ref=e105]:
+          - text: Most dev tools ask you to trust them.
+          - generic [ref=e106]:
+            - text: Ours hand you the receipts.
+            - img [ref=e107]
+            - img [ref=e109]
+        - paragraph [ref=e112]:
+          - text: "No"
+          - generic [ref=e113]: cloud
+          - text: .
+        - paragraph [ref=e116]: Your machine is the backend. The few local servers auto-start and never phone home — nothing to deploy, no cloud bill.
+        - paragraph [ref=e118]:
+          - text: "No"
+          - generic [ref=e119]: black box
+          - text: .
+        - paragraph [ref=e122]: Plain markdown and full-text search you can open, diff, grep, and audit.
+        - paragraph [ref=e124]:
+          - text: "No"
+          - generic [ref=e125]: lock-in
+          - text: .
+        - paragraph [ref=e128]: MIT, cross-CLI, composable. Every tool stands alone, degrades gracefully — the gate even runs with nothing installed.
+    - generic [ref=e133]:
+      - generic [ref=e134]:
+        - paragraph [ref=e135]: 02 / in practice
+        - heading "One prompt. Seven tools firing." [level=2] [ref=e136]:
+          - text: One prompt.
+          - generic [ref=e137]:
+            - text: Seven tools firing.
+            - img [ref=e138]
+            - img [ref=e140]
+        - paragraph [ref=e142]: Scroll through a real refactor session — every garden tool doing its part, triggered by a single prompt. Click any log line to jump to that tool.
+      - generic [ref=e143]:
+        - generic [ref=e144]: ● ● ●
+        - generic [ref=e145]:
+          - generic [ref=e146]: prompt
+          - generic [ref=e147]: "\"refactor auth middleware — session tokens leaking into logs\""
+        - generic [ref=e148] [cursor=pointer]:
+          - generic [ref=e149]: garden
+          - generic [ref=e150]: BUILD archetype · 4 phases · evidence-gated
+        - generic [ref=e151] [cursor=pointer]:
+          - generic [ref=e152]: brain
+          - generic [ref=e153]: 3 memories surfaced · auth PR · INC-42 · session.ts types
+        - generic [ref=e154] [cursor=pointer]:
+          - generic [ref=e155]: understanding
+          - generic [ref=e156]: playbook loaded · auth pattern · 2 gotchas flagged
+        - generic [ref=e157] [cursor=pointer]:
+          - generic [ref=e158]: loom
+          - generic [ref=e159]: gate open · evidence required before phase 2 unlocks
+        - generic [ref=e160] [cursor=pointer]:
+          - generic [ref=e161]: vault
+          - generic [ref=e162]: "recording · run-id: 4f2a · hash: a3f7b2c1"
+        - generic [ref=e163] [cursor=pointer]:
+          - generic [ref=e164]: testing
+          - generic [ref=e165]: 3 verdicts · PASS · evaluator ≠ implementer · re-derived
+        - generic [ref=e166] [cursor=pointer]:
+          - generic [ref=e167]: bus
+          - generic [ref=e168]: 7 events published · phase.start · evidence.record · gate.check
+        - generic [ref=e169]:
+          - generic [ref=e170]: loom
+          - generic [ref=e171]: GATE PASSED · proven, not self-reported ✓
+      - generic [ref=e173]:
+        - paragraph [ref=e174]: stop 01 / 08 — the garden gate
+        - heading "every garden starts at the gate" [level=3] [ref=e175]
+        - paragraph [ref=e176]: wicked-garden reads the shape of each task — a typo fix, a schema migration, a 2am incident — and applies exactly that much rigor, gating each phase on re-derived evidence. Install it once; it curates everything that follows.
+        - 'button "Copy command: claude plugins marketplace add mikeparcewski/wicked-garden && claude plugins install wicked-garden" [ref=e178]':
+          - generic [ref=e179]: ›
+          - generic [ref=e180]: claude plugins marketplace add mikeparcewski/wicked-garden && claude plugins install wicked-garden
+          - generic [ref=e181]: copy
+        - list [ref=e182]:
+          - listitem [ref=e183]:
+            - generic [ref=e184]: ❋
+            - generic [ref=e185]: 9 work-shape archetypes route the right amount of rigor
+          - listitem [ref=e186]:
+            - generic [ref=e187]: ❋
+            - generic [ref=e188]: Evidence-gated phases fail closed — never a vacuous green
+          - listitem [ref=e189]:
+            - generic [ref=e190]: ❋
+            - generic [ref=e191]: The gate compiles into any repo and runs with nothing installed
+        - paragraph [ref=e192]: the garden itself
+    - generic [ref=e204]:
+      - generic [ref=e205]:
+        - paragraph [ref=e206]: also from the garden
+        - heading "It's 11pm. The deck's due tomorrow." [level=2] [ref=e207]
+        - paragraph [ref=e208]: Tell it what you need — board deck, landing page, demo video — and watch it build in your browser. Point at anything that's off and say what to fix. Export clean HTML, PDF, native PowerPoint, or a narrated video. No code. No design tickets. Just you and the deadline.
+        - link "Try it live →" [ref=e210] [cursor=pointer]:
+          - /url: https://wi.wickedagile.com
+          - text: Try it live →
+          - generic [ref=e211]: ↗
+      - generic [ref=e213]:
+        - generic [ref=e218]: wi.wickedagile.com
+        - img "wicked-interactive — in-browser HTML presentation builder"
+    - generic [ref=e221]:
+      - generic [ref=e222]:
+        - paragraph [ref=e223]: 03 / the potting bench
+        - heading "three commands. your garden, planted." [level=2] [ref=e224]:
+          - text: three commands.
+          - generic [ref=e225]:
+            - text: your garden, planted.
+            - img [ref=e226]
+            - img [ref=e228]
+        - paragraph [ref=e230]: wicked-garden curates the rest. The third command runs inside Claude Code — it asks which optional layers you want and installs your picks at their latest versions.
+      - generic [ref=e232]:
+        - generic [ref=e233]:
+          - generic [ref=e234]: "01"
+          - generic [ref=e235]:
+            - 'button "Copy command: claude plugins marketplace add mikeparcewski/wicked-garden" [ref=e236]':
+              - generic [ref=e237]: ›
+              - generic [ref=e238]: claude plugins marketplace add mikeparcewski/wicked-garden
+              - generic [ref=e239]: copy
+            - generic [ref=e241]: add from marketplace
+        - generic [ref=e242]:
+          - generic [ref=e243]: "02"
+          - generic [ref=e244]:
+            - 'button "Copy command: claude plugins install wicked-garden" [ref=e245]':
+              - generic [ref=e246]: ›
+              - generic [ref=e247]: claude plugins install wicked-garden
+              - generic [ref=e248]: copy
+            - generic [ref=e250]: install the gate
+        - generic [ref=e251]:
+          - generic [ref=e252]: "03"
+          - generic [ref=e253]:
+            - 'button "Copy command: /wicked-garden:install" [ref=e254]':
+              - generic [ref=e255]: ›
+              - generic [ref=e256]: /wicked-garden:install
+              - generic [ref=e257]: copy
+            - generic [ref=e258]:
+              - generic [ref=e259]: pick your tools
+              - generic [ref=e260]: runs inside Claude Code · choose testing, memory, playbooks, bus, and more
+  - contentinfo [ref=e262]:
+    - generic [ref=e263]:
+      - generic [ref=e264]:
+        - generic [ref=e265]:
+          - paragraph [ref=e266]: est. on your machine · MIT
+          - paragraph [ref=e267]:
+            - text: wicked
+            - text: good.
+          - paragraph [ref=e268]: One garden of local-first tools that read like the truth. No cloud, no black box, no checkmark you can't re-run.
+          - generic [ref=e269]:
+            - link "GitHub ↗" [ref=e270] [cursor=pointer]:
+              - /url: https://github.com/mikeparcewski
+            - link "npm ↗" [ref=e271] [cursor=pointer]:
+              - /url: https://www.npmjs.com/~mike.parcewski
+        - generic [ref=e272]:
+          - generic [ref=e273]:
+            - paragraph [ref=e274]: The gate
+            - list [ref=e276]:
+              - listitem [ref=e277]:
+                - link "wicked- garden" [ref=e278] [cursor=pointer]:
+                  - /url: https://github.com/mikeparcewski/wicked-garden
+                  - generic [ref=e279]: wicked-
+                  - generic [ref=e280]: garden
+          - generic [ref=e281]:
+            - paragraph [ref=e282]: The floor
+            - list [ref=e284]:
+              - listitem [ref=e285]:
+                - link "wicked- vault" [ref=e286] [cursor=pointer]:
+                  - /url: https://github.com/mikeparcewski/wicked-vault
+                  - generic [ref=e287]: wicked-
+                  - generic [ref=e288]: vault
+              - listitem [ref=e289]:
+                - link "wicked- loom" [ref=e290] [cursor=pointer]:
+                  - /url: https://github.com/mikeparcewski/wicked-loom
+                  - generic [ref=e291]: wicked-
+                  - generic [ref=e292]: loom
+          - generic [ref=e293]:
+            - paragraph [ref=e294]: The layers
+            - list [ref=e296]:
+              - listitem [ref=e297]:
+                - link "wicked- testing" [ref=e298] [cursor=pointer]:
+                  - /url: https://github.com/mikeparcewski/wicked-testing
+                  - generic [ref=e299]: wicked-
+                  - generic [ref=e300]: testing
+              - listitem [ref=e301]:
+                - link "wicked- brain" [ref=e302] [cursor=pointer]:
+                  - /url: https://github.com/mikeparcewski/wicked-brain
+                  - generic [ref=e303]: wicked-
+                  - generic [ref=e304]: brain
+              - listitem [ref=e305]:
+                - link "wicked- understanding" [ref=e306] [cursor=pointer]:
+                  - /url: https://github.com/mikeparcewski/wicked-understanding
+                  - generic [ref=e307]: wicked-
+                  - generic [ref=e308]: understanding
+              - listitem [ref=e309]:
+                - link "wicked- bus" [ref=e310] [cursor=pointer]:
+                  - /url: https://github.com/mikeparcewski/wicked-bus
+                  - generic [ref=e311]: wicked-
+                  - generic [ref=e312]: bus
+          - generic [ref=e313]:
+            - paragraph [ref=e314]: Solo beds
+            - list [ref=e316]:
+              - listitem [ref=e317]:
+                - link "wicked- interactive" [ref=e318] [cursor=pointer]:
+                  - /url: https://github.com/mikeparcewski/wicked-interactive
+                  - generic [ref=e319]: wicked-
+                  - generic [ref=e320]: interactive
+      - generic [ref=e321]:
+        - generic [ref=e322]: © 2026 · MIT licensed · built local-first
+        - generic [ref=e323]: made with Astro · React · Tailwind · Motion

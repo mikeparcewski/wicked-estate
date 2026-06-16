@@ -1404,6 +1404,12 @@ pub trait VectorStore: Send {
         query_vec: &[f32],
         k: usize,
     ) -> wicked_estate_core::Result<Vec<(SymbolId, f32)>>;
+
+    /// Return every stored `(symbol, embedding)` pair. Order is unspecified.
+    ///
+    /// Powers whole-corpus analyses (semantic clustering) that need the full vector set rather
+    /// than a top-k query. A store with no vector layer returns an empty `Vec`.
+    fn all_embeddings(&self) -> wicked_estate_core::Result<Vec<(SymbolId, Vec<f32>)>>;
 }
 
 impl VectorStore for wicked_estate_store::MemStore {
@@ -1414,6 +1420,10 @@ impl VectorStore for wicked_estate_store::MemStore {
     ) -> wicked_estate_core::Result<Vec<(SymbolId, f32)>> {
         wicked_estate_store::MemStore::nearest(self, query_vec, k)
     }
+
+    fn all_embeddings(&self) -> wicked_estate_core::Result<Vec<(SymbolId, Vec<f32>)>> {
+        wicked_estate_store::MemStore::all_embeddings(self)
+    }
 }
 
 impl VectorStore for wicked_estate_store::SqliteStore {
@@ -1423,6 +1433,10 @@ impl VectorStore for wicked_estate_store::SqliteStore {
         k: usize,
     ) -> wicked_estate_core::Result<Vec<(SymbolId, f32)>> {
         wicked_estate_store::SqliteStore::nearest(self, query_vec, k)
+    }
+
+    fn all_embeddings(&self) -> wicked_estate_core::Result<Vec<(SymbolId, Vec<f32>)>> {
+        wicked_estate_store::SqliteStore::all_embeddings(self)
     }
 }
 

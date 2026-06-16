@@ -14,6 +14,7 @@
 pub mod change;
 pub mod conformance;
 pub mod edge;
+pub mod edge_tags;
 pub mod error;
 pub mod history;
 pub mod node;

@@ -740,6 +740,42 @@ impl SqliteStore {
         Ok(scored)
     }
 
+    /// Return every stored `(symbol, embedding)` pair. Order is unspecified.
+    ///
+    /// Decodes each little-endian `f32` blob exactly as [`nearest`](Self::nearest) does. Rows whose
+    /// blob length disagrees with the stored `dim` are skipped (corrupt). Hands back the full
+    /// vector set for analyses that operate over *all* embeddings (semantic clustering) without
+    /// issuing N point queries. O(n·d) over the `embeddings` table.
+    pub fn all_embeddings(&self) -> Result<Vec<(SymbolId, Vec<f32>)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT symbol, dim, vec FROM embeddings")
+            .map_err(st)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(st)?;
+        let mut out: Vec<(SymbolId, Vec<f32>)> = Vec::new();
+        for row in rows {
+            let (sym_str, stored_dim, blob) = row.map_err(st)?;
+            let dim = stored_dim as usize;
+            if blob.len() != dim * 4 {
+                continue; // corrupt blob — skip gracefully
+            }
+            let stored: Vec<f32> = blob
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect();
+            out.push((SymbolId(sym_str), stored));
+        }
+        Ok(out)
+    }
+
     /// Compact the store: prune dangling edges, stale cache rows, orphan embeddings and content,
     /// edge-history beyond the 20-row-per-file retention window, then checkpoint the WAL and VACUUM.
     ///

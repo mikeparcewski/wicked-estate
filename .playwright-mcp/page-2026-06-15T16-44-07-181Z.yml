@@ -1,0 +1,215 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]:
+        - img [ref=e6]
+        - generic [ref=e8]: wickedagile/ wicked-interactive
+      - navigation [ref=e9]:
+        - link "View wicked-interactive on GitHub" [ref=e10] [cursor=pointer]:
+          - /url: https://github.com/mikeparcewski/wicked-interactive
+          - img [ref=e11]
+        - button "Toggle light and dark" [ref=e13] [cursor=pointer]
+  - generic [ref=e16]:
+    - generic [ref=e17]: Interactive HTML & presentation builder · in-browser feedback loop
+    - heading "Describe it. Watch it build. Point, say the change — ship it tonight." [level=1] [ref=e18]:
+      - text: Describe it. Watch it build.
+      - text: Point, say the change — ship it tonight.
+    - paragraph [ref=e19]: No blank page. No screen recorder. Describe a document — a live themed draft renders instantly. Highlight any block and say the change, it reworks just that block. Or point it at any running app and get back a narrated interactive storyboard. One agent, both loops.
+    - group "Try a different document type" [ref=e20]:
+      - generic [ref=e21]: Try a different document type
+      - generic [ref=e22]:
+        - button "Launch brief" [ref=e23] [cursor=pointer]
+        - button "Investor deck" [ref=e24] [cursor=pointer]
+        - button "Onboarding guide" [ref=e25] [cursor=pointer]
+        - button "Release notes" [ref=e26] [cursor=pointer]
+      - generic [ref=e27]:
+        - generic [ref=e28]: You
+        - generic [ref=e29]: Make me a one-page Q3 launch brief for the team.
+      - paragraph [ref=e31]: ↕ updates the demo below
+    - generic [ref=e32]: Scroll — the artifact develops in place
+  - generic [ref=e36]:
+    - generic [ref=e37]:
+      - generic [ref=e38]: The loop, on a belt
+      - heading "One artifact. Four stations. It becomes the thing you asked for." [level=2] [ref=e39]
+      - paragraph [ref=e40]: The headline you read as a prompt at the first station is the exact same element that gets re-set and stamped at the last. Nothing else on the page is touched — that is the whole promise, shown rather than said.
+    - complementary [ref=e41]:
+      - generic [ref=e42]: Station ledger
+      - generic [ref=e43]:
+        - generic [ref=e45]:
+          - generic [ref=e46]: "01"
+          - generic [ref=e47]: Describe
+          - generic [ref=e48]: Plain language, or point at your files / a URL.
+        - generic [ref=e49]:
+          - generic [ref=e50]: "02"
+          - generic [ref=e51]: Watch it build
+          - generic [ref=e52]: A themed first draft renders live, instantly.
+        - generic [ref=e53]:
+          - generic [ref=e54]: "03"
+          - generic [ref=e55]: Point & say
+          - generic [ref=e56]: Highlight a block, say the change in English.
+        - generic [ref=e57]:
+          - generic [ref=e58]: "04"
+          - generic [ref=e59]: Ship
+          - generic [ref=e60]: Regenerates in place, hot-reloads, exports.
+    - article [ref=e62]:
+      - generic [ref=e63]:
+        - generic [ref=e68]: localhost:4400 · q3-launch-brief.html
+        - generic [ref=e69]: Live
+      - generic [ref=e71]:
+        - generic [ref=e72]: Q3 Launch · One-page brief
+        - heading "Our Q3 launch, explained for the whole team Ship Q3 with confidence — the plan, in one read" [level=2] [ref=e73]:
+          - generic [ref=e74]: Our Q3 launch, explained for the whole team
+          - generic [ref=e75]: Ship Q3 with confidence — the plan, in one read
+        - paragraph [ref=e76]: A single page leadership and the floor can both act on — no decks, no doc sprawl.
+        - generic [ref=e77]:
+          - generic [ref=e80]: "What ships: the new onboarding flow and the pricing refresh, together."
+          - generic [ref=e83]: "Why now: renewals open in August — we want the story landed first."
+          - generic [ref=e86]: "Who owns what: one accountable name per workstream, listed below."
+        - generic [ref=e87]:
+          - generic [ref=e88]: Export
+          - generic [ref=e89]: HTML
+          - generic [ref=e91]: PDF
+          - generic [ref=e93]: PPTX
+          - generic [ref=e95]: Video
+        - generic [ref=e97]:
+          - generic [ref=e98]: You
+          - generic [ref=e99]: "\"Make me a one-page Q3 launch brief for the team\""
+        - generic:
+          - generic: You pointed here
+          - generic:
+            - text: "\"Make the headline punchier — lead with"
+            - emphasis: shipping with confidence
+            - text: ", not explaining.\""
+          - generic: Reworking this block only…
+        - generic [ref=e101]: Locked ✓
+      - generic [ref=e106]:
+        - generic [ref=e107]: Describe
+        - generic [ref=e108]: Build
+        - generic [ref=e109]: Point
+        - generic [ref=e110]: Ship
+  - generic [ref=e113]:
+    - generic [ref=e114]:
+      - generic [ref=e115]: Demo video
+      - heading "Point it at any running app. Get a narrated walkthrough." [level=2] [ref=e116]
+      - paragraph [ref=e117]: Give it a URL and a brief. wicked-interactive explores your app, scripts a Playwright spec, records it with narration captions, and hands back an interactive storyboard. No screen recording tools. No editing.
+    - generic [ref=e118]:
+      - generic [ref=e119]:
+        - generic [ref=e120]: "01"
+        - generic [ref=e121]: Aim
+        - generic [ref=e122]: Your app URL + brief.
+      - generic [ref=e123]:
+        - generic [ref=e124]: "02"
+        - generic [ref=e125]: Explore
+        - generic [ref=e126]: Agent maps the app.
+      - generic [ref=e127]:
+        - generic [ref=e128]: "03"
+        - generic [ref=e129]: Record
+        - generic [ref=e130]: Playwright captures it.
+      - generic [ref=e131]:
+        - generic [ref=e132]: "04"
+        - generic [ref=e133]: Storyboard
+        - generic [ref=e134]: Interactive output.
+    - generic [ref=e135]:
+      - generic [ref=e140]: localhost:4400 · new demo
+      - generic [ref=e143]:
+        - generic [ref=e144]:
+          - generic [ref=e145]: Step 1 — aim
+          - generic [ref=e146]:
+            - generic [ref=e147]:
+              - generic [ref=e148]: Your app URL
+              - generic [ref=e149]: http://localhost:3000
+            - generic [ref=e150]:
+              - generic [ref=e151]: What to demo
+              - generic [ref=e152]: Walk through creating a new project, then export as PDF.
+            - button "Record demo →" [ref=e153] [cursor=pointer]
+        - generic:
+          - generic: Agent · mapping localhost:3000
+          - generic:
+            - generic:
+              - generic: →Visiting http://localhost:3000
+              - generic: →Crawling routes & interactions…
+              - generic: "→Found: /dashboard, /projects/new, /export"
+              - generic: →Authoring demo.spec.mjs · 4 chapters planned
+              - generic: →Ready to record
+          - generic:
+            - generic: /dashboard
+            - generic: /projects/new
+            - generic: /export
+        - generic:
+          - generic: Playwright · recording localhost:3000
+          - generic:
+            - generic:
+              - generic: localhost:3000 · projects / new
+            - generic:
+              - generic: New project
+            - generic: Filling in the project name field…
+        - generic:
+          - generic: Output · storyboard.html
+          - generic:
+            - generic:
+              - generic: ▶
+              - generic: 1:34
+            - generic:
+              - generic:
+                - generic: 01 · Dashboard
+              - generic:
+                - generic: 02 · New project
+              - generic:
+                - generic: 03 · Fill in
+              - generic:
+                - generic: 04 · Export PDF
+      - generic [ref=e154]:
+        - generic [ref=e158]:
+          - generic [ref=e159]: Aim
+          - generic [ref=e160]: Explore
+          - generic [ref=e161]: Record
+          - generic [ref=e162]: Storyboard
+        - button "View →"
+  - generic [ref=e163]:
+    - generic [ref=e165]:
+      - generic [ref=e166]:
+        - generic [ref=e167]: That's the loop
+        - heading "One block changed. Everything else held." [level=2] [ref=e168]
+        - paragraph [ref=e169]: "That is the entire product: describe, watch it build, point and say the change, ship. The same headline you read as a prompt is the one that got re-set and stamped — proof by layout, not by claim."
+      - group "Install in Claude Code" [ref=e170]:
+        - generic [ref=e171]:
+          - generic [ref=e172]: Install in Claude Code
+          - button "Copy install commands" [ref=e173] [cursor=pointer]: Copy
+        - code [ref=e175]: /plugin marketplace add mikeparcewski/wicked-interactive /plugin install wicked-interactive
+      - link "View on GitHub" [ref=e176] [cursor=pointer]:
+        - /url: https://github.com/mikeparcewski/wicked-interactive#readme
+        - img [ref=e177]
+        - generic [ref=e179]: View on Github
+    - contentinfo [ref=e180]:
+      - generic [ref=e181]:
+        - generic [ref=e182]:
+          - generic [ref=e183]:
+            - img [ref=e185]
+            - generic [ref=e187]: wickedagile/ wicked-interactive
+          - paragraph [ref=e188]: Interactive HTML & presentation builder, with an in-browser feedback loop. Local-first — runs on the agent already in your session.
+        - navigation "The wicked-* family" [ref=e189]:
+          - generic [ref=e190]: Part of the wicked-* family
+          - list [ref=e191]:
+            - listitem [ref=e192]:
+              - link "wicked-garden site ↗" [ref=e193] [cursor=pointer]:
+                - /url: https://mikeparcewski.github.io/wicked-garden/
+                - text: wicked-garden
+                - generic [ref=e194]: site ↗
+            - listitem [ref=e195]:
+              - link "wicked-bus" [ref=e196] [cursor=pointer]:
+                - /url: https://github.com/mikeparcewski/wicked-bus
+            - listitem [ref=e197]:
+              - link "wicked-brain" [ref=e198] [cursor=pointer]:
+                - /url: https://github.com/mikeparcewski/wicked-brain
+            - listitem [ref=e199]:
+              - link "wicked-testing" [ref=e200] [cursor=pointer]:
+                - /url: https://github.com/mikeparcewski/wicked-testing
+            - listitem [ref=e201]:
+              - link "wicked-loom" [ref=e202] [cursor=pointer]:
+                - /url: https://github.com/mikeparcewski/wicked-loom
+            - listitem [ref=e203]:
+              - link "wicked-vault" [ref=e204] [cursor=pointer]:
+                - /url: https://github.com/mikeparcewski/wicked-vault
+            - listitem [ref=e205]:
+              - link "wicked-understanding" [ref=e206] [cursor=pointer]:
+                - /url: https://github.com/mikeparcewski/wicked-understanding

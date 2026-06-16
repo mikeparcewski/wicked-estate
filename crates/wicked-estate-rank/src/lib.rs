@@ -35,6 +35,14 @@ use petgraph::visit::EdgeRef;
 use std::collections::HashMap;
 use wicked_estate_core::{EdgeKind, GraphRead, Ranker, Result, SymbolId};
 
+pub mod community;
+pub mod semantic_cluster;
+
+pub use community::{CommunityParams, detect_communities, max_community_fraction, modularity};
+pub use semantic_cluster::{
+    ClusterAlgo, SemanticClusterParams, cosine_distance, semantic_clusters,
+};
+
 // ─── constants ──────────────────────────────────────────────────────────────
 
 /// Default damping factor (Brin & Page 1998).
@@ -293,114 +301,6 @@ pub fn ranked_symbols(
     });
     pairs.truncate(top_n);
     Ok(pairs)
-}
-
-// ─── community detection ─────────────────────────────────────────────────────
-
-struct UnionFind {
-    parent: Vec<usize>,
-    rank: Vec<usize>,
-}
-
-impl UnionFind {
-    fn new(n: usize) -> Self {
-        Self {
-            parent: (0..n).collect(),
-            rank: vec![0; n],
-        }
-    }
-
-    fn find(&mut self, x: usize) -> usize {
-        let mut root = x;
-        while self.parent[root] != root {
-            root = self.parent[root];
-        }
-        // Path compression
-        let mut cur = x;
-        while self.parent[cur] != root {
-            let next = self.parent[cur];
-            self.parent[cur] = root;
-            cur = next;
-        }
-        root
-    }
-
-    fn union(&mut self, x: usize, y: usize) {
-        let rx = self.find(x);
-        let ry = self.find(y);
-        if rx == ry {
-            return;
-        }
-        if self.rank[rx] < self.rank[ry] {
-            self.parent[rx] = ry;
-        } else if self.rank[rx] > self.rank[ry] {
-            self.parent[ry] = rx;
-        } else {
-            self.parent[ry] = rx;
-            self.rank[rx] += 1;
-        }
-    }
-}
-
-/// Detects connected communities in the call/import graph using union-find.
-/// Returns a `Vec` of communities, each a `Vec<SymbolId>`, sorted by community size (largest first).
-/// Only includes symbols that appear in at least one edge (singletons are excluded unless
-/// `include_singletons` is true).
-pub fn detect_communities(
-    store: &dyn GraphRead,
-    min_size: usize,
-    include_singletons: bool,
-) -> Result<Vec<Vec<SymbolId>>> {
-    let all_nodes = store.all_nodes()?;
-    let all_edges = store.all_edges()?;
-
-    if all_nodes.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let id_to_idx: HashMap<SymbolId, usize> = all_nodes
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.symbol.clone(), i))
-        .collect();
-
-    let mut uf = UnionFind::new(all_nodes.len());
-    let mut has_edge: std::collections::HashSet<usize> =
-        std::collections::HashSet::with_capacity(all_nodes.len());
-
-    for edge in &all_edges {
-        if !matches!(edge.kind, EdgeKind::Calls | EdgeKind::Imports) {
-            continue;
-        }
-        let (Some(&si), Some(&ti)) = (id_to_idx.get(&edge.source), id_to_idx.get(&edge.target))
-        else {
-            continue;
-        };
-        if si == ti {
-            continue;
-        }
-        uf.union(si, ti);
-        has_edge.insert(si);
-        has_edge.insert(ti);
-    }
-
-    let mut groups: HashMap<usize, Vec<SymbolId>> = HashMap::new();
-    for (idx, node) in all_nodes.iter().enumerate() {
-        if !include_singletons && !has_edge.contains(&idx) {
-            continue;
-        }
-        let root = uf.find(idx);
-        groups.entry(root).or_default().push(node.symbol.clone());
-    }
-
-    let mut communities: Vec<Vec<SymbolId>> = groups
-        .into_values()
-        .filter(|c| c.len() >= min_size)
-        .collect();
-
-    communities.sort_unstable_by_key(|c| std::cmp::Reverse(c.len()));
-
-    Ok(communities)
 }
 
 // ─── tests ───────────────────────────────────────────────────────────────────
@@ -665,80 +565,6 @@ mod tests {
             (score_a - score_b).abs() < 1e-4,
             "Contains edges must not differentiate ranks: file_a={score_a}, func_b={score_b}"
         );
-    }
-
-    // ── community detection ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_detect_communities_two_components() {
-        let mut store = MemStore::new();
-        for name in ["A", "B", "C", "D", "E", "F"] {
-            store.upsert_nodes(&[make_node(name)]).unwrap();
-        }
-        store
-            .upsert_edges(&[
-                make_calls_edge("A", "B"),
-                make_calls_edge("B", "C"),
-                make_calls_edge("D", "E"),
-            ])
-            .unwrap();
-
-        let communities = detect_communities(&store, 2, false).unwrap();
-        assert_eq!(
-            communities.len(),
-            2,
-            "expected 2 communities, got {}",
-            communities.len()
-        );
-        assert_eq!(
-            communities[0].len(),
-            3,
-            "largest community must have 3 symbols"
-        );
-        assert_eq!(
-            communities[1].len(),
-            2,
-            "second community must have 2 symbols"
-        );
-        let flat: std::collections::HashSet<String> =
-            communities[0].iter().map(|s| s.0.clone()).collect();
-        assert!(flat.contains("A") && flat.contains("B") && flat.contains("C"));
-        let flat2: std::collections::HashSet<String> =
-            communities[1].iter().map(|s| s.0.clone()).collect();
-        assert!(flat2.contains("D") && flat2.contains("E"));
-    }
-
-    #[test]
-    fn test_detect_communities_min_size_filter() {
-        let mut store = MemStore::new();
-        for name in ["A", "B", "C", "D", "E", "F"] {
-            store.upsert_nodes(&[make_node(name)]).unwrap();
-        }
-        store
-            .upsert_edges(&[
-                make_calls_edge("A", "B"),
-                make_calls_edge("B", "C"),
-                make_calls_edge("D", "E"),
-            ])
-            .unwrap();
-
-        let communities = detect_communities(&store, 3, false).unwrap();
-        assert_eq!(
-            communities.len(),
-            1,
-            "only one community should have size >= 3"
-        );
-        assert_eq!(communities[0].len(), 3);
-        let flat: std::collections::HashSet<String> =
-            communities[0].iter().map(|s| s.0.clone()).collect();
-        assert!(flat.contains("A") && flat.contains("B") && flat.contains("C"));
-    }
-
-    #[test]
-    fn test_detect_communities_empty_graph() {
-        let store = MemStore::new();
-        let communities = detect_communities(&store, 2, false).unwrap();
-        assert!(communities.is_empty());
     }
 
     // ── ranked_symbols ordering and top_n ────────────────────────────────────

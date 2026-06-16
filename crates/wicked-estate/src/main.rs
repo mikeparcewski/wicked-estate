@@ -1172,9 +1172,9 @@ fn main() -> Result<()> {
             let store = open_store_ext(&db).map_err(to_any)?;
             maybe_print_staleness(store.as_ref(), &db);
             maybe_warn_version_mismatch(store.as_ref(), &db);
+            let params = wicked_estate_rank::CommunityParams::new(min_size, false);
             let communities =
-                wicked_estate_rank::detect_communities(store.as_ref(), min_size, false)
-                    .map_err(to_any)?;
+                wicked_estate_rank::detect_communities(store.as_ref(), &params).map_err(to_any)?;
             if json_out {
                 let j: Vec<Vec<String>> = communities
                     .iter()

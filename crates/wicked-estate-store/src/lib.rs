@@ -282,6 +282,19 @@ impl MemStore {
         scored.truncate(k);
         Ok(scored)
     }
+
+    /// Return every stored `(symbol, embedding)` pair. Order is unspecified.
+    ///
+    /// Unlike [`nearest`](Self::nearest) (a top-k point query), this hands back the full vector
+    /// set so analyses that operate over *all* embeddings — semantic clustering — can run without
+    /// issuing N queries. O(n·d) clone.
+    pub fn all_embeddings(&self) -> Result<Vec<(SymbolId, Vec<f32>)>> {
+        Ok(self
+            .embeddings
+            .iter()
+            .map(|(id, v)| (id.clone(), v.clone()))
+            .collect())
+    }
 }
 
 impl GraphWrite for MemStore {
