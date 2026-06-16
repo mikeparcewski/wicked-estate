@@ -16,13 +16,13 @@
 //!                                     (or --dbs a.db,b.db,c.db)
 //!   wicked-estate watch <path>           [--db ...] [--history]
 //!   wicked-estate subscribe              [--db ...] [--since <seq>]
-//!   wicked-estate clusters [<min_size>]  [--json] [--db ...]
+//!   wicked-estate clusters [<min_size>]  [--json] [--annotate] [--db ...]
 //!   wicked-estate fingerprint <name>     [--content] [--db ...]
 //!   wicked-estate changed-since <sha>    [--json] [--db ...]
-//!   wicked-estate annotate <name>        --key K --value V [--confidence F] [--provenance P] [--author A] [--db ...]
-//!   wicked-estate annotate --symbol <id> --key K --value V [--confidence F] [--provenance P] [--author A] [--db ...]
-//!   wicked-estate annotations <name>     [--db ...]
-//!   wicked-estate annotations --symbol <id> [--db ...]
+//!   wicked-estate annotate <name>        --key K --value V [--type T] [--confidence F] [--provenance P] [--author A] [--db ...]
+//!   wicked-estate annotate --symbol <id> --key K --value V [--type T] [--confidence F] [--provenance P] [--author A] [--db ...]
+//!   wicked-estate annotations <name>     [--type T] [--json] [--db ...]
+//!   wicked-estate annotations --symbol <id> [--type T] [--json] [--db ...]
 //!   wicked-estate context <name>         [--budget <chars>] [--json] [--db ...]
 //!   wicked-estate entrypoints            [--json] [--db ...]
 //!   wicked-estate leaves                 [--json] [--db ...]
@@ -346,6 +346,9 @@ fn main() -> Result<()> {
     let mut ann_confidence: f64 = 1.0;
     let mut ann_provenance: String = String::new();
     let mut ann_author: String = String::new();
+    // --type <t>: annotation type. Write side (annotate) defaults to `note`; read side
+    // (annotations) treats absence as "no filter". A plain string — fixed convention OR custom.
+    let mut ann_type: Option<String> = None;
     // --symbol <SymbolId>: target a single node by stable ID (annotate + annotations).
     let mut ann_symbol: Option<String> = None;
     // --content: fingerprint uses body byte-slice hash instead of identity hash.
@@ -364,6 +367,9 @@ fn main() -> Result<()> {
     let mut cluster_weight: String = "graph".to_string();
     // `--summary`: emit enriched per-community objects instead of bare member-id arrays.
     let mut cluster_summary = false;
+    // `--annotate`: opt-in mutation — write a `community`-type annotation on every member of every
+    // detected community (Chunk 4). Default OFF: `clusters` is read-only unless this is passed.
+    let mut cluster_annotate = false;
     let mut cluster_k: Option<usize> = None;
     let mut cluster_eps: f32 = 0.25;
     let mut cluster_min_pts: usize = 3;
@@ -455,6 +461,11 @@ fn main() -> Result<()> {
                     ann_author = v.clone();
                 }
             }
+            "--type" => {
+                if let Some(v) = it.next() {
+                    ann_type = Some(v.clone());
+                }
+            }
             "--symbol" => {
                 if let Some(v) = it.next() {
                     ann_symbol = Some(v.clone());
@@ -498,6 +509,9 @@ fn main() -> Result<()> {
             }
             "--summary" => {
                 cluster_summary = true;
+            }
+            "--annotate" => {
+                cluster_annotate = true;
             }
             "--package-bias" => {
                 if let Some(v) = it.next() {
@@ -977,6 +991,7 @@ fn main() -> Result<()> {
                     opts,
                     |n| store.symbol_source(n).ok().flatten(),
                     |f| store.file_git_sha(f).ok().flatten(),
+                    |n| store.annotations(&n.symbol).unwrap_or_default(),
                 );
                 println!("{}", serde_json::to_string_pretty(&bundle)?);
             }
@@ -1341,7 +1356,8 @@ fn main() -> Result<()> {
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(2);
             let json_out = positional.iter().any(|a| a == "--json");
-            let store = open_store_ext(&db).map_err(to_any)?;
+            // `--annotate` needs the write side; bind mutably (read methods still work via as_ref).
+            let mut store = open_store_ext(&db).map_err(to_any)?;
             maybe_print_staleness(store.as_ref(), &db);
             maybe_warn_version_mismatch(store.as_ref(), &db);
 
@@ -1392,6 +1408,34 @@ fn main() -> Result<()> {
                         .map_err(to_any)?;
                     (c, Some(q))
                 };
+
+            // Chunk 4 — opt-in mutation: write a `community`-type annotation on every member of
+            // every detected community. `key="community"`, `value=<community index>` (the same
+            // largest-first index `source --cluster <id>` uses), `author="system"`. Default OFF:
+            // `clusters` is a pure read unless `--annotate` is passed. Writes via the
+            // `GraphWrite::annotate` seam; the store stamps `ts`. No-op on un-indexed symbols.
+            if cluster_annotate {
+                use wicked_estate_core::Annotation;
+                let provenance = if semantic {
+                    "clusters:semantic".to_string()
+                } else {
+                    format!("clusters:louvain:res={cluster_resolution}")
+                };
+                let mut written = 0usize;
+                for (idx, members) in communities.iter().enumerate() {
+                    for sym in members {
+                        let ann = Annotation::new("community", "community", idx.to_string())
+                            .with_provenance(provenance.clone())
+                            .with_author("system");
+                        store.annotate(sym, ann).map_err(to_any)?;
+                        written += 1;
+                    }
+                }
+                println!(
+                    "annotated {written} member(s) across {} community/communities with type=community",
+                    communities.len()
+                );
+            }
 
             if json_out {
                 if cluster_summary && !semantic {
@@ -1502,96 +1546,134 @@ fn main() -> Result<()> {
                 }
             }
         }
-        // Agent A: annotation API — tag any indexed symbol with arbitrary key/value metadata.
+        // Agent A: annotation API — tag any indexed symbol with a TYPED key/value note.
         //
         // Usage:
-        //   wicked-estate annotate <name>        --key K --value V [--confidence F] [--provenance P] [--author A] [--db ...]
-        //   wicked-estate annotate --symbol <id> --key K --value V [--confidence F] [--provenance P] [--author A] [--db ...]
+        //   wicked-estate annotate <name>        --key K --value V [--type T] [--confidence F] [--provenance P] [--author A] [--db ...]
+        //   wicked-estate annotate --symbol <id> --key K --value V [--type T] [--confidence F] [--provenance P] [--author A] [--db ...]
+        //
+        // `--type` defaults to `note` (back-compat with pre-0.5 untyped annotate). It is a plain
+        // string — a fixed convention (note/assumption/observation/comment/question/community) OR
+        // any custom type; both are stored and queried identically (rules-as-DATA). Writes via the
+        // type-aware `GraphWrite::annotate` seam; the store stamps `ts` (passed 0).
         "annotate" => {
+            use wicked_estate_core::{Annotation, DEFAULT_ANNOTATION_TYPE, GraphWrite};
             let key = ann_key
                 .as_deref()
                 .context("--key is required for the annotate command")?;
             let value = ann_value
                 .as_deref()
                 .context("--value is required for the annotate command")?;
+            let ty = ann_type.as_deref().unwrap_or(DEFAULT_ANNOTATION_TYPE);
             ensure_db_dir(&db)?;
             let mut store = SqliteStore::open(&db).map_err(to_any)?;
+            // Build the typed annotation once; clone per target. ts=0 → store stamps it.
+            let make = |sym_present_value: &str| {
+                Annotation::new(ty, key, sym_present_value)
+                    .with_confidence(ann_confidence)
+                    .with_provenance(ann_provenance.clone())
+                    .with_author(ann_author.clone())
+            };
             let mut count = 0usize;
             if let Some(sym_str) = &ann_symbol {
                 let symbol = wicked_estate_core::symbol::SymbolId::from(sym_str.as_str());
-                store
-                    .annotate_node(
-                        &symbol,
-                        key,
-                        value,
-                        ann_confidence,
-                        &ann_provenance,
-                        &ann_author,
-                    )
-                    .map_err(to_any)?;
+                store.annotate(&symbol, make(value)).map_err(to_any)?;
                 count = 1;
             } else {
                 let name = positional.first().context(
-                    "usage: wicked-estate annotate <name> --key K --value V [--db ...]\n       \
-                     wicked-estate annotate --symbol <id> --key K --value V [--db ...]",
+                    "usage: wicked-estate annotate <name> --key K --value V [--type T] [--db ...]\n       \
+                     wicked-estate annotate --symbol <id> --key K --value V [--type T] [--db ...]",
                 )?;
                 let hits = wicked_estate::search(&store, name).map_err(to_any)?;
                 for n in &hits {
-                    store
-                        .annotate_node(
-                            &n.symbol,
-                            key,
-                            value,
-                            ann_confidence,
-                            &ann_provenance,
-                            &ann_author,
-                        )
-                        .map_err(to_any)?;
+                    store.annotate(&n.symbol, make(value)).map_err(to_any)?;
                     count += 1;
                 }
             }
-            println!("annotated {count} symbol(s) with {key}={value}");
+            println!("annotated {count} symbol(s) with [{ty}] {key}={value}");
         }
-        // Agent A: show annotations for a symbol.
+        // Agent A: show TYPED annotations for a symbol.
         //
         // Usage:
-        //   wicked-estate annotations <name>     [--db ...]
-        //   wicked-estate annotations --symbol <id> [--db ...]
+        //   wicked-estate annotations <name>        [--type T] [--json] [--db ...]
+        //   wicked-estate annotations --symbol <id> [--type T] [--json] [--db ...]
+        //
+        // Reads via the `GraphRead::annotations` seam (oldest-first). `--type T` filters to that
+        // exact type (fixed convention OR custom, matched identically). `--json` emits the spec
+        // shape `{symbol, annotations:[{type,key,value,confidence,provenance,author,ts,advisory}]}`
+        // — one object per matched symbol (an array under `<name>`, a single object under
+        // `--symbol`). `advisory:true` is emitted for assumption/question (computed from `type`,
+        // not hard-coded). This direct read is NOT R4-capped — only structured payloads are.
         "annotations" => {
+            use wicked_estate_core::GraphRead;
+            let json_out = positional.iter().any(|a| a == "--json");
+            let type_filter = ann_type.as_deref();
             let store = SqliteStore::open(&db).map_err(to_any)?;
+
+            // Fetch + apply the optional type filter for one symbol.
+            let fetch = |sym: &wicked_estate_core::SymbolId| -> Result<Vec<wicked_estate_core::Annotation>> {
+                let mut anns = store.annotations(sym).map_err(to_any)?;
+                if let Some(t) = type_filter {
+                    anns.retain(|a| a.r#type == t);
+                }
+                Ok(anns)
+            };
+            // The spec's per-symbol JSON object: {symbol, annotations:[...]}.
+            let sym_json = |sym: &wicked_estate_core::SymbolId,
+                            anns: &[wicked_estate_core::Annotation]| {
+                serde_json::json!({
+                    "symbol": sym.to_string(),
+                    "annotations": anns.iter().map(source_bundle::annotation_json).collect::<Vec<_>>(),
+                })
+            };
+            // Human line for one annotation (advisory marker shown when advisory).
+            let print_ann = |indent: &str, a: &wicked_estate_core::Annotation| {
+                let adv = if a.is_advisory() { " advisory" } else { "" };
+                println!(
+                    "{indent}[{}] {}={} [confidence={:.3} provenance={:?} author={:?}{adv}]",
+                    a.r#type, a.key, a.value, a.confidence, a.provenance, a.author
+                );
+            };
+
             if let Some(sym_str) = &ann_symbol {
                 let symbol = wicked_estate_core::symbol::SymbolId::from(sym_str.as_str());
-                let anns = store.get_annotations(&symbol).map_err(to_any)?;
-                if anns.is_empty() {
+                let anns = fetch(&symbol)?;
+                if json_out {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&sym_json(&symbol, &anns))?
+                    );
+                } else if anns.is_empty() {
                     println!("(no annotations for symbol {sym_str})");
                 } else {
                     for a in &anns {
-                        println!(
-                            "{}={} [confidence={:.3} provenance={:?} author={:?}]",
-                            a.key, a.value, a.confidence, a.provenance, a.author
-                        );
+                        print_ann("", a);
                     }
                 }
             } else {
                 let name = positional.first().context(
-                    "usage: wicked-estate annotations <name> [--db ...]\n       \
-                     wicked-estate annotations --symbol <id> [--db ...]",
+                    "usage: wicked-estate annotations <name> [--type T] [--json] [--db ...]\n       \
+                     wicked-estate annotations --symbol <id> [--type T] [--json] [--db ...]",
                 )?;
                 let hits = wicked_estate::search(&store, name).map_err(to_any)?;
-                if hits.is_empty() {
+                if json_out {
+                    let mut arr: Vec<serde_json::Value> = Vec::with_capacity(hits.len());
+                    for n in &hits {
+                        let anns = fetch(&n.symbol)?;
+                        arr.push(sym_json(&n.symbol, &anns));
+                    }
+                    println!("{}", serde_json::to_string_pretty(&arr)?);
+                } else if hits.is_empty() {
                     println!("no symbols found for '{name}'");
                 } else {
                     for n in &hits {
-                        let anns = store.get_annotations(&n.symbol).map_err(to_any)?;
+                        let anns = fetch(&n.symbol)?;
                         println!("  [{:?}] {} ({})", n.kind, n.name, loc(n));
                         if anns.is_empty() {
                             println!("    (no annotations)");
                         } else {
                             for a in &anns {
-                                println!(
-                                    "    {}={} [confidence={:.3} provenance={:?} author={:?}]",
-                                    a.key, a.value, a.confidence, a.provenance, a.author
-                                );
+                                print_ann("    ", a);
                             }
                         }
                     }
@@ -1818,6 +1900,7 @@ fn main() -> Result<()> {
         // Usage:
         //   wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json] [--db ...]
         "nodes" => {
+            use wicked_estate_core::GraphRead;
             let kind = {
                 let mut k = String::new();
                 let mut it2 = positional.iter();
@@ -1831,6 +1914,31 @@ fn main() -> Result<()> {
             let json_out = positional.iter().any(|a| a == "--json");
             let store = SqliteStore::open(&db).map_err(to_any)?;
 
+            // Per-node JSON for the `--json` paths: base metadata + typed annotations.
+            // `annotation_summary` is always present (exact, over the FULL set); `annotations` is
+            // present only when non-empty and is R4-capped (advisory-first, ts desc, ≤ 20).
+            let node_json = |n: &wicked_estate_core::Node| -> serde_json::Value {
+                let all_anns = store.annotations(&n.symbol).unwrap_or_default();
+                let mut obj = serde_json::json!({
+                    "symbol_id": n.symbol.to_string(),
+                    "name": n.name,
+                    "kind": format!("{:?}", n.kind),
+                    "file": n.location.file,
+                    "line": n.location.span.start_line + 1,
+                    "signature": n.signature,
+                    "annotation_summary": source_bundle::annotation_summary(&all_anns),
+                });
+                if !all_anns.is_empty() {
+                    let capped: Vec<serde_json::Value> =
+                        source_bundle::cap_annotations_for_payload(all_anns)
+                            .iter()
+                            .map(source_bundle::annotation_json)
+                            .collect();
+                    obj["annotations"] = serde_json::Value::Array(capped);
+                }
+                obj
+            };
+
             if let Some(ann_filter) = &annotated_with {
                 // --annotated-with KEY or KEY=VALUE
                 let (ann_key, ann_val) = if let Some((k, v)) = ann_filter.split_once('=') {
@@ -1840,19 +1948,7 @@ fn main() -> Result<()> {
                 };
                 let nodes = store.find_by_annotation(ann_key, ann_val).map_err(to_any)?;
                 if json_out {
-                    let j: Vec<serde_json::Value> = nodes
-                        .iter()
-                        .map(|n| {
-                            serde_json::json!({
-                                "symbol_id": n.symbol.to_string(),
-                                "name": n.name,
-                                "kind": format!("{:?}", n.kind),
-                                "file": n.location.file,
-                                "line": n.location.span.start_line + 1,
-                                "signature": n.signature,
-                            })
-                        })
-                        .collect();
+                    let j: Vec<serde_json::Value> = nodes.iter().map(&node_json).collect();
                     println!("{}", serde_json::to_string_pretty(&j)?);
                 } else {
                     let filter_desc = ann_val
@@ -1869,19 +1965,7 @@ fn main() -> Result<()> {
             } else {
                 let nodes = store.nodes_by_kind(&kind).map_err(to_any)?;
                 if json_out {
-                    let j: Vec<serde_json::Value> = nodes
-                        .iter()
-                        .map(|n| {
-                            serde_json::json!({
-                                "symbol_id": n.symbol.to_string(),
-                                "name": n.name,
-                                "kind": format!("{:?}", n.kind),
-                                "file": n.location.file,
-                                "line": n.location.span.start_line + 1,
-                                "signature": n.signature,
-                            })
-                        })
-                        .collect();
+                    let j: Vec<serde_json::Value> = nodes.iter().map(&node_json).collect();
                     println!("{}", serde_json::to_string_pretty(&j)?);
                 } else {
                     let label = if kind.is_empty() {
@@ -2300,10 +2384,13 @@ fn main() -> Result<()> {
                 "    Final line: {{\"next_seq\":N}} — pass as --since on the next call to resume."
             );
             println!(
-                "  wicked-estate clusters [<min-size>] [--json]  # community detection / clustering"
+                "  wicked-estate clusters [<min-size>] [--json] [--annotate]  # community detection / clustering"
             );
             println!(
                 "    graph (default): Louvain over CALLS/IMPORTS — [--resolution <γ>] [--hierarchical] [--package-bias <f>]"
+            );
+            println!(
+                "    --annotate    write a `community`-type annotation (author=system) on each member (default: off)"
             );
             println!(
                 "    semantic: [--weight semantic [--k <n> | --eps <d> --min-pts <n>]]  (needs an --embeddings index)"
@@ -2311,14 +2398,19 @@ fn main() -> Result<()> {
             println!(
                 "  wicked-estate context <name> --budget <chars> [--json]  # ranked context within char budget"
             );
-            println!("  wicked-estate annotate <name> --key K --value V [--db ...]");
+            println!("  wicked-estate annotate <name> --key K --value V [--type T] [--db ...]");
             println!("    --key         annotation key (required)");
             println!("    --value       annotation value (required)");
+            println!(
+                "    --type        annotation type (default: note; note/assumption/observation/comment/question/community or custom)"
+            );
             println!("    --confidence  confidence score 0.0–1.0 (default: 1.0)");
             println!("    --provenance  provenance string (default: empty)");
             println!("    --author      author string (default: empty)");
-            println!("  wicked-estate annotations <name>   [--db ...]");
-            println!("    Show all annotations for matching symbols.");
+            println!("  wicked-estate annotations <name>   [--type T] [--json] [--db ...]");
+            println!(
+                "    Show annotations for matching symbols. --type filters; --json emits {{symbol, annotations:[...]}} with an `advisory` flag."
+            );
             println!(
                 "  wicked-estate fingerprint <name>   [--db ...]  # stable hex fingerprint for symbol"
             );
@@ -2336,6 +2428,9 @@ fn main() -> Result<()> {
             );
             println!(
                 "  wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json]  # filter symbols by kind or annotation"
+            );
+            println!(
+                "    --json adds per-node annotation_summary {{count,by_type,has_advisory}} + an annotations[] array (R4-capped at 20)"
             );
             println!(
                 "  wicked-estate export [--format ndjson|json] [--nodes-only] [--edges-only]  # full graph export"

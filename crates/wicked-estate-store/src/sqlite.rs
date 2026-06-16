@@ -9,10 +9,9 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::collections::{BTreeMap, HashSet};
 use wicked_estate_core::{
-    Annotation, Change, ChangeOp, DEFAULT_ANNOTATION_TYPE, Direction, Edge, EdgeKind, Error,
-    GraphRead, GraphStats, GraphWrite, HistoricalEdge, Node, NodeKind, NodeSemantics, RepoInfo,
-    Result, StoreCapabilities, Subgraph, SymbolId, SymbolIndex, SymbolQuery, TraversalSpec,
-    UnresolvedRef,
+    Annotation, Change, ChangeOp, Direction, Edge, EdgeKind, Error, GraphRead, GraphStats,
+    GraphWrite, HistoricalEdge, Node, NodeKind, NodeSemantics, RepoInfo, Result, StoreCapabilities,
+    Subgraph, SymbolId, SymbolIndex, SymbolQuery, TraversalSpec, UnresolvedRef,
 };
 
 const SCHEMA: &str = include_str!("schema.sql");
@@ -496,44 +495,15 @@ impl SqliteStore {
     }
 
     // -----------------------------------------------------------------------
-    // Annotation store — inherent CLI-compat shims.
+    // Annotation store — `find_by_annotation` only (the remaining inherent helper).
     //
-    // The real logic lives on the GraphRead/GraphWrite trait impls below
-    // (`annotate` / `annotations` / `annotations_by_type` / `delete_annotations`).
-    // These inherent methods are thin wrappers the CLI still calls on a concrete
-    // `SqliteStore`; a later chunk migrates the CLI to the trait and retires them.
+    // The typed annotation API lives entirely on the GraphRead/GraphWrite trait
+    // impls below (`annotate` / `annotations` / `annotations_by_type` /
+    // `delete_annotations`). The CLI calls those directly; the old default-typed
+    // shims (`annotate_node` / `get_annotations` / `delete_annotation`) are RETIRED.
+    // `find_by_annotation` stays — it queries by key/value (not type) and powers
+    // `nodes --annotated-with`, which the trait does not express.
     // -----------------------------------------------------------------------
-
-    /// CLI shim: annotate `symbol` with a default-typed (`"note"`) key/value.
-    /// Delegates to [`GraphWrite::annotate`] — the type-aware write path.
-    pub fn annotate_node(
-        &mut self,
-        symbol: &wicked_estate_core::SymbolId,
-        key: &str,
-        value: &str,
-        confidence: f64,
-        provenance: &str,
-        author: &str,
-    ) -> Result<()> {
-        let ann = Annotation {
-            key: key.to_string(),
-            value: value.to_string(),
-            confidence,
-            provenance: provenance.to_string(),
-            author: author.to_string(),
-            ts: 0,
-            r#type: DEFAULT_ANNOTATION_TYPE.to_string(),
-        };
-        <Self as GraphWrite>::annotate(self, symbol, ann)
-    }
-
-    /// CLI shim: all annotations on `symbol`. Delegates to [`GraphRead::annotations`].
-    pub fn get_annotations(
-        &self,
-        symbol: &wicked_estate_core::SymbolId,
-    ) -> Result<Vec<Annotation>> {
-        <Self as GraphRead>::annotations(self, symbol)
-    }
 
     /// Return all nodes that have at least one annotation matching `key` and
     /// optionally `value`. Nodes are returned in name order; each node appears
@@ -566,16 +536,6 @@ impl SqliteStore {
             }
         }
         Ok(nodes)
-    }
-
-    /// CLI shim: delete ALL annotations for `key` on `symbol`, any type.
-    /// Delegates to the type-scoped [`GraphWrite::delete_annotations`] with `ty = None`.
-    pub fn delete_annotation(
-        &mut self,
-        symbol: &wicked_estate_core::SymbolId,
-        key: &str,
-    ) -> Result<usize> {
-        <Self as GraphWrite>::delete_annotations(self, symbol, None, key)
     }
 
     // -----------------------------------------------------------------------
@@ -3183,7 +3143,10 @@ mod tests {
 
     #[test]
     fn sqlite_annotation_roundtrip() {
-        use wicked_estate_core::GraphWrite;
+        // Default-typed write/read/delete via the TRAIT seam (the retired `annotate_node` /
+        // `get_annotations` / `delete_annotation` shims no longer exist). A `note`-typed
+        // annotation round-trips its confidence/provenance/author, then deletes (ty=None → any).
+        use wicked_estate_core::{GraphRead, GraphWrite};
         let mut store = open();
         store
             .upsert_nodes(&[make_node("fn_ann", "src/ann.rs")])
@@ -3191,21 +3154,29 @@ mod tests {
 
         let id = sym("fn_ann");
         store
-            .annotate_node(&id, "test-key", "test-val", 0.9, "ci", "agent")
+            .annotate(
+                &id,
+                Annotation::note("test-key", "test-val")
+                    .with_confidence(0.9)
+                    .with_provenance("ci")
+                    .with_author("agent"),
+            )
             .unwrap();
 
-        let anns = store.get_annotations(&id).unwrap();
+        let anns = store.annotations(&id).unwrap();
         assert_eq!(anns.len(), 1, "one annotation expected");
         assert_eq!(anns[0].key, "test-key");
         assert_eq!(anns[0].value, "test-val");
+        assert_eq!(anns[0].r#type, "note", "default type is note");
         assert!((anns[0].confidence - 0.9).abs() < 1e-9);
         assert_eq!(anns[0].provenance, "ci");
         assert_eq!(anns[0].author, "agent");
 
-        let deleted = store.delete_annotation(&id, "test-key").unwrap();
+        // ty=None → delete every row for the key regardless of type.
+        let deleted = store.delete_annotations(&id, None, "test-key").unwrap();
         assert_eq!(deleted, 1, "one row deleted");
 
-        let after = store.get_annotations(&id).unwrap();
+        let after = store.annotations(&id).unwrap();
         assert!(after.is_empty(), "annotation must be gone after delete");
     }
 

@@ -21,7 +21,68 @@
 //!   truncates identically every run; the same db + selector + budget → byte-identical JSON.
 
 use serde_json::{Value, json};
-use wicked_estate_core::Node;
+use std::collections::BTreeMap;
+use wicked_estate_core::{Annotation, Node, is_advisory};
+
+/// R4 payload cap: at most this many annotations are inlined per entity in a structured payload
+/// (`nodes --json`, `source --json`, `RetrieveEntity`). `annotation_summary.count` always carries
+/// the TRUE total so a consumer can tell it was capped (the spec's "summary is always exact" rule).
+pub const MAX_ANNOTATIONS_PER_ENTITY: usize = 20;
+
+/// Render a single annotation as the spec's payload object:
+/// `{type, key, value, confidence, provenance, author, ts, advisory}`. `advisory` is computed from
+/// the `type` via [`is_advisory`] (assumption / question) — a consumer gates "is this a fact?" off
+/// this field, never the type string (spec build-ahead note 1).
+pub fn annotation_json(a: &Annotation) -> Value {
+    json!({
+        "type": a.r#type,
+        "key": a.key,
+        "value": a.value,
+        "confidence": a.confidence,
+        "provenance": a.provenance,
+        "author": a.author,
+        "ts": a.ts,
+        "advisory": is_advisory(&a.r#type),
+    })
+}
+
+/// Apply the R4 cap to a symbol's annotations for inlining in a payload.
+///
+/// Ordering: **advisory-class (`assumption`/`question`) first, then the rest by recency (`ts`
+/// desc)**, then truncated to [`MAX_ANNOTATIONS_PER_ENTITY`]. This keeps the trust-relevant rows
+/// (the ones a consumer must surface as not-a-fact, R7) when an entity exceeds the cap. The input
+/// is taken by value and reordered in place; the TRUE total is captured by the caller via
+/// [`annotation_summary`] BEFORE capping. Sort is stable so equal-`ts` rows keep their relative
+/// (insertion / oldest-first) order from the store.
+pub fn cap_annotations_for_payload(mut anns: Vec<Annotation>) -> Vec<Annotation> {
+    anns.sort_by(|a, b| {
+        let adv = is_advisory(&b.r#type).cmp(&is_advisory(&a.r#type)); // advisory (true) first
+        adv.then_with(|| b.ts.cmp(&a.ts)) // then newest first
+    });
+    anns.truncate(MAX_ANNOTATIONS_PER_ENTITY);
+    anns
+}
+
+/// Build the `annotation_summary` object — `{count, by_type, has_advisory}` — over the FULL
+/// annotation set (before any R4 cap). `count` is the true total; `by_type` is a per-`type` tally
+/// (deterministic key order via `BTreeMap`); `has_advisory` is true when any annotation is
+/// advisory-class. This is the cheap-triage field a consumer reads instead of pulling every value
+/// (spec build-ahead note 2).
+pub fn annotation_summary(anns: &[Annotation]) -> Value {
+    let mut by_type: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut has_advisory = false;
+    for a in anns {
+        *by_type.entry(a.r#type.as_str()).or_insert(0) += 1;
+        if is_advisory(&a.r#type) {
+            has_advisory = true;
+        }
+    }
+    json!({
+        "count": anns.len(),
+        "by_type": by_type,
+        "has_advisory": has_advisory,
+    })
+}
 
 /// Explicit budget / shaping options for a source bundle. All caps are opt-in: `None` (and the
 /// CLI's "flag omitted") means UNBOUNDED. `0` is treated as unbounded too — a cap of zero would
@@ -78,16 +139,23 @@ fn truncate_chars(s: &str, max: usize) -> (String, bool) {
 /// count the selector resolved to *before* any shaping — it always equals `returned` here because
 /// a node is never dropped, only its body; we surface both so a future "drop" policy stays
 /// observable.
-pub fn build_bundle<S, H>(
+///
+/// `annotations_of` yields a node's FULL typed-annotation set (the CLI passes
+/// `store.annotations`). Each node gains `annotation_summary` (always exact, over the full set)
+/// and, when non-empty, an `annotations` array capped per the R4 rule
+/// ([`cap_annotations_for_payload`]) — advisory-class first, then `ts` desc, ≤ 20.
+pub fn build_bundle<S, H, A>(
     mut nodes: Vec<Node>,
     selector: Value,
     opts: BudgetOpts,
     source_of: S,
     sha_of: H,
+    annotations_of: A,
 ) -> Value
 where
     S: Fn(&Node) -> Option<String>,
     H: Fn(&str) -> Option<String>,
+    A: Fn(&Node) -> Vec<Annotation>,
 {
     // Deterministic fill order: (file, start_byte). Same selection truncates identically every run.
     nodes.sort_by(|a, b| {
@@ -152,7 +220,11 @@ where
             truncated_count += 1;
         }
 
-        out_nodes.push(json!({
+        // Typed annotations: summary is exact over the FULL set; the inlined array is R4-capped
+        // (advisory-first, then ts desc, ≤ 20) and omitted entirely when the symbol has none.
+        let all_anns = annotations_of(n);
+        let summary = annotation_summary(&all_anns);
+        let mut node_obj = json!({
             "symbol_id": n.symbol.0,
             "name": n.name,
             "kind": format!("{:?}", n.kind),
@@ -166,7 +238,16 @@ where
             "doc": n.doc,
             "source": source,
             "source_truncated": truncated,
-        }));
+            "annotation_summary": summary,
+        });
+        if !all_anns.is_empty() {
+            let capped: Vec<Value> = cap_annotations_for_payload(all_anns)
+                .iter()
+                .map(annotation_json)
+                .collect();
+            node_obj["annotations"] = Value::Array(capped);
+        }
+        out_nodes.push(node_obj);
     }
 
     json!({
@@ -189,7 +270,7 @@ where
 mod tests {
     use super::*;
     use wicked_estate_core::{
-        GraphRead, GraphWrite, Language, Location, Node, NodeKind, Span, SymbolId,
+        Annotation, GraphRead, GraphWrite, Language, Location, Node, NodeKind, Span, SymbolId,
     };
     use wicked_estate_store::MemStore;
 
@@ -250,7 +331,7 @@ mod tests {
         (store, vec![alpha, beta, gamma])
     }
 
-    /// Wrap a store as the (source_of, sha_of) closures the CLI passes.
+    /// Wrap a store as the (source_of, sha_of, annotations_of) closures the CLI passes.
     fn bundle(store: &MemStore, nodes: Vec<Node>, sel: Value, opts: BudgetOpts) -> Value {
         build_bundle(
             nodes,
@@ -258,6 +339,7 @@ mod tests {
             opts,
             |n| store.symbol_source(n).unwrap(),
             |f| store.file_git_sha(f).unwrap(),
+            |n| store.annotations(&n.symbol).unwrap(),
         )
     }
 
@@ -431,6 +513,7 @@ mod tests {
         let (store, nodes) = fixture();
         let before = store.all_nodes().unwrap().len();
         let before_a = store.file_content("src/a.rs").unwrap();
+        let before_anns_sym = SymbolId("sym::alpha".to_string());
 
         let _ = bundle(
             &store,
@@ -447,10 +530,152 @@ mod tests {
             before,
             "node count unchanged"
         );
+        // annotations is a read-only fetch — building a bundle must not write any.
+        assert!(
+            store.annotations(&before_anns_sym).unwrap().is_empty(),
+            "no annotations written by bundle build"
+        );
         assert_eq!(
             store.file_content("src/a.rs").unwrap(),
             before_a,
             "content unchanged"
+        );
+    }
+
+    // 8. annotation_json shape: every spec field present; `advisory` computed from `type`.
+    #[test]
+    fn annotation_json_carries_advisory_flag() {
+        let assume = Annotation::new("assumption", "k", "v")
+            .with_confidence(0.7)
+            .with_provenance("manual")
+            .with_author("alice");
+        let j = annotation_json(&assume);
+        assert_eq!(j["type"], json!("assumption"));
+        assert_eq!(j["key"], json!("k"));
+        assert_eq!(j["value"], json!("v"));
+        assert_eq!(j["confidence"], json!(0.7));
+        assert_eq!(j["provenance"], json!("manual"));
+        assert_eq!(j["author"], json!("alice"));
+        assert_eq!(j["advisory"], json!(true), "assumption is advisory");
+
+        // A note is NOT advisory; a custom type is NOT advisory.
+        assert_eq!(
+            annotation_json(&Annotation::note("k", "v"))["advisory"],
+            json!(false)
+        );
+        assert_eq!(
+            annotation_json(&Annotation::new("adr-ref", "k", "v"))["advisory"],
+            json!(false),
+            "custom type is not advisory"
+        );
+        // A question IS advisory.
+        assert_eq!(
+            annotation_json(&Annotation::new("question", "k", "v"))["advisory"],
+            json!(true)
+        );
+    }
+
+    // 9. annotation_summary: exact count, per-type tally, has_advisory.
+    #[test]
+    fn annotation_summary_is_exact() {
+        let anns = vec![
+            Annotation::note("a", "1"),
+            Annotation::note("b", "2"),
+            Annotation::new("assumption", "c", "3"),
+        ];
+        let s = annotation_summary(&anns);
+        assert_eq!(s["count"], json!(3), "count is the true total");
+        assert_eq!(s["by_type"]["note"], json!(2));
+        assert_eq!(s["by_type"]["assumption"], json!(1));
+        assert_eq!(s["has_advisory"], json!(true), "an assumption is present");
+
+        let none = annotation_summary(&[]);
+        assert_eq!(none["count"], json!(0));
+        assert_eq!(none["has_advisory"], json!(false));
+    }
+
+    // 10. R4 cap: advisory-class first, then ts desc, truncated to 20; summary count stays TRUE.
+    #[test]
+    fn cap_orders_advisory_first_then_ts_desc_and_truncates() {
+        // 25 annotations: indices 0..25, ts = index. Make a few advisory at LOW ts so the
+        // ordering rule (advisory-first) is observable distinct from pure recency.
+        let mut anns: Vec<Annotation> = Vec::new();
+        for i in 0..25i64 {
+            // ts = i; types: i==0,1 are questions (advisory, oldest); rest are notes.
+            let ty = if i < 2 { "question" } else { "note" };
+            let mut a = Annotation::new(ty, format!("k{i}"), format!("v{i}"));
+            a.ts = i;
+            anns.push(a);
+        }
+        let total = anns.len();
+        let summary = annotation_summary(&anns);
+        assert_eq!(
+            summary["count"],
+            json!(total as u64),
+            "summary is true total (25)"
+        );
+
+        let capped = cap_annotations_for_payload(anns);
+        assert_eq!(capped.len(), MAX_ANNOTATIONS_PER_ENTITY, "capped to 20");
+        // The two advisory (question, ts 0 and 1) must survive the cap despite being the OLDEST,
+        // and appear FIRST. Among the two advisory rows, ts desc → ts=1 before ts=0.
+        assert!(capped[0].is_advisory(), "first row is advisory");
+        assert!(capped[1].is_advisory(), "second row is advisory");
+        assert_eq!(
+            capped[0].ts, 1,
+            "advisory ordered ts desc within advisory class"
+        );
+        assert_eq!(capped[1].ts, 0);
+        // After the two advisory rows, the remaining 18 are the NEWEST notes (ts 24..7), ts desc.
+        assert_eq!(capped[2].ts, 24, "newest note after advisory rows");
+        assert!(
+            capped.iter().all(|a| a.is_advisory() || a.ts >= 7),
+            "the oldest notes (ts 2..6) were dropped by the cap"
+        );
+    }
+
+    // 11. End-to-end: a node WITH annotations gets `annotations` (capped) + `annotation_summary`;
+    //     a node WITHOUT annotations omits `annotations` but still carries the summary (count 0).
+    #[test]
+    fn bundle_inlines_annotations_and_summary() {
+        let (mut store, nodes) = fixture();
+        // Annotate alpha with 1 note + 1 assumption; leave beta/gamma bare.
+        store
+            .annotate(
+                &SymbolId("sym::alpha".to_string()),
+                Annotation::note("owner", "team-x"),
+            )
+            .unwrap();
+        store
+            .annotate(
+                &SymbolId("sym::alpha".to_string()),
+                Annotation::new("assumption", "thread-safe", "assumed"),
+            )
+            .unwrap();
+
+        let b = bundle(&store, nodes, json!({"file": "all"}), BudgetOpts::default());
+        let out = b["nodes"].as_array().unwrap();
+
+        // alpha sorts first (src/a.rs, byte 0).
+        let alpha = &out[0];
+        assert_eq!(alpha["symbol_id"], json!("sym::alpha"));
+        assert_eq!(alpha["annotation_summary"]["count"], json!(2));
+        assert_eq!(alpha["annotation_summary"]["has_advisory"], json!(true));
+        let alpha_anns = alpha["annotations"]
+            .as_array()
+            .expect("annotations present");
+        assert_eq!(alpha_anns.len(), 2);
+        // Advisory (assumption) must be inlined first.
+        assert_eq!(alpha_anns[0]["type"], json!("assumption"));
+        assert_eq!(alpha_anns[0]["advisory"], json!(true));
+
+        // beta (src/a.rs byte 18) has NO annotations: summary present (count 0), array omitted.
+        let beta = &out[1];
+        assert_eq!(beta["symbol_id"], json!("sym::beta"));
+        assert_eq!(beta["annotation_summary"]["count"], json!(0));
+        assert!(
+            beta.get("annotations").is_none(),
+            "annotations array omitted when empty"
         );
     }
 }
