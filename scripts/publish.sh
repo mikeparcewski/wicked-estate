@@ -15,6 +15,7 @@ cd "$(dirname "$0")/.."
 CRATES=(
   wicked-estate-tree-sitter-rpg
   wicked-estate-core
+  wicked-estate-observe
   wicked-estate-store
   wicked-estate-extract
   wicked-estate-rank
