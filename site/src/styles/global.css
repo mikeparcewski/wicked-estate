@@ -102,7 +102,7 @@
     background-color: var(--canvas);
     color: var(--ink);
     font-family: "Hanken Grotesk", ui-sans-serif, system-ui, sans-serif;
-    overflow-x: hidden;
+    overflow-x: clip; /* clip (not hidden) — hidden makes body a scroll container and breaks sticky scroll sections */
     line-height: 1.55;
     transition: background-color 0.35s var(--ease), color 0.35s var(--ease);
   }
