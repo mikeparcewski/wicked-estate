@@ -2,6 +2,7 @@
 import Base from "wicked-web/layouts/Base.astro";
 import Topbar from "wicked-web/components/Topbar.astro";
 import Footer from "wicked-web/components/Footer.astro";
+import SameGarden from "wicked-web/components/SameGarden.astro";
 import "../styles/global.css";
 import Content from "../components/Content.tsx";
 ---
@@ -12,5 +13,6 @@ import Content from "../components/Content.tsx";
 >
   <Topbar pkg="wicked-estate" repo="https://github.com/mikeparcewski/wicked-estate" />
   <Content client:load />
+  <SameGarden current="wicked-estate" />
   <Footer repo="https://github.com/mikeparcewski/wicked-estate" />
 </Base>

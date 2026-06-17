@@ -158,17 +158,6 @@ function UseCases() {
       cmd: 'wicked-estate index . --db postgres://team/graph',
       out: 'shared_writers=true · server_side_traversal=true',
     },
-    {
-      icon: (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253" />
-        </svg>
-      ),
-      title: 'Add a language in minutes',
-      body: 'One manifest row and one .scm query file. No Rust changes. No recompile. The capability matrix generates itself — 91 languages today, more without surgery.',
-      cmd: 'echo \'[[language]]\\nname = "zig"\' >> languages.toml',
-      out: 'New language detected · extractor active on next index',
-    },
   ]
 
   return (
@@ -1009,81 +998,6 @@ claude mcp add wicked-estate -s project \\
   )
 }
 
-// ── FeaturedTools ──────────────────────────────────────────────────────────────
-function FeaturedTools() {
-  const tools = [
-    {
-      name: 'wicked-garden',
-      tagline: 'The local-first toolkit for AI-native development.',
-      blurb: 'One gate that reads the shape of your work and applies exactly the right rigor — evidence-gated phases, 40+ specialist agents, no black box.',
-      href: 'https://wg.wickedagile.com',
-      img: '/wicked-garden-hero.png',
-      tags: ['MIT', 'Claude plugin', '9 archetypes'],
-    },
-    {
-      name: 'wicked-interactive',
-      tagline: 'If you can say it, you can make it.',
-      blurb: "Describe a page, deck, or demo out loud and watch it build live in your browser. Point at what's wrong and say what to fix. Every version saved.",
-      href: 'https://wi.wickedagile.com',
-      img: '/wicked-interactive-hero.png',
-      tags: ['MIT', 'Claude plugin', 'live builder'],
-    },
-  ]
-
-  return (
-    <section className="snap-start min-h-screen flex flex-col justify-center py-16 px-7 bg-canvas-2">
-      <div className="max-w-6xl mx-auto w-full">
-        <div className="text-center mb-10">
-          <span className="kicker">From the same garden</span>
-          <h2 className="font-display text-3xl sm:text-4xl font-black text-ink mb-3">More tools. Same ethos.</h2>
-          <p className="text-muted font-sans text-sm max-w-lg mx-auto">
-            Local-first, no cloud dependency, no checkmark you can't re-run.
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {tools.map(tool => (
-            <a key={tool.name} href={tool.href} target="_blank" rel="noreferrer"
-              className="group card-hover flex flex-col overflow-hidden rounded-2xl">
-              {/* Screenshot */}
-              <div className="relative overflow-hidden bg-canvas rounded-t-xl border border-b-0 border-hairline"
-                style={{ aspectRatio: '16/9' }}>
-                <img
-                  src={tool.img}
-                  alt={`${tool.name} screenshot`}
-                  className="w-full h-full object-cover object-top transition-transform duration-700 group-hover:scale-[1.03]"
-                />
-                {/* subtle gradient overlay at bottom */}
-                <div className="absolute inset-x-0 bottom-0 h-16 pointer-events-none"
-                  style={{ background: 'linear-gradient(to top, color-mix(in oklab, var(--canvas) 60%, transparent), transparent)' }} />
-              </div>
-
-              {/* Card body */}
-              <div className="flex flex-col flex-1 p-5 border border-t-0 border-hairline rounded-b-2xl"
-                style={{ background: 'color-mix(in oklab, var(--surface) 80%, var(--canvas))' }}>
-                <p className="font-mono text-[0.62rem] tracking-widest uppercase text-faint mb-1">wicked-</p>
-                <h3 className="font-display text-xl font-black text-ink leading-tight mb-1">
-                  {tool.name.replace('wicked-', '')}
-                </h3>
-                <p className="font-sans text-sm font-semibold text-muted mb-2">{tool.tagline}</p>
-                <p className="font-sans text-sm text-muted leading-relaxed flex-1">{tool.blurb}</p>
-                <div className="flex flex-wrap gap-1.5 mt-4 pt-4 border-t border-hairline items-center justify-between">
-                  <div className="flex flex-wrap gap-1.5">
-                    {tool.tags.map(t => <span key={t} className="lang-tag">{t}</span>)}
-                  </div>
-                  <span className="font-mono text-[0.68rem] transition-colors text-faint group-hover:text-accent-ink">
-                    visit ↗
-                  </span>
-                </div>
-              </div>
-            </a>
-          ))}
-        </div>
-      </div>
-    </section>
-  )
-}
-
 // ── Content ──────────────────────────────────────────────────────────────────
 // Body sections only. The shared wicked-web Topbar + Footer wrap this island
 // in src/pages/index.astro; theme is driven by data-theme on <html>.
@@ -1098,7 +1012,6 @@ export default function Content() {
       <Languages />
       <MCPConnect />
       <GetStarted />
-      <FeaturedTools />
     </main>
   )
 }
