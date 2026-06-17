@@ -28,8 +28,9 @@ pub mod symbol;
 pub mod traits;
 
 pub use annotation::{
-    Annotation, AnnotationClass, DEFAULT_ANNOTATION_TYPE, KNOWN_ANNOTATION_TYPES, classify,
-    is_advisory, is_system_derived,
+    Annotation, AnnotationClass, DEFAULT_ANNOTATION_TYPE, DEFAULT_EXTRACTION_METHOD,
+    DEFAULT_SOURCE_TYPE, KNOWN_ANNOTATION_TYPES, KNOWN_SOURCE_TYPES, classify, is_advisory,
+    is_system_derived,
 };
 pub use change::{Change, ChangeOp};
 pub use edge::{Confidence, Direction, Edge, EdgeKind, Provenance, ResolutionTier};

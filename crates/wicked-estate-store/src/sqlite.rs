@@ -25,8 +25,12 @@ const SCHEMA: &str = include_str!("schema.sql");
 /// (where `SCHEMA` already created the column). No data rewrite: the `DEFAULT 'note'` backfills
 /// every pre-existing row on read. There is no schema-version row in this codebase, so the
 /// presence check IS the version gate.
+///
+/// The same presence-guarded pattern backfills the evidence-envelope columns (`source_type`,
+/// `extraction_method`, `last_verified`) onto DBs created before they existed — each ALTER runs at
+/// most once and the column DEFAULT backfills every pre-existing row on read (no data rewrite).
 fn migrate_schema(conn: &Connection) -> Result<()> {
-    // Does annotations.type already exist?
+    // Snapshot the current annotations columns once; the presence check IS the version gate.
     let mut stmt = conn.prepare("PRAGMA table_info(annotations)").map_err(st)?;
     let cols: Vec<String> = stmt
         .query_map([], |r| r.get::<_, String>(1)) // column 1 = name
@@ -38,6 +42,27 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "ALTER TABLE annotations ADD COLUMN type TEXT NOT NULL DEFAULT 'note'; \
              CREATE INDEX IF NOT EXISTS idx_annotations_type ON annotations(type);",
+        )
+        .map_err(st)?;
+    }
+    // Evidence envelope — additive columns. Defaults match `Annotation`'s serde defaults so old
+    // rows backfill identically whether they arrive via JSON deserialization or a DB read.
+    if !cols.iter().any(|c| c == "source_type") {
+        conn.execute_batch(
+            "ALTER TABLE annotations ADD COLUMN source_type TEXT NOT NULL DEFAULT 'unspecified';",
+        )
+        .map_err(st)?;
+    }
+    if !cols.iter().any(|c| c == "extraction_method") {
+        conn.execute_batch(
+            "ALTER TABLE annotations ADD COLUMN extraction_method TEXT NOT NULL DEFAULT 'manual';",
+        )
+        .map_err(st)?;
+    }
+    if !cols.iter().any(|c| c == "last_verified") {
+        conn.execute_batch(
+            "ALTER TABLE annotations ADD COLUMN last_verified INTEGER NOT NULL DEFAULT 0; \
+             CREATE INDEX IF NOT EXISTS idx_annotations_last_verified ON annotations(last_verified);",
         )
         .map_err(st)?;
     }
@@ -1307,8 +1332,8 @@ impl GraphWrite for SqliteStore {
         if annotation.ts == 0 {
             self.conn
                 .execute(
-                    "INSERT INTO annotations(node_sym, key, value, confidence, provenance, author, type)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    "INSERT INTO annotations(node_sym, key, value, confidence, provenance, author, type, source_type, extraction_method, last_verified)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         sid,
                         annotation.key,
@@ -1317,14 +1342,17 @@ impl GraphWrite for SqliteStore {
                         annotation.provenance,
                         annotation.author,
                         annotation.r#type,
+                        annotation.source_type,
+                        annotation.extraction_method,
+                        annotation.last_verified,
                     ],
                 )
                 .map_err(st)?;
         } else {
             self.conn
                 .execute(
-                    "INSERT INTO annotations(node_sym, key, value, confidence, provenance, author, ts, type)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    "INSERT INTO annotations(node_sym, key, value, confidence, provenance, author, ts, type, source_type, extraction_method, last_verified)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     params![
                         sid,
                         annotation.key,
@@ -1334,6 +1362,9 @@ impl GraphWrite for SqliteStore {
                         annotation.author,
                         annotation.ts,
                         annotation.r#type,
+                        annotation.source_type,
+                        annotation.extraction_method,
+                        annotation.last_verified,
                     ],
                 )
                 .map_err(st)?;
@@ -1880,7 +1911,7 @@ impl GraphRead for SqliteStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT key, value, confidence, provenance, author, ts, type
+                "SELECT key, value, confidence, provenance, author, ts, type, source_type, extraction_method, last_verified
                  FROM annotations WHERE node_sym = ?1 ORDER BY ts ASC, id ASC",
             )
             .map_err(st)?;
@@ -1894,6 +1925,9 @@ impl GraphRead for SqliteStore {
                     author: r.get(4)?,
                     ts: r.get(5)?,
                     r#type: r.get(6)?,
+                    source_type: r.get(7)?,
+                    extraction_method: r.get(8)?,
+                    last_verified: r.get(9)?,
                 })
             })
             .map_err(st)?
@@ -1908,7 +1942,7 @@ impl GraphRead for SqliteStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT s.sym, a.key, a.value, a.confidence, a.provenance, a.author, a.ts, a.type
+                "SELECT s.sym, a.key, a.value, a.confidence, a.provenance, a.author, a.ts, a.type, a.source_type, a.extraction_method, a.last_verified
                  FROM annotations a
                  JOIN symbols s ON s.sid = a.node_sym
                  WHERE a.type = ?1
@@ -1927,6 +1961,47 @@ impl GraphRead for SqliteStore {
                         author: r.get(5)?,
                         ts: r.get(6)?,
                         r#type: r.get(7)?,
+                        source_type: r.get(8)?,
+                        extraction_method: r.get(9)?,
+                        last_verified: r.get(10)?,
+                    },
+                ))
+            })
+            .map_err(st)?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    fn annotations_stale_since(&self, cutoff: i64) -> Result<Vec<(SymbolId, Annotation)>> {
+        // Freshness read: every annotation last verified STRICTLY BEFORE `cutoff`. Never-verified
+        // rows (last_verified = 0) fall out for any positive cutoff. idx_annotations_last_verified
+        // backs the range scan; ordered by symbol then ts, parallel to annotations_by_type.
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT s.sym, a.key, a.value, a.confidence, a.provenance, a.author, a.ts, a.type, a.source_type, a.extraction_method, a.last_verified
+                 FROM annotations a
+                 JOIN symbols s ON s.sid = a.node_sym
+                 WHERE a.last_verified < ?1
+                 ORDER BY s.sym ASC, a.ts ASC, a.id ASC",
+            )
+            .map_err(st)?;
+        let rows = stmt
+            .query_map(params![cutoff], |r| {
+                Ok((
+                    SymbolId(r.get::<_, String>(0)?),
+                    Annotation {
+                        key: r.get(1)?,
+                        value: r.get(2)?,
+                        confidence: r.get(3)?,
+                        provenance: r.get(4)?,
+                        author: r.get(5)?,
+                        ts: r.get(6)?,
+                        r#type: r.get(7)?,
+                        source_type: r.get(8)?,
+                        extraction_method: r.get(9)?,
+                        last_verified: r.get(10)?,
                     },
                 ))
             })
@@ -3278,6 +3353,137 @@ mod tests {
 
         // Migration is idempotent: a second run is a no-op (must not error).
         migrate_schema(&conn).expect("second migration run must be a no-op");
+    }
+
+    #[test]
+    fn sqlite_evidence_envelope_columns_backfill_on_old_db() {
+        // A DB created by a build that had `type` but PREDATES the evidence envelope: its
+        // annotations table lacks source_type / extraction_method / last_verified. The idempotent
+        // migration must add all three with their struct-matching DEFAULTs and backfill the
+        // pre-existing row on read — NO data rewrite. Mirrors the `type`-column backfill proof.
+        let conn = Connection::open_in_memory().expect("in-memory conn");
+        conn.execute_batch(
+            "CREATE TABLE annotations (
+               id         INTEGER PRIMARY KEY AUTOINCREMENT,
+               node_sym   INTEGER NOT NULL,
+               key        TEXT NOT NULL,
+               value      TEXT NOT NULL,
+               confidence REAL    NOT NULL DEFAULT 1.0,
+               provenance TEXT    NOT NULL DEFAULT '',
+               author     TEXT    NOT NULL DEFAULT '',
+               ts         INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+               type       TEXT    NOT NULL DEFAULT 'note'
+             );",
+        )
+        .expect("create pre-envelope annotations table");
+        conn.execute(
+            "INSERT INTO annotations(node_sym, key, value, type) VALUES (1, 'k', 'v', 'observation')",
+            [],
+        )
+        .expect("insert pre-envelope row");
+
+        // Precondition: none of the evidence-envelope columns exist yet.
+        {
+            let mut stmt = conn.prepare("PRAGMA table_info(annotations)").unwrap();
+            let cols: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect();
+            for c in ["source_type", "extraction_method", "last_verified"] {
+                assert!(
+                    !cols.iter().any(|x| x == c),
+                    "precondition: pre-envelope table must lack '{c}'"
+                );
+            }
+        }
+
+        migrate_schema(&conn).expect("migration must add the evidence-envelope columns");
+
+        // The pre-existing row backfills to the struct-matching defaults.
+        let (st_, em, lv): (String, String, i64) = conn
+            .query_row(
+                "SELECT source_type, extraction_method, last_verified FROM annotations WHERE key='k'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("row readable after migration");
+        assert_eq!(st_, "unspecified", "source_type backfills to 'unspecified'");
+        assert_eq!(em, "manual", "extraction_method backfills to 'manual'");
+        assert_eq!(lv, 0, "last_verified backfills to 0 (never verified)");
+
+        // Idempotent: a second run is a no-op.
+        migrate_schema(&conn).expect("second migration run must be a no-op");
+    }
+
+    #[test]
+    fn sqlite_evidence_envelope_roundtrip_and_stale_since() {
+        // Full store round-trip persisting + reading the evidence-envelope fields, plus the
+        // freshness read. Distinct from the conformance suite — proves the SQLite columns + the
+        // last_verified range scan directly.
+        use wicked_estate_core::{GraphRead, GraphWrite};
+        let mut store = open();
+        store
+            .upsert_nodes(&[make_node("fn_ev", "src/ev.rs")])
+            .unwrap();
+        let id = sym("fn_ev");
+
+        // Fully-specified envelope (recently verified).
+        store
+            .annotate(
+                &id,
+                Annotation::new("observation", "tls", "requires TLS 1.3")
+                    .with_source_type("static-analysis")
+                    .with_extraction_method("scip-rust@0.3")
+                    .with_last_verified(1_000),
+            )
+            .unwrap();
+        // Stale (verified long ago).
+        store
+            .annotate(
+                &id,
+                Annotation::new("observation", "legacy-fact", "checked ages ago")
+                    .with_source_type("code")
+                    .with_last_verified(100),
+            )
+            .unwrap();
+        // Defaulted envelope (never verified) — proves the column DEFAULTs land for a write that
+        // never set the builders.
+        store.annotate(&id, Annotation::note("plain", "v")).unwrap();
+
+        let rows = store.annotations(&id).unwrap();
+        assert_eq!(rows.len(), 3, "three rows on fn_ev");
+        let tls = rows.iter().find(|a| a.key == "tls").unwrap();
+        assert_eq!(
+            tls.source_type, "static-analysis",
+            "source_type round-trips"
+        );
+        assert_eq!(
+            tls.extraction_method, "scip-rust@0.3",
+            "extraction_method round-trips"
+        );
+        assert_eq!(tls.last_verified, 1_000, "last_verified round-trips");
+        let plain = rows.iter().find(|a| a.key == "plain").unwrap();
+        assert_eq!(plain.source_type, "unspecified", "default source_type");
+        assert_eq!(
+            plain.extraction_method, "manual",
+            "default extraction_method"
+        );
+        assert_eq!(plain.last_verified, 0, "default last_verified");
+
+        // Freshness read: cutoff 500 → stale (100) + never-verified (0), NOT fresh (1000).
+        let stale = store.annotations_stale_since(500).unwrap();
+        let stale_keys: std::collections::HashSet<&str> =
+            stale.iter().map(|(_, a)| a.key.as_str()).collect();
+        assert!(stale_keys.contains("legacy-fact"), "stale row returned");
+        assert!(stale_keys.contains("plain"), "never-verified row returned");
+        assert!(!stale_keys.contains("tls"), "fresh row excluded");
+        // Strict `<`: cutoff exactly at last_verified does not include the row.
+        let at_1000 = store.annotations_stale_since(1_000).unwrap();
+        assert!(
+            !at_1000.iter().any(|(_, a)| a.key == "tls"),
+            "verified exactly at cutoff is NOT stale (strict <)"
+        );
     }
 
     // ── graph helper queries ─────────────────────────────────────────────────

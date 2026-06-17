@@ -151,17 +151,26 @@ CREATE INDEX IF NOT EXISTS idx_edge_history_file ON edge_history(file);
 -- observation/comment/question/community) OR an arbitrary custom type — stored/queried
 -- identically. Defaults to 'note' so legacy/untyped rows read back as a note. New DBs get the
 -- column from here; existing DBs get it via the idempotent ALTER TABLE migration in sqlite.rs.
+-- Evidence envelope (additive, backward-compatible): `source_type` (what KIND of source backed the
+-- fact — code/config/sme-answer/static-analysis/…), `extraction_method` (by what method —
+-- tool+version or 'manual'), `last_verified` (freshness clock, Unix-seconds; distinct from `ts`
+-- which is write-time; 0 = never verified). Defaults match the struct ('unspecified' / 'manual' / 0)
+-- so legacy rows backfill on read. New DBs get them here; existing DBs via the ALTER TABLE migration.
 CREATE TABLE IF NOT EXISTS annotations (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  node_sym   INTEGER NOT NULL,
-  key        TEXT NOT NULL,
-  value      TEXT NOT NULL,
-  confidence REAL    NOT NULL DEFAULT 1.0,
-  provenance TEXT    NOT NULL DEFAULT '',
-  author     TEXT    NOT NULL DEFAULT '',
-  ts         INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-  type       TEXT    NOT NULL DEFAULT 'note'
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  node_sym          INTEGER NOT NULL,
+  key               TEXT NOT NULL,
+  value             TEXT NOT NULL,
+  confidence        REAL    NOT NULL DEFAULT 1.0,
+  provenance        TEXT    NOT NULL DEFAULT '',
+  author            TEXT    NOT NULL DEFAULT '',
+  ts                INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+  type              TEXT    NOT NULL DEFAULT 'note',
+  source_type       TEXT    NOT NULL DEFAULT 'unspecified',
+  extraction_method TEXT    NOT NULL DEFAULT 'manual',
+  last_verified     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_annotations_node ON annotations(node_sym);
 CREATE INDEX IF NOT EXISTS idx_annotations_key  ON annotations(key);
 CREATE INDEX IF NOT EXISTS idx_annotations_type ON annotations(type);
+CREATE INDEX IF NOT EXISTS idx_annotations_last_verified ON annotations(last_verified);

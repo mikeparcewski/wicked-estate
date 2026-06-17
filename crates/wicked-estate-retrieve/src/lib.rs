@@ -225,9 +225,13 @@ fn attach_source(
 const MAX_PAYLOAD_ANNOTATIONS: usize = 20;
 
 /// Render one [`Annotation`] as the payload JSON object the consumer spec fixes:
-/// `{ type, key, value, confidence, provenance, author, ts, advisory }`. `advisory` is computed
-/// from the type via [`is_advisory`] (gate "is this a fact?" off the computed field, never the
-/// type string — a custom advisory-like type can opt in later without consumer changes).
+/// `{ type, key, value, confidence, provenance, author, ts, advisory, source_type,
+/// extraction_method, last_verified }`. `advisory` is computed from the type via [`is_advisory`]
+/// (gate "is this a fact?" off the computed field, never the type string — a custom advisory-like
+/// type can opt in later without consumer changes). The evidence-envelope trio (`source_type` /
+/// `extraction_method` / `last_verified`) is surfaced so a consuming agent can answer "what kind of
+/// source backed this, by what method, and is it still fresh?" — the audit-traceability the
+/// envelope adds. Additive: existing consumers that ignore the new keys are unaffected.
 fn annotation_item_json(a: &Annotation) -> Value {
     json!({
         "type": a.r#type,
@@ -238,6 +242,9 @@ fn annotation_item_json(a: &Annotation) -> Value {
         "author": a.author,
         "ts": a.ts,
         "advisory": is_advisory(&a.r#type),
+        "source_type": a.source_type,
+        "extraction_method": a.extraction_method,
+        "last_verified": a.last_verified,
     })
 }
 
