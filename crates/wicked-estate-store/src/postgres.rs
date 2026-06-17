@@ -17,9 +17,9 @@ use sha1::{Digest as Sha1Digest, Sha1};
 use sqlx::Row;
 use std::collections::BTreeMap;
 use wicked_estate_core::{
-    Change, ChangeOp, Direction, Edge, Error, GraphRead, GraphStats, GraphWrite, HistoricalEdge,
-    Node, NodeKind, NodeSemantics, RepoInfo, Result, StoreCapabilities, Subgraph, SymbolId,
-    SymbolIndex, SymbolQuery, TraversalSpec, UnresolvedRef,
+    Annotation, Change, ChangeOp, Direction, Edge, Error, GraphRead, GraphStats, GraphWrite,
+    HistoricalEdge, Node, NodeKind, NodeSemantics, RepoInfo, Result, StoreCapabilities, Subgraph,
+    SymbolId, SymbolIndex, SymbolQuery, TraversalSpec, UnresolvedRef,
 };
 
 // ── Error helper ─────────────────────────────────────────────────────────────
@@ -78,6 +78,28 @@ fn git_blob_sha(text: &str) -> String {
     h.update(header.as_bytes());
     h.update(bytes);
     format!("{:x}", h.finalize())
+}
+
+// ── Annotation row decode ─────────────────────────────────────────────────────
+
+/// Decode a `PgRow` carrying the standard annotation columns (no `node_sym`) into an
+/// [`Annotation`]. `confidence` is stored as Postgres `REAL` (f32) and widened to the struct's
+/// `f64`; `ts` / `last_verified` are `BIGINT` (i64). Mirrors the column order the read queries
+/// select. Used by all three annotation read methods so the mapping lives in one place.
+fn row_to_annotation(r: &sqlx::postgres::PgRow) -> std::result::Result<Annotation, sqlx::Error> {
+    let confidence: f32 = r.try_get("confidence")?;
+    Ok(Annotation {
+        key: r.try_get("key")?,
+        value: r.try_get("value")?,
+        confidence: confidence as f64,
+        provenance: r.try_get("provenance")?,
+        author: r.try_get("author")?,
+        ts: r.try_get("ts")?,
+        r#type: r.try_get("type")?,
+        source_type: r.try_get("source_type")?,
+        extraction_method: r.try_get("extraction_method")?,
+        last_verified: r.try_get("last_verified")?,
+    })
 }
 
 // ── Schema DDL ────────────────────────────────────────────────────────────────
@@ -159,6 +181,32 @@ CREATE TABLE IF NOT EXISTS edge_history (
   edge_json    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_edge_history_file ON edge_history(file);
+
+-- Annotation store: external agents/tools/humans tag any indexed symbol with typed metadata.
+-- Mirrors SqliteStore's `annotations` table, but `node_sym` is the TEXT symbol id (FK → nodes.symbol)
+-- since Postgres does not intern symbols to integer sids. `type` is a plain string discriminator
+-- (NO enum): a known convention OR an arbitrary custom type — stored/queried identically
+-- (rules-as-DATA). Evidence envelope (additive): `source_type` (what KIND of source), `extraction_method`
+-- (by what method), `last_verified` (freshness clock, Unix-seconds; distinct from `ts` write-time;
+-- 0 = never verified). Defaults match the struct ('unspecified' / 'manual' / 0).
+CREATE TABLE IF NOT EXISTS annotations (
+  id                BIGSERIAL PRIMARY KEY,
+  node_sym          TEXT    NOT NULL,
+  key               TEXT    NOT NULL,
+  value             TEXT    NOT NULL,
+  confidence        REAL    NOT NULL DEFAULT 1.0,
+  provenance        TEXT    NOT NULL DEFAULT '',
+  author            TEXT    NOT NULL DEFAULT '',
+  ts                BIGINT  NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+  type              TEXT    NOT NULL DEFAULT 'note',
+  source_type       TEXT    NOT NULL DEFAULT 'unspecified',
+  extraction_method TEXT    NOT NULL DEFAULT 'manual',
+  last_verified     BIGINT  NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_annotations_node ON annotations(node_sym);
+CREATE INDEX IF NOT EXISTS idx_annotations_key  ON annotations(key);
+CREATE INDEX IF NOT EXISTS idx_annotations_type ON annotations(type);
+CREATE INDEX IF NOT EXISTS idx_annotations_last_verified ON annotations(last_verified);
 "#;
 
 // ── PostgresStore ─────────────────────────────────────────────────────────────
@@ -686,6 +734,85 @@ impl GraphWrite for PostgresStore {
         }
         Ok(())
     }
+
+    fn annotate(&mut self, symbol: &SymbolId, annotation: Annotation) -> Result<()> {
+        rt_block(async {
+            // An un-interned symbol is not a node → no-op (mirrors SqliteStore).
+            let exists: bool = sqlx::query("SELECT 1 AS e FROM nodes WHERE symbol = $1")
+                .bind(&symbol.0)
+                .fetch_optional(&self.pool)
+                .await?
+                .is_some();
+            if !exists {
+                return Ok::<(), sqlx::Error>(());
+            }
+            // Bare INSERT (NOT upsert): a symbol may carry MANY annotations, including a duplicate
+            // (type, key). When ts is unset (0) let the column DEFAULT (NOW epoch) stamp it.
+            if annotation.ts == 0 {
+                sqlx::query(
+                    "INSERT INTO annotations(node_sym, key, value, confidence, provenance, author, type, source_type, extraction_method, last_verified) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                )
+                .bind(&symbol.0)
+                .bind(&annotation.key)
+                .bind(&annotation.value)
+                .bind(annotation.confidence as f32)
+                .bind(&annotation.provenance)
+                .bind(&annotation.author)
+                .bind(&annotation.r#type)
+                .bind(&annotation.source_type)
+                .bind(&annotation.extraction_method)
+                .bind(annotation.last_verified)
+                .execute(&self.pool)
+                .await?;
+            } else {
+                sqlx::query(
+                    "INSERT INTO annotations(node_sym, key, value, confidence, provenance, author, ts, type, source_type, extraction_method, last_verified) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                )
+                .bind(&symbol.0)
+                .bind(&annotation.key)
+                .bind(&annotation.value)
+                .bind(annotation.confidence as f32)
+                .bind(&annotation.provenance)
+                .bind(&annotation.author)
+                .bind(annotation.ts)
+                .bind(&annotation.r#type)
+                .bind(&annotation.source_type)
+                .bind(&annotation.extraction_method)
+                .bind(annotation.last_verified)
+                .execute(&self.pool)
+                .await?;
+            }
+            Ok(())
+        })
+        .map_err(st)?;
+        Ok(())
+    }
+
+    fn delete_annotations(
+        &mut self,
+        symbol: &SymbolId,
+        ty: Option<&str>,
+        key: &str,
+    ) -> Result<usize> {
+        let n = rt_block(async {
+            // $2 IS NULL → key-only (all types); otherwise scope to (type = $2, key = $3).
+            // `type` is matched as an opaque string — no per-type branching (rules-as-DATA).
+            let result = sqlx::query(
+                "DELETE FROM annotations \
+                 WHERE node_sym = $1 AND key = $3 AND ($2::TEXT IS NULL OR type = $2)",
+            )
+            .bind(&symbol.0)
+            .bind(ty)
+            .bind(key)
+            .execute(&self.pool)
+            .await?;
+            Ok::<u64, sqlx::Error>(result.rows_affected())
+        })
+        .map_err(st)?;
+        Ok(n as usize)
+    }
 }
 
 // ── GraphRead ─────────────────────────────────────────────────────────────────
@@ -1134,6 +1261,71 @@ impl GraphRead for PostgresStore {
                 }
             }
             Ok::<Vec<Node>, sqlx::Error>(out)
+        })
+        .map_err(st)
+    }
+
+    fn annotations(&self, symbol: &SymbolId) -> Result<Vec<Annotation>> {
+        rt_block(async {
+            // Order by ts then id so identical-ts rows have a stable, insertion order.
+            let rows = sqlx::query(
+                "SELECT key, value, confidence, provenance, author, ts, type, source_type, extraction_method, last_verified \
+                 FROM annotations WHERE node_sym = $1 ORDER BY ts ASC, id ASC",
+            )
+            .bind(&symbol.0)
+            .fetch_all(&self.pool)
+            .await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for r in rows {
+                out.push(row_to_annotation(&r)?);
+            }
+            Ok::<Vec<Annotation>, sqlx::Error>(out)
+        })
+        .map_err(st)
+    }
+
+    fn annotations_by_type(&self, ty: &str) -> Result<Vec<(SymbolId, Annotation)>> {
+        rt_block(async {
+            // idx_annotations_type backs the WHERE; ordered by symbol then ts for determinism.
+            let rows = sqlx::query(
+                "SELECT node_sym, key, value, confidence, provenance, author, ts, type, source_type, extraction_method, last_verified \
+                 FROM annotations \
+                 WHERE type = $1 \
+                 ORDER BY node_sym ASC, ts ASC, id ASC",
+            )
+            .bind(ty)
+            .fetch_all(&self.pool)
+            .await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for r in rows {
+                let sid: String = r.try_get("node_sym")?;
+                out.push((SymbolId(sid), row_to_annotation(&r)?));
+            }
+            Ok::<Vec<(SymbolId, Annotation)>, sqlx::Error>(out)
+        })
+        .map_err(st)
+    }
+
+    fn annotations_stale_since(&self, cutoff: i64) -> Result<Vec<(SymbolId, Annotation)>> {
+        rt_block(async {
+            // Freshness read: every annotation last verified STRICTLY BEFORE `cutoff`. Never-verified
+            // rows (last_verified = 0) fall out for any positive cutoff. idx_annotations_last_verified
+            // backs the range scan; ordered by symbol then ts, parallel to annotations_by_type.
+            let rows = sqlx::query(
+                "SELECT node_sym, key, value, confidence, provenance, author, ts, type, source_type, extraction_method, last_verified \
+                 FROM annotations \
+                 WHERE last_verified < $1 \
+                 ORDER BY node_sym ASC, ts ASC, id ASC",
+            )
+            .bind(cutoff)
+            .fetch_all(&self.pool)
+            .await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for r in rows {
+                let sid: String = r.try_get("node_sym")?;
+                out.push((SymbolId(sid), row_to_annotation(&r)?));
+            }
+            Ok::<Vec<(SymbolId, Annotation)>, sqlx::Error>(out)
         })
         .map_err(st)
     }

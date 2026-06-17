@@ -25,7 +25,7 @@ fn postgres_store_satisfies_graph_store_contract() {
         rt.block_on(async {
             sqlx::query(
                 "DROP TABLE IF EXISTS \
-                 edge_history, changes, meta, cache, content, \
+                 annotations, edge_history, changes, meta, cache, content, \
                  unresolved_refs, edges, nodes, files CASCADE",
             )
             .execute(&pool)
