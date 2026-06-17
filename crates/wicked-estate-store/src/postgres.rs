@@ -198,14 +198,14 @@ CREATE TABLE IF NOT EXISTS annotations (
   provenance        TEXT    NOT NULL DEFAULT '',
   author            TEXT    NOT NULL DEFAULT '',
   ts                BIGINT  NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
-  type              TEXT    NOT NULL DEFAULT 'note',
+  "type"            TEXT    NOT NULL DEFAULT 'note',
   source_type       TEXT    NOT NULL DEFAULT 'unspecified',
   extraction_method TEXT    NOT NULL DEFAULT 'manual',
   last_verified     BIGINT  NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_annotations_node ON annotations(node_sym);
 CREATE INDEX IF NOT EXISTS idx_annotations_key  ON annotations(key);
-CREATE INDEX IF NOT EXISTS idx_annotations_type ON annotations(type);
+CREATE INDEX IF NOT EXISTS idx_annotations_type ON annotations("type");
 CREATE INDEX IF NOT EXISTS idx_annotations_last_verified ON annotations(last_verified);
 "#;
 
@@ -750,7 +750,7 @@ impl GraphWrite for PostgresStore {
             // (type, key). When ts is unset (0) let the column DEFAULT (NOW epoch) stamp it.
             if annotation.ts == 0 {
                 sqlx::query(
-                    "INSERT INTO annotations(node_sym, key, value, confidence, provenance, author, type, source_type, extraction_method, last_verified) \
+                    "INSERT INTO annotations(node_sym, key, value, confidence, provenance, author, \"type\", source_type, extraction_method, last_verified) \
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                 )
                 .bind(&symbol.0)
@@ -767,7 +767,7 @@ impl GraphWrite for PostgresStore {
                 .await?;
             } else {
                 sqlx::query(
-                    "INSERT INTO annotations(node_sym, key, value, confidence, provenance, author, ts, type, source_type, extraction_method, last_verified) \
+                    "INSERT INTO annotations(node_sym, key, value, confidence, provenance, author, ts, \"type\", source_type, extraction_method, last_verified) \
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
                 )
                 .bind(&symbol.0)
@@ -801,7 +801,7 @@ impl GraphWrite for PostgresStore {
             // `type` is matched as an opaque string — no per-type branching (rules-as-DATA).
             let result = sqlx::query(
                 "DELETE FROM annotations \
-                 WHERE node_sym = $1 AND key = $3 AND ($2::TEXT IS NULL OR type = $2)",
+                 WHERE node_sym = $1 AND key = $3 AND ($2::TEXT IS NULL OR \"type\" = $2)",
             )
             .bind(&symbol.0)
             .bind(ty)
@@ -1269,7 +1269,7 @@ impl GraphRead for PostgresStore {
         rt_block(async {
             // Order by ts then id so identical-ts rows have a stable, insertion order.
             let rows = sqlx::query(
-                "SELECT key, value, confidence, provenance, author, ts, type, source_type, extraction_method, last_verified \
+                "SELECT key, value, confidence, provenance, author, ts, \"type\", source_type, extraction_method, last_verified \
                  FROM annotations WHERE node_sym = $1 ORDER BY ts ASC, id ASC",
             )
             .bind(&symbol.0)
@@ -1288,9 +1288,9 @@ impl GraphRead for PostgresStore {
         rt_block(async {
             // idx_annotations_type backs the WHERE; ordered by symbol then ts for determinism.
             let rows = sqlx::query(
-                "SELECT node_sym, key, value, confidence, provenance, author, ts, type, source_type, extraction_method, last_verified \
+                "SELECT node_sym, key, value, confidence, provenance, author, ts, \"type\", source_type, extraction_method, last_verified \
                  FROM annotations \
-                 WHERE type = $1 \
+                 WHERE \"type\" = $1 \
                  ORDER BY node_sym ASC, ts ASC, id ASC",
             )
             .bind(ty)
@@ -1312,7 +1312,7 @@ impl GraphRead for PostgresStore {
             // rows (last_verified = 0) fall out for any positive cutoff. idx_annotations_last_verified
             // backs the range scan; ordered by symbol then ts, parallel to annotations_by_type.
             let rows = sqlx::query(
-                "SELECT node_sym, key, value, confidence, provenance, author, ts, type, source_type, extraction_method, last_verified \
+                "SELECT node_sym, key, value, confidence, provenance, author, ts, \"type\", source_type, extraction_method, last_verified \
                  FROM annotations \
                  WHERE last_verified < $1 \
                  ORDER BY node_sym ASC, ts ASC, id ASC",
