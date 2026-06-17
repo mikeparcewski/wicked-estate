@@ -21,18 +21,9 @@
   --shadow-rgb: 14, 38, 52;
   color-scheme: light;
 
-  /* ── Background system — estate motif = blueprint / code-graph, steel-blue light.
-     These are the per-site "character" knobs; the layer mechanics are shared. */
-  --motif-line: color-mix(in oklab, var(--ink) 6%, transparent);   /* graph-paper rules */
-  --motif-node: color-mix(in oklab, var(--link) 30%, transparent); /* nodes at intersections */
-  --motif-size: 48px;
-  --burst-1: color-mix(in oklab, var(--link) 18%, transparent);    /* steel-blue key light */
-  --burst-2: color-mix(in oklab, var(--accent) 9%, transparent);   /* warm fill */
-  /* translucent 4-tone band cycle — tints ride OVER the motif so depth shows through */
-  --band-2: color-mix(in oklab, var(--ink) 6%, transparent);
-  --band-3: color-mix(in oklab, var(--ink) 10%, transparent);
-  --band-4: color-mix(in oklab, var(--link) 8%, transparent);
-  --band-edge: color-mix(in oklab, var(--ink) 12%, transparent);   /* stacked-panel top highlight */
+  /* ── Section-band system ─────────────────────────────────────────────────── */
+  --band-edge: color-mix(in oklab, var(--ink) 8%, transparent);    /* hairline section separator */
+  --band-solid-bg: rgba(9, 26, 36, 0.42);   /* alternate band: translucent darker teal (light) — graph shows through */
 }
 
 [data-theme="dark"] {
@@ -40,14 +31,8 @@
   --shadow-rgb: 0, 0, 0;
   color-scheme: dark;
 
-  --motif-line: color-mix(in oklab, var(--ink) 7%, transparent);
-  --motif-node: color-mix(in oklab, var(--link) 36%, transparent);
-  --burst-1: color-mix(in oklab, var(--link) 20%, transparent);
-  --burst-2: color-mix(in oklab, var(--accent) 10%, transparent);
-  --band-2: color-mix(in oklab, var(--ink) 5%, transparent);
-  --band-3: color-mix(in oklab, var(--ink) 9%, transparent);
-  --band-4: color-mix(in oklab, var(--link) 9%, transparent);
-  --band-edge: color-mix(in oklab, var(--ink) 10%, transparent);
+  --band-edge: color-mix(in oklab, var(--ink) 7%, transparent);
+  --band-solid-bg: rgba(20, 33, 61, 0.5);   /* alternate band: translucent navy (#14213d) — graph shows through */
 }
 
 /* Map brand tokens to Tailwind utilities. `inline` keeps them live so the
@@ -93,8 +78,7 @@
     text-rendering: optimizeLegibility;
     scroll-behavior: smooth;
     scroll-snap-type: y mandatory;
-    /* base canvas lives on <html> so the transparent body lets the fixed
-       motif + burst layers show through the whole page */
+    /* base canvas lives on <html>; the transparent body lets section bands sit on it */
     background-color: var(--canvas);
   }
 
@@ -108,26 +92,7 @@
     transition: color 0.35s var(--ease);
   }
 
-  /* ── Background depth stack (fixed, full-page) ───────────────────────────────
-     back-to-front:  html canvas → burst (body::after, z-2) → motif (body::before,
-     z-1) → section bands (in flow) → grain (html::after, top). The grain MUST live
-     on html::after, not body::after, or it overwrites the burst (the old bug). */
-  body::before {
-    content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
-    background-image:
-      radial-gradient(var(--motif-node) 1.4px, transparent 1.7px),
-      linear-gradient(to right,  var(--motif-line) 1px, transparent 1px),
-      linear-gradient(to bottom, var(--motif-line) 1px, transparent 1px);
-    background-size: var(--motif-size) var(--motif-size);
-    background-position: 0 0;
-  }
-  body::after {
-    content: ""; position: fixed; inset: 0; z-index: -2; pointer-events: none;
-    background:
-      radial-gradient(ellipse 60% 50% at 50% -6%,  var(--burst-1), transparent 60%),
-      radial-gradient(ellipse 48% 46% at 98% 102%, var(--burst-2), transparent 62%);
-  }
-  /* Film grain over everything */
+  /* Film grain over everything (kept on html::after, never body::after) */
   html::after {
     content: ""; position: fixed; inset: 0; z-index: 90; pointer-events: none;
     opacity: 0.055;
@@ -296,15 +261,6 @@
     border-color: color-mix(in oklab, var(--accent) 50%, var(--hairline));
   }
 
-  /* ── Grid background ────────────────────────────────────────────────────── */
-  .grid-bg {
-    background-image:
-      linear-gradient(var(--hairline) 1px, transparent 1px),
-      linear-gradient(90deg, var(--hairline) 1px, transparent 1px);
-    background-size: 56px 56px;
-    -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 0%, #000 28%, transparent 76%);
-            mask-image: radial-gradient(ellipse 80% 70% at 50% 0%, #000 28%, transparent 76%);
-  }
 
   /* ── CTA buttons ─────────────────────────────────────────────────────────── */
   .btn-primary {
@@ -371,13 +327,32 @@
   }
 }
 
-/* ── Section bands — 4-tone cycle + stacked-panel depth (UNLAYERED, on purpose)
-   Translucent tints ride OVER the fixed motif + burst, so every section shows
-   the texture/light at a slightly different depth. The top-highlight makes each
-   band read as a panel stacked over the one below. Unlayered so it beats any
-   Tailwind utility background regardless of source order. */
-.band { position: relative; box-shadow: inset 0 1px 0 var(--band-edge); }
-.band-1 { background: transparent; }                 /* base — pure motif + burst */
-.band-2 { background: var(--band-2); }
-.band-3 { background: var(--band-3); }
-.band-4 { background: var(--band-4); }                /* cool steel tint — estate */
+/* ── ONE giant network graph, fixed, spanning the whole page (estate = "the code
+   graph"). A single fixed layer behind everything — NOT per-section — so it's one
+   continuous graph, never repeated. Masked → recolours with the palette; opacity
+   is the (reliable) softness control. (UNLAYERED so it beats Tailwind utilities.) */
+body::before {
+  content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background-color: var(--ink);
+  opacity: 0.05;
+  -webkit-mask-image: url("/motifs/graph-network.svg");
+          mask-image: url("/motifs/graph-network.svg");
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+  -webkit-mask-position: center;  mask-position: center;
+  -webkit-mask-size: cover;       mask-size: cover;
+}
+
+/* Bursts of light — fixed accent/link glows behind the graph (the warmth from
+   the original). rgba (not color-mix) so the alpha is reliable in every engine. */
+body::after {
+  content: ""; position: fixed; inset: 0; z-index: -2; pointer-events: none;
+  background:
+    radial-gradient(ellipse 48% 55% at 6% 4%,   rgba(255, 218, 25, 0.16), transparent 60%),
+    radial-gradient(ellipse 52% 52% at 94% 98%, rgba(121, 192, 255, 0.14), transparent 62%);
+}
+
+/* Sections are translucent so the one fixed graph shows through every one of
+   them; the base alternates depth (clear) ↔ solid (shifted tint). */
+.band, .same-garden { position: relative; box-shadow: inset 0 1px 0 var(--band-edge); }
+.band-depth, .same-garden { background-color: transparent; }
+.band-solid { background-color: var(--band-solid-bg); }
