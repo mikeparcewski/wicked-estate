@@ -328,3 +328,17 @@
     50%       { opacity: 0.3; }
   }
 }
+
+/* ── Alternating section bands (UNLAYERED, on purpose) ───────────────────────
+   canvas vs canvas-2 are nearly the same value, so the section alternation
+   doesn't read. Lift every other section (bg-canvas-2 — used only on sections)
+   to a clearly distinct surface tint + hairlines so adjacent sections are
+   visibly separate bands in BOTH light and dark. This MUST stay unlayered:
+   Tailwind's bg-canvas-2 lives in the `utilities` layer, which beats @layer
+   base/components, so a layered override would lose. Unlayered beats all
+   layers and wins regardless of source order. */
+section.bg-canvas-2 {
+  background: color-mix(in oklab, var(--ink) 8%, var(--canvas));
+  border-top: 1px solid var(--hairline);
+  border-bottom: 1px solid var(--hairline);
+}

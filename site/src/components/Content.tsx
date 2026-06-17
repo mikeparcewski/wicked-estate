@@ -24,7 +24,7 @@ function Hero() {
 
         <h1 className="font-display text-5xl sm:text-6xl lg:text-[4.2rem] font-black mb-6 text-ink" style={{ fontStretch: '115%' }}>
           The code graph<br />
-          <span style={{ color: 'var(--accent-ink)' }}>agents actually trust.</span>
+          <span style={{ color: 'var(--accent)' }}>agents actually trust.</span>
         </h1>
 
         <p className="text-lg sm:text-xl text-muted max-w-2xl mx-auto mb-10 leading-relaxed font-sans">
@@ -222,7 +222,7 @@ function Pipeline() {
   ]
 
   return (
-    <section id="pipeline" className="snap-start min-h-screen flex flex-col justify-center py-8 px-7 bg-canvas-2">
+    <section id="pipeline" className="snap-start min-h-screen flex flex-col justify-center py-8 px-7 bg-canvas">
       <div className="max-w-6xl mx-auto w-full">
 
         <div className="text-center mb-6">
@@ -354,7 +354,7 @@ function Pipeline() {
 // ── Graph Model ────────────────────────────────────────────────────────────────
 function GraphModel() {
   return (
-    <section id="graph" className="snap-start min-h-screen py-24 px-7 bg-canvas">
+    <section id="graph" className="snap-start min-h-screen py-24 px-7 bg-canvas-2">
       <div className="max-w-6xl mx-auto">
         <div className="text-center mb-14">
           <span className="kicker">The Graph</span>
@@ -481,7 +481,7 @@ function AgentContract() {
   ]
 
   return (
-    <section id="agents" className="snap-start min-h-screen py-24 px-7 bg-canvas-2">
+    <section id="agents" className="snap-start min-h-screen py-24 px-7 bg-canvas">
       <div className="max-w-6xl mx-auto">
         <div className="text-center mb-14">
           <span className="kicker">Agent Contract</span>
@@ -561,7 +561,7 @@ function Languages() {
                      5.6,3.5,4.4,3.9,5.0,4.7,3.6,5.2,4.1,3.8,4.6,5.3,3.7,4.0]
 
   return (
-    <section className="snap-start min-h-screen flex flex-col justify-center py-12 px-7 bg-canvas">
+    <section className="snap-start min-h-screen flex flex-col justify-center py-12 px-7 bg-canvas-2">
       <div className="max-w-6xl mx-auto w-full">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 items-center">
           {/* Left: copy + terminal */}
@@ -686,7 +686,7 @@ $ codex mcp add wicked-estate \\
   }
 
   return (
-    <section id="connect" className="snap-start min-h-screen py-24 px-7 bg-canvas-2">
+    <section id="connect" className="snap-start min-h-screen py-24 px-7 bg-canvas">
       <div className="max-w-5xl mx-auto">
         <div className="text-center mb-14">
           <span className="kicker">Connect an Agent</span>
@@ -942,7 +942,7 @@ claude mcp add wicked-estate -s project \\
 # done — your agent now has a real code graph`
 
   return (
-    <section id="get-started" className="snap-start min-h-screen flex flex-col justify-center py-10 px-7 bg-canvas">
+    <section id="get-started" className="snap-start min-h-screen flex flex-col justify-center py-10 px-7 bg-canvas-2">
       <div className="max-w-5xl mx-auto w-full">
         <div className="text-center mb-8">
           <span className="kicker">Get Started</span>
