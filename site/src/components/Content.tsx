@@ -177,7 +177,7 @@ function UseCases() {
             <div key={c.title} className="card-hover flex flex-col gap-4">
               <div className="flex items-start gap-3">
                 <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
-                  style={{ background: 'color-mix(in oklab, var(--accent) 12%, var(--canvas))', color: 'var(--accent-ink)' }}>
+                  style={{ background: 'color-mix(in oklab, var(--accent) 12%, var(--canvas))', color: 'var(--accent)' }}>
                   {c.icon}
                 </div>
                 <div>
@@ -263,7 +263,7 @@ function Pipeline() {
           <div className="flex-1 phase-box !p-4"
             style={{ borderColor: 'color-mix(in oklab, var(--accent) 30%, var(--hairline-strong))' }}>
             <p className="font-mono text-[0.6rem] font-bold tracking-widest uppercase mb-3"
-              style={{ color: 'var(--accent-ink)' }}>Phase 1 — Extract</p>
+              style={{ color: 'var(--accent)' }}>Phase 1 — Extract</p>
             <div className="font-mono text-xs text-faint space-y-0.5 mb-3">
               <div>tree-sitter grammar</div>
               <div>+ <span className="text-muted">.scm</span> query file</div>
@@ -321,7 +321,7 @@ function Pipeline() {
               <p className="font-mono text-[0.58rem] text-faint tracking-widest uppercase mb-1.5">MCP · 5 tools</p>
               <div className="space-y-0.5">
                 {['SearchEntity', 'RetrieveEntity', 'TraverseGraph', 'BlastRadius', 'FetchContent'].map(t => (
-                  <div key={t} className="font-mono text-xs" style={{ color: 'var(--accent-ink)' }}>{t}</div>
+                  <div key={t} className="font-mono text-xs" style={{ color: 'var(--accent)' }}>{t}</div>
                 ))}
               </div>
             </div>
@@ -333,7 +333,7 @@ function Pipeline() {
         <div className="flex items-center gap-3 px-4 py-3 rounded-xl border"
           style={{ borderColor: 'color-mix(in oklab, var(--accent) 35%, var(--hairline))', background: 'color-mix(in oklab, var(--accent) 5%, var(--canvas))' }}>
           <div className="w-6 h-6 rounded-md flex items-center justify-center shrink-0"
-            style={{ background: 'color-mix(in oklab, var(--accent) 20%, var(--canvas))', color: 'var(--accent-ink)' }}>
+            style={{ background: 'color-mix(in oklab, var(--accent) 20%, var(--canvas))', color: 'var(--accent)' }}>
             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
             </svg>
@@ -399,12 +399,12 @@ function GraphModel() {
               <div className="flex items-center gap-2 p-2.5 rounded"
                 style={{ background: 'color-mix(in oklab, var(--ink) 5%, var(--canvas))' }}>
                 <span className="text-faint">A calls B →</span>
-                <span className="text-muted">Edge &#123; source: A, target: B, kind: <span style={{ color: 'var(--accent-ink)' }}>Calls</span> &#125;</span>
+                <span className="text-muted">Edge &#123; source: A, target: B, kind: <span style={{ color: 'var(--accent)' }}>Calls</span> &#125;</span>
               </div>
               <div className="p-3 rounded space-y-1" style={{ background: 'color-mix(in oklab, var(--ink) 4%, var(--canvas))' }}>
                 <div className="text-muted"><span className="text-ink font-semibold">Dependencies of X</span> = edges where source == X</div>
                 <div className="text-muted"><span className="text-ink font-semibold">Dependents of X</span> = edges where target == X</div>
-                <div className="border-t border-hairline pt-2 mt-1" style={{ color: 'var(--accent-ink)', fontWeight: '700' }}>
+                <div className="border-t border-hairline pt-2 mt-1" style={{ color: 'var(--accent)', fontWeight: '700' }}>
                   Blast radius = transitive dependents
                 </div>
               </div>
@@ -445,7 +445,7 @@ function GraphModel() {
           <div className="flex items-start gap-4">
             <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
               style={{ background: 'color-mix(in oklab, var(--accent) 15%, var(--canvas))', border: '1px solid color-mix(in oklab, var(--accent) 40%, var(--hairline))' }}>
-              <svg className="w-4 h-4" style={{ color: 'var(--accent-ink)' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-4 h-4" style={{ color: 'var(--accent)' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 20l4-16m2 16l4-16M6 9h14M4 15h14" />
               </svg>
             </div>
@@ -513,7 +513,7 @@ function AgentContract() {
           <div className="flex items-start gap-4">
             <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
               style={{ background: 'color-mix(in oklab, var(--accent) 15%, var(--canvas))', border: '1px solid color-mix(in oklab, var(--accent) 40%, var(--hairline))' }}>
-              <svg className="w-4 h-4" style={{ color: 'var(--accent-ink)' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-4 h-4" style={{ color: 'var(--accent)' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
               </svg>
             </div>
@@ -522,7 +522,7 @@ function AgentContract() {
               <p className="text-sm text-muted leading-6 font-sans mb-2">
                 Every agent that reads code intelligence state MUST query the graph first.
                 Direct file reads are fallback only — and must be announced with a loud{' '}
-                <span className="font-mono" style={{ color: 'var(--accent-ink)' }}>GRAPH-FALLBACK:</span> prefix.
+                <span className="font-mono" style={{ color: 'var(--accent)' }}>GRAPH-FALLBACK:</span> prefix.
               </p>
             </div>
           </div>
@@ -635,7 +635,7 @@ function Languages() {
                       animationFillMode: 'both, none',
                       animationIterationCount: '1, infinite',
                       ...(isMore ? {
-                        color: 'var(--accent-ink)',
+                        color: 'var(--accent)',
                         borderColor: 'color-mix(in oklab, var(--accent) 40%, var(--hairline))',
                         background: 'color-mix(in oklab, var(--accent) 8%, var(--canvas))',
                       } : {}),
@@ -708,7 +708,7 @@ $ codex mcp add wicked-estate \\
             { name: 'FetchContent', desc: 'Source text stored for a symbol' },
           ].map(t => (
             <div key={t.name} className="card text-center">
-              <p className="font-mono text-xs font-bold mb-1.5" style={{ color: 'var(--accent-ink)' }}>{t.name}</p>
+              <p className="font-mono text-xs font-bold mb-1.5" style={{ color: 'var(--accent)' }}>{t.name}</p>
               <p className="text-xs text-faint leading-4 font-sans">{t.desc}</p>
             </div>
           ))}
@@ -734,7 +734,7 @@ $ codex mcp add wicked-estate \\
                 <span className="w-5 h-5 rounded-full border border-hairline-strong flex items-center justify-center text-[0.55rem] font-bold text-faint shrink-0">
                   {item.step}
                 </span>
-                <span style={{ color: item.color ? 'var(--accent-ink)' : 'var(--muted)' }}>{item.text}</span>
+                <span style={{ color: item.color ? 'var(--accent)' : 'var(--muted)' }}>{item.text}</span>
               </div>
             )
           )}
