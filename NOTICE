@@ -1,0 +1,27 @@
+wicked-estate
+Copyright (c) 2026 Michael Parcewski
+
+This product is licensed under the MIT License; see LICENSE for the full text.
+
+This product includes the following component vendored as source in this
+repository (as distinct from pinned Cargo dependencies, whose licenses are
+recorded in Cargo.lock and surfaced by the usual cargo/`cargo-about` tooling):
+
+-------------------------------------------------------------------------------
+Free-format RPG IV (ILE RPG) tree-sitter grammar
+  Path:      crates/wicked-estate-extract/vendor/tree-sitter-rpg/
+  Crate:     wicked-estate-tree-sitter-rpg (v0.1.2)
+  Origin:    In-house — authored in this repository
+             (https://github.com/mikeparcewski/wicked-estate); not imported
+             from an upstream grammar.
+  License:   MIT (Copyright (c) 2026 Michael Parcewski)
+
+  This grammar was hand-authored via the "template-extrapolate" method:
+  its structure was patterned after existing tree-sitter grammars, while the
+  rules were written for RPG free-form syntax. It is a symbols+calls subset,
+  not a full-language grammar. No third-party grammar source was copied into
+  it; the structural patterning carries no upstream copyright obligation.
+-------------------------------------------------------------------------------
+
+Full per-component provenance (source, commit/origin, import date, license) is
+recorded in crates/wicked-estate-extract/vendor/PROVENANCE.md.

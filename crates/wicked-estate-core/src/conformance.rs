@@ -844,4 +844,106 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
         ghost.is_empty(),
         "absent symbol must carry no annotations after a no-op annotate"
     );
+
+    // (9) Evidence envelope — every store must round-trip source_type / extraction_method /
+    // last_verified, and must answer the freshness read `annotations_stale_since`. Uses a fresh
+    // node (ann_c) so the staleness set is independent of the rows written above.
+    let ann_c = Node::new(
+        sym("ann_c"),
+        NodeKind::Function,
+        "ann_c",
+        Language::new("rust"),
+        Location::new("src/ann.rs", Span::ZERO),
+    );
+    store.upsert_nodes(&[ann_c]).expect("upsert ann_c");
+
+    // A fully-specified, recently-verified annotation.
+    store
+        .annotate(
+            &sym("ann_c"),
+            Annotation::new("observation", "tls", "requires TLS 1.3")
+                .with_source_type("static-analysis")
+                .with_extraction_method("scip-rust@0.3")
+                .with_last_verified(1_000),
+        )
+        .expect("annotate fresh evidence-enveloped row");
+    // A stale (verified long ago) annotation on the same symbol.
+    store
+        .annotate(
+            &sym("ann_c"),
+            Annotation::new("observation", "old-fact", "verified ages ago")
+                .with_source_type("code")
+                .with_extraction_method("manual")
+                .with_last_verified(100),
+        )
+        .expect("annotate stale evidence-enveloped row");
+
+    let ann_c_rows = store.annotations(&sym("ann_c")).expect("ann_c annotations");
+    assert_eq!(ann_c_rows.len(), 2, "two evidence-enveloped rows on ann_c");
+    let tls = ann_c_rows
+        .iter()
+        .find(|a| a.key == "tls")
+        .expect("tls row present");
+    assert_eq!(
+        tls.source_type, "static-analysis",
+        "source_type must round-trip"
+    );
+    assert_eq!(
+        tls.extraction_method, "scip-rust@0.3",
+        "extraction_method must round-trip"
+    );
+    assert_eq!(tls.last_verified, 1_000, "last_verified must round-trip");
+
+    // Defaulted envelope: an annotation written without the builders reads back with the safe
+    // defaults (unspecified / manual / 0 — never verified) — the backward-compat guarantee at the
+    // store layer, mirroring the serde defaults on the struct.
+    let defaulted = ann_c_rows
+        .iter()
+        .find(|a| a.r#type == "observation" && a.key == "old-fact")
+        .map(|_| Annotation::note("plain", "v"))
+        .unwrap();
+    store
+        .annotate(&sym("ann_c"), defaulted)
+        .expect("annotate defaulted-envelope row");
+    let plain = store
+        .annotations(&sym("ann_c"))
+        .expect("re-read ann_c")
+        .into_iter()
+        .find(|a| a.key == "plain")
+        .expect("plain row present");
+    assert_eq!(plain.source_type, "unspecified", "default source_type");
+    assert_eq!(
+        plain.extraction_method, "manual",
+        "default extraction_method"
+    );
+    assert_eq!(
+        plain.last_verified, 0,
+        "default last_verified (never verified)"
+    );
+
+    // Freshness read: cutoff=500 catches the stale (100) and never-verified (0) rows but NOT the
+    // freshly-verified (1000) one. Strict `<`, so cutoff exactly == last_verified is not stale.
+    let stale = store
+        .annotations_stale_since(500)
+        .expect("annotations_stale_since(500)");
+    assert!(
+        stale.iter().any(|(_, a)| a.key == "old-fact"),
+        "stale (verified at 100) must be returned for cutoff 500"
+    );
+    assert!(
+        stale.iter().any(|(_, a)| a.key == "plain"),
+        "never-verified (last_verified 0) must be returned for cutoff 500"
+    );
+    assert!(
+        !stale.iter().any(|(_, a)| a.key == "tls"),
+        "freshly-verified (1000) must NOT be returned for cutoff 500"
+    );
+    // cutoff exactly at a row's last_verified must NOT include it (strict <).
+    let stale_at_1000 = store
+        .annotations_stale_since(1_000)
+        .expect("annotations_stale_since(1000)");
+    assert!(
+        !stale_at_1000.iter().any(|(_, a)| a.key == "tls"),
+        "verified exactly at the cutoff is NOT stale (strict <)"
+    );
 }

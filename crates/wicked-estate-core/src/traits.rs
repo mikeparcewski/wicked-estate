@@ -119,6 +119,13 @@ pub trait GraphRead: Send {
     /// an opaque string (known convention OR custom type — identical treatment). Pairs are ordered
     /// by symbol then `ts` for deterministic output.
     fn annotations_by_type(&self, ty: &str) -> Result<Vec<(SymbolId, Annotation)>>;
+    /// Every `(symbol, annotation)` pair whose evidence-envelope `last_verified` is **strictly
+    /// before** `cutoff` (Unix-seconds) — i.e. the facts a re-verification window deems stale.
+    /// Never-verified annotations (`last_verified == 0`) are stale for any positive `cutoff`. This
+    /// is the freshness read the evidence envelope adds: "what needs re-verification?" — the store
+    /// counterpart of [`Annotation::is_stale_since`]. Pairs are ordered by symbol then `ts` for
+    /// deterministic output, parallel to [`Self::annotations_by_type`].
+    fn annotations_stale_since(&self, cutoff: i64) -> Result<Vec<(SymbolId, Annotation)>>;
     fn stats(&self) -> Result<GraphStats>;
 }
 

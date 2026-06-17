@@ -752,6 +752,20 @@ impl GraphRead for MemStore {
         Ok(out)
     }
 
+    fn annotations_stale_since(&self, cutoff: i64) -> Result<Vec<(SymbolId, Annotation)>> {
+        // Freshness read: last_verified STRICTLY BEFORE cutoff (never-verified rows have
+        // last_verified == 0 → stale for any positive cutoff). Same is_stale_since rule as the
+        // struct, same ordering contract as annotations_by_type.
+        let mut out: Vec<(SymbolId, Annotation)> = self
+            .annotations
+            .iter()
+            .filter(|(_, a)| a.is_stale_since(cutoff))
+            .map(|(s, a)| (s.clone(), a.clone()))
+            .collect();
+        out.sort_by(|(sa, aa), (sb, ab)| sa.0.cmp(&sb.0).then(aa.ts.cmp(&ab.ts)));
+        Ok(out)
+    }
+
     fn stats(&self) -> Result<GraphStats> {
         let mut nodes_by_kind: BTreeMap<String, u64> = BTreeMap::new();
         let mut file_count = 0u64;
