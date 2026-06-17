@@ -12,43 +12,19 @@
    The shared wicked-web chrome (Topbar / Footer) reads these same custom
    properties — keep the names in sync with wicked-web/src/styles/tokens.css.
 ---------------------------------------------------------------------------- */
+/* Family palette (canvas / ink / accent / hairline / link / --topbar-h / fonts
+   + the harbor-blue light & family dark themes) is inherited from the shared
+   wicked-web tokens.css (loaded by the shared Base). Only estate-specific
+   tokens live here, per theme — so estate matches the family. */
 :root {
-  --canvas:          #faf7ec;
-  --canvas-2:        #f3f0e3;
-  --surface:         #fffdf5;
-  --surface-2:       #f3f0e3;
-  --ink:             #232324;
-  --muted:           #6f6c5f;
-  --faint:           #a8a496;
-  --hairline:        rgba(35, 35, 36, 0.13);
-  --hairline-strong: rgba(35, 35, 36, 0.26);
-  --accent:          #ffda19;
-  --accent-ink:      #8a6d05;
-  --on-accent:       #232324;
-  --link:            #1f6feb;
-  --shadow-rgb:      60, 56, 40;
-  --ease:            cubic-bezier(0.16, 1, 0.3, 1);
-  --topbar-h:        58px;
-  --font-display:    "Archivo", ui-sans-serif, sans-serif;
-  --font-mono:       "JetBrains Mono", ui-monospace, monospace;
+  --on-accent: #1c2c36;
+  --shadow-rgb: 14, 38, 52;
   color-scheme: light;
 }
 
 [data-theme="dark"] {
-  --canvas:          #232324;
-  --canvas-2:        #1e1e1f;
-  --surface:         #2e2e2f;
-  --surface-2:       #1e1e1f;
-  --ink:             #eae5b6;
-  --muted:           #b7b3a4;
-  --faint:           #6e6b60;
-  --hairline:        rgba(234, 229, 182, 0.10);
-  --hairline-strong: rgba(234, 229, 182, 0.22);
-  --accent:          #ffda19;
-  --accent-ink:      #ffda19;
-  --on-accent:       #1e1e1f;
-  --link:            #79c0ff;
-  --shadow-rgb:      0, 0, 0;
+  --on-accent: #0d1117;
+  --shadow-rgb: 0, 0, 0;
   color-scheme: dark;
 }
 
