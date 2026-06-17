@@ -12,8 +12,7 @@ function GitHubIcon({ size = 16 }: { size?: number }) {
 // ── Hero ───────────────────────────────────────────────────────────────────────
 function Hero() {
   return (
-    <section className="snap-start relative min-h-screen flex flex-col items-center justify-center pt-[58px] overflow-hidden bg-canvas">
-      <div className="absolute inset-0 grid-bg opacity-100 pointer-events-none" />
+    <section className="snap-start relative min-h-screen flex flex-col items-center justify-center pt-[58px] overflow-hidden band band-1">
 
       <div className="relative max-w-5xl mx-auto px-7 text-center">
         <div className="inline-flex items-center gap-2 font-mono text-[0.65rem] tracking-[0.22em] uppercase text-muted border border-hairline-strong rounded-full px-3 py-1.5 mb-8"
@@ -161,7 +160,7 @@ function UseCases() {
   ]
 
   return (
-    <section id="use-cases" className="snap-start min-h-screen py-24 px-7 bg-canvas-2">
+    <section id="use-cases" className="snap-start min-h-screen py-24 px-7 band band-2">
       <div className="max-w-6xl mx-auto">
         <div className="text-center mb-14">
           <span className="kicker">Use Cases</span>
@@ -222,7 +221,7 @@ function Pipeline() {
   ]
 
   return (
-    <section id="pipeline" className="snap-start min-h-screen flex flex-col justify-center py-8 px-7 bg-canvas">
+    <section id="pipeline" className="snap-start min-h-screen flex flex-col justify-center py-8 px-7 band band-3">
       <div className="max-w-6xl mx-auto w-full">
 
         <div className="text-center mb-6">
@@ -354,7 +353,7 @@ function Pipeline() {
 // ── Graph Model ────────────────────────────────────────────────────────────────
 function GraphModel() {
   return (
-    <section id="graph" className="snap-start min-h-screen py-24 px-7 bg-canvas-2">
+    <section id="graph" className="snap-start min-h-screen py-24 px-7 band band-4">
       <div className="max-w-6xl mx-auto">
         <div className="text-center mb-14">
           <span className="kicker">The Graph</span>
@@ -481,7 +480,7 @@ function AgentContract() {
   ]
 
   return (
-    <section id="agents" className="snap-start min-h-screen py-24 px-7 bg-canvas">
+    <section id="agents" className="snap-start min-h-screen py-24 px-7 band band-1">
       <div className="max-w-6xl mx-auto">
         <div className="text-center mb-14">
           <span className="kicker">Agent Contract</span>
@@ -561,7 +560,7 @@ function Languages() {
                      5.6,3.5,4.4,3.9,5.0,4.7,3.6,5.2,4.1,3.8,4.6,5.3,3.7,4.0]
 
   return (
-    <section className="snap-start min-h-screen flex flex-col justify-center py-12 px-7 bg-canvas-2">
+    <section className="snap-start min-h-screen flex flex-col justify-center py-12 px-7 band band-2">
       <div className="max-w-6xl mx-auto w-full">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 items-center">
           {/* Left: copy + terminal */}
@@ -686,7 +685,7 @@ $ codex mcp add wicked-estate \\
   }
 
   return (
-    <section id="connect" className="snap-start min-h-screen py-24 px-7 bg-canvas">
+    <section id="connect" className="snap-start min-h-screen py-24 px-7 band band-3">
       <div className="max-w-5xl mx-auto">
         <div className="text-center mb-14">
           <span className="kicker">Connect an Agent</span>
@@ -942,7 +941,7 @@ claude mcp add wicked-estate -s project \\
 # done — your agent now has a real code graph`
 
   return (
-    <section id="get-started" className="snap-start min-h-screen flex flex-col justify-center py-10 px-7 bg-canvas-2">
+    <section id="get-started" className="snap-start min-h-screen flex flex-col justify-center py-10 px-7 band band-4">
       <div className="max-w-5xl mx-auto w-full">
         <div className="text-center mb-8">
           <span className="kicker">Get Started</span>

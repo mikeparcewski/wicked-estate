@@ -20,12 +20,34 @@
   --on-accent: #1c2c36;
   --shadow-rgb: 14, 38, 52;
   color-scheme: light;
+
+  /* ── Background system — estate motif = blueprint / code-graph, steel-blue light.
+     These are the per-site "character" knobs; the layer mechanics are shared. */
+  --motif-line: color-mix(in oklab, var(--ink) 6%, transparent);   /* graph-paper rules */
+  --motif-node: color-mix(in oklab, var(--link) 30%, transparent); /* nodes at intersections */
+  --motif-size: 48px;
+  --burst-1: color-mix(in oklab, var(--link) 18%, transparent);    /* steel-blue key light */
+  --burst-2: color-mix(in oklab, var(--accent) 9%, transparent);   /* warm fill */
+  /* translucent 4-tone band cycle — tints ride OVER the motif so depth shows through */
+  --band-2: color-mix(in oklab, var(--ink) 6%, transparent);
+  --band-3: color-mix(in oklab, var(--ink) 10%, transparent);
+  --band-4: color-mix(in oklab, var(--link) 8%, transparent);
+  --band-edge: color-mix(in oklab, var(--ink) 12%, transparent);   /* stacked-panel top highlight */
 }
 
 [data-theme="dark"] {
   --on-accent: #0d1117;
   --shadow-rgb: 0, 0, 0;
   color-scheme: dark;
+
+  --motif-line: color-mix(in oklab, var(--ink) 7%, transparent);
+  --motif-node: color-mix(in oklab, var(--link) 36%, transparent);
+  --burst-1: color-mix(in oklab, var(--link) 20%, transparent);
+  --burst-2: color-mix(in oklab, var(--accent) 10%, transparent);
+  --band-2: color-mix(in oklab, var(--ink) 5%, transparent);
+  --band-3: color-mix(in oklab, var(--ink) 9%, transparent);
+  --band-4: color-mix(in oklab, var(--link) 9%, transparent);
+  --band-edge: color-mix(in oklab, var(--ink) 10%, transparent);
 }
 
 /* Map brand tokens to Tailwind utilities. `inline` keeps them live so the
@@ -71,28 +93,48 @@
     text-rendering: optimizeLegibility;
     scroll-behavior: smooth;
     scroll-snap-type: y mandatory;
+    /* base canvas lives on <html> so the transparent body lets the fixed
+       motif + burst layers show through the whole page */
+    background-color: var(--canvas);
   }
 
   body {
     margin: 0;
-    background-color: var(--canvas);
+    background-color: transparent;
     color: var(--ink);
     font-family: "Hanken Grotesk", ui-sans-serif, system-ui, sans-serif;
     overflow-x: clip; /* clip (not hidden) — hidden makes body a scroll container and breaks sticky scroll sections */
     line-height: 1.55;
-    transition: background-color 0.35s var(--ease), color 0.35s var(--ease);
+    transition: color 0.35s var(--ease);
   }
 
-  /* Film grain over both grounds */
+  /* ── Background depth stack (fixed, full-page) ───────────────────────────────
+     back-to-front:  html canvas → burst (body::after, z-2) → motif (body::before,
+     z-1) → section bands (in flow) → grain (html::after, top). The grain MUST live
+     on html::after, not body::after, or it overwrites the burst (the old bug). */
+  body::before {
+    content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+    background-image:
+      radial-gradient(var(--motif-node) 1.4px, transparent 1.7px),
+      linear-gradient(to right,  var(--motif-line) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--motif-line) 1px, transparent 1px);
+    background-size: var(--motif-size) var(--motif-size);
+    background-position: 0 0;
+  }
   body::after {
-    content: "";
-    position: fixed; inset: 0; z-index: 90; pointer-events: none;
+    content: ""; position: fixed; inset: 0; z-index: -2; pointer-events: none;
+    background:
+      radial-gradient(ellipse 60% 50% at 50% -6%,  var(--burst-1), transparent 60%),
+      radial-gradient(ellipse 48% 46% at 98% 102%, var(--burst-2), transparent 62%);
+  }
+  /* Film grain over everything */
+  html::after {
+    content: ""; position: fixed; inset: 0; z-index: 90; pointer-events: none;
     opacity: 0.055;
     mix-blend-mode: soft-light;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   }
-
-  [data-theme="dark"] body::after {
+  [data-theme="dark"] html::after {
     opacity: 0.07;
     mix-blend-mode: overlay;
   }
@@ -329,16 +371,13 @@
   }
 }
 
-/* ── Alternating section bands (UNLAYERED, on purpose) ───────────────────────
-   canvas vs canvas-2 are nearly the same value, so the section alternation
-   doesn't read. Lift every other section (bg-canvas-2 — used only on sections)
-   to a clearly distinct surface tint + hairlines so adjacent sections are
-   visibly separate bands in BOTH light and dark. This MUST stay unlayered:
-   Tailwind's bg-canvas-2 lives in the `utilities` layer, which beats @layer
-   base/components, so a layered override would lose. Unlayered beats all
-   layers and wins regardless of source order. */
-section.bg-canvas-2 {
-  background: color-mix(in oklab, var(--ink) 8%, var(--canvas));
-  border-top: 1px solid var(--hairline);
-  border-bottom: 1px solid var(--hairline);
-}
+/* ── Section bands — 4-tone cycle + stacked-panel depth (UNLAYERED, on purpose)
+   Translucent tints ride OVER the fixed motif + burst, so every section shows
+   the texture/light at a slightly different depth. The top-highlight makes each
+   band read as a panel stacked over the one below. Unlayered so it beats any
+   Tailwind utility background regardless of source order. */
+.band { position: relative; box-shadow: inset 0 1px 0 var(--band-edge); }
+.band-1 { background: transparent; }                 /* base — pure motif + burst */
+.band-2 { background: var(--band-2); }
+.band-3 { background: var(--band-3); }
+.band-4 { background: var(--band-4); }                /* cool steel tint — estate */
