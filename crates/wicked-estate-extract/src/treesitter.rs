@@ -148,6 +148,9 @@ const VB6_QUERY: &str = include_str!("queries/vb6.scm");
 const VBNET_QUERY: &str = include_str!("queries/vbnet.scm");
 const VBA_QUERY: &str = include_str!("queries/vba.scm");
 const VBSCRIPT_QUERY: &str = include_str!("queries/vbscript.scm");
+const CFML_QUERY: &str = include_str!("queries/cfml.scm");
+const CFSCRIPT_QUERY: &str = include_str!("queries/cfscript.scm");
+const ABL_QUERY: &str = include_str!("queries/abl.scm");
 
 // ── Grammar language fns (one per language) ──────────────────────────────────
 // Each function returns tree_sitter::Language so it can be stored as fn() -> Language.
@@ -439,6 +442,11 @@ fn lang_rpg() -> tree_sitter::Language {
     wicked_estate_tree_sitter_rpg::LANGUAGE.into()
 }
 
+// Progress OpenEdge ABL via the in-house grammar (vendor/tree-sitter-abl) — authored, not published.
+fn lang_abl() -> tree_sitter::Language {
+    wicked_estate_tree_sitter_abl::LANGUAGE.into()
+}
+
 // ── Visual Basic family ───────────────────────────────────────────────────────
 fn lang_vb6() -> tree_sitter::Language {
     wicked_estate_tree_sitter_vb6::LANGUAGE.into()
@@ -448,6 +456,12 @@ fn lang_vbnet() -> tree_sitter::Language {
 }
 fn lang_vba() -> tree_sitter::Language {
     wicked_estate_tree_sitter_vba::LANGUAGE.into()
+}
+fn lang_cfml() -> tree_sitter::Language {
+    wicked_estate_tree_sitter_cfml::LANGUAGE_CFML.into()
+}
+fn lang_cfscript() -> tree_sitter::Language {
+    wicked_estate_tree_sitter_cfml::LANGUAGE_CFSCRIPT.into()
 }
 fn lang_vbscript() -> tree_sitter::Language {
     wicked_estate_tree_sitter_vbscript::LANGUAGE.into()
@@ -1032,9 +1046,9 @@ static LANG_TABLE: &[LangEntry] = &[
         query_src: FORTRAN_QUERY,
     },
     LangEntry {
-        // Pascal / Delphi / Free Pascal.
+        // Pascal / Delphi / Free Pascal. .dpk = Delphi package, .lpr = Lazarus program.
         name: "pascal",
-        ext: &["pas", "pp", "dpr"],
+        ext: &["pas", "pp", "dpr", "dpk", "lpr"],
         make_language: lang_pascal,
         query_src: PASCAL_QUERY,
     },
@@ -1091,6 +1105,31 @@ static LANG_TABLE: &[LangEntry] = &[
         ext: &["vbs", "wsf"],
         make_language: lang_vbscript,
         query_src: VBSCRIPT_QUERY,
+    },
+    // ── ColdFusion CFML ──────────────────────────────────────────────────────
+    LangEntry {
+        // Tag-based CFML: .cfm pages and tag-based .cfc components (<cffunction>, <cfcomponent>).
+        // The tag grammar also recognises embedded <cfscript> function/method definitions.
+        name: "cfml",
+        ext: &["cfm", "cfc"],
+        make_language: lang_cfml,
+        query_src: CFML_QUERY,
+    },
+    LangEntry {
+        // Script-based CFML: pure cfscript files and modern script components.
+        name: "cfscript",
+        ext: &["cfs"],
+        make_language: lang_cfscript,
+        query_src: CFSCRIPT_QUERY,
+    },
+    // ── Progress OpenEdge ABL (in-house grammar) ─────────────────────────────
+    LangEntry {
+        // .p procedures, .w windows, .i include files. ABL classes are .cls but that extension is
+        // already claimed by apex/vb6 — ABL .cls files dispatch by language name (for_language).
+        name: "abl",
+        ext: &["p", "w", "i"],
+        make_language: lang_abl,
+        query_src: ABL_QUERY,
     },
 ];
 

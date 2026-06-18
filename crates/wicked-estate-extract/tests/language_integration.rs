@@ -318,6 +318,21 @@ static SNIPPETS: &[(&str, &str, &str)] = &[
         "IDENTIFICATION DIVISION.\nPROGRAM-ID. HELLO.\nPROCEDURE DIVISION.\nDISPLAY 'HELLO'.\nSTOP RUN.",
     ),
     (
+        "cfml",
+        "cfc",
+        "<cfcomponent name=\"Foo\">\n<cffunction name=\"add\"><cfargument name=\"a\"><cfreturn a></cffunction>\n</cfcomponent>",
+    ),
+    (
+        "cfscript",
+        "cfs",
+        "component {\n  function add(a, b) { return a + b; }\n}",
+    ),
+    (
+        "abl",
+        "p",
+        "FUNCTION addNums RETURNS INTEGER (INPUT a AS INTEGER, INPUT b AS INTEGER):\n  RETURN a + b.\nEND FUNCTION.",
+    ),
+    (
         "solidity",
         "sol",
         "pragma solidity ^0.8.0;\ncontract Foo {\n  function add(uint a, uint b) public pure returns (uint) { return a + b; }\n}",

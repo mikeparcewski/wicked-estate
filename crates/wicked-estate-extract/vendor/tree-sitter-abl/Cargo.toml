@@ -1,0 +1,21 @@
+[package]
+name = "wicked-estate-tree-sitter-abl"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/mikeparcewski/wicked-estate"
+description = "Progress OpenEdge ABL grammar for tree-sitter — wicked_estate symbols+calls subset"
+build = "bindings/rust/build.rs"
+include = ["bindings/rust/*.rs", "grammar.js", "src/**/*"]
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "0.1"
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+tree-sitter = "0.25"

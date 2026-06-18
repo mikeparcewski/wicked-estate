@@ -1,0 +1,12 @@
+{
+  "name": "tree-sitter-abl",
+  "version": "0.1.0",
+  "description": "Progress OpenEdge ABL grammar for tree-sitter — wicked_estate symbols+calls subset",
+  "license": "MIT",
+  "tree-sitter": [
+    {
+      "scope": "source.abl",
+      "file-types": ["p", "cls", "w", "i"]
+    }
+  ]
+}

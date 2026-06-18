@@ -9803,6 +9803,8 @@ dependencies = [
  "tree-sitter-vb-dotnet",
  "tree-sitter-yaml",
  "wicked-estate-core",
+ "wicked-estate-tree-sitter-abl",
+ "wicked-estate-tree-sitter-cfml",
  "wicked-estate-tree-sitter-rpg",
  "wicked-estate-tree-sitter-vb6",
  "wicked-estate-tree-sitter-vba",
@@ -9887,6 +9889,24 @@ dependencies = [
  "wicked-estate-core",
  "wicked-estate-observe",
  "zstd",
+]
+
+[[package]]
+name = "wicked-estate-tree-sitter-abl"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tree-sitter",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "wicked-estate-tree-sitter-cfml"
+version = "0.26.20"
+dependencies = [
+ "cc",
+ "tree-sitter",
+ "tree-sitter-language",
 ]
 
 [[package]]

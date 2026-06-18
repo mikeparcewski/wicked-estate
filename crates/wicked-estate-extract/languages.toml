@@ -339,7 +339,8 @@ caps = ["symbols", "calls"]
 
 [[language]]
 name = "pascal"
-ext = ["pas", "pp", "dpr"]
+# .pas units, .pp Free Pascal, .dpr Delphi project, .dpk Delphi package, .lpr Lazarus program.
+ext = ["pas", "pp", "dpr", "dpk", "lpr"]
 grammar = "tree-sitter-pascal"
 tier = "structural"
 caps = ["symbols", "calls"]
@@ -761,5 +762,31 @@ caps = ["symbols", "calls"]
 name = "vbscript"
 ext = ["vbs", "wsf"]
 grammar = "tree-sitter-vbscript"
+tier = "structural"
+caps = ["symbols", "calls"]
+
+[[language]]
+# ColdFusion CFML (tag-based) — .cfm pages, tag-based .cfc components. Vendored from
+# cfmleditor/tree-sitter-cfml. Captures <cffunction>/<cfcomponent> + embedded <cfscript>.
+name = "cfml"
+ext = ["cfm", "cfc"]
+grammar = "tree-sitter-cfml"
+tier = "structural"
+caps = ["symbols", "calls"]
+
+[[language]]
+# ColdFusion CFScript — modern script-based CFML (.cfs). Same vendored grammar (cfscript dialect).
+name = "cfscript"
+ext = ["cfs"]
+grammar = "tree-sitter-cfml"
+tier = "structural"
+caps = ["symbols", "calls"]
+
+[[language]]
+# Progress OpenEdge ABL (4GL) — in-house minimal grammar (upstream parser.c is ~97MB). .p/.w/.i;
+# ABL classes (.cls) dispatch by language name since .cls is shared with apex/vb6.
+name = "abl"
+ext = ["p", "w", "i"]
+grammar = "tree-sitter-abl"
 tier = "structural"
 caps = ["symbols", "calls"]

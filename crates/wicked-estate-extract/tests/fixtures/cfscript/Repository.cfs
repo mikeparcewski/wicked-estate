@@ -1,0 +1,17 @@
+component accessors="true" {
+
+    property name="dsn" type="string";
+
+    public any function findById(required numeric id) {
+        return loadRecord(arguments.id);
+    }
+
+    public array function findAll() {
+        var rows = runQuery("SELECT * FROM items");
+        return mapRows(rows);
+    }
+
+    private struct function mapRows(required array rows) {
+        return transform(arguments.rows);
+    }
+}
