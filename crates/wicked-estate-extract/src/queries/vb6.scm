@@ -1,38 +1,68 @@
 ; wicked_estate VB6 extraction queries — @code_* convention.
-; Verified against tree-sitter-vb6 0.0.2 (andersonm3ai) node-types.json.
+; Verified against joannefan/tree-sitter-vb6 (2026-03).
 ;
-; VB6 has no class-block node — the whole file is the module.
-; Module kind (Module vs Class) is determined by file extension (.bas → Module;
-; .cls/.frm/.ctl → Class) and is resolved at the Extractor layer.
+; Node name changes vs andersonm3ai 0.0.2:
+;   sub_definition       → sub_declaration
+;   function_definition  → function_declaration
+;   property_definition  → property_declaration
+;   call_statement       → method_invocation  (target: name_access | member_access)
+;   function_call        → function_invocation (target: name_access | member_access)
+;   implements_statement → implements_declaration
+;
+; Key fixes in this grammar:
+;   - Call keyword is a first-class branch of method_invocation (no longer misread as callee name)
+;   - Sub/Function bodies use REPEAT (not REPEAT1) — empty bodies parse correctly
+;   - attribute_line exposes VB_Name for module name extraction
+
+; ── Module name (from Attribute VB_Name = "...") ─────────────────────────────
+; .cls and .frm files declare the module's identity via this attribute.
+(attribute_line
+  (identifier) @_attr
+  (string) @code_module.name
+  (#eq? @_attr "VB_Name")) @code_module.def
 
 ; ── Sub definitions ───────────────────────────────────────────────────────────
-(sub_definition
+(sub_declaration
   name: (identifier) @code_function.name
 ) @code_function.def
 
 ; ── Function definitions ──────────────────────────────────────────────────────
-(function_definition
+(function_declaration
   name: (identifier) @code_function.name
 ) @code_function.def
 
 ; ── Property definitions (Get / Let / Set) ────────────────────────────────────
-(property_definition
+(property_declaration
   name: (identifier) @code_property.name
 ) @code_property.def
 
 ; ── Call sites ────────────────────────────────────────────────────────────────
-; function_call: NAME(args) — standard parenthesised call.
-(function_call
-  name: (qualified_identifier) @call.function
+; method_invocation covers all bare-call forms:
+;   Fn              (no args, no parens)
+;   Fn arg1, arg2   (args, no parens)
+;   Call Fn         (explicit Call, no args)
+;   Call Fn arg     (explicit Call with args)
+;   Call Obj.Method(...) (member access)
+; target field is aliased as name_access (identifier) or member_access.
+(method_invocation
+  target: (name_access) @call.function
 ) @call
 
-; call_statement: NAME args — bare call form (no parens).
-(call_statement
-  name: (identifier) @call.function
+(method_invocation
+  target: (member_access) @call.function
+) @call
+
+; function_invocation covers parenthesised calls: Fn(args), Obj.Method(args)
+(function_invocation
+  target: (name_access) @call.function
+) @call
+
+(function_invocation
+  target: (member_access) @call.function
 ) @call
 
 ; ── Heritage ──────────────────────────────────────────────────────────────────
 ; VB6 class modules declare Implements <Interface> in the header section.
-(implements_statement
+(implements_declaration
   (identifier) @code_implements.target
 ) @code_implements.def

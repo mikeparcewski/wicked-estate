@@ -505,9 +505,19 @@ End Sub
         .iter()
         .filter(|n| n.kind != NodeKind::File)
         .collect();
+    // The new VB6 grammar captures Attribute VB_Name as a Module node; only Module and Function
+    // nodes are expected — Begin..End form-designer blocks must not produce anything else.
     assert!(
-        code_nodes.iter().all(|n| n.kind == NodeKind::Function),
-        "Begin..End must not produce non-Function code nodes; got {code_nodes:?}"
+        code_nodes
+            .iter()
+            .all(|n| n.kind == NodeKind::Function || n.kind == NodeKind::Module),
+        "Begin..End must not produce unexpected code nodes; got {code_nodes:?}"
+    );
+    assert!(
+        code_nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Module && n.name == "NestedForm"),
+        "Module node 'NestedForm' missing; got {code_nodes:?}"
     );
     assert!(
         code_nodes.iter().any(|n| n.name == "Init"),

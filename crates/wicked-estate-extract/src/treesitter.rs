@@ -441,7 +441,7 @@ fn lang_rpg() -> tree_sitter::Language {
 
 // ── Visual Basic family ───────────────────────────────────────────────────────
 fn lang_vb6() -> tree_sitter::Language {
-    tree_sitter_vb6::language()
+    wicked_estate_tree_sitter_vb6::LANGUAGE.into()
 }
 fn lang_vbnet() -> tree_sitter::Language {
     tree_sitter_vb_dotnet::LANGUAGE.into()
@@ -1683,7 +1683,7 @@ impl Extractor for TreeSitterExtractor {
                         def_anchor = Some((kind, c.node));
                     }
                     CaptureRole::DefName { kind } => {
-                        def_name = Some((kind, text));
+                        def_name = Some((kind, strip_literal_quotes(&text)));
                     }
                     CaptureRole::CallFunction => {
                         call_fn = Some((text, pos, span));

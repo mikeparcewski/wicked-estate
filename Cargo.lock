@@ -9003,16 +9003,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tree-sitter-vb6"
-version = "0.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "178cfc0f2c3e9ab0fe72cea69fe30c492d76bb4f94d7a60bc2f865eb994bf655"
-dependencies = [
- "cc",
- "tree-sitter",
-]
-
-[[package]]
 name = "tree-sitter-yaml"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9811,10 +9801,10 @@ dependencies = [
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
  "tree-sitter-vb-dotnet",
- "tree-sitter-vb6",
  "tree-sitter-yaml",
  "wicked-estate-core",
  "wicked-estate-tree-sitter-rpg",
+ "wicked-estate-tree-sitter-vb6",
  "wicked-estate-tree-sitter-vba",
  "wicked-estate-tree-sitter-vbscript",
 ]
@@ -9904,6 +9894,15 @@ name = "wicked-estate-tree-sitter-rpg"
 version = "0.1.2"
 dependencies = [
  "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "wicked-estate-tree-sitter-vb6"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tree-sitter",
  "tree-sitter-language",
 ]
 
