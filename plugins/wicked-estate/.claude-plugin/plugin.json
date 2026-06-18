@@ -1,7 +1,7 @@
 {
   "name": "wicked-estate",
   "description": "Registers the wicked-estate MCP server: a code + infrastructure estate graph for agents — definitions, who-calls-X, blast-radius, scoped context, across 91 languages plus mainframe/IaC estate.",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "author": {
     "name": "Michael Parcewski",
     "url": "https://github.com/mikeparcewski/wicked-estate"

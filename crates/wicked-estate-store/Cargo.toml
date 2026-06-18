@@ -17,7 +17,7 @@ zstd = "0.13"
 # W1.5 bake-off challenger — compiled ONLY when the feature is enabled.
 # All surrealdb code is behind #[cfg(feature = "surrealdb")] so the default
 # build/test path never compiles surrealdb.
-wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.6.0" }
+wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.7.0" }
 surrealdb = { version = "2", optional = true, default-features = false, features = ["kv-mem"] }
 tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros"] }
 async-trait = { version = "0.1", optional = true }
