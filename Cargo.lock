@@ -8993,6 +8993,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-vb-dotnet"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "180e4a199378505f9305c3d01d6ece8a8d34035f310de1c727693f8a2296025e"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-vb6"
+version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "178cfc0f2c3e9ab0fe72cea69fe30c492d76bb4f94d7a60bc2f865eb994bf655"
+dependencies = [
+ "cc",
+ "tree-sitter",
+]
+
+[[package]]
 name = "tree-sitter-yaml"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9638,7 +9658,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9661,7 +9681,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-bench"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -9674,7 +9694,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "proptest",
@@ -9685,7 +9705,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-extract"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "arborium-ada",
  "arborium-awk",
@@ -9790,14 +9810,18 @@ dependencies = [
  "tree-sitter-swift",
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
+ "tree-sitter-vb-dotnet",
+ "tree-sitter-vb6",
  "tree-sitter-yaml",
  "wicked-estate-core",
  "wicked-estate-tree-sitter-rpg",
+ "wicked-estate-tree-sitter-vba",
+ "wicked-estate-tree-sitter-vbscript",
 ]
 
 [[package]]
 name = "wicked-estate-mcp"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -9811,7 +9835,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-observe"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "reqwest 0.12.28",
  "serde_json",
@@ -9820,7 +9844,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-rank"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "petgraph",
  "proptest",
@@ -9831,7 +9855,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-resolve"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "libc",
  "protobuf",
@@ -9846,7 +9870,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-retrieve"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "fastembed",
  "model2vec-rs",
@@ -9858,7 +9882,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-store"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "deadpool",
@@ -9880,6 +9904,24 @@ name = "wicked-estate-tree-sitter-rpg"
 version = "0.1.2"
 dependencies = [
  "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "wicked-estate-tree-sitter-vba"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tree-sitter",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "wicked-estate-tree-sitter-vbscript"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tree-sitter",
  "tree-sitter-language",
 ]
 

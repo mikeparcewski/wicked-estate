@@ -108,6 +108,11 @@ tree-sitter-fortran = "0.6"
 tree-sitter-pascal = "0.10"
 # In-house grammar: free-format RPG IV (a symbols+calls subset). Source in vendor/tree-sitter-rpg.
 wicked-estate-tree-sitter-rpg = { path = "vendor/tree-sitter-rpg", version = "0.1.2" }
+# Visual Basic family — four variants.
+tree-sitter-vb6 = "0.0.2"                 # ABI-14; on crates.io
+tree-sitter-vb-dotnet = "0.1.0"           # ABI-15; on crates.io
+wicked-estate-tree-sitter-vba = { path = "vendor/tree-sitter-vba" }        # ABI vendored from tmepple/tree-sitter-vba
+wicked-estate-tree-sitter-vbscript = { path = "vendor/tree-sitter-vbscript" }  # ABI vendored from JJK96/tree-sitter-vbscript
 # tree-sitter-abap-sqry deferred: it pins tree-sitter ^0.26 (we're on 0.25); would need another
 # runtime bump for one niche SAP fork. ABAP coverage awaits a 0.26 bump or an ABI-≤15 ABAP grammar.
 arborium-dot = "2.18"

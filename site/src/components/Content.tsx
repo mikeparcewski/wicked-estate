@@ -15,7 +15,7 @@ function Hero() {
     <section className="snap-start relative min-h-screen flex flex-col items-center justify-center pt-[58px] overflow-hidden band band-depth">
 
       <div className="relative max-w-5xl mx-auto px-7 text-center">
-        <div className="inline-flex items-center gap-2 font-mono text-[0.65rem] tracking-[0.22em] uppercase text-muted border border-hairline-strong rounded-full px-3 py-1.5 mb-8"
+        <div className="inline-flex items-center gap-2 font-mono text-[0.65rem] tracking-[0.22em] uppercase text-muted border border-hairline-strong rounded-2xl sm:rounded-full px-3 py-1.5 mb-8"
           style={{ background: 'color-mix(in oklab, var(--accent) 8%, var(--canvas))' }}>
           <span className="live-dot w-1.5 h-1.5 rounded-full bg-accent inline-block" />
           Local-first · Single binary · Tree-sitter + SQLite · PostgreSQL
@@ -599,6 +599,25 @@ function Languages() {
             <p className="mt-4 font-mono text-xs text-faint leading-5">
               A fix in one extractor is a hypothesis about all others —<br />patch the shared seam, not N copies.
             </p>
+
+            {/* Mobile: a static tag cloud stands in for the animated node cloud
+                (which is lg-only and absolutely positioned). Gives phones the
+                "wall of languages" proof the section otherwise loses. */}
+            <div className="mt-8 flex flex-wrap gap-1.5 lg:hidden">
+              {langs.map(l => (
+                <span
+                  key={l}
+                  className="lang-tag"
+                  style={l === '+more' ? {
+                    color: 'var(--accent)',
+                    borderColor: 'color-mix(in oklab, var(--accent) 40%, var(--hairline))',
+                    background: 'color-mix(in oklab, var(--accent) 8%, var(--canvas))',
+                  } : undefined}
+                >
+                  {l}
+                </span>
+              ))}
+            </div>
           </div>
 
           {/* Right: floating node cloud */}

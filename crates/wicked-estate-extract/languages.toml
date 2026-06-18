@@ -728,3 +728,38 @@ ext = ["arm.json"]
 grammar = "tree-sitter-json"
 tier = "structural"
 caps = ["symbols", "imports"]
+
+# ── Visual Basic family (4 variants) ────────────────────────────────────────
+
+[[language]]
+# VB6 — Classic Visual Basic 6.0. Modules (.bas), Classes (.cls), Forms (.frm/.ctl).
+name = "vb6"
+ext = ["bas", "cls", "frm", "ctl"]
+grammar = "tree-sitter-vb6"
+tier = "structural"
+caps = ["symbols", "calls"]
+
+[[language]]
+# VB.NET — .NET Visual Basic. Single .vb extension for all file kinds.
+name = "vbnet"
+ext = ["vb"]
+grammar = "tree-sitter-vb-dotnet"
+tier = "structural"
+caps = ["symbols", "calls", "imports", "extends", "implements"]
+
+[[language]]
+# VBA — Visual Basic for Applications (Office macros). Exported files use .vba;
+# .bas/.cls/.frm are shared with VB6 and default to vb6 for extension dispatch.
+name = "vba"
+ext = ["vba"]
+grammar = "tree-sitter-vba"
+tier = "structural"
+caps = ["symbols", "calls"]
+
+[[language]]
+# VBScript — Windows Scripting Host / ASP Classic. .vbs and .wsf files.
+name = "vbscript"
+ext = ["vbs", "wsf"]
+grammar = "tree-sitter-vbscript"
+tier = "structural"
+caps = ["symbols", "calls"]

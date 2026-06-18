@@ -143,6 +143,12 @@ const RPG_QUERY: &str = include_str!("queries/rpg.scm");
 const JINJA2_QUERY: &str = include_str!("queries/jinja2.scm");
 const ARM_QUERY: &str = include_str!("queries/arm.scm");
 
+// ── Visual Basic family (4 variants) ─────────────────────────────────────────
+const VB6_QUERY: &str = include_str!("queries/vb6.scm");
+const VBNET_QUERY: &str = include_str!("queries/vbnet.scm");
+const VBA_QUERY: &str = include_str!("queries/vba.scm");
+const VBSCRIPT_QUERY: &str = include_str!("queries/vbscript.scm");
+
 // ── Grammar language fns (one per language) ──────────────────────────────────
 // Each function returns tree_sitter::Language so it can be stored as fn() -> Language.
 fn lang_rust() -> tree_sitter::Language {
@@ -431,6 +437,20 @@ fn lang_pascal() -> tree_sitter::Language {
 // Free-format RPG IV via the in-house grammar (vendor/tree-sitter-rpg) — authored, not published.
 fn lang_rpg() -> tree_sitter::Language {
     wicked_estate_tree_sitter_rpg::LANGUAGE.into()
+}
+
+// ── Visual Basic family ───────────────────────────────────────────────────────
+fn lang_vb6() -> tree_sitter::Language {
+    tree_sitter_vb6::language()
+}
+fn lang_vbnet() -> tree_sitter::Language {
+    tree_sitter_vb_dotnet::LANGUAGE.into()
+}
+fn lang_vba() -> tree_sitter::Language {
+    wicked_estate_tree_sitter_vba::LANGUAGE.into()
+}
+fn lang_vbscript() -> tree_sitter::Language {
+    wicked_estate_tree_sitter_vbscript::LANGUAGE.into()
 }
 
 // ── W13 IaC language expansion ────────────────────────────────────────────────
@@ -1044,6 +1064,33 @@ static LANG_TABLE: &[LangEntry] = &[
         ext: &["arm.json"],
         make_language: lang_arm,
         query_src: ARM_QUERY,
+    },
+    // ── Visual Basic family ──────────────────────────────────────────────────
+    LangEntry {
+        name: "vb6",
+        ext: &["bas", "cls", "frm", "ctl"],
+        make_language: lang_vb6,
+        query_src: VB6_QUERY,
+    },
+    LangEntry {
+        name: "vbnet",
+        ext: &["vb"],
+        make_language: lang_vbnet,
+        query_src: VBNET_QUERY,
+    },
+    LangEntry {
+        // VBA shares .bas/.cls/.frm with VB6; dispatch by name via `for_language("vba")`.
+        // For extension-based dispatch, .vba (exported from Office) routes here.
+        name: "vba",
+        ext: &["vba"],
+        make_language: lang_vba,
+        query_src: VBA_QUERY,
+    },
+    LangEntry {
+        name: "vbscript",
+        ext: &["vbs", "wsf"],
+        make_language: lang_vbscript,
+        query_src: VBSCRIPT_QUERY,
     },
 ];
 

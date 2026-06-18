@@ -82,6 +82,9 @@
     background-color: var(--canvas);
   }
 
+  /* Phones: scroll-snap locks feel janky on mobile — let scrolling run free. */
+  @media (max-width: 768px) { html { scroll-snap-type: none; } }
+
   body {
     margin: 0;
     background-color: transparent;
