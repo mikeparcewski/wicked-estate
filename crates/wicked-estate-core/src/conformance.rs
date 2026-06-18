@@ -663,6 +663,20 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
     );
 
     // (1) Typed round-trip: write an assumption, read it back with all fields intact.
+    //
+    // FRACTIONAL-CONFIDENCE PRECISION CONTRACT (cross-backend). `Annotation.confidence` is `f64`
+    // in core. The SQLite default stores it in a `REAL` column, which in SQLite is an 8-byte
+    // IEEE-754 double — so a fraction round-trips (near-)exactly. The Postgres backend stores it
+    // in `REAL`, which in Postgres is a 4-byte single (`f32`) — so the same value narrows f64→f32
+    // on write and widens back on read. `0.6` is chosen precisely because it is NOT representable
+    // exactly in f32: it reads back as `0.6000000238…` on Postgres (error ≈ 2.4e-8), whereas on
+    // SQLite it is exact. Asserting with a tight `1e-9` tolerance (as a naive round-trip test
+    // would) silently passes on SQLite but FAILS on Postgres — the exact narrowing the conformance
+    // kit must make explicit rather than hide. We therefore assert with an f32-epsilon-scale
+    // tolerance that holds on BOTH backends, and pin the precision expectation here as the
+    // single source of truth. (Edge `Confidence` is already `f32` in core, so edges round-trip
+    // losslessly on every backend; only this annotation field narrows.)
+    const CONFIDENCE_RT_TOL: f64 = 1e-6; // > f32 machine epsilon (~1.19e-7); holds for f64 and f32 stores.
     store
         .annotate(
             &sym("ann_a"),
@@ -680,8 +694,10 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
     assert_eq!(got[0].key, "thread-safety");
     assert_eq!(got[0].value, "assumed Send+Sync");
     assert!(
-        (got[0].confidence - 0.6).abs() < 1e-9,
-        "confidence must round-trip"
+        (got[0].confidence - 0.6).abs() < CONFIDENCE_RT_TOL,
+        "fractional confidence 0.6 must round-trip within f32 tolerance \
+         (SQLite REAL=f64 is near-exact; Postgres REAL=f32 narrows to ~0.60000002); got {}",
+        got[0].confidence
     );
     assert_eq!(got[0].provenance, "manual", "provenance must round-trip");
     assert_eq!(got[0].author, "alice", "author must round-trip");
