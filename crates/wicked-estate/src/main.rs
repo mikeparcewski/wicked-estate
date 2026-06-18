@@ -23,6 +23,7 @@
 //!   wicked-estate annotate --symbol <id> --key K --value V [--type T] [--confidence F] [--provenance P] [--author A] [--db ...]
 //!   wicked-estate annotations <name>     [--type T] [--json] [--db ...]
 //!   wicked-estate annotations --symbol <id> [--type T] [--json] [--db ...]
+//!   wicked-estate stale-annotations <cutoff> [--json] [--db ...]
 //!   wicked-estate context <name>         [--budget <chars>] [--json] [--db ...]
 //!   wicked-estate entrypoints            [--json] [--db ...]
 //!   wicked-estate leaves                 [--json] [--db ...]
@@ -1723,6 +1724,56 @@ fn main() -> Result<()> {
                 }
             }
         }
+        // Freshness read: every (symbol, annotation) pair whose evidence-envelope `last_verified`
+        // is strictly before <cutoff> (Unix-seconds) — i.e. the facts a re-verification window
+        // deems stale. Never-verified rows (last_verified == 0) are stale for any positive cutoff.
+        // Thin surface over the `GraphRead::annotations_stale_since` seam (ordered symbol then ts).
+        //
+        // Usage:
+        //   wicked-estate stale-annotations <cutoff> [--json] [--db ...]
+        "stale-annotations" => {
+            use wicked_estate_core::GraphRead;
+            let json_out = positional.iter().any(|a| a == "--json");
+            let cutoff: i64 = positional
+                .iter()
+                .find_map(|a| a.parse::<i64>().ok())
+                .context(
+                    "usage: wicked-estate stale-annotations <cutoff-unix-seconds> [--json] [--db ...]",
+                )?;
+            let store = SqliteStore::open(&db).map_err(to_any)?;
+            let stale = store.annotations_stale_since(cutoff).map_err(to_any)?;
+            if json_out {
+                let arr: Vec<serde_json::Value> = stale
+                    .iter()
+                    .map(|(sym, a)| {
+                        serde_json::json!({
+                            "symbol": sym.to_string(),
+                            "annotation": source_bundle::annotation_json(a),
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&arr)?);
+            } else if stale.is_empty() {
+                println!("no annotations stale as of cutoff {cutoff}");
+            } else {
+                println!(
+                    "{} annotation(s) stale as of cutoff {cutoff} (last_verified < {cutoff}):",
+                    stale.len()
+                );
+                for (sym, a) in &stale {
+                    println!(
+                        "  {} [{}] {}={} [last_verified={} source_type={:?} extraction_method={:?}]",
+                        sym,
+                        a.r#type,
+                        a.key,
+                        a.value,
+                        a.last_verified,
+                        a.source_type,
+                        a.extraction_method
+                    );
+                }
+            }
+        }
         // Agent D: stable hex fingerprint for a symbol (covers id+name+kind+file+signature).
         //
         // Usage:
@@ -2453,6 +2504,12 @@ fn main() -> Result<()> {
             println!("  wicked-estate annotations <name>   [--type T] [--json] [--db ...]");
             println!(
                 "    Show annotations for matching symbols. --type filters; --json emits {{symbol, annotations:[...]}} with an `advisory` flag."
+            );
+            println!(
+                "  wicked-estate stale-annotations <cutoff> [--json] [--db ...]  # (symbol, annotation) pairs with last_verified < cutoff"
+            );
+            println!(
+                "    Evidence-envelope freshness read: \"what needs re-verification?\". Never-verified rows (last_verified=0) are always stale."
             );
             println!(
                 "  wicked-estate fingerprint <name>   [--db ...]  # stable hex fingerprint for symbol"

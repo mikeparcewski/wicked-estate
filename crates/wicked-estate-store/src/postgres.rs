@@ -8,7 +8,12 @@
 //! Schema mirrors `SqliteStore` but uses Postgres-native types:
 //! - `BIGSERIAL` primary keys where SQLite uses `INTEGER PRIMARY KEY AUTOINCREMENT`
 //! - `TEXT` for all symbol strings (no integer interning — Postgres handles string dedup well)
-//! - `REAL` for confidence (same as SQLite)
+//! - `REAL` for confidence. NOTE: this is **not** the same as SQLite. SQLite `REAL` is an
+//!   8-byte IEEE-754 double (f64); Postgres `REAL` is a 4-byte single (f32). Edge `Confidence`
+//!   is already f32 in core, so edges round-trip losslessly on both. The `Annotation.confidence`
+//!   field is f64, so on this backend it narrows f64 → f32 on write and widens back on read —
+//!   a fraction like `0.6` reads back as `0.6000000238…`. The conformance kit asserts this with
+//!   an f32-epsilon tolerance (see `graph_store_suite`'s annotation block).
 //! - `TEXT` for JSON columns (same round-trip fidelity as SQLite)
 //! - No zstd compression for content — Postgres applies page-level compression internally
 //! - Full-text search via `ILIKE` (upgrade to `pg_trgm` / `tsvector` in a future pass)
@@ -84,7 +89,9 @@ fn git_blob_sha(text: &str) -> String {
 
 /// Decode a `PgRow` carrying the standard annotation columns (no `node_sym`) into an
 /// [`Annotation`]. `confidence` is stored as Postgres `REAL` (f32) and widened to the struct's
-/// `f64`; `ts` / `last_verified` are `BIGINT` (i64). Mirrors the column order the read queries
+/// `f64` — a **lossy** narrowing relative to SQLite (whose `REAL` is f64): a fractional confidence
+/// such as `0.6` reads back as `0.6000000238…`. `ts` / `last_verified` are `BIGINT` (i64). Mirrors
+/// the column order the read queries
 /// select. Used by all three annotation read methods so the mapping lives in one place.
 fn row_to_annotation(r: &sqlx::postgres::PgRow) -> std::result::Result<Annotation, sqlx::Error> {
     let confidence: f32 = r.try_get("confidence")?;

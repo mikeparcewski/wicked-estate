@@ -124,7 +124,8 @@ pub trait GraphRead: Send {
     /// Never-verified annotations (`last_verified == 0`) are stale for any positive `cutoff`. This
     /// is the freshness read the evidence envelope adds: "what needs re-verification?" — the store
     /// counterpart of [`Annotation::is_stale_since`]. Pairs are ordered by symbol then `ts` for
-    /// deterministic output, parallel to [`Self::annotations_by_type`].
+    /// deterministic output, parallel to [`Self::annotations_by_type`]. Surfaced to consumers via
+    /// the `wicked-estate stale-annotations <cutoff>` CLI command.
     fn annotations_stale_since(&self, cutoff: i64) -> Result<Vec<(SymbolId, Annotation)>>;
     fn stats(&self) -> Result<GraphStats>;
 }
