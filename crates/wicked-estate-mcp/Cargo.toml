@@ -2,7 +2,7 @@
 name = "wicked-estate-mcp"
 description = "MCP server exposing the wicked-estate retrieval tools."
 readme = "README.md"
-keywords = ["mcp", "code-graph", "llm", "model-context-protocol", "agents"]
+keywords = ["mcp", "code-graph", "llm", "code-intelligence", "agents"]
 categories = ["development-tools", "command-line-utilities"]
 version.workspace = true
 edition.workspace = true
