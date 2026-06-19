@@ -1760,11 +1760,12 @@ mod tests {
         index_path(&mut store, tmp.path()).unwrap();
 
         // After round 2, no edge must have a target that is not in the node set.
-        let all_nodes: std::collections::HashSet<SymbolId> = wicked_estate_core::GraphRead::all_nodes(&store)
-            .unwrap()
-            .into_iter()
-            .map(|n| n.symbol)
-            .collect();
+        let all_nodes: std::collections::HashSet<SymbolId> =
+            wicked_estate_core::GraphRead::all_nodes(&store)
+                .unwrap()
+                .into_iter()
+                .map(|n| n.symbol)
+                .collect();
         let dangling: Vec<_> = store
             .all_edges()
             .unwrap()

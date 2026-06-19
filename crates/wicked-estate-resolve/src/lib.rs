@@ -594,7 +594,8 @@ impl Resolver for RulesBridgeResolver {
             .collect();
 
         let mut out: Vec<Edge> = Vec::new();
-        let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
 
         for r in bridge_refs {
             for ruleset in &ruleset_nodes {
@@ -2107,14 +2108,27 @@ mod tests {
         let r = rules_engine_ref("Caller", "odm");
         let edges = RulesBridgeResolver.resolve(&[r], &index).unwrap();
 
-        assert_eq!(edges.len(), 1, "expected exactly 1 InvokedBy edge, got {}", edges.len());
-        assert_eq!(edges[0].source, sym("Caller"), "source must be the call site");
+        assert_eq!(
+            edges.len(),
+            1,
+            "expected exactly 1 InvokedBy edge, got {}",
+            edges.len()
+        );
+        assert_eq!(
+            edges[0].source,
+            sym("Caller"),
+            "source must be the call site"
+        );
         assert_eq!(
             edges[0].target,
             ruleset_sym("LoanApproval", "odm"),
             "target must be the RuleSet node"
         );
-        assert_eq!(edges[0].kind, EdgeKind::InvokedBy, "edge kind must be InvokedBy");
+        assert_eq!(
+            edges[0].kind,
+            EdgeKind::InvokedBy,
+            "edge kind must be InvokedBy"
+        );
         // ResolutionTier::Heuristic → confidence 0.5.
         assert!(
             (edges[0].confidence.get() - 0.5).abs() < 1e-6,

@@ -4093,7 +4093,13 @@ mod tests {
         store.begin_batch().unwrap();
         store
             .upsert_nodes(&[
-                make_node("rs::engine", "PricingRules", NodeKind::RuleSet, "rules/pricing.drl", 1),
+                make_node(
+                    "rs::engine",
+                    "PricingRules",
+                    NodeKind::RuleSet,
+                    "rules/pricing.drl",
+                    1,
+                ),
                 make_node(
                     "app::run_pricing",
                     "run_pricing",
@@ -4122,7 +4128,9 @@ mod tests {
         // The invoking function appears in `invoked_by`.
         let invoked_by = engine["invoked_by"].as_array().unwrap();
         assert!(
-            invoked_by.iter().any(|v| v.as_str() == Some("app::run_pricing")),
+            invoked_by
+                .iter()
+                .any(|v| v.as_str() == Some("app::run_pricing")),
             "invoking symbol must appear in invoked_by; got {invoked_by:?}"
         );
     }

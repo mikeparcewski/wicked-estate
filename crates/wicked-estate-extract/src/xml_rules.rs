@@ -175,8 +175,8 @@ impl Extractor for XmlRulesExtractor {
     }
 
     fn extract(&self, file: &SourceFile) -> Result<Extraction> {
-        let doc = roxmltree::Document::parse(&file.text)
-            .map_err(|e| Error::Extraction(e.to_string()))?;
+        let doc =
+            roxmltree::Document::parse(&file.text).map_err(|e| Error::Extraction(e.to_string()))?;
 
         let lang = self.language();
         let mut nodes: Vec<Node> = Vec::new();
@@ -239,15 +239,16 @@ impl Extractor for XmlRulesExtractor {
                 }
 
                 // Resolve the parent symbol id.
-                let parent_name = if let Some(nm) = node_map.get(edge_mapping.parent_element.as_str()) {
-                    let n = resolve_name(nm, parent_node, &edge_mapping.parent_element);
-                    if n.is_empty() {
+                let parent_name =
+                    if let Some(nm) = node_map.get(edge_mapping.parent_element.as_str()) {
+                        let n = resolve_name(nm, parent_node, &edge_mapping.parent_element);
+                        if n.is_empty() {
+                            continue;
+                        }
+                        n
+                    } else {
                         continue;
-                    }
-                    n
-                } else {
-                    continue;
-                };
+                    };
 
                 // Build the parent's element path.
                 let mut pp: Vec<String> = parent_node
@@ -258,8 +259,7 @@ impl Extractor for XmlRulesExtractor {
                 pp.reverse();
                 pp.push(edge_mapping.parent_element.clone());
                 let parent_path = pp.join("/");
-                let parent_id_str =
-                    format!("{}::{}::{}", file.path, parent_path, parent_name);
+                let parent_id_str = format!("{}::{}::{}", file.path, parent_path, parent_name);
                 let parent_sym = Symbol::synthetic("xml-rules", &parent_id_str).id();
 
                 // Walk direct children matching the child element.
@@ -290,8 +290,7 @@ impl Extractor for XmlRulesExtractor {
                     cp.reverse();
                     cp.push(edge_mapping.child_element.clone());
                     let child_path = cp.join("/");
-                    let child_id_str =
-                        format!("{}::{}::{}", file.path, child_path, child_name);
+                    let child_id_str = format!("{}::{}::{}", file.path, child_path, child_name);
                     let child_sym = Symbol::synthetic("xml-rules", &child_id_str).id();
 
                     // Edge: source = parent (dependent / governer), target = child (dependency).
@@ -354,8 +353,7 @@ edge_kind      = "governs"
 
     #[test]
     fn extracts_rule_set_and_rule_from_dmn() {
-        let extractor =
-            XmlRulesExtractor::from_toml(DMN_CONFIG).expect("config must parse");
+        let extractor = XmlRulesExtractor::from_toml(DMN_CONFIG).expect("config must parse");
 
         let file = SourceFile {
             path: "rules/loan.dmn".to_string(),
@@ -371,7 +369,11 @@ edge_kind      = "governs"
             2,
             "expected 2 nodes, got {}: {:?}",
             extraction.nodes.len(),
-            extraction.nodes.iter().map(|n| (&n.name, &n.kind)).collect::<Vec<_>>()
+            extraction
+                .nodes
+                .iter()
+                .map(|n| (&n.name, &n.kind))
+                .collect::<Vec<_>>()
         );
 
         let rule_sets: Vec<_> = extraction
@@ -399,8 +401,7 @@ edge_kind      = "governs"
 
     #[test]
     fn emits_governs_edge_between_definitions_and_decision() {
-        let extractor =
-            XmlRulesExtractor::from_toml(DMN_CONFIG).expect("config must parse");
+        let extractor = XmlRulesExtractor::from_toml(DMN_CONFIG).expect("config must parse");
 
         let file = SourceFile {
             path: "rules/loan.dmn".to_string(),
@@ -425,8 +426,7 @@ edge_kind      = "governs"
 
     #[test]
     fn node_ids_are_stable_and_synthetic() {
-        let extractor =
-            XmlRulesExtractor::from_toml(DMN_CONFIG).expect("config must parse");
+        let extractor = XmlRulesExtractor::from_toml(DMN_CONFIG).expect("config must parse");
 
         let file = SourceFile {
             path: "rules/loan.dmn".to_string(),
@@ -451,8 +451,7 @@ edge_kind      = "governs"
 
     #[test]
     fn languages_returns_engine_scoped_name() {
-        let extractor =
-            XmlRulesExtractor::from_toml(DMN_CONFIG).expect("config must parse");
+        let extractor = XmlRulesExtractor::from_toml(DMN_CONFIG).expect("config must parse");
         let langs = extractor.languages();
         assert_eq!(langs.len(), 1);
         assert_eq!(langs[0].as_str(), "xml-rules:dmn");
@@ -460,8 +459,7 @@ edge_kind      = "governs"
 
     #[test]
     fn empty_xml_produces_empty_extraction() {
-        let extractor =
-            XmlRulesExtractor::from_toml(DMN_CONFIG).expect("config must parse");
+        let extractor = XmlRulesExtractor::from_toml(DMN_CONFIG).expect("config must parse");
 
         let file = SourceFile {
             path: "rules/empty.dmn".to_string(),
