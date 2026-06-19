@@ -29,8 +29,8 @@
 use serde_json::{Value, json};
 use wicked_estate_core::{GraphRead, RetrievalTool};
 use wicked_estate_retrieve::{
-    BlastRadius, ContextBundle, FetchContent, RetrieveEntity, SearchEntity, SemanticSearch,
-    TraverseGraph,
+    BlastRadius, ContextBundle, FetchContent, RetrieveEntity, RulesInventory, SearchEntity,
+    SemanticSearch, TraverseGraph,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -53,6 +53,7 @@ pub fn all_tools() -> Vec<Box<dyn RetrievalTool>> {
         Box::new(BlastRadius),
         Box::new(FetchContent),
         Box::new(ContextBundle),
+        Box::new(RulesInventory),
     ]
 }
 
@@ -68,6 +69,7 @@ pub fn all_tools_with_semantic(
         Box::new(BlastRadius),
         Box::new(FetchContent),
         Box::new(ContextBundle),
+        Box::new(RulesInventory),
         Box::new(SemanticSearch::with_hash_embedder(vec_store)),
     ]
 }
@@ -228,6 +230,14 @@ fn semantic_search_schema() -> Value {
     })
 }
 
+fn rules_inventory_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+    })
+}
+
 /// Returns the `inputSchema` for a given tool name.  Returns `None` when
 /// the name is unknown (the caller treats this as an unregistered tool).
 pub fn input_schema(name: &str) -> Option<Value> {
@@ -239,6 +249,7 @@ pub fn input_schema(name: &str) -> Option<Value> {
         "FetchContent" => Some(fetch_content_schema()),
         "ContextBundle" => Some(context_bundle_schema()),
         "SemanticSearch" => Some(semantic_search_schema()),
+        "RulesInventory" => Some(rules_inventory_schema()),
         _ => None,
     }
 }
@@ -529,7 +540,7 @@ mod tests {
     // ── tools/list ────────────────────────────────────────────────────────────
 
     #[test]
-    fn tools_list_returns_six_tools() {
+    fn tools_list_returns_seven_tools() {
         let store = fixture();
         let req = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} });
         let resp = handle_request(&store, &req);
@@ -537,7 +548,7 @@ mod tests {
         let tools = resp["result"]["tools"]
             .as_array()
             .expect("tools must be array");
-        assert_eq!(tools.len(), 6, "must expose exactly 6 tools");
+        assert_eq!(tools.len(), 7, "must expose exactly 7 tools");
     }
 
     #[test]
@@ -560,6 +571,7 @@ mod tests {
             "BlastRadius",
             "FetchContent",
             "ContextBundle",
+            "RulesInventory",
         ] {
             assert!(names.contains(expected), "expected tool {expected} in list");
         }

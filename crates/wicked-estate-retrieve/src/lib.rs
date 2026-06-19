@@ -2,15 +2,16 @@
 //!
 //! # Tools
 //!
-//! | Tool name        | Purpose                                               |
-//! |------------------|-------------------------------------------------------|
-//! | `SearchEntity`   | Find symbols by exact / substring name                |
-//! | `RetrieveEntity` | Full detail for a single symbol id                    |
-//! | `TraverseGraph`  | Bounded multi-hop walk from a start symbol            |
-//! | `BlastRadius`    | Transitive dependents (reverse-reachability on Calls) |
-//! | `Lineage`        | Transitive dependencies (what a symbol depends on)    |
-//! | `ContextPack`    | Token-budgeted ranked elided-stub context (W4.2)      |
-//! | `SemanticSearch` | Embedding-based ANN search (W5.2)                     |
+//! | Tool name          | Purpose                                               |
+//! |--------------------|-------------------------------------------------------|
+//! | `SearchEntity`     | Find symbols by exact / substring name                |
+//! | `RetrieveEntity`   | Full detail for a single symbol id                    |
+//! | `TraverseGraph`    | Bounded multi-hop walk from a start symbol            |
+//! | `BlastRadius`      | Transitive dependents (reverse-reachability on Calls) |
+//! | `Lineage`          | Transitive dependencies (what a symbol depends on)    |
+//! | `ContextPack`      | Token-budgeted ranked elided-stub context (W4.2)      |
+//! | `SemanticSearch`   | Embedding-based ANN search (W5.2)                     |
+//! | `RulesInventory`   | List all rules-engine nodes + invoking code (W15)     |
 //!
 //! Agent-behavior rules honored:
 //! * R1 — never `isError: true`; empty results come back as empty `content` + diagnostic.
@@ -22,8 +23,8 @@
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use wicked_estate_core::{
-    Annotation, Direction, EdgeKind, GraphRead, Result, RetrievalResult, RetrievalTool, SymbolId,
-    SymbolQuery, TraversalSpec, is_advisory,
+    Annotation, Direction, EdgeKind, GraphRead, NodeKind, Result, RetrievalResult, RetrievalTool,
+    SymbolId, SymbolQuery, TraversalSpec, is_advisory,
 };
 
 // W12 — one-shot context bundle tool (seed + ranked neighbours + budgeted stubs). Lives in its
@@ -634,7 +635,9 @@ impl RetrievalTool for TraverseGraph {
     fn description(&self) -> &str {
         "Bounded multi-hop walk from a start symbol. Returns the subgraph (nodes, edges, depths) \
          reachable within the given depth and node caps. Supports forward (dependencies), \
-         reverse (dependents), and bidirectional traversal."
+         reverse (dependents), and bidirectional traversal. \
+         For rules engine connections: use edge_kinds=[\"invoked_by\"] to trace code→rules, \
+         [\"governs\"] for ruleset→rule structure, [\"evaluates\"] for rule→condition."
     }
 
     fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
@@ -2089,6 +2092,93 @@ impl RetrievalTool for SemanticSearch {
         let total = matches.len();
         Ok(RetrievalResult {
             content: json!({ "matches": matches, "total": total }),
+            diagnostics: diag,
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RulesInventory
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Inventory of all rules-engine nodes and the code that invokes them (W15).
+///
+/// **Request shape** — no required parameters; the scan is whole-graph.
+/// ```json
+/// {}
+/// ```
+///
+/// **Response `content` shape**
+/// ```json
+/// { "engines": [
+///     { "symbol": "…", "name": "…", "kind": "rule_set", "file": "…",
+///       "invoked_by": [ "src/caller.rs::run_rules", … ] }
+///   ],
+///   "total": 1
+/// }
+/// ```
+/// * `engines` — one entry per `NodeKind::RuleSet` node in the graph.
+/// * `invoked_by` — symbols that carry an `InvokedBy` edge whose **target** is this
+///   RuleSet (i.e. code → rules engine boundary).
+/// * The result is bounded by the graph size; no pagination parameter is needed because
+///   real codebases seldom have more than a handful of rules engines.
+#[derive(Debug, Default)]
+pub struct RulesInventory;
+
+impl RetrievalTool for RulesInventory {
+    fn name(&self) -> &str {
+        "RulesInventory"
+    }
+
+    fn description(&self) -> &str {
+        "List all rules-engine nodes (RuleSet, Rule) in the graph and the code that invokes them. \
+         Use this to discover what business rules engines are present and which code files call \
+         them. Returns: [{name, kind, file, invoked_by: [code_files]}]"
+    }
+
+    fn invoke(&self, store: &dyn GraphRead, _request: &Value) -> Result<RetrievalResult> {
+        let all_nodes = store.all_nodes()?;
+        let all_edges = store.all_edges()?;
+
+        let rule_sets: Vec<_> = all_nodes
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::RuleSet))
+            .collect();
+
+        let engines: Vec<Value> = rule_sets
+            .iter()
+            .map(|rs| {
+                // Find all edges where kind == InvokedBy AND target == this RuleSet.
+                // Edge direction convention: source = dependent, target = dependency.
+                // An InvokedBy edge records: source = code call site, target = RuleSet.
+                let invokers: Vec<String> = all_edges
+                    .iter()
+                    .filter(|e| e.kind == EdgeKind::InvokedBy && e.target == rs.symbol)
+                    .map(|e| e.source.0.clone())
+                    .collect();
+
+                json!({
+                    "symbol": rs.symbol.as_str(),
+                    "name": rs.name,
+                    "kind": "rule_set",
+                    "file": rs.location.file,
+                    "invoked_by": invokers,
+                })
+            })
+            .collect();
+
+        let total = engines.len();
+        let mut diag = vec![staleness_note()];
+        if engines.is_empty() {
+            diag.push(
+                "RulesInventory: no RuleSet nodes found — \
+                 rules engine nodes are populated by the W15 extractor"
+                    .to_string(),
+            );
+        }
+
+        Ok(RetrievalResult {
+            content: json!({ "engines": engines, "total": total }),
             diagnostics: diag,
         })
     }
@@ -3982,6 +4072,101 @@ mod tests {
         assert!(
             !names.contains(&"middle_fn"),
             "seed node must not appear in its own context"
+        );
+    }
+
+    // ── RulesInventory ───────────────────────────────────────────────────────
+
+    fn make_invoked_by_edge(src: &str, tgt: &str) -> Edge {
+        Edge::new(
+            SymbolId(src.to_string()),
+            SymbolId(tgt.to_string()),
+            EdgeKind::InvokedBy,
+            ResolutionTier::Parsed,
+            "test-fixture",
+        )
+    }
+
+    #[test]
+    fn rules_inventory_finds_ruleset_and_invoking_code() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node("rs::engine", "PricingRules", NodeKind::RuleSet, "rules/pricing.drl", 1),
+                make_node(
+                    "app::run_pricing",
+                    "run_pricing",
+                    NodeKind::Function,
+                    "src/pricing_service.rs",
+                    42,
+                ),
+            ])
+            .unwrap();
+        store
+            .upsert_edges(&[make_invoked_by_edge("app::run_pricing", "rs::engine")])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        let tool = RulesInventory;
+        let res = tool.invoke(&store, &json!({})).unwrap();
+
+        // One engine returned.
+        let engines = res.content["engines"].as_array().unwrap();
+        assert_eq!(engines.len(), 1, "exactly one RuleSet expected");
+        let engine = &engines[0];
+        assert_eq!(engine["name"].as_str().unwrap(), "PricingRules");
+        assert_eq!(engine["kind"].as_str().unwrap(), "rule_set");
+        assert_eq!(engine["file"].as_str().unwrap(), "rules/pricing.drl");
+
+        // The invoking function appears in `invoked_by`.
+        let invoked_by = engine["invoked_by"].as_array().unwrap();
+        assert!(
+            invoked_by.iter().any(|v| v.as_str() == Some("app::run_pricing")),
+            "invoking symbol must appear in invoked_by; got {invoked_by:?}"
+        );
+    }
+
+    #[test]
+    fn rules_inventory_empty_store_returns_empty_not_error() {
+        let store = MemStore::new();
+        let tool = RulesInventory;
+        let res = tool.invoke(&store, &json!({})).unwrap();
+
+        assert_eq!(res.content["total"].as_u64().unwrap(), 0);
+        let engines = res.content["engines"].as_array().unwrap();
+        assert!(engines.is_empty());
+        // Diagnostic must mention RulesInventory (coverage note per R3).
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("RulesInventory")),
+            "diagnostic must name the tool when no engines found"
+        );
+    }
+
+    #[test]
+    fn rules_inventory_ruleset_with_no_invokers() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[make_node(
+                "rs::orphan",
+                "OrphanRules",
+                NodeKind::RuleSet,
+                "rules/orphan.drl",
+                1,
+            )])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        let tool = RulesInventory;
+        let res = tool.invoke(&store, &json!({})).unwrap();
+
+        let engines = res.content["engines"].as_array().unwrap();
+        assert_eq!(engines.len(), 1);
+        let invoked_by = engines[0]["invoked_by"].as_array().unwrap();
+        assert!(
+            invoked_by.is_empty(),
+            "no InvokedBy edges → invoked_by must be empty"
         );
     }
 }
