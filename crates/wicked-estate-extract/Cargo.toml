@@ -171,6 +171,10 @@ google-cloud-auth         = { version = "1.13.0", optional = true }
 # tokio is required by all three cloud collectors (sync wrapper around async SDK calls).
 tokio                     = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
 
+# W15.2 XML rules extractor — DOM parsing for rules documents (DMN, Drools, BPMN, …).
+quick-xml  = { workspace = true, optional = true }
+roxmltree  = { workspace = true, optional = true }
+
 [features]
 # Enable the real AWS cloud collector (aws-config + Resource Explorer v2 + EC2 + IAM).
 cloud-aws   = ["dep:aws-config", "dep:aws-sdk-resourceexplorer2", "dep:aws-sdk-ec2",
@@ -181,3 +185,5 @@ cloud-azure = ["dep:azure_identity", "dep:azure_mgmt_resources", "dep:tokio"]
 cloud-gcp   = ["dep:google-cloud-asset-v1", "dep:google-cloud-auth", "dep:tokio"]
 # Convenience: enable all three cloud collectors.
 cloud-all   = ["cloud-aws", "cloud-azure", "cloud-gcp"]
+# W15.2 XML rules extractor — TOML path-config + roxmltree DOM traversal.
+xml-rules   = ["dep:quick-xml", "dep:roxmltree"]

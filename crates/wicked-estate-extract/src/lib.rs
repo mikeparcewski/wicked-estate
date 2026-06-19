@@ -36,6 +36,15 @@ pub use mq::MqExtractor;
 pub mod cics_sql;
 pub use cics_sql::CicsSqlExtractor;
 
+pub mod json_rules;
+pub use json_rules::{AwsConfigRuleExtractor, AzurePolicyExtractor};
+
+// W15.2 — XML rules extractor (feature-gated: `xml-rules`).
+#[cfg(feature = "xml-rules")]
+pub mod xml_rules;
+#[cfg(feature = "xml-rules")]
+pub use xml_rules::{EdgeMapping, EngineConfig, NodeMapping, XmlRulesConfig, XmlRulesExtractor};
+
 pub mod cloud;
 pub use cloud::{
     CloudCollector, CloudConfig, CloudProvider, CloudResource, MockCloudCollector,
