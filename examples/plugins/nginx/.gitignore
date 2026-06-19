@@ -1,0 +1,5 @@
+# Built plugin libraries are platform-specific build artifacts — build with ./build.sh, do not commit.
+libnginx.*
+*.so
+*.dylib
+*.dll

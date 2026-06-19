@@ -1212,11 +1212,30 @@ impl TreeSitterExtractor {
     /// when the embedded query fails to compile against the grammar (broken query = language
     /// unavailable rather than a panic at extract time).
     pub fn for_language(name: &str) -> Option<Self> {
-        let entry = LANG_TABLE.iter().find(|e| e.name == name)?;
-        let language = (entry.make_language)();
-        let query = Query::new(&language, entry.query_src).ok()?;
+        if let Some(entry) = LANG_TABLE.iter().find(|e| e.name == name) {
+            let language = (entry.make_language)();
+            let query = Query::new(&language, entry.query_src).ok()?;
+            return Some(Self {
+                lang_name: entry.name.to_string(),
+                language,
+                query,
+            });
+        }
+        // Not built in — fall back to a runtime-loaded plugin grammar (see [`crate::plugin`]).
+        let p = crate::plugin::find_by_name(name)?;
+        Self::from_grammar(&p.name, p.language.clone(), &p.query_src)
+    }
+
+    /// Build an extractor from a runtime-provided grammar + query (used by the plugin loader).
+    /// Returns `None` if the query fails to compile against the grammar.
+    pub fn from_grammar(
+        name: &str,
+        language: tree_sitter::Language,
+        query_src: &str,
+    ) -> Option<Self> {
+        let query = Query::new(&language, query_src).ok()?;
         Some(Self {
-            lang_name: entry.name.to_string(),
+            lang_name: name.to_string(),
             language,
             query,
         })
@@ -1240,10 +1259,15 @@ impl TreeSitterExtractor {
 /// a superset of what is actually wired). Returns `None` when no wired grammar claims the extension.
 pub fn extractor_for_extension(ext: &str) -> Option<TreeSitterExtractor> {
     let needle = ext.trim_start_matches('.').to_ascii_lowercase();
-    let entry = LANG_TABLE
+    if let Some(entry) = LANG_TABLE
         .iter()
-        .find(|e| e.ext.iter().any(|x| *x == needle))?;
-    TreeSitterExtractor::for_language(entry.name)
+        .find(|e| e.ext.iter().any(|x| *x == needle))
+    {
+        return TreeSitterExtractor::for_language(entry.name);
+    }
+    // Not built in — fall back to a runtime-loaded plugin grammar claiming this extension.
+    let p = crate::plugin::find_by_extension(&needle)?;
+    TreeSitterExtractor::from_grammar(&p.name, p.language.clone(), &p.query_src)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
