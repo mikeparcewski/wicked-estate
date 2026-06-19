@@ -18,11 +18,11 @@ path = "src/main.rs"
 [dependencies]
 wicked-estate-core.workspace = true
 wicked-estate-store.workspace = true
-wicked-estate-extract = { path = "../wicked-estate-extract", version = "0.10.0" }
-wicked-estate-resolve = { path = "../wicked-estate-resolve", version = "0.10.0" }
-wicked-estate-rank = { path = "../wicked-estate-rank", version = "0.10.0" }
-wicked-estate-retrieve = { path = "../wicked-estate-retrieve", version = "0.10.0" }
-wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.10.0" }
+wicked-estate-extract = { path = "../wicked-estate-extract", version = "0.11.0" }
+wicked-estate-resolve = { path = "../wicked-estate-resolve", version = "0.11.0" }
+wicked-estate-rank = { path = "../wicked-estate-rank", version = "0.11.0" }
+wicked-estate-retrieve = { path = "../wicked-estate-retrieve", version = "0.11.0" }
+wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.11.0" }
 anyhow.workspace = true
 async-trait = "0.1"
 ignore = "0.4"
