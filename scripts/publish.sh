@@ -42,13 +42,16 @@ DRY="${1:-}"
 # manifest path (vendor/tree-sitter-<suffix>/Cargo.toml). Other crates are members addressable by `-p`.
 for c in "${CRATES[@]}"; do
   echo ">>> $c"
+  # --allow-dirty: `cargo publish` regenerates each crate's Cargo.lock during its build/verify step
+  # (deps drift between releases), which trips the git-clean check on a fresh CI checkout. The lock
+  # is not part of a library's published package, so the upload still matches the tagged source.
   case "$c" in
     wicked-estate-tree-sitter-*)
       suffix="${c#wicked-estate-tree-sitter-}"
-      PUB=(cargo publish --manifest-path "crates/wicked-estate-extract/vendor/tree-sitter-${suffix}/Cargo.toml")
+      PUB=(cargo publish --manifest-path "crates/wicked-estate-extract/vendor/tree-sitter-${suffix}/Cargo.toml" --allow-dirty)
       ;;
     *)
-      PUB=(cargo publish -p "$c")
+      PUB=(cargo publish -p "$c" --allow-dirty)
       ;;
   esac
   if [ "$DRY" = "--dry-run" ]; then
