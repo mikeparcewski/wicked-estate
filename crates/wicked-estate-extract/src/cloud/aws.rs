@@ -74,8 +74,8 @@ use super::{CloudCollector, CloudConfig, CloudProvider, CloudResource};
 /// assert_eq!(normalize_aws_type("ec2:instance"), "ec2_instance");
 /// ```
 pub fn normalize_aws_type(raw: &str) -> String {
-    let normalised = if raw.starts_with("AWS::") {
-        format!("aws_{}", &raw["AWS::".len()..])
+    let normalised = if let Some(stripped) = raw.strip_prefix("AWS::") {
+        format!("aws_{stripped}")
     } else {
         raw.to_string()
     };

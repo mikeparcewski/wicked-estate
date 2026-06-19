@@ -319,7 +319,9 @@ fn expand_template(template: &str, bindings: &HashMap<String, String>) -> String
 ///
 /// `"synthetic"` → `NodeKind::Synthetic`
 /// `"other:<tag>"` → `NodeKind::Other("<tag>")`
-/// anything else → `NodeKind::Synthetic` (safe default)
+/// W15 rules-engine kinds (`"rule"`, `"rule_set"`, `"condition"`, `"action"`, `"fact"`)
+/// map to their first-class variants.
+/// Anything else → `NodeKind::Synthetic` (safe default).
 fn parse_node_kind(s: &str) -> NodeKind {
     if s == "synthetic" {
         return NodeKind::Synthetic;
@@ -327,13 +329,23 @@ fn parse_node_kind(s: &str) -> NodeKind {
     if let Some(tag) = s.strip_prefix("other:") {
         return NodeKind::Other(tag.to_string());
     }
-    NodeKind::Synthetic
+    match s {
+        // W15 rules-engine NodeKinds — usable directly in cross-graph bridge configs.
+        "rule" => NodeKind::Rule,
+        "rule_set" => NodeKind::RuleSet,
+        "condition" => NodeKind::Condition,
+        "action" => NodeKind::Action,
+        "fact" => NodeKind::Fact,
+        _ => NodeKind::Synthetic,
+    }
 }
 
 /// Parse an edge-kind string from the config.
 ///
 /// `"other:<tag>"` → `EdgeKind::Other("<tag>")`
 /// Built-in names (`"calls"`, `"imports"`, …) map to the corresponding variant.
+/// W15 rules-engine names (`"governs"`, `"evaluates"`, `"produces"`, `"invoked_by"`)
+/// map to their first-class variants so TOML rules bridge configs can use them directly.
 fn parse_edge_kind(s: &str) -> EdgeKind {
     if let Some(tag) = s.strip_prefix("other:") {
         return EdgeKind::Other(tag.to_string());
@@ -345,6 +357,11 @@ fn parse_edge_kind(s: &str) -> EdgeKind {
         "references" => EdgeKind::References,
         "extends" => EdgeKind::Extends,
         "implements" => EdgeKind::Implements,
+        // W15 rules-engine EdgeKinds — used in cross-graph bridge TOML configs.
+        "governs" => EdgeKind::Governs,
+        "evaluates" => EdgeKind::Evaluates,
+        "produces" => EdgeKind::Produces,
+        "invoked_by" => EdgeKind::InvokedBy,
         other => EdgeKind::Other(other.to_string()),
     }
 }
@@ -587,5 +604,62 @@ bus.emit("orders.created", c); // duplicate topic
         assert_eq!(out.nodes.len(), 2, "two distinct topic nodes");
         // Three matches → three edges (same target node for the duplicate, but separate edges).
         assert_eq!(out.edges.len(), 3, "three emits edges");
+    }
+
+    // W15.13 — cross-graph rules bridge via first-class EdgeKind/NodeKind.
+    const ODM_BRIDGE_RULE: &str = r#"
+[[rule]]
+name       = "ibm-odm-invoke"
+file_glob  = "**/*.java"
+pattern    = 'IlrContext\.execute\(\)|RulesRunner\.run\(\)|IlrSession\.execute\(\)'
+
+[rule.emit_node]
+id_template   = "odm:pricing-rules"
+label_capture = "name"
+kind          = "rule_set"
+node_scheme   = "ibm-odm"
+
+[rule.emit_edge]
+kind               = "invoked_by"
+target_id_template = "odm:pricing-rules"
+target_node_scheme = "ibm-odm"
+"#;
+
+    #[test]
+    fn w15_rules_bridge_emits_invoked_by_edge_and_rule_set_node() {
+        use wicked_estate_core::{EdgeKind, NodeKind};
+
+        let ex = ExtraEdgeExtractor::from_toml(ODM_BRIDGE_RULE).unwrap();
+        let sf = SourceFile {
+            path: "src/PricingService.java".into(),
+            language: Language::new("java"),
+            text: "context.execute(pricingRules); ilrCtx.IlrContext.execute();".into(),
+        };
+        let out = ex.extract_extra(&sf);
+
+        assert_eq!(out.nodes.len(), 1, "one RuleSet synthetic node");
+        assert_eq!(out.nodes[0].kind, NodeKind::RuleSet, "node kind must be RuleSet");
+
+        assert_eq!(out.edges.len(), 1, "one InvokedBy edge");
+        assert_eq!(out.edges[0].kind, EdgeKind::InvokedBy, "edge kind must be InvokedBy");
+    }
+
+    #[test]
+    fn parse_edge_kind_covers_all_w15_variants() {
+        use wicked_estate_core::EdgeKind;
+        assert_eq!(parse_edge_kind("governs"), EdgeKind::Governs);
+        assert_eq!(parse_edge_kind("evaluates"), EdgeKind::Evaluates);
+        assert_eq!(parse_edge_kind("produces"), EdgeKind::Produces);
+        assert_eq!(parse_edge_kind("invoked_by"), EdgeKind::InvokedBy);
+    }
+
+    #[test]
+    fn parse_node_kind_covers_all_w15_variants() {
+        use wicked_estate_core::NodeKind;
+        assert_eq!(parse_node_kind("rule"), NodeKind::Rule);
+        assert_eq!(parse_node_kind("rule_set"), NodeKind::RuleSet);
+        assert_eq!(parse_node_kind("condition"), NodeKind::Condition);
+        assert_eq!(parse_node_kind("action"), NodeKind::Action);
+        assert_eq!(parse_node_kind("fact"), NodeKind::Fact);
     }
 }
