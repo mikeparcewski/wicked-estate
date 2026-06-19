@@ -23,6 +23,28 @@ Tree-sitter extraction layer: turns source files into `Extraction` values (nodes
 | `TfstateCollector` | Parses `terraform.tfstate` files into resource nodes + `depends_on` edges. |
 | `JclExtractor` / `HlasmExtractor` / `RacfExtractor` | Grammar-less extractors for IBM mainframe artifacts. |
 
+## W15 — Rules engine extractors
+
+Rules engine logic is extracted into the same graph as code, enabling cross-domain queries
+(e.g. "what code calls this ODM rule set?").
+
+| Extractor | Format | NodeKinds emitted |
+|---|---|---|
+| `OdmExtractor` | IBM ODM BAL/IRL text | RuleSet, Rule, Condition, Action |
+| `CamundaDmnExtractor` | Camunda DMN XML (`.dmn`) | RuleSet, Rule, Condition, Action |
+| `DroolsGdstExtractor` | Drools GDST XML (`.gdst`) | RuleSet, Condition, Action |
+| `ClipsExtractor` | CLIPS/Jess S-expressions (`.clp`) | RuleSet, Rule, Condition, Action, Fact |
+| `ExcelRulesExtractor` | Excel decision tables (`.xlsx`) | RuleSet, Rule, Condition, Action, Fact |
+| `SalesforceFlowExtractor` | Salesforce Flow XML (`.flow-meta.xml`) | RuleSet, Rule, Condition |
+| `AzurePolicyExtractor` | Azure Policy JSON | Rule, Condition, Action |
+| `AwsConfigRuleExtractor` | AWS Config Rules JSON/YAML | Rule, Condition, Action |
+| `ExtraEdgeExtractor` | TOML regex bridge config | Synthetic → RuleSet (bridge ref) |
+
+Feature gates: `xml-rules` (DMN, GDST, Salesforce Flow), `excel-rules` (XLSX).
+
+Edge kinds: `Governs` (RuleSet→Rule), `Evaluates` (Rule→Condition), `Produces` (Rule→Action),
+`InvokedBy` (code→RuleSet via `RulesBridgeResolver` in `wicked-estate-resolve`).
+
 ## Usage
 
 ```rust

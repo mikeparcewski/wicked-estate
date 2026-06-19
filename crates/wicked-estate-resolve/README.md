@@ -24,6 +24,7 @@ Cross-file reference resolvers: binds `UnresolvedRef` values emitted by extracto
 | `MethodResolutionSynthesizer` | `Resolver` impl: Heuristic fallback (0.5) for unique callable candidates. |
 | `resolve_all(resolvers, refs, index)` | Run N resolvers, deduplicate edges keeping max confidence. |
 | `scip_edges(index_bytes, nodes)` | Parse a SCIP index protobuf; emit `ResolutionTier::Scip` edges. |
+| `RulesBridgeResolver` | W15.13 — connects code call sites to real RuleSet nodes. Handles `UnresolvedRef`s with `raw_name = "rules-engine:<scheme>"` emitted by `ExtraEdgeExtractor`. Queries all `NodeKind::RuleSet` nodes and emits `InvokedBy` edges at `ResolutionTier::Heuristic`. |
 | `SynthPrecision` | Precision measurement result for a synthesizer against a gold-labelled ref set. |
 | `SYNTH_PRECISION_FLOOR` | `0.7` — minimum acceptable synthesizer precision. |
 

@@ -23,11 +23,14 @@ Agent-facing retrieval tools: the `RetrievalTool` impls that LLM agents call to 
 | `FetchContent` | Return the exact source slice for a symbol by byte span. |
 | `ContextBundle` | One-shot seed + ranked neighbours + budgeted stubs (W12). |
 | `ContextPack` | Token-budgeted ranked elided-stub context; accepts seeds array or a name query. |
+| `RulesInventory` | Lists all rules-engine nodes (RuleSet, Rule) in the graph + the code files that invoke them via `InvokedBy` edges. Rules engine discovery for LLM agents. |
 | `SemanticSearch` | ANN search via cosine similarity over stored embeddings; requires a `VectorStore`. |
 | `Embedder` | Trait: `embed(text) -> Vec<f32>` + `dim() -> usize`. |
 | `HashEmbedder` | Deterministic bag-of-words FNV-1a embedder; zero deps, proves wiring, no semantic quality. |
 | `reciprocal_rank_fusion(lists, k)` | RRF over multiple ranked `SymbolId` lists; `k=60.0` default. |
 | `render_context(store, seeds, budget)` | Token-budgeted elided-stub string for LLM prompts. |
+
+For rules queries: use `edge_kinds=["invoked_by"]` with `TraverseGraph` to trace code→rules connections, `["governs"]` for ruleset→rule structure, `["evaluates"]` / `["produces"]` for rule internals.
 
 ## Usage
 
