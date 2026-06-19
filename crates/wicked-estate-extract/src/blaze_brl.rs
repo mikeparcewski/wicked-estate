@@ -160,7 +160,13 @@ impl Extractor for BlazeBrlExtractor {
 
             // Condition: from the `if`/`when`/`whenever` opener up to `then` (or end of body).
             if let Some(iff) = if_m {
-                let end_rel = then_m.map(|t| t.start()).unwrap_or(body_scan.len());
+                // Guard against `then` preceding the if/when opener (malformed): a `then` start
+                // before `iff.end()` would make `[iff.start()..end_rel]` an invalid range and panic.
+                // Such a `then` is not the divider — fall back to the body end.
+                let end_rel = then_m
+                    .map(|t| t.start())
+                    .filter(|&start| start >= iff.end())
+                    .unwrap_or(body_scan.len());
                 let cond = content[body_base + iff.start()..body_base + end_rel]
                     .trim()
                     .to_string();
@@ -173,7 +179,10 @@ impl Extractor for BlazeBrlExtractor {
                         NodeKind::Condition,
                         format!("{name}::if"),
                         lang.clone(),
-                        Location::new(&file.path, Span::ZERO),
+                        Location::new(
+                            &file.path,
+                            byte_span(body_base + iff.start(), body_base + end_rel),
+                        ),
                     );
                     cn.signature = Some(cond);
                     nodes.push(cn);
@@ -202,7 +211,7 @@ impl Extractor for BlazeBrlExtractor {
                         NodeKind::Action,
                         format!("{name}::then"),
                         lang.clone(),
-                        Location::new(&file.path, Span::ZERO),
+                        Location::new(&file.path, byte_span(body_base + t.end(), body_end)),
                     );
                     an.signature = Some(action);
                     nodes.push(an);
@@ -395,6 +404,25 @@ mod tests {
             rules,
             vec!["Real"],
             "only the real rule, no comment ghost: {rules:?}"
+        );
+    }
+
+    #[test]
+    fn then_before_if_does_not_panic() {
+        // Same out-of-order class as the gemini #34 finding on DRL: `then` before the if/when opener
+        // would make the condition range invalid and panic. Must not panic.
+        let src = r#"ruleset R {
+  rule Malformed {
+    then set ok to true if applicant.score < 500 ;
+  }
+}
+"#;
+        let ex = BlazeBrlExtractor::new().extract(&brl(src)).unwrap();
+        assert!(
+            ex.nodes
+                .iter()
+                .any(|n| n.kind == NodeKind::Rule && n.name == "Malformed"),
+            "the rule is still emitted without panicking"
         );
     }
 }
