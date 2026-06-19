@@ -309,7 +309,7 @@ fn extract_bal(file: &SourceFile) -> Result<Extraction> {
                                 NodeKind::Condition,
                                 cond_name,
                                 Language::new("ibm-odm-bal"),
-                                Location::new(&file.path, line_span(j)),
+                                Location::new(&file.path, Span::ZERO),
                             );
                             cond_node.signature = Some(cond_text);
                             nodes.push(cond_node);
@@ -351,7 +351,7 @@ fn extract_bal(file: &SourceFile) -> Result<Extraction> {
                                 NodeKind::Action,
                                 action_name,
                                 Language::new("ibm-odm-bal"),
-                                Location::new(&file.path, line_span(j)),
+                                Location::new(&file.path, Span::ZERO),
                             );
                             action_node.signature = Some(action_text);
                             nodes.push(action_node);

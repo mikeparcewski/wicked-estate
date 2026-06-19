@@ -65,7 +65,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use wicked_estate_core::{
     Edge, EdgeKind, Language, Location, Node, NodeKind, Provenance, ResolutionTier, SourceFile,
-    Span, Symbol,
+    Span, Symbol, UnresolvedRef,
 };
 
 // ── TOML config schema ────────────────────────────────────────────────────────
@@ -219,6 +219,7 @@ impl ExtraEdgeExtractor {
         // Deduplicate synthetic nodes across rules within this file: id → Node.
         let mut node_map: HashMap<String, Node> = HashMap::new();
         let mut edges: Vec<Edge> = Vec::new();
+        let mut unresolved_refs: Vec<UnresolvedRef> = Vec::new();
 
         for rule in &self.rules {
             if !glob_matches(&rule.cfg.file_glob, &file.path) {
@@ -274,12 +275,35 @@ impl ExtraEdgeExtractor {
                     edge.location = Some(Location::new(&file.path, Span::ZERO));
                     edges.push(edge);
                 }
+
+                // ── Emit bridge ref (rules-engine NodeKind) ─────────────────────────
+                if let Some(ref nt) = rule.cfg.emit_node {
+                    let is_rules_engine = matches!(
+                        parse_node_kind(&nt.kind),
+                        NodeKind::Rule
+                            | NodeKind::RuleSet
+                            | NodeKind::Condition
+                            | NodeKind::Action
+                            | NodeKind::Fact
+                    );
+                    if is_rules_engine {
+                        let scheme = nt.node_scheme.as_deref().unwrap_or(&rule.cfg.name);
+                        let uref = UnresolvedRef::new(
+                            file_symbol.clone(),
+                            format!("rules-engine:{scheme}"),
+                            EdgeKind::InvokedBy,
+                            Location::new(&file.path, Span::ZERO),
+                        );
+                        unresolved_refs.push(uref);
+                    }
+                }
             }
         }
 
         ExtraExtraction {
             nodes: node_map.into_values().collect(),
             edges,
+            unresolved_refs,
         }
     }
 }
@@ -291,6 +315,9 @@ pub struct ExtraExtraction {
     pub nodes: Vec<Node>,
     /// Domain edges from the file node to the synthetic targets.
     pub edges: Vec<Edge>,
+    /// UnresolvedRefs emitted by bridge rules (rules-engine kinds).
+    /// These are passed to RulesBridgeResolver in the resolution phase.
+    pub unresolved_refs: Vec<UnresolvedRef>,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -615,7 +642,7 @@ pattern    = 'IlrContext\.execute\(\)|RulesRunner\.run\(\)|IlrSession\.execute\(
 
 [rule.emit_node]
 id_template   = "odm:pricing-rules"
-label_capture = "name"
+label_capture = ""
 kind          = "rule_set"
 node_scheme   = "ibm-odm"
 
@@ -642,6 +669,15 @@ target_node_scheme = "ibm-odm"
 
         assert_eq!(out.edges.len(), 1, "one InvokedBy edge");
         assert_eq!(out.edges[0].kind, EdgeKind::InvokedBy, "edge kind must be InvokedBy");
+
+        assert!(
+            !out.unresolved_refs.is_empty(),
+            "bridge rule must emit at least one UnresolvedRef"
+        );
+        assert!(
+            out.unresolved_refs[0].raw_name.starts_with("rules-engine:"),
+            "UnresolvedRef raw_name must start with 'rules-engine:'"
+        );
     }
 
     #[test]
