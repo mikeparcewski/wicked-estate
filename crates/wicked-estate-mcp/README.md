@@ -1,8 +1,45 @@
 # wicked-estate-mcp
 
-MCP server exposing the [wicked-estate](https://github.com/mikeparcewski/wicked-estate) retrieval tools.
+MCP stdio server that exposes the wicked-estate retrieval tools to LLM agents over JSON-RPC 2.0.
 
-A Model Context Protocol server that hands an LLM agent the wicked-estate retrieval surface — definitions, who-calls-X, blast-radius, scoped context, search — over a code + infrastructure estate graph. Point your MCP-capable client at it and ask questions about a codebase.
+## What it does
+
+- Implements the MCP stdio transport (newline-delimited JSON-RPC 2.0) by hand — synchronous, no async overhead on a local stdio server.
+- Routes `tools/list` and `tools/call` to the six `RetrievalTool` impls in `wicked-estate-retrieve`.
+- Injects a W7.4 staleness diagnostic (`STALENESS: commits_behind=N`) into every `tools/call` response when the server can determine commits landed since the last index run.
+- Advertises `SemanticSearch` in `tools/list` only when a `VectorStore` is wired in at startup.
+- `handle_request` and `handle_request_ctx` are pure functions (no I/O) so all routing logic is fully unit-tested without a running server.
+
+## Key types / traits
+
+| Item | Description |
+|---|---|
+| `handle_request(store, req)` | Route one JSON-RPC 2.0 request; returns a `serde_json::Value`. Pure, no I/O. |
+| `handle_request_ctx(store, req, ctx)` | Like `handle_request` but injects `McpContext` (staleness + semantic flag). |
+| `McpContext` | Carries `commits_behind: Option<u64>` and `has_semantic_search: bool` from server startup. |
+| `all_tools()` | Returns the six base `RetrievalTool` instances (no `SemanticSearch`). |
+| `all_tools_with_semantic(vec_store)` | Full registry including `SemanticSearch` backed by the supplied `VectorStore`. |
+| `input_schema(name)` | Returns the JSON Schema `inputSchema` for a named tool; used by `tools/list`. |
+
+## Usage
+
+```rust
+use wicked_estate_mcp::{handle_request_ctx, McpContext};
+
+let ctx = McpContext {
+    commits_behind: wicked_estate::commits_behind().ok(),
+    has_semantic_search: false,
+};
+// Per-line JSON-RPC loop:
+let response = handle_request_ctx(&store, &request_value, &ctx);
+if !response.is_null() {
+    println!("{}", response);
+}
+```
+
+## Crate features
+
+No optional feature flags. The `wicked-estate-mcp` binary is built from `src/main.rs`; the library surface is the pure routing logic in `src/lib.rs`.
 
 Part of **[wicked-estate](https://github.com/mikeparcewski/wicked-estate)** — a code + infrastructure
 estate graph for LLM agents (definitions, who-calls-X, blast-radius, scoped context). Local-first,
