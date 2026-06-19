@@ -45,6 +45,10 @@ pub use json_rules::{AwsConfigRuleExtractor, AzurePolicyExtractor};
 pub mod odm;
 pub use odm::OdmExtractor;
 
+// W15.9 — Drools DRL (`.drl`) heuristic rules extractor (no feature gate; pure regex).
+pub mod drl;
+pub use drl::DrlExtractor;
+
 // W15.2 — XML rules extractor (feature-gated: `xml-rules`).
 #[cfg(feature = "xml-rules")]
 pub mod xml_rules;
