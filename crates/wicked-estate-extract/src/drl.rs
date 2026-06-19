@@ -90,6 +90,7 @@ impl Extractor for DrlExtractor {
 
         // 1. package → RuleSet
         let ruleset_sym = RE_PACKAGE.captures(text).map(|c| {
+            let m = c.get(0).unwrap();
             let pkg = c[1].to_string();
             let sym = Symbol::synthetic("drl", format!("{}::package::{}", file.path, pkg)).id();
             let mut n = Node::new(
@@ -97,7 +98,7 @@ impl Extractor for DrlExtractor {
                 NodeKind::RuleSet,
                 pkg.clone(),
                 Language::new(LANG),
-                Location::new(&file.path, Span::ZERO),
+                Location::new(&file.path, byte_span(m.start(), m.end())),
             );
             n.signature = Some(format!("package {pkg}"));
             nodes.push(n);
@@ -155,7 +156,13 @@ impl Extractor for DrlExtractor {
 
             // when … (up to `then`) → Condition
             if let Some(w) = when_m {
-                let cond_end = then_m.map(|t| t.start()).unwrap_or(body.len());
+                // Guard against a malformed rule where `then` precedes `when`: a `then` start before
+                // `w.end()` would make `[w.end()..cond_end]` an invalid (start>end) range and panic.
+                // Such a `then` is not this condition's terminator — fall back to the body end.
+                let cond_end = then_m
+                    .map(|t| t.start())
+                    .filter(|&start| start >= w.end())
+                    .unwrap_or(body.len());
                 let cond_text = content[header_end + w.end()..header_end + cond_end]
                     .trim()
                     .to_string();
@@ -167,7 +174,10 @@ impl Extractor for DrlExtractor {
                     NodeKind::Condition,
                     format!("{name}::when"),
                     Language::new(LANG),
-                    Location::new(&file.path, Span::ZERO),
+                    Location::new(
+                        &file.path,
+                        byte_span(header_end + w.end(), header_end + cond_end),
+                    ),
                 );
                 cn.signature = Some(cond_text);
                 nodes.push(cn);
@@ -192,7 +202,10 @@ impl Extractor for DrlExtractor {
                     NodeKind::Action,
                     format!("{name}::then"),
                     Language::new(LANG),
-                    Location::new(&file.path, Span::ZERO),
+                    Location::new(
+                        &file.path,
+                        byte_span(header_end + t.end(), header_end + body_len),
+                    ),
                 );
                 an.signature = Some(action_text);
                 nodes.push(an);
@@ -425,6 +438,28 @@ end
             ex.nodes.iter().filter(|n| n.kind == NodeKind::Rule).count(),
             2,
             "both rules detected"
+        );
+    }
+
+    #[test]
+    fn then_before_when_does_not_panic() {
+        // gemini-code-assist review on #34: a malformed rule with `then` before `when` made
+        // cond_end < w.end(), an invalid slice range → runtime panic during `index`. Must not panic.
+        let src = r#"package com.x
+
+rule "Malformed"
+then
+    $a.act();
+when
+    $a : Account( x > 1 )
+end
+"#;
+        let ex = DrlExtractor::new().extract(&drl(src)).unwrap();
+        assert!(
+            ex.nodes
+                .iter()
+                .any(|n| n.kind == NodeKind::Rule && n.name == "Malformed"),
+            "the rule is still emitted without panicking"
         );
     }
 }
