@@ -102,11 +102,20 @@ pub struct CamundaDmnExtractor(XmlRulesExtractor);
 
 impl CamundaDmnExtractor {
     /// Build the extractor from the embedded TOML config.
-    /// Fails only if the embedded config is malformed (compile-time defect — never at runtime).
-    pub fn new() -> Result<Self> {
+    ///
+    /// # Panics
+    ///
+    /// Panics if the embedded config is malformed — a compile-time defect, never at runtime.
+    pub fn new() -> Self {
         let inner = XmlRulesExtractor::from_toml(DMN_CONFIG)
-            .map_err(|e| wicked_estate_core::Error::Extraction(e.to_string()))?;
-        Ok(Self(inner))
+            .expect("CamundaDmnExtractor embedded config must be valid");
+        Self(inner)
+    }
+}
+
+impl Default for CamundaDmnExtractor {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -117,5 +126,53 @@ impl Extractor for CamundaDmnExtractor {
 
     fn extract(&self, file: &SourceFile) -> Result<Extraction> {
         self.0.extract(file)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use wicked_estate_core::{Extractor, Language, NodeKind, SourceFile};
+
+    use super::CamundaDmnExtractor;
+
+    #[test]
+    fn camunda_dmn_new_does_not_panic() {
+        let _ = CamundaDmnExtractor::new();
+    }
+
+    #[test]
+    fn camunda_dmn_extracts_decision_table_from_fixture() {
+        const FIXTURE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="https://www.omg.org/spec/DMN/20191111/MODEL/"
+             name="LoanApproval" id="loan-approval">
+  <decision name="LoanDecision" id="loan-decision">
+    <decisionTable id="loan-dt">
+      <input label="Income"/>
+      <output label="Approved"/>
+      <rule id="rule-1">
+        <inputEntry id="ie-1"><text>&gt;50000</text></inputEntry>
+        <outputEntry id="oe-1"><text>true</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+</definitions>"#;
+
+        let sf = SourceFile {
+            path: "loan.dmn".to_string(),
+            language: Language::new("xml-rules:camunda-dmn"),
+            text: FIXTURE.to_string(),
+        };
+        let extraction = CamundaDmnExtractor::new()
+            .extract(&sf)
+            .expect("extraction must succeed");
+
+        assert!(
+            extraction.nodes.iter().any(|n| n.kind == NodeKind::RuleSet),
+            "expected at least one RuleSet node"
+        );
+        assert!(
+            extraction.nodes.iter().any(|n| n.kind == NodeKind::Rule),
+            "expected at least one Rule node"
+        );
     }
 }

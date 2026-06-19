@@ -820,8 +820,7 @@ fn dmn_fixture_extracts_decisions_and_decision_tables() {
     let text = std::fs::read_to_string(&fixture_path)
         .expect("tests/fixtures/dmn/loan_decision.dmn must exist");
 
-    let extractor = CamundaDmnExtractor::new()
-        .expect("CamundaDmnExtractor::new() must not fail with valid embedded config");
+    let extractor = CamundaDmnExtractor::new();
 
     let file = SourceFile {
         path: fixture_path.to_string_lossy().to_string(),
