@@ -79,6 +79,17 @@ pub enum NodeKind {
     Import,
     /// A synthetic node injected by a drop-in extractor (event-bus topic, capability, …).
     Synthetic,
+    // ── Rules engine entities (W15) ──────────────────────────────────────────
+    /// An individual rule (if/then, when/then, allow/deny, decision row).
+    Rule,
+    /// A rule container: package, ruleset, policy, decision model.
+    RuleSet,
+    /// The LHS / when / if / condition clause of a rule.
+    Condition,
+    /// The RHS / then / effect / action clause of a rule.
+    Action,
+    /// An entity or fact type the rule operates on (data model).
+    Fact,
     Other(String),
 }
 

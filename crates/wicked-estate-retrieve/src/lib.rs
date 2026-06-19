@@ -1219,6 +1219,11 @@ fn render_stub(node: &wicked_estate_core::Node) -> String {
         NodeKind::Import => "import",
         NodeKind::File => "file",
         NodeKind::Synthetic => "synthetic",
+        NodeKind::Rule => "rule",
+        NodeKind::RuleSet => "ruleset",
+        NodeKind::Condition => "condition",
+        NodeKind::Action => "action",
+        NodeKind::Fact => "fact",
         NodeKind::Other(s) => s.as_str(),
     };
 

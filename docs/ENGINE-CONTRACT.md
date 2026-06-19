@@ -61,7 +61,30 @@ Read methods (`get_node`, `find_symbols`, `neighbors`, `traverse`, `stats`) are 
 (`max_depth` + `max_nodes` required; unbounded whole-graph walks are out — see research/09).
 Any new store MUST pass `wicked_estate_core::conformance::graph_store_suite`.
 
-## 5. Wire contracts (stubs — filled in their waves)
+## 5. Rules engine node and edge kinds (W15)
+
+Rules engine entities use first-class `NodeKind` and `EdgeKind` variants:
+
+| NodeKind | Meaning |
+|---|---|
+| `Rule` | An individual rule (if/then, when/then, allow/deny, decision row) |
+| `RuleSet` | A rule container: package, ruleset, policy, decision model |
+| `Condition` | The LHS / when / if clause of a rule |
+| `Action` | The RHS / then / effect clause of a rule |
+| `Fact` | An entity or fact type the rule operates on (data model) |
+
+| EdgeKind | Direction | Meaning |
+|---|---|---|
+| `Governs` | `Rule → code symbol` | Rule constrains or applies to a code symbol |
+| `Evaluates` | `Rule → Fact` | Rule reads/matches on a Fact type (LHS binding) |
+| `Produces` | `Rule → Fact` | Rule asserts or modifies a Fact type (RHS output) |
+| `InvokedBy` | `code call site → RuleSet` | Code triggers the rules engine at this call site |
+
+Edge direction follows the standard invariant: `source` = dependent, `target` = dependency.
+- `InvokedBy`: the call site (source) depends on the RuleSet (target).
+- `Governs`: the Rule (source) governs the code symbol (target) — blast-radius of the symbol surfaces the Rule as a dependent.
+
+## 6. Wire contracts (stubs — filled in their waves)
 
 - **MCP tools** (W4.3): the agent surface is `SearchEntity` / `TraverseGraph` / `RetrieveEntity`
   (+ `blast_radius`), each a `RetrievalTool`. Tools return `RetrievalResult { content, diagnostics }`

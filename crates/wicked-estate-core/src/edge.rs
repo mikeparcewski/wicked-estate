@@ -102,6 +102,15 @@ pub enum EdgeKind {
     Overrides,
     HasType,
     Returns,
+    // ── Rules engine relationships (W15) ─────────────────────────────────────
+    /// A Rule constrains or applies to a code symbol or Fact.
+    Governs,
+    /// A Rule matches on / reads from a Fact type (LHS binding).
+    Evaluates,
+    /// A Rule asserts or modifies a Fact type (RHS output).
+    Produces,
+    /// A code call site triggers a RuleSet (code → rules engine boundary).
+    InvokedBy,
     Other(String),
 }
 
