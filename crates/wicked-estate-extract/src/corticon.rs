@@ -135,35 +135,39 @@ impl Extractor for CorticonExtractor {
         rs_node.signature = Some(format!("Corticon rulesheet {ruleset_name}"));
         nodes.push(rs_node);
 
-        // ruleset/@vocabulary → Fact (the referenced .ecore vocabulary)
-        if let Some(ruleset) = doc.descendants().find(|n| n.tag_name().name() == "ruleset") {
-            if let Some(vocab) = ruleset.attribute("vocabulary") {
-                // e.g. "Maintenance.ecore#/" → "Maintenance.ecore"
-                let vocab_name = vocab.split('#').next().unwrap_or(vocab).trim();
-                if !vocab_name.is_empty() {
-                    let fsym = Symbol::synthetic(
-                        "corticon",
-                        format!("{}::fact::{}", file.path, vocab_name),
-                    )
-                    .id();
-                    let mut fnode = Node::new(
-                        fsym.clone(),
-                        NodeKind::Fact,
-                        vocab_name,
-                        lang.clone(),
-                        loc(),
-                    );
-                    fnode.signature = Some(format!("vocabulary {vocab_name}"));
-                    nodes.push(fnode);
-                    local_edges.push(Edge::new(
-                        ruleset_sym.clone(),
-                        fsym,
-                        EdgeKind::Contains,
-                        ResolutionTier::Heuristic,
-                        "corticon",
-                    ));
-                }
+        // ruleset/@vocabulary → Fact (the referenced .ecore vocabulary). Iterate ALL <ruleset>
+        // elements (deduped) so a multi-ruleset file does not lose vocabularies after the first.
+        let mut seen_vocab = std::collections::BTreeSet::new();
+        for ruleset in doc
+            .descendants()
+            .filter(|n| n.tag_name().name() == "ruleset")
+        {
+            let Some(vocab) = ruleset.attribute("vocabulary") else {
+                continue;
+            };
+            // e.g. "Maintenance.ecore#/" → "Maintenance.ecore"
+            let vocab_name = vocab.split('#').next().unwrap_or(vocab).trim();
+            if vocab_name.is_empty() || !seen_vocab.insert(vocab_name.to_string()) {
+                continue;
             }
+            let fsym =
+                Symbol::synthetic("corticon", format!("{}::fact::{}", file.path, vocab_name)).id();
+            let mut fnode = Node::new(
+                fsym.clone(),
+                NodeKind::Fact,
+                vocab_name,
+                lang.clone(),
+                loc(),
+            );
+            fnode.signature = Some(format!("vocabulary {vocab_name}"));
+            nodes.push(fnode);
+            local_edges.push(Edge::new(
+                ruleset_sym.clone(),
+                fsym,
+                EdgeKind::Contains,
+                ResolutionTier::Heuristic,
+                "corticon",
+            ));
         }
 
         // Each <rule> that carries condition/action logic → Rule (positional).

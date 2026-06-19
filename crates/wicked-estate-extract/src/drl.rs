@@ -76,7 +76,15 @@ impl Extractor for DrlExtractor {
     }
 
     fn extract(&self, file: &SourceFile) -> Result<Extraction> {
-        let text = &file.text;
+        // `content`: comments blanked (keywords inside a comment are not rules).
+        // `scan`: also string literals masked (a `when`/`then`/`end` inside a quoted value must not
+        // split a rule). Both are length-preserving, so offsets found on `scan` index `content` for
+        // human-readable signatures. All structural matching runs on `scan`.
+        let content = crate::rules_text::blank_c_comments(&file.text);
+        let scan = crate::rules_text::mask_strings(&content);
+        // Names/signatures come from `content` (quoted rule names survive); body keyword/boundary
+        // search runs on `scan` (a `when`/`then`/`end` inside a string can't split a rule).
+        let text = content.as_str();
         let mut nodes = Vec::new();
         let mut local_edges = Vec::new();
 
@@ -108,10 +116,17 @@ impl Extractor for DrlExtractor {
                 continue;
             }
 
-            // The rule body runs from the header to the first `end` line that follows it.
+            // The rule body runs from the header to the first `end` line — but never past the next
+            // `rule`/`declare` header, so a rule missing its `end` cannot swallow the following one.
             let header_end = m.end();
-            let rest = &text[header_end..];
-            let body_len = RE_END.find(rest).map(|e| e.start()).unwrap_or(rest.len());
+            let rest = &scan[header_end..];
+            let mut body_len = RE_END.find(rest).map(|e| e.start()).unwrap_or(rest.len());
+            if let Some(nr) = RE_RULE.find(rest) {
+                body_len = body_len.min(nr.start());
+            }
+            if let Some(nd) = RE_DECLARE.find(rest) {
+                body_len = body_len.min(nd.start());
+            }
             let body = &rest[..body_len];
 
             let rule_sym = Symbol::synthetic("drl", format!("{}::rule::{}", file.path, name)).id();
@@ -141,7 +156,9 @@ impl Extractor for DrlExtractor {
             // when … (up to `then`) → Condition
             if let Some(w) = when_m {
                 let cond_end = then_m.map(|t| t.start()).unwrap_or(body.len());
-                let cond_text = body[w.end()..cond_end].trim().to_string();
+                let cond_text = content[header_end + w.end()..header_end + cond_end]
+                    .trim()
+                    .to_string();
                 let cond_sym =
                     Symbol::synthetic("drl", format!("{}::condition::{}::when", file.path, name))
                         .id();
@@ -165,7 +182,9 @@ impl Extractor for DrlExtractor {
 
             // then … (to end) → Action
             if let Some(t) = then_m {
-                let action_text = body[t.end()..].trim().to_string();
+                let action_text = content[header_end + t.end()..header_end + body_len]
+                    .trim()
+                    .to_string();
                 let act_sym =
                     Symbol::synthetic("drl", format!("{}::action::{}::then", file.path, name)).id();
                 let mut an = Node::new(
@@ -336,6 +355,76 @@ end
                 .unwrap_or("")
                 .contains("score >= 700"),
             "condition should carry the when-clause text"
+        );
+    }
+
+    #[test]
+    fn rule_keyword_inside_comment_is_not_a_rule() {
+        // Antagonist M1: a `rule "…"` inside a block/line comment must NOT become a Rule.
+        let src = r#"package com.x
+
+/* rule "Ghost In Block Comment"
+   when then end */
+// rule "Ghost In Line Comment"
+
+rule "Real"
+when
+    $a : Account( open == true )
+then
+    $a.flag();
+end
+"#;
+        let ex = DrlExtractor::new().extract(&drl(src)).unwrap();
+        let rules: Vec<_> = ex
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Rule)
+            .map(|n| n.name.as_str())
+            .collect();
+        assert_eq!(
+            rules,
+            vec!["Real"],
+            "only the real rule, no comment ghosts: {rules:?}"
+        );
+    }
+
+    #[test]
+    fn rule_missing_end_does_not_swallow_the_next_rule() {
+        // Antagonist m3: a rule missing its `end` must not absorb the following rule's text.
+        let src = r#"package com.x
+
+rule "First"
+when
+    $a : Account( a > 1 )
+then
+    $a.first();
+
+rule "Second"
+when
+    $b : Account( b > 2 )
+then
+    $b.second();
+end
+"#;
+        let ex = DrlExtractor::new().extract(&drl(src)).unwrap();
+        let first_cond = ex
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Condition && n.name == "First::when")
+            .expect("First condition");
+        assert!(
+            !first_cond
+                .signature
+                .as_deref()
+                .unwrap_or("")
+                .contains("Account( b > 2 )"),
+            "First's condition must not swallow Second's body: {:?}",
+            first_cond.signature
+        );
+        assert_eq!(
+            ex.nodes.iter().filter(|n| n.kind == NodeKind::Rule).count(),
+            2,
+            "both rules detected"
         );
     }
 }

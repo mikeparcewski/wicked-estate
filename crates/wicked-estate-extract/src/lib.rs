@@ -45,6 +45,9 @@ pub use json_rules::{AwsConfigRuleExtractor, AzurePolicyExtractor};
 pub mod odm;
 pub use odm::OdmExtractor;
 
+// Shared length-preserving comment/string maskers for the heuristic rules extractors.
+mod rules_text;
+
 // W15.9 — Drools DRL (`.drl`) heuristic rules extractor (no feature gate; pure regex).
 pub mod drl;
 pub use drl::DrlExtractor;

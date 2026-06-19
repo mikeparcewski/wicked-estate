@@ -14,13 +14,16 @@
 //! `RulesInventory` can surface. Mapping:
 //!
 //! - `package authz`                     → [`NodeKind::RuleSet`]
-//! - top-level `allow`/`deny`/named rule → [`NodeKind::Rule`]
+//! - top-level `allow`/`deny`/named rule → [`NodeKind::Rule`] (clauses sharing a name dedup)
 //! - rule body `{ … }` (or `if …`)       → [`NodeKind::Condition`]
 //! - rule head value (`:= v` / `= v` / `contains x`) → [`NodeKind::Action`]
-//! - `input.*` / `data.*` references     → [`NodeKind::Fact`]
+//! - `input.*` / `data.*` references     → [`NodeKind::Fact`] (import targets excluded)
 //!
-//! All edges carry [`ResolutionTier::Heuristic`]; all IDs use `Symbol::synthetic` (ADR-002). It
-//! captures rule STRUCTURE, not full Rego datalog semantics.
+//! Structural scanning runs over a comment-blanked, string-masked copy of the source (see
+//! [`crate::rules_text`]) so keywords/braces inside comments or string literals can't mislead, and
+//! the idiomatic multi-line `allow\n{ … }` rule form is recognized. All edges carry
+//! [`ResolutionTier::Heuristic`]; all IDs use `Symbol::synthetic` (ADR-002). It captures rule
+//! STRUCTURE, not full Rego datalog semantics.
 
 use regex::Regex;
 use std::collections::BTreeSet;
@@ -58,29 +61,6 @@ fn byte_span(start: usize, end: usize) -> Span {
     }
 }
 
-/// Given the byte index of an opening `{` in `text`, return (content_without_braces, end_byte_after
-/// matching `}`). Falls back to end-of-text if unbalanced.
-fn brace_block(text: &str, open: usize) -> (String, usize) {
-    let bytes = text.as_bytes();
-    let mut depth = 0usize;
-    let mut i = open;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    let content = text[open + 1..i].trim().to_string();
-                    return (content, i + 1);
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    (text[open..].trim().to_string(), text.len())
-}
-
 /// Heuristic regex extractor for the OPA/Rego rules layer.
 pub struct RegoRulesExtractor;
 
@@ -97,17 +77,17 @@ impl Default for RegoRulesExtractor {
 }
 
 impl Extractor for RegoRulesExtractor {
-    fn languages(&self) -> Vec<Language> {
-        vec![Language::new(LANG)]
-    }
-
     fn extract(&self, file: &SourceFile) -> Result<Extraction> {
-        let text = &file.text;
+        // `content`: comments blanked. `scan`: also string literals masked. Structural matching runs
+        // on `scan` (so `{`/`if`/`:=` inside a string or comment can't mislead); signatures slice
+        // from `content`. Both are length-preserving, so offsets are interchangeable.
+        let content = crate::rules_text::blank_hash_comments(&file.text);
+        let scan = crate::rules_text::mask_strings(&content);
         let mut nodes = Vec::new();
         let mut local_edges = Vec::new();
 
         // 1. package → RuleSet
-        let ruleset_sym = RE_PACKAGE.captures(text).map(|c| {
+        let ruleset_sym = RE_PACKAGE.captures(&scan).map(|c| {
             let pkg = c[1].to_string();
             let sym = Symbol::synthetic("rego", format!("{}::package::{}", file.path, pkg)).id();
             let mut n = Node::new(
@@ -122,9 +102,11 @@ impl Extractor for RegoRulesExtractor {
             sym
         });
 
-        // 2. Collect top-level rule-head match positions (skipping package/import keywords).
-        let heads: Vec<(usize, usize, String, String)> = RE_RULE_HEAD
-            .captures_iter(text)
+        // 2. Top-level rule-head candidates (column-0 lines). A candidate is a rule if its head line
+        //    carries a marker, it is a `default` rule, OR a `{` opens on the next non-blank line
+        //    (the idiomatic multi-line `allow\n{ … }` form). (start, head_end, name, rest, extent).
+        let candidates: Vec<(usize, usize, String, String, bool)> = RE_RULE_HEAD
+            .captures_iter(&scan)
             .filter_map(|c| {
                 let m = c.get(0).unwrap();
                 let name = c.get(2).unwrap().as_str().to_string();
@@ -135,29 +117,34 @@ impl Extractor for RegoRulesExtractor {
                     return None;
                 }
                 let rest = c.get(3).map(|r| r.as_str().to_string()).unwrap_or_default();
-                // A rule head either has a body (`{`), an `if`, an assignment, a `contains`, or a
-                // ref/partial (`[`). A bare top-level identifier with none of these is not a rule.
-                let looks_like_rule = rest.contains('{')
+                Some((m.start(), m.end(), name, rest, c.get(1).is_some()))
+            })
+            .collect();
+
+        let heads: Vec<(usize, usize, String, String, usize)> = candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (start, head_end, name, rest, is_default))| {
+                let extent_end = candidates.get(i + 1).map(|h| h.0).unwrap_or(scan.len());
+                let next_line_brace = scan[*head_end..extent_end].trim_start().starts_with('{');
+                let looks_like_rule = *is_default
+                    || rest.contains('{')
                     || rest.contains(" if")
                     || rest.contains(":=")
                     || rest.contains('=')
                     || rest.contains("contains")
                     || rest.contains('[')
-                    || c.get(1).is_some(); // `default <name>` is always a rule
-                if !looks_like_rule {
-                    return None;
-                }
-                Some((m.start(), m.end(), name, rest))
+                    || next_line_brace;
+                looks_like_rule.then(|| (*start, *head_end, name.clone(), rest.clone(), extent_end))
             })
             .collect();
 
         // 3. Per rule head: Rule + (Condition from body) + (Action from head value).
         let mut seen_rule = BTreeSet::new();
-        for (idx, (start, head_end, name, rest)) in heads.iter().enumerate() {
-            let extent_end = heads.get(idx + 1).map(|h| h.0).unwrap_or(text.len());
+        for (idx, (start, head_end, name, _rest, extent_end)) in heads.iter().enumerate() {
+            // Head line, strings intact, for signatures + value/condition detection.
+            let head_line = content[*start..*head_end].trim();
 
-            // Dedup rules sharing a name (Rego allows multiple `allow { … }` clauses) into one Rule
-            // node; each clause still contributes its own Condition/Action below.
             let rule_sym = Symbol::synthetic("rego", format!("{}::rule::{}", file.path, name)).id();
             if seen_rule.insert(name.clone()) {
                 let mut rule_node = Node::new(
@@ -167,7 +154,7 @@ impl Extractor for RegoRulesExtractor {
                     Language::new(LANG),
                     Location::new(&file.path, byte_span(*start, *head_end)),
                 );
-                rule_node.signature = Some(format!("{name}{rest}").trim().to_string());
+                rule_node.signature = Some(head_line.to_string());
                 nodes.push(rule_node);
                 if let Some(rs) = &ruleset_sym {
                     local_edges.push(Edge::new(
@@ -181,47 +168,23 @@ impl Extractor for RegoRulesExtractor {
             }
 
             // Action: explicit head value (`:= v` / standalone `= v`) or `contains x`.
-            let action_text = if let Some(p) = rest.find(":=") {
-                Some(
-                    rest[p + 2..]
-                        .split('{')
-                        .next()
-                        .unwrap_or("")
-                        .trim()
-                        .to_string(),
-                )
-            } else if let Some(p) = rest.find("contains") {
-                Some(
-                    rest[p..]
-                        .split(" if")
-                        .next()
-                        .unwrap_or("")
-                        .split('{')
-                        .next()
-                        .unwrap_or("")
-                        .trim()
-                        .to_string(),
-                )
+            let action_text = if let Some(p) = head_line.find(":=") {
+                Some(value_before_brace(&head_line[p + 2..]))
+            } else if let Some(p) = head_line.find("contains") {
+                let seg = head_line[p..].split(" if").next().unwrap_or("");
+                Some(value_before_brace(seg))
             } else {
-                // standalone `=` (unification), not `==`
-                rest.match_indices('=').find_map(|(p, _)| {
-                    let after = rest.as_bytes().get(p + 1).copied();
-                    let before = if p > 0 {
-                        rest.as_bytes().get(p - 1).copied()
-                    } else {
+                head_line.match_indices('=').find_map(|(p, _)| {
+                    let bytes = head_line.as_bytes();
+                    let after = bytes.get(p + 1).copied();
+                    let before = p.checked_sub(1).and_then(|q| bytes.get(q).copied());
+                    // Reject `==`, `!=`, `<=`, `>=` — only a single `=` (unification) is a value.
+                    if matches!(after, Some(b'='))
+                        || matches!(before, Some(b'=') | Some(b'!') | Some(b'<') | Some(b'>'))
+                    {
                         None
-                    };
-                    if after == Some(b'=') || before == Some(b'=') || before == Some(b'!') {
-                        None
                     } else {
-                        Some(
-                            rest[p + 1..]
-                                .split('{')
-                                .next()
-                                .unwrap_or("")
-                                .trim()
-                                .to_string(),
-                        )
+                        Some(value_before_brace(&head_line[p + 1..]))
                     }
                 })
             };
@@ -251,12 +214,16 @@ impl Extractor for RegoRulesExtractor {
                 }
             }
 
-            // Condition: the brace body `{ … }`, else a one-line `if <expr>` form.
-            let cond_text = if let Some(rel) = text[*start..extent_end].find('{') {
-                let (content, _) = brace_block(text, *start + rel);
-                Some(content)
+            // Condition: the brace body `{ … }` (string-aware match over `scan`, sliced from
+            // `content`), else a one-line `if <expr>` form.
+            let cond_text = if let Some(rel) = scan[*start..*extent_end].find('{') {
+                let open = *start + rel;
+                let end = crate::rules_text::match_brace_end(&scan, open);
+                Some(content[open + 1..end].trim().to_string())
             } else {
-                rest.find(" if").map(|p| rest[p + 3..].trim().to_string())
+                head_line
+                    .find(" if")
+                    .map(|p| head_line[p + 3..].trim().to_string())
             };
             if let Some(ct) = cond_text {
                 if !ct.is_empty() {
@@ -285,25 +252,31 @@ impl Extractor for RegoRulesExtractor {
             }
         }
 
-        // 4. input.* / data.* references → Fact (deduped by full dotted path).
-        if let Some(rs) = &ruleset_sym {
-            let mut seen_fact = BTreeSet::new();
-            for c in RE_REF.captures_iter(text) {
-                let path = c[1].to_string();
-                if !seen_fact.insert(path.clone()) {
-                    continue;
-                }
-                let fact_sym =
-                    Symbol::synthetic("rego", format!("{}::fact::{}", file.path, path)).id();
-                let mut fact_node = Node::new(
-                    fact_sym.clone(),
-                    NodeKind::Fact,
-                    path.clone(),
-                    Language::new(LANG),
-                    Location::new(&file.path, Span::ZERO),
-                );
-                fact_node.signature = Some(path);
-                nodes.push(fact_node);
+        // 4. input.* / data.* references → Fact (deduped). Skip refs on `import` lines (an imported
+        //    package is not an input fact). Facts are emitted regardless of a package; the Contains
+        //    edge is added only when a RuleSet exists.
+        let mut seen_fact = BTreeSet::new();
+        for c in RE_REF.captures_iter(&scan) {
+            let mo = c.get(1).unwrap();
+            let line_start = scan[..mo.start()].rfind('\n').map(|n| n + 1).unwrap_or(0);
+            if scan[line_start..].trim_start().starts_with("import") {
+                continue;
+            }
+            let path = content[mo.start()..mo.end()].to_string();
+            if !seen_fact.insert(path.clone()) {
+                continue;
+            }
+            let fact_sym = Symbol::synthetic("rego", format!("{}::fact::{}", file.path, path)).id();
+            let mut fact_node = Node::new(
+                fact_sym.clone(),
+                NodeKind::Fact,
+                path.clone(),
+                Language::new(LANG),
+                Location::new(&file.path, Span::ZERO),
+            );
+            fact_node.signature = Some(path);
+            nodes.push(fact_node);
+            if let Some(rs) = &ruleset_sym {
                 local_edges.push(Edge::new(
                     rs.clone(),
                     fact_sym,
@@ -320,6 +293,15 @@ impl Extractor for RegoRulesExtractor {
             refs: Vec::new(),
         })
     }
+
+    fn languages(&self) -> Vec<Language> {
+        vec![Language::new(LANG)]
+    }
+}
+
+/// The value text up to (but not including) a rule body `{`, trimmed.
+fn value_before_brace(s: &str) -> String {
+    s.split('{').next().unwrap_or("").trim().to_string()
 }
 
 #[cfg(test)]
@@ -428,6 +410,104 @@ deny contains msg if {
                     .unwrap_or("")
                     .contains("input.user.role")),
             "a Condition should carry its rule body text"
+        );
+    }
+
+    // ── Antagonist regression tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn next_line_brace_rule_is_detected() {
+        // Antagonist M5: idiomatic multi-line form with the brace on the next line.
+        let src = "package p\n\nallow\n{\n    input.user == \"admin\"\n}\n";
+        let ex = RegoRulesExtractor::new().extract(&rego(src)).unwrap();
+        let n = |k: NodeKind| ex.nodes.iter().filter(|x| x.kind == k).count();
+        assert_eq!(
+            n(NodeKind::Rule),
+            1,
+            "the next-line-brace rule must be detected"
+        );
+        assert!(
+            n(NodeKind::Condition) >= 1,
+            "and its body becomes a Condition"
+        );
+    }
+
+    #[test]
+    fn brace_inside_string_does_not_truncate_condition() {
+        // Antagonist M4: a `}` inside a string literal must not close the body early.
+        let src = "package p\n\nallow if {\n    msg := \"has a } brace\"\n    input.user == \"admin\"\n}\n";
+        let ex = RegoRulesExtractor::new().extract(&rego(src)).unwrap();
+        let cond = ex
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Condition)
+            .expect("condition");
+        assert!(
+            cond.signature
+                .as_deref()
+                .unwrap_or("")
+                .contains("input.user == "),
+            "the real predicate after the string-brace must survive: {:?}",
+            cond.signature
+        );
+    }
+
+    #[test]
+    fn import_paths_are_not_facts() {
+        // Antagonist m1: `import data.lib.helpers` is not an input-document Fact.
+        let src = "package p\n\nimport data.lib.helpers\n\nallow if {\n    input.ok == true\n}\n";
+        let ex = RegoRulesExtractor::new().extract(&rego(src)).unwrap();
+        let facts: Vec<_> = ex
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Fact)
+            .map(|n| n.name.as_str())
+            .collect();
+        assert!(
+            !facts.contains(&"data.lib.helpers"),
+            "import target leaked as Fact: {facts:?}"
+        );
+        assert!(
+            facts.contains(&"input.ok"),
+            "real input ref still a Fact: {facts:?}"
+        );
+    }
+
+    #[test]
+    fn facts_emitted_without_package() {
+        // Antagonist m2: a package-less fragment still yields Facts (just no RuleSet edge).
+        let src = "allow if {\n    input.user == \"admin\"\n}\n";
+        let ex = RegoRulesExtractor::new().extract(&rego(src)).unwrap();
+        assert!(
+            ex.nodes
+                .iter()
+                .any(|n| n.kind == NodeKind::Fact && n.name == "input.user"),
+            "facts must be emitted even without a package declaration"
+        );
+    }
+
+    #[test]
+    fn rule_keyword_inside_comment_is_ignored() {
+        // A `#`-commented line that looks like a rule head must not become a Rule/Fact.
+        let src =
+            "package p\n\n# deny if { input.bad == true }\nallow if {\n    input.ok == true\n}\n";
+        let ex = RegoRulesExtractor::new().extract(&rego(src)).unwrap();
+        let rules: Vec<_> = ex
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Rule)
+            .map(|n| n.name.as_str())
+            .collect();
+        assert_eq!(
+            rules,
+            vec!["allow"],
+            "commented `deny` must be ignored: {rules:?}"
+        );
+        assert!(
+            !ex.nodes
+                .iter()
+                .any(|n| n.kind == NodeKind::Fact && n.name == "input.bad"),
+            "commented input ref must not be a Fact"
         );
     }
 }

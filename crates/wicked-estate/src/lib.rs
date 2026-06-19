@@ -60,11 +60,13 @@ fn is_grammarless_ext(ext: &str) -> bool {
             | "mqsc"
             | "drl"
             | "brl"
-    )
+    ) || is_xml_rules_ext(ext)
 }
 
 /// Dispatch a grammar-less (non-tree-sitter) extractor by file extension — the mainframe estate
-/// languages (JCL, HLASM, RACF security, IMS DBD/PSB, MQ MQSC). Returns `None` for everything else.
+/// languages (JCL, HLASM, RACF security, IMS DBD/PSB, MQ MQSC) plus the heuristic rules-engine
+/// formats (Drools DRL, FICO Blaze `.brl`) and, behind the `xml-rules` feature, the XML rules
+/// formats (Camunda DMN, Progress Corticon). Returns `None` for everything else.
 fn grammarless_extractor(ext: &str) -> Option<Box<dyn Extractor>> {
     match ext {
         "jcl" | "job" | "cntl" => Some(Box::new(JclExtractor::new())),
@@ -74,8 +76,34 @@ fn grammarless_extractor(ext: &str) -> Option<Box<dyn Extractor>> {
         "mqsc" => Some(Box::new(MqExtractor::new())),
         "drl" => Some(Box::new(DrlExtractor::new())),
         "brl" => Some(Box::new(BlazeBrlExtractor::new())),
+        _ => xml_rules_extractor(ext),
+    }
+}
+
+/// XML rules-engine extensions, dispatched only when the `xml-rules` feature is enabled.
+#[cfg(feature = "xml-rules")]
+fn is_xml_rules_ext(ext: &str) -> bool {
+    matches!(ext, "ers" | "erf" | "ecore" | "dmn")
+}
+#[cfg(not(feature = "xml-rules"))]
+fn is_xml_rules_ext(_ext: &str) -> bool {
+    false
+}
+
+/// Dispatch the XML rules-engine extractors (Progress Corticon, Camunda DMN). Compiled in only with
+/// the `xml-rules` feature; a no-op (always `None`) otherwise so the base binary stays dep-light.
+#[cfg(feature = "xml-rules")]
+fn xml_rules_extractor(ext: &str) -> Option<Box<dyn Extractor>> {
+    use wicked_estate_extract::{CamundaDmnExtractor, CorticonExtractor};
+    match ext {
+        "ers" | "erf" | "ecore" => Some(Box::new(CorticonExtractor::new())),
+        "dmn" => Some(Box::new(CamundaDmnExtractor::new())),
         _ => None,
     }
+}
+#[cfg(not(feature = "xml-rules"))]
+fn xml_rules_extractor(_ext: &str) -> Option<Box<dyn Extractor>> {
+    None
 }
 
 /// Symbol index built ONCE from the store for the resolver pass. The resolver calls `by_name`

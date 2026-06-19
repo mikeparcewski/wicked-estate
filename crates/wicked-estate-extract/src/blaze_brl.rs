@@ -26,9 +26,11 @@
 //! - `if`/`when`/`whenever … (to `then`)`      → [`NodeKind::Condition`]
 //! - `then` / `set` / `assign` / `create …`    → [`NodeKind::Action`]
 //!
-//! All edges carry [`ResolutionTier::Heuristic`]; IDs use `Symbol::synthetic` (ADR-002). Pure regex
-//! — stays in the MIT core. As a Tier-3 bootstrap to documented syntax, the extractor captures rule
-//! STRUCTURE and will benefit from tuning against a real `.brl` corpus.
+//! Structural scanning runs over a comment-blanked, string-masked copy (see [`crate::rules_text`]) so
+//! a `then`/`}` inside a comment or string literal can't split a rule; signatures are sliced from the
+//! comment-blanked copy (string values intact). All edges carry [`ResolutionTier::Heuristic`]; IDs use
+//! `Symbol::synthetic` (ADR-002). Pure regex — stays in the MIT core. As a Tier-3 bootstrap to
+//! documented syntax, it captures rule STRUCTURE and will benefit from tuning against a real corpus.
 
 use regex::Regex;
 use std::sync::LazyLock;
@@ -70,27 +72,6 @@ fn file_stem(path: &str) -> String {
     base.strip_suffix(".brl").unwrap_or(base).to_string()
 }
 
-/// Given the byte index of an opening `{`, return (inner_content_trimmed, end_byte_after `}`).
-fn brace_block(text: &str, open: usize) -> (String, usize) {
-    let bytes = text.as_bytes();
-    let mut depth = 0usize;
-    let mut i = open;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return (text[open + 1..i].trim().to_string(), i + 1);
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    (text[open..].trim().to_string(), text.len())
-}
-
 /// Heuristic regex extractor for FICO Blaze Advisor `.brl` SRL files.
 pub struct BlazeBrlExtractor;
 
@@ -112,14 +93,18 @@ impl Extractor for BlazeBrlExtractor {
     }
 
     fn extract(&self, file: &SourceFile) -> Result<Extraction> {
-        let text = &file.text;
+        // `content`: comments blanked (quoted rule names intact). `scan`: also string literals masked
+        // (a `then`/`}` inside a quoted value can't split a rule). Rule names/signatures come from
+        // `content`; brace matching + if/then location run on `scan`. Both length-preserving.
+        let content = crate::rules_text::blank_c_comments(&file.text);
+        let scan = crate::rules_text::mask_strings(&content);
         let lang = Language::new(LANG);
         let mut nodes = Vec::new();
         let mut local_edges = Vec::new();
 
         // 1. ruleset/library name (or file stem) → RuleSet
         let rs_name = RE_RULESET
-            .captures(text)
+            .captures(&content)
             .map(|c| c[1].to_string())
             .unwrap_or_else(|| file_stem(&file.path));
         let ruleset_sym =
@@ -135,7 +120,7 @@ impl Extractor for BlazeBrlExtractor {
         nodes.push(rs_node);
 
         // 2. rule <name> { … } → Rule + Condition (if…) + Action (then…)
-        for caps in RE_RULE.captures_iter(text) {
+        for caps in RE_RULE.captures_iter(&content) {
             let m = caps.get(0).unwrap();
             let name = caps
                 .get(1)
@@ -145,9 +130,11 @@ impl Extractor for BlazeBrlExtractor {
             if name.is_empty() {
                 continue;
             }
-            // Brace body starts at the `{` that the RE_RULE match ends on.
+            // Body is between the `{` the match ends on and its string-aware matching `}`.
             let brace_open = m.end() - 1;
-            let (body, _) = brace_block(text, brace_open);
+            let body_end = crate::rules_text::match_brace_end(&scan, brace_open);
+            let body_base = brace_open + 1;
+            let body_scan = &scan[body_base..body_end];
 
             let rule_sym =
                 Symbol::synthetic("blaze", format!("{}::rule::{}", file.path, name)).id();
@@ -168,13 +155,15 @@ impl Extractor for BlazeBrlExtractor {
                 "fico-blaze-brl",
             ));
 
-            let if_m = RE_IF.find(&body);
-            let then_m = RE_THEN.find(&body);
+            let if_m = RE_IF.find(body_scan);
+            let then_m = RE_THEN.find(body_scan);
 
             // Condition: from the `if`/`when`/`whenever` opener up to `then` (or end of body).
             if let Some(iff) = if_m {
-                let end = then_m.map(|t| t.start()).unwrap_or(body.len());
-                let cond = body[iff.start()..end].trim().to_string();
+                let end_rel = then_m.map(|t| t.start()).unwrap_or(body_scan.len());
+                let cond = content[body_base + iff.start()..body_base + end_rel]
+                    .trim()
+                    .to_string();
                 if !cond.is_empty() {
                     let csym =
                         Symbol::synthetic("blaze", format!("{}::condition::{}", file.path, name))
@@ -200,7 +189,7 @@ impl Extractor for BlazeBrlExtractor {
 
             // Action: everything after `then` (the set/assign/create statements).
             if let Some(t) = then_m {
-                let action = body[t.end()..]
+                let action = content[body_base + t.end()..body_end]
                     .trim()
                     .trim_end_matches(';')
                     .trim()
@@ -330,6 +319,82 @@ mod tests {
                 .iter()
                 .any(|n| n.kind == NodeKind::Rule && n.name == "Risk Check"),
             "quoted rule name should be captured"
+        );
+    }
+
+    // ── Antagonist regression tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn then_inside_a_string_does_not_truncate() {
+        // Antagonist M2: the word `then` inside a quoted value must not split condition/action.
+        let src = r#"ruleset R {
+  rule S {
+    if state is "then-pending" then set ok to true ;
+  }
+}
+"#;
+        let ex = BlazeBrlExtractor::new().extract(&brl(src)).unwrap();
+        let cond = ex
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Condition)
+            .expect("condition");
+        assert!(
+            cond.signature.as_deref().unwrap_or("").contains("state is"),
+            "condition keeps full text past the string `then`: {:?}",
+            cond.signature
+        );
+        assert!(
+            ex.nodes.iter().any(|n| n.kind == NodeKind::Action
+                && n.signature
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("set ok to true")),
+            "the real action after the real `then` is captured"
+        );
+    }
+
+    #[test]
+    fn brace_inside_a_string_does_not_drop_the_action() {
+        // Antagonist M3: a `}` inside a quoted value must not close the rule body early.
+        let src = r#"ruleset R {
+  rule S {
+    if note = "has a } here" then set flag to true ;
+  }
+}
+"#;
+        let ex = BlazeBrlExtractor::new().extract(&brl(src)).unwrap();
+        assert!(
+            ex.nodes.iter().any(|n| n.kind == NodeKind::Action
+                && n.signature
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("set flag to true")),
+            "action survives a closing brace embedded in a string literal"
+        );
+    }
+
+    #[test]
+    fn rule_inside_comment_is_ignored() {
+        // A `rule` keyword inside a comment must not become a Rule.
+        let src = r#"ruleset R {
+  /* rule Ghost { if x then set y ; } */
+  rule Real {
+    if a > 1 then set b to 2 ;
+  }
+}
+"#;
+        let ex = BlazeBrlExtractor::new().extract(&brl(src)).unwrap();
+        let rules: Vec<_> = ex
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Rule)
+            .map(|n| n.name.as_str())
+            .collect();
+        assert_eq!(
+            rules,
+            vec!["Real"],
+            "only the real rule, no comment ghost: {rules:?}"
         );
     }
 }
