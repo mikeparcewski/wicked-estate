@@ -49,6 +49,10 @@ pub use odm::OdmExtractor;
 pub mod drl;
 pub use drl::DrlExtractor;
 
+// W15.8 — OPA/Rego (`.rego`) rules-layer extractor (supplements the tree-sitter code parse).
+pub mod rego_rules;
+pub use rego_rules::RegoRulesExtractor;
+
 // W15.2 — XML rules extractor (feature-gated: `xml-rules`).
 #[cfg(feature = "xml-rules")]
 pub mod xml_rules;

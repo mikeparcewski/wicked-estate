@@ -32,7 +32,7 @@ use wicked_estate_core::{
 };
 use wicked_estate_extract::{
     CicsSqlExtractor, DrlExtractor, HlasmExtractor, IaCExtractor, ImsExtractor, JclExtractor,
-    MqExtractor, RacfExtractor, TfstateCollector,
+    MqExtractor, RacfExtractor, RegoRulesExtractor, TfstateCollector,
     treesitter::{TreeSitterExtractor, extractor_for_extension, is_minified_or_huge},
 };
 use wicked_estate_resolve::{
@@ -448,6 +448,15 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
                     extraction.nodes.extend(emb.nodes);
                     extraction.local_edges.extend(emb.local_edges);
                     extraction.refs.extend(emb.refs);
+                }
+            }
+            // Rego: supplement the tree-sitter code parse (rules-as-functions) with the W15 rules
+            // graph (RuleSet/Rule/Condition/Action/Fact), so policies surface in RulesInventory.
+            if ext.as_str() == "rego" {
+                if let Ok(rules) = RegoRulesExtractor::new().extract(&sf) {
+                    extraction.nodes.extend(rules.nodes);
+                    extraction.local_edges.extend(rules.local_edges);
+                    extraction.refs.extend(rules.refs);
                 }
             }
             Some((fw.rel.clone(), extraction, text))
