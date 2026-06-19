@@ -807,6 +807,9 @@ impl SymbolIndex for MemStore {
     fn get(&self, id: &SymbolId) -> Option<Node> {
         self.nodes.get(id).cloned()
     }
+    fn all_nodes(&self) -> wicked_estate_core::Result<Vec<Node>> {
+        GraphRead::all_nodes(self)
+    }
 }
 
 // ---------------------------------------------------------------------------

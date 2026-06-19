@@ -536,6 +536,96 @@ impl Resolver for InfraResolver {
     }
 }
 
+// ── RulesBridgeResolver ────────────────────────────────────────────────────────
+
+/// Post-extraction resolver that links code call sites to real [`NodeKind::RuleSet`] nodes (W15.13).
+///
+/// ## Purpose
+///
+/// When `ExtraEdgeExtractor` detects a rules engine API call (e.g. `IlrContext.execute()` in Java
+/// calling IBM ODM), it emits an [`UnresolvedRef`] with `raw_name = "rules-engine:{scheme}"` (e.g.
+/// `"rules-engine:odm"`). This resolver handles those refs by scanning the symbol index for all
+/// [`NodeKind::RuleSet`] nodes and emitting an [`EdgeKind::InvokedBy`] edge from each call site to
+/// each discovered ruleset.
+///
+/// ## Confidence
+///
+/// [`ResolutionTier::Heuristic`] (confidence 0.5) — the connection is inferred from the presence
+/// of a rules engine API call, not from type analysis. A single call site might invoke any ruleset
+/// deployed to that engine.
+///
+/// ## Self-edge and dedup guards
+///
+/// Self-edges (source == target) are dropped. Duplicate `(source, target, kind)` triples produced
+/// within a single call are deduplicated before returning.
+///
+/// ## Short-circuit
+///
+/// If no ref has a `raw_name` that starts with `"rules-engine:"`, the method returns immediately
+/// without scanning the index — important for large graphs where `all_nodes()` is expensive.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RulesBridgeResolver;
+
+impl Resolver for RulesBridgeResolver {
+    fn id(&self) -> &str {
+        "rules-bridge-resolver"
+    }
+
+    fn tier(&self) -> ResolutionTier {
+        ResolutionTier::Heuristic
+    }
+
+    fn resolve(&self, refs: &[UnresolvedRef], index: &dyn SymbolIndex) -> Result<Vec<Edge>> {
+        // Short-circuit: skip the expensive all_nodes() scan if there are no bridge refs.
+        let bridge_refs: Vec<&UnresolvedRef> = refs
+            .iter()
+            .filter(|r| r.raw_name.starts_with("rules-engine:"))
+            .collect();
+
+        if bridge_refs.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Scan the entire index for RuleSet nodes.
+        let ruleset_nodes: Vec<_> = index
+            .all_nodes()?
+            .into_iter()
+            .filter(|n| n.kind == NodeKind::RuleSet)
+            .collect();
+
+        let mut out: Vec<Edge> = Vec::new();
+        let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+
+        for r in bridge_refs {
+            for ruleset in &ruleset_nodes {
+                // Skip self-edges.
+                if ruleset.symbol == r.from {
+                    continue;
+                }
+
+                // Deduplicate (source, target) pairs — kind is always InvokedBy here.
+                let key = (r.from.to_string(), ruleset.symbol.to_string());
+                if !seen.insert(key) {
+                    continue;
+                }
+
+                let edge = Edge::new(
+                    r.from.clone(),
+                    ruleset.symbol.clone(),
+                    EdgeKind::InvokedBy,
+                    self.tier(),
+                    self.id(),
+                )
+                .with_location(r.location.clone());
+
+                out.push(edge);
+            }
+        }
+
+        Ok(out)
+    }
+}
+
 // ── MethodResolutionSynthesizer ────────────────────────────────────────────────
 
 /// AST-based synthesizer: resolves call-site references by looking up the called name in the
@@ -1093,6 +1183,9 @@ mod tests {
         }
         fn get(&self, id: &SymbolId) -> Option<Node> {
             self.0.iter().find(|n| &n.symbol == id).cloned()
+        }
+        fn all_nodes(&self) -> wicked_estate_core::Result<Vec<Node>> {
+            Ok(self.0.clone())
         }
     }
 
@@ -1965,6 +2058,95 @@ mod tests {
         assert!(
             (infra_edge.confidence.get() - 1.0).abs() < 1e-6,
             "infra edge confidence must be 1.0"
+        );
+    }
+
+    // ── RulesBridgeResolver tests ─────────────────────────────────────────────
+
+    /// Build a RuleSet node mimicking what the rules engine extractor emits.
+    fn ruleset_node(name: &str, scheme: &str) -> Node {
+        let id = Symbol::synthetic(scheme, name).id();
+        Node::new(
+            id,
+            NodeKind::RuleSet,
+            name,
+            Language::new(scheme),
+            Location::new(name, Span::ZERO),
+        )
+    }
+
+    fn ruleset_sym(name: &str, scheme: &str) -> SymbolId {
+        Symbol::synthetic(scheme, name).id()
+    }
+
+    /// An `UnresolvedRef` emitted by `ExtraEdgeExtractor` when it detects a rules engine call.
+    fn rules_engine_ref(from_name: &str, scheme: &str) -> UnresolvedRef {
+        UnresolvedRef::new(
+            sym(from_name),
+            &format!("rules-engine:{scheme}"),
+            EdgeKind::InvokedBy,
+            Location::new("Caller.java", Span::ZERO),
+        )
+    }
+
+    /// Happy path (W15.13): a code file node emits a "rules-engine:odm" ref → one InvokedBy
+    /// edge is produced pointing to the RuleSet node in the index.
+    #[test]
+    fn rules_bridge_resolver_emits_invoked_by_edges() {
+        let rs = ruleset_node("LoanApproval", "odm");
+        // File node — the referencing side (not a RuleSet itself).
+        let file_node = Node::new(
+            sym("Caller"),
+            NodeKind::File,
+            "Caller",
+            Language::new("java"),
+            Location::new("Caller.java", Span::ZERO),
+        );
+        let index = VecIndex(vec![file_node, rs.clone()]);
+
+        let r = rules_engine_ref("Caller", "odm");
+        let edges = RulesBridgeResolver.resolve(&[r], &index).unwrap();
+
+        assert_eq!(edges.len(), 1, "expected exactly 1 InvokedBy edge, got {}", edges.len());
+        assert_eq!(edges[0].source, sym("Caller"), "source must be the call site");
+        assert_eq!(
+            edges[0].target,
+            ruleset_sym("LoanApproval", "odm"),
+            "target must be the RuleSet node"
+        );
+        assert_eq!(edges[0].kind, EdgeKind::InvokedBy, "edge kind must be InvokedBy");
+        // ResolutionTier::Heuristic → confidence 0.5.
+        assert!(
+            (edges[0].confidence.get() - 0.5).abs() < 1e-6,
+            "Heuristic tier must give confidence 0.5, got {}",
+            edges[0].confidence.get()
+        );
+        assert_eq!(edges[0].resolved_by, "rules-bridge-resolver");
+    }
+
+    /// A ref whose `raw_name` is a plain class name (not "rules-engine:…") must be ignored by
+    /// `RulesBridgeResolver` — it is not a bridge ref.
+    #[test]
+    fn rules_bridge_resolver_ignores_non_bridge_refs() {
+        let rs = ruleset_node("LoanApproval", "odm");
+        let file_node = Node::new(
+            sym("Caller"),
+            NodeKind::File,
+            "Caller",
+            Language::new("java"),
+            Location::new("Caller.java", Span::ZERO),
+        );
+        let index = VecIndex(vec![file_node, rs]);
+
+        // A plain call-site ref — NOT a bridge ref.
+        let r = call_ref("Caller", "SomeClass");
+        let edges = RulesBridgeResolver.resolve(&[r], &index).unwrap();
+
+        assert_eq!(
+            edges.len(),
+            0,
+            "RulesBridgeResolver must not fire on non-bridge refs; got {} edges",
+            edges.len()
         );
     }
 

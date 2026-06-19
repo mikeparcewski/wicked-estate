@@ -98,6 +98,9 @@ impl SymbolIndex for InMemoryIndex {
     fn get(&self, id: &SymbolId) -> Option<Node> {
         self.by_id.get(id).cloned()
     }
+    fn all_nodes(&self) -> wicked_estate_core::Result<Vec<Node>> {
+        Ok(self.by_id.values().cloned().collect())
+    }
 }
 
 /// Collect source files under `root` using the `ignore` crate — gitignore-aware, skips hidden +
@@ -1137,7 +1140,7 @@ pub fn default_embedder() -> Box<dyn Embedder> {
 /// public signature remains unchanged (wicked-estate-bench calls it).  The CLI `index` command
 /// invokes this as an optional second step when `--embeddings` is passed.
 pub fn compute_embeddings(store: &mut SqliteStore, embedder: &dyn Embedder) -> Result<usize> {
-    let nodes = store.all_nodes()?;
+    let nodes = GraphRead::all_nodes(store)?;
     let mut count = 0usize;
     for node in &nodes {
         // Build a plain-text representation from the stable, always-present fields.

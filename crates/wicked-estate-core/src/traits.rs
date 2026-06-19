@@ -25,6 +25,11 @@ pub trait SymbolIndex {
     fn by_name(&self, name: &str) -> Vec<Node>;
     /// Exact lookup of a fully-qualified symbol id.
     fn get(&self, id: &SymbolId) -> Option<Node>;
+    /// All nodes in the index — used by resolvers that need a global scan (e.g. `RulesBridgeResolver`).
+    /// The default returns an empty vec; backends should override with their own bulk fetch.
+    fn all_nodes(&self) -> Result<Vec<Node>> {
+        Ok(vec![])
+    }
 }
 
 /// EXTRACT phase: parse one file into nodes + intra-file edges + unresolved refs.
