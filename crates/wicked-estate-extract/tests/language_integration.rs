@@ -1069,3 +1069,89 @@ fn salesforce_flow_fixture_extracts_decisions_and_rules() {
         contains_edges.len()
     );
 }
+
+// ── W15.7 — CLIPS/Jess extractor ─────────────────────────────────────────────
+
+/// Load and extract the CLIPS fixture file, verifying it produces the required node types.
+#[test]
+fn clips_fixture_produces_rule_nodes() {
+    use wicked_estate_extract::ClipsExtractor;
+
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/clips/sample.clp");
+    let text = std::fs::read_to_string(&fixture_path)
+        .expect("clips fixture must be readable");
+
+    let extractor = ClipsExtractor::new();
+    let file = SourceFile {
+        path: fixture_path.to_string_lossy().to_string(),
+        language: Language::new("clips"),
+        text,
+    };
+    let extraction = extractor.extract(&file).expect("clips extract must succeed");
+
+    let rules: Vec<_> = extraction
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Rule)
+        .collect();
+    assert!(
+        rules.len() >= 2,
+        "expected ≥2 Rule nodes, got {} — nodes: {:?}",
+        rules.len(),
+        extraction.nodes.iter().map(|n| (&n.kind, &n.name)).collect::<Vec<_>>()
+    );
+
+    let facts: Vec<_> = extraction.nodes.iter().filter(|n| n.kind == NodeKind::Fact).collect();
+    assert!(!facts.is_empty(), "expected ≥1 Fact node (deftemplate not extracted)");
+
+    let conditions: Vec<_> = extraction.nodes.iter().filter(|n| n.kind == NodeKind::Condition).collect();
+    assert!(
+        conditions.len() >= rules.len(),
+        "expected ≥{} Condition nodes, got {}",
+        rules.len(), conditions.len()
+    );
+
+    let actions: Vec<_> = extraction.nodes.iter().filter(|n| n.kind == NodeKind::Action).collect();
+    assert!(
+        actions.len() >= rules.len(),
+        "expected ≥{} Action nodes, got {}",
+        rules.len(), actions.len()
+    );
+
+    assert!(
+        extraction.local_edges.iter().any(|e| e.kind == EdgeKind::Evaluates),
+        "expected at least one Evaluates edge (Rule→Condition)"
+    );
+    assert!(
+        extraction.local_edges.iter().any(|e| e.kind == EdgeKind::Produces),
+        "expected at least one Produces edge (Rule→Action)"
+    );
+}
+
+/// Inline snippet smoke-test — minimal CLIPS without panicking.
+#[test]
+fn clips_snippet_minimal() {
+    use wicked_estate_extract::ClipsExtractor;
+
+    let snippet = r#"
+(deftemplate item (slot id))
+(defrule find-item
+  (item (id ?id))
+  =>
+  (printout t "found" crlf))
+"#;
+
+    let extractor = ClipsExtractor::new();
+    let file = SourceFile {
+        path: "test.clp".to_string(),
+        language: Language::new("clips"),
+        text: snippet.to_string(),
+    };
+    let extraction = extractor.extract(&file).expect("clips snippet must succeed");
+
+    assert!(extraction.nodes.iter().any(|n| n.kind == NodeKind::Rule), "must yield Rule node");
+    assert!(extraction.nodes.iter().any(|n| n.kind == NodeKind::Fact), "must yield Fact node");
+    assert!(extraction.nodes.iter().any(|n| n.kind == NodeKind::Condition), "must yield Condition node");
+    assert!(extraction.nodes.iter().any(|n| n.kind == NodeKind::Action), "must yield Action node");
+}

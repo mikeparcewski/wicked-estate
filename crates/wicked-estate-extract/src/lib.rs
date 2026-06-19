@@ -60,6 +60,9 @@ pub mod salesforce_flow;
 #[cfg(feature = "xml-rules")]
 pub use salesforce_flow::SalesforceFlowExtractor;
 
+pub mod clips;
+pub use clips::ClipsExtractor;
+
 pub mod cloud;
 pub use cloud::{
     CloudCollector, CloudConfig, CloudProvider, CloudResource, MockCloudCollector,
