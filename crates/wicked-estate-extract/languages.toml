@@ -635,13 +635,6 @@ tier = "structural"
 caps = ["symbols"]
 
 [[language]]
-name = "nginx"
-ext = ["nginxconf"]
-grammar = "arborium-nginx"
-tier = "document"
-caps = ["symbols"]
-
-[[language]]
 name = "ninja"
 ext = ["ninja"]
 grammar = "arborium-ninja"

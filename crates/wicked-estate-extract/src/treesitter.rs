@@ -117,7 +117,6 @@ const JUST_QUERY: &str = include_str!("queries/just.scm");
 const KDL_QUERY: &str = include_str!("queries/kdl.scm");
 const LEAN_QUERY: &str = include_str!("queries/lean.scm");
 const MESON_QUERY: &str = include_str!("queries/meson.scm");
-const NGINX_QUERY: &str = include_str!("queries/nginx.scm");
 const NINJA_QUERY: &str = include_str!("queries/ninja.scm");
 const POSTSCRIPT_QUERY: &str = include_str!("queries/postscript.scm");
 const REGEX_QUERY: &str = include_str!("queries/regex.scm");
@@ -397,9 +396,6 @@ fn lang_lean() -> tree_sitter::Language {
 }
 fn lang_meson() -> tree_sitter::Language {
     arborium_meson::language().into()
-}
-fn lang_nginx() -> tree_sitter::Language {
-    arborium_nginx::language().into()
 }
 fn lang_ninja() -> tree_sitter::Language {
     arborium_ninja::language().into()
@@ -998,12 +994,6 @@ static LANG_TABLE: &[LangEntry] = &[
         ext: &["meson"],
         make_language: lang_meson,
         query_src: MESON_QUERY,
-    },
-    LangEntry {
-        name: "nginx",
-        ext: &["nginxconf"],
-        make_language: lang_nginx,
-        query_src: NGINX_QUERY,
     },
     LangEntry {
         name: "ninja",
@@ -5146,24 +5136,6 @@ See the [docs](docs/).
             .filter(|n| !matches!(n.kind, NodeKind::File))
             .count();
         assert!(defs >= 1, "meson: expected >=1 def (command), got {defs}");
-    }
-
-    #[test]
-    fn smoke_nginx() {
-        let code = "server {\n    listen 80;\n    server_name example.com;\n    location / {\n        root /var/www/html;\n    }\n}\n";
-        let ex = TreeSitterExtractor::for_language("nginx")
-            .unwrap()
-            .extract(&sf("nginx.nginxconf", "nginx", code))
-            .unwrap();
-        let defs = ex
-            .nodes
-            .iter()
-            .filter(|n| !matches!(n.kind, NodeKind::File))
-            .count();
-        assert!(
-            defs >= 1,
-            "nginx: expected >=1 def (block directive), got {defs}"
-        );
     }
 
     #[test]
