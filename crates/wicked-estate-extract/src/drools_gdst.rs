@@ -149,11 +149,7 @@ mod tests {
                 .iter()
                 .any(|n| n.kind == NodeKind::RuleSet || n.kind == NodeKind::Condition),
             "expected at least one RuleSet or Condition node; got {:?}",
-            extraction
-                .nodes
-                .iter()
-                .map(|n| &n.kind)
-                .collect::<Vec<_>>()
+            extraction.nodes.iter().map(|n| &n.kind).collect::<Vec<_>>()
         );
     }
 }

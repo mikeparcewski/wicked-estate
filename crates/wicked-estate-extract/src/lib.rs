@@ -74,8 +74,7 @@ pub use salesforce_flow::SalesforceFlowExtractor;
 pub mod excel_rules;
 #[cfg(feature = "excel-rules")]
 pub use excel_rules::{
-    ColumnConfig, ColumnRole, ExcelEngineConfig, ExcelRulesConfig, ExcelRulesExtractor,
-    SheetConfig,
+    ColumnConfig, ColumnRole, ExcelEngineConfig, ExcelRulesConfig, ExcelRulesExtractor, SheetConfig,
 };
 
 pub mod clips;

@@ -17,16 +17,12 @@
 
 use wicked_estate_core::{EdgeKind, Extractor, Language, NodeKind, SourceFile};
 use wicked_estate_extract::{
-    ColumnConfig, ColumnRole, ExcelEngineConfig, ExcelRulesConfig, ExcelRulesExtractor,
-    SheetConfig,
+    ColumnConfig, ColumnRole, ExcelEngineConfig, ExcelRulesConfig, ExcelRulesExtractor, SheetConfig,
 };
 
 /// Returns the absolute path to a named fixture file.
 fn fixture_path(name: &str) -> String {
-    format!(
-        "{}/tests/fixtures/excel/{name}",
-        env!("CARGO_MANIFEST_DIR")
-    )
+    format!("{}/tests/fixtures/excel/{name}", env!("CARGO_MANIFEST_DIR"))
 }
 
 /// Build a `SourceFile` for the given fixture.  `text` is empty — the extractor reads from
@@ -154,7 +150,10 @@ fn total_node_count_is_seven() {
         7,
         "1 RuleSet + 2 Rules + 2 Conditions + 2 Actions = 7, got {}: {:#?}",
         ex.nodes.len(),
-        ex.nodes.iter().map(|n| (&n.kind, &n.name)).collect::<Vec<_>>()
+        ex.nodes
+            .iter()
+            .map(|n| (&n.kind, &n.name))
+            .collect::<Vec<_>>()
     );
 }
 

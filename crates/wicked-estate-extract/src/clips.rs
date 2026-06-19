@@ -68,7 +68,11 @@ fn clips_sym(module: &str, name: &str, suffix: Suffix) -> SymbolId {
         None,
         vec![
             Descriptor::new(module, Suffix::Namespace),
-            Descriptor { name: name.to_string(), suffix, disambiguator: None },
+            Descriptor {
+                name: name.to_string(),
+                suffix,
+                disambiguator: None,
+            },
         ],
     )
     .id()
@@ -85,7 +89,14 @@ fn module_path(path: &str) -> String {
 /// Build a zero-width span at the given 0-based line index.
 fn line_span(line: usize) -> Span {
     let row = line as u32;
-    Span { start_byte: 0, end_byte: 0, start_line: row, start_col: 0, end_line: row, end_col: 0 }
+    Span {
+        start_byte: 0,
+        end_byte: 0,
+        start_line: row,
+        start_col: 0,
+        end_line: row,
+        end_col: 0,
+    }
 }
 
 // ── Extractor impl ─────────────────────────────────────────────────────────────
@@ -107,7 +118,7 @@ impl Extractor for ClipsExtractor {
         let mut current_module: Option<SymbolId> = None;
 
         // Parser state machine.
-        let mut depth: i32 = 0;       // paren nesting depth
+        let mut depth: i32 = 0; // paren nesting depth
         let mut phase = Phase::TopLevel;
         let mut rule_ctx: Option<RuleCtx> = None;
         // depth at which the current top-level form opened (always 1 for top-level forms).
@@ -119,7 +130,12 @@ impl Extractor for ClipsExtractor {
 
         // Pending keyword + name extraction: after seeing `(defXXX` we want the next token.
         #[derive(Clone, Copy, PartialEq, Eq)]
-        enum Expect { Nothing, ModuleName, RuleName, TemplateName }
+        enum Expect {
+            Nothing,
+            ModuleName,
+            RuleName,
+            TemplateName,
+        }
         let mut expect = Expect::Nothing;
         let mut pending_line: usize = 0; // line where the keyword was seen
 
@@ -312,7 +328,11 @@ impl Extractor for ClipsExtractor {
             );
         }
 
-        Ok(Extraction { nodes, local_edges, refs })
+        Ok(Extraction {
+            nodes,
+            local_edges,
+            refs,
+        })
     }
 }
 
@@ -343,7 +363,14 @@ fn flush_rule(
             vec![
                 Descriptor::new(module, Suffix::Namespace),
                 Descriptor {
-                    name: format!("{}::cond_{i}", rule_sym.as_str().rsplit_once('/').map(|(_, n)| n).unwrap_or(rule_sym.as_str())),
+                    name: format!(
+                        "{}::cond_{i}",
+                        rule_sym
+                            .as_str()
+                            .rsplit_once('/')
+                            .map(|(_, n)| n)
+                            .unwrap_or(rule_sym.as_str())
+                    ),
                     suffix: Suffix::Term,
                     disambiguator: None,
                 },
@@ -380,7 +407,14 @@ fn flush_rule(
             vec![
                 Descriptor::new(module, Suffix::Namespace),
                 Descriptor {
-                    name: format!("{}::act_{i}", rule_sym.as_str().rsplit_once('/').map(|(_, n)| n).unwrap_or(rule_sym.as_str())),
+                    name: format!(
+                        "{}::act_{i}",
+                        rule_sym
+                            .as_str()
+                            .rsplit_once('/')
+                            .map(|(_, n)| n)
+                            .unwrap_or(rule_sym.as_str())
+                    ),
                     suffix: Suffix::Term,
                     disambiguator: None,
                 },

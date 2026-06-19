@@ -32,14 +32,12 @@ static RE_IRL_RULE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Matches `when {` block opener in IRL
-static RE_IRL_WHEN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^\s*when\s*\{").expect("RE_IRL_WHEN must compile")
-});
+static RE_IRL_WHEN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*when\s*\{").expect("RE_IRL_WHEN must compile"));
 
 /// Matches `then {` block opener in IRL
-static RE_IRL_THEN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^\s*then\s*\{").expect("RE_IRL_THEN must compile")
-});
+static RE_IRL_THEN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*then\s*\{").expect("RE_IRL_THEN must compile"));
 
 /// Matches `rule "RuleName"` in BAL (no `{` follows immediately)
 static RE_BAL_RULE: LazyLock<Regex> = LazyLock::new(|| {
@@ -52,9 +50,8 @@ static RE_BAL_CONDITIONS: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Matches the `actions` section header in BAL
-static RE_BAL_ACTIONS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^\s*actions\s*$").expect("RE_BAL_ACTIONS must compile")
-});
+static RE_BAL_ACTIONS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*actions\s*$").expect("RE_BAL_ACTIONS must compile"));
 
 // ── Extractor ─────────────────────────────────────────────────────────────────
 
@@ -76,10 +73,7 @@ impl Default for OdmExtractor {
 
 impl Extractor for OdmExtractor {
     fn languages(&self) -> Vec<Language> {
-        vec![
-            Language::new("ibm-odm-irl"),
-            Language::new("ibm-odm-bal"),
-        ]
+        vec![Language::new("ibm-odm-irl"), Language::new("ibm-odm-bal")]
     }
 
     fn extract(&self, file: &SourceFile) -> Result<Extraction> {
@@ -127,8 +121,7 @@ fn extract_irl(file: &SourceFile) -> Result<Extraction> {
         let abs_rule_end = search_start + full_match.end();
 
         let rule_name = rule_caps[1].to_string();
-        let rule_sym =
-            Symbol::synthetic("odm", format!("{}::rule::{}", file.path, rule_name)).id();
+        let rule_sym = Symbol::synthetic("odm", format!("{}::rule::{}", file.path, rule_name)).id();
 
         let rule_loc = Location::new(&file.path, byte_span(abs_rule_start, abs_rule_end));
         let mut rule_node = Node::new(
@@ -417,7 +410,13 @@ fn byte_span(start: usize, end: usize) -> Span {
 fn sanitize(s: &str) -> String {
     let cleaned: String = s
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     // Truncate to keep IDs from growing unboundedly.
     cleaned.chars().take(40).collect()
@@ -461,8 +460,7 @@ rule "CheckScore" {
         assert!(
             ex.nodes
                 .iter()
-                .any(|n| n.kind == NodeKind::RuleSet
-                    && n.name == "com.example.lending"),
+                .any(|n| n.kind == NodeKind::RuleSet && n.name == "com.example.lending"),
             "expected a RuleSet node for the package"
         );
     }
@@ -487,15 +485,11 @@ rule "MyRule" {
             "expected Rule node"
         );
         assert!(
-            ex.nodes
-                .iter()
-                .any(|n| n.kind == NodeKind::Condition),
+            ex.nodes.iter().any(|n| n.kind == NodeKind::Condition),
             "expected Condition node"
         );
         assert!(
-            ex.nodes
-                .iter()
-                .any(|n| n.kind == NodeKind::Action),
+            ex.nodes.iter().any(|n| n.kind == NodeKind::Action),
             "expected Action node"
         );
     }
@@ -541,8 +535,7 @@ rule "R" {
         assert!(
             ex.nodes
                 .iter()
-                .any(|n| n.kind == NodeKind::Rule
-                    && n.name == "ApprovalRule"),
+                .any(|n| n.kind == NodeKind::Rule && n.name == "ApprovalRule"),
             "expected Rule node for BAL"
         );
     }
@@ -561,15 +554,11 @@ rule "R" {
             .unwrap();
 
         assert!(
-            ex.nodes
-                .iter()
-                .any(|n| n.kind == NodeKind::Condition),
+            ex.nodes.iter().any(|n| n.kind == NodeKind::Condition),
             "expected Condition node"
         );
         assert!(
-            ex.nodes
-                .iter()
-                .any(|n| n.kind == NodeKind::Action),
+            ex.nodes.iter().any(|n| n.kind == NodeKind::Action),
             "expected Action node"
         );
     }

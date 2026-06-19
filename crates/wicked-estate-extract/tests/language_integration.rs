@@ -11,10 +11,10 @@
 use std::collections::HashMap;
 
 use wicked_estate_core::{EdgeKind, Extractor, Language, NodeKind, SourceFile};
-use wicked_estate_extract::treesitter::extractor_for_extension;
-use wicked_estate_extract::{AwsConfigRuleExtractor, AzurePolicyExtractor};
 #[cfg(feature = "xml-rules")]
 use wicked_estate_extract::CamundaDmnExtractor;
+use wicked_estate_extract::treesitter::extractor_for_extension;
+use wicked_estate_extract::{AwsConfigRuleExtractor, AzurePolicyExtractor};
 
 /// Build extension → caps map from languages.toml.
 fn ext_caps() -> HashMap<String, Vec<String>> {
@@ -510,8 +510,7 @@ fn fixture_files_produce_nodes() {
                 continue;
             };
 
-            let text = std::fs::read_to_string(&file_path)
-                .expect("fixture file must be readable");
+            let text = std::fs::read_to_string(&file_path).expect("fixture file must be readable");
 
             let file = SourceFile {
                 path: file_path.to_string_lossy().to_string(),
@@ -632,8 +631,8 @@ fn fixture_files_produce_nodes() {
 fn azure_policy_fixture_emits_rule_nodes() {
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/azure_policy/require_https_storage.json");
-    let text = std::fs::read_to_string(&fixture_path)
-        .expect("azure_policy fixture must be readable");
+    let text =
+        std::fs::read_to_string(&fixture_path).expect("azure_policy fixture must be readable");
     let file = SourceFile {
         path: fixture_path.to_string_lossy().to_string(),
         language: Language::new("azure-policy"),
@@ -647,7 +646,10 @@ fn azure_policy_fixture_emits_rule_nodes() {
         ex.nodes.len(),
         4,
         "expected 4 nodes (RuleSet, Rule, Condition, Action); got: {:?}",
-        ex.nodes.iter().map(|n| (&n.kind, &n.name)).collect::<Vec<_>>()
+        ex.nodes
+            .iter()
+            .map(|n| (&n.kind, &n.name))
+            .collect::<Vec<_>>()
     );
     assert!(
         ex.nodes.iter().any(|n| n.kind == NodeKind::RuleSet),
@@ -665,18 +667,15 @@ fn azure_policy_fixture_emits_rule_nodes() {
         ex.nodes.iter().any(|n| n.kind == NodeKind::Action),
         "must have Action"
     );
-    assert!(
-        !ex.local_edges.is_empty(),
-        "must have at least one edge"
-    );
+    assert!(!ex.local_edges.is_empty(), "must have at least one edge");
 }
 
 #[test]
 fn azure_policy_fixture_display_name_captured() {
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/azure_policy/require_https_storage.json");
-    let text = std::fs::read_to_string(&fixture_path)
-        .expect("azure_policy fixture must be readable");
+    let text =
+        std::fs::read_to_string(&fixture_path).expect("azure_policy fixture must be readable");
     let file = SourceFile {
         path: fixture_path.to_string_lossy().to_string(),
         language: Language::new("azure-policy"),
@@ -700,8 +699,7 @@ fn azure_policy_fixture_display_name_captured() {
 fn aws_config_rule_fixture_emits_rule_nodes() {
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/aws_config/restricted_ssh.json");
-    let text = std::fs::read_to_string(&fixture_path)
-        .expect("aws_config fixture must be readable");
+    let text = std::fs::read_to_string(&fixture_path).expect("aws_config fixture must be readable");
     let file = SourceFile {
         path: fixture_path.to_string_lossy().to_string(),
         language: Language::new("aws-config-rule"),
@@ -716,7 +714,10 @@ fn aws_config_rule_fixture_emits_rule_nodes() {
         ex.nodes.len(),
         4,
         "expected 4 nodes; got: {:?}",
-        ex.nodes.iter().map(|n| (&n.kind, &n.name)).collect::<Vec<_>>()
+        ex.nodes
+            .iter()
+            .map(|n| (&n.kind, &n.name))
+            .collect::<Vec<_>>()
     );
     assert!(
         ex.nodes.iter().any(|n| n.kind == NodeKind::RuleSet),
@@ -740,8 +741,7 @@ fn aws_config_rule_fixture_emits_rule_nodes() {
 fn aws_config_rule_fixture_correct_names() {
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/aws_config/restricted_ssh.json");
-    let text = std::fs::read_to_string(&fixture_path)
-        .expect("aws_config fixture must be readable");
+    let text = std::fs::read_to_string(&fixture_path).expect("aws_config fixture must be readable");
     let file = SourceFile {
         path: fixture_path.to_string_lossy().to_string(),
         language: Language::new("aws-config-rule"),
@@ -777,8 +777,7 @@ fn aws_config_rule_fixture_correct_names() {
 fn aws_config_rule_fixture_edge_kinds() {
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/aws_config/restricted_ssh.json");
-    let text = std::fs::read_to_string(&fixture_path)
-        .expect("aws_config fixture must be readable");
+    let text = std::fs::read_to_string(&fixture_path).expect("aws_config fixture must be readable");
     let file = SourceFile {
         path: fixture_path.to_string_lossy().to_string(),
         language: Language::new("aws-config-rule"),
@@ -800,7 +799,10 @@ fn aws_config_rule_fixture_edge_kinds() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Contains)
         .count();
-    assert_eq!(contains, 2, "expected 2 Contains edges (RuleSet→Rule, Rule→Condition)");
+    assert_eq!(
+        contains, 2,
+        "expected 2 Contains edges (RuleSet→Rule, Rule→Condition)"
+    );
 }
 
 // ── W15.4: Camunda DMN extractor fixture integration test ─────────────────────
@@ -875,8 +877,7 @@ fn odm_irl_fixture_extracts_rules() {
 
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/ibm_odm/pricing_rules.irl");
-    let text = std::fs::read_to_string(&fixture)
-        .expect("odm fixture must be readable");
+    let text = std::fs::read_to_string(&fixture).expect("odm fixture must be readable");
 
     let file = SourceFile {
         path: fixture.to_string_lossy().to_string(),
@@ -901,7 +902,12 @@ fn odm_irl_fixture_extracts_rules() {
         .iter()
         .filter(|n| n.kind == NodeKind::Rule)
         .collect();
-    assert_eq!(rules.len(), 3, "expected exactly 3 Rule nodes, got {}", rules.len());
+    assert_eq!(
+        rules.len(),
+        3,
+        "expected exactly 3 Rule nodes, got {}",
+        rules.len()
+    );
 
     let conditions: Vec<_> = ex
         .nodes
@@ -930,10 +936,7 @@ fn odm_irl_fixture_extracts_rules() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Contains)
         .collect();
-    assert!(
-        !contains.is_empty(),
-        "expected Contains edges, got none"
-    );
+    assert!(!contains.is_empty(), "expected Contains edges, got none");
 }
 
 #[test]
@@ -943,8 +946,7 @@ fn odm_bal_fixture_extracts_rules() {
 
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/ibm_odm/loan_approval.brl");
-    let text = std::fs::read_to_string(&fixture)
-        .expect("odm fixture must be readable");
+    let text = std::fs::read_to_string(&fixture).expect("odm fixture must be readable");
 
     let file = SourceFile {
         path: fixture.to_string_lossy().to_string(),
@@ -959,7 +961,12 @@ fn odm_bal_fixture_extracts_rules() {
         .iter()
         .filter(|n| n.kind == NodeKind::Rule)
         .collect();
-    assert_eq!(rules.len(), 3, "expected exactly 3 Rule nodes, got {}", rules.len());
+    assert_eq!(
+        rules.len(),
+        3,
+        "expected exactly 3 Rule nodes, got {}",
+        rules.len()
+    );
 
     let conditions: Vec<_> = ex
         .nodes
@@ -986,10 +993,7 @@ fn odm_bal_fixture_extracts_rules() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Contains)
         .collect();
-    assert!(
-        !contains.is_empty(),
-        "expected Contains edges, got none"
-    );
+    assert!(!contains.is_empty(), "expected Contains edges, got none");
 }
 
 // ── W15.6 Salesforce Flow integration test ────────────────────────────────────
@@ -1002,8 +1006,8 @@ fn salesforce_flow_fixture_extracts_decisions_and_rules() {
 
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/salesforce_flow/account_validation.flow-meta.xml");
-    let text = std::fs::read_to_string(&fixture_path)
-        .expect("salesforce_flow fixture must be readable");
+    let text =
+        std::fs::read_to_string(&fixture_path).expect("salesforce_flow fixture must be readable");
 
     let extractor = SalesforceFlowExtractor::new();
     let file = wicked_estate_core::SourceFile {
@@ -1023,7 +1027,11 @@ fn salesforce_flow_fixture_extracts_decisions_and_rules() {
     assert!(
         !rule_sets.is_empty(),
         "expected at least 1 RuleSet node (decisions), got 0; nodes: {:?}",
-        extraction.nodes.iter().map(|n| (&n.name, &n.kind)).collect::<Vec<_>>()
+        extraction
+            .nodes
+            .iter()
+            .map(|n| (&n.name, &n.kind))
+            .collect::<Vec<_>>()
     );
 
     // Assert: at least 2 Rule nodes (the two rules elements: Is_Active_Premium + Is_Inactive)
@@ -1077,10 +1085,9 @@ fn salesforce_flow_fixture_extracts_decisions_and_rules() {
 fn clips_fixture_produces_rule_nodes() {
     use wicked_estate_extract::ClipsExtractor;
 
-    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/clips/sample.clp");
-    let text = std::fs::read_to_string(&fixture_path)
-        .expect("clips fixture must be readable");
+    let fixture_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/clips/sample.clp");
+    let text = std::fs::read_to_string(&fixture_path).expect("clips fixture must be readable");
 
     let extractor = ClipsExtractor::new();
     let file = SourceFile {
@@ -1088,7 +1095,9 @@ fn clips_fixture_produces_rule_nodes() {
         language: Language::new("clips"),
         text,
     };
-    let extraction = extractor.extract(&file).expect("clips extract must succeed");
+    let extraction = extractor
+        .extract(&file)
+        .expect("clips extract must succeed");
 
     let rules: Vec<_> = extraction
         .nodes
@@ -1099,32 +1108,59 @@ fn clips_fixture_produces_rule_nodes() {
         rules.len() >= 2,
         "expected ≥2 Rule nodes, got {} — nodes: {:?}",
         rules.len(),
-        extraction.nodes.iter().map(|n| (&n.kind, &n.name)).collect::<Vec<_>>()
+        extraction
+            .nodes
+            .iter()
+            .map(|n| (&n.kind, &n.name))
+            .collect::<Vec<_>>()
     );
 
-    let facts: Vec<_> = extraction.nodes.iter().filter(|n| n.kind == NodeKind::Fact).collect();
-    assert!(!facts.is_empty(), "expected ≥1 Fact node (deftemplate not extracted)");
+    let facts: Vec<_> = extraction
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Fact)
+        .collect();
+    assert!(
+        !facts.is_empty(),
+        "expected ≥1 Fact node (deftemplate not extracted)"
+    );
 
-    let conditions: Vec<_> = extraction.nodes.iter().filter(|n| n.kind == NodeKind::Condition).collect();
+    let conditions: Vec<_> = extraction
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Condition)
+        .collect();
     assert!(
         conditions.len() >= rules.len(),
         "expected ≥{} Condition nodes, got {}",
-        rules.len(), conditions.len()
+        rules.len(),
+        conditions.len()
     );
 
-    let actions: Vec<_> = extraction.nodes.iter().filter(|n| n.kind == NodeKind::Action).collect();
+    let actions: Vec<_> = extraction
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Action)
+        .collect();
     assert!(
         actions.len() >= rules.len(),
         "expected ≥{} Action nodes, got {}",
-        rules.len(), actions.len()
+        rules.len(),
+        actions.len()
     );
 
     assert!(
-        extraction.local_edges.iter().any(|e| e.kind == EdgeKind::Evaluates),
+        extraction
+            .local_edges
+            .iter()
+            .any(|e| e.kind == EdgeKind::Evaluates),
         "expected at least one Evaluates edge (Rule→Condition)"
     );
     assert!(
-        extraction.local_edges.iter().any(|e| e.kind == EdgeKind::Produces),
+        extraction
+            .local_edges
+            .iter()
+            .any(|e| e.kind == EdgeKind::Produces),
         "expected at least one Produces edge (Rule→Action)"
     );
 }
@@ -1148,10 +1184,27 @@ fn clips_snippet_minimal() {
         language: Language::new("clips"),
         text: snippet.to_string(),
     };
-    let extraction = extractor.extract(&file).expect("clips snippet must succeed");
+    let extraction = extractor
+        .extract(&file)
+        .expect("clips snippet must succeed");
 
-    assert!(extraction.nodes.iter().any(|n| n.kind == NodeKind::Rule), "must yield Rule node");
-    assert!(extraction.nodes.iter().any(|n| n.kind == NodeKind::Fact), "must yield Fact node");
-    assert!(extraction.nodes.iter().any(|n| n.kind == NodeKind::Condition), "must yield Condition node");
-    assert!(extraction.nodes.iter().any(|n| n.kind == NodeKind::Action), "must yield Action node");
+    assert!(
+        extraction.nodes.iter().any(|n| n.kind == NodeKind::Rule),
+        "must yield Rule node"
+    );
+    assert!(
+        extraction.nodes.iter().any(|n| n.kind == NodeKind::Fact),
+        "must yield Fact node"
+    );
+    assert!(
+        extraction
+            .nodes
+            .iter()
+            .any(|n| n.kind == NodeKind::Condition),
+        "must yield Condition node"
+    );
+    assert!(
+        extraction.nodes.iter().any(|n| n.kind == NodeKind::Action),
+        "must yield Action node"
+    );
 }

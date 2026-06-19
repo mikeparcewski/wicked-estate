@@ -665,10 +665,18 @@ target_node_scheme = "ibm-odm"
         let out = ex.extract_extra(&sf);
 
         assert_eq!(out.nodes.len(), 1, "one RuleSet synthetic node");
-        assert_eq!(out.nodes[0].kind, NodeKind::RuleSet, "node kind must be RuleSet");
+        assert_eq!(
+            out.nodes[0].kind,
+            NodeKind::RuleSet,
+            "node kind must be RuleSet"
+        );
 
         assert_eq!(out.edges.len(), 1, "one InvokedBy edge");
-        assert_eq!(out.edges[0].kind, EdgeKind::InvokedBy, "edge kind must be InvokedBy");
+        assert_eq!(
+            out.edges[0].kind,
+            EdgeKind::InvokedBy,
+            "edge kind must be InvokedBy"
+        );
 
         assert!(
             !out.unresolved_refs.is_empty(),

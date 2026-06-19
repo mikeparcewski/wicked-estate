@@ -445,7 +445,10 @@ mod tests {
             ex.nodes.len(),
             4,
             "expected 4 nodes (RuleSet, Rule, Condition, Action); got: {:?}",
-            ex.nodes.iter().map(|n| (&n.kind, &n.name)).collect::<Vec<_>>()
+            ex.nodes
+                .iter()
+                .map(|n| (&n.kind, &n.name))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -508,18 +511,12 @@ mod tests {
             ex.local_edges.len(),
             3,
             "expected 3 Contains edges; got: {:?}",
-            ex.local_edges
-                .iter()
-                .map(|e| &e.kind)
-                .collect::<Vec<_>>()
+            ex.local_edges.iter().map(|e| &e.kind).collect::<Vec<_>>()
         );
         assert!(
             ex.local_edges.iter().all(|e| e.kind == EdgeKind::Contains),
             "all edges must be Contains; got: {:?}",
-            ex.local_edges
-                .iter()
-                .map(|e| &e.kind)
-                .collect::<Vec<_>>()
+            ex.local_edges.iter().map(|e| &e.kind).collect::<Vec<_>>()
         );
     }
 
@@ -546,10 +543,7 @@ mod tests {
         let ex = azure_extractor()
             .extract(&file)
             .expect("must not error for non-policy json");
-        assert!(
-            ex.nodes.is_empty(),
-            "non-policy json must produce no nodes"
-        );
+        assert!(ex.nodes.is_empty(), "non-policy json must produce no nodes");
     }
 
     #[test]
@@ -568,18 +562,13 @@ mod tests {
             language: Language::new("azure-policy"),
             text: json.to_string(),
         };
-        let ex = azure_extractor()
-            .extract(&file)
-            .expect("must parse");
+        let ex = azure_extractor().extract(&file).expect("must parse");
         let ruleset = ex
             .nodes
             .iter()
             .find(|n| n.kind == NodeKind::RuleSet)
             .expect("RuleSet must exist");
-        assert_eq!(
-            ruleset.name, "my_policy",
-            "must fall back to file stem"
-        );
+        assert_eq!(ruleset.name, "my_policy", "must fall back to file stem");
     }
 
     // ── AWS Config Rule ───────────────────────────────────────────────────────
@@ -622,7 +611,10 @@ mod tests {
             ex.nodes.len(),
             4,
             "expected 4 nodes; got: {:?}",
-            ex.nodes.iter().map(|n| (&n.kind, &n.name)).collect::<Vec<_>>()
+            ex.nodes
+                .iter()
+                .map(|n| (&n.kind, &n.name))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -689,10 +681,7 @@ mod tests {
             ex.local_edges.len(),
             3,
             "expected 3 edges; got: {:?}",
-            ex.local_edges
-                .iter()
-                .map(|e| &e.kind)
-                .collect::<Vec<_>>()
+            ex.local_edges.iter().map(|e| &e.kind).collect::<Vec<_>>()
         );
         let contains_count = ex
             .local_edges
@@ -733,8 +722,7 @@ mod tests {
             .filter(|e| e.kind == EdgeKind::Evaluates)
             .count();
         assert_eq!(
-            evaluates_count,
-            3,
+            evaluates_count, 3,
             "expected 3 Evaluates edges; got {evaluates_count}"
         );
     }
@@ -759,9 +747,7 @@ mod tests {
             language: Language::new("aws-config-rule"),
             text: r#"{"name":"foo"}"#.to_string(),
         };
-        let ex = aws_extractor()
-            .extract(&file)
-            .expect("must not error");
+        let ex = aws_extractor().extract(&file).expect("must not error");
         assert!(ex.nodes.is_empty());
     }
 

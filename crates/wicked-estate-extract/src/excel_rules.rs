@@ -202,11 +202,9 @@ mod inner {
         // Determine the sheet name to open.
         let sheet_name: String = match &cfg.sheet_name {
             Some(n) => n.clone(),
-            None => workbook
-                .sheet_names()
-                .first()
-                .cloned()
-                .ok_or_else(|| wicked_estate_core::Error::Extraction("workbook has no sheets".into()))?,
+            None => workbook.sheet_names().first().cloned().ok_or_else(|| {
+                wicked_estate_core::Error::Extraction("workbook has no sheets".into())
+            })?,
         };
 
         let range = workbook
@@ -349,6 +347,5 @@ mod inner {
 
 #[cfg(feature = "excel-rules")]
 pub use inner::{
-    ColumnConfig, ColumnRole, ExcelEngineConfig, ExcelRulesConfig, ExcelRulesExtractor,
-    SheetConfig,
+    ColumnConfig, ColumnRole, ExcelEngineConfig, ExcelRulesConfig, ExcelRulesExtractor, SheetConfig,
 };
