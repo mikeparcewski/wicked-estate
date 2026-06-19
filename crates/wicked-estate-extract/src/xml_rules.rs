@@ -67,9 +67,16 @@ pub struct NodeMapping {
     /// Target `NodeKind` as a snake_case string: `"rule"`, `"rule_set"`, `"condition"`,
     /// `"action"`, or `"fact"`.
     pub emit_kind: String,
-    /// Attribute whose value is used as the node name (takes priority over `name_text`).
+    /// Attribute whose value is used as the node name (takes priority over `name_child` and
+    /// `name_text`).
     pub name_attr: Option<String>,
-    /// If `true` and `name_attr` is absent / unset, use the element's text content as the name.
+    /// Extract the name from the text of a named child element (e.g. `name_child = "label"`
+    /// reads the text content of the first `<label>` child). Checked after `name_attr` but
+    /// before `name_text`.
+    #[serde(default)]
+    pub name_child: Option<String>,
+    /// If `true` and `name_attr` / `name_child` are absent / unset, use the element's text
+    /// content as the name.
     #[serde(default)]
     pub name_text: bool,
 }
@@ -112,9 +119,29 @@ fn parse_edge_kind(s: &str) -> EdgeKind {
     }
 }
 
+// ── Name resolution helper ────────────────────────────────────────────────────
+
+/// Resolve a node's display name from a mapping + element node.
+fn resolve_name(mapping: &NodeMapping, node: roxmltree::Node<'_, '_>, fallback: &str) -> String {
+    if let Some(attr) = &mapping.name_attr {
+        node.attribute(attr.as_str()).unwrap_or("").to_string()
+    } else if let Some(child_elem) = &mapping.name_child {
+        node.children()
+            .find(|c| c.is_element() && c.tag_name().name() == child_elem.as_str())
+            .and_then(|c| c.text())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    } else if mapping.name_text {
+        node.text().unwrap_or("").trim().to_string()
+    } else {
+        fallback.to_string()
+    }
+}
+
 // ── Extractor ─────────────────────────────────────────────────────────────────
 
-/// A data-driven XML extractor for rules documents (DMN, Drools, BPMN, …).
+/// A data-driven XML extractor for rules documents (DMN, Drools, BPMN, Salesforce Flow, …).
 ///
 /// Build one from a deserialized [`XmlRulesConfig`]:
 /// ```ignore
@@ -174,13 +201,7 @@ impl Extractor for XmlRulesExtractor {
             };
 
             // Resolve the node's display name.
-            let name = if let Some(attr) = &mapping.name_attr {
-                node.attribute(attr.as_str()).unwrap_or("").to_string()
-            } else if mapping.name_text {
-                node.text().unwrap_or("").trim().to_string()
-            } else {
-                elem_name.to_string()
-            };
+            let name = resolve_name(mapping, node, elem_name);
 
             if name.is_empty() {
                 continue;
@@ -219,19 +240,14 @@ impl Extractor for XmlRulesExtractor {
 
                 // Resolve the parent symbol id.
                 let parent_name = if let Some(nm) = node_map.get(edge_mapping.parent_element.as_str()) {
-                    if let Some(attr) = &nm.name_attr {
-                        parent_node.attribute(attr.as_str()).unwrap_or("").to_string()
-                    } else if nm.name_text {
-                        parent_node.text().unwrap_or("").trim().to_string()
-                    } else {
-                        edge_mapping.parent_element.clone()
+                    let n = resolve_name(nm, parent_node, &edge_mapping.parent_element);
+                    if n.is_empty() {
+                        continue;
                     }
+                    n
                 } else {
                     continue;
                 };
-                if parent_name.is_empty() {
-                    continue;
-                }
 
                 // Build the parent's element path.
                 let mut pp: Vec<String> = parent_node
@@ -260,13 +276,7 @@ impl Extractor for XmlRulesExtractor {
                         None => continue,
                     };
 
-                    let child_name = if let Some(attr) = &child_nm.name_attr {
-                        child.attribute(attr.as_str()).unwrap_or("").to_string()
-                    } else if child_nm.name_text {
-                        child.text().unwrap_or("").trim().to_string()
-                    } else {
-                        edge_mapping.child_element.clone()
-                    };
+                    let child_name = resolve_name(child_nm, child, &edge_mapping.child_element);
                     if child_name.is_empty() {
                         continue;
                     }
@@ -463,5 +473,38 @@ edge_kind      = "governs"
         // name="" → skipped; no nodes emitted.
         assert!(extraction.nodes.is_empty(), "empty name should be skipped");
         assert!(extraction.local_edges.is_empty());
+    }
+
+    #[test]
+    fn name_child_resolves_from_child_element_text() {
+        // Verify the name_child extension: name comes from a child element's text, not an attr.
+        const CFG: &str = r#"
+[engine]
+name       = "test-child"
+file_globs = ["**/*.xml"]
+
+[[node_mappings]]
+element    = "parent"
+emit_kind  = "rule_set"
+name_child = "label"
+"#;
+
+        const XML: &str = r#"<?xml version="1.0"?>
+<root>
+  <parent>
+    <label>My Rule Set</label>
+  </parent>
+</root>"#;
+
+        let extractor = XmlRulesExtractor::from_toml(CFG).expect("config must parse");
+        let file = SourceFile {
+            path: "test.xml".to_string(),
+            language: Language::new("xml-rules:test-child"),
+            text: XML.to_string(),
+        };
+        let extraction = extractor.extract(&file).expect("extraction must succeed");
+        assert_eq!(extraction.nodes.len(), 1);
+        assert_eq!(extraction.nodes[0].name, "My Rule Set");
+        assert_eq!(extraction.nodes[0].kind, NodeKind::RuleSet);
     }
 }

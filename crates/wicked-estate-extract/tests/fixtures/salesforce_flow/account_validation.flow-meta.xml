@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>57.0</apiVersion>
+    <label>Account Validation Flow</label>
+    <processType>AutoLaunchedFlow</processType>
+    <decisions>
+        <name>Check_Account_Status</name>
+        <label>Check Account Status</label>
+        <locationX>362</locationX>
+        <locationY>278</locationY>
+        <defaultConnectorLabel>Default Outcome</defaultConnectorLabel>
+        <rules>
+            <name>Is_Active_Premium</name>
+            <label>Is Active Premium</label>
+            <conditionLogic>and</conditionLogic>
+            <conditions>
+                <leftValueReference>Account.Status__c</leftValueReference>
+                <operator>EqualTo</operator>
+                <rightValue>
+                    <stringValue>Active</stringValue>
+                </rightValue>
+            </conditions>
+            <conditions>
+                <leftValueReference>Account.Type</leftValueReference>
+                <operator>EqualTo</operator>
+                <rightValue>
+                    <stringValue>Premium</stringValue>
+                </rightValue>
+            </conditions>
+        </rules>
+        <rules>
+            <name>Is_Inactive</name>
+            <label>Is Inactive</label>
+            <conditionLogic>and</conditionLogic>
+            <conditions>
+                <leftValueReference>Account.Status__c</leftValueReference>
+                <operator>EqualTo</operator>
+                <rightValue>
+                    <stringValue>Inactive</stringValue>
+                </rightValue>
+            </conditions>
+        </rules>
+    </decisions>
+    <actionCalls>
+        <name>Send_Premium_Alert</name>
+        <label>Send Premium Alert</label>
+        <actionName>chatterPost</actionName>
+        <actionType>chatterPost</actionType>
+    </actionCalls>
+    <status>Active</status>
+</Flow>

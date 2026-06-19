@@ -492,7 +492,7 @@ fn fixture_files_produce_nodes() {
         let lang = lang_dir.file_name().unwrap().to_string_lossy().to_string();
 
         let mut files: Vec<_> = std::fs::read_dir(&lang_dir)
-            .unwrap_or_else(|_| panic!("cannot read {lang_dir:?}"))
+            .expect(&format!("cannot read {lang_dir:?}"))
             .filter_map(|e| e.ok())
             .filter(|e| e.path().is_file())
             .collect();
@@ -511,7 +511,7 @@ fn fixture_files_produce_nodes() {
             };
 
             let text = std::fs::read_to_string(&file_path)
-                .unwrap_or_else(|_| panic!("cannot read {file_path:?}"));
+                .expect(&format!("cannot read {file_path:?}"));
 
             let file = SourceFile {
                 path: file_path.to_string_lossy().to_string(),
@@ -614,7 +614,8 @@ fn fixture_files_produce_nodes() {
     );
 
     if !failures.is_empty() {
-        panic!(
+        assert!(
+            false,
             "{} fixture(s) failed cap assertions ({} total):\n{}",
             failures.len(),
             tested,
@@ -634,7 +635,7 @@ fn azure_policy_fixture_emits_rule_nodes() {
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/azure_policy/require_https_storage.json");
     let text = std::fs::read_to_string(&fixture_path)
-        .unwrap_or_else(|e| panic!("cannot read azure_policy fixture: {e}"));
+        .expect("cannot read azure_policy fixture");
     let file = SourceFile {
         path: fixture_path.to_string_lossy().to_string(),
         language: Language::new("azure-policy"),
@@ -677,7 +678,7 @@ fn azure_policy_fixture_display_name_captured() {
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/azure_policy/require_https_storage.json");
     let text = std::fs::read_to_string(&fixture_path)
-        .unwrap_or_else(|e| panic!("cannot read azure_policy fixture: {e}"));
+        .expect("cannot read azure_policy fixture");
     let file = SourceFile {
         path: fixture_path.to_string_lossy().to_string(),
         language: Language::new("azure-policy"),
@@ -702,7 +703,7 @@ fn aws_config_rule_fixture_emits_rule_nodes() {
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/aws_config/restricted_ssh.json");
     let text = std::fs::read_to_string(&fixture_path)
-        .unwrap_or_else(|e| panic!("cannot read aws_config fixture: {e}"));
+        .expect("cannot read aws_config fixture");
     let file = SourceFile {
         path: fixture_path.to_string_lossy().to_string(),
         language: Language::new("aws-config-rule"),
@@ -742,7 +743,7 @@ fn aws_config_rule_fixture_correct_names() {
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/aws_config/restricted_ssh.json");
     let text = std::fs::read_to_string(&fixture_path)
-        .unwrap_or_else(|e| panic!("cannot read aws_config fixture: {e}"));
+        .expect("cannot read aws_config fixture");
     let file = SourceFile {
         path: fixture_path.to_string_lossy().to_string(),
         language: Language::new("aws-config-rule"),
@@ -779,7 +780,7 @@ fn aws_config_rule_fixture_edge_kinds() {
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/aws_config/restricted_ssh.json");
     let text = std::fs::read_to_string(&fixture_path)
-        .unwrap_or_else(|e| panic!("cannot read aws_config fixture: {e}"));
+        .expect("cannot read aws_config fixture");
     let file = SourceFile {
         path: fixture_path.to_string_lossy().to_string(),
         language: Language::new("aws-config-rule"),
@@ -878,7 +879,7 @@ fn odm_irl_fixture_extracts_rules() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/ibm_odm/pricing_rules.irl");
     let text = std::fs::read_to_string(&fixture)
-        .unwrap_or_else(|_| panic!("cannot read {fixture:?}"));
+        .expect(&format!("cannot read {fixture:?}"));
 
     let file = SourceFile {
         path: fixture.to_string_lossy().to_string(),
@@ -946,7 +947,7 @@ fn odm_bal_fixture_extracts_rules() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/ibm_odm/loan_approval.brl");
     let text = std::fs::read_to_string(&fixture)
-        .unwrap_or_else(|_| panic!("cannot read {fixture:?}"));
+        .expect(&format!("cannot read {fixture:?}"));
 
     let file = SourceFile {
         path: fixture.to_string_lossy().to_string(),
