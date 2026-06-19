@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="https://www.omg.org/spec/DMN/20191111/MODEL/"
+             id="loan-decision-model"
+             name="LoanDecisionModel"
+             namespace="http://camunda.org/schema/1.0/dmn">
+  <decision id="eligibilityCheck" name="EligibilityCheck">
+    <decisionTable id="eligibilityTable">
+      <input id="creditScoreInput" label="Credit Score">
+        <inputExpression typeRef="integer">
+          <text>creditScore</text>
+        </inputExpression>
+      </input>
+      <input id="incomeInput" label="Annual Income">
+        <inputExpression typeRef="integer">
+          <text>annualIncome</text>
+        </inputExpression>
+      </input>
+      <output id="eligibleOutput" label="Eligible" name="eligible" typeRef="boolean"/>
+      <rule id="rule-prime">
+        <inputEntry><text>&gt;= 700</text></inputEntry>
+        <inputEntry><text>&gt;= 50000</text></inputEntry>
+        <outputEntry><text>true</text></outputEntry>
+      </rule>
+      <rule id="rule-subprime">
+        <inputEntry><text>&lt; 700</text></inputEntry>
+        <inputEntry><text>&lt; 50000</text></inputEntry>
+        <outputEntry><text>false</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+  <decision id="loanAmountCalc" name="LoanAmountCalculation">
+    <informationRequirement id="req1">
+      <requiredDecision href="#eligibilityCheck"/>
+    </informationRequirement>
+    <decisionTable id="amountTable">
+      <input id="requestedAmountInput" label="Requested Amount">
+        <inputExpression typeRef="integer">
+          <text>requestedAmount</text>
+        </inputExpression>
+      </input>
+      <output id="approvedAmountOutput" label="Approved Amount" name="approvedAmount" typeRef="integer"/>
+      <rule id="rule-full">
+        <inputEntry><text>&lt;= 100000</text></inputEntry>
+        <outputEntry><text>requestedAmount</text></outputEntry>
+      </rule>
+    </decisionTable>
+  </decision>
+</definitions>

@@ -45,6 +45,12 @@ pub mod xml_rules;
 #[cfg(feature = "xml-rules")]
 pub use xml_rules::{EdgeMapping, EngineConfig, NodeMapping, XmlRulesConfig, XmlRulesExtractor};
 
+// W15.4 — Camunda DMN extractor (feature-gated: `xml-rules`).
+#[cfg(feature = "xml-rules")]
+pub mod dmn;
+#[cfg(feature = "xml-rules")]
+pub use dmn::CamundaDmnExtractor;
+
 pub mod cloud;
 pub use cloud::{
     CloudCollector, CloudConfig, CloudProvider, CloudResource, MockCloudCollector,

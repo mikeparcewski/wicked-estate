@@ -13,6 +13,8 @@ use std::collections::HashMap;
 use wicked_estate_core::{EdgeKind, Extractor, Language, NodeKind, SourceFile};
 use wicked_estate_extract::treesitter::extractor_for_extension;
 use wicked_estate_extract::{AwsConfigRuleExtractor, AzurePolicyExtractor};
+#[cfg(feature = "xml-rules")]
+use wicked_estate_extract::CamundaDmnExtractor;
 
 /// Build extension → caps map from languages.toml.
 fn ext_caps() -> HashMap<String, Vec<String>> {
@@ -800,4 +802,68 @@ fn aws_config_rule_fixture_edge_kinds() {
         .filter(|e| e.kind == EdgeKind::Contains)
         .count();
     assert_eq!(contains, 2, "expected 2 Contains edges (RuleSet→Rule, Rule→Condition)");
+}
+
+// ── W15.4: Camunda DMN extractor fixture integration test ─────────────────────
+
+/// W15.4 — Camunda DMN extractor smoke test.
+///
+/// Loads `tests/fixtures/dmn/loan_decision.dmn` and verifies that:
+/// - At least 2 `NodeKind::Rule` nodes are produced (the two `<decision>` elements).
+/// - At least 2 `NodeKind::RuleSet` nodes are produced (`<definitions>` + two
+///   `<decisionTable>` elements → at least 2).
+/// - At least 1 `EdgeKind::Governs` edge is produced (`definitions` → `decision`).
+#[cfg(feature = "xml-rules")]
+#[test]
+fn dmn_fixture_extracts_decisions_and_decision_tables() {
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/dmn/loan_decision.dmn");
+    let text = std::fs::read_to_string(&fixture_path)
+        .expect("tests/fixtures/dmn/loan_decision.dmn must exist");
+
+    let extractor = CamundaDmnExtractor::new()
+        .expect("CamundaDmnExtractor::new() must not fail with valid embedded config");
+
+    let file = SourceFile {
+        path: fixture_path.to_string_lossy().to_string(),
+        language: Language("camunda-dmn".to_string()),
+        text,
+    };
+
+    let extraction = extractor
+        .extract(&file)
+        .expect("CamundaDmnExtractor::extract must succeed on valid DMN");
+
+    // Count Rule nodes (decisions + rule rows).
+    let rule_count = extraction
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Rule)
+        .count();
+    assert!(
+        rule_count >= 2,
+        "expected >= 2 Rule nodes (the two <decision> elements + rule rows), got {rule_count}"
+    );
+
+    // Count RuleSet nodes (definitions + decisionTable elements).
+    let rule_set_count = extraction
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::RuleSet)
+        .count();
+    assert!(
+        rule_set_count >= 2,
+        "expected >= 2 RuleSet nodes (<definitions> + at least one <decisionTable>), got {rule_set_count}"
+    );
+
+    // At least one Governs edge (definitions → decision).
+    let governs_count = extraction
+        .local_edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Governs)
+        .count();
+    assert!(
+        governs_count >= 1,
+        "expected >= 1 Governs edge (definitions → decision), got {governs_count}"
+    );
 }
