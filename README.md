@@ -9,13 +9,14 @@ __      ___  ___| | _____  __| |______ ___  ___| |_ __ _| |_ ___
 
 **Turn a repo — and its surrounding infrastructure/mainframe estate — into one queryable graph that
 LLM agents can actually use.** Symbols, calls, imports, types, refs, and cross-domain estate links:
-definitions, who-calls-X, blast-radius, scoped context. Local-first, single static binary,
-tree-sitter + SQLite.
+definitions, who-calls-X, blast-radius, scoped context. **Portable by design** — one static binary
+that runs local-first on SQLite, or backs a shared, concurrent team graph on Postgres. Solo laptop to
+enterprise CI fleet, same engine, same queries.
 
 [![CI](https://github.com/mikeparcewski/wicked-estate/actions/workflows/ci.yml/badge.svg)](https://github.com/mikeparcewski/wicked-estate/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-> **Status:** v0.10.0 — `cargo test --workspace` is **856 passing, 0 failed, 0 ignored**;
+> **Status:** v0.11.0 — `cargo test --workspace` is **856+ passing, 0 failed, 0 ignored**;
 > 0 build warnings; clippy `-D warnings` clean. Greenfield, pre-1.0. See
 > [FEATURES.md](./FEATURES.md) for the exhaustive, honestly-tagged capability inventory
 > (✅ built / 🟡 partial / 🟦 designed-not-built).
@@ -26,7 +27,7 @@ tree-sitter + SQLite.
 
 LLM coding agents waste turns grepping and re-reading files. wicked-estate gives them a precise,
 ranked, **bounded** answer instead — "who calls this?", "what breaks if I change it?", "give me just
-the context for this symbol" — across **105 wired languages** (including legacy enterprise stacks:
+the context for this symbol" — across **102 wired languages** (including legacy enterprise stacks:
 VB6/VBA/VBScript/VB.NET, RPG, Delphi, ColdFusion, Progress ABL, PowerBuilder, Visual FoxPro,
 LotusScript, Informix 4GL, Crystal Reports) plus a mainframe/IaC **estate** layer
 (COBOL, JCL, RACF, IMS, MQ, Terraform, CloudFormation, …) that almost nothing else unifies into one
@@ -104,6 +105,11 @@ wicked-estate watch ./my-project --db graph.db
 - **Git-aware + incremental** — per-file git sha, incremental re-index, watch mode, a read-only
   edge-history log, and a resumable change-log (`subscribe`).
 - **Multi-repo** — federated `cross-graph` search + blast-radius across many repo graphs.
+- **Local or enterprise — same engine, swap one flag** — local-first **SQLite** by default (one
+  file, zero setup, perfect for a laptop or a CI job); point `--db` at **Postgres**
+  (`--features postgres`, `--db postgres://…`) for a shared team graph with concurrent writers and
+  server-side traversal. No re-index, no query changes — storage is a backend, not a rewrite. The DB
+  layer is swappable (the same seam SurrealDB will land behind).
 
 ## Architecture
 
@@ -150,7 +156,10 @@ query + manifest dropped into the plugins dir, loaded at startup. See the
 ## Honest status (not yet true)
 
 Per the project's "every done needs a still-not-done" rule:
-- **External DB** (Postgres/server) and **OpenTelemetry exporters**: seams designed, **not built**.
+- **External DB + OpenTelemetry**: the **Postgres** backend and the **OTLP** exporter are **built** ✅
+  (Postgres conformance-passes — concurrent writers + server-side traversal are real) — but Postgres
+  isn't yet benchmarked at scale vs. SQLite, OTel has no zero-to-dashboard guide yet, and SurrealDB
+  is still designed-not-built.
 - **Cloud collectors** (AWS/Azure/GCP): read-only interfaces + `tfstate` work; live collectors are
   observe-only stubs. Estate maturity trails the code-intelligence core.
 - **Semantic embedder tests** are feature-gated (need a model download) — they run in the CI
