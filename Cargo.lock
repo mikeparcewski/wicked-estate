@@ -624,17 +624,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arborium-nginx"
-version = "2.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28599caef4c67e80a011a800d8662cf5805006ff27217e34160416a483bf9d8d"
-dependencies = [
- "arborium-sysroot",
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
 name = "arborium-ninja"
 version = "2.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9748,7 +9737,6 @@ dependencies = [
  "arborium-make",
  "arborium-matlab",
  "arborium-meson",
- "arborium-nginx",
  "arborium-ninja",
  "arborium-objc",
  "arborium-perl",
