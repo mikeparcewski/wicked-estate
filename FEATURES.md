@@ -108,8 +108,44 @@ get hand-written line/macro extractors:
 - Method: template from a battle-tested grammar (JS/Python) → `npx tree-sitter-cli generate` →
   vendored `parser.c` + `build.rs` (cc) + Rust binding + corpus **parse-gate** (zero ERROR nodes) +
   **extraction-count comparison** = "manufactured battle-testing."
-- Delivered: **RPG IV** free-format grammar (`vendor/tree-sitter-rpg/`), excluded from the workspace,
-  with `rpg_grammar.rs` parse-gate + extraction tests.
+- Delivered (legacy enterprise stacks with no usable upstream grammar): **RPG IV** (free-format),
+  **Progress OpenEdge ABL** (upstream parser.c was ~97MB — too big to vendor), **PowerBuilder
+  PowerScript**, **Visual FoxPro**, **LotusScript**, **Informix 4GL**, and **Crystal Reports
+  formulas** — each `vendor/tree-sitter-<lang>/`, excluded from the workspace, with a
+  `<lang>_grammar.rs` parse-gate + extraction test. (CFML, VB6/VBA/VBScript are vendored from
+  upstream grammars; VB.NET, Delphi/Pascal use crates.io grammars.)
+
+### Runtime language plugins ✅ (`src/plugin.rs`, see [PLUGIN.md](./PLUGIN.md))
+- A language can be added **without compiling it into the core**: drop a directory —
+  `lib<name>.{so,dylib,dll}` (compiled tree-sitter grammar) + `<name>.scm` (query) + `plugin.toml`
+  (manifest) — into `$WICKED_ESTATE_PLUGINS` (default `~/.wicked-estate/plugins`).
+- Loaded at startup via `libloading` (`dlopen`), ABI-checked (13–15), and registered. Lookups consult
+  the built-in `LANG_TABLE` first, then plugins — a plugin never shadows a built-in; an unloadable or
+  ABI-incompatible plugin is skipped with a warning, never aborts.
+- **License isolation:** the grammar is a separate binary artifact, never linked into the MIT core at
+  build time, so a grammar under an incompatible license (GPL, etc.) stays isolated. The only added
+  deps are `libloading` (ISC) + `tree-sitter-language` (MIT) — both permissive.
+- `wicked-estate plugins list` enumerates loaded plugins. Worked example:
+  [`examples/plugins/nginx`](./examples/plugins/nginx) (Apache-2.0, deliberately ≠ the MIT core).
+
+### Rules engine extractors ✅ (W15)
+Business-rules logic is extracted into the **same graph as code**, so cross-domain queries work
+(e.g. "what code calls this ODM rule set?"). NodeKind `{Rule, RuleSet, Condition, Action, Fact}` +
+EdgeKind `{Governs, Evaluates, Produces, InvokedBy}`; `RulesBridgeResolver` connects code call sites
+to real `RuleSet` nodes, and the `RulesInventory` MCP tool lists engines + calling code.
+
+| Extractor | Source | Captures |
+|-----------|--------|----------|
+| `OdmExtractor` | IBM ODM BAL/IRL text | RuleSet, Rule, Condition, Action |
+| `CamundaDmnExtractor` | Camunda DMN XML (`.dmn`) | RuleSet, Rule, Condition, Action |
+| `DroolsGdstExtractor` | Drools GDST XML (`.gdst`) | RuleSet, Condition, Action |
+| `ClipsExtractor` | CLIPS/Jess S-expressions (`.clp`) | RuleSet, Rule, Condition, Action, Fact |
+| `ExcelRulesExtractor` | Excel decision tables (`.xlsx`) | RuleSet, Rule, Condition, Action, Fact |
+| `SalesforceFlowExtractor` | Salesforce Flow XML (`.flow-meta.xml`) | RuleSet, Rule, Condition |
+| `AwsConfigRuleExtractor` / `AzurePolicyExtractor` | AWS Config / Azure Policy JSON | Rule, Condition, Action |
+
+XML/Excel extractors are feature-gated (`xml-rules` / `excel-rules`). Blocked for lack of a grammar or
+specimens: Drools DRL, OPA/Rego, Corticon, FICO Blaze.
 
 ### Known niche gaps 🟡
 - VSAM **AIX** alternate-index modeling; ESDS/RRDS vs KSDS access-method distinction.

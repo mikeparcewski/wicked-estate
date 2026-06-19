@@ -32,84 +32,124 @@ Note: `extends`/`implements` in the manifest reflect what the `.scm` query captu
 (tree-sitter, intra-file). Cross-file resolution of heritage requires the `precise` tier
 (SCIP/TSG/LSP — Waves W2.2/W3.2/W3.3).
 
-**73 languages in manifest · 13 wired (extractor present) · 60 aspirational (manifest row, extractor pending)**
+**113 languages in manifest · 102 wired (extractor present) · 11 aspirational (manifest row, extractor pending)**
 
 ## Full matrix
 
 | Language | Wired? | Tier | Capabilities | Extensions |
 |----------|:------:|------|:------------:|------------|
+| `abl` | yes | `structural` | S·C | `.p`, `.w`, `.i` |
+| `ada` | yes | `structural` | S | `.adb`, `.ads` |
+| `arm` | yes | `structural` | S·I | `.arm.json` |
+| `awk` | yes | `structural` | S·C | `.awk` |
+| `bicep` | yes | `structural` | S·C·I | `.bicep` |
 | `c` | yes | `structural` | S·C·I | `.c`, `.h` |
+| `cfml` | yes | `structural` | S·C | `.cfm`, `.cfc` |
+| `cfscript` | yes | `structural` | S·C | `.cfs` |
+| `clojure` | yes | `structural` | S·C | `.clj`, `.cljs`, `.cljc`, `.edn` |
+| `cmake` | yes | `structural` | S·C | `.cmake` |
+| `commonlisp` | yes | `structural` | S | `.lisp`, `.cl` |
 | `cpp` | yes | `structural` | S·C·I | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh` |
+| `crystal_formula` | yes | `structural` | S·C | `.crf` |
 | `csharp` | yes | `structural` | S·C·I·E | `.cs` |
+| `css` | yes | `structural` | S·I | `.css` |
+| `dart` | yes | `structural` | S·I | `.dart` |
+| `devicetree` | yes | `structural` | S | `.dts`, `.dtsi` |
+| `dockerfile` | yes | `structural` | S | `.dockerfile` |
+| `elisp` | yes | `structural` | S | `.el` |
+| `elixir` | yes | `structural` | S·C·I | `.ex`, `.exs` |
+| `elm` | yes | `structural` | S·I | `.elm` |
+| `erlang` | yes | `structural` | S·C | `.erl`, `.hrl` |
+| `fish` | yes | `structural` | S·C | `.fish` |
+| `fortran` | yes | `structural` | S·C·I | `.f90`, `.f95`, `.f03`, `.f08`, `.f`, `.for` |
+| `foxpro` | yes | `structural` | S·C | `.prg` |
+| `fsharp` | yes | `structural` | S | `.fs`, `.fsi`, `.fsx` |
+| `gleam` | yes | `structural` | S·I | `.gleam` |
+| `glsl` | yes | `structural` | S·C | `.glsl`, `.vert`, `.frag` |
 | `go` | yes | `structural` | S·C·I | `.go` |
+| `graphql` | yes | `structural` | S | `.graphql`, `.gql` |
+| `groovy` | yes | `structural` | S·C·I | `.groovy`, `.gradle` |
+| `haskell` | yes | `structural` | S·C·I | `.hs` |
+| `hcl` | yes | `structural` | S·C | `.tf`, `.hcl`, `.tfvars` |
+| `hlsl` | yes | `structural` | S·C | `.hlsl` |
+| `idris` | yes | `structural` | S | `.idr` |
+| `informix4gl` | yes | `structural` | S·C | `.4gl` |
 | `java` | yes | `structural` | S·C·I·E·P | `.java` |
 | `javascript` | yes | `structural` | S·C·I | `.js`, `.jsx`, `.mjs`, `.cjs` |
+| `jinja2` | yes | `structural` | S·I | `.j2`, `.jinja`, `.jinja2` |
+| `jq` | yes | `structural` | S·I | `.jq` |
+| `just` | yes | `structural` | S | `.just`, `.justfile` |
+| `kotlin` | yes | `structural` | S·C·I·E | `.kt`, `.kts` |
+| `lean` | yes | `structural` | S | `.lean` |
+| `lotusscript` | yes | `structural` | S·C | `.lss`, `.ls` |
+| `make` | yes | `structural` | S | `.mk` |
+| `markdown` | yes | `structural` | S | `.md`, `.markdown` |
+| `matlab` | yes | `structural` | S | `.m` |
+| `meson` | yes | `structural` | S | `.meson` |
+| `ninja` | yes | `structural` | S | `.ninja` |
+| `nix` | yes | `structural` | S·C | `.nix` |
+| `objc` | yes | `structural` | S | `.mm` |
+| `pascal` | yes | `structural` | S·C | `.pas`, `.pp`, `.dpr`, `.dpk`, `.lpr` |
+| `perl` | yes | `structural` | S·I | `.pl`, `.pm` |
+| `php` | yes | `structural` | S·C·I | `.php` |
+| `powerscript` | yes | `structural` | S·C·E | `.sru`, `.srw`, `.srf`, `.sra`, `.srm` |
+| `powershell` | yes | `structural` | S | `.ps1`, `.psm1` |
+| `prolog` | yes | `structural` | S | `.pro` |
+| `proto` | yes | `structural` | S·I | `.proto` |
 | `python` | yes | `structural` | S·C·I·E | `.py`, `.pyi` |
+| `r` | yes | `structural` | S·C | `.r`, `.R` |
+| `rego` | yes | `structural` | S·I | `.rego` |
+| `rescript` | yes | `structural` | S·C | `.res`, `.resi` |
 | `ruby` | yes | `structural` | S·C·I·E·P | `.rb` |
 | `rust` | yes | `structural` | S·C·I | `.rs` |
+| `scala` | yes | `structural` | S·C·I·E | `.scala`, `.sc` |
+| `sql` | yes | `structural` | S | `.sql` |
+| `svelte` | yes | `structural` | S | `.svelte` |
+| `swift` | yes | `structural` | S·C·I·E | `.swift` |
+| `toml` | yes | `structural` | S | `.toml` |
 | `tsx` | yes | `structural` | S·C·I·E·P | `.tsx` |
 | `typescript` | yes | `structural` | S·C·I·E·P | `.ts` |
+| `vb6` | yes | `structural` | S·C | `.bas`, `.cls`, `.frm`, `.ctl` |
+| `vba` | yes | `structural` | S·C | `.vba` |
+| `vbnet` | yes | `structural` | S·C·I·E·P | `.vb` |
+| `vbscript` | yes | `structural` | S·C | `.vbs`, `.wsf` |
+| `vue` | yes | `structural` | S | `.vue` |
+| `zig` | yes | `structural` | S | `.zig` |
+| `apex` | yes | `tags` | S | `.cls`, `.trigger` |
+| `arduino` | yes | `tags` | S·C | `.ino` |
 | `bash` | yes | `tags` | S | `.sh`, `.bash` |
+| `cuda` | yes | `tags` | S | `.cu`, `.cuh` |
+| `d` | yes | `tags` | S·C | `.d` |
+| `elisp` | yes | `tags` | S·C | `.el` |
+| `julia` | yes | `tags` | S·I | `.jl` |
+| `lua` | yes | `tags` | S·C | `.lua` |
+| `ocaml` | yes | `tags` | S·C | `.ml` |
+| `racket` | yes | `tags` | S·C | `.rkt` |
+| `solidity` | yes | `tags` | S·C | `.sol` |
+| `starlark` | yes | `tags` | S·I | `.bzl`, `.star` |
+| `thrift` | yes | `tags` | S | `.thrift` |
+| `verilog` | yes | `tags` | S | `.v`, `.sv` |
+| `vhdl` | yes | `tags` | S | `.vhd`, `.vhdl` |
+| `dot` | yes | `document` | S | `.dot`, `.gv` |
+| `html` | yes | `document` | S | `.html`, `.htm` |
+| `ini` | yes | `document` | S | `.ini` |
+| `jsdoc` | yes | `document` | S | `.jsdoc` |
+| `kdl` | yes | `document` | S | `.kdl` |
+| `postscript` | yes | `document` | S | `.ps`, `.eps` |
+| `regex` | yes | `document` | S | `.re` |
+| `rego` | yes | `document` | S | `.rego` |
+| `ron` | yes | `document` | S | `.ron` |
 | `yaml` | yes | `document` | S | `.yaml`, `.yml` |
-| `dart` | no | `structural` | S·C·I | `.dart` |
-| `elixir` | no | `structural` | S·C·I | `.ex`, `.exs` |
-| `gleam` | no | `structural` | S·C·I | — |
-| `kotlin` | no | `structural` | S·C·I·E | `.kt`, `.kts` |
-| `php` | no | `structural` | S·C·I | `.php` |
-| `scala` | no | `structural` | S·C·I·E | `.scala`, `.sc` |
-| `swift` | no | `structural` | S·C·I | `.swift` |
-| `ada` | no | `tags` | S | `.adb`, `.ads` |
-| `apex` | no | `tags` | S | `.cls`, `.trigger` |
-| `arduino` | no | `tags` | S·C | `.ino` |
-| `asm` | no | `tags` | S | `.asm`, `.s` |
-| `clojure` | no | `tags` | S | `.clj`, `.cljs`, `.cljc` |
-| `commonlisp` | no | `tags` | S·C | `.lisp`, `.cl` |
-| `cuda` | no | `tags` | S | `.cu`, `.cuh` |
-| `d` | no | `tags` | S·C | `.d` |
-| `elisp` | no | `tags` | S·C | `.el` |
-| `elm` | no | `tags` | S·I | `.elm` |
-| `erlang` | no | `tags` | S | `.erl`, `.hrl` |
-| `fish` | no | `tags` | S | `.fish` |
-| `fortran` | no | `tags` | S | `.f90`, `.f95`, `.f` |
-| `fsharp` | no | `tags` | S | `.fs`, `.fsi`, `.fsx` |
-| `groovy` | no | `tags` | S·I | `.groovy`, `.gradle` |
-| `haskell` | no | `tags` | S·I | `.hs` |
-| `julia` | no | `tags` | S·I | `.jl` |
-| `lua` | no | `tags` | S·C | `.lua` |
-| `matlab` | no | `tags` | S·C | `.m` |
+| `asm` | no | `structural` | S | `.asm`, `.s` |
+| `odin` | no | `structural` | S·C | `.odin` |
 | `nim` | no | `tags` | S | `.nim` |
-| `objc` | no | `tags` | S | `.m`, `.mm` |
-| `ocaml` | no | `tags` | S·C | `.ml` |
 | `ocaml_interface` | no | `tags` | S·C | `.mli` |
-| `perl` | no | `tags` | S·I | `.pl`, `.pm` |
 | `pony` | no | `tags` | S·C | `.pony` |
-| `powershell` | no | `tags` | S | `.ps1`, `.psm1` |
-| `r` | no | `tags` | S·C | `.r` |
-| `racket` | no | `tags` | S·C | `.rkt` |
-| `solidity` | no | `tags` | S·C | `.sol` |
-| `starlark` | no | `tags` | S·I | `.bzl`, `.star` |
-| `thrift` | no | `tags` | S | `.thrift` |
-| `zig` | no | `tags` | S | `.zig` |
 | `chatito` | no | `document` | S·C | — |
-| `cmake` | no | `document` | S | `.cmake` |
-| `dockerfile` | no | `document` | S | `.dockerfile` |
 | `generic` | no | `document` | S·I | — |
-| `graphql` | no | `document` | S | `.graphql`, `.gql` |
-| `hcl` | no | `document` | S | `.tf`, `.hcl` |
-| `html` | no | `document` | S | `.html`, `.htm` |
-| `make` | no | `document` | S | `.mk`, `.makefile` |
-| `markdown` | no | `document` | S | `.md`, `.markdown` |
-| `nix` | no | `document` | S | `.nix` |
 | `properties` | no | `document` | S·C | `.properties` |
-| `proto` | no | `document` | S | `.proto` |
-| `rego` | no | `document` | S | `.rego` |
 | `sparql` | no | `document` | S | `.rq` |
-| `sql` | no | `document` | S | `.sql` |
-| `svelte` | no | `document` | S | `.svelte` |
 | `udev` | no | `document` | S·C | `.rules` |
-| `verilog` | no | `document` | S | `.v`, `.sv` |
-| `vhdl` | no | `document` | S | `.vhd`, `.vhdl` |
-| `vue` | no | `document` | S | `.vue` |
 | `xml` | no | `document` | S | `.xml` |
 
 ### IaC extractors (wired via `IaCExtractor`, not in `languages.toml`)
@@ -129,7 +169,9 @@ Add a `[[language]]` row to `languages.toml` to complete the registration.
 
 | Language | Wired? | Tier | Capabilities | Extensions |
 |----------|:------:|------|:------------:|------------|
+| `cobol` | yes | `tags` | S | — |
 | `json` | yes | `document` | S | `.json` |
+| `rpg` | yes | `tags` | S | — |
 
 ## Wired languages summary
 
@@ -137,18 +179,107 @@ Languages with an active extractor (tree-sitter grammar compiled in, `.scm` embe
 
 | Language | Tier | Capabilities | Extensions |
 |----------|------|:------------:|------------|
+| `abl` | `structural` | S·C | `.p`, `.w`, `.i` |
+| `ada` | `structural` | S | `.adb`, `.ads` |
+| `arm` | `structural` | S·I | `.arm.json` |
+| `awk` | `structural` | S·C | `.awk` |
+| `bicep` | `structural` | S·C·I | `.bicep` |
 | `c` | `structural` | S·C·I | `.c`, `.h` |
+| `cfml` | `structural` | S·C | `.cfm`, `.cfc` |
+| `cfscript` | `structural` | S·C | `.cfs` |
+| `clojure` | `structural` | S·C | `.clj`, `.cljs`, `.cljc`, `.edn` |
+| `cmake` | `structural` | S·C | `.cmake` |
+| `commonlisp` | `structural` | S | `.lisp`, `.cl` |
 | `cpp` | `structural` | S·C·I | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh` |
+| `crystal_formula` | `structural` | S·C | `.crf` |
 | `csharp` | `structural` | S·C·I·E | `.cs` |
+| `css` | `structural` | S·I | `.css` |
+| `dart` | `structural` | S·I | `.dart` |
+| `devicetree` | `structural` | S | `.dts`, `.dtsi` |
+| `dockerfile` | `structural` | S | `.dockerfile` |
+| `elisp` | `structural` | S | `.el` |
+| `elixir` | `structural` | S·C·I | `.ex`, `.exs` |
+| `elm` | `structural` | S·I | `.elm` |
+| `erlang` | `structural` | S·C | `.erl`, `.hrl` |
+| `fish` | `structural` | S·C | `.fish` |
+| `fortran` | `structural` | S·C·I | `.f90`, `.f95`, `.f03`, `.f08`, `.f`, `.for` |
+| `foxpro` | `structural` | S·C | `.prg` |
+| `fsharp` | `structural` | S | `.fs`, `.fsi`, `.fsx` |
+| `gleam` | `structural` | S·I | `.gleam` |
+| `glsl` | `structural` | S·C | `.glsl`, `.vert`, `.frag` |
 | `go` | `structural` | S·C·I | `.go` |
+| `graphql` | `structural` | S | `.graphql`, `.gql` |
+| `groovy` | `structural` | S·C·I | `.groovy`, `.gradle` |
+| `haskell` | `structural` | S·C·I | `.hs` |
+| `hcl` | `structural` | S·C | `.tf`, `.hcl`, `.tfvars` |
+| `hlsl` | `structural` | S·C | `.hlsl` |
+| `idris` | `structural` | S | `.idr` |
+| `informix4gl` | `structural` | S·C | `.4gl` |
 | `java` | `structural` | S·C·I·E·P | `.java` |
 | `javascript` | `structural` | S·C·I | `.js`, `.jsx`, `.mjs`, `.cjs` |
+| `jinja2` | `structural` | S·I | `.j2`, `.jinja`, `.jinja2` |
+| `jq` | `structural` | S·I | `.jq` |
+| `just` | `structural` | S | `.just`, `.justfile` |
+| `kotlin` | `structural` | S·C·I·E | `.kt`, `.kts` |
+| `lean` | `structural` | S | `.lean` |
+| `lotusscript` | `structural` | S·C | `.lss`, `.ls` |
+| `make` | `structural` | S | `.mk` |
+| `markdown` | `structural` | S | `.md`, `.markdown` |
+| `matlab` | `structural` | S | `.m` |
+| `meson` | `structural` | S | `.meson` |
+| `ninja` | `structural` | S | `.ninja` |
+| `nix` | `structural` | S·C | `.nix` |
+| `objc` | `structural` | S | `.mm` |
+| `pascal` | `structural` | S·C | `.pas`, `.pp`, `.dpr`, `.dpk`, `.lpr` |
+| `perl` | `structural` | S·I | `.pl`, `.pm` |
+| `php` | `structural` | S·C·I | `.php` |
+| `powerscript` | `structural` | S·C·E | `.sru`, `.srw`, `.srf`, `.sra`, `.srm` |
+| `powershell` | `structural` | S | `.ps1`, `.psm1` |
+| `prolog` | `structural` | S | `.pro` |
+| `proto` | `structural` | S·I | `.proto` |
 | `python` | `structural` | S·C·I·E | `.py`, `.pyi` |
+| `r` | `structural` | S·C | `.r`, `.R` |
+| `rego` | `structural` | S·I | `.rego` |
+| `rescript` | `structural` | S·C | `.res`, `.resi` |
 | `ruby` | `structural` | S·C·I·E·P | `.rb` |
 | `rust` | `structural` | S·C·I | `.rs` |
+| `scala` | `structural` | S·C·I·E | `.scala`, `.sc` |
+| `sql` | `structural` | S | `.sql` |
+| `svelte` | `structural` | S | `.svelte` |
+| `swift` | `structural` | S·C·I·E | `.swift` |
+| `toml` | `structural` | S | `.toml` |
 | `tsx` | `structural` | S·C·I·E·P | `.tsx` |
 | `typescript` | `structural` | S·C·I·E·P | `.ts` |
+| `vb6` | `structural` | S·C | `.bas`, `.cls`, `.frm`, `.ctl` |
+| `vba` | `structural` | S·C | `.vba` |
+| `vbnet` | `structural` | S·C·I·E·P | `.vb` |
+| `vbscript` | `structural` | S·C | `.vbs`, `.wsf` |
+| `vue` | `structural` | S | `.vue` |
+| `zig` | `structural` | S | `.zig` |
+| `apex` | `tags` | S | `.cls`, `.trigger` |
+| `arduino` | `tags` | S·C | `.ino` |
 | `bash` | `tags` | S | `.sh`, `.bash` |
+| `cuda` | `tags` | S | `.cu`, `.cuh` |
+| `d` | `tags` | S·C | `.d` |
+| `elisp` | `tags` | S·C | `.el` |
+| `julia` | `tags` | S·I | `.jl` |
+| `lua` | `tags` | S·C | `.lua` |
+| `ocaml` | `tags` | S·C | `.ml` |
+| `racket` | `tags` | S·C | `.rkt` |
+| `solidity` | `tags` | S·C | `.sol` |
+| `starlark` | `tags` | S·I | `.bzl`, `.star` |
+| `thrift` | `tags` | S | `.thrift` |
+| `verilog` | `tags` | S | `.v`, `.sv` |
+| `vhdl` | `tags` | S | `.vhd`, `.vhdl` |
+| `dot` | `document` | S | `.dot`, `.gv` |
+| `html` | `document` | S | `.html`, `.htm` |
+| `ini` | `document` | S | `.ini` |
+| `jsdoc` | `document` | S | `.jsdoc` |
+| `kdl` | `document` | S | `.kdl` |
+| `postscript` | `document` | S | `.ps`, `.eps` |
+| `regex` | `document` | S | `.re` |
+| `rego` | `document` | S | `.rego` |
+| `ron` | `document` | S | `.ron` |
 | `yaml` | `document` | S | `.yaml`, `.yml` |
 | `cloudformation` | `structural` | S·C | `.yaml`, `.yml`, `.json` |
 | `json` | `document` | S | `.json` |
