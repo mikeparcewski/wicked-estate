@@ -1,0 +1,12 @@
+Apache License 2.0
+SPDX-License-Identifier: Apache-2.0
+
+This example wicked-estate language plugin (the nginx grammar, query, and manifest in this
+directory) is licensed under the Apache License, Version 2.0.
+
+It is licensed DELIBERATELY under a different license than wicked-estate itself (which is MIT) to
+demonstrate the point of the plugin system: a plugin is a separate artifact, loaded at runtime and
+never linked into the wicked-estate core, so its license never affects the core's license. A plugin
+could just as well be GPL-3.0 — the mechanism is identical and the core stays MIT-clean.
+
+The full Apache License 2.0 text is available at: https://www.apache.org/licenses/LICENSE-2.0

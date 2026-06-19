@@ -12,6 +12,9 @@
 pub mod treesitter;
 pub use treesitter::{IaCExtractor, TreeSitterExtractor};
 
+/// Runtime language plugins — drop-in tree-sitter grammars loaded from a plugins directory.
+pub mod plugin;
+
 pub mod extra_edge;
 pub use extra_edge::{EdgeRule, ExtraEdgeExtractor, ExtraExtraction};
 

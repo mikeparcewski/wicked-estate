@@ -1,0 +1,31 @@
+# wicked-estate language plugin manifest — nginx (EXAMPLE).
+#
+# Drop this directory (with the built shared library) into your plugins folder
+# ($WICKED_ESTATE_PLUGINS, default ~/.wicked-estate/plugins) and wicked-estate loads it at startup.
+
+# Language name — what `for_language("nginx")` matches.
+name = "nginx"
+
+# File extensions (no dot) this language claims for extension dispatch.
+extensions = ["nginxconf", "conf"]
+
+# Base name of the shared library in this dir. The platform extension (.so/.dylib/.dll) and a `lib`
+# prefix are tried automatically, so "libnginx" resolves to libnginx.dylib / libnginx.so / nginx.dll.
+library = "libnginx"
+
+# The exported C symbol returning the tree-sitter grammar (defaults to tree_sitter_<name>).
+symbol = "tree_sitter_nginx"
+
+# The @code_* extraction query, relative to this dir.
+query = "nginx.scm"
+
+# Informational: the grammar's tree-sitter ABI (the 0.25 runtime loads 13–15).
+abi = 14
+
+# Informational: this plugin's license. NOTE it is Apache-2.0 — deliberately DIFFERENT from
+# wicked-estate's MIT core. Because the grammar is loaded at runtime as a separate artifact and is
+# never linked into the core, that license stays fully isolated. A GPL grammar would work identically.
+license = "Apache-2.0"
+
+# Informational: extraction capabilities.
+caps = ["symbols"]
