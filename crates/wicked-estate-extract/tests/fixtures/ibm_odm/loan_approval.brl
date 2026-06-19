@@ -1,0 +1,21 @@
+rule "PrimeBorrowerApproval"
+  conditions
+    the applicant's credit score is not less than 720 ;
+    the applicant's debt to income ratio is less than 0.36 ;
+  actions
+    set the loan decision to "approved" ;
+    set the interest rate to 4.5 ;
+
+rule "SubprimeBorrowerReview"
+  conditions
+    the applicant's credit score is less than 720 ;
+    the applicant's credit score is not less than 600 ;
+  actions
+    set the loan decision to "manual review" ;
+    set the interest rate to 8.0 ;
+
+rule "RejectLowCreditScore"
+  conditions
+    the applicant's credit score is less than 600 ;
+  actions
+    set the loan decision to "rejected" ;

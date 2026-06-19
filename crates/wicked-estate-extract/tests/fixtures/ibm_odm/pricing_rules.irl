@@ -1,0 +1,33 @@
+package com.acme.pricing;
+
+import com.acme.model.*;
+
+rule "ApplyPremiumDiscount" {
+  when {
+    Customer c(loyaltyTier == "PREMIUM");
+    Order o(totalAmount > 1000.0);
+  }
+  then {
+    o.applyDiscount(0.15);
+    o.addTag("premium-discount");
+  }
+}
+
+rule "ApplyStandardDiscount" {
+  when {
+    Customer c(loyaltyTier == "STANDARD");
+    Order o(totalAmount > 500.0);
+  }
+  then {
+    o.applyDiscount(0.05);
+  }
+}
+
+rule "RejectZeroValueOrder" {
+  when {
+    Order o(totalAmount <= 0);
+  }
+  then {
+    o.reject("Zero value orders are not allowed");
+  }
+}

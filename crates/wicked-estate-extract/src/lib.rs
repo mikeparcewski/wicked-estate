@@ -39,6 +39,9 @@ pub use cics_sql::CicsSqlExtractor;
 pub mod json_rules;
 pub use json_rules::{AwsConfigRuleExtractor, AzurePolicyExtractor};
 
+pub mod odm;
+pub use odm::OdmExtractor;
+
 // W15.2 — XML rules extractor (feature-gated: `xml-rules`).
 #[cfg(feature = "xml-rules")]
 pub mod xml_rules;
@@ -50,6 +53,12 @@ pub use xml_rules::{EdgeMapping, EngineConfig, NodeMapping, XmlRulesConfig, XmlR
 pub mod dmn;
 #[cfg(feature = "xml-rules")]
 pub use dmn::CamundaDmnExtractor;
+
+// W15.6 — Salesforce Flow extractor (feature-gated: `xml-rules`).
+#[cfg(feature = "xml-rules")]
+pub mod salesforce_flow;
+#[cfg(feature = "xml-rules")]
+pub use salesforce_flow::SalesforceFlowExtractor;
 
 pub mod cloud;
 pub use cloud::{

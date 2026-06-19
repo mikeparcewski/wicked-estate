@@ -867,3 +867,207 @@ fn dmn_fixture_extracts_decisions_and_decision_tables() {
         "expected >= 1 Governs edge (definitions → decision), got {governs_count}"
     );
 }
+
+// ── W15.12 IBM ODM BAL/IRL integration tests ─────────────────────────────────
+
+#[test]
+fn odm_irl_fixture_extracts_rules() {
+    use wicked_estate_core::EdgeKind;
+    use wicked_estate_extract::OdmExtractor;
+
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/ibm_odm/pricing_rules.irl");
+    let text = std::fs::read_to_string(&fixture)
+        .unwrap_or_else(|_| panic!("cannot read {fixture:?}"));
+
+    let file = SourceFile {
+        path: fixture.to_string_lossy().to_string(),
+        language: Language::new("ibm-odm-irl"),
+        text,
+    };
+
+    let ex = OdmExtractor::new().extract(&file).expect("irl extract");
+
+    let rulesets: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::RuleSet)
+        .collect();
+    assert!(
+        !rulesets.is_empty(),
+        "expected at least 1 RuleSet (package) node, got 0"
+    );
+
+    let rules: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Rule)
+        .collect();
+    assert_eq!(rules.len(), 3, "expected exactly 3 Rule nodes, got {}", rules.len());
+
+    let conditions: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Condition)
+        .collect();
+    assert!(
+        conditions.len() >= 3,
+        "expected at least 3 Condition nodes (one per rule), got {}",
+        conditions.len()
+    );
+
+    let actions: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Action)
+        .collect();
+    assert!(
+        actions.len() >= 3,
+        "expected at least 3 Action nodes (one per rule), got {}",
+        actions.len()
+    );
+
+    let contains: Vec<_> = ex
+        .local_edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Contains)
+        .collect();
+    assert!(
+        !contains.is_empty(),
+        "expected Contains edges, got none"
+    );
+}
+
+#[test]
+fn odm_bal_fixture_extracts_rules() {
+    use wicked_estate_core::EdgeKind;
+    use wicked_estate_extract::OdmExtractor;
+
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/ibm_odm/loan_approval.brl");
+    let text = std::fs::read_to_string(&fixture)
+        .unwrap_or_else(|_| panic!("cannot read {fixture:?}"));
+
+    let file = SourceFile {
+        path: fixture.to_string_lossy().to_string(),
+        language: Language::new("ibm-odm-bal"),
+        text,
+    };
+
+    let ex = OdmExtractor::new().extract(&file).expect("bal extract");
+
+    let rules: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Rule)
+        .collect();
+    assert_eq!(rules.len(), 3, "expected exactly 3 Rule nodes, got {}", rules.len());
+
+    let conditions: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Condition)
+        .collect();
+    assert!(
+        !conditions.is_empty(),
+        "expected at least 1 Condition node, got 0"
+    );
+
+    let actions: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Action)
+        .collect();
+    assert!(
+        !actions.is_empty(),
+        "expected at least 1 Action node, got 0"
+    );
+
+    let contains: Vec<_> = ex
+        .local_edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Contains)
+        .collect();
+    assert!(
+        !contains.is_empty(),
+        "expected Contains edges, got none"
+    );
+}
+
+// ── W15.6 Salesforce Flow integration test ────────────────────────────────────
+
+#[cfg(feature = "xml-rules")]
+#[test]
+fn salesforce_flow_fixture_extracts_decisions_and_rules() {
+    use wicked_estate_core::EdgeKind;
+    use wicked_estate_extract::SalesforceFlowExtractor;
+
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/salesforce_flow/account_validation.flow-meta.xml");
+    let text = std::fs::read_to_string(&fixture_path)
+        .expect("salesforce_flow fixture must be readable");
+
+    let extractor = SalesforceFlowExtractor::new();
+    let file = wicked_estate_core::SourceFile {
+        path: fixture_path.to_string_lossy().to_string(),
+        language: Language::new("xml-rules:salesforce-flow"),
+        text,
+    };
+
+    let extraction = extractor.extract(&file).expect("extraction must succeed");
+
+    // Assert: at least 1 RuleSet node (decisions element)
+    let rule_sets: Vec<_> = extraction
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::RuleSet)
+        .collect();
+    assert!(
+        !rule_sets.is_empty(),
+        "expected at least 1 RuleSet node (decisions), got 0; nodes: {:?}",
+        extraction.nodes.iter().map(|n| (&n.name, &n.kind)).collect::<Vec<_>>()
+    );
+
+    // Assert: at least 2 Rule nodes (the two rules elements: Is_Active_Premium + Is_Inactive)
+    let rules: Vec<_> = extraction
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Rule)
+        .collect();
+    assert!(
+        rules.len() >= 2,
+        "expected at least 2 Rule nodes, got {}: {:?}",
+        rules.len(),
+        rules.iter().map(|n| &n.name).collect::<Vec<_>>()
+    );
+
+    // Assert: at least 1 Condition node
+    let conditions: Vec<_> = extraction
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Condition)
+        .collect();
+    assert!(
+        !conditions.is_empty(),
+        "expected at least 1 Condition node, got 0"
+    );
+
+    // Assert: at least 1 Contains edge (decisions -> rules)
+    let contains_edges: Vec<_> = extraction
+        .local_edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Contains)
+        .collect();
+    assert!(
+        !contains_edges.is_empty(),
+        "expected at least 1 Contains edge (decisions -> rules), got 0"
+    );
+
+    println!(
+        "salesforce_flow_fixture: {} rule_sets, {} rules, {} conditions, {} contains_edges",
+        rule_sets.len(),
+        rules.len(),
+        conditions.len(),
+        contains_edges.len()
+    );
+}
