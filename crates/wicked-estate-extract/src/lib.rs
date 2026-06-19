@@ -66,6 +66,15 @@ pub mod salesforce_flow;
 #[cfg(feature = "xml-rules")]
 pub use salesforce_flow::SalesforceFlowExtractor;
 
+// W15.3 — Excel/XLSX decision table extractor (feature-gated: `excel-rules`).
+#[cfg(feature = "excel-rules")]
+pub mod excel_rules;
+#[cfg(feature = "excel-rules")]
+pub use excel_rules::{
+    ColumnConfig, ColumnRole, ExcelEngineConfig, ExcelRulesConfig, ExcelRulesExtractor,
+    SheetConfig,
+};
+
 pub mod clips;
 pub use clips::ClipsExtractor;
 
