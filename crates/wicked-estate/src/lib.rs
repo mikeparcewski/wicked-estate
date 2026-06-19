@@ -31,8 +31,8 @@ use wicked_estate_core::{
     SymbolIndex, SymbolQuery, TraversalSpec,
 };
 use wicked_estate_extract::{
-    CicsSqlExtractor, HlasmExtractor, IaCExtractor, ImsExtractor, JclExtractor, MqExtractor,
-    RacfExtractor, TfstateCollector,
+    BlazeBrlExtractor, CicsSqlExtractor, DrlExtractor, HlasmExtractor, IaCExtractor, ImsExtractor,
+    JclExtractor, MqExtractor, RacfExtractor, RegoRulesExtractor, TfstateCollector,
     treesitter::{TreeSitterExtractor, extractor_for_extension, is_minified_or_huge},
 };
 use wicked_estate_resolve::{
@@ -48,12 +48,25 @@ use xxhash_rust::xxh3::xxh3_64;
 fn is_grammarless_ext(ext: &str) -> bool {
     matches!(
         ext,
-        "jcl" | "job" | "cntl" | "hlasm" | "asm" | "mlc" | "racf" | "dbd" | "psb" | "mqsc"
-    )
+        "jcl"
+            | "job"
+            | "cntl"
+            | "hlasm"
+            | "asm"
+            | "mlc"
+            | "racf"
+            | "dbd"
+            | "psb"
+            | "mqsc"
+            | "drl"
+            | "brl"
+    ) || is_xml_rules_ext(ext)
 }
 
 /// Dispatch a grammar-less (non-tree-sitter) extractor by file extension — the mainframe estate
-/// languages (JCL, HLASM, RACF security, IMS DBD/PSB, MQ MQSC). Returns `None` for everything else.
+/// languages (JCL, HLASM, RACF security, IMS DBD/PSB, MQ MQSC) plus the heuristic rules-engine
+/// formats (Drools DRL, FICO Blaze `.brl`) and, behind the `xml-rules` feature, the XML rules
+/// formats (Camunda DMN, Progress Corticon). Returns `None` for everything else.
 fn grammarless_extractor(ext: &str) -> Option<Box<dyn Extractor>> {
     match ext {
         "jcl" | "job" | "cntl" => Some(Box::new(JclExtractor::new())),
@@ -61,8 +74,36 @@ fn grammarless_extractor(ext: &str) -> Option<Box<dyn Extractor>> {
         "racf" => Some(Box::new(RacfExtractor::new())),
         "dbd" | "psb" => Some(Box::new(ImsExtractor::new())),
         "mqsc" => Some(Box::new(MqExtractor::new())),
+        "drl" => Some(Box::new(DrlExtractor::new())),
+        "brl" => Some(Box::new(BlazeBrlExtractor::new())),
+        _ => xml_rules_extractor(ext),
+    }
+}
+
+/// XML rules-engine extensions, dispatched only when the `xml-rules` feature is enabled.
+#[cfg(feature = "xml-rules")]
+fn is_xml_rules_ext(ext: &str) -> bool {
+    matches!(ext, "ers" | "erf" | "ecore" | "dmn")
+}
+#[cfg(not(feature = "xml-rules"))]
+fn is_xml_rules_ext(_ext: &str) -> bool {
+    false
+}
+
+/// Dispatch the XML rules-engine extractors (Progress Corticon, Camunda DMN). Compiled in only with
+/// the `xml-rules` feature; a no-op (always `None`) otherwise so the base binary stays dep-light.
+#[cfg(feature = "xml-rules")]
+fn xml_rules_extractor(ext: &str) -> Option<Box<dyn Extractor>> {
+    use wicked_estate_extract::{CamundaDmnExtractor, CorticonExtractor};
+    match ext {
+        "ers" | "erf" | "ecore" => Some(Box::new(CorticonExtractor::new())),
+        "dmn" => Some(Box::new(CamundaDmnExtractor::new())),
         _ => None,
     }
+}
+#[cfg(not(feature = "xml-rules"))]
+fn xml_rules_extractor(_ext: &str) -> Option<Box<dyn Extractor>> {
+    None
 }
 
 /// Symbol index built ONCE from the store for the resolver pass. The resolver calls `by_name`
@@ -447,6 +488,15 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
                     extraction.nodes.extend(emb.nodes);
                     extraction.local_edges.extend(emb.local_edges);
                     extraction.refs.extend(emb.refs);
+                }
+            }
+            // Rego: supplement the tree-sitter code parse (rules-as-functions) with the W15 rules
+            // graph (RuleSet/Rule/Condition/Action/Fact), so policies surface in RulesInventory.
+            if ext.as_str() == "rego" {
+                if let Ok(rules) = RegoRulesExtractor::new().extract(&sf) {
+                    extraction.nodes.extend(rules.nodes);
+                    extraction.local_edges.extend(rules.local_edges);
+                    extraction.refs.extend(rules.refs);
                 }
             }
             Some((fw.rel.clone(), extraction, text))

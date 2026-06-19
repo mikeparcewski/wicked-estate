@@ -45,6 +45,21 @@ pub use json_rules::{AwsConfigRuleExtractor, AzurePolicyExtractor};
 pub mod odm;
 pub use odm::OdmExtractor;
 
+// Shared length-preserving comment/string maskers for the heuristic rules extractors.
+mod rules_text;
+
+// W15.9 — Drools DRL (`.drl`) heuristic rules extractor (no feature gate; pure regex).
+pub mod drl;
+pub use drl::DrlExtractor;
+
+// W15.8 — OPA/Rego (`.rego`) rules-layer extractor (supplements the tree-sitter code parse).
+pub mod rego_rules;
+pub use rego_rules::RegoRulesExtractor;
+
+// W15.11 — FICO Blaze Advisor `.brl` SRL heuristic extractor (no feature gate; pure regex).
+pub mod blaze_brl;
+pub use blaze_brl::BlazeBrlExtractor;
+
 // W15.2 — XML rules extractor (feature-gated: `xml-rules`).
 #[cfg(feature = "xml-rules")]
 pub mod xml_rules;
@@ -68,6 +83,12 @@ pub use drools_gdst::DroolsGdstExtractor;
 pub mod salesforce_flow;
 #[cfg(feature = "xml-rules")]
 pub use salesforce_flow::SalesforceFlowExtractor;
+
+// W15.10 — Progress Corticon `.ers`/`.erf`/`.ecore` extractor (feature-gated: `xml-rules`).
+#[cfg(feature = "xml-rules")]
+pub mod corticon;
+#[cfg(feature = "xml-rules")]
+pub use corticon::CorticonExtractor;
 
 // W15.3 — Excel/XLSX decision table extractor (feature-gated: `excel-rules`).
 #[cfg(feature = "excel-rules")]
