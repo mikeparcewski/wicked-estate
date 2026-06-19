@@ -1,6 +1,9 @@
 [package]
 name = "wicked-estate-resolve"
 description = "Cross-file and cross-language reference resolvers for wicked-estate."
+readme = "README.md"
+keywords = ["code-graph", "name-resolution", "cross-language", "llm", "static-analysis"]
+categories = ["development-tools"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,12 +17,12 @@ serde = { workspace = true }
 scip = "0.8"
 protobuf = "3"
 
-wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.9.0" }
+wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.9.1" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
-wicked-estate-store = { path = "../wicked-estate-store", version = "0.9.0" }
+wicked-estate-store = { path = "../wicked-estate-store", version = "0.9.1" }
 tempfile = "3"
 

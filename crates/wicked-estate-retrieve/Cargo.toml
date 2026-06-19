@@ -1,6 +1,9 @@
 [package]
 name = "wicked-estate-retrieve"
 description = "Agent-facing retrieval tools with hybrid and semantic search for wicked-estate."
+readme = "README.md"
+keywords = ["code-graph", "retrieval", "semantic-search", "llm", "rag"]
+categories = ["development-tools"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,7 +12,7 @@ rust-version.workspace = true
 
 [dependencies]
 wicked-estate-core.workspace = true
-wicked-estate-rank = { path = "../wicked-estate-rank", version = "0.9.0" }
+wicked-estate-rank = { path = "../wicked-estate-rank", version = "0.9.1" }
 wicked-estate-store.workspace = true
 serde_json.workspace = true
 # Real semantic embeddings (ONNX/BGE) — OPTIONAL + OFF BY DEFAULT. fastembed pulls ort (ONNX

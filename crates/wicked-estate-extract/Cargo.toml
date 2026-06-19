@@ -1,6 +1,9 @@
 [package]
 name = "wicked-estate-extract"
 description = "Tree-sitter and grammar-less source extractors for wicked-estate."
+readme = "README.md"
+keywords = ["tree-sitter", "code-graph", "parsing", "extraction", "llm"]
+categories = ["development-tools", "parsing"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true

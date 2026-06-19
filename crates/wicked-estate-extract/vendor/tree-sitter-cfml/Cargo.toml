@@ -4,8 +4,9 @@ version = "0.26.20"
 edition = "2021"
 license = "MIT"
 description = "CFML (ColdFusion) grammar for tree-sitter — vendored from cfmleditor/tree-sitter-cfml (cfml tag + cfscript; cfquery SQL dialect omitted)"
+readme = "README.md"
 build = "bindings/rust/build.rs"
-include = ["bindings/rust/*.rs", "common/**/*", "cfml/grammar.js", "cfml/src/**/*", "cfscript/grammar.js", "cfscript/src/**/*"]
+include = ["README.md", "bindings/rust/*.rs", "common/**/*", "cfml/grammar.js", "cfml/src/**/*", "cfscript/grammar.js", "cfscript/src/**/*"]
 
 [lib]
 path = "bindings/rust/lib.rs"

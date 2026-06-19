@@ -5,8 +5,9 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/mikeparcewski/wicked-estate"
 description = "Free-format RPG IV (ILE RPG) grammar for tree-sitter — wicked_estate symbols+calls subset"
+readme = "README.md"
 build = "bindings/rust/build.rs"
-include = ["bindings/rust/*.rs", "grammar.js", "src/**/*"]
+include = ["README.md", "bindings/rust/*.rs", "grammar.js", "src/**/*"]
 
 [lib]
 path = "bindings/rust/lib.rs"

@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "VB6 grammar for tree-sitter — vendored from joannefan/tree-sitter-vb6"
+readme = "README.md"
 build = "bindings/rust/build.rs"
-include = ["bindings/rust/*.rs", "src/**/*"]
+include = ["README.md", "bindings/rust/*.rs", "src/**/*"]
 
 [lib]
 path = "bindings/rust/lib.rs"

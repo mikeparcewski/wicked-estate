@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 description = "OTLP HTTP exporter backend for wicked-estate"
+readme = "README.md"
+keywords = ["opentelemetry", "otlp", "observability", "tracing", "wicked-estate"]
+categories = ["development-tools"]
 
 [dependencies]
 wicked-estate-core = { workspace = true }

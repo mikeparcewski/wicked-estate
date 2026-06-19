@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 description = "Spine: shared graph types + the five traits every wicked_estate crate implements."
+readme = "README.md"
+keywords = ["code-graph", "ast", "traits", "graph", "llm"]
+categories = ["development-tools", "data-structures"]
 
 [dependencies]
 async-trait = "0.1"

@@ -1,6 +1,9 @@
 [package]
 name = "wicked-estate-mcp"
 description = "MCP server exposing the wicked-estate retrieval tools."
+readme = "README.md"
+keywords = ["mcp", "code-graph", "llm", "model-context-protocol", "agents"]
+categories = ["development-tools", "command-line-utilities"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,9 +17,9 @@ path = "src/main.rs"
 [dependencies]
 wicked-estate-core.workspace = true
 wicked-estate-store.workspace = true
-wicked-estate-retrieve = { path = "../wicked-estate-retrieve", version = "0.9.0" }
-wicked-estate = { path = "../wicked-estate", version = "0.9.0", features = ["serve"] }
-wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.9.0" }
+wicked-estate-retrieve = { path = "../wicked-estate-retrieve", version = "0.9.1" }
+wicked-estate = { path = "../wicked-estate", version = "0.9.1", features = ["serve"] }
+wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.9.1" }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std"] }

@@ -26,7 +26,9 @@ tree-sitter + SQLite.
 
 LLM coding agents waste turns grepping and re-reading files. wicked-estate gives them a precise,
 ranked, **bounded** answer instead — "who calls this?", "what breaks if I change it?", "give me just
-the context for this symbol" — across **91 wired languages** plus a mainframe/IaC **estate** layer
+the context for this symbol" — across **105 wired languages** (including legacy enterprise stacks:
+VB6/VBA/VBScript/VB.NET, RPG, Delphi, ColdFusion, Progress ABL, PowerBuilder, Visual FoxPro,
+LotusScript, Informix 4GL, Crystal Reports) plus a mainframe/IaC **estate** layer
 (COBOL, JCL, RACF, IMS, MQ, Terraform, CloudFormation, …) that almost nothing else unifies into one
 graph. Every edge carries `{confidence, provenance, resolved_by}`; heuristics are never presented as
 facts.
@@ -78,7 +80,7 @@ wicked-estate watch ./my-project --db graph.db
 
 ## What it does (highlights — full list in [FEATURES.md](./FEATURES.md))
 
-- **Code graph** — 91 wired languages (tree-sitter), 100 in the manifest; symbols, calls, imports,
+- **Code graph** — 105 wired languages (tree-sitter), 114 in the manifest; symbols, calls, imports,
   heritage. Languages are **data** (a manifest row + a `.scm` query) — adding one is zero core change.
 - **Precise blast-radius** — bounded reverse-reachability over *all* dependency edge kinds (not just
   calls), so it never silently under-reports.

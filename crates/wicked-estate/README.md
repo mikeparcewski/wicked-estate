@@ -1,8 +1,11 @@
 # wicked-estate
 
 Code + infrastructure **estate graph for LLM agents** — definitions, who-calls-X, blast-radius,
-scoped context — across 91 wired languages plus a mainframe/IaC estate layer (COBOL, JCL, RACF,
-IMS, MQ, Terraform, CloudFormation, …). Local-first, tree-sitter + SQLite, single static binary.
+scoped context — across 105 wired languages plus a mainframe/IaC estate layer (COBOL, JCL, RACF,
+IMS, MQ, Terraform, CloudFormation, …). That includes hard-to-find **legacy enterprise stacks** —
+VB6/VBA/VBScript/VB.NET, RPG, Delphi, ColdFusion (CFML), Progress OpenEdge ABL, PowerBuilder,
+Visual FoxPro, LotusScript, Informix 4GL, and Crystal Reports formulas — several with tree-sitter
+grammars authored in-house where none existed. Local-first, tree-sitter + SQLite, single static binary.
 
 ```sh
 cargo install wicked-estate
