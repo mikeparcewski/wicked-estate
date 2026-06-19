@@ -34,3 +34,8 @@ wicked-estate-store = { path = "crates/wicked-estate-store", version = "0.10.0" 
 quick-xml = { version = "0.40", features = ["serialize"] }
 roxmltree = "0.21"
 calamine = "0.25"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
