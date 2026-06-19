@@ -54,6 +54,12 @@ pub mod dmn;
 #[cfg(feature = "xml-rules")]
 pub use dmn::CamundaDmnExtractor;
 
+// W15.5 — Drools GDST guided decision table extractor (feature-gated: `xml-rules`).
+#[cfg(feature = "xml-rules")]
+pub mod drools_gdst;
+#[cfg(feature = "xml-rules")]
+pub use drools_gdst::DroolsGdstExtractor;
+
 // W15.6 — Salesforce Flow extractor (feature-gated: `xml-rules`).
 #[cfg(feature = "xml-rules")]
 pub mod salesforce_flow;
