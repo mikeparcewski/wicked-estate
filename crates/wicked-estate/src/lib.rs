@@ -31,8 +31,8 @@ use wicked_estate_core::{
     SymbolIndex, SymbolQuery, TraversalSpec,
 };
 use wicked_estate_extract::{
-    CicsSqlExtractor, DrlExtractor, HlasmExtractor, IaCExtractor, ImsExtractor, JclExtractor,
-    MqExtractor, RacfExtractor, RegoRulesExtractor, TfstateCollector,
+    BlazeBrlExtractor, CicsSqlExtractor, DrlExtractor, HlasmExtractor, IaCExtractor, ImsExtractor,
+    JclExtractor, MqExtractor, RacfExtractor, RegoRulesExtractor, TfstateCollector,
     treesitter::{TreeSitterExtractor, extractor_for_extension, is_minified_or_huge},
 };
 use wicked_estate_resolve::{
@@ -48,7 +48,18 @@ use xxhash_rust::xxh3::xxh3_64;
 fn is_grammarless_ext(ext: &str) -> bool {
     matches!(
         ext,
-        "jcl" | "job" | "cntl" | "hlasm" | "asm" | "mlc" | "racf" | "dbd" | "psb" | "mqsc" | "drl"
+        "jcl"
+            | "job"
+            | "cntl"
+            | "hlasm"
+            | "asm"
+            | "mlc"
+            | "racf"
+            | "dbd"
+            | "psb"
+            | "mqsc"
+            | "drl"
+            | "brl"
     )
 }
 
@@ -62,6 +73,7 @@ fn grammarless_extractor(ext: &str) -> Option<Box<dyn Extractor>> {
         "dbd" | "psb" => Some(Box::new(ImsExtractor::new())),
         "mqsc" => Some(Box::new(MqExtractor::new())),
         "drl" => Some(Box::new(DrlExtractor::new())),
+        "brl" => Some(Box::new(BlazeBrlExtractor::new())),
         _ => None,
     }
 }
