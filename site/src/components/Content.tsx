@@ -120,7 +120,7 @@ function UseCases() {
         </svg>
       ),
       title: 'Retire a deprecated API safely',
-      body: 'Search for every caller of the old API across 91 languages in one query. Get a ranked list of files to update — sorted by how often each caller is itself called.',
+      body: 'Search for every caller of the old API across 102 languages in one query. Get a ranked list of files to update — sorted by how often each caller is itself called.',
       cmd: 'wicked-estate callers legacyAuth --db graph.db',
       out: '23 callers found · sorted by PageRank · conf ≥ 0.6',
     },
@@ -156,6 +156,28 @@ function UseCases() {
       body: 'Switch from SQLite to PostgreSQL with one flag. Multiple CI jobs and agents write concurrently. Everyone queries the same graph — no stale per-developer DBs.',
       cmd: 'wicked-estate index . --db postgres://team/graph',
       out: 'shared_writers=true · server_side_traversal=true',
+    },
+    {
+      icon: (
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12c0 1.268-.63 2.39-1.593 3.068a3.745 3.745 0 01-1.043 3.296 3.745 3.745 0 01-3.296 1.043A3.745 3.745 0 0112 21c-1.268 0-2.39-.63-3.068-1.593a3.746 3.746 0 01-3.296-1.043 3.745 3.745 0 01-1.043-3.296A3.745 3.745 0 013 12c0-1.268.63-2.39 1.593-3.068a3.745 3.745 0 011.043-3.296 3.746 3.746 0 013.296-1.043A3.746 3.746 0 0112 3c1.268 0 2.39.63 3.068 1.593a3.746 3.746 0 013.296 1.043 3.746 3.746 0 011.043 3.296A3.745 3.745 0 0121 12z" />
+        </svg>
+      ),
+      title: 'Rule engines in the same graph as code',
+      body: 'IBM ODM, Camunda DMN, Drools, CLIPS, Excel decision tables, Salesforce Flow, AWS Config & Azure Policy — extracted as Rule / RuleSet / Condition / Action nodes, joined to the code that invokes them. Ask "what code calls this rule set?" in one query.',
+      cmd: 'wicked-estate query PricingRules --db graph.db',
+      out: 'RuleSet · 6 conditions · 3 callers · InvokedBy',
+    },
+    {
+      icon: (
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M14.25 6.087c0-.355.186-.676.401-.959.221-.29.349-.634.349-1.003 0-1.036-1.007-1.875-2.25-1.875s-2.25.84-2.25 1.875c0 .369.128.713.349 1.003.215.283.401.604.401.959v0a.64.64 0 01-.657.643 48.39 48.39 0 01-4.163-.3c.186 1.613.293 3.25.315 4.907a.656.656 0 01-.658.663v0c-.355 0-.676-.186-.959-.401a1.647 1.647 0 00-1.003-.349c-1.036 0-1.875 1.007-1.875 2.25s.84 2.25 1.875 2.25c.369 0 .713-.128 1.003-.349.283-.215.604-.401.959-.401v0c.31 0 .555.26.532.57a48.039 48.039 0 01-.642 5.056c1.518.19 3.058.309 4.616.354a.64.64 0 00.657-.643v0c0-.355-.186-.676-.401-.959a1.647 1.647 0 01-.349-1.003c0-1.035 1.008-1.875 2.25-1.875 1.243 0 2.25.84 2.25 1.875 0 .369-.128.713-.349 1.003-.215.283-.4.604-.4.959v0c0 .333.277.599.61.58a48.1 48.1 0 005.427-.63 48.05 48.05 0 00.582-4.717.532.532 0 00-.533-.57v0c-.355 0-.676.186-.959.401-.29.221-.634.349-1.003.349-1.035 0-1.875-1.007-1.875-2.25s.84-2.25 1.875-2.25c.37 0 .713.128 1.003.349.283.215.604.401.96.401v0a.656.656 0 00.658-.663 48.422 48.422 0 00-.37-5.36c-1.886.342-3.81.574-5.766.689a.578.578 0 01-.61-.58v0z" />
+        </svg>
+      ),
+      title: 'Drop-in language plugins',
+      body: 'Add a language without recompiling the core. Drop a compiled grammar + query + manifest into the plugins dir and it loads at startup. The grammar is a separate artifact, never linked into the MIT core — so even a GPL grammar stays license-isolated.',
+      cmd: 'wicked-estate plugins list',
+      out: 'nginx  exts=[nginxconf, conf]  license=Apache-2.0',
     },
   ]
 
@@ -567,13 +589,18 @@ function Languages() {
           <div>
             <span className="kicker">Languages</span>
             <h2 className="font-display text-3xl sm:text-4xl font-black text-ink mb-6">
-              91 wired languages.<br />
+              102 wired languages.<br />
               <span className="text-muted">Zero core changes to add more.</span>
             </h2>
             <p className="text-muted leading-7 mb-6 font-sans">
               Extraction logic lives in <span className="font-mono text-ink">.scm</span> query files
               and a manifest — never in compiled <span className="font-mono text-ink">match language &#123;…&#125;</span> arms.
               A new language is a manifest row and a query file. The capability matrix generates itself.
+              Coverage includes hard-to-find legacy enterprise stacks — VB6/VBA/VBScript, RPG, COBOL,
+              ColdFusion, Progress&nbsp;ABL, PowerBuilder, Visual&nbsp;FoxPro, LotusScript,
+              Informix&nbsp;4GL, Crystal&nbsp;Reports — several with grammars authored in-house. Or skip
+              the rebuild entirely with a <span className="font-mono text-ink">runtime plugin</span>: a
+              drop-in grammar loaded at startup, license-isolated from the MIT core.
             </p>
 
             <div className="terminal text-xs" style={{ boxShadow: '0 20px 48px -24px rgba(0,0,0,0.45)' }}>
@@ -826,7 +853,7 @@ function StepPlayer() {
       cmd: ['wicked-estate index . --db graph.db'],
       out: [
         'Walking 1,247 source files...',
-        'Extractor: 91 languages active',
+        'Extractor: 102 languages active',
         'Resolver:  SCIP tier engaged',
         '✓  43,821 symbols · 8,312 edges',
         '   graph.db  2.1 MB · 0 unresolved',

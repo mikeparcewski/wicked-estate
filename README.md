@@ -80,8 +80,13 @@ wicked-estate watch ./my-project --db graph.db
 
 ## What it does (highlights — full list in [FEATURES.md](./FEATURES.md))
 
-- **Code graph** — 105 wired languages (tree-sitter), 114 in the manifest; symbols, calls, imports,
+- **Code graph** — 102 wired languages (tree-sitter), 113 in the manifest; symbols, calls, imports,
   heritage. Languages are **data** (a manifest row + a `.scm` query) — adding one is zero core change.
+- **Runtime language plugins** — drop a compiled tree-sitter grammar + `.scm` query + manifest into
+  the plugins dir and it loads at startup, no recompile. The grammar is a separate artifact, never
+  linked into the (MIT) core — so a grammar under a license incompatible with MIT (GPL, etc.) stays
+  isolated. `wicked-estate plugins list` shows what's loaded; see [PLUGIN.md](./PLUGIN.md) and the
+  [nginx example](./examples/plugins/nginx).
 - **Precise blast-radius** — bounded reverse-reachability over *all* dependency edge kinds (not just
   calls), so it never silently under-reports.
 - **Layered resolution** — name / scoped / import-map → SCIP (precise) → on-demand LSP. Two-phase
@@ -137,6 +142,11 @@ Languages are data, not code. Add a row to `crates/wicked-estate-extract/languag
 `@code_<kind>.name`, `@call.function`, `@import`), and wire one `LangEntry`. The
 `every_wired_query_compiles` test guards it. See [docs/add-lang.md](./docs/add-lang.md).
 
+To add a language **without recompiling the core** — or to use a grammar under a license
+incompatible with MIT — ship it as a **[runtime plugin](./PLUGIN.md)** instead: a compiled grammar +
+query + manifest dropped into the plugins dir, loaded at startup. See the
+[nginx example](./examples/plugins/nginx).
+
 ## Honest status (not yet true)
 
 Per the project's "every done needs a still-not-done" rule:
@@ -150,7 +160,8 @@ Per the project's "every done needs a still-not-done" rule:
 
 ## Docs
 
-[FEATURES.md](./FEATURES.md) (full inventory) · [docs/ENGINE-CONTRACT.md](./docs/ENGINE-CONTRACT.md)
+[FEATURES.md](./FEATURES.md) (full inventory) · [PLUGIN.md](./PLUGIN.md) (authoring runtime language
+plugins) · [docs/ENGINE-CONTRACT.md](./docs/ENGINE-CONTRACT.md)
 (invariants) · [docs/agent-behavior-rules.md](./docs/agent-behavior-rules.md) (the runtime contract)
 · [docs/adr/](./docs/adr/) (decisions) · [docs/plan/WAVE-PLAN.md](./docs/plan/WAVE-PLAN.md) (tracker)
 · [RELEASING.md](./RELEASING.md) (publishing to crates.io) · [docs/DESIGN-NOTES.md](./docs/DESIGN-NOTES.md)
