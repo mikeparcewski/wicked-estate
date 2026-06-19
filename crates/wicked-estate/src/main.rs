@@ -2411,6 +2411,38 @@ fn main() -> Result<()> {
                 }
             }
         }
+        "plugins" => {
+            // `wicked-estate plugins list` — show runtime language plugins loaded from the plugins
+            // dir ($WICKED_ESTATE_PLUGINS or ~/.wicked-estate/plugins). See PLUGIN.md.
+            let sub = positional.first().map(String::as_str).unwrap_or("list");
+            match sub {
+                "list" => {
+                    if let Some(d) = wicked_estate_extract::plugin::plugins_dir() {
+                        println!("plugins dir: {}", d.display());
+                    }
+                    let loaded = wicked_estate_extract::plugin::loaded();
+                    if loaded.is_empty() {
+                        println!(
+                            "(no plugins loaded — drop a plugin dir into the plugins dir; see PLUGIN.md)"
+                        );
+                    } else {
+                        for p in loaded {
+                            println!(
+                                "{}  exts=[{}]  license={}",
+                                p.name,
+                                p.extensions.join(", "),
+                                p.license.as_deref().unwrap_or("unspecified"),
+                            );
+                        }
+                    }
+                }
+                other => {
+                    eprintln!(
+                        "unknown `plugins` subcommand `{other}` (try: wicked-estate plugins list)"
+                    );
+                }
+            }
+        }
         _ => {
             println!("wicked-estate {} — usage:", env!("CARGO_PKG_VERSION"));
             println!(
@@ -2537,6 +2569,9 @@ fn main() -> Result<()> {
             );
             println!(
                 "  wicked-estate correspond --db-a A.db --db-b B.db [--kind K] [--top N] [--min-score F] [--explain] [--json]"
+            );
+            println!(
+                "  wicked-estate plugins list                   # runtime language plugins (drop-in grammars; see PLUGIN.md)"
             );
         }
     }
