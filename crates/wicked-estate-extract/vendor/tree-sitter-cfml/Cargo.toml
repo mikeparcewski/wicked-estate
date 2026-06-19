@@ -1,8 +1,9 @@
 [package]
 name = "wicked-estate-tree-sitter-cfml"
-version = "0.26.20"
+version = "0.26.21"
 edition = "2021"
 license = "MIT"
+repository = "https://github.com/mikeparcewski/wicked-estate"
 description = "CFML (ColdFusion) grammar for tree-sitter — vendored from cfmleditor/tree-sitter-cfml (cfml tag + cfscript; cfquery SQL dialect omitted)"
 readme = "README.md"
 build = "bindings/rust/build.rs"

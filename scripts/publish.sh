@@ -11,9 +11,20 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# Topological order: every crate's internal deps appear before it.
+# Topological order: every crate's internal deps appear before it. The vendored tree-sitter
+# grammars (wicked-estate-tree-sitter-*) are deps of wicked-estate-extract, so they go first.
 CRATES=(
   wicked-estate-tree-sitter-rpg
+  wicked-estate-tree-sitter-vb6
+  wicked-estate-tree-sitter-vba
+  wicked-estate-tree-sitter-vbscript
+  wicked-estate-tree-sitter-cfml
+  wicked-estate-tree-sitter-abl
+  wicked-estate-tree-sitter-foxpro
+  wicked-estate-tree-sitter-informix4gl
+  wicked-estate-tree-sitter-lotusscript
+  wicked-estate-tree-sitter-powerscript
+  wicked-estate-tree-sitter-crystal-formula
   wicked-estate-core
   wicked-estate-observe
   wicked-estate-store
@@ -27,17 +38,19 @@ CRATES=(
 
 DRY="${1:-}"
 
-# The vendored RPG grammar is EXCLUDED from the workspace, so `-p` can't address it; publish it by
-# manifest path. All other crates are workspace members addressable by `-p`.
-RPG_MANIFEST="crates/wicked-estate-extract/vendor/tree-sitter-rpg/Cargo.toml"
-
+# Vendored grammars are EXCLUDED from the workspace, so `-p` can't address them; publish each by its
+# manifest path (vendor/tree-sitter-<suffix>/Cargo.toml). Other crates are members addressable by `-p`.
 for c in "${CRATES[@]}"; do
   echo ">>> $c"
-  if [ "$c" = "wicked-estate-tree-sitter-rpg" ]; then
-    PUB=(cargo publish --manifest-path "$RPG_MANIFEST")
-  else
-    PUB=(cargo publish -p "$c")
-  fi
+  case "$c" in
+    wicked-estate-tree-sitter-*)
+      suffix="${c#wicked-estate-tree-sitter-}"
+      PUB=(cargo publish --manifest-path "crates/wicked-estate-extract/vendor/tree-sitter-${suffix}/Cargo.toml")
+      ;;
+    *)
+      PUB=(cargo publish -p "$c")
+      ;;
+  esac
   if [ "$DRY" = "--dry-run" ]; then
     # A dry-run can only fully validate crates whose deps are already on crates.io. Dependent
     # crates pin internal deps by version (e.g. wicked-estate-core = "0.0.1") that cargo can't

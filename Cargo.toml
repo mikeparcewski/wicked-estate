@@ -1,11 +1,24 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-# Vendored in-house tree-sitter grammar: a `path` dependency of wicked-estate-extract, not a workspace member.
-exclude = ["crates/wicked-estate-extract/vendor/tree-sitter-rpg"]
+# Vendored tree-sitter grammars: `path` dependencies of wicked-estate-extract, not workspace
+# members. Excluded so each can be published to crates.io by --manifest-path (see scripts/publish.sh).
+exclude = [
+  "crates/wicked-estate-extract/vendor/tree-sitter-rpg",
+  "crates/wicked-estate-extract/vendor/tree-sitter-vb6",
+  "crates/wicked-estate-extract/vendor/tree-sitter-vba",
+  "crates/wicked-estate-extract/vendor/tree-sitter-vbscript",
+  "crates/wicked-estate-extract/vendor/tree-sitter-cfml",
+  "crates/wicked-estate-extract/vendor/tree-sitter-abl",
+  "crates/wicked-estate-extract/vendor/tree-sitter-foxpro",
+  "crates/wicked-estate-extract/vendor/tree-sitter-informix4gl",
+  "crates/wicked-estate-extract/vendor/tree-sitter-lotusscript",
+  "crates/wicked-estate-extract/vendor/tree-sitter-powerscript",
+  "crates/wicked-estate-extract/vendor/tree-sitter-crystal-formula",
+]
 
 [workspace.package]
-version = "0.9.1"
+version = "0.9.2"
 edition = "2024"
 license = "MIT"
 rust-version = "1.85"
@@ -16,5 +29,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 anyhow = "1"
-wicked-estate-core = { path = "crates/wicked-estate-core", version = "0.9.1" }
-wicked-estate-store = { path = "crates/wicked-estate-store", version = "0.9.1" }
+wicked-estate-core = { path = "crates/wicked-estate-core", version = "0.9.2" }
+wicked-estate-store = { path = "crates/wicked-estate-store", version = "0.9.2" }

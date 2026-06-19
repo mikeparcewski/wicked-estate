@@ -110,28 +110,28 @@ tree-sitter-bicep = "1.1"
 tree-sitter-fortran = "0.6"
 tree-sitter-pascal = "0.10"
 # In-house grammar: free-format RPG IV (a symbols+calls subset). Source in vendor/tree-sitter-rpg.
-wicked-estate-tree-sitter-rpg = { path = "vendor/tree-sitter-rpg", version = "0.1.2" }
+wicked-estate-tree-sitter-rpg = { path = "vendor/tree-sitter-rpg", version = "0.1.3" }
 # In-house grammar: Progress OpenEdge ABL (symbols+calls subset). The comprehensive upstream
 # grammar (usagi-coffee/tree-sitter-abl) is a ~97MB parser.c — too large to vendor near the
 # 100MiB git limit — so we author a minimal grammar instead. Source in vendor/tree-sitter-abl.
-wicked-estate-tree-sitter-abl = { path = "vendor/tree-sitter-abl" }
+wicked-estate-tree-sitter-abl = { path = "vendor/tree-sitter-abl", version = "0.1.1" }
 # In-house grammar: LotusScript (IBM Domino) — no upstream grammar exists. Source in vendor/tree-sitter-lotusscript.
-wicked-estate-tree-sitter-lotusscript = { path = "vendor/tree-sitter-lotusscript" }
+wicked-estate-tree-sitter-lotusscript = { path = "vendor/tree-sitter-lotusscript", version = "0.1.1" }
 # In-house grammar: Informix 4GL — no usable upstream grammar exists. Source in vendor/tree-sitter-informix4gl.
-wicked-estate-tree-sitter-informix4gl = { path = "vendor/tree-sitter-informix4gl" }
+wicked-estate-tree-sitter-informix4gl = { path = "vendor/tree-sitter-informix4gl", version = "0.1.1" }
 # In-house grammar: Visual FoxPro — no upstream grammar exists. Source in vendor/tree-sitter-foxpro.
-wicked-estate-tree-sitter-foxpro = { path = "vendor/tree-sitter-foxpro" }
+wicked-estate-tree-sitter-foxpro = { path = "vendor/tree-sitter-foxpro", version = "0.1.1" }
 # In-house grammar: PowerBuilder PowerScript — no upstream grammar exists. Source in vendor/tree-sitter-powerscript.
-wicked-estate-tree-sitter-powerscript = { path = "vendor/tree-sitter-powerscript" }
+wicked-estate-tree-sitter-powerscript = { path = "vendor/tree-sitter-powerscript", version = "0.1.1" }
 # In-house grammar: Crystal Reports formula language — no upstream grammar exists. Source in vendor/tree-sitter-crystal-formula.
-wicked-estate-tree-sitter-crystal-formula = { path = "vendor/tree-sitter-crystal-formula" }
+wicked-estate-tree-sitter-crystal-formula = { path = "vendor/tree-sitter-crystal-formula", version = "0.1.1" }
 # Visual Basic family — four variants.
-wicked-estate-tree-sitter-vb6 = { path = "vendor/tree-sitter-vb6" }        # vendored from joannefan/tree-sitter-vb6 (fixes Call keyword + empty bodies)
+wicked-estate-tree-sitter-vb6 = { path = "vendor/tree-sitter-vb6", version = "0.1.1" }        # vendored from joannefan/tree-sitter-vb6 (fixes Call keyword + empty bodies)
 tree-sitter-vb-dotnet = "0.1.0"           # ABI-15; on crates.io
-wicked-estate-tree-sitter-vba = { path = "vendor/tree-sitter-vba" }        # ABI vendored from tmepple/tree-sitter-vba
-wicked-estate-tree-sitter-vbscript = { path = "vendor/tree-sitter-vbscript" }  # ABI vendored from JJK96/tree-sitter-vbscript
+wicked-estate-tree-sitter-vba = { path = "vendor/tree-sitter-vba", version = "0.1.1" }        # ABI vendored from tmepple/tree-sitter-vba
+wicked-estate-tree-sitter-vbscript = { path = "vendor/tree-sitter-vbscript", version = "0.1.1" }  # ABI vendored from JJK96/tree-sitter-vbscript
 # ColdFusion CFML — vendored from cfmleditor/tree-sitter-cfml (cfml tag + cfscript; cfquery SQL dialect omitted). ABI 15.
-wicked-estate-tree-sitter-cfml = { path = "vendor/tree-sitter-cfml" }
+wicked-estate-tree-sitter-cfml = { path = "vendor/tree-sitter-cfml", version = "0.26.21" }
 # tree-sitter-abap-sqry deferred: it pins tree-sitter ^0.26 (we're on 0.25); would need another
 # runtime bump for one niche SAP fork. ABAP coverage awaits a 0.26 bump or an ABI-≤15 ABAP grammar.
 arborium-dot = "2.18"

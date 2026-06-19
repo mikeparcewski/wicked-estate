@@ -1,8 +1,9 @@
 [package]
 name = "wicked-estate-tree-sitter-vbscript"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
+repository = "https://github.com/mikeparcewski/wicked-estate"
 description = "VBScript grammar for tree-sitter — vendored from JJK96/tree-sitter-vbscript"
 readme = "README.md"
 build = "bindings/rust/build.rs"
