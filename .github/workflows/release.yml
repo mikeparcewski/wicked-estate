@@ -1,0 +1,82 @@
+name: Release
+
+# Bumps the workspace version, commits, tags, and pushes — which then triggers publish.yml.
+#
+# Usage: Actions → Release → Run workflow → enter version (e.g. 0.9.3)
+# Prereq: the workflow runner needs write access to the repo (default for GITHUB_TOKEN on
+# non-fork repos with "Allow GitHub Actions to create and approve pull requests" enabled).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'New version (e.g. 0.9.3)'
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: bump version, tag, push
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: validate version input
+        env:
+          NEW_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if ! echo "$NEW_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: version must be X.Y.Z, got: $NEW_VERSION" >&2
+            exit 1
+          fi
+
+      - name: bump workspace version in Cargo.toml
+        env:
+          NEW_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          python3 - <<'EOF'
+          import os, pathlib
+          new_ver = os.environ["NEW_VERSION"]
+          p = pathlib.Path("Cargo.toml")
+          text = p.read_text()
+          # Find the current version in [workspace.package] and dependency pins.
+          # All internal crate version pins use the same value as workspace.package.
+          import re
+          # Replace any version = "N.N.N" that matches a semver pattern.
+          # Third-party deps use "1", "2", "1.85", etc. — only full semver gets replaced.
+          updated = re.sub(
+              r'(version\s*=\s*)"(\d+\.\d+\.\d+)"',
+              lambda m: f'{m.group(1)}"{new_ver}"',
+              text,
+          )
+          if updated == text:
+              print("WARNING: no semver version strings found in Cargo.toml")
+          p.write_text(updated)
+          print(f"Bumped semver strings to {new_ver}")
+          EOF
+
+      - name: update Cargo.lock
+        run: cargo check --workspace --quiet
+
+      - name: commit and tag
+        env:
+          NEW_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git diff --cached --quiet || git commit -m "chore(release): v${NEW_VERSION}"
+          git tag "v${NEW_VERSION}"
+          git push origin HEAD:main
+          git push origin "v${NEW_VERSION}"
