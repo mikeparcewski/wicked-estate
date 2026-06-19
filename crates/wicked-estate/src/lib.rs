@@ -1339,7 +1339,7 @@ mod tests {
         );
 
         // At least one resource node should exist.
-        let nodes = store.all_nodes().unwrap();
+        let nodes = wicked_estate_core::GraphRead::all_nodes(&store).unwrap();
         let resources: Vec<_> = nodes
             .iter()
             .filter(|n| matches!(&n.kind, NodeKind::Other(k) if k == "resource"))
@@ -1760,8 +1760,7 @@ mod tests {
         index_path(&mut store, tmp.path()).unwrap();
 
         // After round 2, no edge must have a target that is not in the node set.
-        let all_nodes: std::collections::HashSet<SymbolId> = store
-            .all_nodes()
+        let all_nodes: std::collections::HashSet<SymbolId> = wicked_estate_core::GraphRead::all_nodes(&store)
             .unwrap()
             .into_iter()
             .map(|n| n.symbol)
@@ -1965,7 +1964,7 @@ mod tests {
         let (store, id_a, _id_b) = build_two_node_store();
 
         // Retrieve the nodes as the nodes arm does (all_nodes is on GraphRead / GraphStoreMutExt).
-        let nodes = store.all_nodes().unwrap();
+        let nodes = wicked_estate_core::GraphRead::all_nodes(&store).unwrap();
         assert!(!nodes.is_empty(), "store must have nodes");
 
         // Reproduce the JSON shaping from the nodes arm for both code paths.

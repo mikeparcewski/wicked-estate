@@ -2083,7 +2083,7 @@ mod tests {
     fn rules_engine_ref(from_name: &str, scheme: &str) -> UnresolvedRef {
         UnresolvedRef::new(
             sym(from_name),
-            &format!("rules-engine:{scheme}"),
+            format!("rules-engine:{scheme}"),
             EdgeKind::InvokedBy,
             Location::new("Caller.java", Span::ZERO),
         )
