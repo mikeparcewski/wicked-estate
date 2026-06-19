@@ -10,8 +10,9 @@
 
 use std::collections::HashMap;
 
-use wicked_estate_core::{Extractor, Language, NodeKind, SourceFile};
+use wicked_estate_core::{EdgeKind, Extractor, Language, NodeKind, SourceFile};
 use wicked_estate_extract::treesitter::extractor_for_extension;
+use wicked_estate_extract::{AwsConfigRuleExtractor, AzurePolicyExtractor};
 
 /// Build extension → caps map from languages.toml.
 fn ext_caps() -> HashMap<String, Vec<String>> {
@@ -619,4 +620,184 @@ fn fixture_files_produce_nodes() {
         );
     }
     println!("fixture_files_produce_nodes: {tested} files passed (cap-aware)");
+}
+
+// ── W15.5: Azure Policy + AWS Config Rule fixture integration tests ───────────
+//
+// These use schema-detecting JSON extractors (not tree-sitter), so they cannot be
+// reached via `extractor_for_extension`. They run as independent test functions.
+
+#[test]
+fn azure_policy_fixture_emits_rule_nodes() {
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/azure_policy/require_https_storage.json");
+    let text = std::fs::read_to_string(&fixture_path)
+        .unwrap_or_else(|e| panic!("cannot read azure_policy fixture: {e}"));
+    let file = SourceFile {
+        path: fixture_path.to_string_lossy().to_string(),
+        language: Language::new("azure-policy"),
+        text,
+    };
+    let ex = AzurePolicyExtractor::new()
+        .extract(&file)
+        .expect("azure policy fixture must parse");
+
+    assert_eq!(
+        ex.nodes.len(),
+        4,
+        "expected 4 nodes (RuleSet, Rule, Condition, Action); got: {:?}",
+        ex.nodes.iter().map(|n| (&n.kind, &n.name)).collect::<Vec<_>>()
+    );
+    assert!(
+        ex.nodes.iter().any(|n| n.kind == NodeKind::RuleSet),
+        "must have RuleSet"
+    );
+    assert!(
+        ex.nodes.iter().any(|n| n.kind == NodeKind::Rule),
+        "must have Rule"
+    );
+    assert!(
+        ex.nodes.iter().any(|n| n.kind == NodeKind::Condition),
+        "must have Condition"
+    );
+    assert!(
+        ex.nodes.iter().any(|n| n.kind == NodeKind::Action),
+        "must have Action"
+    );
+    assert!(
+        !ex.local_edges.is_empty(),
+        "must have at least one edge"
+    );
+}
+
+#[test]
+fn azure_policy_fixture_display_name_captured() {
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/azure_policy/require_https_storage.json");
+    let text = std::fs::read_to_string(&fixture_path)
+        .unwrap_or_else(|e| panic!("cannot read azure_policy fixture: {e}"));
+    let file = SourceFile {
+        path: fixture_path.to_string_lossy().to_string(),
+        language: Language::new("azure-policy"),
+        text,
+    };
+    let ex = AzurePolicyExtractor::new()
+        .extract(&file)
+        .expect("azure policy fixture must parse");
+    let ruleset = ex
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::RuleSet)
+        .expect("RuleSet must exist");
+    assert_eq!(
+        ruleset.name, "Require HTTPS on Storage Accounts",
+        "RuleSet name must match displayName"
+    );
+}
+
+#[test]
+fn aws_config_rule_fixture_emits_rule_nodes() {
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/aws_config/restricted_ssh.json");
+    let text = std::fs::read_to_string(&fixture_path)
+        .unwrap_or_else(|e| panic!("cannot read aws_config fixture: {e}"));
+    let file = SourceFile {
+        path: fixture_path.to_string_lossy().to_string(),
+        language: Language::new("aws-config-rule"),
+        text,
+    };
+    let ex = AwsConfigRuleExtractor::new()
+        .extract(&file)
+        .expect("aws config rule fixture must parse");
+
+    // RuleSet + Rule + Condition + 1 Fact = 4
+    assert_eq!(
+        ex.nodes.len(),
+        4,
+        "expected 4 nodes; got: {:?}",
+        ex.nodes.iter().map(|n| (&n.kind, &n.name)).collect::<Vec<_>>()
+    );
+    assert!(
+        ex.nodes.iter().any(|n| n.kind == NodeKind::RuleSet),
+        "must have RuleSet"
+    );
+    assert!(
+        ex.nodes.iter().any(|n| n.kind == NodeKind::Rule),
+        "must have Rule"
+    );
+    assert!(
+        ex.nodes.iter().any(|n| n.kind == NodeKind::Condition),
+        "must have Condition"
+    );
+    assert!(
+        ex.nodes.iter().any(|n| n.kind == NodeKind::Fact),
+        "must have at least one Fact"
+    );
+}
+
+#[test]
+fn aws_config_rule_fixture_correct_names() {
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/aws_config/restricted_ssh.json");
+    let text = std::fs::read_to_string(&fixture_path)
+        .unwrap_or_else(|e| panic!("cannot read aws_config fixture: {e}"));
+    let file = SourceFile {
+        path: fixture_path.to_string_lossy().to_string(),
+        language: Language::new("aws-config-rule"),
+        text,
+    };
+    let ex = AwsConfigRuleExtractor::new()
+        .extract(&file)
+        .expect("aws config rule fixture must parse");
+
+    let rule = ex
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::Rule)
+        .expect("Rule must exist");
+    assert_eq!(rule.name, "restricted-ssh");
+
+    let fact = ex
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::Fact)
+        .expect("Fact must exist");
+    assert_eq!(fact.name, "AWS::EC2::SecurityGroup");
+
+    let cond = ex
+        .nodes
+        .iter()
+        .find(|n| n.kind == NodeKind::Condition)
+        .expect("Condition must exist");
+    assert_eq!(cond.name, "INCOMING_SSH_DISABLED");
+}
+
+#[test]
+fn aws_config_rule_fixture_edge_kinds() {
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/aws_config/restricted_ssh.json");
+    let text = std::fs::read_to_string(&fixture_path)
+        .unwrap_or_else(|e| panic!("cannot read aws_config fixture: {e}"));
+    let file = SourceFile {
+        path: fixture_path.to_string_lossy().to_string(),
+        language: Language::new("aws-config-rule"),
+        text,
+    };
+    let ex = AwsConfigRuleExtractor::new()
+        .extract(&file)
+        .expect("aws config rule fixture must parse");
+
+    let evaluates = ex
+        .local_edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Evaluates)
+        .count();
+    assert_eq!(evaluates, 1, "expected 1 Evaluates edge for the Fact");
+
+    let contains = ex
+        .local_edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Contains)
+        .count();
+    assert_eq!(contains, 2, "expected 2 Contains edges (RuleSet→Rule, Rule→Condition)");
 }

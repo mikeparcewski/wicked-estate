@@ -1,0 +1,25 @@
+{
+  "properties": {
+    "displayName": "Require HTTPS on Storage Accounts",
+    "policyType": "Custom",
+    "mode": "Indexed",
+    "description": "This policy denies storage accounts that do not use HTTPS, ensuring data in transit is encrypted.",
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Storage/storageAccounts"
+          },
+          {
+            "field": "Microsoft.Storage/storageAccounts/supportsHttpsTrafficOnly",
+            "notEquals": "true"
+          }
+        ]
+      },
+      "then": {
+        "effect": "deny"
+      }
+    }
+  }
+}
