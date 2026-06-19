@@ -15,7 +15,7 @@ tree-sitter + SQLite.
 [![CI](https://github.com/mikeparcewski/wicked-estate/actions/workflows/ci.yml/badge.svg)](https://github.com/mikeparcewski/wicked-estate/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-> **Status:** working engine — `cargo test --workspace` is **617 passing, 0 failed, 0 ignored**;
+> **Status:** v0.10.0 — `cargo test --workspace` is **856 passing, 0 failed, 0 ignored**;
 > 0 build warnings; clippy `-D warnings` clean. Greenfield, pre-1.0. See
 > [FEATURES.md](./FEATURES.md) for the exhaustive, honestly-tagged capability inventory
 > (✅ built / 🟡 partial / 🟦 designed-not-built).
@@ -36,7 +36,7 @@ facts.
 ## Install
 
 ```sh
-# From crates.io (once published):
+# From crates.io:
 cargo install wicked-estate
 
 # Or straight from this repo (works today):
@@ -89,6 +89,7 @@ wicked-estate watch ./my-project --db graph.db
 - **Estate mapping** — IaC (Terraform/CloudFormation/K8s) + mainframe (RACF security, IMS data, MQ
   messaging) as just-more-languages, joined cross-domain (e.g. the RACF profile that *protects* the
   dataset a JCL step *uses* — in one query). Drift = graph diff `iac` vs `live`.
+- **Rules engine layer** — IBM ODM BAL/IRL, Camunda DMN, CLIPS/Jess, Drools GDST, Excel/XLSX decision tables, Salesforce Flow, AWS Config Rules, Azure Policy extracted into the same graph as code. NodeKind::{Rule,RuleSet,Condition,Action,Fact} + EdgeKind::{Governs,Evaluates,Produces,InvokedBy}. `RulesInventory` MCP tool lists engines + calling code. `RulesBridgeResolver` connects code call sites to real RuleSet nodes.
 - **Hybrid + semantic retrieval** — graph + FTS5 core, embeddings an optional sidecar fused via RRF.
   Three embedder tiers: lexical (default) → model2vec (static, light) → fastembed (ONNX/BGE).
 - **MCP server** — exposes the retrieval tools to agents over JSON-RPC, following a strict
@@ -107,7 +108,7 @@ swappable impl behind a seam:
 | Crate | Role |
 |---|---|
 | `wicked-estate-core` | types + the five traits (`Extractor`/`Resolver`/`GraphStore`/`Ranker`/`RetrievalTool`) + GraphStore conformance kit |
-| `wicked-estate-extract` | tree-sitter + grammar-less extractors |
+| `wicked-estate-extract` | tree-sitter + grammar-less extractors + W15 rules engine extractors |
 | `wicked-estate-resolve` | reference resolvers (name/scoped/import-map/SCIP/estate/LSP) |
 | `wicked-estate-store` | storage (SQLite default + in-memory reference) |
 | `wicked-estate-rank` | PageRank importance |
