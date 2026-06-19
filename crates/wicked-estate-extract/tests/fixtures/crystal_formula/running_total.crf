@@ -1,0 +1,9 @@
+// Accumulate order totals; pull a tax rate from another formula.
+WhilePrintingRecords;
+
+Shared CurrencyVar runningTotal;
+Local CurrencyVar lineAmount := {Orders.Amount} * {@TaxRate};
+
+runningTotal := runningTotal + lineAmount;
+
+ToText(runningTotal, 2)

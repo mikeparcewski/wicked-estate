@@ -333,6 +333,27 @@ static SNIPPETS: &[(&str, &str, &str)] = &[
         "FUNCTION addNums RETURNS INTEGER (INPUT a AS INTEGER, INPUT b AS INTEGER):\n  RETURN a + b.\nEND FUNCTION.",
     ),
     (
+        "lotusscript",
+        "lss",
+        "Class Foo\n  Public Sub doIt()\n    Call helper(1)\n  End Sub\nEnd Class",
+    ),
+    (
+        "informix4gl",
+        "4gl",
+        "MAIN\n  CALL doWork()\nEND MAIN\nFUNCTION doWork()\n  DISPLAY \"hi\"\nEND FUNCTION",
+    ),
+    ("foxpro", "prg", "PROCEDURE Greet\n\t=SayHello()\nENDPROC"),
+    (
+        "powerscript",
+        "sru",
+        "global type n_foo from nonvisualobject\nend type\npublic function integer of_run ();\nReturn doWork()\nend function",
+    ),
+    (
+        "crystal_formula",
+        "crf",
+        "Shared NumberVar total;\ntotal := total + {@LineAmount};\nToText(total)",
+    ),
+    (
         "solidity",
         "sol",
         "pragma solidity ^0.8.0;\ncontract Foo {\n  function add(uint a, uint b) public pure returns (uint) { return a + b; }\n}",

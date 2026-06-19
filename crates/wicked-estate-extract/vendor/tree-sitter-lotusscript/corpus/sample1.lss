@@ -1,0 +1,50 @@
+Option Public
+Option Declare
+
+%REM
+  iCalItem represents a single iCalendar event.
+%END REM
+
+Class iCalItem
+	uid As String
+	summary As String
+
+	Public Sub New ()
+		uid = Mid$(CStr(Rnd), 3)
+	End Sub
+
+	Public Sub setUid (uid As String)
+		Me.uid = uid
+	End Sub
+
+	Public Function getUid () As String
+		getUid = Me.uid
+	End Function
+
+	Public Function toString () As String
+		Dim s As String
+		s = s + |BEGIN:VEVENT|
+		If (Me.summary <> "") Then s = s + escapeLine(Me.summary)
+		toString = s
+	End Function
+
+	Property Get Summary As String
+		Summary = Me.summary
+	End Property
+End Class
+
+Class iCalFeed
+	items List As iCalItem
+
+	Public Sub addItem (item As iCalItem)
+		Set items( item.getUid ) = item
+	End Sub
+
+	Public Function render () As String
+		Dim formatter As New iCalItem()
+		ForAll item In items
+			Call appendLine(item.toString())
+		End ForAll
+		render = formatter.toString()
+	End Function
+End Class

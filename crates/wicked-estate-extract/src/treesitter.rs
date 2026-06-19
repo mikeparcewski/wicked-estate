@@ -151,6 +151,11 @@ const VBSCRIPT_QUERY: &str = include_str!("queries/vbscript.scm");
 const CFML_QUERY: &str = include_str!("queries/cfml.scm");
 const CFSCRIPT_QUERY: &str = include_str!("queries/cfscript.scm");
 const ABL_QUERY: &str = include_str!("queries/abl.scm");
+const LOTUSSCRIPT_QUERY: &str = include_str!("queries/lotusscript.scm");
+const INFORMIX4GL_QUERY: &str = include_str!("queries/informix4gl.scm");
+const FOXPRO_QUERY: &str = include_str!("queries/foxpro.scm");
+const POWERSCRIPT_QUERY: &str = include_str!("queries/powerscript.scm");
+const CRYSTAL_FORMULA_QUERY: &str = include_str!("queries/crystal_formula.scm");
 
 // ── Grammar language fns (one per language) ──────────────────────────────────
 // Each function returns tree_sitter::Language so it can be stored as fn() -> Language.
@@ -445,6 +450,31 @@ fn lang_rpg() -> tree_sitter::Language {
 // Progress OpenEdge ABL via the in-house grammar (vendor/tree-sitter-abl) — authored, not published.
 fn lang_abl() -> tree_sitter::Language {
     wicked_estate_tree_sitter_abl::LANGUAGE.into()
+}
+
+// LotusScript via the in-house grammar (vendor/tree-sitter-lotusscript) — authored, not published.
+fn lang_lotusscript() -> tree_sitter::Language {
+    wicked_estate_tree_sitter_lotusscript::LANGUAGE.into()
+}
+
+// Informix 4GL via the in-house grammar (vendor/tree-sitter-informix4gl) — authored, not published.
+fn lang_informix4gl() -> tree_sitter::Language {
+    wicked_estate_tree_sitter_informix4gl::LANGUAGE.into()
+}
+
+// Visual FoxPro via the in-house grammar (vendor/tree-sitter-foxpro) — authored, not published.
+fn lang_foxpro() -> tree_sitter::Language {
+    wicked_estate_tree_sitter_foxpro::LANGUAGE.into()
+}
+
+// PowerBuilder PowerScript via the in-house grammar (vendor/tree-sitter-powerscript).
+fn lang_powerscript() -> tree_sitter::Language {
+    wicked_estate_tree_sitter_powerscript::LANGUAGE.into()
+}
+
+// Crystal Reports formula language via the in-house grammar (vendor/tree-sitter-crystal-formula).
+fn lang_crystal_formula() -> tree_sitter::Language {
+    wicked_estate_tree_sitter_crystal_formula::LANGUAGE.into()
 }
 
 // ── Visual Basic family ───────────────────────────────────────────────────────
@@ -1130,6 +1160,46 @@ static LANG_TABLE: &[LangEntry] = &[
         ext: &["p", "w", "i"],
         make_language: lang_abl,
         query_src: ABL_QUERY,
+    },
+    // ── LotusScript (in-house grammar) ───────────────────────────────────────
+    LangEntry {
+        // .lss = LotusScript Source export (the canonical extension); .ls is a community convention.
+        name: "lotusscript",
+        ext: &["lss", "ls"],
+        make_language: lang_lotusscript,
+        query_src: LOTUSSCRIPT_QUERY,
+    },
+    // ── Informix 4GL (in-house grammar) ──────────────────────────────────────
+    LangEntry {
+        name: "informix4gl",
+        ext: &["4gl"],
+        make_language: lang_informix4gl,
+        query_src: INFORMIX4GL_QUERY,
+    },
+    // ── Visual FoxPro (in-house grammar) ─────────────────────────────────────
+    LangEntry {
+        name: "foxpro",
+        ext: &["prg"],
+        make_language: lang_foxpro,
+        query_src: FOXPRO_QUERY,
+    },
+    // ── PowerBuilder PowerScript (in-house grammar) ──────────────────────────
+    LangEntry {
+        // Exported PowerBuilder objects: .sru (user object), .srw (window), .srf (function),
+        // .sra (application), .srm (menu).
+        name: "powerscript",
+        ext: &["sru", "srw", "srf", "sra", "srm"],
+        make_language: lang_powerscript,
+        query_src: POWERSCRIPT_QUERY,
+    },
+    // ── Crystal Reports formula language (in-house grammar) ──────────────────
+    LangEntry {
+        // No standard text extension exists (formulas live in .rpt binaries); .crf is our
+        // convention for exported formula text. Often dispatched by language name on fragments.
+        name: "crystal_formula",
+        ext: &["crf"],
+        make_language: lang_crystal_formula,
+        query_src: CRYSTAL_FORMULA_QUERY,
     },
 ];
 

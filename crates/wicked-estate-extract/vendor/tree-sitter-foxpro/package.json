@@ -1,0 +1,7 @@
+{
+  "name": "tree-sitter-foxpro",
+  "version": "0.1.0",
+  "description": "Visual FoxPro grammar for tree-sitter — wicked_estate symbols+calls subset",
+  "license": "MIT",
+  "tree-sitter": [{ "scope": "source.foxpro", "file-types": ["prg"] }]
+}

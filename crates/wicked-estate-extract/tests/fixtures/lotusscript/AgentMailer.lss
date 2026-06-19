@@ -1,0 +1,35 @@
+Option Public
+
+%REM
+  AgentMailer — sends a notification mail for each unprocessed document.
+%END REM
+
+Class MailBuilder
+	subject As String
+
+	Public Sub New (subj As String)
+		Me.subject = subj
+	End Sub
+
+	Public Function build (recipient As String) As String
+		Dim body As String
+		body = renderTemplate(Me.subject)
+		build = formatHeader(recipient) + body
+	End Function
+End Class
+
+Sub Initialize
+	Dim session As New NotesSession
+	Dim builder As New MailBuilder("Daily Report")
+	Call sendAll(builder)
+End Sub
+
+Function sendAll (builder As MailBuilder) As Integer
+	Dim count As Integer
+	count = 0
+	ForAll doc In getDocuments()
+		Call deliver(builder.build(doc.recipient))
+		count = count + 1
+	End ForAll
+	sendAll = count
+End Function

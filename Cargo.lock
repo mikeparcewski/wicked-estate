@@ -9805,6 +9805,11 @@ dependencies = [
  "wicked-estate-core",
  "wicked-estate-tree-sitter-abl",
  "wicked-estate-tree-sitter-cfml",
+ "wicked-estate-tree-sitter-crystal-formula",
+ "wicked-estate-tree-sitter-foxpro",
+ "wicked-estate-tree-sitter-informix4gl",
+ "wicked-estate-tree-sitter-lotusscript",
+ "wicked-estate-tree-sitter-powerscript",
  "wicked-estate-tree-sitter-rpg",
  "wicked-estate-tree-sitter-vb6",
  "wicked-estate-tree-sitter-vba",
@@ -9903,6 +9908,51 @@ dependencies = [
 [[package]]
 name = "wicked-estate-tree-sitter-cfml"
 version = "0.26.20"
+dependencies = [
+ "cc",
+ "tree-sitter",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "wicked-estate-tree-sitter-crystal-formula"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tree-sitter",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "wicked-estate-tree-sitter-foxpro"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tree-sitter",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "wicked-estate-tree-sitter-informix4gl"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tree-sitter",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "wicked-estate-tree-sitter-lotusscript"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tree-sitter",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "wicked-estate-tree-sitter-powerscript"
+version = "0.1.0"
 dependencies = [
  "cc",
  "tree-sitter",

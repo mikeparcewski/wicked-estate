@@ -1,0 +1,7 @@
+{
+  "name": "tree-sitter-informix4gl",
+  "version": "0.1.0",
+  "description": "Informix 4GL grammar for tree-sitter — wicked_estate symbols+calls subset",
+  "license": "MIT",
+  "tree-sitter": [{ "scope": "source.informix4gl", "file-types": ["4gl"] }]
+}

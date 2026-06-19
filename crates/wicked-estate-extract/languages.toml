@@ -790,3 +790,44 @@ ext = ["p", "w", "i"]
 grammar = "tree-sitter-abl"
 tier = "structural"
 caps = ["symbols", "calls"]
+
+[[language]]
+# LotusScript (IBM Lotus Notes/Domino) — in-house grammar (no upstream exists). VBA dialect.
+name = "lotusscript"
+ext = ["lss", "ls"]
+grammar = "tree-sitter-lotusscript"
+tier = "structural"
+caps = ["symbols", "calls"]
+
+[[language]]
+# Informix 4GL (I4GL) — in-house grammar (no usable upstream exists). MAIN/FUNCTION/REPORT + SQL.
+name = "informix4gl"
+ext = ["4gl"]
+grammar = "tree-sitter-informix4gl"
+tier = "structural"
+caps = ["symbols", "calls"]
+
+[[language]]
+# Visual FoxPro (.prg) — in-house grammar (no upstream exists). PROCEDURE/FUNCTION/DEFINE CLASS.
+name = "foxpro"
+ext = ["prg"]
+grammar = "tree-sitter-foxpro"
+tier = "structural"
+caps = ["symbols", "calls"]
+
+[[language]]
+# PowerBuilder PowerScript — in-house grammar (no upstream exists). Exported objects (.sru/.srw/…).
+name = "powerscript"
+ext = ["sru", "srw", "srf", "sra", "srm"]
+grammar = "tree-sitter-powerscript"
+tier = "structural"
+caps = ["symbols", "calls", "extends"]
+
+[[language]]
+# Crystal Reports formula language (Crystal Syntax) — in-house grammar (no upstream exists).
+# Variable declarations + {@formula}/function-call references. .crf is a convention (no standard).
+name = "crystal_formula"
+ext = ["crf"]
+grammar = "tree-sitter-crystal-formula"
+tier = "structural"
+caps = ["symbols", "calls"]

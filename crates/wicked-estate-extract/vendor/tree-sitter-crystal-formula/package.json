@@ -1,0 +1,7 @@
+{
+  "name": "tree-sitter-crystal-formula",
+  "version": "0.1.0",
+  "description": "Crystal Reports formula language grammar for tree-sitter — wicked_estate symbols+calls subset",
+  "license": "MIT",
+  "tree-sitter": [{ "scope": "source.crystal-formula", "file-types": ["crf"] }]
+}

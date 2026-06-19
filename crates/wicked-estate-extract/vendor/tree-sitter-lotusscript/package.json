@@ -1,0 +1,12 @@
+{
+  "name": "tree-sitter-lotusscript",
+  "version": "0.1.0",
+  "description": "LotusScript (IBM Domino) grammar for tree-sitter — wicked_estate symbols+calls subset",
+  "license": "MIT",
+  "tree-sitter": [
+    {
+      "scope": "source.lotusscript",
+      "file-types": ["lss", "ls"]
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+// Running concatenation of circle names across detail rows.
+WhilePrintingRecords;
+
+Shared StringVar sCircles;
+Local NumberVar weekStart := 4;
+Global DateVar array holidays;
+
+If {CIRCLES_FULL.CIRCIRCNM} <> "" Then
+    sCircles := sCircles + {CIRCLES_FULL.CIRCIRCNM} + "; "
+Else
+    sCircles := "";
+
+// Pull in another formula and a parameter.
+Local StringVar header := {@ReportHeader} + " for " + {?Region};
+
+ToText(weekStart) + ": " + sCircles

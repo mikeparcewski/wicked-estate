@@ -112,6 +112,16 @@ wicked-estate-tree-sitter-rpg = { path = "vendor/tree-sitter-rpg", version = "0.
 # grammar (usagi-coffee/tree-sitter-abl) is a ~97MB parser.c — too large to vendor near the
 # 100MiB git limit — so we author a minimal grammar instead. Source in vendor/tree-sitter-abl.
 wicked-estate-tree-sitter-abl = { path = "vendor/tree-sitter-abl" }
+# In-house grammar: LotusScript (IBM Domino) — no upstream grammar exists. Source in vendor/tree-sitter-lotusscript.
+wicked-estate-tree-sitter-lotusscript = { path = "vendor/tree-sitter-lotusscript" }
+# In-house grammar: Informix 4GL — no usable upstream grammar exists. Source in vendor/tree-sitter-informix4gl.
+wicked-estate-tree-sitter-informix4gl = { path = "vendor/tree-sitter-informix4gl" }
+# In-house grammar: Visual FoxPro — no upstream grammar exists. Source in vendor/tree-sitter-foxpro.
+wicked-estate-tree-sitter-foxpro = { path = "vendor/tree-sitter-foxpro" }
+# In-house grammar: PowerBuilder PowerScript — no upstream grammar exists. Source in vendor/tree-sitter-powerscript.
+wicked-estate-tree-sitter-powerscript = { path = "vendor/tree-sitter-powerscript" }
+# In-house grammar: Crystal Reports formula language — no upstream grammar exists. Source in vendor/tree-sitter-crystal-formula.
+wicked-estate-tree-sitter-crystal-formula = { path = "vendor/tree-sitter-crystal-formula" }
 # Visual Basic family — four variants.
 wicked-estate-tree-sitter-vb6 = { path = "vendor/tree-sitter-vb6" }        # vendored from joannefan/tree-sitter-vb6 (fixes Call keyword + empty bodies)
 tree-sitter-vb-dotnet = "0.1.0"           # ABI-15; on crates.io
