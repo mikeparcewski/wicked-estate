@@ -111,6 +111,22 @@ fn row_to_annotation(r: &sqlx::postgres::PgRow) -> std::result::Result<Annotatio
 
 // ── Schema DDL ────────────────────────────────────────────────────────────────
 
+/// Split schema DDL into executable statements. Strips `--` comment lines FIRST (so a `;` inside a
+/// comment can't split a statement mid-comment → "unterminated quoted string"), then splits on `;`
+/// and drops empties. Pure string logic — unit-tested without a database.
+fn split_ddl(sql: &str) -> Vec<String> {
+    let cleaned: String = sql
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    cleaned
+        .split(';')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS files (
   path    TEXT PRIMARY KEY,
@@ -131,7 +147,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   scope                 TEXT NOT NULL DEFAULT ''
 );
 -- Idempotent migration for DBs created before `scope` existed. MUST run BEFORE any index on
--- `scope` (DDL is split on ';' and executed in order): on a legacy `nodes` table the CREATE TABLE
+-- `scope` (DDL is split on semicolons, comment lines stripped first, executed in order): on a legacy nodes table the CREATE TABLE
 -- is a no-op, so the column must be ADDed before `idx_nodes_scope` references it.
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
@@ -241,14 +257,10 @@ impl PostgresStore {
     pub fn open(url: &str) -> Result<Self> {
         let pool = rt_block(sqlx::PgPool::connect(url)).map_err(st)?;
 
-        // Run schema DDL statement by statement (split on ";") to avoid parsing issues.
+        // Run schema DDL statement by statement (see `split_ddl`).
         rt_block(async {
-            for stmt in SCHEMA.split(';') {
-                let trimmed = stmt.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                sqlx::query(trimmed).execute(&pool).await?;
+            for stmt in split_ddl(SCHEMA) {
+                sqlx::query(&stmt).execute(&pool).await?;
             }
             Ok::<_, sqlx::Error>(())
         })
@@ -1455,5 +1467,44 @@ impl SymbolIndex for PostgresStore {
 
     fn all_nodes(&self) -> wicked_estate_core::Result<Vec<Node>> {
         GraphRead::all_nodes(self)
+    }
+}
+
+#[cfg(test)]
+mod ddl_tests {
+    use super::{SCHEMA, split_ddl};
+
+    #[test]
+    fn split_ddl_ignores_semicolons_in_comments() {
+        let sql = "-- a comment with ; and 'quotes' inside\nCREATE TABLE t (x int);\nALTER TABLE t ADD y text DEFAULT '';";
+        let s = split_ddl(sql);
+        assert_eq!(s.len(), 2, "exactly two real statements");
+        assert!(s[0].starts_with("CREATE TABLE"));
+        assert!(
+            s.iter().all(|x| !x.contains("--")),
+            "no comment fragments leak into statements"
+        );
+        assert!(
+            s.iter().all(|x| x.matches('\'').count() % 2 == 0),
+            "each statement has balanced quotes"
+        );
+    }
+
+    #[test]
+    fn real_schema_splits_into_balanced_statements() {
+        // Regression: the scope-ordering comment contains ';' — must not split a statement mid-comment.
+        let stmts = split_ddl(SCHEMA);
+        assert!(!stmts.is_empty());
+        for stmt in &stmts {
+            assert!(
+                !stmt.trim_start().starts_with("--"),
+                "comment leaked: {stmt}"
+            );
+            assert_eq!(
+                stmt.matches('\'').count() % 2,
+                0,
+                "unbalanced quotes (would error in PG): {stmt}"
+            );
+        }
     }
 }
