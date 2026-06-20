@@ -1,0 +1,11 @@
+[package]
+name = "wicked-estate-memory-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "The memory/knowledge interface seam: traits + DTOs a host (estate binary/MCP) calls so any memory implementation (e.g. wicked-memory) can plug in. Depends on NOTHING heavy; estate-core does NOT depend on this."
+
+[dependencies]
+serde = { workspace = true }

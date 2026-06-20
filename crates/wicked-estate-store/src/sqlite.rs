@@ -66,6 +66,24 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
         )
         .map_err(st)?;
     }
+    // Hierarchical scope (multi-tenant/partition) — additive `nodes.scope` column. DEFAULT '' (root)
+    // backfills every pre-existing row, so old graphs behave exactly as before (no data rewrite).
+    let mut nstmt = conn.prepare("PRAGMA table_info(nodes)").map_err(st)?;
+    let ncols: Vec<String> = nstmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(st)?
+        .filter_map(|r| r.ok())
+        .collect();
+    // `!ncols.is_empty()` guards the case where the `nodes` table doesn't exist yet (e.g. a partial
+    // legacy DB / a fixture with only `annotations`): an empty PRAGMA means no table, so skip the
+    // ALTER (the SCHEMA `CREATE TABLE` already includes `scope` on a real open).
+    if !ncols.is_empty() && !ncols.iter().any(|c| c == "scope") {
+        conn.execute_batch(
+            "ALTER TABLE nodes ADD COLUMN scope TEXT NOT NULL DEFAULT ''; \
+             CREATE INDEX IF NOT EXISTS idx_nodes_scope ON nodes(scope);",
+        )
+        .map_err(st)?;
+    }
     Ok(())
 }
 
@@ -185,18 +203,27 @@ impl SqliteStore {
         let mut up = self
             .conn
             .prepare_cached(
-                "INSERT INTO nodes(symbol,name,kind,language,file,data) VALUES(?1,?2,?3,?4,?5,?6)
+                "INSERT INTO nodes(symbol,name,kind,language,file,data,scope) VALUES(?1,?2,?3,?4,?5,?6,?7)
                  ON CONFLICT(symbol) DO UPDATE SET
                    name=excluded.name, kind=excluded.kind,
-                   language=excluded.language, file=excluded.file, data=excluded.data",
+                   language=excluded.language, file=excluded.file, data=excluded.data,
+                   scope=excluded.scope",
             )
             .map_err(st)?;
         for (n, sid) in nodes.iter().zip(sids.iter()) {
             let kind = serde_json::to_string(&n.kind)?;
             let data = serde_json::to_string(n)?;
             let file = &n.location.file;
-            up.execute(params![sid, n.name, kind, n.language.0, file, data])
-                .map_err(st)?;
+            up.execute(params![
+                sid,
+                n.name,
+                kind,
+                n.language.0,
+                file,
+                data,
+                n.scope.as_path()
+            ])
+            .map_err(st)?;
         }
         Ok(())
     }
@@ -597,6 +624,58 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Hard-delete nodes by id, plus their FTS rows, embeddings, and incident edges (both
+    /// directions). Returns the number of node rows removed. Used for right-to-erasure (the memory
+    /// layer computes the in-scope, memory-kind ids and calls this — see `wicked-memory` `erase`).
+    /// Unlike `remove_file`, this does NOT archive to edge_history (erasure is a true delete).
+    pub fn remove_nodes(&mut self, ids: &[SymbolId]) -> Result<usize> {
+        // Atomic: all deletes commit together or none. A SAVEPOINT (not BEGIN) nests safely whether
+        // or not an outer transaction/batch is already open.
+        self.conn.execute_batch("SAVEPOINT rm_nodes").map_err(st)?;
+        match self.remove_nodes_inner(ids) {
+            Ok(n) => {
+                self.conn.execute_batch("RELEASE rm_nodes").map_err(st)?;
+                Ok(n)
+            }
+            Err(e) => {
+                let _ = self
+                    .conn
+                    .execute_batch("ROLLBACK TO rm_nodes; RELEASE rm_nodes");
+                Err(e)
+            }
+        }
+    }
+
+    fn remove_nodes_inner(&self, ids: &[SymbolId]) -> Result<usize> {
+        let mut removed = 0usize;
+        for id in ids {
+            let s = &id.0;
+            removed += self
+                .conn
+                .execute(
+                    "DELETE FROM nodes WHERE symbol IN (SELECT sid FROM symbols WHERE sym=?1)",
+                    params![s],
+                )
+                .map_err(st)?;
+            self.conn
+                .execute("DELETE FROM nodes_fts WHERE symbol=?1", params![s])
+                .map_err(st)?;
+            self.conn
+                .execute("DELETE FROM embeddings WHERE symbol=?1", params![s])
+                .map_err(st)?;
+            // edges.source/target are INTEGER sids (interned), NOT the string id — resolve via the
+            // symbols table, else incident edges would leak after erasure.
+            self.conn
+                .execute(
+                    "DELETE FROM edges WHERE source IN (SELECT sid FROM symbols WHERE sym=?1) \
+                        OR target IN (SELECT sid FROM symbols WHERE sym=?1)",
+                    params![s],
+                )
+                .map_err(st)?;
+        }
+        Ok(removed)
+    }
+
     /// Retrieve the stored embedding vector for `symbol`, or `None` if absent.
     pub fn embedding(&self, symbol: &SymbolId) -> Result<Option<Vec<f32>>> {
         let row: Option<(i64, Vec<u8>)> = self
@@ -931,10 +1010,11 @@ impl GraphWrite for SqliteStore {
         let mut up = self
             .conn
             .prepare_cached(
-                "INSERT INTO nodes(symbol,name,kind,language,file,data) VALUES(?1,?2,?3,?4,?5,?6)
+                "INSERT INTO nodes(symbol,name,kind,language,file,data,scope) VALUES(?1,?2,?3,?4,?5,?6,?7)
                  ON CONFLICT(symbol) DO UPDATE SET
                    name=excluded.name, kind=excluded.kind,
-                   language=excluded.language, file=excluded.file, data=excluded.data",
+                   language=excluded.language, file=excluded.file, data=excluded.data,
+                   scope=excluded.scope",
             )
             .map_err(st)?;
         // W5.1: keep the FTS table in sync. DELETE + INSERT (no `ON CONFLICT` for virtual tables).
@@ -953,8 +1033,16 @@ impl GraphWrite for SqliteStore {
             let kind = serde_json::to_string(&n.kind)?;
             let data = serde_json::to_string(n)?;
             let file = &n.location.file;
-            up.execute(params![sid, n.name, kind, n.language.0, file, data])
-                .map_err(st)?;
+            up.execute(params![
+                sid,
+                n.name,
+                kind,
+                n.language.0,
+                file,
+                data,
+                n.scope.as_path()
+            ])
+            .map_err(st)?;
             // FTS uses the string symbol directly (nodes_fts.symbol is TEXT).
             fts_del.execute(params![n.symbol.0]).map_err(st)?;
             fts_ins
@@ -1499,7 +1587,14 @@ impl GraphRead for SqliteStore {
         };
 
         // Apply remaining filters in Rust (BM25 order preserved because retain is stable).
+        // Scope is filtered HERE, before the `limit` truncate below, so a scoped query never leaks
+        // another scope's rows into (or out of) the top-k (multi-tenant isolation).
         nodes.retain(|n| {
+            if let Some(prefix) = &query.scope_prefix {
+                if !wicked_estate_core::scope::path_in_prefix(&n.scope.as_path(), prefix) {
+                    return false;
+                }
+            }
             if !query.kinds.is_empty() && !query.kinds.contains(&n.kind) {
                 return false;
             }

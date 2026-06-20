@@ -9923,6 +9923,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wicked-estate-memory-api"
+version = "0.11.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "wicked-estate-observe"
 version = "0.11.0"
 dependencies = [

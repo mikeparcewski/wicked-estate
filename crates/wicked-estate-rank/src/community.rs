@@ -529,6 +529,7 @@ mod tests {
             signature: None,
             doc: None,
             metadata: Default::default(),
+            scope: Default::default(),
         }
     }
 

@@ -962,4 +962,72 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
         !stale_at_1000.iter().any(|(_, a)| a.key == "tls"),
         "verified exactly at the cutoff is NOT stale (strict <)"
     );
+
+    // --- scope isolation (multi-tenant / partition; added last so prior counts are unaffected) ---
+    let acme =
+        func_node("billing_acme").with_scope(crate::scope::Scope::parse("org:acme/unit:pay"));
+    let acme2 = func_node("billing_acme2").with_scope(crate::scope::Scope::parse("org:acme")); // ancestor
+    let globex = func_node("billing_globex").with_scope(crate::scope::Scope::parse("org:globex"));
+    store
+        .upsert_nodes(&[acme, acme2, globex])
+        .expect("upsert scoped nodes");
+
+    // A scoped query returns the prefix subtree and NOTHING from another tenant (isolation).
+    let scoped = store
+        .find_symbols(&SymbolQuery {
+            scope_prefix: Some("org:acme".to_string()),
+            ..Default::default()
+        })
+        .expect("scoped find_symbols");
+    assert!(
+        scoped.iter().any(|n| n.name == "billing_acme")
+            && scoped.iter().any(|n| n.name == "billing_acme2"),
+        "scoped query must see the org:acme subtree"
+    );
+    assert!(
+        !scoped.iter().any(|n| n.name == "billing_globex"),
+        "SCOPE ISOLATION VIOLATED: org:acme query returned an org:globex node"
+    );
+    assert!(
+        scoped
+            .iter()
+            .all(|n| n.scope.as_path().starts_with("org:acme")),
+        "every scoped result must be within the org:acme subtree"
+    );
+
+    // Segment-aware: a non-existent sibling-ish prefix must not match by raw string prefix.
+    let none = store
+        .find_symbols(&SymbolQuery {
+            scope_prefix: Some("org:acm".to_string()),
+            ..Default::default()
+        })
+        .expect("scoped find_symbols (partial seg)");
+    assert!(
+        !none.iter().any(|n| n.name.starts_with("billing_acme")),
+        "a partial-segment prefix (org:acm) must NOT leak org:acme nodes"
+    );
+
+    // Unscoped query still sees every scope (back-compat: default scope_prefix = None).
+    let all_scoped = store
+        .find_symbols(&SymbolQuery {
+            exact_name: Some("billing_globex".to_string()),
+            ..Default::default()
+        })
+        .expect("unscoped find_symbols");
+    assert_eq!(
+        all_scoped.len(),
+        1,
+        "unscoped query sees other-tenant nodes"
+    );
+
+    // Scope round-trips through the store (data model).
+    let got_acme = store
+        .get_node(&sym("billing_acme"))
+        .expect("get scoped node")
+        .expect("billing_acme exists");
+    assert_eq!(
+        got_acme.scope.as_path(),
+        "org:acme/unit:pay",
+        "scope persisted + round-trips"
+    );
 }

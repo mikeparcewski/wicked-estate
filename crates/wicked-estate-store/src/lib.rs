@@ -523,6 +523,11 @@ impl GraphRead for MemStore {
             .nodes
             .values()
             .filter(|n| {
+                if let Some(prefix) = &query.scope_prefix {
+                    if !wicked_estate_core::scope::path_in_prefix(&n.scope.as_path(), prefix) {
+                        return false;
+                    }
+                }
                 if let Some(name) = &query.exact_name {
                     if &n.name != name {
                         return false;

@@ -110,6 +110,10 @@ pub struct Node {
     pub doc: Option<String>,
     #[serde(default)]
     pub metadata: Metadata,
+    /// Hierarchical ownership/partition scope (default root). Additive — NOT part of [`SymbolId`]
+    /// (ADR-002), so stable code identity is unchanged and default-root nodes behave as before.
+    #[serde(default, skip_serializing_if = "crate::scope::Scope::is_root")]
+    pub scope: crate::scope::Scope,
 }
 
 impl Node {
@@ -129,7 +133,14 @@ impl Node {
             signature: None,
             doc: None,
             metadata: Metadata::new(),
+            scope: crate::scope::Scope::root(),
         }
+    }
+
+    /// Set the node's ownership/partition scope (builder).
+    pub fn with_scope(mut self, scope: crate::scope::Scope) -> Self {
+        self.scope = scope;
+        self
     }
 }
 

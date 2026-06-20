@@ -31,11 +31,13 @@ CREATE TABLE IF NOT EXISTS nodes (
   data                    TEXT NOT NULL,        -- full Node as JSON (still carries string SymbolId for round-trip)
   description             TEXT,                -- semantic: what is this symbol? (Semantic linking)
   requirement             TEXT,                -- semantic: requirement this symbol matches/fulfils
-  requirement_validated   INTEGER NOT NULL DEFAULT 0 -- semantic: match validated as true (0/1)
+  requirement_validated   INTEGER NOT NULL DEFAULT 0, -- semantic: match validated as true (0/1)
+  scope                   TEXT NOT NULL DEFAULT ''  -- hierarchical ownership/partition path (root='')
 );
 CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
 CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
 CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file);
+CREATE INDEX IF NOT EXISTS idx_nodes_scope ON nodes(scope);
 
 -- W5.1: FTS5 virtual table for BM25 full-text search over name/signature/doc.
 -- `symbol` stores the string SymbolId (TEXT) so the join-back to nodes goes through

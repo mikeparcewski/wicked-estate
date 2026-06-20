@@ -23,6 +23,7 @@ pub mod observability;
 pub mod query;
 pub mod refs;
 pub mod repo;
+pub mod scope;
 pub mod semantics;
 pub mod symbol;
 pub mod traits;
@@ -47,6 +48,7 @@ pub use observability::{
 pub use query::{GraphStats, RetrievalResult, Subgraph, SymbolQuery, TraversalSpec};
 pub use refs::{Extraction, UnresolvedRef};
 pub use repo::RepoInfo;
+pub use scope::{Scope, ScopeSeg};
 pub use semantics::NodeSemantics;
 pub use symbol::{Descriptor, Package, Suffix, Symbol, SymbolId};
 pub use traits::{

@@ -47,6 +47,7 @@ fn make_node(id: &str) -> Node {
         signature: None,
         doc: None,
         metadata: Default::default(),
+        scope: Default::default(),
     }
 }
 

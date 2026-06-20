@@ -127,11 +127,17 @@ CREATE TABLE IF NOT EXISTS nodes (
   data                  TEXT NOT NULL,
   description           TEXT,
   requirement           TEXT,
-  requirement_validated BIGINT NOT NULL DEFAULT 0
+  requirement_validated BIGINT NOT NULL DEFAULT 0,
+  scope                 TEXT NOT NULL DEFAULT ''
 );
+-- Idempotent migration for DBs created before `scope` existed. MUST run BEFORE any index on
+-- `scope` (DDL is split on ';' and executed in order): on a legacy `nodes` table the CREATE TABLE
+-- is a no-op, so the column must be ADDed before `idx_nodes_scope` references it.
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
 CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
 CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file);
+CREATE INDEX IF NOT EXISTS idx_nodes_scope ON nodes(scope);
 
 CREATE TABLE IF NOT EXISTS edges (
   source     TEXT NOT NULL,
@@ -431,6 +437,31 @@ impl PostgresStore {
         }
         Ok(out)
     }
+
+    /// Hard-delete nodes by symbol id, plus every edge incident on them. Atomic (transaction): all
+    /// deletes commit together or none. (On PG `edges.source/target` are the symbol strings directly,
+    /// so no sid indirection is needed.) Returns the number of node rows removed.
+    pub fn remove_nodes(&mut self, ids: &[SymbolId]) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let syms: Vec<String> = ids.iter().map(|i| i.0.clone()).collect();
+        let n = rt_block(async {
+            let mut tx = self.pool.begin().await?;
+            sqlx::query("DELETE FROM edges WHERE source = ANY($1) OR target = ANY($1)")
+                .bind(&syms)
+                .execute(&mut *tx)
+                .await?;
+            let res = sqlx::query("DELETE FROM nodes WHERE symbol = ANY($1)")
+                .bind(&syms)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            Ok::<u64, sqlx::Error>(res.rows_affected())
+        })
+        .map_err(st)?;
+        Ok(n as usize)
+    }
 }
 
 // ── GraphWrite ────────────────────────────────────────────────────────────────
@@ -455,14 +486,15 @@ impl GraphWrite for PostgresStore {
             let file = &n.location.file;
             rt_block(
                 sqlx::query(
-                    "INSERT INTO nodes(symbol, name, kind, language, file, data)
-                     VALUES($1, $2, $3, $4, $5, $6)
+                    "INSERT INTO nodes(symbol, name, kind, language, file, data, scope)
+                     VALUES($1, $2, $3, $4, $5, $6, $7)
                      ON CONFLICT(symbol) DO UPDATE SET
                        name     = EXCLUDED.name,
                        kind     = EXCLUDED.kind,
                        language = EXCLUDED.language,
                        file     = EXCLUDED.file,
-                       data     = EXCLUDED.data",
+                       data     = EXCLUDED.data,
+                       scope    = EXCLUDED.scope",
                 )
                 .bind(&n.symbol.0)
                 .bind(&n.name)
@@ -470,6 +502,7 @@ impl GraphWrite for PostgresStore {
                 .bind(&n.language.0)
                 .bind(file)
                 .bind(&data)
+                .bind(n.scope.as_path())
                 .execute(&self.pool),
             )
             .map_err(st)?;
@@ -909,8 +942,14 @@ impl GraphRead for PostgresStore {
             .map_err(st)?
         };
 
-        // Apply remaining filters in Rust.
+        // Apply remaining filters in Rust. Scope is filtered before the limit truncate below, so a
+        // scoped query never leaks another scope's rows into/out of the top-k (multi-tenant isolation).
         nodes.retain(|n| {
+            if let Some(prefix) = &query.scope_prefix {
+                if !wicked_estate_core::scope::path_in_prefix(&n.scope.as_path(), prefix) {
+                    return false;
+                }
+            }
             if !query.kinds.is_empty() && !query.kinds.contains(&n.kind) {
                 return false;
             }

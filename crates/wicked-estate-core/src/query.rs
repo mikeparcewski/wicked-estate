@@ -16,6 +16,10 @@ pub struct SymbolQuery {
     pub kinds: Vec<NodeKind>,
     pub language: Option<Language>,
     pub limit: Option<usize>,
+    /// Restrict results to a scope subtree by canonical path prefix (e.g. `"org:acme"`), matching
+    /// that scope and its descendants. `None` = all scopes. The predicate is pushed into the store
+    /// SQL **before** any `LIMIT`, so top-k ranking never leaks across scopes (multi-tenant isolation).
+    pub scope_prefix: Option<String>,
 }
 
 /// A **bounded** traversal request. We deliberately support only bounded reverse-reachability /
