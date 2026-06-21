@@ -132,6 +132,17 @@ pub trait GraphRead: Send {
     /// deterministic output, parallel to [`Self::annotations_by_type`]. Surfaced to consumers via
     /// the `wicked-estate stale-annotations <cutoff>` CLI command.
     fn annotations_stale_since(&self, cutoff: i64) -> Result<Vec<(SymbolId, Annotation)>>;
+    /// The live symbol's current EPOCH (`symbols.gen`) — a monotonic generation that increments each
+    /// time a symbol with the same stable [`SymbolId`] is re-added after its node was deleted
+    /// (reuse-after-delete). Returns `Some(gen)` when `id` currently has a live node, `None` when it
+    /// has no live node (never indexed, edge-endpoint-only, or removed and not yet re-added). M8 /
+    /// DoD-XA4. This is the cross-store seam the about-arm (DEC-X6-SEQ) stamps/validates xedge
+    /// endpoints against, so a stale cross-store edge can fail-closed instead of resolving to a
+    /// live-WRONG node that merely happens to reuse the same id. A first-ever node — including one for
+    /// a symbol that previously existed ONLY as an edge endpoint / unresolved-ref — has epoch 0; the
+    /// FIRST delete-then-re-add yields `Some(g)` with `g >= 1`. The bump fires in the store's shared
+    /// node-upsert seam (covering both the FTS and skip-FTS reindex paths), NEVER in symbol interning.
+    fn symbol_epoch(&self, id: &SymbolId) -> Result<Option<u64>>;
     fn stats(&self) -> Result<GraphStats>;
 }
 

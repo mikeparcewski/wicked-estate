@@ -1030,4 +1030,137 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
         "org:acme/unit:pay",
         "scope persisted + round-trips"
     );
+
+    // ── SYMBOL EPOCH (M8 / DoD-XA4) — symbol_epoch + the gen bump (the about-arm reuse seam) ──
+    // This is the BUILD-GATE for every backend. It exercises ONLY GraphRead/GraphWrite trait
+    // methods, so it is backend-generic; the skip-FTS-specific non-vacuous case (the store-crate
+    // hot path) is asserted separately in the store crate's concrete test. Fresh symbol names so
+    // none of the counts/state above are disturbed.
+    let epoch_file = "src/epoch_gate.rs";
+    let epoch_node = |name: &str| {
+        Node::new(
+            sym(name),
+            NodeKind::Function,
+            name,
+            Language::new("rust"),
+            Location::new(epoch_file, Span::ZERO),
+        )
+    };
+
+    // (E0) No live node → no epoch.
+    assert_eq!(
+        store.symbol_epoch(&sym("epoch_absent")).expect("epoch absent"),
+        None,
+        "symbol_epoch must be None for a symbol that has never been indexed"
+    );
+
+    // (E1) NON-SPURIOUS: a symbol that exists ONLY as an edge endpoint (interned, no node) and then
+    // gets its FIRST node must be epoch 0 — NOT bumped. If the bump lived in `intern` this would be
+    // wrongly >= 1. We create the edge-only state with an edge whose target was never a node, then
+    // give that target its first node.
+    store
+        .upsert_edges(&[calls("epoch_edge_src", "epoch_edge_only_tgt")])
+        .expect("edge introducing an interned-but-nodeless target");
+    // The edge target has no node yet → no epoch.
+    assert_eq!(
+        store
+            .symbol_epoch(&sym("epoch_edge_only_tgt"))
+            .expect("epoch edge-only target"),
+        None,
+        "an edge-endpoint-only symbol (interned, no node) must have no epoch"
+    );
+    // Now its FIRST node arrives.
+    store
+        .upsert_nodes(&[epoch_node("epoch_edge_only_tgt")])
+        .expect("first node for a previously edge-only symbol");
+    assert_eq!(
+        store
+            .symbol_epoch(&sym("epoch_edge_only_tgt"))
+            .expect("epoch after first node for edge-only symbol"),
+        Some(0),
+        "NON-SPURIOUS: a first-ever node for an edge-only symbol must be epoch 0 (the bump must NOT \
+         live in intern — interning happens for edge endpoints too)"
+    );
+
+    // (E2) A plain first-ever node is also epoch 0.
+    store
+        .upsert_nodes(&[epoch_node("epoch_reused")])
+        .expect("first-ever node for epoch_reused");
+    assert_eq!(
+        store.symbol_epoch(&sym("epoch_reused")).expect("epoch first"),
+        Some(0),
+        "a first-ever node must be epoch 0"
+    );
+    // Re-upserting the SAME live node is an update, not a reuse — epoch must NOT advance.
+    store
+        .upsert_nodes(&[epoch_node("epoch_reused")])
+        .expect("re-upsert live node");
+    assert_eq!(
+        store
+            .symbol_epoch(&sym("epoch_reused"))
+            .expect("epoch after live re-upsert"),
+        Some(0),
+        "re-upserting a LIVE node is an update, not a reuse — epoch must stay 0"
+    );
+
+    // (E3) NON-VACUOUS (trait path): delete the symbol's node (via remove_file), then re-add the
+    // SAME name → epoch must be Some(g) with g >= 1. While deleted, the epoch is None.
+    store.remove_file(epoch_file).expect("remove epoch file");
+    assert_eq!(
+        store
+            .symbol_epoch(&sym("epoch_reused"))
+            .expect("epoch while deleted"),
+        None,
+        "a removed symbol (no live node) must have no epoch"
+    );
+    store
+        .upsert_nodes(&[epoch_node("epoch_reused")])
+        .expect("re-add after delete");
+    let reused = store
+        .symbol_epoch(&sym("epoch_reused"))
+        .expect("epoch after reuse")
+        .expect("re-added symbol must have a live epoch");
+    assert!(
+        reused >= 1,
+        "NON-VACUOUS: epoch after delete-then-re-add must be >= 1 (the gen bump fired); got {reused}"
+    );
+
+    // (E4) A second delete-then-re-add advances the epoch again (strictly monotonic per reuse).
+    let before = reused;
+    store.remove_file(epoch_file).expect("remove epoch file (2)");
+    store
+        .upsert_nodes(&[epoch_node("epoch_reused")])
+        .expect("re-add after delete (2)");
+    let reused2 = store
+        .symbol_epoch(&sym("epoch_reused"))
+        .expect("epoch after second reuse")
+        .expect("still live");
+    assert!(
+        reused2 > before,
+        "epoch must strictly advance on each reuse: {before} -> {reused2}"
+    );
+
+    // (E5) The edge-only-then-first-node symbol (E1) was NOT touched by the reuse cycle above (it is
+    // also in epoch_file, so remove_file deleted it too); re-adding it bumps it from 0 → >=1, proving
+    // its initial 0 was a genuine first-ever, not a missed bump.
+    let edge_then_node = store
+        .symbol_epoch(&sym("epoch_edge_only_tgt"))
+        .expect("epoch edge-only after the remove cycles");
+    // After the two remove_file calls it has no live node.
+    assert_eq!(
+        edge_then_node, None,
+        "the edge-only-then-node symbol was removed with the file; no live epoch"
+    );
+    store
+        .upsert_nodes(&[epoch_node("epoch_edge_only_tgt")])
+        .expect("re-add edge-only-then-node symbol");
+    let edge_reused = store
+        .symbol_epoch(&sym("epoch_edge_only_tgt"))
+        .expect("epoch edge-only re-added")
+        .expect("live");
+    assert!(
+        edge_reused >= 1,
+        "a symbol whose FIRST node was epoch 0 must bump to >=1 once it is deleted and re-added; \
+         got {edge_reused}"
+    );
 }

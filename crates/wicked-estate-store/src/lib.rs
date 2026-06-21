@@ -97,6 +97,16 @@ pub struct MemStore {
     // Monotonic counter used to stamp `ts` when an annotation is written with ts == 0, so ordering
     // by ts is stable in-memory without a wall clock (the SQLite store uses strftime there).
     annotation_seq: i64,
+    // M8/DoD-XA4: per-symbol live-node EPOCH, mirroring SQLite's `symbols.gen` (the Rust field is
+    // `epoch` because `gen` is a reserved keyword). Bumped in `upsert_nodes` when a symbol that HAD a
+    // node (`had_node`) but has none now gets one again (reuse-after-delete). Survives `remove_file`
+    // exactly as the SQLite intern row does.
+    epoch: HashMap<SymbolId, u64>,
+    // M8/DoD-XA4: sticky "a node has EVER existed for this symbol" set, mirroring SQLite's
+    // `symbols.had_node`. Set on first node insert, never cleared by `remove_file`. Distinguishes a
+    // reuse-after-delete (in this set, no live node → bump) from a first-ever / edge-only symbol
+    // getting its first node (not in this set → no bump, epoch stays 0).
+    had_node: HashSet<SymbolId>,
 }
 
 impl MemStore {
@@ -322,6 +332,14 @@ impl GraphWrite for MemStore {
 
     fn upsert_nodes(&mut self, nodes: &[Node]) -> Result<()> {
         for n in nodes {
+            // Epoch bump (M8/DoD-XA4), mirroring the SQLite shared seam: bump iff this symbol HAD a
+            // node before (`had_node`) but has none now (reuse-after-delete). A first-ever node — or
+            // one for a symbol that until now existed only as an edge endpoint / unresolved-ref — is
+            // not in `had_node`, so it stays at epoch 0. The check runs BEFORE the insert.
+            if self.had_node.contains(&n.symbol) && !self.nodes.contains_key(&n.symbol) {
+                *self.epoch.entry(n.symbol.clone()).or_insert(0) += 1;
+            }
+            self.had_node.insert(n.symbol.clone());
             self.nodes.insert(n.symbol.clone(), n.clone());
         }
         Ok(())
@@ -769,6 +787,16 @@ impl GraphRead for MemStore {
             .collect();
         out.sort_by(|(sa, aa), (sb, ab)| sa.0.cmp(&sb.0).then(aa.ts.cmp(&ab.ts)));
         Ok(out)
+    }
+
+    fn symbol_epoch(&self, id: &SymbolId) -> Result<Option<u64>> {
+        // Live only: epoch is defined for a symbol that currently has a node. No live node → None,
+        // regardless of any retained `gen`/`had_node` history (mirrors SQLite's JOIN-on-nodes read).
+        if self.nodes.contains_key(id) {
+            Ok(Some(self.epoch.get(id).copied().unwrap_or(0)))
+        } else {
+            Ok(None)
+        }
     }
 
     fn stats(&self) -> Result<GraphStats> {

@@ -62,6 +62,15 @@ impl SurrealStore {
                  DEFINE TABLE unresolved SCHEMALESS;
                  DEFINE INDEX unresolved_name ON unresolved COLUMNS raw_name;
 
+                 -- M8/DoD-XA4: per-symbol live-node epoch, mirroring SQLite's symbols.gen/had_node.
+                 -- Keyed by the symbol string; SURVIVES remove_file (only `node` rows are deleted),
+                 -- so a delete-then-re-add reuse can be detected and the epoch bumped.
+                 DEFINE TABLE symgen SCHEMAFULL;
+                 DEFINE FIELD symbol   ON symgen TYPE string;
+                 DEFINE FIELD gen      ON symgen TYPE int;
+                 DEFINE FIELD had_node ON symgen TYPE int;
+                 DEFINE INDEX symgen_symbol ON symgen COLUMNS symbol UNIQUE;
+
                  DEFINE TABLE file_meta SCHEMAFULL;
                  DEFINE FIELD path   ON file_meta TYPE string;
                  DEFINE FIELD digest ON file_meta TYPE string;
@@ -101,6 +110,36 @@ impl GraphWrite for SurrealStore {
         self.rt.block_on(async move {
             for n in &nodes {
                 let data = serde_json::to_string(n).map_err(se)?;
+
+                // Epoch pre-pass (M8/DoD-XA4), BEFORE the node insert — same rule as the SQLite seam:
+                // bump iff this symbol HAD a node (symgen.had_node==1) and has none now (reuse). The
+                // `node` existence check runs against the pre-insert state.
+                let mut probe = db
+                    .query(
+                        "SELECT VALUE had_node FROM symgen WHERE symbol=$sym LIMIT 1;
+                         SELECT VALUE count() FROM node WHERE symbol=$sym GROUP ALL;",
+                    )
+                    .bind(("sym", n.symbol.0.clone()))
+                    .await
+                    .map_err(se)?;
+                let had_node: Option<i64> = probe.take(0).map_err(se)?;
+                let live_count: Option<i64> = probe.take(1).map_err(se)?;
+                let had_node = had_node.unwrap_or(0);
+                let has_live = live_count.unwrap_or(0) > 0;
+                let bump = if had_node == 1 && !has_live { 1 } else { 0 };
+
+                // Upsert the symgen marker: bump gen by `bump`, set had_node sticky to 1. On first
+                // sight INSERT with gen=0; thereafter UPDATE adding `bump` (0 or 1).
+                db.query(
+                    "UPDATE symgen SET gen = gen + $bump, had_node = 1
+                     WHERE symbol=$sym
+                     ELSE (INSERT INTO symgen { symbol: $sym, gen: 0, had_node: 1 })",
+                )
+                .bind(("sym", n.symbol.0.clone()))
+                .bind(("bump", bump))
+                .await
+                .map_err(se)?;
+
                 // UPSERT ON DUPLICATE KEY UPDATE via UPDATE … MERGE or CREATE … ON DUPLICATE
                 db.query(
                     "UPDATE node SET symbol=$sym, name=$name, data=$data
@@ -324,6 +363,31 @@ impl GraphRead for SurrealStore {
                 }
             }
             Ok(None)
+        })
+    }
+
+    fn symbol_epoch(&self, id: &SymbolId) -> Result<Option<u64>> {
+        let db = self.db.clone();
+        let id = id.clone();
+        self.rt.block_on(async move {
+            // Live only: epoch is defined iff a `node` row exists. The gen lives in `symgen`, which
+            // survives remove_file; we gate on live-node existence so a removed symbol reads None.
+            let mut res = db
+                .query("SELECT VALUE count() FROM node WHERE symbol=$sym GROUP ALL;")
+                .bind(("sym", id.0.clone()))
+                .await
+                .map_err(se)?;
+            let live_count: Option<i64> = res.take(0).map_err(se)?;
+            if live_count.unwrap_or(0) == 0 {
+                return Ok(None);
+            }
+            let mut gres = db
+                .query("SELECT VALUE gen FROM symgen WHERE symbol=$sym LIMIT 1;")
+                .bind(("sym", id.0.clone()))
+                .await
+                .map_err(se)?;
+            let epoch: Option<i64> = gres.take(0).map_err(se)?;
+            Ok(Some(epoch.unwrap_or(0) as u64))
         })
     }
 

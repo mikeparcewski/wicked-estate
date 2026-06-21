@@ -84,6 +84,33 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
         )
         .map_err(st)?;
     }
+    // M8/DoD-XA4: additive `symbols.gen` (live-node epoch) + `symbols.had_node` (sticky "ever had a
+    // node" marker). DEFAULT 0 backfills every pre-existing interned symbol, so a graph captured
+    // before these columns reads back at epoch 0 with had_node=0 (no data rewrite). NOTE: had_node=0
+    // on a legacy DB means the FIRST upsert after migration is treated as a first-ever node and will
+    // NOT bump even if that symbol already has a live node row — acceptable: pre-`gen` graphs carry no
+    // epoch history, and the about-arm consumers only rely on POST-capture reuse being detected, which
+    // it is (the next remove_file→re-add cycle bumps correctly). We backfill had_node=1 for any sid
+    // that currently HAS a live node so existing live symbols are correctly marked, making the very
+    // next delete→re-add a detected reuse.
+    let mut sstmt = conn.prepare("PRAGMA table_info(symbols)").map_err(st)?;
+    let scols: Vec<String> = sstmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(st)?
+        .filter_map(|r| r.ok())
+        .collect();
+    if !scols.is_empty() && !scols.iter().any(|c| c == "gen") {
+        conn.execute_batch("ALTER TABLE symbols ADD COLUMN gen INTEGER NOT NULL DEFAULT 0;")
+            .map_err(st)?;
+    }
+    if !scols.is_empty() && !scols.iter().any(|c| c == "had_node") {
+        conn.execute_batch(
+            "ALTER TABLE symbols ADD COLUMN had_node INTEGER NOT NULL DEFAULT 0; \
+             UPDATE symbols SET had_node = 1 \
+               WHERE sid IN (SELECT symbol FROM nodes);",
+        )
+        .map_err(st)?;
+    }
     Ok(())
 }
 
@@ -195,11 +222,79 @@ impl SqliteStore {
     /// [`rebuild_fts_for_files`] once for a bulk FTS rebuild.  This avoids the
     /// O(2 × nodes) per-node DELETE+INSERT into the FTS5 shadow tables.
     pub fn upsert_nodes_no_fts(&mut self, nodes: &[Node]) -> Result<()> {
+        self.upsert_nodes_inner(nodes, false)
+    }
+
+    /// Shared node-upsert seam for BOTH the FTS path ([`upsert_nodes`], `with_fts=true`) and the
+    /// skip-FTS reindex hot path ([`upsert_nodes_no_fts`], `with_fts=false`). Previously these two
+    /// were physically duplicated; that duplication is the exact hazard that would let the epoch bump
+    /// ship INERT on one path. Folding both here means the bump (and the intern-then-insert preamble)
+    /// is written ONCE and covers both paths — the watch/`index_path` reindex hot path goes through
+    /// the skip-FTS variant (`lib.rs:585`), so the bump MUST live below the `with_fts` split.
+    ///
+    /// **Epoch bump (M8/DoD-XA4), keyed on NODE insertion — NOT in `intern`.** `intern` runs for edge
+    /// endpoints and unresolved-refs too (5 call sites), so a bump there would fire spuriously on every
+    /// edge to a not-yet-defined symbol. The bump is here, per node, gated on a durable per-symbol
+    /// marker that distinguishes the three states a sid with NO live `nodes` row can be in:
+    ///   (a) brand-new symbol just interned by this call            → `had_node = 0` → NO bump (gen 0)
+    ///   (b) interned only as an edge endpoint / unresolved-ref     → `had_node = 0` → NO bump (gen 0)
+    ///   (c) reuse-after-delete (`remove_file` deleted the node row,
+    ///       leaving `sym` + the sticky `had_node = 1`)             → `had_node = 1` → `gen += 1`
+    /// `had_node` is a sticky bit set to 1 the first time a node is created for the sid and never
+    /// cleared (`remove_file` deletes the `nodes` row but leaves `symbols` intact, by design — see the
+    /// `symbols`/`nodes` split in schema.sql), so it survives process restarts and a multi-run
+    /// reindex. The bump therefore fires iff the sid HAD a node before and has none now — a true reuse.
+    fn upsert_nodes_inner(&mut self, nodes: &[Node], with_fts: bool) -> Result<()> {
         // Intern all symbols first, before prepare_cached borrows conn.
+        // `prepare_cached` reuses ONE prepared statement across the loop (no per-row re-prepare —
+        // the difference between ~300k VM compiles and ~3 on a large repo). §9: slow is a defect.
         let sids: Vec<i64> = nodes
             .iter()
             .map(|n| self.intern(&n.symbol.0))
             .collect::<Result<_>>()?;
+
+        // Epoch pre-pass (M8/DoD-XA4): decide which sids must bump BEFORE we insert any node row, so
+        // the `gen` reflects the reuse at the instant the node comes back. Bump iff
+        // `had_node = 1 AND no live nodes row` (state (c) above). We read both flags in one query per
+        // sid against the marker (`had_node`) and the live-node existence check.
+        let mut to_bump: Vec<i64> = Vec::new();
+        {
+            let mut probe = self
+                .conn
+                .prepare_cached(
+                    "SELECT s.had_node, EXISTS(SELECT 1 FROM nodes n WHERE n.symbol = s.sid) \
+                     FROM symbols s WHERE s.sid = ?1",
+                )
+                .map_err(st)?;
+            for sid in &sids {
+                let (had_node, has_live): (i64, i64) = probe
+                    .query_row(params![sid], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .map_err(st)?;
+                if had_node == 1 && has_live == 0 {
+                    to_bump.push(*sid);
+                }
+            }
+        }
+        // Apply the bumps, then mark EVERY upserted sid as having had a node (sticky). Both run before
+        // the node insert; ordering between them is irrelevant (disjoint columns, `gen` vs `had_node`).
+        for sid in &to_bump {
+            self.conn
+                .execute(
+                    "UPDATE symbols SET gen = gen + 1 WHERE sid = ?1",
+                    params![sid],
+                )
+                .map_err(st)?;
+        }
+        {
+            let mut mark = self
+                .conn
+                .prepare_cached("UPDATE symbols SET had_node = 1 WHERE sid = ?1")
+                .map_err(st)?;
+            for sid in &sids {
+                mark.execute(params![sid]).map_err(st)?;
+            }
+        }
+
         let mut up = self
             .conn
             .prepare_cached(
@@ -210,6 +305,25 @@ impl SqliteStore {
                    scope=excluded.scope",
             )
             .map_err(st)?;
+        // W5.1: keep the FTS table in sync ONLY on the FTS path. DELETE + INSERT (no `ON CONFLICT`
+        // for virtual tables). nodes_fts.symbol is TEXT (the string sym), so we use the original
+        // string directly. On the skip-FTS path these statements are not prepared at all — the caller
+        // (`bulk_rebuild_fts_for_files`) rebuilds FTS once after all node rows exist.
+        let mut fts = if with_fts {
+            let del = self
+                .conn
+                .prepare_cached("DELETE FROM nodes_fts WHERE symbol = ?1")
+                .map_err(st)?;
+            let ins = self
+                .conn
+                .prepare_cached(
+                    "INSERT INTO nodes_fts(symbol, name, signature, doc) VALUES(?1, ?2, ?3, ?4)",
+                )
+                .map_err(st)?;
+            Some((del, ins))
+        } else {
+            None
+        };
         for (n, sid) in nodes.iter().zip(sids.iter()) {
             let kind = serde_json::to_string(&n.kind)?;
             let data = serde_json::to_string(n)?;
@@ -224,6 +338,18 @@ impl SqliteStore {
                 n.scope.as_path()
             ])
             .map_err(st)?;
+            if let Some((fts_del, fts_ins)) = fts.as_mut() {
+                // FTS uses the string symbol directly (nodes_fts.symbol is TEXT).
+                fts_del.execute(params![n.symbol.0]).map_err(st)?;
+                fts_ins
+                    .execute(params![
+                        n.symbol.0,
+                        n.name,
+                        n.signature.as_deref().unwrap_or(""),
+                        n.doc.as_deref().unwrap_or(""),
+                    ])
+                    .map_err(st)?;
+            }
         }
         Ok(())
     }
@@ -1000,60 +1126,9 @@ impl GraphWrite for SqliteStore {
     }
 
     fn upsert_nodes(&mut self, nodes: &[Node]) -> Result<()> {
-        // Intern all symbols first, before prepare_cached borrows conn.
-        // `prepare_cached` reuses ONE prepared statement across the loop (no per-row re-prepare —
-        // the difference between ~300k VM compiles and ~3 on a large repo). §9: slow is a defect.
-        let sids: Vec<i64> = nodes
-            .iter()
-            .map(|n| self.intern(&n.symbol.0))
-            .collect::<Result<_>>()?;
-        let mut up = self
-            .conn
-            .prepare_cached(
-                "INSERT INTO nodes(symbol,name,kind,language,file,data,scope) VALUES(?1,?2,?3,?4,?5,?6,?7)
-                 ON CONFLICT(symbol) DO UPDATE SET
-                   name=excluded.name, kind=excluded.kind,
-                   language=excluded.language, file=excluded.file, data=excluded.data,
-                   scope=excluded.scope",
-            )
-            .map_err(st)?;
-        // W5.1: keep the FTS table in sync. DELETE + INSERT (no `ON CONFLICT` for virtual tables).
-        // nodes_fts.symbol is TEXT (the string sym), so we use the original string directly.
-        let mut fts_del = self
-            .conn
-            .prepare_cached("DELETE FROM nodes_fts WHERE symbol = ?1")
-            .map_err(st)?;
-        let mut fts_ins = self
-            .conn
-            .prepare_cached(
-                "INSERT INTO nodes_fts(symbol, name, signature, doc) VALUES(?1, ?2, ?3, ?4)",
-            )
-            .map_err(st)?;
-        for (n, sid) in nodes.iter().zip(sids.iter()) {
-            let kind = serde_json::to_string(&n.kind)?;
-            let data = serde_json::to_string(n)?;
-            let file = &n.location.file;
-            up.execute(params![
-                sid,
-                n.name,
-                kind,
-                n.language.0,
-                file,
-                data,
-                n.scope.as_path()
-            ])
-            .map_err(st)?;
-            // FTS uses the string symbol directly (nodes_fts.symbol is TEXT).
-            fts_del.execute(params![n.symbol.0]).map_err(st)?;
-            fts_ins
-                .execute(params![
-                    n.symbol.0,
-                    n.name,
-                    n.signature.as_deref().unwrap_or(""),
-                    n.doc.as_deref().unwrap_or(""),
-                ])
-                .map_err(st)?;
-        }
+        // FTS path: the shared seam writes the node rows, keeps `nodes_fts` in sync, and runs the
+        // epoch bump (M8/DoD-XA4). Identical to `upsert_nodes_no_fts` except `with_fts=true`.
+        self.upsert_nodes_inner(nodes, true)?;
         // Emit write batch size histogram (best-effort).
         if !nodes.is_empty() {
             let sink = wicked_estate_observe::init_sink_from_env();
@@ -2104,6 +2179,22 @@ impl GraphRead for SqliteStore {
             .filter_map(|r| r.ok())
             .collect();
         Ok(rows)
+    }
+
+    fn symbol_epoch(&self, id: &SymbolId) -> Result<Option<u64>> {
+        // The JOIN on nodes makes "live node exists" and "the symbol's gen" one atomic read: a row is
+        // returned ONLY when the sid has both an interned `symbols` row AND a live `nodes` row. No
+        // live node (never indexed / edge-endpoint-only / removed-not-readded) → no row → None.
+        let epoch: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT s.gen FROM symbols s JOIN nodes n ON n.symbol = s.sid WHERE s.sym = ?1",
+                params![id.0],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(st)?;
+        Ok(epoch.map(|g| g as u64))
     }
 
     fn stats(&self) -> Result<GraphStats> {

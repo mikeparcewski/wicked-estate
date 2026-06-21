@@ -155,6 +155,17 @@ CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
 CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file);
 CREATE INDEX IF NOT EXISTS idx_nodes_scope ON nodes(scope);
 
+-- M8/DoD-XA4: per-symbol live-node epoch. Postgres keys nodes on the symbol string and DELETEs the
+-- node row on remove_file, so the epoch needs a dedicated table that SURVIVES remove_file (the
+-- analogue of SQLite's symbols.gen/had_node columns on the append-only intern table). `had_node` is
+-- the sticky "ever had a node" marker that separates a reuse-after-delete (bump) from a first-ever /
+-- edge-only symbol getting its first node (no bump).
+CREATE TABLE IF NOT EXISTS symbol_gen (
+  symbol   TEXT PRIMARY KEY,
+  gen      BIGINT NOT NULL DEFAULT 0,
+  had_node BIGINT NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS edges (
   source     TEXT NOT NULL,
   target     TEXT NOT NULL,
@@ -496,6 +507,40 @@ impl GraphWrite for PostgresStore {
             let kind = serde_json::to_string(&n.kind)?;
             let data = serde_json::to_string(n)?;
             let file = &n.location.file;
+
+            // Epoch pre-pass (M8/DoD-XA4), BEFORE the node insert — same rule as the SQLite seam:
+            // bump iff this symbol HAD a node (symbol_gen.had_node==1) and has none now (a reuse).
+            // The live-node check reads the pre-insert state.
+            rt_block(async {
+                let row: Option<sqlx::postgres::PgRow> = sqlx::query(
+                    "SELECT COALESCE(sg.had_node, 0) AS had_node, \
+                            EXISTS(SELECT 1 FROM nodes nn WHERE nn.symbol = $1) AS has_live \
+                     FROM (SELECT $1::text AS s) q \
+                     LEFT JOIN symbol_gen sg ON sg.symbol = q.s",
+                )
+                .bind(&n.symbol.0)
+                .fetch_optional(&self.pool)
+                .await?;
+                let (had_node, has_live): (i64, bool) = match row {
+                    Some(r) => (r.try_get("had_node")?, r.try_get("has_live")?),
+                    None => (0, false),
+                };
+                let bump: i64 = if had_node == 1 && !has_live { 1 } else { 0 };
+                // Upsert the marker: first sight INSERT (gen 0, had_node 1); thereafter add `bump`
+                // and keep had_node sticky at 1.
+                sqlx::query(
+                    "INSERT INTO symbol_gen(symbol, gen, had_node) VALUES($1, 0, 1) \
+                     ON CONFLICT(symbol) DO UPDATE SET \
+                       gen = symbol_gen.gen + $2, had_node = 1",
+                )
+                .bind(&n.symbol.0)
+                .bind(bump)
+                .execute(&self.pool)
+                .await?;
+                Ok::<(), sqlx::Error>(())
+            })
+            .map_err(st)?;
+
             rt_block(
                 sqlx::query(
                     "INSERT INTO nodes(symbol, name, kind, language, file, data, scope)
@@ -895,6 +940,30 @@ impl GraphRead for PostgresStore {
                         serde_json::from_str::<Node>(&json)
                             .map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
                     ))
+                }
+            }
+        })
+        .map_err(st)
+    }
+
+    fn symbol_epoch(&self, id: &SymbolId) -> Result<Option<u64>> {
+        // Live only: the JOIN against nodes returns a row ONLY when a live node exists for the
+        // symbol; the gen comes from symbol_gen (which survives remove_file). No live node → None.
+        rt_block(async {
+            let row: Option<sqlx::postgres::PgRow> = sqlx::query(
+                "SELECT COALESCE(sg.gen, 0) AS gen \
+                 FROM nodes n \
+                 LEFT JOIN symbol_gen sg ON sg.symbol = n.symbol \
+                 WHERE n.symbol = $1",
+            )
+            .bind(&id.0)
+            .fetch_optional(&self.pool)
+            .await?;
+            match row {
+                None => Ok::<Option<u64>, sqlx::Error>(None),
+                Some(r) => {
+                    let epoch: i64 = r.try_get("gen")?;
+                    Ok(Some(epoch as u64))
                 }
             }
         })

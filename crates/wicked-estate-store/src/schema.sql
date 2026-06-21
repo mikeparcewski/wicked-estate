@@ -17,9 +17,22 @@ CREATE TABLE IF NOT EXISTS files (
 -- all other tables reference it by integer sid.  This cuts on-disk footprint for repos
 -- where the same symbol string appears across nodes + edges + unresolved_refs rows.
 -- The `sym` column carries a UNIQUE constraint so INSERT … ON CONFLICT DO NOTHING is safe.
+-- `gen` (M8 / DoD-XA4) is the symbol's EPOCH: a monotonic live-node generation counter. The
+-- intern row is append-only and survives remove_file (only the `nodes` row is deleted), so a
+-- delete-then-re-add reuses the SAME sid. `gen` is bumped (in `upsert_nodes_inner`, NOT `intern`)
+-- whenever a sid that has NO live `nodes` row gains one — i.e. a reuse-after-delete. A first-ever
+-- node (including a symbol that previously existed only as an edge endpoint / unresolved-ref) stays
+-- gen=0. `GraphRead::symbol_epoch` exposes the live symbol's current gen; cross-store about-arm
+-- consumers stamp/validate xedge endpoints against it so a stale row never resolves to a live-wrong
+-- node. DEFAULT 0 so existing DBs migrate (the idempotent ALTER TABLE in sqlite.rs adds the column).
 CREATE TABLE IF NOT EXISTS symbols (
-  sid INTEGER PRIMARY KEY AUTOINCREMENT,
-  sym TEXT UNIQUE NOT NULL   -- the UNIQUE constraint implies an index; no separate idx needed
+  sid      INTEGER PRIMARY KEY AUTOINCREMENT,
+  sym      TEXT UNIQUE NOT NULL,  -- the UNIQUE constraint implies an index; no separate idx needed
+  gen      INTEGER NOT NULL DEFAULT 0,  -- live-node epoch (M8/DoD-XA4): bumped on reuse-after-delete
+  had_node INTEGER NOT NULL DEFAULT 0   -- sticky 1 once a node has EVER existed for this sid; the
+                                        -- durable signal that distinguishes a reuse-after-delete
+                                        -- (had_node=1, no live node) from a first-ever / edge-only
+                                        -- symbol getting its first node (had_node=0, no bump).
 );
 
 CREATE TABLE IF NOT EXISTS nodes (
