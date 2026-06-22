@@ -30,8 +30,10 @@
 //!   wicked-estate dead-code              [--json] [--db ...]
 //!   wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json] [--db ...]
 
+mod emit;
 mod scip_auto;
 mod source_bundle;
+mod watch_coalesce;
 
 use anyhow::{Context, Result};
 use notify::RecursiveMode;
@@ -614,6 +616,18 @@ fn main() -> Result<()> {
             for (k, v) in &stats.edges_by_kind {
                 println!("  {k} = {v}");
             }
+            // Coarse event: one `wicked.estate.indexed` per index run, through the shared seam.
+            emit::emit_event(&emit::EmitEvent::new(
+                "wicked.estate.indexed",
+                "estate.index",
+                serde_json::json!({
+                    "path": path,
+                    "db": db,
+                    "nodes": stats.node_count,
+                    "edges": stats.edge_count,
+                    "files": stats.file_count,
+                }),
+            ));
             // W5.2: optional embeddings pass — OFF by default, opt-in with --embeddings.
             // Runs as a separate step so index_path's public signature is unchanged.
             // :memory: is skipped (embeddings live in the same store; nothing to persist).
@@ -750,6 +764,18 @@ fn main() -> Result<()> {
                 t_cmd_start,
                 t_cmd_end,
             );
+            // Coarse event: one `wicked.estate.drifted` per drift run, through the shared seam.
+            // (Distinct from the OTel span above — that is telemetry; this is a bus event.)
+            emit::emit_event(&emit::EmitEvent::new(
+                "wicked.estate.drifted",
+                "estate.drift",
+                serde_json::json!({
+                    "db": db,
+                    "managed": report.managed.len(),
+                    "undeployed": report.undeployed.len(),
+                    "unmanaged": report.unmanaged.len(),
+                }),
+            ));
         }
         "query" => {
             let name = positional
@@ -1222,23 +1248,37 @@ fn main() -> Result<()> {
             for result in rx {
                 match result {
                     Ok(events) => {
-                        // Only re-index when there is at least one create/modify/remove event.
-                        // EventKind variants: Create, Modify, Remove, Access, Other.
-                        let relevant = events.iter().any(|ev| {
-                            matches!(
-                                ev.kind,
-                                notify::EventKind::Create(_)
-                                    | notify::EventKind::Modify(_)
-                                    | notify::EventKind::Remove(_)
-                            )
-                        });
-                        if relevant {
+                        // A-6: the debouncer already coalesced the raw FS-event storm into this
+                        // one batch. `emits_for_batch` (the unit-tested coalescing core) returns
+                        // how many coarse emits this batch warrants — exactly 1 for a relevant
+                        // batch, 0 otherwise — so the loop never emits once-per-raw-event.
+                        let emits =
+                            watch_coalesce::emits_for_batch(events.iter().map(|ev| &ev.kind));
+                        let raw_event_count = events.len();
+                        for _ in 0..emits {
                             match wicked_estate::index_path(store.as_mut(), watch_path) {
                                 Ok(s) => {
                                     println!(
                                         "watch: re-indexed → {} nodes, {} edges, {} files",
                                         s.node_count, s.edge_count, s.file_count
                                     );
+                                    // One emit per coalesced batch (the 500ms debounce window
+                                    // already folded the storm). `coalesced_events` records how
+                                    // many raw events were folded into this single emit.
+                                    emit::emit_event(&emit::EmitEvent::new(
+                                        "wicked.estate.indexed",
+                                        "estate.index",
+                                        serde_json::json!({
+                                            "path": path_str,
+                                            "db": db,
+                                            "nodes": s.node_count,
+                                            "edges": s.edge_count,
+                                            "files": s.file_count,
+                                            "source": "watch",
+                                            "coalesced": true,
+                                            "coalesced_events": raw_event_count,
+                                        }),
+                                    ));
                                 }
                                 Err(e) => {
                                     eprintln!("watch: re-index error (non-fatal): {e}");
@@ -1635,6 +1675,18 @@ fn main() -> Result<()> {
             } else {
                 println!("annotated {count} symbol(s) with [{ty}] {key}={value}");
             }
+            // Coarse event: one `wicked.estate.annotated` per annotate run, through the seam.
+            emit::emit_event(&emit::EmitEvent::new(
+                "wicked.estate.annotated",
+                "estate.annotate",
+                serde_json::json!({
+                    "db": db,
+                    "ann_type": ty,
+                    "key": key,
+                    "count": count,
+                    "replaced": replaced,
+                }),
+            ));
         }
         // Agent A: show TYPED annotations for a symbol.
         //
