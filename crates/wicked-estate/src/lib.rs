@@ -1189,6 +1189,16 @@ pub fn default_embedder() -> Box<dyn Embedder> {
 /// The function is intentionally **separate** from `index_path` so that `index_path`'s
 /// public signature remains unchanged (wicked-estate-bench calls it).  The CLI `index` command
 /// invokes this as an optional second step when `--embeddings` is passed.
+///
+/// # Dim-guard meta (DoD-A6a / §3.1, §3.3)
+///
+/// After **all** vectors are persisted, this writes `meta["embedder_id"] = embedder.id()` and
+/// `meta["embedder_dim"] = embedder.dim()` so the MCP server can refuse to advertise/dispatch
+/// SemanticSearch when the store's embedder identity does not match the runtime's. The meta write
+/// is performed **LAST, after the loop** for crash-safety: a crash mid-embed leaves a partially
+/// re-embedded store whose `meta` still reflects the PRIOR complete state (or `None` on a
+/// first-ever embed) — never a half-written identity that would let mixed-dim rows be served.
+/// Re-running overwrites both the vectors and the meta atomically-enough for the guard's purpose.
 pub fn compute_embeddings(store: &mut SqliteStore, embedder: &dyn Embedder) -> Result<usize> {
     let nodes = GraphRead::all_nodes(store)?;
     let mut count = 0usize;
@@ -1214,6 +1224,10 @@ pub fn compute_embeddings(store: &mut SqliteStore, embedder: &dyn Embedder) -> R
         store.set_embedding(&node.symbol, &vec)?;
         count += 1;
     }
+    // Tag the store with the embedder identity + dim — LAST, after every vector is persisted, so a
+    // crash before this point leaves meta at the prior complete state (or None) → fail-closed.
+    store.meta_set_key("embedder_id", embedder.id());
+    store.meta_set_key("embedder_dim", &embedder.dim().to_string());
     Ok(count)
 }
 
@@ -2060,5 +2074,43 @@ mod tests {
             "{} node(s) are missing symbol_id",
             missing.len()
         );
+    }
+
+    // ── DoD-A6a: compute_embeddings tags the store with embedder id + dim (§3.1, §3.3) ──
+
+    #[test]
+    fn compute_embeddings_writes_embedder_meta_last() {
+        use wicked_estate_retrieve::HashEmbedder;
+        use wicked_estate_store::SqliteStore;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("g.db");
+        let db = db.to_str().unwrap();
+
+        let mut store = SqliteStore::open(db).unwrap();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[Node::new(
+                SymbolId("fn::alpha".to_string()),
+                NodeKind::Function,
+                "alpha",
+                Language::new("rust"),
+                Location::new("src/lib.rs", Span::ZERO),
+            )])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        // Before embedding: no embedder meta — a store that predates tagging reads None → the MCP
+        // guard fails closed (EMBED-META-MISSING). This is the §3.3 crash-safety prior state.
+        assert_eq!(store.meta_get_key("embedder_id"), None);
+        assert_eq!(store.meta_get_key("embedder_dim"), None);
+
+        let embedder = HashEmbedder::default(); // dim 128, id "hash:v1"
+        let n = compute_embeddings(&mut store, &embedder).unwrap();
+        assert_eq!(n, 1, "one node embedded");
+
+        // After embedding: meta carries the exact embedder identity + dim used at index time.
+        assert_eq!(store.meta_get_key("embedder_id").as_deref(), Some("hash:v1"));
+        assert_eq!(store.meta_get_key("embedder_dim").as_deref(), Some("128"));
     }
 }
