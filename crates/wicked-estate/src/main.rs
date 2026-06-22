@@ -30,6 +30,7 @@
 //!   wicked-estate dead-code              [--json] [--db ...]
 //!   wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json] [--db ...]
 
+mod emit;
 mod scip_auto;
 mod source_bundle;
 

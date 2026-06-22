@@ -25,6 +25,7 @@ wicked-estate-retrieve = { path = "../wicked-estate-retrieve", version = "0.11.2
 wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.11.2" }
 anyhow.workspace = true
 async-trait = "0.1"
+dirs = "6"
 ignore = "0.4"
 rayon = "1"
 serde_json = { workspace = true }
