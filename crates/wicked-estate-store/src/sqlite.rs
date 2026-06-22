@@ -1106,6 +1106,83 @@ impl SqliteStore {
         }
         Ok(out)
     }
+
+    /// Multi-seed bounded reachability — the set-seeded generalization of [`cte_reach`](Self::cte_reach).
+    /// Issues exactly ONE recursive CTE regardless of `start_sids.len()` (the seeds form the CTE base
+    /// at depth 0), returning {sym → MIN depth from the seed set}, with ALL seeds excluded. The
+    /// `start_sids` are DB-derived integers the caller already resolved → safe to inline; never user
+    /// input. Empty seeds → empty map. This is what keeps `traverse_multi` query-count independent of
+    /// the seed count (DEC-X2 perf gate).
+    fn cte_reach_multi(
+        &self,
+        start_sids: &[i64],
+        dir: Direction,
+        spec: &TraversalSpec,
+    ) -> Result<BTreeMap<String, u32>> {
+        if start_sids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let (match_col, advance_col) = match dir {
+            Direction::Dependents => ("target", "source"),
+            Direction::Dependencies => ("source", "target"),
+            Direction::Both => unreachable!("Both handled in traverse_multi()"),
+        };
+        let kind_filter = if spec.edge_kinds.is_empty() {
+            String::new()
+        } else {
+            let list = spec
+                .edge_kinds
+                .iter()
+                .map(|k| {
+                    let s = serde_json::to_string(k).unwrap_or_default();
+                    format!("'{}'", s.replace('\'', "''"))
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("AND e.kind IN ({list})")
+        };
+        // Seeds (DB-derived integer sids) form the CTE base at depth 0; the recursive step is
+        // identical to `cte_reach`. The final SELECT excludes ALL seeds. `seed_list` is integers we
+        // just read from `symbols` (never user input) → safe to interpolate.
+        let seed_list = start_sids
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "WITH RECURSIVE walk(id, depth) AS (
+                 SELECT sid, 0 FROM symbols WHERE sid IN ({seed_list})
+                 UNION
+                 SELECT e.{advance_col}, walk.depth + 1
+                   FROM edges e JOIN walk ON e.{match_col} = walk.id
+                  WHERE walk.depth < ?1 AND e.confidence >= ?2 {kind_filter}
+             )
+             SELECT s.sym, MIN(walk.depth)
+               FROM walk
+               JOIN symbols s ON s.sid = walk.id
+              WHERE walk.id NOT IN ({seed_list})
+              GROUP BY walk.id
+              ORDER BY 2
+              LIMIT ?3"
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(st)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    spec.max_depth,
+                    spec.min_confidence as f64,
+                    spec.max_nodes as i64
+                ],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u32)),
+            )
+            .map_err(st)?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (sym, depth) = row.map_err(st)?;
+            out.insert(sym, depth);
+        }
+        Ok(out)
+    }
 }
 
 impl GraphWrite for SqliteStore {
@@ -1751,6 +1828,77 @@ impl GraphRead for SqliteStore {
         let mut edges = Vec::new();
         let mut seen = HashSet::new();
         let mut anchors: Vec<SymbolId> = vec![start.clone()];
+        anchors.extend(depths.keys().map(|k| SymbolId(k.clone())));
+        for a in &anchors {
+            for e in self.neighbors(a, spec.direction)? {
+                if seen.insert(e.dedup_key()) {
+                    edges.push(e);
+                }
+            }
+        }
+
+        Ok(Subgraph {
+            nodes,
+            edges,
+            depths,
+            truncated,
+        })
+    }
+
+    fn traverse_multi(&self, starts: &[SymbolId], spec: &TraversalSpec) -> Result<Subgraph> {
+        // Resolve all seed sids in ONE query (an uninterned seed contributes nothing).
+        let mut seed_sids: Vec<i64> = Vec::new();
+        if !starts.is_empty() {
+            let placeholders = vec!["?"; starts.len()].join(",");
+            let sql = format!("SELECT sid FROM symbols WHERE sym IN ({placeholders})");
+            let mut stmt = self.conn.prepare(&sql).map_err(st)?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params_from_iter(starts.iter().map(|s| s.0.as_str())),
+                    |r| r.get::<_, i64>(0),
+                )
+                .map_err(st)?;
+            for row in rows {
+                seed_sids.push(row.map_err(st)?);
+            }
+        }
+
+        // Reachable depths from the seed SET — ONE recursive CTE per direction (≤2), independent of
+        // the seed count; all seeds excluded. Mirrors `traverse`'s `Both` merge (min depth).
+        let depths = match spec.direction {
+            Direction::Both => {
+                let mut a = self.cte_reach_multi(&seed_sids, Direction::Dependents, spec)?;
+                for (k, v) in self.cte_reach_multi(&seed_sids, Direction::Dependencies, spec)? {
+                    a.entry(k).and_modify(|e| *e = (*e).min(v)).or_insert(v);
+                }
+                a
+            }
+            d => self.cte_reach_multi(&seed_sids, d, spec)?,
+        };
+        let truncated = depths.len() >= spec.max_nodes;
+
+        // Nodes: each live seed + each reached node (dedup by symbol).
+        let mut nodes = Vec::new();
+        let mut node_seen = HashSet::new();
+        for s in starts {
+            if let Some(n) = self.get_node(s)? {
+                if node_seen.insert(n.symbol.clone()) {
+                    nodes.push(n);
+                }
+            }
+        }
+        for id in depths.keys() {
+            if let Some(n) = self.get_node(&SymbolId(id.clone()))? {
+                if node_seen.insert(n.symbol.clone()) {
+                    nodes.push(n);
+                }
+            }
+        }
+
+        // Induced edges: neighbors of (seeds + reached) in the traversal direction (dedup).
+        let mut edges = Vec::new();
+        let mut seen = HashSet::new();
+        let mut anchors: Vec<SymbolId> = starts.to_vec();
         anchors.extend(depths.keys().map(|k| SymbolId(k.clone())));
         for a in &anchors {
             for e in self.neighbors(a, spec.direction)? {
@@ -2434,6 +2582,84 @@ mod tests {
 
     fn open() -> SqliteStore {
         SqliteStore::in_memory().expect("in-memory store")
+    }
+
+    // --- traverse_multi perf gate (DEC-X2): the multi-seed CTE must issue a recursive-CTE count
+    //     INDEPENDENT of the seed count. A per-seed fold would scale linearly; equality conformance
+    //     alone can't catch a regression to the fold, but this can. Counted via SQLite's trace hook
+    //     (the ACTUAL SQL issued — ungameable by the impl's own accounting). ----------------------
+    thread_local! {
+        static RECURSIVE_CTE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    fn count_recursive_cte(sql: &str) {
+        // Only the reachability CTE — not the sid lookup / get_node / neighbors queries.
+        if sql.contains("WITH RECURSIVE walk") {
+            RECURSIVE_CTE_COUNT.with(|c| c.set(c.get() + 1));
+        }
+    }
+    fn recursive_cte_count_for(n_seeds: usize) -> usize {
+        use wicked_estate_core::{Language, Location, ResolutionTier, Span};
+        let node = |name: &str| {
+            Node::new(
+                sym(name),
+                NodeKind::Function,
+                name,
+                Language::new("rust"),
+                Location::new("src/lib.rs", Span::ZERO),
+            )
+        };
+        let calls = |a: &str, b: &str| {
+            Edge::new(
+                sym(a),
+                sym(b),
+                EdgeKind::Calls,
+                ResolutionTier::Scip,
+                "perf",
+            )
+        };
+        let mut nodes = vec![node("hub"), node("leaf")];
+        let mut edges = vec![calls("hub", "leaf")];
+        let mut seeds = Vec::new();
+        for i in 0..n_seeds {
+            let name = format!("seed_{i}");
+            nodes.push(node(&name));
+            edges.push(calls(&name, "hub"));
+            seeds.push(sym(&name));
+        }
+        let mut store = open();
+        store.begin_batch().unwrap();
+        store.upsert_nodes(&nodes).unwrap();
+        store.upsert_edges(&edges).unwrap();
+        store.commit_batch().unwrap();
+
+        let mut spec = TraversalSpec::blast_radius(8);
+        spec.direction = Direction::Dependencies;
+        spec.max_depth = 8;
+        spec.max_nodes = 1000;
+        spec.min_confidence = 0.0;
+        spec.edge_kinds = vec![];
+
+        store.conn.trace(Some(count_recursive_cte));
+        RECURSIVE_CTE_COUNT.with(|c| c.set(0));
+        let _ = store.traverse_multi(&seeds, &spec).expect("traverse_multi");
+        store.conn.trace(None);
+        RECURSIVE_CTE_COUNT.with(|c| c.get())
+    }
+
+    #[test]
+    fn sqlite_traverse_multi_query_count_independent_of_seed_count() {
+        let c2 = recursive_cte_count_for(2);
+        let c16 = recursive_cte_count_for(16);
+        assert_eq!(
+            c2, c16,
+            "recursive-CTE count must be INDEPENDENT of seed count (2 seeds → {c2}, 16 seeds → {c16}); \
+             a per-seed fold would scale linearly with the seed count"
+        );
+        assert!(
+            (1..=3).contains(&c16),
+            "SqliteStore::traverse_multi must issue 1..=3 recursive CTEs for ANY seed count \
+             (DEC-X2: one per direction; Dependencies = 1) — got {c16}"
+        );
     }
 
     #[test]

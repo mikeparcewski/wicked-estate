@@ -26,6 +26,18 @@ fn sqlite_store_satisfies_graph_store_contract() {
     conformance::graph_store_suite(&mut store);
 }
 
+#[test]
+fn sqlite_traverse_multi_matches_union() {
+    let mut store = wicked_estate_store::SqliteStore::in_memory().expect("in-memory sqlite");
+    conformance::traverse_multi_matches_union_of_traverse(&mut store);
+}
+
+#[test]
+fn memstore_traverse_multi_matches_union() {
+    let mut store = MemStore::new();
+    conformance::traverse_multi_matches_union_of_traverse(&mut store);
+}
+
 fn epoch_sym(name: &str) -> SymbolId {
     Symbol::global("test", None, vec![Descriptor::method(name, None)]).id()
 }
@@ -59,7 +71,9 @@ fn skip_fts_reuse_bumps_epoch<S: GraphStoreMutExt>(store: &mut S) {
         .upsert_nodes_skip_fts(&[epoch_node("reindexed_sym", file)])
         .expect("first skip-fts upsert");
     assert_eq!(
-        store.symbol_epoch(&epoch_sym("reindexed_sym")).expect("epoch"),
+        store
+            .symbol_epoch(&epoch_sym("reindexed_sym"))
+            .expect("epoch"),
         Some(0),
         "first-ever node via skip-FTS path must be epoch 0"
     );

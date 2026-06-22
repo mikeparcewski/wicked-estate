@@ -39,6 +39,145 @@ fn calls(a: &str, b: &str) -> Edge {
     )
 }
 
+/// Independent union-of-`traverse` fold — the reference `traverse_multi` is checked against. Defined
+/// HERE (not by calling `traverse_multi`) so a backend's specialization is compared to the slow
+/// per-seed path, and the trait default's own wiring (incl. the drop-seeds step) is exercised.
+fn union_of_traverse<S: crate::traits::GraphRead>(
+    store: &S,
+    starts: &[crate::symbol::SymbolId],
+    spec: &TraversalSpec,
+) -> crate::query::Subgraph {
+    let mut nodes = Vec::new();
+    let mut node_seen = std::collections::HashSet::new();
+    let mut edges = Vec::new();
+    let mut edge_seen = std::collections::HashSet::new();
+    let mut depths = std::collections::BTreeMap::new();
+    let mut truncated = false;
+    for s in starts {
+        let sub = store.traverse(s, spec).expect("traverse");
+        for n in sub.nodes {
+            if node_seen.insert(n.symbol.0.clone()) {
+                nodes.push(n);
+            }
+        }
+        for e in sub.edges {
+            if edge_seen.insert(e.dedup_key()) {
+                edges.push(e);
+            }
+        }
+        for (k, v) in sub.depths {
+            depths
+                .entry(k)
+                .and_modify(|d: &mut u32| *d = (*d).min(v))
+                .or_insert(v);
+        }
+        truncated |= sub.truncated;
+    }
+    for s in starts {
+        depths.remove(&s.0);
+    }
+    crate::query::Subgraph {
+        nodes,
+        edges,
+        depths,
+        truncated,
+    }
+}
+
+/// Conformance: `traverse_multi(starts)` returns the IDENTICAL subgraph as the union of
+/// `traverse(start)` over each seed — node set (by symbol), edge set (by dedup key), and the
+/// min-depth map with ALL seeds excluded. The fixture has TEETH: a cross-reachable seed
+/// (`tm_s2` reachable from `tm_s1`), a node reached from BOTH seeds (`tm_m1` — min-depth dedup),
+/// and a multi-hop path (`tm_m1 → tm_leaf`) — so a backend that specializes `traverse_multi`
+/// (e.g. SqliteStore's multi-seed CTE) is verified against the slow fold, not merely itself.
+/// Untruncated (generous caps): the cap-interaction between per-seed and total limits is out of
+/// scope here. Run on a FRESH store.
+pub fn traverse_multi_matches_union_of_traverse<S: GraphStore>(store: &mut S) {
+    let nodes = [
+        func_node("tm_s1"),
+        func_node("tm_s2"),
+        func_node("tm_m1"),
+        func_node("tm_leaf"),
+    ];
+    // tm_s1→tm_m1, tm_s1→tm_s2 (cross-reachable seed), tm_s2→tm_m1 (shared), tm_s2→tm_leaf,
+    // tm_m1→tm_leaf (multi-hop).
+    let edges = [
+        calls("tm_s1", "tm_m1"),
+        calls("tm_s1", "tm_s2"),
+        calls("tm_s2", "tm_m1"),
+        calls("tm_s2", "tm_leaf"),
+        calls("tm_m1", "tm_leaf"),
+    ];
+    store.begin_batch().expect("begin");
+    store.upsert_nodes(&nodes).expect("upsert nodes");
+    store.upsert_edges(&edges).expect("upsert edges");
+    store.commit_batch().expect("commit");
+
+    let seeds = [sym("tm_s1"), sym("tm_s2")];
+
+    for dir in [Direction::Dependencies, Direction::Both] {
+        let mut spec = TraversalSpec::blast_radius(8);
+        spec.direction = dir;
+        spec.max_depth = 8;
+        spec.max_nodes = 1000;
+        spec.min_confidence = 0.0;
+        spec.edge_kinds = vec![];
+
+        let got = store.traverse_multi(&seeds, &spec).expect("traverse_multi");
+        let want = union_of_traverse(store, &seeds, &spec);
+
+        assert_eq!(
+            got.depths, want.depths,
+            "traverse_multi depths must equal union-of-traverse ({dir:?})"
+        );
+        let got_syms: std::collections::BTreeSet<_> =
+            got.nodes.iter().map(|n| n.symbol.0.clone()).collect();
+        let want_syms: std::collections::BTreeSet<_> =
+            want.nodes.iter().map(|n| n.symbol.0.clone()).collect();
+        assert_eq!(
+            got_syms, want_syms,
+            "traverse_multi node set must equal union-of-traverse ({dir:?})"
+        );
+        let got_edges: std::collections::BTreeSet<_> =
+            got.edges.iter().map(|e| e.dedup_key()).collect();
+        let want_edges: std::collections::BTreeSet<_> =
+            want.edges.iter().map(|e| e.dedup_key()).collect();
+        assert_eq!(
+            got_edges, want_edges,
+            "traverse_multi edge set must equal union-of-traverse ({dir:?})"
+        );
+    }
+
+    // Hardcoded discriminator (Dependencies) — catches a bug SHARED by the fold and the override:
+    // the cross-reachable seed tm_s2 must be EXCLUDED from depths; tm_m1 at min-depth 1 (both
+    // seeds); tm_leaf at min-depth 1 (tm_s2→tm_leaf beats tm_s1→tm_m1→tm_leaf).
+    let mut spec = TraversalSpec::blast_radius(8);
+    spec.direction = Direction::Dependencies;
+    spec.max_depth = 8;
+    spec.max_nodes = 1000;
+    spec.min_confidence = 0.0;
+    spec.edge_kinds = vec![];
+    let got = store.traverse_multi(&seeds, &spec).expect("traverse_multi");
+    assert_eq!(
+        got.depths.get(sym("tm_m1").as_str()),
+        Some(&1),
+        "tm_m1 reached from both seeds at depth 1"
+    );
+    assert_eq!(
+        got.depths.get(sym("tm_leaf").as_str()),
+        Some(&1),
+        "tm_leaf at min-depth 1 (tm_s2 → tm_leaf)"
+    );
+    assert!(
+        !got.depths.contains_key(sym("tm_s2").as_str()),
+        "cross-reachable SEED tm_s2 must be excluded from depths"
+    );
+    assert!(
+        !got.depths.contains_key(sym("tm_s1").as_str()),
+        "seed tm_s1 must be excluded from depths"
+    );
+}
+
 /// Run the full contract against a fresh, empty store. Panics on the first violation.
 pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
     // Fixture: a → b → c  (a calls b, b calls c).
@@ -1049,7 +1188,9 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
 
     // (E0) No live node → no epoch.
     assert_eq!(
-        store.symbol_epoch(&sym("epoch_absent")).expect("epoch absent"),
+        store
+            .symbol_epoch(&sym("epoch_absent"))
+            .expect("epoch absent"),
         None,
         "symbol_epoch must be None for a symbol that has never been indexed"
     );
@@ -1087,7 +1228,9 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
         .upsert_nodes(&[epoch_node("epoch_reused")])
         .expect("first-ever node for epoch_reused");
     assert_eq!(
-        store.symbol_epoch(&sym("epoch_reused")).expect("epoch first"),
+        store
+            .symbol_epoch(&sym("epoch_reused"))
+            .expect("epoch first"),
         Some(0),
         "a first-ever node must be epoch 0"
     );
@@ -1127,7 +1270,9 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
 
     // (E4) A second delete-then-re-add advances the epoch again (strictly monotonic per reuse).
     let before = reused;
-    store.remove_file(epoch_file).expect("remove epoch file (2)");
+    store
+        .remove_file(epoch_file)
+        .expect("remove epoch file (2)");
     store
         .upsert_nodes(&[epoch_node("epoch_reused")])
         .expect("re-add after delete (2)");

@@ -82,6 +82,56 @@ pub trait GraphRead: Send {
     /// Bounded traversal (e.g. reverse-reachability for blast-radius). Push this server-side on
     /// backends where `capabilities().server_side_traversal` is true (one round-trip, not BFS).
     fn traverse(&self, start: &SymbolId, spec: &TraversalSpec) -> Result<Subgraph>;
+    /// Multi-source bounded traversal: the union of [`traverse`](Self::traverse) over every seed in
+    /// `starts`. `depths` gives each reached node its MIN distance from the seed SET; like the
+    /// single-seed `traverse`, the seeds are returned in `nodes` but EXCLUDED from `depths` (a seed
+    /// would otherwise leak in as a cross-reachable target of another seed). Powers cross-engine
+    /// reachability (Lane X `OverlayReader`), where N anchors must be expanded in one shot.
+    ///
+    /// The default folds per-seed `traverse` — a query count LINEAR in `starts.len()`. A backend
+    /// with a set-seeded reachability query (e.g. `SqliteStore`) MUST override this with a single
+    /// bounded multi-seed query whose query count is INDEPENDENT of `starts.len()`, returning the
+    /// identical (untruncated) subgraph. Conformance pins equality
+    /// (`traverse_multi_matches_union_of_traverse`); a SqliteStore unit test pins the query count.
+    fn traverse_multi(&self, starts: &[SymbolId], spec: &TraversalSpec) -> Result<Subgraph> {
+        let mut nodes: Vec<Node> = Vec::new();
+        let mut node_seen: std::collections::HashSet<SymbolId> = std::collections::HashSet::new();
+        let mut edges: Vec<Edge> = Vec::new();
+        let mut edge_seen: std::collections::HashSet<(String, String, String)> =
+            std::collections::HashSet::new();
+        let mut depths: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+        let mut truncated = false;
+        for s in starts {
+            let sub = self.traverse(s, spec)?;
+            for n in sub.nodes {
+                if node_seen.insert(n.symbol.clone()) {
+                    nodes.push(n);
+                }
+            }
+            for e in sub.edges {
+                if edge_seen.insert(e.dedup_key()) {
+                    edges.push(e);
+                }
+            }
+            for (k, v) in sub.depths {
+                depths
+                    .entry(k)
+                    .and_modify(|d| *d = (*d).min(v))
+                    .or_insert(v);
+            }
+            truncated |= sub.truncated;
+        }
+        // Seeds excluded from `depths` (generalizes traverse's single-seed exclusion).
+        for s in starts {
+            depths.remove(&s.0);
+        }
+        Ok(Subgraph {
+            nodes,
+            edges,
+            depths,
+            truncated,
+        })
+    }
     /// All nodes — for global analytics (PageRank) and export. Local-first scale.
     fn all_nodes(&self) -> Result<Vec<Node>>;
     /// All edges — for global analytics (PageRank) and export.
