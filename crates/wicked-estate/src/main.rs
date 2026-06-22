@@ -615,6 +615,18 @@ fn main() -> Result<()> {
             for (k, v) in &stats.edges_by_kind {
                 println!("  {k} = {v}");
             }
+            // Coarse event: one `wicked.estate.indexed` per index run, through the shared seam.
+            emit::emit_event(&emit::EmitEvent::new(
+                "wicked.estate.indexed",
+                "estate.index",
+                serde_json::json!({
+                    "path": path,
+                    "db": db,
+                    "nodes": stats.node_count,
+                    "edges": stats.edge_count,
+                    "files": stats.file_count,
+                }),
+            ));
             // W5.2: optional embeddings pass — OFF by default, opt-in with --embeddings.
             // Runs as a separate step so index_path's public signature is unchanged.
             // :memory: is skipped (embeddings live in the same store; nothing to persist).
@@ -751,6 +763,18 @@ fn main() -> Result<()> {
                 t_cmd_start,
                 t_cmd_end,
             );
+            // Coarse event: one `wicked.estate.drifted` per drift run, through the shared seam.
+            // (Distinct from the OTel span above — that is telemetry; this is a bus event.)
+            emit::emit_event(&emit::EmitEvent::new(
+                "wicked.estate.drifted",
+                "estate.drift",
+                serde_json::json!({
+                    "db": db,
+                    "managed": report.managed.len(),
+                    "undeployed": report.undeployed.len(),
+                    "unmanaged": report.unmanaged.len(),
+                }),
+            ));
         }
         "query" => {
             let name = positional
@@ -1636,6 +1660,18 @@ fn main() -> Result<()> {
             } else {
                 println!("annotated {count} symbol(s) with [{ty}] {key}={value}");
             }
+            // Coarse event: one `wicked.estate.annotated` per annotate run, through the seam.
+            emit::emit_event(&emit::EmitEvent::new(
+                "wicked.estate.annotated",
+                "estate.annotate",
+                serde_json::json!({
+                    "db": db,
+                    "ann_type": ty,
+                    "key": key,
+                    "count": count,
+                    "replaced": replaced,
+                }),
+            ));
         }
         // Agent A: show TYPED annotations for a symbol.
         //
