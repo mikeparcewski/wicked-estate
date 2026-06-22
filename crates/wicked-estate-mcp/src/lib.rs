@@ -1054,6 +1054,451 @@ mod tests {
         );
     }
 
+    // ── tools/call — RetrieveEntity ───────────────────────────────────────────
+
+    #[test]
+    fn tools_call_retrieve_entity_returns_symbol_details() {
+        // RetrieveEntity through the real tools/call dispatch must return the SPECIFIC
+        // node's details (name, kind, language, file:line) — not just a non-error envelope.
+        let store = fixture();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 60,
+            "method": "tools/call",
+            "params": {
+                "name": "RetrieveEntity",
+                "arguments": { "symbol": "leaf" }
+            }
+        });
+        let resp = handle_request(&store, &req);
+
+        assert_eq!(resp["jsonrpc"], "2.0");
+        assert_eq!(resp["id"], 60);
+        assert!(
+            !resp["result"]["isError"].as_bool().unwrap_or(true),
+            "isError must be false"
+        );
+
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).expect("content text must be valid JSON");
+
+        assert!(
+            parsed["found"].as_bool().unwrap(),
+            "the 'leaf' symbol exists in the fixture → found must be true"
+        );
+        // The RIGHT entity, not merely *an* entity.
+        assert_eq!(
+            parsed["symbol"].as_str().unwrap(),
+            "leaf",
+            "must echo the requested symbol id"
+        );
+        assert_eq!(parsed["name"].as_str().unwrap(), "leaf_fn");
+        assert_eq!(parsed["kind"].as_str().unwrap(), "function");
+        assert_eq!(parsed["language"].as_str().unwrap(), "rust");
+        assert_eq!(parsed["file"].as_str().unwrap(), "src/c.rs");
+        // Fixture put leaf at line 20 (0-based); line_1based must be +1.
+        assert_eq!(parsed["line"].as_u64().unwrap(), 20);
+        assert_eq!(parsed["line_1based"].as_u64().unwrap(), 21);
+    }
+
+    #[test]
+    fn tools_call_retrieve_entity_missing_symbol_is_found_false_not_error() {
+        // Negative/edge case: an absent symbol must yield an HONEST found=false through the
+        // MCP envelope (R1: isError stays false), never a silent wrong entity.
+        let store = fixture();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 61,
+            "method": "tools/call",
+            "params": {
+                "name": "RetrieveEntity",
+                "arguments": { "symbol": "no_such_symbol_xyz" }
+            }
+        });
+        let resp = handle_request(&store, &req);
+
+        assert!(
+            !resp["result"]["isError"].as_bool().unwrap_or(true),
+            "missing symbol must NOT be an error (R1)"
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert!(
+            !parsed["found"].as_bool().unwrap(),
+            "found must be false for an absent symbol"
+        );
+        // And it must NOT have leaked some other entity's name.
+        assert!(
+            parsed.get("name").is_none(),
+            "no entity details must be present when not found"
+        );
+    }
+
+    // ── tools/call — RulesInventory ───────────────────────────────────────────
+
+    /// caller_fn --InvokedBy--> PricingRules (a RuleSet node).
+    /// Edge convention: source = code call site (dependent), target = RuleSet (dependency).
+    fn rules_fixture() -> MemStore {
+        let mut s = MemStore::new();
+        s.begin_batch().unwrap();
+        s.upsert_nodes(&[
+            node(
+                "rs::pricing",
+                "PricingRules",
+                NodeKind::RuleSet,
+                "rules/pricing.drl",
+                1,
+            ),
+            node(
+                "app::run_pricing",
+                "run_pricing",
+                NodeKind::Function,
+                "src/pricing_service.rs",
+                42,
+            ),
+        ])
+        .unwrap();
+        s.upsert_edges(&[Edge::new(
+            SymbolId("app::run_pricing".to_string()),
+            SymbolId("rs::pricing".to_string()),
+            EdgeKind::InvokedBy,
+            ResolutionTier::Parsed,
+            "test-fixture",
+        )])
+        .unwrap();
+        s.commit_batch().unwrap();
+        s
+    }
+
+    #[test]
+    fn tools_call_rules_inventory_returns_engines_and_invokers() {
+        // RulesInventory through tools/call must return the RuleSet AND the code that invokes it.
+        let store = rules_fixture();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 62,
+            "method": "tools/call",
+            "params": {
+                "name": "RulesInventory",
+                "arguments": {}
+            }
+        });
+        let resp = handle_request(&store, &req);
+
+        assert!(
+            !resp["result"]["isError"].as_bool().unwrap_or(true),
+            "isError must be false"
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).expect("content text must be valid JSON");
+
+        assert_eq!(
+            parsed["total"].as_u64().unwrap(),
+            1,
+            "exactly one RuleSet engine in the fixture"
+        );
+        let engines = parsed["engines"].as_array().unwrap();
+        assert_eq!(engines.len(), 1);
+        let engine = &engines[0];
+        assert_eq!(engine["name"].as_str().unwrap(), "PricingRules");
+        assert_eq!(engine["kind"].as_str().unwrap(), "rule_set");
+        assert_eq!(engine["file"].as_str().unwrap(), "rules/pricing.drl");
+
+        // The invoking code (the InvokedBy edge source) must be surfaced.
+        let invoked_by = engine["invoked_by"].as_array().unwrap();
+        assert!(
+            invoked_by
+                .iter()
+                .any(|v| v.as_str() == Some("app::run_pricing")),
+            "the invoking symbol must appear in invoked_by; got {invoked_by:?}"
+        );
+    }
+
+    #[test]
+    fn tools_call_rules_inventory_empty_graph_is_honest_empty_not_error() {
+        // Negative/edge case: the base fixture has NO RuleSet nodes. RulesInventory must report an
+        // honest empty inventory (total=0) through the envelope, not error and not a phantom engine.
+        let store = fixture(); // caller/middle/leaf — no RuleSet
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 63,
+            "method": "tools/call",
+            "params": {
+                "name": "RulesInventory",
+                "arguments": {}
+            }
+        });
+        let resp = handle_request(&store, &req);
+
+        assert!(
+            !resp["result"]["isError"].as_bool().unwrap_or(true),
+            "empty inventory is not an error (R1)"
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            parsed["total"].as_u64().unwrap(),
+            0,
+            "no RuleSet nodes → total must be 0"
+        );
+        assert!(
+            parsed["engines"].as_array().unwrap().is_empty(),
+            "engines must be empty when no RuleSet exists"
+        );
+    }
+
+    // ── tools/call — RankHotspots ─────────────────────────────────────────────
+
+    #[test]
+    fn tools_call_rank_hotspots_ranks_most_depended_on_first() {
+        // Build a hub graph: caller_fn → middle_fn → leaf_fn (the fixture). PageRank flows toward
+        // the most-depended-on node. `leaf` is the deepest sink (depended on by middle, transitively
+        // by caller); `caller` depends on nothing. So `leaf_fn` must outrank `caller_fn`.
+        let store = fixture();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 64,
+            "method": "tools/call",
+            "params": {
+                "name": "RankHotspots",
+                "arguments": { "limit": 20 }
+            }
+        });
+        let resp = handle_request(&store, &req);
+
+        assert!(
+            !resp["result"]["isError"].as_bool().unwrap_or(true),
+            "isError must be false"
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).expect("content text must be valid JSON");
+
+        let hotspots = parsed["hotspots"].as_array().unwrap();
+        assert_eq!(
+            hotspots.len(),
+            3,
+            "all 3 fixture nodes ranked; got {hotspots:?}"
+        );
+
+        // Scores must be in descending order (the tool guarantees high-score-first).
+        let scores: Vec<f64> = hotspots
+            .iter()
+            .map(|h| h["score"].as_f64().expect("score must be a number"))
+            .collect();
+        for w in scores.windows(2) {
+            assert!(
+                w[0] >= w[1],
+                "hotspots must be sorted by score descending; got {scores:?}"
+            );
+        }
+
+        // The most-depended-on symbol (leaf, the sink) must rank strictly above the
+        // depends-on-nothing source (caller). This is the load-bearing, fail-if-broken assertion.
+        let rank_of = |name: &str| -> usize {
+            hotspots
+                .iter()
+                .position(|h| h["name"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("{name} must be present in hotspots"))
+        };
+        assert!(
+            rank_of("leaf_fn") < rank_of("caller_fn"),
+            "the sink (leaf_fn, most depended-on) must outrank the source (caller_fn); \
+             order was {:?}",
+            hotspots
+                .iter()
+                .map(|h| h["name"].as_str().unwrap())
+                .collect::<Vec<_>>()
+        );
+        let leaf_score = hotspots[rank_of("leaf_fn")]["score"].as_f64().unwrap();
+        let caller_score = hotspots[rank_of("caller_fn")]["score"].as_f64().unwrap();
+        assert!(
+            leaf_score > caller_score,
+            "leaf_fn PageRank ({leaf_score}) must exceed caller_fn ({caller_score})"
+        );
+    }
+
+    // ── tools/call — Communities ──────────────────────────────────────────────
+
+    /// Two disjoint fully-connected triangles → exactly two size-3 communities.
+    /// Triangle 1: a1↔a2↔a3 ; Triangle 2: b1↔b2↔b3 ; no cross-group edges.
+    fn two_triangle_fixture() -> MemStore {
+        let mut s = MemStore::new();
+        s.begin_batch().unwrap();
+        s.upsert_nodes(&[
+            node("a1", "a1_fn", NodeKind::Function, "src/a1.rs", 1),
+            node("a2", "a2_fn", NodeKind::Function, "src/a2.rs", 2),
+            node("a3", "a3_fn", NodeKind::Function, "src/a3.rs", 3),
+            node("b1", "b1_fn", NodeKind::Function, "src/b1.rs", 4),
+            node("b2", "b2_fn", NodeKind::Function, "src/b2.rs", 5),
+            node("b3", "b3_fn", NodeKind::Function, "src/b3.rs", 6),
+        ])
+        .unwrap();
+        s.upsert_edges(&[
+            call_edge("a1", "a2"),
+            call_edge("a2", "a3"),
+            call_edge("a3", "a1"),
+            call_edge("b1", "b2"),
+            call_edge("b2", "b3"),
+            call_edge("b3", "b1"),
+        ])
+        .unwrap();
+        s.commit_batch().unwrap();
+        s
+    }
+
+    #[test]
+    fn tools_call_communities_returns_clusters() {
+        // Communities through tools/call must surface the two distinct clusters, each of size 3.
+        let store = two_triangle_fixture();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 65,
+            "method": "tools/call",
+            "params": {
+                "name": "Communities",
+                "arguments": { "limit": 20, "min_size": 2 }
+            }
+        });
+        let resp = handle_request(&store, &req);
+
+        assert!(
+            !resp["result"]["isError"].as_bool().unwrap_or(true),
+            "isError must be false"
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).expect("content text must be valid JSON");
+
+        let communities = parsed["communities"].as_array().unwrap();
+        assert_eq!(
+            parsed["total"].as_u64().unwrap(),
+            2,
+            "two disjoint triangles → exactly two communities; got {communities:?}"
+        );
+        assert_eq!(communities.len(), 2);
+
+        // Each detected community must be a size-3 cluster (the triangles), with member symbols.
+        for c in communities {
+            assert_eq!(
+                c["size"].as_u64().unwrap(),
+                3,
+                "each triangle is a size-3 community; got {c}"
+            );
+            assert!(
+                !c["top_symbols"].as_array().unwrap().is_empty(),
+                "a community must list its member top_symbols"
+            );
+        }
+
+        // Non-vacuous separation: the two clusters must partition the a-group and the b-group —
+        // no community may mix an a-node with a b-node (they share no edges).
+        let group_of = |sym: &str| -> Option<char> { sym.chars().next() };
+        for c in communities {
+            let groups: std::collections::HashSet<char> = c["top_symbols"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|v| v.as_str())
+                .filter_map(group_of)
+                .collect();
+            assert_eq!(
+                groups.len(),
+                1,
+                "a community must not mix the disjoint a/b groups; got {:?}",
+                c["top_symbols"]
+            );
+        }
+    }
+
+    // ── tools/call — Lineage ──────────────────────────────────────────────────
+
+    #[test]
+    fn tools_call_lineage_returns_dependency_lineage() {
+        // Lineage walks Dependencies (what does X depend on?). Fixture: caller → middle → leaf.
+        // From `caller`, the transitive lineage is {middle, leaf}; `caller` itself is excluded.
+        let store = fixture();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 66,
+            "method": "tools/call",
+            "params": {
+                "name": "Lineage",
+                "arguments": { "symbol": "caller", "depth": 8 }
+            }
+        });
+        let resp = handle_request(&store, &req);
+
+        assert!(
+            !resp["result"]["isError"].as_bool().unwrap_or(true),
+            "isError must be false"
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).expect("content text must be valid JSON");
+
+        assert_eq!(
+            parsed["total"].as_u64().unwrap(),
+            2,
+            "caller's transitive dependencies are middle + leaf"
+        );
+        let deps = parsed["dependencies"].as_array().unwrap();
+        let names: Vec<&str> = deps.iter().map(|d| d["name"].as_str().unwrap()).collect();
+        assert!(
+            names.contains(&"middle_fn"),
+            "direct dependency middle_fn must be in the lineage; got {names:?}"
+        );
+        assert!(
+            names.contains(&"leaf_fn"),
+            "transitive dependency leaf_fn must be in the lineage; got {names:?}"
+        );
+        assert!(
+            !names.contains(&"caller_fn"),
+            "the start symbol must be excluded from its own lineage"
+        );
+
+        // Depth must be accurate: middle is 1 hop, leaf is 2 hops from caller.
+        let depth_of = |name: &str| -> u64 {
+            deps.iter()
+                .find(|d| d["name"].as_str() == Some(name))
+                .unwrap()["depth"]
+                .as_u64()
+                .unwrap()
+        };
+        assert_eq!(depth_of("middle_fn"), 1, "middle is one hop from caller");
+        assert_eq!(depth_of("leaf_fn"), 2, "leaf is two hops from caller");
+    }
+
+    #[test]
+    fn tools_call_lineage_missing_symbol_is_empty_not_error() {
+        // Negative/edge case: an absent start symbol must yield an honest empty lineage
+        // (total=0) through the envelope, not an error and not a wrong non-empty result (R1).
+        let store = fixture();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 67,
+            "method": "tools/call",
+            "params": {
+                "name": "Lineage",
+                "arguments": { "symbol": "ghost_symbol_xyz" }
+            }
+        });
+        let resp = handle_request(&store, &req);
+
+        assert!(
+            !resp["result"]["isError"].as_bool().unwrap_or(true),
+            "missing start symbol must NOT be an error (R1)"
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            parsed["total"].as_u64().unwrap(),
+            0,
+            "absent symbol → empty lineage"
+        );
+        assert!(
+            parsed["dependencies"].as_array().unwrap().is_empty(),
+            "dependencies must be empty for an absent symbol"
+        );
+    }
+
     // ── unknown method ────────────────────────────────────────────────────────
 
     #[test]
