@@ -86,6 +86,21 @@ impl AsyncGraphStore for SqlitePool {
                 wicked_estate_core::Error::Invalid(format!("spawn_blocking panicked: {e}"))
             })?
     }
+
+    async fn with_read_inline<F, T>(&self, f: F) -> Result<T>
+    where
+        F: for<'a> FnOnce(&'a dyn GraphRead) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        // `get().await` is the only await; deadpool's RAII `Object` returns the connection on drop.
+        let obj = self.0.get().await.map_err(|e| {
+            wicked_estate_core::Error::Invalid(format!("pool checkout failed: {e}"))
+        })?;
+        // Run `f` on the CURRENT thread — NO nested `spawn_blocking`. The caller is already on a
+        // blocking-pool thread (Lane X `OverlayReader`), so this holds exactly ONE blocking thread
+        // per cross-recall instead of `1+k`; that bound is what the DoD-XA1b saturation gate asserts.
+        f(&*obj)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -147,6 +162,80 @@ mod tests {
         let stats = pool.with_read(|g| g.stats()).await.unwrap();
         assert_eq!(stats.node_count, 2, "expected 2 nodes");
         assert_eq!(stats.edge_count, 1, "expected 1 edge");
+    }
+
+    /// DoD-XA1b — `with_read_inline` must NOT deadlock under saturation. N = 2×cap concurrent
+    /// cross-recalls each simulate Lane X's `OverlayReader`: a `spawn_blocking` thread that
+    /// `block_on`s an inline read. With a SMALL `max_blocking_threads`, the correct inline impl
+    /// (no nested `spawn_blocking`) holds exactly ONE blocking thread per recall and completes all
+    /// N (~100ms). A regression to a `spawn_blocking`-nesting impl would need `1+k` blocking threads
+    /// per recall, exhaust the pool, and deadlock — caught here as a timeout. The connection pool is
+    /// sized generously so the property under test is BLOCKING-thread occupancy, not connections.
+    #[test]
+    fn with_read_inline_no_deadlock_under_saturation() {
+        const CAP: usize = 4;
+        let n = 2 * CAP; // 8 ≥ 2×cap
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(CAP)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async move {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("deadlock.db");
+            let path_str = path.to_str().unwrap().to_string();
+            {
+                let mut store = SqliteStore::open(&path_str).unwrap();
+                store.begin_batch().unwrap();
+                store
+                    .upsert_nodes(&[func_node("a"), func_node("b")])
+                    .unwrap();
+                store.commit_batch().unwrap();
+            }
+
+            let pool = open_sqlite_pool(&path_str, n).unwrap();
+            let handle = tokio::runtime::Handle::current();
+            let mut joins = Vec::new();
+            for _ in 0..n {
+                let pool = pool.clone();
+                let h = handle.clone();
+                joins.push(tokio::task::spawn_blocking(move || {
+                    // OverlayReader shape: already on a blocking thread, block_on an inline read.
+                    h.block_on(async move {
+                        pool.with_read_inline(|g: &dyn GraphRead| {
+                            // Hold the inline path briefly so all N overlap → real saturation.
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            g.all_nodes().map(|v| v.len())
+                        })
+                        .await
+                    })
+                }));
+            }
+
+            // A deadlock manifests as a timeout; the correct impl finishes well under the bound.
+            let counts = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                let mut out = Vec::new();
+                for j in joins {
+                    out.push(
+                        j.await
+                            .expect("spawn_blocking join")
+                            .expect("with_read_inline"),
+                    );
+                }
+                out
+            })
+            .await
+            .expect("N concurrent inline cross-recalls must NOT deadlock (timeout == deadlock)");
+
+            assert_eq!(counts.len(), n, "all {n} concurrent recalls completed");
+            assert!(
+                counts.iter().all(|&c| c == 2),
+                "each recall sees the 2 written nodes; got {counts:?}"
+            );
+        });
     }
 
     /// `with_read` must propagate errors returned by the closure.

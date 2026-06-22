@@ -276,6 +276,21 @@ pub trait AsyncGraphStore: Send + Sync {
     where
         F: for<'a> FnOnce(&'a dyn GraphRead) -> Result<T> + Send + 'static,
         T: Send + 'static;
+
+    /// Inline sibling of [`with_read`](Self::with_read) for callers ALREADY on a blocking-pool
+    /// thread (e.g. Lane X's cross-engine `OverlayReader`, itself running inside `spawn_blocking`).
+    /// Checks out a connection (`get().await` — the only await) and runs `f` on the CURRENT thread
+    /// WITHOUT re-entering `spawn_blocking`, so net blocking-pool occupancy per call is 1, not `1+k`
+    /// — this is what avoids the nested-`spawn_blocking` starvation deadlock when N overlay recalls
+    /// run concurrently (DoD-XA1b).
+    ///
+    /// PRECONDITION: the caller must be in a context where running `f` synchronously is acceptable
+    /// (a blocking thread). On a normal async worker this blocks the runtime — use
+    /// [`with_read`](Self::with_read) there instead.
+    async fn with_read_inline<F, T>(&self, f: F) -> Result<T>
+    where
+        F: for<'a> FnOnce(&'a dyn GraphRead) -> Result<T> + Send + 'static,
+        T: Send + 'static;
 }
 
 /// Assigns importance scores over the graph — personalized PageRank seeded by `seeds`
