@@ -12,7 +12,7 @@ rust-version.workspace = true
 
 [dependencies]
 wicked-estate-core.workspace = true
-wicked-estate-rank = { path = "../wicked-estate-rank", version = "0.11.2" }
+wicked-estate-rank = { path = "../wicked-estate-rank", version = "0.12.0" }
 wicked-estate-store.workspace = true
 serde_json.workspace = true
 # Real semantic embeddings (ONNX/BGE) — OPTIONAL + OFF BY DEFAULT. fastembed pulls ort (ONNX

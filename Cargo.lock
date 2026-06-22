@@ -9736,7 +9736,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate"
-version = "0.11.2"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9760,7 +9760,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-bench"
-version = "0.11.2"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -9773,7 +9773,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-core"
-version = "0.11.2"
+version = "0.12.0"
 dependencies = [
  "async-trait",
  "proptest",
@@ -9784,7 +9784,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-extract"
-version = "0.11.2"
+version = "0.12.0"
 dependencies = [
  "arborium-ada",
  "arborium-awk",
@@ -9911,7 +9911,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-mcp"
-version = "0.11.2"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -9925,14 +9925,14 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-memory-api"
-version = "0.11.2"
+version = "0.12.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "wicked-estate-observe"
-version = "0.11.2"
+version = "0.12.0"
 dependencies = [
  "reqwest 0.12.28",
  "serde_json",
@@ -9941,7 +9941,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-rank"
-version = "0.11.2"
+version = "0.12.0"
 dependencies = [
  "petgraph",
  "proptest",
@@ -9952,7 +9952,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-resolve"
-version = "0.11.2"
+version = "0.12.0"
 dependencies = [
  "libc",
  "protobuf",
@@ -9967,7 +9967,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-retrieve"
-version = "0.11.2"
+version = "0.12.0"
 dependencies = [
  "fastembed",
  "model2vec-rs",
@@ -9979,7 +9979,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-store"
-version = "0.11.2"
+version = "0.12.0"
 dependencies = [
  "async-trait",
  "deadpool",
