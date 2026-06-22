@@ -29,8 +29,8 @@
 use serde_json::{Value, json};
 use wicked_estate_core::{GraphRead, RetrievalTool};
 use wicked_estate_retrieve::{
-    BlastRadius, ContextBundle, FetchContent, RetrieveEntity, RulesInventory, SearchEntity,
-    SemanticSearch, TraverseGraph,
+    BlastRadius, Communities, ContextBundle, FetchContent, Lineage, RankHotspots, RetrieveEntity,
+    RulesInventory, SearchEntity, SemanticSearch, TraverseGraph,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -43,12 +43,19 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 // Tool registry
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// All always-on retrieval tools in declaration order.
+/// All always-on retrieval tools in declaration order — the **10 unconditional read tools** (the
+/// DoD-A4 floor): the original 7 plus the promoted `RankHotspots`, `Communities`, and `Lineage`
+/// (each a real `RetrievalTool` over the read-only `&dyn GraphRead` surface; `Lineage` already
+/// existed in `wicked-estate-retrieve` but was absent here — C-A3).
 ///
 /// SemanticSearch is **not** here — it is stateful (owns a `VectorStore` connection), so it cannot
 /// be a zero-sized entry rebuilt per request. It is constructed once at startup via
 /// [`live_semantic_search`] and threaded into [`handle_request_with_semantic`], which merges it
-/// with this list to form the live dispatch registry.
+/// with this list (when the dim-guard passes) to form the live dispatch registry. So `tools/list`
+/// returns **10 or 11** tools: the 10 here unconditionally, +1 when semantic is available.
+///
+/// `Annotate` is intentionally **absent**: the v1 MCP surface is read-only (write is CLI-only,
+/// design §2.2/§2.3), so no mutating tool appears in `tools/list`.
 pub fn all_tools() -> Vec<Box<dyn RetrievalTool>> {
     vec![
         Box::new(SearchEntity),
@@ -58,6 +65,9 @@ pub fn all_tools() -> Vec<Box<dyn RetrievalTool>> {
         Box::new(FetchContent),
         Box::new(ContextBundle),
         Box::new(RulesInventory),
+        Box::new(RankHotspots),
+        Box::new(Communities),
+        Box::new(Lineage),
     ]
 }
 
@@ -240,6 +250,71 @@ fn rules_inventory_schema() -> Value {
     })
 }
 
+fn lineage_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["symbol"],
+        "properties": {
+            "symbol": {
+                "type": "string",
+                "description": "Symbol ID whose transitive dependencies to enumerate."
+            },
+            "depth": {
+                "type": "integer",
+                "description": "Maximum hop depth (default 8, max 24).",
+                "default": 8,
+                "maximum": 24
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn rank_hotspots_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "description": "How many top-ranked symbols to return (default 20, max 200).",
+                "default": 20,
+                "maximum": 200
+            },
+            "seeds": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Optional symbol IDs to bias the ranking toward (personalized PageRank). Omit for global PageRank."
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn communities_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "description": "How many communities to return, largest first (default 20, max 200).",
+                "default": 20,
+                "maximum": 200
+            },
+            "min_size": {
+                "type": "integer",
+                "description": "Drop communities smaller than this (default 2).",
+                "default": 2
+            },
+            "resolution": {
+                "type": "number",
+                "description": "Louvain resolution γ (default 1.0; > 1.0 yields smaller, tighter communities).",
+                "default": 1.0
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
 /// Returns the `inputSchema` for a given tool name.  Returns `None` when
 /// the name is unknown (the caller treats this as an unregistered tool).
 pub fn input_schema(name: &str) -> Option<Value> {
@@ -252,6 +327,9 @@ pub fn input_schema(name: &str) -> Option<Value> {
         "ContextBundle" => Some(context_bundle_schema()),
         "SemanticSearch" => Some(semantic_search_schema()),
         "RulesInventory" => Some(rules_inventory_schema()),
+        "RankHotspots" => Some(rank_hotspots_schema()),
+        "Communities" => Some(communities_schema()),
+        "Lineage" => Some(lineage_schema()),
         _ => None,
     }
 }
@@ -628,8 +706,15 @@ mod tests {
 
     // ── tools/list ────────────────────────────────────────────────────────────
 
+    /// DoD-A4: `tools/list` exposes the **10 unconditional read tools** as a floor, with
+    /// `SemanticSearch` conditionally present (the dim-guard), so the count is **10 or 11**.
+    ///
+    /// `handle_request` wires no semantic tool (`None`), so the dim-guard cannot pass and the bare
+    /// floor is exactly 10. The conditional 11th is covered by the dim-guard gate tests
+    /// (`semantic_advertised_*` / `semantic_not_advertised_*`) which drive
+    /// `handle_request_with_semantic` with a live `Some(&tool)`.
     #[test]
-    fn tools_list_returns_seven_tools() {
+    fn tools_list_returns_ten_unconditional_tools() {
         let store = fixture();
         let req = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} });
         let resp = handle_request(&store, &req);
@@ -637,7 +722,52 @@ mod tests {
         let tools = resp["result"]["tools"]
             .as_array()
             .expect("tools must be array");
-        assert_eq!(tools.len(), 7, "must expose exactly 7 tools");
+        assert_eq!(
+            tools.len(),
+            10,
+            "the unconditional read-tool floor is exactly 10 (no semantic wired); got {}",
+            tools.len()
+        );
+        // Annotate must NOT be on the read-only MCP surface (design §2.3).
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(
+            !names.contains(&"Annotate"),
+            "Annotate must NOT appear in tools/list (read-only surface)"
+        );
+    }
+
+    /// DoD-A4: when SemanticSearch IS wired and the dim-guard passes, the count rises to **11** —
+    /// the 10 unconditional + the conditional semantic tool. Falsifier for the floor being a hard
+    /// ceiling.
+    #[test]
+    fn tools_list_returns_eleven_with_semantic_available() {
+        let store = fixture();
+        let fake = FakeSemantic;
+        // Matching id + dim → dim-guard passes → SemanticSearch advertised as the 11th tool.
+        let ctx = McpContext {
+            embedder_runtime_id: Some("hash:v1".into()),
+            embedder_runtime_dim: Some(64),
+            embedder_meta_id: Some("hash:v1".into()),
+            embedder_meta_dim: Some(64),
+            ..Default::default()
+        };
+        assert!(
+            semantic_advert(&ctx).is_ok(),
+            "precondition: matching id+dim must pass the dim-guard"
+        );
+        let resp = handle_request_with_semantic(&store, &tools_list_req(), &ctx, Some(&fake));
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        assert_eq!(
+            tools.len(),
+            11,
+            "10 unconditional + 1 conditional SemanticSearch = 11; got {}",
+            tools.len()
+        );
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(
+            names.contains(&"SemanticSearch"),
+            "SemanticSearch must be the 11th"
+        );
     }
 
     #[test]
@@ -661,6 +791,9 @@ mod tests {
             "FetchContent",
             "ContextBundle",
             "RulesInventory",
+            "RankHotspots",
+            "Communities",
+            "Lineage",
         ] {
             assert!(names.contains(expected), "expected tool {expected} in list");
         }
@@ -1032,6 +1165,9 @@ mod tests {
             "BlastRadius",
             "FetchContent",
             "ContextBundle",
+            "RankHotspots",
+            "Communities",
+            "Lineage",
         ] {
             assert!(
                 input_schema(name).is_some(),
