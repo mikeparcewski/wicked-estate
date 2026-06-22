@@ -1085,4 +1085,264 @@ mod tests {
             "R7 diagnostic must surface through the MCP envelope"
         );
     }
+
+    // ── DoD-A6a + DoD-A6b: dim-guard + live SemanticSearch dispatch ────────────
+    //
+    // These gate tests operate at the routing level (handle_request_with_semantic) with a
+    // synthetic live SemanticSearch tool + synthetic McpContext embedder ids — no real model2vec
+    // or `semantic` feature needed (the spec permits a synthetic runtime embedder with a distinct
+    // id()/dim() to simulate the runtime). The store's recorded embedder is modelled by the
+    // `embedder_meta_*` ctx fields, exactly as main.rs reads them from store meta.
+
+    /// Stand-in for the live SemanticSearch tool. Same `name()` so the registry/dispatch treats it
+    /// identically; returns a sentinel so a test can prove dispatch actually reached it.
+    #[derive(Debug)]
+    struct FakeSemantic;
+    impl RetrievalTool for FakeSemantic {
+        fn name(&self) -> &str {
+            "SemanticSearch"
+        }
+        fn description(&self) -> &str {
+            "fake semantic search (test)"
+        }
+        fn invoke(
+            &self,
+            _store: &dyn GraphRead,
+            _request: &Value,
+        ) -> wicked_estate_core::Result<wicked_estate_core::query::RetrievalResult> {
+            Ok(wicked_estate_core::query::RetrievalResult {
+                content: json!({ "matches": [], "total": 0, "__fake_semantic_reached": true }),
+                diagnostics: vec![],
+            })
+        }
+    }
+
+    /// Build a context with the four dim-guard fields set.
+    fn guard_ctx(
+        meta_id: Option<&str>,
+        meta_dim: Option<usize>,
+        rt_id: Option<&str>,
+        rt_dim: Option<usize>,
+    ) -> McpContext {
+        McpContext {
+            commits_behind: None,
+            embedder_runtime_id: rt_id.map(str::to_string),
+            embedder_runtime_dim: rt_dim,
+            embedder_meta_id: meta_id.map(str::to_string),
+            embedder_meta_dim: meta_dim,
+        }
+    }
+
+    fn tool_names(resp: &Value) -> Vec<String> {
+        resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn tools_list_req() -> Value {
+        json!({ "jsonrpc": "2.0", "id": 100, "method": "tools/list", "params": {} })
+    }
+
+    fn semantic_call_req() -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": { "name": "SemanticSearch", "arguments": { "query": "anything" } }
+        })
+    }
+
+    // ── DoD-A6a ──
+
+    #[test]
+    fn dod_a6a_mismatch_id_dim_not_advertised_and_not_callable() {
+        // Store embedded with HashEmbedder (hash:v1 / 128); runtime is a DIFFERENT 256-d model.
+        // The falsifier this defeats: advertised-but-silently-empty. We require BOTH that it is
+        // absent from tools/list AND that a direct call is rejected (unknown tool) — honest absence.
+        let store = fixture();
+        let ctx = guard_ctx(
+            Some("hash:v1"),
+            Some(128),
+            Some("model2vec:potion"),
+            Some(256),
+        );
+        let fake = FakeSemantic;
+
+        let listed = handle_request_with_semantic(&store, &tools_list_req(), &ctx, Some(&fake));
+        assert!(
+            !tool_names(&listed).contains(&"SemanticSearch".to_string()),
+            "id/dim mismatch must NOT advertise SemanticSearch"
+        );
+
+        let called = handle_request_with_semantic(&store, &semantic_call_req(), &ctx, Some(&fake));
+        assert_eq!(
+            called["result"]["isError"].as_bool(),
+            None,
+            "mismatch: SemanticSearch must be rejected as an unknown tool (JSON-RPC error), \
+             not dispatched to a silently-empty result"
+        );
+        assert_eq!(
+            called["error"]["code"].as_i64(),
+            Some(-32602),
+            "unknown-tool error expected when semantic is guarded off"
+        );
+    }
+
+    #[test]
+    fn dod_a6a_same_dim_different_id_not_advertised() {
+        // Two distinct 384-d models: dim matches, identity does not. Identity is decisive.
+        let store = fixture();
+        let ctx = guard_ctx(
+            Some("fastembed:bge-small-en-v1.5"),
+            Some(384),
+            Some("model2vec:other-384"),
+            Some(384),
+        );
+        let fake = FakeSemantic;
+        let listed = handle_request_with_semantic(&store, &tools_list_req(), &ctx, Some(&fake));
+        assert!(
+            !tool_names(&listed).contains(&"SemanticSearch".to_string()),
+            "same-dim/different-id must NOT advertise — dim-equality is insufficient"
+        );
+        assert!(
+            semantic_advert(&ctx)
+                .unwrap_err()
+                .starts_with("EMBED-MISMATCH:"),
+            "diagnostic must be EMBED-MISMATCH"
+        );
+    }
+
+    #[test]
+    fn dod_a6a_none_meta_not_advertised_emits_meta_missing() {
+        // Store predates embedder tagging (meta None) — fail closed.
+        let store = fixture();
+        let ctx = guard_ctx(None, None, Some("hash:v1"), Some(128));
+        let fake = FakeSemantic;
+
+        let listed = handle_request_with_semantic(&store, &tools_list_req(), &ctx, Some(&fake));
+        assert!(
+            !tool_names(&listed).contains(&"SemanticSearch".to_string()),
+            "None meta must NOT advertise SemanticSearch (fail closed)"
+        );
+        let err = semantic_advert(&ctx).unwrap_err();
+        assert!(
+            err.starts_with("EMBED-META-MISSING:"),
+            "None meta must yield EMBED-META-MISSING, got: {err}"
+        );
+    }
+
+    #[test]
+    fn dod_a6a_matched_id_dim_is_advertised() {
+        // Store embedder identity + dim match the runtime → advertise.
+        let store = fixture();
+        let ctx = guard_ctx(Some("hash:v1"), Some(128), Some("hash:v1"), Some(128));
+        let fake = FakeSemantic;
+
+        assert!(
+            semantic_advert(&ctx).is_ok(),
+            "matched id/dim must pass the guard"
+        );
+        let listed = handle_request_with_semantic(&store, &tools_list_req(), &ctx, Some(&fake));
+        assert!(
+            tool_names(&listed).contains(&"SemanticSearch".to_string()),
+            "matched id/dim must advertise SemanticSearch"
+        );
+    }
+
+    #[test]
+    fn dod_a6a_matched_but_no_live_tool_still_not_advertised() {
+        // Guard passes but no live instance wired (e.g. :memory: db) → cannot advertise a tool that
+        // does not exist. Belt-and-suspenders: advertise requires BOTH guard ok AND a live tool.
+        let store = fixture();
+        let ctx = guard_ctx(Some("hash:v1"), Some(128), Some("hash:v1"), Some(128));
+        let listed = handle_request_with_semantic(&store, &tools_list_req(), &ctx, None);
+        assert!(
+            !tool_names(&listed).contains(&"SemanticSearch".to_string()),
+            "no live tool ⇒ not advertised even when the guard passes"
+        );
+    }
+
+    // ── DoD-A6b ──
+
+    #[test]
+    fn dod_a6b_list_then_call_reaches_live_semantic() {
+        // The dispatch-path bug: handle_tools_call resolved against bare all_tools() (no
+        // SemanticSearch) so a list→call never reached a live instance. With the fix + a passing
+        // guard, the call must reach the live tool — proven by the sentinel in its content.
+        let store = fixture();
+        let ctx = guard_ctx(Some("hash:v1"), Some(128), Some("hash:v1"), Some(128));
+        let fake = FakeSemantic;
+
+        // 1) list advertises it
+        let listed = handle_request_with_semantic(&store, &tools_list_req(), &ctx, Some(&fake));
+        assert!(tool_names(&listed).contains(&"SemanticSearch".to_string()));
+
+        // 2) call reaches it (not "unknown tool")
+        let called = handle_request_with_semantic(&store, &semantic_call_req(), &ctx, Some(&fake));
+        assert_eq!(
+            called["result"]["isError"].as_bool(),
+            Some(false),
+            "SemanticSearch call must succeed via the live dispatch path"
+        );
+        let first_text = called["result"]["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(first_text).unwrap();
+        assert_eq!(
+            parsed["__fake_semantic_reached"].as_bool(),
+            Some(true),
+            "dispatch must reach the LIVE SemanticSearch instance, not bare all_tools()"
+        );
+    }
+
+    #[test]
+    fn dod_a6b_hash_fallback_rides_lexical_fallback_in_response_diagnostics() {
+        // Runtime embedder is the hash fallback. A SemanticSearch call must carry LEXICAL-FALLBACK
+        // in the RESPONSE the agent reads (not stderr). Falsifier defeated: we assert it appears in
+        // the response content, so a stderr-only emission would fail this test.
+        let store = fixture();
+        let ctx = guard_ctx(Some("hash:v1"), Some(128), Some("hash:v1"), Some(128));
+        let fake = FakeSemantic;
+
+        let called = handle_request_with_semantic(&store, &semantic_call_req(), &ctx, Some(&fake));
+        let response_text = called["result"]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            response_text
+                .contains("LEXICAL-FALLBACK: no semantic model loaded; results are lexical"),
+            "hash-fallback SemanticSearch call must ride LEXICAL-FALLBACK in the response \
+             diagnostics; got: {response_text}"
+        );
+    }
+
+    #[test]
+    fn dod_a6b_non_hash_runtime_has_no_lexical_fallback() {
+        // Negative control: a real semantic runtime (non-hash id) must NOT carry the lexical marker.
+        let store = fixture();
+        let ctx = guard_ctx(
+            Some("model2vec:potion-base-8M"),
+            Some(256),
+            Some("model2vec:potion-base-8M"),
+            Some(256),
+        );
+        let fake = FakeSemantic;
+        let called = handle_request_with_semantic(&store, &semantic_call_req(), &ctx, Some(&fake));
+        let response_text = called["result"]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !response_text.contains("LEXICAL-FALLBACK"),
+            "a non-hash runtime embedder must NOT emit LEXICAL-FALLBACK"
+        );
+    }
 }

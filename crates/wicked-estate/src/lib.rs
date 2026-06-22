@@ -2110,7 +2110,10 @@ mod tests {
         assert_eq!(n, 1, "one node embedded");
 
         // After embedding: meta carries the exact embedder identity + dim used at index time.
-        assert_eq!(store.meta_get_key("embedder_id").as_deref(), Some("hash:v1"));
+        assert_eq!(
+            store.meta_get_key("embedder_id").as_deref(),
+            Some("hash:v1")
+        );
         assert_eq!(store.meta_get_key("embedder_dim").as_deref(), Some("128"));
     }
 }

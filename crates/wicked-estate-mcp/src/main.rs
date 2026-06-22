@@ -199,9 +199,9 @@ async fn main() -> Result<()> {
 
     let semantic: Option<std::sync::Arc<wicked_estate_retrieve::SemanticSearch>> =
         if db_path != ":memory:" {
-            SqliteStore::open(&db_path)
-                .ok()
-                .map(|vec_store| std::sync::Arc::new(wicked_estate_mcp::live_semantic_search(vec_store)))
+            SqliteStore::open(&db_path).ok().map(|vec_store| {
+                std::sync::Arc::new(wicked_estate_mcp::live_semantic_search(vec_store))
+            })
         } else {
             None
         };
