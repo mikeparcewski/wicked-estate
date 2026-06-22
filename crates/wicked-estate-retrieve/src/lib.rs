@@ -9,6 +9,8 @@
 //! | `TraverseGraph`    | Bounded multi-hop walk from a start symbol            |
 //! | `BlastRadius`      | Transitive dependents (reverse-reachability on Calls) |
 //! | `Lineage`          | Transitive dependencies (what a symbol depends on)    |
+//! | `RankHotspots`     | Most central symbols by PageRank (W4.1)               |
+//! | `Communities`      | Louvain communities + summaries (W4.1)                |
 //! | `ContextPack`      | Token-budgeted ranked elided-stub context (W4.2)      |
 //! | `SemanticSearch`   | Embedding-based ANN search (W5.2)                     |
 //! | `RulesInventory`   | List all rules-engine nodes + invoking code (W15)     |
@@ -1097,15 +1099,14 @@ impl RetrievalTool for Lineage {
             "edge_count": edge_count,
         });
 
-        let total = dependencies.len();
-
         if dependencies.is_empty() {
             diag.push(format!(
                 "Lineage: no dependencies found for '{id_str}' \
                  (it may be a leaf or not yet indexed)"
             ));
         }
-        if subgraph.truncated {
+        let node_truncated = subgraph.truncated;
+        if node_truncated {
             diag.push(format!(
                 "Lineage: result truncated at depth={max_depth} / max_nodes=5000"
             ));
@@ -1123,12 +1124,327 @@ impl RetrievalTool for Lineage {
             ));
         }
 
+        // R4 (DoD-A8) — `max_nodes=5000` bounds the traversal, but 5000 wide rows can still exceed
+        // the 25K-char budget. Cap the serialized `dependencies` array under the budget and emit a
+        // loud truncation diagnostic when it bites, on top of the depth/node-cap note above.
+        let envelope_overhead = 160; // dependencies + total + truncated + confidence scaffolding.
+        let (dependencies, dropped) = cap_rows_to_budget(dependencies, envelope_overhead);
+        if dropped > 0 {
+            diag.push(format!(
+                "Lineage: result truncated to {} dependency/dependencies to stay under the \
+                 {}-char R4 budget ({} dropped); lower `depth`",
+                dependencies.len(),
+                R4_CHAR_BUDGET,
+                dropped
+            ));
+        }
+        let truncated = node_truncated || dropped > 0;
+        let total = dependencies.len();
+
         Ok(RetrievalResult {
             content: json!({
                 "dependencies": dependencies,
                 "total": total,
-                "truncated": subgraph.truncated,
+                "truncated": truncated,
                 "confidence": conf_json,
+            }),
+            diagnostics: diag,
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// R4 char-budget cap (shared by the graph-summary tools)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Hard ceiling on a tool's serialized `content` (R4, CLAUDE.md runtime contract: output < 25K
+/// chars). The graph-summary tools (`RankHotspots`, `Communities`) can return one row per node on a
+/// wide graph, so they cap the row count to keep the payload under this budget and emit a loud
+/// truncation diagnostic when the cap bites — an agent must never silently reason over a cut body.
+const R4_CHAR_BUDGET: usize = 25_000;
+
+/// Trim `items` (already in priority order: best first) until the serialized JSON array fits under
+/// [`R4_CHAR_BUDGET`], leaving headroom for the surrounding envelope keys. Returns the kept rows and
+/// the number dropped. Binary-search on length keeps this O(log n · serialize), not O(n) re-serialize
+/// per drop, on a wide graph.
+fn cap_rows_to_budget(items: Vec<Value>, envelope_overhead: usize) -> (Vec<Value>, usize) {
+    let budget = R4_CHAR_BUDGET.saturating_sub(envelope_overhead);
+    let fits =
+        |rows: &[Value]| -> bool { serde_json::to_string(rows).is_ok_and(|s| s.len() <= budget) };
+    if fits(&items) {
+        return (items, 0);
+    }
+    // Largest prefix length `keep` (0..=items.len()) whose serialization fits.
+    let (mut lo, mut hi) = (0usize, items.len());
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if fits(&items[..mid]) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let keep = lo;
+    let dropped = items.len() - keep;
+    let mut kept = items;
+    kept.truncate(keep);
+    (kept, dropped)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RankHotspots — global PageRank importance ranking (W4.1 promotion)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **`RankHotspots`** — the most central symbols in the graph by (personalized) PageRank over
+/// Calls + Imports edges.
+///
+/// Answers *"what are the load-bearing symbols here?"* — the functions/types the most code flows
+/// through. Use to orient in an unfamiliar repo, to pick refactor targets, or to seed a
+/// change-impact review. Wraps [`wicked_estate_rank::ranked_symbols`] (the `Ranker`/PageRank
+/// backing) and denormalizes each ranked id into `{symbol,name,kind,file,line,score}`.
+///
+/// **Request shape**
+/// ```json
+/// { "limit": <n>, "seeds": ["<id>", …] }
+/// ```
+/// * `limit` (optional, default 20, max 200) — how many top symbols to return.
+/// * `seeds` (optional) — symbol ids to bias the ranking toward (personalized PageRank, Aider
+///   repo-map pattern); omit for standard global PageRank.
+///
+/// **Response `content` shape**
+/// ```json
+/// { "hotspots": [ { "symbol": "…", "name": "…", "kind": "…",
+///                    "file": "…", "line": 0, "score": 0.0123 }, … ],
+///   "total": 20, "truncated": false }
+/// ```
+/// Agent-behavior rules honored: R1 (empty graph → empty list, no error), R4 (`limit` + the
+/// [`R4_CHAR_BUDGET`] char cap), R5 (staleness note).
+#[derive(Debug, Default)]
+pub struct RankHotspots;
+
+impl RetrievalTool for RankHotspots {
+    fn name(&self) -> &str {
+        "RankHotspots"
+    }
+
+    fn description(&self) -> &str {
+        "Most central symbols by PageRank over Calls+Imports edges. \
+         Answers 'what are the load-bearing symbols here?' — the code the most paths flow through. \
+         Use to orient in an unfamiliar repo, pick refactor targets, or seed a change-impact \
+         review. Optionally bias toward `seeds` for a personalized (subsystem-local) ranking."
+    }
+
+    fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
+        let limit = opt_u64(request, "limit").unwrap_or(20).clamp(1, 200) as usize;
+
+        // Optional personalization seeds.
+        let seeds: Vec<SymbolId> = request
+            .get("seeds")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| SymbolId(s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut diag = vec![staleness_note()];
+
+        // Global / personalized PageRank, top-`limit` symbols (already sorted high-score first).
+        let ranked = wicked_estate_rank::ranked_symbols(store, &seeds, limit)?;
+
+        // Denormalize each id into a row; a single get_node cache avoids N+1 churn on shared ids.
+        let mut cache: HashMap<String, Option<wicked_estate_core::Node>> = HashMap::new();
+        let mut hotspots: Vec<Value> = Vec::with_capacity(ranked.len());
+        for (id, score) in &ranked {
+            let node = match cache.get(id.as_str()) {
+                Some(n) => n.clone(),
+                None => {
+                    let n = store.get_node(id)?;
+                    cache.insert(id.0.clone(), n.clone());
+                    n
+                }
+            };
+            let (name, kind, file, line, line1) = match &node {
+                Some(n) => (
+                    Value::String(n.name.clone()),
+                    kind_json(&n.kind),
+                    Value::String(n.location.file.clone()),
+                    json!(n.location.span.start_line),
+                    json!(line_1based(n)),
+                ),
+                None => (
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                ),
+            };
+            hotspots.push(json!({
+                "symbol": id.as_str(),
+                "name": name,
+                "kind": kind,
+                "file": file,
+                "line": line,
+                "line_1based": line1,
+                "score": score,
+            }));
+        }
+
+        if hotspots.is_empty() {
+            diag.push(
+                "RankHotspots: graph is empty or has no Calls/Imports edges (nothing to rank)"
+                    .to_string(),
+            );
+        }
+
+        // R4 — cap the payload under 25K chars. `ranked_symbols` is bounded by `limit` (≤200), but
+        // wide rows (long ids/paths) can still push the array over budget; trim loudly if so.
+        let envelope_overhead = 96; // {"hotspots":[…],"total":N,"truncated":true} scaffolding.
+        let (hotspots, dropped) = cap_rows_to_budget(hotspots, envelope_overhead);
+        let truncated = dropped > 0;
+        if truncated {
+            diag.push(format!(
+                "RankHotspots: result truncated to {} row(s) to stay under the {}-char R4 budget \
+                 ({} dropped); raise specificity or lower `limit`",
+                hotspots.len(),
+                R4_CHAR_BUDGET,
+                dropped
+            ));
+        }
+
+        let total = hotspots.len();
+        Ok(RetrievalResult {
+            content: json!({
+                "hotspots": hotspots,
+                "total": total,
+                "truncated": truncated,
+            }),
+            diagnostics: diag,
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Communities — graph-structural community detection (Louvain, W4.1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **`Communities`** — modularity communities over the Calls + Imports graph, each summarized with
+/// its top-PageRank members and dominant files.
+///
+/// Answers *"what are the natural subsystems here?"* — clusters of symbols more tightly connected
+/// to each other than to the rest of the graph. Use to map an unfamiliar codebase into modules or
+/// to scope a refactor to a cohesive unit.
+///
+/// Wraps [`wicked_estate_rank::detect_communities`] (multi-level **Louvain** over the graph) +
+/// [`wicked_estate_rank::summarize_communities`]. This is the **graph-structural** (unconditional,
+/// `GraphRead`-only) community tool; embedding-proximity clustering (`semantic_clusters`) needs the
+/// semantic sidecar and is **not** part of the read-only MCP surface (see the design's §2.3).
+///
+/// **Request shape**
+/// ```json
+/// { "limit": <n>, "min_size": <m>, "resolution": <γ> }
+/// ```
+/// * `limit` (optional, default 20, max 200) — how many communities to return (largest first).
+/// * `min_size` (optional, default 2) — drop communities smaller than this.
+/// * `resolution` (optional, default 1.0) — Louvain γ; `> 1.0` yields smaller, tighter communities.
+///
+/// **Response `content` shape**
+/// ```json
+/// { "communities": [ { "size": 12, "top_symbols": ["…"], "dominant_files": ["…"],
+///                       "modularity_contribution": 0.07 }, … ],
+///   "total": 8, "truncated": false }
+/// ```
+/// Agent-behavior rules honored: R1 (empty graph → empty list), R4 (`limit` + [`R4_CHAR_BUDGET`]),
+/// R5 (staleness note).
+#[derive(Debug, Default)]
+pub struct Communities;
+
+impl RetrievalTool for Communities {
+    fn name(&self) -> &str {
+        "Communities"
+    }
+
+    fn description(&self) -> &str {
+        "Modularity (Louvain) communities over Calls+Imports edges, each summarized with its \
+         top-PageRank members and dominant files. Answers 'what are the natural subsystems here?' \
+         — clusters of symbols more tightly connected to each other than to the rest of the graph. \
+         Use to map an unfamiliar codebase into modules or scope a refactor to a cohesive unit."
+    }
+
+    fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
+        let limit = opt_u64(request, "limit").unwrap_or(20).clamp(1, 200) as usize;
+        let min_size = opt_u64(request, "min_size").unwrap_or(2).max(1) as usize;
+        let resolution = request
+            .get("resolution")
+            .and_then(|v| v.as_f64())
+            .filter(|r| r.is_finite() && *r > 0.0)
+            .unwrap_or(1.0);
+
+        let mut diag = vec![staleness_note()];
+
+        let params = wicked_estate_rank::CommunityParams {
+            min_size,
+            include_singletons: false,
+            resolution,
+            hierarchical: false,
+            package_bias: 0.0,
+        };
+
+        // Detect (Louvain) then summarize (top-PageRank members + dominant files per community).
+        let partition = wicked_estate_rank::detect_communities(store, &params)?;
+        let summaries = wicked_estate_rank::summarize_communities(store, &partition, resolution)?;
+
+        if summaries.is_empty() {
+            diag.push(format!(
+                "Communities: no communities of size >= {min_size} found \
+                 (graph may be empty, edgeless, or fully fragmented)"
+            ));
+        }
+
+        // summarize_communities returns largest-first; take the top `limit` before serializing.
+        let total_detected = summaries.len();
+        let mut rows: Vec<Value> = summaries
+            .iter()
+            .take(limit)
+            .map(|s| {
+                json!({
+                    "size": s.size,
+                    "top_symbols": s.top_symbols,
+                    "dominant_files": s.dominant_files,
+                    "modularity_contribution": s.modularity_contribution,
+                })
+            })
+            .collect();
+
+        let mut dropped_by_limit = total_detected.saturating_sub(rows.len());
+
+        // R4 — cap under 25K chars; community rows carry up to 5 symbols + 3 files each, so a wide
+        // graph with many communities can exceed budget even after `limit`. Trim loudly if so.
+        let envelope_overhead = 96;
+        let (capped, dropped_by_budget) = cap_rows_to_budget(rows, envelope_overhead);
+        rows = capped;
+        dropped_by_limit += dropped_by_budget;
+        let truncated = dropped_by_limit > 0;
+        if dropped_by_budget > 0 {
+            diag.push(format!(
+                "Communities: result truncated to {} community/communities to stay under the \
+                 {}-char R4 budget ({} dropped); lower `limit`",
+                rows.len(),
+                R4_CHAR_BUDGET,
+                dropped_by_budget
+            ));
+        }
+
+        let total = rows.len();
+        Ok(RetrievalResult {
+            content: json!({
+                "communities": rows,
+                "total": total,
+                "truncated": truncated,
             }),
             diagnostics: diag,
         })
@@ -4217,6 +4533,262 @@ mod tests {
         assert!(
             invoked_by.is_empty(),
             "no InvokedBy edges → invoked_by must be empty"
+        );
+    }
+
+    // ── DoD-A8: R4 < 25K char ceiling on RankHotspots / Communities / Lineage ──
+    //
+    // Each test builds a WIDE graph whose untruncated payload would exceed 25K chars, invokes the
+    // tool, and asserts BOTH: (1) the serialized `content` is < 25,000 chars, and (2) a truncation
+    // diagnostic is present when the cap bites. The falsifier each defeats is a >25K payload on a
+    // large repo. A paired "narrow graph" assertion proves the cap does NOT fire spuriously (no
+    // truncation diag, full result) on a small graph — the cap is data-driven, not unconditional.
+
+    /// Long ids + long file paths make each row fat, so a few hundred rows blow past 25K chars.
+    fn wide_node(i: usize) -> Node {
+        // ~120-char id + ~80-char path per node → ~hundreds of chars per serialized row.
+        let id = format!(
+            "crate::very::deeply::nested::module::path::segment::number::{i:05}::symbol_with_a_long_descriptive_name_{i:05}"
+        );
+        let name = format!("a_long_descriptive_function_name_number_{i:05}");
+        let file = format!("src/very/deeply/nested/module/path/segment/file_{i:05}.rs");
+        make_node(&id, &name, NodeKind::Function, &file, (i % 1000) as u32)
+    }
+
+    fn wide_id(i: usize) -> String {
+        format!(
+            "crate::very::deeply::nested::module::path::segment::number::{i:05}::symbol_with_a_long_descriptive_name_{i:05}"
+        )
+    }
+
+    /// R4 ceiling — RankHotspots. Build a wide hub graph (N callers → 1 core) so PageRank ranks
+    /// every node, then cap with a high `limit` so the char budget (not `limit`) is the binding cap.
+    #[test]
+    fn rank_hotspots_caps_output_under_25k_chars_with_diag() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        let n = 400usize;
+        let mut nodes: Vec<Node> = (0..n).map(wide_node).collect();
+        nodes.push(make_node(
+            "core",
+            "core_fn",
+            NodeKind::Function,
+            "src/core.rs",
+            1,
+        ));
+        store.upsert_nodes(&nodes).unwrap();
+        let edges: Vec<Edge> = (0..n)
+            .map(|i| make_call_edge(&wide_id(i), "core"))
+            .collect();
+        store.upsert_edges(&edges).unwrap();
+        store.commit_batch().unwrap();
+
+        let tool = RankHotspots;
+        // limit=200 (the max) → 201 nodes ranked, but only ≤200 returned; wide rows still exceed 25K.
+        let res = tool.invoke(&store, &json!({ "limit": 200 })).unwrap();
+
+        let payload = serde_json::to_string(&res.content).unwrap();
+        assert!(
+            payload.len() < R4_CHAR_BUDGET,
+            "RankHotspots payload must be < {R4_CHAR_BUDGET} chars, got {}",
+            payload.len()
+        );
+        assert_eq!(
+            res.content["truncated"],
+            json!(true),
+            "must report truncation"
+        );
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.contains("truncated") && d.contains("R4")),
+            "a truncation diagnostic must be present when capped; got {:?}",
+            res.diagnostics
+        );
+    }
+
+    /// Falsifier guard — a narrow graph must NOT trigger the R4 cap (no truncation diag, full list).
+    #[test]
+    fn rank_hotspots_no_truncation_on_narrow_graph() {
+        let store = fixture_store(); // 3 short-named nodes
+        let tool = RankHotspots;
+        let res = tool.invoke(&store, &json!({ "limit": 200 })).unwrap();
+        let payload = serde_json::to_string(&res.content).unwrap();
+        assert!(payload.len() < R4_CHAR_BUDGET);
+        assert_eq!(
+            res.content["truncated"],
+            json!(false),
+            "narrow graph must not truncate"
+        );
+        assert!(
+            !res.diagnostics.iter().any(|d| d.contains("R4 budget")),
+            "no R4 truncation diag on a narrow graph; got {:?}",
+            res.diagnostics
+        );
+        assert_eq!(
+            res.content["total"].as_u64().unwrap(),
+            3,
+            "all 3 nodes ranked"
+        );
+    }
+
+    /// R4 ceiling — Lineage. Build a star where `root` depends on N wide-named leaves (root → leaf).
+    /// Lineage walks Dependencies from `root`, so all N leaves are dependencies; wide rows exceed 25K.
+    #[test]
+    fn lineage_caps_output_under_25k_chars_with_diag() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        let n = 400usize;
+        let mut nodes: Vec<Node> = (0..n).map(wide_node).collect();
+        nodes.push(make_node(
+            "root",
+            "root_fn",
+            NodeKind::Function,
+            "src/root.rs",
+            1,
+        ));
+        store.upsert_nodes(&nodes).unwrap();
+        // root → leaf_i (root depends on each leaf): Dependencies direction reaches all leaves.
+        let edges: Vec<Edge> = (0..n)
+            .map(|i| make_call_edge("root", &wide_id(i)))
+            .collect();
+        store.upsert_edges(&edges).unwrap();
+        store.commit_batch().unwrap();
+
+        let tool = Lineage;
+        let res = tool
+            .invoke(&store, &json!({ "symbol": "root", "depth": 24 }))
+            .unwrap();
+
+        let payload = serde_json::to_string(&res.content).unwrap();
+        assert!(
+            payload.len() < R4_CHAR_BUDGET,
+            "Lineage payload must be < {R4_CHAR_BUDGET} chars, got {}",
+            payload.len()
+        );
+        assert_eq!(
+            res.content["truncated"],
+            json!(true),
+            "must report truncation"
+        );
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("R4 budget")),
+            "a char-budget truncation diagnostic must be present when capped; got {:?}",
+            res.diagnostics
+        );
+    }
+
+    /// Falsifier guard — a narrow graph must NOT trigger Lineage's R4 cap.
+    #[test]
+    fn lineage_no_truncation_on_narrow_graph() {
+        let store = fixture_store(); // caller → middle → leaf
+        let tool = Lineage;
+        // Lineage from `caller` reaches middle + leaf (2 deps), tiny payload.
+        let res = tool
+            .invoke(&store, &json!({ "symbol": "caller", "depth": 24 }))
+            .unwrap();
+        let payload = serde_json::to_string(&res.content).unwrap();
+        assert!(payload.len() < R4_CHAR_BUDGET);
+        assert_eq!(
+            res.content["truncated"],
+            json!(false),
+            "narrow graph must not truncate"
+        );
+        assert!(
+            !res.diagnostics.iter().any(|d| d.contains("R4 budget")),
+            "no R4 truncation diag on a narrow graph; got {:?}",
+            res.diagnostics
+        );
+        assert_eq!(res.content["total"].as_u64().unwrap(), 2, "middle + leaf");
+    }
+
+    /// R4 ceiling — Communities. Build many disjoint wide-named triangles (each a size-3 community)
+    /// so the summary list (≤5 top_symbols + ≤3 files per row) exceeds 25K chars across communities.
+    #[test]
+    fn communities_caps_output_under_25k_chars_with_diag() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        let groups = 300usize;
+        let mut nodes: Vec<Node> = Vec::new();
+        let mut edges: Vec<Edge> = Vec::new();
+        for g in 0..groups {
+            let a = wide_id(g * 3);
+            let b = wide_id(g * 3 + 1);
+            let c = wide_id(g * 3 + 2);
+            nodes.push(wide_node(g * 3));
+            nodes.push(wide_node(g * 3 + 1));
+            nodes.push(wide_node(g * 3 + 2));
+            // Triangle (fully connected) → a tight modularity community of size 3, disjoint from
+            // every other group (no cross-group edges).
+            edges.push(make_call_edge(&a, &b));
+            edges.push(make_call_edge(&b, &c));
+            edges.push(make_call_edge(&c, &a));
+        }
+        store.upsert_nodes(&nodes).unwrap();
+        store.upsert_edges(&edges).unwrap();
+        store.commit_batch().unwrap();
+
+        let tool = Communities;
+        // limit=200 (max) → up to 200 community rows; wide top_symbols/dominant_files exceed 25K.
+        let res = tool
+            .invoke(&store, &json!({ "limit": 200, "min_size": 2 }))
+            .unwrap();
+
+        let payload = serde_json::to_string(&res.content).unwrap();
+        assert!(
+            payload.len() < R4_CHAR_BUDGET,
+            "Communities payload must be < {R4_CHAR_BUDGET} chars, got {}",
+            payload.len()
+        );
+        assert_eq!(
+            res.content["truncated"],
+            json!(true),
+            "must report truncation"
+        );
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("R4 budget")),
+            "a char-budget truncation diagnostic must be present when capped; got {:?}",
+            res.diagnostics
+        );
+    }
+
+    /// Falsifier guard — a narrow graph (one small community) must NOT trigger Communities' R4 cap.
+    #[test]
+    fn communities_no_truncation_on_narrow_graph() {
+        // One triangle → exactly one size-3 community, tiny payload.
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node("a", "a_fn", NodeKind::Function, "src/a.rs", 1),
+                make_node("b", "b_fn", NodeKind::Function, "src/b.rs", 2),
+                make_node("c", "c_fn", NodeKind::Function, "src/c.rs", 3),
+            ])
+            .unwrap();
+        store
+            .upsert_edges(&[
+                make_call_edge("a", "b"),
+                make_call_edge("b", "c"),
+                make_call_edge("c", "a"),
+            ])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        let tool = Communities;
+        let res = tool
+            .invoke(&store, &json!({ "limit": 200, "min_size": 2 }))
+            .unwrap();
+        let payload = serde_json::to_string(&res.content).unwrap();
+        assert!(payload.len() < R4_CHAR_BUDGET);
+        assert_eq!(
+            res.content["truncated"],
+            json!(false),
+            "narrow graph must not truncate"
+        );
+        assert!(
+            !res.diagnostics.iter().any(|d| d.contains("R4 budget")),
+            "no R4 truncation diag on a narrow graph; got {:?}",
+            res.diagnostics
         );
     }
 }
