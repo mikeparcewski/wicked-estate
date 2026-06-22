@@ -16,7 +16,8 @@ use std::collections::HashMap;
 use std::io::Write;
 use tokio::io::AsyncBufReadExt;
 use wicked_estate_core::AsyncGraphStore as _;
-use wicked_estate_mcp::{McpContext, handle_request_ctx};
+use wicked_estate_mcp::{McpContext, handle_request_with_semantic};
+use wicked_estate_retrieve::Embedder as _;
 use wicked_estate_store::SqliteStore;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -170,18 +171,48 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Task F: build SemanticSearch with a second SqliteStore for vector lookup.
-    let has_semantic = db_path != ":memory:";
-    let _sem_store_for_future_ctx = if has_semantic {
-        SqliteStore::open(&db_path).ok()
+    // Dim-guard (DoD-A6a): read the store's recorded embedder identity + dim, and compute the
+    // runtime embedder's. SemanticSearch is advertised/dispatched only when they match.
+    let (embedder_meta_id, embedder_meta_dim) = if db_path != ":memory:" {
+        wicked_estate_store::open_store_ext(&db_path)
+            .ok()
+            .map(|s| {
+                (
+                    s.meta_get_key("embedder_id"),
+                    s.meta_get_key("embedder_dim").and_then(|d| d.parse().ok()),
+                )
+            })
+            .unwrap_or((None, None))
     } else {
-        None
+        (None, None)
     };
 
-    // 3. Build McpContext (unchanged — commits_behind, has_semantic_search).
+    // Build the LIVE SemanticSearch once (it owns a DB connection behind a Mutex — not cloneable,
+    // not cheap to rebuild). Shared across requests via Arc. A second SqliteStore handle backs the
+    // `nearest` vector lookups; the same DB is passed to invoke as &dyn GraphRead for node lookup.
+    // `default_embedder()` is the tiered FastEmbed→model2vec→hash selector — its id/dim are the
+    // runtime side of the guard.
+    let runtime_embedder = wicked_estate::default_embedder();
+    let embedder_runtime_id = Some(runtime_embedder.id().to_string());
+    let embedder_runtime_dim = Some(runtime_embedder.dim());
+    drop(runtime_embedder);
+
+    let semantic: Option<std::sync::Arc<wicked_estate_retrieve::SemanticSearch>> =
+        if db_path != ":memory:" {
+            SqliteStore::open(&db_path)
+                .ok()
+                .map(|vec_store| std::sync::Arc::new(wicked_estate_mcp::live_semantic_search(vec_store)))
+        } else {
+            None
+        };
+
+    // 3. Build McpContext with the dim-guard fields.
     let ctx = McpContext {
         commits_behind,
-        has_semantic_search: has_semantic,
+        embedder_runtime_id,
+        embedder_runtime_dim,
+        embedder_meta_id,
+        embedder_meta_dim,
     };
 
     // 4. Async stdin loop.
@@ -312,8 +343,17 @@ async fn main() -> Result<()> {
             .to_string();
         let t_tool = std::time::Instant::now();
         let ctx_clone = ctx.clone();
+        // Share the single live SemanticSearch into the blocking closure (Arc clone is cheap +
+        // Send + 'static). `handle_request_with_semantic` resolves tools/call against all_tools()
+        // plus this live instance, so a list→call for SemanticSearch reaches it (DoD-A6b).
+        let semantic_clone = semantic.clone();
         let resp = store
-            .with_read(move |graph| Ok(handle_request_ctx(graph, &req, &ctx_clone)))
+            .with_read(move |graph| {
+                let sem = semantic_clone
+                    .as_deref()
+                    .map(|s| s as &dyn wicked_estate_core::RetrievalTool);
+                Ok(handle_request_with_semantic(graph, &req, &ctx_clone, sem))
+            })
             .await?;
         emit_tool_duration(
             std::sync::Arc::clone(&otel_sink),

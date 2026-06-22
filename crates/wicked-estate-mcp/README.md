@@ -15,10 +15,11 @@ MCP stdio server that exposes the wicked-estate retrieval tools to LLM agents ov
 | Item | Description |
 |---|---|
 | `handle_request(store, req)` | Route one JSON-RPC 2.0 request; returns a `serde_json::Value`. Pure, no I/O. |
-| `handle_request_ctx(store, req, ctx)` | Like `handle_request` but injects `McpContext` (staleness + semantic flag). |
-| `McpContext` | Carries `commits_behind: Option<u64>` and `has_semantic_search: bool` from server startup. |
-| `all_tools()` | Returns the six base `RetrievalTool` instances (no `SemanticSearch`). |
-| `all_tools_with_semantic(vec_store)` | Full registry including `SemanticSearch` backed by the supplied `VectorStore`. |
+| `handle_request_ctx(store, req, ctx)` | Like `handle_request` but injects `McpContext` (staleness + dim-guard); no live SemanticSearch. |
+| `handle_request_with_semantic(store, req, ctx, semantic)` | Full routing — injects context **and** the live `SemanticSearch` tool (the serving loop uses this). |
+| `McpContext` | Carries `commits_behind` plus the four `embedder_*` dim-guard fields (runtime vs store-meta id/dim). |
+| `all_tools()` | Returns the seven always-on `RetrievalTool` instances (no `SemanticSearch` — it is stateful). |
+| `live_semantic_search(vec_store)` | Builds the live `SemanticSearch` backed by `default_embedder()` + the supplied `VectorStore`. |
 | `input_schema(name)` | Returns the JSON Schema `inputSchema` for a named tool; used by `tools/list`. |
 
 ## Usage
@@ -27,10 +28,12 @@ MCP stdio server that exposes the wicked-estate retrieval tools to LLM agents ov
 use wicked_estate_mcp::{handle_request_ctx, McpContext};
 
 let ctx = McpContext {
-    commits_behind: wicked_estate::commits_behind().ok(),
-    has_semantic_search: false,
+    commits_behind: None,
+    // Dim-guard: SemanticSearch is advertised/dispatched only when the store's recorded
+    // embedder identity + dim match the runtime embedder. All-None = fail closed (no semantic).
+    ..Default::default()
 };
-// Per-line JSON-RPC loop:
+// Per-line JSON-RPC loop (no live semantic tool):
 let response = handle_request_ctx(&store, &request_value, &ctx);
 if !response.is_null() {
     println!("{}", response);

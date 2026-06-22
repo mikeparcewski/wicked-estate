@@ -43,8 +43,12 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 // Tool registry
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// All retrieval tools in declaration order (no SemanticSearch — it requires a VectorStore).
-/// Use `all_tools_with_semantic` when a vector store is available.
+/// All always-on retrieval tools in declaration order.
+///
+/// SemanticSearch is **not** here — it is stateful (owns a `VectorStore` connection), so it cannot
+/// be a zero-sized entry rebuilt per request. It is constructed once at startup via
+/// [`live_semantic_search`] and threaded into [`handle_request_with_semantic`], which merges it
+/// with this list to form the live dispatch registry.
 pub fn all_tools() -> Vec<Box<dyn RetrievalTool>> {
     vec![
         Box::new(SearchEntity),
@@ -57,21 +61,19 @@ pub fn all_tools() -> Vec<Box<dyn RetrievalTool>> {
     ]
 }
 
-/// Full tool registry including SemanticSearch. Pass in a `VectorStore` implementation;
-/// `SemanticSearch::with_hash_embedder` is used (deterministic, no model download).
-pub fn all_tools_with_semantic(
+/// Build the **live** SemanticSearch tool backed by the real tiered embedder
+/// (`default_embedder()` — FastEmbed → model2vec → hash), not a hardcoded hash embedder.
+///
+/// `vec_store` is the concrete store used for `nearest` vector lookups (a second `SqliteStore`
+/// handle opened against the same DB). The same DB is passed to `invoke` as `&dyn GraphRead` for
+/// node resolution. Built **once** at server start and shared across requests (it holds a DB
+/// connection behind a `Mutex`, so it is neither cloneable nor cheap to rebuild). When
+/// `default_embedder()` falls back to the lexical `HashEmbedder`, [`handle_tools_call_ctx`]
+/// surfaces a per-call `LEXICAL-FALLBACK:` diagnostic (DoD-A6b).
+pub fn live_semantic_search(
     vec_store: impl wicked_estate_retrieve::VectorStore + 'static,
-) -> Vec<Box<dyn RetrievalTool>> {
-    vec![
-        Box::new(SearchEntity),
-        Box::new(RetrieveEntity),
-        Box::new(TraverseGraph),
-        Box::new(BlastRadius),
-        Box::new(FetchContent),
-        Box::new(ContextBundle),
-        Box::new(RulesInventory),
-        Box::new(SemanticSearch::with_hash_embedder(vec_store)),
-    ]
+) -> SemanticSearch {
+    SemanticSearch::new(wicked_estate::default_embedder(), vec_store)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -290,9 +292,13 @@ fn handle_initialize(id: &Value) -> Value {
     )
 }
 
-fn handle_tools_list_ctx(id: &Value, ctx: &McpContext) -> Value {
+fn handle_tools_list_ctx(
+    id: &Value,
+    ctx: &McpContext,
+    semantic: Option<&dyn RetrievalTool>,
+) -> Value {
     let base_tools = all_tools();
-    let tools: Vec<Value> = base_tools
+    let mut tools: Vec<Value> = base_tools
         .iter()
         .map(|t| {
             json!({
@@ -301,18 +307,20 @@ fn handle_tools_list_ctx(id: &Value, ctx: &McpContext) -> Value {
                 "inputSchema": input_schema(t.name()).unwrap_or(json!({"type": "object"}))
             })
         })
-        .chain(if ctx.has_semantic_search {
-            // SemanticSearch is registered as a known tool name; the server builds a real
-            // instance in main.rs. Here we just advertise it in the tool list.
-            vec![json!({
-                "name": "SemanticSearch",
-                "description": SemanticSearch::with_hash_embedder(wicked_estate_store::MemStore::new()).description(),
-                "inputSchema": semantic_search_schema()
-            })].into_iter()
-        } else {
-            vec![].into_iter()
-        })
         .collect();
+
+    // Advertise SemanticSearch ONLY when the live tool is wired AND the dim-guard passes
+    // (store embedder identity + dim match the runtime). A mismatch / missing-meta store leaves
+    // it absent — honest absence, not advertised-but-silently-empty (DoD-A6a).
+    if let Some(tool) = semantic {
+        if semantic_advert(ctx).is_ok() {
+            tools.push(json!({
+                "name": tool.name(),
+                "description": tool.description(),
+                "inputSchema": input_schema(tool.name()).unwrap_or(json!({"type": "object"}))
+            }));
+        }
+    }
 
     ok_response(id, json!({ "tools": tools }))
 }
@@ -322,6 +330,7 @@ fn handle_tools_call_ctx(
     params: &Value,
     store: &dyn GraphRead,
     ctx: &McpContext,
+    semantic: Option<&dyn RetrievalTool>,
 ) -> Value {
     let tool_name = match params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
@@ -333,17 +342,25 @@ fn handle_tools_call_ctx(
     // Default arguments to empty object if omitted.
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
-    // Find the matching tool.
-    let tools = all_tools();
-    let tool = match tools.iter().find(|t| t.name() == tool_name) {
-        Some(t) => t,
-        None => {
-            return err_response(
-                id,
-                -32602,
-                &format!("tools/call: unknown tool '{tool_name}'"),
-            );
-        }
+    // Dispatch registry = the always-on lexical/graph tools PLUS the LIVE SemanticSearch when it is
+    // wired and the dim-guard passes. Resolving against this (not bare `all_tools()`, which excludes
+    // SemanticSearch) is the DoD-A6b fix: a list→call for SemanticSearch now reaches a real instance
+    // built with the runtime store + embedder. When the guard fails, semantic stays unadvertised
+    // (handle_tools_list_ctx) AND unknown here — consistent fail-closed.
+    let base_tools = all_tools();
+    let live_semantic = semantic.filter(|_| semantic_advert(ctx).is_ok());
+    let tool: &dyn RetrievalTool = match base_tools.iter().find(|t| t.name() == tool_name) {
+        Some(t) => t.as_ref(),
+        None => match live_semantic.filter(|t| t.name() == tool_name) {
+            Some(t) => t,
+            None => {
+                return err_response(
+                    id,
+                    -32602,
+                    &format!("tools/call: unknown tool '{tool_name}'"),
+                );
+            }
+        },
     };
 
     match tool.invoke(store, &arguments) {
@@ -356,6 +373,16 @@ fn handle_tools_call_ctx(
 
             // Collect diagnostics: tool-level + W7.4 server-level staleness.
             let mut all_diags = result.diagnostics.clone();
+            // DoD-A6b: when SemanticSearch is served by the lexical hash fallback (no semantic model
+            // loaded), ride a per-call diagnostic in the response the agent reads — NOT eprintln —
+            // so it knows results are lexical, not semantic (R6 applied to the embedder tier).
+            if tool_name == "SemanticSearch"
+                && ctx.embedder_runtime_id.as_deref() == Some("hash:v1")
+            {
+                all_diags.push(
+                    "LEXICAL-FALLBACK: no semantic model loaded; results are lexical".to_string(),
+                );
+            }
             if let Some(n) = ctx.commits_behind {
                 if n > 0 {
                     all_diags.push(format!(
@@ -405,13 +432,57 @@ fn handle_tools_call_ctx(
 ///
 /// `commits_behind`: if known (computed once at server startup), this is injected
 /// as an R5 staleness diagnostic into every `tools/call` response.
+///
+/// The four `embedder_*` fields drive the **dim-guard** (DoD-A6a, §3.1): SemanticSearch is
+/// advertised (and dispatchable) **only** when the store's embedder identity + dim
+/// (`embedder_meta_*`, read from store meta at startup) match the runtime embedder
+/// (`embedder_runtime_*`, from `default_embedder()`). Identity, not dim, is the correctness key —
+/// see [`semantic_advert`]. All-`None` (the `Default`) is the fail-closed state: no semantic.
 #[derive(Debug, Default, Clone)]
 pub struct McpContext {
     /// How many commits have landed in the indexed repo since the last `index` run.
     /// `None` = unknown (git absent, not a repo, first-run, etc.).
     pub commits_behind: Option<u64>,
-    /// Whether to include `SemanticSearch` in the tool list. Requires a vector store.
-    pub has_semantic_search: bool,
+    /// Identity of the runtime embedder (`default_embedder().id()`), e.g. `"hash:v1"`.
+    /// `None` only if the server could not construct an embedder at all.
+    pub embedder_runtime_id: Option<String>,
+    /// Dimension of the runtime embedder (`default_embedder().dim()`).
+    pub embedder_runtime_dim: Option<usize>,
+    /// Embedder identity recorded in the store's `meta["embedder_id"]` at index time.
+    /// `None` = the store predates embedder tagging (or was never `index --embeddings`'d).
+    pub embedder_meta_id: Option<String>,
+    /// Embedder dimension recorded in the store's `meta["embedder_dim"]` at index time.
+    pub embedder_meta_dim: Option<usize>,
+}
+
+/// Decide whether SemanticSearch may be advertised / dispatched for this store + runtime.
+///
+/// Returns `Ok(())` when the store's recorded embedder identity **and** dimension match the
+/// runtime embedder. Otherwise returns the loud diagnostic the agent should see (R6):
+///
+/// * store meta absent (`None`) → `EMBED-META-MISSING:` — the store predates tagging; serving
+///   would silently return quietly-degraded results (`nearest` skips mismatched-dim rows), so we
+///   fail closed and report honest absence.
+/// * id or dim mismatch → `EMBED-MISMATCH: store=<id>/<dim>, runtime=<id>/<dim>; re-index`.
+///
+/// Identity is checked first and is decisive: two distinct models can share a dim (e.g. 384) yet
+/// produce incomparable vectors, so dim-equality alone is insufficient.
+fn semantic_advert(ctx: &McpContext) -> std::result::Result<(), String> {
+    let (Some(meta_id), Some(meta_dim)) = (&ctx.embedder_meta_id, ctx.embedder_meta_dim) else {
+        return Err(
+            "EMBED-META-MISSING: store predates embedder tagging; semantic disabled, re-index with --embeddings"
+                .to_string(),
+        );
+    };
+    let runtime_id = ctx.embedder_runtime_id.as_deref().unwrap_or("<none>");
+    let runtime_dim = ctx.embedder_runtime_dim;
+    if Some(meta_id.as_str()) != Some(runtime_id) || Some(meta_dim) != runtime_dim {
+        let rt_dim = runtime_dim.map_or_else(|| "?".to_string(), |d| d.to_string());
+        return Err(format!(
+            "EMBED-MISMATCH: store={meta_id}/{meta_dim}, runtime={runtime_id}/{rt_dim}; re-index"
+        ));
+    }
+    Ok(())
 }
 
 /// Route one JSON-RPC 2.0 request object to the correct handler and return the
@@ -423,8 +494,26 @@ pub fn handle_request(store: &dyn GraphRead, req: &Value) -> Value {
     handle_request_ctx(store, req, &McpContext::default())
 }
 
-/// Like `handle_request` but injects server-side context (staleness, feature flags).
+/// Like `handle_request` but injects server-side context (staleness, dim-guard fields).
+///
+/// No live SemanticSearch tool — semantic is never advertised/dispatched via this path. Use
+/// [`handle_request_with_semantic`] to wire the live instance (the serving loop does).
 pub fn handle_request_ctx(store: &dyn GraphRead, req: &Value, ctx: &McpContext) -> Value {
+    handle_request_with_semantic(store, req, ctx, None)
+}
+
+/// Full routing entry-point: injects context **and** the live SemanticSearch tool.
+///
+/// `semantic` is the real [`SemanticSearch`] instance (built with the runtime store + embedder).
+/// `tools/list` advertises it and `tools/call` dispatches to it **only** when the dim-guard
+/// ([`semantic_advert`]) passes — closing the DoD-A6b gap where no live semantic dispatch path
+/// existed at all (the serving loop resolved against `all_tools()`, which excludes SemanticSearch).
+pub fn handle_request_with_semantic(
+    store: &dyn GraphRead,
+    req: &Value,
+    ctx: &McpContext,
+    semantic: Option<&dyn RetrievalTool>,
+) -> Value {
     // Extract the request id; absent id ⇒ notification.
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
@@ -438,9 +527,9 @@ pub fn handle_request_ctx(store: &dyn GraphRead, req: &Value, ctx: &McpContext) 
             Value::Null
         }
 
-        "tools/list" => handle_tools_list_ctx(&id, ctx),
+        "tools/list" => handle_tools_list_ctx(&id, ctx, semantic),
 
-        "tools/call" => handle_tools_call_ctx(&id, &params, store, ctx),
+        "tools/call" => handle_tools_call_ctx(&id, &params, store, ctx, semantic),
 
         // Unknown / unimplemented method.
         _ if id.is_null() => {
