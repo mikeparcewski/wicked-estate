@@ -9740,6 +9740,7 @@ version = "0.11.2"
 dependencies = [
  "anyhow",
  "async-trait",
+ "dirs",
  "ignore",
  "notify",
  "notify-debouncer-full",

@@ -1249,21 +1249,21 @@ fn main() -> Result<()> {
                 match result {
                     Ok(events) => {
                         // A-6: the debouncer already coalesced the raw FS-event storm into this
-                        // one batch. `batch_is_relevant` (the unit-tested coalescing core) decides
-                        // whether the batch warrants a single re-index + single emit.
-                        let relevant =
-                            watch_coalesce::batch_is_relevant(events.iter().map(|ev| &ev.kind));
-                        if relevant {
+                        // one batch. `emits_for_batch` (the unit-tested coalescing core) returns
+                        // how many coarse emits this batch warrants — exactly 1 for a relevant
+                        // batch, 0 otherwise — so the loop never emits once-per-raw-event.
+                        let emits =
+                            watch_coalesce::emits_for_batch(events.iter().map(|ev| &ev.kind));
+                        let raw_event_count = events.len();
+                        for _ in 0..emits {
                             match wicked_estate::index_path(store.as_mut(), watch_path) {
                                 Ok(s) => {
                                     println!(
                                         "watch: re-indexed → {} nodes, {} edges, {} files",
                                         s.node_count, s.edge_count, s.file_count
                                     );
-                                    // A-6 coalescing: the debouncer has already folded the raw
-                                    // FS-event storm into ONE batch over its 500ms window, so we
-                                    // emit exactly ONE wicked.estate.indexed per change here —
-                                    // never once per raw event. `coalesced_events` records how
+                                    // One emit per coalesced batch (the 500ms debounce window
+                                    // already folded the storm). `coalesced_events` records how
                                     // many raw events were folded into this single emit.
                                     emit::emit_event(&emit::EmitEvent::new(
                                         "wicked.estate.indexed",
@@ -1276,7 +1276,7 @@ fn main() -> Result<()> {
                                             "files": s.file_count,
                                             "source": "watch",
                                             "coalesced": true,
-                                            "coalesced_events": events.len(),
+                                            "coalesced_events": raw_event_count,
                                         }),
                                     ));
                                 }

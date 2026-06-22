@@ -29,10 +29,7 @@ fn read_spool(path: &std::path::Path) -> Vec<serde_json::Value> {
 }
 
 fn count_type(records: &[serde_json::Value], event_type: &str) -> usize {
-    records
-        .iter()
-        .filter(|r| r["type"] == event_type)
-        .count()
+    records.iter().filter(|r| r["type"] == event_type).count()
 }
 
 /// Build a throwaway working dir with one trivial source file.
@@ -103,10 +100,7 @@ fn annotate_emits_exactly_one_annotated_event() {
         .arg(&work)
         .arg("--db")
         .arg(&db)
-        .env(
-            "WICKED_ESTATE_EMIT_DEADLETTER",
-            work.join("idx-dl.ndjson"),
-        )
+        .env("WICKED_ESTATE_EMIT_DEADLETTER", work.join("idx-dl.ndjson"))
         .env("WICKED_ESTATE_EMIT_PROGRAM", "wicked-bus-absent-emit-pre")
         .status()
         .expect("run index");

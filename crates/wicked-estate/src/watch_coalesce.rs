@@ -71,7 +71,7 @@ mod tests {
     /// A mixed batch (create + modify + remove) is one change → one emit.
     #[test]
     fn mixed_relevant_batch_emits_once() {
-        let batch = vec![
+        let batch = [
             EventKind::Create(CreateKind::File),
             EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Content)),
             EventKind::Remove(RemoveKind::File),
@@ -83,10 +83,7 @@ mod tests {
     /// An access-only / other batch is not a change → zero emits (no spurious event).
     #[test]
     fn irrelevant_batch_emits_zero() {
-        let batch = vec![
-            EventKind::Access(AccessKind::Any),
-            EventKind::Other,
-        ];
+        let batch = [EventKind::Access(AccessKind::Any), EventKind::Other];
         assert!(!batch_is_relevant(batch.iter()));
         assert_eq!(emits_for_batch(batch.iter()), 0);
     }
@@ -94,7 +91,7 @@ mod tests {
     /// An empty batch emits zero.
     #[test]
     fn empty_batch_emits_zero() {
-        let batch: Vec<EventKind> = Vec::new();
+        let batch: [EventKind; 0] = [];
         assert_eq!(emits_for_batch(batch.iter()), 0);
     }
 }
