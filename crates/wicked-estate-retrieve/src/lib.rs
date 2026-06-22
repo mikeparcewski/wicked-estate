@@ -1632,6 +1632,15 @@ impl RetrievalTool for FetchContent {
 ///   `fastembed` crate; gated behind `#[cfg(feature = "fastembed")]` so the default build and
 ///   test run download nothing.
 pub trait Embedder: Send + Sync {
+    /// Stable identity of this embedder (model family + variant), e.g. `"hash:v1"`,
+    /// `"fastembed:bge-small-en-v1.5"`, `"model2vec:minishlab/potion-base-8M"`.
+    ///
+    /// **Identity, not dimension, is the correctness key**: two distinct 384-d models produce
+    /// incomparable vectors, so a store embedded with one cannot be queried with the other even
+    /// though the dims match. The dim-guard (`index --embeddings` writes this to store meta; the
+    /// MCP server compares it against the runtime embedder) keys on this string, not `dim()`.
+    fn id(&self) -> &str;
+
     /// Embed `text` into a `dim()`-dimensional L2-normalised vector.
     fn embed(&self, text: &str) -> Vec<f32>;
 
@@ -1643,6 +1652,9 @@ pub trait Embedder: Send + Sync {
 /// the `fastembed` feature, else `HashEmbedder`) — satisfies the `impl Embedder` call sites
 /// (`SemanticSearch::new`, `compute_embeddings`) without monomorphising per concrete type.
 impl Embedder for Box<dyn Embedder> {
+    fn id(&self) -> &str {
+        (**self).id()
+    }
     fn embed(&self, text: &str) -> Vec<f32> {
         (**self).embed(text)
     }
@@ -1693,6 +1705,12 @@ fn fnv1a(bytes: &[u8]) -> u32 {
 }
 
 impl Embedder for HashEmbedder {
+    fn id(&self) -> &str {
+        // Dimension-independent: every HashEmbedder shares the same FNV-1a bag-of-words algorithm,
+        // so identity is the algorithm version. The dim is tagged separately in store meta.
+        "hash:v1"
+    }
+
     fn embed(&self, text: &str) -> Vec<f32> {
         let mut v = vec![0.0_f32; self.dim];
         for token in text.split_whitespace() {
@@ -1759,6 +1777,12 @@ impl FastEmbedder {
 
 #[cfg(feature = "fastembed")]
 impl Embedder for FastEmbedder {
+    fn id(&self) -> &str {
+        // The default model is fixed to BGE-small-en-v1.5 in `FastEmbedder::new`; the id names it
+        // so a store embedded with BGE is never silently queried with a different model.
+        "fastembed:bge-small-en-v1.5"
+    }
+
     fn embed(&self, text: &str) -> Vec<f32> {
         let result = self
             .model
@@ -1808,6 +1832,10 @@ impl Embedder for FastEmbedder {
 pub struct Model2VecEmbedder {
     model: model2vec_rs::model::StaticModel,
     dim: usize,
+    /// Stable identity `"model2vec:<repo_or_path>"` — the model is configurable (`CI_MODEL2VEC_MODEL`),
+    /// so the id must carry the actual loaded model, not a hard-coded default. Cached at construction
+    /// because [`Embedder::id`] returns a borrowed `&str`.
+    id: String,
 }
 
 #[cfg(feature = "model2vec")]
@@ -1835,12 +1863,20 @@ impl Model2VecEmbedder {
                 "model2vec: model produced a zero-dimension embedding".into(),
             ));
         }
-        Ok(Self { model, dim })
+        Ok(Self {
+            model,
+            dim,
+            id: format!("model2vec:{repo_or_path}"),
+        })
     }
 }
 
 #[cfg(feature = "model2vec")]
 impl Embedder for Model2VecEmbedder {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
     fn embed(&self, text: &str) -> Vec<f32> {
         let v = self.model.encode_single(text);
         // Empty/blank input can yield an empty vector; keep dim consistent for storage + cosine.
@@ -3922,6 +3958,9 @@ mod tests {
         // Also test the free function.
         struct FixedEmbedder(Vec<f32>);
         impl Embedder for FixedEmbedder {
+            fn id(&self) -> &str {
+                "test:fixed"
+            }
             fn embed(&self, _: &str) -> Vec<f32> {
                 self.0.clone()
             }
@@ -3945,6 +3984,9 @@ mod tests {
 
         struct FixedEmbedder;
         impl Embedder for FixedEmbedder {
+            fn id(&self) -> &str {
+                "test:fixed"
+            }
             fn embed(&self, _: &str) -> Vec<f32> {
                 vec![1.0, 0.0]
             }
