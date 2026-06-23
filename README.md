@@ -23,6 +23,18 @@ enterprise CI fleet, same engine, same queries.
 
 ---
 
+## The wicked stack
+
+wicked-estate is the **code graph** in a four-engine, local-first stack for AI agents — each owns its
+store (they never co-mingle):
+
+| Engine | Role |
+|---|---|
+| **`wicked-estate`** (this repo) | the code graph — symbols, calls, blast-radius, scoped context |
+| [`wicked-memory`](https://github.com/mikeparcewski/wicked-memory) | 5-tier experiential memory — capture / recall / reflect |
+| [`wicked-knowledge`](https://github.com/mikeparcewski/wicked-knowledge) | curated, citable knowledge with typed relations |
+| [`wicked-overlay`](https://github.com/mikeparcewski/wicked-overlay) | the cross-store bridge — recall a doc from a code seed (zero lexical overlap) |
+
 ## Why
 
 LLM coding agents waste turns grepping and re-reading files. wicked-estate gives them a precise,
