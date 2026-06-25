@@ -464,7 +464,11 @@ impl SqliteStore {
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; \
              PRAGMA synchronous=NORMAL; \
-             PRAGMA auto_vacuum=INCREMENTAL;",
+             PRAGMA auto_vacuum=INCREMENTAL; \
+             PRAGMA busy_timeout=5000; \
+             PRAGMA cache_size=-65536; \
+             PRAGMA temp_store=MEMORY; \
+             PRAGMA mmap_size=268435456;",
         )
         .map_err(st)?;
         conn.execute_batch(SCHEMA).map_err(st)?;
@@ -1719,6 +1723,29 @@ impl GraphRead for SqliteStore {
                 .map_err(st)?;
             let rows = stmt
                 .query_map(params![name], |r| r.get::<_, String>(0))
+                .map_err(st)?;
+            let mut v = Vec::new();
+            for row in rows {
+                v.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
+            }
+            v
+        } else if !query.kinds.is_empty() {
+            // INDEXED by-kind retrieval: push `kinds` into SQL so `idx_nodes_kind` is used
+            // (O(matches), NOT an O(table) full scan). `nodes.kind` stores the serialized NodeKind,
+            // so bind each kind in that same form (matches storage + the inherent `nodes_by_kind`).
+            // The Rust `retain` below remains as a correctness backstop.
+            let mut kind_strs: Vec<String> = Vec::with_capacity(query.kinds.len());
+            for k in &query.kinds {
+                kind_strs.push(serde_json::to_string(k)?);
+            }
+            let placeholders = vec!["?"; kind_strs.len()].join(",");
+            let sql =
+                format!("SELECT data FROM nodes WHERE kind IN ({placeholders}) ORDER BY symbol");
+            let mut stmt = self.conn.prepare(&sql).map_err(st)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(kind_strs.iter()), |r| {
+                    r.get::<_, String>(0)
+                })
                 .map_err(st)?;
             let mut v = Vec::new();
             for row in rows {

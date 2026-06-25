@@ -1006,6 +1006,30 @@ impl GraphRead for PostgresStore {
                 Ok::<Vec<Node>, sqlx::Error>(v)
             })
             .map_err(st)?
+        } else if !query.kinds.is_empty() {
+            // INDEXED by-kind retrieval: push `kinds` into SQL so `idx_nodes_kind` is used
+            // (O(matches), not a full scan). `nodes.kind` stores serde_json::to_string(&NodeKind),
+            // so bind each kind in that same form. The Rust `retain` below stays as a backstop.
+            let mut kind_strs: Vec<String> = Vec::with_capacity(query.kinds.len());
+            for k in &query.kinds {
+                kind_strs.push(serde_json::to_string(k)?);
+            }
+            rt_block(async {
+                let rows =
+                    sqlx::query("SELECT data FROM nodes WHERE kind = ANY($1) ORDER BY symbol")
+                        .bind(&kind_strs[..])
+                        .fetch_all(&self.pool)
+                        .await?;
+                let mut v = Vec::new();
+                for row in rows {
+                    let json: String = row.try_get("data")?;
+                    if let Ok(n) = serde_json::from_str::<Node>(&json) {
+                        v.push(n);
+                    }
+                }
+                Ok::<Vec<Node>, sqlx::Error>(v)
+            })
+            .map_err(st)?
         } else {
             rt_block(async {
                 let rows = sqlx::query("SELECT data FROM nodes ORDER BY symbol")
