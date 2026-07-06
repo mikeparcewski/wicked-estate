@@ -1,0 +1,16 @@
+{
+  "attestation_id": "019EECC9D78144BEAB98167061A2",
+  "artifact_id": "019EECC824194CE8881EFECB4EB1",
+  "opinion": "pass",
+  "rationale": "PERF GATE — ungameable and genuinely catches a fold regression. The count is gathered via Connection::trace (sqlite.rs:2642), which fires a callback on every SQL statement SQLite actually executes — the impl cannot influence this count by incrementing an internal counter. count_recursive_cte (line 2594) filters only statements containing 'WITH RECURSIVE walk', so only the reachability CTE increments the counter; the sid-lookup, get_node, and neighbors queries do not. The assertion c2==c16 (line 2653) is genuinely discriminating: a per-seed fold would call cte_reach once per seed, producing 2 CTEs for 2 seeds and 16 for 16 seeds — c2==c16 would fail (2 != 16). The current CTE-based override calls cte_reach_multi once regardless of seed count, so both produce 1. The additional bound (1..=3).contains(&c16) catches a Direction::Both case (2 CTEs) and ensures the count is not trivially 0 (empty implementation). Re-run: 1 passed; 0 failed.",
+  "evaluator": "traverse-multi-independent-verifier",
+  "evaluator_source": "explicit",
+  "model": null,
+  "prompt_hash": null,
+  "sampling": null,
+  "evidence_sha256": "6c6dcfc1e063e03521bb7f55a957838011168578ffaf209affb1ae6c115b255e",
+  "criteria_sha256": "10d196319c084b3ab3e195bbf0c70fd1be870939ddefbd6a55cde089c65c6f0e",
+  "worker_identity_weak": false,
+  "created_at": "2026-06-22T00:45:11.425Z",
+  "attestation_hash": "6563707cca9598e6ad5441d3e0db48fa167c74b88d0185009cf102b10ba55ff3"
+}

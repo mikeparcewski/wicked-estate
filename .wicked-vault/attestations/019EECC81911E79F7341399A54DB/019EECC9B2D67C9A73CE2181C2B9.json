@@ -1,0 +1,16 @@
+{
+  "attestation_id": "019EECC9B2D67C9A73CE2181C2B9",
+  "artifact_id": "019EECC81911E79F7341399A54DB",
+  "opinion": "pass",
+  "rationale": "CORRECTNESS GATE — has genuine teeth. The union_of_traverse helper (conformance.rs:45-85) is defined independently: it calls store.traverse() per seed (the slow per-seed path), deduplicates nodes by symbol and edges by dedup_key, and folds MIN depth — it does NOT call traverse_multi. Comparing store.traverse_multi(...) against this independent fold means any deviation in SqliteStore's CTE override (wrong subgraph, wrong exclusions, wrong min-depth) causes a failure the fold would not share. Fixture discriminators verified: (1) tm_s2 is reachable from tm_s1 (cross-reachable seed — must be excluded from depths; asserted at line 171); (2) tm_m1 is reached from BOTH seeds at depth 1 (min-depth dedup; asserted at line 161); (3) tm_m1→tm_leaf is a multi-hop path; (4) tm_leaf at min-depth 1 via tm_s2→tm_leaf (asserted at line 166). The test runs both Direction::Dependencies and Direction::Both, checking node-set, edge-set, and depths equality. Hardcoded depth assertions in the final block catch bugs shared by the fold and the override. Re-run: 7 passed; 0 failed.",
+  "evaluator": "traverse-multi-independent-verifier",
+  "evaluator_source": "explicit",
+  "model": null,
+  "prompt_hash": null,
+  "sampling": null,
+  "evidence_sha256": "ff7f2d1597331a1e55920d7ba73441ecfe438470694cc1998b1e882328b015a2",
+  "criteria_sha256": "ff50e9f54e6e8254be294a01c058e981b680c426d0654173ee1af802b5f6a9cd",
+  "worker_identity_weak": false,
+  "created_at": "2026-06-22T00:45:02.038Z",
+  "attestation_hash": "87f7c8ae6a496e753204d2bcc627343bea3d05ea1506c6cedc15f265acac27c8"
+}

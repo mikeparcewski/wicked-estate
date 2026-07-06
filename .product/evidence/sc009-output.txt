@@ -1,0 +1,47 @@
+wicked-estate SC-009 Integration Test — Evidence
+Date: 2026-07-06
+Ref: REQ-005 §3.1, TEST-001 §1.5
+
+════════════════════════════════════════════════════════
+SC-009: Four fixture databases, single server invocation
+════════════════════════════════════════════════════════
+Command: cargo test -p wicked-estate-mcp --test sc009 -- --nocapture
+
+Fixture databases (pre-populated from v0.12.x binaries):
+  estate_v0120.db   — indexed by wicked-estate v0.12.0 (seed symbol: seed_fn)
+  memory_v0121.db   — seeded by wicked-memory-mcp v0.12.1 (scope: fixture)
+  knowledge_v0121.db — seeded by wicked-knowledge-mcp v0.12.1 (1 doc, 1 concept)
+  xedge_v0121.db    — seeded by wicked-knowledge-mcp v0.12.1 (1 about-edge at epoch 0)
+
+Operations asserted (all 4 in a single handle_request_unified call sequence):
+  1. SearchEntity(name="seed_fn")                                  → non-empty matches
+  2. memory.recall(query="seed", token_budget=512)                 → non-empty items
+  3. knowledge.recall(query="seed", token_budget=512)              → non-empty items
+  4. knowledge.recall_about_code(code_ids=["ts-rust . . . seed_fixture/seed_fn()."]) → non-empty items
+  5. tools/list with all 4 stores open                             → exactly 23 tools
+
+DB compatibility assertions (no migration required):
+  - estate_v0120.db opens cleanly in v0.13.0 engine (no schema migration)
+  - memory_v0121.db opens cleanly in v0.13.0 engine
+  - knowledge_v0121.db opens cleanly in v0.13.0 engine
+  - xedge_v0121.db opens cleanly in v0.13.0 engine
+
+════════════════════════════════════════════════════════
+TEST OUTPUT
+════════════════════════════════════════════════════════
+
+running 2 tests
+test sc009_all_four_stores_open_and_all_reads_return_nonempty ... ok
+test db_compat_all_fixture_stores_open_without_error ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+════════════════════════════════════════════════════════
+VERDICT
+════════════════════════════════════════════════════════
+SC-009: PASS
+DB compatibility (REQ-005 §2.6): PASS
+
+All four v0.12.x fixture databases opened without migration error AND returned
+non-empty results from all four read operations in the v0.13.0 engine. The
+xedge about-edge at epoch 0 resolved correctly (current epoch = 0, not epoch-dropped).

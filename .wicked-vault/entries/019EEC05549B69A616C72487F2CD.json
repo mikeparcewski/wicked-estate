@@ -1,0 +1,27 @@
+{
+  "id": "019EEC05549B69A616C72487F2CD",
+  "scope": "build",
+  "phase": "review",
+  "claim_id": "tests-pass",
+  "kind": "test-run",
+  "source": "cargo test -p wicked-estate-store --test conformance",
+  "verifier": {
+    "kind": "regex_match",
+    "params": {
+      "pattern": "5 passed; 0 failed"
+    }
+  },
+  "criteria_sha256": "6788e2386f5a47a122e0cdd3b7e20e8b86dd331db35cf9fa6f24aabb00581547",
+  "payload_sha256": "77fdd2c15d98327c85243dac7568dc814ab041674bffc4a8ab28f58465589082",
+  "acceptance_criteria": "tests-pass: `cargo test -p wicked-estate-store --test conformance` satisfies regex_match:5 passed; 0 failed",
+  "criteria_authored_by": "record",
+  "payload_ref": "payloads/77fdd2c15d98327c85243dac7568dc814ab041674bffc4a8ab28f58465589082",
+  "envelope_hash": "7eeac3b5129f9d7a6babd64a2eec3f3f822f2ee36aa17f135cfe69924ea30709",
+  "status_at_record": "pass",
+  "state": "active",
+  "supersedes": null,
+  "contract_version": "9e03bc344c817ef8",
+  "created_at": "2026-06-21T21:10:32.859Z",
+  "created_by": "garden-prove",
+  "created_by_source": "explicit"
+}

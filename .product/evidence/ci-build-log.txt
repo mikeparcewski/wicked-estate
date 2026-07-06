@@ -1,0 +1,82 @@
+wicked-estate Unified Foundation — CI Build Log
+Date: 2026-07-06
+Branch: lane-a/epoch
+Phase: Evidence (DoD L1.6)
+
+════════════════════════════════════════════════════════
+GATE 1: cargo build --release -p wicked-estate-mcp
+════════════════════════════════════════════════════════
+Command: cargo build --release -p wicked-estate-mcp
+Result:  0 errors, 0 warnings
+Status:  PASS
+
+════════════════════════════════════════════════════════
+GATE 2: cargo test --workspace
+════════════════════════════════════════════════════════
+Command: cargo test --workspace
+Result:  1025 passed, 0 failed, 2 ignored (pre-existing LSP doctest)
+Status:  PASS
+
+Test breakdown:
+  Unit tests (wicked-estate-mcp):      35 (incl. 12 unified-dispatch Wave E tests)
+  Integration: sc009.rs                 2 (SC-009 + DB compat)
+  Integration: conformance_schemas.rs   5 (CONF-* schema conformance)
+  Integration: env_vars.rs              7 (ENV-001..006 + SMOKE-001..002)
+  wicked-estate (e2e, all-languages):  341
+  All other crates:                    ~635
+  TOTAL:                              1025 passed, 0 failed
+
+════════════════════════════════════════════════════════
+GATE 3: cargo clippy --workspace --all-targets -- -D warnings
+════════════════════════════════════════════════════════
+Command: cargo clippy --workspace --all-targets -- -D warnings
+Result:  0 errors, 0 warnings
+Status:  PASS
+
+════════════════════════════════════════════════════════
+GATE 4: cargo fmt --all --check
+════════════════════════════════════════════════════════
+Command: cargo fmt --all --check
+Result:  CLEAN (no formatting differences found)
+Status:  PASS
+
+════════════════════════════════════════════════════════
+ADDITIONAL CHECKS
+════════════════════════════════════════════════════════
+publish=false on absorbed crates:  PASS (all 6 crates verified)
+cargo tree -d duplicates:          6 pre-existing (documented in docs/tree-dupes.md)
+MSRV check (cargo +1.85):          SKIP (rustup not available; current=1.96.0 > MSRV 1.85)
+
+════════════════════════════════════════════════════════
+CONFORMANCE FIXES APPLIED
+════════════════════════════════════════════════════════
+During the evidence phase, schema conformance tests detected 3 parameter name
+divergences between v0.13.0 live and v0.12.x golden schemas:
+
+  memory.erase: param "scope" -> "scope_prefix" (HC-007 wire contract)
+  memory.learn: param "fact"  -> "content"       (HC-007 wire contract)
+  memory.coverage: param "scope" -> "scope_prefix" (HC-007 wire contract)
+
+All 3 were fixed in lib.rs (schema definitions) and tools/memory.rs (dispatch).
+Post-fix: all 5 conformance tests pass.
+
+════════════════════════════════════════════════════════
+SUMMARY
+════════════════════════════════════════════════════════
+All 4 L1.6 build health gates: PASS
+
+  PASS  cargo build --release   0 warnings
+  PASS  cargo test --workspace  1025 passed, 0 failed
+  PASS  cargo clippy            0 warnings
+  PASS  cargo fmt --check       CLEAN
+
+Wave E absorbed crates verified:
+  PASS  wicked-estate-overlay      (Wave A)
+  PASS  wicked-estate-memory-core  (Wave B)
+  PASS  wicked-estate-memory       (Wave C)
+  PASS  wicked-estate-knowledge    (Wave D)
+  PASS  wicked-estate-memory-api   (Wave E shim)
+  PASS  Unified dispatch + 23 tools (Wave E)
+  PASS  SC-009 all 4 fixture DBs   (integration test)
+  PASS  CONF-* 5/5 schema tests    (conformance)
+  PASS  ENV-001..006 + SMOKE       (env + subprocess tests)
