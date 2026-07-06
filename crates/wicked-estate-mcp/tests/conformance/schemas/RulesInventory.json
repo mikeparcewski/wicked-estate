@@ -1,0 +1,10 @@
+{
+  "captured_from": "wicked-estate-mcp-0.12.0",
+  "description": "List all rules-engine nodes (RuleSet, Rule) in the graph and the code that invokes them. Use this to discover what business rules engines are present and which code files call them. Returns: [{name, kind, file, invoked_by: [code_files]}]",
+  "inputSchema": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  },
+  "name": "RulesInventory"
+}

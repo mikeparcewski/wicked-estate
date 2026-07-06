@@ -1,0 +1,30 @@
+{
+  "captured_from": "wicked-knowledge-0.12.1",
+  "description": "Ingest a document: write a doc node + one chunk node per chunk (each derived_from the doc).",
+  "inputSchema": {
+    "properties": {
+      "chunks": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "scope": {
+        "type": "string"
+      },
+      "source": {
+        "description": "provenance, e.g. a file path or URL",
+        "type": "string"
+      },
+      "title": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "title",
+      "chunks"
+    ],
+    "type": "object"
+  },
+  "name": "knowledge.ingest"
+}

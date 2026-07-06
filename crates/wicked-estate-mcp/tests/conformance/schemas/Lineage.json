@@ -1,0 +1,24 @@
+{
+  "captured_from": "wicked-estate-mcp-0.12.0",
+  "description": "Transitive dependencies of a symbol (forward-reachability on Calls+Imports edges). Answers 'what does this symbol depend on?' \u2014 the complement of BlastRadius. Use to understand the full dependency chain before a refactor or to build a change-impact picture from the dependency side.",
+  "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+      "depth": {
+        "default": 8,
+        "description": "Maximum hop depth (default 8, max 24).",
+        "maximum": 24,
+        "type": "integer"
+      },
+      "symbol": {
+        "description": "Symbol ID whose transitive dependencies to enumerate.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "symbol"
+    ],
+    "type": "object"
+  },
+  "name": "Lineage"
+}

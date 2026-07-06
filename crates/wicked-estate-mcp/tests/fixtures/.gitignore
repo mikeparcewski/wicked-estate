@@ -1,0 +1,13 @@
+# SQLite WAL and shared-memory journal files — generated at runtime, never committed
+*.db-shm
+*.db-wal
+# Unversioned working DBs left by Stage 2 capture or local testing
+# (versioned *_v012*.db files are committed as fixtures)
+estate.db
+memory.db
+memory.db.memext
+knowledge.db
+xedge.db
+# memext sidecars for unversioned working DBs
+*.db.memext
+!memory_v0121.db.memext

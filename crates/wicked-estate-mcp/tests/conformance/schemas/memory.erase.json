@@ -1,0 +1,16 @@
+{
+  "captured_from": "wicked-memory-mcp-0.12.1",
+  "description": "Right-to-erasure: hard-delete all memories under a scope prefix.",
+  "inputSchema": {
+    "properties": {
+      "scope_prefix": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "scope_prefix"
+    ],
+    "type": "object"
+  },
+  "name": "memory.erase"
+}

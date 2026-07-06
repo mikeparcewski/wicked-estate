@@ -1,0 +1,18 @@
+{
+  "captured_from": "wicked-memory-mcp-0.12.1",
+  "representative_params": {
+    "scope_prefix": "test"
+  },
+  "response_schema": {
+    "fields": {
+      "content": "array"
+    },
+    "item_fields": {
+      "content": {
+        "text": "string",
+        "type": "string"
+      }
+    }
+  },
+  "tool": "memory.erase"
+}

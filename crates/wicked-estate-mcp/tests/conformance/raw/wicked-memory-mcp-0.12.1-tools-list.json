@@ -1,0 +1,153 @@
+{
+  "tools": [
+    {
+      "description": "Capture a memory (turn/observation/fact) into the agent memory graph.",
+      "inputSchema": {
+        "properties": {
+          "about": {
+            "description": "code/infra symbol ids this memory is about",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "content": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "working",
+              "episode",
+              "entity",
+              "fact",
+              "skill",
+              "archive"
+            ],
+            "type": "string"
+          },
+          "scope": {
+            "description": "canonical scope path e.g. org:acme/agent:claude",
+            "type": "string"
+          },
+          "tier": {
+            "enum": [
+              "working",
+              "episodic",
+              "semantic",
+              "procedural",
+              "archival"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "name": "memory.capture"
+    },
+    {
+      "description": "Conversational recall: the most relevant, token-budgeted slice for a query.",
+      "inputSchema": {
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "seeds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "token_budget": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "memory.recall"
+    },
+    {
+      "description": "Distill episodic memory into semantic facts + entities for a scope.",
+      "inputSchema": {
+        "properties": {
+          "scope": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "memory.reflect"
+    },
+    {
+      "description": "Right-to-erasure: hard-delete all memories under a scope prefix.",
+      "inputSchema": {
+        "properties": {
+          "scope_prefix": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope_prefix"
+        ],
+        "type": "object"
+      },
+      "name": "memory.erase"
+    },
+    {
+      "description": "EXPEDITION primitive: capture ONE non-obvious fact about a codebase, linked (about-edge) to the code symbol(s) it concerns BY NAME (resolved in the shared code graph). Future recall surfaces it from those symbols.",
+      "inputSchema": {
+        "properties": {
+          "content": {
+            "description": "one specific, non-obvious fact",
+            "type": "string"
+          },
+          "scope": {
+            "description": "e.g. project:my-repo",
+            "type": "string"
+          },
+          "symbols": {
+            "description": "exact code symbol name(s) this fact concerns",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tier": {
+            "description": "semantic=fact/decision, procedural=how-it-works",
+            "enum": [
+              "semantic",
+              "procedural"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "content",
+          "symbols"
+        ],
+        "type": "object"
+      },
+      "name": "memory.learn"
+    },
+    {
+      "description": "Expedition progress: how many memories are stored (optionally under a scope prefix).",
+      "inputSchema": {
+        "properties": {
+          "scope_prefix": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "memory.coverage"
+    }
+  ]
+}

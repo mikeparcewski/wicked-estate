@@ -1,0 +1,18 @@
+{
+  "captured_from": "wicked-estate-mcp-0.12.0",
+  "description": "Retrieve full detail for a single symbol by its stable id. Returns name, kind, language, file:line, signature, and doc comment.",
+  "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+      "symbol": {
+        "description": "Stable symbol ID to retrieve.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "symbol"
+    ],
+    "type": "object"
+  },
+  "name": "RetrieveEntity"
+}

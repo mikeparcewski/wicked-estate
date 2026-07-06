@@ -1,0 +1,47 @@
+{
+  "captured_from": "wicked-estate-mcp-0.12.0",
+  "description": "Bounded multi-hop walk from a start symbol. Returns the subgraph (nodes, edges, depths) reachable within the given depth and node caps. Supports forward (dependencies), reverse (dependents), and bidirectional traversal. For rules engine connections: use edge_kinds=[\"invoked_by\"] to trace code\u2192rules, [\"governs\"] for ruleset\u2192rule structure, [\"evaluates\"] for rule\u2192condition.",
+  "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+      "depth": {
+        "default": 4,
+        "description": "Maximum hop depth (default 4, max 16).",
+        "maximum": 16,
+        "type": "integer"
+      },
+      "direction": {
+        "default": "dependencies",
+        "description": "Traversal direction (default: dependencies).",
+        "enum": [
+          "dependencies",
+          "dependents",
+          "both"
+        ],
+        "type": "string"
+      },
+      "edge_kinds": {
+        "description": "Edge kinds to follow (empty = all kinds).",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "max_nodes": {
+        "default": 200,
+        "description": "Node cap before truncation (default 200, max 1000).",
+        "maximum": 1000,
+        "type": "integer"
+      },
+      "symbol": {
+        "description": "Start symbol ID for the traversal.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "symbol"
+    ],
+    "type": "object"
+  },
+  "name": "TraverseGraph"
+}

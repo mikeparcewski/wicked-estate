@@ -1,0 +1,13 @@
+{
+  "captured_from": "wicked-memory-mcp-0.12.1",
+  "description": "Expedition progress: how many memories are stored (optionally under a scope prefix).",
+  "inputSchema": {
+    "properties": {
+      "scope_prefix": {
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "name": "memory.coverage"
+}

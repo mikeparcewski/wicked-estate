@@ -1,0 +1,27 @@
+{
+  "captured_from": "wicked-estate-mcp-0.12.0",
+  "description": "Modularity (Louvain) communities over Calls+Imports edges, each summarized with its top-PageRank members and dominant files. Answers 'what are the natural subsystems here?' \u2014 clusters of symbols more tightly connected to each other than to the rest of the graph. Use to map an unfamiliar codebase into modules or scope a refactor to a cohesive unit.",
+  "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+      "limit": {
+        "default": 20,
+        "description": "How many communities to return, largest first (default 20, max 200).",
+        "maximum": 200,
+        "type": "integer"
+      },
+      "min_size": {
+        "default": 2,
+        "description": "Drop communities smaller than this (default 2).",
+        "type": "integer"
+      },
+      "resolution": {
+        "default": 1.0,
+        "description": "Louvain resolution \u03b3 (default 1.0; > 1.0 yields smaller, tighter communities).",
+        "type": "number"
+      }
+    },
+    "type": "object"
+  },
+  "name": "Communities"
+}

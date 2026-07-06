@@ -1,0 +1,20 @@
+{
+  "captured_from": "wicked-knowledge-0.12.1",
+  "description": "The cross-store differentiator: recall the knowledge linked (`about`) to one or more code symbols \u2014 surfaces grounding docs FROM a code seed across the SEPARATE knowledge store, no keyword overlap needed.",
+  "inputSchema": {
+    "properties": {
+      "code_ids": {
+        "description": "estate code symbol ids to recall knowledge about",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "code_ids"
+    ],
+    "type": "object"
+  },
+  "name": "knowledge.recall_about_code"
+}

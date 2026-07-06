@@ -1,0 +1,20 @@
+{
+  "captured_from": "wicked-knowledge-0.12.1",
+  "representative_params": {
+    "code_ids": [
+      "ts-rust . . . seed_fixture/seed_fn()."
+    ]
+  },
+  "response_schema": {
+    "fields": {
+      "content": "array"
+    },
+    "item_fields": {
+      "content": {
+        "text": "string",
+        "type": "string"
+      }
+    }
+  },
+  "tool": "knowledge.recall_about_code"
+}

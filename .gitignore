@@ -7,6 +7,9 @@ target/
 *.db
 *.db-shm
 *.db-wal
+# Exception: versioned v0.12.x fixture databases committed as test fixtures
+!crates/wicked-estate-mcp/tests/fixtures/*_v*.db
+!crates/wicked-estate-mcp/tests/fixtures/*_v*.db.memext
 .code-intel/
 .wicked-estate/
 

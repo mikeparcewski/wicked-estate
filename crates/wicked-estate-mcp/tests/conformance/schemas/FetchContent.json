@@ -1,0 +1,18 @@
+{
+  "captured_from": "wicked-estate-mcp-0.12.0",
+  "description": "Return the exact source slice for a symbol (requires content to have been stored during indexing). Returns the raw source text extracted from the symbol's byte span, plus file:line for provenance. Returns found=false (no error) when the symbol is absent or its file content has not been stored.",
+  "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+      "symbol": {
+        "description": "Stable symbol ID whose source slice to fetch.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "symbol"
+    ],
+    "type": "object"
+  },
+  "name": "FetchContent"
+}
