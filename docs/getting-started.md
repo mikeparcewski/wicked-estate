@@ -1,6 +1,6 @@
 # Getting Started with wicked-estate
 
-**W8.4** — build, index, query, and connect an agent. Real output from v0.0.1 on a two-file
+**W8.4** — build, index, query, and connect an agent. Real output from v0.13.0 on a two-file
 Python repo.
 
 ---
@@ -16,7 +16,7 @@ Produces two binaries:
 | Binary | Purpose |
 |--------|---------|
 | `target/release/wicked-estate` | CLI — index, query, blast-radius, rank, source, stats, scip, semantic, watch, subscribe, compact, tfstate, drift, cross-graph, clusters |
-| `target/release/wicked-estate-mcp` | MCP stdio server — 5 retrieval tools for LLM agents |
+| `target/release/wicked-estate-mcp` | MCP stdio server — 23 tools (10 estate + 6 memory + 7 knowledge) for LLM agents |
 
 Zero runtime deps. Single static binary on each target.
 
@@ -67,7 +67,7 @@ indexed ./demo (/tmp/demo.db) → 8 nodes, 11 edges, 2 files
 extension maps to no wired extractor are silently skipped. Check `wicked-estate stats` after
 indexing to confirm coverage.
 
-Wired extractors (as of v0.0.1): **rust**, **python**, **typescript**, **tsx**, **javascript**,
+Wired extractors (as of v0.13.0): **rust**, **python**, **typescript**, **tsx**, **javascript**,
 **go**, **java**, **c**, **cpp**, **csharp**, **ruby**, **bash**, **yaml**, **json**, plus
 **cloudformation** and **kubernetes** via the `IaCExtractor`. See
 `docs/language-coverage-matrix.md` for the full matrix.
@@ -241,7 +241,9 @@ wicked-estate-mcp --db /path/to/graph.db
 # or: WICKED_ESTATE_DB=:memory: wicked-estate-mcp
 ```
 
-### The 5 tools
+### The 23 tools (10 estate + 6 memory + 7 knowledge)
+
+#### Estate tools
 
 | Tool | Description |
 |------|-------------|
@@ -250,6 +252,34 @@ wicked-estate-mcp --db /path/to/graph.db
 | `TraverseGraph` | Multi-hop graph traversal from a symbol. Required: `symbol`. Optional: `depth` (default 4, max 16), `direction` (`dependencies`/`dependents`/`both`), `edge_kinds`, `max_nodes` (default 200, max 1000). |
 | `BlastRadius` | Enumerate all transitive dependents of a symbol. Required: `symbol`. Optional: `depth` (default 8, max 24). |
 | `FetchContent` | Retrieve the source text stored for a symbol. Required: `symbol`. |
+| `ContextBundle` | Return a scoped, ranked context bundle for a symbol — source + callers + dependencies. |
+| `RulesInventory` | List rule engines and rule sets in the graph; link rule sets to calling code. |
+| `RankHotspots` | Return the top N symbols by PageRank × change-frequency churn score. |
+| `Communities` | List detected symbol communities (Louvain clusters) in the graph. |
+| `Lineage` | Trace data-lineage edges (origin → transformation → sink) for a symbol. |
+
+#### Memory tools (absorbed from wicked-memory)
+
+| Tool | Description |
+|------|-------------|
+| `memory.capture` | Store an experiential memory with tier, tags, and TTL. |
+| `memory.recall` | Retrieve memories matching a query, filtered by tier or tags. |
+| `memory.reflect` | Synthesize higher-tier insights from accumulated memories. |
+| `memory.erase` | Delete a memory by ID. |
+| `memory.learn` | Reinforce or update an existing memory from new evidence. |
+| `memory.coverage` | Report memory store statistics (count by tier, staleness). |
+
+#### Knowledge tools (absorbed from wicked-knowledge)
+
+| Tool | Description |
+|------|-------------|
+| `knowledge.ingest` | Ingest a document or chunk into the knowledge store. |
+| `knowledge.write` | Write a curated knowledge node with typed relations. |
+| `knowledge.relate` | Add a typed relation between two knowledge nodes. |
+| `knowledge.recall` | Retrieve knowledge nodes matching a query. |
+| `knowledge.coverage` | Report knowledge store statistics (node count, relation types). |
+| `knowledge.relate_code` | Link a knowledge node to a code symbol in the estate graph. |
+| `knowledge.recall_about_code` | Recall knowledge nodes related to a given code symbol. |
 
 All tools honor the agent-behavior rules from `docs/agent-behavior-rules.md`:
 

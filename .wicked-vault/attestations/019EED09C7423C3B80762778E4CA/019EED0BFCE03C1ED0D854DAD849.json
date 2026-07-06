@@ -1,0 +1,16 @@
+{
+  "attestation_id": "019EED0BFCE03C1ED0D854DAD849",
+  "artifact_id": "019EED09C7423C3B80762778E4CA",
+  "opinion": "pass",
+  "rationale": "DEAD-LETTER FALSIFIER (DoD-A3): dropped_event_lands_in_deadletter_spool forces spawn-Err via WICKED_ESTATE_EMIT_PROGRAM pointing to a nonexistent binary; asserts !accepted, exactly-1 NDJSON line, payload fields (nodes=42), and deadletter_reason present. Real teeth confirmed: no spool line => test fails at assert_eq!(lines.len(), 1). Code path in emit_event() dead-letters on BOTH Err(spawn) (format: 'spawn ... failed') AND Ok(status) where !status.success() (format: 'bus exited non-zero'). EMIT-ONCE: index_emits_exactly_one_indexed_event and annotate_emits_exactly_one_annotated_event drive the real binary via separate WICKED_ESTATE_EMIT_PROGRAM/DEADLETTER env overrides; count_type asserts exactly 1 of the correct kind and 0 of the other two. Cross-kind leak prevention confirmed. COALESCING (A-6): storm_of_events_coalesces_to_one_emit asserts emits_for_batch([50 x Modify]) == 1; falsifier is explicit ('not once per raw event'). mixed and empty/irrelevant guards present. Watch loop in main.rs line 1255-1287 CONSUMES emits_for_batch, iterates for _ in 0..emits, and calls emit_event inside that loop — not a dead parallel function. CROSS-PLATFORM: deadletter_path() uses dirs::home_dir() + std::path::Path joins; no hardcoded tilde; env override WICKED_ESTATE_EMIT_DEADLETTER tested via default_deadletter_path_is_under_home. EMIT MECHANISM: spawns wicked-bus emit CLI with --type/--domain/--subdomain/--payload args; fire-and-forget (dead-letter is the safety net). FROM-SCRATCH RECONCILIATION: git log confirms emit.rs first appeared in e0fbafc ('Lane A (DoD-A3): shared emit seam + dead-letter spool'). Pre-seam main.rs (c6bdcdc) contained only emit_cli_span (OTel telemetry) and zero wicked-bus CLI calls — event-silent confirmed. BUILD: cargo test -p wicked-estate --lib: 26 passed; cargo test -p wicked-estate --test emit_events: 2 passed; cargo clippy -p wicked-estate --all-targets -- -D warnings: clean. Vault hash_ok/payload_ok/criteria_ok/envelope_ok all true.",
+  "evaluator": "deadletter-independent-verifier",
+  "evaluator_source": "explicit",
+  "model": null,
+  "prompt_hash": null,
+  "sampling": null,
+  "evidence_sha256": "8e4f4c8dc6ad591d0f09b8b9a9938cf0c6ae1ebd4d46187b77146789610a83d5",
+  "criteria_sha256": "dba7302783bc06023b62953507ca67293ad09bb7182ba7ad3ae24810dea657e3",
+  "worker_identity_weak": false,
+  "created_at": "2026-06-22T01:57:26.368Z",
+  "attestation_hash": "cb7eebb9e397b710431479025c4174d30384aed6624bd9b739ff242e0b31d93b"
+}

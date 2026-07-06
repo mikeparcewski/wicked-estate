@@ -16,7 +16,7 @@ enterprise CI fleet, same engine, same queries.
 [![CI](https://github.com/mikeparcewski/wicked-estate/actions/workflows/ci.yml/badge.svg)](https://github.com/mikeparcewski/wicked-estate/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-> **Status:** v0.11.0 — `cargo test --workspace` is **856+ passing, 0 failed, 0 ignored**;
+> **Status:** v0.13.0 — `cargo test --workspace` is **1025 passing, 0 failed, 0 ignored**;
 > 0 build warnings; clippy `-D warnings` clean. Greenfield, pre-1.0. See
 > [FEATURES.md](./FEATURES.md) for the exhaustive, honestly-tagged capability inventory
 > (✅ built / 🟡 partial / 🟦 designed-not-built).
@@ -31,9 +31,9 @@ store (they never co-mingle):
 | Engine | Role |
 |---|---|
 | **`wicked-estate`** (this repo) | the code graph — symbols, calls, blast-radius, scoped context |
-| [`wicked-memory`](https://github.com/mikeparcewski/wicked-memory) | 5-tier experiential memory — capture / recall / reflect |
-| [`wicked-knowledge`](https://github.com/mikeparcewski/wicked-knowledge) | curated, citable knowledge with typed relations |
-| [`wicked-overlay`](https://github.com/mikeparcewski/wicked-overlay) | the cross-store bridge — recall a doc from a code seed (zero lexical overlap) |
+| [`wicked-memory`](https://github.com/mikeparcewski/wicked-memory) (**deprecated** — absorbed as `wicked-estate-memory`) | 5-tier experiential memory — absorbed into wicked-estate v0.13.0; repository will be archived |
+| [`wicked-knowledge`](https://github.com/mikeparcewski/wicked-knowledge) (**deprecated** — absorbed as `wicked-estate-knowledge`) | curated, citable knowledge with typed relations — absorbed into wicked-estate v0.13.0; repository will be archived |
+| [`wicked-overlay`](https://github.com/mikeparcewski/wicked-overlay) (**deprecated** — absorbed as `wicked-estate-overlay`) | XedgeStore cross-engine search layer — absorbed into wicked-estate v0.13.0; repository will be archived |
 
 ## Why
 
@@ -110,8 +110,12 @@ wicked-estate watch ./my-project --db graph.db
 - **Rules engine layer** — IBM ODM BAL/IRL, Camunda DMN, CLIPS/Jess, Drools GDST, Excel/XLSX decision tables, Salesforce Flow, AWS Config Rules, Azure Policy extracted into the same graph as code. NodeKind::{Rule,RuleSet,Condition,Action,Fact} + EdgeKind::{Governs,Evaluates,Produces,InvokedBy}. `RulesInventory` MCP tool lists engines + calling code. `RulesBridgeResolver` connects code call sites to real RuleSet nodes.
 - **Hybrid + semantic retrieval** — graph + FTS5 core, embeddings an optional sidecar fused via RRF.
   Three embedder tiers: lexical (default) → model2vec (static, light) → fastembed (ONNX/BGE).
-- **MCP server** — exposes the retrieval tools to agents over JSON-RPC, following a strict
-  runtime-behavior contract (cap output, report staleness, never error-early, label confidence).
+- **MCP server** — exposes **23 tools across 3 domains** to agents over JSON-RPC, following a
+  strict runtime-behavior contract (cap output, report staleness, never error-early, label
+  confidence): 10 estate tools (SearchEntity, RetrieveEntity, TraverseGraph, BlastRadius,
+  FetchContent, ContextBundle, RulesInventory, RankHotspots, Communities, Lineage), 6 memory
+  tools (memory.capture/recall/reflect/erase/learn/coverage), and 7 knowledge tools
+  (knowledge.ingest/write/relate/recall/coverage/relate_code/recall_about_code).
 - **Requirement ↔ code linking** — annotate nodes with `description` / `requirement` /
   `requirement_validated` and query by requirement.
 - **Git-aware + incremental** — per-file git sha, incremental re-index, watch mode, a read-only
@@ -139,11 +143,21 @@ swappable impl behind a seam:
 | `wicked-estate-mcp` | MCP server (`wicked-estate-mcp` binary) |
 | `wicked-estate` | the `wicked-estate` CLI binary |
 | `wicked-estate-bench` | agent-eval benchmark harness |
+| `wicked-estate-overlay` | internal — absorbed from wicked-overlay (XedgeStore cross-engine search layer) |
+| `wicked-estate-memory-core` | internal — absorbed from wicked-memory (`MemoryApi` trait, `CaptureRequest`, `RecallQuery` types) |
+| `wicked-estate-memory` | internal — absorbed from wicked-memory (memory engine impl) |
+| `wicked-estate-knowledge` | internal — absorbed from wicked-knowledge (knowledge engine impl) |
+| `wicked-estate-memory-api` | internal — absorbed from wicked-memory (shim crate for clean re-exports) |
 
 ## MCP
 
-`wicked-estate-mcp` is a stdio MCP server (JSON-RPC 2.0) — register it in **Claude Code, Cursor,
-Antigravity, or Codex**. Per-client config: **[docs/mcp-integration.md](./docs/mcp-integration.md)**.
+`wicked-estate-mcp` is a stdio MCP server (JSON-RPC 2.0) exposing **23 tools across 3 domains**:
+
+- **Estate** (10 tools): `SearchEntity`, `RetrieveEntity`, `TraverseGraph`, `BlastRadius`, `FetchContent`, `ContextBundle`, `RulesInventory`, `RankHotspots`, `Communities`, `Lineage`
+- **Memory** (6 tools): `memory.capture`, `memory.recall`, `memory.reflect`, `memory.erase`, `memory.learn`, `memory.coverage`
+- **Knowledge** (7 tools): `knowledge.ingest`, `knowledge.write`, `knowledge.relate`, `knowledge.recall`, `knowledge.coverage`, `knowledge.relate_code`, `knowledge.recall_about_code`
+
+Register it in **Claude Code, Cursor, Antigravity, or Codex**. Per-client config: **[docs/mcp-integration.md](./docs/mcp-integration.md)**.
 
 ```sh
 wicked-estate index ./my-project --db .wicked-estate/graph.db

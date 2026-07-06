@@ -1,0 +1,25 @@
+{
+  "captured_from": "wicked-knowledge-0.12.1",
+  "description": "Cross-store link: mark a knowledge node as `about` one or more code symbols (estate symbol ids), so recall can surface it FROM those code seeds even with zero lexical overlap.",
+  "inputSchema": {
+    "properties": {
+      "code_ids": {
+        "description": "estate code symbol ids this knowledge is about",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "knowledge_id": {
+        "description": "the knowledge node id returned by knowledge.write / knowledge.ingest",
+        "type": "string"
+      }
+    },
+    "required": [
+      "knowledge_id",
+      "code_ids"
+    ],
+    "type": "object"
+  },
+  "name": "knowledge.relate_code"
+}

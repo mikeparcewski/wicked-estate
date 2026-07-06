@@ -1,0 +1,25 @@
+{
+  "captured_from": "wicked-estate-mcp-0.12.0",
+  "description": "One-shot context bundle for a symbol: resolves the seed (by id or by name/FTS query), gathers its graph neighbours (callers + callees), ranks them by personalised PageRank, and returns the seed plus the top neighbours as token-budgeted elided stubs packed within a character budget. Replaces orchestrating SearchEntity + TraverseGraph + ContextPack by hand \u2014 use it to fill an agent's context window in a single call.",
+  "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+      "budget": {
+        "default": 8000,
+        "description": "Character budget for the packed context (default 8000, hard-capped below the ~25K agent limit).",
+        "maximum": 24000,
+        "type": "integer"
+      },
+      "query": {
+        "description": "Name / FTS text to resolve the seed (alternative to 'symbol'); the top hit is used.",
+        "type": "string"
+      },
+      "symbol": {
+        "description": "Stable symbol ID of the seed (alternative to 'query').",
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "name": "ContextBundle"
+}

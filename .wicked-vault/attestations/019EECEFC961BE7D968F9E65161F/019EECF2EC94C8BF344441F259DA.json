@@ -1,0 +1,16 @@
+{
+  "attestation_id": "019EECF2EC94C8BF344441F259DA",
+  "artifact_id": "019EECEFC961BE7D968F9E65161F",
+  "opinion": "pass",
+  "rationale": "D1-PRESERVED: with_hash_embedder retained for 3 live test consumers in wicked-estate-retrieve (lines 4041, 4062, 4076); the MCP misuses at the old lib.rs:73/:309 are confirmed gone — those locations now contain live_semantic_search() (the non-hardcoded live builder) and handle_tools_list_ctx() dispatch respectively. Retire-as-you-go satisfied: dead MCP uses deleted, test uses legitimately kept. D2-PRESERVED: all_tools_with_semantic deletion is acceptable because the live SemanticSearch is Arc-shared and threaded via handle_request_with_semantic(semantic: Option<&dyn RetrievalTool>). list->call dispatch verified non-tautological: FakeSemantic::invoke writes a unique sentinel __fake_semantic_reached:true into the response; dod_a6b_list_then_call_reaches_live_semantic asserts parsed[__fake_semantic_reached]==true on the actual MCP JSON response (not stderr), proving the wired instance handled the call and not bare all_tools(). D3-PRESERVED: handle_request_ctx delegates to handle_request_with_semantic(..., None) — existing call sites preserved with semantic=None; new sites use handle_request_with_semantic directly. DoD-A6a: semantic_advert() gate is fail-closed: None meta -> EMBED-META-MISSING; id mismatch -> EMBED-MISMATCH; same-dim/different-id -> not advertised (identity decisive); matched id+dim AND live tool present -> advertised. Guard inversion would flip all 5 tests. DoD-A6b: list->call reaches live tool (sentinel in response); LEXICAL-FALLBACK keyed on embedder_runtime_id==hash:v1 asserted in response content array (not stderr) — dod_a6b_hash_fallback test collects content array and checks contains() on the joined text; stderr-only would fail. Negative control (non-hash runtime id) confirms marker absent. LEXICAL-FALLBACK tier is correct fail-closed: hash:v1 is the bottom-tier embedder fallback, precisely when results are lexical not semantic. Pre-existing EMBED-FALLBACK eprintln is a separate server-level tier log; the per-call diagnostic in the response is the A6b requirement and it is present. All 8 dod_a6* tests pass (0 failed), full lib suite 30/30 pass, clippy -D warnings clean.",
+  "evaluator": "dim-guard-independent-verifier",
+  "evaluator_source": "explicit",
+  "model": null,
+  "prompt_hash": null,
+  "sampling": null,
+  "evidence_sha256": "4b4007a56cc6444f09e67e7e925f170cad9fc992cada1f014b7a93ca5540f01e",
+  "criteria_sha256": "0d8d2a8c84e0443c174987f26e6a1ba03d0813e8409e02d3ef29ad3a3b0cdba5",
+  "worker_identity_weak": false,
+  "created_at": "2026-06-22T01:30:03.797Z",
+  "attestation_hash": "7b79dada0e9740ac2bcd0fa2cc973b6044044a2851a76de5cc4a2216bd6bc7e3"
+}

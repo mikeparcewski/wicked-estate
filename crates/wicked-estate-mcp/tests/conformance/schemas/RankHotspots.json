@@ -1,0 +1,24 @@
+{
+  "captured_from": "wicked-estate-mcp-0.12.0",
+  "description": "Most central symbols by PageRank over Calls+Imports edges. Answers 'what are the load-bearing symbols here?' \u2014 the code the most paths flow through. Use to orient in an unfamiliar repo, pick refactor targets, or seed a change-impact review. Optionally bias toward `seeds` for a personalized (subsystem-local) ranking.",
+  "inputSchema": {
+    "additionalProperties": false,
+    "properties": {
+      "limit": {
+        "default": 20,
+        "description": "How many top-ranked symbols to return (default 20, max 200).",
+        "maximum": 200,
+        "type": "integer"
+      },
+      "seeds": {
+        "description": "Optional symbol IDs to bias the ranking toward (personalized PageRank). Omit for global PageRank.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "type": "object"
+  },
+  "name": "RankHotspots"
+}

@@ -1,0 +1,22 @@
+{
+  "captured_from": "wicked-memory-mcp-0.12.1",
+  "representative_params": {
+    "content": "seed fact",
+    "symbols": [
+      "seed_fn"
+    ],
+    "tier": "semantic"
+  },
+  "response_schema": {
+    "fields": {
+      "content": "array"
+    },
+    "item_fields": {
+      "content": {
+        "text": "string",
+        "type": "string"
+      }
+    }
+  },
+  "tool": "memory.learn"
+}

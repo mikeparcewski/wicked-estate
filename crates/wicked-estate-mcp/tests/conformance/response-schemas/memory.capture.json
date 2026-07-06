@@ -1,0 +1,20 @@
+{
+  "captured_from": "wicked-memory-mcp-0.12.1",
+  "representative_params": {
+    "content": "seed capture",
+    "scope": "test",
+    "tier": "episodic"
+  },
+  "response_schema": {
+    "fields": {
+      "content": "array"
+    },
+    "item_fields": {
+      "content": {
+        "text": "string",
+        "type": "string"
+      }
+    }
+  },
+  "tool": "memory.capture"
+}

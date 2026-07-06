@@ -1,0 +1,22 @@
+{
+  "captured_from": "wicked-knowledge-0.12.1",
+  "representative_params": {
+    "code_ids": [
+      "ts-rust . . . seed_fixture/seed_fn()."
+    ],
+    "knowledge_id": "kdoc synthetic 019f37fb-0a72-7d03-9aeb-075e49b0f3cb:"
+  },
+  "response_schema": {
+    "fields": {
+      "content": "array",
+      "isError": "boolean"
+    },
+    "item_fields": {
+      "content": {
+        "text": "string",
+        "type": "string"
+      }
+    }
+  },
+  "tool": "knowledge.relate_code"
+}

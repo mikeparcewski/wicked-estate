@@ -1,0 +1,19 @@
+{
+  "captured_from": "wicked-knowledge-0.12.1",
+  "representative_params": {
+    "class": "concept",
+    "content": "seed concept"
+  },
+  "response_schema": {
+    "fields": {
+      "content": "array"
+    },
+    "item_fields": {
+      "content": {
+        "text": "string",
+        "type": "string"
+      }
+    }
+  },
+  "tool": "knowledge.write"
+}

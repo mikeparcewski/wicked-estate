@@ -1,0 +1,27 @@
+{
+  "id": "019EECD65F20BFCC286271F38762",
+  "scope": "build",
+  "phase": "review",
+  "claim_id": "tests-pass",
+  "kind": "test-run",
+  "source": "cargo test -p wicked-estate-store --features pool --lib with_read_inline_no_deadlock_under_saturation",
+  "verifier": {
+    "kind": "regex_match",
+    "params": {
+      "pattern": "1 passed; 0 failed"
+    }
+  },
+  "criteria_sha256": "c87a6f0e9922300c0c255ffdb58b2277741e4b7f3c2346148c503a8df18df43b",
+  "payload_sha256": "f55d899be381175bbe6346965cfe8deb41504f38a216459b5018143e1f2d6d28",
+  "acceptance_criteria": "tests-pass: `cargo test -p wicked-estate-store --features pool --lib with_read_inline_no_deadlock_under_saturation` satisfies regex_match:1 passed; 0 failed",
+  "criteria_authored_by": "record",
+  "payload_ref": "payloads/f55d899be381175bbe6346965cfe8deb41504f38a216459b5018143e1f2d6d28",
+  "envelope_hash": "e7c0d9f5d8f8a197460580f722a3b7ba215951bbc1a6380946d478c6fc1bb19e",
+  "status_at_record": "pass",
+  "state": "active",
+  "supersedes": null,
+  "contract_version": "b48b8e6c9eede8b0",
+  "created_at": "2026-06-22T00:58:52.576Z",
+  "created_by": "garden-prove",
+  "created_by_source": "explicit"
+}

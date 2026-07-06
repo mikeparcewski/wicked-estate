@@ -15,8 +15,11 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::io::Write;
 use tokio::io::AsyncBufReadExt;
-use wicked_estate_core::AsyncGraphStore as _;
-use wicked_estate_mcp::{McpContext, handle_request_with_semantic};
+use wicked_estate_knowledge::{KnowledgeApi, KnowledgeEngine};
+use wicked_estate_mcp::{DomainHandles, McpContext, handle_request_unified};
+use wicked_estate_memory::MemoryEngine;
+use wicked_estate_memory_core::MemoryApi;
+use wicked_estate_overlay::XedgeStore;
 use wicked_estate_retrieve::Embedder as _;
 use wicked_estate_store::SqliteStore;
 
@@ -37,6 +40,14 @@ fn resolve_db_path() -> String {
         }
     }
     std::env::var("WICKED_ESTATE_DB").unwrap_or_else(|_| DEFAULT_DB.to_string())
+}
+
+fn wicked_home() -> String {
+    std::env::var("WICKED_HOME").unwrap_or_else(|_| {
+        std::env::var("HOME")
+            .map(|h| format!("{h}/.wicked"))
+            .unwrap_or_else(|_| ".wicked".to_string())
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -215,6 +226,74 @@ async fn main() -> Result<()> {
         embedder_meta_dim,
     };
 
+    // 3b. Open domain stores (fail-soft: if any fails, all domains = None).
+    let home = wicked_home();
+    let memory_path =
+        std::env::var("WICKED_MEMORY_DB").unwrap_or_else(|_| format!("{home}/memory.db"));
+    let knowledge_path =
+        std::env::var("WICKED_KNOWLEDGE_DB").unwrap_or_else(|_| format!("{home}/knowledge.db"));
+    let xedge_path =
+        std::env::var("WICKED_XEDGE_DB").unwrap_or_else(|_| format!("{home}/xedge.db"));
+
+    // DES-001 §8.4: guard against two engines sharing the same file (data corruption).
+    {
+        let paths: [(&str, &str); 4] = [
+            ("estate", &db_path),
+            ("memory", &memory_path),
+            ("knowledge", &knowledge_path),
+            ("xedge", &xedge_path),
+        ];
+        let real: Vec<(&str, std::path::PathBuf)> = paths
+            .iter()
+            .filter(|(_, p)| *p != ":memory:")
+            .map(|(name, p)| {
+                (
+                    *name,
+                    std::fs::canonicalize(p).unwrap_or_else(|_| std::path::PathBuf::from(p)),
+                )
+            })
+            .collect();
+        for i in 0..real.len() {
+            for j in (i + 1)..real.len() {
+                if real[i].1 == real[j].1 {
+                    panic!(
+                        "Store path collision: '{}' and '{}' both resolve to '{}'",
+                        real[i].0,
+                        real[j].0,
+                        real[i].1.display()
+                    );
+                }
+            }
+        }
+    }
+
+    let domains_result: anyhow::Result<(MemoryEngine, KnowledgeEngine)> = (|| {
+        let xedge = std::sync::Arc::new(
+            XedgeStore::open(&xedge_path)
+                .map_err(|e| anyhow::anyhow!("xedge store unavailable ({xedge_path}): {e}"))?,
+        );
+        let mem_engine = MemoryEngine::open(&memory_path)
+            .map_err(|e| anyhow::anyhow!("memory store unavailable ({memory_path}): {e}"))?
+            .with_xedge_store(std::sync::Arc::clone(&xedge));
+        let know_engine = KnowledgeEngine::open(&knowledge_path)
+            .map_err(|e| anyhow::anyhow!("knowledge store unavailable ({knowledge_path}): {e}"))?
+            .with_xedge_store(xedge);
+        Ok((mem_engine, know_engine))
+    })();
+
+    let mut domain_engines = match domains_result {
+        Ok(pair) => Some(pair),
+        Err(e) => {
+            eprintln!("[wicked-estate] WARN: {e}");
+            eprintln!("[wicked-estate] WARN: memory and knowledge tools disabled (domains=None)");
+            None
+        }
+    };
+
+    // 3c. Sync SqliteStore for the unified dispatch (estate read path for epoch lookups).
+    let sync_store = SqliteStore::open(&db_path)
+        .unwrap_or_else(|_| SqliteStore::in_memory().expect("in-memory fallback"));
+
     // 4. Async stdin loop.
     // Request cache: key = "tool_name/args_json", value = full MCP response.
     // LLM agents routinely call the same tool with the same args multiple times per session;
@@ -343,18 +422,24 @@ async fn main() -> Result<()> {
             .to_string();
         let t_tool = std::time::Instant::now();
         let ctx_clone = ctx.clone();
-        // Share the single live SemanticSearch into the blocking closure (Arc clone is cheap +
-        // Send + 'static). `handle_request_with_semantic` resolves tools/call against all_tools()
-        // plus this live instance, so a list→call for SemanticSearch reaches it (DoD-A6b).
-        let semantic_clone = semantic.clone();
-        let resp = store
-            .with_read(move |graph| {
-                let sem = semantic_clone
-                    .as_deref()
-                    .map(|s| s as &dyn wicked_estate_core::RetrievalTool);
-                Ok(handle_request_with_semantic(graph, &req, &ctx_clone, sem))
-            })
-            .await?;
+
+        // Use block_in_place so we can call synchronous domain engines on the current thread.
+        let resp = tokio::task::block_in_place(|| {
+            let semantic_ref = semantic
+                .as_ref()
+                .map(|s| s.as_ref() as &dyn wicked_estate_core::RetrievalTool);
+            let mut domains = domain_engines.as_mut().map(|(m, k)| DomainHandles {
+                memory: m as &mut dyn MemoryApi<Error = anyhow::Error>,
+                knowledge: k as &mut dyn KnowledgeApi,
+            });
+            handle_request_unified(
+                &sync_store,
+                &req,
+                &ctx_clone,
+                domains.as_mut(),
+                semantic_ref,
+            )
+        });
         emit_tool_duration(
             std::sync::Arc::clone(&otel_sink),
             otel_resource.clone(),

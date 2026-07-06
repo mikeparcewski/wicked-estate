@@ -1,0 +1,28 @@
+{
+  "captured_from": "wicked-memory-mcp-0.12.1",
+  "description": "Conversational recall: the most relevant, token-budgeted slice for a query.",
+  "inputSchema": {
+    "properties": {
+      "query": {
+        "type": "string"
+      },
+      "scope": {
+        "type": "string"
+      },
+      "seeds": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "token_budget": {
+        "type": "integer"
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "type": "object"
+  },
+  "name": "memory.recall"
+}

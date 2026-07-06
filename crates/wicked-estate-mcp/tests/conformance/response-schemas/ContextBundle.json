@@ -1,0 +1,19 @@
+{
+  "captured_from": "wicked-estate-mcp-0.12.0",
+  "representative_params": {
+    "symbol": "ts-rust . . . seed_fixture/seed_fn()."
+  },
+  "response_schema": {
+    "fields": {
+      "content": "array",
+      "isError": "boolean"
+    },
+    "item_fields": {
+      "content": {
+        "text": "string",
+        "type": "string"
+      }
+    }
+  },
+  "tool": "ContextBundle"
+}

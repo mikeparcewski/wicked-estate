@@ -1,0 +1,27 @@
+{
+  "id": "019EED03F5D2ED0B9895ED57AA38",
+  "scope": "build",
+  "phase": "review",
+  "claim_id": "tests-pass",
+  "kind": "test-run",
+  "source": "cargo test -p wicked-estate-mcp --lib tools_list",
+  "verifier": {
+    "kind": "regex_match",
+    "params": {
+      "pattern": "5 passed; 0 failed"
+    }
+  },
+  "criteria_sha256": "adaea300ed16a02c9152ffe281aa58ec0617def7b828386d3e363528237b54c7",
+  "payload_sha256": "3c5a4301de161c977821897a9565f757f826c05048485faca4fc1d005dadb5d8",
+  "acceptance_criteria": "tests-pass: `cargo test -p wicked-estate-mcp --lib tools_list` satisfies regex_match:5 passed; 0 failed",
+  "criteria_authored_by": "record",
+  "payload_ref": "payloads/3c5a4301de161c977821897a9565f757f826c05048485faca4fc1d005dadb5d8",
+  "envelope_hash": "a7498de3b2629017d176c9c43c6bd2db248b94abf1369e21d8993ec7d9111ad3",
+  "status_at_record": "pass",
+  "state": "active",
+  "supersedes": null,
+  "contract_version": "9e03bc344c817ef8",
+  "created_at": "2026-06-22T01:48:40.274Z",
+  "created_by": "garden-prove",
+  "created_by_source": "explicit"
+}

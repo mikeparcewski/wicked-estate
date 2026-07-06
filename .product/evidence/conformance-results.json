@@ -1,0 +1,42 @@
+{
+  "date": "2026-07-06",
+  "phase": "Evidence — DoD L2.1–L2.4",
+  "test_file": "crates/wicked-estate-mcp/tests/conformance_schemas.rs",
+  "golden_dir": "crates/wicked-estate-mcp/tests/conformance/schemas/",
+  "golden_count": 23,
+  "suite_result": "PASS",
+  "tests": [
+    {
+      "id": "conf_all_23_tool_names_present_in_tools_list",
+      "dod_ref": "L2.1–L2.3",
+      "description": "All 23 tool names from golden files appear in tools/list response",
+      "result": "PASS"
+    },
+    {
+      "id": "conf_estate_tool_required_fields_match_goldens",
+      "dod_ref": "L2.1",
+      "description": "All 10 estate tool inputSchema required fields and property keys match v0.12.0 goldens",
+      "result": "PASS"
+    },
+    {
+      "id": "conf_memory_tool_required_fields_match_goldens",
+      "dod_ref": "L2.2",
+      "description": "All 6 memory tool inputSchema required fields and property keys match v0.12.1 goldens",
+      "result": "PASS",
+      "note": "3 param name fixes applied before PASS: memory.erase scope->scope_prefix, memory.learn fact->content, memory.coverage scope->scope_prefix"
+    },
+    {
+      "id": "conf_knowledge_tool_required_fields_match_goldens",
+      "dod_ref": "L2.3",
+      "description": "All 7 knowledge tool inputSchema required fields and property keys match v0.12.1 goldens",
+      "result": "PASS"
+    },
+    {
+      "id": "conf_tool_count_10_estate_6_memory_7_knowledge",
+      "dod_ref": "L2.4",
+      "description": "Per-domain tool count: exactly 10 estate, 6 memory, 7 knowledge (23 total) in default build",
+      "result": "PASS"
+    }
+  ],
+  "cargo_output": "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s"
+}

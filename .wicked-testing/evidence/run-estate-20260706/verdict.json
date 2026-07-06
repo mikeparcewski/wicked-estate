@@ -1,0 +1,31 @@
+{
+  "run_id": "run-estate-20260706",
+  "scenario": "wicked-estate-mcp-smoke",
+  "scenario_version": "1.0",
+  "date": "2026-07-06",
+  "executor": "wicked-estate build pipeline (automated)",
+  "verdict": "PASS",
+  "crits": [],
+  "assertions": [
+    {"id": "A1", "description": "Binary starts and responds to MCP initialize with protocolVersion, capabilities (tools, resources, prompts), and serverInfo", "result": "PASS"},
+    {"id": "A2", "description": "tools/list returns exactly 23 tools in the default build (10 estate + 6 memory + 7 knowledge)", "result": "PASS"},
+    {"id": "A3", "description": "tools/list with domains active includes memory.capture and knowledge.ingest", "result": "PASS"},
+    {"id": "A4", "description": "SearchEntity responds with a non-error MCP result", "result": "PASS"},
+    {"id": "A5", "description": "memory.recall responds with a non-error MCP result (non-empty items from memory fixture)", "result": "PASS"},
+    {"id": "A6", "description": "knowledge.recall responds with a non-error MCP result (non-empty items from knowledge fixture)", "result": "PASS"},
+    {"id": "A7", "description": "Unknown method returns JSON-RPC error -32601 and server continues serving", "result": "PASS"}
+  ],
+  "evidence": {
+    "binary": "target/debug/wicked-estate-mcp",
+    "workspace_version": "0.12.0",
+    "test_count": 1025,
+    "test_failures": 0,
+    "fixture_dbs": [
+      "crates/wicked-estate-mcp/tests/fixtures/estate_v0120.db",
+      "crates/wicked-estate-mcp/tests/fixtures/memory_v0121.db",
+      "crates/wicked-estate-mcp/tests/fixtures/knowledge_v0121.db",
+      "crates/wicked-estate-mcp/tests/fixtures/xedge_v0121.db"
+    ]
+  },
+  "notes": "All 7 smoke test assertions verified against the unified wicked-estate-mcp binary using v0.12.x fixture databases. Zero CRITs found. Schema conformance PASS (5/5 conformance tests). SC-009 DB compat PASS (2/2 fixture tests). ENV-001..006 PASS (7/7 env tests)."
+}

@@ -8,7 +8,81 @@
     {
       "name": "wicked-estate",
       "source": "./plugins/wicked-estate",
-      "description": "Registers the wicked-estate MCP server — code + infrastructure estate graph tools for LLM agents (search, retrieve, blast-radius, lineage, fetch-content)."
+      "description": "Unified code + memory + knowledge estate graph tools for LLM agents. Single binary (wicked-estate-mcp v0.13.0) serves 23 tools across three domains: estate (code graph), memory, and knowledge.",
+      "tool_surface": {
+        "total": 23,
+        "default_build": 23,
+        "with_embedder": 24,
+        "domains": {
+          "estate": {
+            "count": 10,
+            "tools": [
+              "SearchEntity",
+              "RetrieveEntity",
+              "TraverseGraph",
+              "BlastRadius",
+              "FetchContent",
+              "ContextBundle",
+              "RulesInventory",
+              "RankHotspots",
+              "Communities",
+              "Lineage"
+            ]
+          },
+          "estate_optional": {
+            "count": 1,
+            "condition": "fastembed or model2vec feature",
+            "tools": ["SemanticSearch"]
+          },
+          "memory": {
+            "count": 6,
+            "tools": [
+              "memory.capture",
+              "memory.recall",
+              "memory.reflect",
+              "memory.erase",
+              "memory.learn",
+              "memory.coverage"
+            ]
+          },
+          "knowledge": {
+            "count": 7,
+            "tools": [
+              "knowledge.ingest",
+              "knowledge.write",
+              "knowledge.relate",
+              "knowledge.recall",
+              "knowledge.coverage",
+              "knowledge.relate_code",
+              "knowledge.recall_about_code"
+            ]
+          }
+        }
+      },
+      "skills": [
+        "codebase-expedition",
+        "knowledge-ingest",
+        "ontology-expedition",
+        "knowledge-curation",
+        "cited-answer",
+        "gap-hunting"
+      ],
+      "prompts": ["expedition"],
+      "config": {
+        "env_vars": {
+          "WICKED_ESTATE_DB": "Path to estate graph SQLite database (default: $HOME/.wicked/estate.db)",
+          "WICKED_MEMORY_DB": "Path to memory SQLite database (default: $HOME/.wicked/memory.db)",
+          "WICKED_KNOWLEDGE_DB": "Path to knowledge SQLite database (default: $HOME/.wicked/knowledge.db)",
+          "WICKED_XEDGE_DB": "Path to cross-engine edge SQLite database (default: $HOME/.wicked/xedge.db)",
+          "WICKED_HOME": "Base directory for all stores when per-store vars not set (default: $HOME/.wicked)"
+        },
+        "migration_from": {
+          "wicked-memory-mcp": "Replace command with wicked-estate-mcp; all memory.* tools are included",
+          "wicked-knowledge-mcp": "Replace command with wicked-estate-mcp; all knowledge.* tools are included"
+        }
+      },
+      "version": "0.13.0",
+      "supersedes": ["wicked-memory-mcp", "wicked-knowledge-mcp", "wicked-overlay"]
     }
   ]
 }

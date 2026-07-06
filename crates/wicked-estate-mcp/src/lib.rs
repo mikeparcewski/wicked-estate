@@ -28,10 +28,15 @@
 
 use serde_json::{Value, json};
 use wicked_estate_core::{GraphRead, RetrievalTool};
+use wicked_estate_knowledge::KnowledgeApi;
+use wicked_estate_memory_core::MemoryApi;
 use wicked_estate_retrieve::{
     BlastRadius, Communities, ContextBundle, FetchContent, Lineage, RankHotspots, RetrieveEntity,
     RulesInventory, SearchEntity, SemanticSearch, TraverseGraph,
 };
+
+pub mod resources;
+pub mod tools;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Crate version (injected by Cargo at compile time)
@@ -616,6 +621,152 @@ pub fn handle_request_with_semantic(
         }
         _ => err_response(&id, -32601, &format!("Method not found: '{method}'")),
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unified dispatch — DomainHandles + handle_request_unified
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Borrowed handles for the domain stores (memory + knowledge).
+/// `None` ⇒ the corresponding domain tools return an error rather than crash.
+pub struct DomainHandles<'a> {
+    pub memory: &'a mut dyn MemoryApi<Error = anyhow::Error>,
+    pub knowledge: &'a mut dyn KnowledgeApi,
+}
+
+/// Unified routing entry-point: estate tools + optional memory/knowledge tools + resources/prompts.
+///
+/// `domains = None` → estate-only mode (10/11 tools). `domains = Some(...)` → 23+ tools, resources,
+/// and prompts. Memory/knowledge tools that arrive without domains return a clean JSON-RPC error.
+/// `semantic` is the live SemanticSearch instance; when `None` the tool is neither advertised nor
+/// dispatchable (consistent fail-closed, same as the dim-guard behaviour in the old path).
+pub fn handle_request_unified(
+    store: &dyn GraphRead,
+    req: &Value,
+    ctx: &McpContext,
+    domains: Option<&mut DomainHandles<'_>>,
+    semantic: Option<&dyn RetrievalTool>,
+) -> Value {
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let params = req.get("params").cloned().unwrap_or(json!({}));
+
+    match method {
+        "initialize" => handle_initialize_unified(&id),
+
+        "notifications/initialized" => Value::Null,
+
+        "tools/list" => tools_list_unified(&id, ctx, domains.is_some()),
+
+        "resources/list" => resources::resources_list(&id),
+        "resources/read" => {
+            let uri = params.get("uri").and_then(|v| v.as_str()).unwrap_or("");
+            resources::resources_read(&id, uri)
+        }
+        "prompts/list" => resources::prompts_list(&id),
+        "prompts/get" => {
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            resources::prompts_get(&id, name)
+        }
+
+        "tools/call" => {
+            let tool = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            match tool {
+                "SearchEntity" | "RetrieveEntity" | "TraverseGraph" | "BlastRadius"
+                | "FetchContent" | "ContextBundle" | "RulesInventory" | "RankHotspots"
+                | "Communities" | "Lineage" => {
+                    handle_tools_call_ctx(&id, &params, store, ctx, None)
+                }
+
+                "SemanticSearch" => handle_tools_call_ctx(&id, &params, store, ctx, semantic),
+
+                "memory.capture" | "memory.recall" | "memory.reflect" | "memory.erase"
+                | "memory.learn" | "memory.coverage" => match domains {
+                    Some(d) => tools::memory::dispatch(tool, &id, &params, store, d.memory),
+                    None => err_response(&id, -32601, "memory domain not available"),
+                },
+
+                "knowledge.ingest"
+                | "knowledge.write"
+                | "knowledge.relate"
+                | "knowledge.recall"
+                | "knowledge.coverage"
+                | "knowledge.relate_code"
+                | "knowledge.recall_about_code" => match domains {
+                    Some(d) => tools::knowledge::dispatch(tool, &id, &params, store, d.knowledge),
+                    None => err_response(&id, -32601, "knowledge domain not available"),
+                },
+
+                _ => err_response(&id, -32602, &format!("unknown tool: {tool}")),
+            }
+        }
+
+        _ if id.is_null() => Value::Null,
+        _ => err_response(&id, -32601, &format!("Method not found: '{method}'")),
+    }
+}
+
+fn handle_initialize_unified(id: &Value) -> Value {
+    json!({
+        "jsonrpc": "2.0", "id": id,
+        "result": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": { "tools": {}, "resources": {}, "prompts": {} },
+            "serverInfo": { "name": "wicked-estate", "version": SERVER_VERSION }
+        }
+    })
+}
+
+fn tools_list_unified(id: &Value, ctx: &McpContext, domains_available: bool) -> Value {
+    let base_tools = all_tools();
+    let mut tools: Vec<Value> = base_tools
+        .iter()
+        .map(|t| {
+            json!({
+                "name":        t.name(),
+                "description": t.description(),
+                "inputSchema": input_schema(t.name()).unwrap_or(json!({"type":"object"}))
+            })
+        })
+        .collect();
+
+    if semantic_advert(ctx).is_ok() {
+        tools.push(json!({
+            "name":        "SemanticSearch",
+            "description": "Semantic vector search over code symbols.",
+            "inputSchema": semantic_search_schema()
+        }));
+    }
+
+    if domains_available {
+        tools.extend(memory_tool_schemas());
+        tools.extend(knowledge_tool_schemas());
+    }
+
+    ok_response(id, json!({"tools": tools}))
+}
+
+fn memory_tool_schemas() -> Vec<Value> {
+    vec![
+        json!({"name":"memory.capture","description":"Capture a new memory node (episodic/semantic/procedural/archival).","inputSchema":{"type":"object","required":["content"],"properties":{"content":{"type":"string"},"kind":{"type":"string","enum":["working","episode","entity","fact","skill","archive"]},"tier":{"type":"string","enum":["working","episodic","semantic","procedural","archival"]},"scope":{"type":"string"},"about":{"type":"array","items":{"type":"string"}}}}}),
+        json!({"name":"memory.recall","description":"Conversational recall: token-budgeted slice relevant to a query in scope.","inputSchema":{"type":"object","required":["query"],"properties":{"query":{"type":"string"},"scope":{"type":"string"},"seeds":{"type":"array","items":{"type":"string"}},"token_budget":{"type":"integer","default":2000}}}}),
+        json!({"name":"memory.reflect","description":"Distil episodic memories in a scope into semantic facts (T2 tier). Returns distilled_facts list.","inputSchema":{"type":"object","properties":{"scope":{"type":"string"}}}}),
+        json!({"name":"memory.erase","description":"Hard-delete all memories whose scope starts with the given prefix.","inputSchema":{"type":"object","required":["scope_prefix"],"properties":{"scope_prefix":{"type":"string"}}}}),
+        json!({"name":"memory.learn","description":"Store a semantic fact and link it to code symbols atomically.","inputSchema":{"type":"object","required":["content","symbols"],"properties":{"content":{"description":"one specific, non-obvious fact","type":"string"},"scope":{"description":"e.g. project:my-repo","type":"string"},"symbols":{"description":"exact code symbol name(s) this fact concerns","items":{"type":"string"},"type":"array"},"tier":{"description":"semantic=fact/decision, procedural=how-it-works","enum":["semantic","procedural"],"type":"string"}}}}),
+        json!({"name":"memory.coverage","description":"Coverage: memory node counts (total, by tier, by kind), optionally scoped.","inputSchema":{"type":"object","properties":{"scope_prefix":{"type":"string"}}}}),
+    ]
+}
+
+fn knowledge_tool_schemas() -> Vec<Value> {
+    vec![
+        json!({"name":"knowledge.ingest","description":"Ingest a document as doc + chunk nodes.","inputSchema":{"type":"object","required":["title","chunks"],"properties":{"title":{"type":"string"},"chunks":{"type":"array","items":{"type":"string"}},"scope":{"type":"string"},"source":{"type":"string"}}}}),
+        json!({"name":"knowledge.write","description":"Write ONE knowledge node.","inputSchema":{"type":"object","required":["content"],"properties":{"content":{"type":"string"},"class":{"type":"string","enum":["doc","section","chunk","concept"]},"scope":{"type":"string"},"source":{"type":"string"}}}}),
+        json!({"name":"knowledge.relate","description":"Add a typed relation between two knowledge nodes.","inputSchema":{"type":"object","required":["src","tgt","rel"],"properties":{"src":{"type":"string"},"tgt":{"type":"string"},"rel":{"type":"string"},"confidence":{"type":"number"},"provenance":{"type":"string"}}}}),
+        json!({"name":"knowledge.recall","description":"Hybrid recall (FTS + vector, RRF fused) over the knowledge base.","inputSchema":{"type":"object","required":["query"],"properties":{"query":{"type":"string"},"token_budget":{"type":"integer","default":2000}}}}),
+        json!({"name":"knowledge.coverage","description":"Coverage: node counts per class.","inputSchema":{"type":"object","properties":{"class":{"type":"string","enum":["doc","section","chunk","concept"]}}}}),
+        json!({"name":"knowledge.relate_code","description":"Link a knowledge node to estate code symbols via xedge.","inputSchema":{"type":"object","required":["knowledge_id","code_ids"],"properties":{"knowledge_id":{"type":"string"},"code_ids":{"type":"array","items":{"type":"string"}}}}}),
+        json!({"name":"knowledge.recall_about_code","description":"Recall knowledge linked to code symbols (cross-store lookup).","inputSchema":{"type":"object","required":["code_ids"],"properties":{"code_ids":{"type":"array","items":{"type":"string"}}}}}),
+    ]
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1899,6 +2050,311 @@ mod tests {
                 .contains("LEXICAL-FALLBACK: no semantic model loaded; results are lexical"),
             "hash-fallback SemanticSearch call must ride LEXICAL-FALLBACK in the response \
              diagnostics; got: {response_text}"
+        );
+    }
+
+    // ── handle_request_unified ────────────────────────────────────────────────
+    //
+    // ADR-ESTATE-008: domain tools unavailable (domains=None) must return a JSON-RPC error
+    // (not `isError:true` in the MCP result — the AGENT must know the tool doesn't exist, not
+    // that it ran and returned an error).
+
+    struct FakeMemory;
+    impl wicked_estate_memory_core::MemoryApi for FakeMemory {
+        type Error = anyhow::Error;
+        fn capture(
+            &mut self,
+            _: wicked_estate_memory_core::CaptureRequest,
+        ) -> Result<String, anyhow::Error> {
+            Ok("fake-mem-id".to_string())
+        }
+        fn recall(
+            &self,
+            _: &wicked_estate_memory_core::RecallQuery,
+        ) -> Result<Vec<wicked_estate_memory_core::RecalledItem>, anyhow::Error> {
+            Ok(vec![])
+        }
+        fn reflect(
+            &mut self,
+            scope: &str,
+            _: i64,
+        ) -> Result<wicked_estate_memory_core::ReflectResult, anyhow::Error> {
+            Ok(wicked_estate_memory_core::ReflectResult {
+                scope: scope.to_string(),
+                distilled_facts: vec![],
+                node_count: 0,
+            })
+        }
+        fn erase(&mut self, _: &str, _: i64) -> Result<u32, anyhow::Error> {
+            Ok(0)
+        }
+        fn learn(
+            &mut self,
+            _: &str,
+            _: &[String],
+            _: &std::collections::HashMap<String, u64>,
+            _: i64,
+        ) -> Result<String, anyhow::Error> {
+            Ok("fake-learn-id".to_string())
+        }
+        fn coverage(
+            &self,
+            _: Option<&str>,
+        ) -> Result<wicked_estate_memory_core::MemoryCoverage, anyhow::Error> {
+            Ok(wicked_estate_memory_core::MemoryCoverage {
+                total: 0,
+                by_tier: Default::default(),
+                by_kind: Default::default(),
+            })
+        }
+    }
+
+    struct FakeKnowledge;
+    impl wicked_estate_knowledge::KnowledgeApi for FakeKnowledge {
+        fn ingest(
+            &mut self,
+            _: &str,
+            _: &[String],
+            _: &str,
+            _: &str,
+            _: i64,
+        ) -> anyhow::Result<String> {
+            Ok("fake-doc".to_string())
+        }
+        fn write_node(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: i64,
+        ) -> anyhow::Result<String> {
+            Ok("fake-node".to_string())
+        }
+        fn relate(&mut self, _: &str, _: &str, _: &str, _: f64, _: &str) -> anyhow::Result<String> {
+            Ok("fake-edge".to_string())
+        }
+        fn recall(
+            &mut self,
+            _: &str,
+            _: usize,
+            _: i64,
+        ) -> anyhow::Result<Vec<wicked_estate_knowledge::KnowledgeItem>> {
+            Ok(vec![])
+        }
+        fn coverage(
+            &self,
+            _: Option<&str>,
+        ) -> anyhow::Result<wicked_estate_knowledge::KnowledgeCoverage> {
+            Ok(wicked_estate_knowledge::KnowledgeCoverage {
+                total: 0,
+                by_class: Default::default(),
+                recall_miss_count: 0,
+            })
+        }
+        fn relate_code(
+            &mut self,
+            _: &str,
+            _: &[String],
+            _: &std::collections::HashMap<String, u64>,
+        ) -> anyhow::Result<u32> {
+            Ok(0)
+        }
+        fn recall_about_code(
+            &self,
+            _: &[String],
+        ) -> anyhow::Result<Vec<wicked_estate_knowledge::KnowledgeItem>> {
+            Ok(vec![])
+        }
+    }
+
+    #[test]
+    fn unified_no_domains_memory_tool_returns_json_rpc_error() {
+        // ADR-ESTATE-008: without domains, memory.* tools return JSON-RPC error -32601,
+        // NOT isError:true in the MCP result.
+        let store = fixture();
+        let req = json!({
+            "jsonrpc": "2.0", "id": 200,
+            "method": "tools/call",
+            "params": { "name": "memory.capture", "arguments": { "content": "hello" } }
+        });
+        let resp = handle_request_unified(&store, &req, &McpContext::default(), None, None);
+        assert!(
+            resp.get("error").is_some(),
+            "must be a JSON-RPC error (not isError result)"
+        );
+        assert_eq!(resp["error"]["code"].as_i64().unwrap(), -32601);
+        assert!(
+            resp.get("result").is_none(),
+            "error responses must not have 'result'"
+        );
+    }
+
+    #[test]
+    fn unified_no_domains_knowledge_tool_returns_json_rpc_error() {
+        let store = fixture();
+        let req = json!({
+            "jsonrpc": "2.0", "id": 201,
+            "method": "tools/call",
+            "params": { "name": "knowledge.ingest", "arguments": { "title": "t", "chunks": ["c"] } }
+        });
+        let resp = handle_request_unified(&store, &req, &McpContext::default(), None, None);
+        assert!(resp.get("error").is_some());
+        assert_eq!(resp["error"]["code"].as_i64().unwrap(), -32601);
+    }
+
+    #[test]
+    fn unified_estate_tools_work_without_domains() {
+        // Estate tools (SearchEntity, etc.) must still work when domains=None.
+        let store = fixture();
+        let req = json!({
+            "jsonrpc": "2.0", "id": 202,
+            "method": "tools/call",
+            "params": { "name": "SearchEntity", "arguments": { "name": "middle_fn" } }
+        });
+        let resp = handle_request_unified(&store, &req, &McpContext::default(), None, None);
+        assert!(
+            resp.get("result").is_some(),
+            "estate tool must succeed without domains"
+        );
+        assert!(!resp["result"]["isError"].as_bool().unwrap_or(true));
+    }
+
+    #[test]
+    fn unified_tools_list_with_domains_returns_23_tools() {
+        // tools/list with domains=Some → 10 estate + 6 memory + 7 knowledge = 23 tools.
+        // (SemanticSearch absent: no matching dim-guard in default McpContext)
+        let store = fixture();
+        let req = json!({ "jsonrpc": "2.0", "id": 203, "method": "tools/list", "params": {} });
+        let mut fake_mem = FakeMemory;
+        let mut fake_know = FakeKnowledge;
+        let mut domains = DomainHandles {
+            memory: &mut fake_mem
+                as &mut dyn wicked_estate_memory_core::MemoryApi<Error = anyhow::Error>,
+            knowledge: &mut fake_know as &mut dyn wicked_estate_knowledge::KnowledgeApi,
+        };
+        let resp = handle_request_unified(
+            &store,
+            &req,
+            &McpContext::default(),
+            Some(&mut domains),
+            None,
+        );
+        let tools = resp["result"]["tools"]
+            .as_array()
+            .expect("tools must be array");
+        assert_eq!(
+            tools.len(),
+            23,
+            "10 estate + 6 memory + 7 knowledge = 23; got {}",
+            tools.len()
+        );
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(
+            names.contains(&"memory.capture"),
+            "memory tools must appear"
+        );
+        assert!(
+            names.contains(&"knowledge.ingest"),
+            "knowledge tools must appear"
+        );
+        assert!(names.contains(&"SearchEntity"), "estate tools must appear");
+    }
+
+    #[test]
+    fn unified_tools_list_without_domains_returns_10_tools() {
+        let store = fixture();
+        let req = json!({ "jsonrpc": "2.0", "id": 204, "method": "tools/list", "params": {} });
+        let resp = handle_request_unified(&store, &req, &McpContext::default(), None, None);
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        assert_eq!(
+            tools.len(),
+            10,
+            "without domains: 10 estate tools only; got {}",
+            tools.len()
+        );
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(
+            !names.contains(&"memory.capture"),
+            "memory tools must NOT appear without domains"
+        );
+        assert!(
+            !names.contains(&"knowledge.ingest"),
+            "knowledge tools must NOT appear without domains"
+        );
+    }
+
+    #[test]
+    fn unified_memory_capture_responds_via_fake_domain() {
+        // Positive path: with fake domains wired, memory.capture returns memory_id (HC-007).
+        let store = fixture();
+        let req = json!({
+            "jsonrpc": "2.0", "id": 205,
+            "method": "tools/call",
+            "params": { "name": "memory.capture", "arguments": { "content": "test fact", "kind": "fact", "tier": "semantic", "scope": "test" } }
+        });
+        let mut fake_mem = FakeMemory;
+        let mut fake_know = FakeKnowledge;
+        let mut domains = DomainHandles {
+            memory: &mut fake_mem
+                as &mut dyn wicked_estate_memory_core::MemoryApi<Error = anyhow::Error>,
+            knowledge: &mut fake_know as &mut dyn wicked_estate_knowledge::KnowledgeApi,
+        };
+        let resp = handle_request_unified(
+            &store,
+            &req,
+            &McpContext::default(),
+            Some(&mut domains),
+            None,
+        );
+        assert!(resp.get("result").is_some());
+        assert!(!resp["result"]["isError"].as_bool().unwrap_or(true));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert!(
+            parsed.get("memory_id").is_some(),
+            "HC-007: response must contain memory_id"
+        );
+    }
+
+    #[test]
+    fn unified_resources_list_and_read() {
+        let store = fixture();
+        let list_req =
+            json!({ "jsonrpc": "2.0", "id": 206, "method": "resources/list", "params": {} });
+        let resp = handle_request_unified(&store, &list_req, &McpContext::default(), None, None);
+        let resources = resp["result"]["resources"]
+            .as_array()
+            .expect("resources must be array");
+        assert!(!resources.is_empty(), "bundled skills must be listed");
+
+        // Pick the first resource and read it back.
+        let first_uri = resources[0]["uri"].as_str().unwrap().to_string();
+        let read_req = json!({ "jsonrpc": "2.0", "id": 207, "method": "resources/read", "params": { "uri": first_uri } });
+        let read_resp =
+            handle_request_unified(&store, &read_req, &McpContext::default(), None, None);
+        let contents = read_resp["result"]["contents"].as_array().unwrap();
+        assert!(!contents.is_empty(), "resources/read must return content");
+        assert!(
+            contents[0]["text"].as_str().is_some_and(|t| !t.is_empty()),
+            "skill content must be non-empty"
+        );
+    }
+
+    #[test]
+    fn unified_prompts_get_expedition() {
+        let store = fixture();
+        let req = json!({ "jsonrpc": "2.0", "id": 208, "method": "prompts/get", "params": { "name": "expedition" } });
+        let resp = handle_request_unified(&store, &req, &McpContext::default(), None, None);
+        let messages = resp["result"]["messages"]
+            .as_array()
+            .expect("messages must be array");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"].as_str().unwrap(), "user");
+        assert!(
+            messages[0]["content"]["text"]
+                .as_str()
+                .is_some_and(|t| !t.is_empty())
         );
     }
 

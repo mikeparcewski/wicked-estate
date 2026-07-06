@@ -1,0 +1,13 @@
+{
+  "captured_from": "wicked-memory-mcp-0.12.1",
+  "description": "Distill episodic memory into semantic facts + entities for a scope.",
+  "inputSchema": {
+    "properties": {
+      "scope": {
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "name": "memory.reflect"
+}

@@ -1,0 +1,172 @@
+{
+  "tools": [
+    {
+      "description": "Ingest a document: write a doc node + one chunk node per chunk (each derived_from the doc).",
+      "inputSchema": {
+        "properties": {
+          "chunks": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "source": {
+            "description": "provenance, e.g. a file path or URL",
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "chunks"
+        ],
+        "type": "object"
+      },
+      "name": "knowledge.ingest"
+    },
+    {
+      "description": "Write ONE knowledge node (doc/section/chunk/concept). Returns its stable id.",
+      "inputSchema": {
+        "properties": {
+          "class": {
+            "enum": [
+              "doc",
+              "section",
+              "chunk",
+              "concept"
+            ],
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "name": "knowledge.write"
+    },
+    {
+      "description": "Add ONE TYPED relation (Other(\"<rel>\") edge) between two existing node ids, with confidence + provenance. Both endpoints must have a live node (else isError).",
+      "inputSchema": {
+        "properties": {
+          "confidence": {
+            "type": "number"
+          },
+          "provenance": {
+            "type": "string"
+          },
+          "rel": {
+            "description": "the relation type, e.g. governs, refines, contradicts",
+            "type": "string"
+          },
+          "src": {
+            "type": "string"
+          },
+          "tgt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "src",
+          "tgt",
+          "rel"
+        ],
+        "type": "object"
+      },
+      "name": "knowledge.relate"
+    },
+    {
+      "description": "Standalone recall: the most relevant token-budgeted knowledge slice for a query (keyword \u222a vector, RRF-fused).",
+      "inputSchema": {
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "token_budget": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "knowledge.recall"
+    },
+    {
+      "description": "Coverage: node counts (optionally per class) and the count of logged recall misses (gap-hunting input).",
+      "inputSchema": {
+        "properties": {
+          "class": {
+            "enum": [
+              "doc",
+              "section",
+              "chunk",
+              "concept"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "knowledge.coverage"
+    },
+    {
+      "description": "Cross-store link: mark a knowledge node as `about` one or more code symbols (estate symbol ids), so recall can surface it FROM those code seeds even with zero lexical overlap.",
+      "inputSchema": {
+        "properties": {
+          "code_ids": {
+            "description": "estate code symbol ids this knowledge is about",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "knowledge_id": {
+            "description": "the knowledge node id returned by knowledge.write / knowledge.ingest",
+            "type": "string"
+          }
+        },
+        "required": [
+          "knowledge_id",
+          "code_ids"
+        ],
+        "type": "object"
+      },
+      "name": "knowledge.relate_code"
+    },
+    {
+      "description": "The cross-store differentiator: recall the knowledge linked (`about`) to one or more code symbols \u2014 surfaces grounding docs FROM a code seed across the SEPARATE knowledge store, no keyword overlap needed.",
+      "inputSchema": {
+        "properties": {
+          "code_ids": {
+            "description": "estate code symbol ids to recall knowledge about",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "code_ids"
+        ],
+        "type": "object"
+      },
+      "name": "knowledge.recall_about_code"
+    }
+  ]
+}

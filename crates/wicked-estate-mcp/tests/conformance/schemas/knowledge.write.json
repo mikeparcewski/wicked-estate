@@ -1,0 +1,31 @@
+{
+  "captured_from": "wicked-knowledge-0.12.1",
+  "description": "Write ONE knowledge node (doc/section/chunk/concept). Returns its stable id.",
+  "inputSchema": {
+    "properties": {
+      "class": {
+        "enum": [
+          "doc",
+          "section",
+          "chunk",
+          "concept"
+        ],
+        "type": "string"
+      },
+      "content": {
+        "type": "string"
+      },
+      "scope": {
+        "type": "string"
+      },
+      "source": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "content"
+    ],
+    "type": "object"
+  },
+  "name": "knowledge.write"
+}
