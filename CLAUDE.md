@@ -1,9 +1,10 @@
-# wicked_estate — the ultimate code graph parser
+# wicked-estate — unified MCP foundation (v0.13.0)
 
-Greenfield **Rust** engine that turns a repo into a queryable graph (symbols, calls, imports,
-types, refs) so LLM agents get fast, precise code intelligence — definitions, who-calls-X,
-blast-radius, scoped context — local-first, single binary, tree-sitter + SQLite. Built
-**fleet-parallel behind a fixed trait spine**. Live tracker: `docs/plan/WAVE-PLAN.md`.
+Rust MCP server: **code graph + memory + knowledge** in a single binary, 23 tools across 3 domains.
+Turns a repo into a queryable graph (symbols, calls, imports, edges injected by event bus and commands)
+and pairs it with a semantic memory store and a wiki/document knowledge store — all local-first,
+zero infra, SQLite-backed. Built **fleet-parallel behind a fixed trait spine**. Live design:
+`.product/DES-001-technical-design.md`.
 
 > Guardrails distilled from prior systems and hard-won experience. They are not style preferences —
 > each one is a scar. The trait spine prevents structural slop; these rules prevent process slop.
@@ -208,19 +209,24 @@ provenance) — track them as a future WAVE task before relying on review alone.
 
 ```
 crates/
-  wicked-estate-core/      types + the five traits + conformance kit   (the spine — change with care)
-  wicked-estate-extract/   tree-sitter Extractor impls (one module per language)   [W2.1]
-  wicked-estate-resolve/   Resolver impls: import-map / SCIP / TSG / on-demand LSP  [W2.3,W3.2,W3.3]
-  wicked-estate-store/     GraphStore impls: MemStore, SqliteStore (+ SurrealDB bake-off)  [W1.1,W1.2]
-  wicked-estate-rank/      Ranker: (personalized) PageRank over CALLS/IMPORTS        [W4.1]
-  wicked-estate-retrieve/  RetrievalTool: 3-tool agent API + RRF hybrid              [W4.3,W5.3]
-  wicked-estate-mcp/       MCP server exposing the retrieval tools                   [W2.5]
-  wicked-estate/       `wicked-estate` binary                                       [W2.4]
-  wicked-estate-bench/     agent-eval benchmark harness — the truth oracle           [W0.6/W1.6]
+  wicked-estate-core/         types + the five traits + conformance kit   (the spine — change with care)
+  wicked-estate-extract/      tree-sitter Extractor impls (one module per language)
+  wicked-estate-resolve/      Resolver impls: import-map / SCIP / TSG / on-demand LSP
+  wicked-estate-store/        GraphStore impls: MemStore, SqliteStore (+ SurrealDB bake-off)
+  wicked-estate-rank/         Ranker: (personalized) PageRank over CALLS/IMPORTS
+  wicked-estate-retrieve/     RetrievalTool: graph+FTS5+RRF hybrid retrieval (10 estate tools)
+  wicked-estate-overlay/      XedgeStore: injected cross-repo edges (event→consumer, cmd→agent)
+  wicked-estate-memory-core/  Memory types + MemoryApi trait + fuzzy/salience/scope logic
+  wicked-estate-memory/       MemoryEngine + consolidation + cross-recall (6 memory tools)
+  wicked-estate-memory-api/   Re-export shim for memory public API
+  wicked-estate-knowledge/    KnowledgeEngine: wiki ingest/recall/relate/coverage (7 knowledge tools)
+  wicked-estate-mcp/          MCP server — 23 tools across 3 domains; main.rs 4-store init
+  wicked-estate/              `wicked-estate` watcher binary (emit events on file change)
+  wicked-estate-bench/        agent-eval benchmark harness — the truth oracle
 ```
 
 ## Pointers
 
-`README.md` · `docs/plan/WAVE-PLAN.md` (live tracker) · `docs/ENGINE-CONTRACT.md` ·
-`docs/adr/` · `docs/DESIGN-NOTES.md` (design principles) ·
+`README.md` · `.product/DES-001-technical-design.md` (design) · `.product/TEST-001-test-strategy.md` ·
+`docs/ENGINE-CONTRACT.md` · `docs/adr/` · `docs/DESIGN-NOTES.md` ·
 `docs/agent-behavior-rules.md` · `docs/benchmark-methodology.md`
