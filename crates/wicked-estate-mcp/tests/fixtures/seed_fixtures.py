@@ -274,6 +274,29 @@ def seed_knowledge(workdir, symbol_id):
     return node_id
 
 
+# ── Step 3b: WAL checkpoint ───────────────────────────────────────────────────
+# The MCP servers are killed via SIGTERM, which bypasses SQLite's normal
+# connection-close checkpoint. Force a full checkpoint so the data lives in the
+# main DB file — not only in the WAL — before we copy the files to fixtures/.
+
+def checkpoint_wal_dbs(workdir):
+    print("\n[3b] Checkpointing WAL data into main DB files ...")
+    for name in ["memory.db", "knowledge.db", "xedge.db"]:
+        p = os.path.join(workdir, name)
+        if not os.path.exists(p):
+            print("    {} — not found, skipping".format(name))
+            continue
+        try:
+            con = sqlite3.connect(p)
+            con.execute("PRAGMA wal_checkpoint(FULL)")
+            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            con.close()
+            size = os.path.getsize(p)
+            print("    {} — checkpointed ({} bytes)".format(name, size))
+        except Exception as e:
+            print("    WARNING: checkpoint of {} failed: {}".format(name, e))
+
+
 # ── Step 4: Verify all 4 DBs exist ───────────────────────────────────────────
 
 def verify_dbs(workdir):
@@ -445,6 +468,7 @@ def main():
         symbol_id, symbol_name, symbol_epoch = seed_estate(workdir)
         seed_memory(workdir)
         node_id = seed_knowledge(workdir, symbol_id)
+        checkpoint_wal_dbs(workdir)
         verify_dbs(workdir)
         copy_to_fixtures(workdir)
         write_seed_md(symbol_id, symbol_name, symbol_epoch, node_id)

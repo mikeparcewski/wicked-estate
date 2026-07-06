@@ -4,6 +4,7 @@ description = "MCP server exposing the wicked-estate retrieval tools."
 readme = "README.md"
 keywords = ["mcp", "code-graph", "llm", "code-intelligence", "agents"]
 categories = ["development-tools", "command-line-utilities"]
+publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,12 +18,18 @@ path = "src/main.rs"
 [dependencies]
 wicked-estate-core.workspace = true
 wicked-estate-store.workspace = true
-wicked-estate-retrieve = { path = "../wicked-estate-retrieve", version = "0.12.0" }
-wicked-estate = { path = "../wicked-estate", version = "0.12.0", features = ["serve"] }
-wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.12.0" }
+wicked-estate-retrieve = { path = "../wicked-estate-retrieve", version = "0.13.0" }
+wicked-estate = { path = "../wicked-estate", version = "0.13.0", features = ["serve"] }
+wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.13.0" }
+wicked-estate-memory = { path = "../wicked-estate-memory", version = "0.13.0" }
+wicked-estate-knowledge = { path = "../wicked-estate-knowledge", version = "0.13.0" }
+wicked-estate-memory-api = { path = "../wicked-estate-memory-api", version = "0.13.0" }
+wicked-estate-memory-core = { path = "../wicked-estate-memory-core", version = "0.13.0" }
+wicked-estate-overlay = { path = "../wicked-estate-overlay", version = "0.13.0" }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std"] }
 
 [dev-dependencies]
 wicked-estate-store = { workspace = true }
+tempfile = "3"

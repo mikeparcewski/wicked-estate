@@ -1,5 +1,6 @@
 [package]
 name = "wicked-estate-memory-api"
+publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +10,4 @@ description = "The memory/knowledge interface seam: traits + DTOs a host (estate
 
 [dependencies]
 serde = { workspace = true }
+wicked-estate-memory-core = { path = "../wicked-estate-memory-core" }

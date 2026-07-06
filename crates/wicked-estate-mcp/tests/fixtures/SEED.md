@@ -37,7 +37,7 @@ Seeded with: `knowledge.ingest` (1 doc, 1 chunk) + `knowledge.write` (1 concept)
 
 | Field | Value |
 |---|---|
-| Seed node_id | `kdoc synthetic 019f37fb-55e5-7122-88b8-2d3781989d01:` |
+| Seed node_id | `kdoc synthetic 019f3875-1d18-7ad2-979a-b77e0fcad027:` |
 | Seed query | `seed` |
 
 **§1.5 test instructions:** Call `knowledge.recall(query="seed", token_budget=512)` against knowledge_v0121.db; assert non-empty results.
@@ -45,12 +45,12 @@ Seeded with: `knowledge.ingest` (1 doc, 1 chunk) + `knowledge.write` (1 concept)
 ## XEdge Fixture (`xedge_v0121.db`)
 
 Source binary: `wicked-knowledge-mcp v0.12.1` (XedgeStore writer)
-Seeded with: `knowledge.relate_code(knowledge_id="kdoc synthetic 019f37fb-55e5-7122-88b8-2d3781989d01:", code_ids=["ts-rust . . . seed_fixture/seed_fn()."])` → 1 about-edge
+Seeded with: `knowledge.relate_code(knowledge_id="kdoc synthetic 019f3875-1d18-7ad2-979a-b77e0fcad027:", code_ids=["ts-rust . . . seed_fixture/seed_fn()."])` → 1 about-edge
 
 | Field | Value |
 |---|---|
 | Xedge src_engine | `knowledge` |
-| Xedge src_id | `kdoc synthetic 019f37fb-55e5-7122-88b8-2d3781989d01:` |
+| Xedge src_id | `kdoc synthetic 019f3875-1d18-7ad2-979a-b77e0fcad027:` |
 | Xedge tgt_engine | `estate` |
 | Xedge tgt_id | `ts-rust . . . seed_fixture/seed_fn().` |
 | Xedge tgt_epoch | `0` (hardcoded by `XEdge::about`) |
