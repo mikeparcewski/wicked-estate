@@ -340,7 +340,7 @@ function Pipeline() {
               {['SQLite', 'FTS5', 'sqlite-vec', 'WAL', 'PostgreSQL'].map(t => <span key={t} className="lang-tag">{t}</span>)}
             </div>
             <div className="pt-2 border-t border-hairline">
-              <p className="font-mono text-[0.58rem] text-faint tracking-widest uppercase mb-1.5">MCP · 5 tools</p>
+              <p className="font-mono text-[0.58rem] text-faint tracking-widest uppercase mb-1.5">MCP · 23 tools</p>
               <div className="space-y-0.5">
                 {['SearchEntity', 'RetrieveEntity', 'TraverseGraph', 'BlastRadius', 'FetchContent'].map(t => (
                   <div key={t} className="font-mono text-xs" style={{ color: 'var(--accent)' }}>{t}</div>
@@ -842,10 +842,10 @@ function StepPlayer() {
       cmd: ['cargo install wicked-estate'],
       out: [
         'Updating crates.io index...',
-        'Compiling wicked-estate-core v0.1.7',
-        'Compiling wicked-estate-mcp  v0.1.7',
+        'Compiling wicked-estate-core v0.13.0',
+        'Compiling wicked-estate-mcp  v0.13.0',
         'Finished  release [optimized]',
-        '✓  Installed wicked-estate v0.1.7',
+        '✓  Installed wicked-estate v0.13.0',
       ],
     },
     {
