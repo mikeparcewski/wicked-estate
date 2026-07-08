@@ -18,7 +18,7 @@ function Hero() {
         <div className="inline-flex items-center gap-2 font-mono text-[0.65rem] tracking-[0.22em] uppercase text-muted border border-hairline-strong rounded-2xl sm:rounded-full px-3 py-1.5 mb-8"
           style={{ background: 'color-mix(in oklab, var(--accent) 8%, var(--canvas))' }}>
           <span className="live-dot w-1.5 h-1.5 rounded-full bg-accent inline-block" />
-          Local-first · One MCP server · Graph + Memory + Knowledge · 23 tools
+          Local-first SQLite · PostgreSQL for teams · One MCP server · 23 tools
         </div>
 
         <h1 className="font-display text-5xl sm:text-6xl lg:text-[4.2rem] font-black mb-6 text-ink" style={{ fontStretch: '115%' }}>
@@ -186,7 +186,7 @@ function ThreeDomains() {
           <p className="text-muted max-w-2xl mx-auto font-sans">
             wicked-estate is a single MCP server exposing <span className="text-ink font-mono text-sm">23 tools</span>{' '}
             across three domains an agent needs and never has: the code graph, cross-session memory, and a citeable
-            knowledge base — all local-first, all in one SQLite-backed binary.
+            knowledge base — all local-first on SQLite by default, or a shared PostgreSQL graph for a team.
           </p>
         </div>
 
@@ -265,7 +265,7 @@ function ThreeDomains() {
           ))}
         </div>
         <p className="mt-6 text-center font-mono text-xs text-faint">
-          Same binary, same SQLite file, same provenance discipline — across all three.
+          Same binary, same store — local SQLite or shared PostgreSQL — same provenance discipline, across all three.
         </p>
       </div>
     </section>
@@ -666,6 +666,197 @@ function GraphModel() {
             </div>
           </div>
         </div>
+      </div>
+    </section>
+  )
+}
+
+// ── Beyond Code (requirement traceability + annotations) ────────────────────────
+// The graph isn't only symbols. Two additive layers ride on the SAME stable
+// symbol identity: requirement↔code semantics, and typed key/value annotations.
+function BeyondCode() {
+  return (
+    <section id="beyond-code" className="snap-start min-h-screen py-24 px-7 band band-depth">
+      <div className="max-w-6xl mx-auto">
+        <div className="text-center mb-14">
+          <span className="kicker">Beyond the code</span>
+          <h2 className="font-display text-3xl sm:text-4xl font-black text-ink mb-4">
+            The graph isn&apos;t only code.
+          </h2>
+          <p className="text-muted max-w-2xl mx-auto font-sans">
+            Two additive layers ride on the same stable symbol identity — so an agent can trace{' '}
+            <span className="text-ink">a requirement to the code that implements it</span> and{' '}
+            <span className="text-ink">carry typed notes on any node</span> that survive every re-index.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+          {/* Requirement ↔ code traceability */}
+          <div className="card flex flex-col">
+            <div className="flex items-start gap-3 mb-4">
+              <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
+                style={{ background: 'color-mix(in oklab, var(--accent) 12%, var(--canvas))', color: 'var(--accent)' }}>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <div>
+                <h3 className="font-mono text-sm font-semibold text-ink mb-1">Requirement ↔ code traceability</h3>
+                <p className="text-xs text-muted leading-5 font-sans">
+                  Every symbol can carry the <span className="font-mono text-ink">requirement</span> it satisfies,
+                  a <span className="font-mono text-ink">description</span>, and a{' '}
+                  <span className="font-mono text-ink">validated</span> flag — the requirement↔functionality graph
+                  alongside the structural one. Ask which code satisfies a requirement, and what&apos;s still unvalidated.
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-auto rounded-lg overflow-hidden" style={{ background: '#111113', border: '1px solid rgba(255,255,255,0.07)' }}>
+              <div className="px-4 py-3 font-mono text-xs leading-[1.8]">
+                <div><span style={{ color: 'var(--accent)' }}>$</span><span className="text-white/70"> wicked-estate by-requirement REQ-142</span></div>
+                <div className="text-white/30 mt-1">2 symbol(s) matched REQ-142:</div>
+                <div className="text-[#4ade80]">  validateCoupon   src/checkout/coupon.ts   ✓ validated</div>
+                <div className="text-white/55">  applyDiscount    src/checkout/price.ts    ⋯ unvalidated</div>
+                <div className="text-white/25 mt-1">set_node_semantics · node_semantics · find_by_requirement</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Typed annotations */}
+          <div className="card flex flex-col">
+            <div className="flex items-start gap-3 mb-4">
+              <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
+                style={{ background: 'color-mix(in oklab, var(--accent) 12%, var(--canvas))', color: 'var(--accent)' }}>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zM19.5 15v3.75A2.25 2.25 0 0117.25 21H5.25A2.25 2.25 0 013 18.75V6.75A2.25 2.25 0 015.25 4.5H9" />
+                </svg>
+              </div>
+              <div>
+                <h3 className="font-mono text-sm font-semibold text-ink mb-1">Typed graph annotations</h3>
+                <p className="text-xs text-muted leading-5 font-sans">
+                  Annotate any node with typed <span className="font-mono text-ink">key/value</span> pairs —{' '}
+                  <span className="font-mono text-ink">assumption</span>, <span className="font-mono text-ink">note</span>,{' '}
+                  <span className="font-mono text-ink">question</span>, or your own type — each with confidence and an
+                  advisory flag. They surface inline in retrieval payloads and survive re-index via the stable symbol ID.
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-auto rounded-lg overflow-hidden" style={{ background: '#111113', border: '1px solid rgba(255,255,255,0.07)' }}>
+              <div className="px-4 py-3 font-mono text-xs leading-[1.75]">
+                <div className="text-white/30">RetrieveEntity(&quot;applyDiscount&quot;) →</div>
+                <div className="text-white/55">  &quot;annotations&quot;: [</div>
+                <div className="text-white/55">    &#123; &quot;type&quot;: <span className="text-[#4ade80]">&quot;assumption&quot;</span>, &quot;key&quot;: &quot;max-stack&quot;,</div>
+                <div className="text-white/55">      &quot;value&quot;: &quot;coupons never stack&quot;, &quot;confidence&quot;: <span style={{ color: 'var(--accent)' }}>0.7</span>, &quot;advisory&quot;: true &#125; ],</div>
+                <div className="text-white/55">  &quot;annotation_summary&quot;: &#123; &quot;count&quot;: 3, &quot;by_type&quot;: &#123;&quot;note&quot;:2,&quot;assumption&quot;:1&#125; &#125;</div>
+                <div className="text-white/25 mt-1">annotate · annotations_by_type · stale-since sweep</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <p className="mt-8 text-center font-mono text-xs text-faint">
+          Both layers key off the stable symbol ID — reformat, move, or re-index, and the requirement links and annotations follow.
+        </p>
+      </div>
+    </section>
+  )
+}
+
+// ── Storage (SQLite by default, PostgreSQL for teams) ────────────────────────────
+function Storage() {
+  const rows = [
+    { cap: 'Default, zero-infra', sqlite: 'Local SQLite file — nothing to run', pg: 'One flag: --features postgres' },
+    { cap: 'Concurrent writers', sqlite: 'Single-writer', pg: 'shared_writers = true — team writes' },
+    { cap: 'Traversal', sqlite: 'Bounded recursive CTE', pg: 'Server-side WITH RECURSIVE, in-DB' },
+    { cap: 'Command API', sqlite: 'Same open_store(spec) factory', pg: 'Same factory arm — zero caller changes' },
+    { cap: 'Re-index to switch', sqlite: '—', pg: 'None — same schema, same graph' },
+  ]
+  return (
+    <section id="storage" className="snap-start min-h-screen flex flex-col justify-center py-24 px-7 band band-solid">
+      <div className="max-w-5xl mx-auto w-full">
+        <div className="text-center mb-12">
+          <span className="kicker">Storage</span>
+          <h2 className="font-display text-3xl sm:text-4xl font-black text-ink mb-4">
+            Local-first by default. A shared team graph when you need one.
+          </h2>
+          <p className="text-muted max-w-2xl mx-auto font-sans">
+            SQLite is the zero-infrastructure default. Flip one build flag and the exact same engine and command API
+            run on <span className="text-ink">PostgreSQL</span> — concurrent writers, server-side traversal, no re-index.
+            Storage is negotiated through <span className="font-mono text-ink text-sm">StoreCapabilities</span>, so
+            retrieval adapts to whichever backend is live.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto_1fr] gap-4 items-stretch mb-8">
+          {/* SQLite */}
+          <div className="card">
+            <div className="flex items-center gap-2 mb-4">
+              <span className="w-2 h-2 rounded-full" style={{ background: 'var(--muted)' }} />
+              <h3 className="font-mono text-sm font-semibold text-ink">SQLite — solo, local-first</h3>
+            </div>
+            <div className="flex flex-wrap gap-1.5 mb-4">
+              {['single binary', 'FTS5', 'sqlite-vec', 'WAL', 'no server'].map(t => <span key={t} className="lang-tag">{t}</span>)}
+            </div>
+            <div className="rounded-lg overflow-hidden" style={{ background: '#111113', border: '1px solid rgba(255,255,255,0.07)' }}>
+              <div className="px-3 py-2 font-mono text-[0.68rem] leading-6">
+                <div><span style={{ color: 'var(--accent)' }}>$</span><span className="text-white/60"> wicked-estate index . --db graph.db</span></div>
+                <div className="text-white/30">nothing to run · nothing leaves your box</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Divider */}
+          <div className="hidden lg:flex flex-col items-center justify-center px-1">
+            <span className="font-mono text-[0.6rem] tracking-widest uppercase text-faint rotate-90 whitespace-nowrap">one flag</span>
+          </div>
+
+          {/* Postgres */}
+          <div className="card" style={{ borderColor: 'color-mix(in oklab, var(--accent) 40%, var(--hairline))' }}>
+            <div className="flex items-center gap-2 mb-4">
+              <span className="w-2 h-2 rounded-full" style={{ background: 'var(--accent)' }} />
+              <h3 className="font-mono text-sm font-semibold text-ink">PostgreSQL — shared team graph</h3>
+            </div>
+            <div className="flex flex-wrap gap-1.5 mb-4">
+              {['--features postgres', 'concurrent writers', 'server-side traversal', 'trigram FTS'].map(t => (
+                <span key={t} className="lang-tag" style={{ color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 40%, var(--hairline))', background: 'color-mix(in oklab, var(--accent) 8%, var(--canvas))' }}>{t}</span>
+              ))}
+            </div>
+            <div className="rounded-lg overflow-hidden" style={{ background: '#111113', border: '1px solid rgba(255,255,255,0.07)' }}>
+              <div className="px-3 py-2 font-mono text-[0.68rem] leading-6">
+                <div><span style={{ color: 'var(--accent)' }}>$</span><span className="text-white/60"> wicked-estate index . --db postgres://team/graph</span></div>
+                <div className="text-[#4ade80]">shared_writers=true · server_side_traversal=true</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Capability comparison */}
+        <div className="card overflow-x-auto">
+          <table className="w-full text-left border-collapse font-sans">
+            <thead>
+              <tr className="text-faint font-mono text-[0.6rem] uppercase tracking-widest">
+                <th className="py-2 pr-4 font-medium"></th>
+                <th className="py-2 pr-4 font-medium">SQLite (default)</th>
+                <th className="py-2 font-medium" style={{ color: 'var(--accent)' }}>PostgreSQL (--features postgres)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(r => (
+                <tr key={r.cap} className="border-t border-hairline align-top">
+                  <td className="py-2.5 pr-4 font-mono text-xs text-ink whitespace-nowrap">{r.cap}</td>
+                  <td className="py-2.5 pr-4 text-xs text-muted">{r.sqlite}</td>
+                  <td className="py-2.5 text-xs text-muted">{r.pg}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <p className="mt-6 text-center font-mono text-xs text-faint">
+          Same engine. Same command API. One build flag between a solo laptop graph and a shared team graph.
+        </p>
       </div>
     </section>
   )
@@ -1351,6 +1542,8 @@ export default function Content() {
       <UseCases />
       <Pipeline />
       <GraphModel />
+      <BeyondCode />
+      <Storage />
       <AgentContract />
       <Languages />
       <MCPConnect />

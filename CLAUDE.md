@@ -155,11 +155,13 @@ work is safe concurrently there; for same-crate or dependency-chain work use iso
 See the ADRs / contract for rationale; reopen only with new evidence.
 
 - **Greenfield Rust, single static binary.** (the design notes)
-- **Storage:** SQLite + FTS5 + sqlite-vec is the local default; **SurrealDB** is a benched
-  challenger; **IndraDB excluded.** Storage lives behind `GraphRead` + `GraphWrite` (+ the
-  `GraphStore` supertrait) and a single `open_store(spec)` factory, so an **external DB**
-  (Postgres / server — designed, not built) drops in as one module + one factory arm with **zero
-  caller changes**. Retrieval negotiates `StoreCapabilities`. (the design notes, `docs/adr/ADR-003`)
+- **Storage:** SQLite + FTS5 + sqlite-vec is the local-first default; **Postgres is built behind
+  `--features postgres`** (`PostgresStore` — concurrent team writers + server-side `WITH RECURSIVE`
+  traversal, same `open_store` factory, no re-index); **SurrealDB** is a benched challenger (still
+  designed, not built); **IndraDB excluded.** Storage lives behind `GraphRead` + `GraphWrite` (+ the
+  `GraphStore` supertrait) and a single `open_store(spec)` factory, so a backend drops in as one
+  module + one factory arm with **zero caller changes**. Retrieval negotiates `StoreCapabilities`.
+  (the design notes, `docs/adr/ADR-003`)
 - **Stable symbol identity**, not content-hash. (`docs/adr/ADR-002`)
 - **Edge direction:** `source = dependent`, `target = dependency`. Blast-radius = dependents.
   (`docs/ENGINE-CONTRACT.md`)

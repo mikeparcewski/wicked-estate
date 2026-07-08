@@ -847,9 +847,12 @@ impl SymbolIndex for MemStore {
 
 // ---------------------------------------------------------------------------
 // Backend factory — the external-DB seam (docs/adr/ADR-003-storage-backends.md).
-// Only SQLite is built; Postgres / SurrealDB are *designed* and return a clear
-// "not yet built" error. Adding an external backend later is one match arm here,
-// with zero changes to any caller (CLI / MCP / bench / indexer).
+// SQLite is the local-first default and is always built. Postgres is BUILT behind
+// `--features postgres` (concurrent team writers + server-side WITH RECURSIVE
+// traversal); without that feature the arm returns a clear "requires the 'postgres'
+// feature" error. SurrealDB is still *designed* (the W1.5 bake-off challenger) and
+// returns a "not yet built" error. Adding another external backend is one match arm
+// here, with zero changes to any caller (CLI / MCP / bench / indexer).
 // ---------------------------------------------------------------------------
 
 /// Where the graph lives, parsed from a connection spec by [`open_store`].
@@ -857,7 +860,7 @@ impl SymbolIndex for MemStore {
 pub enum StoreBackend {
     /// `sqlite://<path>`, a bare path, or `:memory:`.
     Sqlite { path: String },
-    /// `postgres://…` — external relational backend (designed, ADR-003).
+    /// `postgres://…` — external relational backend, built behind `--features postgres` (ADR-003).
     Postgres { url: String },
     /// `surrealdb://…` — server graph backend (W1.5 bake-off challenger).
     SurrealDb { url: String },
