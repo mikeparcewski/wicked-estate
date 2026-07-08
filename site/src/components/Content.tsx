@@ -18,7 +18,7 @@ function Hero() {
         <div className="inline-flex items-center gap-2 font-mono text-[0.65rem] tracking-[0.22em] uppercase text-muted border border-hairline-strong rounded-2xl sm:rounded-full px-3 py-1.5 mb-8"
           style={{ background: 'color-mix(in oklab, var(--accent) 8%, var(--canvas))' }}>
           <span className="live-dot w-1.5 h-1.5 rounded-full bg-accent inline-block" />
-          Local-first · Single binary · Tree-sitter + SQLite · PostgreSQL
+          Local-first · One MCP server · Graph + Memory + Knowledge · 23 tools
         </div>
 
         <h1 className="font-display text-5xl sm:text-6xl lg:text-[4.2rem] font-black mb-6 text-ink" style={{ fontStretch: '115%' }}>
@@ -27,11 +27,11 @@ function Hero() {
         </h1>
 
         <p className="text-lg sm:text-xl text-muted max-w-2xl mx-auto mb-10 leading-relaxed font-sans">
-          Turn any repo — and its surrounding infrastructure estate — into one queryable graph.
-          Every edge carries{' '}
-          <span className="text-ink font-mono text-base">confidence</span> and{' '}
-          <span className="text-ink font-mono text-base">provenance</span>.
-          Heuristics are never presented as facts.
+          One local-first MCP server unifies the three things your agent is missing — a queryable{' '}
+          <span className="text-ink font-mono text-base">code graph</span>, cross-session{' '}
+          <span className="text-ink font-mono text-base">memory</span>, and a citeable{' '}
+          <span className="text-ink font-mono text-base">knowledge</span> base. 23 tools, one binary.
+          Every edge carries confidence and provenance — heuristics are never presented as facts.
         </p>
 
         <div className="flex flex-col sm:flex-row gap-3 justify-center mb-16">
@@ -82,6 +82,190 @@ function Hero() {
 
         <p className="mt-5 font-mono text-xs text-faint">
           Blast-radius = transitive dependents — not text matches.
+        </p>
+      </div>
+    </section>
+  )
+}
+
+// ── Three Domains (interactive console) ─────────────────────────────────────────
+// estate is not a graph tool — it's ONE MCP server across three domains. This
+// tabbed, auto-cycling console lets a reader feel each domain answer a real query.
+type Domain = 'graph' | 'memory' | 'knowledge'
+
+function ThreeDomains() {
+  const domains: {
+    id: Domain
+    label: string
+    count: string
+    tagline: string
+    tools: string[]
+    prompt: string
+    lines: { text: string; kind?: 'ok' | 'dim' | 'accent' }[]
+  }[] = [
+    {
+      id: 'graph',
+      label: 'Code graph',
+      count: '10 tools',
+      tagline: 'symbols · callers · blast-radius · scoped context',
+      tools: ['SearchEntity', 'RetrieveEntity', 'TraverseGraph', 'BlastRadius', 'FetchContent', 'Lineage', 'RankHotspots', 'Communities', 'ContextBundle', 'SemanticSearch'],
+      prompt: 'BlastRadius("handleRequest")',
+      lines: [
+        { text: '5 transitive dependents · 0 unresolved', kind: 'dim' },
+        { text: '  authenticate    src/middleware.ts   conf 1.0  SCIP', kind: 'accent' },
+        { text: '  validateToken   src/auth.ts         conf 1.0  SCIP' },
+        { text: '  routeRequest    src/router.ts       conf 0.8  TSG' },
+        { text: '  rateLimitCheck  src/middleware.ts   conf 0.8  TSG' },
+        { text: '  main            src/server.ts       conf 1.0  SCIP' },
+        { text: '✓ dependents, not text matches — every edge carries provenance', kind: 'ok' },
+      ],
+    },
+    {
+      id: 'memory',
+      label: 'Memory',
+      count: '6 tools',
+      tagline: 'cross-session recall · scope · salience · reflect',
+      tools: ['memory.capture', 'memory.recall', 'memory.reflect', 'memory.learn', 'memory.erase', 'memory.coverage'],
+      prompt: 'memory.recall("why did we drop the vector DB?", scope=project:acme)',
+      lines: [
+        { text: '2 memories · token-budgeted · salience-ranked', kind: 'dim' },
+        { text: '  [semantic] chose FTS5 + RRF over pgvector — infra cost', kind: 'accent' },
+        { text: '             scope=project:acme   salience 0.91' },
+        { text: '  [episode]  spike 2026-06: pgvector added ~400ms p95' },
+        { text: '             scope=project:acme   salience 0.74' },
+        { text: '✓ the decision survives the session that made it', kind: 'ok' },
+      ],
+    },
+    {
+      id: 'knowledge',
+      label: 'Knowledge',
+      count: '7 tools',
+      tagline: 'ingest · hybrid recall · relate · link to code',
+      tools: ['knowledge.ingest', 'knowledge.recall', 'knowledge.relate', 'knowledge.write', 'knowledge.relate_code', 'knowledge.recall_about_code', 'knowledge.coverage'],
+      prompt: 'knowledge.recall("deploy runbook: rollback steps")',
+      lines: [
+        { text: '1 article · hybrid FTS + vector · RRF fused', kind: 'dim' },
+        { text: '  [[Deployment Runbook]] §Rollback        conf 0.88', kind: 'accent' },
+        { text: '    relates → [[Incident-2049]]  conf 0.72' },
+        { text: '    linked code → deploy.ts · rollback.ts' },
+        { text: '✓ answers cite a source you can open — not an opaque embedding', kind: 'ok' },
+      ],
+    },
+  ]
+
+  const DURATION = 5200
+  const [active, setActive] = useState<Domain>('graph')
+  const [visible, setVisible] = useState(true)
+  const idx = domains.findIndex(d => d.id === active)
+
+  const goTo = (id: Domain) => {
+    if (id === active) return
+    setVisible(false)
+    setTimeout(() => { setActive(id); setVisible(true) }, 220)
+  }
+
+  useEffect(() => {
+    const t = setInterval(() => {
+      const next = domains[(idx + 1) % domains.length].id
+      setVisible(false)
+      setTimeout(() => { setActive(next); setVisible(true) }, 220)
+    }, DURATION)
+    return () => clearInterval(t)
+  }, [idx])
+
+  const d = domains[idx]
+
+  return (
+    <section id="domains" className="snap-start min-h-screen flex flex-col justify-center py-24 px-7 band band-solid">
+      <div className="max-w-5xl mx-auto w-full">
+        <div className="text-center mb-10">
+          <span className="kicker">One server · Three domains</span>
+          <h2 className="font-display text-3xl sm:text-4xl font-black text-ink mb-4">
+            Not just a graph. The whole context layer.
+          </h2>
+          <p className="text-muted max-w-2xl mx-auto font-sans">
+            wicked-estate is a single MCP server exposing <span className="text-ink font-mono text-sm">23 tools</span>{' '}
+            across three domains an agent needs and never has: the code graph, cross-session memory, and a citeable
+            knowledge base — all local-first, all in one SQLite-backed binary.
+          </p>
+        </div>
+
+        {/* Domain tabs */}
+        <div className="flex flex-wrap justify-center gap-2 mb-5">
+          {domains.map(dd => {
+            const on = dd.id === active
+            return (
+              <button
+                key={dd.id}
+                onClick={() => goTo(dd.id)}
+                className="group flex items-center gap-2 rounded-full px-4 py-2 font-mono text-xs transition-all"
+                style={{
+                  background: on ? 'color-mix(in oklab, var(--accent) 14%, var(--canvas))' : 'var(--surface)',
+                  border: `1px solid ${on ? 'color-mix(in oklab, var(--accent) 55%, var(--hairline))' : 'var(--hairline-strong)'}`,
+                  color: on ? 'var(--ink)' : 'var(--muted)',
+                }}
+              >
+                <span className="w-1.5 h-1.5 rounded-full shrink-0"
+                  style={{ background: on ? 'var(--accent)' : 'var(--faint)' }} />
+                <span className="font-semibold">{dd.label}</span>
+                <span className="text-faint">{dd.count}</span>
+              </button>
+            )
+          })}
+        </div>
+
+        {/* Console */}
+        <div className="terminal" style={{ boxShadow: '0 32px 64px -28px rgba(0,0,0,0.5)' }}>
+          <div className="terminal-bar justify-between flex-shrink-0">
+            <div className="flex items-center gap-1.5">
+              <div className="terminal-dot bg-red-500/80" />
+              <div className="terminal-dot bg-yellow-500/80" />
+              <div className="terminal-dot bg-green-500/80" />
+              <span className="ml-2 font-mono text-[0.62rem] tracking-widest uppercase text-white/30">
+                wicked-estate-mcp · {d.label.toLowerCase()}
+              </span>
+            </div>
+            <span className="font-mono text-[0.6rem] text-white/25">{d.tagline}</span>
+          </div>
+
+          {/* progress bar */}
+          <div className="h-px flex-shrink-0" style={{ background: 'rgba(255,255,255,0.06)' }}>
+            <div key={`dprog-${active}`} className="h-full"
+              style={{ background: 'var(--accent)', animation: `step-progress ${DURATION}ms linear forwards` }} />
+          </div>
+
+          <div className="px-5 py-5 font-mono text-xs leading-[1.85] min-h-[13.5rem]"
+            style={{ opacity: visible ? 1 : 0, transition: 'opacity 0.22s ease' }}>
+            <div key={`dc-${active}`}>
+              <div className="flex gap-2 mb-3 flex-wrap">
+                <span style={{ color: 'var(--accent)' }}>›</span>
+                <span className="text-white/80 break-all">{d.prompt}</span>
+              </div>
+              <div className="space-y-0.5 border-t border-white/5 pt-3">
+                {d.lines.map((ln, i) => (
+                  <div key={i} style={{ animationDelay: `${i * 0.09}s`, animation: 'line-fade 0.35s ease both' }}>
+                    <span style={{
+                      color: ln.kind === 'ok' ? '#4ade80'
+                        : ln.kind === 'accent' ? 'var(--accent)'
+                          : ln.kind === 'dim' ? 'rgba(255,255,255,0.35)'
+                            : 'rgba(255,255,255,0.62)',
+                    }}>{ln.text}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Tool chips for the active domain */}
+        <div className="mt-5 flex flex-wrap justify-center gap-1.5"
+          style={{ opacity: visible ? 1 : 0.4, transition: 'opacity 0.22s ease' }}>
+          {d.tools.map(t => (
+            <span key={t} className="lang-tag" style={{ color: 'var(--muted)' }}>{t}</span>
+          ))}
+        </div>
+        <p className="mt-6 text-center font-mono text-xs text-faint">
+          Same binary, same SQLite file, same provenance discipline — across all three.
         </p>
       </div>
     </section>
@@ -739,12 +923,13 @@ $ codex mcp add wicked-estate \\
             One config. Every major client.
           </h2>
           <p className="text-muted max-w-xl mx-auto font-sans">
-            <span className="font-mono text-ink">wicked-estate-mcp</span> is a JSON-RPC 2.0 stdio server.
-            Register it in Claude Code, Cursor, Antigravity, or Codex.
+            <span className="font-mono text-ink">wicked-estate-mcp</span> is a JSON-RPC 2.0 stdio server
+            exposing all 23 tools — graph, memory, and knowledge. Register it once in Claude Code, Cursor,
+            Antigravity, or Codex.
           </p>
         </div>
 
-        {/* 5 tools */}
+        {/* graph-domain retrieval tools (5 of 10) */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2 mb-10">
           {[
             { name: 'SearchEntity', desc: 'Find symbols by name or semantic query' },
@@ -973,20 +1158,17 @@ function StepPlayer() {
 
 // ── Get Started ────────────────────────────────────────────────────────────────
 function GetStarted() {
-  const quickStart = `#!/usr/bin/env bash
-# install both binaries from crates.io:
-#   wicked-estate      -> the CLI (index / query locally)
+  const directInstall = `# 1 · install both binaries from crates.io
+#   wicked-estate      -> the CLI (index / query)
 #   wicked-estate-mcp  -> the server your agent connects to
 cargo install wicked-estate wicked-estate-mcp
 
-# index your repo with the wicked-estate CLI (incremental on repeat runs)
+# 2 · index your repo (incremental on repeat runs)
 wicked-estate index . --db graph.db
 
-# connect to Claude Code
+# 3 · connect to Claude Code
 claude mcp add wicked-estate -s project \\
-  -- wicked-estate-mcp --db "$PWD/graph.db"
-
-# done — your agent now has a real code graph`
+  -- wicked-estate-mcp --db "$PWD/graph.db"`
 
   return (
     <section id="get-started" className="snap-start min-h-screen flex flex-col justify-center py-10 px-7 band band-solid">
@@ -994,37 +1176,69 @@ claude mcp add wicked-estate -s project \\
         <div className="text-center mb-8">
           <span className="kicker">Get Started</span>
           <h2 className="font-display text-3xl sm:text-4xl font-black text-ink mb-4">
-            One script. Zero to graph.
+            One installer. Zero to graph.
           </h2>
           <p className="text-muted max-w-md mx-auto font-sans">
-            Install, index, connect. Your agent has a real code graph in under two minutes.
+            The family installer picks the products you want and wires the CLIs.
+            Or install this one directly. Under two minutes either way.
           </p>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
-          {/* Left — script terminal */}
-          <div className="terminal" style={{ boxShadow: '0 32px 64px -28px rgba(0,0,0,0.5)' }}>
-            <div className="terminal-bar">
-              <div className="terminal-dot bg-red-500/80" />
-              <div className="terminal-dot bg-yellow-500/80" />
-              <div className="terminal-dot bg-green-500/80" />
-              <span className="ml-2 font-mono text-[0.6rem] tracking-widest uppercase text-white/25">quick-start.sh</span>
-            </div>
-            <pre className="px-5 py-5 text-sm font-mono overflow-x-auto whitespace-pre leading-[1.85]">
-              {quickStart.split('\n').map((line, i) => {
-                const isComment = line.trim().startsWith('#')
-                const isBlank = line.trim() === ''
-                return (
-                  <div key={i} className={isBlank ? 'h-3' : ''}>
-                    {!isBlank && (
-                      <span style={{ color: isComment ? 'rgba(255,255,255,0.28)' : 'rgba(255,255,255,0.72)' }}>
-                        {isComment ? line : <><span style={{ color: 'var(--accent)' }}>  </span>{line}</>}
-                      </span>
-                    )}
+          {/* Left — install paths: installer (primary) + direct (secondary) */}
+          <div className="flex flex-col gap-4">
+
+            {/* PRIMARY — wicked-installer */}
+            <div className="rounded-xl overflow-hidden border"
+              style={{ borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))', background: 'var(--surface)' }}>
+              <div className="flex items-center justify-between px-4 py-2.5 border-b"
+                style={{ borderColor: 'var(--hairline)', background: 'color-mix(in oklab, var(--accent) 8%, var(--canvas))' }}>
+                <span className="font-mono text-[0.62rem] tracking-widest uppercase font-bold" style={{ color: 'var(--accent)' }}>
+                  Recommended · the whole family
+                </span>
+                <span className="font-mono text-[0.55rem] text-faint">npm · wicked-installer</span>
+              </div>
+              <div className="px-4 py-4">
+                <div className="terminal" style={{ boxShadow: 'none' }}>
+                  <div className="px-4 py-3 font-mono text-sm">
+                    <span style={{ color: 'var(--accent)' }}>$ </span>
+                    <span className="text-white/85">npx wicked-installer</span>
                   </div>
-                )
-              })}
-            </pre>
+                </div>
+                <p className="text-xs text-muted leading-5 font-sans mt-3">
+                  Interactive: pick <span className="text-ink">wicked-estate</span> (and any siblings), choose your
+                  agent CLIs, and it installs everything and ships the <span className="font-mono text-ink">wicked</span> CLI —
+                  cross-family, one command.
+                </p>
+              </div>
+            </div>
+
+            {/* SECONDARY — direct install */}
+            <div className="terminal flex-1" style={{ boxShadow: '0 24px 56px -30px rgba(0,0,0,0.5)' }}>
+              <div className="terminal-bar justify-between">
+                <div className="flex items-center gap-1.5">
+                  <div className="terminal-dot bg-red-500/80" />
+                  <div className="terminal-dot bg-yellow-500/80" />
+                  <div className="terminal-dot bg-green-500/80" />
+                </div>
+                <span className="font-mono text-[0.6rem] tracking-widest uppercase text-white/30">or install just this directly</span>
+              </div>
+              <pre className="px-5 py-4 text-xs font-mono overflow-x-auto whitespace-pre leading-[1.85]">
+                {directInstall.split('\n').map((line, i) => {
+                  const isComment = line.trim().startsWith('#')
+                  const isBlank = line.trim() === ''
+                  return (
+                    <div key={i} className={isBlank ? 'h-2' : ''}>
+                      {!isBlank && (
+                        <span style={{ color: isComment ? 'rgba(255,255,255,0.28)' : 'rgba(255,255,255,0.72)' }}>
+                          {isComment ? line : <><span style={{ color: 'var(--accent)' }}>$ </span>{line}</>}
+                        </span>
+                      )}
+                    </div>
+                  )
+                })}
+              </pre>
+            </div>
           </div>
 
           {/* Right — animated step player */}
@@ -1132,6 +1346,7 @@ export default function Content() {
   return (
     <main className="font-sans">
       <Hero />
+      <ThreeDomains />
       <Foundation />
       <UseCases />
       <Pipeline />
