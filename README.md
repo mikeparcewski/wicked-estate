@@ -54,11 +54,17 @@ facts.
 
 ## Install
 
-```sh
-# MCP server, from crates.io (the binary agents connect to):
-cargo install wicked-estate-mcp
+Two binaries, both on crates.io: the **`wicked-estate` CLI** (index / blast-radius / rank /
+callers / query / drift / plugins) and the **`wicked-estate-mcp` server** your agent connects to.
+Install both:
 
-# Or straight from this repo (also builds the wicked-estate CLI):
+```sh
+# from crates.io:
+cargo install wicked-estate       # the CLI — index / query / blast-radius locally
+cargo install wicked-estate-mcp   # the MCP server the agent connects to
+
+# Or straight from this repo (install both from git):
+cargo install --git https://github.com/mikeparcewski/wicked-estate wicked-estate
 cargo install --git https://github.com/mikeparcewski/wicked-estate wicked-estate-mcp
 
 # Or build from source (gives you both the wicked-estate CLI and the MCP server):

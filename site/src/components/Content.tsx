@@ -839,12 +839,12 @@ function StepPlayer() {
   const steps = [
     {
       label: '01 · install',
-      cmd: ['cargo install wicked-estate-mcp'],
+      cmd: ['cargo install wicked-estate wicked-estate-mcp'],
       out: [
         'Updating crates.io index...',
-        'Compiling wicked-estate-core v0.13.1',
-        'Compiling wicked-estate-mcp  v0.13.1',
-        'Finished  release [optimized]',
+        'Installing wicked-estate     v0.13.1  (CLI)',
+        'Installing wicked-estate-mcp v0.13.1  (server)',
+        '✓  Installed wicked-estate v0.13.1',
         '✓  Installed wicked-estate-mcp v0.13.1',
       ],
     },
@@ -974,8 +974,10 @@ function StepPlayer() {
 // ── Get Started ────────────────────────────────────────────────────────────────
 function GetStarted() {
   const quickStart = `#!/usr/bin/env bash
-# install the MCP server from crates.io
-cargo install wicked-estate-mcp
+# install both binaries from crates.io:
+#   wicked-estate      -> the CLI (index / query locally)
+#   wicked-estate-mcp  -> the server your agent connects to
+cargo install wicked-estate wicked-estate-mcp
 
 # index your repo with the wicked-estate CLI (incremental on repeat runs)
 wicked-estate index . --db graph.db
