@@ -26,6 +26,7 @@ CRATES=(
   wicked-estate-tree-sitter-powerscript
   wicked-estate-tree-sitter-crystal-formula
   wicked-estate-core
+  wicked-estate-memory-core
   wicked-estate-memory-api
   wicked-estate-observe
   wicked-estate-store
@@ -33,6 +34,9 @@ CRATES=(
   wicked-estate-rank
   wicked-estate-resolve
   wicked-estate-retrieve
+  wicked-estate-overlay
+  wicked-estate-knowledge
+  wicked-estate-memory
   wicked-estate
   wicked-estate-mcp
 )
