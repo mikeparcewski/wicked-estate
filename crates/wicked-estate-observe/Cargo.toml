@@ -12,5 +12,8 @@ categories = ["development-tools"]
 
 [dependencies]
 wicked-estate-core = { workspace = true }
-reqwest = { version = "0.12", features = ["blocking", "json"] }
+# rustls-tls (not the default native-tls) so the dependency tree carries NO openssl-sys — native-tls
+# links the system OpenSSL on Linux, which cannot cross-compile to aarch64-unknown-linux-gnu (breaks
+# the wicked-core-ts napi cross-build). rustls is pure-Rust and cross-compiles cleanly.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde_json = { workspace = true }
