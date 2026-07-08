@@ -16,30 +16,36 @@ enterprise CI fleet, same engine, same queries.
 [![CI](https://github.com/mikeparcewski/wicked-estate/actions/workflows/ci.yml/badge.svg)](https://github.com/mikeparcewski/wicked-estate/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-> **Status:** v0.13.0 — `cargo test --workspace` is **1025 passing, 0 failed, 0 ignored**;
-> 0 build warnings; clippy `-D warnings` clean. Greenfield, pre-1.0. See
+> **Status:** v0.13.1 — `cargo test --workspace` is **1,000+ tests passing, 0 failed, 0 ignored**;
+> 0 build warnings; clippy `-D warnings` clean. Greenfield, pre-1.0. **Published to crates.io.** See
 > [FEATURES.md](./FEATURES.md) for the exhaustive, honestly-tagged capability inventory
 > (✅ built / 🟡 partial / 🟦 designed-not-built).
 
 ---
 
-## The wicked stack
+## The foundation
 
-wicked-estate is the **code graph** in a four-engine, local-first stack for AI agents — each owns its
-store (they never co-mingle):
+wicked-estate is the **anchor** of a local-first foundation for AI coding agents — the code graph,
+memory, and knowledge everything else queries. Around it sits the plumbing that makes that substrate
+safe, event-driven, memorable, and governable. SQLite by default; no servers, no accounts, nothing
+leaves your machine. The parts compose rather than lock in.
 
-| Engine | Role |
-|---|---|
-| **`wicked-estate`** (this repo) | the code graph — symbols, calls, blast-radius, scoped context |
-| [`wicked-memory`](https://github.com/mikeparcewski/wicked-memory) (**deprecated** — absorbed as `wicked-estate-memory`) | 5-tier experiential memory — absorbed into wicked-estate v0.13.0; repository will be archived |
-| [`wicked-knowledge`](https://github.com/mikeparcewski/wicked-knowledge) (**deprecated** — absorbed as `wicked-estate-knowledge`) | curated, citable knowledge with typed relations — absorbed into wicked-estate v0.13.0; repository will be archived |
-| [`wicked-overlay`](https://github.com/mikeparcewski/wicked-overlay) (**deprecated** — absorbed as `wicked-estate-overlay`) | XedgeStore cross-engine search layer — absorbed into wicked-estate v0.13.0; repository will be archived |
+| Part | Role | Stack |
+|---|---|---|
+| **`wicked-estate`** (this repo) | the graph — symbols, calls, blast-radius, memory, knowledge, scoped context | Rust · crates.io |
+| [`wicked-core`](https://github.com/mikeparcewski/wicked-core) | the runtime — single-writer store actor + live event stream so consumers never race on the shared DB | Rust |
+| [`wicked-bus`](https://github.com/mikeparcewski/wicked-bus) | the event substrate — zero-infra, at-least-once, cursor-poll delivery on local SQLite | JS/ESM · npm |
+| [`wicked-brain`](https://github.com/mikeparcewski/wicked-brain) | the memory — persistent knowledge on markdown + SQLite FTS5, no vector DB (bridge-period; folds into estate) | JS · npm |
+| [`wicked-crew`](https://github.com/mikeparcewski/wicked-crew) | the governor — external daemon for deterministic, deny-dominates, phase-gated AI workflows with HITL | npm |
+
+> Absorbed into this repo (not separate products): `wicked-memory` → `wicked-estate-memory`,
+> `wicked-knowledge` → `wicked-estate-knowledge`, `wicked-overlay` → `wicked-estate-overlay`.
 
 ## Why
 
 LLM coding agents waste turns grepping and re-reading files. wicked-estate gives them a precise,
 ranked, **bounded** answer instead — "who calls this?", "what breaks if I change it?", "give me just
-the context for this symbol" — across **102 wired languages** (including legacy enterprise stacks:
+the context for this symbol" — across **100+ wired languages** (including legacy enterprise stacks:
 VB6/VBA/VBScript/VB.NET, RPG, Delphi, ColdFusion, Progress ABL, PowerBuilder, Visual FoxPro,
 LotusScript, Informix 4GL, Crystal Reports) plus a mainframe/IaC **estate** layer
 (COBOL, JCL, RACF, IMS, MQ, Terraform, CloudFormation, …) that almost nothing else unifies into one
@@ -49,22 +55,22 @@ facts.
 ## Install
 
 ```sh
-# From crates.io:
-cargo install wicked-estate
+# MCP server, from crates.io (the binary agents connect to):
+cargo install wicked-estate-mcp
 
-# Or straight from this repo (works today):
-cargo install --git https://github.com/mikeparcewski/wicked-estate wicked-estate
+# Or straight from this repo (also builds the wicked-estate CLI):
+cargo install --git https://github.com/mikeparcewski/wicked-estate wicked-estate-mcp
 
-# Or build from source:
+# Or build from source (gives you both the wicked-estate CLI and the MCP server):
 git clone https://github.com/mikeparcewski/wicked-estate
-cd wicked-estate && cargo build --release   # binary at target/release/wicked-estate
+cd wicked-estate && cargo build --release   # binaries in target/release/
 ```
 
 Real **semantic** search is opt-in (keeps the default build dependency-free + offline):
 
 ```sh
-cargo install wicked-estate --features model2vec   # static embeddings, light, no ONNX
-cargo install wicked-estate --features fastembed   # contextual ONNX/BGE, highest quality
+cargo install wicked-estate-mcp --features model2vec   # static embeddings, light, no ONNX
+cargo install wicked-estate-mcp --features fastembed   # contextual ONNX/BGE, highest quality
 ```
 
 ## Quickstart
@@ -93,7 +99,7 @@ wicked-estate watch ./my-project --db graph.db
 
 ## What it does (highlights — full list in [FEATURES.md](./FEATURES.md))
 
-- **Code graph** — 102 wired languages (tree-sitter), 113 in the manifest; symbols, calls, imports,
+- **Code graph** — 100+ wired languages (tree-sitter); symbols, calls, imports,
   heritage. Languages are **data** (a manifest row + a `.scm` query) — adding one is zero core change.
 - **Runtime language plugins** — drop a compiled tree-sitter grammar + `.scm` query + manifest into
   the plugins dir and it loads at startup, no recompile. The grammar is a separate artifact, never

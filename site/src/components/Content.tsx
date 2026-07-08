@@ -120,7 +120,7 @@ function UseCases() {
         </svg>
       ),
       title: 'Retire a deprecated API safely',
-      body: 'Search for every caller of the old API across 102 languages in one query. Get a ranked list of files to update — sorted by how often each caller is itself called.',
+      body: 'Search for every caller of the old API across 100+ languages in one query. Get a ranked list of files to update — sorted by how often each caller is itself called.',
       cmd: 'wicked-estate callers legacyAuth --db graph.db',
       out: '23 callers found · sorted by PageRank · conf ≥ 0.6',
     },
@@ -290,7 +290,7 @@ function Pipeline() {
               <div>tree-sitter grammar</div>
               <div>+ <span className="text-muted">.scm</span> query file</div>
               <div className="flex flex-wrap gap-1 pt-1.5">
-                {['rust', 'ts', 'go', 'cobol', 'hcl', '+86'].map(l => (
+                {['rust', 'ts', 'go', 'cobol', 'hcl', '+more'].map(l => (
                   <span key={l} className="lang-tag">{l}</span>
                 ))}
               </div>
@@ -589,7 +589,7 @@ function Languages() {
           <div>
             <span className="kicker">Languages</span>
             <h2 className="font-display text-3xl sm:text-4xl font-black text-ink mb-6">
-              102 wired languages.<br />
+              100+ wired languages.<br />
               <span className="text-muted">Zero core changes to add more.</span>
             </h2>
             <p className="text-muted leading-7 mb-6 font-sans">
@@ -839,13 +839,13 @@ function StepPlayer() {
   const steps = [
     {
       label: '01 · install',
-      cmd: ['cargo install wicked-estate'],
+      cmd: ['cargo install wicked-estate-mcp'],
       out: [
         'Updating crates.io index...',
-        'Compiling wicked-estate-core v0.13.0',
-        'Compiling wicked-estate-mcp  v0.13.0',
+        'Compiling wicked-estate-core v0.13.1',
+        'Compiling wicked-estate-mcp  v0.13.1',
         'Finished  release [optimized]',
-        '✓  Installed wicked-estate v0.13.0',
+        '✓  Installed wicked-estate-mcp v0.13.1',
       ],
     },
     {
@@ -853,7 +853,7 @@ function StepPlayer() {
       cmd: ['wicked-estate index . --db graph.db'],
       out: [
         'Walking 1,247 source files...',
-        'Extractor: 102 languages active',
+        'Extractor: 100+ languages active',
         'Resolver:  SCIP tier engaged',
         '✓  43,821 symbols · 8,312 edges',
         '   graph.db  2.1 MB · 0 unresolved',
@@ -974,10 +974,10 @@ function StepPlayer() {
 // ── Get Started ────────────────────────────────────────────────────────────────
 function GetStarted() {
   const quickStart = `#!/usr/bin/env bash
-# install
-cargo install wicked-estate
+# install the MCP server from crates.io
+cargo install wicked-estate-mcp
 
-# index your repo (incremental on repeat runs)
+# index your repo with the wicked-estate CLI (incremental on repeat runs)
 wicked-estate index . --db graph.db
 
 # connect to Claude Code
@@ -1043,6 +1043,86 @@ claude mcp add wicked-estate -s project \\
   )
 }
 
+// ── Foundation (one story across five repos) ─────────────────────────────────
+function Foundation() {
+  const repos = [
+    {
+      name: 'wicked-estate', anchor: true, role: 'the graph',
+      line: 'The code graph agents actually trust.',
+      body: 'One queryable, typed, ranked graph — definitions, who-calls-X, blast-radius, scoped context. Every edge carries confidence + provenance. The center of gravity everything else queries.',
+      tags: ['Rust', 'crates.io', 'MCP'],
+    },
+    {
+      name: 'wicked-core', role: 'the runtime',
+      line: 'Makes the shared graph concurrency-safe.',
+      body: 'A single-writer store actor owns the SQLite file on one thread; agents, UIs, and MCP servers compose through a shared command API + live event stream instead of racing on the DB.',
+      tags: ['Rust', 'single-writer', 'napi-rs'],
+    },
+    {
+      name: 'wicked-bus', role: 'the event substrate',
+      line: 'Local-first SQLite event bus.',
+      body: 'Zero-infrastructure, at-least-once, cursor-poll delivery entirely on local SQLite — no network, no running server. The substrate agents and tools talk over without coupling to each other.',
+      tags: ['JS/ESM', 'npm', 'at-least-once'],
+    },
+    {
+      name: 'wicked-brain', role: 'the memory',
+      line: "Agent memory — markdown + SQLite, no vector DB.",
+      body: 'Persistent, searchable knowledge on plain markdown and SQLite FTS5. Confidence-scored backlinks, citations that open a real file. A bridge-period adapter folding into estate.',
+      tags: ['JS', 'npm', 'no embeddings'],
+    },
+    {
+      name: 'wicked-crew', role: 'the governor',
+      line: 'Governs multi-phase AI workflows.',
+      body: 'An external daemon that owns the phase lifecycle — deterministic deny-dominates gates, HITL approvals, SQLite checkpointing you can crash and resume — driving AI CLIs it never embeds.',
+      tags: ['npm', 'daemon', 'HITL'],
+    },
+  ]
+
+  return (
+    <section id="foundation" className="snap-start min-h-screen flex flex-col justify-center py-24 px-7 band band-depth">
+      <div className="max-w-6xl mx-auto w-full">
+        <div className="text-center mb-14">
+          <span className="kicker">The Foundation</span>
+          <h2 className="font-display text-3xl sm:text-4xl font-black text-ink mb-4">
+            One local-first substrate. Five composable parts.
+          </h2>
+          <p className="text-muted max-w-2xl mx-auto font-sans">
+            wicked-estate is the anchor — the graph, memory, and knowledge every wicked-* tool queries.
+            Around it sits the plumbing that makes the substrate safe, event-driven, memorable, and
+            governable. SQLite by default. No servers, no accounts, nothing leaves your machine.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {repos.map(r => (
+            <div
+              key={r.name}
+              className={`card-hover flex flex-col gap-3 ${r.anchor ? 'sm:col-span-2 lg:col-span-1' : ''}`}
+              style={r.anchor ? { borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-mono text-sm font-bold text-ink">{r.name}</span>
+                {r.anchor
+                  ? <span className="font-mono text-[0.55rem] uppercase tracking-widest px-2 py-0.5 rounded-full" style={{ color: 'var(--accent)', border: '1px solid color-mix(in oklab, var(--accent) 40%, var(--hairline))' }}>anchor</span>
+                  : <span className="font-mono text-[0.55rem] uppercase tracking-widest text-faint">{r.role}</span>}
+              </div>
+              <p className="font-display text-lg font-black text-ink leading-tight" style={{ fontStretch: '110%' }}>{r.line}</p>
+              <p className="text-xs text-muted leading-5 font-sans">{r.body}</p>
+              <div className="mt-auto flex flex-wrap gap-1 pt-2">
+                {r.tags.map(t => <span key={t} className="lang-tag">{t}</span>)}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <p className="mt-8 text-center font-mono text-xs text-faint leading-6">
+          The products compose rather than lock in — adopt the graph, grow into the rest.
+        </p>
+      </div>
+    </section>
+  )
+}
+
 // ── Content ──────────────────────────────────────────────────────────────────
 // Body sections only. The shared wicked-web Topbar + Footer wrap this island
 // in src/pages/index.astro; theme is driven by data-theme on <html>.
@@ -1050,6 +1130,7 @@ export default function Content() {
   return (
     <main className="font-sans">
       <Hero />
+      <Foundation />
       <UseCases />
       <Pipeline />
       <GraphModel />
