@@ -18,30 +18,32 @@ impl McpResource {
 static BUNDLED_SKILLS: OnceLock<Vec<McpResource>> = OnceLock::new();
 
 fn build_skill_list() -> Vec<McpResource> {
+    // Skill bodies are owned by the crates they belong to (memory / knowledge) and exposed there as
+    // `pub const`; mcp references them rather than keeping its own copies.
     vec![
         McpResource {
             uri: "skill://codebase-expedition/SKILL.md".to_string(),
-            content: include_str!("../skills/codebase-expedition/SKILL.md"),
+            content: wicked_estate_memory::CODEBASE_EXPEDITION_SKILL,
         },
         McpResource {
             uri: "skill://knowledge-ingest/SKILL.md".to_string(),
-            content: include_str!("../skills/knowledge-ingest/SKILL.md"),
+            content: wicked_estate_knowledge::KNOWLEDGE_INGEST_SKILL,
         },
         McpResource {
             uri: "skill://ontology-expedition/SKILL.md".to_string(),
-            content: include_str!("../skills/ontology-expedition/SKILL.md"),
+            content: wicked_estate_knowledge::ONTOLOGY_EXPEDITION_SKILL,
         },
         McpResource {
             uri: "skill://knowledge-curation/SKILL.md".to_string(),
-            content: include_str!("../skills/knowledge-curation/SKILL.md"),
+            content: wicked_estate_knowledge::KNOWLEDGE_CURATION_SKILL,
         },
         McpResource {
             uri: "skill://cited-answer/SKILL.md".to_string(),
-            content: include_str!("../skills/cited-answer/SKILL.md"),
+            content: wicked_estate_knowledge::CITED_ANSWER_SKILL,
         },
         McpResource {
             uri: "skill://gap-hunting/SKILL.md".to_string(),
-            content: include_str!("../skills/gap-hunting/SKILL.md"),
+            content: wicked_estate_knowledge::GAP_HUNTING_SKILL,
         },
     ]
 }
@@ -103,7 +105,7 @@ pub fn prompts_get(id: &Value, name: &str) -> Value {
     if name != "expedition" {
         return json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":format!("prompt not found: {name}")}});
     }
-    let skill_text = include_str!("../skills/codebase-expedition/SKILL.md");
+    let skill_text = wicked_estate_memory::CODEBASE_EXPEDITION_SKILL;
     json!({"jsonrpc":"2.0","id":id,"result":{
         "messages": [{"role":"user","content":{"type":"text","text":skill_text}}]
     }})
