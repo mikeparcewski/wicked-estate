@@ -33,6 +33,15 @@ pub use consolidate::ConsolidationReport;
 use memext::MemExt;
 pub use store::MemStore;
 
+/// The `codebase-expedition` skill (SKILL.md), owned by this crate and embedded at compile time so
+/// it travels with the binary. `CARGO_MANIFEST_DIR` resolves both in-workspace and from this
+/// crate's own published tarball (the `skills/` dir ships — no `include`/`exclude` in Cargo.toml).
+/// Re-exported so consumers (e.g. `wicked-estate-mcp`) reference it instead of copying the file.
+pub const CODEBASE_EXPEDITION_SKILL: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/skills/codebase-expedition/SKILL.md"
+));
+
 /// Recall result item surfaced to the caller.
 #[derive(Debug, Clone)]
 pub struct Recalled {

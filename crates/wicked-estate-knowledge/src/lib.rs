@@ -32,34 +32,63 @@ keyword search cannot bridge. The relation-typing pass \
 (the ontology-expedition skill) is the bar OVER a flat brain. See resources/list for the bundled \
 skills (skill://…/SKILL.md).";
 
+// The 5 knowledge skills owned by this crate, embedded at compile time so they travel with the
+// binary (D-S.1–D-S.5). `CARGO_MANIFEST_DIR` resolves both in-workspace and from this crate's own
+// published tarball (the `skills/` dir ships — no `include`/`exclude` in Cargo.toml). Exposed as
+// `pub const` so consumers (e.g. `wicked-estate-mcp`) reference them instead of copying the files.
+
+/// The `knowledge-ingest` skill (SKILL.md) — supports `knowledge.ingest`.
+pub const KNOWLEDGE_INGEST_SKILL: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/skills/knowledge-ingest/SKILL.md"
+));
+/// The `ontology-expedition` skill (SKILL.md) — the relation-typing pass; supports `knowledge.relate`.
+pub const ONTOLOGY_EXPEDITION_SKILL: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/skills/ontology-expedition/SKILL.md"
+));
+/// The `knowledge-curation` skill (SKILL.md) — supports `knowledge.write`/`knowledge.relate`.
+pub const KNOWLEDGE_CURATION_SKILL: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/skills/knowledge-curation/SKILL.md"
+));
+/// The `cited-answer` skill (SKILL.md) — supports `knowledge.recall`.
+pub const CITED_ANSWER_SKILL: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/skills/cited-answer/SKILL.md"
+));
+/// The `gap-hunting` skill (SKILL.md) — supports `knowledge.coverage`.
+pub const GAP_HUNTING_SKILL: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/skills/gap-hunting/SKILL.md"
+));
+
 /// The 5 knowledge skills bundled WITH this server, surfaced as MCP resources (`skill://` scheme).
-/// Embedded at compile time so they travel with the binary (D-S.1–D-S.5). Full bodies are refined by
-/// T-B-PRE-SKILLS / T-B-SKILLS; the scaffold ships the method + pointer so the surface is real.
 const SKILLS: &[(&str, &str, &str)] = &[
     (
         "knowledge-ingest",
         "Ingest a document into the knowledge base as doc + chunks (supports knowledge.ingest).",
-        include_str!("../skills/knowledge-ingest/SKILL.md"),
+        KNOWLEDGE_INGEST_SKILL,
     ),
     (
         "ontology-expedition",
         "The relation-typing pass — write TYPED Other(\"<rel>\") edges between concepts (the bar over a flat brain; supports knowledge.relate).",
-        include_str!("../skills/ontology-expedition/SKILL.md"),
+        ONTOLOGY_EXPEDITION_SKILL,
     ),
     (
         "knowledge-curation",
         "Resolve duplicates collapse-but-surface and keep the base clean (supports knowledge.write/relate).",
-        include_str!("../skills/knowledge-curation/SKILL.md"),
+        KNOWLEDGE_CURATION_SKILL,
     ),
     (
         "cited-answer",
         "Answer a question with a grounded, cited slice (supports knowledge.recall).",
-        include_str!("../skills/cited-answer/SKILL.md"),
+        CITED_ANSWER_SKILL,
     ),
     (
         "gap-hunting",
         "Turn recall misses into ingest tasks (supports knowledge.coverage).",
-        include_str!("../skills/gap-hunting/SKILL.md"),
+        GAP_HUNTING_SKILL,
     ),
 ];
 
