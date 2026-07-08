@@ -21,31 +21,27 @@ fn build_skill_list() -> Vec<McpResource> {
     vec![
         McpResource {
             uri: "skill://codebase-expedition/SKILL.md".to_string(),
-            content: include_str!("../../wicked-estate-memory/skills/codebase-expedition/SKILL.md"),
+            content: include_str!("../skills/codebase-expedition/SKILL.md"),
         },
         McpResource {
             uri: "skill://knowledge-ingest/SKILL.md".to_string(),
-            content: include_str!("../../wicked-estate-knowledge/skills/knowledge-ingest/SKILL.md"),
+            content: include_str!("../skills/knowledge-ingest/SKILL.md"),
         },
         McpResource {
             uri: "skill://ontology-expedition/SKILL.md".to_string(),
-            content: include_str!(
-                "../../wicked-estate-knowledge/skills/ontology-expedition/SKILL.md"
-            ),
+            content: include_str!("../skills/ontology-expedition/SKILL.md"),
         },
         McpResource {
             uri: "skill://knowledge-curation/SKILL.md".to_string(),
-            content: include_str!(
-                "../../wicked-estate-knowledge/skills/knowledge-curation/SKILL.md"
-            ),
+            content: include_str!("../skills/knowledge-curation/SKILL.md"),
         },
         McpResource {
             uri: "skill://cited-answer/SKILL.md".to_string(),
-            content: include_str!("../../wicked-estate-knowledge/skills/cited-answer/SKILL.md"),
+            content: include_str!("../skills/cited-answer/SKILL.md"),
         },
         McpResource {
             uri: "skill://gap-hunting/SKILL.md".to_string(),
-            content: include_str!("../../wicked-estate-knowledge/skills/gap-hunting/SKILL.md"),
+            content: include_str!("../skills/gap-hunting/SKILL.md"),
         },
     ]
 }
@@ -107,7 +103,7 @@ pub fn prompts_get(id: &Value, name: &str) -> Value {
     if name != "expedition" {
         return json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":format!("prompt not found: {name}")}});
     }
-    let skill_text = include_str!("../../wicked-estate-memory/skills/codebase-expedition/SKILL.md");
+    let skill_text = include_str!("../skills/codebase-expedition/SKILL.md");
     json!({"jsonrpc":"2.0","id":id,"result":{
         "messages": [{"role":"user","content":{"type":"text","text":skill_text}}]
     }})
