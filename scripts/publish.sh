@@ -39,6 +39,43 @@ CRATES=(
 
 DRY="${1:-}"
 
+# ── Skip non-publishable crates ─────────────────────────────────────────────────────────────────
+# A crate with `publish = false` in its Cargo.toml (the wicked-estate-memory-api re-export shim and,
+# today, wicked-estate-mcp) makes `cargo publish` HARD-ERROR ("cannot be published"). Left unhandled
+# that aborts this whole ordered release even after every publishable crate succeeded. Detect
+# publishability from `cargo metadata` (authoritative) rather than grepping Cargo.toml: cargo
+# serializes `publish = false` as an EMPTY `publish` array; `null` (absent) or a non-empty list
+# (e.g. ["crates-io"]) means publishable. Filtering at RUNTIME (vs. deleting entries) means the
+# instant a crate's `publish = false` is removed it publishes again — in topological order, no edit here.
+PY="$(command -v python3 || command -v python || true)"
+[ -n "$PY" ] || { echo "ERROR: python3/python required for publish=false detection" >&2; exit 1; }
+
+# Space-padded list of workspace members with `publish = false` (one metadata call; members publish via -p).
+WORKSPACE_NOPUBLISH=" $(cargo metadata --no-deps --format-version 1 | "$PY" -c '
+import json, sys
+d = json.load(sys.stdin)
+for p in d["packages"]:
+    pub = p.get("publish")
+    if isinstance(pub, list) and not pub:   # [] == publish = false
+        print(p["name"])
+' | tr "\n" " ") "
+
+# Exit 0 when the named package in a STANDALONE manifest sets `publish = false`. Used for the
+# vendored tree-sitter grammars, which are excluded from the workspace metadata queried above.
+manifest_is_nopublish() {
+  cargo metadata --no-deps --format-version 1 --manifest-path "$1" 2>/dev/null | "$PY" -c '
+import json, sys
+name = sys.argv[1]
+try:
+    d = json.load(sys.stdin)
+    pkgs = [p for p in d["packages"] if p["name"] == name]
+    pub = pkgs[0].get("publish") if pkgs else None
+except Exception:
+    pub = None                              # cannot determine → treat as publishable (let publish decide)
+sys.exit(0 if (isinstance(pub, list) and not pub) else 1)
+' "$2"
+}
+
 # Vendored grammars are EXCLUDED from the workspace, so `-p` can't address them; publish each by its
 # manifest path (vendor/tree-sitter-<suffix>/Cargo.toml). Other crates are members addressable by `-p`.
 for c in "${CRATES[@]}"; do
@@ -49,9 +86,20 @@ for c in "${CRATES[@]}"; do
   case "$c" in
     wicked-estate-tree-sitter-*)
       suffix="${c#wicked-estate-tree-sitter-}"
-      PUB=(cargo publish --manifest-path "crates/wicked-estate-extract/vendor/tree-sitter-${suffix}/Cargo.toml" --allow-dirty)
+      manifest="crates/wicked-estate-extract/vendor/tree-sitter-${suffix}/Cargo.toml"
+      if manifest_is_nopublish "$manifest" "$c"; then
+        echo "    skip — \`publish = false\` in $manifest (not publishable to crates.io)"
+        continue
+      fi
+      PUB=(cargo publish --manifest-path "$manifest" --allow-dirty)
       ;;
     *)
+      case "$WORKSPACE_NOPUBLISH" in
+        *" $c "*)
+          echo "    skip — \`publish = false\` (not publishable to crates.io)"
+          continue
+          ;;
+      esac
       PUB=(cargo publish -p "$c" --allow-dirty)
       ;;
   esac

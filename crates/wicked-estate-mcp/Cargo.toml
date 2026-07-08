@@ -15,6 +15,18 @@ rust-version.workspace = true
 name = "wicked-estate-mcp"
 path = "src/main.rs"
 
+# Optional semantic embedders — OFF by default so the standard build + the CI `gate` job stay
+# offline and ML-dep-free (CLAUDE.md §9). They forward to the real optional deps: the binary picks
+# its runtime embedder via `wicked_estate::default_embedder()` (FastEmbed → model2vec → hash) and
+# also constructs `wicked_estate_retrieve::SemanticSearch`, so both crates must carry the flag.
+# Declaring them here ALSO makes `#[cfg(feature = "…")]` in tests/conformance_schemas.rs an EXPECTED
+# cfg; without the declaration the `unexpected_cfgs` lint fires and `RUSTFLAGS=-D warnings` (the gate)
+# turns it into a hard build error. Build the semantic binary with:
+#   cargo build -p wicked-estate-mcp --features fastembed   (see tests/conformance/capture.py)
+[features]
+fastembed = ["wicked-estate/fastembed", "wicked-estate-retrieve/fastembed"]
+model2vec = ["wicked-estate/model2vec", "wicked-estate-retrieve/model2vec"]
+
 [dependencies]
 wicked-estate-core.workspace = true
 wicked-estate-store.workspace = true
