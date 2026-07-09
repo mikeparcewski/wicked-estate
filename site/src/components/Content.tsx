@@ -166,30 +166,30 @@ function QuerySubstrate() {
   const liveStrata = new Set(live.map(f => f.stratum))
 
   return (
-    <Section id="query" solid>
+    <Section id="query" solid className="!py-16">
       <div className="max-w-6xl mx-auto w-full">
-        <div className="mb-9">
+        <div className="mb-6">
           <span className="kicker">Query the substrate</span>
-          <h2 className="mt-4 font-display text-3xl sm:text-[2.6rem] font-black text-ink">
+          <h2 className="mt-4 font-display text-3xl sm:text-[2.6rem] font-black text-ink w-full">
             Pick a subject. Drag the confidence dial. Read one core sample.
           </h2>
-          <p className="mt-4 text-muted max-w-2xl font-sans">
+          <p className="mt-4 text-ink w-full font-sans leading-relaxed">
             The substrate returns a single dossier assembled live across all five strata at once. Every fact carries its{' '}
-            <span className="text-ink">provenance</span> and <span className="text-ink">confidence</span>. Drive the dial
+            <span className="font-semibold">provenance</span> and <span className="font-semibold">confidence</span>. Drive the dial
             to 1.0 and only parsed / SCIP facts survive; drop it and the heuristic tag-scan edges reappear —{' '}
-            <span className="text-ink">clearly labeled, never silently promoted</span>.
+            <span className="font-semibold">clearly labeled, never silently promoted</span>.
           </p>
         </div>
 
         {/* Subject picker — three core samples */}
-        <div className="flex flex-wrap gap-2 mb-6">
+        <div className="flex flex-wrap gap-2 mb-5">
           {SUBJECTS.map(s => {
             const on = s.id === subjectId
             return (
               <button
                 key={s.id}
                 onClick={() => setSubjectId(s.id)}
-                className="text-left rounded-xl px-4 py-3 transition-all"
+                className="text-left rounded-xl px-4 py-2.5 transition-all"
                 style={{
                   background: on ? 'color-mix(in oklab, var(--accent) 12%, var(--rock))' : 'var(--rock)',
                   border: `1px solid ${on ? 'color-mix(in oklab, var(--accent) 55%, var(--hairline))' : 'var(--hairline-strong)'}`,
@@ -197,10 +197,9 @@ function QuerySubstrate() {
               >
                 <div className="flex items-center gap-2">
                   <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: on ? 'var(--accent)' : 'var(--faint)' }} />
-                  <span className="font-mono text-sm font-semibold" style={{ color: on ? 'var(--ink)' : 'var(--muted)' }}>{s.label}</span>
+                  <span className="font-mono text-sm font-semibold" style={{ color: on ? 'var(--ink)' : 'var(--ink)' }}>{s.label}</span>
                   <span className="tag">{s.kind}</span>
                 </div>
-                <div className="depth mt-1.5 pl-3.5">{s.sub}</div>
               </button>
             )
           })}
@@ -225,7 +224,7 @@ function QuerySubstrate() {
                 <span>0.30 · heuristics</span>
                 <span>1.00 · SCIP only</span>
               </div>
-              <p className="mt-3 font-mono text-[0.62rem] text-muted leading-5">
+              <p className="mt-3 font-mono text-[0.62rem] text-ink leading-5">
                 {live.length} of {subject.facts.length} facts above cutoff · {liveStrata.size} of 5 strata live
               </p>
             </div>
@@ -264,27 +263,29 @@ function QuerySubstrate() {
                 const facts = subject.facts.filter(f => f.stratum === s.id)
                 if (facts.length === 0) return null
                 return (
-                  <div key={s.id} className="flex gap-4 px-5 py-4">
-                    <div className="w-32 shrink-0 pt-0.5">
+                  <div key={s.id} className="flex gap-4 px-5 py-3">
+                    <div className="w-28 shrink-0 pt-0.5">
                       <div className="font-mono text-[0.6rem] text-faint">{s.no}</div>
                       <div className="font-display font-black text-ink text-sm leading-tight" style={{ fontStretch: '106%' }}>{s.name}</div>
                       <div className="depth mt-0.5">{s.depth}</div>
                     </div>
-                    <div className="flex-1 flex flex-col gap-2.5 min-w-0">
+                    <div className="flex-1 flex flex-col gap-2 min-w-0">
                       {facts.map((f, i) => {
                         const on = f.conf >= threshold
                         return (
-                          <div key={i} className="fact" style={{ opacity: on ? 1 : 0.32, filter: on ? 'none' : 'grayscale(0.6)' }}>
-                            <div className="flex items-start gap-2 flex-wrap">
-                              <span className="text-sm font-sans" style={{ color: on ? 'var(--ink)' : 'var(--muted)' }}>{f.text}</span>
-                              <span className="prov" style={f.conf >= 1.0 ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>
+                          <div key={i} className="fact min-w-0" style={{ opacity: on ? 1 : 0.42, filter: on ? 'none' : 'grayscale(0.6)' }}>
+                            {/* line 1 — the statement + provenance chips, single line, truncates */}
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className="text-sm font-sans truncate min-w-0 flex-1" style={{ color: on ? 'var(--ink)' : 'var(--muted)' }} title={f.text}>{f.text}</span>
+                              <span className="prov shrink-0" style={f.conf >= 1.0 ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>
                                 {f.prov}
                               </span>
-                              <span className="prov tabular-nums" style={{ color: confColor(f.conf) }}>{f.conf.toFixed(2)}</span>
-                              {f.advisory && <span className="prov">advisory</span>}
-                              {!on && <span className="prov" style={{ color: 'var(--faint)' }}>below cutoff — not promoted</span>}
+                              <span className="prov tabular-nums shrink-0" style={{ color: confColor(f.conf) }}>{f.conf.toFixed(2)}</span>
+                              {f.advisory && <span className="prov shrink-0">adv</span>}
+                              {!on && <span className="prov shrink-0" style={{ color: 'var(--faint)' }}>below cutoff</span>}
                             </div>
-                            {f.detail && <div className="depth mt-1">{f.detail}</div>}
+                            {/* line 2 — detail, single line, truncates */}
+                            {f.detail && <div className="depth mt-0.5 truncate" style={{ color: 'var(--muted)' }} title={f.detail}>{f.detail}</div>}
                           </div>
                         )
                       })}
@@ -317,9 +318,9 @@ function FiveStrata() {
           <h2 className="mt-4 font-display text-3xl sm:text-[2.6rem] font-black text-ink">
             Five layers. One substrate. One symbol identity.
           </h2>
-          <p className="mt-4 text-muted max-w-2xl font-sans">
+          <p className="mt-4 text-ink max-w-2xl font-sans leading-relaxed">
             Not a graph with bolt-ons. A single continuous body, cut here into its bands — each keyed to the same
-            stable <span className="font-mono text-ink text-sm">(scheme, qualified-name)</span> that survives reformatting,
+            stable <span className="font-mono text-sm font-semibold">(scheme, qualified-name)</span> that survives reformatting,
             moves, and re-index.
           </p>
         </div>
@@ -341,7 +342,7 @@ function FiveStrata() {
                     <div className="depth mt-0.5">{s.depth} · {s.tools}</div>
                   </div>
                 </div>
-                <p className="text-sm text-muted font-sans flex-1 leading-relaxed">{copy[s.id]}</p>
+                <p className="text-sm text-ink font-sans flex-1 leading-relaxed">{copy[s.id]}</p>
               </div>
             ))}
           </div>
@@ -371,7 +372,7 @@ function ProvenanceSeam() {
           <h2 className="mt-4 font-display text-3xl sm:text-[2.4rem] font-black text-ink">
             Every edge carries where it came from.
           </h2>
-          <p className="mt-4 text-muted font-sans leading-relaxed">
+          <p className="mt-4 text-ink font-sans leading-relaxed">
             No edge is emitted without <span className="font-mono text-ink text-sm">confidence</span>,{' '}
             <span className="font-mono text-ink text-sm">provenance</span> and{' '}
             <span className="font-mono text-ink text-sm">resolved_by</span>. On a{' '}
@@ -428,9 +429,9 @@ function Bedrock() {
           <h2 className="mt-4 font-display text-3xl sm:text-[2.4rem] font-black text-ink">
             SQLite by default. One flag to a shared team graph.
           </h2>
-          <p className="mt-4 text-muted max-w-2xl font-sans">
+          <p className="mt-4 text-ink max-w-2xl font-sans leading-relaxed">
             The same engine and command API run on either backend through one{' '}
-            <span className="font-mono text-ink text-sm">open_store(spec)</span> factory — no caller changes, no re-index.
+            <span className="font-mono text-sm font-semibold">open_store(spec)</span> factory — no caller changes, no re-index.
           </p>
         </div>
 
@@ -447,8 +448,8 @@ function Bedrock() {
           <div className="divide-y divide-hairline">
             {view.rows.map(([k, v]) => (
               <div key={k} className="flex gap-4 px-5 py-3.5">
-                <span className="font-mono text-xs text-faint w-40 shrink-0">{k}</span>
-                <span className="text-sm text-muted font-sans">{v}</span>
+                <span className="font-mono text-xs text-muted w-40 shrink-0">{k}</span>
+                <span className="text-sm text-ink font-sans">{v}</span>
               </div>
             ))}
           </div>
@@ -468,22 +469,24 @@ function Bedrock() {
 function UnderStack() {
   const layers: { label: string; depth: string; items: { name: string; note: string }[]; bedrock?: boolean }[] = [
     {
-      label: 'Products', depth: 'surface',
+      label: 'Build', depth: 'surface',
       items: [
         { name: 'garden', note: 'agent toolkit' },
-        { name: 'interactive', note: 'HTML builder' },
-        { name: 'studio', note: 'HITL desktop' },
-        { name: 'testing', note: 'QE pipeline' },
-        { name: 'signals', note: 'intent router' },
+        { name: 'interactive', note: 'in-browser builder' },
       ],
     },
     {
-      label: 'Foundation peers', depth: '−6m',
+      label: 'Operate', depth: '−5m',
       items: [
-        { name: 'wicked-core', note: 'single-writer runtime' },
-        { name: 'wicked-bus', note: 'SQLite event substrate' },
-        { name: 'wicked-brain', note: 'memory adapter' },
-        { name: 'wicked-crew', note: 'workflow governor' },
+        { name: 'crew', note: 'workflow governor' },
+        { name: 'testing', note: 'QE pipeline' },
+      ],
+    },
+    {
+      label: 'Foundation', depth: '−10m',
+      items: [
+        { name: 'bus', note: 'event substrate' },
+        { name: 'brain', note: 'memory adapter' },
       ],
     },
   ]
@@ -495,9 +498,9 @@ function UnderStack() {
           <h2 className="mt-4 font-display text-3xl sm:text-[2.6rem] font-black text-ink">
             Estate is the layer everything else rests on.
           </h2>
-          <p className="mt-4 text-muted max-w-2xl font-sans">
-            The products sit on top. The other foundation repos sit below them. Estate is the bedrock at the bottom —
-            the substrate every layer queries.
+          <p className="mt-4 text-ink max-w-2xl font-sans leading-relaxed">
+            Build tools sit on top, Operate tools govern them, and the Foundation carries the load underneath.
+            Estate is the bedrock at the bottom of the Foundation — the substrate every layer queries.
           </p>
         </div>
 
@@ -526,9 +529,9 @@ function UnderStack() {
               <div className="flex-1">
                 <div className="flex items-center gap-3 flex-wrap">
                   <span className="font-display font-black text-ink text-2xl" style={{ fontStretch: '110%' }}>wicked-estate</span>
-                  <span className="tag tag-accent">bedrock</span>
+                  <span className="tag tag-accent">bedrock · foundation</span>
                 </div>
-                <p className="mt-1.5 text-sm text-muted font-sans max-w-xl">
+                <p className="mt-1.5 text-sm text-ink font-sans max-w-xl leading-relaxed">
                   Code graph + memory + knowledge + requirements + annotations, in one binary. Every edge stamped with
                   confidence and provenance. The center of gravity everything else queries.
                 </p>
