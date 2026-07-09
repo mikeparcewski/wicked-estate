@@ -1,1552 +1,624 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 
-// ── Icons ──────────────────────────────────────────────────────────────────────
+/* ────────────────────────────────────────────────────────────────────────────
+   wicked-estate — the substrate every agent queries.
+
+   SUBSTRATE = sub + stratum. The page is one continuous body of stacked strata:
+   code graph · memory · knowledge · requirements↔code · annotations — five layers
+   of ONE thing, all keyed to the same stable symbol identity, all stamped with
+   confidence + provenance. The visual language is a geological cross-section; the
+   centerpiece is a live core sample you query with a confidence dial.
+   ──────────────────────────────────────────────────────────────────────────── */
+
 function GitHubIcon({ size = 16 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0 1 12 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z" />
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.02-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 012-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z" />
     </svg>
   )
 }
 
-// ── Hero ───────────────────────────────────────────────────────────────────────
-function Hero() {
+// ── Strata metadata: the five layers of the one substrate ───────────────────────
+type StratumId = 'graph' | 'memory' | 'knowledge' | 'requirements' | 'annotations'
+
+const STRATA: { id: StratumId; no: string; name: string; depth: string; tools: string }[] = [
+  { id: 'graph',        no: '01', name: 'Code graph',        depth: '−0.0m',  tools: '10 tools' },
+  { id: 'memory',       no: '02', name: 'Memory',            depth: '−4.2m',  tools: '6 tools'  },
+  { id: 'knowledge',    no: '03', name: 'Knowledge',         depth: '−7.8m',  tools: '7 tools'  },
+  { id: 'requirements', no: '04', name: 'Requirements ↔ code', depth: '−11.5m', tools: 'traceability' },
+  { id: 'annotations',  no: '05', name: 'Annotations',       depth: '−14.0m', tools: 'typed notes' },
+]
+const stratumName = (id: StratumId) => STRATA.find(s => s.id === id)!.name
+
+// ── Section shell ────────────────────────────────────────────────────────────
+function Section({
+  id, solid = false, children, className = '',
+}: { id?: string; solid?: boolean; children: React.ReactNode; className?: string }) {
   return (
-    <section className="snap-start relative min-h-screen flex flex-col items-center justify-center pt-[58px] overflow-hidden band band-depth">
-
-      <div className="relative max-w-5xl mx-auto px-7 text-center">
-        <div className="inline-flex items-center gap-2 font-mono text-[0.65rem] tracking-[0.22em] uppercase text-muted border border-hairline-strong rounded-2xl sm:rounded-full px-3 py-1.5 mb-8"
-          style={{ background: 'color-mix(in oklab, var(--accent) 8%, var(--canvas))' }}>
-          <span className="live-dot w-1.5 h-1.5 rounded-full bg-accent inline-block" />
-          Local-first SQLite · PostgreSQL for teams · One MCP server · 23 tools
-        </div>
-
-        <h1 className="font-display text-5xl sm:text-6xl lg:text-[4.2rem] font-black mb-6 text-ink" style={{ fontStretch: '115%' }}>
-          The code graph<br />
-          <span style={{ color: 'var(--accent)' }}>agents actually trust.</span>
-        </h1>
-
-        <p className="text-lg sm:text-xl text-muted max-w-2xl mx-auto mb-10 leading-relaxed font-sans">
-          One local-first MCP server unifies the three things your agent is missing — a queryable{' '}
-          <span className="text-ink font-mono text-base">code graph</span>, cross-session{' '}
-          <span className="text-ink font-mono text-base">memory</span>, and a citeable{' '}
-          <span className="text-ink font-mono text-base">knowledge</span> base. 23 tools, one binary.
-          Every edge carries confidence and provenance — heuristics are never presented as facts.
-        </p>
-
-        <div className="flex flex-col sm:flex-row gap-3 justify-center mb-16">
-          <a href="#get-started" className="btn-primary">Get Started</a>
-          <a href="https://github.com/mikeparcewski/wicked-estate" target="_blank" rel="noreferrer" className="btn-outline">
-            <GitHubIcon />
-            View on GitHub
-          </a>
-        </div>
-
-        {/* Terminal — always dark */}
-        <div className="terminal max-w-2xl mx-auto text-left"
-          style={{ boxShadow: '0 40px 80px -30px rgba(0,0,0,0.55)' }}>
-          <div className="terminal-bar">
-            <div className="terminal-dot bg-red-500/80" />
-            <div className="terminal-dot bg-yellow-500/80" />
-            <div className="terminal-dot bg-green-500/80" />
-            <span className="ml-2 font-mono text-[0.65rem] tracking-widest uppercase text-white/30">blast-radius</span>
-          </div>
-          <div className="px-5 py-4 space-y-1 text-sm">
-            <div>
-              <span style={{ color: 'var(--accent)' }}>$</span>
-              <span className="text-white/80"> wicked-estate blast-radius </span>
-              <span className="text-[#4ade80]">handleRequest</span>
-              <span className="text-white/40"> --db graph.db</span>
-            </div>
-            <div className="pt-2 text-xs leading-[1.8]">
-              <div className="text-white/70 mb-1">5 symbol(s) transitively depend on <span className="text-[#4ade80]">'handleRequest'</span>:</div>
-              <div className="pl-2 space-y-0.5 text-white/50">
-                {[
-                  ['authenticate', 'src/middleware.ts'],
-                  ['validateToken', 'src/auth.ts'],
-                  ['routeRequest', 'src/router.ts'],
-                  ['rateLimitCheck', 'src/middleware.ts'],
-                  ['main', 'src/server.ts'],
-                ].map(([fn, file]) => (
-                  <div key={fn}>
-                    <span style={{ color: 'var(--accent)' }}>Function</span>{' '}
-                    <span className="text-white/80">{fn}</span>
-                    <span className="text-white/25 ml-8">{file}</span>
-                  </div>
-                ))}
-              </div>
-              <div className="pt-2 text-white/30">coverage: 5 resolved dependent(s); 0 unresolved — SCIP tier active</div>
-            </div>
-          </div>
-        </div>
-
-        <p className="mt-5 font-mono text-xs text-faint">
-          Blast-radius = transitive dependents — not text matches.
-        </p>
-      </div>
+    <section
+      id={id}
+      className={`strata${solid ? ' strata-solid' : ''} snap-start min-h-screen flex flex-col justify-center py-24 px-7 ${className}`}
+    >
+      {children}
     </section>
   )
 }
 
-// ── Three Domains (interactive console) ─────────────────────────────────────────
-// estate is not a graph tool — it's ONE MCP server across three domains. This
-// tabbed, auto-cycling console lets a reader feel each domain answer a real query.
-type Domain = 'graph' | 'memory' | 'knowledge'
+// ── 1 · HERO ────────────────────────────────────────────────────────────────
+function Hero() {
+  return (
+    <Section className="!pt-28 overflow-hidden">
+      <div className="max-w-6xl mx-auto w-full grid lg:grid-cols-[1.05fr_0.95fr] gap-14 items-center">
+        {/* Left — the thesis, committed in sentence one */}
+        <div>
+          <span className="kicker">wicked-estate · v0.13.0 · the foundation</span>
+          <h1 className="mt-6 font-display font-black text-ink text-[2.9rem] sm:text-6xl lg:text-[4.2rem] leading-[0.94]" style={{ fontStretch: '112%' }}>
+            The substrate<br />every agent<br />
+            <span style={{ color: 'var(--accent)' }}>queries.</span>
+          </h1>
+          <p className="mt-7 text-lg text-muted leading-relaxed max-w-xl font-sans">
+            One local-first MCP server — a single body of stacked strata:{' '}
+            <span className="text-ink">code graph</span>, <span className="text-ink">memory</span>,{' '}
+            <span className="text-ink">knowledge</span>, <span className="text-ink">requirements↔code</span> and{' '}
+            <span className="text-ink">typed annotations</span>. Five layers of one thing, all keyed to the same
+            stable symbol identity, all stamped with confidence and provenance.
+          </p>
+          <p className="mt-3 font-mono text-xs text-faint">
+            SQLite by default — zero infrastructure. One flag to PostgreSQL for a shared team graph.
+          </p>
+          <div className="mt-9 flex flex-col sm:flex-row gap-3">
+            <a href="#query" className="btn-primary">Query the substrate ↓</a>
+            <a href="https://github.com/mikeparcewski/wicked-estate" target="_blank" rel="noreferrer" className="btn-outline">
+              <GitHubIcon /> View on GitHub
+            </a>
+          </div>
+        </div>
 
-function ThreeDomains() {
-  const domains: {
-    id: Domain
-    label: string
-    count: string
-    tagline: string
-    tools: string[]
-    prompt: string
-    lines: { text: string; kind?: 'ok' | 'dim' | 'accent' }[]
-  }[] = [
-    {
-      id: 'graph',
-      label: 'Code graph',
-      count: '10 tools',
-      tagline: 'symbols · callers · blast-radius · scoped context',
-      tools: ['SearchEntity', 'RetrieveEntity', 'TraverseGraph', 'BlastRadius', 'FetchContent', 'Lineage', 'RankHotspots', 'Communities', 'ContextBundle', 'SemanticSearch'],
-      prompt: 'BlastRadius("handleRequest")',
-      lines: [
-        { text: '5 transitive dependents · 0 unresolved', kind: 'dim' },
-        { text: '  authenticate    src/middleware.ts   conf 1.0  SCIP', kind: 'accent' },
-        { text: '  validateToken   src/auth.ts         conf 1.0  SCIP' },
-        { text: '  routeRequest    src/router.ts       conf 0.8  TSG' },
-        { text: '  rateLimitCheck  src/middleware.ts   conf 0.8  TSG' },
-        { text: '  main            src/server.ts       conf 1.0  SCIP' },
-        { text: '✓ dependents, not text matches — every edge carries provenance', kind: 'ok' },
-      ],
-    },
-    {
-      id: 'memory',
-      label: 'Memory',
-      count: '6 tools',
-      tagline: 'cross-session recall · scope · salience · reflect',
-      tools: ['memory.capture', 'memory.recall', 'memory.reflect', 'memory.learn', 'memory.erase', 'memory.coverage'],
-      prompt: 'memory.recall("why did we drop the vector DB?", scope=project:acme)',
-      lines: [
-        { text: '2 memories · token-budgeted · salience-ranked', kind: 'dim' },
-        { text: '  [semantic] chose FTS5 + RRF over pgvector — infra cost', kind: 'accent' },
-        { text: '             scope=project:acme   salience 0.91' },
-        { text: '  [episode]  spike 2026-06: pgvector added ~400ms p95' },
-        { text: '             scope=project:acme   salience 0.74' },
-        { text: '✓ the decision survives the session that made it', kind: 'ok' },
-      ],
-    },
-    {
-      id: 'knowledge',
-      label: 'Knowledge',
-      count: '7 tools',
-      tagline: 'ingest · hybrid recall · relate · link to code',
-      tools: ['knowledge.ingest', 'knowledge.recall', 'knowledge.relate', 'knowledge.write', 'knowledge.relate_code', 'knowledge.recall_about_code', 'knowledge.coverage'],
-      prompt: 'knowledge.recall("deploy runbook: rollback steps")',
-      lines: [
-        { text: '1 article · hybrid FTS + vector · RRF fused', kind: 'dim' },
-        { text: '  [[Deployment Runbook]] §Rollback        conf 0.88', kind: 'accent' },
-        { text: '    relates → [[Incident-2049]]  conf 0.72' },
-        { text: '    linked code → deploy.ts · rollback.ts' },
-        { text: '✓ answers cite a source you can open — not an opaque embedding', kind: 'ok' },
-      ],
-    },
-  ]
+        {/* Right — a thin live strata slab (the "core sample" you're about to read) */}
+        <div className="relative">
+          <div className="rock-panel p-0">
+            <div className="flex items-center justify-between px-5 py-3 border-b border-hairline-strong">
+              <span className="depth">CORE SAMPLE · applyDiscount</span>
+              <span className="tag tag-accent">one identity</span>
+            </div>
+            <div className="relative">
+              {/* the mineral seam runs vertically through every stratum */}
+              <div className="seam-line absolute top-4 bottom-4" style={{ left: '30%' }} />
+              {STRATA.map((s, i) => (
+                <div
+                  key={s.id}
+                  className="flex items-center gap-4 px-5 py-4 border-b border-hairline last:border-b-0"
+                  style={{ background: i % 2 ? 'color-mix(in oklab, var(--ink) 3%, transparent)' : 'transparent' }}
+                >
+                  <span className="depth w-14 shrink-0">{s.depth}</span>
+                  <span className="font-mono text-[0.6rem] text-faint w-6 shrink-0">{s.no}</span>
+                  <span className="font-display font-black text-ink text-sm sm:text-base flex-1" style={{ fontStretch: '108%' }}>
+                    {s.name}
+                  </span>
+                  <span className="tag hidden sm:inline">{s.tools}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <p className="mt-3 text-center font-mono text-[0.6rem] text-faint tracking-wide">
+            One continuous body — not a graph plus extras.
+          </p>
+        </div>
+      </div>
+    </Section>
+  )
+}
 
-  const DURATION = 5200
-  const [active, setActive] = useState<Domain>('graph')
-  const [visible, setVisible] = useState(true)
-  const idx = domains.findIndex(d => d.id === active)
+// ── 2 · QUERY THE SUBSTRATE (the signature interaction) ─────────────────────────
+type Prov = 'Parsed' | 'SCIP' | 'TSG' | 'ImportMap' | 'Tags' | 'episodic' | 'FTS+RRF' | 'annotation'
+interface Fact { stratum: StratumId; text: string; detail?: string; conf: number; prov: Prov; advisory?: boolean }
+interface Subject { id: string; label: string; kind: string; sub: string; facts: Fact[] }
 
-  const goTo = (id: Domain) => {
-    if (id === active) return
-    setVisible(false)
-    setTimeout(() => { setActive(id); setVisible(true) }, 220)
-  }
+const SUBJECTS: Subject[] = [
+  {
+    id: 'applyDiscount', label: 'applyDiscount', kind: 'symbol', sub: 'src/checkout/price.ts',
+    facts: [
+      { stratum: 'graph', text: '3 transitive dependents', detail: 'checkout · cartTotal · api/price', conf: 1.0, prov: 'SCIP' },
+      { stratum: 'graph', text: 'referralFlow → applyDiscount', detail: 'tag-scan guess, cross-file unverified', conf: 0.3, prov: 'Tags' },
+      { stratum: 'memory', text: 'Decision: coupons never stack', detail: 'spike 2026-06 · scope=project:acme', conf: 0.74, prov: 'episodic' },
+      { stratum: 'knowledge', text: '[[Pricing Rules]] §Discounts', detail: 'hybrid FTS + vector, RRF fused', conf: 0.88, prov: 'FTS+RRF' },
+      { stratum: 'requirements', text: 'satisfies REQ-142 · validated ✓', detail: 'requirement↔code, enforced flag', conf: 1.0, prov: 'Parsed' },
+      { stratum: 'annotations', text: 'assumption: max one coupon per cart', detail: 'advisory · survives re-index', conf: 0.7, prov: 'annotation', advisory: true },
+    ],
+  },
+  {
+    id: 'REQ-142', label: 'REQ-142', kind: 'requirement', sub: 'Discounts never stack',
+    facts: [
+      { stratum: 'requirements', text: '2 symbols satisfy REQ-142', detail: 'validateCoupon ✓ validated · applyDiscount ⋯ unvalidated', conf: 1.0, prov: 'Parsed' },
+      { stratum: 'graph', text: 'blast-radius of implementers: 3 dependents', detail: 'checkout · cartTotal · api/price', conf: 1.0, prov: 'SCIP' },
+      { stratum: 'graph', text: 'candidate impl: legacyDiscount()', detail: 'import-map heuristic, not confirmed', conf: 0.6, prov: 'ImportMap' },
+      { stratum: 'knowledge', text: '[[Pricing Spec]] §Stacking rules', detail: 'linked article', conf: 0.85, prov: 'FTS+RRF' },
+      { stratum: 'memory', text: 'Decision: enforce at price layer, not cart', conf: 0.70, prov: 'episodic' },
+      { stratum: 'annotations', text: 'question: does BOGO count as a coupon?', detail: 'advisory · open', conf: 0.5, prov: 'annotation', advisory: true },
+    ],
+  },
+  {
+    id: 'Deployment Runbook', label: 'Deployment Runbook', kind: 'article', sub: 'knowledge · wiki',
+    facts: [
+      { stratum: 'knowledge', text: '[[Deployment Runbook]] §Rollback', detail: 'hybrid FTS + vector, RRF fused', conf: 0.88, prov: 'FTS+RRF' },
+      { stratum: 'knowledge', text: 'relates → [[Incident-2049]]', detail: 'confidence-scored backlink', conf: 0.72, prov: 'FTS+RRF' },
+      { stratum: 'graph', text: 'linked code: deploy.ts · rollback.ts', detail: 'article↔code edges', conf: 1.0, prov: 'SCIP' },
+      { stratum: 'memory', text: 'Decision: rollback must be idempotent', detail: 'scope=project:acme', conf: 0.80, prov: 'episodic' },
+      { stratum: 'requirements', text: 'supports REQ-207 · unvalidated ⋯', conf: 0.6, prov: 'Parsed' },
+      { stratum: 'annotations', text: 'note: runbook last drilled 2026-05', conf: 0.6, prov: 'annotation', advisory: true },
+    ],
+  },
+]
 
-  useEffect(() => {
-    const t = setInterval(() => {
-      const next = domains[(idx + 1) % domains.length].id
-      setVisible(false)
-      setTimeout(() => { setActive(next); setVisible(true) }, 220)
-    }, DURATION)
-    return () => clearInterval(t)
-  }, [idx])
+function confColor(conf: number) {
+  if (conf >= 1.0) return 'var(--accent)'
+  if (conf >= 0.8) return 'var(--ink)'
+  if (conf >= 0.6) return 'var(--muted)'
+  return 'var(--faint)'
+}
 
-  const d = domains[idx]
+function QuerySubstrate() {
+  const [subjectId, setSubjectId] = useState(SUBJECTS[0].id)
+  const [threshold, setThreshold] = useState(0.6)
+  const subject = SUBJECTS.find(s => s.id === subjectId)!
+
+  const live = subject.facts.filter(f => f.conf >= threshold)
+  const liveStrata = new Set(live.map(f => f.stratum))
 
   return (
-    <section id="domains" className="snap-start min-h-screen flex flex-col justify-center py-24 px-7 band band-solid">
-      <div className="max-w-5xl mx-auto w-full">
-        <div className="text-center mb-10">
-          <span className="kicker">One server · Three domains</span>
-          <h2 className="font-display text-3xl sm:text-4xl font-black text-ink mb-4">
-            Not just a graph. The whole context layer.
+    <Section id="query" solid>
+      <div className="max-w-6xl mx-auto w-full">
+        <div className="mb-9">
+          <span className="kicker">Query the substrate</span>
+          <h2 className="mt-4 font-display text-3xl sm:text-[2.6rem] font-black text-ink">
+            Pick a subject. Drag the confidence dial. Read one core sample.
           </h2>
-          <p className="text-muted max-w-2xl mx-auto font-sans">
-            wicked-estate is a single MCP server exposing <span className="text-ink font-mono text-sm">23 tools</span>{' '}
-            across three domains an agent needs and never has: the code graph, cross-session memory, and a citeable
-            knowledge base — all local-first on SQLite by default, or a shared PostgreSQL graph for a team.
+          <p className="mt-4 text-muted max-w-2xl font-sans">
+            The substrate returns a single dossier assembled live across all five strata at once. Every fact carries its{' '}
+            <span className="text-ink">provenance</span> and <span className="text-ink">confidence</span>. Drive the dial
+            to 1.0 and only parsed / SCIP facts survive; drop it and the heuristic tag-scan edges reappear —{' '}
+            <span className="text-ink">clearly labeled, never silently promoted</span>.
           </p>
         </div>
 
-        {/* Domain tabs */}
-        <div className="flex flex-wrap justify-center gap-2 mb-5">
-          {domains.map(dd => {
-            const on = dd.id === active
+        {/* Subject picker — three core samples */}
+        <div className="flex flex-wrap gap-2 mb-6">
+          {SUBJECTS.map(s => {
+            const on = s.id === subjectId
             return (
               <button
-                key={dd.id}
-                onClick={() => goTo(dd.id)}
-                className="group flex items-center gap-2 rounded-full px-4 py-2 font-mono text-xs transition-all"
+                key={s.id}
+                onClick={() => setSubjectId(s.id)}
+                className="text-left rounded-xl px-4 py-3 transition-all"
                 style={{
-                  background: on ? 'color-mix(in oklab, var(--accent) 14%, var(--canvas))' : 'var(--surface)',
+                  background: on ? 'color-mix(in oklab, var(--accent) 12%, var(--rock))' : 'var(--rock)',
                   border: `1px solid ${on ? 'color-mix(in oklab, var(--accent) 55%, var(--hairline))' : 'var(--hairline-strong)'}`,
-                  color: on ? 'var(--ink)' : 'var(--muted)',
                 }}
               >
-                <span className="w-1.5 h-1.5 rounded-full shrink-0"
-                  style={{ background: on ? 'var(--accent)' : 'var(--faint)' }} />
-                <span className="font-semibold">{dd.label}</span>
-                <span className="text-faint">{dd.count}</span>
+                <div className="flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: on ? 'var(--accent)' : 'var(--faint)' }} />
+                  <span className="font-mono text-sm font-semibold" style={{ color: on ? 'var(--ink)' : 'var(--muted)' }}>{s.label}</span>
+                  <span className="tag">{s.kind}</span>
+                </div>
+                <div className="depth mt-1.5 pl-3.5">{s.sub}</div>
               </button>
             )
           })}
         </div>
 
-        {/* Console */}
-        <div className="terminal" style={{ boxShadow: '0 32px 64px -28px rgba(0,0,0,0.5)' }}>
-          <div className="terminal-bar justify-between flex-shrink-0">
-            <div className="flex items-center gap-1.5">
-              <div className="terminal-dot bg-red-500/80" />
-              <div className="terminal-dot bg-yellow-500/80" />
-              <div className="terminal-dot bg-green-500/80" />
-              <span className="ml-2 font-mono text-[0.62rem] tracking-widest uppercase text-white/30">
-                wicked-estate-mcp · {d.label.toLowerCase()}
-              </span>
-            </div>
-            <span className="font-mono text-[0.6rem] text-white/25">{d.tagline}</span>
-          </div>
-
-          {/* progress bar */}
-          <div className="h-px flex-shrink-0" style={{ background: 'rgba(255,255,255,0.06)' }}>
-            <div key={`dprog-${active}`} className="h-full"
-              style={{ background: 'var(--accent)', animation: `step-progress ${DURATION}ms linear forwards` }} />
-          </div>
-
-          <div className="px-5 py-5 font-mono text-xs leading-[1.85] min-h-[13.5rem]"
-            style={{ opacity: visible ? 1 : 0, transition: 'opacity 0.22s ease' }}>
-            <div key={`dc-${active}`}>
-              <div className="flex gap-2 mb-3 flex-wrap">
-                <span style={{ color: 'var(--accent)' }}>›</span>
-                <span className="text-white/80 break-all">{d.prompt}</span>
-              </div>
-              <div className="space-y-0.5 border-t border-white/5 pt-3">
-                {d.lines.map((ln, i) => (
-                  <div key={i} style={{ animationDelay: `${i * 0.09}s`, animation: 'line-fade 0.35s ease both' }}>
-                    <span style={{
-                      color: ln.kind === 'ok' ? '#4ade80'
-                        : ln.kind === 'accent' ? 'var(--accent)'
-                          : ln.kind === 'dim' ? 'rgba(255,255,255,0.35)'
-                            : 'rgba(255,255,255,0.62)',
-                    }}>{ln.text}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Tool chips for the active domain */}
-        <div className="mt-5 flex flex-wrap justify-center gap-1.5"
-          style={{ opacity: visible ? 1 : 0.4, transition: 'opacity 0.22s ease' }}>
-          {d.tools.map(t => (
-            <span key={t} className="lang-tag" style={{ color: 'var(--muted)' }}>{t}</span>
-          ))}
-        </div>
-        <p className="mt-6 text-center font-mono text-xs text-faint">
-          Same binary, same store — local SQLite or shared PostgreSQL — same provenance discipline, across all three.
-        </p>
-      </div>
-    </section>
-  )
-}
-
-// ── Use Cases ──────────────────────────────────────────────────────────────────
-function UseCases() {
-  const cases = [
-    {
-      icon: (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
-        </svg>
-      ),
-      title: 'Blast-radius before every PR',
-      body: 'Know exactly which callers, tests, and services break before you merge — not after. Trace every transitive dependent of the function you changed.',
-      cmd: 'wicked-estate blast-radius handleRequest',
-      out: '5 transitive dependents · 0 unresolved · SCIP tier',
-    },
-    {
-      icon: (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 15.803 7.5 7.5 0 0016.803 15.803z" />
-        </svg>
-      ),
-      title: 'Onboard a new codebase in minutes',
-      body: "Rank every symbol by PageRank over real call-edges. Find the entry points, the hot paths, and the dead code — without reading a single file manually.",
-      cmd: 'wicked-estate rank --top 20',
-      out: '#1 main  ·  #2 handleRequest  ·  #3 authenticate …',
-    },
-    {
-      icon: (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" />
-        </svg>
-      ),
-      title: 'Retire a deprecated API safely',
-      body: 'Search for every caller of the old API across 100+ languages in one query. Get a ranked list of files to update — sorted by how often each caller is itself called.',
-      cmd: 'wicked-estate callers legacyAuth --db graph.db',
-      out: '23 callers found · sorted by PageRank · conf ≥ 0.6',
-    },
-    {
-      icon: (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z" />
-        </svg>
-      ),
-      title: 'Give your agent precise context',
-      body: 'Stop sending thousand-line file dumps. The MCP server gives your agent ranked, scoped, provenance-tagged slices — exactly what it needs, nothing it doesn\'t.',
-      cmd: 'SearchEntity("login validation")',
-      out: '3 results · ranked · confidence tagged · <2K tokens',
-    },
-    {
-      icon: (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
-        </svg>
-      ),
-      title: 'IaC drift detection',
-      body: 'Terraform, CloudFormation, Kubernetes — parsed as first-class nodes. Pull live state from AWS or Azure directly, then graph-diff it against your IaC to surface drift before it becomes an incident.',
-      cmd: 'wicked-estate drift --db postgres://team/graph',
-      out: '3 resources drifted · 1 unmanaged · 2 undeployed',
-    },
-    {
-      icon: (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 2.625c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125m16.5 5.625c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" />
-        </svg>
-      ),
-      title: 'Shared team graph',
-      body: 'Switch from SQLite to PostgreSQL with one flag. Multiple CI jobs and agents write concurrently. Everyone queries the same graph — no stale per-developer DBs.',
-      cmd: 'wicked-estate index . --db postgres://team/graph',
-      out: 'shared_writers=true · server_side_traversal=true',
-    },
-    {
-      icon: (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12c0 1.268-.63 2.39-1.593 3.068a3.745 3.745 0 01-1.043 3.296 3.745 3.745 0 01-3.296 1.043A3.745 3.745 0 0112 21c-1.268 0-2.39-.63-3.068-1.593a3.746 3.746 0 01-3.296-1.043 3.745 3.745 0 01-1.043-3.296A3.745 3.745 0 013 12c0-1.268.63-2.39 1.593-3.068a3.745 3.745 0 011.043-3.296 3.746 3.746 0 013.296-1.043A3.746 3.746 0 0112 3c1.268 0 2.39.63 3.068 1.593a3.746 3.746 0 013.296 1.043 3.746 3.746 0 011.043 3.296A3.745 3.745 0 0121 12z" />
-        </svg>
-      ),
-      title: 'Rule engines in the same graph as code',
-      body: 'IBM ODM, Camunda DMN, Drools, CLIPS, Excel decision tables, Salesforce Flow, AWS Config & Azure Policy — extracted as Rule / RuleSet / Condition / Action nodes, joined to the code that invokes them. Ask "what code calls this rule set?" in one query.',
-      cmd: 'wicked-estate query PricingRules --db graph.db',
-      out: 'RuleSet · 6 conditions · 3 callers · InvokedBy',
-    },
-    {
-      icon: (
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M14.25 6.087c0-.355.186-.676.401-.959.221-.29.349-.634.349-1.003 0-1.036-1.007-1.875-2.25-1.875s-2.25.84-2.25 1.875c0 .369.128.713.349 1.003.215.283.401.604.401.959v0a.64.64 0 01-.657.643 48.39 48.39 0 01-4.163-.3c.186 1.613.293 3.25.315 4.907a.656.656 0 01-.658.663v0c-.355 0-.676-.186-.959-.401a1.647 1.647 0 00-1.003-.349c-1.036 0-1.875 1.007-1.875 2.25s.84 2.25 1.875 2.25c.369 0 .713-.128 1.003-.349.283-.215.604-.401.959-.401v0c.31 0 .555.26.532.57a48.039 48.039 0 01-.642 5.056c1.518.19 3.058.309 4.616.354a.64.64 0 00.657-.643v0c0-.355-.186-.676-.401-.959a1.647 1.647 0 01-.349-1.003c0-1.035 1.008-1.875 2.25-1.875 1.243 0 2.25.84 2.25 1.875 0 .369-.128.713-.349 1.003-.215.283-.4.604-.4.959v0c0 .333.277.599.61.58a48.1 48.1 0 005.427-.63 48.05 48.05 0 00.582-4.717.532.532 0 00-.533-.57v0c-.355 0-.676.186-.959.401-.29.221-.634.349-1.003.349-1.035 0-1.875-1.007-1.875-2.25s.84-2.25 1.875-2.25c.37 0 .713.128 1.003.349.283.215.604.401.96.401v0a.656.656 0 00.658-.663 48.422 48.422 0 00-.37-5.36c-1.886.342-3.81.574-5.766.689a.578.578 0 01-.61-.58v0z" />
-        </svg>
-      ),
-      title: 'Drop-in language plugins',
-      body: 'Add a language without recompiling the core. Drop a compiled grammar + query + manifest into the plugins dir and it loads at startup. The grammar is a separate artifact, never linked into the MIT core — so even a GPL grammar stays license-isolated.',
-      cmd: 'wicked-estate plugins list',
-      out: 'nginx  exts=[nginxconf, conf]  license=Apache-2.0',
-    },
-  ]
-
-  return (
-    <section id="use-cases" className="snap-start min-h-screen py-24 px-7 band band-solid">
-      <div className="max-w-6xl mx-auto">
-        <div className="text-center mb-14">
-          <span className="kicker">Use Cases</span>
-          <h2 className="font-display text-3xl sm:text-4xl font-black text-ink mb-4">
-            What you can do with a real code graph.
-          </h2>
-          <p className="text-muted max-w-xl mx-auto font-sans">
-            Not text search. Not grep. A typed, ranked, cross-language graph with confidence on every edge.
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {cases.map(c => (
-            <div key={c.title} className="card-hover flex flex-col gap-4">
-              <div className="flex items-start gap-3">
-                <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
-                  style={{ background: 'color-mix(in oklab, var(--accent) 12%, var(--canvas))', color: 'var(--accent)' }}>
-                  {c.icon}
-                </div>
-                <div>
-                  <h3 className="font-mono text-sm font-semibold text-ink mb-1">{c.title}</h3>
-                  <p className="text-xs text-muted leading-5 font-sans">{c.body}</p>
-                </div>
-              </div>
-              <div className="mt-auto rounded-lg overflow-hidden" style={{ background: '#111113', border: '1px solid rgba(255,255,255,0.07)' }}>
-                <div className="px-3 py-2 font-mono text-[0.65rem] leading-5">
-                  <div><span style={{ color: 'var(--accent)' }}>$</span><span className="text-white/60"> {c.cmd}</span></div>
-                  <div className="text-white/30 mt-0.5">{c.out}</div>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-  )
-}
-
-// ── Pipeline ───────────────────────────────────────────────────────────────────
-function Pipeline() {
-  const Chevron = () => (
-    <div className="flex-shrink-0 flex lg:flex-col items-center justify-center lg:self-stretch px-1 py-2 lg:py-0 text-hairline-strong">
-      <svg className="hidden lg:block" width="16" height="20" viewBox="0 0 16 20" fill="none">
-        <path d="M4 2l8 8-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-      </svg>
-      <svg className="lg:hidden" width="20" height="14" viewBox="0 0 20 14" fill="none">
-        <path d="M2 4l8 6 8-6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-      </svg>
-    </div>
-  )
-
-  const tiers = [
-    { label: 'Tags',      conf: 0.3 },
-    { label: 'ImportMap', conf: 0.6 },
-    { label: 'TSG',       conf: 0.8 },
-    { label: 'SCIP',      conf: 1.0, accent: true },
-    { label: 'LSP ᵒᵈ',   conf: 1.0, accent: true },
-  ]
-
-  return (
-    <section id="pipeline" className="snap-start min-h-screen flex flex-col justify-center py-8 px-7 band band-depth">
-      <div className="max-w-6xl mx-auto w-full">
-
-        <div className="text-center mb-6">
-          <span className="kicker">How Code Flows</span>
-          <h2 className="font-display text-3xl sm:text-4xl font-black text-ink mb-3">Two phases. One invariant.</h2>
-          <p className="text-muted max-w-xl mx-auto font-sans text-sm">
-            Parse once into nodes and unresolved references. Resolve separately —
-            swap resolution tiers without touching the extractors.
-          </p>
-        </div>
-
-        {/* 4-stage horizontal pipeline */}
-        <div className="flex flex-col lg:flex-row items-stretch gap-0 mb-4">
-
-          {/* Stage 1 — Source */}
-          <div className="flex-1 phase-box !p-4">
-            <p className="font-mono text-[0.6rem] font-bold tracking-widest uppercase text-faint mb-3">Source</p>
-            <div className="space-y-1.5 mb-3">
-              {[
-                { ext: 'rs', c: '#fb923c' }, { ext: 'ts', c: '#60a5fa' },
-                { ext: 'py', c: '#fbbf24' }, { ext: 'go', c: '#34d399' },
-                { ext: 'tf', c: '#a78bfa' }, { ext: '…',  c: 'var(--faint)' },
-              ].map(f => (
-                <div key={f.ext} className="flex items-center gap-2 font-mono text-xs">
-                  <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: f.c }} />
-                  <span className="text-muted">file.</span>
-                  <span style={{ color: f.c }}>{f.ext}</span>
-                </div>
-              ))}
-            </div>
-            <div className="flex flex-wrap gap-1 pt-2 border-t border-hairline">
-              {['parallel', 'stateless', 'per-file'].map(t => <span key={t} className="lang-tag">{t}</span>)}
-            </div>
-          </div>
-
-          <Chevron />
-
-          {/* Stage 2 — Extract */}
-          <div className="flex-1 phase-box !p-4"
-            style={{ borderColor: 'color-mix(in oklab, var(--accent) 30%, var(--hairline-strong))' }}>
-            <p className="font-mono text-[0.6rem] font-bold tracking-widest uppercase mb-3"
-              style={{ color: 'var(--accent)' }}>Phase 1 — Extract</p>
-            <div className="font-mono text-xs text-faint space-y-0.5 mb-3">
-              <div>tree-sitter grammar</div>
-              <div>+ <span className="text-muted">.scm</span> query file</div>
-              <div className="flex flex-wrap gap-1 pt-1.5">
-                {['rust', 'ts', 'go', 'cobol', 'hcl', '+more'].map(l => (
-                  <span key={l} className="lang-tag">{l}</span>
-                ))}
-              </div>
-            </div>
-            <div className="space-y-1.5 pt-2 border-t border-hairline">
-              {[
-                { label: 'Nodes',         c: '#a78bfa', desc: 'symbols · kinds · spans' },
-                { label: 'Local edges',   c: '#60a5fa', desc: 'contains · defines'      },
-                { label: 'UnresolvedRefs', c: 'var(--accent)', desc: 'cross-file refs'  },
-              ].map(r => (
-                <div key={r.label} className="flex items-center gap-1.5 font-mono text-xs">
-                  <span className="w-1.5 h-1.5 rounded-sm shrink-0" style={{ background: r.c }} />
-                  <span className="text-muted">{r.label}</span>
-                  <span className="text-faint text-[0.58rem] hidden sm:inline">{r.desc}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <Chevron />
-
-          {/* Stage 3 — Resolve */}
-          <div className="flex-1 phase-box !p-4">
-            <p className="font-mono text-[0.6rem] font-bold tracking-widest uppercase text-faint mb-3">Phase 2 — Resolve</p>
-            <p className="font-mono text-[0.58rem] text-faint mb-2">Cheap → Precise · higher tier wins</p>
-            <div className="space-y-1.5 mb-3">
-              {tiers.map(t => (
-                <div key={t.label} className="flex items-center gap-2">
-                  <span className="font-mono text-[0.62rem] text-muted w-16 shrink-0">{t.label}</span>
-                  <div className="flex-1 h-1 rounded-full" style={{ background: 'var(--hairline-strong)' }}>
-                    <div className="h-full rounded-full transition-all"
-                      style={{ width: `${t.conf * 100}%`, background: t.accent ? 'var(--accent)' : 'var(--muted)', opacity: t.accent ? 1 : 0.55 }} />
-                  </div>
-                  <span className="font-mono text-[0.58rem] text-faint w-5 shrink-0">{t.conf}</span>
-                </div>
-              ))}
-            </div>
-            <p className="font-mono text-[0.55rem] text-faint">ᵒᵈ on-demand only, never bulk</p>
-          </div>
-
-          <Chevron />
-
-          {/* Stage 4 — Store */}
-          <div className="flex-1 phase-box !p-4">
-            <p className="font-mono text-[0.6rem] font-bold tracking-widest uppercase text-faint mb-3">Graph Store</p>
-            <div className="flex flex-wrap gap-1 mb-3">
-              {['SQLite', 'FTS5', 'sqlite-vec', 'WAL', 'PostgreSQL'].map(t => <span key={t} className="lang-tag">{t}</span>)}
-            </div>
-            <div className="pt-2 border-t border-hairline">
-              <p className="font-mono text-[0.58rem] text-faint tracking-widest uppercase mb-1.5">MCP · 23 tools</p>
-              <div className="space-y-0.5">
-                {['SearchEntity', 'RetrieveEntity', 'TraverseGraph', 'BlastRadius', 'FetchContent'].map(t => (
-                  <div key={t} className="font-mono text-xs" style={{ color: 'var(--accent)' }}>{t}</div>
-                ))}
-              </div>
-            </div>
-          </div>
-
-        </div>
-
-        {/* Invariant callout */}
-        <div className="flex items-center gap-3 px-4 py-3 rounded-xl border"
-          style={{ borderColor: 'color-mix(in oklab, var(--accent) 35%, var(--hairline))', background: 'color-mix(in oklab, var(--accent) 5%, var(--canvas))' }}>
-          <div className="w-6 h-6 rounded-md flex items-center justify-center shrink-0"
-            style={{ background: 'color-mix(in oklab, var(--accent) 20%, var(--canvas))', color: 'var(--accent)' }}>
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-            </svg>
-          </div>
-          <p className="font-sans text-sm text-muted">
-            <span className="font-semibold text-ink">The invariant:</span>{' '}
-            resolution is swappable — improve a tier without re-parsing any file.
-            A better SCIP index drops in with zero extractor changes.
-          </p>
-        </div>
-
-      </div>
-    </section>
-  )
-}
-
-// ── Graph Model ────────────────────────────────────────────────────────────────
-function GraphModel() {
-  return (
-    <section id="graph" className="snap-start min-h-screen py-24 px-7 band band-solid">
-      <div className="max-w-6xl mx-auto">
-        <div className="text-center mb-14">
-          <span className="kicker">The Graph</span>
-          <h2 className="font-display text-3xl sm:text-4xl font-black text-ink mb-4">
-            source = dependent.&nbsp; target = dependency.&nbsp; Always.
-          </h2>
-          <p className="text-muted max-w-xl mx-auto font-sans">
-            The edge direction is a hard invariant enforced by the conformance suite.
-            Blast-radius follows every dependency kind, not just calls.
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-10">
-          {/* Edge direction */}
-          <div className="card">
-            <h3 className="font-mono text-sm font-semibold text-ink mb-5">Edge direction invariant</h3>
-            <div className="flex items-center justify-center gap-5 mb-6">
-              <div className="text-center">
-                <div className="w-18 h-18 rounded-xl border-2 p-4 flex items-center justify-center mb-2"
-                  style={{ borderColor: 'color-mix(in oklab, var(--accent) 50%, var(--hairline))', background: 'color-mix(in oklab, var(--accent) 8%, var(--canvas))' }}>
-                  <span className="font-mono text-sm font-bold text-ink">A</span>
-                </div>
-                <span className="font-mono text-[0.6rem] text-faint">source<br />(dependent)</span>
-              </div>
-              <div className="flex flex-col items-center gap-1">
-                <div className="flex items-center gap-1">
-                  <div className="w-10 h-px" style={{ background: 'var(--accent)' }} />
-                  <svg width="9" height="9" viewBox="0 0 9 9" fill="none" className="text-accent">
-                    <path d="M0 4.5L7 4.5M4 1L7.5 4.5L4 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                </div>
-                <span className="font-mono text-[0.55rem] text-faint">Calls / Imports / Extends</span>
-              </div>
-              <div className="text-center">
-                <div className="w-18 h-18 rounded-xl border-2 p-4 flex items-center justify-center mb-2"
-                  style={{ borderColor: 'var(--hairline-strong)', background: 'var(--surface)' }}>
-                  <span className="font-mono text-sm font-bold text-ink">B</span>
-                </div>
-                <span className="font-mono text-[0.6rem] text-faint">target<br />(dependency)</span>
-              </div>
-            </div>
-            <div className="space-y-2 font-mono text-xs">
-              <div className="flex items-center gap-2 p-2.5 rounded"
-                style={{ background: 'color-mix(in oklab, var(--ink) 5%, var(--canvas))' }}>
-                <span className="text-faint">A calls B →</span>
-                <span className="text-muted">Edge &#123; source: A, target: B, kind: <span style={{ color: 'var(--accent)' }}>Calls</span> &#125;</span>
-              </div>
-              <div className="p-3 rounded space-y-1" style={{ background: 'color-mix(in oklab, var(--ink) 4%, var(--canvas))' }}>
-                <div className="text-muted"><span className="text-ink font-semibold">Dependencies of X</span> = edges where source == X</div>
-                <div className="text-muted"><span className="text-ink font-semibold">Dependents of X</span> = edges where target == X</div>
-                <div className="border-t border-hairline pt-2 mt-1" style={{ color: 'var(--accent)', fontWeight: '700' }}>
-                  Blast radius = transitive dependents
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Confidence */}
-          <div className="card">
-            <h3 className="font-mono text-sm font-semibold text-ink mb-5">Every edge has a source of truth</h3>
-            <div className="space-y-3">
-              {[
-                { tier: 'Parsed', conf: 1.0, who: 'Direct AST facts — contains, defines' },
-                { tier: 'SCIP / LSP', conf: 1.0, who: 'Precise indexers, on-demand LSP' },
-                { tier: 'TSG', conf: 0.8, who: 'Stack-graphs name resolution' },
-                { tier: 'ImportMap', conf: 0.6, who: 'Import-map heuristics' },
-                { tier: 'Heuristic', conf: 0.5, who: 'Synthesizers' },
-                { tier: 'Tags', conf: 0.3, who: 'Tree-sitter tag scan only' },
-              ].map(t => (
-                <div key={t.tier} className="flex items-center gap-3">
-                  <span className="font-mono text-xs text-muted w-24 shrink-0">{t.tier}</span>
-                  <div className="conf-track">
-                    <div className="h-full rounded-full transition-all"
-                      style={{ width: `${t.conf * 100}%`, background: t.conf === 1.0 ? 'var(--accent)' : 'var(--hairline-strong)' }} />
-                  </div>
-                  <span className="font-mono text-xs text-faint w-6 shrink-0">{t.conf}</span>
-                </div>
-              ))}
-            </div>
-            <p className="mt-4 text-xs text-muted font-sans leading-5">
-              On a <span className="font-mono text-ink">(source, target, kind)</span> collision,
-              the higher-confidence edge wins. Low-confidence edges are labeled — never silently promoted.
-            </p>
-          </div>
-        </div>
-
-        {/* Stable identity callout */}
-        <div className="card border-hairline-strong">
-          <div className="flex items-start gap-4">
-            <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
-              style={{ background: 'color-mix(in oklab, var(--accent) 15%, var(--canvas))', border: '1px solid color-mix(in oklab, var(--accent) 40%, var(--hairline))' }}>
-              <svg className="w-4 h-4" style={{ color: 'var(--accent)' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 20l4-16m2 16l4-16M6 9h14M4 15h14" />
-              </svg>
-            </div>
+        <div className="grid lg:grid-cols-[280px_1fr] gap-5">
+          {/* Left — confidence dial + core column */}
+          <div className="rock-panel p-5 flex flex-col gap-6">
             <div>
-              <h3 className="font-mono text-sm font-semibold text-ink mb-2">Stable symbol identity — never content-hash or line number</h3>
-              <p className="text-sm text-muted leading-6 font-sans">
-                Keying a node by a hash of its body or by its line makes every edit look like a delete + re-create:
-                edges break, history is lost, blast-radius lies.
-                Identity is a stable <span className="font-mono text-ink">(scheme, qualified-name)</span> that
-                survives reformatting and line shifts.
+              <div className="flex items-baseline justify-between mb-3">
+                <span className="kicker">Confidence dial</span>
+                <span className="font-mono text-2xl font-black tabular-nums" style={{ color: 'var(--accent)' }}>
+                  {threshold.toFixed(2)}
+                </span>
+              </div>
+              <input
+                type="range" min={0.3} max={1.0} step={0.05} value={threshold}
+                onChange={e => setThreshold(parseFloat(e.target.value))}
+                className="dial" aria-label="Confidence threshold"
+              />
+              <div className="flex justify-between mt-2 depth">
+                <span>0.30 · heuristics</span>
+                <span>1.00 · SCIP only</span>
+              </div>
+              <p className="mt-3 font-mono text-[0.62rem] text-muted leading-5">
+                {live.length} of {subject.facts.length} facts above cutoff · {liveStrata.size} of 5 strata live
               </p>
             </div>
-          </div>
-        </div>
-      </div>
-    </section>
-  )
-}
 
-// ── Beyond Code (requirement traceability + annotations) ────────────────────────
-// The graph isn't only symbols. Two additive layers ride on the SAME stable
-// symbol identity: requirement↔code semantics, and typed key/value annotations.
-function BeyondCode() {
-  return (
-    <section id="beyond-code" className="snap-start min-h-screen py-24 px-7 band band-depth">
-      <div className="max-w-6xl mx-auto">
-        <div className="text-center mb-14">
-          <span className="kicker">Beyond the code</span>
-          <h2 className="font-display text-3xl sm:text-4xl font-black text-ink mb-4">
-            The graph isn&apos;t only code.
-          </h2>
-          <p className="text-muted max-w-2xl mx-auto font-sans">
-            Two additive layers ride on the same stable symbol identity — so an agent can trace{' '}
-            <span className="text-ink">a requirement to the code that implements it</span> and{' '}
-            <span className="text-ink">carry typed notes on any node</span> that survive every re-index.
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-
-          {/* Requirement ↔ code traceability */}
-          <div className="card flex flex-col">
-            <div className="flex items-start gap-3 mb-4">
-              <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
-                style={{ background: 'color-mix(in oklab, var(--accent) 12%, var(--canvas))', color: 'var(--accent)' }}>
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-              </div>
-              <div>
-                <h3 className="font-mono text-sm font-semibold text-ink mb-1">Requirement ↔ code traceability</h3>
-                <p className="text-xs text-muted leading-5 font-sans">
-                  Every symbol can carry the <span className="font-mono text-ink">requirement</span> it satisfies,
-                  a <span className="font-mono text-ink">description</span>, and a{' '}
-                  <span className="font-mono text-ink">validated</span> flag — the requirement↔functionality graph
-                  alongside the structural one. Ask which code satisfies a requirement, and what&apos;s still unvalidated.
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-auto rounded-lg overflow-hidden" style={{ background: '#111113', border: '1px solid rgba(255,255,255,0.07)' }}>
-              <div className="px-4 py-3 font-mono text-xs leading-[1.8]">
-                <div><span style={{ color: 'var(--accent)' }}>$</span><span className="text-white/70"> wicked-estate by-requirement REQ-142</span></div>
-                <div className="text-white/30 mt-1">2 symbol(s) matched REQ-142:</div>
-                <div className="text-[#4ade80]">  validateCoupon   src/checkout/coupon.ts   ✓ validated</div>
-                <div className="text-white/55">  applyDiscount    src/checkout/price.ts    ⋯ unvalidated</div>
-                <div className="text-white/25 mt-1">set_node_semantics · node_semantics · find_by_requirement</div>
-              </div>
-            </div>
-          </div>
-
-          {/* Typed annotations */}
-          <div className="card flex flex-col">
-            <div className="flex items-start gap-3 mb-4">
-              <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
-                style={{ background: 'color-mix(in oklab, var(--accent) 12%, var(--canvas))', color: 'var(--accent)' }}>
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zM19.5 15v3.75A2.25 2.25 0 0117.25 21H5.25A2.25 2.25 0 013 18.75V6.75A2.25 2.25 0 015.25 4.5H9" />
-                </svg>
-              </div>
-              <div>
-                <h3 className="font-mono text-sm font-semibold text-ink mb-1">Typed graph annotations</h3>
-                <p className="text-xs text-muted leading-5 font-sans">
-                  Annotate any node with typed <span className="font-mono text-ink">key/value</span> pairs —{' '}
-                  <span className="font-mono text-ink">assumption</span>, <span className="font-mono text-ink">note</span>,{' '}
-                  <span className="font-mono text-ink">question</span>, or your own type — each with confidence and an
-                  advisory flag. They surface inline in retrieval payloads and survive re-index via the stable symbol ID.
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-auto rounded-lg overflow-hidden" style={{ background: '#111113', border: '1px solid rgba(255,255,255,0.07)' }}>
-              <div className="px-4 py-3 font-mono text-xs leading-[1.75]">
-                <div className="text-white/30">RetrieveEntity(&quot;applyDiscount&quot;) →</div>
-                <div className="text-white/55">  &quot;annotations&quot;: [</div>
-                <div className="text-white/55">    &#123; &quot;type&quot;: <span className="text-[#4ade80]">&quot;assumption&quot;</span>, &quot;key&quot;: &quot;max-stack&quot;,</div>
-                <div className="text-white/55">      &quot;value&quot;: &quot;coupons never stack&quot;, &quot;confidence&quot;: <span style={{ color: 'var(--accent)' }}>0.7</span>, &quot;advisory&quot;: true &#125; ],</div>
-                <div className="text-white/55">  &quot;annotation_summary&quot;: &#123; &quot;count&quot;: 3, &quot;by_type&quot;: &#123;&quot;note&quot;:2,&quot;assumption&quot;:1&#125; &#125;</div>
-                <div className="text-white/25 mt-1">annotate · annotations_by_type · stale-since sweep</div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <p className="mt-8 text-center font-mono text-xs text-faint">
-          Both layers key off the stable symbol ID — reformat, move, or re-index, and the requirement links and annotations follow.
-        </p>
-      </div>
-    </section>
-  )
-}
-
-// ── Storage (SQLite by default, PostgreSQL for teams) ────────────────────────────
-function Storage() {
-  const rows = [
-    { cap: 'Default, zero-infra', sqlite: 'Local SQLite file — nothing to run', pg: 'One flag: --features postgres' },
-    { cap: 'Concurrent writers', sqlite: 'Single-writer', pg: 'shared_writers = true — team writes' },
-    { cap: 'Traversal', sqlite: 'Bounded recursive CTE', pg: 'Server-side WITH RECURSIVE, in-DB' },
-    { cap: 'Command API', sqlite: 'Same open_store(spec) factory', pg: 'Same factory arm — zero caller changes' },
-    { cap: 'Re-index to switch', sqlite: '—', pg: 'None — same schema, same graph' },
-  ]
-  return (
-    <section id="storage" className="snap-start min-h-screen flex flex-col justify-center py-24 px-7 band band-solid">
-      <div className="max-w-5xl mx-auto w-full">
-        <div className="text-center mb-12">
-          <span className="kicker">Storage</span>
-          <h2 className="font-display text-3xl sm:text-4xl font-black text-ink mb-4">
-            Local-first by default. A shared team graph when you need one.
-          </h2>
-          <p className="text-muted max-w-2xl mx-auto font-sans">
-            SQLite is the zero-infrastructure default. Flip one build flag and the exact same engine and command API
-            run on <span className="text-ink">PostgreSQL</span> — concurrent writers, server-side traversal, no re-index.
-            Storage is negotiated through <span className="font-mono text-ink text-sm">StoreCapabilities</span>, so
-            retrieval adapts to whichever backend is live.
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto_1fr] gap-4 items-stretch mb-8">
-          {/* SQLite */}
-          <div className="card">
-            <div className="flex items-center gap-2 mb-4">
-              <span className="w-2 h-2 rounded-full" style={{ background: 'var(--muted)' }} />
-              <h3 className="font-mono text-sm font-semibold text-ink">SQLite — solo, local-first</h3>
-            </div>
-            <div className="flex flex-wrap gap-1.5 mb-4">
-              {['single binary', 'FTS5', 'sqlite-vec', 'WAL', 'no server'].map(t => <span key={t} className="lang-tag">{t}</span>)}
-            </div>
-            <div className="rounded-lg overflow-hidden" style={{ background: '#111113', border: '1px solid rgba(255,255,255,0.07)' }}>
-              <div className="px-3 py-2 font-mono text-[0.68rem] leading-6">
-                <div><span style={{ color: 'var(--accent)' }}>$</span><span className="text-white/60"> wicked-estate index . --db graph.db</span></div>
-                <div className="text-white/30">nothing to run · nothing leaves your box</div>
-              </div>
-            </div>
-          </div>
-
-          {/* Divider */}
-          <div className="hidden lg:flex flex-col items-center justify-center px-1">
-            <span className="font-mono text-[0.6rem] tracking-widest uppercase text-faint rotate-90 whitespace-nowrap">one flag</span>
-          </div>
-
-          {/* Postgres */}
-          <div className="card" style={{ borderColor: 'color-mix(in oklab, var(--accent) 40%, var(--hairline))' }}>
-            <div className="flex items-center gap-2 mb-4">
-              <span className="w-2 h-2 rounded-full" style={{ background: 'var(--accent)' }} />
-              <h3 className="font-mono text-sm font-semibold text-ink">PostgreSQL — shared team graph</h3>
-            </div>
-            <div className="flex flex-wrap gap-1.5 mb-4">
-              {['--features postgres', 'concurrent writers', 'server-side traversal', 'trigram FTS'].map(t => (
-                <span key={t} className="lang-tag" style={{ color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 40%, var(--hairline))', background: 'color-mix(in oklab, var(--accent) 8%, var(--canvas))' }}>{t}</span>
-              ))}
-            </div>
-            <div className="rounded-lg overflow-hidden" style={{ background: '#111113', border: '1px solid rgba(255,255,255,0.07)' }}>
-              <div className="px-3 py-2 font-mono text-[0.68rem] leading-6">
-                <div><span style={{ color: 'var(--accent)' }}>$</span><span className="text-white/60"> wicked-estate index . --db postgres://team/graph</span></div>
-                <div className="text-[#4ade80]">shared_writers=true · server_side_traversal=true</div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Capability comparison */}
-        <div className="card overflow-x-auto">
-          <table className="w-full text-left border-collapse font-sans">
-            <thead>
-              <tr className="text-faint font-mono text-[0.6rem] uppercase tracking-widest">
-                <th className="py-2 pr-4 font-medium"></th>
-                <th className="py-2 pr-4 font-medium">SQLite (default)</th>
-                <th className="py-2 font-medium" style={{ color: 'var(--accent)' }}>PostgreSQL (--features postgres)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map(r => (
-                <tr key={r.cap} className="border-t border-hairline align-top">
-                  <td className="py-2.5 pr-4 font-mono text-xs text-ink whitespace-nowrap">{r.cap}</td>
-                  <td className="py-2.5 pr-4 text-xs text-muted">{r.sqlite}</td>
-                  <td className="py-2.5 text-xs text-muted">{r.pg}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        <p className="mt-6 text-center font-mono text-xs text-faint">
-          Same engine. Same command API. One build flag between a solo laptop graph and a shared team graph.
-        </p>
-      </div>
-    </section>
-  )
-}
-
-// ── Agent Contract ─────────────────────────────────────────────────────────────
-function AgentContract() {
-  const rules = [
-    { id: 'R1', title: 'Never return an error early in a session', body: 'A single isError: true early on causes session-wide abandonment. Return a successful empty result with a diagnostic instead.', icon: '↩' },
-    { id: 'R2', title: 'Unindexed graph → expose zero tools', body: "If the graph isn't built, the MCP server advertises no tools rather than tools that fail. A tool that exists must work.", icon: '○' },
-    { id: 'R3', title: 'Partial coverage is WORSE than none', body: 'A graph covering some files but omitting others misleads the agent. Coverage gaps are always surfaced in diagnostics.', icon: '▲' },
-    { id: 'R4', title: 'Cap tool output', body: 'Beyond a budget the agent ignores the output. Rank and budget the answer — a tight, ranked response over a complete dump.', icon: '✂' },
-    { id: 'R5', title: 'Always report staleness', body: 'Embed commits_behind in every response. A silently-stale graph is a correctness hazard — not just a quality issue.', icon: '◷' },
-    { id: 'R6', title: 'Loud fallback marker', body: 'When the graph can\'t answer and the agent reads files, emit GRAPH-FALLBACK: before any content derived from the file.', icon: '!' },
-    { id: 'R7', title: 'Confidence is visible', body: 'Heuristic edges are labeled so the agent weights them appropriately. A 0.5-confidence edge is never presented as a 1.0 fact.', icon: '◉' },
-    { id: 'R8', title: 'Results are always ranked', body: 'Every query returns symbols ordered by PageRank × confidence. When the token budget forces a cut, the most important symbols survive — not the most recently indexed.', icon: '↑' },
-    { id: 'R9', title: 'Symbol IDs are stable across re-indexes', body: 'An agent can bookmark a symbol ID mid-session and retrieve it after a re-index. Identity is a stable qualified name — it never changes unless the symbol is deleted.', icon: '⊞' },
-  ]
-
-  return (
-    <section id="agents" className="snap-start min-h-screen py-24 px-7 band band-depth">
-      <div className="max-w-6xl mx-auto">
-        <div className="text-center mb-14">
-          <span className="kicker">Agent Contract</span>
-          <h2 className="font-display text-3xl sm:text-4xl font-black text-ink mb-4">
-            Built for agents that can't afford to fail.
-          </h2>
-          <p className="text-muted max-w-xl mx-auto font-sans">
-            Empirical constraints from A/B-validated real agent sessions — not opinions.
-            Every retrieval tool honors all nine rules.
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mb-8">
-          {rules.map(r => (
-            <div key={r.id} className="rule-card">
-              <div className="font-mono text-xl shrink-0 text-ink">{r.icon}</div>
-              <div>
-                <div className="flex items-baseline gap-2 mb-1.5">
-                  <span className="font-mono text-[0.6rem] font-bold text-faint tracking-wide">{r.id}</span>
-                  <span className="font-mono text-xs font-semibold text-ink">{r.title}</span>
-                </div>
-                <p className="text-xs text-muted leading-5 font-sans">{r.body}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {/* Graph-first callout */}
-        <div className="card" style={{ borderColor: 'color-mix(in oklab, var(--accent) 35%, var(--hairline))' }}>
-          <div className="flex items-start gap-4">
-            <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
-              style={{ background: 'color-mix(in oklab, var(--accent) 15%, var(--canvas))', border: '1px solid color-mix(in oklab, var(--accent) 40%, var(--hairline))' }}>
-              <svg className="w-4 h-4" style={{ color: 'var(--accent)' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
-              </svg>
-            </div>
-            <div>
-              <h3 className="font-mono text-sm font-semibold text-ink mb-2">Graph-first retrieval discipline</h3>
-              <p className="text-sm text-muted leading-6 font-sans mb-2">
-                Every agent that reads code intelligence state MUST query the graph first.
-                Direct file reads are fallback only — and must be announced with a loud{' '}
-                <span className="font-mono" style={{ color: 'var(--accent)' }}>GRAPH-FALLBACK:</span> prefix.
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-  )
-}
-
-// ── Languages ──────────────────────────────────────────────────────────────────
-function Languages() {
-  const langs = [
-    'Rust', 'Python', 'TypeScript', 'JavaScript', 'Go', 'Java', 'C', 'C++', 'C#',
-    'Ruby', 'COBOL', 'JCL', 'RACF', 'IMS/DBD', 'PL/I', 'RPG', 'Natural', 'Assembler',
-    'SQL', 'HCL', 'Terraform', 'CloudFormation', 'Kubernetes', 'Ansible', 'Helm',
-    'Bash', 'YAML', 'JSON', 'TOML', 'Swift', 'Kotlin', 'Scala', 'Elixir', 'Erlang',
-    'Haskell', 'OCaml', 'Zig', 'Lua', 'PHP', 'R', 'Dart', 'Vue', 'Svelte', '+more',
-  ]
-
-  // [left%, top%] across a 600px-tall container — staggered rows, organic feel
-  const positions: [number, number][] = [
-    [7, 4],  [23, 7],  [42, 3],  [60, 6],  [76, 4],  [91, 8],
-    [3, 16], [19, 20], [36, 15], [53, 19], [70, 17], [87, 21],
-    [11, 29],[27, 32], [45, 28], [62, 31], [79, 27], [94, 33],
-    [5, 42], [21, 45], [38, 41], [56, 44], [73, 40], [89, 46],
-    [13, 55],[30, 52], [48, 57], [65, 53], [82, 56],
-    [4, 67], [20, 70], [37, 65], [54, 69], [71, 66], [88, 71],
-    [9, 80], [26, 77], [43, 82], [60, 79], [77, 83],
-    [15, 91],[32, 93], [50, 90], [67, 94],
-  ]
-
-  // Float durations vary per node (3.5–5.8s) so they're all out of phase
-  const floatDurs = [4.2,3.8,5.1,4.6,3.5,5.5,4.0,4.9,3.7,5.2,4.4,3.9,5.7,4.1,3.6,
-                     5.0,4.7,3.8,4.3,5.4,3.9,4.8,3.6,5.1,4.5,3.7,5.3,4.2,3.8,4.9,
-                     5.6,3.5,4.4,3.9,5.0,4.7,3.6,5.2,4.1,3.8,4.6,5.3,3.7,4.0]
-
-  return (
-    <section className="snap-start min-h-screen flex flex-col justify-center py-12 px-7 band band-solid">
-      <div className="max-w-6xl mx-auto w-full">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 items-center">
-          {/* Left: copy + terminal */}
-          <div>
-            <span className="kicker">Languages</span>
-            <h2 className="font-display text-3xl sm:text-4xl font-black text-ink mb-6">
-              100+ wired languages.<br />
-              <span className="text-muted">Zero core changes to add more.</span>
-            </h2>
-            <p className="text-muted leading-7 mb-6 font-sans">
-              Extraction logic lives in <span className="font-mono text-ink">.scm</span> query files
-              and a manifest — never in compiled <span className="font-mono text-ink">match language &#123;…&#125;</span> arms.
-              A new language is a manifest row and a query file. The capability matrix generates itself.
-              Coverage includes hard-to-find legacy enterprise stacks — VB6/VBA/VBScript, RPG, COBOL,
-              ColdFusion, Progress&nbsp;ABL, PowerBuilder, Visual&nbsp;FoxPro, LotusScript,
-              Informix&nbsp;4GL, Crystal&nbsp;Reports — several with grammars authored in-house. Or skip
-              the rebuild entirely with a <span className="font-mono text-ink">runtime plugin</span>: a
-              drop-in grammar loaded at startup, license-isolated from the MIT core.
-            </p>
-
-            <div className="terminal text-xs" style={{ boxShadow: '0 20px 48px -24px rgba(0,0,0,0.45)' }}>
-              <div className="terminal-bar">
-                <div className="terminal-dot bg-red-500/80" />
-                <div className="terminal-dot bg-yellow-500/80" />
-                <div className="terminal-dot bg-green-500/80" />
-                <span className="ml-2 font-mono text-[0.6rem] tracking-widest uppercase text-white/30">languages.toml · adding a language</span>
-              </div>
-              <div className="px-4 py-4 space-y-0.5 leading-[1.8] font-mono text-xs">
-                <div className="text-white/25"># existing</div>
-                <div><span style={{ color: 'var(--accent)' }}>[[language]]</span></div>
-                <div><span className="text-[#60a5fa]">name</span><span className="text-white/40"> = </span><span className="text-[#4ade80]">"rust"</span></div>
-                <div><span className="text-[#60a5fa]">extensions</span><span className="text-white/40"> = </span><span className="text-[#4ade80]">["rs"]</span></div>
-                <div className="mt-2 text-white/25"># new language — zero core change</div>
-                <div><span style={{ color: 'var(--accent)' }}>[[language]]</span></div>
-                <div><span className="text-[#60a5fa]">name</span><span className="text-white/40"> = </span><span className="text-[#4ade80]">"zig"</span></div>
-                <div><span className="text-[#60a5fa]">extensions</span><span className="text-white/40"> = </span><span className="text-[#4ade80]">["zig"]</span></div>
-                <div className="mt-2 text-white/25"># + add src/queries/zig.scm → done.</div>
-              </div>
-            </div>
-
-            <p className="mt-4 font-mono text-xs text-faint leading-5">
-              A fix in one extractor is a hypothesis about all others —<br />patch the shared seam, not N copies.
-            </p>
-
-            {/* Mobile: a static tag cloud stands in for the animated node cloud
-                (which is lg-only and absolutely positioned). Gives phones the
-                "wall of languages" proof the section otherwise loses. */}
-            <div className="mt-8 flex flex-wrap gap-1.5 lg:hidden">
-              {langs.map(l => (
-                <span
-                  key={l}
-                  className="lang-tag"
-                  style={l === '+more' ? {
-                    color: 'var(--accent)',
-                    borderColor: 'color-mix(in oklab, var(--accent) 40%, var(--hairline))',
-                    background: 'color-mix(in oklab, var(--accent) 8%, var(--canvas))',
-                  } : undefined}
-                >
-                  {l}
-                </span>
-              ))}
-            </div>
-          </div>
-
-          {/* Right: floating node cloud */}
-          <div
-            className="relative hidden lg:block"
-            style={{
-              height: '600px',
-              maskImage: 'linear-gradient(to bottom, transparent 0%, black 10%, black 88%, transparent 100%)',
-            }}
-          >
-            {langs.map((l, i) => {
-              const [left, top] = positions[i] ?? [50, 50]
-              const popDelay = i * 0.07
-              const floatDur = floatDurs[i] ?? 4.5
-              const isMore = l === '+more'
-              return (
-                <div
-                  key={l}
-                  style={{
-                    position: 'absolute',
-                    left: `${left}%`,
-                    top: `${top}%`,
-                    transform: 'translate(-50%, -50%)',
-                  }}
-                >
-                  <span
-                    className="lang-tag-lg"
-                    style={{
-                      display: 'block',
-                      animationName: 'node-pop, node-float',
-                      animationDuration: `0.5s, ${floatDur}s`,
-                      animationDelay: `${popDelay}s, ${popDelay + 0.5}s`,
-                      animationTimingFunction: 'cubic-bezier(0.34,1.56,0.64,1), ease-in-out',
-                      animationFillMode: 'both, none',
-                      animationIterationCount: '1, infinite',
-                      ...(isMore ? {
-                        color: 'var(--accent)',
-                        borderColor: 'color-mix(in oklab, var(--accent) 40%, var(--hairline))',
-                        background: 'color-mix(in oklab, var(--accent) 8%, var(--canvas))',
-                      } : {}),
-                    }}
-                  >
-                    {l}
-                  </span>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      </div>
-    </section>
-  )
-}
-
-// ── MCP Connect ────────────────────────────────────────────────────────────────
-function MCPConnect() {
-  const [tab, setTab] = useState<'claude' | 'cursor' | 'codex'>('claude')
-
-  const configs: Record<string, string> = {
-    claude: `# Claude Code (project scope)
-$ claude mcp add wicked-estate -s project \\
-    -- wicked-estate-mcp \\
-    --db "$PWD/.wicked-estate/graph.db"
-
-# Or install the bundled plugin:
-/plugin marketplace add mikeparcewski/wicked-estate`,
-    cursor: `// ~/.cursor/mcp.json  (or .cursor/mcp.json per-project)
-{
-  "mcpServers": {
-    "wicked-estate": {
-      "command": "wicked-estate-mcp",
-      "args": ["--db", "/abs/path/to/.wicked-estate/graph.db"]
-    }
-  }
-}`,
-    codex: `# ~/.codex/config.toml
-[mcp_servers.wicked-estate]
-command = "wicked-estate-mcp"
-args = ["--db", "/abs/path/to/.wicked-estate/graph.db"]
-
-# or via CLI:
-$ codex mcp add wicked-estate \\
-    -- wicked-estate-mcp --db /abs/path/to/graph.db`,
-  }
-
-  return (
-    <section id="connect" className="snap-start min-h-screen py-24 px-7 band band-depth">
-      <div className="max-w-5xl mx-auto">
-        <div className="text-center mb-14">
-          <span className="kicker">Connect an Agent</span>
-          <h2 className="font-display text-3xl sm:text-4xl font-black text-ink mb-4">
-            One config. Every major client.
-          </h2>
-          <p className="text-muted max-w-xl mx-auto font-sans">
-            <span className="font-mono text-ink">wicked-estate-mcp</span> is a JSON-RPC 2.0 stdio server
-            exposing all 23 tools — graph, memory, and knowledge. Register it once in Claude Code, Cursor,
-            Antigravity, or Codex.
-          </p>
-        </div>
-
-        {/* graph-domain retrieval tools (5 of 10) */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2 mb-10">
-          {[
-            { name: 'SearchEntity', desc: 'Find symbols by name or semantic query' },
-            { name: 'RetrieveEntity', desc: 'Fetch a full node by stable symbol ID' },
-            { name: 'TraverseGraph', desc: 'Multi-hop traversal from a symbol' },
-            { name: 'BlastRadius', desc: 'All transitive dependents of a symbol' },
-            { name: 'FetchContent', desc: 'Source text stored for a symbol' },
-          ].map(t => (
-            <div key={t.name} className="card text-center">
-              <p className="font-mono text-xs font-bold mb-1.5" style={{ color: 'var(--accent)' }}>{t.name}</p>
-              <p className="text-xs text-faint leading-4 font-sans">{t.desc}</p>
-            </div>
-          ))}
-        </div>
-
-        {/* Workflow */}
-        <div className="flex flex-wrap items-center gap-2 justify-center mb-10 font-mono text-xs">
-          {[
-            { step: '1', text: 'index <repo>', color: '' },
-            null,
-            { step: '2', text: 'launch mcp', color: '' },
-            null,
-            { step: '3', text: 'SearchEntity(…)', color: 'accent-ink' },
-            null,
-            { step: '4', text: 'BlastRadius(id)', color: 'accent-ink' },
-          ].map((item, i) =>
-            item === null ? (
-              <svg key={i} className="w-3 h-3 text-faint" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-              </svg>
-            ) : (
-              <div key={i} className="flex items-center gap-1.5">
-                <span className="w-5 h-5 rounded-full border border-hairline-strong flex items-center justify-center text-[0.55rem] font-bold text-faint shrink-0">
-                  {item.step}
-                </span>
-                <span style={{ color: item.color ? 'var(--accent)' : 'var(--muted)' }}>{item.text}</span>
-              </div>
-            )
-          )}
-        </div>
-
-        {/* Client tabs */}
-        <div className="terminal" style={{ boxShadow: '0 20px 48px -24px rgba(0,0,0,0.45)' }}>
-          <div className="terminal-bar gap-3">
-            <div className="terminal-dot bg-red-500/80" />
-            <div className="terminal-dot bg-yellow-500/80" />
-            <div className="terminal-dot bg-green-500/80" />
-            <div className="ml-2 flex gap-1">
-              {(['claude', 'cursor', 'codex'] as const).map(t => (
-                <button
-                  key={t}
-                  onClick={() => setTab(t)}
-                  className="font-mono text-[0.65rem] px-2 py-0.5 rounded transition-colors"
-                  style={{
-                    background: tab === t ? 'rgba(255,255,255,0.1)' : 'transparent',
-                    color: tab === t ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.35)',
-                  }}
-                >
-                  {t === 'claude' ? 'Claude Code' : t === 'cursor' ? 'Cursor' : 'Codex CLI'}
-                </button>
-              ))}
-            </div>
-          </div>
-          <pre className="px-5 py-4 text-xs font-mono overflow-x-auto whitespace-pre leading-[1.8]">
-            {configs[tab].split('\n').map((line, i) => {
-              const isComment = line.trim().startsWith('#') || line.trim().startsWith('//')
-              const isKeyword = line.includes('wicked-estate-mcp') || line.includes('--db')
-              return (
-                <div key={i}>
-                  <span style={{
-                    color: isComment ? 'rgba(255,255,255,0.25)'
-                      : isKeyword ? 'var(--accent)'
-                        : 'rgba(255,255,255,0.6)',
-                  }}>{line}</span>
-                </div>
-              )
-            })}
-          </pre>
-        </div>
-
-        <p className="mt-3 font-mono text-[0.6rem] text-faint text-center tracking-wide">
-          Use an absolute DB path — clients launch with an unpredictable working directory.
-        </p>
-      </div>
-    </section>
-  )
-}
-
-// ── Step Player ────────────────────────────────────────────────────────────────
-function StepPlayer() {
-  const DURATION = 4200
-  const steps = [
-    {
-      label: '01 · install',
-      cmd: ['cargo install wicked-estate wicked-estate-mcp'],
-      out: [
-        'Updating crates.io index...',
-        'Installing wicked-estate     v0.13.1  (CLI)',
-        'Installing wicked-estate-mcp v0.13.1  (server)',
-        '✓  Installed wicked-estate v0.13.1',
-        '✓  Installed wicked-estate-mcp v0.13.1',
-      ],
-    },
-    {
-      label: '02 · index',
-      cmd: ['wicked-estate index . --db graph.db'],
-      out: [
-        'Walking 1,247 source files...',
-        'Extractor: 100+ languages active',
-        'Resolver:  SCIP tier engaged',
-        '✓  43,821 symbols · 8,312 edges',
-        '   graph.db  2.1 MB · 0 unresolved',
-      ],
-    },
-    {
-      label: '03 · query',
-      cmd: ['wicked-estate blast-radius handleRequest'],
-      out: [
-        '5 transitive dependents:',
-        '  authenticate    src/middleware.ts',
-        '  validateToken   src/auth.ts',
-        '  routeRequest    src/router.ts',
-        '  rateLimitCheck  src/middleware.ts',
-        '  main            src/server.ts',
-      ],
-    },
-    {
-      label: '04 · connect',
-      cmd: [
-        'claude mcp add wicked-estate -s project \\',
-        '  -- wicked-estate-mcp --db "$PWD/graph.db"',
-      ],
-      out: [
-        'Registering MCP server...',
-        '✓  wicked-estate registered (project)',
-        '   SearchEntity  · RetrieveEntity',
-        '   TraverseGraph · BlastRadius',
-        '   FetchContent',
-        '   Your agent has a real code graph.',
-      ],
-    },
-  ]
-
-  const [step, setStep] = useState(0)
-  const [visible, setVisible] = useState(true)
-
-  const goTo = (i: number) => {
-    setVisible(false)
-    setTimeout(() => { setStep(i); setVisible(true) }, 250)
-  }
-
-  useEffect(() => {
-    const t = setInterval(() => goTo((step + 1) % steps.length), DURATION)
-    return () => clearInterval(t)
-  }, [step])
-
-  const s = steps[step]
-
-  return (
-    <div className="terminal flex flex-col" style={{ boxShadow: '0 20px 48px -24px rgba(0,0,0,0.45)' }}>
-      {/* Bar */}
-      <div className="terminal-bar justify-between flex-shrink-0">
-        <div className="flex items-center gap-1.5">
-          <div className="terminal-dot bg-red-500/80" />
-          <div className="terminal-dot bg-yellow-500/80" />
-          <div className="terminal-dot bg-green-500/80" />
-        </div>
-        <div className="flex items-center gap-1.5">
-          {steps.map((_, i) => (
-            <button
-              key={i}
-              onClick={() => goTo(i)}
-              className="w-5 h-5 rounded-full font-mono text-[0.5rem] font-bold transition-all duration-200 flex items-center justify-center"
-              style={{
-                background: i === step ? 'var(--accent)' : 'rgba(255,255,255,0.12)',
-                color: i === step ? '#232324' : 'rgba(255,255,255,0.35)',
-              }}
-            >
-              {i + 1}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Progress bar */}
-      <div className="h-px flex-shrink-0" style={{ background: 'rgba(255,255,255,0.06)' }}>
-        <div
-          key={`prog-${step}`}
-          className="h-full"
-          style={{ background: 'var(--accent)', animation: `step-progress ${DURATION}ms linear forwards` }}
-        />
-      </div>
-
-      {/* Content */}
-      <div className="flex-1 px-5 py-5 font-mono text-xs leading-[1.75]"
-        style={{ opacity: visible ? 1 : 0, transition: 'opacity 0.25s ease' }}>
-        <div key={`content-${step}`}>
-          <div className="mb-3">
-            <span className="font-bold tracking-widest uppercase text-[0.6rem]"
-              style={{ color: 'var(--accent)' }}>{s.label}</span>
-          </div>
-          <div className="mb-4 space-y-0.5">
-            {s.cmd.map((line, i) => (
-              <div key={i} className="flex gap-1.5">
-                {i === 0 && <span style={{ color: 'var(--accent)' }}>$</span>}
-                {i > 0 && <span className="opacity-0">$</span>}
-                <span className="text-white/75">{line}</span>
-              </div>
-            ))}
-          </div>
-          <div className="space-y-0.5 border-t border-white/5 pt-3">
-            {s.out.map((line, i) => (
-              <div key={i}
-                style={{ animationDelay: `${i * 0.1}s`, animation: 'line-fade 0.35s ease both' }}>
-                <span style={{ color: line.startsWith('✓') ? '#4ade80' : 'rgba(255,255,255,0.38)' }}>
-                  {line}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ── Get Started ────────────────────────────────────────────────────────────────
-function GetStarted() {
-  const directInstall = `# 1 · install both binaries from crates.io
-#   wicked-estate      -> the CLI (index / query)
-#   wicked-estate-mcp  -> the server your agent connects to
-cargo install wicked-estate wicked-estate-mcp
-
-# 2 · index your repo (incremental on repeat runs)
-wicked-estate index . --db graph.db
-
-# 3 · connect to Claude Code
-claude mcp add wicked-estate -s project \\
-  -- wicked-estate-mcp --db "$PWD/graph.db"`
-
-  return (
-    <section id="get-started" className="snap-start min-h-screen flex flex-col justify-center py-10 px-7 band band-solid">
-      <div className="max-w-5xl mx-auto w-full">
-        <div className="text-center mb-8">
-          <span className="kicker">Get Started</span>
-          <h2 className="font-display text-3xl sm:text-4xl font-black text-ink mb-4">
-            One installer. Zero to graph.
-          </h2>
-          <p className="text-muted max-w-md mx-auto font-sans">
-            The family installer picks the products you want and wires the CLIs.
-            Or install this one directly. Under two minutes either way.
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
-          {/* Left — install paths: installer (primary) + direct (secondary) */}
-          <div className="flex flex-col gap-4">
-
-            {/* PRIMARY — wicked-installer */}
-            <div className="rounded-xl overflow-hidden border"
-              style={{ borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))', background: 'var(--surface)' }}>
-              <div className="flex items-center justify-between px-4 py-2.5 border-b"
-                style={{ borderColor: 'var(--hairline)', background: 'color-mix(in oklab, var(--accent) 8%, var(--canvas))' }}>
-                <span className="font-mono text-[0.62rem] tracking-widest uppercase font-bold" style={{ color: 'var(--accent)' }}>
-                  Recommended · the whole family
-                </span>
-                <span className="font-mono text-[0.55rem] text-faint">npm · wicked-installer</span>
-              </div>
-              <div className="px-4 py-4">
-                <div className="terminal" style={{ boxShadow: 'none' }}>
-                  <div className="px-4 py-3 font-mono text-sm">
-                    <span style={{ color: 'var(--accent)' }}>$ </span>
-                    <span className="text-white/85">npx wicked-installer</span>
-                  </div>
-                </div>
-                <p className="text-xs text-muted leading-5 font-sans mt-3">
-                  Interactive: pick <span className="text-ink">wicked-estate</span> (and any siblings), choose your
-                  agent CLIs, and it installs everything and ships the <span className="font-mono text-ink">wicked</span> CLI —
-                  cross-family, one command.
-                </p>
-              </div>
-            </div>
-
-            {/* SECONDARY — direct install */}
-            <div className="terminal flex-1" style={{ boxShadow: '0 24px 56px -30px rgba(0,0,0,0.5)' }}>
-              <div className="terminal-bar justify-between">
-                <div className="flex items-center gap-1.5">
-                  <div className="terminal-dot bg-red-500/80" />
-                  <div className="terminal-dot bg-yellow-500/80" />
-                  <div className="terminal-dot bg-green-500/80" />
-                </div>
-                <span className="font-mono text-[0.6rem] tracking-widest uppercase text-white/30">or install just this directly</span>
-              </div>
-              <pre className="px-5 py-4 text-xs font-mono overflow-x-auto whitespace-pre leading-[1.85]">
-                {directInstall.split('\n').map((line, i) => {
-                  const isComment = line.trim().startsWith('#')
-                  const isBlank = line.trim() === ''
+            {/* the drill core: which strata have a live fact */}
+            <div className="mt-auto">
+              <span className="kicker">Core column</span>
+              <div className="relative mt-3 pl-3">
+                <div className="seam-line absolute top-1 bottom-1 left-0" />
+                {STRATA.map(s => {
+                  const on = liveStrata.has(s.id)
                   return (
-                    <div key={i} className={isBlank ? 'h-2' : ''}>
-                      {!isBlank && (
-                        <span style={{ color: isComment ? 'rgba(255,255,255,0.28)' : 'rgba(255,255,255,0.72)' }}>
-                          {isComment ? line : <><span style={{ color: 'var(--accent)' }}>$ </span>{line}</>}
-                        </span>
-                      )}
+                    <div key={s.id} className="flex items-center gap-3 py-1.5">
+                      <span className="w-2 h-2 rounded-full shrink-0"
+                        style={{ background: on ? 'var(--accent)' : 'var(--hairline-strong)',
+                          animation: on ? 'live-pulse 2.4s var(--ease) infinite' : 'none' }} />
+                      <span className="depth w-14 shrink-0">{s.depth}</span>
+                      <span className="font-mono text-[0.66rem]" style={{ color: on ? 'var(--ink)' : 'var(--faint)' }}>
+                        {s.name}
+                      </span>
                     </div>
                   )
                 })}
-              </pre>
+              </div>
             </div>
           </div>
 
-          {/* Right — animated step player */}
-          <StepPlayer />
+          {/* Right — the assembled dossier */}
+          <div className="rock-panel p-0">
+            <div className="flex items-center justify-between px-5 py-3 border-b border-hairline-strong">
+              <span className="font-mono text-sm text-ink font-semibold">{subject.label}</span>
+              <span className="depth">substrate.query({subject.kind}) → 1 dossier · 5 strata</span>
+            </div>
+            <div className="divide-y divide-hairline">
+              {STRATA.map(s => {
+                const facts = subject.facts.filter(f => f.stratum === s.id)
+                if (facts.length === 0) return null
+                return (
+                  <div key={s.id} className="flex gap-4 px-5 py-4">
+                    <div className="w-32 shrink-0 pt-0.5">
+                      <div className="font-mono text-[0.6rem] text-faint">{s.no}</div>
+                      <div className="font-display font-black text-ink text-sm leading-tight" style={{ fontStretch: '106%' }}>{s.name}</div>
+                      <div className="depth mt-0.5">{s.depth}</div>
+                    </div>
+                    <div className="flex-1 flex flex-col gap-2.5 min-w-0">
+                      {facts.map((f, i) => {
+                        const on = f.conf >= threshold
+                        return (
+                          <div key={i} className="fact" style={{ opacity: on ? 1 : 0.32, filter: on ? 'none' : 'grayscale(0.6)' }}>
+                            <div className="flex items-start gap-2 flex-wrap">
+                              <span className="text-sm font-sans" style={{ color: on ? 'var(--ink)' : 'var(--muted)' }}>{f.text}</span>
+                              <span className="prov" style={f.conf >= 1.0 ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>
+                                {f.prov}
+                              </span>
+                              <span className="prov tabular-nums" style={{ color: confColor(f.conf) }}>{f.conf.toFixed(2)}</span>
+                              {f.advisory && <span className="prov">advisory</span>}
+                              {!on && <span className="prov" style={{ color: 'var(--faint)' }}>below cutoff — not promoted</span>}
+                            </div>
+                            {f.detail && <div className="depth mt-1">{f.detail}</div>}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+    </Section>
+  )
+}
+
+// ── 3 · THE FIVE STRATA (one labeled cross-section) ─────────────────────────────
+function FiveStrata() {
+  const copy: Record<StratumId, string> = {
+    graph: 'Symbols, callers, blast-radius, scoped context. source = dependent, target = dependency — always.',
+    memory: 'Cross-session recall — decisions, episodes, salience. The decision survives the session that made it.',
+    knowledge: 'Ingested articles with hybrid FTS + vector recall, fused via RRF. Answers cite a source you can open.',
+    requirements: 'Every symbol carries the requirement it satisfies, a description, and a validated flag.',
+    annotations: 'Typed key/value notes — assumption, note, question — with confidence and an advisory flag.',
+  }
+  return (
+    <Section id="strata">
+      <div className="max-w-6xl mx-auto w-full">
+        <div className="mb-9">
+          <span className="kicker">The five strata</span>
+          <h2 className="mt-4 font-display text-3xl sm:text-[2.6rem] font-black text-ink">
+            Five layers. One substrate. One symbol identity.
+          </h2>
+          <p className="mt-4 text-muted max-w-2xl font-sans">
+            Not a graph with bolt-ons. A single continuous body, cut here into its bands — each keyed to the same
+            stable <span className="font-mono text-ink text-sm">(scheme, qualified-name)</span> that survives reformatting,
+            moves, and re-index.
+          </p>
         </div>
 
-        <div className="mt-12 flex flex-col sm:flex-row gap-3 justify-center">
+        <div className="rock-panel">
+          <div className="relative">
+            {/* mineral seam through the whole cross-section */}
+            <div className="seam-line absolute top-6 bottom-6" style={{ left: '22%' }} />
+            {STRATA.map((s, i) => (
+              <div
+                key={s.id}
+                className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-6 px-6 py-6 border-b border-hairline last:border-b-0"
+                style={{ background: i % 2 ? 'color-mix(in oklab, var(--ink) 3%, transparent)' : 'transparent' }}
+              >
+                <div className="flex items-center gap-4 sm:w-64 shrink-0">
+                  <span className="font-display font-black text-2xl text-faint tabular-nums" style={{ fontStretch: '108%' }}>{s.no}</span>
+                  <div>
+                    <div className="font-display font-black text-ink text-lg leading-tight" style={{ fontStretch: '108%' }}>{s.name}</div>
+                    <div className="depth mt-0.5">{s.depth} · {s.tools}</div>
+                  </div>
+                </div>
+                <p className="text-sm text-muted font-sans flex-1 leading-relaxed">{copy[s.id]}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+        <p className="mt-5 font-mono text-xs text-faint">
+          23 MCP tools across graph · memory · knowledge, plus requirement↔code traceability and typed annotations — one binary.
+        </p>
+      </div>
+    </Section>
+  )
+}
+
+// ── 4 · PROVENANCE SEAM (the differentiator, stated once) ───────────────────────
+function ProvenanceSeam() {
+  const tiers = [
+    { tier: 'Parsed',    conf: 1.0, who: 'Direct AST facts' },
+    { tier: 'SCIP / LSP', conf: 1.0, who: 'Precise indexers · on-demand' },
+    { tier: 'TSG',       conf: 0.8, who: 'Stack-graphs name resolution' },
+    { tier: 'ImportMap', conf: 0.6, who: 'Import-map heuristics' },
+    { tier: 'Tags',      conf: 0.3, who: 'Tree-sitter tag scan only' },
+  ]
+  return (
+    <Section id="provenance" solid>
+      <div className="max-w-5xl mx-auto w-full grid lg:grid-cols-[1fr_1.1fr] gap-12 items-center">
+        <div>
+          <span className="kicker">The provenance seam</span>
+          <h2 className="mt-4 font-display text-3xl sm:text-[2.4rem] font-black text-ink">
+            Every edge carries where it came from.
+          </h2>
+          <p className="mt-4 text-muted font-sans leading-relaxed">
+            No edge is emitted without <span className="font-mono text-ink text-sm">confidence</span>,{' '}
+            <span className="font-mono text-ink text-sm">provenance</span> and{' '}
+            <span className="font-mono text-ink text-sm">resolved_by</span>. On a{' '}
+            <span className="font-mono text-ink text-sm">(source, target, kind)</span> collision the higher tier wins —
+            a 0.3 tag-scan guess is never presented as a 1.0 fact. You just felt this on the dial.
+          </p>
+        </div>
+        <div className="rock-panel p-6">
+          <div className="flex flex-col gap-4">
+            {tiers.map(t => (
+              <div key={t.tier} className="flex items-center gap-4">
+                <span className="font-mono text-xs text-ink w-24 shrink-0">{t.tier}</span>
+                <div className="flex-1 h-1.5 rounded-full" style={{ background: 'var(--hairline-strong)' }}>
+                  <div className="h-full rounded-full" style={{ width: `${t.conf * 100}%`, background: t.conf >= 1.0 ? 'var(--accent)' : 'var(--muted)', opacity: t.conf >= 1.0 ? 1 : 0.6 }} />
+                </div>
+                <span className="depth w-8 shrink-0 tabular-nums">{t.conf.toFixed(1)}</span>
+                <span className="depth hidden sm:block w-44 shrink-0">{t.who}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </Section>
+  )
+}
+
+// ── 5 · ONE BEDROCK, SOLO OR SHARED (real toggle) ───────────────────────────────
+function Bedrock() {
+  const [shared, setShared] = useState(false)
+  const view = shared
+    ? {
+        db: 'postgres://team/graph',
+        rows: [
+          ['writers', 'concurrent — the whole team writes'],
+          ['traversal', 'server-side WITH RECURSIVE, in-DB'],
+          ['re-index to switch', 'none — same schema, same graph'],
+        ],
+        note: 'shared_writers=true · server_side_traversal=true',
+      }
+    : {
+        db: 'graph.db',
+        rows: [
+          ['writers', 'single-writer — local file'],
+          ['traversal', 'bounded recursive CTE'],
+          ['infrastructure', 'none — nothing to run'],
+        ],
+        note: 'FTS5 · sqlite-vec · WAL · nothing leaves your box',
+      }
+  return (
+    <Section id="storage">
+      <div className="max-w-4xl mx-auto w-full">
+        <div className="mb-8">
+          <span className="kicker">One bedrock, solo or shared</span>
+          <h2 className="mt-4 font-display text-3xl sm:text-[2.4rem] font-black text-ink">
+            SQLite by default. One flag to a shared team graph.
+          </h2>
+          <p className="mt-4 text-muted max-w-2xl font-sans">
+            The same engine and command API run on either backend through one{' '}
+            <span className="font-mono text-ink text-sm">open_store(spec)</span> factory — no caller changes, no re-index.
+          </p>
+        </div>
+
+        <div className="inline-flex gap-1.5 p-1.5 rounded-xl mb-5" style={{ background: 'var(--rock)', border: '1px solid var(--hairline-strong)' }}>
+          <button className="seg" data-on={!shared} onClick={() => setShared(false)}>SQLite · solo</button>
+          <button className="seg" data-on={shared} onClick={() => setShared(true)}>PostgreSQL · shared team</button>
+        </div>
+
+        <div className="rock-panel p-0">
+          <div className="px-5 py-3 border-b border-hairline-strong flex items-center gap-3">
+            <span className="w-2 h-2 rounded-full" style={{ background: shared ? 'var(--accent)' : 'var(--muted)' }} />
+            <span className="font-mono text-sm text-ink">wicked-estate index . --db {view.db}</span>
+          </div>
+          <div className="divide-y divide-hairline">
+            {view.rows.map(([k, v]) => (
+              <div key={k} className="flex gap-4 px-5 py-3.5">
+                <span className="font-mono text-xs text-faint w-40 shrink-0">{k}</span>
+                <span className="text-sm text-muted font-sans">{v}</span>
+              </div>
+            ))}
+          </div>
+          <div className="px-5 py-3 border-t border-hairline-strong">
+            <span className="depth" style={{ color: shared ? 'var(--accent)' : 'var(--faint)' }}>{view.note}</span>
+          </div>
+        </div>
+        <p className="mt-5 font-mono text-xs text-faint">
+          PostgreSQL is built behind <span className="text-ink">--features postgres</span>. Same factory arm, zero caller changes.
+        </p>
+      </div>
+    </Section>
+  )
+}
+
+// ── 6 · THE BEDROCK UNDER THE STACK ─────────────────────────────────────────────
+function UnderStack() {
+  const layers: { label: string; depth: string; items: { name: string; note: string }[]; bedrock?: boolean }[] = [
+    {
+      label: 'Products', depth: 'surface',
+      items: [
+        { name: 'garden', note: 'agent toolkit' },
+        { name: 'interactive', note: 'HTML builder' },
+        { name: 'studio', note: 'HITL desktop' },
+        { name: 'testing', note: 'QE pipeline' },
+        { name: 'signals', note: 'intent router' },
+      ],
+    },
+    {
+      label: 'Foundation peers', depth: '−6m',
+      items: [
+        { name: 'wicked-core', note: 'single-writer runtime' },
+        { name: 'wicked-bus', note: 'SQLite event substrate' },
+        { name: 'wicked-brain', note: 'memory adapter' },
+        { name: 'wicked-crew', note: 'workflow governor' },
+      ],
+    },
+  ]
+  return (
+    <Section id="foundation" solid>
+      <div className="max-w-5xl mx-auto w-full">
+        <div className="mb-9">
+          <span className="kicker">The bedrock under the stack</span>
+          <h2 className="mt-4 font-display text-3xl sm:text-[2.6rem] font-black text-ink">
+            Estate is the layer everything else rests on.
+          </h2>
+          <p className="mt-4 text-muted max-w-2xl font-sans">
+            The products sit on top. The other foundation repos sit below them. Estate is the bedrock at the bottom —
+            the substrate every layer queries.
+          </p>
+        </div>
+
+        <div className="rock-panel p-0">
+          {layers.map(l => (
+            <div key={l.label} className="px-6 py-5 border-b border-hairline">
+              <div className="flex items-center gap-3 mb-3">
+                <span className="depth w-16 shrink-0">{l.depth}</span>
+                <span className="kicker">{l.label}</span>
+              </div>
+              <div className="flex flex-wrap gap-2 pl-16">
+                {l.items.map(it => (
+                  <span key={it.name} className="tag">
+                    <span className="text-ink">{it.name}</span> <span className="text-faint">· {it.note}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
+
+          {/* the bedrock */}
+          <div className="relative px-6 py-8" style={{ background: 'color-mix(in oklab, var(--accent) 8%, transparent)' }}>
+            <div className="seam-line absolute top-4 bottom-4" style={{ left: '14%' }} />
+            <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+              <span className="depth w-16 shrink-0">−14m</span>
+              <div className="flex-1">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="font-display font-black text-ink text-2xl" style={{ fontStretch: '110%' }}>wicked-estate</span>
+                  <span className="tag tag-accent">bedrock</span>
+                </div>
+                <p className="mt-1.5 text-sm text-muted font-sans max-w-xl">
+                  Code graph + memory + knowledge + requirements + annotations, in one binary. Every edge stamped with
+                  confidence and provenance. The center of gravity everything else queries.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-1.5 sm:flex-col sm:items-end">
+                {['Rust', 'crates.io', 'MCP · 23 tools'].map(t => <span key={t} className="tag">{t}</span>)}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Section>
+  )
+}
+
+// ── 7 · GET STARTED (lean) ──────────────────────────────────────────────────────
+function GetStarted() {
+  return (
+    <Section id="get-started">
+      <div className="max-w-4xl mx-auto w-full">
+        <div className="mb-8">
+          <span className="kicker">Get started</span>
+          <h2 className="mt-4 font-display text-3xl sm:text-[2.6rem] font-black text-ink">
+            Zero to a queried substrate in two minutes.
+          </h2>
+        </div>
+
+        <div className="grid md:grid-cols-2 gap-5">
+          {/* PRIMARY — installer */}
+          <div className="rock-panel p-0">
+            <div className="px-5 py-3 border-b border-hairline-strong flex items-center justify-between">
+              <span className="kicker" style={{ color: 'var(--accent)' }}>Recommended · the whole family</span>
+              <span className="depth">npm</span>
+            </div>
+            <div className="px-5 py-5">
+              <div className="font-mono text-sm text-ink">
+                <span style={{ color: 'var(--accent)' }}>$ </span>npx wicked-installer
+              </div>
+              <p className="mt-3 text-xs text-muted font-sans leading-5">
+                Interactive: pick <span className="text-ink">wicked-estate</span> (and any siblings), choose your agent
+                CLIs, and it wires everything and ships the cross-family <span className="font-mono text-ink">wicked</span> CLI.
+              </p>
+            </div>
+          </div>
+
+          {/* SECONDARY — direct */}
+          <div className="rock-panel p-0">
+            <div className="px-5 py-3 border-b border-hairline-strong flex items-center justify-between">
+              <span className="kicker">Or install just this directly</span>
+              <span className="depth">crates.io</span>
+            </div>
+            <div className="px-5 py-5 font-mono text-xs leading-[1.9]">
+              <div className="text-faint"># the CLI + the MCP server</div>
+              <div className="text-ink"><span style={{ color: 'var(--accent)' }}>$ </span>cargo install wicked-estate wicked-estate-mcp</div>
+              <div className="text-faint mt-2"># index your repo</div>
+              <div className="text-ink"><span style={{ color: 'var(--accent)' }}>$ </span>wicked-estate index . --db graph.db</div>
+              <div className="text-faint mt-2"># connect your agent (Claude Code shown)</div>
+              <div className="text-ink"><span style={{ color: 'var(--accent)' }}>$ </span>claude mcp add wicked-estate -s project \</div>
+              <div className="text-ink pl-4">-- wicked-estate-mcp --db "$PWD/graph.db"</div>
+            </div>
+          </div>
+        </div>
+
+        <p className="mt-4 font-mono text-[0.6rem] text-faint tracking-wide">
+          Use an absolute DB path — clients launch from an unpredictable working directory. Same 23 tools in Cursor, Codex, and Antigravity.
+        </p>
+
+        <div className="mt-9 flex flex-col sm:flex-row gap-3">
           <a href="https://github.com/mikeparcewski/wicked-estate" target="_blank" rel="noreferrer" className="btn-primary">
-            <GitHubIcon />
-            GitHub
+            <GitHubIcon /> GitHub
           </a>
           <a href="https://github.com/mikeparcewski/wicked-estate/tree/main/docs" target="_blank" rel="noreferrer" className="btn-outline">
             Documentation
           </a>
         </div>
       </div>
-    </section>
-  )
-}
-
-// ── Foundation (one story across five repos) ─────────────────────────────────
-function Foundation() {
-  const repos = [
-    {
-      name: 'wicked-estate', anchor: true, role: 'the graph',
-      line: 'The code graph agents actually trust.',
-      body: 'One queryable, typed, ranked graph — definitions, who-calls-X, blast-radius, scoped context. Every edge carries confidence + provenance. The center of gravity everything else queries.',
-      tags: ['Rust', 'crates.io', 'MCP'],
-    },
-    {
-      name: 'wicked-core', role: 'the runtime',
-      line: 'Makes the shared graph concurrency-safe.',
-      body: 'A single-writer store actor owns the SQLite file on one thread; agents, UIs, and MCP servers compose through a shared command API + live event stream instead of racing on the DB.',
-      tags: ['Rust', 'single-writer', 'napi-rs'],
-    },
-    {
-      name: 'wicked-bus', role: 'the event substrate',
-      line: 'Local-first SQLite event bus.',
-      body: 'Zero-infrastructure, at-least-once, cursor-poll delivery entirely on local SQLite — no network, no running server. The substrate agents and tools talk over without coupling to each other.',
-      tags: ['JS/ESM', 'npm', 'at-least-once'],
-    },
-    {
-      name: 'wicked-brain', role: 'the memory',
-      line: "Agent memory — markdown + SQLite, no vector DB.",
-      body: 'Persistent, searchable knowledge on plain markdown and SQLite FTS5. Confidence-scored backlinks, citations that open a real file. A bridge-period adapter folding into estate.',
-      tags: ['JS', 'npm', 'no embeddings'],
-    },
-    {
-      name: 'wicked-crew', role: 'the governor',
-      line: 'Governs multi-phase AI workflows.',
-      body: 'An external daemon that owns the phase lifecycle — deterministic deny-dominates gates, HITL approvals, SQLite checkpointing you can crash and resume — driving AI CLIs it never embeds.',
-      tags: ['npm', 'daemon', 'HITL'],
-    },
-  ]
-
-  return (
-    <section id="foundation" className="snap-start min-h-screen flex flex-col justify-center py-24 px-7 band band-depth">
-      <div className="max-w-6xl mx-auto w-full">
-        <div className="text-center mb-14">
-          <span className="kicker">The Foundation</span>
-          <h2 className="font-display text-3xl sm:text-4xl font-black text-ink mb-4">
-            One local-first substrate. Five composable parts.
-          </h2>
-          <p className="text-muted max-w-2xl mx-auto font-sans">
-            wicked-estate is the anchor — the graph, memory, and knowledge every wicked-* tool queries.
-            Around it sits the plumbing that makes the substrate safe, event-driven, memorable, and
-            governable. SQLite by default. No servers, no accounts, nothing leaves your machine.
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {repos.map(r => (
-            <div
-              key={r.name}
-              className={`card-hover flex flex-col gap-3 ${r.anchor ? 'sm:col-span-2 lg:col-span-1' : ''}`}
-              style={r.anchor ? { borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-mono text-sm font-bold text-ink">{r.name}</span>
-                {r.anchor
-                  ? <span className="font-mono text-[0.55rem] uppercase tracking-widest px-2 py-0.5 rounded-full" style={{ color: 'var(--accent)', border: '1px solid color-mix(in oklab, var(--accent) 40%, var(--hairline))' }}>anchor</span>
-                  : <span className="font-mono text-[0.55rem] uppercase tracking-widest text-faint">{r.role}</span>}
-              </div>
-              <p className="font-display text-lg font-black text-ink leading-tight" style={{ fontStretch: '110%' }}>{r.line}</p>
-              <p className="text-xs text-muted leading-5 font-sans">{r.body}</p>
-              <div className="mt-auto flex flex-wrap gap-1 pt-2">
-                {r.tags.map(t => <span key={t} className="lang-tag">{t}</span>)}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <p className="mt-8 text-center font-mono text-xs text-faint leading-6">
-          The products compose rather than lock in — adopt the graph, grow into the rest.
-        </p>
-      </div>
-    </section>
+    </Section>
   )
 }
 
 // ── Content ──────────────────────────────────────────────────────────────────
-// Body sections only. The shared wicked-web Topbar + Footer wrap this island
-// in src/pages/index.astro; theme is driven by data-theme on <html>.
 export default function Content() {
   return (
     <main className="font-sans">
       <Hero />
-      <ThreeDomains />
-      <Foundation />
-      <UseCases />
-      <Pipeline />
-      <GraphModel />
-      <BeyondCode />
-      <Storage />
-      <AgentContract />
-      <Languages />
-      <MCPConnect />
+      <QuerySubstrate />
+      <FiveStrata />
+      <ProvenanceSeam />
+      <Bedrock />
+      <UnderStack />
       <GetStarted />
     </main>
   )
