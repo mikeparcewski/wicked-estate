@@ -1,13 +1,19 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 
 /* ────────────────────────────────────────────────────────────────────────────
    wicked-estate — the substrate every agent queries.
 
-   SUBSTRATE = sub + stratum. The page is one continuous body of stacked strata:
-   code graph · memory · knowledge · requirements↔code · annotations — five layers
-   of ONE thing, all keyed to the same stable symbol identity, all stamped with
-   confidence + provenance. The visual language is a geological cross-section; the
-   centerpiece is a live core sample you query with a confidence dial.
+   CONCEPT · "read the core." estate is one durable substrate you read like a
+   geologist reads a drill core: a single continuous body, banded into strata
+   (graph · memory · knowledge · requirements↔code · annotations), every band
+   keyed to one stable symbol identity and stamped with confidence + provenance.
+   The signature motion is a DRILL that reads the core — sections demo themselves
+   before you touch them. A hard break from the sibling sites' graph-network motif.
+
+   Grounded to v0.13.1 (crates.io): 23 MCP tools across 3 domains (10 estate ·
+   6 memory · 7 knowledge), 100+ wired languages, 1,000+ tests, every edge carries
+   {confidence, provenance, resolved_by}, injected edges (event→consumer,
+   command→agent) grep never sees, SQLite by default / Postgres behind one flag.
    ──────────────────────────────────────────────────────────────────────────── */
 
 function GitHubIcon({ size = 16 }: { size?: number }) {
@@ -18,17 +24,34 @@ function GitHubIcon({ size = 16 }: { size?: number }) {
   )
 }
 
-// ── Strata metadata: the five layers of the one substrate ───────────────────────
+// respects the OS reduced-motion setting for every auto-animation on the page
+function useReducedMotion() {
+  const [reduced, setReduced] = useState(false)
+  useEffect(() => {
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)')
+    setReduced(mq.matches)
+    const on = () => setReduced(mq.matches)
+    mq.addEventListener('change', on)
+    return () => mq.removeEventListener('change', on)
+  }, [])
+  return reduced
+}
+
+// ── Strata metadata: the five bands of the one substrate ────────────────────────
 type StratumId = 'graph' | 'memory' | 'knowledge' | 'requirements' | 'annotations'
 
-const STRATA: { id: StratumId; no: string; name: string; depth: string; tools: string }[] = [
-  { id: 'graph',        no: '01', name: 'Code graph',        depth: '−0.0m',  tools: '10 tools' },
-  { id: 'memory',       no: '02', name: 'Memory',            depth: '−4.2m',  tools: '6 tools'  },
-  { id: 'knowledge',    no: '03', name: 'Knowledge',         depth: '−7.8m',  tools: '7 tools'  },
-  { id: 'requirements', no: '04', name: 'Requirements ↔ code', depth: '−11.5m', tools: 'traceability' },
-  { id: 'annotations',  no: '05', name: 'Annotations',       depth: '−14.0m', tools: 'typed notes' },
+const STRATA: { id: StratumId; no: string; name: string; depth: string; tools: string; copy: string }[] = [
+  { id: 'graph',        no: '01', name: 'Code graph',        depth: '−0.0m',  tools: '10 tools',
+    copy: 'Symbols, callers, blast-radius, scoped context — plus injected edges (event→consumer, command→agent) grep can never see.' },
+  { id: 'memory',       no: '02', name: 'Memory',            depth: '−4.2m',  tools: '6 tools',
+    copy: 'Cross-session recall — decisions, episodes, salience. The decision survives the session that made it.' },
+  { id: 'knowledge',    no: '03', name: 'Knowledge',         depth: '−7.8m',  tools: '7 tools',
+    copy: 'Ingested articles, hybrid FTS + vector recall fused via RRF. Answers cite a source you can open.' },
+  { id: 'requirements', no: '04', name: 'Requirements ↔ code', depth: '−11.5m', tools: 'traceable',
+    copy: 'Every symbol carries the requirement it satisfies, a description, and a validated flag.' },
+  { id: 'annotations',  no: '05', name: 'Annotations',       depth: '−14.0m', tools: 'typed notes',
+    copy: 'Typed key/value notes — assumption, note, question — with confidence and an advisory flag. Survives re-index.' },
 ]
-const stratumName = (id: StratumId) => STRATA.find(s => s.id === id)!.name
 
 // ── Section shell ────────────────────────────────────────────────────────────
 function Section({
@@ -44,15 +67,27 @@ function Section({
   )
 }
 
+// full-container-width, left-aligned header for sections whose title sits ON TOP of content
+function TopHead({ kicker, title, children }: { kicker: string; title: React.ReactNode; children?: React.ReactNode }) {
+  return (
+    <div className="mb-8 w-full text-left">
+      <span className="kicker">{kicker}</span>
+      <h2 className="mt-4 font-display text-3xl sm:text-[2.7rem] font-black text-ink w-full leading-[0.98]">{title}</h2>
+      {children && <div className="mt-4 text-ink w-full font-sans leading-relaxed max-w-none">{children}</div>}
+    </div>
+  )
+}
+
 // ── 1 · HERO ────────────────────────────────────────────────────────────────
 function Hero() {
+  const reduced = useReducedMotion()
   return (
     <Section className="!pt-28 overflow-hidden">
-      <div className="max-w-6xl mx-auto w-full grid lg:grid-cols-[1.05fr_0.95fr] gap-14 items-center">
+      <div className="max-w-6xl mx-auto w-full grid lg:grid-cols-[1.08fr_0.92fr] gap-14 items-center">
         {/* Left — the thesis, committed in sentence one */}
-        <div>
-          <span className="kicker">wicked-estate · v0.13.0 · the foundation</span>
-          <h1 className="mt-6 font-display font-black text-ink text-[2.9rem] sm:text-6xl lg:text-[4.2rem] leading-[0.94]" style={{ fontStretch: '112%' }}>
+        <div className="text-left">
+          <span className="kicker">wicked-estate · v0.13.1 · crates.io · building blocks</span>
+          <h1 className="mt-6 font-display font-black text-ink text-[3rem] sm:text-6xl lg:text-[4.4rem] leading-[0.92]" style={{ fontStretch: '112%' }}>
             The substrate<br />every agent<br />
             <span style={{ color: 'var(--accent)' }}>queries.</span>
           </h1>
@@ -60,30 +95,34 @@ function Hero() {
             One local-first MCP server — a single body of stacked strata:{' '}
             <span className="text-ink">code graph</span>, <span className="text-ink">memory</span>,{' '}
             <span className="text-ink">knowledge</span>, <span className="text-ink">requirements↔code</span> and{' '}
-            <span className="text-ink">typed annotations</span>. Five layers of one thing, all keyed to the same
-            stable symbol identity, all stamped with confidence and provenance.
+            <span className="text-ink">typed annotations</span>. One symbol identity through all five. Every fact
+            stamped with confidence and provenance — a heuristic is never handed to an agent as a fact.
           </p>
-          <p className="mt-3 font-mono text-xs text-faint">
-            SQLite by default — zero infrastructure. One flag to PostgreSQL for a shared team graph.
+          <p className="mt-4 font-mono text-xs text-faint leading-5">
+            23 tools · 3 domains · 100+ wired languages · SQLite by default, one flag to a shared Postgres graph.
           </p>
           <div className="mt-9 flex flex-col sm:flex-row gap-3">
-            <a href="#query" className="btn-primary">Query the substrate ↓</a>
+            <a href="#query" className="btn-primary">Read the core ↓</a>
             <a href="https://github.com/mikeparcewski/wicked-estate" target="_blank" rel="noreferrer" className="btn-outline">
               <GitHubIcon /> View on GitHub
             </a>
           </div>
         </div>
 
-        {/* Right — a thin live strata slab (the "core sample" you're about to read) */}
+        {/* Right — a live drill core, always scanning (the concept in one glance) */}
         <div className="relative">
           <div className="rock-panel p-0">
             <div className="flex items-center justify-between px-5 py-3 border-b border-hairline-strong">
-              <span className="depth">CORE SAMPLE · applyDiscount</span>
+              <span className="depth">CORE LOG · applyDiscount</span>
               <span className="tag tag-accent">one identity</span>
             </div>
-            <div className="relative">
+            <div className="relative overflow-hidden">
               {/* the mineral seam runs vertically through every stratum */}
-              <div className="seam-line absolute top-4 bottom-4" style={{ left: '30%' }} />
+              <div className="seam-line absolute top-3 bottom-3" style={{ left: '30%' }} />
+              {/* the drill head sweeps the core forever */}
+              {!reduced && (
+                <div className="drill-head" style={{ animation: 'drill-sweep 5.5s var(--ease) infinite alternate' }} />
+              )}
               {STRATA.map((s, i) => (
                 <div
                   key={s.id}
@@ -109,39 +148,41 @@ function Hero() {
   )
 }
 
-// ── 2 · QUERY THE SUBSTRATE (the signature interaction) ─────────────────────────
-type Prov = 'Parsed' | 'SCIP' | 'TSG' | 'ImportMap' | 'Tags' | 'episodic' | 'FTS+RRF' | 'annotation'
+// ── 2 · QUERY THE SUBSTRATE — auto-demos, pauses + becomes yours on click ───────
+type Prov = 'Parsed' | 'SCIP' | 'TSG' | 'ImportMap' | 'Tags' | 'Injected' | 'episodic' | 'FTS+RRF' | 'annotation'
 interface Fact { stratum: StratumId; text: string; detail?: string; conf: number; prov: Prov; advisory?: boolean }
-interface Subject { id: string; label: string; kind: string; sub: string; facts: Fact[] }
+interface Subject { id: string; label: string; kind: string; facts: Fact[] }
 
 const SUBJECTS: Subject[] = [
   {
-    id: 'applyDiscount', label: 'applyDiscount', kind: 'symbol', sub: 'src/checkout/price.ts',
+    id: 'applyDiscount', label: 'applyDiscount', kind: 'symbol',
     facts: [
       { stratum: 'graph', text: '3 transitive dependents', detail: 'checkout · cartTotal · api/price', conf: 1.0, prov: 'SCIP' },
-      { stratum: 'graph', text: 'referralFlow → applyDiscount', detail: 'tag-scan guess, cross-file unverified', conf: 0.3, prov: 'Tags' },
+      { stratum: 'graph', text: 'injected: emits wicked.order.placed → 2 consumers', detail: 'event→consumer edge · grep never sees this', conf: 1.0, prov: 'Injected' },
+      { stratum: 'graph', text: 'referralFlow → applyDiscount', detail: 'tag-scan guess · cross-file unverified', conf: 0.3, prov: 'Tags' },
       { stratum: 'memory', text: 'Decision: coupons never stack', detail: 'spike 2026-06 · scope=project:acme', conf: 0.74, prov: 'episodic' },
       { stratum: 'knowledge', text: '[[Pricing Rules]] §Discounts', detail: 'hybrid FTS + vector, RRF fused', conf: 0.88, prov: 'FTS+RRF' },
-      { stratum: 'requirements', text: 'satisfies REQ-142 · validated ✓', detail: 'requirement↔code, enforced flag', conf: 1.0, prov: 'Parsed' },
+      { stratum: 'requirements', text: 'satisfies REQ-142 · validated ✓', detail: 'requirement↔code · enforced', conf: 1.0, prov: 'Parsed' },
       { stratum: 'annotations', text: 'assumption: max one coupon per cart', detail: 'advisory · survives re-index', conf: 0.7, prov: 'annotation', advisory: true },
     ],
   },
   {
-    id: 'REQ-142', label: 'REQ-142', kind: 'requirement', sub: 'Discounts never stack',
+    id: 'REQ-142', label: 'REQ-142', kind: 'requirement',
     facts: [
-      { stratum: 'requirements', text: '2 symbols satisfy REQ-142', detail: 'validateCoupon ✓ validated · applyDiscount ⋯ unvalidated', conf: 1.0, prov: 'Parsed' },
+      { stratum: 'requirements', text: '2 symbols satisfy REQ-142', detail: 'validateCoupon ✓ · applyDiscount ⋯ unvalidated', conf: 1.0, prov: 'Parsed' },
       { stratum: 'graph', text: 'blast-radius of implementers: 3 dependents', detail: 'checkout · cartTotal · api/price', conf: 1.0, prov: 'SCIP' },
-      { stratum: 'graph', text: 'candidate impl: legacyDiscount()', detail: 'import-map heuristic, not confirmed', conf: 0.6, prov: 'ImportMap' },
+      { stratum: 'graph', text: 'candidate impl: legacyDiscount()', detail: 'import-map heuristic · not confirmed', conf: 0.6, prov: 'ImportMap' },
       { stratum: 'knowledge', text: '[[Pricing Spec]] §Stacking rules', detail: 'linked article', conf: 0.85, prov: 'FTS+RRF' },
       { stratum: 'memory', text: 'Decision: enforce at price layer, not cart', conf: 0.70, prov: 'episodic' },
       { stratum: 'annotations', text: 'question: does BOGO count as a coupon?', detail: 'advisory · open', conf: 0.5, prov: 'annotation', advisory: true },
     ],
   },
   {
-    id: 'Deployment Runbook', label: 'Deployment Runbook', kind: 'article', sub: 'knowledge · wiki',
+    id: 'Deployment Runbook', label: 'Deployment Runbook', kind: 'article',
     facts: [
       { stratum: 'knowledge', text: '[[Deployment Runbook]] §Rollback', detail: 'hybrid FTS + vector, RRF fused', conf: 0.88, prov: 'FTS+RRF' },
       { stratum: 'knowledge', text: 'relates → [[Incident-2049]]', detail: 'confidence-scored backlink', conf: 0.72, prov: 'FTS+RRF' },
+      { stratum: 'graph', text: 'injected: command:deploy → deploy-agent', detail: 'command→agent edge · grep never sees this', conf: 1.0, prov: 'Injected' },
       { stratum: 'graph', text: 'linked code: deploy.ts · rollback.ts', detail: 'article↔code edges', conf: 1.0, prov: 'SCIP' },
       { stratum: 'memory', text: 'Decision: rollback must be idempotent', detail: 'scope=project:acme', conf: 0.80, prov: 'episodic' },
       { stratum: 'requirements', text: 'supports REQ-207 · unvalidated ⋯', conf: 0.6, prov: 'Parsed' },
@@ -158,37 +199,67 @@ function confColor(conf: number) {
 }
 
 function QuerySubstrate() {
-  const [subjectId, setSubjectId] = useState(SUBJECTS[0].id)
+  const reduced = useReducedMotion()
+  const [subjectIdx, setSubjectIdx] = useState(0)
   const [threshold, setThreshold] = useState(0.6)
-  const subject = SUBJECTS.find(s => s.id === subjectId)!
+  const [driving, setDriving] = useState(false)
+  // sweep direction for the auto-demo dial
+  const dir = useRef(1)
 
+  const subject = SUBJECTS[subjectIdx]
   const live = subject.facts.filter(f => f.conf >= threshold)
   const liveStrata = new Set(live.map(f => f.stratum))
+
+  // auto-demo: sweep the dial 0.3↔1.0; at each turn, advance the subject.
+  useEffect(() => {
+    if (driving || reduced) return
+    const t = setInterval(() => {
+      setThreshold(prev => {
+        let next = +(prev + dir.current * 0.05).toFixed(2)
+        if (next >= 1.0) { next = 1.0; dir.current = -1; setSubjectIdx(i => (i + 1) % SUBJECTS.length) }
+        else if (next <= 0.3) { next = 0.3; dir.current = 1 }
+        return next
+      })
+    }, 260)
+    return () => clearInterval(t)
+  }, [driving, reduced])
+
+  const takeControl = () => setDriving(true)
 
   return (
     <Section id="query" solid className="!py-16">
       <div className="max-w-6xl mx-auto w-full">
-        <div className="mb-6">
-          <span className="kicker">Query the substrate</span>
-          <h2 className="mt-4 font-display text-3xl sm:text-[2.6rem] font-black text-ink w-full">
-            Pick a subject. Drag the confidence dial. Read one core sample.
-          </h2>
-          <p className="mt-4 text-ink w-full font-sans leading-relaxed">
-            The substrate returns a single dossier assembled live across all five strata at once. Every fact carries its{' '}
-            <span className="font-semibold">provenance</span> and <span className="font-semibold">confidence</span>. Drive the dial
-            to 1.0 and only parsed / SCIP facts survive; drop it and the heuristic tag-scan edges reappear —{' '}
-            <span className="font-semibold">clearly labeled, never silently promoted</span>.
-          </p>
+        <div className="mb-6 w-full text-left flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <span className="kicker">Query the substrate</span>
+            <h2 className="mt-4 font-display text-3xl sm:text-[2.6rem] font-black text-ink w-full leading-[0.98]">
+              One question. One dossier. Assembled live across all five strata.
+            </h2>
+            <p className="mt-4 text-ink w-full font-sans leading-relaxed max-w-3xl">
+              Watch it read itself — the confidence dial sweeps and the subject changes on its own. Drive the dial to{' '}
+              <span className="font-semibold">1.0</span> and only parsed / SCIP facts survive; drop it and the heuristic
+              tag-scan edges reappear — <span className="font-semibold">labeled, never silently promoted</span>.
+            </p>
+          </div>
+          <button
+            className="demo-pill"
+            data-live={String(!driving)}
+            onClick={() => setDriving(d => !d)}
+            aria-label={driving ? 'Resume auto demo' : 'Pause and drive it yourself'}
+          >
+            <span className="dot" />
+            {driving ? 'You’re driving · resume demo' : 'Auto-demo · click to drive'}
+          </button>
         </div>
 
         {/* Subject picker — three core samples */}
         <div className="flex flex-wrap gap-2 mb-5">
-          {SUBJECTS.map(s => {
-            const on = s.id === subjectId
+          {SUBJECTS.map((s, i) => {
+            const on = i === subjectIdx
             return (
               <button
                 key={s.id}
-                onClick={() => setSubjectId(s.id)}
+                onClick={() => { takeControl(); setSubjectIdx(i) }}
                 className="text-left rounded-xl px-4 py-2.5 transition-all"
                 style={{
                   background: on ? 'color-mix(in oklab, var(--accent) 12%, var(--rock))' : 'var(--rock)',
@@ -197,7 +268,7 @@ function QuerySubstrate() {
               >
                 <div className="flex items-center gap-2">
                   <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: on ? 'var(--accent)' : 'var(--faint)' }} />
-                  <span className="font-mono text-sm font-semibold" style={{ color: on ? 'var(--ink)' : 'var(--ink)' }}>{s.label}</span>
+                  <span className="font-mono text-sm font-semibold text-ink">{s.label}</span>
                   <span className="tag">{s.kind}</span>
                 </div>
               </button>
@@ -217,7 +288,8 @@ function QuerySubstrate() {
               </div>
               <input
                 type="range" min={0.3} max={1.0} step={0.05} value={threshold}
-                onChange={e => setThreshold(parseFloat(e.target.value))}
+                onChange={e => { takeControl(); setThreshold(parseFloat(e.target.value)) }}
+                onMouseDown={takeControl} onTouchStart={takeControl}
                 className="dial" aria-label="Confidence threshold"
               />
               <div className="flex justify-between mt-2 depth">
@@ -240,7 +312,7 @@ function QuerySubstrate() {
                     <div key={s.id} className="flex items-center gap-3 py-1.5">
                       <span className="w-2 h-2 rounded-full shrink-0"
                         style={{ background: on ? 'var(--accent)' : 'var(--hairline-strong)',
-                          animation: on ? 'live-pulse 2.4s var(--ease) infinite' : 'none' }} />
+                          animation: on && !reduced ? 'live-pulse 2.4s var(--ease) infinite' : 'none' }} />
                       <span className="depth w-14 shrink-0">{s.depth}</span>
                       <span className="font-mono text-[0.66rem]" style={{ color: on ? 'var(--ink)' : 'var(--faint)' }}>
                         {s.name}
@@ -272,20 +344,19 @@ function QuerySubstrate() {
                     <div className="flex-1 flex flex-col gap-2 min-w-0">
                       {facts.map((f, i) => {
                         const on = f.conf >= threshold
+                        const injected = f.prov === 'Injected'
                         return (
                           <div key={i} className="fact min-w-0" style={{ opacity: on ? 1 : 0.42, filter: on ? 'none' : 'grayscale(0.6)' }}>
-                            {/* line 1 — the statement + provenance chips, single line, truncates */}
                             <div className="flex items-center gap-2 min-w-0">
                               <span className="text-sm font-sans truncate min-w-0 flex-1" style={{ color: on ? 'var(--ink)' : 'var(--muted)' }} title={f.text}>{f.text}</span>
-                              <span className="prov shrink-0" style={f.conf >= 1.0 ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>
+                              <span className="prov shrink-0" style={f.conf >= 1.0 || injected ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>
                                 {f.prov}
                               </span>
                               <span className="prov tabular-nums shrink-0" style={{ color: confColor(f.conf) }}>{f.conf.toFixed(2)}</span>
                               {f.advisory && <span className="prov shrink-0">adv</span>}
                               {!on && <span className="prov shrink-0" style={{ color: 'var(--faint)' }}>below cutoff</span>}
                             </div>
-                            {/* line 2 — detail, single line, truncates */}
-                            {f.detail && <div className="depth mt-0.5 truncate" style={{ color: 'var(--muted)' }} title={f.detail}>{f.detail}</div>}
+                            {f.detail && <div className="depth mt-0.5 truncate" style={{ color: injected ? 'var(--accent)' : 'var(--muted)' }} title={f.detail}>{f.detail}</div>}
                           </div>
                         )
                       })}
@@ -301,50 +372,59 @@ function QuerySubstrate() {
   )
 }
 
-// ── 3 · THE FIVE STRATA (one labeled cross-section) ─────────────────────────────
+// ── 3 · THE FIVE STRATA — a drill reads the cross-section, band by band ─────────
 function FiveStrata() {
-  const copy: Record<StratumId, string> = {
-    graph: 'Symbols, callers, blast-radius, scoped context. source = dependent, target = dependency — always.',
-    memory: 'Cross-session recall — decisions, episodes, salience. The decision survives the session that made it.',
-    knowledge: 'Ingested articles with hybrid FTS + vector recall, fused via RRF. Answers cite a source you can open.',
-    requirements: 'Every symbol carries the requirement it satisfies, a description, and a validated flag.',
-    annotations: 'Typed key/value notes — assumption, note, question — with confidence and an advisory flag.',
-  }
+  const reduced = useReducedMotion()
+  const [active, setActive] = useState(0)
+
+  useEffect(() => {
+    if (reduced) return
+    const t = setInterval(() => setActive(a => (a + 1) % STRATA.length), 1700)
+    return () => clearInterval(t)
+  }, [reduced])
+
   return (
     <Section id="strata">
       <div className="max-w-6xl mx-auto w-full">
-        <div className="mb-9">
-          <span className="kicker">The five strata</span>
-          <h2 className="mt-4 font-display text-3xl sm:text-[2.6rem] font-black text-ink">
-            Five layers. One substrate. One symbol identity.
-          </h2>
-          <p className="mt-4 text-ink max-w-2xl font-sans leading-relaxed">
-            Not a graph with bolt-ons. A single continuous body, cut here into its bands — each keyed to the same
-            stable <span className="font-mono text-sm font-semibold">(scheme, qualified-name)</span> that survives reformatting,
-            moves, and re-index.
+        <TopHead
+          kicker="The five strata"
+          title={<>Five bands. One substrate. <span style={{ color: 'var(--accent)' }}>One symbol identity.</span></>}
+        >
+          <p className="max-w-3xl">
+            Not a graph with bolt-ons — a single continuous body, cut into bands. Each keyed to the same stable{' '}
+            <span className="font-mono text-sm font-semibold">(scheme, qualified-name)</span> that survives reformatting,
+            moves, and re-index. The drill reads one band at a time.
           </p>
-        </div>
+        </TopHead>
 
-        <div className="rock-panel">
+        <div className="rock-panel p-0">
           <div className="relative">
-            {/* mineral seam through the whole cross-section */}
             <div className="seam-line absolute top-6 bottom-6" style={{ left: '22%' }} />
-            {STRATA.map((s, i) => (
-              <div
-                key={s.id}
-                className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-6 px-6 py-6 border-b border-hairline last:border-b-0"
-                style={{ background: i % 2 ? 'color-mix(in oklab, var(--ink) 3%, transparent)' : 'transparent' }}
-              >
-                <div className="flex items-center gap-4 sm:w-64 shrink-0">
-                  <span className="font-display font-black text-2xl text-faint tabular-nums" style={{ fontStretch: '108%' }}>{s.no}</span>
-                  <div>
-                    <div className="font-display font-black text-ink text-lg leading-tight" style={{ fontStretch: '108%' }}>{s.name}</div>
-                    <div className="depth mt-0.5">{s.depth} · {s.tools}</div>
+            {STRATA.map((s, i) => {
+              const on = i === active
+              return (
+                <div
+                  key={s.id}
+                  onMouseEnter={() => setActive(i)}
+                  className="relative flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-6 px-6 py-6 border-b border-hairline last:border-b-0 transition-all duration-300"
+                  style={{
+                    background: on
+                      ? 'color-mix(in oklab, var(--accent) 9%, transparent)'
+                      : (i % 2 ? 'color-mix(in oklab, var(--ink) 3%, transparent)' : 'transparent'),
+                    boxShadow: on ? 'inset 3px 0 0 var(--accent)' : 'none',
+                  }}
+                >
+                  <div className="flex items-center gap-4 sm:w-64 shrink-0">
+                    <span className="font-display font-black text-2xl tabular-nums" style={{ fontStretch: '108%', color: on ? 'var(--accent)' : 'var(--faint)' }}>{s.no}</span>
+                    <div>
+                      <div className="font-display font-black text-ink text-lg leading-tight" style={{ fontStretch: '108%' }}>{s.name}</div>
+                      <div className="depth mt-0.5">{s.depth} · {s.tools}</div>
+                    </div>
                   </div>
+                  <p className="text-sm font-sans flex-1 leading-relaxed transition-colors" style={{ color: on ? 'var(--ink)' : 'var(--muted)' }}>{s.copy}</p>
                 </div>
-                <p className="text-sm text-ink font-sans flex-1 leading-relaxed">{copy[s.id]}</p>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </div>
         <p className="mt-5 font-mono text-xs text-faint">
@@ -355,52 +435,105 @@ function FiveStrata() {
   )
 }
 
-// ── 4 · PROVENANCE SEAM (the differentiator, stated once) ───────────────────────
+// ── 4 · PROVENANCE SEAM — cycle the collisions; the winning label pops ──────────
+const TIERS: { tier: string; conf: number; who: string }[] = [
+  { tier: 'Parsed',     conf: 1.0, who: 'Direct AST facts' },
+  { tier: 'SCIP / LSP', conf: 1.0, who: 'Precise indexers · on-demand' },
+  { tier: 'TSG',        conf: 0.8, who: 'Stack-graph name resolution' },
+  { tier: 'ImportMap',  conf: 0.6, who: 'Import-map heuristics' },
+  { tier: 'Tags',       conf: 0.3, who: 'Tree-sitter tag scan only' },
+]
+
+// each collision: the same (source,target,kind) edge proposed by several tiers.
+// higher tier wins; the losers are superseded. `proposed` = tier indices in play.
+const COLLISIONS: { edge: string; kind: string; proposed: number[] }[] = [
+  { edge: 'checkout → applyDiscount', kind: 'calls', proposed: [0, 3, 4] },
+  { edge: 'price.ts → utils', kind: 'imports', proposed: [1, 3] },
+  { edge: 'referralFlow → applyDiscount', kind: 'calls', proposed: [4] },
+  { edge: 'service → handler', kind: 'implements', proposed: [1, 2] },
+]
+
 function ProvenanceSeam() {
-  const tiers = [
-    { tier: 'Parsed',    conf: 1.0, who: 'Direct AST facts' },
-    { tier: 'SCIP / LSP', conf: 1.0, who: 'Precise indexers · on-demand' },
-    { tier: 'TSG',       conf: 0.8, who: 'Stack-graphs name resolution' },
-    { tier: 'ImportMap', conf: 0.6, who: 'Import-map heuristics' },
-    { tier: 'Tags',      conf: 0.3, who: 'Tree-sitter tag scan only' },
-  ]
+  const reduced = useReducedMotion()
+  const [idx, setIdx] = useState(0)
+  const [pinned, setPinned] = useState(false)
+
+  useEffect(() => {
+    if (reduced || pinned) return
+    const t = setInterval(() => setIdx(i => (i + 1) % COLLISIONS.length), 2600)
+    return () => clearInterval(t)
+  }, [reduced, pinned])
+
+  const c = COLLISIONS[idx]
+  const winner = Math.min(...c.proposed) // lowest tier index = highest tier = winner
+
   return (
     <Section id="provenance" solid>
-      <div className="max-w-5xl mx-auto w-full grid lg:grid-cols-[1fr_1.1fr] gap-12 items-center">
-        <div>
+      <div className="max-w-5xl mx-auto w-full grid lg:grid-cols-[1fr_1.15fr] gap-12 items-center">
+        <div className="text-left">
           <span className="kicker">The provenance seam</span>
-          <h2 className="mt-4 font-display text-3xl sm:text-[2.4rem] font-black text-ink">
+          <h2 className="mt-4 font-display text-3xl sm:text-[2.4rem] font-black text-ink leading-[0.98]">
             Every edge carries where it came from.
           </h2>
           <p className="mt-4 text-ink font-sans leading-relaxed">
-            No edge is emitted without <span className="font-mono text-ink text-sm">confidence</span>,{' '}
+            No edge ships without <span className="font-mono text-ink text-sm">confidence</span>,{' '}
             <span className="font-mono text-ink text-sm">provenance</span> and{' '}
-            <span className="font-mono text-ink text-sm">resolved_by</span>. On a{' '}
-            <span className="font-mono text-ink text-sm">(source, target, kind)</span> collision the higher tier wins —
-            a 0.3 tag-scan guess is never presented as a 1.0 fact. You just felt this on the dial.
+            <span className="font-mono text-ink text-sm">resolved_by</span>. When the same{' '}
+            <span className="font-mono text-ink text-sm">(source, target, kind)</span> edge is proposed by several
+            tiers, the <span className="font-semibold">highest tier wins</span> — a 0.3 tag-scan guess is never
+            presented as a 1.0 fact.
           </p>
+          <div className="mt-6 rock-panel p-4">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="depth">collision</span>
+              <span className="font-mono text-sm text-ink">{c.edge}</span>
+              <span className="tag">{c.kind}</span>
+            </div>
+            <div className="mt-3 flex items-center gap-2 flex-wrap">
+              <span className="depth">resolved_by →</span>
+              <span className="tag tag-accent">{TIERS[winner].tier}</span>
+              <span className="depth">{c.proposed.length > 1 ? `${c.proposed.length - 1} lower tier(s) superseded` : 'sole proposer'}</span>
+            </div>
+            <div className="mt-3 flex gap-1.5">
+              {COLLISIONS.map((_, i) => (
+                <button key={i} onClick={() => { setPinned(true); setIdx(i) }} aria-label={`collision ${i + 1}`}
+                  className="h-1.5 rounded-full transition-all"
+                  style={{ width: i === idx ? 22 : 8, background: i === idx ? 'var(--accent)' : 'var(--hairline-strong)' }} />
+              ))}
+              <span className="depth ml-2">{pinned ? 'pinned' : 'cycling'}</span>
+            </div>
+          </div>
         </div>
+
         <div className="rock-panel p-6">
           <div className="flex flex-col gap-4">
-            {tiers.map(t => (
-              <div key={t.tier} className="flex items-center gap-4">
-                <span className="font-mono text-xs text-ink w-24 shrink-0">{t.tier}</span>
-                <div className="flex-1 h-1.5 rounded-full" style={{ background: 'var(--hairline-strong)' }}>
-                  <div className="h-full rounded-full" style={{ width: `${t.conf * 100}%`, background: t.conf >= 1.0 ? 'var(--accent)' : 'var(--muted)', opacity: t.conf >= 1.0 ? 1 : 0.6 }} />
+            {TIERS.map((t, i) => {
+              const inPlay = c.proposed.includes(i)
+              const isWinner = i === winner
+              return (
+                <div key={t.tier} className="tier-row flex items-center gap-4" data-in={String(inPlay)}>
+                  <span className="font-mono text-xs w-24 shrink-0" style={{ color: isWinner ? 'var(--accent)' : 'var(--ink)' }}>{t.tier}</span>
+                  <div className="flex-1 h-1.5 rounded-full" style={{ background: 'var(--hairline-strong)' }}>
+                    <div className="h-full rounded-full transition-all duration-500"
+                      style={{ width: inPlay ? `${t.conf * 100}%` : '0%', background: isWinner ? 'var(--accent)' : 'var(--muted)', opacity: isWinner ? 1 : 0.55 }} />
+                  </div>
+                  <span className="depth w-8 shrink-0 tabular-nums">{t.conf.toFixed(1)}</span>
+                  <span className="who-label prov hidden sm:block w-48 shrink-0 text-center" data-scope={String(isWinner)}>
+                    {t.who}
+                  </span>
                 </div>
-                <span className="depth w-8 shrink-0 tabular-nums">{t.conf.toFixed(1)}</span>
-                <span className="depth hidden sm:block w-44 shrink-0">{t.who}</span>
-              </div>
-            ))}
+              )
+            })}
           </div>
+          <p className="mt-5 depth">The right-hand label lights when its tier is the one in scope.</p>
         </div>
       </div>
     </Section>
   )
 }
 
-// ── 5 · ONE BEDROCK, SOLO OR SHARED (real toggle) ───────────────────────────────
-function Bedrock() {
+// ── 5 · SOLO OR SHARED — same engine, one flag ──────────────────────────────────
+function Storage() {
   const [shared, setShared] = useState(false)
   const view = shared
     ? {
@@ -410,30 +543,30 @@ function Bedrock() {
           ['traversal', 'server-side WITH RECURSIVE, in-DB'],
           ['re-index to switch', 'none — same schema, same graph'],
         ],
-        note: 'shared_writers=true · server_side_traversal=true',
+        note: '--features postgres · concurrent writers · server-side traversal',
       }
     : {
         db: 'graph.db',
         rows: [
-          ['writers', 'single-writer — local file'],
+          ['writers', 'single-writer — one local file'],
           ['traversal', 'bounded recursive CTE'],
           ['infrastructure', 'none — nothing to run'],
         ],
         note: 'FTS5 · sqlite-vec · WAL · nothing leaves your box',
       }
   return (
-    <Section id="storage">
+    <Section id="storage" solid>
       <div className="max-w-4xl mx-auto w-full">
-        <div className="mb-8">
-          <span className="kicker">One bedrock, solo or shared</span>
-          <h2 className="mt-4 font-display text-3xl sm:text-[2.4rem] font-black text-ink">
-            SQLite by default. One flag to a shared team graph.
-          </h2>
-          <p className="mt-4 text-ink max-w-2xl font-sans leading-relaxed">
+        <TopHead
+          kicker="One bedrock, solo or shared"
+          title={<>SQLite by default. <span style={{ color: 'var(--accent)' }}>One flag</span> to a shared team graph.</>}
+        >
+          <p className="max-w-3xl">
             The same engine and command API run on either backend through one{' '}
-            <span className="font-mono text-sm font-semibold">open_store(spec)</span> factory — no caller changes, no re-index.
+            <span className="font-mono text-sm font-semibold">open_store(spec)</span> factory — no caller changes,
+            no re-index. Local-first is a feature, not a ceiling.
           </p>
-        </div>
+        </TopHead>
 
         <div className="inline-flex gap-1.5 p-1.5 rounded-xl mb-5" style={{ background: 'var(--rock)', border: '1px solid var(--hairline-strong)' }}>
           <button className="seg" data-on={!shared} onClick={() => setShared(false)}>SQLite · solo</button>
@@ -457,107 +590,122 @@ function Bedrock() {
             <span className="depth" style={{ color: shared ? 'var(--accent)' : 'var(--faint)' }}>{view.note}</span>
           </div>
         </div>
-        <p className="mt-5 font-mono text-xs text-faint">
-          PostgreSQL is built behind <span className="text-ink">--features postgres</span>. Same factory arm, zero caller changes.
+      </div>
+    </Section>
+  )
+}
+
+// ── 6 · THE BEDROCK UNDER THE STACK — cycle the layers, pointer + what-you-do ────
+type LayerId = 'solutions' | 'utilities' | 'building'
+const LAYERS: { id: LayerId; label: string; members: { name: string; note: string }[]; doing: string; bedrock?: boolean }[] = [
+  {
+    id: 'solutions', label: 'Solutions',
+    members: [{ name: 'crew', note: 'agentic execution platform' }, { name: 'interactive', note: 'describe-it-build-it docs' }],
+    doing: 'Drive governed multi-agent workflows and build interactive docs by describing them. The top of the stack — they read everything below.',
+  },
+  {
+    id: 'utilities', label: 'Utilities',
+    members: [{ name: 'garden', note: 'agent toolkit' }, { name: 'testing', note: 'QE team, no self-grading' }],
+    doing: 'Prove "done" from evidence and give your agent a QE team that can’t grade its own homework. Both query the substrate for context and edges.',
+  },
+  {
+    id: 'building', label: 'Building Blocks', bedrock: true,
+    members: [{ name: 'estate', note: 'the graph · memory · knowledge' }, { name: 'brain', note: 'markdown memory' }, { name: 'bus', note: 'event substrate' }],
+    doing: 'Query the graph, recall memory, ride the event bus. estate is the bedrock at the base — the substrate every layer above queries.',
+  },
+]
+
+function FamilyStack() {
+  const reduced = useReducedMotion()
+  const [active, setActive] = useState(2) // start on Building Blocks (the bedrock)
+  const [pinned, setPinned] = useState(false)
+
+  useEffect(() => {
+    if (reduced || pinned) return
+    const t = setInterval(() => setActive(a => (a + 1) % LAYERS.length), 2600)
+    return () => clearInterval(t)
+  }, [reduced, pinned])
+
+  const current = LAYERS[active]
+
+  return (
+    <Section id="foundation">
+      <div className="max-w-5xl mx-auto w-full">
+        <TopHead
+          kicker="The bedrock under the stack"
+          title={<>Estate is the layer <span style={{ color: 'var(--accent)' }}>everything else rests on.</span></>}
+        />
+
+        <div className="grid lg:grid-cols-[0.9fr_1.1fr] gap-8 items-center">
+          {/* left — what you DO with the active layer */}
+          <div className="text-left">
+            <span className="kicker">{current.label}</span>
+            <p className="mt-3 text-lg text-ink font-sans leading-relaxed min-h-[7.5rem]">{current.doing}</p>
+            <div className="mt-4 flex gap-1.5">
+              {LAYERS.map((l, i) => (
+                <button key={l.id} onClick={() => { setPinned(true); setActive(i) }} aria-label={l.label}
+                  className="h-1.5 rounded-full transition-all"
+                  style={{ width: i === active ? 24 : 8, background: i === active ? 'var(--accent)' : 'var(--hairline-strong)' }} />
+              ))}
+              <span className="depth ml-2">{pinned ? 'pinned' : 'cycling top → bottom'}</span>
+            </div>
+          </div>
+
+          {/* right — the stack, bottom→top; a left pointer marks the active layer; it shrinks to fit */}
+          <div className="rock-panel p-0 overflow-hidden">
+            {LAYERS.map((l, i) => {
+              const on = i === active
+              return (
+                <div
+                  key={l.id}
+                  className="layer-row flex items-stretch"
+                  data-active={String(on)}
+                  onMouseEnter={() => setActive(i)}
+                  style={{ borderBottom: '1px solid var(--hairline)' }}
+                >
+                  <div className="w-8 flex items-center justify-center shrink-0">
+                    {on && <span className="layer-pointer" aria-hidden>{reduced ? '▸' : '►'}</span>}
+                  </div>
+                  <div className="flex-1 px-4 py-4" style={{ background: l.bedrock ? 'color-mix(in oklab, var(--accent) 7%, transparent)' : 'transparent' }}>
+                    <div className="flex items-center gap-3 mb-2 flex-wrap">
+                      <span className="kicker" style={{ color: on ? 'var(--accent)' : 'var(--muted)' }}>{l.label}</span>
+                      {l.bedrock && <span className="tag tag-accent">bedrock</span>}
+                    </div>
+                    {/* members show in full only for the active layer — the table shrinks to fit */}
+                    {on ? (
+                      <div className="flex flex-wrap gap-2">
+                        {l.members.map(m => (
+                          <span key={m.name} className="tag">
+                            <span className="text-ink font-semibold">{m.name}</span> <span className="text-faint">· {m.note}</span>
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="font-mono text-[0.66rem] text-faint">{l.members.map(m => m.name).join(' · ')}</div>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+        <p className="mt-6 font-mono text-xs text-faint">
+          Building Blocks (bottom) → Utilities → Solutions (top). estate · brain · bus carry the load; everything above queries them.
         </p>
       </div>
     </Section>
   )
 }
 
-// ── 6 · THE BEDROCK UNDER THE STACK ─────────────────────────────────────────────
-function UnderStack() {
-  const layers: { label: string; depth: string; items: { name: string; note: string }[]; bedrock?: boolean }[] = [
-    {
-      label: 'Build', depth: 'surface',
-      items: [
-        { name: 'garden', note: 'agent toolkit' },
-        { name: 'interactive', note: 'in-browser builder' },
-      ],
-    },
-    {
-      label: 'Operate', depth: '−5m',
-      items: [
-        { name: 'crew', note: 'workflow governor' },
-        { name: 'testing', note: 'QE pipeline' },
-      ],
-    },
-    {
-      label: 'Foundation', depth: '−10m',
-      items: [
-        { name: 'bus', note: 'event substrate' },
-        { name: 'brain', note: 'memory adapter' },
-      ],
-    },
-  ]
-  return (
-    <Section id="foundation" solid>
-      <div className="max-w-5xl mx-auto w-full">
-        <div className="mb-9">
-          <span className="kicker">The bedrock under the stack</span>
-          <h2 className="mt-4 font-display text-3xl sm:text-[2.6rem] font-black text-ink">
-            Estate is the layer everything else rests on.
-          </h2>
-          <p className="mt-4 text-ink max-w-2xl font-sans leading-relaxed">
-            Build tools sit on top, Operate tools govern them, and the Foundation carries the load underneath.
-            Estate is the bedrock at the bottom of the Foundation — the substrate every layer queries.
-          </p>
-        </div>
-
-        <div className="rock-panel p-0">
-          {layers.map(l => (
-            <div key={l.label} className="px-6 py-5 border-b border-hairline">
-              <div className="flex items-center gap-3 mb-3">
-                <span className="depth w-16 shrink-0">{l.depth}</span>
-                <span className="kicker">{l.label}</span>
-              </div>
-              <div className="flex flex-wrap gap-2 pl-16">
-                {l.items.map(it => (
-                  <span key={it.name} className="tag">
-                    <span className="text-ink">{it.name}</span> <span className="text-faint">· {it.note}</span>
-                  </span>
-                ))}
-              </div>
-            </div>
-          ))}
-
-          {/* the bedrock */}
-          <div className="relative px-6 py-8" style={{ background: 'color-mix(in oklab, var(--accent) 8%, transparent)' }}>
-            <div className="seam-line absolute top-4 bottom-4" style={{ left: '14%' }} />
-            <div className="flex flex-col sm:flex-row sm:items-center gap-4">
-              <span className="depth w-16 shrink-0">−14m</span>
-              <div className="flex-1">
-                <div className="flex items-center gap-3 flex-wrap">
-                  <span className="font-display font-black text-ink text-2xl" style={{ fontStretch: '110%' }}>wicked-estate</span>
-                  <span className="tag tag-accent">bedrock · foundation</span>
-                </div>
-                <p className="mt-1.5 text-sm text-ink font-sans max-w-xl leading-relaxed">
-                  Code graph + memory + knowledge + requirements + annotations, in one binary. Every edge stamped with
-                  confidence and provenance. The center of gravity everything else queries.
-                </p>
-              </div>
-              <div className="flex flex-wrap gap-1.5 sm:flex-col sm:items-end">
-                {['Rust', 'crates.io', 'MCP · 23 tools'].map(t => <span key={t} className="tag">{t}</span>)}
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </Section>
-  )
-}
-
-// ── 7 · GET STARTED (lean) ──────────────────────────────────────────────────────
+// ── 7 · GET STARTED ─────────────────────────────────────────────────────────────
 function GetStarted() {
   return (
-    <Section id="get-started">
+    <Section id="get-started" solid>
       <div className="max-w-4xl mx-auto w-full">
-        <div className="mb-8">
-          <span className="kicker">Get started</span>
-          <h2 className="mt-4 font-display text-3xl sm:text-[2.6rem] font-black text-ink">
-            Zero to a queried substrate in two minutes.
-          </h2>
-        </div>
+        <TopHead
+          kicker="Get started"
+          title="Zero to a queried substrate in two minutes."
+        />
 
         <div className="grid md:grid-cols-2 gap-5">
           {/* PRIMARY — installer */}
@@ -571,7 +719,7 @@ function GetStarted() {
                 <span style={{ color: 'var(--accent)' }}>$ </span>npx wicked-installer
               </div>
               <p className="mt-3 text-xs text-muted font-sans leading-5">
-                Interactive: pick <span className="text-ink">wicked-estate</span> (and any siblings), choose your agent
+                Interactive: pick <span className="text-ink">estate</span> (and any siblings), choose your agent
                 CLIs, and it wires everything and ships the cross-family <span className="font-mono text-ink">wicked</span> CLI.
               </p>
             </div>
@@ -620,8 +768,8 @@ export default function Content() {
       <QuerySubstrate />
       <FiveStrata />
       <ProvenanceSeam />
-      <Bedrock />
-      <UnderStack />
+      <Storage />
+      <FamilyStack />
       <GetStarted />
     </main>
   )

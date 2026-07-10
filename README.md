@@ -34,9 +34,9 @@ leaves your machine. The parts compose rather than lock in.
 |---|---|---|
 | **`wicked-estate`** (this repo) | the graph — symbols, calls, blast-radius, memory, knowledge, scoped context | Rust · crates.io |
 | [`wicked-core`](https://github.com/mikeparcewski/wicked-core) | the runtime — single-writer store actor + live event stream so consumers never race on the shared DB | Rust |
-| [`wicked-bus`](https://github.com/mikeparcewski/wicked-bus) | the event substrate — zero-infra, at-least-once, cursor-poll delivery on local SQLite | JS/ESM · npm |
+| [`wicked-bus`](https://github.com/mikeparcewski/wicked-bus) | the durable event fabric — restart-durable at-least-once delivery with dead-lettering and replay, zero infra | JS/ESM · npm |
 | [`wicked-brain`](https://github.com/mikeparcewski/wicked-brain) | the memory — persistent knowledge on markdown + SQLite FTS5, no vector DB (bridge-period; folds into estate) | JS · npm |
-| [`wicked-crew`](https://github.com/mikeparcewski/wicked-crew) | the governor — external daemon for deterministic, deny-dominates, phase-gated AI workflows with HITL | npm |
+| [`wicked-crew`](https://github.com/mikeparcewski/wicked-crew) | the harness — runs your coding-agent CLIs as governed workers through durable, deny-dominates, phase-gated workflows with HITL | npm |
 
 > Absorbed into this repo (not separate products): `wicked-memory` → `wicked-estate-memory`,
 > `wicked-knowledge` → `wicked-estate-knowledge`, `wicked-overlay` → `wicked-estate-overlay`.

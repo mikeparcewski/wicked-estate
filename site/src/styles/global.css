@@ -63,6 +63,32 @@
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.35; }
 }
+/* the drill head sweeping down a core */
+@keyframes drill-sweep {
+  0%   { top: 2%; }
+  100% { top: 96%; }
+}
+/* a scanned band flashing as the drill crosses it */
+@keyframes band-scan {
+  0%   { background: color-mix(in oklab, var(--accent) 26%, transparent); }
+  100% { background: transparent; }
+}
+/* the winning-tier label popping into scope */
+@keyframes label-pop {
+  0%   { transform: scale(0.9); opacity: 0.4; }
+  60%  { transform: scale(1.06); }
+  100% { transform: scale(1); opacity: 1; }
+}
+/* the left pointer nudging toward the active layer */
+@keyframes pointer-nudge {
+  0%, 100% { transform: translateX(0); }
+  50%       { transform: translateX(4px); }
+}
+/* auto-demo hint dot */
+@keyframes demo-blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.25; }
+}
 
 @layer base {
   *, *::before, *::after { box-sizing: border-box; }
@@ -258,6 +284,65 @@
   .seg[data-on="true"] {
     color: var(--on-accent); background: var(--accent);
     border-color: var(--accent);
+  }
+
+  /* ── Drill head — the scan line that reads a core ────────────────────────── */
+  .drill-head {
+    position: absolute; left: 0; right: 0; height: 2px; pointer-events: none;
+    background: linear-gradient(90deg, transparent, var(--accent) 20%, var(--accent) 80%, transparent);
+    box-shadow: 0 0 16px 2px color-mix(in oklab, var(--accent) 60%, transparent);
+    z-index: 2;
+  }
+  .drill-head::after {
+    content: "◤"; position: absolute; left: -2px; top: -9px;
+    color: var(--accent); font-size: 0.7rem; line-height: 1;
+    filter: drop-shadow(0 0 5px color-mix(in oklab, var(--accent) 70%, transparent));
+  }
+
+  /* ── Demo / driving status pill ──────────────────────────────────────────── */
+  .demo-pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: "JetBrains Mono", monospace; font-size: 0.6rem; letter-spacing: 0.12em;
+    text-transform: uppercase; padding: 5px 11px; border-radius: 999px;
+    border: 1px solid var(--hairline-strong); color: var(--muted);
+    background: color-mix(in oklab, var(--ink) 5%, transparent); cursor: pointer;
+    transition: all 0.2s var(--ease);
+  }
+  .demo-pill:hover { border-color: var(--accent); color: var(--ink); }
+  .demo-pill .dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+  }
+  .demo-pill[data-live="true"] .dot { animation: demo-blink 1.4s var(--ease) infinite; }
+  .demo-pill[data-live="false"] .dot { background: var(--muted); }
+
+  /* ── Left pointer (bedrock layer cycler) ─────────────────────────────────── */
+  .layer-pointer {
+    display: inline-grid; place-items: center; width: 22px; flex-shrink: 0;
+    color: var(--accent); font-size: 0.85rem;
+    animation: pointer-nudge 1.6s var(--ease) infinite;
+  }
+  .layer-row {
+    transition: background 0.3s var(--ease), opacity 0.3s var(--ease);
+    cursor: pointer;
+  }
+  .layer-row[data-active="false"] { opacity: 0.5; }
+  .layer-row[data-active="true"]  {
+    background: color-mix(in oklab, var(--accent) 8%, transparent);
+  }
+
+  /* ── Provenance winner label — stands out when in scope ──────────────────── */
+  .who-label { transition: all 0.3s var(--ease); }
+  .who-label[data-scope="true"] {
+    color: var(--on-accent); background: var(--accent);
+    border-radius: 5px; padding: 3px 9px; font-weight: 700;
+    animation: label-pop 0.4s var(--ease) both;
+    box-shadow: 0 4px 14px color-mix(in oklab, var(--accent) 40%, transparent);
+  }
+  .tier-row { transition: opacity 0.3s var(--ease); }
+  .tier-row[data-in="false"] { opacity: 0.34; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .drill-head, .layer-pointer, .demo-pill .dot, .who-label[data-scope="true"] { animation: none; }
   }
 }
 
