@@ -104,9 +104,8 @@ fn sc009_all_four_stores_open_and_all_reads_return_nonempty() {
         resp_search.get("error").is_none(),
         "SearchEntity: unexpected JSON-RPC error; response: {resp_search}"
     );
-    assert_eq!(
-        resp_search["result"]["isError"].as_bool().unwrap_or(true),
-        false,
+    assert!(
+        !resp_search["result"]["isError"].as_bool().unwrap_or(true),
         "SearchEntity: isError must be false"
     );
     let search_inner = inner_json(&resp_search);
@@ -147,9 +146,8 @@ fn sc009_all_four_stores_open_and_all_reads_return_nonempty() {
         resp_recall.get("error").is_none(),
         "memory.recall: unexpected JSON-RPC error; response: {resp_recall}"
     );
-    assert_eq!(
-        resp_recall["result"]["isError"].as_bool().unwrap_or(true),
-        false,
+    assert!(
+        !resp_recall["result"]["isError"].as_bool().unwrap_or(true),
         "memory.recall: isError must be false"
     );
     let recall_inner = inner_json(&resp_recall);
@@ -189,11 +187,10 @@ fn sc009_all_four_stores_open_and_all_reads_return_nonempty() {
         resp_know_recall.get("error").is_none(),
         "knowledge.recall: unexpected JSON-RPC error; response: {resp_know_recall}"
     );
-    assert_eq!(
-        resp_know_recall["result"]["isError"]
+    assert!(
+        !resp_know_recall["result"]["isError"]
             .as_bool()
             .unwrap_or(true),
-        false,
         "knowledge.recall: isError must be false"
     );
     let know_recall_inner = inner_json(&resp_know_recall);
@@ -237,9 +234,8 @@ fn sc009_all_four_stores_open_and_all_reads_return_nonempty() {
         resp_about.get("error").is_none(),
         "knowledge.recall_about_code: unexpected JSON-RPC error; response: {resp_about}"
     );
-    assert_eq!(
-        resp_about["result"]["isError"].as_bool().unwrap_or(true),
-        false,
+    assert!(
+        !resp_about["result"]["isError"].as_bool().unwrap_or(true),
         "knowledge.recall_about_code: isError must be false"
     );
     let about_inner = inner_json(&resp_about);
