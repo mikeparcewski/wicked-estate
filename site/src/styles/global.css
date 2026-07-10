@@ -63,15 +63,10 @@
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.35; }
 }
-/* the drill head sweeping down a core */
-@keyframes drill-sweep {
-  0%   { top: 2%; }
-  100% { top: 96%; }
-}
-/* a scanned band flashing as the drill crosses it */
-@keyframes band-scan {
-  0%   { background: color-mix(in oklab, var(--accent) 26%, transparent); }
-  100% { background: transparent; }
+/* the tab dwell bar filling before the subject advances */
+@keyframes tab-fill {
+  from { width: 0%; }
+  to   { width: 100%; }
 }
 /* the winning-tier label popping into scope */
 @keyframes label-pop {
@@ -98,12 +93,13 @@
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
     scroll-behavior: smooth;
-    /* proximity (NOT mandatory): the page must load at the TOP. mandatory
-       force-snaps past the hero on load when sections aren't exact panels. */
+    /* Scroll-lock to section: the document snaps stratum-to-stratum. `proximity`
+       (not mandatory) so a stratum taller than the viewport never traps the
+       user; scroll-padding offsets the fixed topbar. */
     scroll-snap-type: y proximity;
+    scroll-padding-top: var(--topbar-h);
     background-color: var(--canvas);
   }
-  @media (max-width: 768px) { html { scroll-snap-type: none; } }
 
   body {
     margin: 0;
@@ -286,18 +282,30 @@
     border-color: var(--accent);
   }
 
-  /* ── Drill head — the scan line that reads a core ────────────────────────── */
-  .drill-head {
-    position: absolute; left: 0; right: 0; height: 2px; pointer-events: none;
-    background: linear-gradient(90deg, transparent, var(--accent) 20%, var(--accent) 80%, transparent);
-    box-shadow: 0 0 16px 2px color-mix(in oklab, var(--accent) 60%, transparent);
+  /* ── Drill underline — a single scan line that STEPS down the core, settling
+     under one block at a time and pausing there before advancing. It does not
+     sweep behind the rows; it underlines the active block. ──────────────────── */
+  .drill-underline {
+    position: absolute; height: 2px; pointer-events: none;
+    background: linear-gradient(90deg, transparent, var(--accent) 15%, var(--accent) 85%, transparent);
+    box-shadow: 0 0 14px 2px color-mix(in oklab, var(--accent) 55%, transparent);
     z-index: 2;
+    transition: top 0.5s var(--ease), left 0.5s var(--ease), width 0.5s var(--ease);
   }
-  .drill-head::after {
-    content: "◤"; position: absolute; left: -2px; top: -9px;
-    color: var(--accent); font-size: 0.7rem; line-height: 1;
-    filter: drop-shadow(0 0 5px color-mix(in oklab, var(--accent) 70%, transparent));
+  @media (prefers-reduced-motion: reduce) { .drill-underline { display: none; } }
+
+  /* ── Tab dwell bar — fills over the auto-advance interval so it reads as a
+     tab progression that will step to the next subject. ────────────────────── */
+  .tab-progress {
+    height: 2px; margin-top: 7px; border-radius: 2px; overflow: hidden;
+    background: color-mix(in oklab, var(--ink) 10%, transparent);
   }
+  .tab-progress > span {
+    display: block; height: 100%; width: 0;
+    background: var(--accent); border-radius: 2px;
+    animation: tab-fill 5s linear forwards;
+  }
+  @media (prefers-reduced-motion: reduce) { .tab-progress { display: none; } }
 
   /* ── Demo / driving status pill ──────────────────────────────────────────── */
   .demo-pill {
@@ -342,46 +350,72 @@
   .tier-row[data-in="false"] { opacity: 0.34; }
 
   @media (prefers-reduced-motion: reduce) {
-    .drill-head, .layer-pointer, .demo-pill .dot, .who-label[data-scope="true"] { animation: none; }
+    .layer-pointer, .demo-pill .dot, .who-label[data-scope="true"] { animation: none; }
   }
 }
 
-/* ── The strata background: one continuous sedimentary body behind the whole
-   page. A deliberate hard break from the sibling sites' graph-network motif.
-   Fine contour hairlines + broad strata tint bands, fixed, never repeated per
-   section. UNLAYERED so it beats Tailwind utilities. */
-body::before {
+/* ── The substrate background: estate's OWN illustrative schematic — a faint
+   line-art layer of estate's iconography, fixed behind the whole page, in the
+   same visual register as the sibling sites (garden's tool-card trellis,
+   wickedagile's umbrella). Estate IS the substrate everything queries: a code
+   GRAPH + MEMORY + KNOWLEDGE. So the motif is a connective node-and-edge graph
+   (some edges dashed = the injected edges grep never sees) threading between
+   recognizable schematic cards: a database cylinder (SQLite store), a
+   node-and-link cluster (the code graph), stacked strata/records (SUBSTRATE),
+   code brackets { } + a function glyph, a brain (memory), a wiki document +
+   linked docs (knowledge/relate), and a magnifier over a code symbol
+   (retrieval). Same engine as garden: ONE fixed masked layer painted in --ink
+   at low opacity, so it recolours per theme and shows through the translucent
+   strata bands while text stays readable. `html body` (higher specificity,
+   UNLAYERED) decisively overrides the shared wicked-web tokens.css blueprint
+   art. Inline data-URI mask → no base-path issues. */
+html body::before {
   content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
-  background-image:
-    repeating-linear-gradient(
-      179deg,
-      transparent 0 43px,
-      color-mix(in oklab, var(--ink) 5%, transparent) 43px 44px
-    ),
-    repeating-linear-gradient(
-      179deg,
-      color-mix(in oklab, var(--ink) 3%, transparent) 0 132px,
-      transparent 132px 316px
-    );
-  opacity: 0.9;
+  background-color: var(--ink);
+  background-image: none;
+  opacity: 0.075;
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg width='1600' height='900' viewBox='0 0 1600 900' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M95 340l255-90M350 250l140 110M490 360l345-60M835 300l430-150M95 340l55 280M150 620l490-10M640 610l390 10M1030 620l440-150M1470 470l30 320'/%3E%3Cpath d='M490 360l150 250M835 300l195 320M1265 150l205 320M350 250l-40-110' stroke-dasharray='5 8'/%3E%3Ccircle cx='95' cy='340' r='7'/%3E%3Ccircle cx='490' cy='360' r='7'/%3E%3Ccircle cx='835' cy='300' r='7'/%3E%3Ccircle cx='1265' cy='150' r='7'/%3E%3Ccircle cx='150' cy='620' r='7'/%3E%3Ccircle cx='640' cy='610' r='7'/%3E%3Ccircle cx='1030' cy='620' r='7'/%3E%3Ccircle cx='1470' cy='470' r='7'/%3E%3Ccircle cx='1500' cy='790' r='7'/%3E%3Ccircle cx='350' cy='250' r='7'/%3E%3Crect x='150' y='140' width='170' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M201 162a34 11 0 1 0 68 0a34 11 0 1 0-68 0M201 162v48a34 11 0 0 0 68 0v-48M201 184a34 11 0 0 0 68 0'/%3E%3Cpath d='M285 172h30M285 186h22M285 200h30'/%3E%3Crect x='560' y='95' width='185' height='100' rx='14' stroke-width='1.8'/%3E%3Cpath d='M595 140l55-20M595 140l65 30M650 120l55 30M660 170l45-20M660 170l40 15M705 150l-5 35'/%3E%3Ccircle cx='595' cy='140' r='6'/%3E%3Ccircle cx='650' cy='120' r='6'/%3E%3Ccircle cx='660' cy='170' r='6'/%3E%3Ccircle cx='705' cy='150' r='6'/%3E%3Ccircle cx='700' cy='185' r='6'/%3E%3Crect x='980' y='140' width='165' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M1000 168l125-8M1000 186l125-8M1000 204l125-8M1000 222l125-8'/%3E%3Cpath d='M1062 160v66' stroke-dasharray='4 5'/%3E%3Crect x='1355' y='250' width='175' height='90' rx='14' stroke-width='1.8'/%3E%3Cpath d='M1400 264c-8 0-9 6-9 12c0 8-3 9-8 9c5 0 8 1 8 9c0 6 1 12 9 12'/%3E%3Cpath d='M1485 264c8 0 9 6 9 12c0 8 3 9 8 9c-5 0-8 1-8 9c0 6-1 12-9 12'/%3E%3Cpath d='M1428 283h28M1428 298h18'/%3E%3Crect x='225' y='430' width='175' height='100' rx='14' stroke-width='1.8'/%3E%3Cpath d='M312 450c9-7 24-6 30 3c11-2 21 7 18 17c9 5 8 18-1 22c2 11-9 19-19 14c-7 9-22 8-29-1c-11 4-23-7-18-18c-9-6-7-19 4-21c-3-11 7-19 14-16z'/%3E%3Cpath d='M312 450v58M296 468c7 4 7 13 0 18M328 470c-7 4-7 13 0 18'/%3E%3Crect x='690' y='455' width='160' height='100' rx='14' stroke-width='1.8'/%3E%3Cpath d='M725 476h44l16 16v50h-60zM769 476v16h16'/%3E%3Cpath d='M736 508h40M736 521h40M736 534h26'/%3E%3Crect x='1110' y='430' width='175' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M1150 460l-12 12l12 12M1176 460l12 12l-12 12M1168 452l-8 40'/%3E%3Cpath d='M1218 470m-19 0a19 19 0 1 0 38 0a19 19 0 1 0-38 0M1232 484l16 16'/%3E%3Crect x='410' y='690' width='170' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M430 706h108v16h-108zM436 728h108v16h-108zM442 750h108v16h-108z'/%3E%3Crect x='880' y='690' width='180' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M905 712h30l10 10v34h-40zM935 712v10h10'/%3E%3Cpath d='M1010 720h30l10 10v34h-40zM1040 720v10h10'/%3E%3Cpath d='M945 740c26 6 38-2 62 0' stroke-dasharray='5 7'/%3E%3Ccircle cx='988' cy='742' r='5'/%3E%3Crect x='1320' y='620' width='160' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M1345 646a26 9 0 1 0 52 0a26 9 0 1 0-52 0M1345 646v40a26 9 0 0 0 52 0v-40M1345 664a26 9 0 0 0 52 0'/%3E%3Cpath d='M1410 652h40M1410 668h30M1410 684h40'/%3E%3Cpath d='M1520 360c-6 0-7 5-7 10c0 6-2 7-6 7c4 0 6 1 6 7c0 5 1 10 7 10'/%3E%3Cpath d='M60 200c6 0 7 5 7 10c0 6 2 7 6 7c-4 0-6 1-6 7c0 5-1 10-7 10'/%3E%3C/g%3E%3Cg fill='black'%3E%3Ccircle cx='575' cy='60' r='2.5'/%3E%3Ccircle cx='590' cy='60' r='2.5'/%3E%3Ccircle cx='605' cy='60' r='2.5'/%3E%3Ccircle cx='1485' cy='860' r='2.5'/%3E%3Ccircle cx='1500' cy='860' r='2.5'/%3E%3Ccircle cx='1515' cy='860' r='2.5'/%3E%3Ccircle cx='60' cy='700' r='2.5'/%3E%3Ccircle cx='75' cy='700' r='2.5'/%3E%3Ccircle cx='90' cy='700' r='2.5'/%3E%3C/g%3E%3C/svg%3E");
+          mask-image: url("data:image/svg+xml,%3Csvg width='1600' height='900' viewBox='0 0 1600 900' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M95 340l255-90M350 250l140 110M490 360l345-60M835 300l430-150M95 340l55 280M150 620l490-10M640 610l390 10M1030 620l440-150M1470 470l30 320'/%3E%3Cpath d='M490 360l150 250M835 300l195 320M1265 150l205 320M350 250l-40-110' stroke-dasharray='5 8'/%3E%3Ccircle cx='95' cy='340' r='7'/%3E%3Ccircle cx='490' cy='360' r='7'/%3E%3Ccircle cx='835' cy='300' r='7'/%3E%3Ccircle cx='1265' cy='150' r='7'/%3E%3Ccircle cx='150' cy='620' r='7'/%3E%3Ccircle cx='640' cy='610' r='7'/%3E%3Ccircle cx='1030' cy='620' r='7'/%3E%3Ccircle cx='1470' cy='470' r='7'/%3E%3Ccircle cx='1500' cy='790' r='7'/%3E%3Ccircle cx='350' cy='250' r='7'/%3E%3Crect x='150' y='140' width='170' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M201 162a34 11 0 1 0 68 0a34 11 0 1 0-68 0M201 162v48a34 11 0 0 0 68 0v-48M201 184a34 11 0 0 0 68 0'/%3E%3Cpath d='M285 172h30M285 186h22M285 200h30'/%3E%3Crect x='560' y='95' width='185' height='100' rx='14' stroke-width='1.8'/%3E%3Cpath d='M595 140l55-20M595 140l65 30M650 120l55 30M660 170l45-20M660 170l40 15M705 150l-5 35'/%3E%3Ccircle cx='595' cy='140' r='6'/%3E%3Ccircle cx='650' cy='120' r='6'/%3E%3Ccircle cx='660' cy='170' r='6'/%3E%3Ccircle cx='705' cy='150' r='6'/%3E%3Ccircle cx='700' cy='185' r='6'/%3E%3Crect x='980' y='140' width='165' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M1000 168l125-8M1000 186l125-8M1000 204l125-8M1000 222l125-8'/%3E%3Cpath d='M1062 160v66' stroke-dasharray='4 5'/%3E%3Crect x='1355' y='250' width='175' height='90' rx='14' stroke-width='1.8'/%3E%3Cpath d='M1400 264c-8 0-9 6-9 12c0 8-3 9-8 9c5 0 8 1 8 9c0 6 1 12 9 12'/%3E%3Cpath d='M1485 264c8 0 9 6 9 12c0 8 3 9 8 9c-5 0-8 1-8 9c0 6-1 12-9 12'/%3E%3Cpath d='M1428 283h28M1428 298h18'/%3E%3Crect x='225' y='430' width='175' height='100' rx='14' stroke-width='1.8'/%3E%3Cpath d='M312 450c9-7 24-6 30 3c11-2 21 7 18 17c9 5 8 18-1 22c2 11-9 19-19 14c-7 9-22 8-29-1c-11 4-23-7-18-18c-9-6-7-19 4-21c-3-11 7-19 14-16z'/%3E%3Cpath d='M312 450v58M296 468c7 4 7 13 0 18M328 470c-7 4-7 13 0 18'/%3E%3Crect x='690' y='455' width='160' height='100' rx='14' stroke-width='1.8'/%3E%3Cpath d='M725 476h44l16 16v50h-60zM769 476v16h16'/%3E%3Cpath d='M736 508h40M736 521h40M736 534h26'/%3E%3Crect x='1110' y='430' width='175' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M1150 460l-12 12l12 12M1176 460l12 12l-12 12M1168 452l-8 40'/%3E%3Cpath d='M1218 470m-19 0a19 19 0 1 0 38 0a19 19 0 1 0-38 0M1232 484l16 16'/%3E%3Crect x='410' y='690' width='170' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M430 706h108v16h-108zM436 728h108v16h-108zM442 750h108v16h-108z'/%3E%3Crect x='880' y='690' width='180' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M905 712h30l10 10v34h-40zM935 712v10h10'/%3E%3Cpath d='M1010 720h30l10 10v34h-40zM1040 720v10h10'/%3E%3Cpath d='M945 740c26 6 38-2 62 0' stroke-dasharray='5 7'/%3E%3Ccircle cx='988' cy='742' r='5'/%3E%3Crect x='1320' y='620' width='160' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M1345 646a26 9 0 1 0 52 0a26 9 0 1 0-52 0M1345 646v40a26 9 0 0 0 52 0v-40M1345 664a26 9 0 0 0 52 0'/%3E%3Cpath d='M1410 652h40M1410 668h30M1410 684h40'/%3E%3Cpath d='M1520 360c-6 0-7 5-7 10c0 6-2 7-6 7c4 0 6 1 6 7c0 5 1 10 7 10'/%3E%3Cpath d='M60 200c6 0 7 5 7 10c0 6 2 7 6 7c-4 0-6 1-6 7c0 5-1 10-7 10'/%3E%3C/g%3E%3Cg fill='black'%3E%3Ccircle cx='575' cy='60' r='2.5'/%3E%3Ccircle cx='590' cy='60' r='2.5'/%3E%3Ccircle cx='605' cy='60' r='2.5'/%3E%3Ccircle cx='1485' cy='860' r='2.5'/%3E%3Ccircle cx='1500' cy='860' r='2.5'/%3E%3Ccircle cx='1515' cy='860' r='2.5'/%3E%3Ccircle cx='60' cy='700' r='2.5'/%3E%3Ccircle cx='75' cy='700' r='2.5'/%3E%3Ccircle cx='90' cy='700' r='2.5'/%3E%3C/g%3E%3C/svg%3E");
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+  -webkit-mask-position: center;  mask-position: center;
+  -webkit-mask-size: cover;       mask-size: cover;
 }
 
-/* Mineral seam of light through rock + soft mineral glows. rgba (not color-mix)
-   so alpha is reliable across engines. */
-body::after {
+/* Cool mineral light pools behind the schematic — a warm accent spark at the
+   surface (top-left), a cool link-blue pool at depth (bottom-right), and a
+   gentle overall deepening toward the core. Kept faint so text stays readable.
+   rgba (not color-mix) so alpha is reliable across engines. */
+html body::after {
   content: ""; position: fixed; inset: 0; z-index: -2; pointer-events: none;
   background:
-    radial-gradient(ellipse 62% 40% at 50% -6%, rgba(255, 218, 25, 0.10), transparent 60%),
-    linear-gradient(104deg,
-      transparent 45.5%,
-      rgba(255, 218, 25, 0.02) 47%,
-      rgba(255, 218, 25, 0.16) 49.6%,
-      rgba(255, 218, 25, 0.04) 50.6%,
-      transparent 54%),
-    radial-gradient(ellipse 50% 52% at 96% 100%, rgba(121, 192, 255, 0.10), transparent 62%);
+    radial-gradient(ellipse 48% 55% at 6% 4%,   rgba(255, 218, 25, 0.10), transparent 60%),
+    radial-gradient(ellipse 54% 52% at 94% 98%, rgba(121, 192, 255, 0.12), transparent 62%),
+    radial-gradient(ellipse 58% 46% at 80% 108%, rgba(56, 148, 212, 0.10), transparent 62%),
+    linear-gradient(180deg, transparent 46%, rgba(28, 72, 106, 0.06) 100%);
 }
 
 /* Strata sections are translucent so the one fixed sedimentary body shows
    through every band; alternate bands add a shifted tint for section rhythm. */
 .strata, .same-garden { position: relative; box-shadow: inset 0 1px 0 var(--band-edge); }
 .strata-solid { background-color: var(--band-solid-bg); }
+
+/* ── Scroll-lock to section + per-section viewport sizing ──────────────────
+   Each stratum fills the viewport and snaps to the top; `safe center` vertical
+   centering never clips a stratum taller than the viewport (e.g. the 23-tool
+   section) — it aligns to the top instead. Mobile falls back to natural scroll. */
+.strata {
+  min-height: 100vh;
+  scroll-snap-align: start;
+  display: flex;
+  flex-direction: column;
+  justify-content: safe center;
+}
+/* Alternating band rhythm: every other stratum a touch darker. TRANSLUCENT
+   overlay (black mixed with transparent) so the fixed sedimentary body art
+   shows through both the base and the darkened bands. */
+.strata:nth-of-type(odd)  { background-color: transparent; }
+.strata:nth-of-type(even) { background-color: color-mix(in oklab, #000 7%, transparent); }
+@media (max-width: 760px) {
+  html { scroll-snap-type: none; }
+  .strata { min-height: 0; }
+}
