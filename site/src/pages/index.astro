@@ -2,17 +2,15 @@
 import Base from "wicked-web/layouts/Base.astro";
 import Topbar from "wicked-web/components/Topbar.astro";
 import Footer from "wicked-web/components/Footer.astro";
-import SameGarden from "wicked-web/components/SameGarden.astro";
 import "../styles/global.css";
 import Content from "../components/Content.tsx";
 ---
 
 <Base
-  title="wicked-estate — the code graph agents actually trust"
-  description="Turn any repo into a queryable graph. Symbols, calls, imports, types, refs — across any language. Built for LLM agents."
+  title="wicked-estate — the substrate every agent queries"
+  description="One local-first MCP server as five stacked strata — code graph (with injected edges grep never sees), memory, knowledge, requirements↔code, and typed annotations — all keyed to one symbol identity, every edge stamped with confidence and provenance. 23 tools, 100+ languages. SQLite by default, PostgreSQL for teams."
 >
   <Topbar pkg="wicked-estate" repo="https://github.com/mikeparcewski/wicked-estate" />
   <Content client:load />
-  <SameGarden current="wicked-estate" />
   <Footer repo="https://github.com/mikeparcewski/wicked-estate" />
 </Base>

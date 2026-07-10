@@ -1,29 +1,25 @@
 @import "tailwindcss";
 
 /* Dark mode is attribute-driven: <html data-theme="dark"> — shared with the
-   wicked-web Topbar theme toggle so one switch drives tokens + Tailwind.
-   (No `dark:` utilities are used today — theme flips entirely through the CSS
-   custom properties below — but the variant is wired for parity with the
-   rest of the wicked-* family.) */
+   wicked-web Topbar theme toggle so one switch drives tokens + Tailwind. */
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
-/* ── Brand tokens (canonical wicked-garden) ───────────────────────────────────
-   :root is the LIGHT theme; [data-theme="dark"] overrides for night mode.
-   The shared wicked-web chrome (Topbar / Footer) reads these same custom
-   properties — keep the names in sync with wicked-web/src/styles/tokens.css.
----------------------------------------------------------------------------- */
-/* Family palette (canvas / ink / accent / hairline / link / --topbar-h / fonts
-   + the harbor-blue light & family dark themes) is inherited from the shared
-   wicked-web tokens.css (loaded by the shared Base). Only estate-specific
-   tokens live here, per theme — so estate matches the family. */
+/* ── estate-specific tokens ───────────────────────────────────────────────────
+   The family palette (canvas / ink / accent / hairline / link / fonts + the
+   harbor-blue light & family-dark themes) is inherited from the shared
+   wicked-web tokens.css. Only estate's geological section tokens live here.
+   SUBSTRATE = sub + stratum: the page is one continuous body of stacked strata,
+   so the section rhythm and background are sedimentary, not terminal cards. */
 :root {
   --on-accent: #1c2c36;
   --shadow-rgb: 14, 38, 52;
   color-scheme: light;
 
-  /* ── Section-band system ─────────────────────────────────────────────────── */
-  --band-edge: color-mix(in oklab, var(--ink) 8%, transparent);    /* hairline section separator */
-  --band-solid-bg: rgba(9, 26, 36, 0.42);   /* alternate band: translucent darker teal (light) — graph shows through */
+  --band-edge: color-mix(in oklab, var(--ink) 9%, transparent);   /* contour hairline between strata */
+  --band-solid-bg: rgba(9, 26, 36, 0.34);                          /* alternate stratum tint (light) */
+  --rock: color-mix(in oklab, var(--ink) 5%, var(--canvas));       /* rock-panel surface */
+  --rock-2: color-mix(in oklab, var(--ink) 8%, var(--canvas));     /* deeper rock */
+  --seam: #ffda19;                                                 /* the mineral seam of light */
 }
 
 [data-theme="dark"] {
@@ -31,14 +27,12 @@
   --shadow-rgb: 0, 0, 0;
   color-scheme: dark;
 
-  --band-edge: color-mix(in oklab, var(--ink) 7%, transparent);
-  --band-solid-bg: rgba(20, 33, 61, 0.5);   /* alternate band: translucent navy (#14213d) — graph shows through */
+  --band-edge: color-mix(in oklab, var(--ink) 8%, transparent);
+  --band-solid-bg: rgba(20, 33, 61, 0.42);
+  --rock: color-mix(in oklab, var(--ink) 4%, var(--canvas));
+  --rock-2: color-mix(in oklab, var(--ink) 7%, var(--canvas));
 }
 
-/* Map brand tokens to Tailwind utilities. `inline` keeps them live so the
-   utilities re-resolve when data-theme flips the underlying custom properties.
-   These back the bg-canvas / text-ink / border-hairline / font-display etc.
-   classes used throughout the React content. */
 @theme inline {
   --color-canvas: var(--canvas);
   --color-canvas-2: var(--canvas-2);
@@ -55,18 +49,40 @@
   --font-display: "Archivo", ui-sans-serif, sans-serif;
   --font-sans: "Hanken Grotesk", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
-
-  --animate-flow: flow 2s ease-in-out infinite;
-  --animate-blink: blink 1.05s steps(2, start) infinite;
 }
 
-@keyframes flow {
-  0%, 100% { opacity: 0.3; }
-  50% { opacity: 1; }
+@keyframes seam-shimmer {
+  0%, 100% { opacity: 0.55; }
+  50%       { opacity: 1; }
 }
-@keyframes blink {
-  0%, 50% { opacity: 1; }
-  50.01%, 100% { opacity: 0; }
+@keyframes core-rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.35; }
+}
+/* the tab dwell bar filling before the subject advances */
+@keyframes tab-fill {
+  from { width: 0%; }
+  to   { width: 100%; }
+}
+/* the winning-tier label popping into scope */
+@keyframes label-pop {
+  0%   { transform: scale(0.9); opacity: 0.4; }
+  60%  { transform: scale(1.06); }
+  100% { transform: scale(1); opacity: 1; }
+}
+/* the left pointer nudging toward the active layer */
+@keyframes pointer-nudge {
+  0%, 100% { transform: translateX(0); }
+  50%       { transform: translateX(4px); }
+}
+/* auto-demo hint dot */
+@keyframes demo-blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.25; }
 }
 
 @layer base {
@@ -77,34 +93,22 @@
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
     scroll-behavior: smooth;
+    /* Scroll-lock to section: the document snaps stratum-to-stratum. `proximity`
+       (not mandatory) so a stratum taller than the viewport never traps the
+       user; scroll-padding offsets the fixed topbar. */
     scroll-snap-type: y mandatory;
-    /* base canvas lives on <html>; the transparent body lets section bands sit on it */
+    scroll-padding-top: var(--topbar-h);
     background-color: var(--canvas);
   }
-
-  /* Phones: scroll-snap locks feel janky on mobile — let scrolling run free. */
-  @media (max-width: 768px) { html { scroll-snap-type: none; } }
 
   body {
     margin: 0;
     background-color: transparent;
     color: var(--ink);
     font-family: "Hanken Grotesk", ui-sans-serif, system-ui, sans-serif;
-    overflow-x: clip; /* clip (not hidden) — hidden makes body a scroll container and breaks sticky scroll sections */
+    overflow-x: clip;
     line-height: 1.55;
     transition: color 0.35s var(--ease);
-  }
-
-  /* Film grain over everything (kept on html::after, never body::after) */
-  html::after {
-    content: ""; position: fixed; inset: 0; z-index: 90; pointer-events: none;
-    opacity: 0.055;
-    mix-blend-mode: soft-light;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  }
-  [data-theme="dark"] html::after {
-    opacity: 0.07;
-    mix-blend-mode: overlay;
   }
 
   h1, h2, h3, h4 {
@@ -114,6 +118,7 @@
     line-height: 1.0;
     font-stretch: 115%;
     margin: 0;
+    text-wrap: balance;
   }
 
   ::selection { background: var(--accent); color: var(--on-accent); }
@@ -126,236 +131,291 @@
 }
 
 @layer components {
-  /* ── Terminal — always dark regardless of mode ──────────────────────────── */
-  .terminal {
-    background: #111113;
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 12px;
-    overflow: hidden;
-    font-family: "JetBrains Mono", ui-monospace, monospace;
-    font-size: 0.8rem;
-  }
-
-  .terminal-bar {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 10px 16px;
-    border-bottom: 1px solid rgba(255,255,255,0.07);
-    background: #0d0d0f;
-  }
-
-  .terminal-dot {
-    width: 11px; height: 11px; border-radius: 9999px;
-  }
-
-  /* ── Section kicker label ───────────────────────────────────────────────── */
+  /* ── Section kicker / sample tag ────────────────────────────────────────── */
   .kicker {
     font-family: "JetBrains Mono", ui-monospace, monospace;
-    font-size: 0.65rem;
-    letter-spacing: 0.26em;
+    font-size: 0.64rem;
+    letter-spacing: 0.28em;
     text-transform: uppercase;
     color: var(--muted);
     font-weight: 500;
-    display: block;
-    margin-bottom: 12px;
+    display: inline-block;
   }
 
-  /* ── Cards ──────────────────────────────────────────────────────────────── */
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--hairline);
-    border-radius: 12px;
-    padding: 20px 24px;
-    transition: border-color 0.25s var(--ease);
-  }
-
-  .card-hover {
-    background: var(--surface);
-    border: 1px solid var(--hairline);
-    border-radius: 12px;
-    padding: 20px 24px;
-    transition: border-color 0.25s var(--ease), box-shadow 0.25s var(--ease);
-  }
-  .card-hover:hover {
-    border-color: color-mix(in oklab, var(--accent) 55%, var(--hairline));
-    box-shadow: 0 16px 48px -20px rgba(var(--shadow-rgb), 0.18);
-  }
-
-  /* ── Phase box (pipeline steps) ─────────────────────────────────────────── */
-  .phase-box {
-    border: 1px solid var(--hairline-strong);
-    border-radius: 14px;
-    padding: 20px 24px;
-    background: color-mix(in oklab, var(--surface) 60%, var(--canvas));
-  }
-
-  /* ── Language tag pill ──────────────────────────────────────────────────── */
-  .lang-tag {
-    font-family: "JetBrains Mono", monospace;
-    font-size: 0.68rem;
-    padding: 3px 8px;
-    border-radius: 5px;
-    background: color-mix(in oklab, var(--ink) 7%, var(--canvas));
+  /* ── Mono geological sample tag (depth markers, chips) ──────────────────── */
+  .tag {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.62rem;
+    letter-spacing: 0.06em;
+    padding: 3px 9px;
+    border-radius: 4px;
+    background: color-mix(in oklab, var(--ink) 6%, transparent);
     color: var(--muted);
     border: 1px solid var(--hairline-strong);
-  }
-
-  .lang-tag-lg {
-    font-family: "JetBrains Mono", monospace;
-    font-size: 0.82rem;
-    padding: 7px 16px;
-    border-radius: 8px;
-    background: color-mix(in oklab, var(--ink) 7%, var(--canvas));
-    color: var(--muted);
-    border: 1px solid var(--hairline-strong);
-    transition: color 0.2s var(--ease), border-color 0.2s var(--ease), background 0.2s var(--ease);
-    cursor: default;
-    user-select: none;
     white-space: nowrap;
   }
-  .lang-tag-lg:hover {
-    color: var(--ink);
-    border-color: color-mix(in oklab, var(--accent) 55%, var(--hairline));
-    background: color-mix(in oklab, var(--accent) 8%, var(--canvas));
+  .tag-accent {
+    color: var(--accent);
+    border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline));
+    background: color-mix(in oklab, var(--accent) 9%, transparent);
   }
 
-  /* ── Marquee scroll ─────────────────────────────────────────────────────── */
-  @keyframes marquee-fwd {
-    from { transform: translateX(0); }
-    to   { transform: translateX(-50%); }
+  /* ── Rock panel — the sedimentary surface, replaces the terminal card ───── */
+  .rock-panel {
+    position: relative;
+    background: var(--rock);
+    border: 1px solid var(--hairline-strong);
+    border-radius: 14px;
+    overflow: hidden;
   }
-  @keyframes marquee-rev {
-    from { transform: translateX(-50%); }
-    to   { transform: translateX(0); }
+  /* fine sediment contour texture inside a panel */
+  .rock-panel::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 0;
+    background-image: repeating-linear-gradient(
+      179deg,
+      transparent 0 21px,
+      color-mix(in oklab, var(--ink) 4%, transparent) 21px 22px
+    );
+    opacity: 0.7;
+  }
+  .rock-panel > * { position: relative; z-index: 1; }
+
+  /* ── Depth marker ───────────────────────────────────────────────────────── */
+  .depth {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.6rem;
+    letter-spacing: 0.05em;
+    color: var(--faint);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
 
-  /* ── Language node cloud ────────────────────────────────────────────────── */
-  @keyframes node-pop {
-    from { opacity: 0; transform: scale(0.55); }
-    to   { opacity: 1; transform: scale(1); }
+  /* ── The mineral seam — a vertical vein of accent light ─────────────────── */
+  .seam-line {
+    width: 2px;
+    background: linear-gradient(
+      to bottom,
+      transparent,
+      color-mix(in oklab, var(--accent) 70%, transparent) 12%,
+      var(--accent) 50%,
+      color-mix(in oklab, var(--accent) 70%, transparent) 88%,
+      transparent
+    );
+    box-shadow: 0 0 14px 1px color-mix(in oklab, var(--accent) 45%, transparent);
+    animation: seam-shimmer 5.5s var(--ease) infinite;
   }
-  @keyframes node-float {
-    0%, 100% { transform: translateY(0px); }
-    50%       { transform: translateY(-9px); }
+  @media (prefers-reduced-motion: reduce) { .seam-line { animation: none; } }
+
+  /* ── Provenance chip ────────────────────────────────────────────────────── */
+  .prov {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.58rem;
+    letter-spacing: 0.04em;
+    padding: 2px 7px;
+    border-radius: 4px;
+    white-space: nowrap;
+    border: 1px solid var(--hairline-strong);
+    color: var(--muted);
+    background: color-mix(in oklab, var(--ink) 5%, transparent);
   }
 
-  /* ── Step player ────────────────────────────────────────────────────────── */
-  @keyframes step-progress {
-    from { width: 0%; }
-    to   { width: 100%; }
+  /* ── Confidence dial (range input) ──────────────────────────────────────── */
+  .dial {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 4px; border-radius: 2px; outline: none; cursor: pointer;
+    background: linear-gradient(90deg,
+      color-mix(in oklab, var(--ink) 18%, transparent),
+      var(--accent));
   }
-  @keyframes line-fade {
-    from { opacity: 0; transform: translateY(5px); }
-    to   { opacity: 1; transform: translateY(0); }
+  .dial::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 24px; height: 24px; border-radius: 50%;
+    background: var(--accent);
+    border: 4px solid var(--canvas);
+    box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 70%, transparent), 0 6px 16px rgba(0,0,0,0.4);
+    cursor: grab;
+  }
+  .dial::-webkit-slider-thumb:active { cursor: grabbing; }
+  .dial::-moz-range-thumb {
+    width: 24px; height: 24px; border-radius: 50%;
+    background: var(--accent); border: 4px solid var(--canvas);
+    box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 70%, transparent);
+    cursor: grab;
   }
 
-  /* ── Rule card ──────────────────────────────────────────────────────────── */
-  .rule-card {
-    display: flex;
-    gap: 14px;
-    padding: 18px 20px;
-    border-radius: 12px;
-    border: 1px solid var(--hairline);
-    background: var(--surface);
-    transition: border-color 0.25s var(--ease);
+  /* ── Fact row (dossier) ─────────────────────────────────────────────────── */
+  .fact {
+    animation: core-rise 0.4s var(--ease) both;
+    transition: opacity 0.3s var(--ease), filter 0.3s var(--ease);
   }
-  .rule-card:hover {
-    border-color: color-mix(in oklab, var(--accent) 50%, var(--hairline));
-  }
-
+  @media (prefers-reduced-motion: reduce) { .fact { animation: none; } }
 
   /* ── CTA buttons ─────────────────────────────────────────────────────────── */
   .btn-primary {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    padding: 12px 24px;
-    background: var(--accent);
-    color: var(--on-accent);
-    font-family: "JetBrains Mono", monospace;
-    font-size: 0.78rem;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    border-radius: 10px;
-    border: none;
-    cursor: pointer;
-    text-decoration: none;
-    transition: background 0.2s var(--ease);
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 13px 26px;
+    background: var(--accent); color: var(--on-accent);
+    font-family: "JetBrains Mono", monospace; font-size: 0.78rem; font-weight: 700; letter-spacing: 0.04em;
+    border-radius: 10px; border: none; cursor: pointer; text-decoration: none;
+    transition: background 0.2s var(--ease), transform 0.15s var(--ease);
   }
-  .btn-primary:hover { background: #ffe45c; }
+  .btn-primary:hover { background: #ffe45c; transform: translateY(-1px); }
 
   .btn-outline {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    padding: 12px 24px;
-    background: transparent;
-    color: var(--ink);
-    font-family: "JetBrains Mono", monospace;
-    font-size: 0.78rem;
-    font-weight: 500;
-    letter-spacing: 0.04em;
-    border-radius: 10px;
-    border: 1px solid var(--hairline-strong);
-    cursor: pointer;
-    text-decoration: none;
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 13px 26px; background: transparent; color: var(--ink);
+    font-family: "JetBrains Mono", monospace; font-size: 0.78rem; font-weight: 500; letter-spacing: 0.04em;
+    border-radius: 10px; border: 1px solid var(--hairline-strong); cursor: pointer; text-decoration: none;
     transition: border-color 0.2s var(--ease), color 0.2s var(--ease);
   }
   .btn-outline:hover { border-color: var(--accent); }
 
-  /* ── Confidence bar ──────────────────────────────────────────────────────── */
-  .conf-track {
-    flex: 1;
-    height: 5px;
-    background: var(--hairline-strong);
-    border-radius: 9999px;
-    overflow: hidden;
+  /* ── Small pill toggle ───────────────────────────────────────────────────── */
+  .seg {
+    font-family: "JetBrains Mono", monospace; font-size: 0.72rem; font-weight: 600;
+    padding: 9px 18px; border-radius: 9px; cursor: pointer;
+    border: 1px solid var(--hairline-strong); background: transparent; color: var(--muted);
+    transition: all 0.2s var(--ease);
+  }
+  .seg[data-on="true"] {
+    color: var(--on-accent); background: var(--accent);
+    border-color: var(--accent);
   }
 
-  /* ── Flow connector arrow ────────────────────────────────────────────────── */
-  .flow-anim { animation: flow-anim 2s ease-in-out infinite; }
-  @keyframes flow-anim {
-    0%, 100% { opacity: 0.25; }
-    50%       { opacity: 1; }
+  /* ── Drill underline — a single scan line that STEPS down the core, settling
+     under one block at a time and pausing there before advancing. It does not
+     sweep behind the rows; it underlines the active block. ──────────────────── */
+  .drill-underline {
+    position: absolute; height: 2px; pointer-events: none;
+    background: linear-gradient(90deg, transparent, var(--accent) 15%, var(--accent) 85%, transparent);
+    box-shadow: 0 0 14px 2px color-mix(in oklab, var(--accent) 55%, transparent);
+    z-index: 2;
+    transition: top 0.5s var(--ease), left 0.5s var(--ease), width 0.5s var(--ease);
+  }
+  @media (prefers-reduced-motion: reduce) { .drill-underline { display: none; } }
+
+  /* ── Tab dwell bar — fills over the auto-advance interval so it reads as a
+     tab progression that will step to the next subject. ────────────────────── */
+  .tab-progress {
+    height: 2px; margin-top: 7px; border-radius: 2px; overflow: hidden;
+    background: color-mix(in oklab, var(--ink) 10%, transparent);
+  }
+  .tab-progress > span {
+    display: block; height: 100%; width: 0;
+    background: var(--accent); border-radius: 2px;
+    animation: tab-fill 5s linear forwards;
+  }
+  @media (prefers-reduced-motion: reduce) { .tab-progress { display: none; } }
+
+  /* ── Demo / driving status pill ──────────────────────────────────────────── */
+  .demo-pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: "JetBrains Mono", monospace; font-size: 0.6rem; letter-spacing: 0.12em;
+    text-transform: uppercase; padding: 5px 11px; border-radius: 999px;
+    border: 1px solid var(--hairline-strong); color: var(--muted);
+    background: color-mix(in oklab, var(--ink) 5%, transparent); cursor: pointer;
+    transition: all 0.2s var(--ease);
+  }
+  .demo-pill:hover { border-color: var(--accent); color: var(--ink); }
+  .demo-pill .dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+  }
+  .demo-pill[data-live="true"] .dot { animation: demo-blink 1.4s var(--ease) infinite; }
+  .demo-pill[data-live="false"] .dot { background: var(--muted); }
+
+  /* ── Left pointer (bedrock layer cycler) ─────────────────────────────────── */
+  .layer-pointer {
+    display: inline-grid; place-items: center; width: 22px; flex-shrink: 0;
+    color: var(--accent); font-size: 0.85rem;
+    animation: pointer-nudge 1.6s var(--ease) infinite;
+  }
+  .layer-row {
+    transition: background 0.3s var(--ease), opacity 0.3s var(--ease);
+    cursor: pointer;
+  }
+  .layer-row[data-active="false"] { opacity: 0.5; }
+  .layer-row[data-active="true"]  {
+    background: color-mix(in oklab, var(--accent) 8%, transparent);
   }
 
-  /* ── Live dot ────────────────────────────────────────────────────────────── */
-  .live-dot { animation: pulse-dot 2.2s ease-in-out infinite; }
-  @keyframes pulse-dot {
-    0%, 100% { opacity: 1; }
-    50%       { opacity: 0.3; }
+  /* ── Provenance winner label — stands out when in scope ──────────────────── */
+  .who-label { transition: all 0.3s var(--ease); }
+  .who-label[data-scope="true"] {
+    color: var(--on-accent); background: var(--accent);
+    border-radius: 5px; padding: 3px 9px; font-weight: 700;
+    animation: label-pop 0.4s var(--ease) both;
+    box-shadow: 0 4px 14px color-mix(in oklab, var(--accent) 40%, transparent);
+  }
+  .tier-row { transition: opacity 0.3s var(--ease); }
+  .tier-row[data-in="false"] { opacity: 0.34; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .layer-pointer, .demo-pill .dot, .who-label[data-scope="true"] { animation: none; }
   }
 }
 
-/* ── ONE giant network graph, fixed, spanning the whole page (estate = "the code
-   graph"). A single fixed layer behind everything — NOT per-section — so it's one
-   continuous graph, never repeated. Masked → recolours with the palette; opacity
-   is the (reliable) softness control. (UNLAYERED so it beats Tailwind utilities.) */
-body::before {
+/* ── The substrate background: estate's OWN illustrative schematic — a faint
+   line-art layer of estate's iconography, fixed behind the whole page, in the
+   same visual register as the sibling sites (garden's tool-card trellis,
+   wickedagile's umbrella). Estate IS the substrate everything queries: a code
+   GRAPH + MEMORY + KNOWLEDGE. So the motif is a connective node-and-edge graph
+   (some edges dashed = the injected edges grep never sees) threading between
+   recognizable schematic cards: a database cylinder (SQLite store), a
+   node-and-link cluster (the code graph), stacked strata/records (SUBSTRATE),
+   code brackets { } + a function glyph, a brain (memory), a wiki document +
+   linked docs (knowledge/relate), and a magnifier over a code symbol
+   (retrieval). Same engine as garden: ONE fixed masked layer painted in --ink
+   at low opacity, so it recolours per theme and shows through the translucent
+   strata bands while text stays readable. `html body` (higher specificity,
+   UNLAYERED) decisively overrides the shared wicked-web tokens.css blueprint
+   art. Inline data-URI mask → no base-path issues. */
+html body::before {
   content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
   background-color: var(--ink);
-  opacity: 0.05;
-  -webkit-mask-image: url("/motifs/graph-network.svg");
-          mask-image: url("/motifs/graph-network.svg");
+  background-image: none;
+  opacity: 0.075;
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg width='1600' height='900' viewBox='0 0 1600 900' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M95 340l255-90M350 250l140 110M490 360l345-60M835 300l430-150M95 340l55 280M150 620l490-10M640 610l390 10M1030 620l440-150M1470 470l30 320'/%3E%3Cpath d='M490 360l150 250M835 300l195 320M1265 150l205 320M350 250l-40-110' stroke-dasharray='5 8'/%3E%3Ccircle cx='95' cy='340' r='7'/%3E%3Ccircle cx='490' cy='360' r='7'/%3E%3Ccircle cx='835' cy='300' r='7'/%3E%3Ccircle cx='1265' cy='150' r='7'/%3E%3Ccircle cx='150' cy='620' r='7'/%3E%3Ccircle cx='640' cy='610' r='7'/%3E%3Ccircle cx='1030' cy='620' r='7'/%3E%3Ccircle cx='1470' cy='470' r='7'/%3E%3Ccircle cx='1500' cy='790' r='7'/%3E%3Ccircle cx='350' cy='250' r='7'/%3E%3Crect x='150' y='140' width='170' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M201 162a34 11 0 1 0 68 0a34 11 0 1 0-68 0M201 162v48a34 11 0 0 0 68 0v-48M201 184a34 11 0 0 0 68 0'/%3E%3Cpath d='M285 172h30M285 186h22M285 200h30'/%3E%3Crect x='560' y='95' width='185' height='100' rx='14' stroke-width='1.8'/%3E%3Cpath d='M595 140l55-20M595 140l65 30M650 120l55 30M660 170l45-20M660 170l40 15M705 150l-5 35'/%3E%3Ccircle cx='595' cy='140' r='6'/%3E%3Ccircle cx='650' cy='120' r='6'/%3E%3Ccircle cx='660' cy='170' r='6'/%3E%3Ccircle cx='705' cy='150' r='6'/%3E%3Ccircle cx='700' cy='185' r='6'/%3E%3Crect x='980' y='140' width='165' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M1000 168l125-8M1000 186l125-8M1000 204l125-8M1000 222l125-8'/%3E%3Cpath d='M1062 160v66' stroke-dasharray='4 5'/%3E%3Crect x='1355' y='250' width='175' height='90' rx='14' stroke-width='1.8'/%3E%3Cpath d='M1400 264c-8 0-9 6-9 12c0 8-3 9-8 9c5 0 8 1 8 9c0 6 1 12 9 12'/%3E%3Cpath d='M1485 264c8 0 9 6 9 12c0 8 3 9 8 9c-5 0-8 1-8 9c0 6-1 12-9 12'/%3E%3Cpath d='M1428 283h28M1428 298h18'/%3E%3Crect x='225' y='430' width='175' height='100' rx='14' stroke-width='1.8'/%3E%3Cpath d='M312 450c9-7 24-6 30 3c11-2 21 7 18 17c9 5 8 18-1 22c2 11-9 19-19 14c-7 9-22 8-29-1c-11 4-23-7-18-18c-9-6-7-19 4-21c-3-11 7-19 14-16z'/%3E%3Cpath d='M312 450v58M296 468c7 4 7 13 0 18M328 470c-7 4-7 13 0 18'/%3E%3Crect x='690' y='455' width='160' height='100' rx='14' stroke-width='1.8'/%3E%3Cpath d='M725 476h44l16 16v50h-60zM769 476v16h16'/%3E%3Cpath d='M736 508h40M736 521h40M736 534h26'/%3E%3Crect x='1110' y='430' width='175' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M1150 460l-12 12l12 12M1176 460l12 12l-12 12M1168 452l-8 40'/%3E%3Cpath d='M1218 470m-19 0a19 19 0 1 0 38 0a19 19 0 1 0-38 0M1232 484l16 16'/%3E%3Crect x='410' y='690' width='170' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M430 706h108v16h-108zM436 728h108v16h-108zM442 750h108v16h-108z'/%3E%3Crect x='880' y='690' width='180' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M905 712h30l10 10v34h-40zM935 712v10h10'/%3E%3Cpath d='M1010 720h30l10 10v34h-40zM1040 720v10h10'/%3E%3Cpath d='M945 740c26 6 38-2 62 0' stroke-dasharray='5 7'/%3E%3Ccircle cx='988' cy='742' r='5'/%3E%3Crect x='1320' y='620' width='160' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M1345 646a26 9 0 1 0 52 0a26 9 0 1 0-52 0M1345 646v40a26 9 0 0 0 52 0v-40M1345 664a26 9 0 0 0 52 0'/%3E%3Cpath d='M1410 652h40M1410 668h30M1410 684h40'/%3E%3Cpath d='M1520 360c-6 0-7 5-7 10c0 6-2 7-6 7c4 0 6 1 6 7c0 5 1 10 7 10'/%3E%3Cpath d='M60 200c6 0 7 5 7 10c0 6 2 7 6 7c-4 0-6 1-6 7c0 5-1 10-7 10'/%3E%3C/g%3E%3Cg fill='black'%3E%3Ccircle cx='575' cy='60' r='2.5'/%3E%3Ccircle cx='590' cy='60' r='2.5'/%3E%3Ccircle cx='605' cy='60' r='2.5'/%3E%3Ccircle cx='1485' cy='860' r='2.5'/%3E%3Ccircle cx='1500' cy='860' r='2.5'/%3E%3Ccircle cx='1515' cy='860' r='2.5'/%3E%3Ccircle cx='60' cy='700' r='2.5'/%3E%3Ccircle cx='75' cy='700' r='2.5'/%3E%3Ccircle cx='90' cy='700' r='2.5'/%3E%3C/g%3E%3C/svg%3E");
+          mask-image: url("data:image/svg+xml,%3Csvg width='1600' height='900' viewBox='0 0 1600 900' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M95 340l255-90M350 250l140 110M490 360l345-60M835 300l430-150M95 340l55 280M150 620l490-10M640 610l390 10M1030 620l440-150M1470 470l30 320'/%3E%3Cpath d='M490 360l150 250M835 300l195 320M1265 150l205 320M350 250l-40-110' stroke-dasharray='5 8'/%3E%3Ccircle cx='95' cy='340' r='7'/%3E%3Ccircle cx='490' cy='360' r='7'/%3E%3Ccircle cx='835' cy='300' r='7'/%3E%3Ccircle cx='1265' cy='150' r='7'/%3E%3Ccircle cx='150' cy='620' r='7'/%3E%3Ccircle cx='640' cy='610' r='7'/%3E%3Ccircle cx='1030' cy='620' r='7'/%3E%3Ccircle cx='1470' cy='470' r='7'/%3E%3Ccircle cx='1500' cy='790' r='7'/%3E%3Ccircle cx='350' cy='250' r='7'/%3E%3Crect x='150' y='140' width='170' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M201 162a34 11 0 1 0 68 0a34 11 0 1 0-68 0M201 162v48a34 11 0 0 0 68 0v-48M201 184a34 11 0 0 0 68 0'/%3E%3Cpath d='M285 172h30M285 186h22M285 200h30'/%3E%3Crect x='560' y='95' width='185' height='100' rx='14' stroke-width='1.8'/%3E%3Cpath d='M595 140l55-20M595 140l65 30M650 120l55 30M660 170l45-20M660 170l40 15M705 150l-5 35'/%3E%3Ccircle cx='595' cy='140' r='6'/%3E%3Ccircle cx='650' cy='120' r='6'/%3E%3Ccircle cx='660' cy='170' r='6'/%3E%3Ccircle cx='705' cy='150' r='6'/%3E%3Ccircle cx='700' cy='185' r='6'/%3E%3Crect x='980' y='140' width='165' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M1000 168l125-8M1000 186l125-8M1000 204l125-8M1000 222l125-8'/%3E%3Cpath d='M1062 160v66' stroke-dasharray='4 5'/%3E%3Crect x='1355' y='250' width='175' height='90' rx='14' stroke-width='1.8'/%3E%3Cpath d='M1400 264c-8 0-9 6-9 12c0 8-3 9-8 9c5 0 8 1 8 9c0 6 1 12 9 12'/%3E%3Cpath d='M1485 264c8 0 9 6 9 12c0 8 3 9 8 9c-5 0-8 1-8 9c0 6-1 12-9 12'/%3E%3Cpath d='M1428 283h28M1428 298h18'/%3E%3Crect x='225' y='430' width='175' height='100' rx='14' stroke-width='1.8'/%3E%3Cpath d='M312 450c9-7 24-6 30 3c11-2 21 7 18 17c9 5 8 18-1 22c2 11-9 19-19 14c-7 9-22 8-29-1c-11 4-23-7-18-18c-9-6-7-19 4-21c-3-11 7-19 14-16z'/%3E%3Cpath d='M312 450v58M296 468c7 4 7 13 0 18M328 470c-7 4-7 13 0 18'/%3E%3Crect x='690' y='455' width='160' height='100' rx='14' stroke-width='1.8'/%3E%3Cpath d='M725 476h44l16 16v50h-60zM769 476v16h16'/%3E%3Cpath d='M736 508h40M736 521h40M736 534h26'/%3E%3Crect x='1110' y='430' width='175' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M1150 460l-12 12l12 12M1176 460l12 12l-12 12M1168 452l-8 40'/%3E%3Cpath d='M1218 470m-19 0a19 19 0 1 0 38 0a19 19 0 1 0-38 0M1232 484l16 16'/%3E%3Crect x='410' y='690' width='170' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M430 706h108v16h-108zM436 728h108v16h-108zM442 750h108v16h-108z'/%3E%3Crect x='880' y='690' width='180' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M905 712h30l10 10v34h-40zM935 712v10h10'/%3E%3Cpath d='M1010 720h30l10 10v34h-40zM1040 720v10h10'/%3E%3Cpath d='M945 740c26 6 38-2 62 0' stroke-dasharray='5 7'/%3E%3Ccircle cx='988' cy='742' r='5'/%3E%3Crect x='1320' y='620' width='160' height='96' rx='14' stroke-width='1.8'/%3E%3Cpath d='M1345 646a26 9 0 1 0 52 0a26 9 0 1 0-52 0M1345 646v40a26 9 0 0 0 52 0v-40M1345 664a26 9 0 0 0 52 0'/%3E%3Cpath d='M1410 652h40M1410 668h30M1410 684h40'/%3E%3Cpath d='M1520 360c-6 0-7 5-7 10c0 6-2 7-6 7c4 0 6 1 6 7c0 5 1 10 7 10'/%3E%3Cpath d='M60 200c6 0 7 5 7 10c0 6 2 7 6 7c-4 0-6 1-6 7c0 5-1 10-7 10'/%3E%3C/g%3E%3Cg fill='black'%3E%3Ccircle cx='575' cy='60' r='2.5'/%3E%3Ccircle cx='590' cy='60' r='2.5'/%3E%3Ccircle cx='605' cy='60' r='2.5'/%3E%3Ccircle cx='1485' cy='860' r='2.5'/%3E%3Ccircle cx='1500' cy='860' r='2.5'/%3E%3Ccircle cx='1515' cy='860' r='2.5'/%3E%3Ccircle cx='60' cy='700' r='2.5'/%3E%3Ccircle cx='75' cy='700' r='2.5'/%3E%3Ccircle cx='90' cy='700' r='2.5'/%3E%3C/g%3E%3C/svg%3E");
   -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
   -webkit-mask-position: center;  mask-position: center;
   -webkit-mask-size: cover;       mask-size: cover;
 }
 
-/* Bursts of light — fixed accent/link glows behind the graph (the warmth from
-   the original). rgba (not color-mix) so the alpha is reliable in every engine. */
-body::after {
+/* Cool mineral light pools behind the schematic — a warm accent spark at the
+   surface (top-left), a cool link-blue pool at depth (bottom-right), and a
+   gentle overall deepening toward the core. Kept faint so text stays readable.
+   rgba (not color-mix) so alpha is reliable across engines. */
+html body::after {
   content: ""; position: fixed; inset: 0; z-index: -2; pointer-events: none;
   background:
-    radial-gradient(ellipse 48% 55% at 6% 4%,   rgba(255, 218, 25, 0.16), transparent 60%),
-    radial-gradient(ellipse 52% 52% at 94% 98%, rgba(121, 192, 255, 0.14), transparent 62%);
+    radial-gradient(ellipse 48% 55% at 6% 4%,   rgba(255, 218, 25, 0.10), transparent 60%),
+    radial-gradient(ellipse 54% 52% at 94% 98%, rgba(121, 192, 255, 0.12), transparent 62%),
+    radial-gradient(ellipse 58% 46% at 80% 108%, rgba(56, 148, 212, 0.10), transparent 62%),
+    linear-gradient(180deg, transparent 46%, rgba(28, 72, 106, 0.06) 100%);
 }
 
-/* Sections are translucent so the one fixed graph shows through every one of
-   them; the base alternates depth (clear) ↔ solid (shifted tint). */
-.band, .same-garden { position: relative; box-shadow: inset 0 1px 0 var(--band-edge); }
-.band-depth, .same-garden { background-color: transparent; }
-.band-solid { background-color: var(--band-solid-bg); }
+/* Strata sections are translucent so the one fixed sedimentary body shows
+   through every band; alternate bands add a shifted tint for section rhythm. */
+.strata, .same-garden { position: relative; box-shadow: inset 0 1px 0 var(--band-edge); }
+.strata-solid { background-color: var(--band-solid-bg); }
+
+/* ── Scroll-lock to section + per-section viewport sizing ──────────────────
+   Each stratum fills the viewport and snaps to the top; `safe center` vertical
+   centering never clips a stratum taller than the viewport (e.g. the 23-tool
+   section) — it aligns to the top instead. Mobile falls back to natural scroll. */
+.strata {
+  min-height: 100vh;
+  scroll-snap-align: start;
+  display: flex;
+  flex-direction: column;
+  justify-content: safe center;
+}
+/* Alternating band rhythm: every other stratum a touch darker. TRANSLUCENT
+   overlay (black mixed with transparent) so the fixed sedimentary body art
+   shows through both the base and the darkened bands. */
+.strata:nth-of-type(odd)  { background-color: transparent; }
+.strata:nth-of-type(even) { background-color: color-mix(in oklab, #000 7%, transparent); }
+@media (max-width: 760px) {
+  html { scroll-snap-type: none; }
+  .strata { min-height: 0; }
+}
