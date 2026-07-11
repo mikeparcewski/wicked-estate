@@ -92,13 +92,22 @@
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
-    scroll-behavior: smooth;
-    /* Scroll-lock to section: the document snaps stratum-to-stratum. `proximity`
-       (not mandatory) so a stratum taller than the viewport never traps the
-       user; scroll-padding offsets the fixed topbar. */
+    /* Scroll-lock to section: the document (the html root) snaps stratum-to-stratum.
+       `mandatory` is safe because every .strata is sized to the visible band
+       (100svh − topbar), never taller than the snapport, so a whole section can
+       always be shown — no trap. scroll-padding-top offsets the fixed topbar so
+       snap points + anchor links land below it. smooth scroll is gated behind
+       prefers-reduced-motion (see the media query below). */
     scroll-snap-type: y mandatory;
     scroll-padding-top: var(--topbar-h);
     background-color: var(--canvas);
+  }
+
+  /* Reduced-motion: no smooth-scroll animation (snapping still works, it just
+     jumps instead of glides). Completes the reduced-motion story for the page's
+     own scrolling — the JS auto-animations already honor useReducedMotion(). */
+  @media (prefers-reduced-motion: no-preference) {
+    html { scroll-behavior: smooth; }
   }
 
   body {
@@ -404,18 +413,40 @@ html body::after {
    centering never clips a stratum taller than the viewport (e.g. the 23-tool
    section) — it aligns to the top instead. Mobile falls back to natural scroll. */
 .strata {
-  min-height: 100vh;
+  /* One-viewport baseline (FOUNDATION CONTRACT for section implementers):
+     each stratum fills the band BELOW the fixed topbar — 100svh − topbar-h —
+     and centers its content in that visible band, so content is never hidden
+     under the bar and never split across the fold. svh (not vh) so mobile
+     browser chrome can't clip. min-height (not height) + `safe center` means a
+     slightly-tall section degrades gracefully (aligns to top) instead of
+     hard-clipping. Sections must NOT re-add min-height / vertical padding —
+     this rule owns vertical sizing; center your content and it fits. */
+  min-height: calc(100vh  - var(--topbar-h));   /* fallback: engines without svh */
+  min-height: calc(100svh - var(--topbar-h));
   scroll-snap-align: start;
   display: flex;
   flex-direction: column;
-  justify-content: safe center;
+  justify-content: safe center;   /* over-tall content never clips at the TOP */
+  padding-block: 0;               /* centering provides the gutters; no stacked py */
+}
+/* The hero is the FIRST section at scroll position 0, where the fixed topbar
+   OVERLAYS the content instead of pushing it down (no scroll-padding applies at
+   the top of the page). So it must fill the FULL viewport (100svh, not
+   100svh − topbar-h) — otherwise the topbar-height gap at the bottom lets the
+   next section bleed into view. The hero's own top padding clears the bar. */
+.strata:first-of-type {
+  min-height: 100vh;    /* fallback */
+  min-height: 100svh;
 }
 /* Alternating band rhythm: every other stratum a touch darker. TRANSLUCENT
    overlay (black mixed with transparent) so the fixed sedimentary body art
    shows through both the base and the darkened bands. */
 .strata:nth-of-type(odd)  { background-color: transparent; }
 .strata:nth-of-type(even) { background-color: color-mix(in oklab, #000 7%, transparent); }
-@media (max-width: 760px) {
+/* Below Tailwind's `lg` (1024px) every multi-column grid on the page collapses
+   to one column and sections grow past one screen, so mandatory snap would trap
+   or clip them. Drop snap and fall back to natural document flow with gutters. */
+@media (max-width: 1023px) {
   html { scroll-snap-type: none; }
-  .strata { min-height: 0; }
+  .strata { min-height: 0; padding-block: 3rem; }
 }

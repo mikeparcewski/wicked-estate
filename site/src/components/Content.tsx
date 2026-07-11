@@ -60,7 +60,7 @@ function Section({
   return (
     <section
       id={id}
-      className={`strata${solid ? ' strata-solid' : ''} min-h-screen flex flex-col justify-center py-24 px-7 ${className}`}
+      className={`strata${solid ? ' strata-solid' : ''} px-7 ${className}`}
     >
       {children}
     </section>
@@ -274,17 +274,17 @@ function QuerySubstrate() {
   const takeControl = () => setDriving(true)
 
   return (
-    <Section id="query" solid className="!py-10">
+    <Section id="query" solid>
       <div className="max-w-6xl mx-auto w-full">
-        <div className="mb-4 w-full text-left flex flex-wrap items-end justify-between gap-4">
+        <div className="mb-2.5 w-full text-left flex flex-wrap items-end justify-between gap-4">
           <div>
             <span className="kicker">Query the substrate</span>
-            <h2 className="mt-2 font-display text-2xl sm:text-[2.05rem] font-black text-ink w-full leading-[0.98]">
+            <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink w-full leading-[0.98]">
               One question. One dossier. Assembled live across all five strata.
             </h2>
-            <p className="mt-2.5 text-sm text-ink w-full font-sans leading-snug max-w-2xl">
-              Watch it read itself — it steps through each subject on its own, and the confidence dial sweeps to that
-              subject's cutoff. Click any subject to pin it, then drive the dial: push it to{' '}
+            <p className="mt-1.5 text-sm text-ink w-full font-sans leading-tight max-w-2xl">
+              Watch it read itself — it steps through each subject and the confidence dial sweeps to that subject's
+              cutoff. Click any subject to pin it, then drive the dial: push to{' '}
               <span className="font-semibold">1.0</span> and only parsed / SCIP facts survive; drop it and the heuristic
               tag-scan edges reappear — <span className="font-semibold">labeled, never silently promoted</span>.
             </p>
@@ -301,14 +301,14 @@ function QuerySubstrate() {
         </div>
 
         {/* Subject picker — three core samples */}
-        <div className="flex flex-wrap gap-2 mb-3.5">
+        <div className="flex flex-wrap gap-2 mb-2">
           {SUBJECTS.map((s, i) => {
             const on = i === subjectIdx
             return (
               <button
                 key={s.id}
                 onClick={() => { takeControl(); setSubjectIdx(i); setThreshold(s.dial) }}
-                className="text-left rounded-xl px-4 py-2 transition-all"
+                className="text-left rounded-xl px-4 py-1.5 transition-all"
                 style={{
                   background: on ? 'color-mix(in oklab, var(--accent) 12%, var(--rock))' : 'var(--rock)',
                   border: `1px solid ${on ? 'color-mix(in oklab, var(--accent) 55%, var(--hairline))' : 'var(--hairline-strong)'}`,
@@ -327,9 +327,9 @@ function QuerySubstrate() {
           })}
         </div>
 
-        <div className="grid lg:grid-cols-[280px_1fr] gap-4">
+        <div className="grid lg:grid-cols-[280px_1fr] gap-3">
           {/* Left — confidence dial + core column */}
-          <div className="rock-panel p-4 flex flex-col gap-4">
+          <div className="rock-panel p-4 flex flex-col gap-3.5">
             <div>
               <div className="flex items-baseline justify-between mb-2.5">
                 <span className="kicker">Confidence dial</span>
@@ -353,7 +353,7 @@ function QuerySubstrate() {
             </div>
 
             {/* the drill core: which strata have a live fact */}
-            <div className="mt-auto">
+            <div>
               <span className="kicker">Core column</span>
               <div className="relative mt-2 pl-3">
                 <div className="seam-line absolute top-1 bottom-1 left-0" />
@@ -377,7 +377,7 @@ function QuerySubstrate() {
 
           {/* Right — the assembled dossier */}
           <div className="rock-panel p-0">
-            <div className="flex items-center justify-between px-5 py-3 border-b border-hairline-strong">
+            <div className="flex items-center justify-between px-5 py-2 border-b border-hairline-strong">
               <span className="font-mono text-sm text-ink font-semibold">{subject.label}</span>
               <span className="depth">substrate.query({subject.kind}) → 1 dossier · 5 strata</span>
             </div>
@@ -386,13 +386,13 @@ function QuerySubstrate() {
                 const facts = subject.facts.filter(f => f.stratum === s.id)
                 if (facts.length === 0) return null
                 return (
-                  <div key={s.id} className="flex gap-4 px-5 py-2">
+                  <div key={s.id} className="flex gap-4 px-5 py-1">
                     <div className="w-28 shrink-0 pt-0.5">
                       <div className="font-mono text-[0.6rem] text-faint">{s.no}</div>
                       <div className="font-display font-black text-ink text-sm leading-tight" style={{ fontStretch: '106%' }}>{s.name}</div>
                       <div className="depth mt-0.5">{s.depth}</div>
                     </div>
-                    <div className="flex-1 flex flex-col gap-1.5 min-w-0">
+                    <div className="flex-1 flex flex-col gap-1 min-w-0">
                       {facts.map((f, i) => {
                         const on = f.conf >= threshold
                         const injected = f.prov === 'Injected'
@@ -445,11 +445,11 @@ function FiveStrata() {
           <p className="max-w-3xl">
             Not a graph with bolt-ons — a single continuous body, cut into bands. Each keyed to the same stable{' '}
             <span className="font-mono text-sm font-semibold">(scheme, qualified-name)</span> that survives reformatting,
-            moves, and re-index. The drill reads one band at a time.
+            moves, and re-index.
           </p>
         </TopHead>
 
-        <div className="mb-4">
+        <div className="mb-3">
           <button
             className="demo-pill"
             data-live={String(!pinned)}
@@ -463,7 +463,7 @@ function FiveStrata() {
 
         <div className="rock-panel p-0">
           <div className="relative">
-            <div className="seam-line absolute top-6 bottom-6" style={{ left: '22%' }} />
+            <div className="seam-line absolute top-4 bottom-4" style={{ left: '22%' }} />
             {STRATA.map((s, i) => {
               const on = i === active
               return (
@@ -471,7 +471,7 @@ function FiveStrata() {
                   key={s.id}
                   onMouseEnter={() => setActive(i)}
                   onClick={() => { setPinned(true); setActive(i) }}
-                  className="relative flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-6 px-6 py-6 border-b border-hairline last:border-b-0 transition-all duration-300 cursor-pointer"
+                  className="relative flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-6 px-6 py-3.5 border-b border-hairline last:border-b-0 transition-all duration-300 cursor-pointer"
                   style={{
                     background: on
                       ? 'color-mix(in oklab, var(--accent) 9%, transparent)'
@@ -492,7 +492,7 @@ function FiveStrata() {
             })}
           </div>
         </div>
-        <p className="mt-5 font-mono text-xs text-faint">
+        <p className="mt-4 font-mono text-xs text-faint">
           23 MCP tools across graph · memory · knowledge, plus requirement↔code traceability and typed annotations — one binary.
         </p>
       </div>
@@ -571,31 +571,31 @@ const CAPABILITIES: string[] = [
 
 function FullToolface() {
   return (
-    <Section id="toolface" solid className="!py-10">
+    <Section id="toolface" solid>
       <div className="max-w-6xl mx-auto w-full">
-        <div className="mb-4 w-full text-left">
+        <div className="mb-2.5 w-full text-left">
           <span className="kicker">Everything an agent can call</span>
-          <h2 className="mt-2 font-display text-2xl sm:text-[2.05rem] font-black text-ink leading-[0.98]">
+          <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink leading-[0.98]">
             23 MCP tools. 6 agent skills. <span style={{ color: 'var(--accent)' }}>One binary.</span>
           </h2>
-          <p className="mt-2 text-sm text-muted font-sans leading-snug max-w-3xl">
+          <p className="mt-1.5 text-sm text-muted font-sans leading-tight max-w-3xl">
             Not one “search” tool bolted onto a repo — a whole toolface across the five strata, plus the skills
-            (playbooks) that drive them. The full assay, grounded to v0.13.1 — no rounding.
+            (playbooks) that drive them. Grounded to v0.13.1.
           </p>
         </div>
 
         {/* the three MCP domains — every tool name + one-line purpose */}
-        <div className="grid lg:grid-cols-3 gap-3.5">
+        <div className="grid lg:grid-cols-3 gap-2.5">
           {TOOL_DOMAINS.map(d => (
             <div key={d.name} className="rock-panel p-0">
-              <div className="flex items-center gap-2.5 px-4 py-2 border-b border-hairline-strong">
+              <div className="flex items-center gap-2.5 px-4 py-1.5 border-b border-hairline-strong">
                 <span className="font-display font-black text-base tabular-nums" style={{ fontStretch: '108%', color: 'var(--accent)' }}>{d.no}</span>
                 <span className="font-display font-black text-ink text-[0.95rem] flex-1" style={{ fontStretch: '108%' }}>{d.name}</span>
                 <span className="tag tag-accent">{d.note}</span>
               </div>
               <div className="divide-y divide-hairline">
                 {d.tools.map(t => (
-                  <div key={t.name} className="px-4 py-[5px] flex items-baseline gap-2">
+                  <div key={t.name} className="px-4 py-[2px] flex items-baseline gap-2">
                     <span className="font-mono text-[0.7rem] font-semibold text-ink shrink-0">{t.name}</span>
                     <span className="depth flex-1 min-w-0 text-right" style={{ whiteSpace: 'normal', lineHeight: 1.25 }}>{t.purpose}</span>
                   </div>
@@ -606,7 +606,7 @@ function FullToolface() {
         </div>
 
         {/* the agent skills — the playbooks that ship with estate */}
-        <div className="mt-3.5 rock-panel p-0">
+        <div className="mt-2 rock-panel p-0">
           <div className="flex items-center gap-3 px-4 py-2 border-b border-hairline-strong">
             <span className="kicker">Agent skills · in-repo playbooks</span>
             <span className="tag ml-auto">6 skills</span>
@@ -622,13 +622,9 @@ function FullToolface() {
         </div>
 
         {/* cross-cutting capabilities most agents never know estate has */}
-        <div className="mt-3.5 flex flex-wrap gap-1.5">
+        <div className="mt-2 flex flex-wrap gap-1.5">
           {CAPABILITIES.map(c => <span key={c} className="tag">{c}</span>)}
         </div>
-
-        <p className="mt-3 font-mono text-[0.6rem] text-faint tracking-wide">
-          Grounded to v0.13.1 — tools from crates/wicked-estate-mcp, skills from crates/*/skills, capabilities from the engine crates. No rounded counts.
-        </p>
       </div>
     </Section>
   )
