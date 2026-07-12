@@ -198,7 +198,7 @@ const SUBJECTS: Subject[] = [
     facts: [
       { stratum: 'requirements', text: 'satisfies REQ-142 · validated ✓', detail: 'requirement↔code · enforced', conf: 1.0, prov: 'Parsed' },
       { stratum: 'blast', text: '3 transitive dependents', detail: 'checkout · cartTotal · api/price', conf: 1.0, prov: 'SCIP' },
-      { stratum: 'blast', text: 'injected: emits wicked.order.placed → 2 consumers', detail: 'event→consumer edge · grep never sees this', conf: 1.0, prov: 'Injected' },
+      { stratum: 'blast', text: 'injected: emits wicked.shop.order.placed → 2 consumers', detail: 'event→consumer edge · grep never sees this', conf: 1.0, prov: 'Injected' },
       { stratum: 'blast', text: 'referralFlow → applyDiscount', detail: 'tag-scan guess · cross-file unverified', conf: 0.3, prov: 'Tags' },
       { stratum: 'infra', text: 'reads dataset PRICING.TBL via api/price', detail: 'code↔dataset edge', conf: 0.85, prov: 'ImportMap' },
       { stratum: 'history', text: '4 commits · last changed 2026-06', detail: 'per-file git provenance', conf: 1.0, prov: 'git' },

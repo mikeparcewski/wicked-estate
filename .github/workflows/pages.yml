@@ -1,8 +1,9 @@
-name: Deploy GitHub Pages
+name: Deploy site to GitHub Pages
 
-# Dormant by design: go-live is human-gated. This workflow runs ONLY when
-# manually dispatched — it never auto-runs on push or merge.
+# Auto-deploys the site on every push to main; also runnable by hand.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
