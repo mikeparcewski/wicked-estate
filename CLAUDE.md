@@ -1,4 +1,4 @@
-# wicked-estate — unified MCP foundation (v0.13.0)
+# wicked-estate — unified MCP foundation (v0.13.1)
 
 Rust MCP server: **code graph + memory + knowledge** in a single binary, 23 tools across 3 domains.
 Turns a repo into a queryable graph (symbols, calls, imports, edges injected by event bus and commands)

@@ -585,7 +585,7 @@ External consumers of the unified server emit `wicked-bus` events for cross-prod
 |---|---|---|
 | `wicked-crew` | `crew.context-bundle.completed` | After `ContextBundle` result is used to assemble agent context |
 | `wicked-garden` | `garden.knowledge-ingested` | After a document ingest cycle driven by garden orchestration |
-| `wicked-signals` | `signals.hotspot-ranked` | After a hotspot ranking run driven by signals |
+| `wicked-signals` _(archived 2026-07-11)_ | `signals.hotspot-ranked` | Historical example — wicked-signals is archived; routing/ranking now lives in wicked-garden's multi-model council |
 
 This design preserves the clean separation: estate/memory/knowledge are **data stores**, not event producers. Event semantics live in the orchestration layer.
 

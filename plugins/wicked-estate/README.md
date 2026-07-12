@@ -1,7 +1,7 @@
 # wicked-estate — Claude Code plugin
 
 Registers the **wicked-estate** MCP server in Claude Code: a code + infrastructure estate graph for
-agents (search, retrieve, blast-radius, lineage, fetch-content) across 91 languages plus a
+agents (search, retrieve, blast-radius, lineage, fetch-content) across 100+ languages plus a
 mainframe/IaC estate layer.
 
 ## Prerequisites
