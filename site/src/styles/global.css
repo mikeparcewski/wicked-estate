@@ -198,6 +198,14 @@
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
+  .depth-toggle {
+    background: none;
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+    transition: color 0.2s var(--ease);
+  }
+  .depth-toggle:hover { color: var(--accent); }
 
   /* ── The mineral seam — a vertical vein of accent light ─────────────────── */
   .seam-line {

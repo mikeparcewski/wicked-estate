@@ -866,7 +866,13 @@ function FamilyLoop() {
                   className="h-1.5 rounded-full transition-all"
                   style={{ width: i === active ? 24 : 8, background: i === active ? 'var(--accent)' : 'var(--hairline-strong)' }} />
               ))}
-              <span className="depth ml-2">{pinned ? 'pinned' : 'cycling the loop'}</span>
+              <button
+                onClick={() => setPinned(!pinned)}
+                className="depth depth-toggle ml-2"
+                aria-label={pinned ? 'Resume cycling the loop' : 'Pin the loop'}
+              >
+                {pinned ? 'pinned (click to cycle)' : 'cycling the loop'}
+              </button>
             </div>
           </div>
 
