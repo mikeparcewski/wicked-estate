@@ -81,7 +81,7 @@
           "wicked-knowledge-mcp": "Replace command with wicked-estate-mcp; all knowledge.* tools are included"
         }
       },
-      "version": "0.13.0",
+      "version": "0.13.1",
       "supersedes": ["wicked-memory-mcp", "wicked-knowledge-mcp", "wicked-overlay"]
     }
   ]
