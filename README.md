@@ -7,11 +7,18 @@ __      ___  ___| | _____  __| |______ ___  ___| |_ __ _| |_ ___
   \_/\_/ |_|\___|_|\_\___|\__,_|      \___||___/\__\__,_|\__\___|
 ```
 
-**Turn a repo — and its surrounding infrastructure/mainframe estate — into one queryable graph that
-LLM agents can actually use.** Symbols, calls, imports, types, refs, and cross-domain estate links:
-definitions, who-calls-X, blast-radius, scoped context. **Portable by design** — one static binary
-that runs local-first on SQLite, or backs a shared, concurrent team graph on Postgres. Solo laptop to
-enterprise CI fleet, same engine, same queries.
+**Your live technical environment, queryable.** wicked-estate is **Equip** for the wicked loop — it
+turns a repo, and the infrastructure, policy, and mainframe estate around it, into a queryable
+technical environment an LLM agent can actually use: **requirements↔implementation**, **blast-radius
+of change**, **infra + policy relationships**, and **operational history**. Every edge carries
+`{confidence, provenance, resolved_by}`; a heuristic is never handed to an agent as a fact. **Portable
+by design** — one static binary, local-first on SQLite, or a shared concurrent team backend on
+Postgres. Solo laptop to enterprise CI fleet, same engine, same queries.
+
+> The **memory and code-graph proper live in [`wicked-brain`](https://github.com/mikeparcewski/wicked-brain)** —
+> Equip's other half, the graph the agent can search, challenge, correct, and trace to its source.
+> estate is the technical environment those symbols sit in: what a change touches, what protects it,
+> what it was.
 
 [![CI](https://github.com/mikeparcewski/wicked-estate/actions/workflows/ci.yml/badge.svg)](https://github.com/mikeparcewski/wicked-estate/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
@@ -23,23 +30,28 @@ enterprise CI fleet, same engine, same queries.
 
 ---
 
-## The foundation
+## Where it sits in the loop
 
-wicked-estate is the **anchor** of a local-first foundation for AI coding agents — the code graph,
-memory, and knowledge everything else queries. Around it sits the plumbing that makes that substrate
-safe, event-driven, memorable, and governable. SQLite by default; no servers, no accounts, nothing
-leaves your machine. The parts compose rather than lock in.
+The wicked family is **one loop, under human authority**: intent → **Steer** → **Equip** → (your
+coding-agent harness) → **Verify · Govern** → record, and the record feeds the next run. estate is
+one half of **Equip** — the live technical environment; its peer [`wicked-brain`](https://github.com/mikeparcewski/wicked-brain)
+holds the memory + code-graph. SQLite by default; no servers, no accounts, nothing leaves your
+machine. The parts compose rather than lock in.
 
-| Part | Role | Stack |
-|---|---|---|
-| **`wicked-estate`** (this repo) | the graph — symbols, calls, blast-radius, memory, knowledge, scoped context | Rust · crates.io |
-| [`wicked-core`](https://github.com/mikeparcewski/wicked-core) | the runtime — single-writer store actor + live event stream so consumers never race on the shared DB | Rust |
-| [`wicked-bus`](https://github.com/mikeparcewski/wicked-bus) | the durable event fabric — restart-durable at-least-once delivery with dead-lettering and replay, zero infra | JS/ESM · npm |
-| [`wicked-brain`](https://github.com/mikeparcewski/wicked-brain) | the memory — persistent knowledge on markdown + SQLite FTS5, no vector DB (bridge-period; folds into estate) | JS · npm |
-| [`wicked-crew`](https://github.com/mikeparcewski/wicked-crew) | the harness — runs your coding-agent CLIs as governed workers through durable, deny-dominates, phase-gated workflows with HITL | npm |
+| Loop role | Product | What it does | Stack |
+|---|---|---|---|
+| **Equip** | **`wicked-estate`** (this repo) | Your live technical environment, queryable — requirements↔implementation, blast-radius, infra + policy relationships, operational history. | Rust · crates.io |
+| **Equip** | [`wicked-brain`](https://github.com/mikeparcewski/wicked-brain) | Memory + code-graph with provenance — knowledge the agent can search, challenge, correct, and trace to its source. | JS · npm |
+| **Steer** | [`wicked-garden`](https://github.com/mikeparcewski/wicked-garden) | Steering before execution — reads each prompt's work-shape + risk and applies the right rigor, plus the capabilities a planner-executor can't do alone. | JS/TS |
+| **Verify** | [`wicked-testing`](https://github.com/mikeparcewski/wicked-testing) | No agent grades its own homework — an enforced wall between the agent that runs the tests and the one that judges them. | JS/TS |
+| **Govern** | [`wicked-core`](https://github.com/mikeparcewski/wicked-core) | The engine that makes "done" a mechanism, not a claim — workflow-as-data, dual gates, state re-derived from evidence. | Rust |
+| **Govern** | [`wicked-crew`](https://github.com/mikeparcewski/wicked-crew) | The control room for governed agent delivery — drive, gate, and audit the work; the human stays in command. | npm |
+| **Fabric** | [`wicked-bus`](https://github.com/mikeparcewski/wicked-bus) | The durable nervous system beneath it all — local-first, at-least-once, replayable; how the loop coordinates around the harness. | JS/ESM · npm |
+| **Surface** | [`wicked-interactive`](https://github.com/mikeparcewski/wicked-interactive) | A creative surface on the same substrate: describe it, watch it build, ship HTML/PDF/deck. It composes the family's building blocks; it does not close the loop. | TS |
 
-> Absorbed into this repo (not separate products): `wicked-memory` → `wicked-estate-memory`,
-> `wicked-knowledge` → `wicked-estate-knowledge`, `wicked-overlay` → `wicked-estate-overlay`.
+> Absorbed into this repo as internal crates (not separate products): `wicked-memory` →
+> `wicked-estate-memory`, `wicked-knowledge` → `wicked-estate-knowledge`, `wicked-overlay` →
+> `wicked-estate-overlay`.
 
 ## Why
 
@@ -105,8 +117,15 @@ wicked-estate watch ./my-project --db graph.db
 
 ## What it does (highlights — full list in [FEATURES.md](./FEATURES.md))
 
-- **Code graph** — 100+ wired languages (tree-sitter); symbols, calls, imports,
-  heritage. Languages are **data** (a manifest row + a `.scm` query) — adding one is zero core change.
+- **Live technical environment, queryable** — the lead: **requirements↔implementation**,
+  **blast-radius of change**, **infra + policy relationships**, and **operational history**, all keyed
+  to one stable symbol identity with `{confidence, provenance, resolved_by}` on every edge. This is what
+  estate *is* — the environment around your code, not the symbol graph itself. The **memory +
+  code-graph proper live in [`wicked-brain`](https://github.com/mikeparcewski/wicked-brain)**, Equip's
+  other half; estate maps what a change touches, what protects it, and what it was.
+- **Extraction engine — 100+ wired languages (tree-sitter)** — symbols, calls, imports, heritage feed
+  the environment above. Languages are **data** (a manifest row + a `.scm` query) — adding one is zero
+  core change.
 - **Runtime language plugins** — drop a compiled tree-sitter grammar + `.scm` query + manifest into
   the plugins dir and it loads at startup, no recompile. The grammar is a separate artifact, never
   linked into the (MIT) core — so a grammar under a license incompatible with MIT (GPL, etc.) stays

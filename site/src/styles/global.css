@@ -198,6 +198,14 @@
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
+  .depth-toggle {
+    background: none;
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+    transition: color 0.2s var(--ease);
+  }
+  .depth-toggle:hover { color: var(--accent); }
 
   /* ── The mineral seam — a vertical vein of accent light ─────────────────── */
   .seam-line {
@@ -332,7 +340,7 @@
   .demo-pill[data-live="true"] .dot { animation: demo-blink 1.4s var(--ease) infinite; }
   .demo-pill[data-live="false"] .dot { background: var(--muted); }
 
-  /* ── Left pointer (bedrock layer cycler) ─────────────────────────────────── */
+  /* ── Left pointer (loop verb cycler) ─────────────────────────────────────── */
   .layer-pointer {
     display: inline-grid; place-items: center; width: 22px; flex-shrink: 0;
     color: var(--accent); font-size: 0.85rem;

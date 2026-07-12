@@ -1,18 +1,23 @@
 import { useState, useEffect, useRef } from 'react'
 
 /* ────────────────────────────────────────────────────────────────────────────
-   wicked-estate — the substrate every agent queries.
+   wicked-estate — EQUIP · your live technical environment, queryable.
 
-   CONCEPT · "read the core." estate is one durable substrate you read like a
+   ROLE · estate is the Equip layer of the wicked loop: the technical environment
+   coding agents read before they act. Not the symbol/knowledge graph itself (that
+   memory + code-graph lives in its Equip peer, wicked-brain) — estate is the
+   environment those symbols sit in: requirements↔implementation, blast-radius of
+   change, infra + policy relationships, and operational history.
+
+   CONCEPT · "read the core." estate is one durable environment you read like a
    geologist reads a drill core: a single continuous body, banded into strata
-   (graph · memory · knowledge · requirements↔code · annotations), every band
-   keyed to one stable symbol identity and stamped with confidence + provenance.
-   The signature motion is a DRILL that reads the core — sections demo themselves
-   before you touch them. A hard break from the sibling sites' graph-network motif.
+   (requirements↔impl · blast-radius · infra + policy · operational history ·
+   annotations), every band keyed to one stable symbol identity and stamped with
+   confidence + provenance. The signature motion is a DRILL that reads the core —
+   sections demo themselves before you touch them.
 
-   Grounded to v0.13.1 (crates.io): 23 MCP tools across 3 domains (10 estate ·
-   6 memory · 7 knowledge), 100+ wired languages, 1,000+ tests, every edge carries
-   {confidence, provenance, resolved_by}, injected edges (event→consumer,
+   Grounded to v0.13.1 (crates.io): 100+ wired languages, 1,000+ tests, every edge
+   carries {confidence, provenance, resolved_by}, injected edges (event→consumer,
    command→agent) grep never sees, SQLite by default / Postgres behind one flag.
    ──────────────────────────────────────────────────────────────────────────── */
 
@@ -37,18 +42,18 @@ function useReducedMotion() {
   return reduced
 }
 
-// ── Strata metadata: the five bands of the one substrate ────────────────────────
-type StratumId = 'graph' | 'memory' | 'knowledge' | 'requirements' | 'annotations'
+// ── Strata metadata: the five bands of the technical environment ────────────────
+type StratumId = 'requirements' | 'blast' | 'infra' | 'history' | 'annotations'
 
 const STRATA: { id: StratumId; no: string; name: string; depth: string; tools: string; copy: string }[] = [
-  { id: 'graph',        no: '01', name: 'Code graph',        depth: '−0.0m',  tools: '10 tools',
-    copy: 'Symbols, callers, blast-radius, scoped context — plus injected edges (event→consumer, command→agent) grep can never see.' },
-  { id: 'memory',       no: '02', name: 'Memory',            depth: '−4.2m',  tools: '6 tools',
-    copy: 'Cross-session recall — decisions, episodes, salience. The decision survives the session that made it.' },
-  { id: 'knowledge',    no: '03', name: 'Knowledge',         depth: '−7.8m',  tools: '7 tools',
-    copy: 'Ingested articles, hybrid FTS + vector recall fused via RRF. Answers cite a source you can open.' },
-  { id: 'requirements', no: '04', name: 'Requirements ↔ code', depth: '−11.5m', tools: 'traceable',
-    copy: 'Every symbol carries the requirement it satisfies, a description, and a validated flag.' },
+  { id: 'requirements', no: '01', name: 'Requirements ↔ implementation', depth: '−0.0m', tools: 'traceable',
+    copy: 'Every symbol carries the requirement it satisfies, a description, and a validated flag — the spec pinned to the code that fulfils it.' },
+  { id: 'blast',        no: '02', name: 'Blast-radius',      depth: '−4.2m',  tools: 'bounded',
+    copy: 'What breaks if you change it — bounded reverse-reachability over every dependency edge kind, plus injected edges (event→consumer, command→agent) grep can never see.' },
+  { id: 'infra',        no: '03', name: 'Infra + policy',    depth: '−7.8m',  tools: 'cross-domain',
+    copy: 'IaC, mainframe security, data and messaging joined cross-domain — the RACF profile that protects the dataset a JCL step uses, in one query.' },
+  { id: 'history',      no: '04', name: 'Operational history', depth: '−11.5m', tools: 'git-aware',
+    copy: 'Per-file git provenance, a read-only edge-history log, and drift — iac vs live by resource identity. What the environment was, not only what it is.' },
   { id: 'annotations',  no: '05', name: 'Annotations',       depth: '−14.0m', tools: 'typed notes',
     copy: 'Typed key/value notes — assumption, note, question — with confidence and an advisory flag. Survives re-index.' },
 ]
@@ -109,20 +114,23 @@ function Hero() {
       <div className="max-w-6xl mx-auto w-full grid lg:grid-cols-[1.08fr_0.92fr] gap-14 items-center">
         {/* Left — the thesis, committed in sentence one */}
         <div className="text-left">
-          <span className="kicker">wicked-estate · v0.13.1 · crates.io · building blocks</span>
+          <span className="kicker">wicked-estate · Equip · v0.13.1 · crates.io</span>
           <h1 className="mt-6 font-display font-black text-ink text-[3rem] sm:text-6xl lg:text-[4.4rem] leading-[0.92]" style={{ fontStretch: '112%' }}>
-            The substrate<br />every agent<br />
-            <span style={{ color: 'var(--accent)' }}>queries.</span>
+            Your live<br />technical<br />environment,<br />
+            <span style={{ color: 'var(--accent)' }}>queryable.</span>
           </h1>
           <p className="mt-7 text-lg text-muted leading-relaxed max-w-xl font-sans">
-            One local-first MCP server — a single body of stacked strata:{' '}
-            <span className="text-ink">code graph</span>, <span className="text-ink">memory</span>,{' '}
-            <span className="text-ink">knowledge</span>, <span className="text-ink">requirements↔code</span> and{' '}
-            <span className="text-ink">typed annotations</span>. One symbol identity through all five. Every fact
-            stamped with confidence and provenance — a heuristic is never handed to an agent as a fact.
+            One local-first MCP server that maps the environment <span className="italic">around</span> your code —{' '}
+            <span className="text-ink">requirements↔implementation</span>, <span className="text-ink">blast-radius of change</span>,{' '}
+            <span className="text-ink">infra + policy relationships</span> and <span className="text-ink">operational history</span>.
+            Every fact stamped with confidence and provenance — a heuristic is never handed to an agent as a fact.
+          </p>
+          <p className="mt-4 text-sm text-muted leading-relaxed max-w-xl font-sans">
+            The memory and code-graph proper live in <span className="text-ink">wicked-brain</span>, Equip’s other half.
+            estate is the technical environment those symbols sit in: what a change touches, what protects it, what it was.
           </p>
           <p className="mt-4 font-mono text-xs text-faint leading-5">
-            23 tools · 3 domains · 100+ wired languages · SQLite by default, one flag to a shared Postgres graph.
+            100+ wired languages · every edge {'{'}confidence, provenance, resolved_by{'}'} · SQLite by default, one flag to a shared Postgres backend.
           </p>
           <div className="mt-9 flex flex-col sm:flex-row gap-3">
             <a href="#query" className="btn-primary">Read the core ↓</a>
@@ -169,7 +177,7 @@ function Hero() {
             </div>
           </div>
           <p className="mt-3 text-center font-mono text-[0.6rem] text-faint tracking-wide">
-            One continuous body — not a graph plus extras.
+            One continuous body — the whole environment, one identity.
           </p>
         </div>
       </div>
@@ -178,7 +186,7 @@ function Hero() {
 }
 
 // ── 2 · QUERY THE SUBSTRATE — auto-demos, pauses + becomes yours on click ───────
-type Prov = 'Parsed' | 'SCIP' | 'TSG' | 'ImportMap' | 'Tags' | 'Injected' | 'episodic' | 'FTS+RRF' | 'annotation'
+type Prov = 'Parsed' | 'SCIP' | 'TSG' | 'ImportMap' | 'Tags' | 'Injected' | 'git' | 'Collector' | 'annotation'
 interface Fact { stratum: StratumId; text: string; detail?: string; conf: number; prov: Prov; advisory?: boolean }
 // `dial` is the confidence value the dial SWEEPS TO when this subject is on screen —
 // each subject reads out at a different cutoff so the needle visibly travels between tabs.
@@ -188,12 +196,12 @@ const SUBJECTS: Subject[] = [
   {
     id: 'applyDiscount', label: 'applyDiscount', kind: 'symbol', dial: 0.55,
     facts: [
-      { stratum: 'graph', text: '3 transitive dependents', detail: 'checkout · cartTotal · api/price', conf: 1.0, prov: 'SCIP' },
-      { stratum: 'graph', text: 'injected: emits wicked.order.placed → 2 consumers', detail: 'event→consumer edge · grep never sees this', conf: 1.0, prov: 'Injected' },
-      { stratum: 'graph', text: 'referralFlow → applyDiscount', detail: 'tag-scan guess · cross-file unverified', conf: 0.3, prov: 'Tags' },
-      { stratum: 'memory', text: 'Decision: coupons never stack', detail: 'spike 2026-06 · scope=project:acme', conf: 0.74, prov: 'episodic' },
-      { stratum: 'knowledge', text: '[[Pricing Rules]] §Discounts', detail: 'hybrid FTS + vector, RRF fused', conf: 0.88, prov: 'FTS+RRF' },
       { stratum: 'requirements', text: 'satisfies REQ-142 · validated ✓', detail: 'requirement↔code · enforced', conf: 1.0, prov: 'Parsed' },
+      { stratum: 'blast', text: '3 transitive dependents', detail: 'checkout · cartTotal · api/price', conf: 1.0, prov: 'SCIP' },
+      { stratum: 'blast', text: 'injected: emits wicked.order.placed → 2 consumers', detail: 'event→consumer edge · grep never sees this', conf: 1.0, prov: 'Injected' },
+      { stratum: 'blast', text: 'referralFlow → applyDiscount', detail: 'tag-scan guess · cross-file unverified', conf: 0.3, prov: 'Tags' },
+      { stratum: 'infra', text: 'reads dataset PRICING.TBL via api/price', detail: 'code↔dataset edge', conf: 0.85, prov: 'ImportMap' },
+      { stratum: 'history', text: '4 commits · last changed 2026-06', detail: 'per-file git provenance', conf: 1.0, prov: 'git' },
       { stratum: 'annotations', text: 'assumption: max one coupon per cart', detail: 'advisory · survives re-index', conf: 0.7, prov: 'annotation', advisory: true },
     ],
   },
@@ -201,23 +209,23 @@ const SUBJECTS: Subject[] = [
     id: 'REQ-142', label: 'REQ-142', kind: 'requirement', dial: 0.90,
     facts: [
       { stratum: 'requirements', text: '2 symbols satisfy REQ-142', detail: 'validateCoupon ✓ · applyDiscount ⋯ unvalidated', conf: 1.0, prov: 'Parsed' },
-      { stratum: 'graph', text: 'blast-radius of implementers: 3 dependents', detail: 'checkout · cartTotal · api/price', conf: 1.0, prov: 'SCIP' },
-      { stratum: 'graph', text: 'candidate impl: legacyDiscount()', detail: 'import-map heuristic · not confirmed', conf: 0.6, prov: 'ImportMap' },
-      { stratum: 'knowledge', text: '[[Pricing Spec]] §Stacking rules', detail: 'linked article', conf: 0.85, prov: 'FTS+RRF' },
-      { stratum: 'memory', text: 'Decision: enforce at price layer, not cart', conf: 0.70, prov: 'episodic' },
+      { stratum: 'blast', text: 'blast-radius of implementers: 3 dependents', detail: 'checkout · cartTotal · api/price', conf: 1.0, prov: 'SCIP' },
+      { stratum: 'blast', text: 'candidate impl: legacyDiscount()', detail: 'import-map heuristic · not confirmed', conf: 0.6, prov: 'ImportMap' },
+      { stratum: 'infra', text: 'governed by rule-set PricingPolicy', detail: 'ODM ruleset↔code edge · same graph', conf: 0.9, prov: 'Parsed' },
+      { stratum: 'history', text: 'validated flag flipped 2026-05', detail: 'read-only edge-history log', conf: 1.0, prov: 'git' },
       { stratum: 'annotations', text: 'question: does BOGO count as a coupon?', detail: 'advisory · open', conf: 0.5, prov: 'annotation', advisory: true },
     ],
   },
   {
-    id: 'Deployment Runbook', label: 'Deployment Runbook', kind: 'article', dial: 0.70,
+    id: 'PAYROLL.JCL', label: 'PAYROLL.JCL', kind: 'JCL step', dial: 0.70,
     facts: [
-      { stratum: 'knowledge', text: '[[Deployment Runbook]] §Rollback', detail: 'hybrid FTS + vector, RRF fused', conf: 0.88, prov: 'FTS+RRF' },
-      { stratum: 'knowledge', text: 'relates → [[Incident-2049]]', detail: 'confidence-scored backlink', conf: 0.72, prov: 'FTS+RRF' },
-      { stratum: 'graph', text: 'injected: command:deploy → deploy-agent', detail: 'command→agent edge · grep never sees this', conf: 1.0, prov: 'Injected' },
-      { stratum: 'graph', text: 'linked code: deploy.ts · rollback.ts', detail: 'article↔code edges', conf: 1.0, prov: 'SCIP' },
-      { stratum: 'memory', text: 'Decision: rollback must be idempotent', detail: 'scope=project:acme', conf: 0.80, prov: 'episodic' },
+      { stratum: 'infra', text: 'EXEC PGM=PAYCALC uses PAYROLL.MASTER', detail: 'JCL step↔dataset edge', conf: 1.0, prov: 'Parsed' },
+      { stratum: 'infra', text: 'RACF profile PAY.** protects PAYROLL.MASTER', detail: 'cross-domain: RACF↔dataset · one query', conf: 1.0, prov: 'Parsed' },
+      { stratum: 'infra', text: 'injected: command:deploy → deploy-agent', detail: 'command→agent edge · grep never sees this', conf: 1.0, prov: 'Injected' },
+      { stratum: 'blast', text: '2 callers submit this job', detail: 'scheduler.ts · nightly.sh', conf: 0.85, prov: 'ImportMap' },
+      { stratum: 'history', text: 'drift: live RACF ≠ iac since 2026-05', detail: 'graph diff · resource identity', conf: 0.8, prov: 'Collector' },
       { stratum: 'requirements', text: 'supports REQ-207 · unvalidated ⋯', conf: 0.6, prov: 'Parsed' },
-      { stratum: 'annotations', text: 'note: runbook last drilled 2026-05', conf: 0.6, prov: 'annotation', advisory: true },
+      { stratum: 'annotations', text: 'note: dataset last drilled 2026-05', conf: 0.6, prov: 'annotation', advisory: true },
     ],
   },
 ]
@@ -443,7 +451,7 @@ function FiveStrata() {
           title={<>Five bands. One substrate. <span style={{ color: 'var(--accent)' }}>One symbol identity.</span></>}
         >
           <p className="max-w-3xl">
-            Not a graph with bolt-ons — a single continuous body, cut into bands. Each keyed to the same stable{' '}
+            Not a pile of scanners — a single continuous body, cut into bands. Each keyed to the same stable{' '}
             <span className="font-mono text-sm font-semibold">(scheme, qualified-name)</span> that survives reformatting,
             moves, and re-index.
           </p>
@@ -493,7 +501,7 @@ function FiveStrata() {
           </div>
         </div>
         <p className="mt-4 font-mono text-xs text-faint">
-          23 MCP tools across graph · memory · knowledge, plus requirement↔code traceability and typed annotations — one binary.
+          Requirements↔implementation · blast-radius · infra + policy · operational history · typed annotations — one binary, every fact stamped with confidence and provenance.
         </p>
       </div>
     </Section>
@@ -579,8 +587,10 @@ function FullToolface() {
             23 MCP tools. 6 agent skills. <span style={{ color: 'var(--accent)' }}>One binary.</span>
           </h2>
           <p className="mt-1.5 text-sm text-muted font-sans leading-tight max-w-3xl">
-            Not one “search” tool bolted onto a repo — a whole toolface across the five strata, plus the skills
-            (playbooks) that drive them. Grounded to v0.13.1.
+            Not one “search” tool bolted onto a repo — the full MCP surface an agent can call, plus the skills
+            (playbooks) that drive them. The memory and knowledge domains pair with{' '}
+            <span className="text-ink">wicked-brain</span>, where the memory + code-graph proper live; the estate
+            domain is the live technical environment. Grounded to v0.13.1.
           </p>
         </div>
 
@@ -753,8 +763,8 @@ function Storage() {
     <Section id="storage" solid>
       <div className="max-w-4xl mx-auto w-full">
         <TopHead
-          kicker="One bedrock, solo or shared"
-          title={<>SQLite by default. <span style={{ color: 'var(--accent)' }}>One flag</span> to a shared team graph.</>}
+          kicker="One backend, solo or shared"
+          title={<>SQLite by default. <span style={{ color: 'var(--accent)' }}>One flag</span> to a shared team backend.</>}
         >
           <p className="max-w-3xl">
             The same engine and command API run on either backend through one{' '}
@@ -790,65 +800,85 @@ function Storage() {
   )
 }
 
-// ── 6 · THE BEDROCK UNDER THE STACK — cycle the layers, pointer + what-you-do ────
-type LayerId = 'solutions' | 'utilities' | 'building'
-const LAYERS: { id: LayerId; label: string; members: { name: string; note: string }[]; doing: string; bedrock?: boolean }[] = [
+// ── 6 · WHERE ESTATE SITS IN THE LOOP — cycle the four verbs, Equip is home ──────
+// The one canonical wicked visual is a LOOP, not a ranked stack:
+//   intent → Steer → Equip → (harness) → Verify · Govern → record → next run,
+//   all under human authority. bus is the fabric beneath; interactive a surface beside.
+type LoopStep = { id: string; verb: string; here?: boolean; doing: string; members: { name: string; note: string }[] }
+const LOOP: LoopStep[] = [
   {
-    id: 'solutions', label: 'Solutions',
-    members: [{ name: 'crew', note: 'agentic execution platform' }, { name: 'interactive', note: 'describe-it-build-it docs' }],
-    doing: 'Drive governed multi-agent workflows and build interactive docs by describing them. The top of the stack — they read everything below.',
+    id: 'steer', verb: 'Steer',
+    doing: `Steering before execution — reads each prompt's work-shape + risk and applies the right rigor, plus the capabilities a planner-executor can't do alone.`,
+    members: [{ name: 'garden', note: 'the Steer product' }],
   },
   {
-    id: 'utilities', label: 'Utilities',
-    members: [{ name: 'garden', note: 'agent toolkit' }, { name: 'testing', note: 'QE team, no self-grading' }],
-    doing: 'Prove "done" from evidence and give your agent a QE team that can’t grade its own homework. Both query the substrate for context and edges.',
+    id: 'equip', verb: 'Equip', here: true,
+    doing: `Your live technical environment, queryable — requirements↔implementation, blast-radius, infra + policy relationships, operational history. Memory + code-graph with provenance — knowledge the agent can search, challenge, correct, and trace to its source.`,
+    members: [{ name: 'estate', note: 'requirements↔impl · blast-radius · infra + policy · history' }, { name: 'brain', note: 'memory + code-graph with provenance' }],
   },
   {
-    id: 'building', label: 'Building Blocks', bedrock: true,
-    members: [{ name: 'estate', note: 'the graph · memory · knowledge' }, { name: 'brain', note: 'markdown memory' }, { name: 'bus', note: 'event substrate' }],
-    doing: 'Query the graph, recall memory, ride the event bus. estate is the bedrock at the base — the substrate every layer above queries.',
+    id: 'verify', verb: 'Verify',
+    doing: `No agent grades its own homework — an enforced wall between the agent that runs the tests and the one that judges them.`,
+    members: [{ name: 'testing', note: 'the acceptance gate' }],
+  },
+  {
+    id: 'govern', verb: 'Govern',
+    doing: `The engine that makes "done" a mechanism, not a claim — workflow-as-data, dual gates, state re-derived from evidence. The control room for governed agent delivery — drive, gate, and audit the work; the human stays in command.`,
+    members: [{ name: 'core', note: 'the engine' }, { name: 'crew', note: 'the control room' }],
   },
 ]
 
-function FamilyStack() {
+function FamilyLoop() {
   const reduced = useReducedMotion()
-  const [active, setActive] = useState(2) // start on Building Blocks (the bedrock)
+  const [active, setActive] = useState(1) // start on Equip (estate’s home)
   const [pinned, setPinned] = useState(false)
 
   useEffect(() => {
     if (reduced || pinned) return
-    const t = setInterval(() => setActive(a => (a + 1) % LAYERS.length), 2600)
+    const t = setInterval(() => setActive(a => (a + 1) % LOOP.length), 2600)
     return () => clearInterval(t)
   }, [reduced, pinned])
 
-  const current = LAYERS[active]
+  const current = LOOP[active]
 
   return (
     <Section id="foundation">
       <div className="max-w-5xl mx-auto w-full">
         <TopHead
-          kicker="The bedrock under the stack"
-          title={<>Estate is the layer <span style={{ color: 'var(--accent)' }}>everything else rests on.</span></>}
-        />
+          kicker="Where estate sits in the loop"
+          title={<>Estate is where the loop gets <span style={{ color: 'var(--accent)' }}>equipped.</span></>}
+        >
+          <p className="max-w-3xl">
+            One loop, four verbs, under human authority: <span className="font-semibold">intent → Steer → Equip → (your harness) → Verify · Govern → record</span>,
+            and the record feeds the next run. estate is one half of <span className="font-semibold">Equip</span> — the technical environment;{' '}
+            <span className="font-mono text-sm">wicked-brain</span> is the other.
+          </p>
+        </TopHead>
 
         <div className="grid lg:grid-cols-[0.9fr_1.1fr] gap-8 items-center">
-          {/* left — what you DO with the active layer */}
+          {/* left — what the active verb does */}
           <div className="text-left">
-            <span className="kicker">{current.label}</span>
+            <span className="kicker" style={{ color: current.here ? 'var(--accent)' : 'var(--muted)' }}>{current.verb}{current.here ? ' · you are here' : ''}</span>
             <p className="mt-3 text-lg text-ink font-sans leading-relaxed min-h-[7.5rem]">{current.doing}</p>
             <div className="mt-4 flex gap-1.5">
-              {LAYERS.map((l, i) => (
-                <button key={l.id} onClick={() => { setPinned(true); setActive(i) }} aria-label={l.label}
+              {LOOP.map((l, i) => (
+                <button key={l.id} onClick={() => { setPinned(true); setActive(i) }} aria-label={l.verb}
                   className="h-1.5 rounded-full transition-all"
                   style={{ width: i === active ? 24 : 8, background: i === active ? 'var(--accent)' : 'var(--hairline-strong)' }} />
               ))}
-              <span className="depth ml-2">{pinned ? 'pinned' : 'cycling top → bottom'}</span>
+              <button
+                onClick={() => setPinned(!pinned)}
+                className="depth depth-toggle ml-2"
+                aria-label={pinned ? 'Resume cycling the loop' : 'Pin the loop'}
+              >
+                {pinned ? 'pinned (click to cycle)' : 'cycling the loop'}
+              </button>
             </div>
           </div>
 
-          {/* right — the stack, bottom→top; a left pointer marks the active layer; it shrinks to fit */}
+          {/* right — the four verbs; a left pointer marks the active one */}
           <div className="rock-panel p-0 overflow-hidden">
-            {LAYERS.map((l, i) => {
+            {LOOP.map((l, i) => {
               const on = i === active
               return (
                 <div
@@ -861,12 +891,11 @@ function FamilyStack() {
                   <div className="w-8 flex items-center justify-center shrink-0">
                     {on && <span className="layer-pointer" aria-hidden>{reduced ? '▸' : '►'}</span>}
                   </div>
-                  <div className="flex-1 px-4 py-4" style={{ background: l.bedrock ? 'color-mix(in oklab, var(--accent) 7%, transparent)' : 'transparent' }}>
+                  <div className="flex-1 px-4 py-4" style={{ background: l.here ? 'color-mix(in oklab, var(--accent) 7%, transparent)' : 'transparent' }}>
                     <div className="flex items-center gap-3 mb-2 flex-wrap">
-                      <span className="kicker" style={{ color: on ? 'var(--accent)' : 'var(--muted)' }}>{l.label}</span>
-                      {l.bedrock && <span className="tag tag-accent">bedrock</span>}
+                      <span className="kicker" style={{ color: on ? 'var(--accent)' : 'var(--muted)' }}>{l.verb}</span>
+                      {l.here && <span className="tag tag-accent">estate lives here</span>}
                     </div>
-                    {/* members show in full only for the active layer — the table shrinks to fit */}
                     {on ? (
                       <div className="flex flex-wrap gap-2">
                         {l.members.map(m => (
@@ -885,7 +914,7 @@ function FamilyStack() {
           </div>
         </div>
         <p className="mt-6 font-mono text-xs text-faint">
-          Building Blocks (bottom) → Utilities → Solutions (top). estate · brain · bus carry the load; everything above queries them.
+          wicked-bus is the durable fabric beneath the loop · wicked-interactive is a creative surface beside it · every run stays under human authority — approve, redirect, pause, cancel.
         </p>
       </div>
     </Section>
@@ -965,7 +994,7 @@ export default function Content() {
       <FullToolface />
       <ProvenanceSeam />
       <Storage />
-      <FamilyStack />
+      <FamilyLoop />
       <GetStarted />
     </main>
   )
