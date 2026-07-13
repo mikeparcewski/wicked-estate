@@ -2129,6 +2129,87 @@ fn main() -> Result<()> {
                 }
             }
         }
+        // First-class name → SymbolId resolution (Domain-Brain Contract 2 §4 #2).
+        //
+        // Usage:
+        //   wicked-estate resolve <name> [--file F] [--kind K] [--json] [--db ...]
+        //
+        // Emits `[{symbol_id, name, kind, file, line}]` for every node whose simple name equals
+        // <name>, optionally narrowed by exact `location.file == F` and/or case-insensitive
+        // `kind == K` (matched against the Debug form `nodes --json` uses, e.g. "function").
+        // This is the read a write path's precondition depends on: names are NOT unique — one name
+        // can fan out to many SymbolIds (carddemo `MAIN-PARA` × 21) — so a consumer resolves
+        // name → SymbolId HERE before calling `annotate --symbol <id>` / `semantics <id>`, where a
+        // bare name is a silent no-op. Deterministic: `find_symbols(exact_name)` orders by SymbolId.
+        "resolve" => {
+            use wicked_estate_core::query::SymbolQuery;
+            let json_out = positional.iter().any(|a| a == "--json");
+            // `--file` is globally parsed into `src_file`; `--kind` lands in `positional` (like `nodes`).
+            let file_filter = src_file.clone();
+            let mut kind_filter: Option<String> = None;
+            let mut name: Option<String> = None;
+            let mut it2 = positional.iter();
+            while let Some(a) = it2.next() {
+                match a.as_str() {
+                    "--json" => {}
+                    "--kind" => kind_filter = it2.next().cloned(),
+                    other => {
+                        if name.is_none() {
+                            name = Some(other.to_string());
+                        }
+                    }
+                }
+            }
+            let name =
+                name.context("usage: wicked-estate resolve <name> [--file F] [--kind K] [--json]")?;
+
+            // Brain-facing read surface → route through the open_store factory so it
+            // is backend-agnostic (postgres:// under --features postgres) per ADR-003,
+            // rather than pinning a new caller to SqliteStore. resolve only needs
+            // GraphRead::find_symbols, a GraphStore supertrait method, so Box<dyn
+            // GraphStore> derefs cleanly. (The other read arms are pre-existing debt —
+            // a dedicated open_store migration, not this PHASE-1 surface's job.)
+            let store = open_store(&db).map_err(to_any)?;
+            let q = SymbolQuery {
+                exact_name: Some(name.clone()),
+                ..Default::default()
+            };
+            let mut nodes = store.find_symbols(&q).map_err(to_any)?;
+            if let Some(f) = &file_filter {
+                nodes.retain(|n| &n.location.file == f);
+            }
+            if let Some(k) = &kind_filter {
+                let kl = k.to_lowercase();
+                nodes.retain(|n| format!("{:?}", n.kind).to_lowercase() == kl);
+            }
+
+            if json_out {
+                let rows: Vec<serde_json::Value> = nodes
+                    .iter()
+                    .map(|n| {
+                        serde_json::json!({
+                            "symbol_id": n.symbol.to_string(),
+                            "name": n.name,
+                            "kind": format!("{:?}", n.kind),
+                            "file": n.location.file,
+                            "line": n.location.span.start_line + 1,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else {
+                println!("{} match(es) for '{name}':", nodes.len());
+                for n in &nodes {
+                    println!(
+                        "  {} {:?} ({}:{})",
+                        n.name,
+                        n.kind,
+                        n.location.file,
+                        n.location.span.start_line + 1
+                    );
+                }
+            }
+        }
         // Cross-repo symbol correspondence.
         //
         // Usage:
@@ -2615,6 +2696,12 @@ fn main() -> Result<()> {
             );
             println!(
                 "    --json adds per-node annotation_summary {{count,by_type,has_advisory}} + an annotations[] array (R4-capped at 20)"
+            );
+            println!(
+                "  wicked-estate resolve <name> [--file F] [--kind K] [--json]  # name → [{{symbol_id,name,kind,file,line}}]"
+            );
+            println!(
+                "    Resolve a simple name to its stable SymbolId(s) before an --symbol write (names are not unique)."
             );
             println!(
                 "  wicked-estate export [--format ndjson|json] [--nodes-only] [--edges-only]  # full graph export"
