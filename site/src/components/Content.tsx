@@ -129,9 +129,6 @@ function Hero() {
             The memory and code-graph proper live in <span className="text-ink">wicked-brain</span>, Equip’s other half.
             estate is the technical environment those symbols sit in: what a change touches, what protects it, what it was.
           </p>
-          <p className="mt-4 font-mono text-xs text-faint leading-5">
-            100+ wired languages · every edge {'{'}confidence, provenance, resolved_by{'}'} · SQLite by default, one flag to a shared Postgres backend.
-          </p>
           <div className="mt-9 flex flex-col sm:flex-row gap-3">
             <a href="#query" className="btn-primary">Read the core ↓</a>
             <a href="https://github.com/mikeparcewski/wicked-estate" target="_blank" rel="noreferrer" className="btn-outline">
