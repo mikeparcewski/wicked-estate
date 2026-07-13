@@ -538,10 +538,12 @@ function AgentIDE() {
                             <span className="ide-line-body">
                               <span className="ide-line-top">
                                 <span className="ide-line-text" title={f.text}>{f.text}</span>
-                                <span className="prov shrink-0" style={f.conf >= 1.0 || injected ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>{f.prov}</span>
-                                <span className="prov tabular-nums shrink-0" style={{ color: confColor(f.conf) }}>{f.conf.toFixed(2)}</span>
-                                {f.advisory && <span className="prov shrink-0">adv</span>}
-                                {!on && <span className="prov shrink-0" style={{ color: 'var(--faint)' }}>below cutoff</span>}
+                                <span className="ide-line-chips">
+                                  <span className="prov" style={f.conf >= 1.0 || injected ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>{f.prov}</span>
+                                  <span className="prov tabular-nums" style={{ color: confColor(f.conf) }}>{f.conf.toFixed(2)}</span>
+                                  {f.advisory && <span className="prov">adv</span>}
+                                  {!on && <span className="prov" style={{ color: 'var(--faint)' }}>below cutoff</span>}
+                                </span>
                               </span>
                               {f.detail && (
                                 <span className="ide-line-detail" data-injected={String(injected)} title={f.detail}>{f.detail}</span>

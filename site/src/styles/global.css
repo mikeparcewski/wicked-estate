@@ -387,6 +387,7 @@
 @layer components {
   .ide-window {
     position: relative;
+    width: 100%; max-width: 100%;
     border-radius: 14px;
     border: 1px solid var(--hairline-strong);
     background: var(--rock);
@@ -407,9 +408,10 @@
   }
   .ide-lights { display: inline-flex; gap: 7px; flex-shrink: 0; }
   .ide-lights i { width: 11px; height: 11px; border-radius: 50%; display: block; }
-  .ide-lights i:nth-child(1) { background: #ff5f57; }
-  .ide-lights i:nth-child(2) { background: #febc2e; }
-  .ide-lights i:nth-child(3) { background: #28c840; }
+  /* muted toward estate's disciplined palette — window signal without the loud macOS pop */
+  .ide-lights i:nth-child(1) { background: color-mix(in oklab, #e06c60 48%, var(--hairline-strong)); }
+  .ide-lights i:nth-child(2) { background: color-mix(in oklab, #e0b341 48%, var(--hairline-strong)); }
+  .ide-lights i:nth-child(3) { background: color-mix(in oklab, #57a55a 48%, var(--hairline-strong)); }
   .ide-title {
     flex: 1; min-width: 0; text-align: center;
     font-size: 0.72rem; letter-spacing: 0.04em; color: var(--muted);
@@ -425,7 +427,7 @@
   .ide-explorer {
     border-right: 1px solid var(--hairline-strong);
     background: color-mix(in oklab, var(--ink) 3%, var(--rock));
-    padding: 13px 11px; display: flex; flex-direction: column; gap: 17px;
+    padding: 11px 10px; display: flex; flex-direction: column; gap: 13px;
     min-width: 0;
   }
   @media (max-width: 1023px) {
@@ -439,7 +441,7 @@
 
   .ide-file, .ide-action {
     width: 100%; display: flex; align-items: center; gap: 8px;
-    padding: 7px 8px; border-radius: 7px; cursor: pointer; text-align: left;
+    padding: 6px 8px; border-radius: 7px; cursor: pointer; text-align: left;
     background: transparent; border: 1px solid transparent; color: var(--muted);
     transition: background 0.16s var(--ease), border-color 0.16s var(--ease), color 0.16s var(--ease);
   }
@@ -515,7 +517,7 @@
   .ide-diff-code { margin: 0; padding: 0 14px 9px; overflow-x: auto; }
   .ide-diff-code code { display: block; }
   .ide-diff-line {
-    display: block; font-size: 0.66rem; line-height: 1.75; white-space: pre;
+    display: block; font-size: 0.66rem; line-height: 1.65; white-space: pre;
     color: var(--muted); padding: 0 6px; border-radius: 3px;
   }
   .ide-diff-line[data-kind="add"] { color: #2ea043; background: color-mix(in oklab, #2ea043 12%, transparent); }
@@ -542,11 +544,12 @@
   .ide-gutter-ends span { font-size: 0.5rem; letter-spacing: 0.05em; color: var(--faint); white-space: nowrap; }
   @media (max-width: 620px) { .ide-gutter-ends { display: none; } }
 
-  /* peek results — the assembled dossier */
-  .ide-peek { padding: 4px 0 8px; overflow-y: auto; max-height: min(40vh, 384px); }
-  @media (max-width: 1023px) { .ide-peek { max-height: none; } }
+  /* peek results — the assembled dossier. scrollbar-gutter reserves the scroll track
+     so the conf value at each row's right edge is never clipped by the scrollbar. */
+  .ide-peek { padding: 4px 0 8px; overflow-y: auto; scrollbar-gutter: stable; max-height: min(36vh, 340px); }
+  @media (max-width: 1023px) { .ide-peek { max-height: none; scrollbar-gutter: auto; } }
   .ide-peek-group {
-    padding: 3px 14px 6px; border-left: 2px solid transparent;
+    padding: 3px 16px 6px 14px; border-left: 2px solid transparent;
     transition: opacity 0.25s var(--ease), border-color 0.25s var(--ease), background 0.25s var(--ease);
   }
   .ide-peek[data-dim="true"] .ide-peek-group[data-off="true"] { opacity: 0.4; }
@@ -567,9 +570,11 @@
   .ide-line-body { flex: 1; min-width: 0; }
   .ide-line-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .ide-line-text {
-    flex: 1; min-width: 0; font-family: "Hanken Grotesk", ui-sans-serif, sans-serif;
+    flex: 1 1 auto; min-width: 0; font-family: "Hanken Grotesk", ui-sans-serif, sans-serif;
     font-size: 0.82rem; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
+  /* the prov + confidence + advisory chips stay one pinned cluster; the text truncates first */
+  .ide-line-chips { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; }
   .ide-line[data-on="false"] { opacity: 0.5; }
   .ide-line[data-on="false"] .ide-line-text { color: var(--muted); }
   .ide-line-detail {
@@ -641,6 +646,13 @@ html body::after {
    through every band; alternate bands add a shifted tint for section rhythm. */
 .strata, .same-garden { position: relative; box-shadow: inset 0 1px 0 var(--band-edge); }
 .strata-solid { background-color: var(--band-solid-bg); }
+
+/* The agent's-IDE section is the hero's "Read the core ↓" anchor target. The html
+   scroll-padding-top already offsets anchor landings by the topbar height, but the
+   headline then sits flush against the bar with no breathing room. A small
+   scroll-margin-top adds a clean gap below the topbar without over-pushing the
+   section (which would drop the status bar below the fold on short viewports). */
+#query { scroll-margin-top: 14px; }
 
 /* ── Scroll-lock to section + per-section viewport sizing ──────────────────
    Each stratum fills the viewport and snaps to the top; `safe center` vertical
