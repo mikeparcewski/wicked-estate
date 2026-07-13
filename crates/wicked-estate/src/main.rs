@@ -2142,7 +2142,6 @@ fn main() -> Result<()> {
         // name → SymbolId HERE before calling `annotate --symbol <id>` / `semantics <id>`, where a
         // bare name is a silent no-op. Deterministic: `find_symbols(exact_name)` orders by SymbolId.
         "resolve" => {
-            use wicked_estate_core::GraphRead;
             use wicked_estate_core::query::SymbolQuery;
             let json_out = positional.iter().any(|a| a == "--json");
             // `--file` is globally parsed into `src_file`; `--kind` lands in `positional` (like `nodes`).
@@ -2164,7 +2163,13 @@ fn main() -> Result<()> {
             let name =
                 name.context("usage: wicked-estate resolve <name> [--file F] [--kind K] [--json]")?;
 
-            let store = SqliteStore::open(&db).map_err(to_any)?;
+            // Brain-facing read surface → route through the open_store factory so it
+            // is backend-agnostic (postgres:// under --features postgres) per ADR-003,
+            // rather than pinning a new caller to SqliteStore. resolve only needs
+            // GraphRead::find_symbols, a GraphStore supertrait method, so Box<dyn
+            // GraphStore> derefs cleanly. (The other read arms are pre-existing debt —
+            // a dedicated open_store migration, not this PHASE-1 surface's job.)
+            let store = open_store(&db).map_err(to_any)?;
             let q = SymbolQuery {
                 exact_name: Some(name.clone()),
                 ..Default::default()
