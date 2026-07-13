@@ -336,6 +336,9 @@
   .layer-row[data-active="true"]  {
     background: color-mix(in oklab, var(--accent) 8%, transparent);
   }
+  /* Mobile: the loop is shown fully highlighted and static (no cycling), so the
+     pointer must not nudge. */
+  @media (max-width: 760px) { .layer-pointer { animation: none; } }
 
   /* ── Provenance winner label — stands out when in scope ──────────────────── */
   .who-label { transition: all 0.3s var(--ease); }
@@ -648,6 +651,60 @@
   @media (prefers-reduced-motion: reduce) {
     .ide-cursor { transition: none; }
     .ide-ctxmenu, .ide-dock-body { animation: none; }
+  }
+
+  /* ══ MOBILE (≤760px) · the stacked, static IDE treatment ══════════════════════
+     The desktop split-pane (absolute cursor + right-click context menu + measured
+     positioning) is replaced in JSX by a legible stacked layout: file → tappable
+     IDE gestures → confidence dial → dock. These rules size that treatment to the
+     viewport and let the dock rows WRAP (instead of ellipsis-truncating) so nothing
+     is unreadable and nothing overflows the phone. Desktop is untouched. */
+  .ide-window--mobile { font-size: clamp(0.82rem, 3.6vw, 1rem); }
+  .ide-window--mobile .ide-title { white-space: normal; font-size: clamp(0.6rem, 3vw, 0.72rem); }
+
+  /* static code block — scales its own font, scrolls internally if a line is long */
+  .ide-code--mobile { overflow: visible; }
+  .ide-code--mobile .ide-code-pre { font-size: clamp(0.62rem, 3.1vw, 0.72rem); }
+
+  /* IDE gestures — the command palette as a tap-target list */
+  .ide-m-gestures {
+    padding: 10px 12px 4px;
+    border-bottom: 1px solid var(--hairline);
+    background: color-mix(in oklab, var(--ink) 3%, var(--rock));
+  }
+  .ide-m-cmds {
+    list-style: none; margin: 6px 0 0; padding: 0;
+    display: grid; grid-template-columns: 1fr; gap: 5px; min-width: 0;
+  }
+  /* two-up only on wider phones/tablets, where the tracks comfortably fit */
+  @media (min-width: 520px) and (max-width: 760px) { .ide-m-cmds { grid-template-columns: 1fr 1fr; } }
+  .ide-m-cmds > li { min-width: 0; }
+  .ide-m-cmd {
+    width: 100%; display: flex; align-items: center; gap: 8px;
+    padding: 9px 10px; border-radius: 8px; cursor: pointer; text-align: left;
+    background: color-mix(in oklab, var(--ink) 4%, transparent);
+    border: 1px solid var(--hairline-strong); color: var(--muted);
+    transition: background 0.16s var(--ease), border-color 0.16s var(--ease), color 0.16s var(--ease);
+  }
+  .ide-m-cmd .ide-cmd-label { font-size: clamp(0.68rem, 3.2vw, 0.74rem); }
+  .ide-m-cmd[data-active="true"] {
+    background: color-mix(in oklab, var(--accent) 12%, transparent);
+    border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline)); color: var(--ink);
+  }
+  .ide-m-cmd[data-active="true"] .ide-cmd-label { color: var(--accent); }
+  .ide-m-cmd[data-active="true"] .ide-kbd { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline)); }
+
+  /* dock rows: let text wrap so full facts/memories are readable on a phone */
+  @media (max-width: 760px) {
+    .ide-dock-body { height: auto; min-height: 0; scrollbar-gutter: auto; }
+    .ide-line-top, .ide-mem-top { flex-wrap: wrap; row-gap: 3px; }
+    .ide-line-text, .ide-mem-text, .ide-line-detail { white-space: normal; overflow: visible; }
+    .ide-line-text, .ide-mem-text { font-size: clamp(0.76rem, 3.4vw, 0.82rem); }
+    .ide-statusbar { gap: 8px 12px; }
+    .ide-status-legend { margin-left: 0; }
+    /* The family-loop rows show every member statically on mobile; their tags
+       carry long notes that would clip against the panel edge at nowrap. */
+    .layer-row .tag { white-space: normal; }
   }
 }
 
