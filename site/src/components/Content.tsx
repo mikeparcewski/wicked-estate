@@ -185,16 +185,29 @@ function Hero() {
   )
 }
 
-// ── 2 · QUERY THE SUBSTRATE — auto-demos, pauses + becomes yours on click ───────
+// ── 2 · THE AGENT'S IDE — estate as the agent's live, queryable workspace ───────
+// The query surface reframed as an IDE: the SUBJECTS are files the agent "opens",
+// estate's query verbs are IDE actions, and the dossier renders like a peek panel —
+// facts grouped by stratum, each stamped with confidence + provenance, the confidence
+// dial a gutter control. Same SUBJECTS / STRATA data + the dial-sweep logic as before.
 type Prov = 'Parsed' | 'SCIP' | 'TSG' | 'ImportMap' | 'Tags' | 'Injected' | 'git' | 'Collector' | 'annotation'
 interface Fact { stratum: StratumId; text: string; detail?: string; conf: number; prov: Prov; advisory?: boolean }
 // `dial` is the confidence value the dial SWEEPS TO when this subject is on screen —
 // each subject reads out at a different cutoff so the needle visibly travels between tabs.
-interface Subject { id: string; label: string; kind: string; dial: number; facts: Fact[] }
+// one line of the file the agent is editing — the edit that triggers the search
+interface EditLine { text: string; kind: 'add' | 'del' | 'ctx'; caret?: boolean }
+interface Subject { id: string; label: string; kind: string; dial: number; file: string; lang: string; edit: EditLine[]; facts: Fact[] }
 
 const SUBJECTS: Subject[] = [
   {
-    id: 'applyDiscount', label: 'applyDiscount', kind: 'symbol', dial: 0.55,
+    id: 'applyDiscount', label: 'applyDiscount', kind: 'symbol', dial: 0.55, file: 'applyDiscount.ts', lang: 'TS',
+    edit: [
+      { text: 'export function applyDiscount(cart, coupon) {', kind: 'ctx' },
+      { text: '  const price = cartTotal(cart)', kind: 'ctx' },
+      { text: '  return price - coupon.value', kind: 'del' },
+      { text: '  return clamp(price - coupon.value, 0)', kind: 'add', caret: true },
+      { text: '}', kind: 'ctx' },
+    ],
     facts: [
       { stratum: 'requirements', text: 'satisfies REQ-142 · validated ✓', detail: 'requirement↔code · enforced', conf: 1.0, prov: 'Parsed' },
       { stratum: 'blast', text: '3 transitive dependents', detail: 'checkout · cartTotal · api/price', conf: 1.0, prov: 'SCIP' },
@@ -206,7 +219,13 @@ const SUBJECTS: Subject[] = [
     ],
   },
   {
-    id: 'REQ-142', label: 'REQ-142', kind: 'requirement', dial: 0.90,
+    id: 'REQ-142', label: 'REQ-142', kind: 'requirement', dial: 0.90, file: 'REQ-142.spec', lang: 'REQ',
+    edit: [
+      { text: 'REQ-142  coupons never exceed the cart total', kind: 'ctx' },
+      { text: '  given  a cart with one coupon applied', kind: 'ctx' },
+      { text: '  then   discount <= subtotal', kind: 'del' },
+      { text: '  then   discount <= subtotal AND discount >= 0', kind: 'add', caret: true },
+    ],
     facts: [
       { stratum: 'requirements', text: '2 symbols satisfy REQ-142', detail: 'validateCoupon ✓ · applyDiscount ⋯ unvalidated', conf: 1.0, prov: 'Parsed' },
       { stratum: 'blast', text: 'blast-radius of implementers: 3 dependents', detail: 'checkout · cartTotal · api/price', conf: 1.0, prov: 'SCIP' },
@@ -217,7 +236,12 @@ const SUBJECTS: Subject[] = [
     ],
   },
   {
-    id: 'PAYROLL.JCL', label: 'PAYROLL.JCL', kind: 'JCL step', dial: 0.70,
+    id: 'PAYROLL.JCL', label: 'PAYROLL.JCL', kind: 'JCL step', dial: 0.70, file: 'PAYROLL.JCL', lang: 'JCL',
+    edit: [
+      { text: '//PAYCALC  EXEC PGM=PAYCALC', kind: 'ctx' },
+      { text: '//MASTER   DD DSN=PAYROLL.MASTER,DISP=SHR', kind: 'del' },
+      { text: '//MASTER   DD DSN=PAYROLL.MASTER,DISP=OLD', kind: 'add', caret: true },
+    ],
     facts: [
       { stratum: 'infra', text: 'EXEC PGM=PAYCALC uses PAYROLL.MASTER', detail: 'JCL step↔dataset edge', conf: 1.0, prov: 'Parsed' },
       { stratum: 'infra', text: 'RACF profile PAY.** protects PAYROLL.MASTER', detail: 'cross-domain: RACF↔dataset · one query', conf: 1.0, prov: 'Parsed' },
@@ -230,6 +254,25 @@ const SUBJECTS: Subject[] = [
   },
 ]
 
+// IDE query actions — estate's verbs, each mapped to one stratum of the dossier.
+// Running one focuses that stratum's group in the editor (an IDE "peek" jump).
+const ACTIONS: { id: StratumId; verb: string; hint: string; cmd: string }[] = [
+  { id: 'requirements', verb: 'Go to requirement',  hint: 'requirement ↔ impl',             cmd: 'F12' },
+  { id: 'blast',        verb: 'Find references',     hint: 'blast-radius · event→consumers', cmd: '⇧F12' },
+  { id: 'infra',        verb: 'Show infra / policy', hint: 'IaC · RACF · datasets',          cmd: '⌘I' },
+  { id: 'history',      verb: 'Recall history',      hint: 'git · drift · edge log',         cmd: '⌘H' },
+  { id: 'annotations',  verb: 'Read annotations',    hint: 'typed memory · advisory',        cmd: '⌘K' },
+]
+
+// compact provenance legend for the status bar. `accent` = a 1.0 / injected tier.
+const PROV_LEGEND: { prov: string; note: string; accent?: boolean }[] = [
+  { prov: 'Parsed',    note: 'AST · 1.0',     accent: true },
+  { prov: 'SCIP',      note: 'indexer · 1.0', accent: true },
+  { prov: 'Injected',  note: 'bus / cmd edge', accent: true },
+  { prov: 'ImportMap', note: 'heuristic' },
+  { prov: 'Tags',      note: 'tag-scan · 0.3' },
+]
+
 function confColor(conf: number) {
   if (conf >= 1.0) return 'var(--accent)'
   if (conf >= 0.8) return 'var(--ink)'
@@ -237,28 +280,55 @@ function confColor(conf: number) {
   return 'var(--faint)'
 }
 
-function QuerySubstrate() {
+function AgentIDE() {
   const reduced = useReducedMotion()
   const [subjectIdx, setSubjectIdx] = useState(0)
   const [threshold, setThreshold] = useState(SUBJECTS[0].dial)
   const [driving, setDriving] = useState(false)
+  const [focus, setFocus] = useState<StratumId | null>(null)
+  // how many references the blast-radius search has surfaced so far (the auto reveal)
+  const [revealed, setRevealed] = useState(SUBJECTS[0].facts.length)
 
   const subject = SUBJECTS[subjectIdx]
-  const live = subject.facts.filter(f => f.conf >= threshold)
+  // number every fact like an editor line, in stratum (top-to-bottom) order — this is
+  // also the order the blast-radius search surfaces them in.
+  const lineOf = new Map<Fact, number>()
+  STRATA.forEach(s => subject.facts.filter(f => f.stratum === s.id).forEach(f => lineOf.set(f, lineOf.size + 1)))
+  const isShown = (f: Fact) => (lineOf.get(f) ?? 0) <= revealed
+  const live = subject.facts.filter(f => isShown(f) && f.conf >= threshold)
   const liveStrata = new Set(live.map(f => f.stratum))
+  const searching = !driving && !reduced && revealed < subject.facts.length
 
-  // auto-demo: dwell ~5s on each subject (each subject is a tab), then advance
-  // to the next and cycle. Clicking a subject or driving the dial pins it and
-  // stops the auto-progression.
+  // AUTO-DEMO · edit → blast-radius search, in place (no subject-stepping). The open
+  // file shows an edit; estate then surfaces the transitive dependents, the injected
+  // event→consumer edge grep can't see, and the lower-confidence heuristics one at a
+  // time — each with its confidence + provenance. After a dwell it replays. Driving or
+  // reduced-motion reveals the whole dossier at once (nothing to watch — go explore).
   useEffect(() => {
-    if (driving || reduced) return
-    const t = setInterval(() => setSubjectIdx(i => (i + 1) % SUBJECTS.length), 5000)
-    return () => clearInterval(t)
-  }, [driving, reduced])
+    const total = SUBJECTS[subjectIdx].facts.length
+    if (driving || reduced) { setRevealed(total); return }
+    const EDIT_BEAT = 950   // the "editing" moment before the search fires
+    const STAGGER = 560     // gap between each surfaced reference
+    const DWELL = 2400      // hold the full dossier before replaying
+    let cancelled = false
+    const timers: number[] = []
+    const runOnce = () => {
+      setRevealed(0)
+      for (let k = 1; k <= total; k++) {
+        timers.push(window.setTimeout(() => { if (!cancelled) setRevealed(k) }, EDIT_BEAT + k * STAGGER))
+      }
+      timers.push(window.setTimeout(() => { if (!cancelled) runOnce() }, EDIT_BEAT + total * STAGGER + DWELL))
+    }
+    runOnce()
+    return () => { cancelled = true; timers.forEach(clearTimeout) }
+  }, [subjectIdx, driving, reduced])
 
-  // The confidence dial SWEEPS: when the tab advances, the needle glides from its
-  // current value to the new subject's read-out cutoff — so the dial visibly moves
-  // between subjects instead of sitting still. Held facts filter live as it travels.
+  // clear the focused stratum whenever the open file changes
+  useEffect(() => { setFocus(null) }, [subjectIdx])
+
+  // The confidence dial SWEEPS: on opening a file the needle glides from its current
+  // value to that file's read-out cutoff — so the dial visibly moves between files
+  // instead of sitting still. Shown facts filter live as it travels.
   const thresholdRef = useRef(threshold)
   thresholdRef.current = threshold
   const rafRef = useRef<number | undefined>(undefined)
@@ -279,103 +349,207 @@ function QuerySubstrate() {
     return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current) }
   }, [subjectIdx, driving, reduced])
 
+  // when an action focuses a stratum, bring its group into view inside the peek pane
+  const groupRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  useEffect(() => {
+    if (!focus) return
+    const el = groupRefs.current[focus]
+    if (el) el.scrollIntoView({ block: 'nearest', behavior: reduced ? 'auto' : 'smooth' })
+  }, [focus, reduced])
+
   const takeControl = () => setDriving(true)
+  // open a file in the editor — in auto this replays the edit → search on that file;
+  // opening does NOT pin (moving the dial, running an action, or the toolbar toggle pins).
+  const openSymbol = (i: number) => { setSubjectIdx(i) }
+  // run an estate query action — pins, then focuses (or unfocuses) that stratum group
+  const runAction = (id: StratumId) => { takeControl(); setFocus(f => (f === id ? null : id)) }
+  // shown (revealed) / total fact counts for one stratum of the current file's dossier
+  const strataCounts = (id: StratumId) => {
+    const inStratum = subject.facts.filter(f => f.stratum === id)
+    return { live: inStratum.filter(f => isShown(f) && f.conf >= threshold).length, total: inStratum.length }
+  }
 
   return (
     <Section id="query" solid>
       <div className="max-w-6xl mx-auto w-full">
-        <div className="mb-2.5 w-full text-left flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <span className="kicker">Query the substrate</span>
-            <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink w-full leading-[0.98]">
-              One question. One dossier. Assembled live across all five strata.
-            </h2>
-            <p className="mt-1.5 text-sm text-ink w-full font-sans leading-tight max-w-2xl">
-              Watch it read itself — it steps through each subject and the confidence dial sweeps to that subject's
-              cutoff. Click any subject to pin it, then drive the dial: push to{' '}
-              <span className="font-semibold">1.0</span> and only parsed / SCIP facts survive; drop it and the heuristic
-              tag-scan edges reappear — <span className="font-semibold">labeled, never silently promoted</span>.
-            </p>
+        {/* section header — the query surface, reframed as the agent's IDE */}
+        <div className="mb-4 w-full text-left max-w-3xl">
+          <span className="kicker">The agent&apos;s IDE</span>
+          <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink leading-[0.98]">
+            The agent doesn&apos;t grep. It edits — and estate runs the <span style={{ color: 'var(--accent)' }}>blast-radius.</span>
+          </h2>
+          <p className="mt-1.5 text-sm text-muted font-sans leading-tight">
+            estate is the live technical environment the agent codes in. Change a line and it runs the search grep can&apos;t:
+            the transitive dependents, the <span className="text-ink">injected event→consumer edge</span>, the lower-confidence
+            heuristics — each a live fact stamped with <span className="text-ink">confidence + provenance</span>. Push the dial
+            to <span className="font-semibold">1.0</span> and only parsed / SCIP survive; drop it and the tag-scan edges
+            reappear — <span className="font-semibold">labeled, never silently promoted</span>.
+          </p>
+        </div>
+
+        {/* ── THE IDE WINDOW ────────────────────────────────────────────── */}
+        <div className="ide-window">
+          {/* chrome bar */}
+          <div className="ide-chrome">
+            <span className="ide-lights" aria-hidden="true"><i /><i /><i /></span>
+            <span className="ide-title">wicked-estate — the agent&apos;s workspace</span>
+            <button
+              className="demo-pill ide-run"
+              data-live={String(!driving)}
+              onClick={() => setDriving(d => !d)}
+              aria-label={driving ? 'Resume the auto demo' : 'Pause and drive the workspace yourself'}
+            >
+              <span className="dot" />
+              {driving ? 'Driving · resume' : 'Auto-demo · drive'}
+            </button>
           </div>
-          <button
-            className="demo-pill"
-            data-live={String(!driving)}
-            onClick={() => setDriving(d => !d)}
-            aria-label={driving ? 'Resume auto demo' : 'Pause and drive it yourself'}
-          >
-            <span className="dot" />
-            {driving ? 'You’re driving · resume demo' : 'Auto-demo · click to drive'}
-          </button>
-        </div>
 
-        {/* Subject picker — three core samples */}
-        <div className="flex flex-wrap gap-2 mb-2">
-          {SUBJECTS.map((s, i) => {
-            const on = i === subjectIdx
-            return (
-              <button
-                key={s.id}
-                onClick={() => { takeControl(); setSubjectIdx(i); setThreshold(s.dial) }}
-                className="text-left rounded-xl px-4 py-1.5 transition-all"
-                style={{
-                  background: on ? 'color-mix(in oklab, var(--accent) 12%, var(--rock))' : 'var(--rock)',
-                  border: `1px solid ${on ? 'color-mix(in oklab, var(--accent) 55%, var(--hairline))' : 'var(--hairline-strong)'}`,
-                }}
-              >
-                <div className="flex items-center gap-2">
-                  <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: on ? 'var(--accent)' : 'var(--faint)' }} />
-                  <span className="font-mono text-sm font-semibold text-ink">{s.label}</span>
-                  <span className="tag">{s.kind}</span>
+          {/* body — explorer + editor */}
+          <div className="ide-body">
+            {/* LEFT · explorer / activity */}
+            <aside className="ide-explorer" aria-label="Substrate explorer">
+              <div>
+                <span className="ide-sec-label">Explorer · open symbols</span>
+                <ul className="ide-tree" role="list">
+                  {SUBJECTS.map((s, i) => {
+                    const on = i === subjectIdx
+                    return (
+                      <li key={s.id}>
+                        <button
+                          className="ide-file"
+                          data-on={String(on)}
+                          aria-current={on ? 'true' : undefined}
+                          onClick={() => openSymbol(i)}
+                        >
+                          <span className="ide-glyph" data-lang={s.lang}>{s.lang}</span>
+                          <span className="ide-file-name">{s.file}</span>
+                          <span className="ide-file-kind">{s.kind}</span>
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+              </div>
+
+              <div>
+                <span className="ide-sec-label">Query actions</span>
+                <ul className="ide-actions" role="list">
+                  {ACTIONS.map(a => {
+                    const c = strataCounts(a.id)
+                    const foc = focus === a.id
+                    return (
+                      <li key={a.id}>
+                        <button
+                          className="ide-action"
+                          data-focus={String(foc)}
+                          aria-pressed={foc}
+                          onClick={() => runAction(a.id)}
+                        >
+                          <span className="ide-action-dot" data-lit={String(c.live > 0)} aria-hidden="true" />
+                          <span className="ide-action-body">
+                            <span className="ide-action-verb">{a.verb}</span>
+                            <span className="ide-action-hint">{a.hint}</span>
+                          </span>
+                          <span className="ide-action-meta">
+                            <span className="ide-action-count tabular-nums">{c.live}/{c.total}</span>
+                            <span className="ide-kbd">{a.cmd}</span>
+                          </span>
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+              </div>
+            </aside>
+
+            {/* CENTER · editor / dossier */}
+            <div className="ide-editor">
+              {/* tab bar */}
+              <div className="ide-tabbar">
+                <span className="ide-tab" data-on="true">
+                  <span className="ide-glyph" data-lang={subject.lang}>{subject.lang}</span>
+                  <span className="ide-tab-name">{subject.file}</span>
+                </span>
+                <span className="ide-crumb depth">substrate.query({subject.kind}) → 1 dossier · 5 strata</span>
+              </div>
+
+              {/* the edit that triggers the search */}
+              <div className="ide-diff" data-live={String(!driving && !reduced)}>
+                <div className="ide-diff-head">
+                  <span className="ide-diff-dot" data-on={String(searching)} aria-hidden="true" />
+                  <span className="ide-diff-label">{searching ? 'running blast-radius search' : 'edit → blast-radius search'}</span>
+                  <span className="ide-diff-count depth">{Math.min(revealed, subject.facts.length)}/{subject.facts.length} references</span>
                 </div>
-                {on && !driving && !reduced && (
-                  <div className="tab-progress" key={subjectIdx}><span /></div>
-                )}
-              </button>
-            )
-          })}
-        </div>
+                <pre className="ide-diff-code"><code>
+                  {subject.edit.map((l, i) => (
+                    <span key={i} className="ide-diff-line" data-kind={l.kind}>
+                      <span className="ide-diff-sign">{l.kind === 'add' ? '+' : l.kind === 'del' ? '-' : ' '}</span>
+                      <span className="ide-diff-text">{l.text}</span>
+                      {l.caret && <span className="ide-caret" aria-hidden="true" />}
+                    </span>
+                  ))}
+                </code></pre>
+              </div>
 
-        <div className="grid lg:grid-cols-[280px_1fr] gap-3">
-          {/* Left — confidence dial + core column */}
-          <div className="rock-panel p-4 flex flex-col gap-3.5">
-            <div>
-              <div className="flex items-baseline justify-between mb-2.5">
-                <span className="kicker">Confidence dial</span>
-                <span className="dial-readout font-mono text-xl font-black tabular-nums" style={{ color: 'var(--accent)' }}>
-                  {threshold.toFixed(2)}
+              {/* confidence gutter — the dial as an IDE control */}
+              <div className="ide-gutter">
+                <span className="ide-gutter-label">confidence ≥</span>
+                <span className="ide-gutter-val tabular-nums">{threshold.toFixed(2)}</span>
+                <input
+                  type="range" min={0.3} max={1.0} step={0.05} value={threshold}
+                  onChange={e => { takeControl(); setThreshold(parseFloat(e.target.value)) }}
+                  onMouseDown={takeControl} onTouchStart={takeControl}
+                  className="dial ide-dial" aria-label="Confidence threshold"
+                />
+                <span className="ide-gutter-ends">
+                  <span>0.30 · heuristics</span>
+                  <span>1.00 · SCIP only</span>
                 </span>
               </div>
-              <input
-                type="range" min={0.3} max={1.0} step={0.05} value={threshold}
-                onChange={e => { takeControl(); setThreshold(parseFloat(e.target.value)) }}
-                onMouseDown={takeControl} onTouchStart={takeControl}
-                className="dial" aria-label="Confidence threshold"
-              />
-              <div className="flex justify-between mt-2 depth">
-                <span>0.30 · heuristics</span>
-                <span>1.00 · SCIP only</span>
-              </div>
-              <p className="mt-2.5 font-mono text-[0.62rem] text-ink leading-5">
-                {live.length} of {subject.facts.length} facts above cutoff · {liveStrata.size} of 5 strata live
-              </p>
-            </div>
 
-            {/* the drill core: which strata have a live fact */}
-            <div>
-              <span className="kicker">Core column</span>
-              <div className="relative mt-2 pl-3">
-                <div className="seam-line absolute top-1 bottom-1 left-0" />
+              {/* peek results — the dossier, surfaced by the search, grouped by stratum */}
+              <div className="ide-peek" data-dim={String(focus !== null)}>
                 {STRATA.map(s => {
-                  const on = liveStrata.has(s.id)
+                  const facts = subject.facts.filter(f => f.stratum === s.id)
+                  const shown = facts.filter(isShown)
+                  if (shown.length === 0) return null
+                  const foc = focus === s.id
+                  const someLive = shown.some(f => f.conf >= threshold)
                   return (
-                    <div key={s.id} className="flex items-center gap-3 py-1">
-                      <span className="w-2 h-2 rounded-full shrink-0"
-                        style={{ background: on ? 'var(--accent)' : 'var(--hairline-strong)',
-                          animation: on && !reduced ? 'live-pulse 2.4s var(--ease) infinite' : 'none' }} />
-                      <span className="depth w-14 shrink-0">{s.depth}</span>
-                      <span className="font-mono text-[0.66rem]" style={{ color: on ? 'var(--ink)' : 'var(--faint)' }}>
-                        {s.name}
-                      </span>
+                    <div
+                      key={s.id}
+                      ref={el => { groupRefs.current[s.id] = el }}
+                      className="ide-peek-group"
+                      data-focus={String(foc)}
+                      data-off={String(focus !== null && !foc)}
+                    >
+                      <div className="ide-peek-head">
+                        <span className="ide-peek-no">{s.no}</span>
+                        <span className="ide-peek-name">{s.name}</span>
+                        <span className="ide-peek-dot" data-lit={String(someLive)} aria-hidden="true" />
+                        <span className="depth ide-peek-depth">{s.depth}</span>
+                      </div>
+                      {shown.map((f, i) => {
+                        const on = f.conf >= threshold
+                        const injected = f.prov === 'Injected'
+                        return (
+                          <div key={i} className="ide-line fact" data-on={String(on)}>
+                            <span className="ide-ln">{lineOf.get(f)}</span>
+                            <span className="ide-line-body">
+                              <span className="ide-line-top">
+                                <span className="ide-line-text" title={f.text}>{f.text}</span>
+                                <span className="prov shrink-0" style={f.conf >= 1.0 || injected ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>{f.prov}</span>
+                                <span className="prov tabular-nums shrink-0" style={{ color: confColor(f.conf) }}>{f.conf.toFixed(2)}</span>
+                                {f.advisory && <span className="prov shrink-0">adv</span>}
+                                {!on && <span className="prov shrink-0" style={{ color: 'var(--faint)' }}>below cutoff</span>}
+                              </span>
+                              {f.detail && (
+                                <span className="ide-line-detail" data-injected={String(injected)} title={f.detail}>{f.detail}</span>
+                              )}
+                            </span>
+                          </div>
+                        )
+                      })}
                     </div>
                   )
                 })}
@@ -383,47 +557,26 @@ function QuerySubstrate() {
             </div>
           </div>
 
-          {/* Right — the assembled dossier */}
-          <div className="rock-panel p-0">
-            <div className="flex items-center justify-between px-5 py-2 border-b border-hairline-strong">
-              <span className="font-mono text-sm text-ink font-semibold">{subject.label}</span>
-              <span className="depth">substrate.query({subject.kind}) → 1 dossier · 5 strata</span>
-            </div>
-            <div className="divide-y divide-hairline">
-              {STRATA.map(s => {
-                const facts = subject.facts.filter(f => f.stratum === s.id)
-                if (facts.length === 0) return null
-                return (
-                  <div key={s.id} className="flex gap-4 px-5 py-1">
-                    <div className="w-28 shrink-0 pt-0.5">
-                      <div className="font-mono text-[0.6rem] text-faint">{s.no}</div>
-                      <div className="font-display font-black text-ink text-sm leading-tight" style={{ fontStretch: '106%' }}>{s.name}</div>
-                      <div className="depth mt-0.5">{s.depth}</div>
-                    </div>
-                    <div className="flex-1 flex flex-col gap-1 min-w-0">
-                      {facts.map((f, i) => {
-                        const on = f.conf >= threshold
-                        const injected = f.prov === 'Injected'
-                        return (
-                          <div key={i} className="fact min-w-0" style={{ opacity: on ? 1 : 0.42, filter: on ? 'none' : 'grayscale(0.6)' }}>
-                            <div className="flex items-center gap-2 min-w-0">
-                              <span className="text-sm font-sans truncate min-w-0 flex-1" style={{ color: on ? 'var(--ink)' : 'var(--muted)' }} title={f.text}>{f.text}</span>
-                              <span className="prov shrink-0" style={f.conf >= 1.0 || injected ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>
-                                {f.prov}
-                              </span>
-                              <span className="prov tabular-nums shrink-0" style={{ color: confColor(f.conf) }}>{f.conf.toFixed(2)}</span>
-                              {f.advisory && <span className="prov shrink-0">adv</span>}
-                              {!on && <span className="prov shrink-0" style={{ color: 'var(--faint)' }}>below cutoff</span>}
-                            </div>
-                            {f.detail && <div className="depth mt-0.5 truncate" style={{ color: injected ? 'var(--accent)' : 'var(--muted)' }} title={f.detail}>{f.detail}</div>}
-                          </div>
-                        )
-                      })}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
+          {/* STATUS BAR */}
+          <div className="ide-statusbar">
+            <span className="ide-status-left">
+              <span className="ide-status-seg">5 strata</span>
+              <span className="ide-sep" aria-hidden="true">·</span>
+              <span className="ide-status-seg">confidence-gated</span>
+              <span className="ide-sep" aria-hidden="true">·</span>
+              <span className="ide-status-seg" data-accent="true">{live.length}/{subject.facts.length} facts</span>
+              <span className="ide-sep" aria-hidden="true">·</span>
+              <span className="ide-status-seg">{liveStrata.size}/5 strata live</span>
+            </span>
+            <span className="ide-status-legend">
+              <span className="ide-legend-label">provenance</span>
+              {PROV_LEGEND.map(p => (
+                <span key={p.prov} className="ide-legend-item">
+                  <span className="prov" style={p.accent ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>{p.prov}</span>
+                  <span className="depth">{p.note}</span>
+                </span>
+              ))}
+            </span>
           </div>
         </div>
       </div>
@@ -989,7 +1142,7 @@ export default function Content() {
   return (
     <main className="font-sans">
       <Hero />
-      <QuerySubstrate />
+      <AgentIDE />
       <FiveStrata />
       <FullToolface />
       <ProvenanceSeam />
