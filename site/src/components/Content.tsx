@@ -185,93 +185,151 @@ function Hero() {
   )
 }
 
-// ── 2 · THE AGENT'S IDE — estate as the agent's live, queryable workspace ───────
-// The query surface reframed as an IDE: the SUBJECTS are files the agent "opens",
-// estate's query verbs are IDE actions, and the dossier renders like a peek panel —
-// facts grouped by stratum, each stamped with confidence + provenance, the confidence
-// dial a gutter control. Same SUBJECTS / STRATA data + the dial-sweep logic as before.
-type Prov = 'Parsed' | 'SCIP' | 'TSG' | 'ImportMap' | 'Tags' | 'Injected' | 'git' | 'Collector' | 'annotation'
-interface Fact { stratum: StratumId; text: string; detail?: string; conf: number; prov: Prov; advisory?: boolean }
-// `dial` is the confidence value the dial SWEEPS TO when this subject is on screen —
-// each subject reads out at a different cutoff so the needle visibly travels between tabs.
-// one line of the file the agent is editing — the edit that triggers the search
-interface EditLine { text: string; kind: 'add' | 'del' | 'ctx'; caret?: boolean }
-interface Subject { id: string; label: string; kind: string; dial: number; file: string; lang: string; edit: EditLine[]; facts: Fact[] }
+// ── 2 · THE AGENT'S IDE — estate is the IDE the agent edits code in ─────────────
+// Reframed from a "query the substrate" panel into actually USING an IDE. The agent
+// right-clicks a symbol → a context menu of real IDE commands → one runs → the result
+// lands in a tabbed dock (Code intelligence · Memory · Knowledge). Clicking a class shows
+// all its details at once. The dock proves estate gives an agent EVERYTHING — code
+// intelligence (callers / blast-radius / requirement / definition), recalled Memory
+// (decisions · patterns · gotchas, with scope + salience + provenance) and Knowledge (the
+// wiki, RRF-fused). Every result carries confidence + provenance; the dial gates the
+// low-confidence / low-salience ones. The auto-play is a storyboard of these gestures —
+// a visible cursor + the menu opening — so it reads as "look what an agent can do editing
+// code in an IDE that actually knows the system." Blast-radius is one gesture, not the lead.
 
-const SUBJECTS: Subject[] = [
-  {
-    id: 'applyDiscount', label: 'applyDiscount', kind: 'symbol', dial: 0.55, file: 'applyDiscount.ts', lang: 'TS',
-    edit: [
-      { text: 'export function applyDiscount(cart, coupon) {', kind: 'ctx' },
-      { text: '  const price = cartTotal(cart)', kind: 'ctx' },
-      { text: '  return price - coupon.value', kind: 'del' },
-      { text: '  return clamp(price - coupon.value, 0)', kind: 'add', caret: true },
-      { text: '}', kind: 'ctx' },
-    ],
-    facts: [
-      { stratum: 'requirements', text: 'satisfies REQ-142 · validated ✓', detail: 'requirement↔code · enforced', conf: 1.0, prov: 'Parsed' },
-      { stratum: 'blast', text: '3 transitive dependents', detail: 'checkout · cartTotal · api/price', conf: 1.0, prov: 'SCIP' },
-      { stratum: 'blast', text: 'injected: emits wicked.shop.order.placed → 2 consumers', detail: 'event→consumer edge · grep never sees this', conf: 1.0, prov: 'Injected' },
-      { stratum: 'blast', text: 'referralFlow → applyDiscount', detail: 'tag-scan guess · cross-file unverified', conf: 0.3, prov: 'Tags' },
-      { stratum: 'infra', text: 'reads dataset PRICING.TBL via api/price', detail: 'code↔dataset edge', conf: 0.85, prov: 'ImportMap' },
-      { stratum: 'history', text: '4 commits · last changed 2026-06', detail: 'per-file git provenance', conf: 1.0, prov: 'git' },
-      { stratum: 'annotations', text: 'assumption: max one coupon per cart', detail: 'advisory · survives re-index', conf: 0.7, prov: 'annotation', advisory: true },
-    ],
-  },
-  {
-    id: 'REQ-142', label: 'REQ-142', kind: 'requirement', dial: 0.90, file: 'REQ-142.spec', lang: 'REQ',
-    edit: [
-      { text: 'REQ-142  coupons never exceed the cart total', kind: 'ctx' },
-      { text: '  given  a cart with one coupon applied', kind: 'ctx' },
-      { text: '  then   discount <= subtotal', kind: 'del' },
-      { text: '  then   discount <= subtotal AND discount >= 0', kind: 'add', caret: true },
-    ],
-    facts: [
-      { stratum: 'requirements', text: '2 symbols satisfy REQ-142', detail: 'validateCoupon ✓ · applyDiscount ⋯ unvalidated', conf: 1.0, prov: 'Parsed' },
-      { stratum: 'blast', text: 'blast-radius of implementers: 3 dependents', detail: 'checkout · cartTotal · api/price', conf: 1.0, prov: 'SCIP' },
-      { stratum: 'blast', text: 'candidate impl: legacyDiscount()', detail: 'import-map heuristic · not confirmed', conf: 0.6, prov: 'ImportMap' },
-      { stratum: 'infra', text: 'governed by rule-set PricingPolicy', detail: 'ODM ruleset↔code edge · same graph', conf: 0.9, prov: 'Parsed' },
-      { stratum: 'history', text: 'validated flag flipped 2026-05', detail: 'read-only edge-history log', conf: 1.0, prov: 'git' },
-      { stratum: 'annotations', text: 'question: does BOGO count as a coupon?', detail: 'advisory · open', conf: 0.5, prov: 'annotation', advisory: true },
-    ],
-  },
-  {
-    id: 'PAYROLL.JCL', label: 'PAYROLL.JCL', kind: 'JCL step', dial: 0.70, file: 'PAYROLL.JCL', lang: 'JCL',
-    edit: [
-      { text: '//PAYCALC  EXEC PGM=PAYCALC', kind: 'ctx' },
-      { text: '//MASTER   DD DSN=PAYROLL.MASTER,DISP=SHR', kind: 'del' },
-      { text: '//MASTER   DD DSN=PAYROLL.MASTER,DISP=OLD', kind: 'add', caret: true },
-    ],
-    facts: [
-      { stratum: 'infra', text: 'EXEC PGM=PAYCALC uses PAYROLL.MASTER', detail: 'JCL step↔dataset edge', conf: 1.0, prov: 'Parsed' },
-      { stratum: 'infra', text: 'RACF profile PAY.** protects PAYROLL.MASTER', detail: 'cross-domain: RACF↔dataset · one query', conf: 1.0, prov: 'Parsed' },
-      { stratum: 'infra', text: 'injected: command:deploy → deploy-agent', detail: 'command→agent edge · grep never sees this', conf: 1.0, prov: 'Injected' },
-      { stratum: 'blast', text: '2 callers submit this job', detail: 'scheduler.ts · nightly.sh', conf: 0.85, prov: 'ImportMap' },
-      { stratum: 'history', text: 'drift: live RACF ≠ iac since 2026-05', detail: 'graph diff · resource identity', conf: 0.8, prov: 'Collector' },
-      { stratum: 'requirements', text: 'supports REQ-207 · unvalidated ⋯', conf: 0.6, prov: 'Parsed' },
-      { stratum: 'annotations', text: 'note: dataset last drilled 2026-05', conf: 0.6, prov: 'annotation', advisory: true },
-    ],
-  },
+type Prov = 'Parsed' | 'SCIP' | 'Injected' | 'ImportMap' | 'Tags' | 'git' | 'Memory' | 'Knowledge' | 'annotation'
+interface Fact { text: string; detail?: string; conf: number; prov: Prov; advisory?: boolean }
+type SymId = 'PricingService' | 'applyDiscount'
+type DockTab = 'code' | 'memory' | 'knowledge'
+// estate's answer to one code-intelligence command
+interface Peek { title: string; sub: string; facts: Fact[]; wiki?: string }
+// a context-menu / command-palette command and where its result lands
+interface Command { id: string; label: string; note?: string; lands: DockTab; peek?: Peek; memId?: string }
+// a token in the code; `sym` set => it's a clickable symbol
+interface Token { t: string; sym?: SymId; k?: string }
+// one recalled memory node — decision / pattern / gotcha
+interface Memory { id: string; kind: 'decision' | 'pattern' | 'gotcha'; text: string; scope: string; salience: number; prov: string; because: string; superseded?: boolean }
+// one recalled knowledge (wiki) node
+interface Know { id: string; title: string; section: string; detail: string; conf: number }
+
+// The working file shown in the editor (each line is a token list; symbols are buttons).
+const CODE: Token[][] = [
+  [{ t: 'export ', k: 'kw' }, { t: 'class ', k: 'kw' }, { t: 'PricingService', sym: 'PricingService', k: 'nm' }, { t: ' {' }],
+  [{ t: '  ' }, { t: 'applyDiscount', sym: 'applyDiscount', k: 'fn' }, { t: '(cart, coupon) {' }],
+  [{ t: '    ' }, { t: 'const ', k: 'kw' }, { t: 'price = ' }, { t: 'cartTotal', k: 'fn' }, { t: '(cart)' }],
+  [{ t: '    ' }, { t: 'return ', k: 'kw' }, { t: 'clamp', k: 'fn' }, { t: '(price - coupon.value, ' }, { t: '0', k: 'nm' }, { t: ')' }],
+  [{ t: '  }' }],
+  [{ t: '}' }],
 ]
 
-// IDE query actions — estate's feature set, each mapped to one stratum of the dossier.
-// The auto-play "runs" each in turn and spotlights its result group in the editor;
-// blast-radius (find-references) is one feature among equals, not the headline.
-const ACTIONS: { id: StratumId; verb: string; hint: string; cmd: string }[] = [
-  { id: 'requirements', verb: 'Go to requirement',  hint: 'requirement ↔ impl',             cmd: 'F12' },
-  { id: 'blast',        verb: 'Find references',     hint: 'blast-radius · event→consumers', cmd: '⇧F12' },
-  { id: 'infra',        verb: 'Show infra / policy', hint: 'IaC · RACF · datasets',          cmd: '⌘I' },
-  { id: 'history',      verb: 'Recall history',      hint: 'git · drift · edge log',         cmd: '⌘H' },
-  { id: 'annotations',  verb: 'Read annotations',    hint: 'typed memory · advisory',        cmd: '⌘K' },
+// The IDE commands (context menu = command palette). Most land code-intelligence results
+// in the Code tab; "Recall decisions" lands in Memory, "Search knowledge" in Knowledge.
+const COMMANDS: Command[] = [
+  { id: 'definition', label: 'Peek definition', note: 'F12', lands: 'code', peek: {
+    title: 'Peek definition', sub: 'PricingService.applyDiscount',
+    facts: [
+      { text: 'applyDiscount(cart, coupon) → number', detail: 'checkout/PricingService.ts:2 · exported', conf: 1.0, prov: 'Parsed' },
+      { text: 'returns clamp(price − coupon.value, 0)', detail: 'pure · does not mutate cart', conf: 1.0, prov: 'SCIP' },
+    ],
+  } },
+  { id: 'callers', label: 'Find all callers', note: '⇧F12', lands: 'code', peek: {
+    title: 'Find all callers', sub: 'applyDiscount · 3 found',
+    facts: [
+      { text: 'checkout() → applyDiscount', detail: 'checkout/Checkout.ts:41', conf: 1.0, prov: 'SCIP' },
+      { text: 'api/price route → applyDiscount', detail: 'routes/price.ts:18', conf: 1.0, prov: 'SCIP' },
+      { text: 'referralFlow → applyDiscount', detail: 'tag-scan guess · cross-file, unverified', conf: 0.3, prov: 'Tags' },
+    ],
+  } },
+  { id: 'references', label: 'Find all references', note: 'blast radius', lands: 'code', peek: {
+    title: 'Find all references · blast radius', sub: 'what breaks if you change it',
+    facts: [
+      { text: '3 transitive dependents', detail: 'checkout · cartTotal · api/price', conf: 1.0, prov: 'SCIP' },
+      { text: 'emits wicked.shop.order.placed → 2 consumers', detail: 'injected event→consumer edge · grep never sees this', conf: 1.0, prov: 'Injected' },
+      { text: 'referralFlow → applyDiscount', detail: 'tag-scan guess · cross-file, unverified', conf: 0.3, prov: 'Tags' },
+    ],
+  } },
+  { id: 'requirement', label: 'Go to requirement', note: '⌘R', lands: 'code', peek: {
+    title: 'Go to requirement', sub: 'requirement ↔ implementation', wiki: '[[Pricing Rules]] §Discounts',
+    facts: [
+      { text: 'satisfies REQ-142 · validated ✓', detail: '“coupons never exceed the cart total” · enforced', conf: 1.0, prov: 'Parsed' },
+      { text: 'validated flag flipped 2026-05', detail: 'read-only edge-history log', conf: 1.0, prov: 'git' },
+    ],
+  } },
+  { id: 'decisions', label: 'Recall decisions', note: '⌘K', lands: 'memory', memId: 'm-nostack' },
+  { id: 'policy', label: 'Show governing policy', note: '⌘I', lands: 'code', peek: {
+    title: 'Show governing policy', sub: 'infra + policy, cross-domain',
+    facts: [
+      { text: 'governed by rule-set PricingPolicy', detail: 'ODM ruleset ↔ code edge · same graph', conf: 0.9, prov: 'Parsed' },
+      { text: 'reads dataset PRICING.TBL via api/price', detail: 'code ↔ dataset edge', conf: 0.85, prov: 'ImportMap' },
+    ],
+  } },
+  { id: 'annotations', label: 'Annotations', note: '⌘/', lands: 'code', peek: {
+    title: 'Annotations', sub: 'typed notes · survive re-index',
+    facts: [
+      { text: 'assumption: max one coupon per cart', detail: 'advisory · survives re-index', conf: 0.7, prov: 'annotation', advisory: true },
+      { text: 'note: pricing last audited 2026-05', detail: 'typed note', conf: 0.6, prov: 'annotation', advisory: true },
+    ],
+  } },
+  { id: 'knowledge', label: 'Search knowledge', note: '⌘⇧F', lands: 'knowledge' },
 ]
 
-// compact provenance legend for the status bar. `accent` = a 1.0 / injected tier.
+// Clicking the class opens the "all details" peek — everything estate knows, at once.
+const DETAILS: Peek = {
+  title: 'PricingService — all details', sub: 'everything estate knows, at once', wiki: '[[Pricing Rules]] §Discounts',
+  facts: [
+    { text: 'class PricingService · 1 public method', detail: 'checkout/PricingService.ts:1', conf: 1.0, prov: 'Parsed' },
+    { text: 'satisfies REQ-142 · validated ✓', detail: 'coupons never exceed the cart total', conf: 1.0, prov: 'Parsed' },
+    { text: '3 callers · 3 transitive dependents', detail: 'checkout · api/price · cartTotal', conf: 1.0, prov: 'SCIP' },
+    { text: 'emits wicked.shop.order.placed → 2 consumers', detail: 'injected edge · grep never sees this', conf: 1.0, prov: 'Injected' },
+    { text: 'decision: coupons never stack', detail: 'recalled from memory · scope project:acme', conf: 0.92, prov: 'Memory' },
+    { text: 'governed by rule-set PricingPolicy', detail: 'ODM ruleset · reads PRICING.TBL', conf: 0.9, prov: 'Parsed' },
+    { text: 'assumption: max one coupon per cart', detail: 'advisory · survives re-index', conf: 0.7, prov: 'annotation', advisory: true },
+  ],
+}
+
+// The Memory panel — estate's recalled memory relevant to the code in view. Salience acts
+// as the confidence the dial gates; the superseded decision falls below the default cutoff.
+const MEMORIES: Memory[] = [
+  { id: 'm-nostack', kind: 'decision', text: 'Coupons never stack — one per cart', scope: 'project:acme', salience: 0.92, prov: 'episodic · spike 2026-06', because: 'applyDiscount' },
+  { id: 'm-clamp', kind: 'pattern', text: 'Discount math clamps at 0 — never a negative total', scope: 'project:acme', salience: 0.8, prov: 'semantic · reflected 2026-05', because: 'applyDiscount' },
+  { id: 'm-tz', kind: 'gotcha', text: 'PRICING.TBL is timezone-naive — normalize before compare', scope: 'project:acme', salience: 0.68, prov: 'episodic · spike 2026-04', because: 'api/price' },
+  { id: 'm-old', kind: 'decision', text: 'Stack up to 2 coupons — superseded by REQ-142', scope: 'project:acme', salience: 0.34, prov: 'episodic · spike 2025-11', because: 'applyDiscount', superseded: true },
+]
+
+// A touch of Knowledge — the wiki, hybrid FTS + vector, RRF-fused.
+const KNOWLEDGE: Know[] = [
+  { id: 'k-rules', title: 'Pricing Rules', section: '§Discounts', detail: 'coupon eligibility + stacking policy · hybrid FTS+vector, RRF-fused', conf: 0.9 },
+  { id: 'k-flow', title: 'Checkout Flow', section: '§Totals', detail: 'where applyDiscount sits in the order lifecycle', conf: 0.85 },
+  { id: 'k-adr', title: 'ADR-014 Coupon Policy', section: '§Decision', detail: 'why stacking was dropped — links REQ-142', conf: 0.88 },
+]
+
+// The auto-play storyboard: real IDE gestures, ~2.6s each. A visible cursor moves to the
+// target; a right-click opens the menu and one command runs; a class click opens details.
+// The result lands in the matching dock tab — so the tour shows code · memory · knowledge.
+interface Gesture { target: SymId; kind: 'menu' | 'click'; run?: string }
+const STORYBOARD: Gesture[] = [
+  { target: 'applyDiscount', kind: 'menu', run: 'callers' },
+  { target: 'PricingService', kind: 'click' },
+  { target: 'applyDiscount', kind: 'menu', run: 'requirement' },
+  { target: 'applyDiscount', kind: 'menu', run: 'decisions' },
+  { target: 'applyDiscount', kind: 'menu', run: 'references' },
+  { target: 'applyDiscount', kind: 'menu', run: 'knowledge' },
+]
+
+const DOCK_TABS: { id: DockTab; label: string }[] = [
+  { id: 'code', label: 'Code intelligence' },
+  { id: 'memory', label: 'Memory' },
+  { id: 'knowledge', label: 'Knowledge' },
+]
+
+// provenance legend for the status bar
 const PROV_LEGEND: { prov: string; note: string; accent?: boolean }[] = [
-  { prov: 'Parsed',    note: 'AST · 1.0',     accent: true },
-  { prov: 'SCIP',      note: 'indexer · 1.0', accent: true },
-  { prov: 'Injected',  note: 'bus / cmd edge', accent: true },
-  { prov: 'ImportMap', note: 'heuristic' },
-  { prov: 'Tags',      note: 'tag-scan · 0.3' },
+  { prov: 'Parsed', note: 'AST · 1.0', accent: true },
+  { prov: 'SCIP', note: 'indexer · 1.0', accent: true },
+  { prov: 'Injected', note: 'bus / cmd edge', accent: true },
+  { prov: 'Memory', note: 'recalled · salience' },
+  { prov: 'Knowledge', note: 'wiki · RRF' },
+  { prov: 'Tags', note: 'tag-scan · 0.3' },
 ]
 
 function confColor(conf: number) {
@@ -281,101 +339,120 @@ function confColor(conf: number) {
   return 'var(--faint)'
 }
 
+function cmdById(id: string | undefined) { return COMMANDS.find(c => c.id === id) }
+
+// a small pointer cursor for the auto-play gestures
+function CursorArrow() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 2l15 8.5-6.4 1.4L9.6 20 4 2z" fill="var(--ink)" stroke="var(--canvas)" strokeWidth="1.4" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+// one provenance chip + confidence value, reused across code / memory / knowledge rows
+function Chips({ prov, conf, advisory, on, injected }: { prov: string; conf: number; advisory?: boolean; on: boolean; injected?: boolean }) {
+  return (
+    <span className="ide-line-chips">
+      <span className="prov" style={conf >= 1.0 || injected ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>{prov}</span>
+      <span className="prov tabular-nums" style={{ color: confColor(conf) }}>{conf.toFixed(2)}</span>
+      {advisory && <span className="prov">adv</span>}
+      {!on && <span className="prov" style={{ color: 'var(--faint)' }}>below cutoff</span>}
+    </span>
+  )
+}
+
 function AgentIDE() {
   const reduced = useReducedMotion()
-  const [subjectIdx, setSubjectIdx] = useState(0)
-  const [threshold, setThreshold] = useState(SUBJECTS[0].dial)
   const [driving, setDriving] = useState(false)
-  // the estate feature currently "running" — its stratum is spotlit in the editor
-  const [activeStratum, setActiveStratum] = useState<StratumId | null>(ACTIONS[0].id)
+  const [threshold, setThreshold] = useState(0.55)
+  const [step, setStep] = useState(0)
+  const [cursorAt, setCursorAt] = useState<SymId | null>(STORYBOARD[0].target)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [menuRun, setMenuRun] = useState<string | null>(null)
+  const [codePeek, setCodePeek] = useState<Peek>(cmdById(STORYBOARD[0].run)!.peek!)
+  const [dockTab, setDockTab] = useState<DockTab>('code')
+  const [memHighlight, setMemHighlight] = useState<string | null>(null)
 
-  const subject = SUBJECTS[subjectIdx]
-  // number every fact like an editor line, in stratum (top-to-bottom) order
-  const lineOf = new Map<Fact, number>()
-  STRATA.forEach(s => subject.facts.filter(f => f.stratum === s.id).forEach(f => lineOf.set(f, lineOf.size + 1)))
-  const live = subject.facts.filter(f => f.conf >= threshold)
-  const liveStrata = new Set(live.map(f => f.stratum))
-  const activeAction = ACTIONS.find(a => a.id === activeStratum) ?? null
-  const activeResults = activeStratum ? subject.facts.filter(f => f.stratum === activeStratum && f.conf >= threshold).length : 0
-  const spotlight = activeStratum !== null && !reduced
+  // apply a command's result: land it in the right dock tab
+  const applyCommand = (id: string) => {
+    const c = cmdById(id); if (!c) return
+    setDockTab(c.lands)
+    if (c.lands === 'code' && c.peek) { setCodePeek(c.peek); setMemHighlight(null) }
+    else if (c.lands === 'memory') setMemHighlight(c.memId ?? null)
+    else setMemHighlight(null)
+  }
 
-  // AUTO-DEMO · the agent's IDE toolset lighting up in turn. The auto-play steps through
-  // estate's query actions — go-to-requirement → find-references → infra/policy → history
-  // → annotations — "running" each feature and spotlighting its result stratum in the
-  // editor, so the visitor sees the whole toolset, not one search. Opening a file, running
-  // an action, or the toolbar toggle pins it (then drive the dial / browse the dossier).
+  // ── AUTO-PLAY · a storyboard of real IDE gestures ───────────────────────────
   useEffect(() => {
     if (driving || reduced) return
-    const t = setInterval(() => {
-      setActiveStratum(cur => {
-        const i = ACTIONS.findIndex(a => a.id === cur)
-        return ACTIONS[(i + 1) % ACTIONS.length].id
-      })
-    }, 2200)
-    return () => clearInterval(t)
-  }, [driving, reduced])
-
-  // restart the feature tour from the top whenever the open file changes (while in auto)
-  useEffect(() => { if (!driving) setActiveStratum(ACTIONS[0].id) }, [subjectIdx, driving])
-
-  // The confidence dial SWEEPS: on opening a file the needle glides from its current value
-  // to that file's read-out cutoff — so the dial visibly moves between files instead of
-  // sitting still. Facts filter live as it travels.
-  const thresholdRef = useRef(threshold)
-  thresholdRef.current = threshold
-  const rafRef = useRef<number | undefined>(undefined)
-  useEffect(() => {
-    if (driving) return
-    const target = SUBJECTS[subjectIdx].dial
-    if (reduced) { setThreshold(target); return } // no animation, but still land on the value
-    const start = thresholdRef.current
-    const t0 = performance.now()
-    const dur = 900
-    const ease = (x: number) => 1 - Math.pow(1 - x, 3)
-    const tick = (now: number) => {
-      const p = Math.min(1, (now - t0) / dur)
-      setThreshold(+(start + (target - start) * ease(p)).toFixed(4))
-      if (p < 1) rafRef.current = requestAnimationFrame(tick)
+    const g = STORYBOARD[step]
+    setCursorAt(g.target); setMenuOpen(false); setMenuRun(null)
+    const timers: number[] = []
+    if (g.kind === 'menu') {
+      timers.push(window.setTimeout(() => setMenuOpen(true), 620))
+      timers.push(window.setTimeout(() => setMenuRun(g.run ?? null), 1200))
+      timers.push(window.setTimeout(() => { setMenuOpen(false); setMenuRun(null); applyCommand(g.run!) }, 1820))
+    } else {
+      timers.push(window.setTimeout(() => { setCodePeek(DETAILS); setDockTab('code'); setMemHighlight(null) }, 980))
     }
-    rafRef.current = requestAnimationFrame(tick)
-    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current) }
-  }, [subjectIdx, driving, reduced])
+    timers.push(window.setTimeout(() => setStep(s => (s + 1) % STORYBOARD.length), 2650))
+    return () => timers.forEach(clearTimeout)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, driving, reduced])
 
-  // keep the running feature's result group in view within the peek pane
-  const groupRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  // reduced motion: no cursor / menu; show a static, representative result set
   useEffect(() => {
-    if (!activeStratum) return
-    const el = groupRefs.current[activeStratum]
-    if (el) el.scrollIntoView({ block: 'nearest', behavior: reduced ? 'auto' : 'smooth' })
-  }, [activeStratum, reduced])
+    if (reduced) { setCursorAt(null); setMenuOpen(false); setCodePeek(DETAILS); setDockTab('code') }
+  }, [reduced])
 
-  const takeControl = () => setDriving(true)
-  // open a file in the editor — in auto this reruns the feature tour on that file;
-  // opening does NOT pin (moving the dial, running an action, or the toolbar toggle pins).
-  const openSymbol = (i: number) => { setSubjectIdx(i) }
-  // run an estate feature — pins, then spotlights (or clears) that stratum's result
-  const runAction = (id: StratumId) => { takeControl(); setActiveStratum(cur => (cur === id ? null : id)) }
-  // live / total fact counts for one stratum of the current file's dossier
-  const strataCounts = (id: StratumId) => {
-    const inStratum = subject.facts.filter(f => f.stratum === id)
-    return { live: inStratum.filter(f => f.conf >= threshold).length, total: inStratum.length }
+  const takeControl = () => { setDriving(true); setCursorAt(null); setMenuOpen(false); setMenuRun(null) }
+  const runCommand = (id: string) => { takeControl(); applyCommand(id) }
+  const openMenuAt = (sym: SymId) => { setDriving(true); setMenuRun(null); setCursorAt(sym); setMenuOpen(true) }
+  const clickSymbol = (sym: SymId) => {
+    if (sym === 'PricingService') { setDriving(true); setMenuOpen(false); setMenuRun(null); setCursorAt(sym); setCodePeek(DETAILS); setDockTab('code'); setMemHighlight(null) }
+    else openMenuAt(sym)
   }
+
+  // cursor + menu positioning: measure the target symbol within the code pane
+  const codeRef = useRef<HTMLDivElement>(null)
+  const symRefs = useRef<Record<string, HTMLElement | null>>({})
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
+  useEffect(() => {
+    const host = codeRef.current
+    const el = cursorAt ? symRefs.current[cursorAt] : null
+    if (!host || !el) { setPos(null); return }
+    const hr = host.getBoundingClientRect(); const r = el.getBoundingClientRect()
+    setPos({ x: r.left - hr.left + r.width * 0.6, y: r.top - hr.top + r.height * 0.72 })
+  }, [cursorAt])
+
+  const showCursor = !driving && !reduced && !!pos
+  const showMenu = menuOpen && !!pos
+
+  // per-tab live counts (gated by the dial) for the dock tab badges
+  const codeLive = codePeek.facts.filter(f => f.conf >= threshold).length
+  const memLive = MEMORIES.filter(m => m.salience >= threshold).length
+  const knowLive = KNOWLEDGE.filter(k => k.conf >= threshold).length
+  const tabCount = (id: DockTab) => id === 'code' ? codeLive : id === 'memory' ? memLive : knowLive
+  const statusTitle = dockTab === 'code' ? codePeek.title : dockTab === 'memory' ? 'Recall memory' : 'Search knowledge'
+  const statusLive = dockTab === 'code' ? codeLive : dockTab === 'memory' ? memLive : knowLive
+  const statusTotal = dockTab === 'code' ? codePeek.facts.length : dockTab === 'memory' ? MEMORIES.length : KNOWLEDGE.length
 
   return (
     <Section id="query" solid>
       <div className="max-w-6xl mx-auto w-full">
-        {/* section header — the query surface, reframed as the agent's IDE */}
+        {/* section header — using an IDE that actually knows your system */}
         <div className="mb-4 w-full text-left max-w-3xl">
           <span className="kicker">The agent&apos;s IDE</span>
           <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink leading-[0.98]">
-            The agent doesn&apos;t grep. Estate is its IDE — <span style={{ color: 'var(--accent)' }}>every feature it needs.</span>
+            The agent doesn&apos;t grep. It edits in an IDE that <span style={{ color: 'var(--accent)' }}>knows your whole system.</span>
           </h2>
           <p className="mt-1.5 text-sm text-muted font-sans leading-tight">
-            Go-to-requirement, find-references across the blast-radius, show infra &amp; policy, recall memory &amp; history,
-            read annotations — estate answers every one as a live fact stamped with{' '}
-            <span className="text-ink">confidence + provenance</span> (heuristics like the injected event→consumer edge grep
-            can&apos;t see, always labeled). Push the dial to <span className="font-semibold">1.0</span> and only parsed / SCIP
-            survive; drop it and the tag-scan edges reappear — <span className="font-semibold">never silently promoted</span>.
+            Right-click a symbol for every caller, click a class for its whole picture, trace the requirement it satisfies,
+            recall the <span className="text-ink">decision</span> behind it, pull the <span className="text-ink">wiki</span>,
+            see the blast radius — what an agent can do while editing that grep can&apos;t. Code intelligence, memory and
+            knowledge, every answer a live fact with <span className="text-ink">confidence + provenance</span>; drop the dial
+            and the low-confidence guesses fall out, labeled — never silently promoted.
           </p>
         </div>
 
@@ -398,56 +475,35 @@ function AgentIDE() {
 
           {/* body — explorer + editor */}
           <div className="ide-body">
-            {/* LEFT · explorer / activity */}
-            <aside className="ide-explorer" aria-label="Substrate explorer">
+            {/* LEFT · explorer */}
+            <aside className="ide-explorer" aria-label="Explorer">
               <div>
-                <span className="ide-sec-label">Explorer · open symbols</span>
+                <span className="ide-sec-label">Explorer · checkout/PricingService.ts</span>
                 <ul className="ide-tree" role="list">
-                  {SUBJECTS.map((s, i) => {
-                    const on = i === subjectIdx
-                    return (
-                      <li key={s.id}>
-                        <button
-                          className="ide-file"
-                          data-on={String(on)}
-                          aria-current={on ? 'true' : undefined}
-                          onClick={() => openSymbol(i)}
-                        >
-                          <span className="ide-glyph" data-lang={s.lang}>{s.lang}</span>
-                          <span className="ide-file-name">{s.file}</span>
-                          <span className="ide-file-kind">{s.kind}</span>
-                        </button>
-                      </li>
-                    )
-                  })}
+                  {([['PricingService', 'CLS', 'class'], ['applyDiscount', 'FN', 'method']] as [SymId, string, string][]).map(([sym, glyph, kind]) => (
+                    <li key={sym}>
+                      <button className="ide-file" data-on={String(cursorAt === sym)} onClick={() => clickSymbol(sym)}>
+                        <span className="ide-glyph" data-lang={glyph}>{glyph}</span>
+                        <span className="ide-file-name">{sym}</span>
+                        <span className="ide-file-kind">{kind}</span>
+                      </button>
+                    </li>
+                  ))}
                 </ul>
               </div>
 
               <div>
-                <span className="ide-sec-label">Query actions</span>
+                <span className="ide-sec-label">IDE commands · right-click a symbol</span>
                 <ul className="ide-actions" role="list">
-                  {ACTIONS.map(a => {
-                    const c = strataCounts(a.id)
-                    const active = activeStratum === a.id
-                    const running = active && !driving && !reduced
+                  {COMMANDS.map(c => {
+                    const active = (c.lands === 'code' && dockTab === 'code' && codePeek.title === c.peek?.title)
+                      || (c.lands === 'memory' && dockTab === 'memory')
+                      || (c.lands === 'knowledge' && dockTab === 'knowledge')
                     return (
-                      <li key={a.id}>
-                        <button
-                          className="ide-action"
-                          data-active={String(active)}
-                          data-running={String(running)}
-                          aria-pressed={active}
-                          onClick={() => runAction(a.id)}
-                        >
-                          <span className="ide-action-dot" data-lit={String(c.live > 0)} aria-hidden="true" />
-                          <span className="ide-action-body">
-                            <span className="ide-action-verb">{a.verb}</span>
-                            <span className="ide-action-hint">{a.hint}</span>
-                          </span>
-                          <span className="ide-action-meta">
-                            <span className="ide-action-count tabular-nums">{c.live}/{c.total}</span>
-                            <span className="ide-kbd">{running ? 'run' : a.cmd}</span>
-                          </span>
+                      <li key={c.id}>
+                        <button className="ide-action ide-cmd" data-active={String(active)} aria-pressed={active} onClick={() => runCommand(c.id)}>
+                          <span className="ide-cmd-label">{c.label}</span>
+                          {c.note && <span className="ide-kbd">{c.note}</span>}
                         </button>
                       </li>
                     )
@@ -456,40 +512,62 @@ function AgentIDE() {
               </div>
             </aside>
 
-            {/* CENTER · editor / dossier */}
+            {/* CENTER · editor */}
             <div className="ide-editor">
               {/* tab bar */}
               <div className="ide-tabbar">
                 <span className="ide-tab" data-on="true">
-                  <span className="ide-glyph" data-lang={subject.lang}>{subject.lang}</span>
-                  <span className="ide-tab-name">{subject.file}</span>
+                  <span className="ide-glyph" data-lang="TS">TS</span>
+                  <span className="ide-tab-name">PricingService.ts</span>
                 </span>
-                <span className="ide-crumb depth">substrate.query({subject.kind}) → 1 dossier · 5 strata</span>
+                <span className="ide-crumb depth">checkout/ · right-click a symbol → estate answers</span>
               </div>
 
-              {/* the agent's working file; estate answers feature queries against it */}
-              <div className="ide-diff" data-live={String(!driving && !reduced)}>
-                <div className="ide-diff-head">
-                  <span className="ide-diff-dot" data-on={String(!driving && !reduced)} aria-hidden="true" />
-                  <span className="ide-diff-label">working file · the agent edits, estate answers</span>
-                  <span className="ide-diff-count depth">
-                    {activeAction
-                      ? <>estate <span className="ide-diff-run-verb">▸ {activeAction.verb}</span> → {activeResults}</>
-                      : 'estate ▸ all features'}
-                  </span>
-                </div>
-                <pre className="ide-diff-code"><code>
-                  {subject.edit.map((l, i) => (
-                    <span key={i} className="ide-diff-line" data-kind={l.kind}>
-                      <span className="ide-diff-sign">{l.kind === 'add' ? '+' : l.kind === 'del' ? '-' : ' '}</span>
-                      <span className="ide-diff-text">{l.text}</span>
-                      {l.caret && <span className="ide-caret" aria-hidden="true" />}
+              {/* the code — clickable symbols, with the cursor + context menu overlay */}
+              <div className="ide-code" ref={codeRef}>
+                <pre className="ide-code-pre"><code>
+                  {CODE.map((line, li) => (
+                    <span className="ide-code-line" key={li}>
+                      <span className="ide-code-ln">{li + 1}</span>
+                      <span className="ide-code-toks">
+                        {line.map((tk, ti) => tk.sym ? (
+                          <button
+                            key={ti}
+                            ref={el => { symRefs.current[tk.sym!] = el }}
+                            className="ide-sym"
+                            data-k={tk.k}
+                            data-active={String(cursorAt === tk.sym)}
+                            onClick={() => clickSymbol(tk.sym!)}
+                            onContextMenu={e => { e.preventDefault(); openMenuAt(tk.sym!) }}
+                          >{tk.t}</button>
+                        ) : (
+                          <span key={ti} className="ide-tok" data-k={tk.k}>{tk.t}</span>
+                        ))}
+                      </span>
                     </span>
                   ))}
                 </code></pre>
+
+                {showMenu && (
+                  <button className="ide-ctx-backdrop" aria-label="Close menu" onClick={() => setMenuOpen(false)} />
+                )}
+                {showCursor && (
+                  <span className="ide-cursor" style={{ left: pos!.x, top: pos!.y }} aria-hidden="true"><CursorArrow /></span>
+                )}
+                {showMenu && (
+                  <div className="ide-ctxmenu" style={{ left: pos!.x, top: pos!.y }} role="menu" aria-label="Estate commands">
+                    <div className="ide-ctxmenu-head">estate</div>
+                    {COMMANDS.map(c => (
+                      <button key={c.id} role="menuitem" className="ide-ctxmenu-item" data-run={String(menuRun === c.id)} onClick={() => runCommand(c.id)}>
+                        <span className="ide-ctxmenu-label">{c.label}</span>
+                        {c.note && <span className="ide-ctxmenu-note">{c.note}</span>}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
 
-              {/* confidence gutter — the dial as an IDE control */}
+              {/* confidence gutter — the dial gates every dock result */}
               <div className="ide-gutter">
                 <span className="ide-gutter-label">confidence ≥</span>
                 <span className="ide-gutter-val tabular-nums">{threshold.toFixed(2)}</span>
@@ -505,55 +583,107 @@ function AgentIDE() {
                 </span>
               </div>
 
-              {/* peek results — the full dossier; the running feature's stratum is spotlit */}
-              <div className="ide-peek" data-spotlight={String(spotlight)}>
-                {STRATA.map(s => {
-                  const facts = subject.facts.filter(f => f.stratum === s.id)
-                  if (facts.length === 0) return null
-                  const active = activeStratum === s.id
-                  const someLive = facts.some(f => f.conf >= threshold)
-                  const feature = ACTIONS.find(a => a.id === s.id)
-                  return (
-                    <div
-                      key={s.id}
-                      ref={el => { groupRefs.current[s.id] = el }}
-                      className="ide-peek-group"
-                      data-active={String(active)}
-                      data-dim={String(spotlight && !active)}
+              {/* the DOCK — tabbed: Code intelligence · Memory · Knowledge */}
+              <div className="ide-dock">
+                <div className="ide-dock-tabs" role="tablist" aria-label="Estate panels">
+                  {DOCK_TABS.map(t => (
+                    <button
+                      key={t.id}
+                      role="tab"
+                      aria-selected={dockTab === t.id}
+                      className="ide-dock-tab"
+                      data-on={String(dockTab === t.id)}
+                      onClick={() => { takeControl(); setDockTab(t.id) }}
                     >
-                      <div className="ide-peek-head">
-                        <span className="ide-peek-no">{s.no}</span>
-                        <span className="ide-peek-name">{s.name}</span>
-                        {active && feature && <span className="ide-peek-run">▸ {feature.verb}</span>}
-                        <span className="ide-peek-dot" data-lit={String(someLive)} aria-hidden="true" />
-                        <span className="depth ide-peek-depth">{s.depth}</span>
+                      {t.label}
+                      <span className="ide-dock-badge">{tabCount(t.id)}</span>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="ide-dock-body" key={dockTab + (dockTab === 'code' ? codePeek.title : '')}>
+                  {dockTab === 'code' && (
+                    <>
+                      <div className="ide-dock-head">
+                        <span className="ide-dock-title">{codePeek.title}</span>
+                        <span className="ide-dock-sub depth">{codePeek.sub}</span>
+                        {codePeek.wiki && <span className="ide-wiki-ref">{codePeek.wiki}</span>}
                       </div>
-                      {facts.map((f, i) => {
+                      {codePeek.facts.map((f, i) => {
                         const on = f.conf >= threshold
                         const injected = f.prov === 'Injected'
                         return (
                           <div key={i} className="ide-line fact" data-on={String(on)}>
-                            <span className="ide-ln">{lineOf.get(f)}</span>
+                            <span className="ide-ln">{i + 1}</span>
                             <span className="ide-line-body">
                               <span className="ide-line-top">
                                 <span className="ide-line-text" title={f.text}>{f.text}</span>
-                                <span className="ide-line-chips">
-                                  <span className="prov" style={f.conf >= 1.0 || injected ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>{f.prov}</span>
-                                  <span className="prov tabular-nums" style={{ color: confColor(f.conf) }}>{f.conf.toFixed(2)}</span>
-                                  {f.advisory && <span className="prov">adv</span>}
-                                  {!on && <span className="prov" style={{ color: 'var(--faint)' }}>below cutoff</span>}
-                                </span>
+                                <Chips prov={f.prov} conf={f.conf} advisory={f.advisory} on={on} injected={injected} />
                               </span>
-                              {f.detail && (
-                                <span className="ide-line-detail" data-injected={String(injected)} title={f.detail}>{f.detail}</span>
-                              )}
+                              {f.detail && <span className="ide-line-detail" data-injected={String(injected)} title={f.detail}>{f.detail}</span>}
                             </span>
                           </div>
                         )
                       })}
-                    </div>
-                  )
-                })}
+                    </>
+                  )}
+
+                  {dockTab === 'memory' && (
+                    <>
+                      <div className="ide-dock-head">
+                        <span className="ide-dock-title">Recalled memory</span>
+                        <span className="ide-dock-sub depth">decisions · patterns · gotchas — relevant to this code</span>
+                      </div>
+                      {MEMORIES.map(m => {
+                        const on = m.salience >= threshold
+                        const hot = memHighlight === m.id
+                        return (
+                          <div key={m.id} className="ide-mem" data-on={String(on)} data-hot={String(hot)} data-superseded={String(!!m.superseded)}>
+                            <span className="ide-mem-kind" data-kind={m.kind}>{m.kind}</span>
+                            <span className="ide-mem-body">
+                              <span className="ide-mem-top">
+                                <span className="ide-mem-text" title={m.text}>{m.text}</span>
+                                <span className="ide-line-chips">
+                                  <span className="prov" style={m.salience >= 0.85 ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>{m.scope}</span>
+                                  <span className="prov tabular-nums" style={{ color: confColor(m.salience) }}>{m.salience.toFixed(2)}</span>
+                                  {m.superseded && <span className="prov">superseded</span>}
+                                  {!on && <span className="prov" style={{ color: 'var(--faint)' }}>below cutoff</span>}
+                                </span>
+                              </span>
+                              <span className="ide-mem-meta depth">{m.prov} · recalled because you&apos;re editing <b className="ide-mem-link">{m.because}</b></span>
+                            </span>
+                          </div>
+                        )
+                      })}
+                    </>
+                  )}
+
+                  {dockTab === 'knowledge' && (
+                    <>
+                      <div className="ide-dock-head">
+                        <span className="ide-dock-title">Knowledge · the wiki</span>
+                        <span className="ide-dock-sub depth">hybrid FTS + vector, RRF-fused</span>
+                      </div>
+                      {KNOWLEDGE.map(k => {
+                        const on = k.conf >= threshold
+                        return (
+                          <div key={k.id} className="ide-line fact" data-on={String(on)}>
+                            <span className="ide-ln ide-know-ln" aria-hidden="true">§</span>
+                            <span className="ide-line-body">
+                              <span className="ide-line-top">
+                                <span className="ide-line-text" title={k.detail}>
+                                  <b className="ide-wiki-ref ide-wiki-inline">[[{k.title}]]</b> {k.section}
+                                </span>
+                                <Chips prov="Knowledge" conf={k.conf} on={on} />
+                              </span>
+                              <span className="ide-line-detail" title={k.detail}>{k.detail}</span>
+                            </span>
+                          </div>
+                        )
+                      })}
+                    </>
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -561,13 +691,11 @@ function AgentIDE() {
           {/* STATUS BAR */}
           <div className="ide-statusbar">
             <span className="ide-status-left">
-              <span className="ide-status-seg">5 strata</span>
+              <span className="ide-status-seg" data-accent="true">{statusTitle}</span>
+              <span className="ide-sep" aria-hidden="true">·</span>
+              <span className="ide-status-seg">{statusLive}/{statusTotal} results</span>
               <span className="ide-sep" aria-hidden="true">·</span>
               <span className="ide-status-seg">confidence-gated</span>
-              <span className="ide-sep" aria-hidden="true">·</span>
-              <span className="ide-status-seg" data-accent="true">{live.length}/{subject.facts.length} facts</span>
-              <span className="ide-sep" aria-hidden="true">·</span>
-              <span className="ide-status-seg">{liveStrata.size}/5 strata live</span>
             </span>
             <span className="ide-status-legend">
               <span className="ide-legend-label">provenance</span>

@@ -372,17 +372,18 @@
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
-   THE AGENT'S IDE — the "Query the substrate" section reframed as an IDE.
-   A code-workspace window (chrome bar · explorer · editor · status bar), theme-aware
-   via estate's own rock/ink/hairline tokens (the page is theme-aware, so this is too),
-   but carrying real IDE depth + glow + a mono register. The auto-demo is an in-place
-   "edit → blast-radius search": the file shows a diff, then estate surfaces the
-   transitive + injected + heuristic edges one at a time (each a .fact core-rise), the
-   confidence dial gating them live.
+   THE AGENT'S IDE — the "Query the substrate" section reframed as actually USING an
+   IDE. A code-workspace window (chrome · explorer · editor · tabbed dock · status bar),
+   theme-aware via estate's rock/ink/hairline tokens but with real IDE depth + a mono
+   register. The agent right-clicks a symbol → a context menu of real IDE commands → one
+   runs → the result lands in a tabbed dock (Code intelligence · Memory · Knowledge). The
+   auto-play is a storyboard of these gestures (a visible cursor + the menu opening). The
+   confidence dial gates every result (facts by confidence, memories by salience).
    ════════════════════════════════════════════════════════════════════════════════ */
-@keyframes ide-caret-blink { 0%, 45% { opacity: 1; } 55%, 100% { opacity: 0; } }
 @keyframes ide-scan-pulse  { 0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 55%, transparent); }
                              50% { opacity: 0.55; box-shadow: 0 0 0 5px color-mix(in oklab, var(--accent) 0%, transparent); } }
+@keyframes ide-menu-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } to { opacity: 1; transform: none; } }
+@keyframes ide-dock-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
 @layer components {
   .ide-window {
@@ -401,14 +402,12 @@
 
   /* ── chrome bar ─────────────────────────────────────────────────────────── */
   .ide-chrome {
-    display: flex; align-items: center; gap: 12px;
-    padding: 9px 14px;
+    display: flex; align-items: center; gap: 12px; padding: 9px 14px;
     background: linear-gradient(180deg, color-mix(in oklab, var(--ink) 8%, var(--rock)), var(--rock));
     border-bottom: 1px solid var(--hairline-strong);
   }
   .ide-lights { display: inline-flex; gap: 7px; flex-shrink: 0; }
   .ide-lights i { width: 11px; height: 11px; border-radius: 50%; display: block; }
-  /* muted toward estate's disciplined palette — window signal without the loud macOS pop */
   .ide-lights i:nth-child(1) { background: color-mix(in oklab, #e06c60 48%, var(--hairline-strong)); }
   .ide-lights i:nth-child(2) { background: color-mix(in oklab, #e0b341 48%, var(--hairline-strong)); }
   .ide-lights i:nth-child(3) { background: color-mix(in oklab, #57a55a 48%, var(--hairline-strong)); }
@@ -420,32 +419,29 @@
   .ide-run { flex-shrink: 0; }
 
   /* ── body split ─────────────────────────────────────────────────────────── */
-  .ide-body { display: grid; grid-template-columns: 262px 1fr; }
+  .ide-body { display: grid; grid-template-columns: 240px 1fr; }
   @media (max-width: 1023px) { .ide-body { grid-template-columns: 1fr; } }
 
   /* ── explorer ───────────────────────────────────────────────────────────── */
   .ide-explorer {
     border-right: 1px solid var(--hairline-strong);
     background: color-mix(in oklab, var(--ink) 3%, var(--rock));
-    padding: 11px 10px; display: flex; flex-direction: column; gap: 13px;
-    min-width: 0;
+    padding: 11px 10px; display: flex; flex-direction: column; gap: 13px; min-width: 0;
   }
-  @media (max-width: 1023px) {
-    .ide-explorer { border-right: 0; border-bottom: 1px solid var(--hairline-strong); }
-  }
+  @media (max-width: 1023px) { .ide-explorer { border-right: 0; border-bottom: 1px solid var(--hairline-strong); } }
   .ide-sec-label {
-    display: block; font-size: 0.56rem; letter-spacing: 0.22em; text-transform: uppercase;
-    color: var(--faint); padding: 0 6px 8px;
+    display: block; font-size: 0.55rem; letter-spacing: 0.2em; text-transform: uppercase;
+    color: var(--faint); padding: 0 6px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .ide-tree, .ide-actions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
 
-  .ide-file, .ide-action {
+  .ide-file {
     width: 100%; display: flex; align-items: center; gap: 8px;
     padding: 6px 8px; border-radius: 7px; cursor: pointer; text-align: left;
     background: transparent; border: 1px solid transparent; color: var(--muted);
     transition: background 0.16s var(--ease), border-color 0.16s var(--ease), color 0.16s var(--ease);
   }
-  .ide-file:hover, .ide-action:hover { background: color-mix(in oklab, var(--ink) 7%, transparent); color: var(--ink); }
+  .ide-file:hover { background: color-mix(in oklab, var(--ink) 7%, transparent); color: var(--ink); }
   .ide-file[data-on="true"] {
     background: color-mix(in oklab, var(--accent) 12%, transparent);
     border-color: color-mix(in oklab, var(--accent) 40%, var(--hairline));
@@ -456,44 +452,33 @@
     padding: 2px 5px; border-radius: 4px;
     color: var(--link, #79c0ff); background: color-mix(in oklab, var(--link, #79c0ff) 15%, transparent);
   }
-  .ide-glyph[data-lang="REQ"] { color: var(--accent); background: color-mix(in oklab, var(--accent) 15%, transparent); }
-  .ide-glyph[data-lang="JCL"] { color: #d2a8ff; background: color-mix(in oklab, #d2a8ff 18%, transparent); }
+  .ide-glyph[data-lang="FN"] { color: #a371f7; background: color-mix(in oklab, #a371f7 16%, transparent); }
+  .ide-glyph[data-lang="CLS"] { color: var(--accent); background: color-mix(in oklab, var(--accent) 15%, transparent); }
   .ide-file-name {
     flex: 1; min-width: 0; font-size: 0.76rem; font-weight: 600; color: inherit;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .ide-file-kind { flex-shrink: 0; font-size: 0.53rem; letter-spacing: 0.05em; color: var(--faint); }
 
-  /* action rows */
-  .ide-action { align-items: flex-start; }
-  .ide-action-dot {
-    margin-top: 5px; width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
-    background: var(--hairline-strong); transition: background 0.25s var(--ease), box-shadow 0.25s var(--ease);
+  /* command rows (the accessible parallel to the right-click menu) */
+  .ide-action {
+    width: 100%; display: flex; align-items: center; gap: 8px;
+    padding: 6px 8px; border-radius: 7px; cursor: pointer; text-align: left;
+    background: transparent; border: 1px solid transparent; color: var(--muted);
+    transition: background 0.16s var(--ease), border-color 0.16s var(--ease), color 0.16s var(--ease);
   }
-  .ide-action-dot[data-lit="true"] { background: var(--accent); box-shadow: 0 0 8px -1px var(--accent); }
-  .ide-action-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-  .ide-action-verb { font-size: 0.72rem; font-weight: 600; color: inherit; }
-  .ide-action-hint {
-    font-size: 0.53rem; letter-spacing: 0.02em; color: var(--faint);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .ide-action-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; flex-shrink: 0; }
-  .ide-action-count { font-size: 0.56rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .ide-action:hover { background: color-mix(in oklab, var(--ink) 7%, transparent); color: var(--ink); }
+  .ide-cmd-label { flex: 1; min-width: 0; font-size: 0.72rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .ide-kbd {
-    font-size: 0.5rem; color: var(--faint); border: 1px solid var(--hairline-strong);
-    border-radius: 4px; padding: 1px 4px; background: color-mix(in oklab, var(--ink) 4%, transparent);
+    flex-shrink: 0; font-size: 0.5rem; color: var(--faint); border: 1px solid var(--hairline-strong);
+    border-radius: 4px; padding: 1px 5px; background: color-mix(in oklab, var(--ink) 4%, transparent);
   }
   .ide-action[data-active="true"] {
     background: color-mix(in oklab, var(--accent) 10%, transparent);
     border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline)); color: var(--ink);
   }
-  .ide-action[data-active="true"] .ide-action-verb { color: var(--accent); }
-  /* the feature currently "running" in the auto tour — its dot pulses */
-  .ide-action[data-running="true"] .ide-action-dot {
-    background: var(--accent); box-shadow: 0 0 8px -1px var(--accent);
-    animation: ide-scan-pulse 1.5s var(--ease) infinite;
-  }
-  .ide-action[data-running="true"] .ide-kbd { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline)); }
+  .ide-action[data-active="true"] .ide-cmd-label { color: var(--accent); }
+  .ide-action[data-active="true"] .ide-kbd { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline)); }
 
   /* ── editor ─────────────────────────────────────────────────────────────── */
   .ide-editor { display: flex; flex-direction: column; min-width: 0; background: var(--rock); }
@@ -510,37 +495,64 @@
   .ide-tab-name { font-weight: 600; }
   .ide-crumb { margin-left: auto; padding: 8px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 
-  /* the edit diff strip */
-  .ide-diff {
+  /* ── the code pane (with cursor + context menu overlay) ─────────────────── */
+  .ide-code {
+    position: relative; overflow: visible;
+    padding: 8px 6px 10px; background: color-mix(in oklab, var(--ink) 3%, transparent);
     border-bottom: 1px solid var(--hairline);
-    background: color-mix(in oklab, var(--ink) 3%, transparent);
   }
-  .ide-diff-head { display: flex; align-items: center; gap: 8px; padding: 7px 14px 4px; }
-  .ide-diff-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: var(--hairline-strong); }
-  .ide-diff-dot[data-on="true"] { background: var(--accent); animation: ide-scan-pulse 1.5s var(--ease) infinite; }
-  .ide-diff-label { font-size: 0.56rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
-  .ide-diff-count { margin-left: auto; white-space: nowrap; }
-  .ide-diff-run-verb { color: var(--accent); font-weight: 700; }
-  .ide-diff-code { margin: 0; padding: 0 14px 9px; overflow-x: auto; }
-  .ide-diff-code code { display: block; }
-  .ide-diff-line {
-    display: block; font-size: 0.66rem; line-height: 1.65; white-space: pre;
-    color: var(--muted); padding: 0 6px; border-radius: 3px;
+  .ide-code-pre { margin: 0; font-size: 0.72rem; line-height: 1.62; overflow-x: auto; }
+  .ide-code-pre code { display: block; }
+  .ide-code-line { display: flex; align-items: baseline; white-space: pre; }
+  .ide-code-ln {
+    flex-shrink: 0; width: 26px; padding-right: 12px; text-align: right; user-select: none;
+    color: color-mix(in oklab, var(--ink) 26%, transparent); font-variant-numeric: tabular-nums;
   }
-  .ide-diff-line[data-kind="add"] { color: #2ea043; background: color-mix(in oklab, #2ea043 12%, transparent); }
-  .ide-diff-line[data-kind="del"] { color: #cf474f; background: color-mix(in oklab, #cf474f 10%, transparent); }
-  [data-theme="dark"] .ide-diff-line[data-kind="add"] { color: #56d364; }
-  [data-theme="dark"] .ide-diff-line[data-kind="del"] { color: #ff7b72; }
-  .ide-diff-sign { display: inline-block; width: 1ch; opacity: 0.8; user-select: none; }
-  .ide-caret {
-    display: inline-block; width: 2px; height: 0.95em; margin-left: 1px; vertical-align: text-bottom;
-    background: var(--accent); border-radius: 1px;
+  .ide-code-toks { min-width: 0; color: var(--muted); }
+  .ide-tok[data-k="kw"], .ide-sym[data-k="kw"] { color: #e5534b; }
+  .ide-tok[data-k="fn"], .ide-sym[data-k="fn"] { color: #a371f7; }
+  .ide-tok[data-k="nm"], .ide-sym[data-k="nm"] { color: #4c9ff0; }
+  .ide-sym {
+    font: inherit; padding: 0 2px; margin: 0 -1px; border-radius: 3px; cursor: pointer;
+    background: transparent; border: 0; color: #4c9ff0; text-decoration: none;
+    transition: background 0.14s var(--ease), box-shadow 0.14s var(--ease);
   }
-  .ide-diff[data-live="true"] .ide-caret { animation: ide-caret-blink 1.05s steps(1) infinite; }
+  .ide-sym:hover { background: color-mix(in oklab, var(--accent) 14%, transparent); text-decoration: underline; }
+  .ide-sym[data-active="true"] { background: color-mix(in oklab, var(--accent) 18%, transparent); box-shadow: inset 0 -2px 0 var(--accent); }
 
-  /* confidence gutter */
+  /* the auto-play cursor */
+  .ide-cursor {
+    position: absolute; z-index: 7; pointer-events: none;
+    transform: translate(-3px, -2px);
+    transition: left 0.5s var(--ease), top 0.5s var(--ease);
+    filter: drop-shadow(0 2px 3px rgba(0,0,0,0.5));
+  }
+
+  /* the right-click context menu */
+  .ide-ctx-backdrop { position: absolute; inset: 0; z-index: 6; background: transparent; border: 0; cursor: default; }
+  .ide-ctxmenu {
+    position: absolute; z-index: 9; min-width: 210px; padding: 4px;
+    background: color-mix(in oklab, var(--ink) 10%, var(--rock));
+    border: 1px solid var(--hairline-strong); border-radius: 9px;
+    box-shadow: 0 20px 48px rgba(var(--shadow-rgb), 0.55), inset 0 1px 0 color-mix(in oklab, #fff 6%, transparent);
+    animation: ide-menu-in 0.13s var(--ease) both;
+  }
+  .ide-ctxmenu-head { font-size: 0.5rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--faint); padding: 4px 9px 5px; }
+  .ide-ctxmenu-item {
+    width: 100%; display: flex; align-items: center; gap: 12px; justify-content: space-between;
+    padding: 5px 9px; border-radius: 6px; cursor: pointer; text-align: left;
+    background: transparent; border: 0; color: var(--ink); transition: background 0.12s var(--ease);
+  }
+  .ide-ctxmenu-item:hover { background: color-mix(in oklab, var(--ink) 10%, transparent); }
+  .ide-ctxmenu-label { font-size: 0.72rem; white-space: nowrap; }
+  .ide-ctxmenu-note { font-size: 0.55rem; color: var(--faint); flex-shrink: 0; }
+  .ide-ctxmenu-item[data-run="true"] { background: color-mix(in oklab, var(--accent) 20%, transparent); }
+  .ide-ctxmenu-item[data-run="true"] .ide-ctxmenu-label { color: var(--accent); font-weight: 700; }
+  .ide-ctxmenu-item[data-run="true"] .ide-ctxmenu-note { color: var(--accent); }
+
+  /* ── confidence gutter ──────────────────────────────────────────────────── */
   .ide-gutter {
-    display: flex; align-items: center; gap: 12px; padding: 9px 14px;
+    display: flex; align-items: center; gap: 12px; padding: 7px 14px;
     border-bottom: 1px solid var(--hairline);
     background: color-mix(in oklab, var(--ink) 4%, transparent);
   }
@@ -551,59 +563,94 @@
   .ide-gutter-ends span { font-size: 0.5rem; letter-spacing: 0.05em; color: var(--faint); white-space: nowrap; }
   @media (max-width: 620px) { .ide-gutter-ends { display: none; } }
 
-  /* peek results — the assembled dossier. scrollbar-gutter reserves the scroll track
-     so the conf value at each row's right edge is never clipped by the scrollbar. */
-  .ide-peek { padding: 4px 0 8px; overflow-y: auto; scrollbar-gutter: stable; max-height: min(36vh, 340px); }
-  @media (max-width: 1023px) { .ide-peek { max-height: none; scrollbar-gutter: auto; } }
-  .ide-peek-group {
-    padding: 3px 16px 6px 14px; border-left: 2px solid transparent;
-    transition: opacity 0.25s var(--ease), border-color 0.25s var(--ease), background 0.25s var(--ease);
+  /* ── the DOCK — tabbed: Code intelligence · Memory · Knowledge ──────────── */
+  .ide-dock { display: flex; flex-direction: column; min-width: 0; }
+  .ide-dock-tabs {
+    display: flex; align-items: stretch; gap: 2px; padding: 0 8px;
+    background: color-mix(in oklab, var(--ink) 4%, var(--rock));
+    border-bottom: 1px solid var(--hairline);
   }
-  /* during the auto tour the non-running strata are lightly de-emphasised (not hidden —
-     the breadth stays visible), and the running feature's group is ringed + spotlit. */
-  .ide-peek[data-spotlight="true"] .ide-peek-group[data-dim="true"] { opacity: 0.55; }
-  .ide-peek-group[data-active="true"] { border-left-color: var(--accent); background: color-mix(in oklab, var(--accent) 7%, transparent); }
-  .ide-peek-head { display: flex; align-items: center; gap: 8px; padding: 6px 0 3px; }
-  .ide-peek-no { font-size: 0.53rem; color: var(--faint); font-variant-numeric: tabular-nums; }
-  .ide-peek-name { font-family: "Archivo", ui-sans-serif, sans-serif; font-weight: 800; font-size: 0.82rem; color: var(--ink); }
-  /* the running feature's verb, shown in its spotlit group header */
-  .ide-peek-run {
-    font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 0.56rem; font-weight: 700;
-    letter-spacing: 0.03em; color: var(--accent);
-    padding: 1px 7px; border-radius: 999px;
-    border: 1px solid color-mix(in oklab, var(--accent) 45%, var(--hairline));
-    background: color-mix(in oklab, var(--accent) 12%, transparent);
+  .ide-dock-tab {
+    display: inline-flex; align-items: center; gap: 7px; padding: 7px 11px;
+    font-size: 0.62rem; letter-spacing: 0.02em; color: var(--muted); cursor: pointer;
+    background: transparent; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px;
+    transition: color 0.15s var(--ease), border-color 0.15s var(--ease);
   }
-  .ide-peek-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--hairline-strong); flex-shrink: 0; }
-  .ide-peek-dot[data-lit="true"] { background: var(--accent); box-shadow: 0 0 7px -1px var(--accent); }
-  .ide-peek-depth { margin-left: auto; }
+  .ide-dock-tab:hover { color: var(--ink); }
+  .ide-dock-tab[data-on="true"] { color: var(--ink); border-bottom-color: var(--accent); background: color-mix(in oklab, var(--accent) 6%, transparent); }
+  .ide-dock-badge {
+    font-size: 0.5rem; font-variant-numeric: tabular-nums; color: var(--muted);
+    background: color-mix(in oklab, var(--ink) 10%, transparent); border-radius: 999px; padding: 1px 6px; min-width: 16px; text-align: center;
+  }
+  .ide-dock-tab[data-on="true"] .ide-dock-badge { color: var(--accent); background: color-mix(in oklab, var(--accent) 14%, transparent); }
+  .ide-dock-body {
+    padding: 5px 16px 9px 14px; overflow-y: auto; scrollbar-gutter: stable;
+    max-height: min(25vh, 214px); animation: ide-dock-in 0.28s var(--ease) both;
+  }
+  @media (max-width: 1023px) { .ide-dock-body { max-height: none; scrollbar-gutter: auto; } }
+  .ide-dock-head { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; padding: 4px 0 5px; }
+  .ide-dock-title { font-family: "Archivo", ui-sans-serif, sans-serif; font-weight: 800; font-size: 0.82rem; color: var(--ink); }
+  .ide-dock-sub { }
+  .ide-wiki-ref {
+    font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 0.58rem; font-weight: 600;
+    color: #4c9ff0; margin-left: auto; white-space: nowrap;
+  }
+  .ide-wiki-inline { margin-left: 0; }
 
+  /* result rows (code intelligence + knowledge) */
   .ide-line { display: flex; gap: 10px; padding: 3px 0; align-items: flex-start; }
   .ide-ln {
-    flex-shrink: 0; width: 22px; text-align: right; padding-top: 1px;
+    flex-shrink: 0; width: 20px; text-align: right; padding-top: 1px;
     font-size: 0.6rem; color: color-mix(in oklab, var(--ink) 28%, transparent);
     font-variant-numeric: tabular-nums; user-select: none;
   }
+  .ide-know-ln { color: #4c9ff0; font-weight: 700; }
   .ide-line-body { flex: 1; min-width: 0; }
   .ide-line-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .ide-line-text {
     flex: 1 1 auto; min-width: 0; font-family: "Hanken Grotesk", ui-sans-serif, sans-serif;
     font-size: 0.82rem; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  /* the prov + confidence + advisory chips stay one pinned cluster; the text truncates first */
-  .ide-line-chips { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; }
   .ide-line[data-on="false"] { opacity: 0.5; }
   .ide-line[data-on="false"] .ide-line-text { color: var(--muted); }
+  .ide-line-chips { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; }
   .ide-line-detail {
     display: block; margin-top: 1px; font-family: "JetBrains Mono", ui-monospace, monospace;
     font-size: 0.6rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .ide-line-detail[data-injected="true"] { color: var(--accent); }
 
+  /* ── the Memory panel ───────────────────────────────────────────────────── */
+  .ide-mem {
+    display: flex; gap: 10px; padding: 6px 8px 6px 6px; align-items: flex-start;
+    border-left: 2px solid transparent; border-radius: 0 6px 6px 0;
+    transition: opacity 0.25s var(--ease), background 0.25s var(--ease), border-color 0.25s var(--ease);
+  }
+  .ide-mem[data-on="false"] { opacity: 0.5; }
+  .ide-mem[data-hot="true"] { border-left-color: var(--accent); background: color-mix(in oklab, var(--accent) 8%, transparent); }
+  .ide-mem-kind {
+    flex-shrink: 0; margin-top: 1px; font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.5rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 2px 6px; border-radius: 4px; color: var(--muted);
+    border: 1px solid var(--hairline-strong); background: color-mix(in oklab, var(--ink) 5%, transparent);
+  }
+  .ide-mem-kind[data-kind="decision"] { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline)); background: color-mix(in oklab, var(--accent) 10%, transparent); }
+  .ide-mem-kind[data-kind="pattern"] { color: #4c9ff0; border-color: color-mix(in oklab, #4c9ff0 45%, var(--hairline)); background: color-mix(in oklab, #4c9ff0 12%, transparent); }
+  .ide-mem-kind[data-kind="gotcha"] { color: #e0a53a; border-color: color-mix(in oklab, #e0a53a 45%, var(--hairline)); background: color-mix(in oklab, #e0a53a 12%, transparent); }
+  .ide-mem-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .ide-mem-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .ide-mem-text {
+    flex: 1 1 auto; min-width: 0; font-family: "Hanken Grotesk", ui-sans-serif, sans-serif;
+    font-size: 0.82rem; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .ide-mem[data-superseded="true"] .ide-mem-text { text-decoration: line-through; color: var(--muted); }
+  .ide-mem-meta { }
+  .ide-mem-link { color: var(--accent); font-weight: 700; font-style: normal; }
+
   /* ── status bar ─────────────────────────────────────────────────────────── */
   .ide-statusbar {
-    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-    padding: 7px 14px; border-top: 1px solid var(--hairline-strong);
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 7px 14px;
+    border-top: 1px solid var(--hairline-strong);
     background: linear-gradient(180deg, var(--rock), color-mix(in oklab, var(--ink) 7%, var(--rock)));
   }
   .ide-status-left { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
@@ -615,9 +662,11 @@
   .ide-legend-item { display: inline-flex; align-items: center; gap: 5px; }
 
   @media (prefers-reduced-motion: reduce) {
-    .ide-diff-dot[data-on="true"], .ide-diff[data-live="true"] .ide-caret { animation: none; }
+    .ide-cursor { transition: none; }
+    .ide-ctxmenu, .ide-dock-body { animation: none; }
   }
 }
+
 
 /* ── The substrate background: estate's OWN illustrative schematic — a faint
    line-art layer of estate's iconography, fixed behind the whole page, in the
