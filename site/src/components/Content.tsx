@@ -42,6 +42,28 @@ function useReducedMotion() {
   return reduced
 }
 
+// tracks whether the viewport is phone-sized, so components can swap the tuned
+// desktop layout for a legible stacked/simplified mobile treatment. Initial state
+// is `false` (matches the SSR / first-hydration render — desktop), then the effect
+// corrects it on mount, so there is no hydration mismatch.
+function useIsMobile(maxWidth = 760) {
+  const [isMobile, setIsMobile] = useState(false)
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return
+    const mq = window.matchMedia(`(max-width: ${maxWidth}px)`)
+    const on = () => setIsMobile(mq.matches)
+    on()
+    // Safari < 14 / older iOS lack addEventListener on MediaQueryList.
+    if (mq.addEventListener) {
+      mq.addEventListener('change', on)
+      return () => mq.removeEventListener('change', on)
+    }
+    mq.addListener(on)
+    return () => mq.removeListener(on)
+  }, [maxWidth])
+  return isMobile
+}
+
 // ── Strata metadata: the five bands of the technical environment ────────────────
 type StratumId = 'requirements' | 'blast' | 'infra' | 'history' | 'annotations'
 
@@ -115,7 +137,7 @@ function Hero() {
         {/* Left — the thesis, committed in sentence one */}
         <div className="text-left">
           <span className="kicker">wicked-estate · Equip · v0.13.1 · crates.io</span>
-          <h1 className="mt-6 font-display font-black text-ink text-[3rem] sm:text-6xl lg:text-[4.4rem] leading-[0.92]" style={{ fontStretch: '112%' }}>
+          <h1 className="mt-6 font-display font-black text-ink text-[clamp(2.1rem,10vw,3rem)] sm:text-6xl lg:text-[4.4rem] leading-[0.92]" style={{ fontStretch: '112%' }}>
             Your live<br />technical<br />environment,<br />
             <span style={{ color: 'var(--accent)' }}>queryable.</span>
           </h1>
@@ -361,6 +383,7 @@ function Chips({ prov, conf, advisory, on, injected }: { prov: string; conf: num
 
 function AgentIDE() {
   const reduced = useReducedMotion()
+  const isMobile = useIsMobile()
   const [driving, setDriving] = useState(false)
   const [threshold, setThreshold] = useState(0.55)
   const [step, setStep] = useState(0)
@@ -383,7 +406,7 @@ function AgentIDE() {
 
   // ── AUTO-PLAY · a storyboard of real IDE gestures (only while on screen) ─────
   useEffect(() => {
-    if (driving || reduced || !inView) return
+    if (driving || reduced || !inView || isMobile) return
     const g = STORYBOARD[step]
     setCursorAt(g.target); setMenuOpen(false); setMenuRun(null)
     const timers: number[] = []
@@ -397,7 +420,7 @@ function AgentIDE() {
     timers.push(window.setTimeout(() => setStep(s => (s + 1) % STORYBOARD.length), 2650))
     return () => timers.forEach(clearTimeout)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, driving, reduced, inView])
+  }, [step, driving, reduced, inView, isMobile])
 
   // reduced motion: no cursor / menu; show a static, representative result set
   useEffect(() => {
@@ -451,6 +474,248 @@ function AgentIDE() {
   const statusTitle = dockTab === 'code' ? codePeek.title : dockTab === 'memory' ? 'Recall memory' : 'Search knowledge'
   const statusLive = dockTab === 'code' ? codeLive : dockTab === 'memory' ? memLive : knowLive
   const statusTotal = dockTab === 'code' ? codePeek.facts.length : dockTab === 'memory' ? MEMORIES.length : KNOWLEDGE.length
+
+  // ── confidence gutter — the dial gates every dock result. Shared by the
+  //    desktop split-pane and the mobile stacked treatment. ─────────────────
+  const gutterEl = (
+    <div className="ide-gutter">
+      <span className="ide-gutter-label">confidence ≥</span>
+      <span className="ide-gutter-val tabular-nums">{threshold.toFixed(2)}</span>
+      <input
+        type="range" min={0.3} max={1.0} step={0.05} value={threshold}
+        onChange={e => { takeControl(); setThreshold(parseFloat(e.target.value)) }}
+        onMouseDown={takeControl} onTouchStart={takeControl}
+        className="dial ide-dial" aria-label="Confidence threshold"
+      />
+      <span className="ide-gutter-ends">
+        <span>0.30 · heuristics</span>
+        <span>1.00 · SCIP only</span>
+      </span>
+    </div>
+  )
+
+  // ── the DOCK — tabbed: Code intelligence · Memory · Knowledge. Shared by both
+  //    layouts; on mobile the CSS lets its rows wrap instead of ellipsis-truncate. ─
+  const dockEl = (
+    <div className="ide-dock">
+      <div className="ide-dock-tabs" role="tablist" aria-label="Estate panels">
+        {DOCK_TABS.map(t => (
+          <button
+            key={t.id}
+            id={`ide-tab-${t.id}`}
+            role="tab"
+            aria-selected={dockTab === t.id}
+            className="ide-dock-tab"
+            data-on={String(dockTab === t.id)}
+            onClick={() => { takeControl(); setDockTab(t.id) }}
+          >
+            {t.label}
+            <span className="ide-dock-badge">{tabCount(t.id)}</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="ide-dock-body" id="ide-dock-panel" role="tabpanel" aria-labelledby={`ide-tab-${dockTab}`} key={dockTab + (dockTab === 'code' ? codePeek.title : '')}>
+        {dockTab === 'code' && (
+          <>
+            <div className="ide-dock-head">
+              <span className="ide-dock-title">{codePeek.title}</span>
+              <span className="ide-dock-sub depth">{codePeek.sub}</span>
+              {codePeek.wiki && <span className="ide-wiki-ref">{codePeek.wiki}</span>}
+            </div>
+            {codePeek.facts.map((f, i) => {
+              const on = f.conf >= threshold
+              const injected = f.prov === 'Injected'
+              return (
+                <div key={i} className="ide-line fact" data-on={String(on)}>
+                  <span className="ide-ln">{i + 1}</span>
+                  <span className="ide-line-body">
+                    <span className="ide-line-top">
+                      <span className="ide-line-text" title={f.text}>{f.text}</span>
+                      <Chips prov={f.prov} conf={f.conf} advisory={f.advisory} on={on} injected={injected} />
+                    </span>
+                    {f.detail && <span className="ide-line-detail" data-injected={String(injected)} title={f.detail}>{f.detail}</span>}
+                  </span>
+                </div>
+              )
+            })}
+          </>
+        )}
+
+        {dockTab === 'memory' && (
+          <>
+            <div className="ide-dock-head">
+              <span className="ide-dock-title">Recalled memory</span>
+              <span className="ide-dock-sub depth">decisions · patterns · gotchas — relevant to this code</span>
+            </div>
+            {MEMORIES.map(m => {
+              const on = m.salience >= threshold
+              const hot = memHighlight === m.id
+              return (
+                <div key={m.id} className="ide-mem" data-on={String(on)} data-hot={String(hot)} data-superseded={String(!!m.superseded)}>
+                  <span className="ide-mem-kind" data-kind={m.kind}>{m.kind}</span>
+                  <span className="ide-mem-body">
+                    <span className="ide-mem-top">
+                      <span className="ide-mem-text" title={m.text}>{m.text}</span>
+                      <span className="ide-line-chips">
+                        <span className="prov" style={m.salience >= 0.85 ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>{m.scope}</span>
+                        <span className="prov tabular-nums" style={{ color: confColor(m.salience) }}>{m.salience.toFixed(2)}</span>
+                        {m.superseded && <span className="prov">superseded</span>}
+                        {!on && <span className="prov" style={{ color: 'var(--faint)' }}>below cutoff</span>}
+                      </span>
+                    </span>
+                    <span className="ide-mem-meta depth">{m.prov} · recalled because you&apos;re editing <b className="ide-mem-link">{m.because}</b></span>
+                  </span>
+                </div>
+              )
+            })}
+          </>
+        )}
+
+        {dockTab === 'knowledge' && (
+          <>
+            <div className="ide-dock-head">
+              <span className="ide-dock-title">Knowledge · the wiki</span>
+              <span className="ide-dock-sub depth">hybrid FTS + vector, RRF-fused</span>
+            </div>
+            {KNOWLEDGE.map(k => {
+              const on = k.conf >= threshold
+              return (
+                <div key={k.id} className="ide-line fact" data-on={String(on)}>
+                  <span className="ide-ln ide-know-ln" aria-hidden="true">§</span>
+                  <span className="ide-line-body">
+                    <span className="ide-line-top">
+                      <span className="ide-line-text" title={k.detail}>
+                        <b className="ide-wiki-ref ide-wiki-inline">[[{k.title}]]</b> {k.section}
+                      </span>
+                      <Chips prov="Knowledge" conf={k.conf} on={on} />
+                    </span>
+                    <span className="ide-line-detail" title={k.detail}>{k.detail}</span>
+                  </span>
+                </div>
+              )
+            })}
+          </>
+        )}
+      </div>
+    </div>
+  )
+
+  // the status bar — reused verbatim across both layouts
+  const statusBarEl = (
+    <div className="ide-statusbar">
+      <span className="ide-status-left">
+        <span className="ide-status-seg" data-accent="true">{statusTitle}</span>
+        <span className="ide-sep" aria-hidden="true">·</span>
+        <span className="ide-status-seg">{statusLive}/{statusTotal} results</span>
+        <span className="ide-sep" aria-hidden="true">·</span>
+        <span className="ide-status-seg">confidence-gated</span>
+      </span>
+      <span className="ide-status-legend">
+        <span className="ide-legend-label">provenance</span>
+        {PROV_LEGEND.map(p => (
+          <span key={p.prov} className="ide-legend-item">
+            <span className="prov" style={p.accent ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>{p.prov}</span>
+            <span className="depth">{p.note}</span>
+          </span>
+        ))}
+      </span>
+    </div>
+  )
+
+  // ── MOBILE · a legible stacked treatment. The desktop split-pane (absolute
+  //    cursor + right-click context menu + measured positioning) can't survive a
+  //    phone, so on ≤760px we render a static, tappable representation that still
+  //    tells the whole story: the file, the IDE gestures (find-callers / peek /
+  //    recall / blast-radius) as tap targets, the confidence dial that gates, and
+  //    the Code-intelligence · Memory · Knowledge dock. No auto-play, no overlays,
+  //    nothing that can overflow. ────────────────────────────────────────────────
+  const tapCommand = (id: string) => { setDriving(true); applyCommand(id) }
+  const tapSymbol = (sym: SymId) => {
+    setDriving(true)
+    setCursorAt(sym)
+    if (sym === 'PricingService') { setCodePeek(DETAILS); setDockTab('code'); setMemHighlight(null) }
+    else applyCommand('callers')
+  }
+  if (isMobile) {
+    return (
+      <Section id="query" solid>
+        <div className="max-w-6xl mx-auto w-full" ref={rootRef}>
+          <div className="mb-4 w-full text-left">
+            <span className="kicker">The agent&apos;s IDE</span>
+            <h2 className="mt-1.5 font-display text-2xl font-black text-ink leading-[0.98]">
+              The agent doesn&apos;t grep. It edits in an IDE that <span style={{ color: 'var(--accent)' }}>knows your whole system.</span>
+            </h2>
+            <p className="mt-1.5 text-sm text-muted font-sans leading-tight">
+              Tap a symbol or an IDE gesture — every caller, the whole picture of a class, the requirement it
+              satisfies, the <span className="text-ink">decision</span> behind it, the <span className="text-ink">wiki</span>,
+              the blast radius. Each answer a live fact with <span className="text-ink">confidence + provenance</span>;
+              drop the dial and the low-confidence guesses fall out, labeled.
+            </p>
+          </div>
+
+          <div className="ide-window ide-window--mobile">
+            <div className="ide-chrome">
+              <span className="ide-lights" aria-hidden="true"><i /><i /><i /></span>
+              <span className="ide-title">wicked-estate — the agent&apos;s workspace</span>
+            </div>
+
+            {/* the file — static, tappable symbols */}
+            <div className="ide-tabbar">
+              <span className="ide-tab" data-on="true">
+                <span className="ide-glyph" data-lang="TS">TS</span>
+                <span className="ide-tab-name">PricingService.ts</span>
+              </span>
+            </div>
+            <div className="ide-code ide-code--mobile">
+              <pre className="ide-code-pre"><code>{CODE.map((line, li) => (
+                <span className="ide-code-line" key={li}>
+                  <span className="ide-code-ln">{li + 1}</span>
+                  <span className="ide-code-toks">
+                    {line.map((tk, ti) => tk.sym ? (
+                      <button
+                        key={ti}
+                        className="ide-sym"
+                        data-k={tk.k}
+                        data-active={String(cursorAt === tk.sym)}
+                        onClick={() => tapSymbol(tk.sym!)}
+                      >{tk.t}</button>
+                    ) : (
+                      <span key={ti} className="ide-tok" data-k={tk.k}>{tk.t}</span>
+                    ))}
+                  </span>
+                </span>
+              ))}</code></pre>
+            </div>
+
+            {/* IDE gestures — the command palette, as tap targets */}
+            <div className="ide-m-gestures">
+              <span className="ide-sec-label">IDE gestures · tap one — estate answers</span>
+              <ul className="ide-m-cmds" role="list">
+                {COMMANDS.map(c => {
+                  const active = (c.lands === 'code' && dockTab === 'code' && codePeek.title === c.peek?.title)
+                    || (c.lands === 'memory' && dockTab === 'memory')
+                    || (c.lands === 'knowledge' && dockTab === 'knowledge')
+                  return (
+                    <li key={c.id}>
+                      <button className="ide-m-cmd" data-active={String(active)} aria-pressed={active} onClick={() => tapCommand(c.id)}>
+                        <span className="ide-cmd-label">{c.label}</span>
+                        {c.note && <span className="ide-kbd">{c.note}</span>}
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            </div>
+
+            {gutterEl}
+            {dockEl}
+            {statusBarEl}
+          </div>
+        </div>
+      </Section>
+    )
+  }
 
   return (
     <Section id="query" solid>
@@ -581,147 +846,12 @@ function AgentIDE() {
                 )}
               </div>
 
-              {/* confidence gutter — the dial gates every dock result */}
-              <div className="ide-gutter">
-                <span className="ide-gutter-label">confidence ≥</span>
-                <span className="ide-gutter-val tabular-nums">{threshold.toFixed(2)}</span>
-                <input
-                  type="range" min={0.3} max={1.0} step={0.05} value={threshold}
-                  onChange={e => { takeControl(); setThreshold(parseFloat(e.target.value)) }}
-                  onMouseDown={takeControl} onTouchStart={takeControl}
-                  className="dial ide-dial" aria-label="Confidence threshold"
-                />
-                <span className="ide-gutter-ends">
-                  <span>0.30 · heuristics</span>
-                  <span>1.00 · SCIP only</span>
-                </span>
-              </div>
-
-              {/* the DOCK — tabbed: Code intelligence · Memory · Knowledge */}
-              <div className="ide-dock">
-                <div className="ide-dock-tabs" role="tablist" aria-label="Estate panels">
-                  {DOCK_TABS.map(t => (
-                    <button
-                      key={t.id}
-                      id={`ide-tab-${t.id}`}
-                      role="tab"
-                      aria-selected={dockTab === t.id}
-                      className="ide-dock-tab"
-                      data-on={String(dockTab === t.id)}
-                      onClick={() => { takeControl(); setDockTab(t.id) }}
-                    >
-                      {t.label}
-                      <span className="ide-dock-badge">{tabCount(t.id)}</span>
-                    </button>
-                  ))}
-                </div>
-
-                <div className="ide-dock-body" id="ide-dock-panel" role="tabpanel" aria-labelledby={`ide-tab-${dockTab}`} key={dockTab + (dockTab === 'code' ? codePeek.title : '')}>
-                  {dockTab === 'code' && (
-                    <>
-                      <div className="ide-dock-head">
-                        <span className="ide-dock-title">{codePeek.title}</span>
-                        <span className="ide-dock-sub depth">{codePeek.sub}</span>
-                        {codePeek.wiki && <span className="ide-wiki-ref">{codePeek.wiki}</span>}
-                      </div>
-                      {codePeek.facts.map((f, i) => {
-                        const on = f.conf >= threshold
-                        const injected = f.prov === 'Injected'
-                        return (
-                          <div key={i} className="ide-line fact" data-on={String(on)}>
-                            <span className="ide-ln">{i + 1}</span>
-                            <span className="ide-line-body">
-                              <span className="ide-line-top">
-                                <span className="ide-line-text" title={f.text}>{f.text}</span>
-                                <Chips prov={f.prov} conf={f.conf} advisory={f.advisory} on={on} injected={injected} />
-                              </span>
-                              {f.detail && <span className="ide-line-detail" data-injected={String(injected)} title={f.detail}>{f.detail}</span>}
-                            </span>
-                          </div>
-                        )
-                      })}
-                    </>
-                  )}
-
-                  {dockTab === 'memory' && (
-                    <>
-                      <div className="ide-dock-head">
-                        <span className="ide-dock-title">Recalled memory</span>
-                        <span className="ide-dock-sub depth">decisions · patterns · gotchas — relevant to this code</span>
-                      </div>
-                      {MEMORIES.map(m => {
-                        const on = m.salience >= threshold
-                        const hot = memHighlight === m.id
-                        return (
-                          <div key={m.id} className="ide-mem" data-on={String(on)} data-hot={String(hot)} data-superseded={String(!!m.superseded)}>
-                            <span className="ide-mem-kind" data-kind={m.kind}>{m.kind}</span>
-                            <span className="ide-mem-body">
-                              <span className="ide-mem-top">
-                                <span className="ide-mem-text" title={m.text}>{m.text}</span>
-                                <span className="ide-line-chips">
-                                  <span className="prov" style={m.salience >= 0.85 ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>{m.scope}</span>
-                                  <span className="prov tabular-nums" style={{ color: confColor(m.salience) }}>{m.salience.toFixed(2)}</span>
-                                  {m.superseded && <span className="prov">superseded</span>}
-                                  {!on && <span className="prov" style={{ color: 'var(--faint)' }}>below cutoff</span>}
-                                </span>
-                              </span>
-                              <span className="ide-mem-meta depth">{m.prov} · recalled because you&apos;re editing <b className="ide-mem-link">{m.because}</b></span>
-                            </span>
-                          </div>
-                        )
-                      })}
-                    </>
-                  )}
-
-                  {dockTab === 'knowledge' && (
-                    <>
-                      <div className="ide-dock-head">
-                        <span className="ide-dock-title">Knowledge · the wiki</span>
-                        <span className="ide-dock-sub depth">hybrid FTS + vector, RRF-fused</span>
-                      </div>
-                      {KNOWLEDGE.map(k => {
-                        const on = k.conf >= threshold
-                        return (
-                          <div key={k.id} className="ide-line fact" data-on={String(on)}>
-                            <span className="ide-ln ide-know-ln" aria-hidden="true">§</span>
-                            <span className="ide-line-body">
-                              <span className="ide-line-top">
-                                <span className="ide-line-text" title={k.detail}>
-                                  <b className="ide-wiki-ref ide-wiki-inline">[[{k.title}]]</b> {k.section}
-                                </span>
-                                <Chips prov="Knowledge" conf={k.conf} on={on} />
-                              </span>
-                              <span className="ide-line-detail" title={k.detail}>{k.detail}</span>
-                            </span>
-                          </div>
-                        )
-                      })}
-                    </>
-                  )}
-                </div>
-              </div>
+              {gutterEl}
+              {dockEl}
             </div>
           </div>
 
-          {/* STATUS BAR */}
-          <div className="ide-statusbar">
-            <span className="ide-status-left">
-              <span className="ide-status-seg" data-accent="true">{statusTitle}</span>
-              <span className="ide-sep" aria-hidden="true">·</span>
-              <span className="ide-status-seg">{statusLive}/{statusTotal} results</span>
-              <span className="ide-sep" aria-hidden="true">·</span>
-              <span className="ide-status-seg">confidence-gated</span>
-            </span>
-            <span className="ide-status-legend">
-              <span className="ide-legend-label">provenance</span>
-              {PROV_LEGEND.map(p => (
-                <span key={p.prov} className="ide-legend-item">
-                  <span className="prov" style={p.accent ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>{p.prov}</span>
-                  <span className="depth">{p.note}</span>
-                </span>
-              ))}
-            </span>
-          </div>
+          {statusBarEl}
         </div>
       </div>
     </Section>
@@ -1070,7 +1200,7 @@ function Storage() {
           </p>
         </TopHead>
 
-        <div className="inline-flex gap-1.5 p-1.5 rounded-xl mb-5" style={{ background: 'var(--rock)', border: '1px solid var(--hairline-strong)' }}>
+        <div className="inline-flex flex-wrap gap-1.5 p-1.5 rounded-xl mb-5" style={{ background: 'var(--rock)', border: '1px solid var(--hairline-strong)' }}>
           <button className="seg" data-on={!shared} onClick={() => setShared(false)}>SQLite · solo</button>
           <button className="seg" data-on={shared} onClick={() => setShared(true)}>PostgreSQL · shared team</button>
         </div>
@@ -1127,14 +1257,17 @@ const LOOP: LoopStep[] = [
 
 function FamilyLoop() {
   const reduced = useReducedMotion()
+  const isMobile = useIsMobile()
   const [active, setActive] = useState(1) // start on Equip (estate’s home)
   const [pinned, setPinned] = useState(false)
 
+  // On mobile we don't cycle a highlight through the rows — motion is disabled and
+  // every row shows statically highlighted (see `on` below). So skip the interval.
   useEffect(() => {
-    if (reduced || pinned) return
+    if (reduced || pinned || isMobile) return
     const t = setInterval(() => setActive(a => (a + 1) % LOOP.length), 2600)
     return () => clearInterval(t)
-  }, [reduced, pinned])
+  }, [reduced, pinned, isMobile])
 
   const current = LOOP[active]
 
@@ -1163,30 +1296,34 @@ function FamilyLoop() {
                   className="h-1.5 rounded-full transition-all"
                   style={{ width: i === active ? 24 : 8, background: i === active ? 'var(--accent)' : 'var(--hairline-strong)' }} />
               ))}
-              <button
-                onClick={() => setPinned(!pinned)}
-                className="depth depth-toggle ml-2"
-                aria-label={pinned ? 'Resume cycling the loop' : 'Pin the loop'}
-              >
-                {pinned ? 'pinned (click to cycle)' : 'cycling the loop'}
-              </button>
+              {!isMobile && (
+                <button
+                  onClick={() => setPinned(!pinned)}
+                  className="depth depth-toggle ml-2"
+                  aria-label={pinned ? 'Resume cycling the loop' : 'Pin the loop'}
+                >
+                  {pinned ? 'pinned (click to cycle)' : 'cycling the loop'}
+                </button>
+              )}
             </div>
           </div>
 
           {/* right — the four verbs; a left pointer marks the active one */}
           <div className="rock-panel p-0 overflow-hidden">
             {LOOP.map((l, i) => {
-              const on = i === active
+              // On mobile every row is highlighted statically (no cycling); on desktop
+              // the highlight follows the active row.
+              const on = isMobile ? true : i === active
               return (
                 <div
                   key={l.id}
                   className="layer-row flex items-stretch"
                   data-active={String(on)}
-                  onMouseEnter={() => setActive(i)}
+                  onMouseEnter={() => { if (!isMobile) setActive(i) }}
                   style={{ borderBottom: '1px solid var(--hairline)' }}
                 >
                   <div className="w-8 flex items-center justify-center shrink-0">
-                    {on && <span className="layer-pointer" aria-hidden>{reduced ? '▸' : '►'}</span>}
+                    {on && <span className="layer-pointer" aria-hidden>{(reduced || isMobile) ? '▸' : '►'}</span>}
                   </div>
                   <div className="flex-1 px-4 py-4" style={{ background: l.here ? 'color-mix(in oklab, var(--accent) 7%, transparent)' : 'transparent' }}>
                     <div className="flex items-center gap-3 mb-2 flex-wrap">
