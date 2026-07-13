@@ -129,9 +129,6 @@ function Hero() {
             The memory and code-graph proper live in <span className="text-ink">wicked-brain</span>, Equip’s other half.
             estate is the technical environment those symbols sit in: what a change touches, what protects it, what it was.
           </p>
-          <p className="mt-4 font-mono text-xs text-faint leading-5">
-            100+ wired languages · every edge {'{'}confidence, provenance, resolved_by{'}'} · SQLite by default, one flag to a shared Postgres backend.
-          </p>
           <div className="mt-9 flex flex-col sm:flex-row gap-3">
             <a href="#query" className="btn-primary">Read the core ↓</a>
             <a href="https://github.com/mikeparcewski/wicked-estate" target="_blank" rel="noreferrer" className="btn-outline">
@@ -185,49 +182,151 @@ function Hero() {
   )
 }
 
-// ── 2 · QUERY THE SUBSTRATE — auto-demos, pauses + becomes yours on click ───────
-type Prov = 'Parsed' | 'SCIP' | 'TSG' | 'ImportMap' | 'Tags' | 'Injected' | 'git' | 'Collector' | 'annotation'
-interface Fact { stratum: StratumId; text: string; detail?: string; conf: number; prov: Prov; advisory?: boolean }
-// `dial` is the confidence value the dial SWEEPS TO when this subject is on screen —
-// each subject reads out at a different cutoff so the needle visibly travels between tabs.
-interface Subject { id: string; label: string; kind: string; dial: number; facts: Fact[] }
+// ── 2 · THE AGENT'S IDE — estate is the IDE the agent edits code in ─────────────
+// Reframed from a "query the substrate" panel into actually USING an IDE. The agent
+// right-clicks a symbol → a context menu of real IDE commands → one runs → the result
+// lands in a tabbed dock (Code intelligence · Memory · Knowledge). Clicking a class shows
+// all its details at once. The dock proves estate gives an agent EVERYTHING — code
+// intelligence (callers / blast-radius / requirement / definition), recalled Memory
+// (decisions · patterns · gotchas, with scope + salience + provenance) and Knowledge (the
+// wiki, RRF-fused). Every result carries confidence + provenance; the dial gates the
+// low-confidence / low-salience ones. The auto-play is a storyboard of these gestures —
+// a visible cursor + the menu opening — so it reads as "look what an agent can do editing
+// code in an IDE that actually knows the system." Blast-radius is one gesture, not the lead.
 
-const SUBJECTS: Subject[] = [
-  {
-    id: 'applyDiscount', label: 'applyDiscount', kind: 'symbol', dial: 0.55,
+type Prov = 'Parsed' | 'SCIP' | 'Injected' | 'ImportMap' | 'Tags' | 'git' | 'Memory' | 'Knowledge' | 'annotation'
+interface Fact { text: string; detail?: string; conf: number; prov: Prov; advisory?: boolean }
+type SymId = 'PricingService' | 'applyDiscount'
+type DockTab = 'code' | 'memory' | 'knowledge'
+// estate's answer to one code-intelligence command
+interface Peek { title: string; sub: string; facts: Fact[]; wiki?: string }
+// a context-menu / command-palette command and where its result lands
+interface Command { id: string; label: string; note?: string; lands: DockTab; peek?: Peek; memId?: string }
+// a token in the code; `sym` set => it's a clickable symbol
+interface Token { t: string; sym?: SymId; k?: string }
+// one recalled memory node — decision / pattern / gotcha
+interface Memory { id: string; kind: 'decision' | 'pattern' | 'gotcha'; text: string; scope: string; salience: number; prov: string; because: string; superseded?: boolean }
+// one recalled knowledge (wiki) node
+interface Know { id: string; title: string; section: string; detail: string; conf: number }
+
+// The working file shown in the editor (each line is a token list; symbols are buttons).
+const CODE: Token[][] = [
+  [{ t: 'export ', k: 'kw' }, { t: 'class ', k: 'kw' }, { t: 'PricingService', sym: 'PricingService', k: 'nm' }, { t: ' {' }],
+  [{ t: '  ' }, { t: 'applyDiscount', sym: 'applyDiscount', k: 'fn' }, { t: '(cart, coupon) {' }],
+  [{ t: '    ' }, { t: 'const ', k: 'kw' }, { t: 'price = ' }, { t: 'cartTotal', k: 'fn' }, { t: '(cart)' }],
+  [{ t: '    ' }, { t: 'return ', k: 'kw' }, { t: 'clamp', k: 'fn' }, { t: '(price - coupon.value, ' }, { t: '0', k: 'nm' }, { t: ')' }],
+  [{ t: '  }' }],
+  [{ t: '}' }],
+]
+
+// The IDE commands (context menu = command palette). Most land code-intelligence results
+// in the Code tab; "Recall decisions" lands in Memory, "Search knowledge" in Knowledge.
+const COMMANDS: Command[] = [
+  { id: 'definition', label: 'Peek definition', note: 'F12', lands: 'code', peek: {
+    title: 'Peek definition', sub: 'PricingService.applyDiscount',
     facts: [
-      { stratum: 'requirements', text: 'satisfies REQ-142 · validated ✓', detail: 'requirement↔code · enforced', conf: 1.0, prov: 'Parsed' },
-      { stratum: 'blast', text: '3 transitive dependents', detail: 'checkout · cartTotal · api/price', conf: 1.0, prov: 'SCIP' },
-      { stratum: 'blast', text: 'injected: emits wicked.shop.order.placed → 2 consumers', detail: 'event→consumer edge · grep never sees this', conf: 1.0, prov: 'Injected' },
-      { stratum: 'blast', text: 'referralFlow → applyDiscount', detail: 'tag-scan guess · cross-file unverified', conf: 0.3, prov: 'Tags' },
-      { stratum: 'infra', text: 'reads dataset PRICING.TBL via api/price', detail: 'code↔dataset edge', conf: 0.85, prov: 'ImportMap' },
-      { stratum: 'history', text: '4 commits · last changed 2026-06', detail: 'per-file git provenance', conf: 1.0, prov: 'git' },
-      { stratum: 'annotations', text: 'assumption: max one coupon per cart', detail: 'advisory · survives re-index', conf: 0.7, prov: 'annotation', advisory: true },
+      { text: 'applyDiscount(cart, coupon) → number', detail: 'checkout/PricingService.ts:2 · exported', conf: 1.0, prov: 'Parsed' },
+      { text: 'returns clamp(price − coupon.value, 0)', detail: 'pure · does not mutate cart', conf: 1.0, prov: 'SCIP' },
     ],
-  },
-  {
-    id: 'REQ-142', label: 'REQ-142', kind: 'requirement', dial: 0.90,
+  } },
+  { id: 'callers', label: 'Find all callers', note: '⇧F12', lands: 'code', peek: {
+    title: 'Find all callers', sub: 'applyDiscount · 3 found',
     facts: [
-      { stratum: 'requirements', text: '2 symbols satisfy REQ-142', detail: 'validateCoupon ✓ · applyDiscount ⋯ unvalidated', conf: 1.0, prov: 'Parsed' },
-      { stratum: 'blast', text: 'blast-radius of implementers: 3 dependents', detail: 'checkout · cartTotal · api/price', conf: 1.0, prov: 'SCIP' },
-      { stratum: 'blast', text: 'candidate impl: legacyDiscount()', detail: 'import-map heuristic · not confirmed', conf: 0.6, prov: 'ImportMap' },
-      { stratum: 'infra', text: 'governed by rule-set PricingPolicy', detail: 'ODM ruleset↔code edge · same graph', conf: 0.9, prov: 'Parsed' },
-      { stratum: 'history', text: 'validated flag flipped 2026-05', detail: 'read-only edge-history log', conf: 1.0, prov: 'git' },
-      { stratum: 'annotations', text: 'question: does BOGO count as a coupon?', detail: 'advisory · open', conf: 0.5, prov: 'annotation', advisory: true },
+      { text: 'checkout() → applyDiscount', detail: 'checkout/Checkout.ts:41', conf: 1.0, prov: 'SCIP' },
+      { text: 'api/price route → applyDiscount', detail: 'routes/price.ts:18', conf: 1.0, prov: 'SCIP' },
+      { text: 'referralFlow → applyDiscount', detail: 'tag-scan guess · cross-file, unverified', conf: 0.3, prov: 'Tags' },
     ],
-  },
-  {
-    id: 'PAYROLL.JCL', label: 'PAYROLL.JCL', kind: 'JCL step', dial: 0.70,
+  } },
+  { id: 'references', label: 'Find all references', note: 'blast radius', lands: 'code', peek: {
+    title: 'Find all references · blast radius', sub: 'what breaks if you change it',
     facts: [
-      { stratum: 'infra', text: 'EXEC PGM=PAYCALC uses PAYROLL.MASTER', detail: 'JCL step↔dataset edge', conf: 1.0, prov: 'Parsed' },
-      { stratum: 'infra', text: 'RACF profile PAY.** protects PAYROLL.MASTER', detail: 'cross-domain: RACF↔dataset · one query', conf: 1.0, prov: 'Parsed' },
-      { stratum: 'infra', text: 'injected: command:deploy → deploy-agent', detail: 'command→agent edge · grep never sees this', conf: 1.0, prov: 'Injected' },
-      { stratum: 'blast', text: '2 callers submit this job', detail: 'scheduler.ts · nightly.sh', conf: 0.85, prov: 'ImportMap' },
-      { stratum: 'history', text: 'drift: live RACF ≠ iac since 2026-05', detail: 'graph diff · resource identity', conf: 0.8, prov: 'Collector' },
-      { stratum: 'requirements', text: 'supports REQ-207 · unvalidated ⋯', conf: 0.6, prov: 'Parsed' },
-      { stratum: 'annotations', text: 'note: dataset last drilled 2026-05', conf: 0.6, prov: 'annotation', advisory: true },
+      { text: '3 transitive dependents', detail: 'checkout · cartTotal · api/price', conf: 1.0, prov: 'SCIP' },
+      { text: 'emits wicked.shop.order.placed → 2 consumers', detail: 'injected event→consumer edge · grep never sees this', conf: 1.0, prov: 'Injected' },
+      { text: 'referralFlow → applyDiscount', detail: 'tag-scan guess · cross-file, unverified', conf: 0.3, prov: 'Tags' },
     ],
-  },
+  } },
+  { id: 'requirement', label: 'Go to requirement', note: '⌘R', lands: 'code', peek: {
+    title: 'Go to requirement', sub: 'requirement ↔ implementation', wiki: '[[Pricing Rules]] §Discounts',
+    facts: [
+      { text: 'satisfies REQ-142 · validated ✓', detail: '“coupons never exceed the cart total” · enforced', conf: 1.0, prov: 'Parsed' },
+      { text: 'validated flag flipped 2026-05', detail: 'read-only edge-history log', conf: 1.0, prov: 'git' },
+    ],
+  } },
+  { id: 'decisions', label: 'Recall decisions', note: '⌘K', lands: 'memory', memId: 'm-nostack' },
+  { id: 'policy', label: 'Show governing policy', note: '⌘I', lands: 'code', peek: {
+    title: 'Show governing policy', sub: 'infra + policy, cross-domain',
+    facts: [
+      { text: 'governed by rule-set PricingPolicy', detail: 'ODM ruleset ↔ code edge · same graph', conf: 0.9, prov: 'Parsed' },
+      { text: 'reads dataset PRICING.TBL via api/price', detail: 'code ↔ dataset edge', conf: 0.85, prov: 'ImportMap' },
+    ],
+  } },
+  { id: 'annotations', label: 'Annotations', note: '⌘/', lands: 'code', peek: {
+    title: 'Annotations', sub: 'typed notes · survive re-index',
+    facts: [
+      { text: 'assumption: max one coupon per cart', detail: 'advisory · survives re-index', conf: 0.7, prov: 'annotation', advisory: true },
+      { text: 'note: pricing last audited 2026-05', detail: 'typed note', conf: 0.6, prov: 'annotation', advisory: true },
+    ],
+  } },
+  { id: 'knowledge', label: 'Search knowledge', note: '⌘⇧F', lands: 'knowledge' },
+]
+
+// Clicking the class opens the "all details" peek — everything estate knows, at once.
+const DETAILS: Peek = {
+  title: 'PricingService — all details', sub: 'everything estate knows, at once', wiki: '[[Pricing Rules]] §Discounts',
+  facts: [
+    { text: 'class PricingService · 1 public method', detail: 'checkout/PricingService.ts:1', conf: 1.0, prov: 'Parsed' },
+    { text: 'satisfies REQ-142 · validated ✓', detail: 'coupons never exceed the cart total', conf: 1.0, prov: 'Parsed' },
+    { text: '3 callers · 3 transitive dependents', detail: 'checkout · api/price · cartTotal', conf: 1.0, prov: 'SCIP' },
+    { text: 'emits wicked.shop.order.placed → 2 consumers', detail: 'injected edge · grep never sees this', conf: 1.0, prov: 'Injected' },
+    { text: 'decision: coupons never stack', detail: 'recalled from memory · scope project:acme', conf: 0.92, prov: 'Memory' },
+    { text: 'governed by rule-set PricingPolicy', detail: 'ODM ruleset · reads PRICING.TBL', conf: 0.9, prov: 'Parsed' },
+    { text: 'assumption: max one coupon per cart', detail: 'advisory · survives re-index', conf: 0.7, prov: 'annotation', advisory: true },
+  ],
+}
+
+// The Memory panel — estate's recalled memory relevant to the code in view. Salience acts
+// as the confidence the dial gates; the superseded decision falls below the default cutoff.
+const MEMORIES: Memory[] = [
+  { id: 'm-nostack', kind: 'decision', text: 'Coupons never stack — one per cart', scope: 'project:acme', salience: 0.92, prov: 'episodic · spike 2026-06', because: 'applyDiscount' },
+  { id: 'm-clamp', kind: 'pattern', text: 'Discount math clamps at 0 — never a negative total', scope: 'project:acme', salience: 0.8, prov: 'semantic · reflected 2026-05', because: 'applyDiscount' },
+  { id: 'm-tz', kind: 'gotcha', text: 'PRICING.TBL is timezone-naive — normalize before compare', scope: 'project:acme', salience: 0.68, prov: 'episodic · spike 2026-04', because: 'api/price' },
+  { id: 'm-old', kind: 'decision', text: 'Stack up to 2 coupons — superseded by REQ-142', scope: 'project:acme', salience: 0.34, prov: 'episodic · spike 2025-11', because: 'applyDiscount', superseded: true },
+]
+
+// A touch of Knowledge — the wiki, hybrid FTS + vector, RRF-fused.
+const KNOWLEDGE: Know[] = [
+  { id: 'k-rules', title: 'Pricing Rules', section: '§Discounts', detail: 'coupon eligibility + stacking policy · hybrid FTS+vector, RRF-fused', conf: 0.9 },
+  { id: 'k-flow', title: 'Checkout Flow', section: '§Totals', detail: 'where applyDiscount sits in the order lifecycle', conf: 0.85 },
+  { id: 'k-adr', title: 'ADR-014 Coupon Policy', section: '§Decision', detail: 'why stacking was dropped — links REQ-142', conf: 0.88 },
+]
+
+// The auto-play storyboard: real IDE gestures, ~2.6s each. A visible cursor moves to the
+// target; a right-click opens the menu and one command runs; a class click opens details.
+// The result lands in the matching dock tab — so the tour shows code · memory · knowledge.
+interface Gesture { target: SymId; kind: 'menu' | 'click'; run?: string }
+const STORYBOARD: Gesture[] = [
+  { target: 'applyDiscount', kind: 'menu', run: 'callers' },
+  { target: 'PricingService', kind: 'click' },
+  { target: 'applyDiscount', kind: 'menu', run: 'requirement' },
+  { target: 'applyDiscount', kind: 'menu', run: 'decisions' },
+  { target: 'applyDiscount', kind: 'menu', run: 'references' },
+  { target: 'applyDiscount', kind: 'menu', run: 'knowledge' },
+]
+
+const DOCK_TABS: { id: DockTab; label: string }[] = [
+  { id: 'code', label: 'Code intelligence' },
+  { id: 'memory', label: 'Memory' },
+  { id: 'knowledge', label: 'Knowledge' },
+]
+
+// provenance legend for the status bar
+const PROV_LEGEND: { prov: string; note: string; accent?: boolean }[] = [
+  { prov: 'Parsed', note: 'AST · 1.0', accent: true },
+  { prov: 'SCIP', note: 'indexer · 1.0', accent: true },
+  { prov: 'Injected', note: 'bus / cmd edge', accent: true },
+  { prov: 'Memory', note: 'recalled · salience' },
+  { prov: 'Knowledge', note: 'wiki · RRF' },
+  { prov: 'Tags', note: 'tag-scan · 0.3' },
 ]
 
 function confColor(conf: number) {
@@ -237,193 +336,391 @@ function confColor(conf: number) {
   return 'var(--faint)'
 }
 
-function QuerySubstrate() {
+function cmdById(id: string | undefined) { return COMMANDS.find(c => c.id === id) }
+
+// a small pointer cursor for the auto-play gestures
+function CursorArrow() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 2l15 8.5-6.4 1.4L9.6 20 4 2z" fill="var(--ink)" stroke="var(--canvas)" strokeWidth="1.4" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+// one provenance chip + confidence value, reused across code / memory / knowledge rows
+function Chips({ prov, conf, advisory, on, injected }: { prov: string; conf: number; advisory?: boolean; on: boolean; injected?: boolean }) {
+  return (
+    <span className="ide-line-chips">
+      <span className="prov" style={conf >= 1.0 || injected ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>{prov}</span>
+      <span className="prov tabular-nums" style={{ color: confColor(conf) }}>{conf.toFixed(2)}</span>
+      {advisory && <span className="prov">adv</span>}
+      {!on && <span className="prov" style={{ color: 'var(--faint)' }}>below cutoff</span>}
+    </span>
+  )
+}
+
+function AgentIDE() {
   const reduced = useReducedMotion()
-  const [subjectIdx, setSubjectIdx] = useState(0)
-  const [threshold, setThreshold] = useState(SUBJECTS[0].dial)
   const [driving, setDriving] = useState(false)
+  const [threshold, setThreshold] = useState(0.55)
+  const [step, setStep] = useState(0)
+  const [inView, setInView] = useState(false)
+  const [cursorAt, setCursorAt] = useState<SymId | null>(STORYBOARD[0].target)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [menuRun, setMenuRun] = useState<string | null>(null)
+  const [codePeek, setCodePeek] = useState<Peek>(cmdById(STORYBOARD[0].run)?.peek ?? DETAILS)
+  const [dockTab, setDockTab] = useState<DockTab>('code')
+  const [memHighlight, setMemHighlight] = useState<string | null>(null)
 
-  const subject = SUBJECTS[subjectIdx]
-  const live = subject.facts.filter(f => f.conf >= threshold)
-  const liveStrata = new Set(live.map(f => f.stratum))
+  // apply a command's result: land it in the right dock tab
+  const applyCommand = (id: string) => {
+    const c = cmdById(id); if (!c) return
+    setDockTab(c.lands)
+    if (c.lands === 'code' && c.peek) { setCodePeek(c.peek); setMemHighlight(null) }
+    else if (c.lands === 'memory') setMemHighlight(c.memId ?? null)
+    else setMemHighlight(null)
+  }
 
-  // auto-demo: dwell ~5s on each subject (each subject is a tab), then advance
-  // to the next and cycle. Clicking a subject or driving the dial pins it and
-  // stops the auto-progression.
+  // ── AUTO-PLAY · a storyboard of real IDE gestures (only while on screen) ─────
   useEffect(() => {
-    if (driving || reduced) return
-    const t = setInterval(() => setSubjectIdx(i => (i + 1) % SUBJECTS.length), 5000)
-    return () => clearInterval(t)
-  }, [driving, reduced])
-
-  // The confidence dial SWEEPS: when the tab advances, the needle glides from its
-  // current value to the new subject's read-out cutoff — so the dial visibly moves
-  // between subjects instead of sitting still. Held facts filter live as it travels.
-  const thresholdRef = useRef(threshold)
-  thresholdRef.current = threshold
-  const rafRef = useRef<number | undefined>(undefined)
-  useEffect(() => {
-    if (driving) return
-    const target = SUBJECTS[subjectIdx].dial
-    if (reduced) { setThreshold(target); return } // no animation, but still land on the value
-    const start = thresholdRef.current
-    const t0 = performance.now()
-    const dur = 900
-    const ease = (x: number) => 1 - Math.pow(1 - x, 3)
-    const tick = (now: number) => {
-      const p = Math.min(1, (now - t0) / dur)
-      setThreshold(+(start + (target - start) * ease(p)).toFixed(4))
-      if (p < 1) rafRef.current = requestAnimationFrame(tick)
+    if (driving || reduced || !inView) return
+    const g = STORYBOARD[step]
+    setCursorAt(g.target); setMenuOpen(false); setMenuRun(null)
+    const timers: number[] = []
+    if (g.kind === 'menu') {
+      timers.push(window.setTimeout(() => setMenuOpen(true), 620))
+      timers.push(window.setTimeout(() => setMenuRun(g.run ?? null), 1200))
+      timers.push(window.setTimeout(() => { setMenuOpen(false); setMenuRun(null); if (g.run) applyCommand(g.run) }, 1820))
+    } else {
+      timers.push(window.setTimeout(() => { setCodePeek(DETAILS); setDockTab('code'); setMemHighlight(null) }, 980))
     }
-    rafRef.current = requestAnimationFrame(tick)
-    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current) }
-  }, [subjectIdx, driving, reduced])
+    timers.push(window.setTimeout(() => setStep(s => (s + 1) % STORYBOARD.length), 2650))
+    return () => timers.forEach(clearTimeout)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, driving, reduced, inView])
 
-  const takeControl = () => setDriving(true)
+  // reduced motion: no cursor / menu; show a static, representative result set
+  useEffect(() => {
+    if (reduced) { setCursorAt(null); setMenuOpen(false); setCodePeek(DETAILS); setDockTab('code') }
+  }, [reduced])
+
+  // auto-play the moment the section scrolls into view; pause when it scrolls out.
+  // Arriving shows it already cycling: entry restarts the storyboard from step 0.
+  const rootRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = rootRef.current
+    if (!el || typeof IntersectionObserver === 'undefined') { setInView(true); return }
+    let fired = false
+    const io = new IntersectionObserver(([e]) => { fired = true; setInView(e.isIntersecting) }, { threshold: 0.2 })
+    io.observe(el)
+    // safety net: in a few embedded/automation contexts IO never delivers — rather than
+    // sit frozen, fall back to always-animating if no callback has arrived.
+    const t = window.setTimeout(() => { if (!fired) setInView(true) }, 1600)
+    return () => { io.disconnect(); clearTimeout(t) }
+  }, [])
+  useEffect(() => { if (inView && !driving) setStep(0) }, [inView, driving])
+
+  const takeControl = () => { setDriving(true); setCursorAt(null); setMenuOpen(false); setMenuRun(null) }
+  const runCommand = (id: string) => { takeControl(); applyCommand(id) }
+  const openMenuAt = (sym: SymId) => { setDriving(true); setMenuRun(null); setCursorAt(sym); setMenuOpen(true) }
+  const clickSymbol = (sym: SymId) => {
+    if (sym === 'PricingService') { setDriving(true); setMenuOpen(false); setMenuRun(null); setCursorAt(sym); setCodePeek(DETAILS); setDockTab('code'); setMemHighlight(null) }
+    else openMenuAt(sym)
+  }
+
+  // cursor + menu positioning: measure the target symbol within the code pane
+  const codeRef = useRef<HTMLDivElement>(null)
+  const symRefs = useRef<Record<string, HTMLElement | null>>({})
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
+  useEffect(() => {
+    const host = codeRef.current
+    const el = cursorAt ? symRefs.current[cursorAt] : null
+    if (!host || !el) { setPos(null); return }
+    const hr = host.getBoundingClientRect(); const r = el.getBoundingClientRect()
+    setPos({ x: r.left - hr.left + r.width * 0.6, y: r.top - hr.top + r.height * 0.72 })
+  }, [cursorAt])
+
+  const showCursor = inView && !driving && !reduced && !!pos
+  const showMenu = menuOpen && !!pos
+
+  // per-tab live counts (gated by the dial) for the dock tab badges
+  const codeLive = codePeek.facts.filter(f => f.conf >= threshold).length
+  const memLive = MEMORIES.filter(m => m.salience >= threshold).length
+  const knowLive = KNOWLEDGE.filter(k => k.conf >= threshold).length
+  const tabCount = (id: DockTab) => id === 'code' ? codeLive : id === 'memory' ? memLive : knowLive
+  const statusTitle = dockTab === 'code' ? codePeek.title : dockTab === 'memory' ? 'Recall memory' : 'Search knowledge'
+  const statusLive = dockTab === 'code' ? codeLive : dockTab === 'memory' ? memLive : knowLive
+  const statusTotal = dockTab === 'code' ? codePeek.facts.length : dockTab === 'memory' ? MEMORIES.length : KNOWLEDGE.length
 
   return (
     <Section id="query" solid>
-      <div className="max-w-6xl mx-auto w-full">
-        <div className="mb-2.5 w-full text-left flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <span className="kicker">Query the substrate</span>
-            <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink w-full leading-[0.98]">
-              One question. One dossier. Assembled live across all five strata.
-            </h2>
-            <p className="mt-1.5 text-sm text-ink w-full font-sans leading-tight max-w-2xl">
-              Watch it read itself — it steps through each subject and the confidence dial sweeps to that subject's
-              cutoff. Click any subject to pin it, then drive the dial: push to{' '}
-              <span className="font-semibold">1.0</span> and only parsed / SCIP facts survive; drop it and the heuristic
-              tag-scan edges reappear — <span className="font-semibold">labeled, never silently promoted</span>.
-            </p>
+      <div className="max-w-6xl mx-auto w-full" ref={rootRef}>
+        {/* section header — using an IDE that actually knows your system */}
+        <div className="mb-4 w-full text-left max-w-3xl">
+          <span className="kicker">The agent&apos;s IDE</span>
+          <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink leading-[0.98]">
+            The agent doesn&apos;t grep. It edits in an IDE that <span style={{ color: 'var(--accent)' }}>knows your whole system.</span>
+          </h2>
+          <p className="mt-1.5 text-sm text-muted font-sans leading-tight">
+            Right-click a symbol for every caller, click a class for its whole picture, trace the requirement it satisfies,
+            recall the <span className="text-ink">decision</span> behind it, pull the <span className="text-ink">wiki</span>,
+            see the blast radius — what an agent can do while editing that grep can&apos;t. Code intelligence, memory and
+            knowledge, every answer a live fact with <span className="text-ink">confidence + provenance</span>; drop the dial
+            and the low-confidence guesses fall out, labeled — never silently promoted.
+          </p>
+        </div>
+
+        {/* ── THE IDE WINDOW ────────────────────────────────────────────── */}
+        <div className="ide-window">
+          {/* chrome bar */}
+          <div className="ide-chrome">
+            <span className="ide-lights" aria-hidden="true"><i /><i /><i /></span>
+            <span className="ide-title">wicked-estate — the agent&apos;s workspace</span>
+            <button
+              className="demo-pill ide-run"
+              data-live={String(!driving)}
+              onClick={() => setDriving(d => !d)}
+              aria-label={driving ? 'Resume the auto demo' : 'Pause and drive the workspace yourself'}
+            >
+              <span className="dot" />
+              {driving ? 'Driving · resume' : 'Auto-demo · drive'}
+            </button>
           </div>
-          <button
-            className="demo-pill"
-            data-live={String(!driving)}
-            onClick={() => setDriving(d => !d)}
-            aria-label={driving ? 'Resume auto demo' : 'Pause and drive it yourself'}
-          >
-            <span className="dot" />
-            {driving ? 'You’re driving · resume demo' : 'Auto-demo · click to drive'}
-          </button>
-        </div>
 
-        {/* Subject picker — three core samples */}
-        <div className="flex flex-wrap gap-2 mb-2">
-          {SUBJECTS.map((s, i) => {
-            const on = i === subjectIdx
-            return (
-              <button
-                key={s.id}
-                onClick={() => { takeControl(); setSubjectIdx(i); setThreshold(s.dial) }}
-                className="text-left rounded-xl px-4 py-1.5 transition-all"
-                style={{
-                  background: on ? 'color-mix(in oklab, var(--accent) 12%, var(--rock))' : 'var(--rock)',
-                  border: `1px solid ${on ? 'color-mix(in oklab, var(--accent) 55%, var(--hairline))' : 'var(--hairline-strong)'}`,
-                }}
-              >
-                <div className="flex items-center gap-2">
-                  <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: on ? 'var(--accent)' : 'var(--faint)' }} />
-                  <span className="font-mono text-sm font-semibold text-ink">{s.label}</span>
-                  <span className="tag">{s.kind}</span>
-                </div>
-                {on && !driving && !reduced && (
-                  <div className="tab-progress" key={subjectIdx}><span /></div>
+          {/* body — explorer + editor */}
+          <div className="ide-body">
+            {/* LEFT · explorer */}
+            <aside className="ide-explorer" aria-label="Explorer">
+              <div>
+                <span className="ide-sec-label">Explorer · checkout/PricingService.ts</span>
+                <ul className="ide-tree" role="list">
+                  {([['PricingService', 'CLS', 'class'], ['applyDiscount', 'FN', 'method']] as [SymId, string, string][]).map(([sym, glyph, kind]) => (
+                    <li key={sym}>
+                      <button className="ide-file" data-on={String(cursorAt === sym)} onClick={() => clickSymbol(sym)}>
+                        <span className="ide-glyph" data-lang={glyph}>{glyph}</span>
+                        <span className="ide-file-name">{sym}</span>
+                        <span className="ide-file-kind">{kind}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <div>
+                <span className="ide-sec-label">IDE commands · right-click a symbol</span>
+                <ul className="ide-actions" role="list">
+                  {COMMANDS.map(c => {
+                    const active = (c.lands === 'code' && dockTab === 'code' && codePeek.title === c.peek?.title)
+                      || (c.lands === 'memory' && dockTab === 'memory')
+                      || (c.lands === 'knowledge' && dockTab === 'knowledge')
+                    return (
+                      <li key={c.id}>
+                        <button className="ide-action ide-cmd" data-active={String(active)} aria-pressed={active} onClick={() => runCommand(c.id)}>
+                          <span className="ide-cmd-label">{c.label}</span>
+                          {c.note && <span className="ide-kbd">{c.note}</span>}
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+              </div>
+            </aside>
+
+            {/* CENTER · editor */}
+            <div className="ide-editor">
+              {/* tab bar */}
+              <div className="ide-tabbar">
+                <span className="ide-tab" data-on="true">
+                  <span className="ide-glyph" data-lang="TS">TS</span>
+                  <span className="ide-tab-name">PricingService.ts</span>
+                </span>
+                <span className="ide-crumb depth">checkout/ · right-click a symbol → estate answers</span>
+              </div>
+
+              {/* the code — clickable symbols, with the cursor + context menu overlay */}
+              <div className="ide-code" ref={codeRef}>
+                <pre className="ide-code-pre"><code>
+                  {CODE.map((line, li) => (
+                    <span className="ide-code-line" key={li}>
+                      <span className="ide-code-ln">{li + 1}</span>
+                      <span className="ide-code-toks">
+                        {line.map((tk, ti) => tk.sym ? (
+                          <button
+                            key={ti}
+                            ref={el => { symRefs.current[tk.sym!] = el }}
+                            className="ide-sym"
+                            data-k={tk.k}
+                            data-active={String(cursorAt === tk.sym)}
+                            onClick={() => clickSymbol(tk.sym!)}
+                            onContextMenu={e => { e.preventDefault(); openMenuAt(tk.sym!) }}
+                          >{tk.t}</button>
+                        ) : (
+                          <span key={ti} className="ide-tok" data-k={tk.k}>{tk.t}</span>
+                        ))}
+                      </span>
+                    </span>
+                  ))}
+                </code></pre>
+
+                {showMenu && (
+                  <button className="ide-ctx-backdrop" aria-label="Close menu" onClick={() => setMenuOpen(false)} />
                 )}
-              </button>
-            )
-          })}
-        </div>
+                {showCursor && (
+                  <span className="ide-cursor" style={{ left: pos!.x, top: pos!.y }} aria-hidden="true"><CursorArrow /></span>
+                )}
+                {showMenu && (
+                  <div className="ide-ctxmenu" style={{ left: pos!.x, top: pos!.y }} role="group" aria-label="Estate commands">
+                    <div className="ide-ctxmenu-head">estate</div>
+                    {COMMANDS.map(c => (
+                      <button key={c.id} className="ide-ctxmenu-item" data-run={String(menuRun === c.id)} onClick={() => runCommand(c.id)}>
+                        <span className="ide-ctxmenu-label">{c.label}</span>
+                        {c.note && <span className="ide-ctxmenu-note">{c.note}</span>}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
 
-        <div className="grid lg:grid-cols-[280px_1fr] gap-3">
-          {/* Left — confidence dial + core column */}
-          <div className="rock-panel p-4 flex flex-col gap-3.5">
-            <div>
-              <div className="flex items-baseline justify-between mb-2.5">
-                <span className="kicker">Confidence dial</span>
-                <span className="dial-readout font-mono text-xl font-black tabular-nums" style={{ color: 'var(--accent)' }}>
-                  {threshold.toFixed(2)}
+              {/* confidence gutter — the dial gates every dock result */}
+              <div className="ide-gutter">
+                <span className="ide-gutter-label">confidence ≥</span>
+                <span className="ide-gutter-val tabular-nums">{threshold.toFixed(2)}</span>
+                <input
+                  type="range" min={0.3} max={1.0} step={0.05} value={threshold}
+                  onChange={e => { takeControl(); setThreshold(parseFloat(e.target.value)) }}
+                  onMouseDown={takeControl} onTouchStart={takeControl}
+                  className="dial ide-dial" aria-label="Confidence threshold"
+                />
+                <span className="ide-gutter-ends">
+                  <span>0.30 · heuristics</span>
+                  <span>1.00 · SCIP only</span>
                 </span>
               </div>
-              <input
-                type="range" min={0.3} max={1.0} step={0.05} value={threshold}
-                onChange={e => { takeControl(); setThreshold(parseFloat(e.target.value)) }}
-                onMouseDown={takeControl} onTouchStart={takeControl}
-                className="dial" aria-label="Confidence threshold"
-              />
-              <div className="flex justify-between mt-2 depth">
-                <span>0.30 · heuristics</span>
-                <span>1.00 · SCIP only</span>
-              </div>
-              <p className="mt-2.5 font-mono text-[0.62rem] text-ink leading-5">
-                {live.length} of {subject.facts.length} facts above cutoff · {liveStrata.size} of 5 strata live
-              </p>
-            </div>
 
-            {/* the drill core: which strata have a live fact */}
-            <div>
-              <span className="kicker">Core column</span>
-              <div className="relative mt-2 pl-3">
-                <div className="seam-line absolute top-1 bottom-1 left-0" />
-                {STRATA.map(s => {
-                  const on = liveStrata.has(s.id)
-                  return (
-                    <div key={s.id} className="flex items-center gap-3 py-1">
-                      <span className="w-2 h-2 rounded-full shrink-0"
-                        style={{ background: on ? 'var(--accent)' : 'var(--hairline-strong)',
-                          animation: on && !reduced ? 'live-pulse 2.4s var(--ease) infinite' : 'none' }} />
-                      <span className="depth w-14 shrink-0">{s.depth}</span>
-                      <span className="font-mono text-[0.66rem]" style={{ color: on ? 'var(--ink)' : 'var(--faint)' }}>
-                        {s.name}
-                      </span>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          </div>
+              {/* the DOCK — tabbed: Code intelligence · Memory · Knowledge */}
+              <div className="ide-dock">
+                <div className="ide-dock-tabs" role="tablist" aria-label="Estate panels">
+                  {DOCK_TABS.map(t => (
+                    <button
+                      key={t.id}
+                      id={`ide-tab-${t.id}`}
+                      role="tab"
+                      aria-selected={dockTab === t.id}
+                      className="ide-dock-tab"
+                      data-on={String(dockTab === t.id)}
+                      onClick={() => { takeControl(); setDockTab(t.id) }}
+                    >
+                      {t.label}
+                      <span className="ide-dock-badge">{tabCount(t.id)}</span>
+                    </button>
+                  ))}
+                </div>
 
-          {/* Right — the assembled dossier */}
-          <div className="rock-panel p-0">
-            <div className="flex items-center justify-between px-5 py-2 border-b border-hairline-strong">
-              <span className="font-mono text-sm text-ink font-semibold">{subject.label}</span>
-              <span className="depth">substrate.query({subject.kind}) → 1 dossier · 5 strata</span>
-            </div>
-            <div className="divide-y divide-hairline">
-              {STRATA.map(s => {
-                const facts = subject.facts.filter(f => f.stratum === s.id)
-                if (facts.length === 0) return null
-                return (
-                  <div key={s.id} className="flex gap-4 px-5 py-1">
-                    <div className="w-28 shrink-0 pt-0.5">
-                      <div className="font-mono text-[0.6rem] text-faint">{s.no}</div>
-                      <div className="font-display font-black text-ink text-sm leading-tight" style={{ fontStretch: '106%' }}>{s.name}</div>
-                      <div className="depth mt-0.5">{s.depth}</div>
-                    </div>
-                    <div className="flex-1 flex flex-col gap-1 min-w-0">
-                      {facts.map((f, i) => {
+                <div className="ide-dock-body" id="ide-dock-panel" role="tabpanel" aria-labelledby={`ide-tab-${dockTab}`} key={dockTab + (dockTab === 'code' ? codePeek.title : '')}>
+                  {dockTab === 'code' && (
+                    <>
+                      <div className="ide-dock-head">
+                        <span className="ide-dock-title">{codePeek.title}</span>
+                        <span className="ide-dock-sub depth">{codePeek.sub}</span>
+                        {codePeek.wiki && <span className="ide-wiki-ref">{codePeek.wiki}</span>}
+                      </div>
+                      {codePeek.facts.map((f, i) => {
                         const on = f.conf >= threshold
                         const injected = f.prov === 'Injected'
                         return (
-                          <div key={i} className="fact min-w-0" style={{ opacity: on ? 1 : 0.42, filter: on ? 'none' : 'grayscale(0.6)' }}>
-                            <div className="flex items-center gap-2 min-w-0">
-                              <span className="text-sm font-sans truncate min-w-0 flex-1" style={{ color: on ? 'var(--ink)' : 'var(--muted)' }} title={f.text}>{f.text}</span>
-                              <span className="prov shrink-0" style={f.conf >= 1.0 || injected ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>
-                                {f.prov}
+                          <div key={i} className="ide-line fact" data-on={String(on)}>
+                            <span className="ide-ln">{i + 1}</span>
+                            <span className="ide-line-body">
+                              <span className="ide-line-top">
+                                <span className="ide-line-text" title={f.text}>{f.text}</span>
+                                <Chips prov={f.prov} conf={f.conf} advisory={f.advisory} on={on} injected={injected} />
                               </span>
-                              <span className="prov tabular-nums shrink-0" style={{ color: confColor(f.conf) }}>{f.conf.toFixed(2)}</span>
-                              {f.advisory && <span className="prov shrink-0">adv</span>}
-                              {!on && <span className="prov shrink-0" style={{ color: 'var(--faint)' }}>below cutoff</span>}
-                            </div>
-                            {f.detail && <div className="depth mt-0.5 truncate" style={{ color: injected ? 'var(--accent)' : 'var(--muted)' }} title={f.detail}>{f.detail}</div>}
+                              {f.detail && <span className="ide-line-detail" data-injected={String(injected)} title={f.detail}>{f.detail}</span>}
+                            </span>
                           </div>
                         )
                       })}
-                    </div>
-                  </div>
-                )
-              })}
+                    </>
+                  )}
+
+                  {dockTab === 'memory' && (
+                    <>
+                      <div className="ide-dock-head">
+                        <span className="ide-dock-title">Recalled memory</span>
+                        <span className="ide-dock-sub depth">decisions · patterns · gotchas — relevant to this code</span>
+                      </div>
+                      {MEMORIES.map(m => {
+                        const on = m.salience >= threshold
+                        const hot = memHighlight === m.id
+                        return (
+                          <div key={m.id} className="ide-mem" data-on={String(on)} data-hot={String(hot)} data-superseded={String(!!m.superseded)}>
+                            <span className="ide-mem-kind" data-kind={m.kind}>{m.kind}</span>
+                            <span className="ide-mem-body">
+                              <span className="ide-mem-top">
+                                <span className="ide-mem-text" title={m.text}>{m.text}</span>
+                                <span className="ide-line-chips">
+                                  <span className="prov" style={m.salience >= 0.85 ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>{m.scope}</span>
+                                  <span className="prov tabular-nums" style={{ color: confColor(m.salience) }}>{m.salience.toFixed(2)}</span>
+                                  {m.superseded && <span className="prov">superseded</span>}
+                                  {!on && <span className="prov" style={{ color: 'var(--faint)' }}>below cutoff</span>}
+                                </span>
+                              </span>
+                              <span className="ide-mem-meta depth">{m.prov} · recalled because you&apos;re editing <b className="ide-mem-link">{m.because}</b></span>
+                            </span>
+                          </div>
+                        )
+                      })}
+                    </>
+                  )}
+
+                  {dockTab === 'knowledge' && (
+                    <>
+                      <div className="ide-dock-head">
+                        <span className="ide-dock-title">Knowledge · the wiki</span>
+                        <span className="ide-dock-sub depth">hybrid FTS + vector, RRF-fused</span>
+                      </div>
+                      {KNOWLEDGE.map(k => {
+                        const on = k.conf >= threshold
+                        return (
+                          <div key={k.id} className="ide-line fact" data-on={String(on)}>
+                            <span className="ide-ln ide-know-ln" aria-hidden="true">§</span>
+                            <span className="ide-line-body">
+                              <span className="ide-line-top">
+                                <span className="ide-line-text" title={k.detail}>
+                                  <b className="ide-wiki-ref ide-wiki-inline">[[{k.title}]]</b> {k.section}
+                                </span>
+                                <Chips prov="Knowledge" conf={k.conf} on={on} />
+                              </span>
+                              <span className="ide-line-detail" title={k.detail}>{k.detail}</span>
+                            </span>
+                          </div>
+                        )
+                      })}
+                    </>
+                  )}
+                </div>
+              </div>
             </div>
+          </div>
+
+          {/* STATUS BAR */}
+          <div className="ide-statusbar">
+            <span className="ide-status-left">
+              <span className="ide-status-seg" data-accent="true">{statusTitle}</span>
+              <span className="ide-sep" aria-hidden="true">·</span>
+              <span className="ide-status-seg">{statusLive}/{statusTotal} results</span>
+              <span className="ide-sep" aria-hidden="true">·</span>
+              <span className="ide-status-seg">confidence-gated</span>
+            </span>
+            <span className="ide-status-legend">
+              <span className="ide-legend-label">provenance</span>
+              {PROV_LEGEND.map(p => (
+                <span key={p.prov} className="ide-legend-item">
+                  <span className="prov" style={p.accent ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>{p.prov}</span>
+                  <span className="depth">{p.note}</span>
+                </span>
+              ))}
+            </span>
           </div>
         </div>
       </div>
@@ -989,7 +1286,7 @@ export default function Content() {
   return (
     <main className="font-sans">
       <Hero />
-      <QuerySubstrate />
+      <AgentIDE />
       <FiveStrata />
       <FullToolface />
       <ProvenanceSeam />
