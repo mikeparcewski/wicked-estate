@@ -2091,7 +2091,7 @@ fn main() -> Result<()> {
                         .reduce(f64::max);
                     // `requirement` / `requirement_validated`: the requirement↔functionality link.
                     // Best-effort read (degrades to null/false, matching `all_anns` above).
-                    let sem = wicked_estate::get_semantics(&store, &n.symbol.to_string())
+                    let sem = wicked_estate::get_semantics(&store, n.symbol.as_str())
                         .ok()
                         .flatten();
                     // `out_edges`: DISTINCT outgoing edge kinds. Outgoing = source == id, i.e.
