@@ -63,11 +63,6 @@
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.35; }
 }
-/* the tab dwell bar filling before the subject advances */
-@keyframes tab-fill {
-  from { width: 0%; }
-  to   { width: 100%; }
-}
 /* the winning-tier label popping into scope */
 @keyframes label-pop {
   0%   { transform: scale(0.9); opacity: 0.4; }
@@ -311,19 +306,6 @@
   }
   @media (prefers-reduced-motion: reduce) { .drill-underline { display: none; } }
 
-  /* ── Tab dwell bar — fills over the auto-advance interval so it reads as a
-     tab progression that will step to the next subject. ────────────────────── */
-  .tab-progress {
-    height: 2px; margin-top: 7px; border-radius: 2px; overflow: hidden;
-    background: color-mix(in oklab, var(--ink) 10%, transparent);
-  }
-  .tab-progress > span {
-    display: block; height: 100%; width: 0;
-    background: var(--accent); border-radius: 2px;
-    animation: tab-fill 5s linear forwards;
-  }
-  @media (prefers-reduced-motion: reduce) { .tab-progress { display: none; } }
-
   /* ── Demo / driving status pill ──────────────────────────────────────────── */
   .demo-pill {
     display: inline-flex; align-items: center; gap: 7px;
@@ -380,8 +362,6 @@
    auto-play is a storyboard of these gestures (a visible cursor + the menu opening). The
    confidence dial gates every result (facts by confidence, memories by salience).
    ════════════════════════════════════════════════════════════════════════════════ */
-@keyframes ide-scan-pulse  { 0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 55%, transparent); }
-                             50% { opacity: 0.55; box-shadow: 0 0 0 5px color-mix(in oklab, var(--accent) 0%, transparent); } }
 @keyframes ide-menu-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } to { opacity: 1; transform: none; } }
 @keyframes ide-dock-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 

@@ -368,7 +368,7 @@ function AgentIDE() {
   const [cursorAt, setCursorAt] = useState<SymId | null>(STORYBOARD[0].target)
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuRun, setMenuRun] = useState<string | null>(null)
-  const [codePeek, setCodePeek] = useState<Peek>(cmdById(STORYBOARD[0].run)!.peek!)
+  const [codePeek, setCodePeek] = useState<Peek>(cmdById(STORYBOARD[0].run)?.peek ?? DETAILS)
   const [dockTab, setDockTab] = useState<DockTab>('code')
   const [memHighlight, setMemHighlight] = useState<string | null>(null)
 
@@ -390,7 +390,7 @@ function AgentIDE() {
     if (g.kind === 'menu') {
       timers.push(window.setTimeout(() => setMenuOpen(true), 620))
       timers.push(window.setTimeout(() => setMenuRun(g.run ?? null), 1200))
-      timers.push(window.setTimeout(() => { setMenuOpen(false); setMenuRun(null); applyCommand(g.run!) }, 1820))
+      timers.push(window.setTimeout(() => { setMenuOpen(false); setMenuRun(null); if (g.run) applyCommand(g.run) }, 1820))
     } else {
       timers.push(window.setTimeout(() => { setCodePeek(DETAILS); setDockTab('code'); setMemHighlight(null) }, 980))
     }
@@ -569,10 +569,10 @@ function AgentIDE() {
                   <span className="ide-cursor" style={{ left: pos!.x, top: pos!.y }} aria-hidden="true"><CursorArrow /></span>
                 )}
                 {showMenu && (
-                  <div className="ide-ctxmenu" style={{ left: pos!.x, top: pos!.y }} role="menu" aria-label="Estate commands">
+                  <div className="ide-ctxmenu" style={{ left: pos!.x, top: pos!.y }} role="group" aria-label="Estate commands">
                     <div className="ide-ctxmenu-head">estate</div>
                     {COMMANDS.map(c => (
-                      <button key={c.id} role="menuitem" className="ide-ctxmenu-item" data-run={String(menuRun === c.id)} onClick={() => runCommand(c.id)}>
+                      <button key={c.id} className="ide-ctxmenu-item" data-run={String(menuRun === c.id)} onClick={() => runCommand(c.id)}>
                         <span className="ide-ctxmenu-label">{c.label}</span>
                         {c.note && <span className="ide-ctxmenu-note">{c.note}</span>}
                       </button>
@@ -603,8 +603,10 @@ function AgentIDE() {
                   {DOCK_TABS.map(t => (
                     <button
                       key={t.id}
+                      id={`ide-tab-${t.id}`}
                       role="tab"
                       aria-selected={dockTab === t.id}
+                      aria-controls="ide-dock-panel"
                       className="ide-dock-tab"
                       data-on={String(dockTab === t.id)}
                       onClick={() => { takeControl(); setDockTab(t.id) }}
@@ -615,7 +617,7 @@ function AgentIDE() {
                   ))}
                 </div>
 
-                <div className="ide-dock-body" key={dockTab + (dockTab === 'code' ? codePeek.title : '')}>
+                <div className="ide-dock-body" id="ide-dock-panel" role="tabpanel" aria-labelledby={`ide-tab-${dockTab}`} key={dockTab + (dockTab === 'code' ? codePeek.title : '')}>
                   {dockTab === 'code' && (
                     <>
                       <div className="ide-dock-head">
