@@ -254,8 +254,9 @@ const SUBJECTS: Subject[] = [
   },
 ]
 
-// IDE query actions — estate's verbs, each mapped to one stratum of the dossier.
-// Running one focuses that stratum's group in the editor (an IDE "peek" jump).
+// IDE query actions — estate's feature set, each mapped to one stratum of the dossier.
+// The auto-play "runs" each in turn and spotlights its result group in the editor;
+// blast-radius (find-references) is one feature among equals, not the headline.
 const ACTIONS: { id: StratumId; verb: string; hint: string; cmd: string }[] = [
   { id: 'requirements', verb: 'Go to requirement',  hint: 'requirement ↔ impl',             cmd: 'F12' },
   { id: 'blast',        verb: 'Find references',     hint: 'blast-radius · event→consumers', cmd: '⇧F12' },
@@ -285,50 +286,41 @@ function AgentIDE() {
   const [subjectIdx, setSubjectIdx] = useState(0)
   const [threshold, setThreshold] = useState(SUBJECTS[0].dial)
   const [driving, setDriving] = useState(false)
-  const [focus, setFocus] = useState<StratumId | null>(null)
-  // how many references the blast-radius search has surfaced so far (the auto reveal)
-  const [revealed, setRevealed] = useState(SUBJECTS[0].facts.length)
+  // the estate feature currently "running" — its stratum is spotlit in the editor
+  const [activeStratum, setActiveStratum] = useState<StratumId | null>(ACTIONS[0].id)
 
   const subject = SUBJECTS[subjectIdx]
-  // number every fact like an editor line, in stratum (top-to-bottom) order — this is
-  // also the order the blast-radius search surfaces them in.
+  // number every fact like an editor line, in stratum (top-to-bottom) order
   const lineOf = new Map<Fact, number>()
   STRATA.forEach(s => subject.facts.filter(f => f.stratum === s.id).forEach(f => lineOf.set(f, lineOf.size + 1)))
-  const isShown = (f: Fact) => (lineOf.get(f) ?? 0) <= revealed
-  const live = subject.facts.filter(f => isShown(f) && f.conf >= threshold)
+  const live = subject.facts.filter(f => f.conf >= threshold)
   const liveStrata = new Set(live.map(f => f.stratum))
-  const searching = !driving && !reduced && revealed < subject.facts.length
+  const activeAction = ACTIONS.find(a => a.id === activeStratum) ?? null
+  const activeResults = activeStratum ? subject.facts.filter(f => f.stratum === activeStratum && f.conf >= threshold).length : 0
+  const spotlight = activeStratum !== null && !reduced
 
-  // AUTO-DEMO · edit → blast-radius search, in place (no subject-stepping). The open
-  // file shows an edit; estate then surfaces the transitive dependents, the injected
-  // event→consumer edge grep can't see, and the lower-confidence heuristics one at a
-  // time — each with its confidence + provenance. After a dwell it replays. Driving or
-  // reduced-motion reveals the whole dossier at once (nothing to watch — go explore).
+  // AUTO-DEMO · the agent's IDE toolset lighting up in turn. The auto-play steps through
+  // estate's query actions — go-to-requirement → find-references → infra/policy → history
+  // → annotations — "running" each feature and spotlighting its result stratum in the
+  // editor, so the visitor sees the whole toolset, not one search. Opening a file, running
+  // an action, or the toolbar toggle pins it (then drive the dial / browse the dossier).
   useEffect(() => {
-    const total = SUBJECTS[subjectIdx].facts.length
-    if (driving || reduced) { setRevealed(total); return }
-    const EDIT_BEAT = 950   // the "editing" moment before the search fires
-    const STAGGER = 560     // gap between each surfaced reference
-    const DWELL = 2400      // hold the full dossier before replaying
-    let cancelled = false
-    const timers: number[] = []
-    const runOnce = () => {
-      setRevealed(0)
-      for (let k = 1; k <= total; k++) {
-        timers.push(window.setTimeout(() => { if (!cancelled) setRevealed(k) }, EDIT_BEAT + k * STAGGER))
-      }
-      timers.push(window.setTimeout(() => { if (!cancelled) runOnce() }, EDIT_BEAT + total * STAGGER + DWELL))
-    }
-    runOnce()
-    return () => { cancelled = true; timers.forEach(clearTimeout) }
-  }, [subjectIdx, driving, reduced])
+    if (driving || reduced) return
+    const t = setInterval(() => {
+      setActiveStratum(cur => {
+        const i = ACTIONS.findIndex(a => a.id === cur)
+        return ACTIONS[(i + 1) % ACTIONS.length].id
+      })
+    }, 2200)
+    return () => clearInterval(t)
+  }, [driving, reduced])
 
-  // clear the focused stratum whenever the open file changes
-  useEffect(() => { setFocus(null) }, [subjectIdx])
+  // restart the feature tour from the top whenever the open file changes (while in auto)
+  useEffect(() => { if (!driving) setActiveStratum(ACTIONS[0].id) }, [subjectIdx, driving])
 
-  // The confidence dial SWEEPS: on opening a file the needle glides from its current
-  // value to that file's read-out cutoff — so the dial visibly moves between files
-  // instead of sitting still. Shown facts filter live as it travels.
+  // The confidence dial SWEEPS: on opening a file the needle glides from its current value
+  // to that file's read-out cutoff — so the dial visibly moves between files instead of
+  // sitting still. Facts filter live as it travels.
   const thresholdRef = useRef(threshold)
   thresholdRef.current = threshold
   const rafRef = useRef<number | undefined>(undefined)
@@ -349,24 +341,24 @@ function AgentIDE() {
     return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current) }
   }, [subjectIdx, driving, reduced])
 
-  // when an action focuses a stratum, bring its group into view inside the peek pane
+  // keep the running feature's result group in view within the peek pane
   const groupRefs = useRef<Record<string, HTMLDivElement | null>>({})
   useEffect(() => {
-    if (!focus) return
-    const el = groupRefs.current[focus]
+    if (!activeStratum) return
+    const el = groupRefs.current[activeStratum]
     if (el) el.scrollIntoView({ block: 'nearest', behavior: reduced ? 'auto' : 'smooth' })
-  }, [focus, reduced])
+  }, [activeStratum, reduced])
 
   const takeControl = () => setDriving(true)
-  // open a file in the editor — in auto this replays the edit → search on that file;
+  // open a file in the editor — in auto this reruns the feature tour on that file;
   // opening does NOT pin (moving the dial, running an action, or the toolbar toggle pins).
   const openSymbol = (i: number) => { setSubjectIdx(i) }
-  // run an estate query action — pins, then focuses (or unfocuses) that stratum group
-  const runAction = (id: StratumId) => { takeControl(); setFocus(f => (f === id ? null : id)) }
-  // shown (revealed) / total fact counts for one stratum of the current file's dossier
+  // run an estate feature — pins, then spotlights (or clears) that stratum's result
+  const runAction = (id: StratumId) => { takeControl(); setActiveStratum(cur => (cur === id ? null : id)) }
+  // live / total fact counts for one stratum of the current file's dossier
   const strataCounts = (id: StratumId) => {
     const inStratum = subject.facts.filter(f => f.stratum === id)
-    return { live: inStratum.filter(f => isShown(f) && f.conf >= threshold).length, total: inStratum.length }
+    return { live: inStratum.filter(f => f.conf >= threshold).length, total: inStratum.length }
   }
 
   return (
@@ -376,14 +368,14 @@ function AgentIDE() {
         <div className="mb-4 w-full text-left max-w-3xl">
           <span className="kicker">The agent&apos;s IDE</span>
           <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink leading-[0.98]">
-            The agent doesn&apos;t grep. It edits — and estate runs the <span style={{ color: 'var(--accent)' }}>blast-radius.</span>
+            The agent doesn&apos;t grep. Estate is its IDE — <span style={{ color: 'var(--accent)' }}>every feature it needs.</span>
           </h2>
           <p className="mt-1.5 text-sm text-muted font-sans leading-tight">
-            estate is the live technical environment the agent codes in. Change a line and it runs the search grep can&apos;t:
-            the transitive dependents, the <span className="text-ink">injected event→consumer edge</span>, the lower-confidence
-            heuristics — each a live fact stamped with <span className="text-ink">confidence + provenance</span>. Push the dial
-            to <span className="font-semibold">1.0</span> and only parsed / SCIP survive; drop it and the tag-scan edges
-            reappear — <span className="font-semibold">labeled, never silently promoted</span>.
+            Go-to-requirement, find-references across the blast-radius, show infra &amp; policy, recall memory &amp; history,
+            read annotations — estate answers every one as a live fact stamped with{' '}
+            <span className="text-ink">confidence + provenance</span> (heuristics like the injected event→consumer edge grep
+            can&apos;t see, always labeled). Push the dial to <span className="font-semibold">1.0</span> and only parsed / SCIP
+            survive; drop it and the tag-scan edges reappear — <span className="font-semibold">never silently promoted</span>.
           </p>
         </div>
 
@@ -436,13 +428,15 @@ function AgentIDE() {
                 <ul className="ide-actions" role="list">
                   {ACTIONS.map(a => {
                     const c = strataCounts(a.id)
-                    const foc = focus === a.id
+                    const active = activeStratum === a.id
+                    const running = active && !driving && !reduced
                     return (
                       <li key={a.id}>
                         <button
                           className="ide-action"
-                          data-focus={String(foc)}
-                          aria-pressed={foc}
+                          data-active={String(active)}
+                          data-running={String(running)}
+                          aria-pressed={active}
                           onClick={() => runAction(a.id)}
                         >
                           <span className="ide-action-dot" data-lit={String(c.live > 0)} aria-hidden="true" />
@@ -452,7 +446,7 @@ function AgentIDE() {
                           </span>
                           <span className="ide-action-meta">
                             <span className="ide-action-count tabular-nums">{c.live}/{c.total}</span>
-                            <span className="ide-kbd">{a.cmd}</span>
+                            <span className="ide-kbd">{running ? 'run' : a.cmd}</span>
                           </span>
                         </button>
                       </li>
@@ -473,12 +467,16 @@ function AgentIDE() {
                 <span className="ide-crumb depth">substrate.query({subject.kind}) → 1 dossier · 5 strata</span>
               </div>
 
-              {/* the edit that triggers the search */}
+              {/* the agent's working file; estate answers feature queries against it */}
               <div className="ide-diff" data-live={String(!driving && !reduced)}>
                 <div className="ide-diff-head">
-                  <span className="ide-diff-dot" data-on={String(searching)} aria-hidden="true" />
-                  <span className="ide-diff-label">{searching ? 'running blast-radius search' : 'edit → blast-radius search'}</span>
-                  <span className="ide-diff-count depth">{Math.min(revealed, subject.facts.length)}/{subject.facts.length} references</span>
+                  <span className="ide-diff-dot" data-on={String(!driving && !reduced)} aria-hidden="true" />
+                  <span className="ide-diff-label">working file · the agent edits, estate answers</span>
+                  <span className="ide-diff-count depth">
+                    {activeAction
+                      ? <>estate <span className="ide-diff-run-verb">▸ {activeAction.verb}</span> → {activeResults}</>
+                      : 'estate ▸ all features'}
+                  </span>
                 </div>
                 <pre className="ide-diff-code"><code>
                   {subject.edit.map((l, i) => (
@@ -507,29 +505,30 @@ function AgentIDE() {
                 </span>
               </div>
 
-              {/* peek results — the dossier, surfaced by the search, grouped by stratum */}
-              <div className="ide-peek" data-dim={String(focus !== null)}>
+              {/* peek results — the full dossier; the running feature's stratum is spotlit */}
+              <div className="ide-peek" data-spotlight={String(spotlight)}>
                 {STRATA.map(s => {
                   const facts = subject.facts.filter(f => f.stratum === s.id)
-                  const shown = facts.filter(isShown)
-                  if (shown.length === 0) return null
-                  const foc = focus === s.id
-                  const someLive = shown.some(f => f.conf >= threshold)
+                  if (facts.length === 0) return null
+                  const active = activeStratum === s.id
+                  const someLive = facts.some(f => f.conf >= threshold)
+                  const feature = ACTIONS.find(a => a.id === s.id)
                   return (
                     <div
                       key={s.id}
                       ref={el => { groupRefs.current[s.id] = el }}
                       className="ide-peek-group"
-                      data-focus={String(foc)}
-                      data-off={String(focus !== null && !foc)}
+                      data-active={String(active)}
+                      data-dim={String(spotlight && !active)}
                     >
                       <div className="ide-peek-head">
                         <span className="ide-peek-no">{s.no}</span>
                         <span className="ide-peek-name">{s.name}</span>
+                        {active && feature && <span className="ide-peek-run">▸ {feature.verb}</span>}
                         <span className="ide-peek-dot" data-lit={String(someLive)} aria-hidden="true" />
                         <span className="depth ide-peek-depth">{s.depth}</span>
                       </div>
-                      {shown.map((f, i) => {
+                      {facts.map((f, i) => {
                         const on = f.conf >= threshold
                         const injected = f.prov === 'Injected'
                         return (

@@ -483,11 +483,17 @@
     font-size: 0.5rem; color: var(--faint); border: 1px solid var(--hairline-strong);
     border-radius: 4px; padding: 1px 4px; background: color-mix(in oklab, var(--ink) 4%, transparent);
   }
-  .ide-action[data-focus="true"] {
+  .ide-action[data-active="true"] {
     background: color-mix(in oklab, var(--accent) 10%, transparent);
     border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline)); color: var(--ink);
   }
-  .ide-action[data-focus="true"] .ide-action-verb { color: var(--accent); }
+  .ide-action[data-active="true"] .ide-action-verb { color: var(--accent); }
+  /* the feature currently "running" in the auto tour — its dot pulses */
+  .ide-action[data-running="true"] .ide-action-dot {
+    background: var(--accent); box-shadow: 0 0 8px -1px var(--accent);
+    animation: ide-scan-pulse 1.5s var(--ease) infinite;
+  }
+  .ide-action[data-running="true"] .ide-kbd { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline)); }
 
   /* ── editor ─────────────────────────────────────────────────────────────── */
   .ide-editor { display: flex; flex-direction: column; min-width: 0; background: var(--rock); }
@@ -513,7 +519,8 @@
   .ide-diff-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: var(--hairline-strong); }
   .ide-diff-dot[data-on="true"] { background: var(--accent); animation: ide-scan-pulse 1.5s var(--ease) infinite; }
   .ide-diff-label { font-size: 0.56rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
-  .ide-diff-count { margin-left: auto; }
+  .ide-diff-count { margin-left: auto; white-space: nowrap; }
+  .ide-diff-run-verb { color: var(--accent); font-weight: 700; }
   .ide-diff-code { margin: 0; padding: 0 14px 9px; overflow-x: auto; }
   .ide-diff-code code { display: block; }
   .ide-diff-line {
@@ -552,11 +559,21 @@
     padding: 3px 16px 6px 14px; border-left: 2px solid transparent;
     transition: opacity 0.25s var(--ease), border-color 0.25s var(--ease), background 0.25s var(--ease);
   }
-  .ide-peek[data-dim="true"] .ide-peek-group[data-off="true"] { opacity: 0.4; }
-  .ide-peek-group[data-focus="true"] { border-left-color: var(--accent); background: color-mix(in oklab, var(--accent) 6%, transparent); }
+  /* during the auto tour the non-running strata are lightly de-emphasised (not hidden —
+     the breadth stays visible), and the running feature's group is ringed + spotlit. */
+  .ide-peek[data-spotlight="true"] .ide-peek-group[data-dim="true"] { opacity: 0.55; }
+  .ide-peek-group[data-active="true"] { border-left-color: var(--accent); background: color-mix(in oklab, var(--accent) 7%, transparent); }
   .ide-peek-head { display: flex; align-items: center; gap: 8px; padding: 6px 0 3px; }
   .ide-peek-no { font-size: 0.53rem; color: var(--faint); font-variant-numeric: tabular-nums; }
   .ide-peek-name { font-family: "Archivo", ui-sans-serif, sans-serif; font-weight: 800; font-size: 0.82rem; color: var(--ink); }
+  /* the running feature's verb, shown in its spotlit group header */
+  .ide-peek-run {
+    font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 0.56rem; font-weight: 700;
+    letter-spacing: 0.03em; color: var(--accent);
+    padding: 1px 7px; border-radius: 999px;
+    border: 1px solid color-mix(in oklab, var(--accent) 45%, var(--hairline));
+    background: color-mix(in oklab, var(--accent) 12%, transparent);
+  }
   .ide-peek-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--hairline-strong); flex-shrink: 0; }
   .ide-peek-dot[data-lit="true"] { background: var(--accent); box-shadow: 0 0 7px -1px var(--accent); }
   .ide-peek-depth { margin-left: auto; }
