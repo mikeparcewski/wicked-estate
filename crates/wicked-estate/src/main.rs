@@ -1701,10 +1701,11 @@ fn main() -> Result<()> {
         // `--symbol`). `advisory:true` is emitted for assumption/question (computed from `type`,
         // not hard-coded). This direct read is NOT R4-capped — only structured payloads are.
         "annotations" => {
-            use wicked_estate_core::GraphRead;
             let json_out = positional.iter().any(|a| a == "--json");
             let type_filter = ann_type.as_deref();
-            let store = SqliteStore::open(&db).map_err(to_any)?;
+            // ADR-003: route through the open_store factory (backend-agnostic) — this arm
+            // needs only GraphRead methods, which deref through Box<dyn GraphStore>.
+            let store = open_store(&db).map_err(to_any)?;
 
             // Fetch + apply the optional type filter for one symbol.
             let fetch = |sym: &wicked_estate_core::SymbolId| -> Result<Vec<wicked_estate_core::Annotation>> {
@@ -1751,7 +1752,7 @@ fn main() -> Result<()> {
                     "usage: wicked-estate annotations <name> [--type T] [--json] [--db ...]\n       \
                      wicked-estate annotations --symbol <id> [--type T] [--json] [--db ...]",
                 )?;
-                let hits = wicked_estate::search(&store, name).map_err(to_any)?;
+                let hits = wicked_estate::search(&*store, name).map_err(to_any)?;
                 if json_out {
                     let mut arr: Vec<serde_json::Value> = Vec::with_capacity(hits.len());
                     for n in &hits {
@@ -1784,7 +1785,6 @@ fn main() -> Result<()> {
         // Usage:
         //   wicked-estate stale-annotations <cutoff> [--json] [--db ...]
         "stale-annotations" => {
-            use wicked_estate_core::GraphRead;
             let json_out = positional.iter().any(|a| a == "--json");
             let cutoff: i64 = positional
                 .iter()
@@ -1792,7 +1792,8 @@ fn main() -> Result<()> {
                 .context(
                     "usage: wicked-estate stale-annotations <cutoff-unix-seconds> [--json] [--db ...]",
                 )?;
-            let store = SqliteStore::open(&db).map_err(to_any)?;
+            // ADR-003: backend-agnostic factory — annotations_stale_since is a GraphRead method.
+            let store = open_store(&db).map_err(to_any)?;
             let stale = store.annotations_stale_since(cutoff).map_err(to_any)?;
             if json_out {
                 let arr: Vec<serde_json::Value> = stale
@@ -2539,8 +2540,6 @@ fn main() -> Result<()> {
             }
         }
         "export" => {
-            use wicked_estate_core::GraphRead;
-
             let format = {
                 let mut f = "ndjson".to_string();
                 let mut it2 = positional.iter();
@@ -2554,7 +2553,8 @@ fn main() -> Result<()> {
             let nodes_only = positional.iter().any(|a| a == "--nodes-only");
             let edges_only = positional.iter().any(|a| a == "--edges-only");
 
-            let store = SqliteStore::open(&db).map_err(to_any)?;
+            // ADR-003: backend-agnostic factory — all_nodes/all_edges are GraphRead methods.
+            let store = open_store(&db).map_err(to_any)?;
             let nodes = if !edges_only {
                 store.all_nodes().map_err(to_any)?
             } else {
