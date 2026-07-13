@@ -583,11 +583,15 @@
     background: color-mix(in oklab, var(--ink) 10%, transparent); border-radius: 999px; padding: 1px 6px; min-width: 16px; text-align: center;
   }
   .ide-dock-tab[data-on="true"] .ide-dock-badge { color: var(--accent); background: color-mix(in oklab, var(--accent) 14%, transparent); }
+  /* FIXED height (not max-height): the tab content swaps but the frame never reflows,
+     so the whole section holds a constant outer height across the gesture cycle — zero
+     vertical bounce. The tallest states (the all-details peek, the 4-row memory panel)
+     scroll internally within this reserved area. */
   .ide-dock-body {
     padding: 5px 16px 9px 14px; overflow-y: auto; scrollbar-gutter: stable;
-    max-height: min(25vh, 214px); animation: ide-dock-in 0.28s var(--ease) both;
+    height: min(24vh, 194px); animation: ide-dock-in 0.28s var(--ease) both;
   }
-  @media (max-width: 1023px) { .ide-dock-body { max-height: none; scrollbar-gutter: auto; } }
+  @media (max-width: 1023px) { .ide-dock-body { height: auto; min-height: 150px; scrollbar-gutter: auto; } }
   .ide-dock-head { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; padding: 4px 0 5px; }
   .ide-dock-title { font-family: "Archivo", ui-sans-serif, sans-serif; font-weight: 800; font-size: 0.82rem; color: var(--ink); }
   .ide-dock-sub { }

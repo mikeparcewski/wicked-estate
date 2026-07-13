@@ -367,6 +367,7 @@ function AgentIDE() {
   const [driving, setDriving] = useState(false)
   const [threshold, setThreshold] = useState(0.55)
   const [step, setStep] = useState(0)
+  const [inView, setInView] = useState(false)
   const [cursorAt, setCursorAt] = useState<SymId | null>(STORYBOARD[0].target)
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuRun, setMenuRun] = useState<string | null>(null)
@@ -383,9 +384,9 @@ function AgentIDE() {
     else setMemHighlight(null)
   }
 
-  // ── AUTO-PLAY · a storyboard of real IDE gestures ───────────────────────────
+  // ── AUTO-PLAY · a storyboard of real IDE gestures (only while on screen) ─────
   useEffect(() => {
-    if (driving || reduced) return
+    if (driving || reduced || !inView) return
     const g = STORYBOARD[step]
     setCursorAt(g.target); setMenuOpen(false); setMenuRun(null)
     const timers: number[] = []
@@ -399,12 +400,28 @@ function AgentIDE() {
     timers.push(window.setTimeout(() => setStep(s => (s + 1) % STORYBOARD.length), 2650))
     return () => timers.forEach(clearTimeout)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, driving, reduced])
+  }, [step, driving, reduced, inView])
 
   // reduced motion: no cursor / menu; show a static, representative result set
   useEffect(() => {
     if (reduced) { setCursorAt(null); setMenuOpen(false); setCodePeek(DETAILS); setDockTab('code') }
   }, [reduced])
+
+  // auto-play the moment the section scrolls into view; pause when it scrolls out.
+  // Arriving shows it already cycling: entry restarts the storyboard from step 0.
+  const rootRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = rootRef.current
+    if (!el || typeof IntersectionObserver === 'undefined') { setInView(true); return }
+    let fired = false
+    const io = new IntersectionObserver(([e]) => { fired = true; setInView(e.isIntersecting) }, { threshold: 0.2 })
+    io.observe(el)
+    // safety net: in a few embedded/automation contexts IO never delivers — rather than
+    // sit frozen, fall back to always-animating if no callback has arrived.
+    const t = window.setTimeout(() => { if (!fired) setInView(true) }, 1600)
+    return () => { io.disconnect(); clearTimeout(t) }
+  }, [])
+  useEffect(() => { if (inView && !driving) setStep(0) }, [inView, driving])
 
   const takeControl = () => { setDriving(true); setCursorAt(null); setMenuOpen(false); setMenuRun(null) }
   const runCommand = (id: string) => { takeControl(); applyCommand(id) }
@@ -426,7 +443,7 @@ function AgentIDE() {
     setPos({ x: r.left - hr.left + r.width * 0.6, y: r.top - hr.top + r.height * 0.72 })
   }, [cursorAt])
 
-  const showCursor = !driving && !reduced && !!pos
+  const showCursor = inView && !driving && !reduced && !!pos
   const showMenu = menuOpen && !!pos
 
   // per-tab live counts (gated by the dial) for the dock tab badges
@@ -440,7 +457,7 @@ function AgentIDE() {
 
   return (
     <Section id="query" solid>
-      <div className="max-w-6xl mx-auto w-full">
+      <div className="max-w-6xl mx-auto w-full" ref={rootRef}>
         {/* section header — using an IDE that actually knows your system */}
         <div className="mb-4 w-full text-left max-w-3xl">
           <span className="kicker">The agent&apos;s IDE</span>
