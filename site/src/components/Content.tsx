@@ -606,7 +606,6 @@ function AgentIDE() {
                       id={`ide-tab-${t.id}`}
                       role="tab"
                       aria-selected={dockTab === t.id}
-                      aria-controls="ide-dock-panel"
                       className="ide-dock-tab"
                       data-on={String(dockTab === t.id)}
                       onClick={() => { takeControl(); setDockTab(t.id) }}
