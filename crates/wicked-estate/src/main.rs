@@ -28,7 +28,7 @@
 //!   wicked-estate entrypoints            [--json] [--db ...]
 //!   wicked-estate leaves                 [--json] [--db ...]
 //!   wicked-estate dead-code              [--json] [--db ...]
-//!   wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json] [--db ...]
+//!   wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json] [--semantics] [--db ...]
 
 mod emit;
 mod scip_auto;
@@ -2044,7 +2044,7 @@ fn main() -> Result<()> {
         // Agent E: nodes — bulk export all symbols, optionally filtered by kind or annotation.
         //
         // Usage:
-        //   wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json] [--db ...]
+        //   wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json] [--semantics] [--db ...]
         "nodes" => {
             use wicked_estate_core::GraphRead;
             let kind = {
@@ -2058,6 +2058,12 @@ fn main() -> Result<()> {
                 k
             };
             let json_out = positional.iter().any(|a| a == "--json");
+            // Opt-in: `nodes --json --semantics` adds four extra per-node keys the domain-brain
+            // extraction engine needs — `rule_confidence`, `requirement`, `requirement_validated`,
+            // `out_edges`. OFF by default so the plain `nodes --json` path pays neither the
+            // per-node `get_semantics` read nor the `neighbors` edge fetch (and its shape is
+            // unchanged for existing consumers).
+            let with_semantics = positional.iter().any(|a| a == "--semantics");
             let store = SqliteStore::open(&db).map_err(to_any)?;
 
             // Per-node JSON for the `--json` paths: base metadata + typed annotations.
@@ -2074,6 +2080,37 @@ fn main() -> Result<()> {
                     "signature": n.signature,
                     "annotation_summary": source_bundle::annotation_summary(&all_anns),
                 });
+                if with_semantics {
+                    use wicked_estate_core::Direction;
+                    // `rule_confidence`: MAX confidence over this node's `business_rule` annotations
+                    // (already in `all_anns` — no extra query), or null when there are none.
+                    let rule_confidence = all_anns
+                        .iter()
+                        .filter(|a| a.r#type == "business_rule")
+                        .map(|a| a.confidence)
+                        .reduce(f64::max);
+                    // `requirement` / `requirement_validated`: the requirement↔functionality link.
+                    // Best-effort read (degrades to null/false, matching `all_anns` above).
+                    let sem = wicked_estate::get_semantics(&store, n.symbol.as_str())
+                        .ok()
+                        .flatten();
+                    // `out_edges`: DISTINCT outgoing edge kinds. Outgoing = source == id, i.e.
+                    // `Direction::Dependencies`; deduped via a BTreeSet so the Vec comes out sorted.
+                    let out_edges: Vec<String> = store
+                        .neighbors(&n.symbol, Direction::Dependencies)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|e| format!("{:?}", e.kind))
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect();
+                    obj["rule_confidence"] = serde_json::json!(rule_confidence);
+                    obj["requirement"] =
+                        serde_json::json!(sem.as_ref().and_then(|s| s.requirement.clone()));
+                    obj["requirement_validated"] =
+                        serde_json::json!(sem.map(|s| s.requirement_validated).unwrap_or(false));
+                    obj["out_edges"] = serde_json::json!(out_edges);
+                }
                 if !all_anns.is_empty() {
                     let capped: Vec<serde_json::Value> =
                         source_bundle::cap_annotations_for_payload(all_anns)
@@ -2692,10 +2729,13 @@ fn main() -> Result<()> {
                 "  wicked-estate dead-code   [--json]            # symbols with no edges at all"
             );
             println!(
-                "  wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json]  # filter symbols by kind or annotation"
+                "  wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json] [--semantics]  # filter symbols by kind or annotation"
             );
             println!(
                 "    --json adds per-node annotation_summary {{count,by_type,has_advisory}} + an annotations[] array (R4-capped at 20)"
+            );
+            println!(
+                "    --semantics (with --json) adds per-node requirement, requirement_validated, rule_confidence, out_edges[] for domain-brain"
             );
             println!(
                 "  wicked-estate resolve <name> [--file F] [--kind K] [--json]  # name → [{{symbol_id,name,kind,file,line}}]"

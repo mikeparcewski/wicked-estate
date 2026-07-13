@@ -7,6 +7,10 @@
 //!    JSON cannot silently drop `members` again (the MCP `Communities` tool omits it — §2).
 //! 2. `resolve <name> [--file F] [--kind K] --json` → `[{symbol_id, name, kind, file, line}]` — the
 //!    first-class name→SymbolId surface (§4 #2) that a write path's precondition depends on.
+//! 3. `nodes --json --semantics` — the plain `nodes --json` node object PLUS the four fields brain's
+//!    domain-extraction engine needs: `requirement`, `requirement_validated`, `rule_confidence`,
+//!    `out_edges`. Without these every node classifies as "unaccounted" and coverage can't reach
+//!    1.0. This test locks the shape AND that the four keys stay ABSENT without the opt-in flag.
 //!
 //! These drive the compiled binary as a subprocess against a temp on-disk DB, exercising the real
 //! flag-parse → store-read → JSON-shape wiring — the exact seam brain mocks with a fake client.
@@ -266,4 +270,147 @@ fn resolve_file_filter_narrows_to_one_location() {
         "file filter narrows to a single location"
     );
     assert_eq!(filtered[0]["file"], target_file);
+}
+
+// ── Surface 3: nodes --json --semantics adds brain's four domain-extraction fields ────────────
+
+/// Find the node object named `name` in a `nodes --json` array (panics if absent).
+fn find_node<'a>(nodes: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    nodes
+        .as_array()
+        .expect("nodes --json is an array")
+        .iter()
+        .find(|n| n["name"] == name)
+        .unwrap_or_else(|| {
+            panic!("expected node `{name}` in nodes --json output, but it was not found")
+        })
+}
+
+#[test]
+fn nodes_json_semantics_emits_requirement_rule_confidence_and_out_edges() {
+    // `target` calls `helper`; we attach a validated requirement + two business_rule annotations
+    // (differing confidences) to `target`. brain's domain-extraction engine reads exactly these.
+    let src = "\
+fn helper() {}
+fn target() { helper(); }
+";
+    let (dir, db) = index_files("nodes_semantics", &[("src/a.rs", src)]);
+
+    // Resolve `target`'s stable SymbolId — the write path (semantics/annotate) keys on the id.
+    let resolved: serde_json::Value =
+        serde_json::from_str(&run(&dir, &db, &["resolve", "target", "--json"])).unwrap();
+    let target_id = resolved.as_array().unwrap()[0]["symbol_id"]
+        .as_str()
+        .expect("resolved symbol_id")
+        .to_string();
+
+    run(
+        &dir,
+        &db,
+        &[
+            "semantics",
+            &target_id,
+            "--requirement",
+            "REQ-42",
+            "--validated",
+            "true",
+        ],
+    );
+    run(
+        &dir,
+        &db,
+        &[
+            "annotate",
+            "--symbol",
+            &target_id,
+            "--key",
+            "rule_a",
+            "--value",
+            "v",
+            "--type",
+            "business_rule",
+            "--confidence",
+            "0.6",
+        ],
+    );
+    run(
+        &dir,
+        &db,
+        &[
+            "annotate",
+            "--symbol",
+            &target_id,
+            "--key",
+            "rule_b",
+            "--value",
+            "v",
+            "--type",
+            "business_rule",
+            "--confidence",
+            "0.8",
+        ],
+    );
+
+    // With --semantics: the four fields carry the right values on `target`.
+    let with: serde_json::Value =
+        serde_json::from_str(&run(&dir, &db, &["nodes", "--json", "--semantics"])).unwrap();
+    let target = find_node(&with, "target");
+
+    assert_eq!(
+        target["requirement"], "REQ-42",
+        "requirement echoes the set value: {target}"
+    );
+    assert_eq!(
+        target["requirement_validated"], true,
+        "requirement_validated is the stored bool: {target}"
+    );
+    // rule_confidence is the MAX confidence over the node's business_rule annotations (0.8 > 0.6).
+    let rc = target["rule_confidence"]
+        .as_f64()
+        .expect("rule_confidence is a number when a business_rule annotation exists");
+    assert!(
+        (rc - 0.8).abs() < 1e-9,
+        "rule_confidence is the max business_rule confidence (0.8), got {rc}"
+    );
+    // out_edges is the DISTINCT set of outgoing edge kinds — target calls helper.
+    let out_edges = target["out_edges"]
+        .as_array()
+        .expect("out_edges is an array");
+    assert!(
+        out_edges.iter().any(|e| e == "Calls"),
+        "out_edges includes the Calls edge to helper: {target}"
+    );
+
+    // `helper` has neither a requirement nor a business_rule annotation → null / false / empty.
+    let helper = find_node(&with, "helper");
+    assert!(
+        helper["requirement"].is_null(),
+        "no requirement → null: {helper}"
+    );
+    assert_eq!(helper["requirement_validated"], false);
+    assert!(
+        helper["rule_confidence"].is_null(),
+        "no business_rule annotations → null rule_confidence: {helper}"
+    );
+    assert_eq!(
+        helper["out_edges"].as_array().unwrap().len(),
+        0,
+        "helper calls nothing → empty out_edges: {helper}"
+    );
+
+    // WITHOUT --semantics: none of the four keys appear (default shape must not regress).
+    let plain: serde_json::Value =
+        serde_json::from_str(&run(&dir, &db, &["nodes", "--json"])).unwrap();
+    let plain_target = find_node(&plain, "target");
+    for k in [
+        "requirement",
+        "requirement_validated",
+        "rule_confidence",
+        "out_edges",
+    ] {
+        assert!(
+            plain_target.get(k).is_none(),
+            "`{k}` must be absent without --semantics (no shape regression): {plain_target}"
+        );
+    }
 }
