@@ -281,7 +281,9 @@ fn find_node<'a>(nodes: &'a serde_json::Value, name: &str) -> &'a serde_json::Va
         .expect("nodes --json is an array")
         .iter()
         .find(|n| n["name"] == name)
-        .unwrap_or_else(|| panic!("expected node `{name}` in nodes --json output, but it was not found"))
+        .unwrap_or_else(|| {
+            panic!("expected node `{name}` in nodes --json output, but it was not found")
+        })
 }
 
 #[test]
