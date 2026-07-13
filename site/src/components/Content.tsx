@@ -49,11 +49,17 @@ function useReducedMotion() {
 function useIsMobile(maxWidth = 760) {
   const [isMobile, setIsMobile] = useState(false)
   useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return
     const mq = window.matchMedia(`(max-width: ${maxWidth}px)`)
     const on = () => setIsMobile(mq.matches)
     on()
-    mq.addEventListener('change', on)
-    return () => mq.removeEventListener('change', on)
+    // Safari < 14 / older iOS lack addEventListener on MediaQueryList.
+    if (mq.addEventListener) {
+      mq.addEventListener('change', on)
+      return () => mq.removeEventListener('change', on)
+    }
+    mq.addListener(on)
+    return () => mq.removeListener(on)
   }, [maxWidth])
   return isMobile
 }
@@ -627,6 +633,7 @@ function AgentIDE() {
   const tapCommand = (id: string) => { setDriving(true); applyCommand(id) }
   const tapSymbol = (sym: SymId) => {
     setDriving(true)
+    setCursorAt(sym)
     if (sym === 'PricingService') { setCodePeek(DETAILS); setDockTab('code'); setMemHighlight(null) }
     else applyCommand('callers')
   }
@@ -661,26 +668,24 @@ function AgentIDE() {
               </span>
             </div>
             <div className="ide-code ide-code--mobile">
-              <pre className="ide-code-pre"><code>
-                {CODE.map((line, li) => (
-                  <span className="ide-code-line" key={li}>
-                    <span className="ide-code-ln">{li + 1}</span>
-                    <span className="ide-code-toks">
-                      {line.map((tk, ti) => tk.sym ? (
-                        <button
-                          key={ti}
-                          className="ide-sym"
-                          data-k={tk.k}
-                          data-active={String(cursorAt === tk.sym)}
-                          onClick={() => tapSymbol(tk.sym!)}
-                        >{tk.t}</button>
-                      ) : (
-                        <span key={ti} className="ide-tok" data-k={tk.k}>{tk.t}</span>
-                      ))}
-                    </span>
+              <pre className="ide-code-pre"><code>{CODE.map((line, li) => (
+                <span className="ide-code-line" key={li}>
+                  <span className="ide-code-ln">{li + 1}</span>
+                  <span className="ide-code-toks">
+                    {line.map((tk, ti) => tk.sym ? (
+                      <button
+                        key={ti}
+                        className="ide-sym"
+                        data-k={tk.k}
+                        data-active={String(cursorAt === tk.sym)}
+                        onClick={() => tapSymbol(tk.sym!)}
+                      >{tk.t}</button>
+                    ) : (
+                      <span key={ti} className="ide-tok" data-k={tk.k}>{tk.t}</span>
+                    ))}
                   </span>
-                ))}
-              </code></pre>
+                </span>
+              ))}</code></pre>
             </div>
 
             {/* IDE gestures — the command palette, as tap targets */}
