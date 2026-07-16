@@ -4,7 +4,7 @@
 //! the per-node-query BFS in prior art/prior art). Passes the same conformance suite as
 //! `MemStore`, proving the `GraphStore` trait abstraction holds across backends (the W1.5 premise).
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::collections::{BTreeMap, HashSet};
@@ -499,6 +499,46 @@ impl SqliteStore {
     /// Used by the connection-pool manager, which holds a `PathBuf`.
     pub fn open_file(path: &std::path::Path) -> Result<Self> {
         Self::open(path)
+    }
+
+    /// Open an existing on-disk store **read-only** (`SQLITE_OPEN_READONLY`).
+    ///
+    /// Unlike [`Self::open`], this path skips all WAL/schema DDL — it never writes a byte to
+    /// the file, so it is safe to call from a subprocess while the single-writer actor holds the
+    /// store open. Use this for gate-hook subprocesses and other read-only consumers (policy
+    /// recall, coverage reads) that must not race the actor's write path.
+    ///
+    /// Returns an error if the file does not already exist (there is no schema to create and
+    /// nothing to read anyway).
+    pub fn open_readonly(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(st)?;
+        // Tuning only — no schema DDL, no WAL pragma (WAL mode is set on the writer side; a
+        // read-only connection rides the existing WAL automatically).
+        conn.execute_batch(
+            "PRAGMA busy_timeout=5000; \
+             PRAGMA cache_size=-65536; \
+             PRAGMA temp_store=MEMORY; \
+             PRAGMA mmap_size=268435456;",
+        )
+        .map_err(st)?;
+        let history_enabled = {
+            let v: Option<String> = conn
+                .query_row("SELECT v FROM meta WHERE k='history_enabled'", [], |r| {
+                    r.get(0)
+                })
+                .optional()
+                .map_err(st)?;
+            v.is_some_and(|s| s == "1")
+        };
+        Ok(Self {
+            conn,
+            in_batch: false,
+            history_enabled,
+        })
     }
 
     /// Open an in-memory store (tests, ephemeral use).
@@ -4034,5 +4074,55 @@ mod tests {
 
         let none = store.nodes_by_kind("").unwrap();
         assert_eq!(none.len(), 2, "kind='' also returns all non-file nodes");
+    }
+
+    fn unique_test_dir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CTR: AtomicU64 = AtomicU64::new(0);
+        let n = CTR.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("we-{tag}-{}-{n}", std::process::id()))
+    }
+
+    #[test]
+    fn open_readonly_reads_data_without_writing() {
+        use wicked_estate_core::{GraphWrite, Language, Location, Span};
+        let dir = unique_test_dir("ro");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("test.db");
+
+        // Write a node via the RW opener.
+        let mut rw = SqliteStore::open(&db).expect("rw open");
+        let node = Node::new(
+            SymbolId("sym_ro".to_string()),
+            NodeKind::Function,
+            "ro_fn",
+            Language::new("rust"),
+            Location::new("src/lib.rs", Span::ZERO),
+        );
+        rw.upsert_nodes(&[node]).expect("upsert");
+        drop(rw);
+
+        // Open read-only: must see the written node, must not run DDL.
+        let ro = SqliteStore::open_readonly(&db).expect("readonly open");
+        let node = ro
+            .get_node(&SymbolId("sym_ro".to_string()))
+            .expect("get_node")
+            .expect("node must be present");
+        assert_eq!(
+            node.name, "ro_fn",
+            "readonly store must read the written node"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_readonly_rejects_missing_file() {
+        let path = unique_test_dir("ro-nonexistent").join("ghost.db");
+        assert!(
+            SqliteStore::open_readonly(&path).is_err(),
+            "open_readonly on a non-existent file must error"
+        );
     }
 }
