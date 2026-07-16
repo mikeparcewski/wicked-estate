@@ -4076,10 +4076,17 @@ mod tests {
         assert_eq!(none.len(), 2, "kind='' also returns all non-file nodes");
     }
 
+    fn unique_test_dir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CTR: AtomicU64 = AtomicU64::new(0);
+        let n = CTR.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("we-{tag}-{}-{n}", std::process::id()))
+    }
+
     #[test]
     fn open_readonly_reads_data_without_writing() {
         use wicked_estate_core::{GraphWrite, Language, Location, Span};
-        let dir = std::env::temp_dir().join(format!("wicked-estate-ro-{}", std::process::id()));
+        let dir = unique_test_dir("ro");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("test.db");
@@ -4112,8 +4119,7 @@ mod tests {
 
     #[test]
     fn open_readonly_rejects_missing_file() {
-        let path = std::env::temp_dir().join("wicked-estate-ro-nonexistent-999.db");
-        let _ = std::fs::remove_file(&path);
+        let path = unique_test_dir("ro-nonexistent").join("ghost.db");
         assert!(
             SqliteStore::open_readonly(&path).is_err(),
             "open_readonly on a non-existent file must error"
