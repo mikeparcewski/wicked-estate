@@ -951,20 +951,41 @@ fn main() -> Result<()> {
             let store = open_store_ext(&db).map_err(to_any)?;
             let top = wicked_estate::important_symbols(store.as_ref(), limit).map_err(to_any)?;
 
-            // Exclude structural-only kinds; code-bearing kinds go into the view.
+            // Exclude structural-only and rules-engine kinds; keep code-bearing kinds.
+            // Namespace/Synthetic/Rule*/Condition/Action/Fact are not user code symbols.
             let excluded = [
                 NodeKind::File,
                 NodeKind::Module,
+                NodeKind::Namespace,
                 NodeKind::Import,
                 NodeKind::Constant,
                 NodeKind::Variable,
                 NodeKind::Field,
                 NodeKind::Parameter,
+                NodeKind::Synthetic,
+                NodeKind::Rule,
+                NodeKind::RuleSet,
+                NodeKind::Condition,
+                NodeKind::Action,
+                NodeKind::Fact,
             ];
 
             let code_nodes: Vec<&(wicked_estate_core::Node, f32)> = top
                 .iter()
-                .filter(|(n, _)| !excluded.contains(&n.kind))
+                .filter(|(n, _)| {
+                    if excluded.contains(&n.kind) {
+                        return false;
+                    }
+                    // Drop external/stdlib nodes — they have no repo-local file.
+                    if n.location.file.is_empty() {
+                        return false;
+                    }
+                    // Drop vendored JS/TS deps.
+                    if n.location.file.starts_with("node_modules/") {
+                        return false;
+                    }
+                    true
+                })
                 .collect();
 
             let node_ids: HashSet<&str> =
