@@ -317,6 +317,95 @@ fn emit_cli_span(
     }
 }
 
+/// Returns `true` when `file` (repo-relative) looks like a test file.
+///
+/// Covers ~100 languages via directory-segment matching (exact, no false positives on names like
+/// "contest.ts") and filename conventions:
+///   - Directories: `test/`, `tests/`, `spec/`, `specs/`, `__tests__/`, `e2e/`, `integration/`,
+///     `acceptance/`, `fixtures/`, `testdata/`
+///   - Prefix:  `test_*`  (Python, Rust, Elixir, Erlang)
+///   - Suffix:  `*_test.ext` | `*_spec.ext` | `*_tests.ext` | `*_suite.ext`  (Go, Dart, …)
+///   - Mid-ext: `*.test.ext` | `*.spec.ext`  (JS / TS / JSX / TSX)
+///
+/// Callers that want to include test symbols should skip this predicate (pass `--include-tests`
+/// to `graph-view`).
+pub fn is_test_file(file: &str) -> bool {
+    if file.is_empty() {
+        return false;
+    }
+    let lower = file.to_lowercase();
+    let parts: Vec<&str> = lower.split('/').collect();
+    let basename = parts.last().copied().unwrap_or("");
+
+    // Exact directory-segment match — avoids "contest/" or "testutils/" false positives.
+    const TEST_DIRS: &[&str] = &[
+        "test",
+        "tests",
+        "spec",
+        "specs",
+        "__tests__",
+        "e2e",
+        "integration",
+        "acceptance",
+        "fixtures",
+        "testdata",
+    ];
+    if parts[..parts.len().saturating_sub(1)]
+        .iter()
+        .any(|seg| TEST_DIRS.contains(seg))
+    {
+        return true;
+    }
+
+    // test_ prefix: Python (test_foo.py), Rust (test_utils.rs), Elixir (test_helper.exs), …
+    if basename.starts_with("test_") {
+        return true;
+    }
+
+    // *_test.ext | *_spec.ext | *_tests.ext | *_suite.ext
+    // Splits at the last dot; checks what precedes it ends with the suffix.
+    if let Some(dot) = basename.rfind('.') {
+        let stem = &basename[..dot];
+        if stem.ends_with("_test")
+            || stem.ends_with("_spec")
+            || stem.ends_with("_tests")
+            || stem.ends_with("_suite")
+        {
+            return true;
+        }
+    }
+
+    // *.test.ext | *.spec.ext  (JS/TS: foo.test.ts, foo.spec.tsx, …)
+    basename.contains(".test.") || basename.contains(".spec.")
+}
+
+/// Returns `true` when `file` matches `pattern`.
+///
+/// Pattern rules (applied to the lowercased file path):
+///   - No `*` → substring match: `"tests/"` matches any path containing `tests/`
+///   - Leading `*` only → suffix/contains: `"*_test.go"` matches any path containing `_test.go`
+///   - Trailing `*` only → prefix: `"src/generated/*"` matches paths starting with `src/generated/`
+///   - Both → substring of the middle part after stripping prefix/suffix wildcards
+fn matches_ignore_pattern(file: &str, pattern: &str) -> bool {
+    let file_l = file.to_lowercase();
+    let pat_l = pattern.to_lowercase();
+    if !pat_l.contains('*') {
+        return file_l.contains(&pat_l);
+    }
+    let stripped_start = pat_l.strip_prefix('*').unwrap_or(&pat_l);
+    let stripped_both = stripped_start.strip_suffix('*').unwrap_or(stripped_start);
+    if pat_l.starts_with('*') && pat_l.ends_with('*') {
+        return file_l.contains(stripped_both);
+    }
+    if pat_l.starts_with('*') {
+        return file_l.contains(stripped_start.trim_end_matches('*'));
+    }
+    if pat_l.ends_with('*') {
+        return file_l.starts_with(stripped_both);
+    }
+    file_l.contains(&pat_l)
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (cmd, rest) = match args.split_first() {
@@ -926,26 +1015,38 @@ fn main() -> Result<()> {
         }
         // Graph view for UI consumption — top-N code symbols by PageRank + inter-symbol edges.
         //
-        //   wicked-estate graph-view [--limit N] [--db <file>]
+        //   wicked-estate graph-view [--limit N] [--include-tests] [--ignore <pat>] [--db <file>]
         //
         // Returns JSON { nodes: [...], edges: [...] } to stdout.
-        // Excludes structural-only kinds (file, module, import, constant, variable, field).
+        // Excludes structural-only and external nodes by default; test files hidden by default.
+        //   --include-tests   include test files (overrides the default heuristic)
+        //   --ignore <pat>    exclude files matching pat (repeatable; substring or *glob*)
         // Uses open_store_ext so overlay/injected cross-repo edges are included.
         "graph-view" => {
             use std::collections::HashSet;
             use wicked_estate_core::{Direction, EdgeKind, NodeKind};
 
-            let limit: usize = {
-                let mut lim = 80usize;
+            let mut limit = 80usize;
+            let mut include_tests = false;
+            let mut ignore_patterns: Vec<String> = Vec::new();
+            {
                 let mut it = positional.iter();
                 while let Some(a) = it.next() {
-                    if a == "--limit" {
-                        if let Some(v) = it.next() {
-                            lim = v.parse().unwrap_or(80);
+                    match a.as_str() {
+                        "--limit" => {
+                            if let Some(v) = it.next() {
+                                limit = v.parse().unwrap_or(80);
+                            }
                         }
+                        "--include-tests" => include_tests = true,
+                        "--ignore" => {
+                            if let Some(p) = it.next() {
+                                ignore_patterns.push(p.clone());
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                lim
             };
 
             let store = open_store_ext(&db).map_err(to_any)?;
@@ -976,12 +1077,24 @@ fn main() -> Result<()> {
                     if excluded.contains(&n.kind) {
                         return false;
                     }
+                    let file = &n.location.file;
                     // Drop external/stdlib nodes — they have no repo-local file.
-                    if n.location.file.is_empty() {
+                    if file.is_empty() {
                         return false;
                     }
                     // Drop vendored JS/TS deps.
-                    if n.location.file.starts_with("node_modules/") {
+                    if file.starts_with("node_modules/") {
+                        return false;
+                    }
+                    // Drop test files unless caller opted in.
+                    if !include_tests && is_test_file(file) {
+                        return false;
+                    }
+                    // Drop caller-specified ignore patterns.
+                    if ignore_patterns
+                        .iter()
+                        .any(|p| matches_ignore_pattern(file, p))
+                    {
                         return false;
                     }
                     true
