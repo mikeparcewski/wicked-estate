@@ -959,6 +959,7 @@ fn main() -> Result<()> {
                 NodeKind::Constant,
                 NodeKind::Variable,
                 NodeKind::Field,
+                NodeKind::Parameter,
             ];
 
             let code_nodes: Vec<&(wicked_estate_core::Node, f32)> = top
@@ -969,11 +970,15 @@ fn main() -> Result<()> {
             let node_ids: HashSet<&str> =
                 code_nodes.iter().map(|(n, _)| n.symbol.as_str()).collect();
 
-            // For each code node: full-graph in/out degree (Calls+Imports only).
-            // Also collect outgoing edges for the inter-top-N subgraph in the same pass.
+            // Single-pass: collect outgoing edges, out-degree, and in-degree simultaneously.
+            // out_deg_map[X] = number of Calls/Imports edges leaving X (full graph).
+            // in_deg_map[Y]  = number of top-N nodes with a Calls/Imports edge pointing to Y.
+            // Halves store calls vs. a separate per-node Dependents query in the nodes_json map.
             let mut edges_json: Vec<serde_json::Value> = Vec::new();
             let mut seen: HashSet<String> = HashSet::new();
             let mut out_deg_map: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            let mut in_deg_map: std::collections::HashMap<String, usize> =
                 std::collections::HashMap::new();
 
             for (node, _) in &top {
@@ -991,6 +996,7 @@ fn main() -> Result<()> {
                         if matches!(e.kind, EdgeKind::Calls | EdgeKind::Imports)
                             && node_ids.contains(e.target.as_str())
                         {
+                            *in_deg_map.entry(e.target.as_str().to_string()).or_insert(0) += 1;
                             let key = format!("{}→{}", e.source.as_str(), e.target.as_str());
                             if seen.insert(key) {
                                 edges_json.push(serde_json::json!({
@@ -1006,15 +1012,7 @@ fn main() -> Result<()> {
             let nodes_json: Vec<serde_json::Value> = code_nodes
                 .iter()
                 .map(|(n, score)| {
-                    // Full-graph in-degree: count callers from the whole store.
-                    let in_deg = store
-                        .neighbors(&n.symbol, Direction::Dependents)
-                        .map(|v| {
-                            v.iter()
-                                .filter(|e| matches!(e.kind, EdgeKind::Calls | EdgeKind::Imports))
-                                .count()
-                        })
-                        .unwrap_or(0);
+                    let in_deg = in_deg_map.get(n.symbol.as_str()).copied().unwrap_or(0);
                     let out_deg = out_deg_map.get(n.symbol.as_str()).copied().unwrap_or(0);
                     serde_json::json!({
                         "id":     n.symbol.as_str(),
