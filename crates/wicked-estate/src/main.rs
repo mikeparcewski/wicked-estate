@@ -317,6 +317,194 @@ fn emit_cli_span(
     }
 }
 
+/// Returns `true` when `file` is in a vendored-dependency directory.
+///
+/// Covers the common vendor directory conventions across ecosystems:
+///   `vendor/`, `_vendor/`, `third_party/`, `external/`, `extern/`, `deps/`
+pub fn is_vendor_file(file: &str) -> bool {
+    if file.is_empty() {
+        return false;
+    }
+    const VENDOR_DIRS: &[&str] = &[
+        "vendor",
+        "_vendor",
+        "third_party",
+        "external",
+        "extern",
+        "deps",
+    ];
+    let lower = file.to_lowercase();
+    let parts: Vec<&str> = lower.split('/').collect();
+    parts[..parts.len().saturating_sub(1)]
+        .iter()
+        .any(|seg| VENDOR_DIRS.contains(seg))
+}
+
+/// Returns `true` when `name` is a trivial/generic symbol that dominates PageRank
+/// with no useful graph signal — stdlib trait methods, universal constructors,
+/// common functional combinators, etc.
+///
+/// Pass `--include-trivial` to `graph-view` to bypass this filter.
+pub fn is_trivial_name(name: &str) -> bool {
+    // Exact lowercase match against a curated cross-language set.
+    // Rust stdlib traits + methods: covers Iterator, Option, Result, Clone, Hash, Ord, …
+    // JS/TS: constructor, toString, …   Python: __init__, __str__, …
+    const TRIVIAL: &[&str] = &[
+        // Constructors / factory
+        "new",
+        "create",
+        "build",
+        "init",
+        "default",
+        "from",
+        "into",
+        "try_from",
+        "try_into",
+        "constructor",
+        // Rust stdlib enum constructors / variants that leak into symbol tables
+        "some",
+        "none",
+        "ok",
+        "err",
+        // Universal accessor pattern
+        "get",
+        "get_mut",
+        "set",
+        "put",
+        // Rust Clone / Drop / Display / Debug / PartialEq / Hash / Ord
+        "clone",
+        "drop",
+        "fmt",
+        "eq",
+        "ne",
+        "lt",
+        "le",
+        "gt",
+        "ge",
+        "hash",
+        "partial_cmp",
+        "cmp",
+        // Conversion / borrow
+        "as_ref",
+        "as_mut",
+        "as_bytes",
+        "as_str",
+        "as_slice",
+        "as_ptr",
+        "as_mut_ptr",
+        "borrow",
+        "borrow_mut",
+        "deref",
+        "deref_mut",
+        // String / byte helpers
+        "to_string",
+        "to_owned",
+        "to_vec",
+        "into_string",
+        "into_bytes",
+        "trim",
+        "trim_start",
+        "trim_end",
+        "to_lowercase",
+        "to_uppercase",
+        "starts_with",
+        "ends_with",
+        "contains",
+        "replace",
+        "split",
+        "join",
+        "chars",
+        "bytes",
+        "len",
+        "is_empty",
+        // Iterator combinators (Rust + JS/TS + Python)
+        "iter",
+        "iter_mut",
+        "into_iter",
+        "next",
+        "map",
+        "flat_map",
+        "filter",
+        "filter_map",
+        "fold",
+        "reduce",
+        "collect",
+        "flatten",
+        "chain",
+        "zip",
+        "enumerate",
+        "any",
+        "all",
+        "find",
+        "position",
+        "count",
+        "sum",
+        "product",
+        "min",
+        "max",
+        "min_by",
+        "max_by",
+        "take",
+        "skip",
+        // Option / Result combinators
+        "map_err",
+        "and_then",
+        "or_else",
+        "unwrap",
+        "expect",
+        "unwrap_or",
+        "unwrap_or_else",
+        "ok_or",
+        "ok_or_else",
+        "transpose",
+        // Collection mutations
+        "push",
+        "pop",
+        "insert",
+        "remove",
+        "retain",
+        "clear",
+        "extend",
+        "append",
+        "drain",
+        "truncate",
+        "reserve",
+        // Async / IO helpers
+        "poll",
+        "await",
+        "flush",
+        "close",
+        "read",
+        "write",
+        "seek",
+        "send",
+        "recv",
+        "try_send",
+        "try_recv",
+        // Python dunder noise
+        "__init__",
+        "__str__",
+        "__repr__",
+        "__len__",
+        "__eq__",
+        "__hash__",
+        "__iter__",
+        "__next__",
+        "__enter__",
+        "__exit__",
+        "__getitem__",
+        "__setitem__",
+        "__delitem__",
+        "__contains__",
+        // JS/TS universal
+        "tostring",
+        "valueof",
+        "symbol_iterator",
+    ];
+    let lower = name.to_lowercase();
+    TRIVIAL.contains(&lower.as_str())
+}
+
 /// Returns `true` when `file` (repo-relative) looks like a test file.
 ///
 /// Covers ~100 languages via directory-segment matching (exact, no false positives on names like
@@ -1015,12 +1203,15 @@ fn main() -> Result<()> {
         }
         // Graph view for UI consumption — top-N code symbols by PageRank + inter-symbol edges.
         //
-        //   wicked-estate graph-view [--limit N] [--include-tests] [--ignore <pat>] [--db <file>]
+        //   wicked-estate graph-view [--limit N] [--include-tests] [--include-trivial]
+        //                            [--ignore <pat>] [--db <file>]
         //
         // Returns JSON { nodes: [...], edges: [...] } to stdout.
-        // Excludes structural-only and external nodes by default; test files hidden by default.
-        //   --include-tests   include test files (overrides the default heuristic)
-        //   --ignore <pat>    exclude files matching pat (repeatable; substring or *glob*)
+        // Smart defaults (all opt-out):
+        //   test files hidden    → pass --include-tests to restore
+        //   trivial names hidden → pass --include-trivial to restore (get, new, len, map_err, …)
+        //   vendor dirs hidden   → always filtered; use --ignore to add more
+        //   --ignore <pat>       exclude additional file paths (repeatable; substring or *glob*)
         // Uses open_store_ext so overlay/injected cross-repo edges are included.
         "graph-view" => {
             use std::collections::HashSet;
@@ -1028,6 +1219,7 @@ fn main() -> Result<()> {
 
             let mut limit = 80usize;
             let mut include_tests = false;
+            let mut include_trivial = false;
             let mut ignore_patterns: Vec<String> = Vec::new();
             {
                 let mut it = positional.iter();
@@ -1039,6 +1231,7 @@ fn main() -> Result<()> {
                             }
                         }
                         "--include-tests" => include_tests = true,
+                        "--include-trivial" => include_trivial = true,
                         "--ignore" => {
                             if let Some(p) = it.next() {
                                 ignore_patterns.push(p.clone());
@@ -1078,16 +1271,20 @@ fn main() -> Result<()> {
                         return false;
                     }
                     let file = &n.location.file;
-                    // Drop external/stdlib nodes — they have no repo-local file.
-                    if file.is_empty() {
+                    // Drop external/stdlib nodes — no repo-local file or absolute path.
+                    if file.is_empty() || file.starts_with('/') {
                         return false;
                     }
-                    // Drop vendored JS/TS deps.
-                    if file.starts_with("node_modules/") {
+                    // Drop JS/TS package deps and generic vendor dirs.
+                    if file.starts_with("node_modules/") || is_vendor_file(file) {
                         return false;
                     }
                     // Drop test files unless caller opted in.
                     if !include_tests && is_test_file(file) {
+                        return false;
+                    }
+                    // Drop trivial generic names (get, new, len, map_err, …) unless opted in.
+                    if !include_trivial && is_trivial_name(&n.name) {
                         return false;
                     }
                     // Drop caller-specified ignore patterns.
