@@ -29,6 +29,7 @@
 //!   wicked-estate leaves                 [--json] [--db ...]
 //!   wicked-estate dead-code              [--json] [--db ...]
 //!   wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json] [--semantics] [--db ...]
+//!   wicked-estate graph-view [--limit N]  [--db ...]
 
 mod emit;
 mod scip_auto;
@@ -922,6 +923,118 @@ fn main() -> Result<()> {
                 t_cmd_start,
                 t_cmd_end,
             );
+        }
+        // Graph view for UI consumption — top-N code symbols by PageRank + inter-symbol edges.
+        //
+        //   wicked-estate graph-view [--limit N] [--db <file>]
+        //
+        // Returns JSON { nodes: [...], edges: [...] } to stdout.
+        // Excludes structural-only kinds (file, module, import, constant, variable, field).
+        // Uses open_store_ext so overlay/injected cross-repo edges are included.
+        "graph-view" => {
+            use std::collections::HashSet;
+            use wicked_estate_core::{Direction, EdgeKind, NodeKind};
+
+            let limit: usize = {
+                let mut lim = 80usize;
+                let mut it = positional.iter();
+                while let Some(a) = it.next() {
+                    if a == "--limit" {
+                        if let Some(v) = it.next() {
+                            lim = v.parse().unwrap_or(80);
+                        }
+                    }
+                }
+                lim
+            };
+
+            let store = open_store_ext(&db).map_err(to_any)?;
+            let top = wicked_estate::important_symbols(store.as_ref(), limit).map_err(to_any)?;
+
+            // Exclude structural-only kinds; code-bearing kinds go into the view.
+            let excluded = [
+                NodeKind::File,
+                NodeKind::Module,
+                NodeKind::Import,
+                NodeKind::Constant,
+                NodeKind::Variable,
+                NodeKind::Field,
+            ];
+
+            let code_nodes: Vec<&(wicked_estate_core::Node, f32)> = top
+                .iter()
+                .filter(|(n, _)| !excluded.contains(&n.kind))
+                .collect();
+
+            let node_ids: HashSet<&str> =
+                code_nodes.iter().map(|(n, _)| n.symbol.as_str()).collect();
+
+            // For each code node: full-graph in/out degree (Calls+Imports only).
+            // Also collect outgoing edges for the inter-top-N subgraph in the same pass.
+            let mut edges_json: Vec<serde_json::Value> = Vec::new();
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut out_deg_map: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+
+            for (node, _) in &top {
+                if !node_ids.contains(node.symbol.as_str()) {
+                    continue;
+                }
+                if let Ok(nbrs) = store.neighbors(&node.symbol, Direction::Dependencies) {
+                    let out_deg = nbrs
+                        .iter()
+                        .filter(|e| matches!(e.kind, EdgeKind::Calls | EdgeKind::Imports))
+                        .count();
+                    out_deg_map.insert(node.symbol.as_str().to_string(), out_deg);
+
+                    for e in &nbrs {
+                        if matches!(e.kind, EdgeKind::Calls | EdgeKind::Imports)
+                            && node_ids.contains(e.target.as_str())
+                        {
+                            let key = format!("{}→{}", e.source.as_str(), e.target.as_str());
+                            if seen.insert(key) {
+                                edges_json.push(serde_json::json!({
+                                    "src": e.source.as_str(),
+                                    "tgt": e.target.as_str(),
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+
+            let nodes_json: Vec<serde_json::Value> = code_nodes
+                .iter()
+                .map(|(n, score)| {
+                    // Full-graph in-degree: count callers from the whole store.
+                    let in_deg = store
+                        .neighbors(&n.symbol, Direction::Dependents)
+                        .map(|v| {
+                            v.iter()
+                                .filter(|e| matches!(e.kind, EdgeKind::Calls | EdgeKind::Imports))
+                                .count()
+                        })
+                        .unwrap_or(0);
+                    let out_deg = out_deg_map.get(n.symbol.as_str()).copied().unwrap_or(0);
+                    serde_json::json!({
+                        "id":     n.symbol.as_str(),
+                        "name":   n.name,
+                        "kind":   serde_json::to_value(&n.kind).unwrap_or(serde_json::Value::Null),
+                        "file":   n.location.file,
+                        "lang":   n.language.as_str(),
+                        "score":  score,
+                        "inDeg":  in_deg,
+                        "outDeg": out_deg,
+                    })
+                })
+                .collect();
+
+            let out = serde_json::to_string(&serde_json::json!({
+                "nodes": nodes_json,
+                "edges": edges_json,
+            }))
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            println!("{out}");
         }
         // Bulk SOURCE bundle — full bodies for an entire file / cluster / symbol-set in one call.
         //
