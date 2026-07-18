@@ -1243,7 +1243,13 @@ fn main() -> Result<()> {
             };
 
             let store = open_store_ext(&db).map_err(to_any)?;
-            let top = wicked_estate::important_symbols(store.as_ref(), limit).map_err(to_any)?;
+            // Oversample PageRank candidates so filters don't under-deliver.
+            // Fetch 4× the requested limit (at least limit+200) so that after
+            // removing tests, trivials, external, and vendor nodes we still
+            // have `limit` meaningful symbols to return.
+            let fetch_limit = (limit * 4).max(limit + 200);
+            let top =
+                wicked_estate::important_symbols(store.as_ref(), fetch_limit).map_err(to_any)?;
 
             // Exclude structural-only and rules-engine kinds; keep code-bearing kinds.
             // Namespace/Synthetic/Rule*/Condition/Action/Fact are not user code symbols.
@@ -1296,6 +1302,7 @@ fn main() -> Result<()> {
                     }
                     true
                 })
+                .take(limit)
                 .collect();
 
             let node_ids: HashSet<&str> =
