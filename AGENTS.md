@@ -1,5 +1,12 @@
 # AGENTS.md
 
+## Contributor wiki
+
+Contributor wiki: ./wiki
+
+Invariants, contracts, and extension recipes live there. This pointer is
+the machine-readable anchor agents grep for.
+
 **Single source of truth for build guardrails is [`CLAUDE.md`](./CLAUDE.md).** Read it before
 working in this repo. It carries the Voice, the §1–§12 Working Style, the Universal Don'ts, the
 locked decisions, the "don't rebuild the spine" table, and the commands/gates — all of which apply
