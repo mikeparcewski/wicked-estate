@@ -55,6 +55,7 @@ fn slc_001_single_connection_handle_per_store_file() {
     assert_eq!(
         busy, 0,
         "WAL checkpoint blocked after SqliteStore::drop (busy={busy}) — \
-         indicates more than one connection handle was opened to '{path_str}'"
+         a connection to '{path_str}' is still open and prevented checkpointing; \
+         SqliteStore may have leaked a handle"
     );
 }
