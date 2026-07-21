@@ -29,7 +29,7 @@
 //!   wicked-estate leaves                 [--json] [--db ...]
 //!   wicked-estate dead-code              [--json] [--db ...]
 //!   wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json] [--semantics] [--db ...]
-//!   wicked-estate graph-view [--limit N]  [--db ...]
+//!   wicked-estate graph-view [--limit N] [--include-tests] [--include-trivial] [--ignore <pat>] [--db ...]
 
 mod emit;
 mod scip_auto;
@@ -1309,9 +1309,10 @@ fn main() -> Result<()> {
                 code_nodes.iter().map(|(n, _)| n.symbol.as_str()).collect();
 
             // Single-pass: collect outgoing edges, out-degree, and in-degree simultaneously.
-            // out_deg_map[X] = number of Calls/Imports edges leaving X (full graph).
-            // in_deg_map[Y]  = number of top-N nodes with a Calls/Imports edge pointing to Y.
-            // Halves store calls vs. a separate per-node Dependents query in the nodes_json map.
+            // out_deg_map[X] = number of Calls/Imports edges leaving X (full graph, from Dependencies).
+            // in_deg_map[Y]  = number of top-N nodes with a Calls/Imports edge pointing to Y
+            //                  (within-set in-degree, appropriate for layout sizing in the UI).
+            // This halves store calls vs. a separate per-node Dependents query per node.
             let mut edges_json: Vec<serde_json::Value> = Vec::new();
             let mut seen: HashSet<String> = HashSet::new();
             let mut out_deg_map: std::collections::HashMap<String, usize> =
@@ -1356,7 +1357,7 @@ fn main() -> Result<()> {
                     serde_json::json!({
                         "id":     n.symbol.as_str(),
                         "name":   n.name,
-                        "kind":   serde_json::to_value(&n.kind).unwrap_or(serde_json::Value::Null),
+                        "kind":   &n.kind,
                         "file":   n.location.file,
                         "lang":   n.language.as_str(),
                         "score":  score,
