@@ -163,11 +163,11 @@ All items in this level are executed after Levels 1 and 2 are fully checked. Thi
 ### 3.2 Deprecation Notices
 
 - [x] Deprecation notice committed to `wicked-memory` README pointing to `wicked-estate v0.13.0`
-  - * Link to the commit SHA in `wicked-memory` repo (02e1243)
+  - * Link to the commit SHA in `wicked-memory` repo ([02e1243](https://github.com/mikeparcewski/wicked-memory/commit/02e1243))
 - [x] Deprecation notice committed to `wicked-knowledge` README pointing to `wicked-estate v0.13.0`
-  - * Link to the commit SHA in `wicked-knowledge` repo (d13862c)
+  - * Link to the commit SHA in `wicked-knowledge` repo ([d13862c](https://github.com/mikeparcewski/wicked-knowledge/commit/d13862c))
 - [x] Deprecation notice committed to `wicked-overlay` README pointing to `wicked-estate v0.13.0`
-  - * Link to the commit SHA in `wicked-overlay` repo (6cb5a15)
+  - * Link to the commit SHA in `wicked-overlay` repo ([6cb5a15](https://github.com/mikeparcewski/wicked-overlay/commit/6cb5a15))
 
 ### 3.3 Archive Actions
 
@@ -181,7 +181,7 @@ All items in this level are executed after Levels 1 and 2 are fully checked. Thi
 
 ### 3.4 Release
 
-- [x] `wicked-estate` Cargo workspace version set to `0.13.0` in `Cargo.toml` (subsequently bumped to v0.13.2 in later patches)
+- [x] `wicked-estate` Cargo workspace version set to `0.13.0` in `Cargo.toml` at the time of the v0.13.0 tag; the workspace has since been bumped to v0.13.2 via follow-on patch commits — the DoD item records the initial release state
 - [x] `wicked-estate` git tag `v0.13.0` created and pushed to the remote
 - [ ] `wicked-estate` `v0.13.0` released to crates.io (binary crate `wicked-estate`)
 - [x] GitHub release created for `v0.13.0` with changelog entries covering all absorbed capabilities
