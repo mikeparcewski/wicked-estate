@@ -64,13 +64,15 @@ All items in this level are verified by the engineering team during the Build ph
 - [x] Single-writer constraint is enforced per store: no two code paths hold a write connection to the same file simultaneously
 - [x] Store handles are not duplicated: `XedgeStore` is constructed exactly once and `Arc`-shared across all tools that require it
 - [x] Server shuts down cleanly (all store connections closed, WAL checkpointed) on SIGTERM and SIGINT
-- [ ] * Integration test exists asserting exactly one open connection handle per store file
+- [x] * Integration test exists asserting exactly one open connection handle per store file
+  - Evidence: `crates/wicked-estate-store/tests/connection_lifecycle.rs` — `slc_001_single_connection_handle_per_store_file` passes (`cargo test -p wicked-estate-store slc_001`)
 
 ### 1.5 Absorbed Crates
 
 - [x] `wicked-estate-overlay` absorbed: `XedgeStore` and `OverlayReader` are available as workspace crate `wicked-estate-overlay`
 - [x] `wicked-estate-memory-core` absorbed: `rrf_fuse`, `budget_pack`, and `Candidate` are available from the workspace crate and are shared by both the memory and knowledge domains (no duplication)
-- [ ] `wicked-estate-memory-api` stub resolved: either deleted (if superseded by absorbed implementation) or reconciled (if it defines the interface spec that the absorbed crate conforms to) — decision documented in an ADR
+- [x] `wicked-estate-memory-api` stub resolved: either deleted (if superseded by absorbed implementation) or reconciled (if it defines the interface spec that the absorbed crate conforms to) — decision documented in an ADR
+  - Decision: **retained as re-export shim** for backward compatibility; all internal callers already use `wicked_estate_memory_core` directly. See `docs/adr/ADR-008-memory-api-shim-retention.md`
 - [x] No duplicate type definitions across the workspace for types that are logically shared (e.g., `Candidate`, `SearchResult`)
 - [x] StoreTrait abstraction present (SC-008): tool handler call sites depend on trait, not SqliteStore directly; compilation with a no-op alternative implementation succeeds
 
@@ -187,8 +189,10 @@ All items in this level are executed after Levels 1 and 2 are fully checked. Thi
 ### 3.5 Marketplace and Tooling Updates
 
 - [x] `.claude-plugin/marketplace.json` updated to reflect the unified 24-tool surface: all tool names, descriptions, and input schemas match the unified server's `tools/list` response
-- [ ] Any skill registries or agent definitions that reference `wicked-memory-mcp` or `wicked-knowledge-mcp` as a command updated to reference `wicked-estate`
-- [ ] wicked-brain (JS) configuration updated to point to `wicked-estate` if it was previously calling `wicked-memory-mcp` or `wicked-knowledge-mcp` directly (or a ISSUE filed for the v0.2 migration track — see ASSM-003)
+- [x] Any skill registries or agent definitions that reference `wicked-memory-mcp` or `wicked-knowledge-mcp` as a command updated to reference `wicked-estate`
+  - Verified: no active skill registries or agent definitions reference `wicked-memory-mcp` or `wicked-knowledge-mcp` as a command. References found only in historical design recon docs and conformance schema provenance metadata (`"captured_from": "wicked-memory-mcp-0.12.1"`) — these are read-only historical records, not command references.
+- [x] wicked-brain (JS) configuration updated to point to `wicked-estate` if it was previously calling `wicked-memory-mcp` or `wicked-knowledge-mcp` directly (or a ISSUE filed for the v0.2 migration track — see ASSM-003)
+  - Verified: `wicked-brain/skills/wicked-brain-context/hooks/` config files contain no references to `wicked-memory-mcp` or `wicked-knowledge-mcp`. The brain daemon config does not call either old binary. No update required.
 
 ---
 
@@ -212,3 +216,5 @@ The DoD checklist itself (this file) must be updated to `status: complete` once 
 | 0.1 | 2026-07-05 | mike.parcewski@gmail.com | Initial draft |
 | 0.2 | 2026-07-05 | mike.parcewski@gmail.com | §1.1 SemanticSearch condition corrected (fastembed or model2vec); §2.7 binary name corrected to wicked-estate-mcp |
 | 0.3 | 2026-07-21 | mike.parcewski@gmail.com | Evidence-phase verification: 70/75 items checked off against evidence artifacts. Remaining 5: §1.4 connection-handle test, §1.5 memory-api ADR, §3.4 crates.io, §3.5 skill-registry + brain-config updates |
+| 0.4 | 2026-07-21 | mike.parcewski@gmail.com | §1.4 connection-handle test added (slc_001 in wicked-estate-store/tests/connection_lifecycle.rs, passing). §1.5 memory-api ADR written (ADR-008). 72/75 items now checked. Remaining 3: §3.4 crates.io, §3.5 skill-registry, §3.5 brain-config |
+| 0.5 | 2026-07-21 | mike.parcewski@gmail.com | §3.5 skill-registry and brain-config items verified via active codebase search — no references to old binaries found in any active skill/agent/config files. 74/75 items checked. §3.4 crates.io remains unverifiable without web access. |
