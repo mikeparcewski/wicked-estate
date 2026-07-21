@@ -1,13 +1,15 @@
-//! SLC-001 — Single connection handle per store file.
+//! SLC-001 — Store connection lifecycle: WAL mode + clean drop.
 //!
-//! `SqliteStore` wraps a single `rusqlite::Connection`.  This test verifies that
-//! (a) WAL mode is enabled by `open()` — the prerequisite for safe concurrent access,
-//! and (b) after the store is dropped, the WAL can be fully checkpointed with
-//! `busy = 0` (no dangling connection handles remain open to the file).
+//! Verifies two properties of `SqliteStore`:
 //!
-//! A store that internally opened N > 1 connections and only tracked one in its
-//! struct field would leave N−1 handles live after `drop`, causing the checkpoint
-//! to return `busy > 0` and failing the assertion below.
+//! (a) `open()` enables WAL journal mode — the prerequisite for safe concurrent access
+//!     (multiple readers, serialized writers, no full-file locking on reads).
+//!
+//! (b) After `drop(store)`, all connection handles held by the store are released:
+//!     `PRAGMA wal_checkpoint(TRUNCATE)` returns `busy = 0`, meaning no external reader
+//!     is blocking the checkpoint.  A store that opened N > 1 connections internally but
+//!     only closed one of them on `drop` would leave N−1 handles live, causing the
+//!     checkpoint to return `busy > 0` and failing assertion (b).
 
 use rusqlite::Connection;
 use wicked_estate_store::SqliteStore;

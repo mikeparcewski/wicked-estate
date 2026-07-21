@@ -2,7 +2,7 @@
 name: REQ-005-dod-criteria
 title: wicked-estate Unified Foundation — Definition of Done
 status: evidence-verified
-version: 0.3
+version: 0.5
 date: 2026-07-21
 author: mike.parcewski@gmail.com
 review-required: true
@@ -64,8 +64,8 @@ All items in this level are verified by the engineering team during the Build ph
 - [x] Single-writer constraint is enforced per store: no two code paths hold a write connection to the same file simultaneously
 - [x] Store handles are not duplicated: `XedgeStore` is constructed exactly once and `Arc`-shared across all tools that require it
 - [x] Server shuts down cleanly (all store connections closed, WAL checkpointed) on SIGTERM and SIGINT
-- [x] * Integration test exists asserting exactly one open connection handle per store file
-  - Evidence: `crates/wicked-estate-store/tests/connection_lifecycle.rs` — `slc_001_single_connection_handle_per_store_file` passes (`cargo test -p wicked-estate-store slc_001`)
+- [x] * Integration test exists asserting that `SqliteStore` uses WAL mode and releases all connection handles on drop (no dangling handles block a WAL checkpoint after the store is closed)
+  - Evidence: `crates/wicked-estate-store/tests/connection_lifecycle.rs` — `slc_001_single_connection_handle_per_store_file` asserts WAL mode enabled and `wal_checkpoint(TRUNCATE)` returns `busy=0` after `drop(store)`. Passes: `cargo test -p wicked-estate-store slc_001`
 
 ### 1.5 Absorbed Crates
 
