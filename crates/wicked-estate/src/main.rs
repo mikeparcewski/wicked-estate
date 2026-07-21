@@ -29,6 +29,7 @@
 //!   wicked-estate leaves                 [--json] [--db ...]
 //!   wicked-estate dead-code              [--json] [--db ...]
 //!   wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json] [--semantics] [--db ...]
+//!   wicked-estate graph-view [--limit N] [--include-tests] [--include-trivial] [--ignore <pat>] [--db ...]
 
 mod emit;
 mod scip_auto;
@@ -314,6 +315,283 @@ fn emit_cli_span(
     if let Err(e) = sink.export_spans(resource, scope, &[span]) {
         eprintln!("telemetry: {e}");
     }
+}
+
+/// Returns `true` when `file` is in a vendored-dependency directory.
+///
+/// Covers the common vendor directory conventions across ecosystems:
+///   `vendor/`, `_vendor/`, `third_party/`, `external/`, `extern/`, `deps/`
+pub fn is_vendor_file(file: &str) -> bool {
+    if file.is_empty() {
+        return false;
+    }
+    const VENDOR_DIRS: &[&str] = &[
+        "vendor",
+        "_vendor",
+        "third_party",
+        "external",
+        "extern",
+        "deps",
+    ];
+    let lower = file.to_lowercase();
+    let parts: Vec<&str> = lower.split('/').collect();
+    parts[..parts.len().saturating_sub(1)]
+        .iter()
+        .any(|seg| VENDOR_DIRS.contains(seg))
+}
+
+/// Returns `true` when `name` is a trivial/generic symbol that dominates PageRank
+/// with no useful graph signal — stdlib trait methods, universal constructors,
+/// common functional combinators, etc.
+///
+/// Pass `--include-trivial` to `graph-view` to bypass this filter.
+pub fn is_trivial_name(name: &str) -> bool {
+    // Exact lowercase match against a curated cross-language set.
+    // Rust stdlib traits + methods: covers Iterator, Option, Result, Clone, Hash, Ord, …
+    // JS/TS: constructor, toString, …   Python: __init__, __str__, …
+    const TRIVIAL: &[&str] = &[
+        // Constructors / factory
+        "new",
+        "create",
+        "build",
+        "init",
+        "default",
+        "from",
+        "into",
+        "try_from",
+        "try_into",
+        "constructor",
+        // Rust stdlib enum constructors / variants that leak into symbol tables
+        "some",
+        "none",
+        "ok",
+        "err",
+        // Universal accessor pattern
+        "get",
+        "get_mut",
+        "set",
+        "put",
+        // Rust Clone / Drop / Display / Debug / PartialEq / Hash / Ord
+        "clone",
+        "drop",
+        "fmt",
+        "eq",
+        "ne",
+        "lt",
+        "le",
+        "gt",
+        "ge",
+        "hash",
+        "partial_cmp",
+        "cmp",
+        // Conversion / borrow
+        "as_ref",
+        "as_mut",
+        "as_bytes",
+        "as_str",
+        "as_slice",
+        "as_ptr",
+        "as_mut_ptr",
+        "borrow",
+        "borrow_mut",
+        "deref",
+        "deref_mut",
+        // String / byte helpers
+        "to_string",
+        "to_owned",
+        "to_vec",
+        "into_string",
+        "into_bytes",
+        "trim",
+        "trim_start",
+        "trim_end",
+        "to_lowercase",
+        "to_uppercase",
+        "starts_with",
+        "ends_with",
+        "contains",
+        "replace",
+        "split",
+        "join",
+        "chars",
+        "bytes",
+        "len",
+        "is_empty",
+        // Iterator combinators (Rust + JS/TS + Python)
+        "iter",
+        "iter_mut",
+        "into_iter",
+        "next",
+        "map",
+        "flat_map",
+        "filter",
+        "filter_map",
+        "fold",
+        "reduce",
+        "collect",
+        "flatten",
+        "chain",
+        "zip",
+        "enumerate",
+        "any",
+        "all",
+        "find",
+        "position",
+        "count",
+        "sum",
+        "product",
+        "min",
+        "max",
+        "min_by",
+        "max_by",
+        "take",
+        "skip",
+        // Option / Result combinators
+        "map_err",
+        "and_then",
+        "or_else",
+        "unwrap",
+        "expect",
+        "unwrap_or",
+        "unwrap_or_else",
+        "ok_or",
+        "ok_or_else",
+        "transpose",
+        // Collection mutations
+        "push",
+        "pop",
+        "insert",
+        "remove",
+        "retain",
+        "clear",
+        "extend",
+        "append",
+        "drain",
+        "truncate",
+        "reserve",
+        // Async / IO helpers
+        "poll",
+        "await",
+        "flush",
+        "close",
+        "read",
+        "write",
+        "seek",
+        "send",
+        "recv",
+        "try_send",
+        "try_recv",
+        // Python dunder noise
+        "__init__",
+        "__str__",
+        "__repr__",
+        "__len__",
+        "__eq__",
+        "__hash__",
+        "__iter__",
+        "__next__",
+        "__enter__",
+        "__exit__",
+        "__getitem__",
+        "__setitem__",
+        "__delitem__",
+        "__contains__",
+        // JS/TS universal
+        "tostring",
+        "valueof",
+        "symbol_iterator",
+    ];
+    let lower = name.to_lowercase();
+    TRIVIAL.contains(&lower.as_str())
+}
+
+/// Returns `true` when `file` (repo-relative) looks like a test file.
+///
+/// Covers ~100 languages via directory-segment matching (exact, no false positives on names like
+/// "contest.ts") and filename conventions:
+///   - Directories: `test/`, `tests/`, `spec/`, `specs/`, `__tests__/`, `e2e/`, `integration/`,
+///     `acceptance/`, `fixtures/`, `testdata/`
+///   - Prefix:  `test_*`  (Python, Rust, Elixir, Erlang)
+///   - Suffix:  `*_test.ext` | `*_spec.ext` | `*_tests.ext` | `*_suite.ext`  (Go, Dart, …)
+///   - Mid-ext: `*.test.ext` | `*.spec.ext`  (JS / TS / JSX / TSX)
+///
+/// Callers that want to include test symbols should skip this predicate (pass `--include-tests`
+/// to `graph-view`).
+pub fn is_test_file(file: &str) -> bool {
+    if file.is_empty() {
+        return false;
+    }
+    let lower = file.to_lowercase();
+    let parts: Vec<&str> = lower.split('/').collect();
+    let basename = parts.last().copied().unwrap_or("");
+
+    // Exact directory-segment match — avoids "contest/" or "testutils/" false positives.
+    const TEST_DIRS: &[&str] = &[
+        "test",
+        "tests",
+        "spec",
+        "specs",
+        "__tests__",
+        "e2e",
+        "integration",
+        "acceptance",
+        "fixtures",
+        "testdata",
+    ];
+    if parts[..parts.len().saturating_sub(1)]
+        .iter()
+        .any(|seg| TEST_DIRS.contains(seg))
+    {
+        return true;
+    }
+
+    // test_ prefix: Python (test_foo.py), Rust (test_utils.rs), Elixir (test_helper.exs), …
+    if basename.starts_with("test_") {
+        return true;
+    }
+
+    // *_test.ext | *_spec.ext | *_tests.ext | *_suite.ext
+    // Splits at the last dot; checks what precedes it ends with the suffix.
+    if let Some(dot) = basename.rfind('.') {
+        let stem = &basename[..dot];
+        if stem.ends_with("_test")
+            || stem.ends_with("_spec")
+            || stem.ends_with("_tests")
+            || stem.ends_with("_suite")
+        {
+            return true;
+        }
+    }
+
+    // *.test.ext | *.spec.ext  (JS/TS: foo.test.ts, foo.spec.tsx, …)
+    basename.contains(".test.") || basename.contains(".spec.")
+}
+
+/// Returns `true` when `file` matches `pattern`.
+///
+/// Pattern rules (applied to the lowercased file path):
+///   - No `*` → substring match: `"tests/"` matches any path containing `tests/`
+///   - Leading `*` only → suffix/contains: `"*_test.go"` matches any path containing `_test.go`
+///   - Trailing `*` only → prefix: `"src/generated/*"` matches paths starting with `src/generated/`
+///   - Both → substring of the middle part after stripping prefix/suffix wildcards
+fn matches_ignore_pattern(file: &str, pattern: &str) -> bool {
+    let file_l = file.to_lowercase();
+    let pat_l = pattern.to_lowercase();
+    if !pat_l.contains('*') {
+        return file_l.contains(&pat_l);
+    }
+    let stripped_start = pat_l.strip_prefix('*').unwrap_or(&pat_l);
+    let stripped_both = stripped_start.strip_suffix('*').unwrap_or(stripped_start);
+    if pat_l.starts_with('*') && pat_l.ends_with('*') {
+        return file_l.contains(stripped_both);
+    }
+    if pat_l.starts_with('*') {
+        return file_l.contains(stripped_start.trim_end_matches('*'));
+    }
+    if pat_l.ends_with('*') {
+        return file_l.starts_with(stripped_both);
+    }
+    file_l.contains(&pat_l)
 }
 
 fn main() -> Result<()> {
@@ -922,6 +1200,179 @@ fn main() -> Result<()> {
                 t_cmd_start,
                 t_cmd_end,
             );
+        }
+        // Graph view for UI consumption — top-N code symbols by PageRank + inter-symbol edges.
+        //
+        //   wicked-estate graph-view [--limit N] [--include-tests] [--include-trivial]
+        //                            [--ignore <pat>] [--db <file>]
+        //
+        // Returns JSON { nodes: [...], edges: [...] } to stdout.
+        // Smart defaults (all opt-out):
+        //   test files hidden    → pass --include-tests to restore
+        //   trivial names hidden → pass --include-trivial to restore (get, new, len, map_err, …)
+        //   vendor dirs hidden   → always filtered; use --ignore to add more
+        //   --ignore <pat>       exclude additional file paths (repeatable; substring or *glob*)
+        // Uses open_store_ext so overlay/injected cross-repo edges are included.
+        "graph-view" => {
+            use std::collections::HashSet;
+            use wicked_estate_core::{Direction, EdgeKind, NodeKind};
+
+            let mut limit = 80usize;
+            let mut include_tests = false;
+            let mut include_trivial = false;
+            let mut ignore_patterns: Vec<String> = Vec::new();
+            {
+                let mut it = positional.iter();
+                while let Some(a) = it.next() {
+                    match a.as_str() {
+                        "--limit" => {
+                            if let Some(v) = it.next() {
+                                limit = v.parse().unwrap_or(80);
+                            }
+                        }
+                        "--include-tests" => include_tests = true,
+                        "--include-trivial" => include_trivial = true,
+                        "--ignore" => {
+                            if let Some(p) = it.next() {
+                                ignore_patterns.push(p.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            };
+
+            let store = open_store_ext(&db).map_err(to_any)?;
+            // Oversample PageRank candidates so filters don't under-deliver.
+            // Fetch 4× the requested limit (at least limit+200) so that after
+            // removing tests, trivials, external, and vendor nodes we still
+            // have `limit` meaningful symbols to return.
+            let fetch_limit = (limit * 4).max(limit + 200);
+            let top =
+                wicked_estate::important_symbols(store.as_ref(), fetch_limit).map_err(to_any)?;
+
+            // Exclude structural-only and rules-engine kinds; keep code-bearing kinds.
+            // Namespace/Synthetic/Rule*/Condition/Action/Fact are not user code symbols.
+            let excluded = [
+                NodeKind::File,
+                NodeKind::Module,
+                NodeKind::Namespace,
+                NodeKind::Import,
+                NodeKind::Constant,
+                NodeKind::Variable,
+                NodeKind::Field,
+                NodeKind::Parameter,
+                NodeKind::Synthetic,
+                NodeKind::Rule,
+                NodeKind::RuleSet,
+                NodeKind::Condition,
+                NodeKind::Action,
+                NodeKind::Fact,
+            ];
+
+            let code_nodes: Vec<&(wicked_estate_core::Node, f32)> = top
+                .iter()
+                .filter(|(n, _)| {
+                    if excluded.contains(&n.kind) {
+                        return false;
+                    }
+                    let file = &n.location.file;
+                    // Drop external/stdlib nodes — no repo-local file or absolute path.
+                    if file.is_empty() || file.starts_with('/') {
+                        return false;
+                    }
+                    // Drop JS/TS package deps and generic vendor dirs.
+                    if file.starts_with("node_modules/") || is_vendor_file(file) {
+                        return false;
+                    }
+                    // Drop test files unless caller opted in.
+                    if !include_tests && is_test_file(file) {
+                        return false;
+                    }
+                    // Drop trivial generic names (get, new, len, map_err, …) unless opted in.
+                    if !include_trivial && is_trivial_name(&n.name) {
+                        return false;
+                    }
+                    // Drop caller-specified ignore patterns.
+                    if ignore_patterns
+                        .iter()
+                        .any(|p| matches_ignore_pattern(file, p))
+                    {
+                        return false;
+                    }
+                    true
+                })
+                .take(limit)
+                .collect();
+
+            let node_ids: HashSet<&str> =
+                code_nodes.iter().map(|(n, _)| n.symbol.as_str()).collect();
+
+            // Single-pass: collect outgoing edges, out-degree, and in-degree simultaneously.
+            // out_deg_map[X] = number of Calls/Imports edges leaving X (full graph, from Dependencies).
+            // in_deg_map[Y]  = number of top-N nodes with a Calls/Imports edge pointing to Y
+            //                  (within-set in-degree, appropriate for layout sizing in the UI).
+            // This halves store calls vs. a separate per-node Dependents query per node.
+            let mut edges_json: Vec<serde_json::Value> = Vec::new();
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut out_deg_map: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            let mut in_deg_map: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+
+            for (node, _) in &top {
+                if !node_ids.contains(node.symbol.as_str()) {
+                    continue;
+                }
+                let nbrs = store
+                    .neighbors(&node.symbol, Direction::Dependencies)
+                    .map_err(to_any)?;
+                let out_deg = nbrs
+                    .iter()
+                    .filter(|e| matches!(e.kind, EdgeKind::Calls | EdgeKind::Imports))
+                    .count();
+                out_deg_map.insert(node.symbol.as_str().to_string(), out_deg);
+
+                for e in &nbrs {
+                    if matches!(e.kind, EdgeKind::Calls | EdgeKind::Imports)
+                        && node_ids.contains(e.target.as_str())
+                    {
+                        *in_deg_map.entry(e.target.as_str().to_string()).or_insert(0) += 1;
+                        let key = format!("{}→{}", e.source.as_str(), e.target.as_str());
+                        if seen.insert(key) {
+                            edges_json.push(serde_json::json!({
+                                "src": e.source.as_str(),
+                                "tgt": e.target.as_str(),
+                            }));
+                        }
+                    }
+                }
+            }
+
+            let nodes_json: Vec<serde_json::Value> = code_nodes
+                .iter()
+                .map(|(n, score)| {
+                    let in_deg = in_deg_map.get(n.symbol.as_str()).copied().unwrap_or(0);
+                    let out_deg = out_deg_map.get(n.symbol.as_str()).copied().unwrap_or(0);
+                    serde_json::json!({
+                        "id":     n.symbol.as_str(),
+                        "name":   n.name,
+                        "kind":   &n.kind,
+                        "file":   n.location.file,
+                        "lang":   n.language.as_str(),
+                        "score":  score,
+                        "inDeg":  in_deg,
+                        "outDeg": out_deg,
+                    })
+                })
+                .collect();
+
+            let out = serde_json::to_string(&serde_json::json!({
+                "nodes": nodes_json,
+                "edges": edges_json,
+            }))
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            println!("{out}");
         }
         // Bulk SOURCE bundle — full bodies for an entire file / cluster / symbol-set in one call.
         //
