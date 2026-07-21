@@ -1323,25 +1323,26 @@ fn main() -> Result<()> {
                 if !node_ids.contains(node.symbol.as_str()) {
                     continue;
                 }
-                if let Ok(nbrs) = store.neighbors(&node.symbol, Direction::Dependencies) {
-                    let out_deg = nbrs
-                        .iter()
-                        .filter(|e| matches!(e.kind, EdgeKind::Calls | EdgeKind::Imports))
-                        .count();
-                    out_deg_map.insert(node.symbol.as_str().to_string(), out_deg);
+                let nbrs = store
+                    .neighbors(&node.symbol, Direction::Dependencies)
+                    .map_err(to_any)?;
+                let out_deg = nbrs
+                    .iter()
+                    .filter(|e| matches!(e.kind, EdgeKind::Calls | EdgeKind::Imports))
+                    .count();
+                out_deg_map.insert(node.symbol.as_str().to_string(), out_deg);
 
-                    for e in &nbrs {
-                        if matches!(e.kind, EdgeKind::Calls | EdgeKind::Imports)
-                            && node_ids.contains(e.target.as_str())
-                        {
-                            *in_deg_map.entry(e.target.as_str().to_string()).or_insert(0) += 1;
-                            let key = format!("{}→{}", e.source.as_str(), e.target.as_str());
-                            if seen.insert(key) {
-                                edges_json.push(serde_json::json!({
-                                    "src": e.source.as_str(),
-                                    "tgt": e.target.as_str(),
-                                }));
-                            }
+                for e in &nbrs {
+                    if matches!(e.kind, EdgeKind::Calls | EdgeKind::Imports)
+                        && node_ids.contains(e.target.as_str())
+                    {
+                        *in_deg_map.entry(e.target.as_str().to_string()).or_insert(0) += 1;
+                        let key = format!("{}→{}", e.source.as_str(), e.target.as_str());
+                        if seen.insert(key) {
+                            edges_json.push(serde_json::json!({
+                                "src": e.source.as_str(),
+                                "tgt": e.target.as_str(),
+                            }));
                         }
                     }
                 }
