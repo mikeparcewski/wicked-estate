@@ -1,5 +1,12 @@
 # wicked-estate — unified MCP foundation (v0.13.1)
 
+## Contributor wiki
+
+Contributor wiki: ./wiki
+
+Invariants, contracts, and extension recipes live there. This pointer is
+the machine-readable anchor agents grep for.
+
 Rust MCP server: **code graph + memory + knowledge** in a single binary, 23 tools across 3 domains.
 Turns a repo into a queryable graph (symbols, calls, imports, edges injected by event bus and commands)
 and pairs it with a semantic memory store and a wiki/document knowledge store — all local-first,

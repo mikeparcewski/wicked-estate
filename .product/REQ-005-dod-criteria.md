@@ -64,8 +64,8 @@ All items in this level are verified by the engineering team during the Build ph
 - [x] Single-writer constraint is enforced per store: no two code paths hold a write connection to the same file simultaneously
 - [x] Store handles are not duplicated: `XedgeStore` is constructed exactly once and `Arc`-shared across all tools that require it
 - [x] Server shuts down cleanly (all store connections closed, WAL checkpointed) on SIGTERM and SIGINT
-- [x] * Integration test exists asserting that `SqliteStore` uses WAL mode and releases all connection handles on drop (no dangling handles block a WAL checkpoint after the store is closed)
-  - Evidence: `crates/wicked-estate-store/tests/connection_lifecycle.rs` — `slc_001_single_connection_handle_per_store_file` asserts WAL mode enabled and `wal_checkpoint(TRUNCATE)` returns `busy=0` after `drop(store)`. Passes: `cargo test -p wicked-estate-store slc_001`
+- [x] * Integration test exists asserting that `SqliteStore` uses WAL mode and that after `drop(store)`, no store-owned connection blocks a WAL checkpoint (`wal_checkpoint(TRUNCATE)` returns `busy=0`)
+  - Evidence: `crates/wicked-estate-store/tests/connection_lifecycle.rs` — `slc_001_wal_mode_and_clean_drop` asserts WAL mode enabled and `wal_checkpoint(TRUNCATE)` returns `busy=0` after `drop(store)`. Passes: `cargo test -p wicked-estate-store slc_001`
 
 ### 1.5 Absorbed Crates
 
@@ -192,7 +192,7 @@ All items in this level are executed after Levels 1 and 2 are fully checked. Thi
 - [x] Any skill registries or agent definitions that reference `wicked-memory-mcp` or `wicked-knowledge-mcp` as a command updated to reference `wicked-estate`
   - Verified: no active skill registries or agent definitions reference `wicked-memory-mcp` or `wicked-knowledge-mcp` as a command. References found only in historical design recon docs and conformance schema provenance metadata (`"captured_from": "wicked-memory-mcp-0.12.1"`) — these are read-only historical records, not command references.
 - [x] wicked-brain (JS) configuration updated to point to `wicked-estate` if it was previously calling `wicked-memory-mcp` or `wicked-knowledge-mcp` directly (or a ISSUE filed for the v0.2 migration track — see ASSM-003)
-  - Verified: `wicked-brain/skills/wicked-brain-context/hooks/` config files contain no references to `wicked-memory-mcp` or `wicked-knowledge-mcp`. The brain daemon config does not call either old binary. No update required.
+  - Verified in the `wicked-brain` repository (external to this workspace): skill hook config files under `skills/wicked-brain-context/hooks/` and the brain daemon config contain no references to `wicked-memory-mcp` or `wicked-knowledge-mcp`. Evidence: manual search in `mikeparcewski/wicked-brain` repo at HEAD. No update required.
 
 ---
 
