@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.14.0] — 2026-07-27
+
+### Added
+- `graph-view` CLI subcommand — symbol-level code graph rendered via the estate service
+- SLC-001 store connection-lifecycle integration test (WAL mode + clean drop), hardened through three review rounds
+
+### Changed
+- DoD criteria checked off against existing evidence artifacts (docs); site astro 6 → 7
+
 ## [0.13.0] — 2026-07-06
 
 ### Added
