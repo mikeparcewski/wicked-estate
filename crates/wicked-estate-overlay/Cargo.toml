@@ -8,8 +8,8 @@ repository.workspace = true
 description = "Lane X — the xedge cross-store overlay + OverlayReader: GraphRead that unions a home engine with foreign engines at read time (the cross-store about-arm differentiator engine)."
 
 [dependencies]
-wicked-estate-core = { path = "../wicked-estate-core", version = "0.14.0" }
-wicked-estate-store = { path = "../wicked-estate-store", version = "0.14.0", features = ["pool"] }
+wicked-estate-core = { path = "../wicked-estate-core", version = "0.14.1" }
+wicked-estate-store = { path = "../wicked-estate-store", version = "0.14.1", features = ["pool"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 

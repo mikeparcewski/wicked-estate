@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.14.1] — 2026-07-29
+
+### Fixed
+- `graph-view` returns a CONNECTED slice: seed with the top-ranked core, expand breadth-first along Calls/Imports edges (same filters, one 6-expansion budget per frontier node), backfill from the ranking — a plain top-N-by-PageRank slice rendered as scattered islands (observed: 51 nodes / 23 edges; now 50 / 63). `--limit 0` returns an empty slice instead of panicking.
+
 ## [0.14.0] — 2026-07-27
 
 ### Added
