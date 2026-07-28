@@ -1310,6 +1310,11 @@ fn main() -> Result<()> {
             // core, then EXPAND along Calls/Imports edges (both directions, same filters,
             // breadth-first, capped per node) until `limit`, so the returned slice is a
             // readable neighbourhood. Backfill from the ranking if expansion runs dry.
+            if limit == 0 {
+                // `--limit 0` is a valid ask for an empty slice — and `.clamp(1, 0)` panics.
+                println!("{}", serde_json::json!({ "nodes": [], "edges": [] }));
+                return Ok(());
+            }
             let seed_count = (limit / 3).clamp(1, limit);
             let mut selected: Vec<wicked_estate_core::Node> = Vec::new();
             let mut sel_ids: HashSet<String> = HashSet::new();
@@ -1323,9 +1328,10 @@ fn main() -> Result<()> {
             while selected.len() < limit && !frontier.is_empty() {
                 let mut next: Vec<wicked_estate_core::SymbolId> = Vec::new();
                 'expand: for sym in &frontier {
+                    // One budget across BOTH directions — 6 expansions per frontier node total.
+                    let mut taken = 0usize;
                     for dir in [Direction::Dependencies, Direction::Dependents] {
                         let nbrs = store.neighbors(sym, dir).map_err(to_any)?;
-                        let mut taken = 0usize;
                         for e in nbrs
                             .iter()
                             .filter(|e| matches!(e.kind, EdgeKind::Calls | EdgeKind::Imports))
