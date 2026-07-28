@@ -1096,13 +1096,16 @@ fn main() -> Result<()> {
                 .first()
                 .context("usage: wicked-estate blast-radius <name>")?;
             let store = open_store_ext(&db).map_err(to_any)?;
-            maybe_print_staleness(store.as_ref(), &db);
-            maybe_warn_version_mismatch(store.as_ref(), &db);
+            let json_out = positional.iter().any(|a| a == "--json");
+            // Machine output must be exactly one JSON document — notices would corrupt it.
+            if !json_out {
+                maybe_print_staleness(store.as_ref(), &db);
+                maybe_warn_version_mismatch(store.as_ref(), &db);
+            }
             let t_cmd_start = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos() as u64;
-            let json_out = positional.iter().any(|a| a == "--json");
             let deps = wicked_estate::blast_radius_by_name(&*store, name, 12).map_err(to_any)?;
             let unresolved = store.unresolved_refs_for_name(name).map_err(to_any)?.len();
             let t_cmd_end = std::time::SystemTime::now()
@@ -1122,7 +1125,7 @@ fn main() -> Result<()> {
                             "name": n.name,
                             "kind": &n.kind,
                             "file": n.location.file,
-                            "line": n.location.span.start_line,
+                            "line": n.location.span.start_line + 1,
                         }))
                         .collect::<Vec<_>>(),
                     "unresolved": unresolved,
@@ -1256,11 +1259,10 @@ fn main() -> Result<()> {
                                 limit = v.parse().unwrap_or(80);
                             }
                         }
-                        "--focus" => {
-                            if let Some(v) = it.next() {
-                                focus = Some(v.clone());
-                            }
-                        }
+                        "--focus" => match it.next() {
+                            Some(v) => focus = Some(v.clone()),
+                            None => anyhow::bail!("graph-view --focus requires a value"),
+                        },
                         "--include-tests" => include_tests = true,
                         "--include-trivial" => include_trivial = true,
                         "--ignore" => {
@@ -1368,7 +1370,7 @@ fn main() -> Result<()> {
                 if seeds.is_empty() {
                     anyhow::bail!("graph-view --focus: no symbol matches '{f}'");
                 }
-                for n in seeds {
+                for n in seeds.into_iter().take(limit) {
                     if sel_ids.insert(n.symbol.as_str().to_string()) {
                         selected.push(n);
                     }
