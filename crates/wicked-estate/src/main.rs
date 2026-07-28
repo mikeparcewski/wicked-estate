@@ -1270,43 +1270,105 @@ fn main() -> Result<()> {
                 NodeKind::Fact,
             ];
 
-            let code_nodes: Vec<&(wicked_estate_core::Node, f32)> = top
+            // Shared node filter (kind exclusion + external/vendor/test/trivial/ignore).
+            let passes = |n: &wicked_estate_core::Node| -> bool {
+                if excluded.contains(&n.kind) {
+                    return false;
+                }
+                let file = &n.location.file;
+                if file.is_empty() || file.starts_with('/') {
+                    return false;
+                }
+                if file.starts_with("node_modules/") || is_vendor_file(file) {
+                    return false;
+                }
+                if !include_tests && is_test_file(file) {
+                    return false;
+                }
+                if !include_trivial && is_trivial_name(&n.name) {
+                    return false;
+                }
+                if ignore_patterns
+                    .iter()
+                    .any(|p| matches_ignore_pattern(file, p))
+                {
+                    return false;
+                }
+                true
+            };
+
+            let ranked: Vec<&(wicked_estate_core::Node, f32)> =
+                top.iter().filter(|(n, _)| passes(n)).collect();
+            let rank_of: std::collections::HashMap<String, f32> = ranked
                 .iter()
-                .filter(|(n, _)| {
-                    if excluded.contains(&n.kind) {
-                        return false;
-                    }
-                    let file = &n.location.file;
-                    // Drop external/stdlib nodes — no repo-local file or absolute path.
-                    if file.is_empty() || file.starts_with('/') {
-                        return false;
-                    }
-                    // Drop JS/TS package deps and generic vendor dirs.
-                    if file.starts_with("node_modules/") || is_vendor_file(file) {
-                        return false;
-                    }
-                    // Drop test files unless caller opted in.
-                    if !include_tests && is_test_file(file) {
-                        return false;
-                    }
-                    // Drop trivial generic names (get, new, len, map_err, …) unless opted in.
-                    if !include_trivial && is_trivial_name(&n.name) {
-                        return false;
-                    }
-                    // Drop caller-specified ignore patterns.
-                    if ignore_patterns
-                        .iter()
-                        .any(|p| matches_ignore_pattern(file, p))
-                    {
-                        return false;
-                    }
-                    true
-                })
-                .take(limit)
+                .map(|(n, s)| (n.symbol.as_str().to_string(), *s))
                 .collect();
 
-            let node_ids: HashSet<&str> =
-                code_nodes.iter().map(|(n, _)| n.symbol.as_str()).collect();
+            // CONNECTED SLICE: a plain top-N-by-PageRank slice renders as scattered islands —
+            // the globally most-important symbols in a large graph are rarely each other's
+            // neighbours, so almost no edges fall within the set. Seed with the top-ranked
+            // core, then EXPAND along Calls/Imports edges (both directions, same filters,
+            // breadth-first, capped per node) until `limit`, so the returned slice is a
+            // readable neighbourhood. Backfill from the ranking if expansion runs dry.
+            let seed_count = (limit / 3).clamp(1, limit);
+            let mut selected: Vec<wicked_estate_core::Node> = Vec::new();
+            let mut sel_ids: HashSet<String> = HashSet::new();
+            for (n, _) in ranked.iter().take(seed_count) {
+                if sel_ids.insert(n.symbol.as_str().to_string()) {
+                    selected.push((*n).clone());
+                }
+            }
+            let mut frontier: Vec<wicked_estate_core::SymbolId> =
+                selected.iter().map(|n| n.symbol.clone()).collect();
+            while selected.len() < limit && !frontier.is_empty() {
+                let mut next: Vec<wicked_estate_core::SymbolId> = Vec::new();
+                'expand: for sym in &frontier {
+                    for dir in [Direction::Dependencies, Direction::Dependents] {
+                        let nbrs = store.neighbors(sym, dir).map_err(to_any)?;
+                        let mut taken = 0usize;
+                        for e in nbrs
+                            .iter()
+                            .filter(|e| matches!(e.kind, EdgeKind::Calls | EdgeKind::Imports))
+                        {
+                            if taken >= 6 {
+                                break;
+                            }
+                            let other = if matches!(dir, Direction::Dependencies) {
+                                &e.target
+                            } else {
+                                &e.source
+                            };
+                            if sel_ids.contains(other.as_str()) {
+                                continue;
+                            }
+                            let Ok(Some(n)) = store.get_node(other) else {
+                                continue;
+                            };
+                            if !passes(&n) {
+                                continue;
+                            }
+                            sel_ids.insert(other.as_str().to_string());
+                            selected.push(n);
+                            next.push(other.clone());
+                            taken += 1;
+                            if selected.len() >= limit {
+                                break 'expand;
+                            }
+                        }
+                    }
+                }
+                frontier = next;
+            }
+            for (n, _) in ranked.iter() {
+                if selected.len() >= limit {
+                    break;
+                }
+                if sel_ids.insert(n.symbol.as_str().to_string()) {
+                    selected.push((*n).clone());
+                }
+            }
+
+            let node_ids: HashSet<&str> = selected.iter().map(|n| n.symbol.as_str()).collect();
 
             // Single-pass: collect outgoing edges, out-degree, and in-degree simultaneously.
             // out_deg_map[X] = number of Calls/Imports edges leaving X (full graph, from Dependencies).
@@ -1320,10 +1382,7 @@ fn main() -> Result<()> {
             let mut in_deg_map: std::collections::HashMap<String, usize> =
                 std::collections::HashMap::new();
 
-            for (node, _) in &top {
-                if !node_ids.contains(node.symbol.as_str()) {
-                    continue;
-                }
+            for node in &selected {
                 let nbrs = store
                     .neighbors(&node.symbol, Direction::Dependencies)
                     .map_err(to_any)?;
@@ -1349,9 +1408,9 @@ fn main() -> Result<()> {
                 }
             }
 
-            let nodes_json: Vec<serde_json::Value> = code_nodes
+            let nodes_json: Vec<serde_json::Value> = selected
                 .iter()
-                .map(|(n, score)| {
+                .map(|n| {
                     let in_deg = in_deg_map.get(n.symbol.as_str()).copied().unwrap_or(0);
                     let out_deg = out_deg_map.get(n.symbol.as_str()).copied().unwrap_or(0);
                     serde_json::json!({
@@ -1360,7 +1419,8 @@ fn main() -> Result<()> {
                         "kind":   &n.kind,
                         "file":   n.location.file,
                         "lang":   n.language.as_str(),
-                        "score":  score,
+                        // Expansion nodes are unranked → 0.0 (sizing treats them as leaf-weight).
+                        "score":  rank_of.get(n.symbol.as_str()).copied().unwrap_or(0.0),
                         "inDeg":  in_deg,
                         "outDeg": out_deg,
                     })
