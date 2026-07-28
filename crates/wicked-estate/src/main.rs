@@ -1096,8 +1096,12 @@ fn main() -> Result<()> {
                 .first()
                 .context("usage: wicked-estate blast-radius <name>")?;
             let store = open_store_ext(&db).map_err(to_any)?;
-            maybe_print_staleness(store.as_ref(), &db);
-            maybe_warn_version_mismatch(store.as_ref(), &db);
+            let json_out = positional.iter().any(|a| a == "--json");
+            // Machine output must be exactly one JSON document — notices would corrupt it.
+            if !json_out {
+                maybe_print_staleness(store.as_ref(), &db);
+                maybe_warn_version_mismatch(store.as_ref(), &db);
+            }
             let t_cmd_start = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -1108,7 +1112,29 @@ fn main() -> Result<()> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos() as u64;
-            if deps.is_empty() {
+            if json_out {
+                // Machine consumers (wicked-crew studio) get the same honesty contract as the
+                // text path: dependents PLUS the unresolved count — absence of dependents must
+                // never silently read as "safe to change".
+                let out = serde_json::json!({
+                    "target": name,
+                    "dependents": deps
+                        .iter()
+                        .map(|n| serde_json::json!({
+                            "id": n.symbol.as_str(),
+                            "name": n.name,
+                            "kind": &n.kind,
+                            "file": n.location.file,
+                            "line": n.location.span.start_line + 1,
+                        }))
+                        .collect::<Vec<_>>(),
+                    "unresolved": unresolved,
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string(&out).map_err(|e| anyhow::anyhow!(e))?
+                );
+            } else if deps.is_empty() {
                 println!("no resolved dependents for '{name}' (symbol may not be indexed)");
             } else {
                 println!("{} symbol(s) depend on '{name}':", deps.len());
@@ -1117,11 +1143,13 @@ fn main() -> Result<()> {
                 }
             }
             // Honest coverage — never let the absence of dependents read as "safe to change".
-            println!(
-                "coverage: {} resolved dependent(s); {unresolved} unresolved call(s) reference \
-                 '{name}' — best-effort static resolution, MAY be incomplete (precise tier pending)",
-                deps.len()
-            );
+            if !json_out {
+                println!(
+                    "coverage: {} resolved dependent(s); {unresolved} unresolved call(s) reference \
+                     '{name}' — best-effort static resolution, MAY be incomplete (precise tier pending)",
+                    deps.len()
+                );
+            }
             emit_cli_span(
                 &otel_sink,
                 &otel_resource,
@@ -1220,6 +1248,7 @@ fn main() -> Result<()> {
             let mut limit = 80usize;
             let mut include_tests = false;
             let mut include_trivial = false;
+            let mut focus: Option<String> = None;
             let mut ignore_patterns: Vec<String> = Vec::new();
             {
                 let mut it = positional.iter();
@@ -1230,6 +1259,10 @@ fn main() -> Result<()> {
                                 limit = v.parse().unwrap_or(80);
                             }
                         }
+                        "--focus" => match it.next() {
+                            Some(v) => focus = Some(v.clone()),
+                            None => anyhow::bail!("graph-view --focus requires a value"),
+                        },
                         "--include-tests" => include_tests = true,
                         "--include-trivial" => include_trivial = true,
                         "--ignore" => {
@@ -1315,12 +1348,39 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::json!({ "nodes": [], "edges": [] }));
                 return Ok(());
             }
-            let seed_count = (limit / 3).clamp(1, limit);
             let mut selected: Vec<wicked_estate_core::Node> = Vec::new();
             let mut sel_ids: HashSet<String> = HashSet::new();
-            for (n, _) in ranked.iter().take(seed_count) {
-                if sel_ids.insert(n.symbol.as_str().to_string()) {
-                    selected.push((*n).clone());
+            if let Some(f) = &focus {
+                // FOCUS (ego-graph) mode — the navigation primitive: seed with ONE symbol
+                // (exact SymbolId, else name matches, capped) and expand its neighbourhood.
+                // The focus seeds bypass the display filters (you asked for this node);
+                // filters still gate what the expansion pulls in.
+                let sid: wicked_estate_core::SymbolId = f.clone().into();
+                let mut seeds: Vec<wicked_estate_core::Node> = Vec::new();
+                if let Ok(Some(n)) = store.get_node(&sid) {
+                    seeds.push(n);
+                } else {
+                    let q = wicked_estate_core::SymbolQuery {
+                        exact_name: Some(f.clone()),
+                        limit: Some(5),
+                        ..Default::default()
+                    };
+                    seeds.extend(store.find_symbols(&q).map_err(to_any)?);
+                }
+                if seeds.is_empty() {
+                    anyhow::bail!("graph-view --focus: no symbol matches '{f}'");
+                }
+                for n in seeds.into_iter().take(limit) {
+                    if sel_ids.insert(n.symbol.as_str().to_string()) {
+                        selected.push(n);
+                    }
+                }
+            } else {
+                let seed_count = (limit / 3).clamp(1, limit);
+                for (n, _) in ranked.iter().take(seed_count) {
+                    if sel_ids.insert(n.symbol.as_str().to_string()) {
+                        selected.push((*n).clone());
+                    }
                 }
             }
             let mut frontier: Vec<wicked_estate_core::SymbolId> =
@@ -1365,12 +1425,14 @@ fn main() -> Result<()> {
                 }
                 frontier = next;
             }
-            for (n, _) in ranked.iter() {
-                if selected.len() >= limit {
-                    break;
-                }
-                if sel_ids.insert(n.symbol.as_str().to_string()) {
-                    selected.push((*n).clone());
+            if focus.is_none() {
+                for (n, _) in ranked.iter() {
+                    if selected.len() >= limit {
+                        break;
+                    }
+                    if sel_ids.insert(n.symbol.as_str().to_string()) {
+                        selected.push((*n).clone());
+                    }
                 }
             }
 
