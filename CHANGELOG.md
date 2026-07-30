@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.14.2] — 2026-07-30
+
+### Added
+- `blast-radius --json` — machine-readable impact: target, dependents (id/name/kind/file/1-based line), and the honesty contract's unresolved-call count. JSON mode suppresses staleness/version notices so stdout is exactly one document.
+- `graph-view --focus <symbol>` — seed the connected slice at a named symbol (exact-name match, up to the display limit); `--focus` without a value errors instead of silently no-oping.
+
 ## [0.14.1] — 2026-07-29
 
 ### Fixed
