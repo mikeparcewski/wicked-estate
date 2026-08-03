@@ -430,6 +430,12 @@ impl<H: GraphRead + Sync + ?Sized> GraphRead for OverlayReader<'_, H> {
         self.home.file_digest(file)
     }
 
+    // #10b indexed_files — HOME-ONLY, for the same reason as #10: digests are written by the home
+    // engine's indexer. Unioning the overlay in would hand the delete-sweep paths it never indexed.
+    fn indexed_files(&self) -> Result<Vec<String>> {
+        self.home.indexed_files()
+    }
+
     // #11 file_git_sha — HOME-ONLY (home git provenance).
     fn file_git_sha(&self, file: &str) -> Result<Option<String>> {
         self.home.file_git_sha(file)
