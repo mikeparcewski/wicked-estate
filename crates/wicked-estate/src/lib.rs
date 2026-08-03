@@ -255,9 +255,11 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
     let files = collect_source_files(root);
 
     // ── Derive the set of previously-indexed file paths ─────────────────────────────────────
-    // The digest table — every path a prior `index_path` wrote via `set_file_digest`, and nothing
-    // else. `remove_file` drops nodes and the digest entry atomically, so a path removed last run
-    // does not reappear here.
+    // Every path a prior `index_path` recorded through a file-writing call — `set_file_digest` or
+    // `set_file_content` — and nothing else. Both count: this indexer issues both for every file it
+    // takes, and scoping to digests alone would miss a path whose content was stored but whose
+    // digest write did not land. `remove_file` drops nodes and the file row atomically, so a path
+    // removed last run does not reappear here.
     //
     // This USED to read `all_nodes()`, mapping each node's `location.file`. That answers a
     // different question: not "what did I index?" but "what is in this store?" — and the sweep

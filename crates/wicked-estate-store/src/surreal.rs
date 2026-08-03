@@ -625,15 +625,26 @@ impl GraphRead for SurrealStore {
     fn indexed_files(&self) -> Result<Vec<String>> {
         let db = self.db.clone();
         self.rt.block_on(async move {
+            // Both file-writing calls. This store splits them across two tables —
+            // `set_file_digest` writes `file_meta`, `set_file_content` writes `file_content` and
+            // never creates a `file_meta` row — so reading only `file_meta` would hide every
+            // content-recorded path from the delete-sweep.
+            //
             // Typed field projection rather than the `surrealdb::Value` walk the rest of this
             // module uses: that path does not name a type in surrealdb 3 and every one of its 25
-            // sites here fails to compile. `take((0, "path"))` deserialises one named column of
-            // statement 0 straight into `Vec<String>`, which is exactly the shape wanted.
-            db.query("SELECT path FROM file_meta")
+            // sites here fails to compile. `take((n, "path"))` deserialises one named column of
+            // statement `n` straight into `Vec<String>`, which is exactly the shape wanted.
+            let mut res = db
+                .query("SELECT path FROM file_meta; SELECT path FROM file_content")
                 .await
-                .map_err(se)?
+                .map_err(se)?;
+            let mut out: HashSet<String> = res
                 .take::<Vec<String>>((0, "path"))
-                .map_err(se)
+                .map_err(se)?
+                .into_iter()
+                .collect();
+            out.extend(res.take::<Vec<String>>((1, "path")).map_err(se)?);
+            Ok(out.into_iter().collect())
         })
     }
 

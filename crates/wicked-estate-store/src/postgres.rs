@@ -1238,9 +1238,13 @@ impl GraphRead for PostgresStore {
             let rows = sqlx::query("SELECT path FROM files")
                 .fetch_all(&self.pool)
                 .await?;
-            Ok::<Vec<String>, sqlx::Error>(
-                rows.iter().filter_map(|r| r.try_get("path").ok()).collect(),
-            )
+            // `?`, not `.ok()`. A dropped row here does not fail loudly — it silently shrinks the
+            // "previously indexed" set, and the caller reads that as "this path was never indexed",
+            // so a file deleted from disk is never swept. A decode failure must surface as an error,
+            // not as a quietly incomplete answer.
+            rows.iter()
+                .map(|r| r.try_get::<String, _>("path"))
+                .collect::<std::result::Result<Vec<String>, sqlx::Error>>()
         })
         .map_err(st)
     }

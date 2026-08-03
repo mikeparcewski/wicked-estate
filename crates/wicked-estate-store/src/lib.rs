@@ -670,7 +670,13 @@ impl GraphRead for MemStore {
     }
 
     fn indexed_files(&self) -> Result<Vec<String>> {
-        Ok(self.file_digests.keys().cloned().collect())
+        // Both file-writing calls, not just `set_file_digest`. `set_file_content` records a path in
+        // `file_git_shas` and never touches `file_digests`, so a digest-only answer would hide
+        // content-recorded paths from the delete-sweep — the mirror image of `SqliteStore`, whose
+        // single `files` table is written by both calls. Union keeps the backends interchangeable.
+        let mut out: HashSet<String> = self.file_digests.keys().cloned().collect();
+        out.extend(self.file_git_shas.keys().cloned());
+        Ok(out.into_iter().collect())
     }
 
     fn file_digest(&self, file: &str) -> Result<Option<String>> {

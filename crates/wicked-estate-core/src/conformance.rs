@@ -440,6 +440,19 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
         "a path with a stored digest must be reported; got {indexed:?}"
     );
 
+    // BOTH file-writing calls count, not just `set_file_digest`. The backends disagreed on this:
+    // `SqliteStore` keeps one `files` table that both calls write, while `MemStore` and
+    // `SurrealStore` route content to a separate map/table. A content-recorded path invisible here
+    // is never considered by the delete-sweep, so it lingers forever after being deleted on disk.
+    store
+        .set_file_content("src/content_only.rs", "pub fn only_content() {}\n")
+        .expect("set_file_content");
+    let indexed = store.indexed_files().expect("indexed_files after content");
+    assert!(
+        indexed.contains(&"src/content_only.rs".to_string()),
+        "a path recorded via set_file_content must be reported too; got {indexed:?}"
+    );
+
     // A node whose location was never written through any file-writing call. This is the exact
     // shape of the rows that were destroyed, and it must be invisible here.
     let foreign_path = "agent_session/conformance-1";
