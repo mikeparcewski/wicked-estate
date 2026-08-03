@@ -1233,6 +1233,18 @@ impl GraphRead for PostgresStore {
         .map_err(st)
     }
 
+    fn indexed_files(&self) -> Result<Vec<String>> {
+        rt_block(async {
+            let rows = sqlx::query("SELECT path FROM files")
+                .fetch_all(&self.pool)
+                .await?;
+            Ok::<Vec<String>, sqlx::Error>(
+                rows.iter().filter_map(|r| r.try_get("path").ok()).collect(),
+            )
+        })
+        .map_err(st)
+    }
+
     fn file_digest(&self, file: &str) -> Result<Option<String>> {
         rt_block(async {
             let row: Option<sqlx::postgres::PgRow> =

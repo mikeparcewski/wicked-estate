@@ -2052,6 +2052,13 @@ impl GraphRead for SqliteStore {
         Ok(out)
     }
 
+    fn indexed_files(&self) -> Result<Vec<String>> {
+        // Delegates to the inherent method of the same name, which the incremental CLI already
+        // calls directly; the trait method exists so `index_path` — which sees a `dyn` store — can
+        // reach the same rows (FINDING-067).
+        SqliteStore::indexed_files(self)
+    }
+
     fn file_digest(&self, file: &str) -> Result<Option<String>> {
         let digest: Option<String> = self
             .conn

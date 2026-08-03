@@ -142,6 +142,33 @@ pub trait GraphRead: Send {
     fn unresolved_refs_for_name(&self, name: &str) -> Result<Vec<UnresolvedRef>>;
     /// The stored content digest for `file`, if indexed (incremental change detection). (Wave 2.6)
     fn file_digest(&self, file: &str) -> Result<Option<String>>;
+    /// Every path THIS INDEXER recorded — the authoritative record of what a prior `index_path` run
+    /// put in the store, and nothing else.
+    ///
+    /// The contract is about PROVENANCE, not about which column was written: a path belongs here iff
+    /// it reached the store through a file-writing call ([`GraphWrite::set_file_digest`] or
+    /// [`GraphWrite::set_file_content`], both indexer-only). It must NEVER appear merely because
+    /// some node's `location.file` names it. `SqliteStore` backs this with `SELECT path FROM files`,
+    /// whose rows only those two calls create — so content-stored paths are included even while
+    /// their `digest` column is still `''`, and that is correct: the indexer wrote them.
+    ///
+    /// This exists so the incremental delete-sweep has a source of truth it actually owns. The sweep
+    /// removes "previously indexed but no longer on disk"; deriving that set from `all_nodes()`
+    /// instead answers a different question — "every node in the store" — and those two sets are
+    /// equal only in a store nothing else writes to.
+    ///
+    /// They were not equal in production. A store shared with an orchestrator held its operational
+    /// domain objects as nodes with synthetic `location.file` values (`agent_session/<id>`,
+    /// `work_unit/<id>`, `validator_vault/<pin>`, `repo_entry/<id>`). Indexing one repo subdirectory
+    /// into that store classified all 833 of them as deleted source files and `remove_file`'d every
+    /// one — sessions, work units, workflows, the validator vault, the policy set and the repo
+    /// registration, in a single transaction, including the run that triggered the index
+    /// (FINDING-067). A digest row is only ever written by [`GraphWrite::set_file_digest`] from the
+    /// indexer, so scoping the sweep to it cannot reach a node the indexer did not create.
+    ///
+    /// Order is unspecified. A path here need not still exist on disk — that is precisely what the
+    /// caller is testing for.
+    fn indexed_files(&self) -> Result<Vec<String>>;
     /// The git blob SHA recorded for `file` (`git hash-object`), if the repo was a git checkout.
     /// Content-addressed file-version id; correlates the graph to git history. (Wave 7 — live brain)
     fn file_git_sha(&self, file: &str) -> Result<Option<String>>;

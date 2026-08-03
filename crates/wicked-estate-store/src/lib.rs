@@ -669,6 +669,10 @@ impl GraphRead for MemStore {
             .collect())
     }
 
+    fn indexed_files(&self) -> Result<Vec<String>> {
+        Ok(self.file_digests.keys().cloned().collect())
+    }
+
     fn file_digest(&self, file: &str) -> Result<Option<String>> {
         Ok(self.file_digests.get(file).cloned())
     }

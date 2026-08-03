@@ -115,6 +115,9 @@ impl GraphRead for OverlayMemStore {
     fn file_digest(&self, file: &str) -> Result<Option<String>> {
         self.overlay().file_digest(file)
     }
+    fn indexed_files(&self) -> Result<Vec<String>> {
+        self.overlay().indexed_files()
+    }
     fn file_git_sha(&self, file: &str) -> Result<Option<String>> {
         self.overlay().file_git_sha(file)
     }

@@ -420,6 +420,46 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
         "symbol_source for Span::ZERO must return None"
     );
 
+    // --- FINDING-067: indexed_files reports what the INDEXER wrote, never a node's location ---
+    // `index_path`'s delete-sweep removes every path this returns that is not on disk. So the one
+    // property that keeps the sweep safe is: a path may appear here only because the indexer put it
+    // here (`set_file_digest` / `set_file_content`), never merely because some node's
+    // `location.file` says so.
+    //
+    // That distinction is not academic. An orchestrator sharing a store keeps its domain objects as
+    // nodes with synthetic `location.file` values — `agent_session/<id>`, `work_unit/<id>`. A
+    // backend answering this from nodes classifies all of them as deleted source files; in
+    // production that swept 833 operational nodes in one transaction, including the session that
+    // issued the index.
+    store
+        .set_file_digest("src/lib.rs", "deadbeef")
+        .expect("set_file_digest");
+    let indexed = store.indexed_files().expect("indexed_files");
+    assert!(
+        indexed.contains(&"src/lib.rs".to_string()),
+        "a path with a stored digest must be reported; got {indexed:?}"
+    );
+
+    // A node whose location was never written through any file-writing call. This is the exact
+    // shape of the rows that were destroyed, and it must be invisible here.
+    let foreign_path = "agent_session/conformance-1";
+    store
+        .upsert_nodes(&[Node::new(
+            sym("conformance_foreign"),
+            NodeKind::Other("agent_session".to_string()),
+            "conformance-1",
+            Language::new("none"),
+            Location::new(foreign_path, Span::ZERO),
+        )])
+        .expect("upsert foreign node");
+    let indexed = store
+        .indexed_files()
+        .expect("indexed_files after foreign node");
+    assert!(
+        !indexed.iter().any(|p| p == foreign_path),
+        "indexed_files must never report a path that only exists as a node location; got {indexed:?}"
+    );
+
     // --- Wave 2.6: remove_file removes that file's nodes ---
     // The fixture nodes all have location.file == "src/lib.rs" (set by func_node above).
     // After remove_file("src/lib.rs") none of them should remain.

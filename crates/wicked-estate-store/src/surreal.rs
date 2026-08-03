@@ -622,6 +622,21 @@ impl GraphRead for SurrealStore {
         })
     }
 
+    fn indexed_files(&self) -> Result<Vec<String>> {
+        let db = self.db.clone();
+        self.rt.block_on(async move {
+            // Typed field projection rather than the `surrealdb::Value` walk the rest of this
+            // module uses: that path does not name a type in surrealdb 3 and every one of its 25
+            // sites here fails to compile. `take((0, "path"))` deserialises one named column of
+            // statement 0 straight into `Vec<String>`, which is exactly the shape wanted.
+            db.query("SELECT path FROM file_meta")
+                .await
+                .map_err(se)?
+                .take::<Vec<String>>((0, "path"))
+                .map_err(se)
+        })
+    }
+
     fn file_digest(&self, file: &str) -> Result<Option<String>> {
         let db = self.db.clone();
         let file = file.to_string();

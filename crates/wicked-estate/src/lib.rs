@@ -11,6 +11,10 @@
 //! previous run. DELETED files (previously indexed but no longer present) have their contributions
 //! removed via `store.remove_file(path)`.
 //!
+//! "Previously indexed" means [`GraphRead::indexed_files`] — this indexer's own digest rows — never
+//! "every node in the store". A store may be shared with a writer that keeps non-source nodes in
+//! it; sweeping those is data loss, not incremental indexing (FINDING-067).
+//!
 //! ### Known limitation
 //!
 //! An unchanged file F that calls a symbol S newly added by a changed file C will NOT have its
@@ -251,14 +255,30 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
     let files = collect_source_files(root);
 
     // ── Derive the set of previously-indexed file paths ─────────────────────────────────────
-    // We use the currently stored nodes' location.file values as the source of truth for what
-    // was indexed last time. This works because every node carries location.file (since Fix A).
-    // `remove_file` removes both nodes and the digest entry atomically, so a deleted file's path
-    // won't appear here on the next run.
+    // The digest table — every path a prior `index_path` wrote via `set_file_digest`, and nothing
+    // else. `remove_file` drops nodes and the digest entry atomically, so a path removed last run
+    // does not reappear here.
+    //
+    // This USED to read `all_nodes()`, mapping each node's `location.file`. That answers a
+    // different question: not "what did I index?" but "what is in this store?" — and the sweep
+    // below deletes everything in that set which is not on disk right now. The two sets are equal
+    // only in a store no other writer touches, and that assumption does not survive contact with a
+    // shared store.
+    //
+    // It did not survive here. An orchestrator sharing this store kept its operational domain
+    // objects as nodes with synthetic `location.file` values — `agent_session/<id>`,
+    // `work_unit/<id>`, `validator_vault/<pin>`, `repo_entry/<id>`. Indexing one repo subdirectory
+    // into that store swept all 833 of them: every session, work unit, workflow, work output,
+    // validator vault entry, policy and repo registration, in one transaction, including the run
+    // whose worker issued the index — which then died with `run not found` (FINDING-067).
+    //
+    // A digest row can only come from this indexer, so scoping to it makes reaching a node we did
+    // not create impossible rather than merely unlikely. Nothing about the deleted-file behaviour
+    // changes: a real source file that vanished still has its digest row from last run and is
+    // still swept.
     let previously_indexed: HashSet<String> = store
-        .all_nodes()?
+        .indexed_files()?
         .into_iter()
-        .map(|n| n.location.file)
         .filter(|f| !f.is_empty())
         .collect();
 
@@ -1789,6 +1809,63 @@ mod tests {
                 .iter()
                 .any(|c| c.op == ChangeOp::Remove && c.target.contains("to_delete.rs")),
             "a Remove change for to_delete.rs must be emitted"
+        );
+    }
+
+    /// FINDING-067. The sibling of the test above, and the one that was missing: the sweep must
+    /// remove deleted SOURCE files and nothing else. A store is not always exclusively the
+    /// indexer's — an orchestrator sharing one keeps its domain objects as nodes whose
+    /// `location.file` is a synthetic key (`agent_session/<id>`, `validator_vault/<pin>`), never a
+    /// path on disk. Deriving "previously indexed" from `all_nodes()` made every one of those look
+    /// like a file that had been deleted since the last run.
+    ///
+    /// Measured, not hypothesised: indexing one repo subdirectory into a live orchestrator's store
+    /// removed 833 operational nodes in a single transaction — 27 sessions, 77 work units, 57
+    /// phases, 53 work outputs, 23 workflows, 4 validator-vault entries, 3 policies and the repo
+    /// registration — while upserting the 41 source files it had been asked to index. The session
+    /// that issued the index was among the 27, and the run died with `run not found`.
+    ///
+    /// Revert `previously_indexed` to `all_nodes()` and this fails on the first assert.
+    #[test]
+    fn the_delete_sweep_leaves_foreign_nodes_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("real.rs"), "pub fn kept() {}\n").unwrap();
+
+        let mut store = MemStore::new();
+        index_path(&mut store, tmp.path()).unwrap();
+
+        // A node no indexer wrote: synthetic `location.file`, shaped exactly like the operational
+        // rows that were destroyed. It is in the store when the index runs, and it is not on disk.
+        let foreign_id = Symbol::synthetic("wicked-core", "agent_session/run-1").id();
+        let foreign = Node::new(
+            foreign_id.clone(),
+            NodeKind::Other("agent_session".to_string()),
+            "run-1".to_string(),
+            Language::new("none"),
+            Location::new("agent_session/run-1".to_string(), Span::ZERO),
+        );
+        store.upsert_nodes(&[foreign]).unwrap();
+
+        // Re-index with a genuinely deleted source file in the same pass, so this pins the fix
+        // rather than a sweep that simply stopped running.
+        std::fs::write(tmp.path().join("doomed.rs"), "pub fn doomed() {}\n").unwrap();
+        index_path(&mut store, tmp.path()).unwrap();
+        std::fs::remove_file(tmp.path().join("doomed.rs")).unwrap();
+        index_path(&mut store, tmp.path()).unwrap();
+
+        assert!(
+            store.get_node(&foreign_id).unwrap().is_some(),
+            "indexing a directory must not delete a node it never indexed"
+        );
+        let files: HashSet<String> = GraphRead::all_nodes(&store)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.location.file)
+            .collect();
+        assert!(files.contains("real.rs"), "the live source file survives");
+        assert!(
+            !files.contains("doomed.rs"),
+            "a source file that really was deleted is still swept — the sweep still works"
         );
     }
 
