@@ -14,7 +14,7 @@ use crate::node::{Language, Node, SourceFile};
 use crate::query::{GraphStats, RetrievalResult, Subgraph, SymbolQuery, TraversalSpec};
 use crate::refs::{Extraction, UnresolvedRef};
 use crate::repo::RepoInfo;
-use crate::semantics::NodeSemantics;
+use crate::semantics::{NodeSemantics, ValidationClaim};
 use crate::symbol::SymbolId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -254,12 +254,17 @@ pub trait GraphWrite {
     /// Set semantic annotations on node `symbol` (links code → requirements). PARTIAL update: each
     /// `Some(..)` writes that column, `None` leaves it unchanged. No-op if the symbol is absent.
     /// (Semantic linking — `description` / `requirement` / `requirement_validated`.)
+    ///
+    /// `validation` is a [`ValidationClaim`], not a bare `bool`: asserting that a requirement is
+    /// satisfied requires naming who asserts it. The store stamps the time. A caller that cannot
+    /// name an actor has no business marking a requirement validated — see the type's docs and
+    /// wicked-core#131.
     fn set_node_semantics(
         &mut self,
         symbol: &SymbolId,
         description: Option<&str>,
         requirement: Option<&str>,
-        requirement_validated: Option<bool>,
+        validation: Option<&ValidationClaim>,
     ) -> Result<()>;
     /// Attach a typed annotation to `symbol`. A bare INSERT, NOT an upsert — so the same symbol can
     /// carry MANY annotations (same or different `type`/`key`). No-op if the symbol is absent (not

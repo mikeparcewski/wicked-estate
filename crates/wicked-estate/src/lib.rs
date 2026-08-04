@@ -774,18 +774,35 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
 
 /// Set semantic annotations on a symbol — the requirement↔functionality link API. Partial update:
 /// each `Some(..)` writes that column, `None` leaves it unchanged.
+///
+/// `validated_by` names the actor asserting the requirement is satisfied; it is REQUIRED whenever
+/// `validated` is given. A claim with no author is what wicked-core#131 was made of — 34,897 nodes
+/// self-validated by the agent that wrote them, with nothing recording who decided.
 pub fn set_semantics(
     store: &mut dyn GraphStoreMutExt,
     symbol: &str,
     description: Option<&str>,
     requirement: Option<&str>,
     validated: Option<bool>,
+    validated_by: Option<&str>,
 ) -> Result<()> {
+    let claim =
+        match (validated, validated_by) {
+            (Some(v), Some(by)) => Some(
+                wicked_estate_core::ValidationClaim::new(v, by)
+                    .map_err(|e| wicked_estate_core::Error::Invalid(e.to_string()))?,
+            ),
+            (Some(_), None) => return Err(wicked_estate_core::Error::Invalid(
+                "validating a requirement requires naming the actor asserting it (--validated-by)"
+                    .to_string(),
+            )),
+            (None, _) => None,
+        };
     store.set_node_semantics(
         &SymbolId(symbol.to_string()),
         description,
         requirement,
-        validated,
+        claim.as_ref(),
     )
 }
 

@@ -621,6 +621,7 @@ fn main() -> Result<()> {
     let mut sem_description: Option<String> = None;
     let mut sem_requirement: Option<String> = None;
     let mut sem_validated: Option<bool> = None;
+    let mut sem_validated_by: Option<String> = None;
     // Annotation flags for the `annotate` command.
     let mut ann_key: Option<String> = None;
     let mut ann_value: Option<String> = None;
@@ -715,6 +716,11 @@ fn main() -> Result<()> {
             "--requirement" => {
                 if let Some(v) = it.next() {
                     sem_requirement = Some(v.clone());
+                }
+            }
+            "--validated-by" => {
+                if let Some(v) = it.next() {
+                    sem_validated_by = Some(v.clone());
                 }
             }
             "--validated" => {
@@ -1933,7 +1939,7 @@ fn main() -> Result<()> {
             let symbol = positional.first().cloned().unwrap_or_default();
             if symbol.is_empty() {
                 eprintln!(
-                    "usage: wicked-estate semantics <symbol> [--description X] [--requirement Y] [--validated true|false] [--db ...]"
+                    "usage: wicked-estate semantics <symbol> [--description X] [--requirement Y] [--validated true|false --validated-by <actor>] [--db ...]"
                 );
             } else {
                 let mut store = open_store_ext(&db).map_err(to_any)?;
@@ -1947,6 +1953,7 @@ fn main() -> Result<()> {
                         sem_description.as_deref(),
                         sem_requirement.as_deref(),
                         sem_validated,
+                        sem_validated_by.as_deref(),
                     )
                     .map_err(to_any)?;
                     println!("updated semantics for {symbol}");
@@ -1963,6 +1970,20 @@ fn main() -> Result<()> {
                                 s.requirement.as_deref().unwrap_or("(none)")
                             );
                             println!("  validated:   {}", s.requirement_validated);
+                            // Only when something WAS validated. Printing "(unattributed)" against
+                            // `validated: false` describes a claim nobody made, which reads as a
+                            // defect in the record rather than the absence of a claim.
+                            if s.requirement_validated {
+                                println!(
+                                    "  validated by: {}",
+                                    s.requirement_validated_by.as_deref().unwrap_or(
+                                        "(unattributed — written before authorship was recorded)"
+                                    )
+                                );
+                                if let Some(at) = s.requirement_validated_at {
+                                    println!("  validated at: {at}");
+                                }
+                            }
                         }
                         None => println!("no semantics set for {symbol}"),
                     }

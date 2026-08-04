@@ -314,6 +314,11 @@ fn target() { helper(); }
             "REQ-42",
             "--validated",
             "true",
+            // `--validated-by` is REQUIRED alongside `--validated` (#79). Before it existed this
+            // call asserted REQ-42 satisfied with nothing recording who decided — the shape
+            // wicked-core#131 was made of, at scale.
+            "--validated-by",
+            "surface-cli-test",
         ],
     );
     run(
