@@ -465,14 +465,14 @@ impl GraphWrite for MemStore {
         symbol: &SymbolId,
         description: Option<&str>,
         requirement: Option<&str>,
-        requirement_validated: Option<bool>,
+        validation: Option<&wicked_estate_core::ValidationClaim>,
     ) -> Result<()> {
         // No-op if the symbol is not a node.
         if !self.nodes.contains_key(symbol) {
             return Ok(());
         }
         // No-op if nothing is being changed.
-        if description.is_none() && requirement.is_none() && requirement_validated.is_none() {
+        if description.is_none() && requirement.is_none() && validation.is_none() {
             return Ok(());
         }
         let entry = self.semantics.entry(symbol.clone()).or_default();
@@ -482,8 +482,17 @@ impl GraphWrite for MemStore {
         if let Some(r) = requirement {
             entry.requirement = Some(r.to_string());
         }
-        if let Some(v) = requirement_validated {
-            entry.requirement_validated = v;
+        if let Some(claim) = validation {
+            // Flag and author set together — the reference impl must model the same invariant the
+            // SQLite store does, or conformance proves nothing about it.
+            entry.requirement_validated = claim.validated;
+            entry.requirement_validated_by = Some(claim.by.clone());
+            entry.requirement_validated_at = Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0),
+            );
         }
         Ok(())
     }
@@ -1113,6 +1122,7 @@ impl GraphStoreMutExt for PostgresStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wicked_estate_core::ValidationClaim;
 
     fn sym(s: &str) -> SymbolId {
         SymbolId(s.to_string())
@@ -1561,7 +1571,7 @@ mod tests {
                 &sym("fn_b"),
                 Some("does the thing"),
                 Some("REQ-42"),
-                Some(true),
+                Some(&ValidationClaim::new(true, "test-actor").unwrap()),
             )
             .unwrap();
         let got = store
@@ -1580,7 +1590,12 @@ mod tests {
             .upsert_nodes(&[make_node("fn_c", "src/c.rs")])
             .unwrap();
         store
-            .set_node_semantics(&sym("fn_c"), Some("original"), Some("REQ-7"), Some(true))
+            .set_node_semantics(
+                &sym("fn_c"),
+                Some("original"),
+                Some("REQ-7"),
+                Some(&ValidationClaim::new(true, "test-actor").unwrap()),
+            )
             .unwrap();
         // Partial: change only description.
         store
@@ -1610,10 +1625,20 @@ mod tests {
             .upsert_nodes(&[make_node("fn_x", "src/x.rs"), make_node("fn_y", "src/y.rs")])
             .unwrap();
         store
-            .set_node_semantics(&sym("fn_x"), Some("desc x"), Some("REQ-99"), Some(false))
+            .set_node_semantics(
+                &sym("fn_x"),
+                Some("desc x"),
+                Some("REQ-99"),
+                Some(&ValidationClaim::new(false, "test-actor").unwrap()),
+            )
             .unwrap();
         store
-            .set_node_semantics(&sym("fn_y"), Some("desc y"), Some("REQ-other"), Some(false))
+            .set_node_semantics(
+                &sym("fn_y"),
+                Some("desc y"),
+                Some("REQ-other"),
+                Some(&ValidationClaim::new(false, "test-actor").unwrap()),
+            )
             .unwrap();
         let found = store.find_by_requirement("REQ-99").unwrap();
         assert_eq!(found.len(), 1, "exactly one node matches REQ-99");
@@ -1624,7 +1649,12 @@ mod tests {
     fn mem_set_node_semantics_absent_symbol_noop() {
         let mut store = MemStore::new();
         store
-            .set_node_semantics(&sym("ghost"), Some("desc"), Some("REQ-1"), Some(false))
+            .set_node_semantics(
+                &sym("ghost"),
+                Some("desc"),
+                Some("REQ-1"),
+                Some(&ValidationClaim::new(false, "test-actor").unwrap()),
+            )
             .unwrap();
         assert!(
             store.node_semantics(&sym("ghost")).unwrap().is_none(),

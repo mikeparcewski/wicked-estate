@@ -11,6 +11,7 @@ use crate::node::{Language, Location, Node, NodeKind, Span};
 use crate::query::{SymbolQuery, TraversalSpec};
 use crate::refs::UnresolvedRef;
 use crate::repo::RepoInfo;
+use crate::semantics::ValidationClaim;
 use crate::symbol::{Descriptor, Symbol};
 use crate::traits::GraphStore;
 
@@ -760,7 +761,7 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
             &sym("sem_fn"),
             Some("what it is"),
             Some("REQ-1"),
-            Some(true),
+            Some(&ValidationClaim::new(true, "conformance-actor").expect("named actor")),
         )
         .expect("set_node_semantics full");
 
@@ -779,6 +780,18 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
         "requirement must be stored"
     );
     assert!(full.requirement_validated, "validated flag must be true");
+    // A validated requirement must carry WHO validated it. A store that keeps the flag and drops the
+    // author reintroduces the unattributable claim `ValidationClaim` exists to prevent (#79).
+    assert_eq!(
+        full.requirement_validated_by.as_deref(),
+        Some("conformance-actor"),
+        "the validating actor must be stored alongside the flag"
+    );
+    assert!(
+        full.requirement_validated_at.is_some_and(|t| t > 0),
+        "the store must stamp when the claim was made, got {:?}",
+        full.requirement_validated_at
+    );
 
     // PARTIAL update: change only description — requirement and validated must be unchanged.
     store
@@ -819,7 +832,7 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
             &sym("no_such_symbol"),
             Some("desc"),
             Some("REQ-X"),
-            Some(false),
+            Some(&ValidationClaim::new(false, "conformance-retractor").expect("named actor")),
         )
         .expect("set_node_semantics on absent symbol must be a no-op");
 

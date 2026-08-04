@@ -45,6 +45,31 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
         )
         .map_err(st)?;
     }
+    // Validation AUTHORSHIP on nodes (wicked-estate#79). `requirement_validated` was a bare flag,
+    // so a row could claim a requirement was satisfied with nothing recording who decided that —
+    // and a consumer's evaluator≠creator rule had nowhere to look (wicked-core#131). Additive and
+    // NULLable: an existing row keeps its flag and gains a NULL author, which is the honest
+    // representation of a claim nobody signed.
+    {
+        let mut nstmt = conn.prepare("PRAGMA table_info(nodes)").map_err(st)?;
+        let ncols: Vec<String> = nstmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .map_err(st)?
+            .filter_map(|r| r.ok())
+            .collect();
+        // An EMPTY column list means the table is absent, not that the column is missing. A legacy
+        // database can carry `annotations` with no `nodes` yet, and an unconditional ALTER there
+        // aborts the whole migration with "no such table: nodes" — taking the other migrations
+        // (which that database does need) down with it.
+        if !ncols.is_empty() && !ncols.iter().any(|c| c == "requirement_validated_by") {
+            conn.execute_batch(
+                "ALTER TABLE nodes ADD COLUMN requirement_validated_by TEXT; \
+                 ALTER TABLE nodes ADD COLUMN requirement_validated_at INTEGER;",
+            )
+            .map_err(st)?;
+        }
+    }
+
     // Evidence envelope — additive columns. Defaults match `Annotation`'s serde defaults so old
     // rows backfill identically whether they arrive via JSON deserialization or a DB read.
     if !cols.iter().any(|c| c == "source_type") {
@@ -1545,10 +1570,10 @@ impl GraphWrite for SqliteStore {
         symbol: &SymbolId,
         description: Option<&str>,
         requirement: Option<&str>,
-        requirement_validated: Option<bool>,
+        validation: Option<&wicked_estate_core::ValidationClaim>,
     ) -> Result<()> {
         // No fields to set → no-op (nothing to write).
-        if description.is_none() && requirement.is_none() && requirement_validated.is_none() {
+        if description.is_none() && requirement.is_none() && validation.is_none() {
             return Ok(());
         }
         // Look up the sid without interning: if not present, the symbol is not a node.
@@ -1584,12 +1609,19 @@ impl GraphWrite for SqliteStore {
                 )
                 .map_err(st)?;
         }
-        if let Some(v) = requirement_validated {
-            let flag: i64 = v as i64;
+        if let Some(claim) = validation {
+            // Flag, author and time move as ONE write. Splitting them would let a crash leave a
+            // validated row with no author — exactly the unattributable state the type prevents.
+            let flag: i64 = claim.validated as i64;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
             self.conn
                 .execute(
-                    "UPDATE nodes SET requirement_validated=?2 WHERE symbol=?1",
-                    params![sid, flag],
+                    "UPDATE nodes SET requirement_validated=?2, requirement_validated_by=?3, \
+                     requirement_validated_at=?4 WHERE symbol=?1",
+                    params![sid, flag, claim.by, now],
                 )
                 .map_err(st)?;
         }
@@ -2234,10 +2266,18 @@ impl GraphRead for SqliteStore {
         // Only return Some when at least one semantic column has been written.
         // `description IS NOT NULL OR requirement IS NOT NULL OR requirement_validated != 0`
         // distinguishes "never annotated" (all defaults) from "annotated to empty string/false".
-        let row: Option<(Option<String>, Option<String>, i64)> = self
+        #[allow(clippy::type_complexity)]
+        let row: Option<(
+            Option<String>,
+            Option<String>,
+            i64,
+            Option<String>,
+            Option<i64>,
+        )> = self
             .conn
             .query_row(
-                "SELECT description, requirement, requirement_validated \
+                "SELECT description, requirement, requirement_validated, \
+                        requirement_validated_by, requirement_validated_at \
                  FROM nodes \
                  WHERE symbol=?1 \
                    AND (description IS NOT NULL \
@@ -2249,6 +2289,8 @@ impl GraphRead for SqliteStore {
                         r.get::<_, Option<String>>(0)?,
                         r.get::<_, Option<String>>(1)?,
                         r.get::<_, i64>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<i64>>(4)?,
                     ))
                 },
             )
@@ -2256,10 +2298,14 @@ impl GraphRead for SqliteStore {
             .map_err(st)?;
         match row {
             None => Ok(None), // node row exists but no semantic annotation has been set
-            Some((description, requirement, validated_int)) => Ok(Some(NodeSemantics {
+            Some((description, requirement, validated_int, by, at)) => Ok(Some(NodeSemantics {
                 description,
                 requirement,
                 requirement_validated: validated_int != 0,
+                // NULL on a row written before authorship existed: a claim nobody signed. Surfaced
+                // rather than defaulted to a plausible-looking actor.
+                requirement_validated_by: by,
+                requirement_validated_at: at,
             })),
         }
     }
@@ -2643,6 +2689,7 @@ impl SqliteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wicked_estate_core::ValidationClaim;
 
     fn sym(s: &str) -> SymbolId {
         SymbolId(s.to_string())
@@ -3569,7 +3616,7 @@ mod tests {
                 &sym("fn_b"),
                 Some("does the thing"),
                 Some("REQ-42"),
-                Some(true),
+                Some(&ValidationClaim::new(true, "test-actor").unwrap()),
             )
             .unwrap();
         let got = store
@@ -3590,7 +3637,12 @@ mod tests {
             .unwrap();
         // Full write first.
         store
-            .set_node_semantics(&sym("fn_c"), Some("original"), Some("REQ-7"), Some(true))
+            .set_node_semantics(
+                &sym("fn_c"),
+                Some("original"),
+                Some("REQ-7"),
+                Some(&ValidationClaim::new(true, "test-actor").unwrap()),
+            )
             .unwrap();
         // Partial: change only description.
         store
@@ -3621,10 +3673,20 @@ mod tests {
             .upsert_nodes(&[make_node("fn_x", "src/x.rs"), make_node("fn_y", "src/y.rs")])
             .unwrap();
         store
-            .set_node_semantics(&sym("fn_x"), Some("desc x"), Some("REQ-99"), Some(false))
+            .set_node_semantics(
+                &sym("fn_x"),
+                Some("desc x"),
+                Some("REQ-99"),
+                Some(&ValidationClaim::new(false, "test-actor").unwrap()),
+            )
             .unwrap();
         store
-            .set_node_semantics(&sym("fn_y"), Some("desc y"), Some("REQ-other"), Some(false))
+            .set_node_semantics(
+                &sym("fn_y"),
+                Some("desc y"),
+                Some("REQ-other"),
+                Some(&ValidationClaim::new(false, "test-actor").unwrap()),
+            )
             .unwrap();
         let found = store.find_by_requirement("REQ-99").unwrap();
         assert_eq!(found.len(), 1, "exactly one node matches REQ-99");
@@ -3636,7 +3698,12 @@ mod tests {
         let mut store = open();
         // Symbol was never upserted — should not error.
         store
-            .set_node_semantics(&sym("ghost"), Some("desc"), Some("REQ-1"), Some(false))
+            .set_node_semantics(
+                &sym("ghost"),
+                Some("desc"),
+                Some("REQ-1"),
+                Some(&ValidationClaim::new(false, "test-actor").unwrap()),
+            )
             .unwrap();
         assert!(
             store.node_semantics(&sym("ghost")).unwrap().is_none(),
