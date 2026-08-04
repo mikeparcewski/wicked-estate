@@ -108,6 +108,31 @@ fn a_named_actor_is_stored_and_read_back() {
     );
 }
 
+/// An UNVALIDATED requirement must not be described as unattributed. Nothing was claimed, so there
+/// is nobody to attribute — saying otherwise reads as a defect in the record rather than the
+/// absence of a claim.
+#[test]
+fn an_unvalidated_requirement_reports_no_attribution_line() {
+    let (dir, db) = indexed("unvalidated");
+    let sym = target_symbol(&dir, &db);
+    assert!(
+        semantics(&dir, &db, &[&sym, "--requirement", "REQ-9"])
+            .status
+            .success()
+    );
+
+    let show = semantics(&dir, &db, &[&sym]);
+    let text = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        text.contains("REQ-9"),
+        "requirement should be shown: {text}"
+    );
+    assert!(
+        !text.contains("unattributed"),
+        "nothing was validated, so nothing is unattributed: {text}"
+    );
+}
+
 /// Setting a requirement WITHOUT validating it needs no actor: nothing is being asserted true.
 #[test]
 fn recording_a_requirement_alone_needs_no_actor() {

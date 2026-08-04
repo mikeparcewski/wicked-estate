@@ -1970,16 +1970,19 @@ fn main() -> Result<()> {
                                 s.requirement.as_deref().unwrap_or("(none)")
                             );
                             println!("  validated:   {}", s.requirement_validated);
-                            // WHO, always — printing the flag without its author is how an
-                            // unattributable claim reads as a verified one (#79).
-                            println!(
-                                "  validated by: {}",
-                                s.requirement_validated_by.as_deref().unwrap_or(
-                                    "(unattributed — written before authorship was recorded)"
-                                )
-                            );
-                            if let Some(at) = s.requirement_validated_at {
-                                println!("  validated at: {at}");
+                            // Only when something WAS validated. Printing "(unattributed)" against
+                            // `validated: false` describes a claim nobody made, which reads as a
+                            // defect in the record rather than the absence of a claim.
+                            if s.requirement_validated {
+                                println!(
+                                    "  validated by: {}",
+                                    s.requirement_validated_by.as_deref().unwrap_or(
+                                        "(unattributed — written before authorship was recorded)"
+                                    )
+                                );
+                                if let Some(at) = s.requirement_validated_at {
+                                    println!("  validated at: {at}");
+                                }
                             }
                         }
                         None => println!("no semantics set for {symbol}"),

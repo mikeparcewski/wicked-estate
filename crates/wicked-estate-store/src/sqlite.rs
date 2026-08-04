@@ -61,12 +61,24 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
         // database can carry `annotations` with no `nodes` yet, and an unconditional ALTER there
         // aborts the whole migration with "no such table: nodes" — taking the other migrations
         // (which that database does need) down with it.
-        if !ncols.is_empty() && !ncols.iter().any(|c| c == "requirement_validated_by") {
-            conn.execute_batch(
-                "ALTER TABLE nodes ADD COLUMN requirement_validated_by TEXT; \
-                 ALTER TABLE nodes ADD COLUMN requirement_validated_at INTEGER;",
-            )
-            .map_err(st)?;
+        // Each column is checked and added INDEPENDENTLY. Inferring one from the other means a
+        // database that somehow has only one (a partial or hand-run migration) never gets the
+        // second, while the reader selects both unconditionally — a hard failure on every read.
+        if !ncols.is_empty() {
+            if !ncols.iter().any(|c| c == "requirement_validated_by") {
+                conn.execute(
+                    "ALTER TABLE nodes ADD COLUMN requirement_validated_by TEXT",
+                    [],
+                )
+                .map_err(st)?;
+            }
+            if !ncols.iter().any(|c| c == "requirement_validated_at") {
+                conn.execute(
+                    "ALTER TABLE nodes ADD COLUMN requirement_validated_at INTEGER",
+                    [],
+                )
+                .map_err(st)?;
+            }
         }
     }
 
