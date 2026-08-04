@@ -667,6 +667,7 @@ fn main() -> Result<()> {
     let mut src_max_total: Option<usize> = None;
     let mut src_max_node: Option<usize> = None;
     let mut positional: Vec<String> = Vec::new();
+    let mut help_requested = false;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -851,9 +852,14 @@ fn main() -> Result<()> {
                     src_max_node = v.parse::<usize>().ok();
                 }
             }
+            // Before the catch-all: otherwise these land in `positional` and the `index` arm
+            // treats `--help` as a path to walk, printing "indexed --help → 0 nodes" and exiting 0.
+            "--help" | "-h" => help_requested = true,
             _ => positional.push(a.clone()),
         }
     }
+    // Re-dispatch to the usage arm. `help` matches no command, so it falls through to `_`.
+    let cmd = if help_requested { "help" } else { cmd };
 
     let otel_sink = wicked_estate_observe::init_sink_from_env();
     let otel_resource = wicked_estate_core::observability::Resource::service(
@@ -868,6 +874,20 @@ fn main() -> Result<()> {
     match cmd {
         "index" => {
             let path = positional.first().map(String::as_str).unwrap_or(".");
+            // Fail CLOSED on a path that is not there. Walking a missing directory yields zero files,
+            // and reporting that as `indexed <path> → 0 nodes` with exit 0 makes every upstream path
+            // bug look like an empty repository: the caller gets a real, queryable, EMPTY graph and a
+            // success code. That is how a wrong `--db`/root goes unnoticed for months
+            // (wicked-core#170) and how three runs indexed the wrong repo without anyone being told
+            // (wicked-crew#196). "Indexed a repo with no code" and "was handed a path that does not
+            // exist" are different answers and must have different exit codes.
+            let target = Path::new(path);
+            if !target.exists() {
+                anyhow::bail!(
+                    "index path does not exist: {path}\n\
+                     (nothing was indexed; if you meant the current directory, pass `.` explicitly)"
+                );
+            }
             ensure_db_dir(&db)?;
             // --force: invalidate all stored digests so index_path treats every file as changed.
             if force_reindex && db != ":memory:" {
