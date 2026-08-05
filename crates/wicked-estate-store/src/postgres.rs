@@ -144,12 +144,19 @@ CREATE TABLE IF NOT EXISTS nodes (
   description           TEXT,
   requirement           TEXT,
   requirement_validated BIGINT NOT NULL DEFAULT 0,
+  requirement_validated_by TEXT,
+  requirement_validated_at BIGINT,
   scope                 TEXT NOT NULL DEFAULT ''
 );
 -- Idempotent migration for DBs created before `scope` existed. MUST run BEFORE any index on
 -- `scope` (DDL is split on semicolons, comment lines stripped first, executed in order): on a legacy nodes table the CREATE TABLE
 -- is a no-op, so the column must be ADDed before `idx_nodes_scope` references it.
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT '';
+-- A validated requirement must name WHO validated it, so the flag never travels alone. Added
+-- independently of each other and of `scope`: on a legacy nodes table the CREATE TABLE above is a
+-- no-op, so every column added after the original schema needs its own ADD.
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS requirement_validated_by TEXT;
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS requirement_validated_at BIGINT;
 CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
 CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
 CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file);
@@ -782,9 +789,9 @@ impl GraphWrite for PostgresStore {
         symbol: &SymbolId,
         description: Option<&str>,
         requirement: Option<&str>,
-        requirement_validated: Option<bool>,
+        validation: Option<&wicked_estate_core::ValidationClaim>,
     ) -> Result<()> {
-        if description.is_none() && requirement.is_none() && requirement_validated.is_none() {
+        if description.is_none() && requirement.is_none() && validation.is_none() {
             return Ok(());
         }
         // Check the symbol exists (no intern for Postgres — directly query nodes).
@@ -819,13 +826,25 @@ impl GraphWrite for PostgresStore {
             )
             .map_err(st)?;
         }
-        if let Some(v) = requirement_validated {
-            let flag: i64 = v as i64;
+        if let Some(claim) = validation {
+            // Flag, author and timestamp move in ONE statement. Splitting them would allow a
+            // validated row with no author — the unattributable state `ValidationClaim` exists to
+            // make unrepresentable (mirrors SqliteStore).
+            let flag: i64 = claim.validated as i64;
+            let now: i64 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
             rt_block(
-                sqlx::query("UPDATE nodes SET requirement_validated = $2 WHERE symbol = $1")
-                    .bind(&symbol.0)
-                    .bind(flag)
-                    .execute(&self.pool),
+                sqlx::query(
+                    "UPDATE nodes SET requirement_validated = $2, requirement_validated_by = $3, \
+                     requirement_validated_at = $4 WHERE symbol = $1",
+                )
+                .bind(&symbol.0)
+                .bind(flag)
+                .bind(&claim.by)
+                .bind(now)
+                .execute(&self.pool),
             )
             .map_err(st)?;
         }
@@ -1387,7 +1406,8 @@ impl GraphRead for PostgresStore {
     fn node_semantics(&self, symbol: &SymbolId) -> Result<Option<NodeSemantics>> {
         rt_block(async {
             let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-                "SELECT description, requirement, requirement_validated \
+                "SELECT description, requirement, requirement_validated, \
+                        requirement_validated_by, requirement_validated_at \
                  FROM nodes \
                  WHERE symbol = $1 \
                    AND (description IS NOT NULL \
@@ -1403,10 +1423,17 @@ impl GraphRead for PostgresStore {
                     let description: Option<String> = r.try_get("description")?;
                     let requirement: Option<String> = r.try_get("requirement")?;
                     let validated_int: i64 = r.try_get("requirement_validated")?;
+                    let by: Option<String> = r.try_get("requirement_validated_by")?;
+                    let at: Option<i64> = r.try_get("requirement_validated_at")?;
                     Ok(Some(NodeSemantics {
                         description,
                         requirement,
                         requirement_validated: validated_int != 0,
+                        // NULL on a row written before authorship existed: a claim nobody signed.
+                        // Surfaced rather than defaulted to a plausible-looking actor (mirrors
+                        // SqliteStore).
+                        requirement_validated_by: by,
+                        requirement_validated_at: at,
                     }))
                 }
             }
