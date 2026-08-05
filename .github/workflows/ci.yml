@@ -33,6 +33,29 @@ jobs:
       - name: test (workspace + conformance + bench)
         run: cargo test --workspace
 
+  # ── The Postgres backend is behind `--features postgres`, so NOTHING in the default
+  #    `gate` job compiles it — `cargo build --workspace` does not enable optional
+  #    features. `PostgresStore` therefore rotted silently when the `GraphStore` trait
+  #    changed: `set_node_semantics` took a `ValidationClaim`, `SqliteStore` was updated,
+  #    and Postgres kept the old `Option<bool>` for as long as nobody asked for the
+  #    feature. It was caught only downstream, by wicked-core, whose CI does build it.
+  #
+  #    A locked decision says Postgres is a supported backend and every store must pass
+  #    conformance; a backend no job compiles cannot honour that. This is compile-only —
+  #    it needs no server, and the round-trip against a live Postgres stays in
+  #    wicked-core's CI. ─────────────────────────────────────────────────────────────
+  postgres-backend:
+    name: postgres backend compiles (feature-gated)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy the postgres store
+        run: cargo clippy -p wicked-estate-store --features postgres --all-targets -- -D warnings
+
   # ── Feature-gated semantic embedders. These tests download an embedding model on
   #    first run, so they CANNOT live in the default `gate` job (which must stay
   #    offline + dependency-free). This lane proves the semantic tiers keep working:
