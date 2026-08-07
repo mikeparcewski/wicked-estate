@@ -156,10 +156,26 @@ fn collect_source_files(root: &Path) -> Vec<PathBuf> {
         .git_ignore(true)
         .git_global(false)
         .require_git(false)
+        // Vendor/build dirs AND wicked's own generated measurement artifacts. The latter close a
+        // self-reference trap: the domain-extraction coverage phase writes `coverage-report.json`
+        // (and the modeler exports `requirements_graph.json`) through a RELATIVE `--out`, so on any
+        // launch whose CWD is an indexed root — an onboard index, a bare `wicked-core coverage`
+        // call — the report lands at the repo root, un-hidden. Indexing it back in turns each of its
+        // JSON keys into a behavior-bearing `Struct` node that can never be domain-annotated, so the
+        // NEXT coverage run is pinned below 1.0 forever: the measurement corrupts the measurand.
+        // Governed worktree runs escape the trap only because their CWD is under `.wicked/` (hidden);
+        // this skip closes the hole for every other launch path regardless of where the file lands.
         .filter_entry(|e| {
             !matches!(
                 e.file_name().to_string_lossy().as_ref(),
-                "target" | "node_modules" | ".wicked-estate" | ".reference" | "dist" | "build"
+                "target"
+                    | "node_modules"
+                    | ".wicked-estate"
+                    | ".reference"
+                    | "dist"
+                    | "build"
+                    | "coverage-report.json"
+                    | "requirements_graph.json"
             )
         })
         .build()
@@ -1828,6 +1844,44 @@ mod tests {
                 .iter()
                 .any(|c| c.op == ChangeOp::Remove && c.target.contains("to_delete.rs")),
             "a Remove change for to_delete.rs must be emitted"
+        );
+    }
+
+    /// P8 self-pollution. wicked's own coverage/requirements artifacts, if they land at an indexed
+    /// root (a coverage run whose CWD is the repo, not a worktree), must never be collected as
+    /// source — indexing `coverage-report.json` back in turns its JSON keys into behavior-bearing
+    /// nodes that pin the NEXT coverage run below 1.0 forever. Tests the walk seam directly, so it
+    /// is independent of any extractor: drop the artifact names from the `filter_entry` skip list
+    /// and `coverage-report.json` reappears in the collected set, failing the second assert.
+    #[test]
+    fn collect_source_files_skips_wicked_measurement_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("main.rs"), "pub fn foo() {}\n").unwrap();
+        std::fs::write(
+            tmp.path().join("coverage-report.json"),
+            "{\"total\":1,\"coverage\":1.0}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("requirements_graph.json"),
+            "{\"reqs\":[]}\n",
+        )
+        .unwrap();
+
+        let names: Vec<String> = collect_source_files(tmp.path())
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+
+        assert!(
+            names.iter().any(|n| n == "main.rs"),
+            "real source must still be collected; got {names:?}"
+        );
+        assert!(
+            !names
+                .iter()
+                .any(|n| n == "coverage-report.json" || n == "requirements_graph.json"),
+            "wicked measurement artifacts must be skipped (self-pollution); got {names:?}"
         );
     }
 
