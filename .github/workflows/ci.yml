@@ -56,6 +56,44 @@ jobs:
       - name: clippy the postgres store
         run: cargo clippy -p wicked-estate-store --features postgres --all-targets -- -D warnings
 
+  # ── The compile guard above proves PostgresStore BUILDS; it does not prove it BEHAVES
+  #    (#84). CLAUDE.md §9 makes the GraphStore conformance kit the thing every store MUST
+  #    pass, and Postgres is a supported backend — so it needs the SAME suite run against a
+  #    real server, not just a compile. `postgres_conformance.rs` was already written and
+  #    skips gracefully when TEST_POSTGRES_URL is unset; nothing ran it. This lane
+  #    provisions a live Postgres and runs it. It is a SEPARATE lane (like semantic-embedders)
+  #    so the default `gate` stays offline + server-free. ─────────────────────────────────
+  postgres-conformance:
+    name: postgres backend round-trip (conformance)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: wicked
+          POSTGRES_PASSWORD: wicked
+          POSTGRES_DB: estate_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U wicked -d estate_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: postgres-conformance
+      # Runs postgres_conformance.rs::postgres_store_satisfies_graph_store_contract, which drops
+      # the schema for a fresh start and drives the full graph_store_suite against PostgresStore.
+      # TEST_POSTGRES_URL is what the test reads (NOT DATABASE_URL) — matching wicked-core's convention.
+      - name: cargo test wicked-estate-store --features postgres (conformance against live Postgres, #84)
+        env:
+          TEST_POSTGRES_URL: postgres://wicked:wicked@localhost:5432/estate_test
+        run: cargo test -p wicked-estate-store --features postgres
+
   # ── Feature-gated semantic embedders. These tests download an embedding model on
   #    first run, so they CANNOT live in the default `gate` job (which must stay
   #    offline + dependency-free). This lane proves the semantic tiers keep working:
