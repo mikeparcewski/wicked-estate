@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Marketing site for wicked-estate — the code graph agents actually trust.",
+  "description": "Marketing site for wicked-estate \u2014 the code graph agents actually trust.",
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
@@ -12,7 +12,7 @@
     "astro": "astro"
   },
   "dependencies": {
-    "@astrojs/react": "^4.0.0",
+    "@astrojs/react": "^6.0.0",
     "astro": "^7.1.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
