@@ -12,7 +12,7 @@ Source of truth for the brain side: `wicked-brain/server/lib/sqlite-search.mjs`.
 | # | Brain source (`.brain.db`) | Estate destination | Import surface |
 |---|---|---|---|
 | 1 | `links.confidence` (REAL, tuned ±0.1/±0.2 by `confirm_link`) | knowledge relation edge **`confidence`** (`Edge.confidence`, promoted `edges.confidence` column) — already existed | `knowledge.relate` `confidence` param (already present) |
-| 2 | `links.evidence_count` (INTEGER, incremented by `confirm_link`) | knowledge relation edge **`evidence_count`** — NEW. Rides `Edge.metadata[evidence_count]` (`EVIDENCE_COUNT_META_KEY`), promoted to the NEW queryable `edges.evidence_count` column | `knowledge.relate` **new** `evidence_count` param |
+| 2 | `links.evidence_count` (INTEGER, incremented by `confirm_link`) | knowledge relation edge **`evidence_count`** — NEW **first-class `Edge` field** (`u32`, `#[serde(default)]`). Round-trips in all four backends; `SqliteStore` additionally promotes it to the NEW queryable `edges.evidence_count` column | `knowledge.relate` **new** `evidence_count` param |
 | 3 | `access_log(doc_id, session_id, accessed_at)` | NEW `access_log(item_id, session_id, accessed_at)` table | `wicked-estate import-telemetry` CLI |
 | 4 | `search_misses(query, searched_at, session_id)` | NEW `search_misses(query, searched_at, session_id)` table | `wicked-estate import-telemetry` CLI |
 
@@ -27,15 +27,17 @@ passes the brain's stored value verbatim.
 - Note: `knowledge.relate` defaults `confidence` to `0.8` when omitted; brain's table default is `0.5`. The migrator MUST send the brain's real per-link value so the default never applies.
 
 ### 2. `links.evidence_count` → knowledge relation `evidence_count`
-No estate edge carried an evidence counter. Rather than add a field to the spine
-`Edge` struct (which would ripple across every store, the conformance kit, and ~15
-construction sites), `evidence_count` rides the edge's opaque `metadata` slot —
-the same idiom knowledge already uses for its node fields — and `SqliteStore`
-**promotes it to a queryable `edges.evidence_count` column**. The authoritative
-value also round-trips inside `edges.data` (the full-Edge JSON), so the signal is
-lossless independent of the promoted column.
+No estate edge carried an evidence counter. Per human review of PR #95, it is a
+**first-class field on the spine `Edge` struct** (`pub evidence_count: u32`,
+`#[serde(default)]`) — not a metadata key. Because every backend stores the full
+`Edge` as JSON (`data`) / holds the struct (MemStore), the field round-trips in all
+four backends automatically, and the GraphStore conformance suite asserts that
+round-trip for each. `SqliteStore` **additionally** promotes it to a queryable
+`edges.evidence_count` column (written in lockstep with `data`); Postgres/Surreal/Mem
+carry it via the serialized `Edge` (no promoted column — round-trip fidelity is
+identical, the column is a SQLite-only audit affordance).
 
-- brain `links.evidence_count` **→** `knowledge.relate` arg `evidence_count` (integer, default 0) **→** `Edge.metadata["evidence_count"]` **→** promoted `edges.evidence_count`.
+- brain `links.evidence_count` **→** `knowledge.relate` arg `evidence_count` (integer, default 0) **→** `Edge.evidence_count` (round-trips in all backends) **→** also mirrored to SQLite's `edges.evidence_count` column.
 
 ### 3. `access_log` → estate `access_log`
 Per-item access telemetry (feeds an access-count + session-diversity ranking boost).
@@ -99,10 +101,12 @@ Estate versions its SQLite schema by **column-presence checks** (`PRAGMA table_i
 not a `_schema_version` row (`migrate_schema` in
 `crates/wicked-estate-store/src/sqlite.rs`).
 
-- **New column** `edges.evidence_count` — presence-guarded `ALTER TABLE … ADD COLUMN
-  evidence_count INTEGER NOT NULL DEFAULT 0` in `migrate_schema`, plus the column in
-  `schema.sql` for fresh DBs. `DEFAULT 0` backfills every pre-existing edge (code
-  edges never confirm → stay 0).
+- **New column** `edges.evidence_count` (SQLite only) — presence-guarded `ALTER TABLE …
+  ADD COLUMN evidence_count INTEGER NOT NULL DEFAULT 0` in `migrate_schema`, plus the
+  column in `schema.sql` for fresh DBs. `DEFAULT 0` backfills every pre-existing edge
+  (code edges never confirm → stay 0). This column is a queryable audit **mirror** of the
+  authoritative `Edge.evidence_count` field, which already round-trips inside `edges.data`;
+  the two are written in lockstep by `upsert_edges`.
 - **New tables** `access_log`, `search_misses` — added to `schema.sql` only. `SCHEMA`
   runs (`CREATE TABLE IF NOT EXISTS`) on every writable open, so existing DBs gain the
   tables on next open with no explicit ALTER.

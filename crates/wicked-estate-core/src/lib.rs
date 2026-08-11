@@ -34,9 +34,7 @@ pub use annotation::{
     is_system_derived,
 };
 pub use change::{Change, ChangeOp};
-pub use edge::{
-    Confidence, Direction, EVIDENCE_COUNT_META_KEY, Edge, EdgeKind, Provenance, ResolutionTier,
-};
+pub use edge::{Confidence, Direction, Edge, EdgeKind, Provenance, ResolutionTier};
 pub use error::{Error, Result};
 pub use history::HistoricalEdge;
 pub use node::{Language, Location, Metadata, Node, NodeKind, SourceFile, Span};

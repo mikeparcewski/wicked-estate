@@ -466,10 +466,11 @@ impl KnowledgeEngine {
             ResolutionTier::Heuristic,
             prov,
         );
-        // confidence rides free on the edge; evidence_count (brain consolidation) rides the metadata
-        // slot and is promoted to the edges.evidence_count column by SqliteStore.
+        // confidence + evidence_count (brain consolidation) both ride free on the edge as first-class
+        // fields; every backend round-trips them, and SqliteStore also promotes evidence_count to a
+        // queryable column.
         e.confidence = Confidence::new(conf as f32);
-        e = e.with_evidence_count(evidence_count);
+        e.evidence_count = evidence_count;
         self.store.upsert_edges(&[e])?;
         Ok(())
     }
@@ -536,7 +537,7 @@ mod tests {
     #[test]
     fn relate_persists_confidence_and_evidence_count() {
         // Brain consolidation: relate must land BOTH tuned signals on the knowledge relation —
-        // confidence (already carried) AND evidence_count (the new metadata-carried audit counter).
+        // confidence (already carried) AND evidence_count (the new first-class Edge field).
         let mut e = KnowledgeEngine::in_memory().unwrap();
         let a = e
             .write(&KNode::new(KClass::Concept, "concept a", "", "", 1))
@@ -552,8 +553,7 @@ mod tests {
             .find(|ed| matches!(&ed.kind, EdgeKind::Other(r) if r == "governs"))
             .expect("the typed governs edge must exist");
         assert_eq!(
-            gov.evidence_count(),
-            4,
+            gov.evidence_count, 4,
             "relate must persist evidence_count on the relation"
         );
         assert!(

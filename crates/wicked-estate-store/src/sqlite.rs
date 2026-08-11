@@ -1547,8 +1547,9 @@ impl GraphWrite for SqliteStore {
             })
             .collect::<Result<_>>()?;
         // On a (source,target,kind) collision, keep the higher-confidence edge (W3.4).
-        // evidence_count is promoted from Edge.metadata (brain consolidation) and updated in lockstep
-        // with data so the queryable column never drifts from the authoritative JSON value.
+        // evidence_count is a first-class Edge field (brain consolidation); it round-trips via the
+        // `data` JSON like every other field, and is ALSO written to the promoted `evidence_count`
+        // column in lockstep so SQL audit queries never drift from the authoritative value.
         let mut stmt = self
             .conn
             .prepare_cached(
@@ -1573,7 +1574,7 @@ impl GraphWrite for SqliteStore {
                 e.confidence.get() as f64,
                 file,
                 data,
-                e.evidence_count() as i64
+                e.evidence_count as i64
             ])
             .map_err(st)?;
         }
@@ -4431,8 +4432,8 @@ mod tests {
 
     #[test]
     fn edges_evidence_count_promoted_column_and_data_agree() {
-        // Signal `links.evidence_count`: relate an edge carrying evidence_count and prove BOTH the
-        // authoritative metadata (persisted in data JSON — the fidelity guarantee) AND the promoted
+        // Signal `links.evidence_count`: upsert an edge carrying evidence_count and prove BOTH the
+        // authoritative field (persisted in data JSON — the fidelity guarantee) AND the promoted
         // queryable column carry the value. Code edges (no evidence_count) stay at the DEFAULT 0.
         use wicked_estate_core::ResolutionTier;
         let mut store = open();
@@ -4458,7 +4459,7 @@ mod tests {
         let gov_kind = serde_json::to_string(&EdgeKind::Other("governs".into())).unwrap();
         let call_kind = serde_json::to_string(&EdgeKind::Calls).unwrap();
 
-        // Promoted column reflects the metadata value for the confirmed relation…
+        // Promoted column reflects the Edge.evidence_count field for the confirmed relation…
         let col: i64 = store
             .conn
             .query_row(
@@ -4469,7 +4470,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             col, 5,
-            "promoted column mirrors Edge.metadata evidence_count"
+            "promoted column mirrors the Edge.evidence_count field"
         );
         // …and the authoritative value round-trips through data JSON (lossless persistence).
         let data: String = store
@@ -4481,11 +4482,7 @@ mod tests {
             )
             .unwrap();
         let back: Edge = serde_json::from_str(&data).unwrap();
-        assert_eq!(
-            back.evidence_count(),
-            5,
-            "data JSON preserves evidence_count"
-        );
+        assert_eq!(back.evidence_count, 5, "data JSON preserves evidence_count");
         // A code edge that never set it defaults to 0 — existing behavior unchanged.
         let code_ec: i64 = store
             .conn

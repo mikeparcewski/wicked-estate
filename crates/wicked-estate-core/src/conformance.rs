@@ -193,6 +193,14 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
     // --- idempotency: re-upserting the same edges must not create duplicates ---
     store.upsert_edges(&edges).expect("re-upsert edges");
 
+    // --- evidence_count round-trips (brain consolidation) ---
+    // Re-upsert a→b carrying evidence_count=7. Same (source,target,kind) + confidence, so this
+    // UPDATES the existing edge in place (no new row — edge_count stays 2). Asserted on read below;
+    // every backend MUST round-trip the first-class field. b→c never sets it → stays the honest 0.
+    store
+        .upsert_edges(&[calls("a", "b").with_evidence_count(7)])
+        .expect("re-upsert a->b with evidence_count");
+
     // --- stats ---
     let stats = store.stats().expect("stats");
     assert_eq!(
@@ -228,6 +236,10 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
     assert_eq!(dependents.len(), 1, "b has exactly one dependent");
     assert_eq!(dependents[0].source, sym("a"), "a is the dependent of b");
     assert_eq!(dependents[0].target, sym("b"));
+    assert_eq!(
+        dependents[0].evidence_count, 7,
+        "evidence_count must round-trip through the store (a->b carries 7)"
+    );
 
     // b's dependencies = what b depends on = edges where source==b → {c}.
     let deps = store
@@ -235,6 +247,10 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
         .expect("dependencies");
     assert_eq!(deps.len(), 1, "b has exactly one dependency");
     assert_eq!(deps[0].target, sym("c"), "c is the dependency of b");
+    assert_eq!(
+        deps[0].evidence_count, 0,
+        "an edge that never set evidence_count round-trips as the honest 0"
+    );
 
     // --- BLAST-RADIUS via bounded reverse-reachability ---
     // "what breaks if I change c?" → c's transitive dependents = {b (depth 1), a (depth 2)}.

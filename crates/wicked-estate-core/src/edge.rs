@@ -10,14 +10,6 @@ use crate::node::{Location, Metadata};
 use crate::symbol::SymbolId;
 use serde::{Deserialize, Serialize};
 
-/// Metadata key carrying an edge's **evidence count** — how many times the relationship has been
-/// independently confirmed/contradicted (an audit counter, distinct from `confidence`). Rides the
-/// opaque `Edge::metadata` slot rather than a struct field so the spine type is unchanged (no fleet
-/// ripple across the stores/conformance kit); `SqliteStore` promotes it to a queryable
-/// `edges.evidence_count` column. Absent key ⇒ 0. This is the estate destination for
-/// wicked-brain's `links.evidence_count` signal (the brain→estate consolidation).
-pub const EVIDENCE_COUNT_META_KEY: &str = "evidence_count";
-
 /// A confidence score in `[0.0, 1.0]`. Every edge carries one (ADR-001).
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct Confidence(f32);
@@ -134,6 +126,15 @@ pub struct Edge {
     pub provenance: Provenance,
     /// The concrete resolver that produced this edge (e.g. "scip-typescript", "import-map-py").
     pub resolved_by: String,
+    /// **Evidence count** — how many times this relationship has been independently confirmed /
+    /// contradicted (an audit counter, distinct from `confidence`). The estate destination for
+    /// wicked-brain's `links.evidence_count` signal. Structurally-derived code edges leave it at 0;
+    /// knowledge relations set it via `knowledge.relate`. `#[serde(default)]` so an `Edge` persisted
+    /// before this field existed (the JSON in `edges.data`) deserializes to 0 — the honest default
+    /// for a relationship nobody has confirmed. `SqliteStore` also promotes it to a queryable
+    /// `edges.evidence_count` column.
+    #[serde(default)]
+    pub evidence_count: u32,
     /// Where the relationship occurs (the call site, the import statement, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<Location>,
@@ -157,6 +158,7 @@ impl Edge {
             confidence: tier.default_confidence(),
             provenance: tier.provenance(),
             resolved_by: resolved_by.into(),
+            evidence_count: 0,
             location: None,
             metadata: Metadata::new(),
         }
@@ -167,24 +169,11 @@ impl Edge {
         self
     }
 
-    /// Set this edge's evidence count (audit counter — how many times the relationship has been
-    /// confirmed/contradicted). Stored in `metadata` under [`EVIDENCE_COUNT_META_KEY`] so the spine
-    /// struct is unchanged; `SqliteStore` promotes it to the `edges.evidence_count` column. Builder.
+    /// Set this edge's [`evidence_count`](Self::evidence_count) audit counter. Builder sugar over the
+    /// public field; used by `knowledge.relate` to land wicked-brain's `links.evidence_count` value.
     pub fn with_evidence_count(mut self, n: u32) -> Self {
-        self.metadata.insert(
-            EVIDENCE_COUNT_META_KEY.to_string(),
-            serde_json::Value::from(n),
-        );
+        self.evidence_count = n;
         self
-    }
-
-    /// This edge's evidence count (0 when the key is absent — the honest default for an edge that
-    /// has never been confirmed). Reads the [`EVIDENCE_COUNT_META_KEY`] metadata slot.
-    pub fn evidence_count(&self) -> u32 {
-        self.metadata
-            .get(EVIDENCE_COUNT_META_KEY)
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32
     }
 
     /// Deduplication key: a relationship is identified by its endpoints + kind. When two
@@ -225,31 +214,33 @@ mod tests {
 
     #[test]
     fn evidence_count_defaults_to_zero() {
-        // An edge that was never confirmed reads back 0 — the honest default. Legacy edges (whose
-        // JSON has no evidence_count key) hydrate the same way.
-        assert_eq!(e().evidence_count(), 0);
+        // A structurally-derived edge (Edge::new) was never confirmed → 0, the honest default.
+        assert_eq!(e().evidence_count, 0);
     }
 
     #[test]
-    fn with_evidence_count_round_trips_through_metadata() {
+    fn with_evidence_count_sets_the_field() {
         let edge = e().with_evidence_count(7);
-        assert_eq!(edge.evidence_count(), 7);
-        // It rides the opaque metadata slot — the spine struct gained no field.
-        assert_eq!(
-            edge.metadata
-                .get(EVIDENCE_COUNT_META_KEY)
-                .and_then(|v| v.as_u64()),
-            Some(7)
-        );
+        assert_eq!(edge.evidence_count, 7, "builder sets the first-class field");
     }
 
     #[test]
     fn evidence_count_survives_serde_round_trip() {
-        // This is the persistence path: SqliteStore stores the full Edge as JSON in edges.data, so
+        // The persistence path: every backend stores the full Edge as JSON in `data`, so
         // evidence_count MUST survive a serialize→deserialize cycle for the migration to be lossless.
         let edge = e().with_evidence_count(42);
         let json = serde_json::to_string(&edge).unwrap();
         let back: Edge = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.evidence_count(), 42);
+        assert_eq!(back.evidence_count, 42);
+    }
+
+    #[test]
+    fn legacy_json_without_evidence_count_deserializes_to_zero() {
+        // An Edge persisted before the field existed (no `evidence_count` key in the JSON) must
+        // hydrate to 0 via `#[serde(default)]` — the backward-compat guarantee for old `edges.data`.
+        let legacy = r#"{"source":"a","target":"b","kind":{"other":"governs"},
+            "confidence":0.5,"provenance":"heuristic","resolved_by":"test"}"#;
+        let back: Edge = serde_json::from_str(legacy).unwrap();
+        assert_eq!(back.evidence_count, 0);
     }
 }
