@@ -127,7 +127,7 @@ fn dispatch_recall(
         .unwrap_or(2000) as usize;
     let rq = RecallQuery {
         query,
-        scope: scope.clone(),
+        scope,
         seeds,
         token_budget,
         now,
@@ -139,7 +139,7 @@ fn dispatch_recall(
                 .map(|item| {
                     json!({
                         "memory_id": item.id,
-                        "scope":     scope,
+                        "scope":     item.scope,
                         "content":   item.content,
                         "tier":      item.tier,
                         "score":     item.score,

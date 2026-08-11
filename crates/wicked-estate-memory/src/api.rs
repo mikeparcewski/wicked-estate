@@ -80,6 +80,7 @@ impl MemoryApi for MemoryEngine {
                 content: r.content,
                 tier: r.tier.as_str().to_string(),
                 score: r.score,
+                scope: r.scope,
             })
             .collect())
     }

@@ -302,6 +302,13 @@ pub struct RecalledItem {
     pub content: String,
     pub tier: String,
     pub score: f64,
+    /// The memory node's own hierarchical scope (e.g. `"org:acme/agent:claude"`). Always present
+    /// on the wire (S4 attribution requirement). Empty string when scope was not recorded at
+    /// capture time, or when the node could not be re-hydrated from the store at recall time.
+    /// `#[serde(default)]` keeps deserialization backward-compatible: older responses
+    /// that predate this field deserialize to `""` (the documented fallback) rather than erroring.
+    #[serde(default)]
+    pub scope: String,
 }
 
 /// Memory counts, optionally scoped (MCP: memory.coverage). HC-007 frozen schema.

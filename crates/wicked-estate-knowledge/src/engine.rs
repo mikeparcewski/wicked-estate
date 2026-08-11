@@ -520,6 +520,32 @@ mod tests {
     }
 
     #[test]
+    fn recall_surfaces_source_on_wire() {
+        // S4 gate: KRecalled.source must be non-empty for a known-source document and must survive
+        // the full recall pipeline. This is the falsifier for the drop-source regression.
+        let mut e = KnowledgeEngine::in_memory().unwrap();
+        e.ingest(
+            "Payment design",
+            &["Stripe webhooks trigger charge events.".into()],
+            "project:pay",
+            "docs/payment.md",
+            1,
+        )
+        .unwrap();
+        let hits = e.recall("how does payment work", 2000, 2).unwrap();
+        assert!(!hits.is_empty(), "recall must return at least one hit");
+        let hit = &hits[0];
+        assert!(
+            !hit.source.is_empty(),
+            "KRecalled.source must be non-empty for a known-source document; got empty"
+        );
+        assert_eq!(
+            hit.source, "docs/payment.md",
+            "KRecalled.source must match the ingested source"
+        );
+    }
+
+    #[test]
     fn separate_store_means_own_fts() {
         // DEC-1 / B3: the knowledge store is a distinct SqliteStore — code/memory nodes never appear
         // here. all_nodes only ever returns k* nodes (no dilution is even possible).
