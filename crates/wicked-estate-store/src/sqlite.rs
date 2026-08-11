@@ -182,8 +182,9 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
         .map_err(st)?;
     }
     // Brain-consolidation: promoted `edges.evidence_count` audit counter. DEFAULT 0 backfills every
-    // pre-existing edge (no data rewrite); the authoritative value also rides `Edge.metadata` and
-    // round-trips inside `data`, so this column is a queryable mirror, never the sole source. The
+    // pre-existing edge (no data rewrite); the authoritative value is the first-class
+    // `Edge.evidence_count` field, which round-trips inside `data` — this column is a queryable
+    // mirror written in lockstep by upsert_edges, never the sole source. The
     // `!ecols.is_empty()` guard skips the ALTER on a partial/legacy DB with no `edges` table (SCHEMA's
     // CREATE covers fresh opens). The new telemetry TABLES (access_log, search_misses) need no ALTER —
     // SCHEMA's `CREATE TABLE IF NOT EXISTS` creates them on the next open of any existing DB.

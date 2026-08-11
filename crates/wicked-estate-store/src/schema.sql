@@ -64,9 +64,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
 );
 
 -- evidence_count (brain-consolidation): promoted audit counter for how many times a relationship
--- has been confirmed/contradicted. The authoritative value rides the Edge's `metadata` slot
--- (EVIDENCE_COUNT_META_KEY) and round-trips inside `data`; this column mirrors it for SQL-queryable
--- auditing/lints. DEFAULT 0 backfills every pre-existing edge (code edges never confirm → stay 0).
+-- has been confirmed/contradicted. The authoritative value is the first-class `Edge.evidence_count`
+-- field, which round-trips inside `data` like every other Edge field; this column mirrors it for
+-- SQL-queryable auditing/lints (written in lockstep by upsert_edges, so it can never drift).
+-- DEFAULT 0 backfills every pre-existing edge (code edges never confirm → stay 0).
 -- New DBs get the column here; existing DBs via the idempotent ALTER TABLE migration in sqlite.rs.
 CREATE TABLE IF NOT EXISTS edges (
   source         INTEGER NOT NULL,   -- sid FK → symbols.sid (dependent, edge-direction invariant)
@@ -75,7 +76,7 @@ CREATE TABLE IF NOT EXISTS edges (
   confidence     REAL NOT NULL,
   file           TEXT NOT NULL DEFAULT '', -- repo-relative source file of the edge site (Wave 2.6)
   data           TEXT NOT NULL,      -- full Edge as JSON (still carries string SymbolIds for round-trip)
-  evidence_count INTEGER NOT NULL DEFAULT 0, -- audit counter promoted from Edge.metadata (brain consolidation)
+  evidence_count INTEGER NOT NULL DEFAULT 0, -- queryable mirror of the first-class Edge.evidence_count field (brain consolidation)
   PRIMARY KEY (source, target, kind)
 );
 -- target index powers blast-radius (Dependents); source index powers Dependencies.

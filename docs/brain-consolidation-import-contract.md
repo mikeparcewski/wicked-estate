@@ -30,12 +30,15 @@ passes the brain's stored value verbatim.
 No estate edge carried an evidence counter. Per human review of PR #95, it is a
 **first-class field on the spine `Edge` struct** (`pub evidence_count: u32`,
 `#[serde(default)]`) — not a metadata key. Because every backend stores the full
-`Edge` as JSON (`data`) / holds the struct (MemStore), the field round-trips in all
-four backends automatically, and the GraphStore conformance suite asserts that
-round-trip for each. `SqliteStore` **additionally** promotes it to a queryable
-`edges.evidence_count` column (written in lockstep with `data`); Postgres/Surreal/Mem
-carry it via the serialized `Edge` (no promoted column — round-trip fidelity is
-identical, the column is a SQLite-only audit affordance).
+`Edge` as JSON (`data`) / holds the struct (MemStore), the field round-trips
+automatically in every backend that runs the GraphStore conformance suite (the
+suite asserts the round-trip). `SqliteStore` **additionally** promotes it to a
+queryable `edges.evidence_count` column (written in lockstep with `data`);
+Postgres/Mem carry it via the serialized `Edge` (no promoted column —
+round-trip fidelity is identical, the column is a SQLite-only audit
+affordance). SurrealStore is a W1.5 bake-off challenger — not reachable via
+`open_store` — that carries the field the same way but keeps the older
+confidence-only merge rule (see §2 note below).
 
 - brain `links.evidence_count` **→** `knowledge.relate` arg `evidence_count` (integer, default 0) **→** `Edge.evidence_count` (round-trips in all backends) **→** also mirrored to SQLite's `edges.evidence_count` column.
 
@@ -76,7 +79,10 @@ Re-relating an existing `(src, tgt, rel)` updates the stored edge when the new
 confidence is ≥ the stored one **or** the new `evidence_count` is greater —
 evidence growth is strictly newer information, so a contradicted link (lower
 confidence, higher evidence) still lands. A same-evidence lower-confidence
-write is treated as stale and ignored.
+write is treated as stale and ignored. This merge rule is implemented by the
+backends `open_store` can hand out (SQLite, Postgres) and by the in-memory
+reference store; SurrealStore (a W1.5 bake-off challenger, not reachable via
+`open_store`) still merges on confidence alone.
 
 ### `wicked-estate import-telemetry <file.json>` (CLI) — signals 3 & 4
 Bulk-imports the two telemetry tables from one JSON file. Point `--db` at the
