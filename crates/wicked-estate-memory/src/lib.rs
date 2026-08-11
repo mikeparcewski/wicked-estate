@@ -49,6 +49,10 @@ pub struct Recalled {
     pub content: String,
     pub tier: wicked_estate_memory_core::Tier,
     pub score: f64,
+    /// The memory node's own hierarchical scope (S4 attribution). Recovered from the store at
+    /// recall time. Empty string when the node could not be found or re-hydrated in the store,
+    /// or when `Memory::from_node` returns `None` (node exists but is not a memory node).
+    pub scope: String,
 }
 
 /// The memory engine (L0b: single-store, single-writer).
@@ -453,11 +457,20 @@ impl MemoryEngine {
             .take(k)
             .map(|c| {
                 let score = c.final_score(self.alpha);
+                let scope = self
+                    .store
+                    .get_node(&c.id)
+                    .ok()
+                    .flatten()
+                    .and_then(|n| Memory::from_node(&n))
+                    .map(|m| m.scope.as_path().to_string())
+                    .unwrap_or_default();
                 Recalled {
                     id: c.id,
                     content: c.content,
                     tier: c.tier,
                     score,
+                    scope,
                 }
             })
             .collect())
@@ -559,11 +572,22 @@ impl MemoryEngine {
             .into_iter()
             .map(|c| {
                 let score = c.final_score(self.alpha);
+                // Recover the item's own scope for S4 attribution. The node was already
+                // hydrated in ranked_candidates; a second get_node is a cheap pk lookup.
+                let scope = self
+                    .store
+                    .get_node(&c.id)
+                    .ok()
+                    .flatten()
+                    .and_then(|n| Memory::from_node(&n))
+                    .map(|m| m.scope.as_path().to_string())
+                    .unwrap_or_default();
                 Recalled {
                     id: c.id,
                     content: c.content,
                     tier: c.tier,
                     score,
+                    scope,
                 }
             })
             .collect())
