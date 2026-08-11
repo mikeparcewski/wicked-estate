@@ -6,7 +6,7 @@
 //!.
 
 pub mod sqlite;
-pub use sqlite::{CompactStats, SqliteStore};
+pub use sqlite::{AccessRecord, CompactStats, SearchMissRecord, SqliteStore, TelemetryImport};
 // `Annotation` now lives in the core spine (the typed-annotations seam); re-export it here so
 // existing callers of `wicked_estate_store::Annotation` keep compiling.
 pub use wicked_estate_core::Annotation;

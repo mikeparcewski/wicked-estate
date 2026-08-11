@@ -447,6 +447,7 @@ impl KnowledgeEngine {
         tgt: &SymbolId,
         rel: &str,
         conf: f64,
+        evidence_count: u32,
         prov: &str,
     ) -> Result<()> {
         // node-before-edge (G3): both endpoints MUST resolve to a live node, else this is a dangling
@@ -465,8 +466,10 @@ impl KnowledgeEngine {
             ResolutionTier::Heuristic,
             prov,
         );
-        // confidence rides free on the edge.
+        // confidence rides free on the edge; evidence_count (brain consolidation) rides the metadata
+        // slot and is promoted to the edges.evidence_count column by SqliteStore.
         e.confidence = Confidence::new(conf as f32);
+        e = e.with_evidence_count(evidence_count);
         self.store.upsert_edges(&[e])?;
         Ok(())
     }
@@ -528,6 +531,35 @@ mod tests {
         );
         assert_eq!(e.count(Some(KClass::Doc)).unwrap(), 1);
         assert_eq!(e.count(Some(KClass::Chunk)).unwrap(), 1);
+    }
+
+    #[test]
+    fn relate_persists_confidence_and_evidence_count() {
+        // Brain consolidation: relate must land BOTH tuned signals on the knowledge relation —
+        // confidence (already carried) AND evidence_count (the new metadata-carried audit counter).
+        let mut e = KnowledgeEngine::in_memory().unwrap();
+        let a = e
+            .write(&KNode::new(KClass::Concept, "concept a", "", "", 1))
+            .unwrap();
+        let b = e
+            .write(&KNode::new(KClass::Concept, "concept b", "", "", 1))
+            .unwrap();
+        e.relate(&a, &b, "governs", 0.9, 4, "test").unwrap();
+
+        let edges = e.out_edges(&a).unwrap();
+        let gov = edges
+            .iter()
+            .find(|ed| matches!(&ed.kind, EdgeKind::Other(r) if r == "governs"))
+            .expect("the typed governs edge must exist");
+        assert_eq!(
+            gov.evidence_count(),
+            4,
+            "relate must persist evidence_count on the relation"
+        );
+        assert!(
+            (gov.confidence.get() - 0.9).abs() < 1e-6,
+            "relate must persist confidence on the relation"
+        );
     }
 
     #[test]

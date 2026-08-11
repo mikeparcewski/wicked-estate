@@ -104,11 +104,16 @@ fn dispatch_relate(id: &Value, args: &Value, knowledge: &mut dyn KnowledgeApi) -
         .get("confidence")
         .and_then(|v| v.as_f64())
         .unwrap_or(0.8);
+    // evidence_count (brain consolidation): optional audit counter, default 0.
+    let evidence_count = args
+        .get("evidence_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
     let provenance = args
         .get("provenance")
         .and_then(|v| v.as_str())
         .unwrap_or("knowledge.relate");
-    match knowledge.relate(src, tgt, rel, confidence, provenance) {
+    match knowledge.relate(src, tgt, rel, confidence, evidence_count, provenance) {
         Ok(edge_id) => mcp_result(id, json!({"edge_id": edge_id})),
         Err(e) => {
             // Dangling-endpoint is a tool error (isError:true), not a JSON-RPC error.
