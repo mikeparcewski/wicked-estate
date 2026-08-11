@@ -302,6 +302,9 @@ pub struct RecalledItem {
     pub content: String,
     pub tier: String,
     pub score: f64,
+    /// The memory node's own hierarchical scope (e.g. `"org:acme/agent:claude"`). Always present
+    /// on the wire (S4 attribution requirement). Empty string only if scope was not recorded.
+    pub scope: String,
 }
 
 /// Memory counts, optionally scoped (MCP: memory.coverage). HC-007 frozen schema.

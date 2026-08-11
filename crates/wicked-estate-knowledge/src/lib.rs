@@ -152,7 +152,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "knowledge.recall",
-            "description": "Standalone recall: the most relevant token-budgeted knowledge slice for a query (keyword ∪ vector, RRF-fused).",
+            "description": "Standalone recall: the most relevant token-budgeted knowledge slice for a query (keyword ∪ vector, RRF-fused). Each item in `items` carries `node_id`, `class`, `label`, `body_snippet`, `score`, and `source` (provenance set at ingest, e.g. a file path or URL; empty string when not recorded).",
             "inputSchema": { "type": "object", "required": ["query"], "properties": {
                 "query": {"type": "string"},
                 "token_budget": {"type": "integer"}
@@ -586,6 +586,41 @@ mod tests {
     }
 
     #[test]
+    fn recall_response_includes_source_field_on_wire() {
+        // S4 gate: knowledge.recall items MUST carry `source` (the provenance set at ingest).
+        // This test drives the full JSON-RPC path and inspects the raw text block — the falsifier
+        // for the "source is dropped when building KnowledgeItem" regression.
+        let mut e = engine();
+        let xedge = XedgeStore::in_memory().unwrap();
+        // Ingest with a known, non-empty source.
+        let _ing = handle_request(
+            &mut e,
+            &xedge,
+            1,
+            &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"knowledge.ingest","arguments":{
+                "title":"Caching design",
+                "chunks":["The cache uses LRU eviction and a 60-second TTL."],
+                "scope":"project:cache","source":"docs/cache.md"
+            }}}),
+        )
+        .unwrap();
+        let rec = handle_request(
+            &mut e, &xedge,
+            2,
+            &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"knowledge.recall","arguments":{"query":"how does the cache evict entries"}}}),
+        )
+        .unwrap();
+        // The recall response is a text blob: content [source]
+        let text = rec["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("docs/cache.md"),
+            "knowledge.recall wire text must carry the ingested source attribution; got: {text:?}"
+        );
+    }
+
+    #[test]
     fn write_node_persists_and_is_recallable_over_jsonrpc() {
         // T-B-KMCP (write half): write ONE node through the real JSON-RPC dispatch, then prove it
         // (a) PERSISTED — coverage's node count goes 0 → 1 — and (b) is RECALLABLE — recall surfaces
@@ -865,6 +900,9 @@ pub struct KnowledgeItem {
     pub label: String,
     pub body_snippet: String,
     pub score: f64,
+    /// Provenance of the knowledge node — the `source` field set at ingest time (e.g. a file path
+    /// or URL). Empty string when no provenance was recorded. Always present on the wire (S4).
+    pub source: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -975,6 +1013,7 @@ impl KnowledgeApi for KnowledgeEngine {
                 label: h.content.chars().take(60).collect(),
                 body_snippet: h.content,
                 score: h.score,
+                source: h.source,
             })
             .collect())
     }
@@ -1036,6 +1075,7 @@ impl KnowledgeApi for KnowledgeEngine {
                             label,
                             body_snippet: kn.content,
                             score: edge.confidence as f64,
+                            source: kn.source,
                         });
                     }
                 }
