@@ -612,11 +612,14 @@ mod tests {
                 "name":"knowledge.recall","arguments":{"query":"how does the cache evict entries"}}}),
         )
         .unwrap();
-        // The recall response is a text blob: content [source]
+        // The standalone knowledge dispatch formats items as "content [source]" plain text,
+        // NOT as JSON (JSON items are the unified MCP path in wicked-estate-mcp). Assert the
+        // source appears in the bracketed suffix form — more precise than a bare path substring,
+        // so body_snippet text containing the path cannot false-positive.
         let text = rec["result"]["content"][0]["text"].as_str().unwrap();
         assert!(
-            text.contains("docs/cache.md"),
-            "knowledge.recall wire text must carry the ingested source attribution; got: {text:?}"
+            text.contains("[docs/cache.md]"),
+            "knowledge.recall wire text must carry source in [source] suffix; got: {text:?}"
         );
     }
 

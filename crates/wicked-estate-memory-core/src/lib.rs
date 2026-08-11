@@ -303,7 +303,8 @@ pub struct RecalledItem {
     pub tier: String,
     pub score: f64,
     /// The memory node's own hierarchical scope (e.g. `"org:acme/agent:claude"`). Always present
-    /// on the wire (S4 attribution requirement). Empty string only if scope was not recorded.
+    /// on the wire (S4 attribution requirement). Empty string when scope was not recorded at
+    /// capture time, or when the node could not be re-hydrated from the store at recall time.
     pub scope: String,
 }
 

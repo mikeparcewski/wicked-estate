@@ -50,7 +50,8 @@ pub struct Recalled {
     pub tier: wicked_estate_memory_core::Tier,
     pub score: f64,
     /// The memory node's own hierarchical scope (S4 attribution). Recovered from the store at
-    /// recall time; empty string only when the node could not be re-hydrated.
+    /// recall time. Empty string when the node could not be found or re-hydrated in the store,
+    /// or when `Memory::from_node` returns `None` (node exists but is not a memory node).
     pub scope: String,
 }
 
