@@ -59,6 +59,7 @@ fn make_calls_edge(src: &str, tgt: &str) -> Edge {
         confidence: Confidence::new(1.0),
         provenance: Provenance::Parsed,
         resolved_by: "prop-test".into(),
+        evidence_count: 0,
         location: None,
         metadata: Default::default(),
     }

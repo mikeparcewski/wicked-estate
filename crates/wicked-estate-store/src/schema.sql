@@ -63,13 +63,20 @@ CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
   doc                 -- optional doc-comment
 );
 
+-- evidence_count (brain-consolidation): promoted audit counter for how many times a relationship
+-- has been confirmed/contradicted. The authoritative value is the first-class `Edge.evidence_count`
+-- field, which round-trips inside `data` like every other Edge field; this column mirrors it for
+-- SQL-queryable auditing/lints (written in lockstep by upsert_edges, so it can never drift).
+-- DEFAULT 0 backfills every pre-existing edge (code edges never confirm → stay 0).
+-- New DBs get the column here; existing DBs via the idempotent ALTER TABLE migration in sqlite.rs.
 CREATE TABLE IF NOT EXISTS edges (
-  source     INTEGER NOT NULL,   -- sid FK → symbols.sid (dependent, edge-direction invariant)
-  target     INTEGER NOT NULL,   -- sid FK → symbols.sid (dependency)
-  kind       TEXT NOT NULL,      -- serialized EdgeKind (e.g. "calls")
-  confidence REAL NOT NULL,
-  file       TEXT NOT NULL DEFAULT '', -- repo-relative source file of the edge site (Wave 2.6)
-  data       TEXT NOT NULL,      -- full Edge as JSON (still carries string SymbolIds for round-trip)
+  source         INTEGER NOT NULL,   -- sid FK → symbols.sid (dependent, edge-direction invariant)
+  target         INTEGER NOT NULL,   -- sid FK → symbols.sid (dependency)
+  kind           TEXT NOT NULL,      -- serialized EdgeKind (e.g. "calls")
+  confidence     REAL NOT NULL,
+  file           TEXT NOT NULL DEFAULT '', -- repo-relative source file of the edge site (Wave 2.6)
+  data           TEXT NOT NULL,      -- full Edge as JSON (still carries string SymbolIds for round-trip)
+  evidence_count INTEGER NOT NULL DEFAULT 0, -- queryable mirror of the first-class Edge.evidence_count field (brain consolidation)
   PRIMARY KEY (source, target, kind)
 );
 -- target index powers blast-radius (Dependents); source index powers Dependencies.
@@ -189,3 +196,27 @@ CREATE INDEX IF NOT EXISTS idx_annotations_node ON annotations(node_sym);
 CREATE INDEX IF NOT EXISTS idx_annotations_key  ON annotations(key);
 CREATE INDEX IF NOT EXISTS idx_annotations_type ON annotations(type);
 CREATE INDEX IF NOT EXISTS idx_annotations_last_verified ON annotations(last_verified);
+
+-- Access telemetry (brain-consolidation): per-item access log. One row per (item, session, time)
+-- an item was surfaced by search/recall. `item_id` is a stable identity string — a knowledge node
+-- SymbolId for the knowledge store, or any node/document id. Aggregated into an access-count /
+-- session-diversity ranking boost by consumers. This is the estate destination for wicked-brain's
+-- `access_log` signal. Pure telemetry: no FK into nodes (an item may be logged then removed).
+CREATE TABLE IF NOT EXISTS access_log (
+  item_id     TEXT    NOT NULL,
+  session_id  TEXT    NOT NULL,
+  accessed_at INTEGER NOT NULL   -- epoch millis (matches the brain source clock)
+);
+CREATE INDEX IF NOT EXISTS idx_access_item    ON access_log(item_id);
+CREATE INDEX IF NOT EXISTS idx_access_session ON access_log(session_id);
+
+-- Search-miss log (brain-consolidation): failed / empty-result queries, the input to synonym
+-- suggestion + gap-hunting. session_id is nullable (a miss may be logged outside a session).
+-- This is the estate destination for wicked-brain's `search_misses` signal (and the persisted form
+-- the knowledge engine's in-memory `RecallMiss` sidecar anticipated).
+CREATE TABLE IF NOT EXISTS search_misses (
+  query       TEXT    NOT NULL,
+  searched_at INTEGER NOT NULL, -- epoch millis
+  session_id  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_search_misses_time ON search_misses(searched_at);

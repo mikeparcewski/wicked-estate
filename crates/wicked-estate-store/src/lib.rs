@@ -6,7 +6,7 @@
 //!.
 
 pub mod sqlite;
-pub use sqlite::{CompactStats, SqliteStore};
+pub use sqlite::{AccessRecord, CompactStats, SearchMissRecord, SqliteStore, TelemetryImport};
 // `Annotation` now lives in the core spine (the typed-annotations seam); re-export it here so
 // existing callers of `wicked_estate_store::Annotation` keep compiling.
 pub use wicked_estate_core::Annotation;
@@ -349,8 +349,15 @@ impl GraphWrite for MemStore {
         for e in edges {
             let key = e.dedup_key();
             match self.edges.iter_mut().find(|x| x.dedup_key() == key) {
-                // On a collision the higher-confidence edge wins (W3.4 max-confidence merge).
-                Some(existing) if e.confidence.get() >= existing.confidence.get() => {
+                // On a collision the higher-confidence edge wins (W3.4 max-confidence merge) —
+                // UNLESS the incoming edge carries more evidence. evidence_count is a monotonic
+                // audit counter, so growth is strictly newer information (a contradicted link
+                // arrives with lower confidence + higher evidence and must land). Matches
+                // SqliteStore/PostgresStore.
+                Some(existing)
+                    if e.confidence.get() >= existing.confidence.get()
+                        || e.evidence_count > existing.evidence_count =>
+                {
                     *existing = e.clone();
                 }
                 Some(_) => {}

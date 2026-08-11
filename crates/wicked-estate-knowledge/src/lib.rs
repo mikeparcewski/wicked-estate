@@ -141,12 +141,13 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "knowledge.relate",
-            "description": "Add ONE TYPED relation (Other(\"<rel>\") edge) between two existing node ids, with confidence + provenance. Both endpoints must have a live node (else isError).",
+            "description": "Add ONE TYPED relation (Other(\"<rel>\") edge) between two existing node ids, with confidence + evidence_count + provenance. Both endpoints must have a live node (else isError).",
             "inputSchema": { "type": "object", "required": ["src", "tgt", "rel"], "properties": {
                 "src": {"type": "string"},
                 "tgt": {"type": "string"},
                 "rel": {"type": "string", "description": "the relation type, e.g. governs, refines, contradicts"},
                 "confidence": {"type": "number"},
+                "evidence_count": {"type": "integer", "minimum": 0, "maximum": 4294967295u64, "description": "audit counter: how many times this relation has been confirmed/contradicted (default 0; non-negative, fits u32, else -32602)"},
                 "provenance": {"type": "string"}
             }}
         },
@@ -301,12 +302,29 @@ fn handle_call(
                 return err(id, -32602, "src, tgt, rel all required");
             };
             let conf = a.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.8);
+            // evidence_count (brain consolidation): the relation's audit counter. Optional, default 0
+            // (a fresh relation nobody has confirmed yet). Reject anything that is not a
+            // non-negative integer fitting u32 — silent truncation would corrupt the audit signal.
+            let evidence_count = match a.get("evidence_count") {
+                None | Some(serde_json::Value::Null) => 0u32,
+                Some(v) => match v.as_u64().and_then(|n| u32::try_from(n).ok()) {
+                    Some(n) => n,
+                    None => {
+                        return err(
+                            id,
+                            -32602,
+                            "evidence_count must be a non-negative integer <= 4294967295",
+                        );
+                    }
+                },
+            };
             let prov = s("provenance").unwrap_or_else(|| "knowledge.relate".into());
             match engine.relate(
                 &wicked_estate_core::SymbolId(src),
                 &wicked_estate_core::SymbolId(tgt),
                 &rel,
                 conf,
+                evidence_count,
                 &prov,
             ) {
                 Ok(()) => Ok(content(format!("related (typed: {rel})"))),
@@ -943,6 +961,7 @@ pub trait KnowledgeApi {
         tgt_id: &str,
         rel: &str,
         confidence: f64,
+        evidence_count: u32,
         provenance: &str,
     ) -> anyhow::Result<String>;
     fn recall(
@@ -993,6 +1012,7 @@ impl KnowledgeApi for KnowledgeEngine {
         tgt_id: &str,
         rel: &str,
         confidence: f64,
+        evidence_count: u32,
         provenance: &str,
     ) -> anyhow::Result<String> {
         let src = wicked_estate_core::SymbolId(src_id.to_string());
@@ -1000,7 +1020,15 @@ impl KnowledgeApi for KnowledgeEngine {
         if KnowledgeEngine::node(self, &src)?.is_none() {
             anyhow::bail!("no live knowledge node {src_id}");
         }
-        KnowledgeEngine::relate(self, &src, &tgt, rel, confidence, provenance)?;
+        KnowledgeEngine::relate(
+            self,
+            &src,
+            &tgt,
+            rel,
+            confidence,
+            evidence_count,
+            provenance,
+        )?;
         Ok(format!("{src_id}--{rel}-->{tgt_id}"))
     }
 

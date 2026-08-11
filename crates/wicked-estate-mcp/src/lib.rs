@@ -761,7 +761,7 @@ fn knowledge_tool_schemas() -> Vec<Value> {
     vec![
         json!({"name":"knowledge.ingest","description":"Ingest a document as doc + chunk nodes.","inputSchema":{"type":"object","required":["title","chunks"],"properties":{"title":{"type":"string"},"chunks":{"type":"array","items":{"type":"string"}},"scope":{"type":"string"},"source":{"type":"string"}}}}),
         json!({"name":"knowledge.write","description":"Write ONE knowledge node.","inputSchema":{"type":"object","required":["content"],"properties":{"content":{"type":"string"},"class":{"type":"string","enum":["doc","section","chunk","concept"]},"scope":{"type":"string"},"source":{"type":"string"}}}}),
-        json!({"name":"knowledge.relate","description":"Add a typed relation between two knowledge nodes.","inputSchema":{"type":"object","required":["src","tgt","rel"],"properties":{"src":{"type":"string"},"tgt":{"type":"string"},"rel":{"type":"string"},"confidence":{"type":"number"},"provenance":{"type":"string"}}}}),
+        json!({"name":"knowledge.relate","description":"Add a typed relation between two knowledge nodes, with confidence + evidence_count + provenance.","inputSchema":{"type":"object","required":["src","tgt","rel"],"properties":{"src":{"type":"string"},"tgt":{"type":"string"},"rel":{"type":"string"},"confidence":{"type":"number"},"evidence_count":{"type":"integer","minimum":0,"maximum":4294967295u64,"description":"audit counter: confirmations/contradictions (default 0; non-negative, fits u32, else -32602)"},"provenance":{"type":"string"}}}}),
         json!({"name":"knowledge.recall","description":"Hybrid recall (FTS + vector, RRF fused) over the knowledge base. Each item carries node_id, class, label, body_snippet, score, and source (provenance set at ingest, e.g. a file path or URL; empty string when not recorded).","inputSchema":{"type":"object","required":["query"],"properties":{"query":{"type":"string"},"token_budget":{"type":"integer","default":2000}}}}),
         json!({"name":"knowledge.coverage","description":"Coverage: node counts per class.","inputSchema":{"type":"object","properties":{"class":{"type":"string","enum":["doc","section","chunk","concept"]}}}}),
         json!({"name":"knowledge.relate_code","description":"Link a knowledge node to estate code symbols via xedge.","inputSchema":{"type":"object","required":["knowledge_id","code_ids"],"properties":{"knowledge_id":{"type":"string"},"code_ids":{"type":"array","items":{"type":"string"}}}}}),
@@ -2131,7 +2131,15 @@ mod tests {
         ) -> anyhow::Result<String> {
             Ok("fake-node".to_string())
         }
-        fn relate(&mut self, _: &str, _: &str, _: &str, _: f64, _: &str) -> anyhow::Result<String> {
+        fn relate(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: f64,
+            _: u32,
+            _: &str,
+        ) -> anyhow::Result<String> {
             Ok("fake-edge".to_string())
         }
         fn recall(

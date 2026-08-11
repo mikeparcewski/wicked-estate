@@ -3,6 +3,7 @@
 //!   wicked-estate index <path>           [--db <file|:memory:>] [--history] [--embeddings] [--force]
 //!   wicked-estate scip  <root>           [--db ...] [--scip-file <path>]
 //!   wicked-estate tfstate <file>         [--db ...]
+//!   wicked-estate import-telemetry <file.json> [--db ...]
 //!   wicked-estate drift                  [--db ...]
 //!   wicked-estate query <name>           [--db ...]
 //!   wicked-estate blast-radius <name>    [--db ...]
@@ -1005,6 +1006,43 @@ fn main() -> Result<()> {
             let mut store = open_store_ext(&db).map_err(to_any)?;
             let n = wicked_estate::ingest_tfstate(store.as_mut(), &json).map_err(to_any)?;
             println!("tfstate: upserted {n} live resource node(s) from '{file_path}' into {db}");
+        }
+        // Brain consolidation: bulk-import access_log + search_misses telemetry from a JSON file
+        // produced by the brain-side export tool. The file shape is `TelemetryImport`
+        // (`{ "access_log": [...], "search_misses": [...] }`, both arrays optional). Point `--db`
+        // at the target SQLite store file (the knowledge db for knowledge telemetry; both signals
+        // are opaque id/query strings so any SQLite store file works — graph or knowledge db).
+        // SQLite-only today: the telemetry tables live in schema.sql and the import APIs are
+        // SqliteStore methods, so non-SQLite specs fail fast instead of silently creating a junk
+        // file named after the connection URL. Additive: never touches nodes/edges.
+        "import-telemetry" => {
+            let file_path = positional
+                .first()
+                .context("usage: wicked-estate import-telemetry <file.json> [--db ...]")?;
+            let json = std::fs::read_to_string(file_path)
+                .with_context(|| format!("cannot read telemetry file '{file_path}'"))?;
+            let payload: wicked_estate_store::TelemetryImport = serde_json::from_str(&json)
+                .with_context(|| format!("invalid telemetry JSON in '{file_path}'"))?;
+            // Parse the spec through the one store seam so `sqlite://<path>` and `:memory:`
+            // behave like everywhere else, and non-SQLite backends get a clear error.
+            let sqlite_path = match wicked_estate_store::StoreBackend::parse(&db) {
+                wicked_estate_store::StoreBackend::Sqlite { path } => path,
+                other => anyhow::bail!(
+                    "import-telemetry is SQLite-only today (the telemetry tables live in the \
+                     SQLite schema); got a non-SQLite store spec: {other:?}"
+                ),
+            };
+            ensure_db_dir(&sqlite_path)?;
+            let mut store = SqliteStore::open(&sqlite_path).map_err(to_any)?;
+            let a = store
+                .import_access_log(&payload.access_log)
+                .map_err(to_any)?;
+            let m = store
+                .import_search_misses(&payload.search_misses)
+                .map_err(to_any)?;
+            println!(
+                "import-telemetry: imported {a} access-log row(s), {m} search-miss(es) into {db}"
+            );
         }
         // Task C: W10 drift report.
         "drift" => {
@@ -3254,6 +3292,9 @@ fn main() -> Result<()> {
             );
             println!(
                 "  wicked-estate tfstate <file>        [--db ...]  # index live Terraform state"
+            );
+            println!(
+                "  wicked-estate import-telemetry <file.json> [--db ...]  # import access_log + search_misses"
             );
             println!(
                 "  wicked-estate drift                 [--db ...]  # IaC vs live resource diff (W10)"

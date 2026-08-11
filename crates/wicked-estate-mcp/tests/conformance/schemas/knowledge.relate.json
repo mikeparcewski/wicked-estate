@@ -1,10 +1,16 @@
 {
   "captured_from": "wicked-knowledge-0.12.1",
-  "description": "Add ONE TYPED relation (Other(\"<rel>\") edge) between two existing node ids, with confidence + provenance. Both endpoints must have a live node (else isError).",
+  "description": "Add ONE TYPED relation (Other(\"<rel>\") edge) between two existing node ids, with confidence + evidence_count + provenance. Both endpoints must have a live node (else isError).",
   "inputSchema": {
     "properties": {
       "confidence": {
         "type": "number"
+      },
+      "evidence_count": {
+        "description": "audit counter: how many times this relation has been confirmed/contradicted (default 0; non-negative, fits u32, else -32602)",
+        "maximum": 4294967295,
+        "minimum": 0,
+        "type": "integer"
       },
       "provenance": {
         "type": "string"

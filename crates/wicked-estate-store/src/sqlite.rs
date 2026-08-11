@@ -16,6 +16,39 @@ use wicked_estate_core::{
 
 const SCHEMA: &str = include_str!("schema.sql");
 
+/// One access-telemetry row (brain consolidation) — the estate destination for a wicked-brain
+/// `access_log` row. `item_id` is the accessed item's stable id (a knowledge-node `SymbolId` string
+/// for the knowledge store; any node/document id otherwise). `accessed_at` is epoch **millis** (the
+/// brain source clock). Serde field names ARE the import wire contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessRecord {
+    pub item_id: String,
+    pub session_id: String,
+    pub accessed_at: i64,
+}
+
+/// One search-miss row (brain consolidation) — the estate destination for a wicked-brain
+/// `search_misses` row. `session_id` is optional (a miss may be logged outside any session).
+/// `searched_at` is epoch **millis**. Serde field names ARE the import wire contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchMissRecord {
+    pub query: String,
+    pub searched_at: i64,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+/// The telemetry-import envelope the `wicked-estate import-telemetry <file.json>` CLI accepts and
+/// the brain-side export tool targets. Both arrays default empty, so a file may carry either signal
+/// alone. This struct IS the documented import contract shape.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TelemetryImport {
+    #[serde(default)]
+    pub access_log: Vec<AccessRecord>,
+    #[serde(default)]
+    pub search_misses: Vec<SearchMissRecord>,
+}
+
 /// Apply idempotent in-place schema migrations on an opened connection.
 ///
 /// `CREATE TABLE IF NOT EXISTS` in `SCHEMA` does NOT add new columns to a table that already
@@ -145,6 +178,25 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
             "ALTER TABLE symbols ADD COLUMN had_node INTEGER NOT NULL DEFAULT 0; \
              UPDATE symbols SET had_node = 1 \
                WHERE sid IN (SELECT symbol FROM nodes);",
+        )
+        .map_err(st)?;
+    }
+    // Brain-consolidation: promoted `edges.evidence_count` audit counter. DEFAULT 0 backfills every
+    // pre-existing edge (no data rewrite); the authoritative value is the first-class
+    // `Edge.evidence_count` field, which round-trips inside `data` — this column is a queryable
+    // mirror written in lockstep by upsert_edges, never the sole source. The
+    // `!ecols.is_empty()` guard skips the ALTER on a partial/legacy DB with no `edges` table (SCHEMA's
+    // CREATE covers fresh opens). The new telemetry TABLES (access_log, search_misses) need no ALTER —
+    // SCHEMA's `CREATE TABLE IF NOT EXISTS` creates them on the next open of any existing DB.
+    let mut estmt = conn.prepare("PRAGMA table_info(edges)").map_err(st)?;
+    let ecols: Vec<String> = estmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(st)?
+        .filter_map(|r| r.ok())
+        .collect();
+    if !ecols.is_empty() && !ecols.iter().any(|c| c == "evidence_count") {
+        conn.execute_batch(
+            "ALTER TABLE edges ADD COLUMN evidence_count INTEGER NOT NULL DEFAULT 0;",
         )
         .map_err(st)?;
     }
@@ -628,6 +680,166 @@ impl SqliteStore {
             .execute("UPDATE files SET digest = ''", [])
             .map_err(st)?;
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Brain-consolidation telemetry: access_log + search_misses record/import.
+    // The bulk `import_*` paths are the migrator's write surface; the single-row
+    // `record_*` paths let a live consumer log telemetry as it happens. Reads
+    // (`access_stats`, `search_misses`) mirror wicked-brain's ranking-boost /
+    // synonym-suggestion aggregations so the signal stays USABLE post-migration.
+    // -----------------------------------------------------------------------
+
+    /// Record ONE access event (an item surfaced by search/recall). `accessed_at` is epoch millis.
+    pub fn record_access(
+        &mut self,
+        item_id: &str,
+        session_id: &str,
+        accessed_at: i64,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO access_log(item_id, session_id, accessed_at) VALUES(?1, ?2, ?3)",
+                params![item_id, session_id, accessed_at],
+            )
+            .map_err(st)?;
+        Ok(())
+    }
+
+    /// Bulk-import access-telemetry rows atomically (the migrator's write path). A SAVEPOINT nests
+    /// safely whether or not an outer batch is open. Returns the number of rows written.
+    pub fn import_access_log(&mut self, rows: &[AccessRecord]) -> Result<usize> {
+        self.conn
+            .execute_batch("SAVEPOINT imp_access")
+            .map_err(st)?;
+        let res = (|| -> Result<()> {
+            let mut stmt = self
+                .conn
+                .prepare_cached(
+                    "INSERT INTO access_log(item_id, session_id, accessed_at) VALUES(?1, ?2, ?3)",
+                )
+                .map_err(st)?;
+            for r in rows {
+                stmt.execute(params![r.item_id, r.session_id, r.accessed_at])
+                    .map_err(st)?;
+            }
+            Ok(())
+        })();
+        match res {
+            Ok(()) => {
+                self.conn.execute_batch("RELEASE imp_access").map_err(st)?;
+                Ok(rows.len())
+            }
+            Err(e) => {
+                let _ = self
+                    .conn
+                    .execute_batch("ROLLBACK TO imp_access; RELEASE imp_access");
+                Err(e)
+            }
+        }
+    }
+
+    /// Aggregate access stats for one item: `(total_accesses, distinct_sessions)`. Mirrors
+    /// wicked-brain's `access_log` ranking-boost aggregation. Both zero when never accessed.
+    pub fn access_stats(&self, item_id: &str) -> Result<(u64, u64)> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*), COUNT(DISTINCT session_id) FROM access_log WHERE item_id=?1",
+                params![item_id],
+                |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+            )
+            .map_err(st)
+    }
+
+    /// Record ONE search miss (empty / failed query — the synonym-suggestion input). `searched_at`
+    /// is epoch millis; `session_id` is optional.
+    pub fn record_search_miss(
+        &mut self,
+        query: &str,
+        searched_at: i64,
+        session_id: Option<&str>,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO search_misses(query, searched_at, session_id) VALUES(?1, ?2, ?3)",
+                params![query, searched_at, session_id],
+            )
+            .map_err(st)?;
+        Ok(())
+    }
+
+    /// Bulk-import search-miss rows atomically (the migrator's write path). Returns rows written.
+    pub fn import_search_misses(&mut self, rows: &[SearchMissRecord]) -> Result<usize> {
+        self.conn.execute_batch("SAVEPOINT imp_miss").map_err(st)?;
+        let res = (|| -> Result<()> {
+            let mut stmt = self
+                .conn
+                .prepare_cached(
+                    "INSERT INTO search_misses(query, searched_at, session_id) VALUES(?1, ?2, ?3)",
+                )
+                .map_err(st)?;
+            for r in rows {
+                stmt.execute(params![r.query, r.searched_at, r.session_id])
+                    .map_err(st)?;
+            }
+            Ok(())
+        })();
+        match res {
+            Ok(()) => {
+                self.conn.execute_batch("RELEASE imp_miss").map_err(st)?;
+                Ok(rows.len())
+            }
+            Err(e) => {
+                let _ = self
+                    .conn
+                    .execute_batch("ROLLBACK TO imp_miss; RELEASE imp_miss");
+                Err(e)
+            }
+        }
+    }
+
+    /// Read logged search misses, most-recent-first. `since` (epoch millis, inclusive) and `limit`
+    /// bound the result. Mirrors wicked-brain's `search_misses` read.
+    pub fn search_misses(&self, limit: usize, since: Option<i64>) -> Result<Vec<SearchMissRecord>> {
+        let to_row = |r: &rusqlite::Row<'_>| {
+            Ok(SearchMissRecord {
+                query: r.get::<_, String>(0)?,
+                searched_at: r.get::<_, i64>(1)?,
+                session_id: r.get::<_, Option<String>>(2)?,
+            })
+        };
+        let mut out = Vec::new();
+        match since {
+            Some(s) => {
+                let mut stmt = self
+                    .conn
+                    .prepare(
+                        "SELECT query, searched_at, session_id FROM search_misses \
+                         WHERE searched_at >= ?1 ORDER BY searched_at DESC LIMIT ?2",
+                    )
+                    .map_err(st)?;
+                let rows = stmt
+                    .query_map(params![s, limit as i64], to_row)
+                    .map_err(st)?;
+                for r in rows {
+                    out.push(r.map_err(st)?);
+                }
+            }
+            None => {
+                let mut stmt = self
+                    .conn
+                    .prepare(
+                        "SELECT query, searched_at, session_id FROM search_misses \
+                         ORDER BY searched_at DESC LIMIT ?1",
+                    )
+                    .map_err(st)?;
+                let rows = stmt.query_map(params![limit as i64], to_row).map_err(st)?;
+                for r in rows {
+                    out.push(r.map_err(st)?);
+                }
+            }
+        }
+        Ok(out)
     }
 
     // -----------------------------------------------------------------------
@@ -1335,14 +1547,25 @@ impl GraphWrite for SqliteStore {
                 Ok((src, tgt))
             })
             .collect::<Result<_>>()?;
-        // On a (source,target,kind) collision, keep the higher-confidence edge (W3.4).
+        // On a (source,target,kind) collision, keep the higher-confidence edge (W3.4) — UNLESS the
+        // incoming edge carries MORE evidence. evidence_count is a monotonic audit counter: growth
+        // means strictly newer information (brain's confirm AND contradict both bump it), so a
+        // tuned signal whose confidence legitimately dropped (a contradicted link) still lands
+        // instead of being silently discarded by the higher-confidence-wins rule. Structural
+        // extractors leave evidence_count at 0, so the W3.4 merge behavior for code edges is
+        // unchanged. evidence_count is a first-class Edge field (brain consolidation); it
+        // round-trips via the `data` JSON like every other field, and is ALSO written to the
+        // promoted `evidence_count` column in lockstep so SQL audit queries never drift from the
+        // authoritative value.
         let mut stmt = self
             .conn
             .prepare_cached(
-                "INSERT INTO edges(source,target,kind,confidence,file,data) VALUES(?1,?2,?3,?4,?5,?6)
+                "INSERT INTO edges(source,target,kind,confidence,file,data,evidence_count) VALUES(?1,?2,?3,?4,?5,?6,?7)
                  ON CONFLICT(source,target,kind) DO UPDATE SET
-                   confidence=excluded.confidence, file=excluded.file, data=excluded.data
-                 WHERE excluded.confidence >= edges.confidence",
+                   confidence=excluded.confidence, file=excluded.file, data=excluded.data,
+                   evidence_count=excluded.evidence_count
+                 WHERE excluded.confidence >= edges.confidence
+                    OR excluded.evidence_count > edges.evidence_count",
             )
             .map_err(st)?;
         for (e, (src_sid, tgt_sid)) in edges.iter().zip(sids.iter()) {
@@ -1358,7 +1581,8 @@ impl GraphWrite for SqliteStore {
                 kind,
                 e.confidence.get() as f64,
                 file,
-                data
+                data,
+                e.evidence_count as i64
             ])
             .map_err(st)?;
         }
@@ -4210,5 +4434,195 @@ mod tests {
             SqliteStore::open_readonly(&path).is_err(),
             "open_readonly on a non-existent file must error"
         );
+    }
+
+    // ── Brain-consolidation signal destinations ──────────────────────────────────────────────────
+
+    #[test]
+    fn edges_evidence_count_promoted_column_and_data_agree() {
+        // Signal `links.evidence_count`: upsert an edge carrying evidence_count and prove BOTH the
+        // authoritative field (persisted in data JSON — the fidelity guarantee) AND the promoted
+        // queryable column carry the value. Code edges (no evidence_count) stay at the DEFAULT 0.
+        use wicked_estate_core::ResolutionTier;
+        let mut store = open();
+        let related = Edge::new(
+            sym("a"),
+            sym("b"),
+            EdgeKind::Other("governs".into()),
+            ResolutionTier::Heuristic,
+            "test",
+        )
+        .with_evidence_count(5);
+        let plain_call = Edge::new(
+            sym("c"),
+            sym("d"),
+            EdgeKind::Calls,
+            ResolutionTier::Scip,
+            "test",
+        );
+        store.upsert_edges(&[related, plain_call]).unwrap();
+
+        // `kind` is stored as serialized JSON — compute the exact stored text via serde so the test
+        // is robust to the enum's wire encoding rather than hardcoding it.
+        let gov_kind = serde_json::to_string(&EdgeKind::Other("governs".into())).unwrap();
+        let call_kind = serde_json::to_string(&EdgeKind::Calls).unwrap();
+
+        // Promoted column reflects the Edge.evidence_count field for the confirmed relation…
+        let col: i64 = store
+            .conn
+            .query_row(
+                "SELECT evidence_count FROM edges WHERE kind = ?1",
+                params![gov_kind],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            col, 5,
+            "promoted column mirrors the Edge.evidence_count field"
+        );
+        // …and the authoritative value round-trips through data JSON (lossless persistence).
+        let data: String = store
+            .conn
+            .query_row(
+                "SELECT data FROM edges WHERE kind = ?1",
+                params![gov_kind],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let back: Edge = serde_json::from_str(&data).unwrap();
+        assert_eq!(back.evidence_count, 5, "data JSON preserves evidence_count");
+        // A code edge that never set it defaults to 0 — existing behavior unchanged.
+        let code_ec: i64 = store
+            .conn
+            .query_row(
+                "SELECT evidence_count FROM edges WHERE kind = ?1",
+                params![call_kind],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(code_ec, 0, "an edge with no evidence_count backfills to 0");
+    }
+
+    #[test]
+    fn migrate_adds_evidence_count_to_legacy_edges() {
+        // A DB whose `edges` predates the column must gain it (DEFAULT 0 backfilling every row) on
+        // the idempotent migration — existing edges keep working. Mirrors the annotations-envelope
+        // migration test. `annotations` is created at current shape so its migrations are no-ops.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE annotations (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, node_sym INTEGER NOT NULL, key TEXT NOT NULL,
+               value TEXT NOT NULL, confidence REAL NOT NULL DEFAULT 1.0,
+               provenance TEXT NOT NULL DEFAULT '', author TEXT NOT NULL DEFAULT '',
+               ts INTEGER NOT NULL DEFAULT 0, type TEXT NOT NULL DEFAULT 'note',
+               source_type TEXT NOT NULL DEFAULT 'unspecified',
+               extraction_method TEXT NOT NULL DEFAULT 'manual',
+               last_verified INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE edges (
+               source INTEGER NOT NULL, target INTEGER NOT NULL, kind TEXT NOT NULL,
+               confidence REAL NOT NULL, file TEXT NOT NULL DEFAULT '', data TEXT NOT NULL,
+               PRIMARY KEY (source, target, kind)
+             );
+             INSERT INTO edges(source,target,kind,confidence,file,data)
+               VALUES (1, 2, '\"calls\"', 1.0, '', '{}');",
+        )
+        .expect("create legacy edges fixture");
+
+        {
+            let mut s = conn.prepare("PRAGMA table_info(edges)").unwrap();
+            let cols: Vec<String> = s
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect();
+            assert!(
+                !cols.iter().any(|c| c == "evidence_count"),
+                "precondition: legacy edges lacks evidence_count"
+            );
+        }
+
+        migrate_schema(&conn).expect("migration must add evidence_count");
+        let ec: i64 = conn
+            .query_row("SELECT evidence_count FROM edges", [], |r| r.get(0))
+            .expect("column readable after migration");
+        assert_eq!(ec, 0, "pre-existing edge backfills to 0");
+
+        migrate_schema(&conn).expect("second migration run must be a no-op");
+    }
+
+    #[test]
+    fn access_log_record_import_and_stats() {
+        // Signal `access_log`: record + bulk-import telemetry, then aggregate it the way the brain's
+        // ranking boost does — total accesses and DISTINCT-session diversity per item.
+        let mut store = open();
+        store.record_access("k1", "sess-a", 1000).unwrap();
+        let n = store
+            .import_access_log(&[
+                AccessRecord {
+                    item_id: "k1".into(),
+                    session_id: "sess-a".into(),
+                    accessed_at: 2000,
+                },
+                AccessRecord {
+                    item_id: "k1".into(),
+                    session_id: "sess-b".into(),
+                    accessed_at: 3000,
+                },
+                AccessRecord {
+                    item_id: "k2".into(),
+                    session_id: "sess-a".into(),
+                    accessed_at: 4000,
+                },
+            ])
+            .unwrap();
+        assert_eq!(n, 3, "import returns rows written");
+
+        let (count, sessions) = store.access_stats("k1").unwrap();
+        assert_eq!(count, 3, "k1: 1 recorded + 2 imported");
+        assert_eq!(sessions, 2, "k1 seen from 2 distinct sessions");
+        assert_eq!(
+            store.access_stats("nope").unwrap(),
+            (0, 0),
+            "a never-accessed item aggregates to zero"
+        );
+    }
+
+    #[test]
+    fn search_misses_record_import_and_read() {
+        // Signal `search_misses`: record + bulk-import misses, then read them most-recent-first with
+        // the inclusive `since` bound — the synonym-suggestion input.
+        let mut store = open();
+        store
+            .record_search_miss("old query", 1000, Some("sess"))
+            .unwrap();
+        store
+            .import_search_misses(&[
+                SearchMissRecord {
+                    query: "middle".into(),
+                    searched_at: 2000,
+                    session_id: None,
+                },
+                SearchMissRecord {
+                    query: "newest".into(),
+                    searched_at: 3000,
+                    session_id: Some("s2".into()),
+                },
+            ])
+            .unwrap();
+
+        let all = store.search_misses(10, None).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].query, "newest", "most-recent first");
+        assert_eq!(all[2].query, "old query");
+        assert_eq!(all[1].session_id, None, "nullable session_id round-trips");
+
+        let recent = store.search_misses(10, Some(2000)).unwrap();
+        assert_eq!(
+            recent.len(),
+            2,
+            "since=2000 (inclusive) excludes the ts=1000 miss"
+        );
+        assert!(recent.iter().all(|m| m.searched_at >= 2000));
     }
 }

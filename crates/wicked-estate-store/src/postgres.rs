@@ -582,13 +582,19 @@ impl GraphWrite for PostgresStore {
             let confidence = e.confidence.get() as f64;
             rt_block(
                 sqlx::query(
+                    // Higher-confidence-wins (W3.4), UNLESS the incoming edge carries more
+                    // evidence — evidence_count is a monotonic audit counter, so growth means
+                    // strictly newer information (see SqliteStore::upsert_edges). Here it rides
+                    // in the `data` JSON (no promoted column); absent on pre-field rows → 0.
                     "INSERT INTO edges(source, target, kind, confidence, file, data)
                      VALUES($1, $2, $3, $4, $5, $6)
                      ON CONFLICT(source, target, kind) DO UPDATE SET
                        confidence = EXCLUDED.confidence,
                        file       = EXCLUDED.file,
                        data       = EXCLUDED.data
-                     WHERE EXCLUDED.confidence >= edges.confidence",
+                     WHERE EXCLUDED.confidence >= edges.confidence
+                        OR COALESCE((EXCLUDED.data::jsonb->>'evidence_count')::bigint, 0)
+                           > COALESCE((edges.data::jsonb->>'evidence_count')::bigint, 0)",
                 )
                 .bind(&e.source.0)
                 .bind(&e.target.0)

@@ -126,6 +126,15 @@ pub struct Edge {
     pub provenance: Provenance,
     /// The concrete resolver that produced this edge (e.g. "scip-typescript", "import-map-py").
     pub resolved_by: String,
+    /// **Evidence count** — how many times this relationship has been independently confirmed /
+    /// contradicted (an audit counter, distinct from `confidence`). The estate destination for
+    /// wicked-brain's `links.evidence_count` signal. Structurally-derived code edges leave it at 0;
+    /// knowledge relations set it via `knowledge.relate`. `#[serde(default)]` so an `Edge` persisted
+    /// before this field existed (the JSON in `edges.data`) deserializes to 0 — the honest default
+    /// for a relationship nobody has confirmed. `SqliteStore` also promotes it to a queryable
+    /// `edges.evidence_count` column.
+    #[serde(default)]
+    pub evidence_count: u32,
     /// Where the relationship occurs (the call site, the import statement, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<Location>,
@@ -149,6 +158,7 @@ impl Edge {
             confidence: tier.default_confidence(),
             provenance: tier.provenance(),
             resolved_by: resolved_by.into(),
+            evidence_count: 0,
             location: None,
             metadata: Metadata::new(),
         }
@@ -156,6 +166,13 @@ impl Edge {
 
     pub fn with_location(mut self, location: Location) -> Self {
         self.location = Some(location);
+        self
+    }
+
+    /// Set this edge's [`evidence_count`](Self::evidence_count) audit counter. Builder sugar over the
+    /// public field; used by `knowledge.relate` to land wicked-brain's `links.evidence_count` value.
+    pub fn with_evidence_count(mut self, n: u32) -> Self {
+        self.evidence_count = n;
         self
     }
 
@@ -179,4 +196,51 @@ pub enum Direction {
     /// Edges where the node is the `source` — i.e. its **dependencies**.
     Dependencies,
     Both,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn e() -> Edge {
+        Edge::new(
+            SymbolId("a".into()),
+            SymbolId("b".into()),
+            EdgeKind::Other("governs".into()),
+            ResolutionTier::Heuristic,
+            "test",
+        )
+    }
+
+    #[test]
+    fn evidence_count_defaults_to_zero() {
+        // A structurally-derived edge (Edge::new) was never confirmed → 0, the honest default.
+        assert_eq!(e().evidence_count, 0);
+    }
+
+    #[test]
+    fn with_evidence_count_sets_the_field() {
+        let edge = e().with_evidence_count(7);
+        assert_eq!(edge.evidence_count, 7, "builder sets the first-class field");
+    }
+
+    #[test]
+    fn evidence_count_survives_serde_round_trip() {
+        // The persistence path: every backend stores the full Edge as JSON in `data`, so
+        // evidence_count MUST survive a serialize→deserialize cycle for the migration to be lossless.
+        let edge = e().with_evidence_count(42);
+        let json = serde_json::to_string(&edge).unwrap();
+        let back: Edge = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.evidence_count, 42);
+    }
+
+    #[test]
+    fn legacy_json_without_evidence_count_deserializes_to_zero() {
+        // An Edge persisted before the field existed (no `evidence_count` key in the JSON) must
+        // hydrate to 0 via `#[serde(default)]` — the backward-compat guarantee for old `edges.data`.
+        let legacy = r#"{"source":"a","target":"b","kind":{"other":"governs"},
+            "confidence":0.5,"provenance":"heuristic","resolved_by":"test"}"#;
+        let back: Edge = serde_json::from_str(legacy).unwrap();
+        assert_eq!(back.evidence_count, 0);
+    }
 }

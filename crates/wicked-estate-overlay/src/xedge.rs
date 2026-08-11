@@ -90,6 +90,8 @@ impl XEdge {
             confidence: Confidence::new(self.confidence),
             provenance: Provenance::Synthesizer(self.provenance.clone()),
             resolved_by: format!("xedge:{}", self.rel),
+            // Injected cross-repo edges carry no confirm/contradict history → 0.
+            evidence_count: 0,
             location: None,
             metadata: Default::default(),
         }

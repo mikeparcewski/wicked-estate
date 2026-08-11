@@ -354,6 +354,7 @@ mod tests {
             confidence: Confidence::new(1.0),
             provenance: Provenance::Parsed,
             resolved_by: "test".into(),
+            evidence_count: 0,
             location: None,
             metadata: Default::default(),
         }
@@ -367,6 +368,7 @@ mod tests {
             confidence: Confidence::new(1.0),
             provenance: Provenance::Parsed,
             resolved_by: "test".into(),
+            evidence_count: 0,
             location: None,
             metadata: Default::default(),
         }
@@ -555,6 +557,7 @@ mod tests {
             confidence: Confidence::new(1.0),
             provenance: Provenance::Parsed,
             resolved_by: "test".into(),
+            evidence_count: 0,
             location: None,
             metadata: Default::default(),
         };

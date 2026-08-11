@@ -104,11 +104,27 @@ fn dispatch_relate(id: &Value, args: &Value, knowledge: &mut dyn KnowledgeApi) -
         .get("confidence")
         .and_then(|v| v.as_f64())
         .unwrap_or(0.8);
+    // evidence_count (brain consolidation): optional audit counter, default 0. Reject anything
+    // that is not a non-negative integer fitting u32 — a silent `as` truncation (or a negative
+    // value defaulting to 0) would corrupt the audit signal instead of surfacing the caller's bug.
+    let evidence_count = match args.get("evidence_count") {
+        None | Some(Value::Null) => 0u32,
+        Some(v) => match v.as_u64().and_then(|n| u32::try_from(n).ok()) {
+            Some(n) => n,
+            None => {
+                return json_rpc_error(
+                    id,
+                    -32602,
+                    "evidence_count must be a non-negative integer <= 4294967295",
+                );
+            }
+        },
+    };
     let provenance = args
         .get("provenance")
         .and_then(|v| v.as_str())
         .unwrap_or("knowledge.relate");
-    match knowledge.relate(src, tgt, rel, confidence, provenance) {
+    match knowledge.relate(src, tgt, rel, confidence, evidence_count, provenance) {
         Ok(edge_id) => mcp_result(id, json!({"edge_id": edge_id})),
         Err(e) => {
             // Dangling-endpoint is a tool error (isError:true), not a JSON-RPC error.
