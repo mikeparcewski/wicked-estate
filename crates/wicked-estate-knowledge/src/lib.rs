@@ -905,6 +905,9 @@ pub struct KnowledgeItem {
     pub score: f64,
     /// Provenance of the knowledge node — the `source` field set at ingest time (e.g. a file path
     /// or URL). Empty string when no provenance was recorded. Always present on the wire (S4).
+    /// `#[serde(default)]` keeps deserialization backward-compatible: older responses that
+    /// predate this field deserialize to `""` rather than erroring.
+    #[serde(default)]
     pub source: String,
 }
 
