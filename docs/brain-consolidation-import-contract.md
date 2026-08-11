@@ -68,12 +68,23 @@ MCP server accept:
 
 `src`, `tgt`, `rel` required; `confidence` (default 0.8), `evidence_count`
 (default 0), `provenance` (default `"knowledge.relate"`) optional. Both endpoints
-must be live nodes (else `isError:true`).
+must be live nodes (else `isError:true`). `evidence_count` must be a
+non-negative integer that fits u32 (≤ 4294967295) — anything else is rejected
+with JSON-RPC `-32602` rather than silently truncated.
+
+Re-relating an existing `(src, tgt, rel)` updates the stored edge when the new
+confidence is ≥ the stored one **or** the new `evidence_count` is greater —
+evidence growth is strictly newer information, so a contradicted link (lower
+confidence, higher evidence) still lands. A same-evidence lower-confidence
+write is treated as stale and ignored.
 
 ### `wicked-estate import-telemetry <file.json>` (CLI) — signals 3 & 4
 Bulk-imports the two telemetry tables from one JSON file. Point `--db` at the
-target store (the knowledge db for knowledge telemetry; both signals are opaque
-id/query strings, so any store works). Additive — never touches nodes/edges.
+target **SQLite store file** (the knowledge db for knowledge telemetry; both
+signals are opaque id/query strings, so any SQLite store file works — graph db
+or knowledge db). SQLite-only today: the telemetry tables live in the SQLite
+schema and the import APIs are `SqliteStore` methods; a `postgres://` spec is
+rejected with a clear error. Additive — never touches nodes/edges.
 
 ```
 wicked-estate import-telemetry telemetry.json --db /path/to/knowledge.db

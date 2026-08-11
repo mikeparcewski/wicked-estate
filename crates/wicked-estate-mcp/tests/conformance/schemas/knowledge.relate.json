@@ -7,7 +7,9 @@
         "type": "number"
       },
       "evidence_count": {
-        "description": "audit counter: how many times this relation has been confirmed/contradicted (default 0)",
+        "description": "audit counter: how many times this relation has been confirmed/contradicted (default 0; non-negative, fits u32, else -32602)",
+        "maximum": 4294967295,
+        "minimum": 0,
         "type": "integer"
       },
       "provenance": {

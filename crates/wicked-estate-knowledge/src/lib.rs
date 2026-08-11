@@ -147,7 +147,7 @@ pub fn tool_defs() -> Value {
                 "tgt": {"type": "string"},
                 "rel": {"type": "string", "description": "the relation type, e.g. governs, refines, contradicts"},
                 "confidence": {"type": "number"},
-                "evidence_count": {"type": "integer", "description": "audit counter: how many times this relation has been confirmed/contradicted (default 0)"},
+                "evidence_count": {"type": "integer", "minimum": 0, "maximum": 4294967295u64, "description": "audit counter: how many times this relation has been confirmed/contradicted (default 0; non-negative, fits u32, else -32602)"},
                 "provenance": {"type": "string"}
             }}
         },
@@ -303,11 +303,21 @@ fn handle_call(
             };
             let conf = a.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.8);
             // evidence_count (brain consolidation): the relation's audit counter. Optional, default 0
-            // (a fresh relation nobody has confirmed yet).
-            let evidence_count = a
-                .get("evidence_count")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
+            // (a fresh relation nobody has confirmed yet). Reject anything that is not a
+            // non-negative integer fitting u32 — silent truncation would corrupt the audit signal.
+            let evidence_count = match a.get("evidence_count") {
+                None | Some(serde_json::Value::Null) => 0u32,
+                Some(v) => match v.as_u64().and_then(|n| u32::try_from(n).ok()) {
+                    Some(n) => n,
+                    None => {
+                        return err(
+                            id,
+                            -32602,
+                            "evidence_count must be a non-negative integer <= 4294967295",
+                        );
+                    }
+                },
+            };
             let prov = s("provenance").unwrap_or_else(|| "knowledge.relate".into());
             match engine.relate(
                 &wicked_estate_core::SymbolId(src),

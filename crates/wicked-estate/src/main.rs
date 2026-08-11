@@ -1010,8 +1010,11 @@ fn main() -> Result<()> {
         // Brain consolidation: bulk-import access_log + search_misses telemetry from a JSON file
         // produced by the brain-side export tool. The file shape is `TelemetryImport`
         // (`{ "access_log": [...], "search_misses": [...] }`, both arrays optional). Point `--db`
-        // at the target store (the knowledge db for knowledge telemetry; both signals are opaque
-        // id/query strings so any store works). Additive: never touches nodes/edges.
+        // at the target SQLite store file (the knowledge db for knowledge telemetry; both signals
+        // are opaque id/query strings so any SQLite store file works — graph or knowledge db).
+        // SQLite-only today: the telemetry tables live in schema.sql and the import APIs are
+        // SqliteStore methods, so non-SQLite specs fail fast instead of silently creating a junk
+        // file named after the connection URL. Additive: never touches nodes/edges.
         "import-telemetry" => {
             let file_path = positional
                 .first()
@@ -1020,8 +1023,17 @@ fn main() -> Result<()> {
                 .with_context(|| format!("cannot read telemetry file '{file_path}'"))?;
             let payload: wicked_estate_store::TelemetryImport = serde_json::from_str(&json)
                 .with_context(|| format!("invalid telemetry JSON in '{file_path}'"))?;
-            ensure_db_dir(&db)?;
-            let mut store = SqliteStore::open(&db).map_err(to_any)?;
+            // Parse the spec through the one store seam so `sqlite://<path>` and `:memory:`
+            // behave like everywhere else, and non-SQLite backends get a clear error.
+            let sqlite_path = match wicked_estate_store::StoreBackend::parse(&db) {
+                wicked_estate_store::StoreBackend::Sqlite { path } => path,
+                other => anyhow::bail!(
+                    "import-telemetry is SQLite-only today (the telemetry tables live in the \
+                     SQLite schema); got a non-SQLite store spec: {other:?}"
+                ),
+            };
+            ensure_db_dir(&sqlite_path)?;
+            let mut store = SqliteStore::open(&sqlite_path).map_err(to_any)?;
             let a = store
                 .import_access_log(&payload.access_log)
                 .map_err(to_any)?;

@@ -563,6 +563,48 @@ mod tests {
     }
 
     #[test]
+    fn relate_update_lands_contradicted_signal_but_not_stale_writes() {
+        // Brain consolidation: a contradicted link legitimately DROPS confidence while GROWING
+        // evidence_count (both confirm and contradict bump the audit counter). The store's
+        // higher-confidence-wins collision rule (W3.4) must not eat that update — evidence
+        // growth wins. A write with NO evidence growth and lower confidence is a stale/duplicate
+        // signal and must still lose.
+        let mut e = KnowledgeEngine::in_memory().unwrap();
+        let a = e
+            .write(&KNode::new(KClass::Concept, "concept a", "", "", 1))
+            .unwrap();
+        let b = e
+            .write(&KNode::new(KClass::Concept, "concept b", "", "", 1))
+            .unwrap();
+        e.relate(&a, &b, "governs", 0.9, 4, "test").unwrap();
+
+        // Contradiction: confidence 0.9 → 0.7, evidence 4 → 5. Must land.
+        e.relate(&a, &b, "governs", 0.7, 5, "test").unwrap();
+        let gov = |e: &KnowledgeEngine| {
+            e.out_edges(&a)
+                .unwrap()
+                .into_iter()
+                .find(|ed| matches!(&ed.kind, EdgeKind::Other(r) if r == "governs"))
+                .expect("the typed governs edge must exist")
+        };
+        let g = gov(&e);
+        assert_eq!(g.evidence_count, 5, "evidence growth must win the upsert");
+        assert!(
+            (g.confidence.get() - 0.7).abs() < 1e-6,
+            "the contradicted (lower) confidence must land alongside the evidence growth"
+        );
+
+        // Stale write: lower confidence, NO evidence growth. Must be ignored (W3.4).
+        e.relate(&a, &b, "governs", 0.5, 5, "test").unwrap();
+        let g = gov(&e);
+        assert_eq!(g.evidence_count, 5);
+        assert!(
+            (g.confidence.get() - 0.7).abs() < 1e-6,
+            "a same-evidence lower-confidence write is stale and must lose"
+        );
+    }
+
+    #[test]
     fn knode_roundtrips_to_node() {
         let kn = KNode::new(
             KClass::Chunk,

@@ -104,11 +104,22 @@ fn dispatch_relate(id: &Value, args: &Value, knowledge: &mut dyn KnowledgeApi) -
         .get("confidence")
         .and_then(|v| v.as_f64())
         .unwrap_or(0.8);
-    // evidence_count (brain consolidation): optional audit counter, default 0.
-    let evidence_count = args
-        .get("evidence_count")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+    // evidence_count (brain consolidation): optional audit counter, default 0. Reject anything
+    // that is not a non-negative integer fitting u32 — a silent `as` truncation (or a negative
+    // value defaulting to 0) would corrupt the audit signal instead of surfacing the caller's bug.
+    let evidence_count = match args.get("evidence_count") {
+        None | Some(Value::Null) => 0u32,
+        Some(v) => match v.as_u64().and_then(|n| u32::try_from(n).ok()) {
+            Some(n) => n,
+            None => {
+                return json_rpc_error(
+                    id,
+                    -32602,
+                    "evidence_count must be a non-negative integer <= 4294967295",
+                );
+            }
+        },
+    };
     let provenance = args
         .get("provenance")
         .and_then(|v| v.as_str())

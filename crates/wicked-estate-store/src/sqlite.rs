@@ -1546,10 +1546,16 @@ impl GraphWrite for SqliteStore {
                 Ok((src, tgt))
             })
             .collect::<Result<_>>()?;
-        // On a (source,target,kind) collision, keep the higher-confidence edge (W3.4).
-        // evidence_count is a first-class Edge field (brain consolidation); it round-trips via the
-        // `data` JSON like every other field, and is ALSO written to the promoted `evidence_count`
-        // column in lockstep so SQL audit queries never drift from the authoritative value.
+        // On a (source,target,kind) collision, keep the higher-confidence edge (W3.4) — UNLESS the
+        // incoming edge carries MORE evidence. evidence_count is a monotonic audit counter: growth
+        // means strictly newer information (brain's confirm AND contradict both bump it), so a
+        // tuned signal whose confidence legitimately dropped (a contradicted link) still lands
+        // instead of being silently discarded by the higher-confidence-wins rule. Structural
+        // extractors leave evidence_count at 0, so the W3.4 merge behavior for code edges is
+        // unchanged. evidence_count is a first-class Edge field (brain consolidation); it
+        // round-trips via the `data` JSON like every other field, and is ALSO written to the
+        // promoted `evidence_count` column in lockstep so SQL audit queries never drift from the
+        // authoritative value.
         let mut stmt = self
             .conn
             .prepare_cached(
@@ -1557,7 +1563,8 @@ impl GraphWrite for SqliteStore {
                  ON CONFLICT(source,target,kind) DO UPDATE SET
                    confidence=excluded.confidence, file=excluded.file, data=excluded.data,
                    evidence_count=excluded.evidence_count
-                 WHERE excluded.confidence >= edges.confidence",
+                 WHERE excluded.confidence >= edges.confidence
+                    OR excluded.evidence_count > edges.evidence_count",
             )
             .map_err(st)?;
         for (e, (src_sid, tgt_sid)) in edges.iter().zip(sids.iter()) {
