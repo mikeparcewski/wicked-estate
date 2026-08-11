@@ -748,7 +748,7 @@ fn tools_list_unified(id: &Value, ctx: &McpContext, domains_available: bool) -> 
 
 fn memory_tool_schemas() -> Vec<Value> {
     vec![
-        json!({"name":"memory.capture","description":"Capture a new memory node (episodic/semantic/procedural/archival).","inputSchema":{"type":"object","required":["content"],"properties":{"content":{"type":"string"},"kind":{"type":"string","enum":["working","episode","entity","fact","skill","archive"]},"tier":{"type":"string","enum":["working","episodic","semantic","procedural","archival"]},"scope":{"type":"string"},"about":{"type":"array","items":{"type":"string"}}}}}),
+        json!({"name":"memory.capture","description":"Capture a new memory node (episodic/semantic/procedural/archival).","inputSchema":{"type":"object","required":["content"],"properties":{"content":{"type":"string"},"kind":{"type":"string","enum":["working","episode","entity","fact","skill","archive"]},"tier":{"type":"string","enum":["working","episodic","semantic","procedural","archival"]},"scope":{"type":"string","description":"Hierarchical scope path: slash-separated kind:id segments (e.g. \"org:acme/agent:claude\"). Empty/omitted = root. Segments that are not kind:id pairs are rejected (invalid params), never silently dropped."},"about":{"type":"array","items":{"type":"string"}}}}}),
         json!({"name":"memory.recall","description":"Conversational recall: token-budgeted slice relevant to a query in scope. Each item carries memory_id, scope (the item's own hierarchical scope, e.g. org:acme/agent:claude), content, tier, and score.","inputSchema":{"type":"object","required":["query"],"properties":{"query":{"type":"string"},"scope":{"type":"string"},"seeds":{"type":"array","items":{"type":"string"}},"token_budget":{"type":"integer","default":2000}}}}),
         json!({"name":"memory.reflect","description":"Distil episodic memories in a scope into semantic facts (T2 tier). Returns distilled_facts list.","inputSchema":{"type":"object","properties":{"scope":{"type":"string"}}}}),
         json!({"name":"memory.erase","description":"Hard-delete all memories whose scope starts with the given prefix.","inputSchema":{"type":"object","required":["scope_prefix"],"properties":{"scope_prefix":{"type":"string"}}}}),
@@ -2299,7 +2299,7 @@ mod tests {
         let req = json!({
             "jsonrpc": "2.0", "id": 205,
             "method": "tools/call",
-            "params": { "name": "memory.capture", "arguments": { "content": "test fact", "kind": "fact", "tier": "semantic", "scope": "test" } }
+            "params": { "name": "memory.capture", "arguments": { "content": "test fact", "kind": "fact", "tier": "semantic", "scope": "suite:test" } }
         });
         let mut fake_mem = FakeMemory;
         let mut fake_know = FakeKnowledge;
@@ -2323,6 +2323,74 @@ mod tests {
             parsed.get("memory_id").is_some(),
             "HC-007: response must contain memory_id"
         );
+    }
+
+    #[test]
+    fn unified_memory_capture_rejects_malformed_scope_fail_loud() {
+        // A scope whose segments are not `kind:id` pairs must be REJECTED with
+        // JSON-RPC -32602 (invalid params) — never silently re-routed to root.
+        // Regression: `brain/wicked-garden/<doc>` (zero colons) was lenient-parsed
+        // to root "", landing 205 imported memories where their documented
+        // `memory.erase scope_prefix` could not reach them.
+        let store = fixture();
+        let mut fake_mem = FakeMemory;
+        let mut fake_know = FakeKnowledge;
+        for bad_scope in ["brain/wicked-garden/mem-1.md", "org:acme/loose", ":x", "k:"] {
+            let req = json!({
+                "jsonrpc": "2.0", "id": 208,
+                "method": "tools/call",
+                "params": { "name": "memory.capture", "arguments": { "content": "x", "scope": bad_scope } }
+            });
+            let mut domains = DomainHandles {
+                memory: &mut fake_mem
+                    as &mut dyn wicked_estate_memory_core::MemoryApi<Error = anyhow::Error>,
+                knowledge: &mut fake_know as &mut dyn wicked_estate_knowledge::KnowledgeApi,
+            };
+            let resp = handle_request_unified(
+                &store,
+                &req,
+                &McpContext::default(),
+                Some(&mut domains),
+                None,
+            );
+            let err = resp
+                .get("error")
+                .unwrap_or_else(|| panic!("scope '{bad_scope}' must be rejected, got: {resp}"));
+            assert_eq!(err["code"].as_i64().unwrap(), -32602, "scope '{bad_scope}'");
+            assert!(
+                err["message"].as_str().unwrap().contains("kind:id"),
+                "error must explain the grammar; got: {}",
+                err["message"]
+            );
+        }
+
+        // Root (empty / omitted scope) stays valid — the documented default.
+        for args in [
+            json!({ "content": "x" }),
+            json!({ "content": "x", "scope": "" }),
+        ] {
+            let req = json!({
+                "jsonrpc": "2.0", "id": 209,
+                "method": "tools/call",
+                "params": { "name": "memory.capture", "arguments": args }
+            });
+            let mut domains = DomainHandles {
+                memory: &mut fake_mem
+                    as &mut dyn wicked_estate_memory_core::MemoryApi<Error = anyhow::Error>,
+                knowledge: &mut fake_know as &mut dyn wicked_estate_knowledge::KnowledgeApi,
+            };
+            let resp = handle_request_unified(
+                &store,
+                &req,
+                &McpContext::default(),
+                Some(&mut domains),
+                None,
+            );
+            assert!(
+                resp.get("error").is_none(),
+                "root scope must remain valid: {resp}"
+            );
+        }
     }
 
     #[test]
