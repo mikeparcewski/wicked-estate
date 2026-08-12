@@ -15,10 +15,12 @@ of change**, **infra + policy relationships**, and **operational history**. Ever
 by design** — one static binary, local-first on SQLite, or a shared concurrent team backend on
 Postgres. Solo laptop to enterprise CI fleet, same engine, same queries.
 
-> The **memory and code-graph proper live in [`wicked-brain`](https://github.com/mikeparcewski/wicked-brain)** —
-> Equip's other half, the graph the agent can search, challenge, correct, and trace to its source.
-> estate is the technical environment those symbols sit in: what a change touches, what protects it,
-> what it was.
+> estate is **all of Equip** now: the code graph, the memory, and the knowledge store in one binary.
+> [`wicked-brain`](https://github.com/mikeparcewski/wicked-brain) (retired 2026-08) migrated its
+> memory + knowledge here zero-loss; the agent surface is wicked-garden's `mem`/`search` skill
+> domains. estate is both the graph the agent can search, challenge, correct, and trace to its
+> source, and the technical environment those symbols sit in: what a change touches, what protects
+> it, what it was.
 
 [![CI](https://github.com/mikeparcewski/wicked-estate/actions/workflows/ci.yml/badge.svg)](https://github.com/mikeparcewski/wicked-estate/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
@@ -34,14 +36,13 @@ Postgres. Solo laptop to enterprise CI fleet, same engine, same queries.
 
 The wicked family is **one loop, under human authority**: intent → **Steer** → **Equip** → (your
 coding-agent harness) → **Verify · Govern** → record, and the record feeds the next run. estate is
-one half of **Equip** — the live technical environment; its peer [`wicked-brain`](https://github.com/mikeparcewski/wicked-brain)
-holds the memory + code-graph. SQLite by default; no servers, no accounts, nothing leaves your
-machine. The parts compose rather than lock in.
+**Equip** — the live technical environment plus the memory + code-graph (absorbed from the retired
+[`wicked-brain`](https://github.com/mikeparcewski/wicked-brain), 2026-08). SQLite by default; no
+servers, no accounts, nothing leaves your machine. The parts compose rather than lock in.
 
 | Loop role | Product | What it does | Stack |
 |---|---|---|---|
-| **Equip** | **`wicked-estate`** (this repo) | Your live technical environment, queryable — requirements↔implementation, blast-radius, infra + policy relationships, operational history. | Rust · crates.io |
-| **Equip** | [`wicked-brain`](https://github.com/mikeparcewski/wicked-brain) | Memory + code-graph with provenance — knowledge the agent can search, challenge, correct, and trace to its source. | JS · npm |
+| **Equip** | **`wicked-estate`** (this repo) | Your live technical environment, queryable — requirements↔implementation, blast-radius, infra + policy relationships, operational history — plus memory + knowledge with provenance (absorbed from the retired `wicked-brain`). | Rust · crates.io |
 | **Steer** | [`wicked-garden`](https://github.com/mikeparcewski/wicked-garden) | Steering before execution — reads each prompt's work-shape + risk and applies the right rigor, plus the capabilities a planner-executor can't do alone. | JS/TS |
 | **Verify** | [`wicked-testing`](https://github.com/mikeparcewski/wicked-testing) | No agent grades its own homework — an enforced wall between the agent that runs the tests and the one that judges them. | JS/TS |
 | **Govern** | [`wicked-core`](https://github.com/mikeparcewski/wicked-core) | The engine that makes "done" a mechanism, not a claim — workflow-as-data, dual gates, state re-derived from evidence. | Rust |
@@ -120,9 +121,10 @@ wicked-estate watch ./my-project --db graph.db
 - **Live technical environment, queryable** — the lead: **requirements↔implementation**,
   **blast-radius of change**, **infra + policy relationships**, and **operational history**, all keyed
   to one stable symbol identity with `{confidence, provenance, resolved_by}` on every edge. This is what
-  estate *is* — the environment around your code, not the symbol graph itself. The **memory +
-  code-graph proper live in [`wicked-brain`](https://github.com/mikeparcewski/wicked-brain)**, Equip's
-  other half; estate maps what a change touches, what protects it, and what it was.
+  estate *is* — the environment around your code **and** the memory + knowledge layer (absorbed
+  from the retired [`wicked-brain`](https://github.com/mikeparcewski/wicked-brain), 2026-08; agent
+  surface: wicked-garden's `mem`/`search` domains); estate maps what a change touches, what
+  protects it, and what it was.
 - **Extraction engine — 100+ wired languages (tree-sitter)** — symbols, calls, imports, heritage feed
   the environment above. Languages are **data** (a manifest row + a `.scm` query) — adding one is zero
   core change.
