@@ -918,6 +918,106 @@ impl StoreBackend {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// WICKED_RUNTIME profile resolution — the foundation team-profile seam.
+//
+// The wicked foundation packages (wicked-estate, wicked-vault, wicked-ledger,
+// wicked-bus) flip together on one environment switch:
+//
+//   WICKED_RUNTIME=local   (default) — zero-infra local SQLite
+//   WICKED_RUNTIME=team    — self-hosted shared Postgres (decision #3),
+//                            named by WICKED_STORE_URL=postgres://…
+//
+// Resolution priority (narrow-explicit beats broad-profile beats ambient):
+//   1. an explicit spec (a CLI `--db` flag) — the operator said exactly where
+//   2. WICKED_RUNTIME=team → WICKED_STORE_URL (the profile IS the point:
+//      one switch retargets the foundation coherently, including over an
+//      ambient WICKED_ESTATE_DB from a shell profile)
+//   3. WICKED_ESTATE_DB — the ambient local override
+//   4. the caller's default spec
+//
+// Fail-loud rules: `team` without a postgres:// WICKED_STORE_URL is an error,
+// and an unrecognized WICKED_RUNTIME value is an error — a typo must never
+// silently fall back to a local store in a deployment that believes it is
+// shared. See docs/team-runtime.md for the per-package coverage matrix.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Resolve the effective store spec from an explicit override plus the
+/// `WICKED_RUNTIME` profile in the process environment. Thin env wrapper over
+/// [`resolve_store_spec_from`] (the unit-tested pure logic).
+pub fn resolve_store_spec(explicit: Option<&str>, default_spec: &str) -> Result<String> {
+    let runtime = std::env::var("WICKED_RUNTIME").ok();
+    let store_url = std::env::var("WICKED_STORE_URL").ok();
+    let estate_db = std::env::var("WICKED_ESTATE_DB").ok();
+    resolve_store_spec_from(
+        explicit,
+        runtime.as_deref(),
+        store_url.as_deref(),
+        estate_db.as_deref(),
+        default_spec,
+    )
+}
+
+/// Pure profile-resolution logic — see the module-section comment above for
+/// the priority order and fail-loud rules. `runtime`/`store_url`/`estate_db`
+/// mirror `WICKED_RUNTIME`/`WICKED_STORE_URL`/`WICKED_ESTATE_DB`.
+pub fn resolve_store_spec_from(
+    explicit: Option<&str>,
+    runtime: Option<&str>,
+    store_url: Option<&str>,
+    estate_db: Option<&str>,
+    default_spec: &str,
+) -> Result<String> {
+    // 1. Explicit spec: the operator named the exact store — profiles don't override it
+    //    (crew-style repo-scoped stores stay repo-scoped under any profile).
+    if let Some(spec) = explicit.filter(|s| !s.is_empty()) {
+        return Ok(spec.to_string());
+    }
+    let profile = runtime
+        .map(|r| r.trim().to_ascii_lowercase())
+        .filter(|r| !r.is_empty());
+    match profile.as_deref() {
+        // 3./4. Local profile (default): ambient WICKED_ESTATE_DB, else the caller default.
+        // A set-but-unused WICKED_STORE_URL is ignored under local (documented). Trimmed:
+        // templated shell profiles leak whitespace, which would otherwise become part of
+        // the path and fail later with a confusing open error.
+        None | Some("local") => Ok(estate_db
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| default_spec.to_string())),
+        // 2. Team profile: the shared Postgres, and nothing else — refusing to fall back
+        //    keeps "the deployment believes state is shared" and reality in agreement.
+        Some("team") => {
+            // Trimmed BEFORE the scheme check: a trailing newline in the env var must not
+            // turn a valid postgres:// URL into a false "non-postgres" error.
+            let url = store_url
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    Error::Invalid(
+                        "WICKED_RUNTIME=team requires WICKED_STORE_URL=postgres://… (the \
+                     self-hosted shared Postgres); refusing to silently fall back to a \
+                     local store under a team profile"
+                            .into(),
+                    )
+                })?;
+            if !(url.starts_with("postgres://") || url.starts_with("postgresql://")) {
+                return Err(Error::Invalid(format!(
+                    "WICKED_RUNTIME=team requires a postgres:// (or postgresql://) \
+                     WICKED_STORE_URL — got '{url}'. The team profile is a self-hosted \
+                     shared Postgres, not a local file"
+                )));
+            }
+            Ok(url.to_string())
+        }
+        Some(other) => Err(Error::Invalid(format!(
+            "WICKED_RUNTIME='{other}' is not a recognized runtime profile \
+             (expected 'local' or 'team')"
+        ))),
+    }
+}
+
 /// Open a graph store from a connection spec. Every entrypoint goes through this one seam, so
 /// an external backend drops in here with no caller changes.
 pub fn open_store(spec: &str) -> Result<Box<dyn GraphStore>> {
@@ -1681,6 +1781,148 @@ mod tests {
         assert!(
             store.node_semantics(&sym("fn_d")).unwrap().is_none(),
             "all-None call must leave semantics as None"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests — WICKED_RUNTIME profile resolution (pure logic, no env mutation)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod runtime_profile_tests {
+    use super::resolve_store_spec_from;
+
+    const DEFAULT: &str = ".wicked-estate/graph.db";
+    const PG: &str = "postgres://wicked@pg.internal:5432/estate";
+
+    #[test]
+    fn default_is_local_default_spec() {
+        assert_eq!(
+            resolve_store_spec_from(None, None, None, None, DEFAULT).unwrap(),
+            DEFAULT
+        );
+    }
+
+    #[test]
+    fn local_profile_honors_ambient_estate_db() {
+        for runtime in [None, Some("local"), Some("LOCAL"), Some("  local ")] {
+            assert_eq!(
+                resolve_store_spec_from(None, runtime, None, Some("/x/e.db"), DEFAULT).unwrap(),
+                "/x/e.db"
+            );
+        }
+    }
+
+    #[test]
+    fn local_profile_ignores_store_url() {
+        // A shared shell profile may export WICKED_STORE_URL permanently; under
+        // local it is inert, not an error.
+        assert_eq!(
+            resolve_store_spec_from(None, Some("local"), Some(PG), None, DEFAULT).unwrap(),
+            DEFAULT
+        );
+    }
+
+    #[test]
+    fn explicit_spec_beats_everything_including_team() {
+        // A crew-style repo-scoped store stays repo-scoped under any profile.
+        assert_eq!(
+            resolve_store_spec_from(
+                Some("/repo/g.db"),
+                Some("team"),
+                Some(PG),
+                Some("/x/e.db"),
+                DEFAULT
+            )
+            .unwrap(),
+            "/repo/g.db"
+        );
+    }
+
+    #[test]
+    fn team_profile_resolves_store_url_over_ambient_estate_db() {
+        // The profile IS the point: one switch retargets the foundation coherently.
+        assert_eq!(
+            resolve_store_spec_from(None, Some("team"), Some(PG), Some("/x/e.db"), DEFAULT)
+                .unwrap(),
+            PG
+        );
+    }
+
+    #[test]
+    fn team_without_store_url_fails_loud() {
+        let err = resolve_store_spec_from(None, Some("team"), None, Some("/x/e.db"), DEFAULT)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("WICKED_STORE_URL"),
+            "names the missing env: {err}"
+        );
+        // Empty counts as missing.
+        assert!(resolve_store_spec_from(None, Some("team"), Some(""), None, DEFAULT).is_err());
+    }
+
+    #[test]
+    fn team_with_non_postgres_url_fails_loud() {
+        let err = resolve_store_spec_from(
+            None,
+            Some("team"),
+            Some("sqlite:///tmp/x.db"),
+            None,
+            DEFAULT,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("postgres://"),
+            "names the required scheme: {err}"
+        );
+    }
+
+    #[test]
+    fn postgresql_scheme_accepted() {
+        let url = "postgresql://u@h/d";
+        assert_eq!(
+            resolve_store_spec_from(None, Some("team"), Some(url), None, DEFAULT).unwrap(),
+            url
+        );
+    }
+
+    #[test]
+    fn unrecognized_profile_fails_loud_never_silent_local() {
+        let err = resolve_store_spec_from(None, Some("prod"), Some(PG), None, DEFAULT)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'prod'"), "echoes the bad value: {err}");
+    }
+
+    #[test]
+    fn empty_runtime_is_local() {
+        assert_eq!(
+            resolve_store_spec_from(None, Some(""), Some(PG), None, DEFAULT).unwrap(),
+            DEFAULT
+        );
+    }
+
+    #[test]
+    fn env_whitespace_is_trimmed() {
+        // Templated shell profiles leak whitespace/newlines around values.
+        assert_eq!(
+            resolve_store_spec_from(None, None, None, Some("  /x/e.db\n"), DEFAULT).unwrap(),
+            "/x/e.db"
+        );
+        // Whitespace-only counts as unset.
+        assert_eq!(
+            resolve_store_spec_from(None, None, None, Some("   "), DEFAULT).unwrap(),
+            DEFAULT
+        );
+        // A trailing newline must not turn a valid postgres:// URL into a
+        // false "non-postgres" scheme error under team.
+        let padded = format!(" {PG}\n");
+        assert_eq!(
+            resolve_store_spec_from(None, Some("team"), Some(&padded), None, DEFAULT).unwrap(),
+            PG
         );
     }
 }

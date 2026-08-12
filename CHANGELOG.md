@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **`WICKED_RUNTIME` profile seam (foundation team profile):** one switch flips the foundation between `local` (zero-infra SQLite, the default) and `team` (self-hosted shared Postgres via `WICKED_STORE_URL`). New `resolve_store_spec`/`resolve_store_spec_from` in wicked-estate-store (priority: explicit `--db` > team profile > `WICKED_ESTATE_DB` > default; unknown profiles and team-without-postgres-URL fail loud). Wired into the `wicked-estate` CLI (new opt-in `postgres` feature builds the factory arm in) and `wicked-estate-mcp` (which fails loud under team — its async graph path and memory/knowledge stores are SQLite-only today; named follow-up). `deploy/docker-compose.team.yml` + `docs/team-runtime.md` document bring-up and the honest coverage matrix. Functional gate: `tests/team_runtime.rs` runs profile resolution → factory → full GraphStore conformance against a real Postgres in the CI postgres job.
+
 ### Fixed
 - **PostgresStore torn read (locked decision #8):** `begin_batch`/`commit_batch` now map to ONE real transaction at `READ COMMITTED` — previously they were no-ops (`transactional_batch: false` under `shared_writers: true`), so a concurrent reader could observe a partially-written graph batch. All statements issued while a batch is open (reads included) ride the batch transaction, preserving read-your-own-writes for the resolver's mid-batch `SymbolIndex` lookups. `StoreCapabilities.transactional_batch` is now `true`. New deterministic two-connection concurrency test (`postgres_batch_commits_atomically_no_torn_reads`) proves a mid-batch reader sees old-or-new, never partial.
 - Postgres conformance cleanup now also drops `symbol_gen`, so re-runs against the same database no longer inherit sticky `had_node` markers that skew epoch assertions.

@@ -29,17 +29,37 @@ use wicked_estate_store::SqliteStore;
 
 const DEFAULT_DB: &str = ".wicked-estate/graph.db";
 
-fn resolve_db_path() -> String {
-    // Priority: --db <path> > WICKED_ESTATE_DB env > default.
+fn resolve_db_path() -> Result<String> {
+    // Priority: --db <path> > WICKED_RUNTIME=team profile (WICKED_STORE_URL)
+    // > WICKED_ESTATE_DB env > default — the shared resolution seam
+    // (wicked_estate_store::resolve_store_spec, see docs/team-runtime.md).
+    let mut explicit: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--db" {
             if let Some(path) = args.next() {
-                return path;
+                explicit = Some(path);
             }
         }
     }
-    std::env::var("WICKED_ESTATE_DB").unwrap_or_else(|_| DEFAULT_DB.to_string())
+    let spec = wicked_estate_store::resolve_store_spec(explicit.as_deref(), DEFAULT_DB)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // HONEST GAP (team profile): the MCP server cannot serve a Postgres graph store yet —
+    // its async read path is the SqlitePool (open_async_store) and the memory / knowledge /
+    // embedding stores open SqliteStore directly. Failing loudly here beats a confusing
+    // "unable to open database file" from five init sites below. Team mode today covers the
+    // `wicked-estate` CLI + the store layer; an AsyncGraphStore-for-Postgres (+ PG homes for
+    // memory/knowledge) is the named follow-up in docs/team-runtime.md.
+    if spec.starts_with("postgres://") || spec.starts_with("postgresql://") {
+        anyhow::bail!(
+            "WICKED_RUNTIME=team: wicked-estate-mcp cannot serve a Postgres store yet — the \
+             MCP async graph path and the memory/knowledge stores are SQLite-only today. Team \
+             mode currently covers the `wicked-estate` CLI and the store layer (see \
+             docs/team-runtime.md, 'MCP on Postgres' follow-up). Unset WICKED_RUNTIME (or set \
+             WICKED_RUNTIME=local) to serve the local store."
+        );
+    }
+    Ok(spec)
 }
 
 fn wicked_home() -> String {
@@ -149,7 +169,7 @@ fn emit_tool_duration(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let db_path = resolve_db_path();
+    let db_path = resolve_db_path()?;
 
     // 2. Open async connection pool instead of a single connection.
     let store = wicked_estate::open_async_store(&db_path)

@@ -49,7 +49,11 @@ fn to_any(e: wicked_estate_core::Error) -> anyhow::Error {
 }
 
 fn ensure_db_dir(db: &str) -> Result<()> {
-    if db == ":memory:" {
+    // :memory: and URL-shaped specs (a `postgres://…` resolved by the WICKED_RUNTIME
+    // profile seam, or an explicit `sqlite://` spec) are not filesystem paths — treating
+    // them as one would create junk directories like `postgres:` in the CWD. The store
+    // factory owns opening those; only a bare file path needs its parent created here.
+    if db == ":memory:" || db.contains("://") {
         return Ok(());
     }
     if let Some(parent) = Path::new(db).parent() {
@@ -608,7 +612,13 @@ fn main() -> Result<()> {
     // `--db` may be repeated; the LAST single `--db` value is used for single-db commands
     // (backward-compatible).  All `--db` values are collected into `db_paths` for the
     // `cross-graph` command.  `--dbs a,b,c` is an alias that accepts a comma-delimited list.
-    let mut db = ".wicked-estate/graph.db".to_string();
+    //
+    // The DEFAULT spec resolves through the WICKED_RUNTIME profile seam
+    // (docs/team-runtime.md): team → WICKED_STORE_URL (shared Postgres, needs a
+    // `--features postgres` build) > WICKED_ESTATE_DB > the local graph.db. An explicit
+    // `--db` flag below still overrides whatever resolves here.
+    let mut db =
+        wicked_estate_store::resolve_store_spec(None, ".wicked-estate/graph.db").map_err(to_any)?;
     let mut db_paths: Vec<String> = Vec::new();
     let mut scip_file: Option<String> = None;
     let mut since: u64 = 0;
@@ -3416,4 +3426,33 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod ensure_db_dir_tests {
+    use super::ensure_db_dir;
+
+    #[test]
+    fn url_shaped_specs_are_not_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        // A team-profile-resolved postgres:// spec (and an explicit sqlite:// spec) must
+        // not create junk directories like `postgres:` in the CWD.
+        ensure_db_dir("postgres://wicked@pg.internal:5432/estate").unwrap();
+        ensure_db_dir("postgresql://wicked@pg.internal/estate").unwrap();
+        ensure_db_dir("sqlite:///abs/never/created.db").unwrap();
+        ensure_db_dir(":memory:").unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
+        std::env::set_current_dir(cwd).unwrap();
+        assert!(leftovers.is_empty(), "no junk dirs: {leftovers:?}");
+    }
+
+    #[test]
+    fn bare_path_parent_is_created() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("nested/dir/graph.db");
+        ensure_db_dir(db.to_str().unwrap()).unwrap();
+        assert!(db.parent().unwrap().is_dir());
+    }
 }

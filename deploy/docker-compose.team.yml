@@ -1,0 +1,37 @@
+# Self-hosted shared Postgres for the wicked foundation team profile
+# (WICKED_RUNTIME=team, decision #3: team infra = self-hosted shared Postgres;
+# local zero-infra SQLite stays the default).
+#
+# Bring-up:
+#   WICKED_PG_PASSWORD=change-me docker compose -f deploy/docker-compose.team.yml up -d
+#
+# Then point the foundation at it:
+#   export WICKED_RUNTIME=team
+#   export WICKED_STORE_URL=postgres://wicked:$WICKED_PG_PASSWORD@<host>:5432/wicked_estate
+#
+# See docs/team-runtime.md for the resolution rules and the per-package
+# coverage matrix (what team mode flips today vs the named follow-ups).
+services:
+  wicked-foundation-pg:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${WICKED_PG_USER:-wicked}
+      # No default on purpose: a shared team store must not ship a well-known password.
+      # Pure ${VAR} passthrough (no :?error form — secret scanners misread it as a
+      # literal). Unset → empty → the postgres image itself refuses to start:
+      # "Database is uninitialized and superuser password is not specified".
+      POSTGRES_PASSWORD: ${WICKED_PG_PASSWORD}
+      POSTGRES_DB: ${WICKED_PG_DB:-wicked_estate}
+    ports:
+      - "${WICKED_PG_PORT:-5432}:5432"
+    volumes:
+      - wicked-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${WICKED_PG_USER:-wicked} -d ${WICKED_PG_DB:-wicked_estate}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  wicked-pg-data:
