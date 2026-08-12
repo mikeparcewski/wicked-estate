@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use wicked_estate_core::{GraphRead, SymbolId};
-use wicked_estate_memory_core::{CaptureRequest, MemoryApi, RecallQuery};
+use wicked_estate_memory_core::{CaptureRequest, MemoryApi, RecallQuery, Scope};
 
 pub fn dispatch(
     tool: &str,
@@ -65,6 +65,29 @@ fn dispatch_capture(
         Some(c) => c.to_string(),
         None => return json_rpc_error(id, -32602, "content required"),
     };
+    // FAIL-LOUD scope validation: the engine's lenient `Scope::parse` silently
+    // discards malformed (colonless / empty-kind / empty-id) segments, which
+    // re-routes the write to a DIFFERENT scope than the caller asked for —
+    // typically root "" — where the caller's documented `memory.erase
+    // scope_prefix` can never find it again. Reject at the wire instead.
+    // Omitted / null / empty scope stays valid (root is the documented
+    // default; wicked producers serialize `Option::None` as JSON null). A
+    // present NON-string scope (number/object/array/bool) is invalid params,
+    // not an implicit root write — same misrouting failure mode.
+    let scope = match args.get("scope") {
+        None | Some(Value::Null) => "",
+        Some(Value::String(s)) => s.as_str(),
+        Some(other) => {
+            return json_rpc_error(
+                id,
+                -32602,
+                &format!("invalid scope: expected a string of kind:id segments, got {other}"),
+            );
+        }
+    };
+    if let Err(e) = Scope::parse_strict(scope) {
+        return json_rpc_error(id, -32602, &format!("invalid scope: {e}"));
+    }
     let about: Option<Vec<String>> = args.get("about").and_then(|v| v.as_array()).map(|a| {
         a.iter()
             .filter_map(|x| x.as_str().map(str::to_owned))
@@ -83,11 +106,7 @@ fn dispatch_capture(
         .and_then(|v| v.as_str())
         .unwrap_or("episodic")
         .to_string();
-    req.scope = args
-        .get("scope")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    req.scope = scope.to_string();
     req.now = now;
     req.about = about;
     req.about_epochs = about_epochs;

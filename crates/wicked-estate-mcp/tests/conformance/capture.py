@@ -104,10 +104,10 @@ REPRESENTATIVE_CALLS = {
     "Lineage":                    {"symbol": SEED_SYMBOL_ID, "depth": 2},  # param is "symbol", NOT "symbol_id"; depth NOT max_depth
     "SemanticSearch":             {"query": SEED_QUERY},            # fastembed build only
     # Memory tools (6) — HC-007 frozen golden schema param names
-    "memory.capture":             {"content": "seed capture", "scope": "test", "tier": "episodic"},  # tier enum NOT "T1"
+    "memory.capture":             {"content": "seed capture", "scope": "suite:test", "tier": "episodic"},  # tier enum NOT "T1"; scope must be kind:id segments (colonless is rejected since the fail-loud fix)
     "memory.recall":              {"query": SEED_QUERY, "token_budget": 512},  # token_budget NOT limit
-    "memory.reflect":             {"scope": "test"},
-    "memory.erase":               {"scope_prefix": "test"},
+    "memory.reflect":             {"scope": "suite:test"},   # match the capture scope above (read-paths are lenient, but keep the seed set internally consistent)
+    "memory.erase":               {"scope_prefix": "suite:test"},
     "memory.learn":               {"content": "seed fact", "symbols": [SEED_SYMBOL_NAME], "tier": "semantic"},  # symbols takes NAME strings (engine.resolve_code), NOT stable IDs; golden: "exact code symbol name(s)"
     "memory.coverage":            {},
     # Knowledge tools (7) — HC-007 frozen golden schema param names
