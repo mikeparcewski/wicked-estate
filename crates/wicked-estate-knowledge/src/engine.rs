@@ -229,6 +229,15 @@ impl KnowledgeEngine {
         self
     }
 
+    /// Set a custom embedder (e.g. estate's `Model2VecEmbedder`/`FastEmbedder` for real semantic
+    /// recall, vs the compile-time default). MUST be set before any `write`/`ingest`, since stored
+    /// vectors are only comparable to query vectors from the SAME embedder. Builder (mirrors
+    /// `MemoryEngine::with_embedder`).
+    pub fn with_embedder(mut self, e: Box<dyn Embedder>) -> Self {
+        self.embedder = e;
+        self
+    }
+
     /// Wire up the shared XedgeStore for cross-engine about-edge writes.
     pub fn with_xedge_store(mut self, xedge: std::sync::Arc<XedgeStore>) -> Self {
         self.xedge = Some(xedge);
@@ -299,9 +308,34 @@ impl KnowledgeEngine {
         Ok(nodes.iter().filter_map(KNode::from_node).collect())
     }
 
-    /// Per-term FTS keyword candidates with OR semantics (mirrors memory's `keyword_candidates`:
-    /// estate FTS phrase-matches the whole `text`, so multi-word queries need per-term union). Scoped
-    /// to knowledge chunk/section/concept nodes.
+    /// One BM25-ordered FTS candidate list, scoped to the given knowledge kinds. `text` is
+    /// phrase-quoted by the store, so a multi-token string requires ADJACENT tokens.
+    fn fts_list(&self, text: &str, kinds: &[NodeKind]) -> Result<Vec<SymbolId>> {
+        Ok(self
+            .store
+            .find_symbols(&SymbolQuery {
+                text: Some(text.to_string()),
+                exact_name: None,
+                kinds: kinds.to_vec(),
+                language: None,
+                limit: Some(self.k),
+                scope_prefix: None,
+            })?
+            .iter()
+            .map(|n| n.symbol.clone())
+            .collect())
+    }
+
+    /// FTS keyword candidates: whole-query PHRASE list ∪ per-term OR lists, RRF-fused. Scoped to
+    /// knowledge chunk/section/concept nodes (mirrors memory's `keyword_candidates`).
+    ///
+    /// The phrase list is the identifier-shaped-query (symbolish) fix: FTS5's default unicode61
+    /// tokenizer splits code identifiers on `_`/`.`/`::` at index time, so the raw query
+    /// phrase-matches those sub-tokens ADJACENTLY (`prompt_submit.py` → `[prompt, submit, py]` in
+    /// order) and the chunk containing the literal identifier outranks chunks that merely scatter
+    /// its unigrams. The per-term lists alone lose that adjacency — measured on the S3 parity
+    /// bench as estate's one outright class loss vs wicked-brain FTS (symbolish r@10 0.494 vs
+    /// 0.786). Skipped when the query is already a single bare term (identical list, no signal).
     fn keyword_candidates(&self, query: &str) -> Result<Vec<SymbolId>> {
         let mut terms: Vec<String> = query
             .split(|c: char| !c.is_alphanumeric())
@@ -319,20 +353,16 @@ impl KnowledgeEngine {
             .map(|c| NodeKind::Other(c.as_kind().into()))
             .collect();
         let mut lists: Vec<Vec<SymbolId>> = Vec::new();
+        let phrase = query.trim();
+        let single_bare_term = terms.len() == 1 && terms[0] == phrase.to_lowercase();
+        if !phrase.is_empty() && !single_bare_term {
+            let l = self.fts_list(phrase, &recall_kinds)?;
+            if !l.is_empty() {
+                lists.push(l);
+            }
+        }
         for term in terms {
-            let l: Vec<SymbolId> = self
-                .store
-                .find_symbols(&SymbolQuery {
-                    text: Some(term),
-                    exact_name: None,
-                    kinds: recall_kinds.clone(),
-                    language: None,
-                    limit: Some(self.k),
-                    scope_prefix: None,
-                })?
-                .iter()
-                .map(|n| n.symbol.clone())
-                .collect();
+            let l = self.fts_list(&term, &recall_kinds)?;
             if !l.is_empty() {
                 lists.push(l);
             }
@@ -350,20 +380,36 @@ impl KnowledgeEngine {
     pub fn recall(&mut self, query: &str, token_budget: usize, now: i64) -> Result<Vec<KRecalled>> {
         let kw = self.keyword_candidates(query)?;
 
-        let qvec = self.embedder.embed(query);
+        // Vector (ANN) candidates — only when the embedder carries real semantic signal. The
+        // dependency-free HashEmbedder fallback is a lexical hash: fusing its neighbours as a
+        // peer retriever injects rank noise that degrades every query class (S3 parity bench,
+        // keyword-only vs hash-fused). Model-backed embedders (`semantic`/`semantic-bge`) keep
+        // contributing exactly as before.
         let mut sem = Vec::new();
-        for (id, _) in <SqliteStore as VectorStore>::nearest(&self.store, &qvec, self.k)? {
-            if let Some(node) = self.store.get_node(&id)? {
-                if let NodeKind::Other(k) = &node.kind {
-                    if KClass::is_knowledge_kind(k) {
-                        sem.push(id);
+        if self.embedder.is_semantic() {
+            let qvec = self.embedder.embed(query);
+            for (id, _) in <SqliteStore as VectorStore>::nearest(&self.store, &qvec, self.k)? {
+                if let Some(node) = self.store.get_node(&id)? {
+                    if let NodeKind::Other(k) = &node.kind {
+                        if KClass::is_knowledge_kind(k) {
+                            sem.push(id);
+                        }
                     }
                 }
             }
         }
 
         // RRF fuse keyword ∪ vector (the -core primitive), then hydrate → budget pack (also -core).
+        //
+        // Document diversity: keep only the BEST-fused piece per parent document (`derived_from`
+        // target; a node without one is its own group). `ingest` splits a document into pieces,
+        // so without this a multi-piece document's runners-up crowd out other documents' best
+        // slices inside the token budget — breadth loss, not relevance (measured: parity-bench
+        // symbolish r@10 0.652 → 0.769 at a 6000-token budget, every other class unchanged).
+        // Same move as brain search's `collapseDuplicates` on the surface this replaces; a caller
+        // wanting depth on one document has its identity in `source`/`KRecalled.id` to fetch more.
         let fused = rrf_fuse(&[kw, sem], 60.0);
+        let mut seen_docs = std::collections::BTreeSet::new();
         let mut cands = Vec::new();
         for (id, rrf) in fused {
             let Some(node) = self.store.get_node(&id)? else {
@@ -372,6 +418,16 @@ impl KnowledgeEngine {
             let Some(kn) = KNode::from_node(&node) else {
                 continue;
             };
+            let doc_group = self
+                .store
+                .neighbors(&id, Direction::Dependencies)?
+                .into_iter()
+                .find(|e| matches!(&e.kind, EdgeKind::Other(r) if r == "derived_from"))
+                .map(|e| e.target)
+                .unwrap_or_else(|| id.clone());
+            if !seen_docs.insert(doc_group) {
+                continue;
+            }
             // Knowledge is NOT tiered: neutral recency/salience so the RRF rank drives ordering.
             cands.push(Candidate {
                 id,
@@ -532,7 +588,10 @@ mod tests {
             1,
         )
         .unwrap();
-        let hits = e.recall("how does payment work", 2000, 2).unwrap();
+        // Query tokens overlap the chunk lexically: with the hash-fallback embedder the vector
+        // list is gated (is_semantic=false), so keyword candidates must carry the hit themselves
+        // (the old "how does payment work" phrasing only ever matched via hash-vector noise).
+        let hits = e.recall("stripe charge events", 2000, 2).unwrap();
         assert!(!hits.is_empty(), "recall must return at least one hit");
         let hit = &hits[0];
         assert!(
@@ -542,6 +601,136 @@ mod tests {
         assert_eq!(
             hit.source, "docs/payment.md",
             "KRecalled.source must match the ingested source"
+        );
+    }
+
+    // Symbolish parity (the S3 bench's one outright estate loss): an identifier-shaped query must
+    // rank the chunk containing the LITERAL identifier above chunks that merely scatter its
+    // unigrams. The whole-query phrase list in `keyword_candidates` is what wins this — the
+    // per-term OR lists alone rank the decoys (more unigram hits) first.
+    #[test]
+    fn identifier_query_ranks_adjacent_phrase_above_scattered_unigrams() {
+        let mut e = KnowledgeEngine::in_memory().unwrap();
+        // Decoys: every unigram of the query, repeatedly, never adjacent.
+        for i in 0..4 {
+            e.write(&KNode::new(
+                KClass::Chunk,
+                format!(
+                    "chunk {i}: the prompt asked users to submit feedback; \
+                     submit the py bindings, then prompt again for py review"
+                ),
+                "s",
+                format!("decoy-{i}.md"),
+                1,
+            ))
+            .unwrap();
+        }
+        // Target: the literal identifier (tokenized [prompt, submit, py] ADJACENTLY by FTS5).
+        e.write(&KNode::new(
+            KClass::Chunk,
+            "the prompt_submit.py hook flips the mandatory-pull flag on archetype match",
+            "s",
+            "hooks.md",
+            1,
+        ))
+        .unwrap();
+
+        let hits = e.recall("prompt_submit.py", 4000, 2).unwrap();
+        assert!(!hits.is_empty(), "recall must return hits");
+        assert!(
+            hits[0].content.contains("prompt_submit.py"),
+            "the chunk with the literal identifier must rank FIRST; got: {:?}",
+            hits.iter().map(|h| &h.content).collect::<Vec<_>>()
+        );
+    }
+
+    // Document diversity in recall packing: a multi-piece document contributes its BEST piece
+    // only, so runners-up from the same document cannot crowd other documents' top slices out of
+    // the token budget (breadth over same-document depth; the parity-bench q28 failure mode).
+    #[test]
+    fn recall_returns_at_most_one_piece_per_document() {
+        let mut e = KnowledgeEngine::in_memory().unwrap();
+        // Doc A: three pieces, all matching the query strongly.
+        e.ingest(
+            "gate policy",
+            &[
+                "the gate policy matrix resolves reviewers per gate".into(),
+                "gate policy fallback: the gate policy names a fallback reviewer".into(),
+                "gate policy modes: sequential, parallel, council per gate policy".into(),
+            ],
+            "s",
+            "gate-policy.md",
+            1,
+        )
+        .unwrap();
+        // Doc B: one piece, also matching — must NOT be crowded out by A's runners-up.
+        e.ingest(
+            "adjudicator",
+            &["the adjudicator applies the gate policy verdict".into()],
+            "s",
+            "adjudicator.md",
+            1,
+        )
+        .unwrap();
+
+        let hits = e.recall("gate policy", 6000, 2).unwrap();
+        let from_a = hits.iter().filter(|h| h.source == "gate-policy.md").count();
+        assert_eq!(
+            from_a,
+            1,
+            "exactly ONE piece of the multi-piece document, got {from_a}: {:?}",
+            hits.iter()
+                .map(|h| (&h.source, &h.content))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            hits.iter().any(|h| h.source == "adjudicator.md"),
+            "the other document's slice must surface, got: {:?}",
+            hits.iter().map(|h| &h.source).collect::<Vec<_>>()
+        );
+    }
+
+    // The vector-list gate: a NON-semantic embedder (the hash fallback) must not surface
+    // zero-lexical-overlap docs through vector fusion; a semantic embedder must keep doing so.
+    #[test]
+    fn non_semantic_embedder_contributes_no_vector_candidates() {
+        // A constant-vector embedder makes EVERY doc a nearest neighbour of every query, so any
+        // vector contribution is fully observable. `semantic` flips only the self-identification.
+        struct ConstEmbedder {
+            semantic: bool,
+        }
+        impl Embedder for ConstEmbedder {
+            fn id(&self) -> &str {
+                "const:test"
+            }
+            fn embed(&self, _text: &str) -> Vec<f32> {
+                vec![1.0, 0.0]
+            }
+            fn dim(&self) -> usize {
+                2
+            }
+            fn is_semantic(&self) -> bool {
+                self.semantic
+            }
+        }
+
+        let run = |semantic: bool| {
+            let mut e = KnowledgeEngine::in_memory()
+                .unwrap()
+                .with_embedder(Box::new(ConstEmbedder { semantic }));
+            e.write(&KNode::new(KClass::Chunk, "zebra quagga", "s", "z.md", 1))
+                .unwrap();
+            // Query shares NO tokens with the doc — only the vector path can surface it.
+            e.recall("unrelated words", 2000, 2).unwrap()
+        };
+
+        assert!(
+            !run(true).is_empty(),
+            "semantic embedder: vector path must surface the zero-overlap doc"
+        );
+        assert!(
+            run(false).is_empty(),
+            "non-semantic embedder: vector noise must be gated out of recall"
         );
     }
 
