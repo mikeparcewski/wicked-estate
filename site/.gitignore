@@ -2,3 +2,5 @@ node_modules/
 dist/
 .astro/
 .vite/
+playwright-report/
+test-results/

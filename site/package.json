@@ -3,13 +3,14 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Marketing site for wicked-estate \u2014 the code graph agents actually trust.",
+  "description": "Marketing site for wicked-estate — the code graph agents actually trust.",
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
     "build": "astro build",
     "preview": "astro preview --host",
-    "astro": "astro"
+    "astro": "astro",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@astrojs/react": "^6.0.0",
@@ -19,6 +20,7 @@
     "wicked-web": "github:mikeparcewski/wicked-web#a3c18aabed02dc8c1696c9491f37b6714d002d19"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@tailwindcss/vite": "^4.0.0",
     "@types/node": "^25.9.2",
     "@types/react": "^19.0.0",
