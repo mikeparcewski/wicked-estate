@@ -19,7 +19,7 @@
   --band-solid-bg: rgba(9, 26, 36, 0.34);                          /* alternate stratum tint (light) */
   --rock: color-mix(in oklab, var(--ink) 5%, var(--canvas));       /* rock-panel surface */
   --rock-2: color-mix(in oklab, var(--ink) 8%, var(--canvas));     /* deeper rock */
-  --seam: #ffda19;                                                 /* the mineral seam of light */
+  --seam: #79c0ff;                                                 /* the mineral seam of light */
 }
 
 [data-theme="dark"] {
@@ -31,6 +31,16 @@
   --band-solid-bg: rgba(20, 33, 61, 0.42);
   --rock: color-mix(in oklab, var(--ink) 4%, var(--canvas));
   --rock-2: color-mix(in oklab, var(--ink) 7%, var(--canvas));
+}
+
+/* ── FOUNDATION-plane accent ─────────────────────────────────────────────────
+   Estate is the Foundation plane of the four-plane platform story, so this
+   site's accent is the shared foundation hue (--plane-foundation, tokens.css)
+   instead of the family's brand yellow. html-prefixed selectors out-rank the
+   shared tokens.css theme blocks regardless of bundle order. */
+html[data-theme="light"], html[data-theme="dark"] {
+  --accent: #79c0ff;
+  --accent-ink: #0d1117;
 }
 
 @theme inline {
@@ -68,11 +78,6 @@
   0%   { transform: scale(0.9); opacity: 0.4; }
   60%  { transform: scale(1.06); }
   100% { transform: scale(1); opacity: 1; }
-}
-/* the left pointer nudging toward the active layer */
-@keyframes pointer-nudge {
-  0%, 100% { transform: translateX(0); }
-  50%       { transform: translateX(4px); }
 }
 /* auto-demo hint dot */
 @keyframes demo-blink {
@@ -271,7 +276,7 @@
     border-radius: 10px; border: none; cursor: pointer; text-decoration: none;
     transition: background 0.2s var(--ease), transform 0.15s var(--ease);
   }
-  .btn-primary:hover { background: #ffe45c; transform: translateY(-1px); }
+  .btn-primary:hover { background: #9fd1ff; transform: translateY(-1px); }
 
   .btn-outline {
     display: inline-flex; align-items: center; justify-content: center; gap: 8px;
@@ -322,23 +327,20 @@
   .demo-pill[data-live="true"] .dot { animation: demo-blink 1.4s var(--ease) infinite; }
   .demo-pill[data-live="false"] .dot { background: var(--muted); }
 
-  /* ── Left pointer (loop verb cycler) ─────────────────────────────────────── */
-  .layer-pointer {
-    display: inline-grid; place-items: center; width: 22px; flex-shrink: 0;
-    color: var(--accent); font-size: 0.85rem;
-    animation: pointer-nudge 1.6s var(--ease) infinite;
+  /* ── Copy-to-clipboard button (GetStarted command rows) ──────────────────── */
+  .copy-btn {
+    flex-shrink: 0;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.58rem; letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 4px 10px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--hairline-strong); color: var(--muted);
+    background: color-mix(in oklab, var(--ink) 5%, transparent);
+    transition: color 0.2s var(--ease), border-color 0.2s var(--ease), background 0.2s var(--ease);
   }
-  .layer-row {
-    transition: background 0.3s var(--ease), opacity 0.3s var(--ease);
-    cursor: pointer;
+  .copy-btn:hover { border-color: var(--accent); color: var(--ink); }
+  .copy-btn[data-copied="true"] {
+    color: var(--on-accent); background: var(--accent); border-color: var(--accent);
   }
-  .layer-row[data-active="false"] { opacity: 0.5; }
-  .layer-row[data-active="true"]  {
-    background: color-mix(in oklab, var(--accent) 8%, transparent);
-  }
-  /* Mobile: the loop is shown fully highlighted and static (no cycling), so the
-     pointer must not nudge. */
-  @media (max-width: 760px) { .layer-pointer { animation: none; } }
 
   /* ── Provenance winner label — stands out when in scope ──────────────────── */
   .who-label { transition: all 0.3s var(--ease); }
@@ -352,7 +354,7 @@
   .tier-row[data-in="false"] { opacity: 0.34; }
 
   @media (prefers-reduced-motion: reduce) {
-    .layer-pointer, .demo-pill .dot, .who-label[data-scope="true"] { animation: none; }
+    .demo-pill .dot, .who-label[data-scope="true"] { animation: none; }
   }
 }
 
@@ -702,9 +704,6 @@
     .ide-line-text, .ide-mem-text { font-size: clamp(0.76rem, 3.4vw, 0.82rem); }
     .ide-statusbar { gap: 8px 12px; }
     .ide-status-legend { margin-left: 0; }
-    /* The family-loop rows show every member statically on mobile; their tags
-       carry long notes that would clip against the panel edge at nowrap. */
-    .layer-row .tag { white-space: normal; }
   }
 }
 
@@ -743,7 +742,7 @@ html body::before {
 html body::after {
   content: ""; position: fixed; inset: 0; z-index: -2; pointer-events: none;
   background:
-    radial-gradient(ellipse 48% 55% at 6% 4%,   rgba(255, 218, 25, 0.10), transparent 60%),
+    radial-gradient(ellipse 48% 55% at 6% 4%,   rgba(121, 192, 255, 0.11), transparent 60%),
     radial-gradient(ellipse 54% 52% at 94% 98%, rgba(121, 192, 255, 0.12), transparent 62%),
     radial-gradient(ellipse 58% 46% at 80% 108%, rgba(56, 148, 212, 0.10), transparent 62%),
     linear-gradient(180deg, transparent 46%, rgba(28, 72, 106, 0.06) 100%);
@@ -786,8 +785,10 @@ html body::after {
    OVERLAYS the content instead of pushing it down (no scroll-padding applies at
    the top of the page). So it must fill the FULL viewport (100svh, not
    100svh − topbar-h) — otherwise the topbar-height gap at the bottom lets the
-   next section bleed into view. The hero's own top padding clears the bar. */
-.strata:first-of-type {
+   next section bleed into view. The hero's own top padding clears the bar.
+   (An explicit class, not :first-of-type — the page is now several islands, so
+   each island's first section would otherwise match.) */
+.strata--hero {
   min-height: 100vh;    /* fallback */
   min-height: 100svh;
 }

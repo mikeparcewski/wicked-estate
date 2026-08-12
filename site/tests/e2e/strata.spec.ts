@@ -13,7 +13,7 @@ test('FiveStrata: clicking a band pins it', async ({ page }) => {
   await expect(pill).toHaveText(/Auto-scanning/);
   await expect(pill).toHaveAttribute('data-live', 'true');
 
-  const band = section.locator('.rock-panel .cursor-pointer').filter({ hasText: 'Infra + policy' });
+  const band = section.locator('.rock-panel .cursor-pointer').filter({ hasText: 'Injected edges' });
   await clickUntil(band, async () => ((await pill.textContent()) ?? '').includes('Pinned'));
 
   // pinned state: pill flips, and the clicked band carries the active seam

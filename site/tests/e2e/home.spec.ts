@@ -11,14 +11,23 @@ test('home page renders hero, all signature sections, and footer without page er
 
   await expect(page).toHaveTitle(/wicked-estate/);
 
-  // hero — thesis headline + the live core-log panel
-  await expect(page.locator('h1')).toContainText('queryable');
+  // hero — the foundation thesis + the live core-log panel
+  await expect(page.locator('h1')).toContainText('One binary');
   await expect(page.getByText('CORE LOG · applyDiscount')).toBeVisible();
 
   // every signature section is present and rendered
   for (const id of ['#query', '#strata', '#toolface', '#provenance', '#storage', '#foundation', '#get-started']) {
     await expect(page.locator(id)).toBeVisible();
   }
+
+  // #foundation is the shared SameGarden four-plane map, with estate marked
+  // as "you are here" on the Foundation plane (never a self-promoting link)
+  const map = page.locator('#foundation .same-garden');
+  await expect(map).toBeVisible();
+  const here = map.locator('.sg-card--here');
+  await expect(here).toHaveCount(1);
+  await expect(here).toContainText('wicked-estate');
+  await expect(here.locator('.sg-here-chip')).toHaveText('you are here');
 
   // shared chrome — topbar wordmark + footer
   await expect(page.locator('.topbar .wordmark')).toBeVisible();
