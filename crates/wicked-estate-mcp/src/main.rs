@@ -302,6 +302,11 @@ async fn main() -> Result<()> {
     // Cache validity: we watch graph.db's mtime. Any external write (e.g. a concurrent
     // `wicked-estate index` run) changes the mtime and causes a full cache clear on the
     // next request, ensuring the agent always sees the current graph state.
+    //
+    // SCOPE (#102): only GRAPH-domain read tools participate (`response_cacheable`). Both cache
+    // levels are versioned/invalidated exclusively by graph-store changes, so memory.* and
+    // knowledge.* responses must never enter them: a memory.capture / knowledge.ingest bumps
+    // nothing the cache watches, and a cached recall would be served stale indefinitely.
     let mut request_cache: HashMap<String, serde_json::Value> = HashMap::new();
     let mut cache_db_mtime: Option<std::time::SystemTime> = if db_path != ":memory:" {
         std::fs::metadata(&db_path)
@@ -353,11 +358,17 @@ async fn main() -> Result<()> {
             }
         }
 
-        // Build a cache key for tools/call requests (read-only, deterministic).
+        // Build a cache key for tools/call requests — graph-domain read tools only (#102).
+        // Memory/knowledge tools bypass both cache levels: their stores' writes never bump the
+        // graph version this cache is keyed on, so a hit could be stale forever.
         let cache_key = if req.get("method").and_then(|m| m.as_str()) == Some("tools/call") {
             let tool = req["params"]["name"].as_str().unwrap_or("");
-            let args = req["params"]["arguments"].to_string();
-            Some(format!("{tool}/{args}"))
+            if wicked_estate_mcp::response_cacheable(tool) {
+                let args = req["params"]["arguments"].to_string();
+                Some(format!("{tool}/{args}"))
+            } else {
+                None
+            }
         } else {
             None
         };
