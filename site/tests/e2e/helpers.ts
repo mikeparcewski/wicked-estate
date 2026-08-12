@@ -12,14 +12,33 @@ export async function clickUntil(
   { timeout = 15_000 }: { timeout?: number } = {},
 ): Promise<void> {
   await target.scrollIntoViewIfNeeded();
-  await expect
-    .poll(
-      async () => {
-        if (await effect()) return true;
-        await target.click({ timeout: 2_000 }).catch(() => {});
-        return effect();
-      },
-      { timeout },
-    )
-    .toBe(true);
+  // Keep the last click failure so a timeout reports WHY the click never
+  // landed (detached node, overlay intercept, ...) instead of a bare poll
+  // timeout.
+  let lastClickError: unknown;
+  try {
+    await expect
+      .poll(
+        async () => {
+          if (await effect()) return true;
+          try {
+            await target.click({ timeout: 2_000 });
+            lastClickError = undefined;
+          } catch (err) {
+            lastClickError = err;
+          }
+          return effect();
+        },
+        { timeout },
+      )
+      .toBe(true);
+  } catch (err) {
+    if (lastClickError !== undefined) {
+      throw new Error(
+        `clickUntil on ${String(target)} timed out; last click failure: ${String(lastClickError)}`,
+        { cause: err },
+      );
+    }
+    throw err;
+  }
 }
