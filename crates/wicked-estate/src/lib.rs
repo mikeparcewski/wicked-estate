@@ -367,8 +367,11 @@ fn load_extra_edge_rules(root: &Path) -> (Option<ExtraEdgeExtractor>, String) {
 
 /// Second walk for extra-edge rule targets: INCLUDES hidden paths, because drop-in rules routinely
 /// target dot-dir catalogs (e.g. `.claude-plugin/archetypes.json`) that [`collect_source_files`]'s
-/// hidden-filter skips. Still gitignore-aware; skips VCS/vendor dirs and the rules dir itself.
-/// Only files matching at least one rule's `file_glob` are returned.
+/// hidden-filter skips. Still gitignore-aware; skips `.git`, the rules dir itself, and exactly the
+/// same build/vendor dir names as [`collect_source_files`] — the two walks must agree on what is
+/// visible so a rule behaves the same whether or not its target is also an ordinary source file
+/// (anything beyond that list, e.g. a committed Go-style `vendor/`, is gitignore's call in BOTH
+/// walks). Only files matching at least one rule's `file_glob` are returned.
 fn collect_extra_rule_files(root: &Path, rules: &ExtraEdgeExtractor) -> Vec<PathBuf> {
     WalkBuilder::new(root)
         .hidden(false)
