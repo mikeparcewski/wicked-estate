@@ -55,6 +55,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: clippy the postgres store
         run: cargo clippy -p wicked-estate-store --features postgres --all-targets -- -D warnings
+      # The CLI's `postgres` feature is a one-line forward to the store's, but a forward no
+      # job compiles can silently break — same rot class as the store itself (above). This
+      # is what a WICKED_RUNTIME=team CLI build uses (docs/team-runtime.md).
+      - name: clippy the CLI with the postgres feature (team-profile build)
+        run: cargo clippy -p wicked-estate --features postgres --all-targets -- -D warnings
 
   # ── The compile guard above proves PostgresStore BUILDS; it does not prove it BEHAVES
   #    (#84). CLAUDE.md §9 makes the GraphStore conformance kit the thing every store MUST

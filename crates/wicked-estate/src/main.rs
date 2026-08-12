@@ -608,7 +608,13 @@ fn main() -> Result<()> {
     // `--db` may be repeated; the LAST single `--db` value is used for single-db commands
     // (backward-compatible).  All `--db` values are collected into `db_paths` for the
     // `cross-graph` command.  `--dbs a,b,c` is an alias that accepts a comma-delimited list.
-    let mut db = ".wicked-estate/graph.db".to_string();
+    //
+    // The DEFAULT spec resolves through the WICKED_RUNTIME profile seam
+    // (docs/team-runtime.md): team → WICKED_STORE_URL (shared Postgres, needs a
+    // `--features postgres` build) > WICKED_ESTATE_DB > the local graph.db. An explicit
+    // `--db` flag below still overrides whatever resolves here.
+    let mut db =
+        wicked_estate_store::resolve_store_spec(None, ".wicked-estate/graph.db").map_err(to_any)?;
     let mut db_paths: Vec<String> = Vec::new();
     let mut scip_file: Option<String> = None;
     let mut since: u64 = 0;

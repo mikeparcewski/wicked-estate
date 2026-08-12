@@ -16,6 +16,47 @@ use wicked_estate_core::{
 /// would produce phantom failures unrelated to the contract.
 static PG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Cross-BINARY serialization: this file and `team_runtime.rs` share one database. Cargo
+/// currently runs integration-test binaries sequentially, but that is an implementation
+/// detail, not a contract — a session-level Postgres advisory lock makes the isolation
+/// explicit. Held for the whole test; released on drop (and by the server if the session
+/// dies). Same key in both files.
+struct PgTestLease {
+    rt: tokio::runtime::Runtime,
+    pool: sqlx::PgPool,
+}
+
+impl PgTestLease {
+    const KEY: i64 = 0x5749_434B; // "WICK"
+
+    fn acquire(url: &str) -> Self {
+        use sqlx::postgres::PgPoolOptions;
+        let rt = tokio::runtime::Runtime::new().expect("tokio");
+        // max_connections(1): the advisory lock is session-scoped, so it must live on the
+        // one connection this pool will ever hand out.
+        let pool = rt
+            .block_on(PgPoolOptions::new().max_connections(1).connect(url))
+            .expect("connect for test lease");
+        rt.block_on(
+            sqlx::query("SELECT pg_advisory_lock($1)")
+                .bind(Self::KEY)
+                .execute(&pool),
+        )
+        .expect("acquire pg advisory test lock");
+        Self { rt, pool }
+    }
+}
+
+impl Drop for PgTestLease {
+    fn drop(&mut self) {
+        let _ = self.rt.block_on(
+            sqlx::query("SELECT pg_advisory_unlock($1)")
+                .bind(Self::KEY)
+                .execute(&self.pool),
+        );
+    }
+}
+
 /// Drop every table the store creates so each test starts with a fresh schema.
 /// `symbol_gen` matters: its `had_node` marker is sticky by design, so a leftover row from a
 /// prior run would flip first-insert epochs from 0 to 1 and fail the epoch conformance block.
@@ -49,6 +90,7 @@ fn postgres_store_satisfies_graph_store_contract() {
     let _guard = PG_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lease = PgTestLease::acquire(&url);
 
     drop_all_tables(&url);
 
@@ -102,6 +144,7 @@ fn postgres_batch_commits_atomically_no_torn_reads() {
     let _guard = PG_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lease = PgTestLease::acquire(&url);
 
     drop_all_tables(&url);
 
