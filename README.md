@@ -36,7 +36,8 @@ Postgres. Solo laptop to enterprise CI fleet, same engine, same queries.
 
 The wicked family is **one loop, under human authority**: intent → **Steer** → **Equip** → (your
 coding-agent harness) → **Verify · Govern** → record, and the record feeds the next run. estate is
-**Equip** — the live technical environment plus the memory + code-graph (absorbed from the retired
+**Equip** — the live technical environment plus the code graph, memory, and knowledge (the
+memory + knowledge absorbed from the retired
 [`wicked-brain`](https://github.com/mikeparcewski/wicked-brain), 2026-08). SQLite by default; no
 servers, no accounts, nothing leaves your machine. The parts compose rather than lock in.
 
