@@ -123,6 +123,46 @@ impl Scope {
     pub fn is_root(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// Allocation-free equivalent of `path_in_prefix(&self.as_path(), prefix)` (the
+    /// `wicked_estate_core::scope` subtree predicate erase/coverage/recall share) — does this
+    /// scope fall within `prefix`'s subtree? Walks the prefix against the segments' virtual
+    /// `kind:id/…` rendering instead of materializing the path, so per-candidate checks (the
+    /// recall rerank loop, erase/coverage filters) don't allocate.
+    ///
+    /// Equivalence holds for parse-normalized scopes ([`Scope::parse`] splits on `/`, so segment
+    /// kinds/ids can never contain one) — which is every scope decoded from a store. A prefix
+    /// that is not itself a canonical rendering (partial segment, trailing `/`, missing `:`)
+    /// matches nothing, exactly as the string predicate behaves against canonical paths.
+    pub fn path_in_prefix(&self, prefix: &str) -> bool {
+        if prefix.is_empty() {
+            return true; // root subtree — matches everything
+        }
+        let mut rem = prefix;
+        for seg in &self.0 {
+            // The segment's virtual rendering is "{kind}:{id}"; consume it from the prefix.
+            rem = match rem.strip_prefix(seg.kind.as_str()) {
+                Some(r) => r,
+                None => return false,
+            };
+            rem = match rem.strip_prefix(':') {
+                Some(r) => r,
+                None => return false,
+            };
+            rem = match rem.strip_prefix(seg.id.as_str()) {
+                Some(r) => r,
+                None => return false,
+            };
+            if rem.is_empty() {
+                return true; // prefix ends exactly at a segment boundary — subtree hit
+            }
+            rem = match rem.strip_prefix('/') {
+                Some(r) => r,
+                None => return false, // prefix continues mid-segment ("org:acme" vs "org:acme2")
+            };
+        }
+        false // prefix has segments beyond this scope — deeper than the candidate
+    }
 }
 
 #[cfg(test)]
@@ -202,5 +242,43 @@ mod tests {
         assert_eq!(a.len(), 4); // agent, team, org, root
         assert_eq!(a[0], agent);
         assert!(a[3].is_root());
+    }
+
+    /// `Scope::path_in_prefix` (allocation-free walk) must agree with the shared string
+    /// predicate on every parse-normalized scope × prefix pair — including non-canonical
+    /// prefixes. This pins "a recall with a prefix previews exactly what erase would delete".
+    #[test]
+    fn path_in_prefix_walk_is_equivalent_to_string_predicate() {
+        let scopes = [
+            "",
+            "org:acme",
+            "org:acme2",
+            "org:acme/unit:pay",
+            "org:acme/unit:pay/agent:claude",
+            "brain:wicked-garden/doc:mem%2Fabc.md",
+        ];
+        let prefixes = [
+            "",                                     // root subtree
+            "org:acme",                             // exact + descendant
+            "org:acme/",                            // trailing slash (non-canonical)
+            "org:acme/unit:pay",                    // deeper exact
+            "org:acme/unit:pay/agent:claude/x:y",   // deeper than any scope
+            "org:acm",                              // partial id
+            "org:acme2",                            // sibling
+            "org",                                  // missing `:` (non-canonical)
+            "brain:wicked-garden",                  // migrated-brain subtree
+            "brain:wicked-garden/doc:mem%2Fabc.md", // migrated-brain leaf
+        ];
+        for s in scopes {
+            let scope = Scope::parse(s);
+            let path = scope.as_path();
+            for p in prefixes {
+                assert_eq!(
+                    scope.path_in_prefix(p),
+                    wicked_estate_core::scope::path_in_prefix(&path, p),
+                    "walk vs string diverged: scope={path:?} prefix={p:?}"
+                );
+            }
+        }
     }
 }

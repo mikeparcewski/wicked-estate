@@ -159,9 +159,9 @@ impl ScopeFilter<'_> {
     fn admits(&self, mem_scope: &Scope) -> bool {
         match self {
             ScopeFilter::Ancestors(query_scope) => mem_scope.is_ancestor_of(query_scope),
-            ScopeFilter::Subtree(prefix) => {
-                wicked_estate_core::scope::path_in_prefix(&mem_scope.as_path(), prefix)
-            }
+            // Allocation-free segment walk (this runs per candidate in the rerank loop) —
+            // exact `path_in_prefix` semantics for parse-normalized scopes, see Scope::path_in_prefix.
+            ScopeFilter::Subtree(prefix) => mem_scope.path_in_prefix(prefix),
         }
     }
 }
@@ -279,7 +279,7 @@ impl MemoryEngine {
         let victims: Vec<Memory> = self
             .all_memories()?
             .into_iter()
-            .filter(|m| wicked_estate_core::scope::path_in_prefix(&m.scope.as_path(), scope_prefix))
+            .filter(|m| m.scope.path_in_prefix(scope_prefix))
             .collect();
         let ids: Vec<SymbolId> = victims.iter().map(|m| m.symbol()).collect();
         let id_strs: Vec<String> = ids.iter().map(|s| s.0.clone()).collect();

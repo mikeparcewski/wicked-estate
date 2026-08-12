@@ -3,7 +3,7 @@
 
 use crate::{MemoryEngine, ScopeFilter};
 use std::collections::HashMap;
-use wicked_estate_core::{SymbolId, scope::path_in_prefix};
+use wicked_estate_core::SymbolId;
 use wicked_estate_memory_core::{
     CaptureRequest, MemKind, Memory, MemoryApi, MemoryCoverage, RecallQuery, RecalledItem,
     ReflectResult, Scope, Tier,
@@ -118,7 +118,7 @@ impl MemoryApi for MemoryEngine {
         let victim_ids: Vec<String> = self
             .all_memories()?
             .into_iter()
-            .filter(|m| path_in_prefix(&m.scope.as_path(), scope_prefix))
+            .filter(|m| m.scope.path_in_prefix(scope_prefix))
             .map(|m| m.symbol().0)
             .collect();
         let count = MemoryEngine::erase(self, scope_prefix)?;
@@ -153,7 +153,7 @@ impl MemoryApi for MemoryEngine {
         let mems = self.all_memories()?;
         let filtered: Vec<_> = if let Some(prefix) = scope_prefix {
             mems.into_iter()
-                .filter(|m| path_in_prefix(&m.scope.as_path(), prefix))
+                .filter(|m| m.scope.path_in_prefix(prefix))
                 .collect()
         } else {
             mems

@@ -558,7 +558,7 @@ impl GraphRead for MemStore {
             .values()
             .filter(|n| {
                 if let Some(prefix) = &query.scope_prefix {
-                    if !wicked_estate_core::scope::path_in_prefix(&n.scope.as_path(), prefix) {
+                    if !n.scope.path_in_prefix(prefix) {
                         return false;
                     }
                 }
