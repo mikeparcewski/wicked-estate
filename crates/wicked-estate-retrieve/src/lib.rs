@@ -1962,6 +1962,17 @@ pub trait Embedder: Send + Sync {
 
     /// Dimensionality of the output vector.
     fn dim(&self) -> usize;
+
+    /// Whether this embedder carries real semantic signal (`true` for model-backed embedders —
+    /// the default) or is a lexical fallback whose nearest-neighbour lists must NOT be fused as a
+    /// peer semantic retriever (`false`; overridden by [`HashEmbedder`]).
+    ///
+    /// Recall pipelines gate their vector candidate list on this: fusing a hash fallback's
+    /// "nearest" as if it were semantics injects rank noise that degrades every query class
+    /// (measured: the S3 parity bench, keyword-only vs hash-fused on 60 queries × 5 classes).
+    fn is_semantic(&self) -> bool {
+        true
+    }
 }
 
 /// Forwarding impl so a `Box<dyn Embedder>` — the runtime-selected embedder (`FastEmbedder` under
@@ -1976,6 +1987,9 @@ impl Embedder for Box<dyn Embedder> {
     }
     fn dim(&self) -> usize {
         (**self).dim()
+    }
+    fn is_semantic(&self) -> bool {
+        (**self).is_semantic()
     }
 }
 
@@ -2045,6 +2059,13 @@ impl Embedder for HashEmbedder {
 
     fn dim(&self) -> usize {
         self.dim
+    }
+
+    /// A hashed bag-of-words is a lexical proxy, not semantics ("not semantically meaningful —
+    /// exists to prove the wiring", above). Recall pipelines must not fuse its neighbours as a
+    /// peer semantic retriever.
+    fn is_semantic(&self) -> bool {
+        false
     }
 }
 
@@ -4190,6 +4211,34 @@ mod tests {
         let v2 = emb.embed("bar");
         // Not guaranteed, but astronomically unlikely to collide for short distinct tokens.
         assert_ne!(v1, v2, "distinct tokens should embed to distinct vectors");
+    }
+
+    #[test]
+    fn hash_embedder_is_not_semantic_and_trait_defaults_to_semantic() {
+        // The lexical fallback self-identifies so recall pipelines can gate their vector list.
+        assert!(!HashEmbedder::new(64).is_semantic());
+
+        // A model-backed embedder that doesn't override gets the `true` default.
+        struct ModelLike;
+        impl Embedder for ModelLike {
+            fn id(&self) -> &str {
+                "model:test"
+            }
+            fn embed(&self, _text: &str) -> Vec<f32> {
+                vec![1.0]
+            }
+            fn dim(&self) -> usize {
+                1
+            }
+        }
+        assert!(ModelLike.is_semantic(), "trait default must be semantic");
+
+        // The Box forwarding impl must preserve the override, not the default.
+        let boxed: Box<dyn Embedder> = Box::new(HashEmbedder::new(8));
+        assert!(
+            !boxed.is_semantic(),
+            "Box<dyn Embedder> must forward is_semantic"
+        );
     }
 
     /// The defining property of a REAL semantic embedder vs the lexical HashEmbedder: text that is

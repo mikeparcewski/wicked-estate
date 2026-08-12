@@ -365,9 +365,32 @@ impl MemoryEngine {
             .collect())
     }
 
-    /// Keyword candidates with OR-term semantics: split the query into significant terms and union
-    /// per-term FTS matches (estate FTS phrase-matches the whole `text`, so multi-word queries would
-    /// otherwise return nothing). First-seen order ≈ term-priority; capped at `self.k`.
+    /// One BM25-ordered FTS candidate list over memory nodes. `text` is phrase-quoted by the
+    /// store, so a multi-token string requires ADJACENT tokens.
+    fn fts_list(&self, text: &str) -> wicked_estate_core::Result<Vec<SymbolId>> {
+        Ok(self
+            .store
+            .find_symbols(&SymbolQuery {
+                text: Some(text.to_string()),
+                exact_name: None,
+                kinds: vec![NodeKind::Other("memory".into())],
+                language: None,
+                limit: Some(self.k),
+                scope_prefix: None,
+            })?
+            .iter()
+            .map(|n| n.symbol.clone())
+            .collect())
+    }
+
+    /// Keyword candidates: whole-query PHRASE list ∪ per-term OR lists, RRF-fused.
+    ///
+    /// The phrase list is the identifier-shaped-query (symbolish) fix: FTS5's default unicode61
+    /// tokenizer splits code identifiers on `_`/`.`/`::` at index time, so the raw query
+    /// phrase-matches those sub-tokens ADJACENTLY (`prompt_submit.py` → `[prompt, submit, py]` in
+    /// order) and the memory containing the literal identifier outranks memories that merely
+    /// scatter its unigrams (S3 parity bench, symbolish class). Skipped when the query is already
+    /// a single bare term (identical list, no signal). Mirrors knowledge's `keyword_candidates`.
     fn keyword_candidates(&self, query: &str) -> wicked_estate_core::Result<Vec<SymbolId>> {
         // Significant terms (len ≥ 2 keeps "AI"/"DB"/"ML"); fall back to the cleaned whole query.
         let mut terms: Vec<String> = query
@@ -385,20 +408,16 @@ impl MemoryEngine {
         // terms, order-independent). Fuse them as SEPARATE RRF inputs so a memory matching multiple
         // terms ACCUMULATES score and outranks a single-term match (multi-term relevance preserved).
         let mut lists: Vec<Vec<SymbolId>> = Vec::new();
+        let phrase = query.trim();
+        let single_bare_term = terms.len() == 1 && terms[0] == phrase.to_lowercase();
+        if !phrase.is_empty() && !single_bare_term {
+            let l = self.fts_list(phrase)?;
+            if !l.is_empty() {
+                lists.push(l);
+            }
+        }
         for term in terms {
-            let l: Vec<SymbolId> = self
-                .store
-                .find_symbols(&SymbolQuery {
-                    text: Some(term),
-                    exact_name: None,
-                    kinds: vec![NodeKind::Other("memory".into())],
-                    language: None,
-                    limit: Some(self.k),
-                    scope_prefix: None,
-                })?
-                .iter()
-                .map(|n| n.symbol.clone())
-                .collect();
+            let l = self.fts_list(&term)?;
             if !l.is_empty() {
                 lists.push(l);
             }
@@ -538,7 +557,13 @@ impl MemoryEngine {
         // 2. semantic (vector ANN) candidates — via the MemStore trait, filtered to live nodes
         //    (embeddings may outlive their node). (Was estate's `semantic_search`, which required a
         //    concrete `VectorStore`; the trait keeps recall backend-agnostic.)
-        let sem_ids: Vec<SymbolId> = if mode.uses_vector() {
+        //    Gated on the embedder carrying real semantic signal: the HashEmbedder fallback is a
+        //    lexical hash, and fusing its neighbours as a peer retriever injects rank noise that
+        //    degrades every query class (S3 parity bench, keyword-only vs hash-fused). An EXPLICIT
+        //    `VectorOnly` request is an ablation and stays honored verbatim.
+        let sem_ids: Vec<SymbolId> = if mode.uses_vector()
+            && (self.embedder.is_semantic() || matches!(mode, RecallMode::VectorOnly))
+        {
             let qvec = self.embedder.embed(query);
             let mut v = Vec::new();
             for (id, _) in self.store.nearest(&qvec, self.k)? {
@@ -701,6 +726,116 @@ mod tests {
             out.iter().any(|r| r.content.contains("oat milk")),
             "expected the oat-milk memory in: {:?}",
             out.iter().map(|r| &r.content).collect::<Vec<_>>()
+        );
+    }
+
+    // Symbolish parity (the S3 bench's one outright estate loss), memory-side mirror of the
+    // knowledge test: an identifier-shaped query must rank the memory containing the LITERAL
+    // identifier above memories that merely scatter its unigrams — the whole-query phrase list
+    // in `keyword_candidates` preserves FTS5 token adjacency (`vault_gate.py` → [vault, gate, py]).
+    #[test]
+    fn identifier_query_ranks_adjacent_phrase_above_scattered_unigrams() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let now = 5;
+        let scope = Scope::parse("org:acme");
+        for i in 0..4 {
+            eng.capture(&Memory::new(
+                MemKind::Fact,
+                Tier::Semantic,
+                scope.clone(),
+                format!(
+                    "note {i}: the vault held the gate open; py tooling gates the vault \
+                     release, gate reviews vault py changes"
+                ),
+                now,
+            ))
+            .unwrap();
+        }
+        eng.capture(&Memory::new(
+            MemKind::Fact,
+            Tier::Semantic,
+            scope.clone(),
+            "vault_gate.py enforces the evidence gate before phase transitions",
+            now,
+        ))
+        .unwrap();
+
+        let out = eng
+            .recall(
+                "vault_gate.py",
+                ScopeFilter::Ancestors(&scope),
+                &[],
+                4000,
+                now,
+            )
+            .unwrap();
+        assert!(!out.is_empty(), "recall returned nothing");
+        assert!(
+            out[0].content.contains("vault_gate.py"),
+            "the memory with the literal identifier must rank FIRST; got: {:?}",
+            out.iter().map(|r| &r.content).collect::<Vec<_>>()
+        );
+    }
+
+    // The vector-list gate, memory-side: a NON-semantic embedder (the hash fallback) must not
+    // surface zero-lexical-overlap memories through Hybrid vector fusion; a semantic embedder
+    // must keep doing so. (An explicit RecallMode::VectorOnly ablation stays honored either way.)
+    #[test]
+    fn non_semantic_embedder_contributes_no_vector_candidates() {
+        struct ConstEmbedder {
+            semantic: bool,
+        }
+        impl Embedder for ConstEmbedder {
+            fn id(&self) -> &str {
+                "const:test"
+            }
+            fn embed(&self, _text: &str) -> Vec<f32> {
+                vec![1.0, 0.0]
+            }
+            fn dim(&self) -> usize {
+                2
+            }
+            fn is_semantic(&self) -> bool {
+                self.semantic
+            }
+        }
+
+        let run = |semantic: bool, mode: RecallMode| {
+            let mut eng = MemoryEngine::in_memory()
+                .unwrap()
+                .with_embedder(Box::new(ConstEmbedder { semantic }));
+            let scope = Scope::parse("org:acme");
+            eng.capture(&Memory::new(
+                MemKind::Fact,
+                Tier::Semantic,
+                scope.clone(),
+                "zebra quagga",
+                5,
+            ))
+            .unwrap();
+            // Query shares NO tokens with the memory — only the vector path can surface it.
+            eng.recall_mode(
+                "unrelated words",
+                ScopeFilter::Ancestors(&scope),
+                &[],
+                2000,
+                5,
+                mode,
+            )
+            .unwrap()
+        };
+
+        assert!(
+            !run(true, RecallMode::Hybrid).is_empty(),
+            "semantic embedder: vector path must surface the zero-overlap memory"
+        );
+        assert!(
+            run(false, RecallMode::Hybrid).is_empty(),
+            "non-semantic embedder: vector noise must be gated out of Hybrid recall"
+        );
+        assert!(
+            !run(false, RecallMode::VectorOnly).is_empty(),
+            "explicit VectorOnly ablation must stay honored even for a non-semantic embedder"
         );
     }
 
