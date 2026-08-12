@@ -174,7 +174,21 @@ Use cases:
 ### How it works
 
 Rules are declared in a TOML file (typically `.wicked-estate-extractors/<name>.toml` in your repo,
-or passed directly via API). Each `[[rule]]` block specifies:
+or passed directly via API). **`wicked-estate index <path>` auto-discovers every
+`.wicked-estate-extractors/*.toml` under the indexed root** and runs the rules as part of the
+pipeline — no separate step. Three discovery behaviors worth knowing:
+
+- **Hidden files are admitted for rules.** The main walk skips dotfiles, but a file matched by a
+  rule's `file_glob` (e.g. `.claude-plugin/archetypes.json`) is indexed anyway — it gets a File
+  node plus the rule-injected nodes/edges (no language extraction unless its extension is
+  supported).
+- **Editing the rules forces a full re-extract** (tracked via the `extra_rules_digest` store meta
+  key), so edges injected by an old rule set never linger on unchanged files.
+- **Dangling injected edges are pruned.** An edge whose target (e.g. a `target_kind = "file"`
+  path that doesn't exist in the graph) or synthetic source is missing is removed by the
+  indexer's dangling-edge prune — a declared-but-missing target never fabricates a relationship.
+
+Each `[[rule]]` block specifies:
 
 | Field | Required | Meaning |
 |-------|----------|---------|
@@ -198,8 +212,11 @@ or passed directly via API). Each `[[rule]]` block specifies:
 | Field | Required | Meaning |
 |-------|----------|---------|
 | `kind` | yes | `"other:<tag>"` or a built-in kind (`"calls"`, `"imports"`, …). |
-| `target_id_template` | yes | Must expand to the same value as `emit_node.id_template` so both rules hit the same `SymbolId`. |
-| `target_node_scheme` | no | Must match `emit_node.node_scheme`. Defaults to `rule.name`. |
+| `target_id_template` | yes | Must expand to the same value as `emit_node.id_template` so both rules hit the same `SymbolId`. With `target_kind = "file"` it is the repo-relative path of the target file instead. |
+| `target_node_scheme` | no | Must match `emit_node.node_scheme`. Defaults to `rule.name`. Ignored when `target_kind = "file"`. |
+| `target_kind` | no | `"synthetic"` (default) or `"file"`. With `"file"`, the edge lands on the **literal file node** at the expanded path — if that file is not in the graph the edge is pruned as dangling (file-existence guard). |
+| `source_id_template` | no | When set, the edge STARTS at the synthetic node `Symbol::Synthetic { scheme: source_node_scheme, id: expanded }` instead of the matched file's node. The synthetic source must be emitted by this or a sibling rule's `emit_node`, or the edge is pruned. |
+| `source_node_scheme` | no | Scheme for the synthetic source. Defaults to `rule.name`. Only read when `source_id_template` is set. |
 
 ### Event-bus example
 
@@ -245,6 +262,49 @@ target_node_scheme = "event-bus-topic"
 
 With these rules applied, `blast-radius orders.created` returns every file that emits or
 consumes the `orders.created` topic — the graph now sees through the event bus.
+
+### Catalog → file example (source/target overrides)
+
+A JSON catalog wires names to files by *convention* (no symbol reference). Two rules over the
+same catalog: rule 1 emits a synthetic node per catalog key (+ a `contains` edge from the catalog
+file); rule 2 emits an edge FROM that synthetic node TO the **literal file node** the convention
+names. This is the wicked-garden archetype→playbook shape (ADR 0005 there):
+
+```toml
+# .wicked-estate-extractors/archetype.toml
+
+[[rule]]
+name      = "archetype-declare"
+file_glob = ".claude-plugin/archetypes.json"
+pattern   = '(?m)^ {4}"(?P<name>[a-z][a-z0-9_-]*)":\s*\{'
+
+[rule.emit_node]
+id_template   = "archetype:{name}"
+label_capture = "name"
+kind          = "other:archetype"
+node_scheme   = "archetype"
+
+[rule.emit_edge]
+kind               = "contains"
+target_id_template = "archetype:{name}"
+target_node_scheme = "archetype"
+
+[[rule]]
+name      = "archetype-playbook"
+file_glob = ".claude-plugin/archetypes.json"
+pattern   = '(?m)^ {4}"(?P<name>[a-z][a-z0-9_-]*)":\s*\{'
+
+[rule.emit_edge]
+kind               = "references"
+source_id_template = "archetype:{name}"   # start at rule 1's synthetic node
+source_node_scheme = "archetype"
+target_kind        = "file"               # land on the LITERAL playbook file node
+target_id_template = "skills/archetype/refs/{name}.md"
+```
+
+`blast-radius skills/archetype/refs/triage.md` now surfaces `archetype:triage` and, transitively,
+the catalog. A catalog key whose playbook file is missing keeps its archetype node (queryable as
+"declared but playbook-less") but the file edge is pruned — never fabricated.
 
 ### Stable synthetic IDs
 

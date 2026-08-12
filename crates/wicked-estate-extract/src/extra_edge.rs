@@ -26,6 +26,10 @@
 //! kind               = "other:emits"     # "other:<tag>" → EdgeKind::Other("emits")
 //! target_id_template = "topic:{topic}"   # must expand to the same id as emit_node.id_template
 //! target_node_scheme = "event-bus-topic" # must match emit_node.node_scheme
+//! # target_kind        = "file"          # optional — target the LITERAL file node whose
+//! #                                      # repo-relative path is the expanded target_id_template
+//! # source_id_template  = "agent:{name}" # optional — start the edge at a synthetic node
+//! # source_node_scheme  = "agent"        # instead of the matched file's node
 //!
 //! [[rule]]
 //! name      = "event-bus-consume"
@@ -95,18 +99,42 @@ fn default_node_kind() -> String {
     "synthetic".to_string()
 }
 
-/// How to construct an edge from the file node → a synthetic target.
+/// How to construct an edge per match. By default the edge runs from the **matched file's node**
+/// to a **synthetic** target; both ends can be overridden:
+///
+/// - `source_id_template` + `source_node_scheme` — start the edge at a synthetic node instead of
+///   the file node (e.g. an `archetype:{name}` node emitted by a sibling rule).
+/// - `target_kind = "file"` — land the edge on the **literal file node** whose repo-relative path
+///   is the expanded `target_id_template`. If that file is not in the graph, the edge dangles and
+///   the indexer's dangling-edge prune removes it — a declared-but-missing target never fabricates
+///   a relationship (the file-existence guard).
 #[derive(Debug, Clone, Deserialize)]
 pub struct EdgeTemplate {
     /// Edge kind: `"other:<tag>"` (e.g. `"other:emits"`, `"other:consumes"`).
     pub kind: String,
     /// `id_template` for the target node (must match `NodeTemplate::id_template` exactly when both
-    /// are present so the same `SymbolId` is used as key).
+    /// are present so the same `SymbolId` is used as key). With `target_kind = "file"` this is the
+    /// repo-relative path of the target file instead.
     pub target_id_template: String,
     /// Scheme for the target `Symbol::Synthetic`. Must match `NodeTemplate::node_scheme` (or the
-    /// rule name if absent). Defaults to the rule's `name` when not set.
+    /// rule name if absent). Defaults to the rule's `name` when not set. Ignored when
+    /// `target_kind = "file"`.
     #[serde(default)]
     pub target_node_scheme: Option<String>,
+    /// Target kind: `"synthetic"` (default) or `"file"`. With `"file"`, the expanded
+    /// `target_id_template` is a repo-relative path and the target is `Symbol::File { path }`.
+    #[serde(default)]
+    pub target_kind: Option<String>,
+    /// When set, the edge's SOURCE is the synthetic node
+    /// `Symbol::Synthetic { scheme: source_node_scheme (or rule name), id: expanded template }`
+    /// instead of the matched file's node. The synthetic source must be emitted somewhere (this
+    /// rule's or a sibling rule's `emit_node`) or the edge is pruned as dangling.
+    #[serde(default)]
+    pub source_id_template: Option<String>,
+    /// Scheme for the synthetic source. Defaults to the rule's `name`. Only read when
+    /// `source_id_template` is set.
+    #[serde(default)]
+    pub source_node_scheme: Option<String>,
 }
 
 /// One rule in the TOML config: a glob filter, a regex, and optional node/edge templates.
@@ -192,14 +220,37 @@ impl ExtraEdgeExtractor {
     ///
     /// Returns `Err` if the TOML is invalid or any regex fails to compile.
     pub fn from_toml(src: &str) -> Result<Self, String> {
-        let file: RulesFile =
-            toml::from_str(src).map_err(|e| format!("extra-edge config parse error: {e}"))?;
-        let rules = file
-            .rules
+        Self::from_toml_named(&[("<inline>".to_string(), src.to_string())])
+    }
+
+    /// Parse SEVERAL TOML rule files (e.g. every `*.toml` under `.wicked-estate-extractors/`) into
+    /// one extractor. `files` is `(label, contents)` — the label names the file in parse errors.
+    /// Rules keep the given file order, then their in-file order.
+    pub fn from_toml_named(files: &[(String, String)]) -> Result<Self, String> {
+        let mut rules: Vec<EdgeRule> = Vec::new();
+        for (label, src) in files {
+            let file: RulesFile = toml::from_str(src)
+                .map_err(|e| format!("extra-edge config parse error in {label}: {e}"))?;
+            rules.extend(file.rules);
+        }
+        let rules = rules
             .into_iter()
             .map(CompiledRule::try_from)
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { rules })
+    }
+
+    /// True when at least one rule's `file_glob` matches `path` — the cheap pre-filter callers use
+    /// to decide whether a file needs the extra-edge pass at all.
+    pub fn matches_path(&self, path: &str) -> bool {
+        self.rules
+            .iter()
+            .any(|r| glob_matches(&r.cfg.file_glob, path))
+    }
+
+    /// Number of compiled rules (0 = nothing will ever match).
+    pub fn rule_count(&self) -> usize {
+        self.rules.len()
     }
 
     /// Run all applicable rules over `file` and return the synthetic nodes + domain edges.
@@ -259,12 +310,30 @@ impl ExtraEdgeExtractor {
                 // ── Emit edge ─────────────────────────────────────────────────
                 if let Some(ref et) = rule.cfg.emit_edge {
                     let target_id = expand_template(&et.target_id_template, &bindings);
-                    // Use explicit target_node_scheme when set; fall back to rule name.
-                    let target_scheme = et.target_node_scheme.as_deref().unwrap_or(&rule.cfg.name);
-                    let target_symbol = Symbol::synthetic(target_scheme, &target_id).id();
+                    // Target: synthetic node (default) or — with target_kind = "file" — the
+                    // literal file node at the expanded repo-relative path.
+                    let target_symbol = if et.target_kind.as_deref() == Some("file") {
+                        Symbol::file(&target_id).id()
+                    } else {
+                        // Use explicit target_node_scheme when set; fall back to rule name.
+                        let target_scheme =
+                            et.target_node_scheme.as_deref().unwrap_or(&rule.cfg.name);
+                        Symbol::synthetic(target_scheme, &target_id).id()
+                    };
+                    // Source: the matched file's node (default) or a synthetic node when
+                    // source_id_template is set (e.g. the archetype node a sibling rule emits).
+                    let source_symbol = match &et.source_id_template {
+                        Some(t) => {
+                            let source_id = expand_template(t, &bindings);
+                            let source_scheme =
+                                et.source_node_scheme.as_deref().unwrap_or(&rule.cfg.name);
+                            Symbol::synthetic(source_scheme, &source_id).id()
+                        }
+                        None => file_symbol.clone(),
+                    };
                     let ek = parse_edge_kind(&et.kind);
                     let mut edge = Edge::new(
-                        file_symbol.clone(),
+                        source_symbol,
                         target_symbol,
                         ek,
                         ResolutionTier::Heuristic,
@@ -685,6 +754,177 @@ target_node_scheme = "ibm-odm"
         assert!(
             out.unresolved_refs[0].raw_name.starts_with("rules-engine:"),
             "UnresolvedRef raw_name must start with 'rules-engine:'"
+        );
+    }
+
+    // ── source/target overrides (archetype→playbook shape) ────────────────────
+
+    // Two rules over one catalog file: rule 1 emits the synthetic archetype node (+ a contains
+    // edge from the catalog file), rule 2 emits archetype-node → playbook FILE-node edges.
+    const ARCHETYPE_RULES: &str = r#"
+[[rule]]
+name      = "archetype-declare"
+file_glob = ".claude-plugin/archetypes.json"
+pattern   = '(?m)^ {4}"(?P<name>[a-z][a-z0-9_-]*)":\s*\{'
+
+[rule.emit_node]
+id_template   = "archetype:{name}"
+label_capture = "name"
+kind          = "other:archetype"
+node_scheme   = "archetype"
+
+[rule.emit_edge]
+kind               = "contains"
+target_id_template = "archetype:{name}"
+target_node_scheme = "archetype"
+
+[[rule]]
+name      = "archetype-playbook"
+file_glob = ".claude-plugin/archetypes.json"
+pattern   = '(?m)^ {4}"(?P<name>[a-z][a-z0-9_-]*)":\s*\{'
+
+[rule.emit_edge]
+kind               = "references"
+source_id_template = "archetype:{name}"
+source_node_scheme = "archetype"
+target_kind        = "file"
+target_id_template = "skills/archetype/refs/{name}.md"
+"#;
+
+    const CATALOG_JSON: &str = r#"{
+  "archetypes": {
+    "triage": {
+      "phases": ["classify"]
+    },
+    "build": {
+      "phases": ["plan", "implement"]
+    }
+  }
+}"#;
+
+    #[test]
+    fn edge_source_override_uses_synthetic_node() {
+        let ex = ExtraEdgeExtractor::from_toml(ARCHETYPE_RULES).unwrap();
+        let sf = SourceFile {
+            path: ".claude-plugin/archetypes.json".into(),
+            language: Language::new("json"),
+            text: CATALOG_JSON.into(),
+        };
+        let out = ex.extract_extra(&sf);
+
+        // Rule 2's edges must start at the synthetic archetype node, not the file node.
+        let playbook_edges: Vec<_> = out
+            .edges
+            .iter()
+            .filter(|e| e.provenance == Provenance::Extractor("archetype-playbook".to_string()))
+            .collect();
+        assert_eq!(playbook_edges.len(), 2, "one playbook edge per archetype");
+        let expected_src = Symbol::synthetic("archetype", "archetype:triage").id();
+        assert!(
+            playbook_edges.iter().any(|e| e.source == expected_src),
+            "edge source must be the synthetic archetype node"
+        );
+    }
+
+    #[test]
+    fn edge_target_kind_file_targets_literal_file_node() {
+        let ex = ExtraEdgeExtractor::from_toml(ARCHETYPE_RULES).unwrap();
+        let sf = SourceFile {
+            path: ".claude-plugin/archetypes.json".into(),
+            language: Language::new("json"),
+            text: CATALOG_JSON.into(),
+        };
+        let out = ex.extract_extra(&sf);
+
+        let expected_tgt = Symbol::file("skills/archetype/refs/triage.md").id();
+        assert!(
+            out.edges.iter().any(|e| e.target == expected_tgt),
+            "playbook edge must target the literal playbook FILE node, got {:?}",
+            out.edges.iter().map(|e| &e.target).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn shared_scheme_rules_converge_and_catalog_contains_edge_lands() {
+        let ex = ExtraEdgeExtractor::from_toml(ARCHETYPE_RULES).unwrap();
+        let sf = SourceFile {
+            path: ".claude-plugin/archetypes.json".into(),
+            language: Language::new("json"),
+            text: CATALOG_JSON.into(),
+        };
+        let out = ex.extract_extra(&sf);
+
+        // Two archetype nodes (kind other:archetype), deduped across the two rules.
+        assert_eq!(out.nodes.len(), 2, "one node per archetype key");
+        assert!(
+            out.nodes
+                .iter()
+                .all(|n| n.kind == NodeKind::Other("archetype".to_string()))
+        );
+
+        // Rule 1: catalog file → archetype node (Contains).
+        let file_sym = Symbol::file(".claude-plugin/archetypes.json").id();
+        let arch_sym = Symbol::synthetic("archetype", "archetype:build").id();
+        assert!(
+            out.edges.iter().any(|e| e.kind == EdgeKind::Contains
+                && e.source == file_sym
+                && e.target == arch_sym),
+            "catalog file must contain the archetype node"
+        );
+
+        // Rule 2's source is exactly rule 1's emitted node id — the shared-scheme convergence.
+        assert!(
+            out.edges
+                .iter()
+                .any(|e| e.kind == EdgeKind::References && e.source == arch_sym),
+            "playbook edge source must converge on rule 1's node"
+        );
+    }
+
+    #[test]
+    fn nested_keys_do_not_match_the_anchored_catalog_pattern() {
+        let ex = ExtraEdgeExtractor::from_toml(ARCHETYPE_RULES).unwrap();
+        let sf = SourceFile {
+            path: ".claude-plugin/archetypes.json".into(),
+            language: Language::new("json"),
+            text: CATALOG_JSON.into(),
+        };
+        let out = ex.extract_extra(&sf);
+        // "phases" is nested at 6 spaces — the 4-space anchor must not capture it.
+        assert!(
+            !out.nodes.iter().any(|n| n.name == "phases"),
+            "nested keys must not become archetype nodes"
+        );
+    }
+
+    // ── from_toml_named / matches_path ─────────────────────────────────────────
+
+    #[test]
+    fn from_toml_named_merges_rules_across_files() {
+        let files = vec![
+            ("a.toml".to_string(), EMIT_RULE.to_string()),
+            ("b.toml".to_string(), ARCHETYPE_RULES.to_string()),
+        ];
+        let ex = ExtraEdgeExtractor::from_toml_named(&files).unwrap();
+        assert_eq!(ex.rule_count(), 3, "1 rule from a.toml + 2 from b.toml");
+        assert!(ex.matches_path("src/orders.js"));
+        assert!(ex.matches_path(".claude-plugin/archetypes.json"));
+        assert!(!ex.matches_path("src/orders.py"));
+    }
+
+    #[test]
+    fn from_toml_named_parse_error_names_the_file() {
+        let files = vec![
+            ("good.toml".to_string(), EMIT_RULE.to_string()),
+            ("bad.toml".to_string(), "not valid toml @@@".to_string()),
+        ];
+        let err = match ExtraEdgeExtractor::from_toml_named(&files) {
+            Err(e) => e,
+            Ok(_) => panic!("parse must fail on bad.toml"),
+        };
+        assert!(
+            err.contains("bad.toml"),
+            "error must name the offending file, got: {err}"
         );
     }
 
