@@ -36,8 +36,9 @@ test('ecosystem dropdown opens on click and closes on Escape', async ({ page }) 
   await expect(menu).toBeVisible();
   await expect(btn).toHaveAttribute('aria-expanded', 'true');
 
-  // the family roster is intact (7 marketed items)
-  await expect(menu.locator('a.dropdown-item')).toHaveCount(7);
+  // the four-plane roster is intact (5 marketed items: interactive · studio ·
+  // crew · garden · estate — retired/absorbed packages get no row)
+  await expect(menu.locator('a.dropdown-item')).toHaveCount(5);
   await expect(menu.locator('a.dropdown-item').filter({ hasText: 'estate' })).toBeVisible();
 
   await page.keyboard.press('Escape');

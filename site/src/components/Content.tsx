@@ -1,24 +1,26 @@
 import { useState, useEffect, useRef } from 'react'
 
 /* ────────────────────────────────────────────────────────────────────────────
-   wicked-estate — EQUIP · your live technical environment, queryable.
+   wicked-estate — THE FOUNDATION · the system of record.
 
-   ROLE · estate is the Equip layer of the wicked loop: the technical environment
-   coding agents read before they act. Not the symbol/knowledge graph itself (that
-   memory + code-graph lives in its Equip peer, wicked-brain) — estate is the
-   environment those symbols sit in: requirements↔implementation, blast-radius of
-   change, infra + policy relationships, and operational history.
+   ROLE · estate is the foundation plane of the wicked platform: code graph +
+   memory + knowledge in ONE binary (23 MCP tools across 3 domains). It is the
+   record every agent reads before it acts and writes after it's done — the
+   capability plane reads and writes it through its contract, never around it.
 
-   CONCEPT · "read the core." estate is one durable environment you read like a
-   geologist reads a drill core: a single continuous body, banded into strata
-   (requirements↔impl · blast-radius · infra + policy · operational history ·
-   annotations), every band keyed to one stable symbol identity and stamped with
-   confidence + provenance. The signature motion is a DRILL that reads the core —
-   sections demo themselves before you touch them.
+   CONCEPT · "read the record." One durable body you read like a geologist
+   reads a drill core: five bands (code graph · injected edges · memory ·
+   knowledge · provenance), every band keyed to one stable symbol identity,
+   every fact stamped with confidence + provenance. The signature motion is a
+   DRILL that reads the core — sections demo themselves before you touch them.
 
-   Grounded to v0.13.1 (crates.io): 100+ wired languages, 1,000+ tests, every edge
-   carries {confidence, provenance, resolved_by}, injected edges (event→consumer,
-   command→agent) grep never sees, SQLite by default / Postgres behind one flag.
+   Grounded to v0.14.4 (crates.io): 102 wired tree-sitter languages
+   (languages-as-data — 113 in the manifest), ExtraEdge TOML rules injecting
+   the edges grep never sees (event→consumer, command→agent), every edge
+   {confidence, provenance, resolved_by}, memory scopes with subtree
+   recall/erase, hybrid RRF retrieval with a public parity bench
+   (overall r@10 0.849 vs 0.437 for the FTS system it replaced), SQLite by
+   default with the WICKED_RUNTIME team profile seam to shared Postgres.
    ──────────────────────────────────────────────────────────────────────────── */
 
 function GitHubIcon({ size = 16 }: { size?: number }) {
@@ -64,20 +66,20 @@ function useIsMobile(maxWidth = 760) {
   return isMobile
 }
 
-// ── Strata metadata: the five bands of the technical environment ────────────────
-type StratumId = 'requirements' | 'blast' | 'infra' | 'history' | 'annotations'
+// ── Strata metadata: the five bands of the record ───────────────────────────
+type StratumId = 'graph' | 'injected' | 'memory' | 'knowledge' | 'provenance'
 
 const STRATA: { id: StratumId; no: string; name: string; depth: string; tools: string; copy: string }[] = [
-  { id: 'requirements', no: '01', name: 'Requirements ↔ implementation', depth: '−0.0m', tools: 'traceable',
-    copy: 'Every symbol carries the requirement it satisfies, a description, and a validated flag — the spec pinned to the code that fulfils it.' },
-  { id: 'blast',        no: '02', name: 'Blast-radius',      depth: '−4.2m',  tools: 'bounded',
-    copy: 'What breaks if you change it — bounded reverse-reachability over every dependency edge kind, plus injected edges (event→consumer, command→agent) grep can never see.' },
-  { id: 'infra',        no: '03', name: 'Infra + policy',    depth: '−7.8m',  tools: 'cross-domain',
-    copy: 'IaC, mainframe security, data and messaging joined cross-domain — the RACF profile that protects the dataset a JCL step uses, in one query.' },
-  { id: 'history',      no: '04', name: 'Operational history', depth: '−11.5m', tools: 'git-aware',
-    copy: 'Per-file git provenance, a read-only edge-history log, and drift — iac vs live by resource identity. What the environment was, not only what it is.' },
-  { id: 'annotations',  no: '05', name: 'Annotations',       depth: '−14.0m', tools: 'typed notes',
-    copy: 'Typed key/value notes — assumption, note, question — with confidence and an advisory flag. Survives re-index.' },
+  { id: 'graph',      no: '01', name: 'Code graph',     depth: '−0.0m',  tools: '102 languages',
+    copy: 'Symbols, calls, imports, heritage — tree-sitter extraction across 102 wired languages. Languages are data, not code: a new one is a manifest row + a query file, zero core change.' },
+  { id: 'injected',   no: '02', name: 'Injected edges', depth: '−4.2m',  tools: 'ExtraEdge TOML',
+    copy: 'The relationships grep never sees — event→consumer, command→agent — injected by plain-TOML ExtraEdge rules. A new domain edge type is a rule block, zero Rust; blast-radius crosses the event-bus boundary.' },
+  { id: 'memory',     no: '03', name: 'Memory',         depth: '−7.8m',  tools: 'scoped',
+    copy: 'Episodic, semantic, procedural — captured under scopes, recalled on a token budget, distilled by reflection. Erasable by subtree: one call hard-deletes everything under a scope prefix. Erasability is governance.' },
+  { id: 'knowledge',  no: '04', name: 'Knowledge',      depth: '−11.5m', tools: 'RRF-fused',
+    copy: 'Docs and wiki as retrievable nodes with typed, confidence-scored relations — linked to the code symbols they describe. Hybrid FTS + vector recall, RRF-fused, benchmarked in the open.' },
+  { id: 'provenance', no: '05', name: 'Provenance',     depth: '−14.0m', tools: 'every edge',
+    copy: 'Every edge carries {confidence, provenance, resolved_by}. When tiers disagree, the highest wins and the losers are superseded — a 0.3 tag-scan guess is never handed to an agent as a 1.0 fact.' },
 ]
 
 // ── Section shell ────────────────────────────────────────────────────────────
@@ -132,27 +134,29 @@ function Hero() {
   }, [activeRow])
 
   return (
-    <Section className="!pt-28 overflow-hidden">
+    <Section className="strata--hero !pt-28 overflow-hidden">
       <div className="max-w-6xl mx-auto w-full grid lg:grid-cols-[1.08fr_0.92fr] gap-14 items-center">
         {/* Left — the thesis, committed in sentence one */}
         <div className="text-left">
-          <span className="kicker">wicked-estate · Equip · v0.13.1 · crates.io</span>
-          <h1 className="mt-6 font-display font-black text-ink text-[clamp(2.1rem,10vw,3rem)] sm:text-6xl lg:text-[4.4rem] leading-[0.92]" style={{ fontStretch: '112%' }}>
-            Your live<br />technical<br />environment,<br />
-            <span style={{ color: 'var(--accent)' }}>queryable.</span>
+          <span className="kicker">wicked-estate · the foundation · v0.14.4 · crates.io</span>
+          <h1 className="mt-6 font-display font-black text-ink text-[clamp(2.1rem,10vw,3rem)] sm:text-6xl lg:text-[4.2rem] leading-[0.92]" style={{ fontStretch: '112%' }}>
+            Code graph.<br />Memory.<br />Knowledge.<br />
+            <span style={{ color: 'var(--accent)' }}>One binary.</span>
           </h1>
           <p className="mt-7 text-lg text-muted leading-relaxed max-w-xl font-sans">
-            One local-first MCP server that maps the environment <span className="italic">around</span> your code —{' '}
-            <span className="text-ink">requirements↔implementation</span>, <span className="text-ink">blast-radius of change</span>,{' '}
-            <span className="text-ink">infra + policy relationships</span> and <span className="text-ink">operational history</span>.
-            Every fact stamped with confidence and provenance — a heuristic is never handed to an agent as a fact.
+            The <span className="text-ink">system of record</span> for your codebase — one local-first MCP server,{' '}
+            <span className="text-ink">23 tools across 3 domains</span>. What breaks if you change it, the decision
+            behind it, the doc that explains it — including the{' '}
+            <span className="text-ink">injected edges grep never sees</span>. Every fact stamped with confidence and
+            provenance: a heuristic is never handed to an agent as a fact.
           </p>
           <p className="mt-4 text-sm text-muted leading-relaxed max-w-xl font-sans">
-            The memory and code-graph proper live in <span className="text-ink">wicked-brain</span>, Equip’s other half.
-            estate is the technical environment those symbols sit in: what a change touches, what protects it, what it was.
+            Zero infrastructure by default — one SQLite file, nothing leaves your box. And it earned the job:
+            its hybrid retrieval is <span className="text-ink">parity-benchmarked in the open</span> against the
+            dedicated search system it replaced.
           </p>
           <div className="mt-9 flex flex-col sm:flex-row gap-3">
-            <a href="#query" className="btn-primary">Read the core ↓</a>
+            <a href="#query" className="btn-primary">Read the record ↓</a>
             <a href="https://github.com/mikeparcewski/wicked-estate" target="_blank" rel="noreferrer" className="btn-outline">
               <GitHubIcon /> View on GitHub
             </a>
@@ -196,7 +200,7 @@ function Hero() {
             </div>
           </div>
           <p className="mt-3 text-center font-mono text-[0.6rem] text-faint tracking-wide">
-            One continuous body — the whole environment, one identity.
+            One continuous record — five bands, one symbol identity.
           </p>
         </div>
       </div>
@@ -205,22 +209,22 @@ function Hero() {
 }
 
 // ── 2 · THE AGENT'S IDE — estate is the IDE the agent edits code in ─────────────
-// Reframed from a "query the substrate" panel into actually USING an IDE. The agent
-// right-clicks a symbol → a context menu of real IDE commands → one runs → the result
-// lands in a tabbed dock (Code intelligence · Memory · Knowledge). Clicking a class shows
-// all its details at once. The dock proves estate gives an agent EVERYTHING — code
-// intelligence (callers / blast-radius / requirement / definition), recalled Memory
-// (decisions · patterns · gotchas, with scope + salience + provenance) and Knowledge (the
-// wiki, RRF-fused). Every result carries confidence + provenance; the dial gates the
-// low-confidence / low-salience ones. The auto-play is a storyboard of these gestures —
-// a visible cursor + the menu opening — so it reads as "look what an agent can do editing
-// code in an IDE that actually knows the system." Blast-radius is one gesture, not the lead.
+// The centerpiece. The agent right-clicks a symbol → a context menu of real IDE
+// commands → one runs → the result lands in a tabbed dock (Code intelligence ·
+// Memory · Knowledge). Clicking a class shows all its details at once. The dock
+// proves the record gives an agent EVERYTHING — code intelligence (callers /
+// blast-radius / requirement / definition), recalled Memory (decisions · patterns ·
+// gotchas, with scope + salience + provenance) and Knowledge (the wiki, RRF-fused).
+// Every result carries confidence + provenance; the dial gates the low-confidence /
+// low-salience ones. The auto-play is a storyboard of these gestures — a visible
+// cursor + the menu opening — driven by an IntersectionObserver; any interaction
+// takes control (driving=true) and stops the demo.
 
 type Prov = 'Parsed' | 'SCIP' | 'Injected' | 'ImportMap' | 'Tags' | 'git' | 'Memory' | 'Knowledge' | 'annotation'
 interface Fact { text: string; detail?: string; conf: number; prov: Prov; advisory?: boolean }
 type SymId = 'PricingService' | 'applyDiscount'
 type DockTab = 'code' | 'memory' | 'knowledge'
-// estate's answer to one code-intelligence command
+// the record's answer to one code-intelligence command
 interface Peek { title: string; sub: string; facts: Fact[]; wiki?: string }
 // a context-menu / command-palette command and where its result lands
 interface Command { id: string; label: string; note?: string; lands: DockTab; peek?: Peek; memId?: string }
@@ -263,7 +267,7 @@ const COMMANDS: Command[] = [
     title: 'Find all references · blast radius', sub: 'what breaks if you change it',
     facts: [
       { text: '3 transitive dependents', detail: 'checkout · cartTotal · api/price', conf: 1.0, prov: 'SCIP' },
-      { text: 'emits wicked.shop.order.placed → 2 consumers', detail: 'injected event→consumer edge · grep never sees this', conf: 1.0, prov: 'Injected' },
+      { text: 'emits wicked.shop.order.placed → 2 consumers', detail: 'injected by an ExtraEdge TOML rule · grep never sees this', conf: 1.0, prov: 'Injected' },
       { text: 'referralFlow → applyDiscount', detail: 'tag-scan guess · cross-file, unverified', conf: 0.3, prov: 'Tags' },
     ],
   } },
@@ -292,21 +296,21 @@ const COMMANDS: Command[] = [
   { id: 'knowledge', label: 'Search knowledge', note: '⌘⇧F', lands: 'knowledge' },
 ]
 
-// Clicking the class opens the "all details" peek — everything estate knows, at once.
+// Clicking the class opens the "all details" peek — everything the record knows, at once.
 const DETAILS: Peek = {
-  title: 'PricingService — all details', sub: 'everything estate knows, at once', wiki: '[[Pricing Rules]] §Discounts',
+  title: 'PricingService — all details', sub: 'everything the record knows, at once', wiki: '[[Pricing Rules]] §Discounts',
   facts: [
     { text: 'class PricingService · 1 public method', detail: 'checkout/PricingService.ts:1', conf: 1.0, prov: 'Parsed' },
     { text: 'satisfies REQ-142 · validated ✓', detail: 'coupons never exceed the cart total', conf: 1.0, prov: 'Parsed' },
     { text: '3 callers · 3 transitive dependents', detail: 'checkout · api/price · cartTotal', conf: 1.0, prov: 'SCIP' },
-    { text: 'emits wicked.shop.order.placed → 2 consumers', detail: 'injected edge · grep never sees this', conf: 1.0, prov: 'Injected' },
+    { text: 'emits wicked.shop.order.placed → 2 consumers', detail: 'ExtraEdge rule · grep never sees this', conf: 1.0, prov: 'Injected' },
     { text: 'decision: coupons never stack', detail: 'recalled from memory · scope project:acme', conf: 0.92, prov: 'Memory' },
     { text: 'governed by rule-set PricingPolicy', detail: 'ODM ruleset · reads PRICING.TBL', conf: 0.9, prov: 'Parsed' },
     { text: 'assumption: max one coupon per cart', detail: 'advisory · survives re-index', conf: 0.7, prov: 'annotation', advisory: true },
   ],
 }
 
-// The Memory panel — estate's recalled memory relevant to the code in view. Salience acts
+// The Memory panel — recalled memory relevant to the code in view. Salience acts
 // as the confidence the dial gates; the superseded decision falls below the default cutoff.
 const MEMORIES: Memory[] = [
   { id: 'm-nostack', kind: 'decision', text: 'Coupons never stack — one per cart', scope: 'project:acme', salience: 0.92, prov: 'episodic · spike 2026-06', because: 'applyDiscount' },
@@ -345,7 +349,7 @@ const DOCK_TABS: { id: DockTab; label: string }[] = [
 const PROV_LEGEND: { prov: string; note: string; accent?: boolean }[] = [
   { prov: 'Parsed', note: 'AST · 1.0', accent: true },
   { prov: 'SCIP', note: 'indexer · 1.0', accent: true },
-  { prov: 'Injected', note: 'bus / cmd edge', accent: true },
+  { prov: 'Injected', note: 'ExtraEdge rule', accent: true },
   { prov: 'Memory', note: 'recalled · salience' },
   { prov: 'Knowledge', note: 'wiki · RRF' },
   { prov: 'Tags', note: 'tag-scan · 0.3' },
@@ -546,7 +550,7 @@ function AgentIDE() {
           <>
             <div className="ide-dock-head">
               <span className="ide-dock-title">Recalled memory</span>
-              <span className="ide-dock-sub depth">decisions · patterns · gotchas — relevant to this code</span>
+              <span className="ide-dock-sub depth">decisions · patterns · gotchas — scoped · erasable by subtree</span>
             </div>
             {MEMORIES.map(m => {
               const on = m.salience >= threshold
@@ -576,7 +580,7 @@ function AgentIDE() {
           <>
             <div className="ide-dock-head">
               <span className="ide-dock-title">Knowledge · the wiki</span>
-              <span className="ide-dock-sub depth">hybrid FTS + vector, RRF-fused</span>
+              <span className="ide-dock-sub depth">hybrid FTS + vector, RRF-fused · r@10 0.849 on the parity bench</span>
             </div>
             {KNOWLEDGE.map(k => {
               const on = k.conf >= threshold
@@ -690,7 +694,7 @@ function AgentIDE() {
 
             {/* IDE gestures — the command palette, as tap targets */}
             <div className="ide-m-gestures">
-              <span className="ide-sec-label">IDE gestures · tap one — estate answers</span>
+              <span className="ide-sec-label">IDE gestures · tap one — the record answers</span>
               <ul className="ide-m-cmds" role="list">
                 {COMMANDS.map(c => {
                   const active = (c.lands === 'code' && dockTab === 'code' && codePeek.title === c.peek?.title)
@@ -729,9 +733,10 @@ function AgentIDE() {
           <p className="mt-1.5 text-sm text-muted font-sans leading-tight">
             Right-click a symbol for every caller, click a class for its whole picture, trace the requirement it satisfies,
             recall the <span className="text-ink">decision</span> behind it, pull the <span className="text-ink">wiki</span>,
-            see the blast radius — what an agent can do while editing that grep can&apos;t. Code intelligence, memory and
-            knowledge, every answer a live fact with <span className="text-ink">confidence + provenance</span>; drop the dial
-            and the low-confidence guesses fall out, labeled — never silently promoted.
+            see the blast radius — what an agent can do while editing when it reads the record instead of grepping.
+            Code intelligence, memory and knowledge, every answer a live fact with{' '}
+            <span className="text-ink">confidence + provenance</span>; drop the dial and the low-confidence guesses
+            fall out, labeled — never silently promoted.
           </p>
         </div>
 
@@ -799,7 +804,7 @@ function AgentIDE() {
                   <span className="ide-glyph" data-lang="TS">TS</span>
                   <span className="ide-tab-name">PricingService.ts</span>
                 </span>
-                <span className="ide-crumb depth">checkout/ · right-click a symbol → estate answers</span>
+                <span className="ide-crumb depth">checkout/ · right-click a symbol → the record answers</span>
               </div>
 
               {/* the code — clickable symbols, with the cursor + context menu overlay */}
@@ -875,7 +880,7 @@ function FiveStrata() {
       <div className="max-w-6xl mx-auto w-full">
         <TopHead
           kicker="The five strata"
-          title={<>Five bands. One substrate. <span style={{ color: 'var(--accent)' }}>One symbol identity.</span></>}
+          title={<>Five bands. One record. <span style={{ color: 'var(--accent)' }}>One symbol identity.</span></>}
         >
           <p className="max-w-3xl">
             Not a pile of scanners — a single continuous body, cut into bands. Each keyed to the same stable{' '}
@@ -928,7 +933,7 @@ function FiveStrata() {
           </div>
         </div>
         <p className="mt-4 font-mono text-xs text-faint">
-          Requirements↔implementation · blast-radius · infra + policy · operational history · typed annotations — one binary, every fact stamped with confidence and provenance.
+          Code graph · injected edges · memory · knowledge · provenance — one binary, every fact stamped with confidence and provenance.
         </p>
       </div>
     </Section>
@@ -936,7 +941,7 @@ function FiveStrata() {
 }
 
 // ── 3b · THE FULL TOOLFACE — every tool + skill an agent can call ───────────────
-// Grounded to v0.13.1. Tools: crates/wicked-estate-mcp/src/lib.rs (all_tools() +
+// Grounded to v0.14.4. Tools: crates/wicked-estate-mcp/src/lib.rs (dispatch +
 // memory/knowledge schemas), README.md §MCP. Skills: crates/*/skills/*/SKILL.md.
 type ToolDomain = { no: string; name: string; note: string; tools: { name: string; purpose: string }[] }
 
@@ -964,7 +969,7 @@ const TOOL_DOMAINS: ToolDomain[] = [
       { name: 'memory.learn',    purpose: 'Store a semantic fact and link it to code symbols atomically.' },
       { name: 'memory.reflect',  purpose: 'Distil episodic memories in a scope into semantic facts.' },
       { name: 'memory.coverage', purpose: 'Node counts by tier and kind.' },
-      { name: 'memory.erase',    purpose: 'Hard-delete every memory under a scope prefix.' },
+      { name: 'memory.erase',    purpose: 'Hard-delete every memory under a scope prefix — erasability as governance.' },
     ],
   },
   {
@@ -974,7 +979,7 @@ const TOOL_DOMAINS: ToolDomain[] = [
       { name: 'knowledge.write',             purpose: 'Write one node (doc / section / chunk / concept).' },
       { name: 'knowledge.relate',            purpose: 'Add a typed, confidence-scored relation between nodes.' },
       { name: 'knowledge.recall',            purpose: 'Hybrid FTS + vector recall, RRF-fused.' },
-      { name: 'knowledge.relate_code',       purpose: 'Link a knowledge node to estate code symbols.' },
+      { name: 'knowledge.relate_code',       purpose: 'Link a knowledge node to code symbols in the graph.' },
       { name: 'knowledge.recall_about_code', purpose: 'Recall knowledge linked to given code symbols.' },
       { name: 'knowledge.coverage',          purpose: 'Node counts per class.' },
     ],
@@ -987,22 +992,35 @@ const AGENT_SKILLS: { name: string; purpose: string }[] = [
   { name: 'codebase-expedition',  purpose: 'Hotspot-first tour: RankHotspots → TraverseGraph → FetchContent.' },
   { name: 'knowledge-ingest',     purpose: 'Chunk and ingest a document into the knowledge base.' },
   { name: 'cited-answer',         purpose: 'Answer with a grounded, cited slice — never from model memory.' },
-  { name: 'ontology-expedition',  purpose: 'Connect concepts with typed relations — the bar over a flat brain.' },
+  { name: 'ontology-expedition',  purpose: 'Connect concepts with typed relations — structure over a flat store.' },
   { name: 'knowledge-curation',   purpose: 'Dedup as the base grows — collapse-but-surface, never delete.' },
   { name: 'gap-hunting',          purpose: 'Turn recall misses into ingest tasks — close the loop.' },
 ]
 
 // Cross-cutting capabilities, each grounded in a repo path.
 const CAPABILITIES: string[] = [
-  'Injected edges · event→consumer · command→agent',
+  'Injected edges · ExtraEdge TOML rules · event→consumer · command→agent',
   'Every edge: confidence + provenance + resolved_by',
   '7 resolution tiers · Parsed → SCIP → LSP',
   'Rules engines in the same graph · ODM · DMN · Drools',
   'Requirement ↔ code traceability',
   'Typed annotations · survive re-index',
-  'SQLite by default · Postgres behind one flag',
-  '100+ languages as data — a row + a query file',
+  'Memory scopes · subtree recall + erase',
+  'SQLite by default · Postgres for teams',
+  '102 wired languages — a manifest row + a query file',
+  '+ SemanticSearch, an 11th graph tool, when an embedder is wired',
 ]
+
+// The retrieval receipt — the S3 parity bench that gated the wicked-brain
+// consolidation: 60 queries × 5 classes over an identical 357-doc corpus,
+// estate's knowledge surface vs the dedicated FTS search it replaced.
+const BENCH = {
+  rows: [
+    { metric: 'overall r@10', estate: '0.849', fts: '0.437' },
+    { metric: 'overall MRR',  estate: '0.810', fts: '0.571' },
+  ],
+  note: 'Ahead on four of five query classes; within 2.2% on the fifth (identifier-shaped queries — the FTS system’s home turf).',
+}
 
 function FullToolface() {
   return (
@@ -1015,9 +1033,9 @@ function FullToolface() {
           </h2>
           <p className="mt-1.5 text-sm text-muted font-sans leading-tight max-w-3xl">
             Not one “search” tool bolted onto a repo — the full MCP surface an agent can call, plus the skills
-            (playbooks) that drive them. The memory and knowledge domains pair with{' '}
-            <span className="text-ink">wicked-brain</span>, where the memory + code-graph proper live; the estate
-            domain is the live technical environment. Grounded to v0.13.1.
+            (playbooks) that drive them. The graph domain is the code graph; memory and knowledge are where the{' '}
+            wicked-brain consolidation landed — one store, one identity, a{' '}
+            <span className="text-ink">lossless import contract</span> so nothing tuned was dropped. Grounded to v0.14.4.
           </p>
         </div>
 
@@ -1042,6 +1060,25 @@ function FullToolface() {
           ))}
         </div>
 
+        {/* the retrieval receipt — the bench that gated the consolidation */}
+        <div className="mt-2 rock-panel p-0" id="bench">
+          <div className="flex items-center gap-3 px-4 py-2 border-b border-hairline-strong flex-wrap">
+            <span className="kicker" style={{ color: 'var(--accent)' }}>The retrieval receipt</span>
+            <span className="depth">parity bench · 60 queries × 5 classes · identical 357-doc corpus · vs the dedicated FTS search it replaced</span>
+          </div>
+          <div className="px-4 py-2.5 flex flex-wrap items-center gap-x-6 gap-y-2">
+            {BENCH.rows.map(r => (
+              <span key={r.metric} className="inline-flex items-baseline gap-2">
+                <span className="depth">{r.metric}</span>
+                <span className="font-mono text-sm font-bold" style={{ color: 'var(--accent)' }}>{r.estate}</span>
+                <span className="depth">vs</span>
+                <span className="font-mono text-sm text-muted">{r.fts}</span>
+              </span>
+            ))}
+            <span className="text-xs text-muted font-sans flex-1 min-w-[16rem]">{BENCH.note}</span>
+          </div>
+        </div>
+
         {/* the agent skills — the playbooks that ship with estate */}
         <div className="mt-2 rock-panel p-0">
           <div className="flex items-center gap-3 px-4 py-2 border-b border-hairline-strong">
@@ -1058,7 +1095,7 @@ function FullToolface() {
           </div>
         </div>
 
-        {/* cross-cutting capabilities most agents never know estate has */}
+        {/* cross-cutting capabilities most agents never know the record has */}
         <div className="mt-2 flex flex-wrap gap-1.5">
           {CAPABILITIES.map(c => <span key={c} className="tag">{c}</span>)}
         </div>
@@ -1164,39 +1201,43 @@ function ProvenanceSeam() {
   )
 }
 
-// ── 5 · SOLO OR SHARED — same engine, one flag ──────────────────────────────────
+// ── 5 · SOLO OR SHARED — same record, one profile switch ────────────────────────
 function Storage() {
   const [shared, setShared] = useState(false)
   const view = shared
     ? {
-        db: 'postgres://team/graph',
+        cmd: 'WICKED_RUNTIME=team wicked-estate index .',
         rows: [
+          ['store', 'WICKED_STORE_URL=postgres://team/graph — shared, self-hosted'],
           ['writers', 'concurrent — the whole team writes'],
           ['traversal', 'server-side WITH RECURSIVE, in-DB'],
-          ['re-index to switch', 'none — same schema, same graph'],
+          ['switching', 'one profile switch — same schema, no re-index'],
         ],
-        note: '--features postgres · concurrent writers · server-side traversal',
+        note: '--features postgres · fail-loud: a typo’d profile errors, never silently local',
       }
     : {
-        db: 'graph.db',
+        cmd: 'wicked-estate index . --db graph.db',
         rows: [
-          ['writers', 'single-writer — one local file'],
+          ['store', 'graph.db — one local file, repo-scoped'],
+          ['writers', 'single-writer — no daemon, no races'],
           ['traversal', 'bounded recursive CTE'],
-          ['infrastructure', 'none — nothing to run'],
+          ['infrastructure', 'none — nothing to run, nothing leaves your box'],
         ],
-        note: 'FTS5 · sqlite-vec · WAL · nothing leaves your box',
+        note: 'FTS5 · sqlite-vec · WAL · the zero-infra default',
       }
   return (
     <Section id="storage" solid>
       <div className="max-w-4xl mx-auto w-full">
         <TopHead
-          kicker="One backend, solo or shared"
-          title={<>SQLite by default. <span style={{ color: 'var(--accent)' }}>One flag</span> to a shared team backend.</>}
+          kicker="One record, solo or shared"
+          title={<>SQLite by default. <span style={{ color: 'var(--accent)' }}>One profile switch</span> to a shared team backend.</>}
         >
           <p className="max-w-3xl">
-            The same engine and command API run on either backend through one{' '}
+            The same engine and the same 23 tools run on either backend through one{' '}
             <span className="font-mono text-sm font-semibold">open_store(spec)</span> factory — no caller changes,
-            no re-index. Local-first is a feature, not a ceiling.
+            no re-index. The Postgres backend passes the same store-conformance suite in CI, and the{' '}
+            <span className="font-mono text-sm font-semibold">WICKED_RUNTIME=team</span> profile seam retargets the
+            whole foundation with one environment variable. Local-first is a feature, not a ceiling.
           </p>
         </TopHead>
 
@@ -1208,7 +1249,7 @@ function Storage() {
         <div className="rock-panel p-0">
           <div className="px-5 py-3 border-b border-hairline-strong flex items-center gap-3">
             <span className="w-2 h-2 rounded-full" style={{ background: shared ? 'var(--accent)' : 'var(--muted)' }} />
-            <span className="font-mono text-sm text-ink">wicked-estate index . --db {view.db}</span>
+            <span className="font-mono text-sm text-ink">{view.cmd}</span>
           </div>
           <div className="divide-y divide-hairline">
             {view.rows.map(([k, v]) => (
@@ -1227,142 +1268,59 @@ function Storage() {
   )
 }
 
-// ── 6 · WHERE ESTATE SITS IN THE LOOP — cycle the four verbs, Equip is home ──────
-// The one canonical wicked visual is a LOOP, not a ranked stack:
-//   intent → Steer → Equip → (harness) → Verify · Govern → record → next run,
-//   all under human authority. bus is the fabric beneath; interactive a surface beside.
-type LoopStep = { id: string; verb: string; here?: boolean; doing: string; members: { name: string; note: string }[] }
-const LOOP: LoopStep[] = [
-  {
-    id: 'steer', verb: 'Steer',
-    doing: `Steering before execution — reads each prompt's work-shape + risk and applies the right rigor, plus the capabilities a planner-executor can't do alone.`,
-    members: [{ name: 'garden', note: 'the Steer product' }],
-  },
-  {
-    id: 'equip', verb: 'Equip', here: true,
-    doing: `Your live technical environment, queryable — requirements↔implementation, blast-radius, infra + policy relationships, operational history. Memory + code-graph with provenance — knowledge the agent can search, challenge, correct, and trace to its source.`,
-    members: [{ name: 'estate', note: 'requirements↔impl · blast-radius · infra + policy · history' }, { name: 'brain', note: 'memory + code-graph with provenance' }],
-  },
-  {
-    id: 'verify', verb: 'Verify',
-    doing: `No agent grades its own homework — an enforced wall between the agent that runs the tests and the one that judges them.`,
-    members: [{ name: 'testing', note: 'the acceptance gate' }],
-  },
-  {
-    id: 'govern', verb: 'Govern',
-    doing: `The engine that makes "done" a mechanism, not a claim — workflow-as-data, dual gates, state re-derived from evidence. The control room for governed agent delivery — drive, gate, and audit the work; the human stays in command.`,
-    members: [{ name: 'core', note: 'the engine' }, { name: 'crew', note: 'the control room' }],
-  },
-]
-
-function FamilyLoop() {
-  const reduced = useReducedMotion()
-  const isMobile = useIsMobile()
-  const [active, setActive] = useState(1) // start on Equip (estate’s home)
-  const [pinned, setPinned] = useState(false)
-
-  // On mobile we don't cycle a highlight through the rows — motion is disabled and
-  // every row shows statically highlighted (see `on` below). So skip the interval.
-  useEffect(() => {
-    if (reduced || pinned || isMobile) return
-    const t = setInterval(() => setActive(a => (a + 1) % LOOP.length), 2600)
-    return () => clearInterval(t)
-  }, [reduced, pinned, isMobile])
-
-  const current = LOOP[active]
-
+// ── 6 · GET STARTED (exported separately — the SameGarden four-plane map, an
+//        Astro component, renders between the main island and this one) ─────────
+function CopyBtn({ text, label }: { text: string; label: string }) {
+  const [copied, setCopied] = useState(false)
+  const timer = useRef<number | null>(null)
+  useEffect(() => () => { if (timer.current) window.clearTimeout(timer.current) }, [])
+  const copy = async () => {
+    let ok = false
+    try {
+      if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); ok = true }
+    } catch { /* fall through to the legacy path */ }
+    if (!ok) {
+      try {
+        const ta = document.createElement('textarea')
+        ta.value = text
+        ta.setAttribute('readonly', '')
+        ta.style.position = 'absolute'
+        ta.style.left = '-9999px'
+        document.body.appendChild(ta)
+        ta.select()
+        ok = document.execCommand('copy')
+        ta.remove()
+      } catch { ok = false }
+    }
+    if (ok) {
+      setCopied(true)
+      if (timer.current) window.clearTimeout(timer.current)
+      timer.current = window.setTimeout(() => setCopied(false), 2000)
+    }
+  }
   return (
-    <Section id="foundation">
-      <div className="max-w-5xl mx-auto w-full">
-        <TopHead
-          kicker="Where estate sits in the loop"
-          title={<>Estate is where the loop gets <span style={{ color: 'var(--accent)' }}>equipped.</span></>}
-        >
-          <p className="max-w-3xl">
-            One loop, four verbs, under human authority: <span className="font-semibold">intent → Steer → Equip → (your harness) → Verify · Govern → record</span>,
-            and the record feeds the next run. estate is one half of <span className="font-semibold">Equip</span> — the technical environment;{' '}
-            <span className="font-mono text-sm">wicked-brain</span> is the other.
-          </p>
-        </TopHead>
-
-        <div className="grid lg:grid-cols-[0.9fr_1.1fr] gap-8 items-center">
-          {/* left — what the active verb does */}
-          <div className="text-left">
-            <span className="kicker" style={{ color: current.here ? 'var(--accent)' : 'var(--muted)' }}>{current.verb}{current.here ? ' · you are here' : ''}</span>
-            <p className="mt-3 text-lg text-ink font-sans leading-relaxed min-h-[7.5rem]">{current.doing}</p>
-            <div className="mt-4 flex gap-1.5">
-              {LOOP.map((l, i) => (
-                <button key={l.id} onClick={() => { setPinned(true); setActive(i) }} aria-label={l.verb}
-                  className="h-1.5 rounded-full transition-all"
-                  style={{ width: i === active ? 24 : 8, background: i === active ? 'var(--accent)' : 'var(--hairline-strong)' }} />
-              ))}
-              {!isMobile && (
-                <button
-                  onClick={() => setPinned(!pinned)}
-                  className="depth depth-toggle ml-2"
-                  aria-label={pinned ? 'Resume cycling the loop' : 'Pin the loop'}
-                >
-                  {pinned ? 'pinned (click to cycle)' : 'cycling the loop'}
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* right — the four verbs; a left pointer marks the active one */}
-          <div className="rock-panel p-0 overflow-hidden">
-            {LOOP.map((l, i) => {
-              // On mobile every row is highlighted statically (no cycling); on desktop
-              // the highlight follows the active row.
-              const on = isMobile ? true : i === active
-              return (
-                <div
-                  key={l.id}
-                  className="layer-row flex items-stretch"
-                  data-active={String(on)}
-                  onMouseEnter={() => { if (!isMobile) setActive(i) }}
-                  style={{ borderBottom: '1px solid var(--hairline)' }}
-                >
-                  <div className="w-8 flex items-center justify-center shrink-0">
-                    {on && <span className="layer-pointer" aria-hidden>{(reduced || isMobile) ? '▸' : '►'}</span>}
-                  </div>
-                  <div className="flex-1 px-4 py-4" style={{ background: l.here ? 'color-mix(in oklab, var(--accent) 7%, transparent)' : 'transparent' }}>
-                    <div className="flex items-center gap-3 mb-2 flex-wrap">
-                      <span className="kicker" style={{ color: on ? 'var(--accent)' : 'var(--muted)' }}>{l.verb}</span>
-                      {l.here && <span className="tag tag-accent">estate lives here</span>}
-                    </div>
-                    {on ? (
-                      <div className="flex flex-wrap gap-2">
-                        {l.members.map(m => (
-                          <span key={m.name} className="tag">
-                            <span className="text-ink font-semibold">{m.name}</span> <span className="text-faint">· {m.note}</span>
-                          </span>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="font-mono text-[0.66rem] text-faint">{l.members.map(m => m.name).join(' · ')}</div>
-                    )}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-        <p className="mt-6 font-mono text-xs text-faint">
-          wicked-bus is the durable fabric beneath the loop · wicked-interactive is a creative surface beside it · every run stays under human authority — approve, redirect, pause, cancel.
-        </p>
-      </div>
-    </Section>
+    <button type="button" className="copy-btn" data-copied={String(copied)} onClick={copy} aria-label={`Copy: ${label}`}>
+      {copied ? 'copied ✓' : 'copy'}
+    </button>
   )
 }
 
-// ── 7 · GET STARTED ─────────────────────────────────────────────────────────────
-function GetStarted() {
+const INSTALL_CMD = 'npx wicked-installer'
+const DIRECT_CMDS: { comment: string; cmd: string; show?: string }[] = [
+  { comment: '# the CLI + the MCP server', cmd: 'cargo install wicked-estate wicked-estate-mcp' },
+  { comment: '# index your repo', cmd: 'wicked-estate index . --db graph.db' },
+  { comment: '# connect your agent (Claude Code shown)',
+    cmd: 'claude mcp add wicked-estate -s project -- wicked-estate-mcp --db "$PWD/graph.db"',
+    show: 'claude mcp add wicked-estate -s project \\\n    -- wicked-estate-mcp --db "$PWD/graph.db"' },
+]
+
+export function GetStarted() {
   return (
     <Section id="get-started" solid>
       <div className="max-w-4xl mx-auto w-full">
         <TopHead
           kicker="Get started"
-          title="Zero to a queried substrate in two minutes."
+          title="Zero to a queried record in two minutes."
         />
 
         <div className="grid md:grid-cols-2 gap-5">
@@ -1373,8 +1331,11 @@ function GetStarted() {
               <span className="depth">npm</span>
             </div>
             <div className="px-5 py-5">
-              <div className="font-mono text-sm text-ink">
-                <span style={{ color: 'var(--accent)' }}>$ </span>npx wicked-installer
+              <div className="flex items-center gap-3">
+                <div className="font-mono text-sm text-ink flex-1 min-w-0">
+                  <span style={{ color: 'var(--accent)' }}>$ </span>{INSTALL_CMD}
+                </div>
+                <CopyBtn text={INSTALL_CMD} label={INSTALL_CMD} />
               </div>
               <p className="mt-3 text-xs text-muted font-sans leading-5">
                 Interactive: pick <span className="text-ink">estate</span> (and any siblings), choose your agent
@@ -1390,13 +1351,17 @@ function GetStarted() {
               <span className="depth">crates.io</span>
             </div>
             <div className="px-5 py-5 font-mono text-xs leading-[1.9]">
-              <div className="text-faint"># the CLI + the MCP server</div>
-              <div className="text-ink"><span style={{ color: 'var(--accent)' }}>$ </span>cargo install wicked-estate wicked-estate-mcp</div>
-              <div className="text-faint mt-2"># index your repo</div>
-              <div className="text-ink"><span style={{ color: 'var(--accent)' }}>$ </span>wicked-estate index . --db graph.db</div>
-              <div className="text-faint mt-2"># connect your agent (Claude Code shown)</div>
-              <div className="text-ink"><span style={{ color: 'var(--accent)' }}>$ </span>claude mcp add wicked-estate -s project \</div>
-              <div className="text-ink pl-4">-- wicked-estate-mcp --db "$PWD/graph.db"</div>
+              {DIRECT_CMDS.map(c => (
+                <div key={c.cmd} className="mb-2 last:mb-0">
+                  <div className="text-faint">{c.comment}</div>
+                  <div className="flex items-start gap-3">
+                    <div className="text-ink flex-1 min-w-0 whitespace-pre-wrap">
+                      <span style={{ color: 'var(--accent)' }}>$ </span>{c.show ?? c.cmd}
+                    </div>
+                    <CopyBtn text={c.cmd} label={c.cmd} />
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         </div>
@@ -1419,17 +1384,17 @@ function GetStarted() {
 }
 
 // ── Content ──────────────────────────────────────────────────────────────────
+// The SameGarden four-plane map (shared wicked-web chrome, an Astro component)
+// renders between this island and the GetStarted island — see index.astro.
 export default function Content() {
   return (
-    <main className="font-sans">
+    <>
       <Hero />
       <AgentIDE />
       <FiveStrata />
       <FullToolface />
       <ProvenanceSeam />
       <Storage />
-      <FamilyLoop />
-      <GetStarted />
-    </main>
+    </>
   )
 }
