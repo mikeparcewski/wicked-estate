@@ -400,7 +400,16 @@ impl KnowledgeEngine {
         }
 
         // RRF fuse keyword ∪ vector (the -core primitive), then hydrate → budget pack (also -core).
+        //
+        // Document diversity: keep only the BEST-fused piece per parent document (`derived_from`
+        // target; a node without one is its own group). `ingest` splits a document into pieces,
+        // so without this a multi-piece document's runners-up crowd out other documents' best
+        // slices inside the token budget — breadth loss, not relevance (measured: parity-bench
+        // symbolish r@10 0.652 → 0.769 at a 6000-token budget, every other class unchanged).
+        // Same move as brain search's `collapseDuplicates` on the surface this replaces; a caller
+        // wanting depth on one document has its identity in `source`/`KRecalled.id` to fetch more.
         let fused = rrf_fuse(&[kw, sem], 60.0);
+        let mut seen_docs = std::collections::BTreeSet::new();
         let mut cands = Vec::new();
         for (id, rrf) in fused {
             let Some(node) = self.store.get_node(&id)? else {
@@ -409,6 +418,16 @@ impl KnowledgeEngine {
             let Some(kn) = KNode::from_node(&node) else {
                 continue;
             };
+            let doc_group = self
+                .store
+                .neighbors(&id, Direction::Dependencies)?
+                .into_iter()
+                .find(|e| matches!(&e.kind, EdgeKind::Other(r) if r == "derived_from"))
+                .map(|e| e.target)
+                .unwrap_or_else(|| id.clone());
+            if !seen_docs.insert(doc_group) {
+                continue;
+            }
             // Knowledge is NOT tiered: neutral recency/salience so the RRF rank drives ordering.
             cands.push(Candidate {
                 id,
@@ -622,6 +641,52 @@ mod tests {
             hits[0].content.contains("prompt_submit.py"),
             "the chunk with the literal identifier must rank FIRST; got: {:?}",
             hits.iter().map(|h| &h.content).collect::<Vec<_>>()
+        );
+    }
+
+    // Document diversity in recall packing: a multi-piece document contributes its BEST piece
+    // only, so runners-up from the same document cannot crowd other documents' top slices out of
+    // the token budget (breadth over same-document depth; the parity-bench q28 failure mode).
+    #[test]
+    fn recall_returns_at_most_one_piece_per_document() {
+        let mut e = KnowledgeEngine::in_memory().unwrap();
+        // Doc A: three pieces, all matching the query strongly.
+        e.ingest(
+            "gate policy",
+            &[
+                "the gate policy matrix resolves reviewers per gate".into(),
+                "gate policy fallback: the gate policy names a fallback reviewer".into(),
+                "gate policy modes: sequential, parallel, council per gate policy".into(),
+            ],
+            "s",
+            "gate-policy.md",
+            1,
+        )
+        .unwrap();
+        // Doc B: one piece, also matching — must NOT be crowded out by A's runners-up.
+        e.ingest(
+            "adjudicator",
+            &["the adjudicator applies the gate policy verdict".into()],
+            "s",
+            "adjudicator.md",
+            1,
+        )
+        .unwrap();
+
+        let hits = e.recall("gate policy", 6000, 2).unwrap();
+        let from_a = hits.iter().filter(|h| h.source == "gate-policy.md").count();
+        assert_eq!(
+            from_a,
+            1,
+            "exactly ONE piece of the multi-piece document, got {from_a}: {:?}",
+            hits.iter()
+                .map(|h| (&h.source, &h.content))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            hits.iter().any(|h| h.source == "adjudicator.md"),
+            "the other document's slice must surface, got: {:?}",
+            hits.iter().map(|h| &h.source).collect::<Vec<_>>()
         );
     }
 
