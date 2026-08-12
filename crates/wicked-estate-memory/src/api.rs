@@ -1,7 +1,7 @@
 //! `MemoryApi` (6-method, DES-001 §4.2) implemented for [`crate::MemoryEngine`].
 //! Uses `wicked_estate_memory_core` types directly.
 
-use crate::MemoryEngine;
+use crate::{MemoryEngine, ScopeFilter};
 use std::collections::HashMap;
 use wicked_estate_core::{SymbolId, scope::path_in_prefix};
 use wicked_estate_memory_core::{
@@ -71,8 +71,15 @@ impl MemoryApi for MemoryEngine {
 
     fn recall(&self, q: &RecallQuery) -> Result<Vec<RecalledItem>, anyhow::Error> {
         let scope = Scope::parse(&q.scope);
+        // Wire → filter: `scope_prefix` present (even "") REPLACES the inheritance filter with
+        // the subtree-inclusive erase/coverage predicate; absent keeps the existing behavior
+        // exactly. See [`ScopeFilter`] for why replace, not fuse.
+        let filter = match q.scope_prefix.as_deref() {
+            Some(prefix) => ScopeFilter::Subtree(prefix),
+            None => ScopeFilter::Ancestors(&scope),
+        };
         let seeds: Vec<SymbolId> = q.seeds.iter().cloned().map(SymbolId).collect();
-        let out = MemoryEngine::recall(self, &q.query, &scope, &seeds, q.token_budget, q.now)?;
+        let out = MemoryEngine::recall(self, &q.query, filter, &seeds, q.token_budget, q.now)?;
         Ok(out
             .into_iter()
             .map(|r| RecalledItem {
@@ -200,6 +207,7 @@ mod tests {
             &RecallQuery {
                 query: "what does the user drink".into(),
                 scope: "org:acme/agent:claude".into(),
+                scope_prefix: None,
                 seeds: vec![],
                 token_budget: 500,
                 now: 101,
@@ -208,6 +216,50 @@ mod tests {
         .unwrap();
         assert!(out.iter().any(|r| r.content.contains("oat milk")));
         assert!(out.iter().all(|r| !r.tier.is_empty()));
+    }
+
+    #[test]
+    fn api_recall_scope_prefix_flips_to_subtree_visibility() {
+        // The MemoryApi seam: `scope_prefix` on RecallQuery must reach the engine as
+        // ScopeFilter::Subtree. A leaf-scoped memory is invisible to a root-scoped recall
+        // (inheritance) but visible with scope_prefix "" (root subtree) or its own subtree.
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        MemoryApi::capture(
+            &mut eng,
+            make_req(
+                "brain import landed at a leaf scope",
+                "fact",
+                "semantic",
+                "brain:test/doc:a",
+                100,
+            ),
+        )
+        .unwrap();
+        let q = |scope_prefix: Option<&str>| RecallQuery {
+            query: "brain import leaf".into(),
+            scope: String::new(), // root query scope
+            scope_prefix: scope_prefix.map(str::to_string),
+            seeds: vec![],
+            token_budget: 500,
+            now: 101,
+        };
+        let inherit = MemoryApi::recall(&eng, &q(None)).unwrap();
+        assert!(
+            inherit.is_empty(),
+            "no prefix ⇒ inheritance: root recall must NOT see the leaf memory: {inherit:?}"
+        );
+        for prefix in ["", "brain:test"] {
+            let out = MemoryApi::recall(&eng, &q(Some(prefix))).unwrap();
+            assert!(
+                out.iter().any(|r| r.scope == "brain:test/doc:a"),
+                "scope_prefix {prefix:?} must surface the leaf memory with its own scope: {out:?}"
+            );
+        }
+        let other = MemoryApi::recall(&eng, &q(Some("brain:other"))).unwrap();
+        assert!(
+            other.is_empty(),
+            "a disjoint prefix must match nothing: {other:?}"
+        );
     }
 
     #[test]

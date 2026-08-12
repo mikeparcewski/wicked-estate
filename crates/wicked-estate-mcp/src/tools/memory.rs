@@ -131,6 +131,23 @@ fn dispatch_recall(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // Optional subtree filter. Present (even "") ⇒ candidates are memories whose scope is WITHIN
+    // the prefix subtree (the same path_in_prefix predicate memory.erase/memory.coverage use),
+    // REPLACING the ancestor-visible inheritance filter from `scope`. "" = root subtree = every
+    // memory. Omitted/null ⇒ existing inheritance behavior, exactly. A present NON-string value
+    // is invalid params (same fail-loud rule as memory.capture's scope) — silently ignoring it
+    // would answer from the WRONG visibility set.
+    let scope_prefix: Option<String> = match args.get("scope_prefix") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(other) => {
+            return json_rpc_error(
+                id,
+                -32602,
+                &format!("invalid scope_prefix: expected a string scope-path prefix, got {other}"),
+            );
+        }
+    };
     let seeds: Vec<String> = args
         .get("seeds")
         .and_then(|v| v.as_array())
@@ -147,6 +164,7 @@ fn dispatch_recall(
     let rq = RecallQuery {
         query,
         scope,
+        scope_prefix,
         seeds,
         token_budget,
         now,

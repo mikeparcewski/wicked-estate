@@ -392,7 +392,7 @@ impl MemoryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::MemoryEngine;
+    use crate::{MemoryEngine, ScopeFilter};
     use wicked_estate_memory_core::{MemKind, Memory, Scope, Tier};
 
     fn cap(
@@ -711,7 +711,9 @@ mod tests {
             0,
         );
         let far = 1000 * 86_400; // ~3 years later → decayed salience well below 0.4
-        let out = eng.recall("system note", &scope, &[], 500, far).unwrap();
+        let out = eng
+            .recall("system note", ScopeFilter::Ancestors(&scope), &[], 500, far)
+            .unwrap();
         assert!(
             out.is_empty(),
             "decayed memory below the floor must be forgotten from recall"
@@ -728,7 +730,7 @@ mod tests {
         );
         assert!(
             !eng2
-                .recall("system note", &scope, &[], 500, far)
+                .recall("system note", ScopeFilter::Ancestors(&scope), &[], 500, far)
                 .unwrap()
                 .is_empty()
         );

@@ -288,6 +288,13 @@ impl Default for CaptureRequest {
 pub struct RecallQuery {
     pub query: String,
     pub scope: String,
+    /// Subtree-inclusive scope filter. When present, candidate memories are those whose scope
+    /// falls WITHIN this prefix's subtree — the same `path_in_prefix` predicate `memory.erase`
+    /// and `memory.coverage` use — REPLACING the default ancestor-visible (inheritance) filter
+    /// derived from `scope`. `Some("")` = the root subtree = every memory. `None` = the existing
+    /// inheritance behavior, exactly. `#[serde(default)]` keeps older serialized queries valid.
+    #[serde(default)]
+    pub scope_prefix: Option<String>,
     /// code/infra seed symbol ids to expand from via `about` edges
     #[serde(default)]
     pub seeds: Vec<String>,
