@@ -30,13 +30,14 @@ use std::path::{Path, PathBuf};
 use ignore::WalkBuilder;
 use rayon::prelude::*;
 use wicked_estate_core::{
-    ChangeOp, Edge, EdgeKind, Extractor, GraphRead, GraphStats, Location, Node, NodeKind,
-    NodeSemantics, RepoInfo, ResolutionTier, Resolver, Result, SourceFile, Span, Symbol, SymbolId,
-    SymbolIndex, SymbolQuery, TraversalSpec,
+    ChangeOp, Edge, EdgeKind, Extraction, Extractor, GraphRead, GraphStats, Language, Location,
+    Node, NodeKind, NodeSemantics, RepoInfo, ResolutionTier, Resolver, Result, SourceFile, Span,
+    Symbol, SymbolId, SymbolIndex, SymbolQuery, TraversalSpec,
 };
 use wicked_estate_extract::{
-    BlazeBrlExtractor, CicsSqlExtractor, DrlExtractor, HlasmExtractor, IaCExtractor, ImsExtractor,
-    JclExtractor, MqExtractor, RacfExtractor, RegoRulesExtractor, TfstateCollector,
+    BlazeBrlExtractor, CicsSqlExtractor, DrlExtractor, ExtraEdgeExtractor, HlasmExtractor,
+    IaCExtractor, ImsExtractor, JclExtractor, MqExtractor, RacfExtractor, RegoRulesExtractor,
+    TfstateCollector,
     treesitter::{TreeSitterExtractor, extractor_for_extension, is_minified_or_huge},
 };
 use wicked_estate_resolve::{
@@ -108,6 +109,124 @@ fn xml_rules_extractor(ext: &str) -> Option<Box<dyn Extractor>> {
 #[cfg(not(feature = "xml-rules"))]
 fn xml_rules_extractor(_ext: &str) -> Option<Box<dyn Extractor>> {
     None
+}
+
+/// Language-based extraction dispatch for ONE file: grammar-less line extractors first, then the
+/// IaC sniff for YAML/JSON, then tree-sitter by extension. Returns `None` when no extractor claims
+/// the file or extraction fails — the caller decides whether the file still matters (e.g. because
+/// a drop-in extra-edge rule targets it).
+fn base_extraction(
+    rel_path: &str,
+    ext: &str,
+    text: &str,
+    ext_map: &HashMap<String, TreeSitterExtractor>,
+) -> Option<Extraction> {
+    // Grammar-less mainframe estate languages (JCL batch, HLASM assembler, RACF security,
+    // IMS DBD/PSB data, MQ MQSC messaging): line/macro extractors dispatched by extension.
+    // They map the estate into the same graph as the tree-sitter languages.
+    if let Some(extractor) = grammarless_extractor(ext) {
+        let language = extractor.languages().into_iter().next()?;
+        let sf = SourceFile {
+            path: rel_path.to_string(),
+            language: language.clone(),
+            text: text.to_string(),
+        };
+        let mut extraction = extractor.extract(&sf).ok()?;
+        // Give every grammar-less file the same File node + Contains edges the tree-sitter
+        // path emits, so the indexed-file count is honest and file-level blast-radius
+        // ("what's defined in queues.mqsc?") works uniformly across all languages.
+        let file_symbol = Symbol::file(rel_path).id();
+        let floc = Location::new(rel_path, Span::ZERO);
+        let child_syms: Vec<SymbolId> = extraction.nodes.iter().map(|n| n.symbol.clone()).collect();
+        for sym in child_syms {
+            extraction.local_edges.push(
+                Edge::new(
+                    file_symbol.clone(),
+                    sym,
+                    EdgeKind::Contains,
+                    ResolutionTier::Parsed,
+                    "grammarless",
+                )
+                .with_location(floc.clone()),
+            );
+        }
+        extraction.nodes.push(Node::new(
+            file_symbol,
+            NodeKind::File,
+            rel_path.to_string(),
+            language,
+            floc,
+        ));
+        return Some(extraction);
+    }
+
+    // IaC sniff dispatch for YAML / JSON files: cheap string check before extraction.
+    // CloudFormation: top-level `Resources:` key.
+    // Kubernetes: `kind:` + `apiVersion:` keys present.
+    // All other YAML/JSON: fall through to the normal tree-sitter extractor.
+    if matches!(ext, "yaml" | "yml" | "json") {
+        let is_cfn = text.contains("Resources:")
+            && (text.contains("AWSTemplateFormatVersion")
+                || text.contains("CloudFormation")
+                || text
+                    .lines()
+                    .any(|l| l.trim_start_matches(' ') == "Resources:"));
+        let is_k8s = text.contains("kind:") && text.contains("apiVersion:");
+
+        if is_cfn {
+            let extractor = IaCExtractor::cloudformation();
+            let language = extractor.languages().into_iter().next()?;
+            let sf = SourceFile {
+                path: rel_path.to_string(),
+                language,
+                text: text.to_string(),
+            };
+            return extractor.extract(&sf).ok();
+        } else if is_k8s {
+            let extractor = IaCExtractor::kubernetes();
+            let language = extractor.languages().into_iter().next()?;
+            let sf = SourceFile {
+                path: rel_path.to_string(),
+                language,
+                text: text.to_string(),
+            };
+            return extractor.extract(&sf).ok();
+        }
+        // Non-IaC YAML/JSON — fall through to normal extractor below.
+    }
+
+    let extractor = ext_map.get(ext)?;
+    let language = extractor
+        .languages()
+        .into_iter()
+        .next()
+        .expect("extractor has a language");
+    let sf = SourceFile {
+        path: rel_path.to_string(),
+        language,
+        text: text.to_string(),
+    };
+    let mut extraction = extractor.extract(&sf).ok()?;
+    // COBOL: supplement the structural extraction with embedded EXEC CICS / EXEC SQL
+    // commands (CICS LINK/XCTL programs + maps, Db2 tables). The COBOL grammar parses EXEC
+    // blocks opaquely, so these come from a regex pass over the same source.
+    if matches!(ext, "cbl" | "cob" | "cobol" | "cpy") {
+        if let Ok(emb) = CicsSqlExtractor::new().extract(&sf) {
+            extraction.nodes.extend(emb.nodes);
+            extraction.local_edges.extend(emb.local_edges);
+            extraction.refs.extend(emb.refs);
+        }
+    }
+    // Rego: supplement the tree-sitter code parse (rules-as-functions) with the W15 rules
+    // graph (RuleSet/Rule/Condition/Action/Fact), so policies surface in RulesInventory.
+    if ext == "rego" {
+        if let Ok(rules) = RegoRulesExtractor::new().extract(&sf) {
+            extraction.nodes.extend(rules.nodes);
+            extraction.local_edges.extend(rules.local_edges);
+            extraction.refs.extend(rules.refs);
+        }
+    }
+    Some(extraction)
 }
 
 /// Symbol index built ONCE from the store for the resolver pass. The resolver calls `by_name`
@@ -192,6 +311,96 @@ fn rel(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
+/// Load every drop-in extra-edge rule file (`.wicked-estate-extractors/*.toml`) under `root`.
+///
+/// Returns the compiled extractor (`None` when the dir is absent, has no rules, or the rules fail
+/// to parse — parse failures print a LOUD `EXTRA-EDGE:` marker, never silently no-op) plus a
+/// digest of the raw rule bytes. The digest is compared against the store's `extra_rules_digest`
+/// meta key so *editing the rules* forces a full re-extract — otherwise edges produced by the old
+/// rule set would linger on unchanged files.
+fn load_extra_edge_rules(root: &Path) -> (Option<ExtraEdgeExtractor>, String) {
+    let dir = root.join(".wicked-estate-extractors");
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return (None, String::new());
+    };
+    let mut paths: Vec<PathBuf> = rd
+        .filter_map(std::result::Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("toml"))
+        .collect();
+    paths.sort();
+
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for p in &paths {
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match std::fs::read_to_string(p) {
+            Ok(contents) => entries.push((name, contents)),
+            Err(e) => eprintln!("EXTRA-EDGE: cannot read {}: {e} — skipping", p.display()),
+        }
+    }
+    if entries.is_empty() {
+        return (None, String::new());
+    }
+    // Digest the raw bytes (name + contents), not the parsed rules, so ANY edit — including one
+    // that breaks parsing — changes the digest and triggers the full re-extract.
+    let mut digest_input = String::new();
+    for (name, contents) in &entries {
+        digest_input.push_str(name);
+        digest_input.push('\0');
+        digest_input.push_str(contents);
+        digest_input.push('\0');
+    }
+    let digest = file_digest(digest_input.as_bytes());
+
+    match ExtraEdgeExtractor::from_toml_named(&entries) {
+        Ok(x) if x.rule_count() > 0 => (Some(x), digest),
+        Ok(_) => (None, digest),
+        Err(e) => {
+            eprintln!("EXTRA-EDGE: {e} — extra-edge rules DISABLED for this run");
+            (None, digest)
+        }
+    }
+}
+
+/// Second walk for extra-edge rule targets: INCLUDES hidden paths, because drop-in rules routinely
+/// target dot-dir catalogs (e.g. `.claude-plugin/archetypes.json`) that [`collect_source_files`]'s
+/// hidden-filter skips. Still gitignore-aware; skips `.git`, the rules dir itself, and exactly the
+/// same build/vendor dir names as [`collect_source_files`] — the two walks must agree on what is
+/// visible so a rule behaves the same whether or not its target is also an ordinary source file
+/// (anything beyond that list, e.g. a committed Go-style `vendor/`, is gitignore's call in BOTH
+/// walks). Only files matching at least one rule's `file_glob` are returned.
+fn collect_extra_rule_files(root: &Path, rules: &ExtraEdgeExtractor) -> Vec<PathBuf> {
+    WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(false)
+        .require_git(false)
+        .filter_entry(|e| {
+            !matches!(
+                e.file_name().to_string_lossy().as_ref(),
+                ".git"
+                    | ".wicked-estate-extractors"
+                    | "target"
+                    | "node_modules"
+                    | ".wicked-estate"
+                    | ".reference"
+                    | "dist"
+                    | "build"
+                    | "coverage-report.json"
+                    | "requirements_graph.json"
+            )
+        })
+        .build()
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+        .map(ignore::DirEntry::into_path)
+        .filter(|p| rules.matches_path(&rel(root, p)))
+        .collect()
+}
+
 /// Compute an xxh3 hex digest for a byte slice.
 fn file_digest(bytes: &[u8]) -> String {
     format!("{:016x}", xxh3_64(bytes))
@@ -251,7 +460,7 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
     // Read the previously-stored binary version BEFORE overwriting it so we can detect a
     // version upgrade and force full re-extraction when the binary has changed.
     let prev_version = store.meta_get_key("indexed_version");
-    let force_full = prev_version
+    let mut force_full = prev_version
         .as_deref()
         .is_some_and(|v| v != env!("CARGO_PKG_VERSION"));
     store.meta_set_key("indexed_version", env!("CARGO_PKG_VERSION"));
@@ -263,12 +472,36 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
         );
     }
 
+    // Drop-in extra-edge rules (`.wicked-estate-extractors/*.toml`, extractor SDK Part 2).
+    // A changed rule set forces a full re-extract: extra edges live in per-file extractions, so
+    // only re-extracting every file purges edges the OLD rules injected into unchanged files.
+    let (extra, extra_digest) = load_extra_edge_rules(root);
+    let prev_extra = store.meta_get_key("extra_rules_digest").unwrap_or_default();
+    if prev_extra != extra_digest {
+        if prev_version.is_some() {
+            eprintln!("EXTRA-EDGE rules changed: forcing full re-extraction");
+        }
+        force_full = true;
+    }
+    store.meta_set_key("extra_rules_digest", &extra_digest);
+
     // W7: capture git provenance once per index run and persist it to the store.
     // Non-fatal: git absent / not a repo → all-None RepoInfo, which is a valid default.
     let repo_info = collect_repo_info(root);
     let _ = store.set_repo_info(&repo_info);
 
-    let files = collect_source_files(root);
+    let mut files = collect_source_files(root);
+
+    // Admit extra-edge rule targets the main walk cannot see (hidden dot-dir files). Rule-matched
+    // files that are ALSO ordinary source files stay deduped — they get both passes below.
+    if let Some(x) = &extra {
+        let mut known: HashSet<PathBuf> = files.iter().cloned().collect();
+        for p in collect_extra_rule_files(root, x) {
+            if known.insert(p.clone()) {
+                files.push(p);
+            }
+        }
+    }
 
     // ── Derive the set of previously-indexed file paths ─────────────────────────────────────
     // Every path a prior `index_path` recorded through a file-writing call — `set_file_digest` or
@@ -335,10 +568,14 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
+            let rel_path = rel(root, &p);
             // Admit tree-sitter languages AND the grammar-less line extractors (JCL / HLASM), whose
-            // dispatch lives in the per-file closure below — they are NOT in `ext_map`.
-            if ext_map.contains_key(&ext) || is_grammarless_ext(&ext) {
-                Some((p.clone(), rel(root, &p)))
+            // dispatch lives in the per-file closure below — they are NOT in `ext_map`. Files
+            // matched by a drop-in extra-edge rule are admitted too (they may have no language
+            // extractor at all — e.g. a JSON catalog only the rules care about).
+            let extra_match = extra.as_ref().is_some_and(|x| x.matches_path(&rel_path));
+            if ext_map.contains_key(&ext) || is_grammarless_ext(&ext) || extra_match {
+                Some((p, rel_path))
             } else {
                 None
             }
@@ -422,120 +659,55 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
                 .unwrap_or("")
                 .to_ascii_lowercase();
             let text = String::from_utf8(fw.bytes.clone()).ok()?;
+            let extra_rules = extra.as_ref().filter(|x| x.matches_path(&fw.rel));
 
             // Skip minified or huge files before any parsing — they generate noise, not signal.
-            if is_minified_or_huge(&text) {
+            // A file explicitly targeted by an extra-edge rule still gets the (regex-only) extra
+            // pass below; only the language extraction is skipped for it.
+            let minified = is_minified_or_huge(&text);
+            if minified && extra_rules.is_none() {
                 skipped_minified.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
 
-            // Grammar-less mainframe estate languages (JCL batch, HLASM assembler, RACF security,
-            // IMS DBD/PSB data, MQ MQSC messaging): line/macro extractors dispatched by extension.
-            // They map the estate into the same graph as the tree-sitter languages.
-            if let Some(extractor) = grammarless_extractor(ext.as_str()) {
-                let language = extractor.languages().into_iter().next()?;
+            let mut extraction = if minified {
+                Extraction::default()
+            } else {
+                // None when no language extractor claims the file (e.g. a JSON catalog only the
+                // extra-edge rules target) — the extra pass below still runs on it.
+                base_extraction(&fw.rel, &ext, &text, &ext_map).unwrap_or_default()
+            };
+
+            // ── Extra-edge pass: drop-in domain rules (.wicked-estate-extractors/) ────────────
+            if let Some(x) = extra_rules {
                 let sf = SourceFile {
                     path: fw.rel.clone(),
-                    language: language.clone(),
+                    language: Language::new("text"),
                     text: text.clone(),
                 };
-                let mut extraction = extractor.extract(&sf).ok()?;
-                // Give every grammar-less file the same File node + Contains edges the tree-sitter
-                // path emits, so the indexed-file count is honest and file-level blast-radius
-                // ("what's defined in queues.mqsc?") works uniformly across all languages.
+                let ee = x.extract_extra(&sf);
+                // Injected edges hang off the file node — guarantee it exists even for files no
+                // language extractor claims (e.g. a hidden `.claude-plugin/archetypes.json`).
                 let file_symbol = Symbol::file(&fw.rel).id();
-                let floc = Location::new(&fw.rel, Span::ZERO);
-                let child_syms: Vec<SymbolId> =
-                    extraction.nodes.iter().map(|n| n.symbol.clone()).collect();
-                for sym in child_syms {
-                    extraction.local_edges.push(
-                        Edge::new(
-                            file_symbol.clone(),
-                            sym,
-                            EdgeKind::Contains,
-                            ResolutionTier::Parsed,
-                            "grammarless",
-                        )
-                        .with_location(floc.clone()),
-                    );
+                if !extraction.nodes.iter().any(|n| n.symbol == file_symbol) {
+                    extraction.nodes.push(Node::new(
+                        file_symbol,
+                        NodeKind::File,
+                        fw.rel.clone(),
+                        Language::new("text"),
+                        Location::new(&fw.rel, Span::ZERO),
+                    ));
                 }
-                extraction.nodes.push(Node::new(
-                    file_symbol,
-                    NodeKind::File,
-                    fw.rel.clone(),
-                    language,
-                    floc,
-                ));
-                return Some((fw.rel.clone(), extraction, text));
+                extraction.nodes.extend(ee.nodes);
+                extraction.local_edges.extend(ee.edges);
+                extraction.refs.extend(ee.unresolved_refs);
             }
 
-            // IaC sniff dispatch for YAML / JSON files: cheap string check before extraction.
-            // CloudFormation: top-level `Resources:` key.
-            // Kubernetes: `kind:` + `apiVersion:` keys present.
-            // All other YAML/JSON: fall through to the normal tree-sitter extractor.
-            if matches!(ext.as_str(), "yaml" | "yml" | "json") {
-                let is_cfn = text.contains("Resources:")
-                    && (text.contains("AWSTemplateFormatVersion")
-                        || text.contains("CloudFormation")
-                        || text
-                            .lines()
-                            .any(|l| l.trim_start_matches(' ') == "Resources:"));
-                let is_k8s = text.contains("kind:") && text.contains("apiVersion:");
-
-                if is_cfn {
-                    let extractor = IaCExtractor::cloudformation();
-                    let language = extractor.languages().into_iter().next()?;
-                    let sf = SourceFile {
-                        path: fw.rel.clone(),
-                        language,
-                        text: text.clone(),
-                    };
-                    let extraction = extractor.extract(&sf).ok()?;
-                    return Some((fw.rel.clone(), extraction, text));
-                } else if is_k8s {
-                    let extractor = IaCExtractor::kubernetes();
-                    let language = extractor.languages().into_iter().next()?;
-                    let sf = SourceFile {
-                        path: fw.rel.clone(),
-                        language,
-                        text: text.clone(),
-                    };
-                    let extraction = extractor.extract(&sf).ok()?;
-                    return Some((fw.rel.clone(), extraction, text));
-                }
-                // Non-IaC YAML/JSON — fall through to normal extractor below.
-            }
-
-            let extractor = ext_map.get(&ext)?;
-            let language = extractor
-                .languages()
-                .into_iter()
-                .next()
-                .expect("extractor has a language");
-            let sf = SourceFile {
-                path: fw.rel.clone(),
-                language,
-                text: text.clone(),
-            };
-            let mut extraction = extractor.extract(&sf).ok()?;
-            // COBOL: supplement the structural extraction with embedded EXEC CICS / EXEC SQL
-            // commands (CICS LINK/XCTL programs + maps, Db2 tables). The COBOL grammar parses EXEC
-            // blocks opaquely, so these come from a regex pass over the same source.
-            if matches!(ext.as_str(), "cbl" | "cob" | "cobol" | "cpy") {
-                if let Ok(emb) = CicsSqlExtractor::new().extract(&sf) {
-                    extraction.nodes.extend(emb.nodes);
-                    extraction.local_edges.extend(emb.local_edges);
-                    extraction.refs.extend(emb.refs);
-                }
-            }
-            // Rego: supplement the tree-sitter code parse (rules-as-functions) with the W15 rules
-            // graph (RuleSet/Rule/Condition/Action/Fact), so policies surface in RulesInventory.
-            if ext.as_str() == "rego" {
-                if let Ok(rules) = RegoRulesExtractor::new().extract(&sf) {
-                    extraction.nodes.extend(rules.nodes);
-                    extraction.local_edges.extend(rules.local_edges);
-                    extraction.refs.extend(rules.refs);
-                }
+            if extraction.nodes.is_empty()
+                && extraction.local_edges.is_empty()
+                && extraction.refs.is_empty()
+            {
+                return None;
             }
             Some((fw.rel.clone(), extraction, text))
         })
