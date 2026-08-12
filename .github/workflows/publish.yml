@@ -2,15 +2,23 @@ name: Publish
 
 # Fires when a version tag (e.g. v0.13.1) is pushed.
 #
-# TEMPORARY (0.13.1 bootstrap): token auth. The 5 memory/knowledge/overlay crates + mcp are brand-new
-# crate names, and crates.io Trusted Publishing (OIDC) can't authorize a crate that doesn't exist yet
-# — so the first full publish must use a plain API token. Set CARGO_REGISTRY_TOKEN (scopes:
-# publish-new + publish-update) in repo Settings → Secrets → Actions.
+# Auth: crates.io Trusted Publishing (OIDC). rust-lang/crates-io-auth-action exchanges this
+# workflow's GitHub OIDC token (requires `id-token: write`) for a short-lived crates.io token,
+# which cargo consumes via CARGO_REGISTRY_TOKEN; the action's post step revokes it when the job
+# ends. Trusted-publisher binding attached to ALL 25 published crates (14 core + 11 vendored
+# tree-sitter grammar crates): repo mikeparcewski/wicked-estate, workflow publish.yml, no
+# environment.
 #
-# After 0.13.1 is live, restore OIDC (rust-lang/crates-io-auth-action, id-token: write) once trusted
-# publishers are attached for publish.yml on all crates, and delete this secret.
+# The minted token is short-lived; if a long run outlives it, later crates fail auth — just
+# re-run the workflow: publish.sh skips crates already published at the tagged version, so
+# re-runs are safe and resume where the run died.
 #
-# publish.sh skips crates already at the tagged version, so re-running a failed/rate-limited run is safe.
+# NOTE: the CARGO_REGISTRY_TOKEN repo secret still exists but is intentionally unused here.
+# Delete it manually only AFTER the next release validates the OIDC publish end-to-end.
+#
+# Caveat: Trusted Publishing cannot authorize a crate name that doesn't exist on crates.io yet.
+# A future brand-new crate needs a one-time token-auth bootstrap (see the 0.13.1 bootstrap in
+# git history), then a trusted-publisher binding like the other 25.
 
 on:
   push:
@@ -24,11 +32,17 @@ jobs:
     name: publish to crates.io
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    permissions:
+      id-token: write # mint the GitHub OIDC token exchanged for a crates.io publish token
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: authenticate with crates.io (OIDC trusted publishing)
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
       - name: publish (resumable, rate-limit-aware)
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: bash scripts/publish.sh

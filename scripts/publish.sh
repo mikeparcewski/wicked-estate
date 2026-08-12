@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Publish wicked-estate to crates.io in dependency order.
 #
-# Prereq: `cargo login <token>` (a crates.io API token with publish scope).
+# Auth: cargo needs a crates.io token. In CI (publish.yml) it arrives via the CARGO_REGISTRY_TOKEN
+# env var, minted per-run by OIDC Trusted Publishing (rust-lang/crates-io-auth-action) — no secret.
+# For a manual local run: `cargo login <token>` (a crates.io API token with publish scope).
 # crates.io publishes are IRREVERSIBLE — a version can be yanked, never deleted.
 # Bump [workspace.package] version in the root Cargo.toml before re-publishing.
 #
