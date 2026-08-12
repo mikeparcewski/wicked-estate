@@ -2364,10 +2364,49 @@ mod tests {
             );
         }
 
-        // Root (empty / omitted scope) stays valid — the documented default.
+        // A present NON-string scope (number/object/array/bool) is invalid
+        // params too — it must not be silently treated as omitted and rooted.
+        for bad_scope in [
+            json!(42),
+            json!({"k": "v"}),
+            json!(["suite:test"]),
+            json!(true),
+        ] {
+            let req = json!({
+                "jsonrpc": "2.0", "id": 210,
+                "method": "tools/call",
+                "params": { "name": "memory.capture", "arguments": { "content": "x", "scope": bad_scope } }
+            });
+            let mut domains = DomainHandles {
+                memory: &mut fake_mem
+                    as &mut dyn wicked_estate_memory_core::MemoryApi<Error = anyhow::Error>,
+                knowledge: &mut fake_know as &mut dyn wicked_estate_knowledge::KnowledgeApi,
+            };
+            let resp = handle_request_unified(
+                &store,
+                &req,
+                &McpContext::default(),
+                Some(&mut domains),
+                None,
+            );
+            let err = resp.get("error").unwrap_or_else(|| {
+                panic!("non-string scope {bad_scope} must be rejected, got: {resp}")
+            });
+            assert_eq!(err["code"].as_i64().unwrap(), -32602, "scope {bad_scope}");
+            assert!(
+                err["message"].as_str().unwrap().contains("kind:id"),
+                "error must explain the grammar; got: {}",
+                err["message"]
+            );
+        }
+
+        // Root (empty / omitted / explicit-null scope) stays valid — the
+        // documented default. Null is how wicked producers spell Option::None
+        // on the wire, so it must behave exactly like omitted.
         for args in [
             json!({ "content": "x" }),
             json!({ "content": "x", "scope": "" }),
+            json!({ "content": "x", "scope": null }),
         ] {
             let req = json!({
                 "jsonrpc": "2.0", "id": 209,
