@@ -6,9 +6,12 @@
 //! assembles a token-budgeted pack. Estate is a **library** here.
 //!
 //! Scope note (L3 done): `wicked-estate-core` now has a first-class `Scope` primitive +
-//! `SymbolQuery.scope_prefix` (subtree predicate, conformance-tested isolation). Memory recall uses
-//! its own **ancestor** filter here because inheritance recall (see broader/root-scoped memories)
-//! is the opposite direction from estate's subtree predicate; both are valid, different uses.
+//! `SymbolQuery.scope_prefix` (subtree predicate, conformance-tested isolation). Memory recall
+//! defaults to its own **ancestor** filter here because inheritance recall (see broader/
+//! root-scoped memories) is the opposite direction from estate's subtree predicate; both are
+//! valid, different uses. An optional `scope_prefix` on recall flips to the subtree-inclusive
+//! predicate (`path_in_prefix`, the one erase/coverage use) so descendant-scoped memories —
+//! e.g. imported leaf scopes like `brain:wicked-garden/doc:<id>` — are recallable from above.
 
 use wicked_estate_core::{
     Direction, Edge, EdgeKind, NodeKind, ResolutionTier, SymbolId, SymbolQuery,
@@ -127,6 +130,42 @@ impl RecallMode {
     }
 }
 
+/// The scope-visibility filter a recall applies — one of the two directions over the scope tree.
+/// The variants are mutually exclusive BY CONSTRUCTION: a `scope_prefix` on the wire REPLACES the
+/// inheritance rule rather than fusing with it. Replace (not fuse) for two reasons: (1) it keeps
+/// `scope_prefix` meaning EXACTLY what it means on `memory.erase`/`memory.coverage` — a recall
+/// with a prefix previews precisely the set an erase with that prefix would delete; (2) fusing
+/// would make subtree-only recall inexpressible — root-scoped memories are ancestor-visible from
+/// EVERY query scope, so a fused filter could never exclude them, while the fused view stays
+/// expressible under replace (`Subtree("")` is a superset of any fusion).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeFilter<'a> {
+    /// Inheritance (the default): memories at the query scope or an ANCESTOR of it — a
+    /// leaf-scoped query also sees broader/root-scoped memories.
+    Ancestors(&'a Scope),
+    /// Subtree-inclusive (the `memory.erase`/`memory.coverage` direction, `path_in_prefix`):
+    /// memories whose scope equals the prefix or DESCENDS from it (`""` = the root subtree =
+    /// every memory). This is how descendant-scoped memories — e.g. imported leaf scopes like
+    /// `brain:wicked-garden/doc:<id>` — are recalled from above.
+    Subtree(&'a str),
+}
+
+impl ScopeFilter<'_> {
+    /// Does a memory whose own scope is `mem_scope` pass this filter?
+    ///
+    /// NOTE: `mem_scope` is the memory-domain scope (decoded from the node's `metadata.scope`
+    /// JSON via [`Memory::from_node`]), NOT the store's `nodes.scope` column — that column is the
+    /// graph-domain predicate and stays `''` for memory nodes.
+    fn admits(&self, mem_scope: &Scope) -> bool {
+        match self {
+            ScopeFilter::Ancestors(query_scope) => mem_scope.is_ancestor_of(query_scope),
+            // Allocation-free segment walk (this runs per candidate in the rerank loop) —
+            // exact `path_in_prefix` semantics for parse-normalized scopes, see Scope::path_in_prefix.
+            ScopeFilter::Subtree(prefix) => mem_scope.path_in_prefix(prefix),
+        }
+    }
+}
+
 impl MemoryEngine {
     /// Open an in-memory engine (tests / ephemeral).
     pub fn in_memory() -> wicked_estate_core::Result<Self> {
@@ -240,7 +279,7 @@ impl MemoryEngine {
         let victims: Vec<Memory> = self
             .all_memories()?
             .into_iter()
-            .filter(|m| wicked_estate_core::scope::path_in_prefix(&m.scope.as_path(), scope_prefix))
+            .filter(|m| m.scope.path_in_prefix(scope_prefix))
             .collect();
         let ids: Vec<SymbolId> = victims.iter().map(|m| m.symbol()).collect();
         let id_strs: Vec<String> = ids.iter().map(|s| s.0.clone()).collect();
@@ -390,35 +429,33 @@ impl MemoryEngine {
     /// Conversational recall: return the most relevant slice for `query` within `token_budget`,
     /// scoped to `query_scope` and its ancestors (inheritance). `now` is unix-seconds (caller-owned
     /// clock → deterministic).
+    ///
+    /// `scope` picks the visibility DIRECTION — see [`ScopeFilter`]: `Ancestors` is the default
+    /// inheritance predicate (memories at the query scope or an ancestor of it); `Subtree` is the
+    /// subtree-inclusive `path_in_prefix` predicate `erase`/`coverage` already use (memories whose
+    /// scope equals the prefix or descends from it; `Subtree("")` = everything).
     pub fn recall(
         &self,
         query: &str,
-        query_scope: &Scope,
+        scope: ScopeFilter<'_>,
         seeds: &[SymbolId],
         token_budget: usize,
         now: i64,
     ) -> wicked_estate_core::Result<Vec<Recalled>> {
-        self.recall_impl(
-            query,
-            query_scope,
-            seeds,
-            token_budget,
-            now,
-            RecallMode::Hybrid,
-        )
+        self.recall_impl(query, scope, seeds, token_budget, now, RecallMode::Hybrid)
     }
 
     /// Single-retriever recall for benchmarking the hybrid uplift (PR-14). Not the production path.
     pub fn recall_mode(
         &self,
         query: &str,
-        query_scope: &Scope,
+        scope: ScopeFilter<'_>,
         seeds: &[SymbolId],
         token_budget: usize,
         now: i64,
         mode: RecallMode,
     ) -> wicked_estate_core::Result<Vec<Recalled>> {
-        self.recall_impl(query, query_scope, seeds, token_budget, now, mode)
+        self.recall_impl(query, scope, seeds, token_budget, now, mode)
     }
 
     /// **Un-budget-capped ranked recall (T-Y-RANKED).** Return the top-`k` recall candidates in
@@ -439,13 +476,13 @@ impl MemoryEngine {
     pub fn recall_ranked(
         &self,
         query: &str,
-        query_scope: &Scope,
+        scope: ScopeFilter<'_>,
         seeds: &[SymbolId],
         k: usize,
         now: i64,
         mode: RecallMode,
     ) -> wicked_estate_core::Result<Vec<Recalled>> {
-        let mut cands = self.ranked_candidates(query, query_scope, seeds, now, mode)?;
+        let mut cands = self.ranked_candidates(query, scope, seeds, now, mode)?;
         // Final-rerank-score order, descending — NO budget_pack (no token cap, no Working eviction).
         cands.sort_by(|a, b| {
             b.final_score(self.alpha)
@@ -484,7 +521,7 @@ impl MemoryEngine {
     fn ranked_candidates(
         &self,
         query: &str,
-        query_scope: &Scope,
+        scope: ScopeFilter<'_>,
         seeds: &[SymbolId],
         now: i64,
         mode: RecallMode,
@@ -524,7 +561,7 @@ impl MemoryEngine {
         // 4. RRF fusion of keyword ∪ graph ∪ semantic.
         let fused = hybrid_search(kw_ids, graph_ids, sem_ids, 60.0);
 
-        // 5. rerank + scope-filter (ancestor inheritance) into Candidates.
+        // 5. rerank + scope-filter (the caller's ScopeFilter direction) into Candidates.
         let mut cands: Vec<Candidate> = Vec::new();
         for (id, rrf) in fused {
             let Some(node) = self.store.get_node(&id)? else {
@@ -533,8 +570,11 @@ impl MemoryEngine {
             let Some(mem) = Memory::from_node(&node) else {
                 continue;
             };
-            // scope inheritance: keep memories at the query scope OR an ancestor of it.
-            if !mem.scope.is_ancestor_of(query_scope) {
+            // Scope visibility — the direction is the caller's [`ScopeFilter`] choice:
+            // `Ancestors` (inheritance, the default) or `Subtree` (the erase/coverage
+            // `path_in_prefix` predicate). See `ScopeFilter::admits` for the domain note
+            // (memory scope lives in `metadata.scope`, not the `nodes.scope` column).
+            if !scope.admits(&mem.scope) {
                 continue;
             }
             let age = (now - mem.created_at).max(0);
@@ -558,13 +598,13 @@ impl MemoryEngine {
     fn recall_impl(
         &self,
         query: &str,
-        query_scope: &Scope,
+        scope: ScopeFilter<'_>,
         seeds: &[SymbolId],
         token_budget: usize,
         now: i64,
         mode: RecallMode,
     ) -> wicked_estate_core::Result<Vec<Recalled>> {
-        let cands = self.ranked_candidates(query, query_scope, seeds, now, mode)?;
+        let cands = self.ranked_candidates(query, scope, seeds, now, mode)?;
 
         // token-budgeted assembly (the production path; recall_ranked bypasses this).
         let pack = budget_pack(cands, token_budget, self.alpha);
@@ -615,7 +655,9 @@ mod tests {
             1,
         ))
         .unwrap();
-        let out = eng.recall("billing", &scope, &[], 500, 2).unwrap();
+        let out = eng
+            .recall("billing", ScopeFilter::Ancestors(&scope), &[], 500, 2)
+            .unwrap();
         assert!(out.iter().any(|r| r.content.contains("Stripe")));
     }
 
@@ -645,7 +687,13 @@ mod tests {
             eng.capture(&mem).unwrap();
         }
         let out = eng
-            .recall("what does the user drink", &scope, &[], 1000, now)
+            .recall(
+                "what does the user drink",
+                ScopeFilter::Ancestors(&scope),
+                &[],
+                1000,
+                now,
+            )
             .unwrap();
         assert!(!out.is_empty(), "recall returned nothing");
         // The oat-milk fact should surface (keyword + semantic both favor it).
@@ -679,7 +727,15 @@ mod tests {
         ))
         .unwrap();
 
-        let out = eng.recall("secret roadmap", &acme, &[], 1000, now).unwrap();
+        let out = eng
+            .recall(
+                "secret roadmap",
+                ScopeFilter::Ancestors(&acme),
+                &[],
+                1000,
+                now,
+            )
+            .unwrap();
         assert!(
             out.iter().any(|r| r.content.contains("acme")),
             "should see acme's own memory"
@@ -688,6 +744,139 @@ mod tests {
             !out.iter().any(|r| r.content.contains("other")),
             "SCOPE ISOLATION VIOLATED: acme recall returned other-org memory: {:?}",
             out.iter().map(|r| &r.content).collect::<Vec<_>>()
+        );
+    }
+
+    /// Build an engine holding one memory per scope: root, `brain:test/doc:a` (a migrated-style
+    /// leaf), and `brain:other/doc:b` (a sibling subtree). All three lexically match the query
+    /// `"wicked garden fact"`, so any exclusion below is the SCOPE FILTER's doing, not retrieval's.
+    fn subtree_fixture() -> (MemoryEngine, i64) {
+        let now = 7;
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        for (scope, text) in [
+            (Scope::root(), "root wicked garden fact"),
+            (
+                Scope::parse("brain:test/doc:a"),
+                "leaf wicked garden fact from the brain import",
+            ),
+            (
+                Scope::parse("brain:other/doc:b"),
+                "sibling wicked garden fact in another subtree",
+            ),
+        ] {
+            eng.capture(&Memory::new(
+                MemKind::Fact,
+                Tier::Semantic,
+                scope,
+                text,
+                now,
+            ))
+            .unwrap();
+        }
+        (eng, now)
+    }
+
+    #[test]
+    fn root_recall_without_prefix_does_not_see_leaf_scoped_memory() {
+        // Pins the EXISTING inheritance semantics (no regression from adding Subtree): a recall at
+        // root without a prefix sees only root-scoped memories — descendant (leaf) scopes stay
+        // invisible. This is exactly the migration gap: memories imported at
+        // `brain:wicked-garden/doc:<id>` are unreachable from an unscoped (root) recall.
+        let (eng, now) = subtree_fixture();
+        let root = Scope::root();
+        let out = eng
+            .recall(
+                "wicked garden fact",
+                ScopeFilter::Ancestors(&root),
+                &[],
+                4000,
+                now,
+            )
+            .unwrap();
+        assert!(
+            out.iter().any(|r| r.content.contains("root")),
+            "root recall must see the root-scoped memory"
+        );
+        assert!(
+            !out.iter().any(|r| r.content.contains("leaf")),
+            "ANCESTOR SEMANTICS REGRESSED: root recall without scope_prefix returned a \
+             leaf-scoped memory: {:?}",
+            out.iter().map(|r| &r.content).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn subtree_empty_prefix_sees_root_and_leaf() {
+        // `Subtree("")` = the root subtree = every memory: both the root-scoped and the
+        // leaf-scoped memories surface (this is the recall garden's hooks need to reach the 205
+        // migrated brain memories from an unscoped query).
+        let (eng, now) = subtree_fixture();
+        let out = eng
+            .recall(
+                "wicked garden fact",
+                ScopeFilter::Subtree(""),
+                &[],
+                4000,
+                now,
+            )
+            .unwrap();
+        for expect in ["root", "leaf", "sibling"] {
+            assert!(
+                out.iter().any(|r| r.content.contains(expect)),
+                "Subtree(\"\") must see the {expect}-scoped memory; got: {:?}",
+                out.iter().map(|r| &r.content).collect::<Vec<_>>()
+            );
+        }
+        // And the items carry their own scopes on the way out (S4 attribution intact).
+        assert!(
+            out.iter().any(|r| r.scope == "brain:test/doc:a"),
+            "leaf item must carry its own scope; got: {:?}",
+            out.iter().map(|r| &r.scope).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn subtree_prefix_sees_only_that_subtree() {
+        // `Subtree("brain:test")` admits ONLY that subtree: not root (replace, not fuse — root is
+        // an ancestor, not a descendant), not the `brain:other` sibling.
+        let (eng, now) = subtree_fixture();
+        let out = eng
+            .recall(
+                "wicked garden fact",
+                ScopeFilter::Subtree("brain:test"),
+                &[],
+                4000,
+                now,
+            )
+            .unwrap();
+        assert!(
+            out.iter().any(|r| r.content.contains("leaf")),
+            "Subtree(\"brain:test\") must see its leaf memory; got: {:?}",
+            out.iter().map(|r| &r.content).collect::<Vec<_>>()
+        );
+        assert!(
+            !out.iter().any(|r| r.content.contains("root")),
+            "REPLACE VIOLATED: subtree recall returned the root-scoped (ancestor) memory"
+        );
+        assert!(
+            !out.iter().any(|r| r.content.contains("sibling")),
+            "SUBTREE ISOLATION VIOLATED: recall leaked the brain:other sibling subtree"
+        );
+        // Segment-aware: "brain:tes" is a string prefix of "brain:test" but NOT a scope ancestor —
+        // it must match nothing (path_in_prefix isolation, same as erase/coverage).
+        let none = eng
+            .recall(
+                "wicked garden fact",
+                ScopeFilter::Subtree("brain:tes"),
+                &[],
+                4000,
+                now,
+            )
+            .unwrap();
+        assert!(
+            none.is_empty(),
+            "SEGMENT ISOLATION VIOLATED: partial-segment prefix matched: {:?}",
+            none.iter().map(|r| &r.content).collect::<Vec<_>>()
         );
     }
 
@@ -708,7 +897,13 @@ mod tests {
         }
         let budget = 10;
         let out = eng
-            .recall("system event", &scope, &[], budget, now)
+            .recall(
+                "system event",
+                ScopeFilter::Ancestors(&scope),
+                &[],
+                budget,
+                now,
+            )
             .unwrap();
         let tokens: usize = out.iter().map(|r| (r.content.len() / 4).max(1)).sum();
         assert!(tokens <= budget, "budget {budget} exceeded: {tokens}");
@@ -742,11 +937,20 @@ mod tests {
 
         // Production recall at a TIGHT budget: budget_pack caps the count hard.
         let tiny_budget = 20; // ~ one unit's token_cost
-        let budgeted = eng.recall(query, &scope, &[], tiny_budget, now).unwrap();
+        let budgeted = eng
+            .recall(query, ScopeFilter::Ancestors(&scope), &[], tiny_budget, now)
+            .unwrap();
 
         // recall_ranked at k=10 with the SAME query: NO budget cap → up to 10 units.
         let ranked = eng
-            .recall_ranked(query, &scope, &[], 10, now, RecallMode::Hybrid)
+            .recall_ranked(
+                query,
+                ScopeFilter::Ancestors(&scope),
+                &[],
+                10,
+                now,
+                RecallMode::Hybrid,
+            )
             .unwrap();
 
         // The discriminating assertion: ranked returns strictly more than the budget-capped pack,
@@ -796,12 +1000,18 @@ mod tests {
         }
         let big_budget = 100_000; // no truncation
         let prod = eng
-            .recall("billing checkout", &scope, &[], big_budget, now)
+            .recall(
+                "billing checkout",
+                ScopeFilter::Ancestors(&scope),
+                &[],
+                big_budget,
+                now,
+            )
             .unwrap();
         let ranked = eng
             .recall_ranked(
                 "billing checkout",
-                &scope,
+                ScopeFilter::Ancestors(&scope),
                 &[],
                 100,
                 now,
@@ -844,10 +1054,18 @@ mod tests {
         let query = "what should I know about this service"; // no lexical overlap with the memory
 
         // WITHOUT the seed: keyword+vector likely miss it.
-        let without = eng.recall(query, &scope, &[], 1000, now).unwrap();
+        let without = eng
+            .recall(query, ScopeFilter::Ancestors(&scope), &[], 1000, now)
+            .unwrap();
         // WITH the code seed: the `about` cross-edge surfaces it.
         let with = eng
-            .recall(query, &scope, std::slice::from_ref(&checkout), 1000, now)
+            .recall(
+                query,
+                ScopeFilter::Ancestors(&scope),
+                std::slice::from_ref(&checkout),
+                1000,
+                now,
+            )
             .unwrap();
 
         let hit = |v: &[Recalled]| v.iter().any(|r| r.content.contains("idempotency"));

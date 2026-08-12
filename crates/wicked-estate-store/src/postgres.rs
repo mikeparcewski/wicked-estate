@@ -1076,7 +1076,7 @@ impl GraphRead for PostgresStore {
         // scoped query never leaks another scope's rows into/out of the top-k (multi-tenant isolation).
         nodes.retain(|n| {
             if let Some(prefix) = &query.scope_prefix {
-                if !wicked_estate_core::scope::path_in_prefix(&n.scope.as_path(), prefix) {
+                if !n.scope.path_in_prefix(prefix) {
                     return false;
                 }
             }

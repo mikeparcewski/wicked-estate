@@ -10,14 +10,14 @@
 //!
 //! ```ignore
 //! use std::{collections::HashMap, sync::Arc};
-//! use wicked_memory::{MemoryEngine, RecallMode};
+//! use wicked_memory::{MemoryEngine, RecallMode, ScopeFilter};
 //! use wicked_memory::cross::{ForeignEngine, ForeignPools, OverlayMemStore, XEdge, XedgeStore, open_sqlite_pool};
 //!
 //! let mut others: ForeignPools = HashMap::new();
 //! others.insert("memory", Arc::new(open_sqlite_pool("knowledge.db", 4)?) as Arc<dyn ForeignEngine>);
 //! let store = OverlayMemStore::new(home_code_store, "estate", Arc::new(others), xedge, vec!["about".into()]);
 //! let eng = MemoryEngine::with_backend(Box::new(store), ":memory:")?;
-//! let hits = eng.recall_mode("what should I know here", &scope, &[code_seed], 2000, now, RecallMode::Hybrid)?;
+//! let hits = eng.recall_mode("what should I know here", ScopeFilter::Ancestors(&scope), &[code_seed], 2000, now, RecallMode::Hybrid)?;
 //! ```
 
 use std::sync::Arc;
@@ -199,10 +199,10 @@ impl GraphWrite for OverlayMemStore {
         symbol: &SymbolId,
         description: Option<&str>,
         requirement: Option<&str>,
-        requirement_validated: Option<bool>,
+        validation: Option<&wicked_estate_core::ValidationClaim>,
     ) -> Result<()> {
         self.home
-            .set_node_semantics(symbol, description, requirement, requirement_validated)
+            .set_node_semantics(symbol, description, requirement, validation)
     }
     fn annotate(&mut self, symbol: &SymbolId, annotation: Annotation) -> Result<()> {
         self.home.annotate(symbol, annotation)
@@ -243,7 +243,7 @@ mod tests {
     use wicked_estate_core::Symbol;
     use wicked_estate_memory_core::{MemKind, Memory, Scope, Tier};
 
-    use crate::{MemoryEngine, RecallMode};
+    use crate::{MemoryEngine, RecallMode, ScopeFilter};
 
     fn code_seed_node(name: &str) -> Node {
         use wicked_estate_core::node::{Language, Location, NodeKind, Span};
@@ -338,7 +338,7 @@ mod tests {
                     let found = eng
                         .recall_mode(
                             QUERIES[i],
-                            &scope,
+                            ScopeFilter::Ancestors(&scope),
                             std::slice::from_ref(&seed),
                             2000,
                             6000,
