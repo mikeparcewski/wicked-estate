@@ -5,6 +5,12 @@
 //! current Tokio runtime (via `block_in_place`) or creates a one-shot runtime when called from
 //! a non-async context.
 //!
+//! **Batch atomicity (locked decision #8):** `begin_batch`/`commit_batch` open and commit ONE
+//! real transaction at `READ COMMITTED`; every statement issued while the batch is open —
+//! writes AND reads — rides that transaction (see [`PostgresStore::conn`]). Concurrent readers
+//! on other connections see the pre-batch state or the full committed batch, never a torn
+//! partial batch. `transactional_batch: true` in [`StoreCapabilities`].
+//!
 //! Schema mirrors `SqliteStore` but uses Postgres-native types:
 //! - `BIGSERIAL` primary keys where SQLite uses `INTEGER PRIMARY KEY AUTOINCREMENT`
 //! - `TEXT` for all symbol strings (no integer interning — Postgres handles string dedup well)
@@ -261,10 +267,62 @@ CREATE INDEX IF NOT EXISTS idx_annotations_last_verified ON annotations(last_ver
 /// Postgres-backed graph store. Satisfies [`GraphRead`] + [`GraphWrite`] (and therefore
 /// [`GraphStore`]).  Connects via `sqlx::PgPool`; every method blocks on the async layer
 /// using [`rt_block`].
+///
+/// **Batch atomicity (locked decision #8):** `begin_batch`/`commit_batch` map to ONE real
+/// Postgres transaction at `READ COMMITTED`. While a batch is open, every statement issued
+/// through this store rides that transaction (reads included — the resolver's `SymbolIndex`
+/// lookups must see the nodes written earlier in the same batch, exactly as they do on the
+/// single-connection SQLite store). Concurrent readers on other connections therefore see
+/// either the pre-batch state or the full committed batch — never a partial batch (the
+/// torn-read bug this replaced: `shared_writers: true` with per-statement auto-commit).
 pub struct PostgresStore {
     pool: sqlx::PgPool,
-    in_batch: bool,
+    /// The open batch transaction (`begin_batch` → `commit_batch`), if any. Behind a `Mutex`
+    /// only because `GraphRead` methods take `&self` and must also ride the transaction;
+    /// the store follows the single-writer contract, so the lock is uncontended. Dropping
+    /// the store mid-batch rolls the transaction back (sqlx `Transaction` drop semantics).
+    batch: std::sync::Mutex<Option<sqlx::Transaction<'static, sqlx::Postgres>>>,
     history_enabled: bool,
+}
+
+/// Connection handle resolved per method call: the open batch transaction when one exists,
+/// else a plain pooled connection (per-statement auto-commit — the pre-batch behavior).
+enum ConnHandle<'s> {
+    /// A batch is open — statements join the single batch transaction (locked decision #8).
+    Tx(std::sync::MutexGuard<'s, Option<sqlx::Transaction<'static, sqlx::Postgres>>>),
+    /// No batch — a pooled connection, each statement auto-commits. `Option` only so the
+    /// manual `Drop` below can move it out; it is `Some` for the handle's entire life.
+    Pooled(Option<sqlx::pool::PoolConnection<sqlx::Postgres>>),
+}
+
+impl ConnHandle<'_> {
+    /// The `PgConnection` to execute on. For `Tx` this is the transaction's connection.
+    fn as_conn(&mut self) -> &mut sqlx::PgConnection {
+        match self {
+            // `Tx` is only constructed when the Option is Some (see `PostgresStore::conn`),
+            // and `commit_batch` can't run while a handle is live (single-writer contract).
+            ConnHandle::Tx(guard) => guard
+                .as_mut()
+                .map(|tx| &mut **tx)
+                .expect("ConnHandle::Tx constructed from Some"),
+            ConnHandle::Pooled(conn) => conn.as_mut().expect("Pooled is Some until drop"),
+        }
+    }
+}
+
+impl Drop for ConnHandle<'_> {
+    fn drop(&mut self) {
+        // Returning a `PoolConnection` to the pool spawns a task and PANICS outside a Tokio
+        // context ("this functionality requires a Tokio context"). `GraphStore` is a sync
+        // trait, so handles routinely die on plain threads — enter the process-wide runtime
+        // for the release. (No-op cost when already inside one: enter() is a thread-local set.)
+        if let ConnHandle::Pooled(opt) = self {
+            if let Some(conn) = opt.take() {
+                let _rt = global_rt().enter();
+                drop(conn);
+            }
+        }
+    }
 }
 
 impl PostgresStore {
@@ -307,19 +365,39 @@ impl PostgresStore {
 
         Ok(Self {
             pool,
-            in_batch: false,
+            batch: std::sync::Mutex::new(None),
             history_enabled,
         })
+    }
+
+    /// Resolve the connection every statement in the calling method executes on: the open
+    /// batch transaction when one exists, else a pooled connection.
+    ///
+    /// The handle holds the batch lock (or a pooled connection) until dropped, so a method
+    /// MUST NOT call another `self` method while its handle is alive — acquire late, drop
+    /// early. All in-tree callers follow this (each method acquires exactly one handle).
+    fn conn(&self) -> Result<ConnHandle<'_>> {
+        let guard = self
+            .batch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.is_some() {
+            return Ok(ConnHandle::Tx(guard));
+        }
+        drop(guard);
+        let conn = rt_block(self.pool.acquire()).map_err(st)?;
+        Ok(ConnHandle::Pooled(Some(conn)))
     }
 
     // ── meta helpers ────────────────────────────────────────────────────────
 
     /// Read an arbitrary string value from the `meta` table. Returns `None` when absent.
     pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
+        let mut h = self.conn()?;
         rt_block(async {
             let row: Option<sqlx::postgres::PgRow> = sqlx::query("SELECT v FROM meta WHERE k = $1")
                 .bind(key)
-                .fetch_optional(&self.pool)
+                .fetch_optional(h.as_conn())
                 .await?;
             Ok::<Option<String>, sqlx::Error>(row.and_then(|r| r.try_get("v").ok()))
         })
@@ -328,6 +406,7 @@ impl PostgresStore {
 
     /// Write an arbitrary string value to the `meta` table (insert or replace).
     pub fn meta_set(&mut self, key: &str, value: &str) -> Result<()> {
+        let mut h = self.conn()?;
         rt_block(
             sqlx::query(
                 "INSERT INTO meta(k, v) VALUES($1, $2) \
@@ -335,7 +414,7 @@ impl PostgresStore {
             )
             .bind(key)
             .bind(value)
-            .execute(&self.pool),
+            .execute(h.as_conn()),
         )
         .map_err(st)?;
         Ok(())
@@ -351,9 +430,10 @@ impl PostgresStore {
 
     /// Increment the graph version. All cache entries at prior versions become stale.
     pub fn bump_version(&mut self) -> Result<()> {
+        let mut h = self.conn()?;
         rt_block(
             sqlx::query("UPDATE meta SET v = (v::BIGINT + 1)::TEXT WHERE k = 'graph_version'")
-                .execute(&self.pool),
+                .execute(h.as_conn()),
         )
         .map_err(st)?;
         Ok(())
@@ -363,13 +443,15 @@ impl PostgresStore {
 
     /// Return the cached value for `key` only if stored at the current graph version.
     pub fn cache_get(&self, key: &str) -> Result<Option<String>> {
+        // graph_version acquires (and releases) its own handle — must complete before ours.
         let ver = self.graph_version()?;
+        let mut h = self.conn()?;
         rt_block(async {
             let row: Option<sqlx::postgres::PgRow> =
                 sqlx::query("SELECT value FROM cache WHERE key = $1 AND version = $2")
                     .bind(key)
                     .bind(ver)
-                    .fetch_optional(&self.pool)
+                    .fetch_optional(h.as_conn())
                     .await?;
             Ok::<Option<String>, sqlx::Error>(row.and_then(|r| r.try_get("value").ok()))
         })
@@ -378,7 +460,9 @@ impl PostgresStore {
 
     /// Store `value` for `key` at the current graph version.
     pub fn cache_put(&mut self, key: &str, value: &str) -> Result<()> {
+        // graph_version acquires (and releases) its own handle — must complete before ours.
         let ver = self.graph_version()?;
+        let mut h = self.conn()?;
         rt_block(
             sqlx::query(
                 "INSERT INTO cache(key, version, value) VALUES($1, $2, $3) \
@@ -387,7 +471,7 @@ impl PostgresStore {
             .bind(key)
             .bind(ver)
             .bind(value)
-            .execute(&self.pool),
+            .execute(h.as_conn()),
         )
         .map_err(st)?;
         Ok(())
@@ -448,13 +532,14 @@ impl PostgresStore {
 
         // Fetch max_nodes + 1 rows so we can distinguish "exactly max_nodes reachable" from
         // "truncated" — if we get more than max_nodes back, the result was cut.
+        let mut h = self.conn()?;
         let rows = rt_block(async {
             sqlx::query(&sql)
                 .bind(&start.0)
                 .bind(spec.max_depth as i64)
                 .bind(spec.min_confidence as f64)
                 .bind((spec.max_nodes as i64) + 1)
-                .fetch_all(&self.pool)
+                .fetch_all(h.as_conn())
                 .await
         })
         .map_err(st)?;
@@ -476,8 +561,13 @@ impl PostgresStore {
             return Ok(0);
         }
         let syms: Vec<String> = ids.iter().map(|i| i.0.clone()).collect();
+        let mut h = self.conn()?;
         let n = rt_block(async {
-            let mut tx = self.pool.begin().await?;
+            // `Connection::begin` on the handle's connection: a real transaction when no batch
+            // is open, an automatic SAVEPOINT when called inside an open batch transaction —
+            // so the two deletes stay atomic in both modes without double-BEGIN errors.
+            use sqlx::Connection;
+            let mut tx = h.as_conn().begin().await?;
             sqlx::query("DELETE FROM edges WHERE source = ANY($1) OR target = ANY($1)")
                 .bind(&syms)
                 .execute(&mut *tx)
@@ -494,22 +584,72 @@ impl PostgresStore {
     }
 }
 
+impl Drop for PostgresStore {
+    fn drop(&mut self) {
+        // A batch left open at drop rolls back (sqlx `Transaction` drop semantics). The inner
+        // `PoolConnection` release needs a Tokio context (see `ConnHandle::drop`), so take the
+        // transaction down inside the process-wide runtime.
+        let tx = self
+            .batch
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(tx) = tx {
+            let _rt = global_rt().enter();
+            drop(tx);
+        }
+    }
+}
+
 // ── GraphWrite ────────────────────────────────────────────────────────────────
 
 impl GraphWrite for PostgresStore {
     fn begin_batch(&mut self) -> Result<()> {
-        // Postgres auto-commits per statement via connection pool; begin_batch is a no-op
-        // for the conformance contract.  The in_batch flag is tracked for correctness.
-        self.in_batch = true;
+        // Locked decision #8: the graph batch is ONE real transaction at READ COMMITTED, so
+        // concurrent readers (shared_writers: true) see old-or-new, never a partial batch.
+        // Idempotent like SqliteStore: a second begin_batch inside an open batch is a no-op.
+        // SERIALIZABLE is reserved for merge-critical paths if they ever need it — the graph
+        // batch is a single-writer bulk load, so READ COMMITTED is sufficient and cheaper.
+        if self
+            .batch
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return Ok(());
+        }
+        let tx = rt_block(async {
+            let mut tx = self.pool.begin().await?;
+            // Explicit rather than relying on the server default: a cluster configured with
+            // default_transaction_isolation=serializable must not change batch semantics.
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+                .execute(&mut *tx)
+                .await?;
+            Ok::<_, sqlx::Error>(tx)
+        })
+        .map_err(st)?;
+        *self
+            .batch
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tx);
         Ok(())
     }
 
     fn commit_batch(&mut self) -> Result<()> {
-        self.in_batch = false;
+        // No open batch → no-op (mirrors SqliteStore).
+        let tx = self
+            .batch
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(tx) = tx {
+            rt_block(tx.commit()).map_err(st)?;
+        }
         Ok(())
     }
 
     fn upsert_nodes(&mut self, nodes: &[Node]) -> Result<()> {
+        let mut h = self.conn()?;
         for n in nodes {
             let kind = serde_json::to_string(&n.kind)?;
             let data = serde_json::to_string(n)?;
@@ -517,7 +657,8 @@ impl GraphWrite for PostgresStore {
 
             // Epoch pre-pass (M8/DoD-XA4), BEFORE the node insert — same rule as the SQLite seam:
             // bump iff this symbol HAD a node (symbol_gen.had_node==1) and has none now (a reuse).
-            // The live-node check reads the pre-insert state.
+            // The live-node check reads the pre-insert state (through the batch transaction when
+            // one is open, so it sees nodes written earlier in the same batch).
             rt_block(async {
                 let row: Option<sqlx::postgres::PgRow> = sqlx::query(
                     "SELECT COALESCE(sg.had_node, 0) AS had_node, \
@@ -526,7 +667,7 @@ impl GraphWrite for PostgresStore {
                      LEFT JOIN symbol_gen sg ON sg.symbol = q.s",
                 )
                 .bind(&n.symbol.0)
-                .fetch_optional(&self.pool)
+                .fetch_optional(h.as_conn())
                 .await?;
                 let (had_node, has_live): (i64, bool) = match row {
                     Some(r) => (r.try_get("had_node")?, r.try_get("has_live")?),
@@ -542,7 +683,7 @@ impl GraphWrite for PostgresStore {
                 )
                 .bind(&n.symbol.0)
                 .bind(bump)
-                .execute(&self.pool)
+                .execute(h.as_conn())
                 .await?;
                 Ok::<(), sqlx::Error>(())
             })
@@ -567,7 +708,7 @@ impl GraphWrite for PostgresStore {
                 .bind(file)
                 .bind(&data)
                 .bind(n.scope.as_path())
-                .execute(&self.pool),
+                .execute(h.as_conn()),
             )
             .map_err(st)?;
         }
@@ -575,6 +716,7 @@ impl GraphWrite for PostgresStore {
     }
 
     fn upsert_edges(&mut self, edges: &[Edge]) -> Result<()> {
+        let mut h = self.conn()?;
         for e in edges {
             let kind = serde_json::to_string(&e.kind)?;
             let data = serde_json::to_string(e)?;
@@ -602,7 +744,7 @@ impl GraphWrite for PostgresStore {
                 .bind(confidence)
                 .bind(file)
                 .bind(&data)
-                .execute(&self.pool),
+                .execute(h.as_conn()),
             )
             .map_err(st)?;
         }
@@ -610,6 +752,7 @@ impl GraphWrite for PostgresStore {
     }
 
     fn upsert_unresolved_refs(&mut self, refs: &[UnresolvedRef]) -> Result<()> {
+        let mut h = self.conn()?;
         for r in refs {
             let kind = serde_json::to_string(&r.kind)?;
             let file = &r.location.file;
@@ -624,7 +767,7 @@ impl GraphWrite for PostgresStore {
                 .bind(&kind)
                 .bind(file)
                 .bind(line)
-                .execute(&self.pool),
+                .execute(h.as_conn()),
             )
             .map_err(st)?;
         }
@@ -632,12 +775,13 @@ impl GraphWrite for PostgresStore {
     }
 
     fn remove_file(&mut self, file: &str) -> Result<()> {
+        let mut h = self.conn()?;
         // Step 1: read the file's current git_sha.
         let current_git_sha: String = rt_block(async {
             let row: Option<sqlx::postgres::PgRow> =
                 sqlx::query("SELECT git_sha FROM files WHERE path = $1")
                     .bind(file)
-                    .fetch_optional(&self.pool)
+                    .fetch_optional(h.as_conn())
                     .await?;
             Ok::<String, sqlx::Error>(
                 row.and_then(|r| r.try_get::<Option<String>, _>("git_sha").ok().flatten())
@@ -655,7 +799,7 @@ impl GraphWrite for PostgresStore {
                         OR source IN (SELECT symbol FROM nodes WHERE file = $1)",
                 )
                 .bind(file)
-                .fetch_all(&self.pool)
+                .fetch_all(h.as_conn())
                 .await?;
                 let mut v = Vec::new();
                 for row in rows {
@@ -673,7 +817,7 @@ impl GraphWrite for PostgresStore {
                     .bind(&current_git_sha)
                     .bind(file)
                     .bind(edge_json)
-                    .execute(&self.pool),
+                    .execute(h.as_conn()),
                 )
                 .map_err(st)?;
             }
@@ -687,7 +831,7 @@ impl GraphWrite for PostgresStore {
                     OR source IN (SELECT symbol FROM nodes WHERE file = $1)",
             )
             .bind(file)
-            .execute(&self.pool),
+            .execute(h.as_conn()),
         )
         .map_err(st)?;
 
@@ -695,21 +839,21 @@ impl GraphWrite for PostgresStore {
         rt_block(
             sqlx::query("DELETE FROM nodes WHERE file = $1")
                 .bind(file)
-                .execute(&self.pool),
+                .execute(h.as_conn()),
         )
         .map_err(st)?;
 
         rt_block(
             sqlx::query("DELETE FROM unresolved_refs WHERE file = $1")
                 .bind(file)
-                .execute(&self.pool),
+                .execute(h.as_conn()),
         )
         .map_err(st)?;
 
         rt_block(
             sqlx::query("DELETE FROM files WHERE path = $1")
                 .bind(file)
-                .execute(&self.pool),
+                .execute(h.as_conn()),
         )
         .map_err(st)?;
 
@@ -717,6 +861,7 @@ impl GraphWrite for PostgresStore {
     }
 
     fn set_file_digest(&mut self, file: &str, digest: &str) -> Result<()> {
+        let mut h = self.conn()?;
         rt_block(
             sqlx::query(
                 "INSERT INTO files(path, digest) VALUES($1, $2) \
@@ -724,7 +869,7 @@ impl GraphWrite for PostgresStore {
             )
             .bind(file)
             .bind(digest)
-            .execute(&self.pool),
+            .execute(h.as_conn()),
         )
         .map_err(st)?;
         Ok(())
@@ -732,12 +877,13 @@ impl GraphWrite for PostgresStore {
 
     fn set_file_content(&mut self, file: &str, text: &str) -> Result<()> {
         let sha = git_blob_sha(text);
+        let mut h = self.conn()?;
         // Dedup: INSERT … ON CONFLICT DO NOTHING — identical content shares one content row.
         rt_block(
             sqlx::query("INSERT INTO content(git_sha, body) VALUES($1, $2) ON CONFLICT DO NOTHING")
                 .bind(&sha)
                 .bind(text)
-                .execute(&self.pool),
+                .execute(h.as_conn()),
         )
         .map_err(st)?;
         // Upsert the files row with the git_sha pointer.
@@ -748,20 +894,21 @@ impl GraphWrite for PostgresStore {
             )
             .bind(file)
             .bind(&sha)
-            .execute(&self.pool),
+            .execute(h.as_conn()),
         )
         .map_err(st)?;
         Ok(())
     }
 
     fn prune_dangling_edges(&mut self) -> Result<usize> {
+        let mut h = self.conn()?;
         let result = rt_block(
             sqlx::query(
                 "DELETE FROM edges \
                  WHERE source NOT IN (SELECT symbol FROM nodes) \
                     OR target NOT IN (SELECT symbol FROM nodes)",
             )
-            .execute(&self.pool),
+            .execute(h.as_conn()),
         )
         .map_err(st)?;
         Ok(result.rows_affected() as usize)
@@ -780,11 +927,12 @@ impl GraphWrite for PostgresStore {
             ChangeOp::Upsert => "upsert",
             ChangeOp::Remove => "remove",
         };
+        let mut h = self.conn()?;
         rt_block(
             sqlx::query("INSERT INTO changes(op, target) VALUES($1, $2)")
                 .bind(op_str)
                 .bind(target)
-                .execute(&self.pool),
+                .execute(h.as_conn()),
         )
         .map_err(st)?;
         Ok(())
@@ -800,12 +948,13 @@ impl GraphWrite for PostgresStore {
         if description.is_none() && requirement.is_none() && validation.is_none() {
             return Ok(());
         }
+        let mut h = self.conn()?;
         // Check the symbol exists (no intern for Postgres — directly query nodes).
         let exists: bool = rt_block(async {
             let row: Option<sqlx::postgres::PgRow> =
                 sqlx::query("SELECT 1 AS exists_flag FROM nodes WHERE symbol = $1")
                     .bind(&symbol.0)
-                    .fetch_optional(&self.pool)
+                    .fetch_optional(h.as_conn())
                     .await?;
             Ok::<bool, sqlx::Error>(row.is_some())
         })
@@ -819,7 +968,7 @@ impl GraphWrite for PostgresStore {
                 sqlx::query("UPDATE nodes SET description = $2 WHERE symbol = $1")
                     .bind(&symbol.0)
                     .bind(d)
-                    .execute(&self.pool),
+                    .execute(h.as_conn()),
             )
             .map_err(st)?;
         }
@@ -828,7 +977,7 @@ impl GraphWrite for PostgresStore {
                 sqlx::query("UPDATE nodes SET requirement = $2 WHERE symbol = $1")
                     .bind(&symbol.0)
                     .bind(r)
-                    .execute(&self.pool),
+                    .execute(h.as_conn()),
             )
             .map_err(st)?;
         }
@@ -850,7 +999,7 @@ impl GraphWrite for PostgresStore {
                 .bind(flag)
                 .bind(&claim.by)
                 .bind(now)
-                .execute(&self.pool),
+                .execute(h.as_conn()),
             )
             .map_err(st)?;
         }
@@ -858,11 +1007,12 @@ impl GraphWrite for PostgresStore {
     }
 
     fn annotate(&mut self, symbol: &SymbolId, annotation: Annotation) -> Result<()> {
+        let mut h = self.conn()?;
         rt_block(async {
             // An un-interned symbol is not a node → no-op (mirrors SqliteStore).
             let exists: bool = sqlx::query("SELECT 1 AS e FROM nodes WHERE symbol = $1")
                 .bind(&symbol.0)
-                .fetch_optional(&self.pool)
+                .fetch_optional(h.as_conn())
                 .await?
                 .is_some();
             if !exists {
@@ -885,7 +1035,7 @@ impl GraphWrite for PostgresStore {
                 .bind(&annotation.source_type)
                 .bind(&annotation.extraction_method)
                 .bind(annotation.last_verified)
-                .execute(&self.pool)
+                .execute(h.as_conn())
                 .await?;
             } else {
                 sqlx::query(
@@ -903,7 +1053,7 @@ impl GraphWrite for PostgresStore {
                 .bind(&annotation.source_type)
                 .bind(&annotation.extraction_method)
                 .bind(annotation.last_verified)
-                .execute(&self.pool)
+                .execute(h.as_conn())
                 .await?;
             }
             Ok(())
@@ -918,6 +1068,7 @@ impl GraphWrite for PostgresStore {
         ty: Option<&str>,
         key: &str,
     ) -> Result<usize> {
+        let mut h = self.conn()?;
         let n = rt_block(async {
             // $2 IS NULL → key-only (all types); otherwise scope to (type = $2, key = $3).
             // `type` is matched as an opaque string — no per-type branching (rules-as-DATA).
@@ -928,7 +1079,7 @@ impl GraphWrite for PostgresStore {
             .bind(&symbol.0)
             .bind(ty)
             .bind(key)
-            .execute(&self.pool)
+            .execute(h.as_conn())
             .await?;
             Ok::<u64, sqlx::Error>(result.rows_affected())
         })
@@ -945,17 +1096,20 @@ impl GraphRead for PostgresStore {
             full_text_search: true,
             vector_search: false,
             server_side_traversal: true,
-            transactional_batch: false, // begin/commit are no-ops
-            shared_writers: true,       // Postgres supports concurrent writers
+            // begin/commit map to ONE real READ COMMITTED transaction (locked decision #8) —
+            // concurrent readers never observe a partial batch.
+            transactional_batch: true,
+            shared_writers: true, // Postgres supports concurrent writers
         }
     }
 
     fn get_node(&self, id: &SymbolId) -> Result<Option<Node>> {
+        let mut h = self.conn()?;
         rt_block(async {
             let row: Option<sqlx::postgres::PgRow> =
                 sqlx::query("SELECT data FROM nodes WHERE symbol = $1")
                     .bind(&id.0)
-                    .fetch_optional(&self.pool)
+                    .fetch_optional(h.as_conn())
                     .await?;
             match row {
                 None => Ok::<Option<Node>, sqlx::Error>(None),
@@ -974,6 +1128,7 @@ impl GraphRead for PostgresStore {
     fn symbol_epoch(&self, id: &SymbolId) -> Result<Option<u64>> {
         // Live only: the JOIN against nodes returns a row ONLY when a live node exists for the
         // symbol; the gen comes from symbol_gen (which survives remove_file). No live node → None.
+        let mut h = self.conn()?;
         rt_block(async {
             let row: Option<sqlx::postgres::PgRow> = sqlx::query(
                 "SELECT COALESCE(sg.gen, 0) AS gen \
@@ -982,7 +1137,7 @@ impl GraphRead for PostgresStore {
                  WHERE n.symbol = $1",
             )
             .bind(&id.0)
-            .fetch_optional(&self.pool)
+            .fetch_optional(h.as_conn())
             .await?;
             match row {
                 None => Ok::<Option<u64>, sqlx::Error>(None),
@@ -996,6 +1151,7 @@ impl GraphRead for PostgresStore {
     }
 
     fn find_symbols(&self, query: &SymbolQuery) -> Result<Vec<Node>> {
+        let mut h = self.conn()?;
         let mut nodes: Vec<Node> = if let Some(text) = &query.text {
             let pattern = format!("%{text}%");
             rt_block(async {
@@ -1003,7 +1159,7 @@ impl GraphRead for PostgresStore {
                     "SELECT data FROM nodes WHERE name ILIKE $1 OR data ILIKE $1 ORDER BY symbol",
                 )
                 .bind(&pattern)
-                .fetch_all(&self.pool)
+                .fetch_all(h.as_conn())
                 .await?;
                 let mut v = Vec::new();
                 for row in rows {
@@ -1019,7 +1175,7 @@ impl GraphRead for PostgresStore {
             rt_block(async {
                 let rows = sqlx::query("SELECT data FROM nodes WHERE name = $1 ORDER BY symbol")
                     .bind(name)
-                    .fetch_all(&self.pool)
+                    .fetch_all(h.as_conn())
                     .await?;
                 let mut v = Vec::new();
                 for row in rows {
@@ -1043,7 +1199,7 @@ impl GraphRead for PostgresStore {
                 let rows =
                     sqlx::query("SELECT data FROM nodes WHERE kind = ANY($1) ORDER BY symbol")
                         .bind(&kind_strs[..])
-                        .fetch_all(&self.pool)
+                        .fetch_all(h.as_conn())
                         .await?;
                 let mut v = Vec::new();
                 for row in rows {
@@ -1058,7 +1214,7 @@ impl GraphRead for PostgresStore {
         } else {
             rt_block(async {
                 let rows = sqlx::query("SELECT data FROM nodes ORDER BY symbol")
-                    .fetch_all(&self.pool)
+                    .fetch_all(h.as_conn())
                     .await?;
                 let mut v = Vec::new();
                 for row in rows {
@@ -1103,8 +1259,9 @@ impl GraphRead for PostgresStore {
             Direction::Dependencies => "SELECT data FROM edges WHERE source = $1",
             Direction::Both => "SELECT data FROM edges WHERE source = $1 OR target = $1",
         };
+        let mut h = self.conn()?;
         rt_block(async {
-            let rows = sqlx::query(sql).bind(&id.0).fetch_all(&self.pool).await?;
+            let rows = sqlx::query(sql).bind(&id.0).fetch_all(h.as_conn()).await?;
             let mut out = Vec::new();
             for row in rows {
                 let json: String = row.try_get("data")?;
@@ -1182,9 +1339,10 @@ impl GraphRead for PostgresStore {
     }
 
     fn all_nodes(&self) -> Result<Vec<Node>> {
+        let mut h = self.conn()?;
         rt_block(async {
             let rows = sqlx::query("SELECT data FROM nodes")
-                .fetch_all(&self.pool)
+                .fetch_all(h.as_conn())
                 .await?;
             let mut out = Vec::new();
             for row in rows {
@@ -1199,9 +1357,10 @@ impl GraphRead for PostgresStore {
     }
 
     fn all_edges(&self) -> Result<Vec<Edge>> {
+        let mut h = self.conn()?;
         rt_block(async {
             let rows = sqlx::query("SELECT data FROM edges")
-                .fetch_all(&self.pool)
+                .fetch_all(h.as_conn())
                 .await?;
             let mut out = Vec::new();
             for row in rows {
@@ -1217,13 +1376,14 @@ impl GraphRead for PostgresStore {
 
     fn unresolved_refs_for_name(&self, name: &str) -> Result<Vec<UnresolvedRef>> {
         use wicked_estate_core::{Location, Span};
+        let mut h = self.conn()?;
         rt_block(async {
             let rows = sqlx::query(
                 "SELECT from_sym, raw_name, kind, file, line \
                  FROM unresolved_refs WHERE raw_name = $1",
             )
             .bind(name)
-            .fetch_all(&self.pool)
+            .fetch_all(h.as_conn())
             .await?;
             let mut out = Vec::new();
             for row in rows {
@@ -1259,9 +1419,10 @@ impl GraphRead for PostgresStore {
     }
 
     fn indexed_files(&self) -> Result<Vec<String>> {
+        let mut h = self.conn()?;
         rt_block(async {
             let rows = sqlx::query("SELECT path FROM files")
-                .fetch_all(&self.pool)
+                .fetch_all(h.as_conn())
                 .await?;
             // `?`, not `.ok()`. A dropped row here does not fail loudly — it silently shrinks the
             // "previously indexed" set, and the caller reads that as "this path was never indexed",
@@ -1275,11 +1436,12 @@ impl GraphRead for PostgresStore {
     }
 
     fn file_digest(&self, file: &str) -> Result<Option<String>> {
+        let mut h = self.conn()?;
         rt_block(async {
             let row: Option<sqlx::postgres::PgRow> =
                 sqlx::query("SELECT digest FROM files WHERE path = $1")
                     .bind(file)
-                    .fetch_optional(&self.pool)
+                    .fetch_optional(h.as_conn())
                     .await?;
             Ok::<Option<String>, sqlx::Error>(row.and_then(|r| r.try_get("digest").ok()))
         })
@@ -1287,11 +1449,12 @@ impl GraphRead for PostgresStore {
     }
 
     fn file_git_sha(&self, file: &str) -> Result<Option<String>> {
+        let mut h = self.conn()?;
         rt_block(async {
             let row: Option<sqlx::postgres::PgRow> =
                 sqlx::query("SELECT git_sha FROM files WHERE path = $1")
                     .bind(file)
-                    .fetch_optional(&self.pool)
+                    .fetch_optional(h.as_conn())
                     .await?;
             Ok::<Option<String>, sqlx::Error>(
                 row.and_then(|r| r.try_get::<Option<String>, _>("git_sha").ok().flatten()),
@@ -1319,13 +1482,14 @@ impl GraphRead for PostgresStore {
     }
 
     fn changes_since(&self, cursor: u64) -> Result<Vec<Change>> {
+        let mut h = self.conn()?;
         rt_block(async {
             let rows = sqlx::query(
                 "SELECT seq, op, target FROM changes \
                  WHERE seq > $1 ORDER BY seq ASC LIMIT 10000",
             )
             .bind(cursor as i64)
-            .fetch_all(&self.pool)
+            .fetch_all(h.as_conn())
             .await?;
             let mut out = Vec::new();
             for row in rows {
@@ -1348,13 +1512,14 @@ impl GraphRead for PostgresStore {
     }
 
     fn edge_history(&self, file: &str) -> Result<Vec<HistoricalEdge>> {
+        let mut h = self.conn()?;
         rt_block(async {
             let rows = sqlx::query(
                 "SELECT archived_seq, git_sha, edge_json FROM edge_history \
                  WHERE file = $1 ORDER BY archived_seq DESC",
             )
             .bind(file)
-            .fetch_all(&self.pool)
+            .fetch_all(h.as_conn())
             .await?;
             let mut out = Vec::new();
             for row in rows {
@@ -1375,6 +1540,7 @@ impl GraphRead for PostgresStore {
     }
 
     fn file_content(&self, file: &str) -> Result<Option<String>> {
+        let mut h = self.conn()?;
         rt_block(async {
             let row: Option<sqlx::postgres::PgRow> = sqlx::query(
                 "SELECT c.body FROM files f \
@@ -1382,7 +1548,7 @@ impl GraphRead for PostgresStore {
                  WHERE f.path = $1",
             )
             .bind(file)
-            .fetch_optional(&self.pool)
+            .fetch_optional(h.as_conn())
             .await?;
             Ok::<Option<String>, sqlx::Error>(row.and_then(|r| r.try_get("body").ok()))
         })
@@ -1410,6 +1576,7 @@ impl GraphRead for PostgresStore {
     }
 
     fn node_semantics(&self, symbol: &SymbolId) -> Result<Option<NodeSemantics>> {
+        let mut h = self.conn()?;
         rt_block(async {
             let row: Option<sqlx::postgres::PgRow> = sqlx::query(
                 "SELECT description, requirement, requirement_validated, \
@@ -1421,7 +1588,7 @@ impl GraphRead for PostgresStore {
                         OR requirement_validated != 0)",
             )
             .bind(&symbol.0)
-            .fetch_optional(&self.pool)
+            .fetch_optional(h.as_conn())
             .await?;
             match row {
                 None => Ok::<Option<NodeSemantics>, sqlx::Error>(None),
@@ -1448,10 +1615,11 @@ impl GraphRead for PostgresStore {
     }
 
     fn find_by_requirement(&self, requirement: &str) -> Result<Vec<Node>> {
+        let mut h = self.conn()?;
         rt_block(async {
             let rows = sqlx::query("SELECT data FROM nodes WHERE requirement = $1 ORDER BY symbol")
                 .bind(requirement)
-                .fetch_all(&self.pool)
+                .fetch_all(h.as_conn())
                 .await?;
             let mut out = Vec::new();
             for row in rows {
@@ -1466,6 +1634,7 @@ impl GraphRead for PostgresStore {
     }
 
     fn annotations(&self, symbol: &SymbolId) -> Result<Vec<Annotation>> {
+        let mut h = self.conn()?;
         rt_block(async {
             // Order by ts then id so identical-ts rows have a stable, insertion order.
             let rows = sqlx::query(
@@ -1473,7 +1642,7 @@ impl GraphRead for PostgresStore {
                  FROM annotations WHERE node_sym = $1 ORDER BY ts ASC, id ASC",
             )
             .bind(&symbol.0)
-            .fetch_all(&self.pool)
+            .fetch_all(h.as_conn())
             .await?;
             let mut out = Vec::with_capacity(rows.len());
             for r in rows {
@@ -1485,6 +1654,7 @@ impl GraphRead for PostgresStore {
     }
 
     fn annotations_by_type(&self, ty: &str) -> Result<Vec<(SymbolId, Annotation)>> {
+        let mut h = self.conn()?;
         rt_block(async {
             // idx_annotations_type backs the WHERE; ordered by symbol then ts for determinism.
             let rows = sqlx::query(
@@ -1494,7 +1664,7 @@ impl GraphRead for PostgresStore {
                  ORDER BY node_sym ASC, ts ASC, id ASC",
             )
             .bind(ty)
-            .fetch_all(&self.pool)
+            .fetch_all(h.as_conn())
             .await?;
             let mut out = Vec::with_capacity(rows.len());
             for r in rows {
@@ -1507,6 +1677,7 @@ impl GraphRead for PostgresStore {
     }
 
     fn annotations_stale_since(&self, cutoff: i64) -> Result<Vec<(SymbolId, Annotation)>> {
+        let mut h = self.conn()?;
         rt_block(async {
             // Freshness read: every annotation last verified STRICTLY BEFORE `cutoff`. Never-verified
             // rows (last_verified = 0) fall out for any positive cutoff. idx_annotations_last_verified
@@ -1518,7 +1689,7 @@ impl GraphRead for PostgresStore {
                  ORDER BY node_sym ASC, ts ASC, id ASC",
             )
             .bind(cutoff)
-            .fetch_all(&self.pool)
+            .fetch_all(h.as_conn())
             .await?;
             let mut out = Vec::with_capacity(rows.len());
             for r in rows {
@@ -1531,13 +1702,14 @@ impl GraphRead for PostgresStore {
     }
 
     fn stats(&self) -> Result<GraphStats> {
+        let mut h = self.conn()?;
         rt_block(async {
             let node_count: i64 = sqlx::query("SELECT COUNT(*) AS c FROM nodes")
-                .fetch_one(&self.pool)
+                .fetch_one(h.as_conn())
                 .await?
                 .try_get("c")?;
             let edge_count: i64 = sqlx::query("SELECT COUNT(*) AS c FROM edges")
-                .fetch_one(&self.pool)
+                .fetch_one(h.as_conn())
                 .await?
                 .try_get("c")?;
 
@@ -1545,20 +1717,20 @@ impl GraphRead for PostgresStore {
                 .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
             let file_count: i64 = sqlx::query("SELECT COUNT(*) AS c FROM nodes WHERE kind = $1")
                 .bind(&file_kind)
-                .fetch_one(&self.pool)
+                .fetch_one(h.as_conn())
                 .await?
                 .try_get("c")?;
 
             let unresolved_ref_count: i64 =
                 sqlx::query("SELECT COUNT(*) AS c FROM unresolved_refs")
-                    .fetch_one(&self.pool)
+                    .fetch_one(h.as_conn())
                     .await?
                     .try_get("c")?;
 
             let mut nodes_by_kind = BTreeMap::new();
             {
                 let rows = sqlx::query("SELECT kind, COUNT(*) AS c FROM nodes GROUP BY kind")
-                    .fetch_all(&self.pool)
+                    .fetch_all(h.as_conn())
                     .await?;
                 for row in rows {
                     let k: String = row.try_get("kind")?;
@@ -1569,7 +1741,7 @@ impl GraphRead for PostgresStore {
             let mut edges_by_kind = BTreeMap::new();
             {
                 let rows = sqlx::query("SELECT kind, COUNT(*) AS c FROM edges GROUP BY kind")
-                    .fetch_all(&self.pool)
+                    .fetch_all(h.as_conn())
                     .await?;
                 for row in rows {
                     let k: String = row.try_get("kind")?;
