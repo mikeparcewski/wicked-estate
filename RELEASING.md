@@ -10,8 +10,9 @@ published until the crates it depends on already exist on crates.io at the pinne
 ## Prerequisites
 
 > CI releases (tag push → `.github/workflows/publish.yml`) authenticate via crates.io
-> **Trusted Publishing (OIDC)** — no token involved. The token prerequisites below apply to
-> manual local publishes only.
+> **Trusted Publishing (OIDC)** — a short-lived token is minted per run and revoked after; no
+> long-lived API token secret is involved. The token prerequisites below apply to manual local
+> publishes only.
 
 1. A crates.io account + an API token with publish scope: <https://crates.io/settings/tokens>
 2. `cargo login <token>` (once per machine).
