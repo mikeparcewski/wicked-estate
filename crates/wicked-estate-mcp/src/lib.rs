@@ -706,6 +706,37 @@ pub fn handle_request_unified(
     }
 }
 
+/// Should a `tools/call` response for `tool` be served from / stored in the MCP response cache?
+///
+/// The response cache (L1 HashMap + L2 `cache` table in the GRAPH store) is versioned solely by
+/// the graph store: L2 rows are stamped with `graph_version` and the server watches graph.db's
+/// mtime. Nothing bumps that version when the MEMORY / KNOWLEDGE / XEDGE stores change, so caching
+/// a `memory.*` / `knowledge.*` response serves stale recalls indefinitely after a
+/// `memory.capture` / `knowledge.ingest` (issue #102) — and silently swallows repeated
+/// write-shaped calls (a second `memory.capture` with identical args never reached the engine).
+///
+/// Fix: only GRAPH-domain read tools are cacheable. This is an ALLOWLIST, not a denylist, so any
+/// future tool that is not a pure graph read stays uncached by default (fail-safe). Cross-domain
+/// reads (`knowledge.recall_about_code` touches knowledge + xedge + graph) are therefore uncached
+/// too. Measured cost of the exemption: a domain recall against local SQLite is ~1.7–2.5 ms
+/// end-to-end vs ~0.05 ms for a cache hit — the cache bought ~2 ms per repeated identical call.
+pub fn response_cacheable(tool: &str) -> bool {
+    matches!(
+        tool,
+        "SearchEntity"
+            | "RetrieveEntity"
+            | "TraverseGraph"
+            | "BlastRadius"
+            | "FetchContent"
+            | "ContextBundle"
+            | "RulesInventory"
+            | "RankHotspots"
+            | "Communities"
+            | "Lineage"
+            | "SemanticSearch"
+    )
+}
+
 fn handle_initialize_unified(id: &Value) -> Value {
     json!({
         "jsonrpc": "2.0", "id": id,
@@ -2290,6 +2321,47 @@ mod tests {
             !names.contains(&"knowledge.ingest"),
             "knowledge tools must NOT appear without domains"
         );
+    }
+
+    #[test]
+    fn response_cacheable_covers_exactly_the_graph_read_tools() {
+        // #102: the response cache is versioned by the GRAPH store only, so cacheability must
+        // track the graph-tool roster exactly. Every advertised estate tool (plus SemanticSearch,
+        // which is dispatched from the same graph store) is cacheable...
+        for t in all_tools() {
+            assert!(
+                response_cacheable(t.name()),
+                "graph read tool '{}' must be response-cacheable",
+                t.name()
+            );
+        }
+        assert!(
+            response_cacheable("SemanticSearch"),
+            "SemanticSearch reads the graph store; must be cacheable"
+        );
+        // ...and nothing else is (fail-safe default for unknown/future tools).
+        assert!(!response_cacheable("unknown.tool"));
+        assert!(!response_cacheable(""));
+    }
+
+    #[test]
+    fn domain_tools_are_never_response_cacheable() {
+        // #102 regression: memory.*/knowledge.* writes never bump the graph cache version, so a
+        // cached recall would be stale forever after a capture/ingest. Enumerate the ADVERTISED
+        // schemas (not a hand-copied list) so a newly added domain tool cannot silently become
+        // cacheable.
+        let advertised: Vec<Value> = memory_tool_schemas()
+            .into_iter()
+            .chain(knowledge_tool_schemas())
+            .collect();
+        assert!(!advertised.is_empty(), "domain tool schemas must exist");
+        for schema in advertised {
+            let name = schema["name"].as_str().expect("tool schema has a name");
+            assert!(
+                !response_cacheable(name),
+                "domain tool '{name}' must NOT be response-cacheable (#102)"
+            );
+        }
     }
 
     #[test]
