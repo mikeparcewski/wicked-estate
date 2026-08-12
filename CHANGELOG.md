@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **PostgresStore torn read (locked decision #8):** `begin_batch`/`commit_batch` now map to ONE real transaction at `READ COMMITTED` — previously they were no-ops (`transactional_batch: false` under `shared_writers: true`), so a concurrent reader could observe a partially-written graph batch. All statements issued while a batch is open (reads included) ride the batch transaction, preserving read-your-own-writes for the resolver's mid-batch `SymbolIndex` lookups. `StoreCapabilities.transactional_batch` is now `true`. New deterministic two-connection concurrency test (`postgres_batch_commits_atomically_no_torn_reads`) proves a mid-batch reader sees old-or-new, never partial.
+- Postgres conformance cleanup now also drops `symbol_gen`, so re-runs against the same database no longer inherit sticky `had_node` markers that skew epoch assertions.
+
 ## [0.14.2] — 2026-07-30
 
 ### Added
