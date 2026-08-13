@@ -25,7 +25,7 @@ Postgres. Solo laptop to enterprise CI fleet, same engine, same queries.
 [![CI](https://github.com/mikeparcewski/wicked-estate/actions/workflows/ci.yml/badge.svg)](https://github.com/mikeparcewski/wicked-estate/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-> **Status:** v0.13.1 — `cargo test --workspace` is **1,000+ tests passing, 0 failed, 0 ignored**;
+> **Status:** v0.14.5 — `cargo test --workspace` is **1,100+ tests passing, 0 failed, 0 ignored**;
 > 0 build warnings; clippy `-D warnings` clean. Greenfield, pre-1.0. **Published to crates.io.** See
 > [FEATURES.md](./FEATURES.md) for the exhaustive, honestly-tagged capability inventory
 > (✅ built / 🟡 partial / 🟦 designed-not-built).
@@ -44,10 +44,9 @@ servers, no accounts, nothing leaves your machine. The parts compose rather than
 | Loop role | Product | What it does | Stack |
 |---|---|---|---|
 | **Equip** | **`wicked-estate`** (this repo) | Your live technical environment, queryable — requirements↔implementation, blast-radius, infra + policy relationships, operational history — plus memory + knowledge with provenance (absorbed from the retired `wicked-brain`). | Rust · crates.io |
-| **Steer** | [`wicked-garden`](https://github.com/mikeparcewski/wicked-garden) | Steering before execution — reads each prompt's work-shape + risk and applies the right rigor, plus the capabilities a planner-executor can't do alone. | JS/TS |
-| **Verify** | [`wicked-testing`](https://github.com/mikeparcewski/wicked-testing) | No agent grades its own homework — an enforced wall between the agent that runs the tests and the one that judges them. | JS/TS |
+| **Steer** | [`wicked-garden`](https://github.com/mikeparcewski/wicked-garden) | Gap-filling toolkit for what coding agents can't do alone — evidence-gated testing (qe domain), graph-aware refactor, cross-session memory, multi-model review panels. | JS/TS |
 | **Govern** | [`wicked-core`](https://github.com/mikeparcewski/wicked-core) | The engine that makes "done" a mechanism, not a claim — workflow-as-data, dual gates, state re-derived from evidence. | Rust |
-| **Govern** | [`wicked-crew`](https://github.com/mikeparcewski/wicked-crew) | The control room for governed agent delivery — drive, gate, and audit the work; the human stays in command. | npm |
+| **Govern** | [`wicked-crew`](https://github.com/mikeparcewski/wicked-crew) | The control room for governed agent delivery — drive, gate, and audit the work; the human stays in command. Includes the Studio browser console. | npm |
 | **Fabric** | [`wicked-bus`](https://github.com/mikeparcewski/wicked-bus) | The durable nervous system beneath it all — local-first, at-least-once, replayable; how the loop coordinates around the harness. | JS/ESM · npm |
 | **Surface** | [`wicked-interactive`](https://github.com/mikeparcewski/wicked-interactive) | A creative surface on the same substrate: describe it, watch it build, ship HTML/PDF/deck. It composes the family's building blocks; it does not close the loop. | TS |
 
