@@ -7,8 +7,10 @@
 
 ## 1. Problem
 
-wicked-estate is zero-infra local-first: the default graph, memory, and knowledge
-stores are SQLite files in `~/.wicked/`. A team deployment (shared estate among
+wicked-estate is zero-infra local-first: the default graph store is
+`CWD/.wicked-estate/graph.db` (a per-repo SQLite file); memory and knowledge
+stores default to `~/.wicked/{memory,knowledge}.db`. A team deployment (shared
+estate among
 multiple engineers, CI, and agents) needs a single environment switch that
 retargets the foundation stores coherently — without changing any individual
 binary invocation or configuration file, and without ever silently falling back
@@ -18,7 +20,7 @@ to local state under a team profile.
 
 | `WICKED_RUNTIME` | Graph store | Memory/knowledge | Notes |
 |---|---|---|---|
-| unset or `local` | `~/.wicked-estate/graph.db` (SQLite) | `~/.wicked/{memory,knowledge}.db` (SQLite) | Zero-infra default |
+| unset or `local` | `CWD/.wicked-estate/graph.db` (SQLite) | `~/.wicked/{memory,knowledge}.db` (SQLite) | Zero-infra default; graph store is per-repo (CWD), memory/knowledge are user-global |
 | `team` | `WICKED_STORE_URL` (must be `postgres://…`) | LOCAL-ONLY today — see §5 | Fail-loud if URL absent or non-postgres |
 
 Any other value is a loud boot error (a typo must never silently fall back).
@@ -110,8 +112,8 @@ crew API and tracked in wicked-crew's DES-AUTH-001.
 
 ## 8. Reference
 
-- Implementation: `crates/wicked-estate-store/src/lib.rs` — `resolve_store_spec_from`, `open_store_any`
-- Postgres conformance: `crates/wicked-estate-store/tests/team_runtime.rs`, `tests/postgres.rs`
+- Implementation: `crates/wicked-estate-store/src/lib.rs` — `resolve_store_spec_from`, `open_store`, `open_store_ext`
+- Postgres conformance: `crates/wicked-estate-store/tests/team_runtime.rs`, `tests/postgres_conformance.rs`
 - User-facing doc: `docs/team-runtime.md` (authoritative operator guide)
 - Docker Compose: `deploy/docker-compose.team.yml`
 - PostgresBus verdict: `wicked-bus#58` + `experimental/postgres-bus/BENCH-REPORT.md`
