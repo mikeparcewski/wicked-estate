@@ -2426,7 +2426,7 @@ dependencies = [
  "dtoa-short",
  "itoa",
  "phf 0.11.3",
- "smallvec",
+ "smallvec 1.15.2",
 ]
 
 [[package]]
@@ -3033,7 +3033,7 @@ dependencies = [
  "lebe",
  "miniz_oxide",
  "rayon-core",
- "smallvec",
+ "smallvec 1.15.2",
  "zune-inflate",
 ]
 
@@ -3259,6 +3259,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ab85b9b05e3978cc9a9cf8fea7f01b494e1a09ed3037e16ba39edc7a29eb61a"
 
 [[package]]
+name = "fuchsia-cprng"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06f77d526c1a601b7c4cdd98f54b5eaabffc14d5f2f0296febdc7f357c6d3ba"
+
+[[package]]
 name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3398,6 +3404,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "gaoya"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35ad0269fceec0ceb5983e31ea6c18fc7cb756e963aebb6ca1510709b8be9044"
+dependencies = [
+ "ahash 0.8.12",
+ "crossbeam-utils",
+ "fnv",
+ "itertools 0.14.0",
+ "num-traits",
+ "rand 0.10.1",
+ "rand_pcg 0.3.1",
+ "random_choice",
+ "rayon",
+ "seahash",
+ "sha-1",
+ "shingles",
+ "siphasher",
+ "smallvec 2.0.0-alpha.12",
+ "triomphe",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3428,27 +3457,11 @@ dependencies = [
 
 [[package]]
 name = "geo"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f811f663912a69249fa620dcd2a005db7254529da2d8a0b23942e81f47084501"
-dependencies = [
- "earcutr",
- "float_next_after",
- "geo-types",
- "geographiclib-rs",
- "log",
- "num-traits",
- "robust",
- "rstar 0.12.2",
- "spade",
-]
-
-[[package]]
-name = "geo"
 version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f3901269ec6d4f6068d3f09e5f02f995bd076398dcd1dfec407cd230b02d11b"
 dependencies = [
+ "earcutr",
  "float_next_after",
  "geo-types",
  "geographiclib-rs",
@@ -3460,6 +3473,7 @@ dependencies = [
  "rstar 0.12.2",
  "serde",
  "sif-itree",
+ "spade",
 ]
 
 [[package]]
@@ -3470,6 +3484,7 @@ checksum = "94776032c45f950d30a13af6113c2ad5625316c9abfbccee4dd5a6695f8fe0f5"
 dependencies = [
  "approx",
  "num-traits",
+ "rayon",
  "rstar 0.10.0",
  "rstar 0.11.0",
  "rstar 0.12.2",
@@ -4305,7 +4320,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "smallvec",
+ "smallvec 1.15.2",
  "tokio",
  "want",
 ]
@@ -4422,6 +4437,7 @@ dependencies = [
  "i_key_sort",
  "i_shape",
  "i_tree",
+ "rayon",
 ]
 
 [[package]]
@@ -4499,7 +4515,7 @@ dependencies = [
  "icu_normalizer_data",
  "icu_properties",
  "icu_provider",
- "smallvec",
+ "smallvec 1.15.2",
  "zerovec",
 ]
 
@@ -4563,7 +4579,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b0875f23caa03898994f6ddc501886a45c7d3d62d04d2d90788d47be1b1e4de"
 dependencies = [
  "idna_adapter",
- "smallvec",
+ "smallvec 1.15.2",
  "utf8_iter",
 ]
 
@@ -5410,7 +5426,7 @@ dependencies = [
  "num-iter",
  "num-traits",
  "rand 0.8.6",
- "smallvec",
+ "smallvec 1.15.2",
  "zeroize",
 ]
 
@@ -5697,7 +5713,7 @@ checksum = "d7de3af33d24a745ffb8fab904b13478438d1cd52868e6f17735ef6e1f8bf133"
 dependencies = [
  "ndarray 0.17.2",
  "ort-sys",
- "smallvec",
+ "smallvec 1.15.2",
  "tracing",
  "ureq 3.3.0",
 ]
@@ -5778,7 +5794,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "redox_syscall 0.5.18",
- "smallvec",
+ "smallvec 1.15.2",
  "windows-link 0.2.1",
 ]
 
@@ -6336,7 +6352,7 @@ dependencies = [
  "getrandom 0.4.2",
  "lru-slab",
  "rand 0.10.1",
- "rand_pcg",
+ "rand_pcg 0.10.2",
  "ring",
  "rustc-hash",
  "rustls 0.23.40",
@@ -6388,6 +6404,29 @@ name = "radium"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
+
+[[package]]
+name = "rand"
+version = "0.3.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64ac302d8f83c0c1974bf758f6b041c6c8ada916fbb44a609158ca8b064cc76c"
+dependencies = [
+ "libc",
+ "rand 0.4.6",
+]
+
+[[package]]
+name = "rand"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "552840b97013b1a26992c11eac34bdd778e464601a4c2054b5f0bff7c6761293"
+dependencies = [
+ "fuchsia-cprng",
+ "libc",
+ "rand_core 0.3.1",
+ "rdrand",
+ "winapi",
+]
 
 [[package]]
 name = "rand"
@@ -6466,6 +6505,21 @@ dependencies = [
 
 [[package]]
 name = "rand_core"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a6fdeb83b075e8266dcc8762c22776f6877a63111121f5f8c7411e5be7eed4b"
+dependencies = [
+ "rand_core 0.4.2",
+]
+
+[[package]]
+name = "rand_core"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c33a3c44ca05fa6f1807d8e6743f3824e8509beca625669633be0acbdf509dc"
+
+[[package]]
+name = "rand_core"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90bde5296fc891b0cef12a6d03ddccc162ce7b2aff54160af9338f8d40df6d19"
@@ -6518,6 +6572,15 @@ dependencies = [
 
 [[package]]
 name = "rand_pcg"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59cad018caf63deb318e5a4586d99a24424a364f40f1e5778c29aca23f4fc73e"
+dependencies = [
+ "rand_core 0.6.4",
+]
+
+[[package]]
+name = "rand_pcg"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
@@ -6532,6 +6595,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
 dependencies = [
  "rand_core 0.9.5",
+]
+
+[[package]]
+name = "random_choice"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09c8d23fe09a1d82566c84c9dfa810b0479c6dbbe190728274f68ee3a0c27dbf"
+dependencies = [
+ "rand 0.3.23",
 ]
 
 [[package]]
@@ -6619,6 +6691,15 @@ checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
+]
+
+[[package]]
+name = "rdrand"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "678054eb77286b51581ba43620cc911abf02758c91f93f479767aed0f90458b2"
+dependencies = [
+ "rand_core 0.3.1",
 ]
 
 [[package]]
@@ -6817,7 +6898,7 @@ checksum = "13b48b66c1cd4bf814516ea48f727d4b3697e3fa8841be99a7d9cbb8c9ac1666"
 dependencies = [
  "bytes",
  "chrono",
- "geo 0.32.0",
+ "geo",
  "regex",
  "revision-derive",
  "roaring",
@@ -6970,7 +7051,7 @@ dependencies = [
  "num-traits",
  "pdqselect",
  "serde",
- "smallvec",
+ "smallvec 1.15.2",
 ]
 
 [[package]]
@@ -6982,7 +7063,7 @@ dependencies = [
  "heapless 0.7.17",
  "num-traits",
  "serde",
- "smallvec",
+ "smallvec 1.15.2",
 ]
 
 [[package]]
@@ -6994,7 +7075,7 @@ dependencies = [
  "heapless 0.7.17",
  "num-traits",
  "serde",
- "smallvec",
+ "smallvec 1.15.2",
 ]
 
 [[package]]
@@ -7006,7 +7087,7 @@ dependencies = [
  "heapless 0.7.17",
  "num-traits",
  "serde",
- "smallvec",
+ "smallvec 1.15.2",
 ]
 
 [[package]]
@@ -7018,7 +7099,7 @@ dependencies = [
  "heapless 0.8.0",
  "num-traits",
  "serde",
- "smallvec",
+ "smallvec 1.15.2",
 ]
 
 [[package]]
@@ -7032,7 +7113,7 @@ dependencies = [
  "fallible-streaming-iterator",
  "hashlink 0.9.1",
  "libsqlite3-sys",
- "smallvec",
+ "smallvec 1.15.2",
 ]
 
 [[package]]
@@ -7529,6 +7610,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha-1"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5058ada175748e33390e40e872bd0fe59a19f265d0158daa551c5a88a76009c"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
+]
+
+[[package]]
 name = "sha1"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7569,6 +7661,12 @@ checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
 ]
+
+[[package]]
+name = "shingles"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72bb884be1ddfbded5873be4672cf5aee71210ce0f8ae99787d158b9b72b5ca0"
 
 [[package]]
 name = "shlex"
@@ -7667,6 +7765,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "smallvec"
+version = "2.0.0-alpha.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef784004ca8777809dcdad6ac37629f0a97caee4c685fcea805278d81dd8b857"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
 name = "socket2"
 version = "0.5.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7706,7 +7813,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "num-traits",
  "robust",
- "smallvec",
+ "smallvec 1.15.2",
 ]
 
 [[package]]
@@ -7780,7 +7887,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "smallvec",
+ "smallvec 1.15.2",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -7861,7 +7968,7 @@ dependencies = [
  "serde",
  "sha1",
  "sha2 0.10.9",
- "smallvec",
+ "smallvec 1.15.2",
  "sqlx-core",
  "stringprep",
  "thiserror 2.0.18",
@@ -7898,7 +8005,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "smallvec",
+ "smallvec 1.15.2",
  "sqlx-core",
  "stringprep",
  "thiserror 2.0.18",
@@ -8094,7 +8201,7 @@ dependencies = [
  "fst",
  "futures",
  "fuzzy-matcher",
- "geo 0.32.0",
+ "geo",
  "geo-types",
  "getrandom 0.3.4",
  "half",
@@ -8171,7 +8278,7 @@ dependencies = [
  "chrono",
  "flatbuffers",
  "futures",
- "geo 0.28.0",
+ "geo",
  "prost",
  "prost-types",
  "rust_decimal",
@@ -8206,7 +8313,7 @@ dependencies = [
  "castaway",
  "chrono",
  "flatbuffers",
- "geo 0.32.0",
+ "geo",
  "hex",
  "http 1.4.2",
  "papaya",
@@ -8252,7 +8359,7 @@ dependencies = [
  "papaya",
  "parking_lot",
  "serde",
- "smallvec",
+ "smallvec 1.15.2",
  "thiserror 2.0.18",
  "tracing",
  "web-time",
@@ -9291,6 +9398,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "triomphe"
+version = "0.1.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b40688ea6389c8171614b25491f71d4a27946e0c7ce2da1c6de27e25abf1a0ae"
+dependencies = [
+ "serde",
+ "stable_deref_trait",
+]
+
+[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9420,7 +9537,7 @@ version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43f613e4fa046e69818dd287fdc4bc78175ff20331479dab6e1b0f98d57062de"
 dependencies = [
- "smallvec",
+ "smallvec 1.15.2",
 ]
 
 [[package]]
@@ -9910,7 +10027,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate"
-version = "0.14.4"
+version = "0.14.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9934,7 +10051,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-bench"
-version = "0.14.4"
+version = "0.14.5"
 dependencies = [
  "anyhow",
  "serde",
@@ -9947,7 +10064,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-core"
-version = "0.14.4"
+version = "0.14.5"
 dependencies = [
  "async-trait",
  "proptest",
@@ -9958,7 +10075,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-extract"
-version = "0.14.4"
+version = "0.14.5"
 dependencies = [
  "arborium-ada",
  "arborium-awk",
@@ -10085,7 +10202,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-knowledge"
-version = "0.14.4"
+version = "0.14.5"
 dependencies = [
  "anyhow",
  "serde",
@@ -10100,7 +10217,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-mcp"
-version = "0.14.4"
+version = "0.14.5"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -10120,7 +10237,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-memory"
-version = "0.14.4"
+version = "0.14.5"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -10138,7 +10255,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-memory-api"
-version = "0.14.4"
+version = "0.14.5"
 dependencies = [
  "serde",
  "wicked-estate-memory-core",
@@ -10146,8 +10263,9 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-memory-core"
-version = "0.14.4"
+version = "0.14.5"
 dependencies = [
+ "gaoya",
  "serde",
  "serde_json",
  "uuid",
@@ -10156,7 +10274,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-observe"
-version = "0.14.4"
+version = "0.14.5"
 dependencies = [
  "reqwest 0.12.28",
  "serde_json",
@@ -10165,7 +10283,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-overlay"
-version = "0.14.4"
+version = "0.14.5"
 dependencies = [
  "rusqlite",
  "tempfile",
@@ -10176,7 +10294,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-rank"
-version = "0.14.4"
+version = "0.14.5"
 dependencies = [
  "petgraph",
  "proptest",
@@ -10187,7 +10305,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-resolve"
-version = "0.14.4"
+version = "0.14.5"
 dependencies = [
  "libc",
  "protobuf",
@@ -10202,7 +10320,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-retrieve"
-version = "0.14.4"
+version = "0.14.5"
 dependencies = [
  "fastembed",
  "model2vec-rs",
@@ -10214,7 +10332,7 @@ dependencies = [
 
 [[package]]
 name = "wicked-estate-store"
-version = "0.14.4"
+version = "0.14.5"
 dependencies = [
  "async-trait",
  "deadpool",
