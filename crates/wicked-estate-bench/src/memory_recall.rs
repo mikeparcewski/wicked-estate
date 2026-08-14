@@ -232,4 +232,41 @@ mod tests {
             report.recall_at_k, report.hits, report.total,
         );
     }
+
+    #[test]
+    fn dataset_integrity_answer_kw_appears_in_content() {
+        // Each answer_kw must be a substring of its own content — if not, the benchmark
+        // can never pass even with perfect recall (the wrong fact is in the store).
+        for qa in QA_DATASET {
+            assert!(
+                qa.content.contains(qa.answer_kw),
+                "answer_kw {:?} not found in content: {:?}",
+                qa.answer_kw,
+                qa.content,
+            );
+        }
+    }
+
+    #[test]
+    fn recall_with_no_memories_returns_empty() {
+        // An engine with no stored memories must return an empty list for any query —
+        // the engine must not hallucinate or surface garbage results.
+        let engine = MemoryEngine::in_memory().expect("in_memory engine failed");
+        let now = 1_700_000_000i64;
+        let results = engine
+            .recall_ranked(
+                "What handles API rate limiting?",
+                ScopeFilter::Subtree(""),
+                &[],
+                5,
+                now,
+                RecallMode::Hybrid,
+            )
+            .expect("recall_ranked failed on empty engine");
+        assert!(
+            results.is_empty(),
+            "empty engine returned {} results; expected 0",
+            results.len()
+        );
+    }
 }
