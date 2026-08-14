@@ -9941,6 +9941,8 @@ dependencies = [
  "serde_json",
  "wicked-estate",
  "wicked-estate-core",
+ "wicked-estate-memory",
+ "wicked-estate-memory-core",
  "wicked-estate-rank",
  "wicked-estate-store",
 ]

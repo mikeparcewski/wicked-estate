@@ -17,6 +17,8 @@ wicked-estate-core.workspace = true
 wicked-estate = { path = "../wicked-estate", version = "0.14.2" }
 wicked-estate-store = { path = "../wicked-estate-store", version = "0.14.2" }
 wicked-estate-rank = { path = "../wicked-estate-rank", version = "0.14.2" }
+wicked-estate-memory = { path = "../wicked-estate-memory", version = "0.14.2" }
+wicked-estate-memory-core = { path = "../wicked-estate-memory-core", version = "0.14.2" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

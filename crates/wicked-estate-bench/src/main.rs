@@ -12,9 +12,28 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use wicked_estate_bench::capability::{print_summary_table, run_benchmark};
+use wicked_estate_bench::memory_recall::{GATE, run_memory_recall_bench};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if args.iter().any(|a| a == "--recall") {
+        let k = 5;
+        eprintln!("wicked-estate-bench: running memory recall@{k} benchmark ...");
+        let report = run_memory_recall_bench(k)?;
+        eprintln!(
+            "recall@{k}: {}/{} = {:.2} (gate >= {GATE}) — {}",
+            report.hits,
+            report.total,
+            report.recall_at_k,
+            if report.pass { "PASS" } else { "FAIL" },
+        );
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if !report.pass {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
     let paths: Vec<PathBuf> = if args.is_empty() {
         let defaults = default_paths();
