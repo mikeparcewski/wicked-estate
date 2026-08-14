@@ -171,4 +171,92 @@ mod tests {
             "LSH path must find normalized-identical 'stripe'"
         );
     }
+
+    #[test]
+    fn empty_normalized_inputs_produce_zero_jaccard() {
+        // Before the empty-norm guard in trigrams(), all-punctuation inputs produced the
+        // shared trigram {[' ',' ',' ']} and compared as 1.0 — a false entity merge.
+        assert_eq!(jaccard("!!!", "???"), 0.0, "all-punctuation must not merge");
+        assert_eq!(jaccard("---", "==="), 0.0);
+        assert_eq!(jaccard("", ""), 0.0, "two empty strings must not merge");
+        assert_eq!(jaccard("stripe", ""), 0.0, "non-empty vs empty must be 0");
+        assert_eq!(
+            jaccard("!!!", "stripe"),
+            0.0,
+            "punctuation vs real name must be 0"
+        );
+    }
+
+    #[test]
+    fn lsh_path_finds_near_threshold_candidate() {
+        // "stripe inc" has trigram-Jaccard ≈ 0.636 with "stripe" — above the 0.5 threshold
+        // but not an exact normalized match. Verifies LSH candidate generation doesn't drop
+        // real hits that aren't identical.
+        let mut cands: Vec<String> = (0..249).map(|i| format!("unrelated_entity_{i}")).collect();
+        cands.push("stripe inc".to_string()); // index 249; Jaccard("stripe","stripe inc") ≈ 0.636
+        assert_eq!(cands.len(), 250);
+        let hits = fuzzy_candidates("stripe", &cands, 0.5);
+        assert!(
+            hits.contains(&249),
+            "LSH must surface 'stripe inc' (Jaccard ≈ 0.636 ≥ 0.5 threshold)"
+        );
+    }
+
+    #[test]
+    fn lsh_and_jaccard_paths_agree_on_same_candidates() {
+        // Place the same three meaningful candidates in a 3-candidate set (O(n) Jaccard path)
+        // and embedded in a 250-candidate set (LSH path). Both paths must agree on which
+        // candidates clear the threshold — disagreement signals LSH recall loss or a re-score bug.
+        let threshold = 0.5;
+        let meaningful = ["Square", "stripe", "stripe inc"]; // idx 0,1,2
+
+        // O(n) path
+        let small: Vec<String> = meaningful.iter().map(|s| s.to_string()).collect();
+        let jaccard_hits: std::collections::HashSet<usize> =
+            fuzzy_candidates("stripe", &small, threshold)
+                .into_iter()
+                .collect();
+
+        // LSH path: pad to 250 with noise, meaningful at known indices
+        let mut large: Vec<String> = (0..247).map(|i| format!("noise_entity_{i}")).collect();
+        let square_idx = 247usize;
+        large.push("Square".to_string());
+        let stripe_idx = 248usize;
+        large.push("stripe".to_string());
+        let stripe_inc_idx = 249usize;
+        large.push("stripe inc".to_string());
+        assert_eq!(large.len(), 250);
+        let lsh_hits: std::collections::HashSet<usize> =
+            fuzzy_candidates("stripe", &large, threshold)
+                .into_iter()
+                .collect();
+
+        // O(n) path expectations
+        assert!(
+            jaccard_hits.contains(&1),
+            "O(n): 'stripe' (exact) must be a hit"
+        );
+        assert!(
+            jaccard_hits.contains(&2),
+            "O(n): 'stripe inc' (Jaccard≈0.636) must be a hit"
+        );
+        assert!(
+            !jaccard_hits.contains(&0),
+            "O(n): 'Square' must be below threshold"
+        );
+
+        // LSH path must agree
+        assert!(
+            lsh_hits.contains(&stripe_idx),
+            "LSH: 'stripe' must be a hit"
+        );
+        assert!(
+            lsh_hits.contains(&stripe_inc_idx),
+            "LSH: 'stripe inc' must be a hit"
+        );
+        assert!(
+            !lsh_hits.contains(&square_idx),
+            "LSH: 'Square' must be below threshold"
+        );
+    }
 }
