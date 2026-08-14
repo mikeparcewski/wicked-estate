@@ -39,13 +39,14 @@ pub fn normalize(s: &str) -> String {
 }
 
 /// Character trigrams of the normalized string (padded so short strings still produce shingles).
+/// Returns empty when `normalize(s)` is empty to avoid false merges on all-punctuation inputs.
 fn trigrams(s: &str) -> HashSet<[char; 3]> {
     let norm = normalize(s);
+    if norm.is_empty() {
+        return HashSet::new();
+    }
     let padded: Vec<char> = format!("  {norm} ").chars().collect();
     let mut set = HashSet::new();
-    if padded.len() < 3 {
-        return set;
-    }
     for w in padded.windows(3) {
         set.insert([w[0], w[1], w[2]]);
     }
@@ -53,12 +54,10 @@ fn trigrams(s: &str) -> HashSet<[char; 3]> {
 }
 
 /// Sorted, deduplicated character trigrams as a `Vec` for MinHash iteration.
+/// Derived from `trigrams()` so both paths share the same normalization and empty-guard.
 fn trigrams_vec(s: &str) -> Vec<[char; 3]> {
-    let norm = normalize(s);
-    let padded: Vec<char> = format!("  {norm} ").chars().collect();
-    let mut out: Vec<[char; 3]> = padded.windows(3).map(|w| [w[0], w[1], w[2]]).collect();
+    let mut out: Vec<[char; 3]> = trigrams(s).into_iter().collect();
     out.sort_unstable();
-    out.dedup();
     out
 }
 
@@ -80,6 +79,8 @@ pub fn jaccard(a: &str, b: &str) -> f64 {
 }
 
 /// MinHash/LSH candidate retrieval for large sets. Uses gaoya for sublinear lookup.
+/// LSH is candidate-generation only: every hit is re-scored with exact `jaccard()` to enforce
+/// the documented threshold semantics (MinHash similarity estimates can exceed the true Jaccard).
 fn lsh_candidates(target: &str, candidates: &[String], threshold: f64) -> Vec<usize> {
     let (num_bands, band_width) = calculate_minhash_params(threshold, LSH_NUM_HASHES);
     let hasher = MinHasher32::new(num_bands * band_width);
@@ -91,7 +92,14 @@ fn lsh_candidates(target: &str, candidates: &[String], threshold: f64) -> Vec<us
     let mut results: Vec<(usize, f64)> = index
         .query_owned_return_similarity(&query_sig)
         .into_iter()
-        .filter(|(_, sim)| *sim >= threshold)
+        .filter_map(|(i, _)| {
+            let exact = jaccard(target, &candidates[i]);
+            if exact >= threshold {
+                Some((i, exact))
+            } else {
+                None
+            }
+        })
         .collect();
     results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     results.into_iter().map(|(i, _)| i).collect()
