@@ -775,7 +775,16 @@ fn main() -> Result<()> {
             // `--repo --force` fell into the same hole twice: `--force` became the label AND was
             // dropped as a flag.
             "--repo" | "--as" => match it.next() {
-                Some(v) if !v.starts_with('-') => repo_label = Some(v.clone()),
+                // Validate HERE, not only deep in `index_path_as` (Copilot on #117). The `=` arm
+                // below already does, and an argument error that names the argument is this CLI's
+                // convention — `--repo a/b` reporting only a bad label, with no mention of the
+                // flag that carried it, is the asymmetry that fix introduced.
+                Some(v) if !v.starts_with('-') => {
+                    if let Err(e) = wicked_estate::repo_scope::validate_label(v) {
+                        anyhow::bail!("{a} {v}: {e}");
+                    }
+                    repo_label = Some(v.clone());
+                }
                 Some(v) => anyhow::bail!(
                     "{a} needs a repo name, got the flag `{v}` — write `{a} <name> {v}`"
                 ),

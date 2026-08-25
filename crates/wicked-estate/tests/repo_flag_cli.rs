@@ -186,3 +186,35 @@ fn a_leading_dash_label_is_refused_in_both_flag_forms() {
         "`--repo=` must be refused",
     );
 }
+
+/// BOTH flag forms must name the flag when the label is bad — not just the `=` one.
+///
+/// The `=` arm was fixed to validate at parse time; the space form still fell through to
+/// `index_path_as`, whose error names the label but not the argument that carried it
+/// (Copilot on #117). The asymmetry was introduced by the earlier fix.
+#[test]
+fn both_flag_forms_name_the_flag_on_a_bad_label() {
+    let dir = scratch("bothforms");
+    let db = dir.join("bf.db");
+    for bad in ["a/b", "..", "."] {
+        for args in [
+            vec!["repo", "--db", db.to_str().unwrap(), "--repo", bad],
+            vec!["repo", "--db", db.to_str().unwrap(), "--as", bad],
+        ] {
+            let out = index_in(&dir, &args);
+            assert!(
+                !out.status.success(),
+                "label {bad:?} must be refused: {args:?}"
+            );
+            let msg = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                msg.contains("--repo") || msg.contains("--as"),
+                "the error must name the flag the caller typed: {msg}"
+            );
+        }
+    }
+}
