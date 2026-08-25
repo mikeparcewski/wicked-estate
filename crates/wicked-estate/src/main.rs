@@ -1,7 +1,10 @@
 //! `wicked-estate` — CLI over the indexing pipeline (`wicked_estate` lib).
 //!
-//!   wicked-estate index <path>           [--db <file|:memory:>] [--history] [--embeddings] [--force]
-//!   wicked-estate scip  <root>           [--db ...] [--scip-file <path>]
+//!   wicked-estate index <path>           [--db <file|:memory:>] [--repo <name>] [--history] [--embeddings] [--force]
+//!                                     `--repo <name>` (alias `--as`) co-locates MANY repos in ONE db:
+//!                                     every path this run stores is namespaced `<name>/…`. Without it
+//!                                     the behaviour is unchanged. Edges do NOT resolve across repos.
+//!   wicked-estate scip  <root>           [--db ...] [--repo <name>] [--scip-file <path>]
 //!   wicked-estate tfstate <file>         [--db ...]
 //!   wicked-estate import-telemetry <file.json> [--db ...]
 //!   wicked-estate drift                  [--db ...]
@@ -67,6 +70,24 @@ fn ensure_db_dir(db: &str) -> Result<()> {
 /// W7.4: emit staleness notice if git reports commits since the db was written.
 /// Reads the indexed root from store meta; resolves the db path for mtime.
 fn maybe_print_staleness(store: &dyn wicked_estate_store::GraphStoreMutExt, db: &str) {
+    // A multi-repo graph has one root per repo — check each, and name the label in the fix so the
+    // operator re-indexes THAT repo and not whichever one happened to be indexed last.
+    let repos = wicked_estate::repo_scope::registry(store);
+    if !repos.is_empty() {
+        for rec in repos {
+            if let Some(n) = wicked_estate::commits_behind(Path::new(&rec.root), db) {
+                if n > 0 {
+                    println!(
+                        "STALENESS: {n} commit(s) in '{label}' since last index — run \
+                         `wicked-estate index {root} --repo {label}` to refresh",
+                        label = rec.label,
+                        root = rec.root,
+                    );
+                }
+            }
+        }
+        return;
+    }
     let root_str = match store.meta_get_key("indexed_root") {
         Some(r) => r,
         None => return, // never indexed yet
@@ -628,6 +649,8 @@ fn main() -> Result<()> {
     let mut embeddings = false;
     // --force: bypass incremental digest skip; re-extract all files even if unchanged.
     let mut force_reindex = false;
+    // --repo <name>: index into a MULTI-REPO graph under this label. None = single-repo mode.
+    let mut repo_label: Option<String> = None;
     // Semantic-annotation flags for the `semantics` command (requirement↔functionality linking).
     let mut sem_description: Option<String> = None;
     let mut sem_requirement: Option<String> = None;
@@ -718,6 +741,15 @@ fn main() -> Result<()> {
             }
             "--force" => {
                 force_reindex = true;
+            }
+            // `--repo <name>` names the repo this run is indexing, so several repos can share
+            // one db. Noun-shaped like the CLI's other value flags (`--db`, `--file`,
+            // `--symbol`), and it is the word that shows up in `stats`, in the guard's errors,
+            // and as the path prefix on every row. `--as` is accepted as an alias.
+            "--repo" | "--as" => {
+                if let Some(v) = it.next() {
+                    repo_label = Some(v.clone());
+                }
             }
             "--description" => {
                 if let Some(v) = it.next() {
@@ -911,6 +943,7 @@ fn main() -> Result<()> {
                 let mut concrete = SqliteStore::open(&db).map_err(to_any)?;
                 concrete.clear_file_digests().map_err(to_any)?;
             }
+            let as_repo = repo_label.as_deref();
             let stats = if history && db != ":memory:" {
                 // Caller explicitly opted in to history — open the concrete store to call
                 // set_history_enabled(true) (inherent method, not on any trait), then box it.
@@ -918,16 +951,26 @@ fn main() -> Result<()> {
                 let mut concrete = SqliteStore::open(&db).map_err(to_any)?;
                 concrete.set_history_enabled(true).map_err(to_any)?;
                 let mut store: Box<dyn GraphStoreMutExt> = Box::new(concrete);
-                wicked_estate::index_path(store.as_mut(), Path::new(path)).map_err(to_any)?
+                wicked_estate::index_path_as(store.as_mut(), Path::new(path), as_repo)
+                    .map_err(to_any)?
             } else {
                 // Default: history OFF (no-bloat-by-default).
                 let mut store = open_store_ext(&db).map_err(to_any)?;
-                wicked_estate::index_path(store.as_mut(), Path::new(path)).map_err(to_any)?
+                wicked_estate::index_path_as(store.as_mut(), Path::new(path), as_repo)
+                    .map_err(to_any)?
             };
-            println!(
-                "indexed {path} ({db}) → {} nodes, {} edges, {} files",
-                stats.node_count, stats.edge_count, stats.file_count
-            );
+            // The counts are the WHOLE graph's, which in a multi-repo db is every repo — say so
+            // rather than let a labelled run read as if it had produced all of them itself.
+            match as_repo {
+                Some(label) => println!(
+                    "indexed {path} as '{label}' ({db}) → graph now has {} nodes, {} edges, {} files",
+                    stats.node_count, stats.edge_count, stats.file_count
+                ),
+                None => println!(
+                    "indexed {path} ({db}) → {} nodes, {} edges, {} files",
+                    stats.node_count, stats.edge_count, stats.file_count
+                ),
+            }
             for (k, v) in &stats.edges_by_kind {
                 println!("  {k} = {v}");
             }
@@ -938,6 +981,7 @@ fn main() -> Result<()> {
                 serde_json::json!({
                     "path": path,
                     "db": db,
+                    "repo": as_repo,
                     "nodes": stats.node_count,
                     "edges": stats.edge_count,
                     "files": stats.file_count,
@@ -958,12 +1002,41 @@ fn main() -> Result<()> {
             let root_str = positional.first().map(String::as_str).unwrap_or(".");
             let root = Path::new(root_str);
             ensure_db_dir(&db)?;
+            let as_repo = repo_label.as_deref();
+            // SCIP paths are repo-relative; a labelled graph's nodes are not. Correlating the two
+            // without knowing which repo this index belongs to matches nothing and reports "0
+            // precise edges" — refuse instead of ingesting silence.
+            {
+                let probe = open_store_ext(&db).map_err(to_any)?;
+                let known = wicked_estate::repo_scope::labels(probe.as_ref());
+                if !known.is_empty() {
+                    match as_repo {
+                        None => anyhow::bail!(
+                            "REPO COLLISION: {db} holds {n} labelled repo(s) [{list}] — say which \
+                             one this SCIP index belongs to: `wicked-estate scip {root_str} --db \
+                             {db} --repo <name>`",
+                            n = known.len(),
+                            list = known.join(", "),
+                        ),
+                        Some(l) if !known.iter().any(|k| k == l) => anyhow::bail!(
+                            "unknown repo label '{l}' in {db} — this graph holds [{list}]",
+                            list = known.join(", "),
+                        ),
+                        Some(_) => {}
+                    }
+                } else if let Some(l) = as_repo {
+                    anyhow::bail!(
+                        "--repo {l} was given but {db} is a single-repo graph (no labelled repos) \
+                         — drop the flag, or index the repos with `--repo` first"
+                    );
+                }
+            }
 
             if let Some(explicit) = scip_file.as_deref() {
                 let scip_path = Path::new(explicit);
                 let mut store = open_store_ext(&db).map_err(to_any)?;
-                let count =
-                    wicked_estate::ingest_scip(store.as_mut(), root, scip_path).map_err(to_any)?;
+                let count = wicked_estate::ingest_scip_as(store.as_mut(), root, scip_path, as_repo)
+                    .map_err(to_any)?;
                 println!(
                     "scip (explicit): ingested {count} precise edge(s) from {explicit} into {db}"
                 );
@@ -996,8 +1069,9 @@ fn main() -> Result<()> {
                 if !result.path.exists() {
                     continue;
                 }
-                let count = wicked_estate::ingest_scip(store.as_mut(), root, &result.path)
-                    .map_err(to_any)?;
+                let count =
+                    wicked_estate::ingest_scip_as(store.as_mut(), root, &result.path, as_repo)
+                        .map_err(to_any)?;
                 let path_display = result.path.display();
                 println!(
                     "scip ({}): ingested {count} precise edge(s) from {path_display} into {db}",
@@ -1258,6 +1332,30 @@ fn main() -> Result<()> {
                     "  hint: db is {:.0}MB — run `wicked-estate compact` to reclaim space",
                     db_mb
                 );
+            }
+            // Multi-repo graph: one provenance block per repo. `repo_info()` is None here by
+            // construction — a labelled index never writes the singular repo_* keys — so this is
+            // the only place a co-located graph's provenance is reported.
+            let repos = wicked_estate::repo_scope::registry(store.as_ref());
+            if !repos.is_empty() {
+                let indexed = store.indexed_files().unwrap_or_default();
+                println!("repos ({}):", repos.len());
+                for rec in &repos {
+                    let prefix = wicked_estate::repo_scope::prefix(&rec.label);
+                    let files = indexed.iter().filter(|f| f.starts_with(&prefix)).count();
+                    print!("  {label}  files={files}", label = rec.label);
+                    if let Some(c) = &rec.info.commit {
+                        print!("  commit={}", &c[..8.min(c.len())]);
+                    }
+                    if let Some(b) = &rec.info.branch {
+                        print!("  branch={b}");
+                    }
+                    if rec.info.dirty {
+                        print!("  dirty");
+                    }
+                    println!("  root={}", rec.root);
+                }
+                println!("  (co-located, not linked: edges do not resolve across repos)");
             }
             // W7: print git provenance if available.
             if let Ok(Some(info)) = store.repo_info() {
@@ -1878,7 +1976,9 @@ fn main() -> Result<()> {
                 open_store_ext(&db).map_err(to_any)?
             };
 
-            let stats = wicked_estate::index_path(store.as_mut(), watch_path).map_err(to_any)?;
+            let as_repo = repo_label.as_deref();
+            let stats = wicked_estate::index_path_as(store.as_mut(), watch_path, as_repo)
+                .map_err(to_any)?;
             println!(
                 "watch: initial index of {path_str} → {} nodes, {} edges, {} files",
                 stats.node_count, stats.edge_count, stats.file_count
@@ -1909,7 +2009,8 @@ fn main() -> Result<()> {
                             watch_coalesce::emits_for_batch(events.iter().map(|ev| &ev.kind));
                         let raw_event_count = events.len();
                         for _ in 0..emits {
-                            match wicked_estate::index_path(store.as_mut(), watch_path) {
+                            match wicked_estate::index_path_as(store.as_mut(), watch_path, as_repo)
+                            {
                                 Ok(s) => {
                                     println!(
                                         "watch: re-indexed → {} nodes, {} edges, {} files",
@@ -2515,15 +2616,11 @@ fn main() -> Result<()> {
                 // Resolve paths against the stored index root so --content works
                 // regardless of CWD (the indexed path is root-relative, not CWD-relative).
                 let concrete = SqliteStore::open(&db).map_err(to_any)?;
-                let index_root: Option<std::path::PathBuf> = concrete
-                    .meta_get("indexed_root")
-                    .map_err(to_any)?
-                    .map(std::path::PathBuf::from);
                 for node in &hits {
                     let rel = &node.location.file;
-                    let resolved = index_root
-                        .as_deref()
-                        .map(|r| r.join(rel))
+                    // In a multi-repo graph the path carries a `<label>/` prefix and belongs to
+                    // that repo's root, not to `indexed_root`.
+                    let resolved = wicked_estate::repo_scope::resolve_indexed_path(&concrete, rel)
                         .unwrap_or_else(|| std::path::PathBuf::from(rel));
                     let start = node.location.span.start_byte as usize;
                     let end = node.location.span.end_byte as usize;
@@ -3284,8 +3381,18 @@ fn main() -> Result<()> {
         _ => {
             println!("wicked-estate {} — usage:", env!("CARGO_PKG_VERSION"));
             println!(
-                "  wicked-estate index <path>         [--db <file|:memory:>] [--history] [--embeddings] [--force]"
+                "  wicked-estate index <path>         [--db <file|:memory:>] [--repo <name>] [--history] [--embeddings] [--force]"
             );
+            println!(
+                "    --repo <name> co-locate MANY repos in ONE db (alias --as): namespaces this repo's"
+            );
+            println!(
+                "                  paths as <name>/… so nothing collides, and records its provenance"
+            );
+            println!(
+                "                  separately. Omit for a single-repo db (unchanged behaviour)."
+            );
+            println!("                  Co-location only — edges do NOT resolve across repos.");
             println!("    --history     opt-in to edge-history archival (default: off)");
             println!(
                 "    --embeddings  compute and store embedding vectors after indexing (default: off)"
