@@ -2060,6 +2060,10 @@ fn main() -> Result<()> {
                                         serde_json::json!({
                                             "path": path_str,
                                             "db": db,
+                                            // Same field the `index` command emits. Without it a
+                                            // subscriber to a co-located graph cannot tell WHICH
+                                            // repo a watch re-index touched.
+                                            "repo": as_repo,
                                             "nodes": s.node_count,
                                             "edges": s.edge_count,
                                             "files": s.file_count,
