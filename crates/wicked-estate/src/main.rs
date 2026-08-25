@@ -1,7 +1,10 @@
 //! `wicked-estate` — CLI over the indexing pipeline (`wicked_estate` lib).
 //!
-//!   wicked-estate index <path>           [--db <file|:memory:>] [--history] [--embeddings] [--force]
-//!   wicked-estate scip  <root>           [--db ...] [--scip-file <path>]
+//!   wicked-estate index <path>           [--db <file|:memory:>] [--repo <name>] [--history] [--embeddings] [--force]
+//!                                     `--repo <name>` (alias `--as`) co-locates MANY repos in ONE db:
+//!                                     every path this run stores is namespaced `<name>/…`. Without it
+//!                                     the behaviour is unchanged. Edges do NOT resolve across repos.
+//!   wicked-estate scip  <root>           [--db ...] [--repo <name>] [--scip-file <path>]
 //!   wicked-estate tfstate <file>         [--db ...]
 //!   wicked-estate import-telemetry <file.json> [--db ...]
 //!   wicked-estate drift                  [--db ...]
@@ -15,7 +18,7 @@
 //!   wicked-estate semantic <query>       [--db ...]
 //!   wicked-estate cross-graph <name>     --db <a.db> --db <b.db> ...
 //!                                     (or --dbs a.db,b.db,c.db)
-//!   wicked-estate watch <path>           [--db ...] [--history]
+//!   wicked-estate watch <path>           [--db ...] [--repo <name>] [--history]
 //!   wicked-estate subscribe              [--db ...] [--since <seq>]
 //!   wicked-estate clusters [<min_size>]  [--json] [--annotate] [--db ...]
 //!   wicked-estate fingerprint <name>     [--content] [--db ...]
@@ -67,6 +70,24 @@ fn ensure_db_dir(db: &str) -> Result<()> {
 /// W7.4: emit staleness notice if git reports commits since the db was written.
 /// Reads the indexed root from store meta; resolves the db path for mtime.
 fn maybe_print_staleness(store: &dyn wicked_estate_store::GraphStoreMutExt, db: &str) {
+    // A multi-repo graph has one root per repo — check each, and name the label in the fix so the
+    // operator re-indexes THAT repo and not whichever one happened to be indexed last.
+    let repos = wicked_estate::repo_scope::registry(store);
+    if !repos.is_empty() {
+        for rec in repos {
+            if let Some(n) = wicked_estate::commits_behind(Path::new(&rec.root), db) {
+                if n > 0 {
+                    println!(
+                        "STALENESS: {n} commit(s) in '{label}' since last index — run \
+                         `wicked-estate index {root} --repo {label}` to refresh",
+                        label = rec.label,
+                        root = rec.root,
+                    );
+                }
+            }
+        }
+        return;
+    }
     let root_str = match store.meta_get_key("indexed_root") {
         Some(r) => r,
         None => return, // never indexed yet
@@ -85,6 +106,29 @@ fn maybe_print_staleness(store: &dyn wicked_estate_store::GraphStoreMutExt, db: 
 /// Annotations are stored separately and are preserved across re-indexes.
 fn maybe_warn_version_mismatch(store: &dyn wicked_estate_store::GraphStoreMutExt, db: &str) {
     let current = env!("CARGO_PKG_VERSION");
+    // A labelled repo records its binary version under `repo:<label>:indexed_version` and never
+    // the bare key, so reading only the bare one made this warning silently unreachable on every
+    // multi-repo graph — the graphs most likely to hold rows from a stale binary, since each repo
+    // is re-indexed on its own schedule. Warn per repo, and name the label in the fix.
+    let repos = wicked_estate::repo_scope::registry(store);
+    if !repos.is_empty() {
+        for rec in repos {
+            let key = wicked_estate::repo_scope::meta_key(Some(&rec.label), "indexed_version");
+            let Some(indexed) = store.meta_get_key(&key) else {
+                continue;
+            };
+            if indexed != current {
+                eprintln!(
+                    "VERSION MISMATCH: '{label}' in {db} was indexed with v{indexed}, current \
+                     binary is v{current}. Re-index to apply extraction fixes: \
+                     `wicked-estate index {root} --repo {label}` (your annotations are preserved).",
+                    label = rec.label,
+                    root = rec.root,
+                );
+            }
+        }
+        return;
+    }
     let indexed = match store.meta_get_key("indexed_version") {
         Some(v) => v,
         None => return, // pre-version database — no key stored yet
@@ -628,6 +672,8 @@ fn main() -> Result<()> {
     let mut embeddings = false;
     // --force: bypass incremental digest skip; re-extract all files even if unchanged.
     let mut force_reindex = false;
+    // --repo <name>: index into a MULTI-REPO graph under this label. None = single-repo mode.
+    let mut repo_label: Option<String> = None;
     // Semantic-annotation flags for the `semantics` command (requirement↔functionality linking).
     let mut sem_description: Option<String> = None;
     let mut sem_requirement: Option<String> = None;
@@ -718,6 +764,50 @@ fn main() -> Result<()> {
             }
             "--force" => {
                 force_reindex = true;
+            }
+            // `--repo <name>` names the repo this run is indexing, so several repos can share
+            // one db. Noun-shaped like the CLI's other value flags (`--db`, `--file`,
+            // `--symbol`), and it is the word that shows up in `stats`, in the guard's errors,
+            // and as the path prefix on every row. `--as` is accepted as an alias.
+            // A missing value is a HARD error here, unlike the other value flags. Every other one
+            // degrades to a visible default; this one degrades to "index un-labelled", which is a
+            // different write to the graph than the caller asked for and looks like success.
+            // `--repo --force` fell into the same hole twice: `--force` became the label AND was
+            // dropped as a flag.
+            "--repo" | "--as" => match it.next() {
+                // Validate HERE, not only deep in `index_path_as` (Copilot on #117). The `=` arm
+                // below already does, and an argument error that names the argument is this CLI's
+                // convention — `--repo a/b` reporting only a bad label, with no mention of the
+                // flag that carried it, is the asymmetry that fix introduced.
+                Some(v) if !v.starts_with('-') => {
+                    if let Err(e) = wicked_estate::repo_scope::validate_label(v) {
+                        anyhow::bail!("{a} {v}: {e}");
+                    }
+                    repo_label = Some(v.clone());
+                }
+                Some(v) => anyhow::bail!(
+                    "{a} needs a repo name, got the flag `{v}` — write `{a} <name> {v}`"
+                ),
+                None => anyhow::bail!("{a} needs a repo name (e.g. `{a} ledger`)"),
+            },
+            // `--repo=<name>` is accepted too. Before this arm existed the whole argument fell
+            // through the match and was SILENTLY DROPPED, so `--repo=x` indexed the repo
+            // UN-LABELLED while reporting success — the operator ends up with a graph in a
+            // different shape than the one they asked for, and finds out later when the guard
+            // refuses something confusing. Same failure family as `--repo --force`.
+            _ if a.starts_with("--repo=") || a.starts_with("--as=") => {
+                let v = a.split_once('=').map(|(_, v)| v).unwrap_or_default();
+                if v.is_empty() {
+                    anyhow::bail!("{a} needs a repo name (e.g. `--repo=ledger`)");
+                }
+                // Validate at PARSE time, not just deep in the index call, so the message can
+                // name the argument the caller actually typed. `validate_label` alone reports the
+                // bad label but not which flag carried it, and the CLI's convention (see
+                // tests/repo_flag_cli.rs) is that an argument error names the argument.
+                if let Err(e) = wicked_estate::repo_scope::validate_label(v) {
+                    anyhow::bail!("{a}: {e}");
+                }
+                repo_label = Some(v.to_string());
             }
             "--description" => {
                 if let Some(v) = it.next() {
@@ -906,10 +996,16 @@ fn main() -> Result<()> {
                 );
             }
             ensure_db_dir(&db)?;
-            // --force: invalidate all stored digests so index_path treats every file as changed.
+            let as_repo = repo_label.as_deref();
+            // --force: invalidate the stored digests so index_path treats every file as changed —
+            // but only THIS repo's, or forcing one repo would silently make every other repo in a
+            // co-located graph re-extract from scratch on its next run.
             if force_reindex && db != ":memory:" {
                 let mut concrete = SqliteStore::open(&db).map_err(to_any)?;
-                concrete.clear_file_digests().map_err(to_any)?;
+                let scope = as_repo.map(wicked_estate::repo_scope::prefix);
+                concrete
+                    .clear_file_digests_under(scope.as_deref())
+                    .map_err(to_any)?;
             }
             let stats = if history && db != ":memory:" {
                 // Caller explicitly opted in to history — open the concrete store to call
@@ -918,16 +1014,26 @@ fn main() -> Result<()> {
                 let mut concrete = SqliteStore::open(&db).map_err(to_any)?;
                 concrete.set_history_enabled(true).map_err(to_any)?;
                 let mut store: Box<dyn GraphStoreMutExt> = Box::new(concrete);
-                wicked_estate::index_path(store.as_mut(), Path::new(path)).map_err(to_any)?
+                wicked_estate::index_path_as(store.as_mut(), Path::new(path), as_repo)
+                    .map_err(to_any)?
             } else {
                 // Default: history OFF (no-bloat-by-default).
                 let mut store = open_store_ext(&db).map_err(to_any)?;
-                wicked_estate::index_path(store.as_mut(), Path::new(path)).map_err(to_any)?
+                wicked_estate::index_path_as(store.as_mut(), Path::new(path), as_repo)
+                    .map_err(to_any)?
             };
-            println!(
-                "indexed {path} ({db}) → {} nodes, {} edges, {} files",
-                stats.node_count, stats.edge_count, stats.file_count
-            );
+            // The counts are the WHOLE graph's, which in a multi-repo db is every repo — say so
+            // rather than let a labelled run read as if it had produced all of them itself.
+            match as_repo {
+                Some(label) => println!(
+                    "indexed {path} as '{label}' ({db}) → graph now has {} nodes, {} edges, {} files",
+                    stats.node_count, stats.edge_count, stats.file_count
+                ),
+                None => println!(
+                    "indexed {path} ({db}) → {} nodes, {} edges, {} files",
+                    stats.node_count, stats.edge_count, stats.file_count
+                ),
+            }
             for (k, v) in &stats.edges_by_kind {
                 println!("  {k} = {v}");
             }
@@ -938,6 +1044,7 @@ fn main() -> Result<()> {
                 serde_json::json!({
                     "path": path,
                     "db": db,
+                    "repo": as_repo,
                     "nodes": stats.node_count,
                     "edges": stats.edge_count,
                     "files": stats.file_count,
@@ -958,12 +1065,41 @@ fn main() -> Result<()> {
             let root_str = positional.first().map(String::as_str).unwrap_or(".");
             let root = Path::new(root_str);
             ensure_db_dir(&db)?;
+            let as_repo = repo_label.as_deref();
+            // SCIP paths are repo-relative; a labelled graph's nodes are not. Correlating the two
+            // without knowing which repo this index belongs to matches nothing and reports "0
+            // precise edges" — refuse instead of ingesting silence.
+            {
+                let probe = open_store_ext(&db).map_err(to_any)?;
+                let known = wicked_estate::repo_scope::labels(probe.as_ref());
+                if !known.is_empty() {
+                    match as_repo {
+                        None => anyhow::bail!(
+                            "REPO COLLISION: {db} holds {n} labelled repo(s) [{list}] — say which \
+                             one this SCIP index belongs to: `wicked-estate scip {root_str} --db \
+                             {db} --repo <name>`",
+                            n = known.len(),
+                            list = known.join(", "),
+                        ),
+                        Some(l) if !known.iter().any(|k| k == l) => anyhow::bail!(
+                            "unknown repo label '{l}' in {db} — this graph holds [{list}]",
+                            list = known.join(", "),
+                        ),
+                        Some(_) => {}
+                    }
+                } else if let Some(l) = as_repo {
+                    anyhow::bail!(
+                        "--repo {l} was given but {db} is a single-repo graph (no labelled repos) \
+                         — drop the flag, or index the repos with `--repo` first"
+                    );
+                }
+            }
 
             if let Some(explicit) = scip_file.as_deref() {
                 let scip_path = Path::new(explicit);
                 let mut store = open_store_ext(&db).map_err(to_any)?;
-                let count =
-                    wicked_estate::ingest_scip(store.as_mut(), root, scip_path).map_err(to_any)?;
+                let count = wicked_estate::ingest_scip_as(store.as_mut(), root, scip_path, as_repo)
+                    .map_err(to_any)?;
                 println!(
                     "scip (explicit): ingested {count} precise edge(s) from {explicit} into {db}"
                 );
@@ -996,8 +1132,9 @@ fn main() -> Result<()> {
                 if !result.path.exists() {
                     continue;
                 }
-                let count = wicked_estate::ingest_scip(store.as_mut(), root, &result.path)
-                    .map_err(to_any)?;
+                let count =
+                    wicked_estate::ingest_scip_as(store.as_mut(), root, &result.path, as_repo)
+                        .map_err(to_any)?;
                 let path_display = result.path.display();
                 println!(
                     "scip ({}): ingested {count} precise edge(s) from {path_display} into {db}",
@@ -1258,6 +1395,30 @@ fn main() -> Result<()> {
                     "  hint: db is {:.0}MB — run `wicked-estate compact` to reclaim space",
                     db_mb
                 );
+            }
+            // Multi-repo graph: one provenance block per repo. `repo_info()` is None here by
+            // construction — a labelled index never writes the singular repo_* keys — so this is
+            // the only place a co-located graph's provenance is reported.
+            let repos = wicked_estate::repo_scope::registry(store.as_ref());
+            if !repos.is_empty() {
+                let indexed = store.indexed_files().unwrap_or_default();
+                println!("repos ({}):", repos.len());
+                for rec in &repos {
+                    let prefix = wicked_estate::repo_scope::prefix(&rec.label);
+                    let files = indexed.iter().filter(|f| f.starts_with(&prefix)).count();
+                    print!("  {label}  files={files}", label = rec.label);
+                    if let Some(c) = &rec.info.commit {
+                        print!("  commit={}", &c[..8.min(c.len())]);
+                    }
+                    if let Some(b) = &rec.info.branch {
+                        print!("  branch={b}");
+                    }
+                    if rec.info.dirty {
+                        print!("  dirty");
+                    }
+                    println!("  root={}", rec.root);
+                }
+                println!("  (co-located, not linked: edges do not resolve across repos)");
             }
             // W7: print git provenance if available.
             if let Ok(Some(info)) = store.repo_info() {
@@ -1878,7 +2039,9 @@ fn main() -> Result<()> {
                 open_store_ext(&db).map_err(to_any)?
             };
 
-            let stats = wicked_estate::index_path(store.as_mut(), watch_path).map_err(to_any)?;
+            let as_repo = repo_label.as_deref();
+            let stats = wicked_estate::index_path_as(store.as_mut(), watch_path, as_repo)
+                .map_err(to_any)?;
             println!(
                 "watch: initial index of {path_str} → {} nodes, {} edges, {} files",
                 stats.node_count, stats.edge_count, stats.file_count
@@ -1909,7 +2072,8 @@ fn main() -> Result<()> {
                             watch_coalesce::emits_for_batch(events.iter().map(|ev| &ev.kind));
                         let raw_event_count = events.len();
                         for _ in 0..emits {
-                            match wicked_estate::index_path(store.as_mut(), watch_path) {
+                            match wicked_estate::index_path_as(store.as_mut(), watch_path, as_repo)
+                            {
                                 Ok(s) => {
                                     println!(
                                         "watch: re-indexed → {} nodes, {} edges, {} files",
@@ -1924,6 +2088,10 @@ fn main() -> Result<()> {
                                         serde_json::json!({
                                             "path": path_str,
                                             "db": db,
+                                            // Same field the `index` command emits. Without it a
+                                            // subscriber to a co-located graph cannot tell WHICH
+                                            // repo a watch re-index touched.
+                                            "repo": as_repo,
                                             "nodes": s.node_count,
                                             "edges": s.edge_count,
                                             "files": s.file_count,
@@ -2515,15 +2683,11 @@ fn main() -> Result<()> {
                 // Resolve paths against the stored index root so --content works
                 // regardless of CWD (the indexed path is root-relative, not CWD-relative).
                 let concrete = SqliteStore::open(&db).map_err(to_any)?;
-                let index_root: Option<std::path::PathBuf> = concrete
-                    .meta_get("indexed_root")
-                    .map_err(to_any)?
-                    .map(std::path::PathBuf::from);
                 for node in &hits {
                     let rel = &node.location.file;
-                    let resolved = index_root
-                        .as_deref()
-                        .map(|r| r.join(rel))
+                    // In a multi-repo graph the path carries a `<label>/` prefix and belongs to
+                    // that repo's root, not to `indexed_root`.
+                    let resolved = wicked_estate::repo_scope::resolve_indexed_path(&concrete, rel)
                         .unwrap_or_else(|| std::path::PathBuf::from(rel));
                     let start = node.location.span.start_byte as usize;
                     let end = node.location.span.end_byte as usize;
@@ -3284,8 +3448,18 @@ fn main() -> Result<()> {
         _ => {
             println!("wicked-estate {} — usage:", env!("CARGO_PKG_VERSION"));
             println!(
-                "  wicked-estate index <path>         [--db <file|:memory:>] [--history] [--embeddings] [--force]"
+                "  wicked-estate index <path>         [--db <file|:memory:>] [--repo <name>] [--history] [--embeddings] [--force]"
             );
+            println!(
+                "    --repo <name> co-locate MANY repos in ONE db (alias --as): namespaces this repo's"
+            );
+            println!(
+                "                  paths as <name>/… so nothing collides, and records its provenance"
+            );
+            println!(
+                "                  separately. Omit for a single-repo db (unchanged behaviour)."
+            );
+            println!("                  Co-location only — edges do NOT resolve across repos.");
             println!("    --history     opt-in to edge-history archival (default: off)");
             println!(
                 "    --embeddings  compute and store embedding vectors after indexing (default: off)"
@@ -3293,7 +3467,9 @@ fn main() -> Result<()> {
             println!(
                 "    --force       bypass incremental digest skip; re-extract all files (use after a binary upgrade)"
             );
-            println!("  wicked-estate scip  <root>         [--db ...] [--scip-file <path>]");
+            println!(
+                "  wicked-estate scip  <root>         [--db ...] [--repo <name>] [--scip-file <path>]"
+            );
             println!(
                 "    Ingest a SCIP index (precise call resolution). Requires `wicked-estate index`"
             );
@@ -3339,7 +3515,7 @@ fn main() -> Result<()> {
                 "    (or --dbs a.db,b.db)  # federated search + blast-radius across repos (W12)"
             );
             println!("  wicked-estate compact              [--db <file>]  # prune cruft + VACUUM");
-            println!("  wicked-estate watch <path>         [--db ...] [--history]");
+            println!("  wicked-estate watch <path>         [--db ...] [--repo <name>] [--history]");
             println!(
                 "    Initial full index then reactive re-index on file changes (Ctrl-C to stop)."
             );

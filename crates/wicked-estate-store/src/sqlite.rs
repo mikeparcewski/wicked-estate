@@ -676,9 +676,37 @@ impl SqliteStore {
     /// Invalidate all stored file digests, causing the next `index_path` call to
     /// treat every file as changed and re-extract it. Used by `--force`.
     pub fn clear_file_digests(&mut self) -> Result<()> {
-        self.conn
-            .execute("UPDATE files SET digest = ''", [])
-            .map_err(st)?;
+        self.clear_file_digests_under(None)
+    }
+
+    /// [`Self::clear_file_digests`] restricted to one repo's path prefix (`"ledger/"`).
+    ///
+    /// `--force` on ONE repo of a multi-repo graph must not invalidate the others: they would each
+    /// re-extract every file on their next run, work the caller did not ask for and cannot see
+    /// they triggered. `None` clears the whole table, the single-repo behaviour.
+    pub fn clear_file_digests_under(&mut self, prefix: Option<&str>) -> Result<()> {
+        match prefix {
+            // `substr(path, 1, n) = prefix`, NOT `LIKE` (Copilot on #117). SQLite's LIKE is
+            // case-INSENSITIVE for ASCII by default, so `--force --repo alpha` also cleared
+            // `Alpha/`'s digests — two DIFFERENT repos, since the guard rightly allows
+            // case-variant labels for distinct repos. Forcing one repo would then silently
+            // re-extract the other's whole tree: work the caller did not ask for and cannot see
+            // they triggered, which is the very thing this function exists to prevent.
+            //
+            // An exact prefix compare is case-SENSITIVE and needs no wildcard escaping at all —
+            // `%` and `_` are literal here, so the previous ESCAPE dance is gone with it.
+            Some(p) => self
+                .conn
+                .execute(
+                    "UPDATE files SET digest = '' WHERE substr(path, 1, ?2) = ?1",
+                    params![p, i64::try_from(p.chars().count()).unwrap_or(i64::MAX)],
+                )
+                .map_err(st)?,
+            None => self
+                .conn
+                .execute("UPDATE files SET digest = ''", [])
+                .map_err(st)?,
+        };
         Ok(())
     }
 
@@ -3408,6 +3436,81 @@ mod tests {
         let after = store.changes_since(all[1].seq).unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].target, "c.rs");
+    }
+
+    /// `--force` on one repo of a co-located graph must invalidate only that repo's digests.
+    /// Clearing them all makes every OTHER repo re-extract its whole tree on its next run — work
+    /// nobody asked for and nobody can see was triggered.
+    ///
+    /// `_` is a legal label character, and it was ALSO LIKE's single-character wildcard back when
+    /// this matched with LIKE — `--repo a_b --force` then also cleared `axb/`. The match is now an
+    /// exact `substr(path, 1, n) = prefix`, so `_` is a literal and this case can no longer arise;
+    /// the assertions stay as the regression pin against anything reintroducing pattern matching.
+    #[test]
+    fn clearing_digests_is_scoped_to_one_repo_prefix() {
+        let mut store = open();
+        for p in ["a_b/x.rs", "axb/x.rs", "ab/x.rs", "a_b/deep/y.rs"] {
+            store.set_file_digest(p, "d0").unwrap();
+        }
+        store.clear_file_digests_under(Some("a_b/")).unwrap();
+
+        fn digest(s: &SqliteStore, p: &str) -> String {
+            s.file_digest(p).unwrap().unwrap()
+        }
+        assert_eq!(
+            digest(&store, "a_b/x.rs"),
+            "",
+            "the named repo must be invalidated"
+        );
+        assert_eq!(digest(&store, "a_b/deep/y.rs"), "", "…all the way down");
+        assert_eq!(
+            digest(&store, "axb/x.rs"),
+            "d0",
+            "`_` was treated as a LIKE wildcard and swept a different repo"
+        );
+        assert_eq!(
+            digest(&store, "ab/x.rs"),
+            "d0",
+            "a shorter label is not a prefix"
+        );
+
+        // None is the single-repo behaviour: everything.
+        store.clear_file_digests_under(None).unwrap();
+        assert_eq!(digest(&store, "axb/x.rs"), "");
+    }
+
+    /// Two DIFFERENT repos may carry labels that differ only by CASE — the collision guard
+    /// allows it, because they genuinely are different repos. SQLite's `LIKE` is
+    /// case-INSENSITIVE for ASCII, so scoping with it made `--force --repo alpha` also clear
+    /// `Alpha/`, silently re-extracting the other repo's whole tree (Copilot on #117).
+    ///
+    /// Reproduced before the fix: clearing `alpha/` left BOTH paths empty.
+    #[test]
+    fn clearing_digests_is_case_sensitive_across_repo_labels() {
+        let mut store = open();
+        for p in ["alpha/src/a.ts", "Alpha/src/a.ts", "ALPHA/src/a.ts"] {
+            store.set_file_digest(p, "d0").unwrap();
+        }
+        store.clear_file_digests_under(Some("alpha/")).unwrap();
+
+        fn digest(s: &SqliteStore, p: &str) -> String {
+            s.file_digest(p).unwrap().unwrap()
+        }
+        assert_eq!(
+            digest(&store, "alpha/src/a.ts"),
+            "",
+            "the named repo must be invalidated"
+        );
+        assert_eq!(
+            digest(&store, "Alpha/src/a.ts"),
+            "d0",
+            "a case-variant label is a DIFFERENT repo and must be untouched"
+        );
+        assert_eq!(
+            digest(&store, "ALPHA/src/a.ts"),
+            "d0",
+            "…including an all-caps variant"
+        );
     }
 
     // ── Wave 7: repo_info round-trip ─────────────────────────────────────────

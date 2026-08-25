@@ -98,6 +98,10 @@ cargo install wicked-estate-mcp --features fastembed   # contextual ONNX/BGE, hi
 # Index a repo into a local graph
 wicked-estate index ./my-project --db graph.db
 
+# Several repos in ONE graph — label each one (co-location, not cross-repo linking)
+wicked-estate index ../wicked-ledger --db graph.db --repo ledger
+wicked-estate index ../wicked-vault  --db graph.db --repo vault
+
 # Who/what depends on a symbol (blast radius = transitive dependents)
 wicked-estate blast-radius MyClass --db graph.db
 

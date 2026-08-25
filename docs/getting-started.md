@@ -229,6 +229,76 @@ wicked-estate index . --db .wicked-estate/graph.db
 The DB is written transactionally; a kill -9 mid-index leaves the graph in the last committed
 state (no corruption).
 
+### Many repos in one graph — `--repo <name>`
+
+A graph holds one repo by default, and it holds it by RELATIVE path: `src/index.ts`, with that same
+relative path embedded in every SymbolId it mints. Two repos that share a path therefore mint the
+same ids, so indexing a second repo into the same `--db` used to overwrite the first silently.
+
+Label each repo and they co-exist:
+
+```bash
+wicked-estate index ../wicked-ledger --db estate.db --repo ledger
+wicked-estate index ../wicked-vault  --db estate.db --repo vault
+
+wicked-estate query atomicWriteJson --db estate.db
+#   Function atomicWriteJson (ledger/lib/domain-store.mjs:130)
+#   Function atomicWriteJson (vault/src/vault/vault.mjs:88)
+
+wicked-estate stats --db estate.db
+# repos (2):
+#   ledger  files=25  commit=d848cb8e  branch=main  root=…/wicked-ledger
+#   vault   files=42  commit=b9d50e75  branch=main  root=…/wicked-vault
+```
+
+Every path the labelled run stores is namespaced `<name>/…`, which is what keeps `files.path`,
+`nodes.file` and the path-embedded SymbolIds unique per repo. Each repo keeps its own git
+provenance (`repo:<name>:commit|branch|remote|dirty`), and re-indexing one repo never touches
+another's rows. `--as` is accepted as an alias for `--repo`.
+
+**Co-location, not linkage.** Edges do NOT resolve across repos: each repo resolves against its own
+nodes only, exactly as if it had its own db. A call from `studio` into a symbol published by
+`wicked-crew-api-types` stays unresolved — cross-repo edge resolution needs a package-resolver tier
+and is separate work.
+
+**The graph refuses to mix silently.** A second un-labelled index of a different repo, an
+un-labelled index into a labelled graph, a label already bound to another repo, or the same repo
+under a second label are all refused before anything is written:
+
+```
+$ wicked-estate index ../wicked-vault --db estate.db
+Error: invalid argument: REPO COLLISION: this graph already holds …/wicked-ledger, and
+…/wicked-vault shares relative paths with it — indexing it un-labelled would overwrite those rows
+and delete the rest.
+fix: give each repo a label — index the second as `wicked-estate index …/wicked-vault --repo <name>`,
+and re-index the first the same way into a fresh --db (a graph cannot mix labelled and un-labelled
+repos).
+```
+
+Repo identity is the git `origin` remote **plus the indexed root's position inside the work tree**
+when both sides have one — so a moved or re-cloned checkout is still the same repo, while two
+packages of one monorepo (`mono/pkgA` and `mono/pkgB`, one `origin` between them, both with
+`src/index.ts`) are two different trees and each needs its own `--repo` label. Outside git, the
+canonical root path is the identity.
+
+**One known sharp edge (pre-existing, now visible across repos).** Import targets that never got
+resolved to a definition are identified by the module *specifier*, not by a path — `node:fs` and an
+npm package, but also a plain relative `./index` — so the id carries nothing to namespace. Repos
+whose files import the same specifier share ONE node row, and that row records ONE owning file.
+Deleting that file removes the shared node, and the other repos' import edges to it dangle until
+those repos are re-indexed. This is the same wart a single repo already has between two files that
+import the same specifier; co-location widens its reach from files to repos. It costs import edges,
+never symbols: per-repo node counts in a co-located graph are a few lower than the same repo
+indexed alone (the shared specifier nodes are counted once, under whichever repo wrote them last).
+
+`wicked-estate scip` takes the same `--repo <name>` (its documents are repo-relative too, so
+against a multi-repo graph it refuses rather than correlate nothing). Read commands need no flag —
+`query`, `blast-radius`, `source`, `rank`, `stats` all work across the whole graph, and every
+result names its repo in the path.
+
+Omit `--repo` and nothing changes: single-repo graphs, and every command that reads them, behave
+exactly as before.
+
 ---
 
 ## 10. MCP server — connect an LLM agent

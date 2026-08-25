@@ -23,6 +23,18 @@
 //! (an O(fanout) pass over the import graph). That is future work — see the design notes.
 //! The current approach is correct for the changed files' own edges; only the cross-file
 //! "unchanged imports changed" case is deferred.
+//!
+//! ## Many repos, one graph
+//!
+//! [`index_path_as`] takes an optional repo label. With one, every path this run stores is
+//! namespaced (`ledger/src/lib.rs`) — including the paths embedded in SymbolIds — so several repos
+//! co-exist in one db without colliding, each with its own provenance and its own delete-sweep
+//! scope. Without one, nothing is prefixed and the run is byte-identical to before. Either way the
+//! [`repo_scope::guard`] refuses, before writing anything, an index that would overwrite another
+//! repo's rows. Co-location only: **edges do not resolve across repos** — resolution is scoped to
+//! the indexed repo's own nodes. See [`repo_scope`].
+
+pub mod repo_scope;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -238,10 +250,17 @@ struct InMemoryIndex {
 }
 
 impl InMemoryIndex {
-    fn build(store: &dyn GraphRead) -> Result<Self> {
+    /// `scope` restricts the index to one repo's nodes (path prefix `<label>/`). A labelled index
+    /// resolves against its OWN repo only — same candidate set it would see in a private db, so
+    /// co-locating repos neither creates cross-repo edges nor makes a name ambiguous that was
+    /// unique before. `None` = every node, the single-repo behaviour.
+    fn build(store: &dyn GraphRead, scope: Option<&str>) -> Result<Self> {
         let mut by_name: HashMap<String, Vec<Node>> = HashMap::new();
         let mut by_id = HashMap::new();
         for n in store.all_nodes()? {
+            if scope.is_some_and(|p| !n.location.file.starts_with(p)) {
+                continue;
+            }
             by_name.entry(n.name.clone()).or_default().push(n.clone());
             by_id.insert(n.symbol.clone(), n);
         }
@@ -450,58 +469,36 @@ pub fn collect_repo_info(path: &Path) -> RepoInfo {
 /// W11.3: bumps the store version at the start (invalidating stale cache) and populates the
 ///   `pagerank.top` cache entry at the end with the top-N PageRank scores.
 pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<GraphStats> {
+    index_path_as(store, root, None)
+}
+
+/// [`index_path`] with an optional repo label — the multi-repo entry point.
+///
+/// `repo = Some("ledger")` namespaces every path this run stores as `ledger/<rel>`, which is what
+/// makes `files.path`, `nodes.file` and the path-embedded SymbolIds unique per repo; it scopes the
+/// delete-sweep and the resolver's candidate set to that repo, and records provenance under
+/// `repo:ledger:*` instead of the singular `repo_*` keys. `repo = None` is the single-repo path
+/// and behaves exactly as it always has.
+///
+/// Refuses (before any write) when the run would overwrite another repo's rows — see
+/// [`repo_scope::guard`].
+pub fn index_path_as(
+    store: &mut dyn GraphStoreMutExt,
+    root: &Path,
+    repo: Option<&str>,
+) -> Result<GraphStats> {
     let t = std::time::Instant::now();
 
-    // W11.3: bump the graph version so any prior cache entries become stale.
-    store.version_bump();
-
-    // W7.4: persist the indexed root so staleness checks can find the git repo.
-    store.meta_set_key("indexed_root", &root.to_string_lossy());
-    // Read the previously-stored binary version BEFORE overwriting it so we can detect a
-    // version upgrade and force full re-extraction when the binary has changed.
-    let prev_version = store.meta_get_key("indexed_version");
-    let mut force_full = prev_version
-        .as_deref()
-        .is_some_and(|v| v != env!("CARGO_PKG_VERSION"));
-    store.meta_set_key("indexed_version", env!("CARGO_PKG_VERSION"));
-    if force_full {
-        eprintln!(
-            "VERSION CHANGE detected (v{prev} → v{cur}): forcing full re-extraction",
-            prev = prev_version.as_deref().unwrap_or("?"),
-            cur = env!("CARGO_PKG_VERSION"),
-        );
+    if let Some(label) = repo {
+        repo_scope::validate_label(label)?;
     }
+    // Path prefix carried by every row this run writes. Also the delete-sweep's scope.
+    let scope = repo.map(repo_scope::prefix);
 
-    // Drop-in extra-edge rules (`.wicked-estate-extractors/*.toml`, extractor SDK Part 2).
-    // A changed rule set forces a full re-extract: extra edges live in per-file extractions, so
-    // only re-extracting every file purges edges the OLD rules injected into unchanged files.
-    let (extra, extra_digest) = load_extra_edge_rules(root);
-    let prev_extra = store.meta_get_key("extra_rules_digest").unwrap_or_default();
-    if prev_extra != extra_digest {
-        if prev_version.is_some() {
-            eprintln!("EXTRA-EDGE rules changed: forcing full re-extraction");
-        }
-        force_full = true;
-    }
-    store.meta_set_key("extra_rules_digest", &extra_digest);
-
-    // W7: capture git provenance once per index run and persist it to the store.
-    // Non-fatal: git absent / not a repo → all-None RepoInfo, which is a valid default.
+    // W7: capture git provenance once per index run. Non-fatal: git absent / not a repo →
+    // all-None RepoInfo, which is a valid default. Collected BEFORE the guard runs — the remote
+    // it carries is the evidence the guard decides repo identity on.
     let repo_info = collect_repo_info(root);
-    let _ = store.set_repo_info(&repo_info);
-
-    let mut files = collect_source_files(root);
-
-    // Admit extra-edge rule targets the main walk cannot see (hidden dot-dir files). Rule-matched
-    // files that are ALSO ordinary source files stay deduped — they get both passes below.
-    if let Some(x) = &extra {
-        let mut known: HashSet<PathBuf> = files.iter().cloned().collect();
-        for p in collect_extra_rule_files(root, x) {
-            if known.insert(p.clone()) {
-                files.push(p);
-            }
-        }
-    }
 
     // ── Derive the set of previously-indexed file paths ─────────────────────────────────────
     // Every path a prior `index_path` recorded through a file-writing call — `set_file_digest` or
@@ -527,11 +524,86 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
     // not create impossible rather than merely unlikely. Nothing about the deleted-file behaviour
     // changes: a real source file that vanished still has its digest row from last run and is
     // still swept.
-    let previously_indexed: HashSet<String> = store
+    let all_indexed: HashSet<String> = store
         .indexed_files()?
         .into_iter()
         .filter(|f| !f.is_empty())
         .collect();
+
+    // THE GUARD. Read-only, and it runs before the first mutation below: a refusal must leave the
+    // graph exactly as it was.
+    repo_scope::guard(store, &all_indexed, repo, root, &repo_info)?;
+
+    // A labelled run owns only its own prefix. Un-prefixed: the whole set, as before.
+    let previously_indexed: HashSet<String> = match &scope {
+        Some(p) => all_indexed
+            .into_iter()
+            .filter(|f| f.starts_with(p.as_str()))
+            .collect(),
+        None => all_indexed,
+    };
+
+    // W11.3: bump the graph version so any prior cache entries become stale.
+    store.version_bump();
+
+    // W7.4: persist the indexed root so staleness checks can find the git repo. In a multi-repo
+    // graph this is the LAST root indexed; each repo's own root is in its `repo:<label>:root`.
+    store.meta_set_key("indexed_root", &root.to_string_lossy());
+    // Read the previously-stored binary version BEFORE overwriting it so we can detect a
+    // version upgrade and force full re-extraction when the binary has changed. Per repo: an
+    // upgrade must force a re-extract of EACH repo the next time it is indexed, not just the
+    // first one to run under the new binary.
+    let version_key = repo_scope::meta_key(repo, "indexed_version");
+    let prev_version = store.meta_get_key(&version_key);
+    let mut force_full = prev_version
+        .as_deref()
+        .is_some_and(|v| v != env!("CARGO_PKG_VERSION"));
+    store.meta_set_key(&version_key, env!("CARGO_PKG_VERSION"));
+    if force_full {
+        eprintln!(
+            "VERSION CHANGE detected (v{prev} → v{cur}): forcing full re-extraction",
+            prev = prev_version.as_deref().unwrap_or("?"),
+            cur = env!("CARGO_PKG_VERSION"),
+        );
+    }
+
+    // Drop-in extra-edge rules (`.wicked-estate-extractors/*.toml`, extractor SDK Part 2).
+    // A changed rule set forces a full re-extract: extra edges live in per-file extractions, so
+    // only re-extracting every file purges edges the OLD rules injected into unchanged files.
+    // The rules are read from THIS root, so the digest is per repo too.
+    let (extra, extra_digest) = load_extra_edge_rules(root);
+    let digest_key = repo_scope::meta_key(repo, "extra_rules_digest");
+    let prev_extra = store.meta_get_key(&digest_key).unwrap_or_default();
+    if prev_extra != extra_digest {
+        if prev_version.is_some() {
+            eprintln!("EXTRA-EDGE rules changed: forcing full re-extraction");
+        }
+        force_full = true;
+    }
+    store.meta_set_key(&digest_key, &extra_digest);
+
+    // W7: persist the git provenance collected above. A labelled run writes `repo:<label>:*` and
+    // leaves the singular `repo_*` keys untouched — that is what stops the second repo indexed
+    // into a graph from clobbering the first's commit/branch/remote/dirty.
+    match repo {
+        Some(label) => repo_scope::write_record(store, label, root, &repo_info),
+        None => {
+            let _ = store.set_repo_info(&repo_info);
+        }
+    }
+
+    let mut files = collect_source_files(root);
+
+    // Admit extra-edge rule targets the main walk cannot see (hidden dot-dir files). Rule-matched
+    // files that are ALSO ordinary source files stay deduped — they get both passes below.
+    if let Some(x) = &extra {
+        let mut known: HashSet<PathBuf> = files.iter().cloned().collect();
+        for p in collect_extra_rule_files(root, x) {
+            if known.insert(p.clone()) {
+                files.push(p);
+            }
+        }
+    }
 
     // Build per-extension extractor cache so each language's Query is compiled ONCE.
     let mut extractor_cache: HashMap<String, Option<TreeSitterExtractor>> = HashMap::new();
@@ -555,7 +627,12 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
     // Parallelise the read+digest step across all files — I/O-bound, safe to fan out.
     struct FileWork {
         abs: PathBuf,
+        /// Storage identity: repo-relative, and `<label>/`-prefixed under a repo label. Every
+        /// path-derived id (file row, `nodes.file`, the path inside a SymbolId) comes from this.
         rel: String,
+        /// The same path WITHOUT the label — what drop-in extra-edge rules glob against, so a
+        /// rule written `src/**/*.js` keeps matching once the repo is labelled.
+        raw: String,
         bytes: Vec<u8>,
         digest: String,
     }
@@ -582,7 +659,10 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
         })
         .collect();
 
-    let current_rel_paths: HashSet<String> = supported.iter().map(|(_, r)| r.clone()).collect();
+    let current_rel_paths: HashSet<String> = supported
+        .iter()
+        .map(|(_, r)| repo_scope::namespaced(repo, r))
+        .collect();
 
     let work: Vec<FileWork> = supported
         .into_par_iter()
@@ -591,7 +671,8 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
             let digest = file_digest(&bytes);
             Some(FileWork {
                 abs,
-                rel: rel_path,
+                rel: repo_scope::namespaced(repo, &rel_path),
+                raw: rel_path,
                 bytes,
                 digest,
             })
@@ -659,7 +740,7 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
                 .unwrap_or("")
                 .to_ascii_lowercase();
             let text = String::from_utf8(fw.bytes.clone()).ok()?;
-            let extra_rules = extra.as_ref().filter(|x| x.matches_path(&fw.rel));
+            let extra_rules = extra.as_ref().filter(|x| x.matches_path(&fw.raw));
 
             // Skip minified or huge files before any parsing — they generate noise, not signal.
             // A file explicitly targeted by an extra-edge rule still gets the (regex-only) extra
@@ -680,12 +761,17 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
 
             // ── Extra-edge pass: drop-in domain rules (.wicked-estate-extractors/) ────────────
             if let Some(x) = extra_rules {
+                // Rules glob against the RAW repo-relative path; the ids they mint are then
+                // rewritten into the repo's namespace (no-op when un-labelled).
                 let sf = SourceFile {
-                    path: fw.rel.clone(),
+                    path: fw.raw.clone(),
                     language: Language::new("text"),
                     text: text.clone(),
                 };
-                let ee = x.extract_extra(&sf);
+                let mut ee = x.extract_extra(&sf);
+                if let Some(label) = repo {
+                    repo_scope::namespace_extra(&mut ee, label, &fw.rel);
+                }
                 // Injected edges hang off the file node — guarantee it exists even for files no
                 // language extractor claims (e.g. a hidden `.claude-plugin/archetypes.json`).
                 let file_symbol = Symbol::file(&fw.rel).id();
@@ -829,7 +915,9 @@ pub fn index_path(store: &mut dyn GraphStoreMutExt, root: &Path) -> Result<Graph
     // importers of changed files (O(fanout) pass over the import graph) — see the design notes
     let (resolved, estate) = {
         let reader: &dyn GraphRead = &*store;
-        let index = InMemoryIndex::build(reader)?;
+        // Scoped to this repo: a labelled run resolves against its own nodes only, so a name that
+        // is unique inside the repo stays unique no matter how many repos share the graph.
+        let index = InMemoryIndex::build(reader, scope.as_deref())?;
         // InfraResolver handles IaC/tfstate resource refs; it does not interfere with code
         // resolvers (it only fires when raw_name maps exclusively to resource nodes).
         let resolvers: &[&dyn Resolver] = &[
@@ -1044,9 +1132,33 @@ pub fn blast_radius_by_name(store: &dyn GraphRead, name: &str, depth: u32) -> Re
 /// Running `ingest_scip` on an empty store produces 0 edges (no matching nodes → nothing to wire).
 pub fn ingest_scip(
     store: &mut dyn GraphStoreMutExt,
-    _root: &Path,
+    root: &Path,
     scip_path: &Path,
 ) -> Result<usize> {
+    ingest_scip_as(store, root, scip_path, None)
+}
+
+/// [`ingest_scip`] against one repo of a multi-repo graph.
+///
+/// SCIP documents carry REPO-relative paths, while a labelled repo's nodes carry `<label>/…`. The
+/// correlation is done on the repo-relative form (the label is stripped from a scratch copy of the
+/// nodes and re-applied to the resulting edge locations), so a `.scip` file produced by a plain
+/// `scip-typescript` run correlates without the indexer having to know about labels. Without this
+/// the correlation matches nothing and reports "0 precise edges" — a silent no-op.
+pub fn ingest_scip_as(
+    store: &mut dyn GraphStoreMutExt,
+    _root: &Path,
+    scip_path: &Path,
+    repo: Option<&str>,
+) -> Result<usize> {
+    // Validate here too, not only in `index_path_as` (Copilot on #117). `repo` becomes the
+    // `<label>/` prefix that is stripped from SCIP's relative paths and re-applied to the edge
+    // locations written back, so an unvalidated label — one containing `/` or `..` — writes
+    // nonsensical or forged locations. Label validation is the single thing that makes path
+    // forging unreachable; a second entry point that skips it is a hole in that guarantee.
+    if let Some(label) = repo {
+        repo_scope::validate_label(label)?;
+    }
     let bytes = std::fs::read(scip_path).map_err(|e| {
         wicked_estate_core::Error::Io(std::io::Error::other(format!(
             "scip: cannot read {:?}: {e}",
@@ -1054,8 +1166,23 @@ pub fn ingest_scip(
         )))
     })?;
 
-    let nodes = store.all_nodes()?;
-    let edges = wicked_estate_resolve::scip_edges(&bytes, &nodes)?;
+    let mut nodes = store.all_nodes()?;
+    let prefix = repo.map(repo_scope::prefix);
+    if let Some(p) = &prefix {
+        for n in &mut nodes {
+            if let Some(rest) = n.location.file.strip_prefix(p.as_str()) {
+                n.location.file = rest.to_string();
+            }
+        }
+    }
+    let mut edges = wicked_estate_resolve::scip_edges(&bytes, &nodes)?;
+    if let Some(p) = &prefix {
+        for e in &mut edges {
+            if let Some(loc) = &mut e.location {
+                loc.file = format!("{p}{}", loc.file);
+            }
+        }
+    }
     let count = edges.len();
 
     store.begin_batch()?;
@@ -1736,7 +1863,7 @@ mod tests {
         store.upsert_nodes(&[resource_node, eip_node]).unwrap();
         store.commit_batch().unwrap();
 
-        let index = InMemoryIndex::build(&store).unwrap();
+        let index = InMemoryIndex::build(&store, None).unwrap();
         let refs = vec![UnresolvedRef::new(
             eip_sym,
             resource_name,
