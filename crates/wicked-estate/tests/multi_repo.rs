@@ -555,3 +555,38 @@ fn a_second_labelled_index_of_an_unchanged_tree_sweeps_nothing() {
     );
     assert_eq!(names(&store, "uniqInc"), vec!["inc/src/index.ts"]);
 }
+
+/// `ingest_scip_as` must validate its label exactly as `index_path_as` does.
+///
+/// The label becomes the `<label>/` prefix stripped from SCIP's relative paths and re-applied to
+/// the edge locations written back. Label validation is the ONE thing that makes path forging
+/// unreachable, so a second entry point that skipped it was a hole in that guarantee
+/// (Copilot on #117) — reachable from the CLI as `wicked-estate scip <root> --repo ../evil`.
+#[test]
+fn scip_ingest_rejects_a_forged_label() {
+    let root = fresh_dir("scip_label");
+    make_repo(&root.join("repo"), "alpha");
+    let mut store = SqliteStore::open(root.join("s.db")).unwrap();
+    wicked_estate::index_path_as(&mut store, &root.join("repo"), Some("ok")).unwrap();
+
+    // No SCIP file is needed: validation must reject BEFORE any file read or write.
+    let missing = root.join("index.scip");
+    for bad in ["../evil", "a/b", "/abs", "..", "", "  ", "a\\b"] {
+        let err =
+            wicked_estate::ingest_scip_as(&mut store, &root.join("repo"), &missing, Some(bad))
+                .expect_err(&format!("label {bad:?} must be refused"));
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            !msg.contains("cannot read"),
+            "label {bad:?} reached the file read before validation: {msg}"
+        );
+    }
+
+    // A valid label still gets past validation (and then fails on the absent file, as it should).
+    let err = wicked_estate::ingest_scip_as(&mut store, &root.join("repo"), &missing, Some("ok"))
+        .expect_err("absent scip file must still error");
+    assert!(
+        err.to_string().to_lowercase().contains("cannot read"),
+        "a VALID label must get past validation to the file read: {err}"
+    );
+}

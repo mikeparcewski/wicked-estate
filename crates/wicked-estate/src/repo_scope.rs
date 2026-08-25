@@ -189,19 +189,51 @@ fn canon_remote(remote: Option<&str>) -> Option<String> {
         return None;
     }
     let r = r.trim_end_matches('/').trim_end_matches(".git");
-    // Drop the scheme, then the `user@` in the authority.
-    let r = r.split_once("://").map_or(r, |(_, rest)| rest);
-    let authority_end = r.find(['/', ':']).unwrap_or(r.len());
-    let r = match r[..authority_end].find('@') {
-        Some(at) => &r[at + 1..],
-        None => r,
-    };
-    // scp-style `host:path` → `host/path`. A path remote has no colon and is left alone.
-    let r = r.replacen(':', "/", 1);
-    Some(match r.split_once('/') {
-        Some((authority, path)) => format!("{}/{path}", authority.to_ascii_lowercase()),
-        None => r.to_ascii_lowercase(),
-    })
+
+    // A SCHEME remote's authority ends at the first `/` — any `:` inside it is a PORT, not a
+    // path separator (Copilot on #117). Treating it as one turned
+    // `ssh://git@github.com:2222/acme/x` into `github.com/2222/acme/x`, so the same repo compared
+    // DIFFERENT depending on whether the clone url named a port: the guard then refuses a
+    // legitimate re-index, and — worse — fails to notice the same repo being indexed under a
+    // second label, which stores every symbol twice.
+    if let Some((_, rest)) = r.split_once("://") {
+        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let authority = authority
+            .rsplit_once('@')
+            .map_or(authority, |(_, host)| host);
+        // Drop an explicit port: the transport does not change the repo's identity.
+        let host = authority.rsplit_once(':').map_or(authority, |(h, port)| {
+            if port.chars().all(|c| c.is_ascii_digit()) && !port.is_empty() {
+                h
+            } else {
+                authority
+            }
+        });
+        return Some(if path.is_empty() {
+            host.to_ascii_lowercase()
+        } else {
+            format!("{}/{path}", host.to_ascii_lowercase())
+        });
+    }
+
+    // Scheme-less. `user@host:path` is scp-style and rewrites to `host/path`; anything else is a
+    // filesystem path and is left alone. A lone drive letter (`C:/repos/x`) is NOT an authority —
+    // rewriting it produced `c//repos/x` — so require the pre-colon part to be longer than one
+    // character before treating it as a host.
+    let after_user = r.rsplit_once('@').map_or(r, |(_, host)| host);
+    let scp = after_user
+        .split_once(':')
+        .filter(|(host, _)| host.len() > 1 && !host.contains('/'));
+    match scp {
+        Some((host, path)) => Some(format!(
+            "{}/{}",
+            host.to_ascii_lowercase(),
+            path.trim_start_matches('/')
+        )),
+        // A path remote: only case-fold when there is no path to damage. `/srv/git/Alpha` and
+        // `/srv/git/alpha` are different repositories on a case-sensitive filesystem.
+        None => Some(r.to_string()),
+    }
 }
 
 /// Where an indexed root sits INSIDE its git work tree — `""` at the top level,
@@ -824,6 +856,65 @@ mod tests {
         assert_eq!(
             resolve_indexed_path(&store, "alpha/src/a.ts"),
             Some(PathBuf::from("/repos/alpha/src/a.ts"))
+        );
+    }
+
+    /// One repo, many clone URLs — all must reduce to ONE identity, or the guard both refuses
+    /// legitimate re-indexes AND fails to notice the same repo arriving under a second label.
+    #[test]
+    fn canon_remote_is_transport_and_port_independent() {
+        let same = [
+            "git@github.com:acme/x.git",
+            "https://github.com/acme/x",
+            "ssh://git@github.com/acme/x.git",
+            // The port is transport, not identity (Copilot on #117).
+            "ssh://git@github.com:2222/acme/x.git",
+            "https://github.com:443/acme/x",
+            "GIT@GitHub.com:acme/x.git",
+        ];
+        let canon: Vec<Option<String>> = same.iter().map(|r| canon_remote(Some(r))).collect();
+        for (r, c) in same.iter().zip(&canon) {
+            assert_eq!(
+                c.as_deref(),
+                Some("github.com/acme/x"),
+                "{r} did not reduce to the shared identity"
+            );
+        }
+    }
+
+    /// Path remotes are NOT scp-style and must survive untouched — including a Windows drive
+    /// letter, which the scp rewrite turned into `c//repos/x`.
+    #[test]
+    fn canon_remote_leaves_path_remotes_alone() {
+        assert_eq!(
+            canon_remote(Some("/srv/git/alpha")).as_deref(),
+            Some("/srv/git/alpha")
+        );
+        // Case-sensitive filesystems: these are two different repositories.
+        assert_ne!(
+            canon_remote(Some("/srv/git/Alpha")),
+            canon_remote(Some("/srv/git/alpha"))
+        );
+        assert_eq!(
+            canon_remote(Some("C:/repos/x")).as_deref(),
+            Some("C:/repos/x")
+        );
+        assert_eq!(
+            canon_remote(Some("C:\\repos\\x")).as_deref(),
+            Some("C:\\repos\\x")
+        );
+    }
+
+    /// Different repos must NOT collapse together — the failure that lets one overwrite another.
+    #[test]
+    fn canon_remote_keeps_different_repos_apart() {
+        assert_ne!(
+            canon_remote(Some("git@github.com:acme/x")),
+            canon_remote(Some("git@github.com:acme/y"))
+        );
+        assert_ne!(
+            canon_remote(Some("git@github.com:acme/x")),
+            canon_remote(Some("git@gitlab.com:acme/x"))
         );
     }
 }

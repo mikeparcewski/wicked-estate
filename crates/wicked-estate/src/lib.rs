@@ -1151,6 +1151,14 @@ pub fn ingest_scip_as(
     scip_path: &Path,
     repo: Option<&str>,
 ) -> Result<usize> {
+    // Validate here too, not only in `index_path_as` (Copilot on #117). `repo` becomes the
+    // `<label>/` prefix that is stripped from SCIP's relative paths and re-applied to the edge
+    // locations written back, so an unvalidated label — one containing `/` or `..` — writes
+    // nonsensical or forged locations. Label validation is the single thing that makes path
+    // forging unreachable; a second entry point that skips it is a hole in that guarantee.
+    if let Some(label) = repo {
+        repo_scope::validate_label(label)?;
+    }
     let bytes = std::fs::read(scip_path).map_err(|e| {
         wicked_estate_core::Error::Io(std::io::Error::other(format!(
             "scip: cannot read {:?}: {e}",
