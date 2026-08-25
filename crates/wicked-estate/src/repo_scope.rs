@@ -60,10 +60,16 @@ pub struct RepoRecord {
 /// `files.path` and into SymbolIds, so a `/` or a `..` in it would forge paths in another repo's
 /// namespace — the exact collision this whole mechanism exists to prevent.
 pub fn validate_label(label: &str) -> Result<()> {
+    // A leading `-` is rejected even though the character is otherwise legal (Copilot on #117):
+    // `--repo -foo` is refused by the CLI as a flag, so a label the LIBRARY accepted could never
+    // be named again from the command line — indexed once, impossible to refresh, and the guard
+    // would keep refusing every attempt to re-index it. The two entry points must agree on what
+    // a label can be.
     let ok = !label.is_empty()
         && label.len() <= 64
         && label != "."
         && label != ".."
+        && !label.starts_with('-')
         && label
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
@@ -71,8 +77,9 @@ pub fn validate_label(label: &str) -> Result<()> {
         Ok(())
     } else {
         Err(Error::Invalid(format!(
-            "invalid repo label {label:?}: use 1-64 chars of [A-Za-z0-9._-] (it becomes a path \
-             segment on every row this repo writes)"
+            "invalid repo label {label:?}: use 1-64 chars of [A-Za-z0-9._-], not starting with \
+             `-` (it becomes a path segment on every row this repo writes, and a leading `-` \
+             could never be passed back on the command line)"
         )))
     }
 }

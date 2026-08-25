@@ -781,6 +781,25 @@ fn main() -> Result<()> {
                 ),
                 None => anyhow::bail!("{a} needs a repo name (e.g. `{a} ledger`)"),
             },
+            // `--repo=<name>` is accepted too. Before this arm existed the whole argument fell
+            // through the match and was SILENTLY DROPPED, so `--repo=x` indexed the repo
+            // UN-LABELLED while reporting success — the operator ends up with a graph in a
+            // different shape than the one they asked for, and finds out later when the guard
+            // refuses something confusing. Same failure family as `--repo --force`.
+            _ if a.starts_with("--repo=") || a.starts_with("--as=") => {
+                let v = a.split_once('=').map(|(_, v)| v).unwrap_or_default();
+                if v.is_empty() {
+                    anyhow::bail!("{a} needs a repo name (e.g. `--repo=ledger`)");
+                }
+                // Validate at PARSE time, not just deep in the index call, so the message can
+                // name the argument the caller actually typed. `validate_label` alone reports the
+                // bad label but not which flag carried it, and the CLI's convention (see
+                // tests/repo_flag_cli.rs) is that an argument error names the argument.
+                if let Err(e) = wicked_estate::repo_scope::validate_label(v) {
+                    anyhow::bail!("{a}: {e}");
+                }
+                repo_label = Some(v.to_string());
+            }
             "--description" => {
                 if let Some(v) = it.next() {
                     sem_description = Some(v.clone());

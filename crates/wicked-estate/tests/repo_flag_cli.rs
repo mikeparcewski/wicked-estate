@@ -130,3 +130,59 @@ fn a_real_label_still_indexes_and_the_following_flag_still_applies() {
         "rows are not in the label's namespace: {q}"
     );
 }
+
+/// `--repo=<name>` must be PARSED, not silently dropped.
+///
+/// The `=` form fell through the argument match entirely, so `--repo=x` indexed the repo
+/// UN-LABELLED and still reported success (Copilot on #117 surfaced the leading-dash half; this
+/// is the deeper one). The operator ends up with a graph in a different shape than they asked
+/// for and only finds out when the guard later refuses something confusing — the same failure
+/// family as `--repo --force` consuming the flag as a label.
+#[test]
+fn repo_equals_form_is_parsed_not_dropped() {
+    let dir = scratch("equals");
+    let db = dir.join("eq.db");
+    let out = index_in(&dir, &["repo", "--db", db.to_str().unwrap(), "--repo=good"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "--repo=good must succeed: {stdout}");
+    assert!(
+        stdout.contains("as 'good'"),
+        "the `=` form was dropped — indexed UN-LABELLED: {stdout}"
+    );
+
+    let q = Command::new(bin())
+        .current_dir(&dir)
+        .args(["query", "only", "--db", db.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    let q = String::from_utf8_lossy(&q.stdout);
+    assert!(
+        q.contains("good/src/index.ts"),
+        "rows are not in the label's namespace: {q}"
+    );
+}
+
+/// A label the CLI could never name again must not be creatable through ANY entry point.
+#[test]
+fn a_leading_dash_label_is_refused_in_both_flag_forms() {
+    let dir = scratch("dash");
+    let db = dir.join("dash.db");
+    refuses(
+        &dir,
+        &["repo", "--db", db.to_str().unwrap(), "--repo", "-foo"],
+        "`--repo -foo` must not be read as a label",
+    );
+    // The `=` form reaches validation, which must reject a leading dash — otherwise the label
+    // exists in the graph and `--repo -foo` can never address it again.
+    refuses(
+        &dir,
+        &["repo", "--db", db.to_str().unwrap(), "--repo=-foo"],
+        "`--repo=-foo` must be refused, not stored as an unaddressable label",
+    );
+    // An empty value is a mistake, not a request to index un-labelled.
+    refuses(
+        &dir,
+        &["repo", "--db", db.to_str().unwrap(), "--repo="],
+        "`--repo=` must be refused",
+    );
+}
