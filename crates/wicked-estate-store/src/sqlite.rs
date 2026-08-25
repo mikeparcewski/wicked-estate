@@ -3442,8 +3442,10 @@ mod tests {
     /// Clearing them all makes every OTHER repo re-extract its whole tree on its next run — work
     /// nobody asked for and nobody can see was triggered.
     ///
-    /// The prefix goes into a LIKE pattern, where `_` is the single-character wildcard and `_` is
-    /// also a legal label character: unescaped, `--repo a_b --force` would also clear `axb/`.
+    /// `_` is a legal label character, and it was ALSO LIKE's single-character wildcard back when
+    /// this matched with LIKE — `--repo a_b --force` then also cleared `axb/`. The match is now an
+    /// exact `substr(path, 1, n) = prefix`, so `_` is a literal and this case can no longer arise;
+    /// the assertions stay as the regression pin against anything reintroducing pattern matching.
     #[test]
     fn clearing_digests_is_scoped_to_one_repo_prefix() {
         let mut store = open();
