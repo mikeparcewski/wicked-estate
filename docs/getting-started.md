@@ -243,7 +243,7 @@ wicked-estate index ../wicked-vault  --db estate.db --repo vault
 
 wicked-estate query atomicWriteJson --db estate.db
 #   Function atomicWriteJson (ledger/lib/domain-store.mjs:130)
-#   Function atomicWriteJson (installer/src/install-claude.ts:617)
+#   Function atomicWriteJson (vault/src/vault/vault.mjs:88)
 
 wicked-estate stats --db estate.db
 # repos (2):
@@ -275,17 +275,21 @@ and re-index the first the same way into a fresh --db (a graph cannot mix labell
 repos).
 ```
 
-Repo identity is the git `origin` remote when both sides have one (so a moved or re-cloned checkout
-is still the same repo), and the canonical root path otherwise.
+Repo identity is the git `origin` remote **plus the indexed root's position inside the work tree**
+when both sides have one — so a moved or re-cloned checkout is still the same repo, while two
+packages of one monorepo (`mono/pkgA` and `mono/pkgB`, one `origin` between them, both with
+`src/index.ts`) are two different trees and each needs its own `--repo` label. Outside git, the
+canonical root path is the identity.
 
-**One known sharp edge (pre-existing, now visible across repos).** A few node ids are not derived
-from a path — the external-module targets of imports (`node:fs`, an npm package) are one id per
-module — so repos that import the same module share one node row, and that row records ONE owning
-file. Deleting that file removes the shared node and the other repos' import edges to it are pruned
-until they are re-indexed. This is the same wart a single repo already has between two files that
-import the same module; co-location widens its reach from files to repos. It costs edges, never
-symbols: per-repo node counts in a co-located graph are a few lower than the same repo indexed
-alone (the shared module nodes are counted once, under whichever repo wrote them last).
+**One known sharp edge (pre-existing, now visible across repos).** Import targets that never got
+resolved to a definition are identified by the module *specifier*, not by a path — `node:fs` and an
+npm package, but also a plain relative `./index` — so the id carries nothing to namespace. Repos
+whose files import the same specifier share ONE node row, and that row records ONE owning file.
+Deleting that file removes the shared node, and the other repos' import edges to it dangle until
+those repos are re-indexed. This is the same wart a single repo already has between two files that
+import the same specifier; co-location widens its reach from files to repos. It costs import edges,
+never symbols: per-repo node counts in a co-located graph are a few lower than the same repo
+indexed alone (the shared specifier nodes are counted once, under whichever repo wrote them last).
 
 `wicked-estate scip` takes the same `--repo <name>` (its documents are repo-relative too, so
 against a multi-repo graph it refuses rather than correlate nothing). Read commands need no flag —

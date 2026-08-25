@@ -676,9 +676,35 @@ impl SqliteStore {
     /// Invalidate all stored file digests, causing the next `index_path` call to
     /// treat every file as changed and re-extract it. Used by `--force`.
     pub fn clear_file_digests(&mut self) -> Result<()> {
-        self.conn
-            .execute("UPDATE files SET digest = ''", [])
-            .map_err(st)?;
+        self.clear_file_digests_under(None)
+    }
+
+    /// [`Self::clear_file_digests`] restricted to one repo's path prefix (`"ledger/"`).
+    ///
+    /// `--force` on ONE repo of a multi-repo graph must not invalidate the others: they would each
+    /// re-extract every file on their next run, work the caller did not ask for and cannot see
+    /// they triggered. `None` clears the whole table, the single-repo behaviour.
+    pub fn clear_file_digests_under(&mut self, prefix: Option<&str>) -> Result<()> {
+        match prefix {
+            // `\` escapes the LIKE wildcards, so a label containing `_` (a legal label character,
+            // and `_` is LIKE's single-character wildcard) matches itself and not its neighbours.
+            Some(p) => self
+                .conn
+                .execute(
+                    "UPDATE files SET digest = '' WHERE path LIKE ?1 ESCAPE '\\'",
+                    params![format!(
+                        "{}%",
+                        p.replace('\\', "\\\\")
+                            .replace('%', "\\%")
+                            .replace('_', "\\_")
+                    )],
+                )
+                .map_err(st)?,
+            None => self
+                .conn
+                .execute("UPDATE files SET digest = ''", [])
+                .map_err(st)?,
+        };
         Ok(())
     }
 
@@ -3408,6 +3434,45 @@ mod tests {
         let after = store.changes_since(all[1].seq).unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].target, "c.rs");
+    }
+
+    /// `--force` on one repo of a co-located graph must invalidate only that repo's digests.
+    /// Clearing them all makes every OTHER repo re-extract its whole tree on its next run — work
+    /// nobody asked for and nobody can see was triggered.
+    ///
+    /// The prefix goes into a LIKE pattern, where `_` is the single-character wildcard and `_` is
+    /// also a legal label character: unescaped, `--repo a_b --force` would also clear `axb/`.
+    #[test]
+    fn clearing_digests_is_scoped_to_one_repo_prefix() {
+        let mut store = open();
+        for p in ["a_b/x.rs", "axb/x.rs", "ab/x.rs", "a_b/deep/y.rs"] {
+            store.set_file_digest(p, "d0").unwrap();
+        }
+        store.clear_file_digests_under(Some("a_b/")).unwrap();
+
+        fn digest(s: &SqliteStore, p: &str) -> String {
+            s.file_digest(p).unwrap().unwrap()
+        }
+        assert_eq!(
+            digest(&store, "a_b/x.rs"),
+            "",
+            "the named repo must be invalidated"
+        );
+        assert_eq!(digest(&store, "a_b/deep/y.rs"), "", "…all the way down");
+        assert_eq!(
+            digest(&store, "axb/x.rs"),
+            "d0",
+            "`_` was treated as a LIKE wildcard and swept a different repo"
+        );
+        assert_eq!(
+            digest(&store, "ab/x.rs"),
+            "d0",
+            "a shorter label is not a prefix"
+        );
+
+        // None is the single-repo behaviour: everything.
+        store.clear_file_digests_under(None).unwrap();
+        assert_eq!(digest(&store, "axb/x.rs"), "");
     }
 
     // ── Wave 7: repo_info round-trip ─────────────────────────────────────────

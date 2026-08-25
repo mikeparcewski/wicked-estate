@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use wicked_estate::repo_scope;
-use wicked_estate_core::GraphRead;
+use wicked_estate_core::{EdgeKind, GraphRead};
 use wicked_estate_store::{GraphStoreMutExt, SqliteStore};
 
 /// Two repos with the SAME relative path, one shared function name, one unique function name.
@@ -245,6 +245,109 @@ fn unlabelled_indexing_is_unchanged() {
     assert_eq!(again.node_count, plain_stats.node_count);
 }
 
+/// Repo-scoped RESOLUTION, proved by the edge it saves. `sa` calls `uniqHelper`, defined in a
+/// DIFFERENT directory of `sa`; `sb` defines a `uniqHelper` too. Only `NameResolver` can wire this
+/// (not same-file, not same-dir), and it resolves unique candidates only — so if the resolver's
+/// index saw the whole graph instead of just `sa/`, the name would be ambiguous and the call edge
+/// would silently vanish. `sb` is indexed FIRST so its node is already present when `sa` resolves.
+#[test]
+fn resolution_is_scoped_to_the_indexed_repo() {
+    let root = fresh_dir("resolvescope");
+    fs::create_dir_all(root.join("sa/src/a")).unwrap();
+    fs::create_dir_all(root.join("sa/src/b")).unwrap();
+    fs::create_dir_all(root.join("sb/lib/x")).unwrap();
+    fs::write(
+        root.join("sa/src/b/helper.ts"),
+        "export function uniqHelper() { return 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("sa/src/a/caller.ts"),
+        "export function callerA() { return uniqHelper(); }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("sb/lib/x/helper.ts"),
+        "export function uniqHelper() { return 2; }\n",
+    )
+    .unwrap();
+
+    let mut store = SqliteStore::open(root.join("shared.db")).unwrap();
+    wicked_estate::index_path_as(&mut store, &root.join("sb"), Some("sb")).unwrap();
+    wicked_estate::index_path_as(&mut store, &root.join("sa"), Some("sa")).unwrap();
+
+    let wired = store.all_edges().unwrap().into_iter().any(|e| {
+        e.source.as_str().contains("sa/src/a/caller")
+            && e.target.as_str().contains("sa/src/b/helper")
+    });
+    assert!(
+        wired,
+        "callerA → uniqHelper must resolve inside `sa`; an unscoped resolver sees sb's \
+         same-name symbol, calls it ambiguous, and drops the edge"
+    );
+}
+
+/// Drop-in extra-edge rules through a LABELLED index — the ids the rules mint are rewritten into
+/// the repo's namespace. The label here is `docs`, which is ALSO a top-level directory of the
+/// repo: the rule's target `docs/triage.md` must become `docs/docs/triage.md` to match the file
+/// row, and an id-namespacer that skipped ids "already" starting with `docs/` silently produced a
+/// dangling edge that the prune then deleted.
+#[test]
+fn extra_edges_survive_a_label_that_collides_with_a_directory_name() {
+    const RULES: &str = r#"
+[[rule]]
+name      = "archetype-playbook"
+file_glob = ".claude-plugin/archetypes.json"
+pattern   = '(?m)^ {4}"(?P<name>[a-z][a-z0-9_-]*)":\s*\{'
+
+[rule.emit_node]
+id_template   = "archetype:{name}"
+label_capture = "name"
+kind          = "other:archetype"
+node_scheme   = "archetype"
+
+[rule.emit_edge]
+kind               = "references"
+source_id_template = "archetype:{name}"
+source_node_scheme = "archetype"
+target_kind        = "file"
+target_id_template = "docs/{name}.md"
+"#;
+    const CATALOG: &str =
+        "{\n  \"archetypes\": {\n    \"triage\": {\n      \"phases\": []\n    }\n  }\n}";
+
+    let root = fresh_dir("xedgelabel");
+    let repo = root.join("repoA");
+    fs::create_dir_all(repo.join(".wicked-estate-extractors")).unwrap();
+    fs::create_dir_all(repo.join(".claude-plugin")).unwrap();
+    fs::create_dir_all(repo.join("docs")).unwrap();
+    fs::write(repo.join(".wicked-estate-extractors/archetype.toml"), RULES).unwrap();
+    fs::write(repo.join(".claude-plugin/archetypes.json"), CATALOG).unwrap();
+    fs::write(repo.join("docs/triage.md"), "# triage\n").unwrap();
+
+    let mut store = SqliteStore::open(root.join("shared.db")).unwrap();
+    wicked_estate::index_path_as(&mut store, &repo, Some("docs")).unwrap();
+
+    // The rule's file target is namespaced like every other path this run stored.
+    assert!(
+        indexed(&store).contains("docs/docs/triage.md"),
+        "labelled file rows: {:?}",
+        indexed(&store)
+    );
+    let refs: Vec<String> = store
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == EdgeKind::References)
+        .map(|e| format!("{} -> {}", e.source.as_str(), e.target.as_str()))
+        .collect();
+    assert_eq!(
+        refs,
+        vec!["archetype synthetic docs/archetype:triage: -> file . docs/docs/triage.md:"],
+        "the rule-emitted edge must survive the prune, namespaced on BOTH ends"
+    );
+}
+
 /// SCIP correlation matches a document's REPO-relative path against `nodes.file`. In a labelled
 /// graph those differ by the `<label>/` prefix, so an un-labelled ingest silently correlates
 /// nothing. (The fixture is the resolve crate's — one `.scip` file, not two.)
@@ -307,4 +410,148 @@ fn scip_ingest_correlates_against_a_labelled_repo() {
         scoped > 0,
         "labelled correlation must find the precise edges"
     );
+}
+
+// ── The monorepo hole, and the two halves of repo identity ────────────────────────────────────
+//
+// Repo identity used to be the git `origin` remote alone. Every package of a monorepo shares one
+// `origin` — and two of them both mint `src/index.ts` — so the guard read `mono/pkgB` as
+// `mono/pkgA` re-indexed, allowed it, and the graph-wide delete sweep removed pkgA. Exit 0, no
+// warning, `query uniqPkgA` → 0 matches: the exact failure the guard exists to stop, reached
+// through the commonest layout there is.
+//
+// Identity is now (remote, position inside the work tree). The pair of tests below pin BOTH
+// directions, because a predicate that just answers "different" more often would pass the first
+// one while breaking every re-index.
+
+/// `git init` a tree with an `origin` that is not a real host, so nothing here touches a network.
+fn git_repo(dir: &Path, origin: &str) {
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    fs::create_dir_all(dir).unwrap();
+    run(&["init", "-q", "."]);
+    run(&["remote", "add", "origin", origin]);
+}
+
+#[test]
+fn two_packages_of_one_monorepo_are_not_the_same_repo() {
+    let root = fresh_dir("monorepo");
+    let mono = root.join("mono");
+    git_repo(&mono, "git@github.com:acme/mono.git");
+    make_repo(&mono.join("pkgA"), "uniqPkgA");
+    make_repo(&mono.join("pkgB"), "uniqPkgB");
+
+    let mut store = SqliteStore::open(root.join("mono.db")).unwrap();
+    wicked_estate::index_path_as(&mut store, &mono.join("pkgA"), None).unwrap();
+
+    let err = wicked_estate::index_path_as(&mut store, &mono.join("pkgB"), None)
+        .expect_err("pkgB shares `src/index.ts` with pkgA — indexing it un-labelled destroys pkgA");
+    assert!(
+        err.to_string().contains("REPO COLLISION"),
+        "must be the loud refusal, got: {err}"
+    );
+    assert_eq!(
+        names(&store, "uniqPkgA"),
+        vec!["src/index.ts"],
+        "a refusal must leave the graph exactly as it was"
+    );
+
+    // Labelled, the same two packages are two repos and co-exist.
+    let mut labelled = SqliteStore::open(root.join("mono-labelled.db")).unwrap();
+    wicked_estate::index_path_as(&mut labelled, &mono.join("pkgA"), Some("pkga")).unwrap();
+    wicked_estate::index_path_as(&mut labelled, &mono.join("pkgB"), Some("pkgb"))
+        .expect("sibling packages of one monorepo are different trees and must both be indexable");
+    assert_eq!(names(&labelled, "uniqPkgA"), vec!["pkga/src/index.ts"]);
+    assert_eq!(names(&labelled, "uniqPkgB"), vec!["pkgb/src/index.ts"]);
+}
+
+/// The other direction: a checkout that MOVED (or was re-cloned elsewhere) is still one repo, and
+/// re-indexing it must stay an ordinary incremental run. Same remote, same position in the work
+/// tree, different path on disk.
+#[test]
+fn a_moved_checkout_is_still_the_same_repo() {
+    let root = fresh_dir("moved");
+    let here = root.join("here");
+    let there = root.join("there");
+    git_repo(&here, "git@github.com:acme/solo.git");
+    git_repo(&there, "https://github.com/acme/solo");
+    make_repo(&here, "uniqSolo");
+    make_repo(&there, "uniqSolo");
+
+    let mut store = SqliteStore::open(root.join("solo.db")).unwrap();
+    wicked_estate::index_path_as(&mut store, &here, None).unwrap();
+    wicked_estate::index_path_as(&mut store, &there, None)
+        .expect("the same repo at a new path must re-index, not refuse");
+
+    let mut labelled = SqliteStore::open(root.join("solo-labelled.db")).unwrap();
+    wicked_estate::index_path_as(&mut labelled, &here, Some("solo")).unwrap();
+    wicked_estate::index_path_as(&mut labelled, &there, Some("solo"))
+        .expect("same label, same repo, new path — an incremental re-index");
+    assert_eq!(names(&labelled, "uniqSolo"), vec!["solo/src/index.ts"]);
+}
+
+/// Per-repo `indexed_version`. It decides whether a repo's rows are re-extracted after a binary
+/// upgrade, and one shared key makes the FIRST repo indexed under the new binary answer for all of
+/// them: every other repo keeps rows the old extractor produced and is never told.
+#[test]
+fn the_binary_version_is_recorded_per_repo() {
+    let root = fresh_dir("version");
+    make_repo(&root.join("repoA"), "uniqVa");
+    make_repo(&root.join("repoB"), "uniqVb");
+    let mut store = SqliteStore::open(root.join("v.db")).unwrap();
+    wicked_estate::index_path_as(&mut store, &root.join("repoA"), Some("va")).unwrap();
+    wicked_estate::index_path_as(&mut store, &root.join("repoB"), Some("vb")).unwrap();
+
+    for label in ["va", "vb"] {
+        let key = repo_scope::meta_key(Some(label), "indexed_version");
+        assert_eq!(
+            store.meta_get_key(&key).as_deref(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "'{label}' must record its own binary version under {key}"
+        );
+    }
+    assert!(
+        store.meta_get_key("indexed_version").is_none(),
+        "a labelled run must not write the SHARED key — one repo's version would answer for every \
+         other repo's staleness"
+    );
+    // Same argument, same fix, for the extra-edge rule digest: the rules are read from ONE root.
+    assert!(
+        store
+            .meta_get_key(&repo_scope::meta_key(Some("va"), "extra_rules_digest"))
+            .is_some()
+            && store.meta_get_key("extra_rules_digest").is_none(),
+        "the extra-edge rule digest is a property of one repo's tree, not of the graph"
+    );
+}
+
+/// The incremental digest skip has to survive a label. The set of paths currently on disk is
+/// compared against the set previously indexed, and BOTH sides carry the `<label>/` prefix; if
+/// only one did, every file would read as deleted, get swept, and be re-extracted from scratch on
+/// every single run — the end state still correct, the work and the change-log churn not.
+#[test]
+fn a_second_labelled_index_of_an_unchanged_tree_sweeps_nothing() {
+    use wicked_estate_core::ChangeOp;
+
+    let root = fresh_dir("incremental");
+    make_repo(&root.join("repoA"), "uniqInc");
+    let mut store = SqliteStore::open(root.join("inc.db")).unwrap();
+    wicked_estate::index_path_as(&mut store, &root.join("repoA"), Some("inc")).unwrap();
+
+    let cursor = store.changes_since(0).unwrap().last().unwrap().seq;
+    wicked_estate::index_path_as(&mut store, &root.join("repoA"), Some("inc")).unwrap();
+
+    let after: Vec<_> = store.changes_since(cursor).unwrap();
+    assert!(
+        after.iter().all(|c| c.op != ChangeOp::Remove),
+        "nothing changed on disk, so the second run must remove nothing: {after:?}"
+    );
+    assert_eq!(names(&store, "uniqInc"), vec!["inc/src/index.ts"]);
 }

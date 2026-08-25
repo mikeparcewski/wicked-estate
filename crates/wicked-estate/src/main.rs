@@ -18,7 +18,7 @@
 //!   wicked-estate semantic <query>       [--db ...]
 //!   wicked-estate cross-graph <name>     --db <a.db> --db <b.db> ...
 //!                                     (or --dbs a.db,b.db,c.db)
-//!   wicked-estate watch <path>           [--db ...] [--history]
+//!   wicked-estate watch <path>           [--db ...] [--repo <name>] [--history]
 //!   wicked-estate subscribe              [--db ...] [--since <seq>]
 //!   wicked-estate clusters [<min_size>]  [--json] [--annotate] [--db ...]
 //!   wicked-estate fingerprint <name>     [--content] [--db ...]
@@ -106,6 +106,29 @@ fn maybe_print_staleness(store: &dyn wicked_estate_store::GraphStoreMutExt, db: 
 /// Annotations are stored separately and are preserved across re-indexes.
 fn maybe_warn_version_mismatch(store: &dyn wicked_estate_store::GraphStoreMutExt, db: &str) {
     let current = env!("CARGO_PKG_VERSION");
+    // A labelled repo records its binary version under `repo:<label>:indexed_version` and never
+    // the bare key, so reading only the bare one made this warning silently unreachable on every
+    // multi-repo graph — the graphs most likely to hold rows from a stale binary, since each repo
+    // is re-indexed on its own schedule. Warn per repo, and name the label in the fix.
+    let repos = wicked_estate::repo_scope::registry(store);
+    if !repos.is_empty() {
+        for rec in repos {
+            let key = wicked_estate::repo_scope::meta_key(Some(&rec.label), "indexed_version");
+            let Some(indexed) = store.meta_get_key(&key) else {
+                continue;
+            };
+            if indexed != current {
+                eprintln!(
+                    "VERSION MISMATCH: '{label}' in {db} was indexed with v{indexed}, current \
+                     binary is v{current}. Re-index to apply extraction fixes: \
+                     `wicked-estate index {root} --repo {label}` (your annotations are preserved).",
+                    label = rec.label,
+                    root = rec.root,
+                );
+            }
+        }
+        return;
+    }
     let indexed = match store.meta_get_key("indexed_version") {
         Some(v) => v,
         None => return, // pre-version database — no key stored yet
@@ -746,11 +769,18 @@ fn main() -> Result<()> {
             // one db. Noun-shaped like the CLI's other value flags (`--db`, `--file`,
             // `--symbol`), and it is the word that shows up in `stats`, in the guard's errors,
             // and as the path prefix on every row. `--as` is accepted as an alias.
-            "--repo" | "--as" => {
-                if let Some(v) = it.next() {
-                    repo_label = Some(v.clone());
-                }
-            }
+            // A missing value is a HARD error here, unlike the other value flags. Every other one
+            // degrades to a visible default; this one degrades to "index un-labelled", which is a
+            // different write to the graph than the caller asked for and looks like success.
+            // `--repo --force` fell into the same hole twice: `--force` became the label AND was
+            // dropped as a flag.
+            "--repo" | "--as" => match it.next() {
+                Some(v) if !v.starts_with('-') => repo_label = Some(v.clone()),
+                Some(v) => anyhow::bail!(
+                    "{a} needs a repo name, got the flag `{v}` — write `{a} <name> {v}`"
+                ),
+                None => anyhow::bail!("{a} needs a repo name (e.g. `{a} ledger`)"),
+            },
             "--description" => {
                 if let Some(v) = it.next() {
                     sem_description = Some(v.clone());
@@ -938,12 +968,17 @@ fn main() -> Result<()> {
                 );
             }
             ensure_db_dir(&db)?;
-            // --force: invalidate all stored digests so index_path treats every file as changed.
+            let as_repo = repo_label.as_deref();
+            // --force: invalidate the stored digests so index_path treats every file as changed —
+            // but only THIS repo's, or forcing one repo would silently make every other repo in a
+            // co-located graph re-extract from scratch on its next run.
             if force_reindex && db != ":memory:" {
                 let mut concrete = SqliteStore::open(&db).map_err(to_any)?;
-                concrete.clear_file_digests().map_err(to_any)?;
+                let scope = as_repo.map(wicked_estate::repo_scope::prefix);
+                concrete
+                    .clear_file_digests_under(scope.as_deref())
+                    .map_err(to_any)?;
             }
-            let as_repo = repo_label.as_deref();
             let stats = if history && db != ":memory:" {
                 // Caller explicitly opted in to history — open the concrete store to call
                 // set_history_enabled(true) (inherent method, not on any trait), then box it.
@@ -3400,7 +3435,9 @@ fn main() -> Result<()> {
             println!(
                 "    --force       bypass incremental digest skip; re-extract all files (use after a binary upgrade)"
             );
-            println!("  wicked-estate scip  <root>         [--db ...] [--scip-file <path>]");
+            println!(
+                "  wicked-estate scip  <root>         [--db ...] [--repo <name>] [--scip-file <path>]"
+            );
             println!(
                 "    Ingest a SCIP index (precise call resolution). Requires `wicked-estate index`"
             );
@@ -3446,7 +3483,7 @@ fn main() -> Result<()> {
                 "    (or --dbs a.db,b.db)  # federated search + blast-radius across repos (W12)"
             );
             println!("  wicked-estate compact              [--db <file>]  # prune cruft + VACUUM");
-            println!("  wicked-estate watch <path>         [--db ...] [--history]");
+            println!("  wicked-estate watch <path>         [--db ...] [--repo <name>] [--history]");
             println!(
                 "    Initial full index then reactive re-index on file changes (Ctrl-C to stop)."
             );

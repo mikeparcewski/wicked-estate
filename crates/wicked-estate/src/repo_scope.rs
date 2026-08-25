@@ -19,11 +19,12 @@
 //! labelled repo's own nodes (see `InMemoryIndex::build`), exactly as if each repo were in its own
 //! db. `studio → wicked-crew-api-types → crew` needs a package-resolver tier and is separate work.
 //!
-//! One id shape stays shared, unavoidably: the external-module targets of imports (`node:fs`) are
-//! identified by module, not by path, so repos importing the same module share one node row whose
-//! `file` column belongs to whichever repo wrote it last. Removing that file prunes the other
-//! repos' edges to it until they re-index. The same wart already exists between two FILES in one
-//! repo; namespacing cannot reach it because the id carries no path to namespace.
+//! One id shape stays shared, unavoidably: an import target that was never resolved to a
+//! definition is identified by the module SPECIFIER, not by a path — `node:fs`, an npm package,
+//! and equally a relative `./index` — so repos importing the same specifier share one node row
+//! whose `file` column belongs to whichever repo wrote it last. Removing that file leaves the
+//! other repos' edges to it dangling until they re-index. The same wart already exists between two
+//! FILES in one repo; namespacing cannot reach it because the id carries no path to namespace.
 //!
 //! ## Provenance
 //!
@@ -49,6 +50,9 @@ pub struct RepoRecord {
     pub label: String,
     /// The root the repo was last indexed from (as the caller spelled it).
     pub root: String,
+    /// `root`'s position inside its git work tree at index time; see [`git_subpath`]. `None` for
+    /// a non-git tree, and for records written before this field existed.
+    pub subpath: Option<String>,
     pub info: RepoInfo,
 }
 
@@ -117,6 +121,10 @@ pub fn record(store: &dyn GraphStoreMutExt, label: &str) -> Option<RepoRecord> {
     Some(RepoRecord {
         label: label.to_string(),
         root,
+        // NOT `field` — the empty string is this value's most common REAL answer (a root at the
+        // work-tree top level) and must stay distinguishable from "the key is not there", which
+        // is what an older record looks like and which means "no evidence".
+        subpath: store.meta_get_key(&key(label, "subpath")),
         info: RepoInfo {
             commit: field("commit"),
             branch: field("branch"),
@@ -139,6 +147,11 @@ pub fn registry(store: &dyn GraphStoreMutExt) -> Vec<RepoRecord> {
 /// Record (or refresh) one repo's provenance and add it to the label list.
 pub fn write_record(store: &mut dyn GraphStoreMutExt, label: &str, root: &Path, info: &RepoInfo) {
     store.meta_set_key(&key(label, "root"), &root.to_string_lossy());
+    // Written only when git answered. An absent key means "unknown", which `same_repo` reads as
+    // "no evidence"; writing `""` for unknown would claim the work-tree top level instead.
+    if let Some(sub) = git_subpath(root) {
+        store.meta_set_key(&key(label, "subpath"), &sub);
+    }
     store.meta_set_key(&key(label, "commit"), info.commit.as_deref().unwrap_or(""));
     store.meta_set_key(&key(label, "branch"), info.branch.as_deref().unwrap_or(""));
     store.meta_set_key(&key(label, "remote"), info.remote.as_deref().unwrap_or(""));
@@ -165,6 +178,11 @@ fn canon(root: &str) -> String {
 /// `origin`'s URL reduced to `host/path`, so the transport it was cloned over does not change the
 /// repo's identity: `git@github.com:acme/x.git`, `https://github.com/acme/x` and
 /// `ssh://git@github.com/acme/x` all reduce to `github.com/acme/x`.
+///
+/// Only the AUTHORITY is case-folded. Lower-casing the path too made `/srv/git/Alpha` and
+/// `/srv/git/alpha` — two different repositories on a case-sensitive filesystem, reachable as
+/// path remotes — compare equal, and "equal" on this predicate is what lets an un-labelled index
+/// overwrite the other one without a word.
 fn canon_remote(remote: Option<&str>) -> Option<String> {
     let r = remote?.trim();
     if r.is_empty() {
@@ -179,20 +197,79 @@ fn canon_remote(remote: Option<&str>) -> Option<String> {
         None => r,
     };
     // scp-style `host:path` → `host/path`. A path remote has no colon and is left alone.
-    Some(r.replacen(':', "/", 1).to_ascii_lowercase())
+    let r = r.replacen(':', "/", 1);
+    Some(match r.split_once('/') {
+        Some((authority, path)) => format!("{}/{path}", authority.to_ascii_lowercase()),
+        None => r.to_ascii_lowercase(),
+    })
 }
 
-/// Are these two index runs the SAME repo?
+/// Where an indexed root sits INSIDE its git work tree — `""` at the top level,
+/// `packages/api` for a subdirectory. `None` when git cannot answer (no git, not a work tree,
+/// path gone); the caller then has no evidence and must not judge on it.
 ///
-/// Git remote first: it survives clones, worktrees, and a moved checkout, and two different repos
-/// never share one. When either side has no remote (not a git repo, or no `origin`) there is no
-/// evidence but the root path, so paths are compared canonically. That fallback errs toward
-/// "different" — a non-git tree that MOVED reads as a new repo and gets refused. Refusal is
-/// recoverable; the silent overwrite it replaces is not.
-fn same_repo(a_root: &str, a_remote: Option<&str>, b_root: &str, b_remote: Option<&str>) -> bool {
-    match (canon_remote(a_remote), canon_remote(b_remote)) {
-        (Some(x), Some(y)) => x == y,
-        _ => canon(a_root) == canon(b_root),
+/// This is the second half of repo identity. The remote alone is not enough: every package of a
+/// monorepo shares one `origin`, and two of them both have `src/index.ts`.
+pub fn git_subpath(root: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["-C", &root.to_string_lossy(), "rev-parse", "--show-prefix"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8(out.stdout)
+            .ok()?
+            .trim()
+            .trim_matches('/')
+            .to_string(),
+    )
+}
+
+/// One side of an identity comparison.
+#[derive(Clone, Copy)]
+struct Ident<'a> {
+    root: &'a str,
+    remote: Option<&'a str>,
+    /// `root`'s path inside its git work tree; see [`git_subpath`]. `None` = unknown.
+    subpath: Option<&'a str>,
+}
+
+/// Are these two index runs the SAME TREE?
+///
+/// Git remote first: it survives clones, worktrees, and a moved checkout, and two different
+/// repositories never share one. But a shared remote does not mean a shared tree — `mono/pkgA`
+/// and `mono/pkgB` have one `origin` between them and both mint `src/index.ts`, so treating the
+/// remote as the whole identity let the second one overwrite the first without a word (the exact
+/// failure this guard exists to stop, reached through the commonest layout there is). So when the
+/// remotes match, the roots' positions INSIDE the work tree must match too.
+///
+/// A position is compared only when both sides know theirs. Unknown on either side ⇒ remote alone,
+/// which is what keeps a moved or re-cloned checkout reading as one repo.
+///
+/// With no remote on one side there is no evidence but the root path, so paths are compared
+/// canonically. That fallback errs toward "different" — a non-git tree that MOVED reads as a new
+/// repo and gets refused. Refusal is recoverable; the silent overwrite it replaces is not.
+fn same_repo(a: Ident<'_>, b: Ident<'_>) -> bool {
+    match (canon_remote(a.remote), canon_remote(b.remote)) {
+        (Some(x), Some(y)) => {
+            x == y
+                && match (a.subpath, b.subpath) {
+                    (Some(p), Some(q)) => p.trim_matches('/') == q.trim_matches('/'),
+                    _ => true,
+                }
+        }
+        _ => canon(a.root) == canon(b.root),
+    }
+}
+
+/// The identity a recorded repo compares under.
+fn ident_of(rec: &RepoRecord) -> Ident<'_> {
+    Ident {
+        root: &rec.root,
+        remote: rec.info.remote.as_deref(),
+        subpath: rec.subpath.as_deref(),
     }
 }
 
@@ -231,6 +308,14 @@ pub fn guard(
     let has_unlabelled = indexed
         .iter()
         .any(|f| !known.iter().any(|l| f.starts_with(&prefix(l))));
+    // This run's position inside its work tree — the half of identity that tells two packages of
+    // one monorepo apart. Computed once; `git_subpath` shells out.
+    let this_subpath = git_subpath(root);
+    let this = Ident {
+        root: &root_str,
+        remote: info.remote.as_deref(),
+        subpath: this_subpath.as_deref(),
+    };
 
     match label {
         None => {
@@ -247,19 +332,45 @@ pub fn guard(
             if !has_unlabelled {
                 return Ok(()); // empty graph — nothing to collide with.
             }
+            let prev_remote = store.meta_get_key("repo_remote");
             let prev_root = match store.meta_get_key("indexed_root") {
                 Some(r) => r,
-                // Content but no recorded root (pre-W7.4 db): no evidence to judge on, so behave
-                // exactly as before rather than refuse on a guess.
-                None => return Ok(()),
+                // Content but no recorded root (pre-W7.4 db). The root is not the only evidence
+                // there is: when both sides name an `origin`, a DIFFERENT origin still proves
+                // these are different repos and the overwrite is still real. Only when that too
+                // is silent is there nothing to judge on, and the old behaviour stands.
+                None => {
+                    return match (
+                        canon_remote(prev_remote.as_deref()),
+                        canon_remote(this.remote),
+                    ) {
+                        (Some(x), Some(y)) if x != y => Err(Error::Invalid(format!(
+                            "REPO COLLISION: this graph already holds {prev}, and {new} shares \
+                             relative paths with it — indexing it un-labelled would overwrite \
+                             those rows and delete the rest.\n\
+                             fix: give each repo a label — index the second as \
+                             `wicked-estate index {root_str} --repo <name>`, and re-index the \
+                             first the same way into a fresh --db.",
+                            prev = describe("<unknown root>", prev_remote.as_deref()),
+                            new = describe(&root_str, this.remote),
+                        ))),
+                        _ => Ok(()),
+                    };
+                }
             };
-            let prev_remote = store.meta_get_key("repo_remote");
-            if same_repo(
-                &prev_root,
-                prev_remote.as_deref(),
-                &root_str,
-                info.remote.as_deref(),
-            ) {
+            // An un-labelled graph records no subpath — adding a meta key would be a visible
+            // change to single-repo dbs, which this whole flag exists to leave alone — so ask git
+            // about the recorded root directly. That is exactly the evidence this case needs: the
+            // collision it guards against is two roots that BOTH exist right now. A root that has
+            // since gone answers `None`, and the comparison falls back to the remote alone, which
+            // is what keeps a moved checkout reading as one repo.
+            let prev_subpath = git_subpath(Path::new(&prev_root));
+            let prev = Ident {
+                root: &prev_root,
+                remote: prev_remote.as_deref(),
+                subpath: prev_subpath.as_deref(),
+            };
+            if same_repo(prev, this) {
                 return Ok(()); // same repo, re-indexed — today's behaviour, untouched.
             }
             Err(Error::Invalid(format!(
@@ -270,7 +381,7 @@ pub fn guard(
                  `wicked-estate index {root_str} --repo <name>`, and re-index the first the same \
                  way into a fresh --db (a graph cannot mix labelled and un-labelled repos).",
                 prev = describe(&prev_root, prev_remote.as_deref()),
-                new = describe(&root_str, info.remote.as_deref()),
+                new = describe(&root_str, this.remote),
             )))
         }
         Some(l) => {
@@ -288,35 +399,29 @@ pub fn guard(
                 )));
             }
             if let Some(existing) = record(store, l) {
-                if !same_repo(
-                    &existing.root,
-                    existing.info.remote.as_deref(),
-                    &root_str,
-                    info.remote.as_deref(),
-                ) {
+                if !same_repo(ident_of(&existing), this) {
                     return Err(Error::Invalid(format!(
                         "REPO COLLISION: label '{l}' is already bound to {prev} in this graph; \
                          indexing {new} under it would overwrite that repo's rows.\n\
-                         fix: pick a different `--repo` name for {root_str}.",
+                         fix: pick a different `--repo` name for {root_str}. If this IS that repo \
+                         moved on disk (a non-git tree is identified by its path, so a move reads \
+                         as a new repo), re-index every repo into a fresh --db — reusing the label \
+                         here would overwrite the rows still recorded under the old root.",
                         prev = describe(&existing.root, existing.info.remote.as_deref()),
-                        new = describe(&root_str, info.remote.as_deref()),
+                        new = describe(&root_str, this.remote),
                     )));
                 }
                 return Ok(());
             }
-            if let Some(other) = registry(store).into_iter().find(|r| {
-                same_repo(
-                    &r.root,
-                    r.info.remote.as_deref(),
-                    &root_str,
-                    info.remote.as_deref(),
-                )
-            }) {
+            if let Some(other) = registry(store)
+                .into_iter()
+                .find(|r| same_repo(ident_of(r), this))
+            {
                 return Err(Error::Invalid(format!(
                     "REPO COLLISION: {new} is already indexed in this graph as '{other}'; \
                      adding it again as '{l}' would store every symbol twice.\n\
                      fix: re-run as `wicked-estate index {root_str} --repo {other}` to refresh it.",
-                    new = describe(&root_str, info.remote.as_deref()),
+                    new = describe(&root_str, this.remote),
                     other = other.label,
                 )));
             }
@@ -356,23 +461,26 @@ pub(crate) fn namespace_extra(extra: &mut ExtraExtraction, label: &str, file_pat
     }
 }
 
-/// Namespace a `file`/`synthetic` SymbolId. Any other shape is already path-namespaced by the
-/// extractor (it was handed the prefixed path) and is returned untouched.
+/// Namespace a `file`/`synthetic` SymbolId. Any other shape carries the path the extractor was
+/// handed (already prefixed via `FileWork::rel`) and is returned untouched.
+///
+/// NOT idempotent, and deliberately so. An earlier version short-circuited when the id already
+/// started with `<label>/`, to make a second pass a no-op — but that made the function silently
+/// WRONG for the repos most likely to hit it: `--repo docs` on a repo that has a top-level `docs/`
+/// left `file . docs/x.md:` unprefixed (it "already" started with `docs/`), the file row was
+/// `docs/docs/x.md`, and the edge pointing at the un-prefixed id was pruned as dangling — an
+/// extra edge lost with no diagnostic. Correctness beats a property nothing needs: the sole
+/// caller, [`namespace_extra`], runs exactly once per extraction, immediately after
+/// `extract_extra` and before anything is stored.
 fn namespace_symbol(id: &SymbolId, label: &str) -> SymbolId {
     let s = id.as_str();
     if let Some(rest) = s.strip_prefix("file . ") {
         if let Some(path) = rest.strip_suffix(':') {
-            if path.starts_with(&prefix(label)) {
-                return id.clone();
-            }
             return Symbol::file(namespaced(Some(label), path)).id();
         }
     }
     if let Some((scheme, rest)) = s.split_once(" synthetic ") {
         if let Some(sid) = rest.strip_suffix(':') {
-            if sid.starts_with(&prefix(label)) {
-                return id.clone();
-            }
             return Symbol::synthetic(scheme, namespaced(Some(label), sid)).id();
         }
     }
@@ -457,6 +565,83 @@ mod tests {
         );
         assert_ne!(canon_remote(Some("git@github.com:acme/beta.git")), ssh);
         assert_eq!(canon_remote(Some("  ")), None);
+    }
+
+    /// Only the AUTHORITY folds case. Two path remotes differing only in the case of a path
+    /// segment are two repositories on a case-sensitive filesystem, and "same repo" on this
+    /// predicate is the answer that lets one overwrite the other un-labelled.
+    #[test]
+    fn remote_identity_folds_the_host_but_not_the_path() {
+        assert_eq!(
+            canon_remote(Some("git@GitHub.COM:acme/alpha.git")).as_deref(),
+            Some("github.com/acme/alpha")
+        );
+        assert_ne!(
+            canon_remote(Some("/srv/git/Alpha")),
+            canon_remote(Some("/srv/git/alpha"))
+        );
+    }
+
+    fn ident<'a>(root: &'a str, remote: Option<&'a str>, sub: Option<&'a str>) -> Ident<'a> {
+        Ident {
+            root,
+            remote,
+            subpath: sub,
+        }
+    }
+
+    /// The monorepo hole. One `origin`, two packages, both with `src/index.ts`: identical on the
+    /// remote alone, and the guard reading them as one repo is what let the second index sweep the
+    /// first away without a word.
+    #[test]
+    fn one_remote_two_packages_are_not_the_same_tree() {
+        let r = Some("git@github.com:acme/mono.git");
+        assert!(!same_repo(
+            ident("/m/pkgA", r, Some("pkgA")),
+            ident("/m/pkgB", r, Some("pkgB")),
+        ));
+        // …and a package against the whole repo is likewise not the same tree.
+        assert!(!same_repo(
+            ident("/m", r, Some("")),
+            ident("/m/pkgB", r, Some("pkgB")),
+        ));
+        // Same package, same remote, different path on disk — a moved or re-cloned checkout.
+        assert!(same_repo(
+            ident("/old/m/pkgA", r, Some("pkgA")),
+            ident(
+                "/new/m/pkgA",
+                Some("https://github.com/acme/mono"),
+                Some("pkgA")
+            ),
+        ));
+        // Position unknown on either side ⇒ no evidence ⇒ the remote alone decides, which is the
+        // behaviour a record written before subpaths existed still gets.
+        assert!(same_repo(
+            ident("/a", r, None),
+            ident("/b", r, Some("pkgB"))
+        ));
+    }
+
+    /// A pre-W7.4 db has content but no `indexed_root`. The root is not the only evidence there:
+    /// a DIFFERENT `origin` still proves the overwrite is real.
+    #[test]
+    fn a_rootless_db_still_refuses_a_different_remote() {
+        let mut store = MemStore::new();
+        store.meta_set_key("repo_remote", "git@github.com:acme/alpha.git");
+        let idx = files(&["src/index.ts"]);
+        let err = guard(
+            &store,
+            &idx,
+            None,
+            Path::new("/repos/beta"),
+            &info(Some("git@github.com:acme/beta.git")),
+        )
+        .expect_err("a different origin is evidence enough");
+        assert!(err.to_string().contains("REPO COLLISION"));
+        // No remote on either side is genuinely no evidence — behave as before rather than guess.
+        let mut bare = MemStore::new();
+        bare.meta_set_key("repo_remote", "");
+        assert!(guard(&bare, &idx, None, Path::new("/repos/beta"), &info(None)).is_ok());
     }
 
     #[test]
@@ -602,12 +787,29 @@ mod tests {
                 .id()
                 .as_str()
         );
-        // Idempotent — a second pass must not double-prefix.
-        let once = namespace_symbol(&f, "alpha");
-        assert_eq!(namespace_symbol(&once, "alpha"), once);
         // A global symbol already carries the prefixed path; leave it alone.
         let g = SymbolId::from("ts-typescript . . . alpha/src/a/x().");
         assert_eq!(namespace_symbol(&g, "alpha"), g);
+    }
+
+    /// Regression: the label may equal a leading path segment of the id being namespaced
+    /// (`--repo docs` on a repo that has `docs/`). It must STILL be prefixed — the file row it has
+    /// to match is `docs/docs/x.md`. The old `starts_with(prefix)` short-circuit returned the
+    /// un-prefixed id here, and the edge pointing at it was silently pruned as dangling.
+    #[test]
+    fn a_label_that_matches_a_leading_path_segment_is_still_namespaced() {
+        let f = Symbol::file("docs/triage.md").id();
+        assert_eq!(
+            namespace_symbol(&f, "docs").as_str(),
+            Symbol::file("docs/docs/triage.md").id().as_str()
+        );
+        let s = Symbol::synthetic("archetype", "docs/triage").id();
+        assert_eq!(
+            namespace_symbol(&s, "docs").as_str(),
+            Symbol::synthetic("archetype", "docs/docs/triage")
+                .id()
+                .as_str()
+        );
     }
 
     #[test]

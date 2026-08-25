@@ -187,19 +187,28 @@ async fn main() -> Result<()> {
 
     // W7.4: compute staleness once at startup. Best-effort — None on any failure.
     let commits_behind: Option<u64> = {
-        // We need the indexed root from meta. Open a second ext handle for meta access.
-        let indexed_root = if db_path != ":memory:" {
-            wicked_estate_store::open_store_ext(&db_path)
-                .ok()
-                .and_then(|s| s.meta_get_key("indexed_root"))
+        // We need the indexed root(s) from meta. Open a second ext handle for meta access.
+        let store = if db_path != ":memory:" {
+            wicked_estate_store::open_store_ext(&db_path).ok()
         } else {
             None
         };
-        if let Some(root) = indexed_root {
+        store.and_then(|s| {
+            // A co-located graph has one root PER REPO, and `indexed_root` is only the last one
+            // indexed — reading it alone reports one arbitrary repo's staleness as the whole
+            // graph's, and answers "fresh" while every other repo is behind. Take the worst.
+            let repos = wicked_estate::repo_scope::registry(s.as_ref());
+            if !repos.is_empty() {
+                return repos
+                    .iter()
+                    .filter_map(|r| {
+                        wicked_estate::commits_behind(std::path::Path::new(&r.root), &db_path)
+                    })
+                    .max();
+            }
+            let root = s.meta_get_key("indexed_root")?;
             wicked_estate::commits_behind(std::path::Path::new(&root), &db_path)
-        } else {
-            None
-        }
+        })
     };
 
     // Dim-guard (DoD-A6a): read the store's recorded embedder identity + dim, and compute the
