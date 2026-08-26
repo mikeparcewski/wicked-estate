@@ -20,9 +20,23 @@ name: Publish
 # A future brand-new crate needs a one-time token-auth bootstrap (see the 0.13.1 bootstrap in
 # git history), then a trusted-publisher binding like the other 25.
 
+# A tag push is the normal trigger, and workflow_dispatch is the RECOVERY one. v0.14.6 was tagged
+# and pushed and this workflow never ran — zero runs for that ref — so the release sat unpublished
+# on crates.io while the tag, the manifest and main all said 0.14.6. Nothing in the repo could fix
+# that: the only trigger was a tag push, the tag already existed, and there was no prior run to
+# re-run. The header's own advice ("just re-run the workflow") assumed a run existed.
+#
+# publish.sh already skips crates published at the tagged version, so dispatching against an
+# existing tag is safe and idempotent — it publishes only what is genuinely missing.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Tag to publish (e.g. v0.14.6). Must already exist.'
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -36,7 +50,10 @@ jobs:
       id-token: write # mint the GitHub OIDC token exchanged for a crates.io publish token
       contents: read
     steps:
+      # Check out the DISPATCHED tag when run by hand; the pushed tag otherwise.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: authenticate with crates.io (OIDC trusted publishing)
