@@ -30,3 +30,15 @@ Thumbs.db
 
 # NOTE: Cargo.lock IS committed — wicked-estate ships as a binary (reproducible builds).
 # NOTE: crates/we-extract/vendor/tree-sitter-rpg/src/parser.c IS committed — vendored grammar source.
+
+# Estate store artifacts written beside a site build. The `*.db` rules above do NOT
+# match these -- the suffix comes AFTER .db (wicked-estate.db.mem, .db.knowledge-wal),
+# so `git add -A` in site/ would happily commit a local database.
+#
+# Scoped to site/ deliberately. Rooted `*.db.mem*` would apply repo-wide and sit BELOW the
+# fixture un-ignores at the top of this file, and later rules win -- so it would be a live
+# hazard for any future crates/**/fixtures/*_v*.db.memext. (Those fixtures are already
+# governed by their own nested .gitignore, which ignores *.db.memext and un-ignores the one
+# checked-in file; this scoping keeps the two from ever interacting.)
+site/*.db.mem*
+site/*.db.knowledge*

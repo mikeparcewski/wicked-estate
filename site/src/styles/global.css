@@ -93,12 +93,22 @@ html[data-theme="light"], html[data-theme="dark"] {
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
     /* Scroll-lock to section: the document (the html root) snaps stratum-to-stratum.
-       `mandatory` is safe because every .strata is sized to the visible band
-       (100svh − topbar), never taller than the snapport, so a whole section can
-       always be shown — no trap. scroll-padding-top offsets the fixed topbar so
-       snap points + anchor links land below it. smooth scroll is gated behind
-       prefers-reduced-motion (see the media query below). */
-    scroll-snap-type: y mandatory;
+       PROXIMITY, not mandatory — the shared chrome's default (tokens.css), which
+       this file used to override. The override was justified by "every .strata is
+       sized to the visible band (100svh − topbar), never taller than the snapport,
+       so a whole section can always be shown — no trap". Measured at 1440x700 that
+       premise is false: the hero is 750px and #toolface 786px against a 636px
+       snapport. Under `mandatory` the browser refuses to come to rest anywhere but
+       a snap point (plus the slack inside an over-tall snap area), so a stratum
+       that exactly fits has exactly ONE resting place and you cannot stop part-way
+       down it to read. Measured, wheeling 320px at a time from the top: mandatory
+       gave 14 resting places for 9 sections and none at all inside #strata or
+       #provenance beyond their snap point; proximity gives 18, including a
+       mid-section rest inside every stratum. Same defect as wicked-studio#132.
+       scroll-padding-top offsets the fixed topbar so snap points + anchor links
+       land below it. smooth scroll is gated behind prefers-reduced-motion (see
+       the media query below). */
+    scroll-snap-type: y proximity;
     scroll-padding-top: var(--topbar-h);
     background-color: var(--canvas);
   }
@@ -571,7 +581,11 @@ html[data-theme="light"], html[data-theme="dark"] {
   /* FIXED height (not max-height): the tab content swaps but the frame never reflows,
      so the whole section holds a constant outer height across the gesture cycle — zero
      vertical bounce. The tallest states (the all-details peek, the 4-row memory panel)
-     scroll internally within this reserved area. */
+     scroll internally within this reserved area.
+     Do NOT shrink this to make #query fit a short viewport: at 1440x700 the explorer
+     column (423px) is the taller half of .ide-body, so trimming the dock costs the
+     reader dock rows and buys the section nothing. Measured: 24vh→22vh moved #query
+     716px → 716px. Trim the explorer rows instead. */
   .ide-dock-body {
     padding: 5px 16px 9px 14px; overflow-y: auto; scrollbar-gutter: stable;
     height: min(24vh, 194px); animation: ide-dock-in 0.28s var(--ease) both;
@@ -798,8 +812,9 @@ html body::after {
 .strata:nth-of-type(odd)  { background-color: transparent; }
 .strata:nth-of-type(even) { background-color: color-mix(in oklab, #000 7%, transparent); }
 /* Below Tailwind's `lg` (1024px) every multi-column grid on the page collapses
-   to one column and sections grow past one screen, so mandatory snap would trap
-   or clip them. Drop snap and fall back to natural document flow with gutters. */
+   to one column and sections grow past one screen, so even proximity snap would
+   fight the reader. Drop snap and fall back to natural document flow with
+   gutters. */
 @media (max-width: 1023px) {
   html { scroll-snap-type: none; }
   .strata { min-height: 0; padding-block: 3rem; }
