@@ -36,8 +36,7 @@ test('ecosystem dropdown opens on click and closes on Escape', async ({ page }) 
   await expect(menu).toBeVisible();
   await expect(btn).toHaveAttribute('aria-expanded', 'true');
 
-  // the four-plane roster is intact (5 marketed items: interactive · studio ·
-  // crew · garden · estate — retired/absorbed packages get no row)
+  // The four-plane roster is intact: 4 marketed items — studio · crew · garden · estate.
   // 4, not 5: the ecosystem dropdown no longer carries a wicked-interactive row. Its builder UI
   // moved into wicked-studio and the service answers a direct visitor with "it serves the API, not
   // the UI", so a nav row there would spend the click telling you that. The product is not gone —
