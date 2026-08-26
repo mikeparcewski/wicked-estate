@@ -30,3 +30,9 @@ Thumbs.db
 
 # NOTE: Cargo.lock IS committed — wicked-estate ships as a binary (reproducible builds).
 # NOTE: crates/we-extract/vendor/tree-sitter-rpg/src/parser.c IS committed — vendored grammar source.
+
+# Estate store artifacts written beside a site build. The `*.db` rules above do NOT
+# match these -- the suffix comes AFTER .db (wicked-estate.db.mem, .db.knowledge-wal),
+# so `git add -A` in site/ would happily commit a local database.
+*.db.mem*
+*.db.knowledge*

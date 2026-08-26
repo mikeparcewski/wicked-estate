@@ -134,28 +134,28 @@ function Hero() {
   }, [activeRow])
 
   return (
-    <Section className="strata--hero !pt-28 overflow-hidden">
+    <Section className="strata--hero !pt-24 overflow-hidden">
       <div className="max-w-6xl mx-auto w-full grid lg:grid-cols-[1.08fr_0.92fr] gap-14 items-center">
         {/* Left — the thesis, committed in sentence one */}
         <div className="text-left">
           <span className="kicker">wicked-estate · the foundation · v0.14.4 · crates.io</span>
-          <h1 className="mt-6 font-display font-black text-ink text-[clamp(2.1rem,10vw,3rem)] sm:text-6xl lg:text-[4.2rem] leading-[0.92]" style={{ fontStretch: '112%' }}>
+          <h1 className="mt-4 font-display font-black text-ink text-[clamp(2.1rem,10vw,3rem)] sm:text-6xl lg:text-[4.2rem] leading-[0.92]" style={{ fontStretch: '112%' }}>
             Code graph.<br />Memory.<br />Knowledge.<br />
             <span style={{ color: 'var(--accent)' }}>One binary.</span>
           </h1>
-          <p className="mt-7 text-lg text-muted leading-relaxed max-w-xl font-sans">
+          <p className="mt-5 text-lg text-muted leading-relaxed max-w-xl font-sans">
             The <span className="text-ink">system of record</span> for your codebase — one local-first MCP server,{' '}
             <span className="text-ink">23 tools across 3 domains</span>. What breaks if you change it, the decision
             behind it, the doc that explains it — including the{' '}
             <span className="text-ink">injected edges grep never sees</span>. Every fact stamped with confidence and
             provenance: a heuristic is never handed to an agent as a fact.
           </p>
-          <p className="mt-4 text-sm text-muted leading-relaxed max-w-xl font-sans">
+          <p className="mt-3 text-sm text-muted leading-relaxed max-w-xl font-sans">
             Zero infrastructure by default — one SQLite file, nothing leaves your box. And it earned the job:
             its hybrid retrieval is <span className="text-ink">parity-benchmarked in the open</span> against the
             dedicated search system it replaced.
           </p>
-          <div className="mt-9 flex flex-col sm:flex-row gap-3">
+          <div className="mt-5 flex flex-col sm:flex-row gap-3">
             <a href="#query" className="btn-primary">Read the record ↓</a>
             <a href="https://github.com/mikeparcewski/wicked-estate" target="_blank" rel="noreferrer" className="btn-outline">
               <GitHubIcon /> View on GitHub
@@ -725,7 +725,7 @@ function AgentIDE() {
     <Section id="query" solid>
       <div className="max-w-6xl mx-auto w-full" ref={rootRef}>
         {/* section header — using an IDE that actually knows your system */}
-        <div className="mb-4 w-full text-left max-w-3xl">
+        <div className="mb-3 w-full text-left max-w-3xl">
           <span className="kicker">The agent&apos;s IDE</span>
           <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink leading-[0.98]">
             The agent doesn&apos;t grep. It edits in an IDE that <span style={{ color: 'var(--accent)' }}>knows your whole system.</span>
