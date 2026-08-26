@@ -17,7 +17,7 @@
     "astro": "^7.1.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "wicked-web": "github:mikeparcewski/wicked-web#bc1f547b10e761c3ea78fcdb90ad7a8402d71da6"
+    "wicked-web": "github:mikeparcewski/wicked-web#8ca61ea5705f33c8b7083abbfb5f1ec1db997da2"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
