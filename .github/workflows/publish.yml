@@ -51,13 +51,25 @@ jobs:
       contents: read
     steps:
       # Check out the DISPATCHED tag when run by hand; the pushed tag otherwise.
-      # refs/tags/ EXPLICITLY on a dispatched run. An unqualified `v0.14.6` is ambiguous — a branch
-      # of that name resolves too — so a branch named like a tag could be published from, which
-      # defeats the point of "publish the tagged release" on a job holding a crates.io OIDC token.
-      # A pushed tag already arrives fully qualified in github.ref.
-      - uses: actions/checkout@v4
+      # TWO checkout steps, gated on the event, rather than one with a fallback expression.
+      #
+      # The first cut used `inputs.ref && format('refs/tags/{0}', inputs.ref) || github.ref`. An
+      # empty or malformed input makes that whole expression fall through to `github.ref`, which on
+      # a workflow_dispatch run is the DEFAULT BRANCH — so the recovery path could publish main
+      # while appearing to publish a tag. `required: true` is a UI constraint; an API dispatch can
+      # still send "".
+      #
+      # Gated steps cannot fall back: the dispatch path only ever checks out refs/tags/<input>, and
+      # if that tag does not exist the checkout fails loudly, which is the correct outcome for a job
+      # holding a crates.io OIDC publishing token.
+      - name: check out the dispatched TAG (recovery path)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.ref && format('refs/tags/{0}', github.event.inputs.ref) || github.ref }}
+          ref: refs/tags/${{ inputs.ref }}
+      - name: check out the pushed tag (normal path)
+        if: github.event_name != 'workflow_dispatch'
+        uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: authenticate with crates.io (OIDC trusted publishing)
