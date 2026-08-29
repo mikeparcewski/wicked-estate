@@ -2888,7 +2888,6 @@ mod tests {
         assert_eq!(res.unresolved.len(), 1, "but it binds nothing");
     }
 
-
     /// Studio `p` shape: a deny-listed html type_alias homonym shadows a same-family tsx
     /// function. Dropping the type_alias pre-uniqueness is the INTENDED recovery → exactly one
     /// new name-resolver edge at 0.60.
