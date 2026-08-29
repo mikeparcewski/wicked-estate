@@ -963,4 +963,53 @@ mod resolver_tests {
         };
         assert_eq!(run(), run(), "same input twice → identical output");
     }
+
+    /// S9 complexity guard (ATT-INV-5): a deterministic OPERATION-COUNT invariant, not a
+    /// wall-clock assertion. 20k File nodes / 100k refs: total exact-map probes stay ≤
+    /// refs × 14 and the File map is built exactly ONCE — the O(refs × files) class
+    /// (review doc 01: ~234 ns × refs × files ≈ 39 min on a 50k-file monorepo) cannot pass.
+    /// Wall-clock lives in the lane's §5 release measurement protocol, not in the suite.
+    #[test]
+    fn twenty_k_files_hundred_k_refs_bounded_probes() {
+        let n_files = 20_000usize;
+        let mut nodes = Vec::with_capacity(n_files);
+        for i in 0..n_files {
+            nodes.push(file_node(&format!("src/m{i}.ts"), "typescript"));
+        }
+        let index = VecIndex(nodes);
+
+        // 100k refs: 90k extensionless binds (1 probe each), 5k .js remap binds (1 probe),
+        // 5k parked specs (worst case: full probe + index slots).
+        let mut refs = Vec::with_capacity(100_000);
+        for i in 0..90_000usize {
+            let target = i % n_files;
+            refs.push(rel_ref(
+                &format!("src/m{}.ts", (i + 1) % n_files),
+                &format!("./m{target}"),
+            ));
+        }
+        for i in 0..5_000usize {
+            let target = i % n_files;
+            refs.push(rel_ref(
+                &format!("src/m{}.ts", (i + 3) % n_files),
+                &format!("./m{target}.js"),
+            ));
+        }
+        for i in 0..5_000usize {
+            refs.push(rel_ref(
+                &format!("src/m{}.ts", i % n_files),
+                &format!("./missing{i}"),
+            ));
+        }
+
+        let (edges, stats) = resolver().resolve_with_stats(&refs, &index).unwrap();
+        assert_eq!(edges.len(), 95_000, "all non-parked refs bind");
+        assert_eq!(stats.map_builds, 1, "the File map is built exactly once");
+        assert!(
+            stats.probes <= refs.len() * 14,
+            "probes must stay O(refs): {} > {} × 14",
+            stats.probes,
+            refs.len()
+        );
+    }
 }
