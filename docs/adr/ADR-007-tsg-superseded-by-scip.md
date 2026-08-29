@@ -113,13 +113,15 @@ Context section above. The original text is kept unedited for history; this note
 never matched `index_path`'s resolver slice. The real slice, as shipped and as of this note, is:
 
 ```
-NameResolver → ScopedNameResolver → ImportMapResolver → InfraResolver → RulesBridgeResolver
+NameResolver → ScopedNameResolver → ImportMapResolver → RelativeImportResolver
+    → InfraResolver → RulesBridgeResolver
 ```
 
 (`crates/wicked-estate/src/lib.rs`, guarded against drift by
 `tests::slice_matches_engine_contract_table`; the per-tier activation table lives in
-`docs/ENGINE-CONTRACT.md` §3.1. `resolve_all` dedups by max confidence, so order within the slice
-never affected results.)
+`docs/ENGINE-CONTRACT.md` §3.1 — that table is the drift-guarded source of truth for the slice;
+this listing is informative. `resolve_all_with_coverage` dedups by max confidence, so order within
+the slice never affected results.)
 
 **2. `MethodResolutionSynthesizer` was retired 2026-08-28 and the precision dashboard never
 existed in bench.** The synthesizer was never in any production slice on any branch

@@ -772,9 +772,11 @@ pub struct Resolution {
 /// naturally wins because its edges carry higher confidence.
 ///
 /// **The production `index`/`watch` slice** (`wicked-estate`'s `index_path`; the activation table
-/// lives in `docs/ENGINE-CONTRACT.md` §3.1):
+/// in `docs/ENGINE-CONTRACT.md` §3.1 is the drift-guarded source of truth — this listing is
+/// unguarded and informative only):
 /// ```text
-/// NameResolver → ScopedNameResolver → ImportMapResolver → InfraResolver → RulesBridgeResolver
+/// NameResolver → ScopedNameResolver → ImportMapResolver → RelativeImportResolver
+///     → InfraResolver → RulesBridgeResolver
 /// ```
 /// Dedup keeps the max-confidence edge per key, so resolver ORDER is irrelevant to the result
 /// (pinned by `resolve_all_dedup_keeps_higher_confidence_regardless_of_order`).
