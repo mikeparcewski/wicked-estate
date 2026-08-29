@@ -16,8 +16,15 @@ test('home page renders hero, all signature sections, and footer without page er
   await expect(page.getByText('CORE LOG · applyDiscount')).toBeVisible();
 
   // every signature section is present and rendered
-  for (const id of ['#query', '#strata', '#toolface', '#provenance', '#storage', '#foundation', '#get-started']) {
+  for (const id of ['#query', '#strata', '#toolface', '#binary', '#provenance', '#storage', '#foundation', '#get-started']) {
     await expect(page.locator(id)).toBeVisible();
+  }
+
+  // #binary — the released long tail: watch mode, SCIP tier, multi-repo, IaC drift
+  const binary = page.locator('#binary');
+  await expect(binary).toContainText('The CLI ships the long tail');
+  for (const verb of ['watch', 'scip', 'cross-graph', 'tfstate', 'drift', 'by-requirement', 'fingerprint']) {
+    await expect(binary.getByText(verb, { exact: true }).first()).toBeVisible();
   }
 
   // #foundation is the shared SameGarden four-plane map, with estate marked
