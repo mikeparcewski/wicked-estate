@@ -291,10 +291,20 @@ are crate-internal; no external caller's signature moves.
 | **`cluster_summary`** (`rank/src/cluster_summary.rs:105`, `:163`) | score LOOKUP, not top-N | must NOT be filtered: `ranked_symbols(store, &[], usize::MAX)` feeds `pr_scores.get(s).unwrap_or(0.0)` for every community member's `top_symbols`; the filter would zero File/Import members and degrade Import-heavy communities to id-ordered exemplars. It switches to a crate-internal `ranked_symbols_unfiltered` (the pre-filter pairs), preserving today's exemplar behavior byte-for-byte; pinned by a test. |
 | ContextBundle unranked-candidate tail (`retrieve:1649-1653`, BR-3) | append path | File/Import filtered when appending candidates absent from the ranked list, so importer/imported Files pulled in by the Both/depth-2/200-node gather don't pad the pack tail |
 Weighting by confidence was rejected: the File→Import edges are `Parsed/1.0`, so no weight
-removes the pre-existing Import pollution (crew #1 = `import/json/` at HEAD). graph-view's
-post-hoc `NodeKind::File` / `NodeKind::Import` entries in `excluded` (`main.rs:1524-1527`) are
-deleted (§8) — safe only because of the cache-read filter above. The bench `query_symbol` on crew
-**will change identity** for this reason alone — the plan owns that receipt shift (§5).
+removes the pre-existing Import pollution (crew #1 = `import/json/` at HEAD). The bench
+`query_symbol` on crew **will change identity** for this reason alone — the plan owns that
+receipt shift (§5).
+
+**Round-1 correction (R1-CORR-2):** S5 originally deleted graph-view's `NodeKind::File` /
+`NodeKind::Import` entries from `excluded` as "post-hoc" (§8), reasoning that `important_symbols`
+never returns them after the cache-read filter. That reasoning covered only the seed/backfill
+path: the shared `passes` closure is ALSO the BFS **expansion** gate (`main.rs`, the
+Calls|Imports neighbor walk), and File nodes enter the frontier via file-scope Calls edges
+(a bare top-level `f();` attributes the ref to the File symbol), then pull Import nodes and more
+Files through Imports edges — including this lane's File→File edges. The entries are restored;
+they are redundant for seeds but load-bearing for expansion. Regression pinned by
+`crates/wicked-estate/tests/graph_view_cli.rs` (fixture verified to FAIL on the unfixed binary:
+4 functions + 3 file + 2 import nodes; passes with the gate restored).
 
 ### I. Captures: three JS/TS/TSX forms as `.scm` data, same capture names
 Added to `typescript.scm`, `tsx.scm`, `javascript.scm` in one commit (§11 lockstep), reusing

@@ -1516,10 +1516,15 @@ fn main() -> Result<()> {
 
             // Exclude structural-only and rules-engine kinds; keep code-bearing kinds.
             // Namespace/Synthetic/Rule*/Condition/Action/Fact are not user code symbols.
-            // File and Import are NOT listed: important_symbols never returns them — the
-            // ranked_symbols seam filters live results and the cache-read path cleans stale
-            // pre-upgrade caches (lane relative-imports Decision H / BR-1).
+            // File and Import stay listed even though important_symbols never returns them
+            // (the ranked_symbols seam filters live results and the cache-read path cleans
+            // stale pre-upgrade caches — Decision H / BR-1): `passes` is ALSO the BFS
+            // expansion gate below, and File nodes enter the frontier via file-scope Calls
+            // edges, then pull Import nodes and more Files through Imports edges
+            // (round-1 R1-CORR-2).
             let excluded = [
+                NodeKind::File,
+                NodeKind::Import,
                 NodeKind::Module,
                 NodeKind::Namespace,
                 NodeKind::Constant,
