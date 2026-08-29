@@ -1338,6 +1338,17 @@ fn module_path(path: &str) -> String {
     }
 }
 
+/// Version of the definition-SymbolId scheme minted by this extractor.
+///
+/// Scheme "1" (implicit, never stored): exactly two descriptors — `[module/, name<suffix>]` —
+/// so every same-named definition in one module minted the SAME id and the store's
+/// `ON CONFLICT(symbol) DO UPDATE` collapsed them into one node. Scheme "2" nests definition
+/// identity under the contiguous run of Type-suffixed enclosing definitions
+/// (`<module>/Repo#save().`) — see the 2026-08 amendment in
+/// `docs/adr/ADR-002-stable-symbol-identity.md`. Stored per repo as the `id_scheme` meta key;
+/// a mismatch forces a full re-extraction so a DB never mixes schemes.
+pub const SYMBOL_ID_SCHEME: &str = "2";
+
 fn def_suffix(kind: &str) -> Suffix {
     match kind {
         "function" | "method" | "constructor" => Suffix::Method,
@@ -1345,6 +1356,78 @@ fn def_suffix(kind: &str) -> Suffix {
         | "type_alias" | "type" => Suffix::Type,
         _ => Suffix::Term,
     }
+}
+
+/// A definition collected during the match loop — no id yet. Ids are minted in a second pass
+/// (after the loop) because the enclosing chain needs the FULL definition list:
+/// `QueryCursor::matches` does not contract document order, and a def's enclosing type can come
+/// from a different pattern than the def itself (e.g. Python methods vs. their class).
+struct PendingDef {
+    kind: String,
+    name: String,
+    start: usize,
+    end: usize,
+    span: Span,
+    signature: Option<String>,
+}
+
+/// The chain of Type descriptors a definition nests under (ADR-002 amendment, 2026-08).
+///
+/// Rule: walk every OTHER pending def whose byte range strictly contains `[start, end)`
+/// (contains AND not range-equal — range-equality excludes the def itself and duplicate
+/// captures of it), innermost → outermost, and collect a `Name#` descriptor while the container
+/// is Type-suffixed; the FIRST non-Type container (Method, Function, or Term) truncates the
+/// chain. Anything declared inside a function/method/Term body therefore takes no Type
+/// descriptors and stays module-flat — the deliberate residual that preserves ADR-002's
+/// rename-stability for function bodies. Returned outer → inner, ready to splice into the id.
+fn enclosing_chain(pending: &[PendingDef], start: usize, end: usize) -> Vec<Descriptor> {
+    let mut containers: Vec<&PendingDef> = pending
+        .iter()
+        .filter(|p| p.start <= start && end <= p.end && !(p.start == start && p.end == end))
+        .collect();
+    // Innermost first: latest start wins; on equal starts the smaller range is inner.
+    containers.sort_by(|a, b| b.start.cmp(&a.start).then(a.end.cmp(&b.end)));
+    // A container captured by two patterns (decorated TS class, Rust function_item) appears
+    // twice with the same range+name — its descriptor must enter the chain ONCE.
+    containers.dedup_by(|a, b| a.start == b.start && a.end == b.end && a.name == b.name);
+    let mut chain: Vec<Descriptor> = containers
+        .into_iter()
+        .take_while(|p| def_suffix(&p.kind) == Suffix::Type)
+        .map(|p| Descriptor::new(p.name.clone(), Suffix::Type))
+        .collect();
+    chain.reverse(); // outer → inner
+    chain
+}
+
+/// The ONLY constructor of a tree-sitter code-definition SymbolId (scheme 2):
+/// `[module/] ++ chain ++ [name<suffix>]`. Framework emitters that need a def's id resolve it
+/// through [`def_symbol_at`] first and fall back to this with a self-excluded chain.
+fn def_symbol(
+    scheme: &str,
+    module: &str,
+    chain: &[Descriptor],
+    name: &str,
+    suffix: Suffix,
+) -> SymbolId {
+    let mut descriptors = Vec::with_capacity(chain.len() + 2);
+    descriptors.push(Descriptor::new(module.to_string(), Suffix::Namespace));
+    descriptors.extend_from_slice(chain);
+    descriptors.push(Descriptor {
+        name: name.to_string(),
+        suffix,
+        disambiguator: None,
+    });
+    Symbol::global(scheme, None, descriptors).id()
+}
+
+/// The symbol of the smallest already-minted definition containing `pos` whose name is `name`
+/// (a def's range contains its own name identifier). How framework emitters (DI / route /
+/// event-listener) join their edges onto the def nodes the def loop produced.
+fn def_symbol_at(defs: &[DefRec], pos: usize, name: &str) -> Option<SymbolId> {
+    defs.iter()
+        .filter(|d| d.start <= pos && pos < d.end && d.name == name)
+        .min_by_key(|d| d.end - d.start)
+        .map(|d| d.symbol.clone())
 }
 
 fn def_nodekind(kind: &str) -> NodeKind {
@@ -1373,6 +1456,8 @@ struct DefRec {
     symbol: SymbolId,
     start: usize,
     end: usize,
+    /// The definition's name — [`def_symbol_at`] joins framework captures onto defs by it.
+    name: String,
 }
 
 /// Strip surrounding quote/delimiter chars from a captured literal to get its canonical name.
@@ -1734,21 +1819,26 @@ impl Extractor for TreeSitterExtractor {
 
         let mut def_nodes: Vec<Node> = Vec::new();
         let mut defs: Vec<DefRec> = Vec::new();
+        // Definitions collected during the match loop; ids are minted in pass 2 (after the loop)
+        // where the full list is available to compute each def's enclosing Type chain.
+        let mut pending: Vec<PendingDef> = Vec::new();
         // raw_refs: (raw_name, EdgeKind, byte_pos_for_enclosing, span)
         let mut raw_refs: Vec<(String, EdgeKind, usize, Span)> = Vec::new();
-        // Framework DI: (injecting_class_name, injected_type_name, span). The source symbol is the
-        // class (built from the class name + module/scheme), NOT the enclosing def — constructor
-        // injection sits inside the constructor, whose `enclosing()` would be the constructor.
-        let mut di_pairs: Vec<(String, String, Span)> = Vec::new();
-        // Framework routes: (route_path, handler_method_name, span). Source = synthetic route node,
-        // target = the handler method symbol (same 2-descriptor scheme as the def loop).
-        let mut route_triples: Vec<(String, String, Span)> = Vec::new();
-        // Event listeners targeting a real type: (listener_method_name, event_type_name, span).
-        // source = listener method (known here), target = event type (resolved cross-file).
-        let mut event_listen_type_triples: Vec<(String, String, Span)> = Vec::new();
-        // Event listeners targeting a topic string: (listener_method_name, topic, span).
-        // source = listener method, target = synthetic topic node.
-        let mut event_listen_topic_triples: Vec<(String, String, Span)> = Vec::new();
+        // Framework DI: (injecting_class_name, name_pos, injected_type_name, span). The source
+        // symbol is the class (joined onto its def node via `def_symbol_at`), NOT the enclosing
+        // def — constructor injection sits inside the constructor, whose `enclosing()` would be
+        // the constructor.
+        let mut di_pairs: Vec<(String, usize, String, Span)> = Vec::new();
+        // Framework routes: (route_path, handler_method_name, name_pos, span). Source =
+        // synthetic route node, target = the handler method's def-node symbol.
+        let mut route_triples: Vec<(String, String, usize, Span)> = Vec::new();
+        // Event listeners targeting a real type: (listener_method_name, name_pos,
+        // event_type_name, span). source = listener method def node, target = event type
+        // (resolved cross-file).
+        let mut event_listen_type_triples: Vec<(String, usize, String, Span)> = Vec::new();
+        // Event listeners targeting a topic string: (listener_method_name, name_pos, topic,
+        // span). source = listener method def node, target = synthetic topic node.
+        let mut event_listen_topic_triples: Vec<(String, usize, String, Span)> = Vec::new();
         // Event emits to a topic string: (topic, call_site_pos, span). source = enclosing def
         // (resolved after the match loop, like a Calls ref), target = synthetic topic node.
         let mut event_emit_topic_sites: Vec<(String, usize, Span)> = Vec::new();
@@ -1783,12 +1873,13 @@ impl Extractor for TreeSitterExtractor {
             let mut implements_anchor: Option<tree_sitter::Node> = None;
             let mut implements_target: Option<String> = None;
 
-            // Framework relationships (per-match).
-            let mut di_source_name: Option<String> = None; // injecting class name
+            // Framework relationships (per-match). Name captures carry their byte position so
+            // emission can join onto the def node minted for that name (`def_symbol_at`).
+            let mut di_source_name: Option<(String, usize)> = None; // injecting class name + pos
             let mut di_target: Option<(String, Span)> = None; // injected type name + site
             let mut route_path: Option<(String, Span)> = None; // route/path string + site
-            let mut route_handler_name: Option<String> = None; // handler method name
-            let mut event_listener_name: Option<String> = None; // listener method name
+            let mut route_handler_name: Option<(String, usize)> = None; // handler name + pos
+            let mut event_listener_name: Option<(String, usize)> = None; // listener name + pos
             let mut event_type: Option<(String, Span)> = None; // handled event type + site
             let mut event_topic: Option<(String, Span)> = None; // subscribed topic string + site
             let mut event_emit_type: Option<(String, usize, Span)> = None; // published type + pos
@@ -1833,7 +1924,7 @@ impl Extractor for TreeSitterExtractor {
                         implements_target = Some(text);
                     }
                     CaptureRole::DiSourceName => {
-                        di_source_name = Some(text);
+                        di_source_name = Some((text, pos));
                     }
                     CaptureRole::DiTarget => {
                         di_target = Some((text, span));
@@ -1842,10 +1933,10 @@ impl Extractor for TreeSitterExtractor {
                         route_path = Some((strip_literal_quotes(&text), span));
                     }
                     CaptureRole::RouteHandlerName => {
-                        route_handler_name = Some(text);
+                        route_handler_name = Some((text, pos));
                     }
                     CaptureRole::EventListenerName => {
-                        event_listener_name = Some(text);
+                        event_listener_name = Some((text, pos));
                     }
                     CaptureRole::EventType => {
                         event_type = Some((text, span));
@@ -1864,44 +1955,26 @@ impl Extractor for TreeSitterExtractor {
             }
 
             // ── Process definitions ─────────────────────────────────────────
+            // No id is minted here: the enclosing Type chain needs the FULL definition list,
+            // which only exists after the match loop (pass 2 below).
             if let (Some((anchor_kind, anchor_node)), Some((name_kind, name_text))) =
                 (def_anchor, &def_name)
             {
                 // The name must come from the same kind as the anchor.
                 // (In rare cases where multiple kinds appear in one match this guards correctness.)
                 if anchor_kind == *name_kind {
-                    let span = ts_span(anchor_node);
-                    let symbol = Symbol::global(
-                        &scheme,
-                        None,
-                        vec![
-                            Descriptor::new(module.clone(), Suffix::Namespace),
-                            Descriptor {
-                                name: name_text.clone(),
-                                suffix: def_suffix(anchor_kind),
-                                disambiguator: None,
-                            },
-                        ],
-                    )
-                    .id();
                     let signature = anchor_node
                         .utf8_text(src)
                         .ok()
                         .and_then(|t| t.lines().next())
                         .map(|l| l.chars().take(200).collect::<String>());
-                    let mut node = Node::new(
-                        symbol.clone(),
-                        def_nodekind(anchor_kind),
-                        name_text.clone(),
-                        file.language.clone(),
-                        Location::new(&file.path, span),
-                    );
-                    node.signature = signature;
-                    def_nodes.push(node);
-                    defs.push(DefRec {
-                        symbol,
+                    pending.push(PendingDef {
+                        kind: anchor_kind.to_string(),
+                        name: name_text.clone(),
                         start: anchor_node.start_byte(),
                         end: anchor_node.end_byte(),
+                        span: ts_span(anchor_node),
+                        signature,
                     });
                 }
             }
@@ -1977,24 +2050,36 @@ impl Extractor for TreeSitterExtractor {
             // `.scm` match (the pattern is nested under `class_declaration`), so the source is
             // unambiguously the class — not `enclosing()`, which for constructor injection
             // would resolve to the constructor.
-            if let (Some(src_name), Some((tgt, span))) = (&di_source_name, &di_target) {
-                di_pairs.push((src_name.clone(), tgt.clone(), *span));
+            if let (Some((src_name, src_pos)), Some((tgt, span))) = (&di_source_name, &di_target) {
+                di_pairs.push((src_name.clone(), *src_pos, tgt.clone(), *span));
             }
 
             // ── Process framework route handlers ────────────────────────────
-            if let (Some((path, span)), Some(handler)) = (&route_path, &route_handler_name) {
-                route_triples.push((path.clone(), handler.clone(), *span));
+            if let (Some((path, span)), Some((handler, handler_pos))) =
+                (&route_path, &route_handler_name)
+            {
+                route_triples.push((path.clone(), handler.clone(), *handler_pos, *span));
             }
 
             // ── Process framework event listeners ───────────────────────────
             // source = the listener method (known from this match, like a route handler);
             // target = the event type (real symbol, resolved cross-file) or a topic string node.
-            if let Some(listener) = &event_listener_name {
+            if let Some((listener, listener_pos)) = &event_listener_name {
                 if let Some((ty, span)) = &event_type {
-                    event_listen_type_triples.push((listener.clone(), ty.clone(), *span));
+                    event_listen_type_triples.push((
+                        listener.clone(),
+                        *listener_pos,
+                        ty.clone(),
+                        *span,
+                    ));
                 }
                 if let Some((topic, span)) = &event_topic {
-                    event_listen_topic_triples.push((listener.clone(), topic.clone(), *span));
+                    event_listen_topic_triples.push((
+                        listener.clone(),
+                        *listener_pos,
+                        topic.clone(),
+                        *span,
+                    ));
                 }
             }
 
@@ -2006,6 +2091,53 @@ impl Extractor for TreeSitterExtractor {
             }
             if let Some((topic, pos, span)) = event_emit_topic {
                 event_emit_topic_sites.push((topic, pos, span));
+            }
+        }
+
+        // ── Pass 2: mint definition ids (ADR-002 amendment — type-nested identity) ──
+        // MUST run before the COBOL span fixup below: the fixup mutates `def_nodes`, which this
+        // pass populates. `PendingDef`/`DefRec` keep PRE-fixup byte ranges (identical to the
+        // `enclosing()` inputs the one-pass design used); the fixup keeps mutating only
+        // `node.location.span` afterwards.
+        {
+            // Dedupe by (start, end, name): a def captured by two patterns (a decorated TS class,
+            // a Rust `function_item` matched as both function and impl-method, a Python method
+            // matched as both method and function) must mint ONE node. The LAST record for a key
+            // survives — the same record the store's last-write-wins upsert kept when both were
+            // minted, so the stored NodeKind for double-captured defs is unchanged.
+            let keep: HashSet<usize> = {
+                let mut last: HashMap<(usize, usize, &str), usize> = HashMap::new();
+                for (i, p) in pending.iter().enumerate() {
+                    last.insert((p.start, p.end, p.name.as_str()), i);
+                }
+                last.into_values().collect()
+            };
+            let deduped: Vec<PendingDef> = pending
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| keep.contains(i))
+                .map(|(_, p)| p)
+                .collect();
+            pending = deduped;
+
+            for p in &pending {
+                let chain = enclosing_chain(&pending, p.start, p.end);
+                let symbol = def_symbol(&scheme, &module, &chain, &p.name, def_suffix(&p.kind));
+                let mut node = Node::new(
+                    symbol.clone(),
+                    def_nodekind(&p.kind),
+                    p.name.clone(),
+                    file.language.clone(),
+                    Location::new(&file.path, p.span),
+                );
+                node.signature = p.signature.clone();
+                def_nodes.push(node);
+                defs.push(DefRec {
+                    symbol,
+                    start: p.start,
+                    end: p.end,
+                    name: p.name.clone(),
+                });
             }
         }
 
@@ -2144,18 +2276,19 @@ impl Extractor for TreeSitterExtractor {
         }
 
         // ── Emit framework DI-wiring refs ─────────────────────────────────
-        // source = injecting class (built with the same 2-descriptor global scheme the def loop
-        // uses for a class), target = injected type by name (resolved cross-file, like `extends`).
-        for (class_name, type_name, span) in di_pairs {
-            let from = Symbol::global(
-                &scheme,
-                None,
-                vec![
-                    Descriptor::new(module.clone(), Suffix::Namespace),
-                    Descriptor::new(class_name, Suffix::Type),
-                ],
-            )
-            .id();
+        // source = injecting class — the def node the def loop minted for it (joined by the
+        // captured name's position), target = injected type by name (resolved cross-file, like
+        // `extends`). Fallback when the language's def query did not capture the class: mint the
+        // id from the enclosing chain at the name position, self-excluded — the same dangling
+        // behaviour class as the old hand-built id, no silent drop.
+        for (class_name, class_pos, type_name, span) in di_pairs {
+            let from = def_symbol_at(&defs, class_pos, &class_name).unwrap_or_else(|| {
+                let mut chain = enclosing_chain(&pending, class_pos, class_pos);
+                if chain.last().is_some_and(|d| d.name == class_name) {
+                    chain.pop();
+                }
+                def_symbol(&scheme, &module, &chain, &class_name, Suffix::Type)
+            });
             refs.push(UnresolvedRef::new(
                 from,
                 type_name,
@@ -2165,10 +2298,11 @@ impl Extractor for TreeSitterExtractor {
         }
 
         // ── Emit framework route-handler nodes + edges ────────────────────
-        // source = synthetic route node (shared by path), target = the handler method symbol
-        // (same 2-descriptor scheme as the def loop). Per the engine contract for route-handler.
+        // source = synthetic route node (shared by path), target = the handler method's def-node
+        // symbol (joined by the captured name's position). Per the engine contract for
+        // route-handler.
         let mut seen_routes: HashSet<String> = HashSet::new();
-        for (path, handler_name, span) in route_triples {
+        for (path, handler_name, handler_pos, span) in route_triples {
             let route_symbol = Symbol::synthetic("route", &path).id();
             if seen_routes.insert(path.clone()) {
                 let mut route_node = Node::new(
@@ -2181,15 +2315,14 @@ impl Extractor for TreeSitterExtractor {
                 route_node.signature = Some(path.clone());
                 nodes.push(route_node);
             }
-            let handler_symbol = Symbol::global(
-                &scheme,
-                None,
-                vec![
-                    Descriptor::new(module.clone(), Suffix::Namespace),
-                    Descriptor::new(handler_name, Suffix::Method),
-                ],
-            )
-            .id();
+            let handler_symbol =
+                def_symbol_at(&defs, handler_pos, &handler_name).unwrap_or_else(|| {
+                    let mut chain = enclosing_chain(&pending, handler_pos, handler_pos);
+                    if chain.last().is_some_and(|d| d.name == handler_name) {
+                        chain.pop();
+                    }
+                    def_symbol(&scheme, &module, &chain, &handler_name, Suffix::Method)
+                });
             local_edges.push(
                 Edge::new(
                     route_symbol,
@@ -2203,18 +2336,16 @@ impl Extractor for TreeSitterExtractor {
         }
 
         // ── Emit framework event-listens refs to real types ───────────────
-        // source = listener method (same 2-descriptor scheme), target = event type by name
-        // (resolved cross-file, like `di-wired`). Per the contract, the listener is the dependent.
-        for (listener_name, type_name, span) in event_listen_type_triples {
-            let from = Symbol::global(
-                &scheme,
-                None,
-                vec![
-                    Descriptor::new(module.clone(), Suffix::Namespace),
-                    Descriptor::new(listener_name, Suffix::Method),
-                ],
-            )
-            .id();
+        // source = listener method's def-node symbol, target = event type by name (resolved
+        // cross-file, like `di-wired`). Per the contract, the listener is the dependent.
+        for (listener_name, listener_pos, type_name, span) in event_listen_type_triples {
+            let from = def_symbol_at(&defs, listener_pos, &listener_name).unwrap_or_else(|| {
+                let mut chain = enclosing_chain(&pending, listener_pos, listener_pos);
+                if chain.last().is_some_and(|d| d.name == listener_name) {
+                    chain.pop();
+                }
+                def_symbol(&scheme, &module, &chain, &listener_name, Suffix::Method)
+            });
             refs.push(UnresolvedRef::new(
                 from,
                 type_name,
@@ -2244,17 +2375,16 @@ impl Extractor for TreeSitterExtractor {
             topic_symbol
         };
 
-        for (listener_name, topic, span) in event_listen_topic_triples {
+        for (listener_name, listener_pos, topic, span) in event_listen_topic_triples {
             let topic_symbol = ensure_topic_node(&mut nodes, &topic, span);
-            let listener_symbol = Symbol::global(
-                &scheme,
-                None,
-                vec![
-                    Descriptor::new(module.clone(), Suffix::Namespace),
-                    Descriptor::new(listener_name, Suffix::Method),
-                ],
-            )
-            .id();
+            let listener_symbol = def_symbol_at(&defs, listener_pos, &listener_name)
+                .unwrap_or_else(|| {
+                    let mut chain = enclosing_chain(&pending, listener_pos, listener_pos);
+                    if chain.last().is_some_and(|d| d.name == listener_name) {
+                        chain.pop();
+                    }
+                    def_symbol(&scheme, &module, &chain, &listener_name, Suffix::Method)
+                });
             local_edges.push(
                 Edge::new(
                     listener_symbol,
@@ -4611,6 +4741,19 @@ See the [docs](docs/).
             defs >= 1,
             "expected >=1 COBOL paragraph/program def, got {defs}"
         );
+        // Pins the pass-2-before-fixup ordering: the paragraph span fixup iterates `def_nodes`,
+        // which the id-minting pass populates — if minting ran after the fixup, MAIN-PARA would
+        // keep its single-line header span and this fails.
+        let main_para = ex
+            .nodes
+            .iter()
+            .find(|n| n.name == "MAIN-PARA")
+            .expect("MAIN-PARA paragraph def expected");
+        assert!(
+            main_para.location.span.end_line > main_para.location.span.start_line,
+            "paragraph span must extend past its header line; got {:?}",
+            main_para.location.span
+        );
     }
 
     // ── W2.1 arborium batch smoke tests ──────────────────────────────────────
@@ -5488,32 +5631,26 @@ See the [docs](docs/).
     // ── Framework relationship edges (Java/Spring) ─────────────────────────────
     // These prove the @di.* / @route.* generic capture roles + the java.scm patterns
     // produce the EXACT edge (tag + source + target) the engine contract requires, with
-    // SymbolIds that match the base extractor's 2-descriptor global scheme.
+    // endpoints that ARE def-node symbols in the same Extraction — the graph joins.
 
-    /// Build the class SymbolId the base def loop produces for `module`/`class_name`.
-    fn java_class_id(file_no_ext: &str, class_name: &str) -> SymbolId {
-        Symbol::global(
-            "ts-java",
-            None,
-            vec![
-                Descriptor::new(file_no_ext.to_string(), Suffix::Namespace),
-                Descriptor::new(class_name.to_string(), Suffix::Type),
-            ],
-        )
-        .id()
-    }
-
-    /// Build the method SymbolId the base def loop produces for `module`/`method_name`.
-    fn java_method_id(file_no_ext: &str, method_name: &str) -> SymbolId {
-        Symbol::global(
-            "ts-java",
-            None,
-            vec![
-                Descriptor::new(file_no_ext.to_string(), Suffix::Namespace),
-                Descriptor::new(method_name.to_string(), Suffix::Method),
-            ],
-        )
-        .id()
+    /// The symbol of the ACTUAL def node named `name` with `kind` in the extraction. Asserting
+    /// edge endpoints against this (instead of a hand-built id) proves the edge lands on a node
+    /// that exists — the join the old string-vs-string comparison could not check.
+    fn node_symbol(ex: &Extraction, name: &str, kind: &NodeKind) -> SymbolId {
+        ex.nodes
+            .iter()
+            .find(|n| n.name == name && &n.kind == kind)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no def node name={name:?} kind={kind:?}; nodes = {:?}",
+                    ex.nodes
+                        .iter()
+                        .map(|n| (n.name.as_str(), format!("{:?}", n.kind)))
+                        .collect::<Vec<_>>()
+                )
+            })
+            .symbol
+            .clone()
     }
 
     #[test]
@@ -5531,7 +5668,7 @@ public class OrderService {
             .extract(&sf("OrderService.java", "java", code))
             .unwrap();
 
-        let expected_from = java_class_id("OrderService", "OrderService");
+        let expected_from = node_symbol(&ex, "OrderService", &NodeKind::Class);
         let di: Vec<_> = ex
             .refs
             .iter()
@@ -5574,7 +5711,7 @@ public class OrderService {
             .extract(&sf("OrderService.java", "java", code))
             .unwrap();
 
-        let expected_from = java_class_id("OrderService", "OrderService");
+        let expected_from = node_symbol(&ex, "OrderService", &NodeKind::Class);
         let targets: HashSet<&str> = ex
             .refs
             .iter()
@@ -5609,7 +5746,7 @@ public class OrderController {
             .unwrap();
 
         let route_symbol = Symbol::synthetic("route", "/orders").id();
-        let handler_symbol = java_method_id("OrderController", "listOrders");
+        let handler_symbol = node_symbol(&ex, "listOrders", &NodeKind::Method);
 
         // Synthetic route node present.
         assert!(
@@ -5655,7 +5792,7 @@ public class UserController {
             .unwrap();
 
         let route_symbol = Symbol::synthetic("route", "/users").id();
-        let handler_symbol = java_method_id("UserController", "listUsers");
+        let handler_symbol = node_symbol(&ex, "listUsers", &NodeKind::Method);
         let routes: Vec<_> = ex
             .local_edges
             .iter()
@@ -5668,6 +5805,33 @@ public class UserController {
         );
         assert_eq!(routes[0].source, route_symbol);
         assert_eq!(routes[0].target, handler_symbol);
+    }
+
+    #[test]
+    fn java_route_handler_target_is_type_nested() {
+        // Pins the literal id shape ONCE: a handler method nests under its class (ADR-002
+        // amendment) — the route edge must land on the type-nested method id.
+        let code = r#"
+@RestController
+public class OrderController {
+    @GetMapping("/orders")
+    public String listOrders() { return "ok"; }
+}
+"#;
+        let ex = TreeSitterExtractor::for_language("java")
+            .unwrap()
+            .extract(&sf("OrderController.java", "java", code))
+            .unwrap();
+        let routes: Vec<_> = ex
+            .local_edges
+            .iter()
+            .filter(|e| edge_tags::is_tag(&e.kind, edge_tags::ROUTE_HANDLER))
+            .collect();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(
+            routes[0].target.as_str(),
+            "ts-java . . . OrderController/OrderController#listOrders().",
+        );
     }
 
     #[test]
@@ -5740,7 +5904,10 @@ public class OrderService {
             .filter(|r| edge_tags::is_tag(&r.kind, edge_tags::DI_WIRED))
             .collect();
         assert_eq!(di.len(), 1, "exactly one di-wired ref expected for @Inject");
-        assert_eq!(di[0].from, java_class_id("OrderService", "OrderService"));
+        assert_eq!(
+            di[0].from,
+            node_symbol(&ex, "OrderService", &NodeKind::Class)
+        );
         assert_eq!(di[0].raw_name, "PaymentService");
     }
 
@@ -5769,7 +5936,10 @@ public class OrderService {
             1,
             "exactly one di-wired ref expected for @Resource"
         );
-        assert_eq!(di[0].from, java_class_id("OrderService", "OrderService"));
+        assert_eq!(
+            di[0].from,
+            node_symbol(&ex, "OrderService", &NodeKind::Class)
+        );
         assert_eq!(di[0].raw_name, "InventoryService");
     }
 
@@ -5808,7 +5978,7 @@ public class OrderEventListener {
         let r = listens[0];
         assert_eq!(
             r.from,
-            java_method_id("OrderEventListener", "onOrderCreated"),
+            node_symbol(&ex, "onOrderCreated", &NodeKind::Method),
             "source = the listener method (dependent)"
         );
         assert_eq!(r.raw_name, "OrderCreatedEvent", "target = the event type");
@@ -5835,7 +6005,7 @@ public class OrderConsumer {
             .unwrap();
 
         let topic_symbol = Symbol::synthetic("topic", "orders").id();
-        let listener_symbol = java_method_id("OrderConsumer", "consume");
+        let listener_symbol = node_symbol(&ex, "consume", &NodeKind::Method);
 
         // Synthetic topic node present.
         assert!(
@@ -5896,7 +6066,7 @@ public class ShippingService {
         let r = emits[0];
         assert_eq!(
             r.from,
-            java_method_id("ShippingService", "ship"),
+            node_symbol(&ex, "ship", &NodeKind::Method),
             "source = the enclosing emitting method (dependent)"
         );
         assert_eq!(
@@ -5924,7 +6094,7 @@ public class OrderProducer {
             .unwrap();
 
         let topic_symbol = Symbol::synthetic("topic", "orders").id();
-        let emitter_symbol = java_method_id("OrderProducer", "publish");
+        let emitter_symbol = node_symbol(&ex, "publish", &NodeKind::Method);
 
         assert!(
             ex.nodes
@@ -6030,6 +6200,260 @@ public class PlainListener {
         assert_eq!(
             event_edges, 0,
             "non-event constructs must not emit event edges"
+        );
+    }
+
+    // ── Type-nested definition identity (ADR-002 amendment, engine defect #1) ──
+    // Fixture: the doc03 collision shape — two classes and an interface each defining `save`,
+    // an object-literal `save`, and a method-local `const save = () =>` arrow. Before the
+    // amendment every one of them minted the SAME 2-descriptor id and the store's
+    // ON CONFLICT(symbol) upsert collapsed them into one node.
+
+    const IDENTITY_FIXTURE: &str = include_str!("../tests/fixtures/typescript/method_identity.ts");
+
+    fn identity_extraction() -> Extraction {
+        TreeSitterExtractor::for_language("typescript")
+            .unwrap()
+            .extract(&sf(
+                "src/method_identity.ts",
+                "typescript",
+                IDENTITY_FIXTURE,
+            ))
+            .unwrap()
+    }
+
+    /// All symbols of non-File nodes with the given name.
+    fn symbols_named(ex: &Extraction, name: &str) -> Vec<String> {
+        ex.nodes
+            .iter()
+            .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == name)
+            .map(|n| n.symbol.as_str().to_string())
+            .collect()
+    }
+
+    fn has_symbol(ex: &Extraction, sym: &str) -> bool {
+        ex.nodes.iter().any(|n| n.symbol.as_str() == sym)
+    }
+
+    const IDENTITY_PY: &str = "class Outer:\n    class Inner:\n        def run(self): pass\n    def run(self): pass\ndef top():\n    def run(): pass\n";
+
+    #[test]
+    fn identity_nests_methods_under_enclosing_type() {
+        let ex = identity_extraction();
+        // Three DISTINCT class/interface members named `save`, each nested under its type.
+        for sym in [
+            "ts-typescript . . . src/method_identity/Repo#save().",
+            "ts-typescript . . . src/method_identity/Cache#save().",
+            "ts-typescript . . . src/method_identity/Store#save().",
+        ] {
+            assert!(
+                has_symbol(&ex, sym),
+                "expected {sym}; saves = {:?}",
+                symbols_named(&ex, "save")
+            );
+        }
+        // Class ids themselves are unchanged by the amendment.
+        assert!(has_symbol(
+            &ex,
+            "ts-typescript . . . src/method_identity/Repo#"
+        ));
+
+        // Python half: Type-under-Type nests; a function-local def stays flat (D1 residual).
+        let py = TreeSitterExtractor::for_language("python")
+            .unwrap()
+            .extract(&sf("pkg/mod.py", "python", IDENTITY_PY))
+            .unwrap();
+        for sym in [
+            "ts-python . . . pkg/mod/Outer#run().",
+            "ts-python . . . pkg/mod/Outer#Inner#run().",
+            "ts-python . . . pkg/mod/Outer#Inner#",
+            "ts-python . . . pkg/mod/run().", // function-local `run` inside top(): flat
+        ] {
+            assert!(
+                has_symbol(&py, sym),
+                "expected {sym}; runs = {:?}",
+                symbols_named(&py, "run")
+            );
+        }
+    }
+
+    #[test]
+    fn identity_refs_from_carry_the_type() {
+        let ex = identity_extraction();
+        let save_froms: Vec<&str> = ex
+            .refs
+            .iter()
+            .filter(|r| r.raw_name == "save" && r.kind == EdgeKind::Calls)
+            .map(|r| r.from.as_str())
+            .collect();
+        assert!(
+            save_froms.contains(&"ts-typescript . . . src/method_identity/Repo#update()."),
+            "this.save() in Repo.update must come FROM Repo#update().; froms = {save_froms:?}"
+        );
+        assert!(
+            save_froms.contains(&"ts-typescript . . . src/method_identity/Cache#flush()."),
+            "this.save() in Cache.flush must come FROM Cache#flush().; froms = {save_froms:?}"
+        );
+    }
+
+    #[test]
+    fn identity_does_not_nest_under_functions_or_terms() {
+        // Pins the truncation rule: the chain is the contiguous run of Type-suffixed containers
+        // immediately enclosing a def — a Method, Function, or Term container ends it. These
+        // assertions hold BEFORE the amendment too (everything was flat) and pin the residuals
+        // the amendment deliberately keeps.
+        let ex = identity_extraction();
+
+        // `const cb = () =>` inside Cache.flush: flat, never Cache#cb().
+        assert!(
+            has_symbol(&ex, "ts-typescript . . . src/method_identity/cb()."),
+            "cb must stay flat; cbs = {:?}",
+            symbols_named(&ex, "cb")
+        );
+        assert!(
+            !ex.nodes
+                .iter()
+                .any(|n| n.symbol.as_str().contains("Cache#cb")),
+            "cb must NOT nest under Cache (its innermost container is the flush METHOD)"
+        );
+
+        // Top-level function stays flat.
+        assert!(has_symbol(
+            &ex,
+            "ts-typescript . . . src/method_identity/top()."
+        ));
+
+        // Object-literal methods do not nest under the Term binding `lit`.
+        assert!(
+            !ex.nodes
+                .iter()
+                .any(|n| n.symbol.as_str().contains("lit.save")),
+            "lit.save must NOT nest under the Term container `lit`"
+        );
+
+        // Exactly ONE distinct flat …/save(). symbol: `lit.save` and the method-local
+        // `const save = () =>` arrow merge into it (the documented D1 residual).
+        let flat_saves: HashSet<&str> = ex
+            .nodes
+            .iter()
+            .map(|n| n.symbol.as_str())
+            .filter(|s| s.ends_with("/save()."))
+            .collect();
+        assert_eq!(
+            flat_saves.len(),
+            1,
+            "exactly one flat …/save(). residual expected; got {flat_saves:?}"
+        );
+
+        // MI-A1: the method-local `const save = () =>` must not mint Cache#save(). — every node
+        // carrying that symbol must have the METHOD's span (vacuously true pre-amendment).
+        let cache_save_off = IDENTITY_FIXTURE
+            .match_indices("save(): void {}")
+            .nth(1)
+            .map(|(i, _)| i as u32)
+            .expect("fixture must contain Cache.save");
+        for n in ex.nodes.iter().filter(|n| {
+            n.symbol.as_str() == "ts-typescript . . . src/method_identity/Cache#save()."
+        }) {
+            assert_eq!(
+                n.location.span.start_byte, cache_save_off,
+                "Cache#save(). must be the method, not the method-local arrow"
+            );
+        }
+    }
+
+    #[test]
+    fn identity_disambiguator_is_none() {
+        // D6 pinned: no overload disambiguator is ever populated — every Method-suffixed id
+        // renders as `name().` (empty parens).
+        let ex = identity_extraction();
+        for n in ex.nodes.iter().filter(|n| {
+            matches!(
+                n.kind,
+                NodeKind::Method | NodeKind::Function | NodeKind::Constructor
+            )
+        }) {
+            assert!(
+                n.symbol.as_str().ends_with("()."),
+                "disambiguator must stay None: {}",
+                n.symbol
+            );
+        }
+    }
+
+    #[test]
+    fn identity_contains_edges_stay_file_to_def() {
+        // D4 pinned: Contains stays File→def; no Class→Method Contains edge is emitted.
+        let ex = identity_extraction();
+        let file_symbol = Symbol::file("src/method_identity.ts").id();
+        let contains: Vec<_> = ex
+            .local_edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Contains)
+            .collect();
+        for e in &contains {
+            assert_eq!(
+                e.source, file_symbol,
+                "every Contains edge must originate at the File node"
+            );
+        }
+        let def_count = ex
+            .nodes
+            .iter()
+            .filter(|n| !matches!(n.kind, NodeKind::File | NodeKind::Import))
+            .count();
+        assert_eq!(
+            contains.len(),
+            def_count,
+            "one File→def Contains edge per definition record"
+        );
+    }
+
+    #[test]
+    fn identity_dedupes_duplicate_anchors() {
+        // A decorated class matches TWO @code_class.def patterns (plain + @Entity). The chain
+        // must contain its Type descriptor ONCE: Ent#save()., never Ent#Ent#save().
+        let code = "@Entity()\nclass Ent { save(): void {} }\n";
+        let ex = TreeSitterExtractor::for_language("typescript")
+            .unwrap()
+            .extract(&sf("src/ent.ts", "typescript", code))
+            .unwrap();
+        assert!(
+            ex.nodes
+                .iter()
+                .any(|n| n.symbol.as_str() == "ts-typescript . . . src/ent/Ent#save()."),
+            "expected Ent#save().; saves = {:?}",
+            symbols_named(&ex, "save")
+        );
+        assert!(
+            !ex.nodes
+                .iter()
+                .any(|n| n.symbol.as_str().contains("Ent#Ent#")),
+            "duplicate class anchors must be deduped, not stacked"
+        );
+    }
+
+    #[test]
+    fn identity_field_object_literal_residual() {
+        // KNOWN RESIDUAL (MI-ATK-1): `x = { save(){} }` — the field `x` is NOT captured as a def
+        // (the query requires an arrow value), so the walk cannot see it as a container: the
+        // object-literal `save` nests under `class A` and MERGES with the real A.save() method.
+        // When the extraction-gaps lane captures object-valued fields as Term defs, this test
+        // MUST be consciously updated to assert the split instead.
+        let code = "class A { save(): void {} x = { save() {} } }\n";
+        let ex = TreeSitterExtractor::for_language("typescript")
+            .unwrap()
+            .extract(&sf("src/a.ts", "typescript", code))
+            .unwrap();
+        let save_syms: HashSet<String> = symbols_named(&ex, "save").into_iter().collect();
+        assert_eq!(
+            save_syms.len(),
+            1,
+            "both saves collide into one id (the pinned residual); got {save_syms:?}"
+        );
+        assert!(
+            save_syms.contains("ts-typescript . . . src/a/A#save()."),
+            "the merged id is the type-nested one; got {save_syms:?}"
         );
     }
 }

@@ -10,7 +10,7 @@
 //! by the SCIP/TSG/LSP resolution tiers (`wicked-estate-resolve`), not by tree-sitter.
 
 pub mod treesitter;
-pub use treesitter::{IaCExtractor, TreeSitterExtractor};
+pub use treesitter::{IaCExtractor, SYMBOL_ID_SCHEME, TreeSitterExtractor};
 
 /// Runtime language plugins — drop-in tree-sitter grammars loaded from a plugins directory.
 pub mod plugin;
