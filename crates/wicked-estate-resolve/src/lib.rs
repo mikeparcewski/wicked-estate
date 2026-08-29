@@ -25,6 +25,8 @@ pub mod lsp;
 pub mod estate;
 pub use estate::estate_edges;
 
+pub mod relative_import;
+
 use wicked_estate_core::{
     Edge, EdgeKind, NodeKind, ResolutionTier, Resolver, Result, SymbolIndex, UnresolvedRef,
 };

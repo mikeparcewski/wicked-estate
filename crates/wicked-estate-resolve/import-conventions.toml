@@ -1,0 +1,58 @@
+# Relative-specifier resolution conventions, keyed by the IMPORTER's language (`Node.language`).
+#
+# The resolver algorithm is language-blind (CLAUDE.md "Rules as DATA"): every per-language
+# difference in how a relative import specifier maps to an on-disk file is a row here.
+# Ext/probe orders are transcribed from the documented TypeScript resolution order
+# (TS handbook "Module Resolution"; `--moduleResolution node16/nodenext`: a `./x.js` specifier
+# probes `x.ts`, `x.tsx`, `x.d.ts` before the literal `x.js`; extensionless relative specifiers
+# under `bundler` probe `.ts/.tsx/.d.ts` then the directory `index.*`). These tables are NOT
+# self-certifying — the lane's adjudication runs an independent `ts.resolveModuleName` oracle
+# over every ambiguous join point (docs/recon/relative-imports.md §5, ATT-INV-1).
+#
+# Fields per row:
+#   known_exts  — extensions recognised (and stripped) on the SPEC side, matched longest-first.
+#                 A spec extension NOT in this list ('.css', '.json', '.svg') is probed literally
+#                 and never extension-expanded.
+#   probe_exts  — priority order of candidate extensions for an EXTENSIONLESS spec.
+#   index_names — directory-index basenames probed (after probe_exts misses) as
+#                 `<joined>/<index_name>.<probe_ext>`.
+#   remap       — explicit spec extension -> candidate extension list, priority order
+#                 (tsc nodenext: './q.js' resolves q.ts before q.js for a TS importer).
+#
+# Load-time validation (relative_import.rs): unknown keys rejected, duplicate extensions within
+# any list rejected (the only constructible same-priority tie), every probe/remap ext must be a
+# known ext.
+
+[[language]]
+name        = "typescript"
+known_exts  = ["d.ts", "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]
+probe_exts  = ["ts", "tsx", "d.ts", "js", "jsx", "mts", "cts", "mjs", "cjs"]
+index_names = ["index"]
+[language.remap]
+js  = ["ts", "tsx", "d.ts", "js"]
+jsx = ["tsx", "jsx"]
+mjs = ["mts", "mjs"]
+cjs = ["cts", "cjs"]
+
+[[language]]
+name        = "tsx"
+known_exts  = ["d.ts", "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]
+probe_exts  = ["tsx", "ts", "d.ts", "js", "jsx", "mts", "cts", "mjs", "cjs"]
+index_names = ["index"]
+[language.remap]
+js  = ["ts", "tsx", "d.ts", "js"]
+jsx = ["tsx", "jsx"]
+mjs = ["mts", "mjs"]
+cjs = ["cts", "cjs"]
+
+# Node semantics for a JS importer: the literal extension wins ('./q.js' -> q.js when it exists),
+# falling back to the TS twin only when the literal is absent (a JS file importing emitted output
+# inside a mixed repo). Extensionless JS specifiers probe JS-family first.
+[[language]]
+name        = "javascript"
+known_exts  = ["d.ts", "ts", "tsx", "js", "jsx", "mjs", "cjs"]
+probe_exts  = ["js", "jsx", "mjs", "cjs", "ts", "tsx"]
+index_names = ["index"]
+[language.remap]
+js  = ["js", "ts"]
+jsx = ["jsx", "tsx"]
