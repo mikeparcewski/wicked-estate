@@ -1389,12 +1389,16 @@ fn module_path(path: &str) -> String {
 ///
 /// Scheme "1" (implicit, never stored): exactly two descriptors — `[module/, name<suffix>]` —
 /// so every same-named definition in one module minted the SAME id and the store's
-/// `ON CONFLICT(symbol) DO UPDATE` collapsed them into one node. Scheme "2" nests definition
+/// `ON CONFLICT(symbol) DO UPDATE` collapsed them into one node. Scheme "2" nested definition
 /// identity under the contiguous run of Type-suffixed enclosing definitions
-/// (`<module>/Repo#save().`) — see the 2026-08 amendment in
+/// (`<module>/Repo#save().`). Scheme "3" adds the two generic query-level identity roles
+/// (`@code_<kind>.anchor` — a non-emitting containment anchor, e.g. a Rust `impl` block — and
+/// `@code_<kind>.owner` — an owner type name spliced as the innermost Type descriptor where no
+/// containing node exists, e.g. a Go receiver or a C++ `Foo::` qualifier), so members whose
+/// owner is not an enclosing definition node nest too — see the 2026-08 amendment in
 /// `docs/adr/ADR-002-stable-symbol-identity.md`. Stored per repo as the `id_scheme` meta key;
 /// a mismatch forces a full re-extraction so a DB never mixes schemes.
-pub const SYMBOL_ID_SCHEME: &str = "2";
+pub const SYMBOL_ID_SCHEME: &str = "3";
 
 fn def_suffix(kind: &str) -> Suffix {
     match kind {
@@ -1416,6 +1420,19 @@ struct PendingDef {
     end: usize,
     span: Span,
     signature: Option<String>,
+    /// `false` for `@code_<kind>.anchor` records: the record participates in
+    /// [`enclosing_chain`] as a containment anchor but pass 2 mints NO Node, NO
+    /// `DefRec` (so framework `def_symbol_at` joins never land on the anchor
+    /// range), and NO Contains edge for it. Constraint (documented at the
+    /// `.anchor` role): an anchor pattern must never be range-equal + same-name
+    /// with an emitting def — the `(start, end, name)` dedup below would keep an
+    /// uncontracted-order winner.
+    emit: bool,
+    /// `@code_<kind>.owner` captured in the same match: the owner TYPE NAME of a
+    /// def whose owner is not an enclosing node (Go receiver, C++ `Foo::`
+    /// qualifier, Ruby `def self.m`). Pass 2 appends it as the INNERMOST Type
+    /// descriptor after [`enclosing_chain`].
+    owner: Option<String>,
 }
 
 /// The chain of Type descriptors a definition nests under (ADR-002 amendment, 2026-08).
@@ -1430,11 +1447,12 @@ struct PendingDef {
 ///
 /// Anchor-artifact exception (MI-R1-1): a non-Type pending def whose byte range EQUALS a
 /// Type-suffixed pending def's range is the same syntactic node re-captured by a second query
-/// pattern — an anchor artifact, not a real inner scope. python.scm's ORM field patterns anchor
-/// `@code_field.def` at the WHOLE `class_definition`, so without this exception the equal-range
-/// Term (a) truncated the Type chain of every member of a nested ORM class (re-minting the D03
-/// collision) and (b) left the flat two-model case correct only by uncontracted match order.
-/// Such records are dropped from the container walk before truncation applies.
+/// pattern — an anchor artifact, not a real inner scope. Such records are dropped from the
+/// container walk before truncation applies. DEFENSIVE: the last real producer (python.scm's
+/// ORM field patterns, which anchored `@code_field.def` at the WHOLE `class_definition`) was
+/// re-anchored at the field's own statement in the scm-anchors lane; the drop stays as a
+/// fleet-wide guard against the recurrence class (73 query files, any future wide anchor),
+/// tested directly by `enclosing_chain_drops_equal_range_anchor_artifacts`.
 fn enclosing_chain(pending: &[PendingDef], start: usize, end: usize) -> Vec<Descriptor> {
     let mut containers: Vec<&PendingDef> = pending
         .iter()
@@ -1715,8 +1733,17 @@ fn enclosing(defs: &[DefRec], pos: usize) -> Option<SymbolId> {
 /// What role a capture name plays in the prior art convention.
 #[derive(Debug)]
 enum CaptureRole<'a> {
-    /// `@code_<kind>.def` / `@code_<kind>` / `@code_<kind>.arrow` — anchor node for a definition.
-    DefAnchor { kind: &'a str },
+    /// `@code_<kind>.def` / `@code_<kind>` / `@code_<kind>.arrow` — anchor node for a definition
+    /// (`emit: true`), or `@code_<kind>.anchor` — a NON-EMITTING containment anchor
+    /// (`emit: false`): it enters the pending-def list so members nest under it in
+    /// [`enclosing_chain`], but pass 2 mints no Node / DefRec / Contains edge for it
+    /// (Rust `impl` blocks, Ruby `class << self` — minting them would create phantom
+    /// or duplicate nodes, the #129 double-emit class).
+    DefAnchor { kind: &'a str, emit: bool },
+    /// `@code_<kind>.owner` — the owner TYPE NAME captured in the same match as a def whose
+    /// owner is not an enclosing node (Go receivers, C++ `Foo::` qualifiers, Ruby `def self.m`).
+    /// Spliced as the innermost Type descriptor of that def's id in pass 2.
+    DefOwner { kind: &'a str },
     /// `@code_<kind>.name` — the identifier for a definition of `<kind>`.
     /// `symbol` is true for the `@code_<kind>.name.symbol` variant: the captured
     /// text is a symbol literal (Ruby `:name`) whose leading `:` must be stripped
@@ -1820,7 +1847,13 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
             let kind = &rest[..dot];
             let suffix = &rest[dot + 1..];
             if suffix == "def" || suffix == "arrow" || suffix == "decl" {
-                return CaptureRole::DefAnchor { kind };
+                return CaptureRole::DefAnchor { kind, emit: true };
+            }
+            if suffix == "anchor" {
+                return CaptureRole::DefAnchor { kind, emit: false };
+            }
+            if suffix == "owner" {
+                return CaptureRole::DefOwner { kind };
             }
             if suffix == "name" {
                 return CaptureRole::DefName {
@@ -1835,7 +1868,10 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
             // .annotation, …) is auxiliary — ignored.
         } else {
             // @code_<kind> with no dot — treat as def anchor (e.g. @code_variable, @code_module)
-            return CaptureRole::DefAnchor { kind: rest };
+            return CaptureRole::DefAnchor {
+                kind: rest,
+                emit: true,
+            };
         }
     }
 
@@ -1969,8 +2005,9 @@ impl Extractor for TreeSitterExtractor {
 
             // Per-kind: (anchor_node, name_text)
             // We support one def per kind per match (tree-sitter match semantics).
-            let mut def_anchor: Option<(&str, tree_sitter::Node)> = None; // (kind, node)
+            let mut def_anchor: Option<(&str, tree_sitter::Node, bool)> = None; // (kind, node, emit)
             let mut def_name: Option<(&str, String)> = None; // (kind, text)
+            let mut def_owner: Option<(&str, String)> = None; // (kind, owner type name)
 
             let mut call_fn: Option<(String, usize, Span)> = None; // (name, pos, span)
             let mut call_method: Option<(String, usize, Span)> = None;
@@ -2002,9 +2039,12 @@ impl Extractor for TreeSitterExtractor {
                 let pos = c.node.start_byte();
 
                 match classify_capture(cap) {
-                    CaptureRole::DefAnchor { kind } => {
+                    CaptureRole::DefAnchor { kind, emit } => {
                         // Last anchor wins if duplicated (shouldn't happen in well-formed query)
-                        def_anchor = Some((kind, c.node));
+                        def_anchor = Some((kind, c.node, emit));
+                    }
+                    CaptureRole::DefOwner { kind } => {
+                        def_owner = Some((kind, text));
                     }
                     CaptureRole::DefName { kind, symbol } => {
                         let name = strip_def_name(&text);
@@ -2073,7 +2113,7 @@ impl Extractor for TreeSitterExtractor {
             // ── Process definitions ─────────────────────────────────────────
             // No id is minted here: the enclosing Type chain needs the FULL definition list,
             // which only exists after the match loop (pass 2 below).
-            if let (Some((anchor_kind, anchor_node)), Some((name_kind, name_text))) =
+            if let (Some((anchor_kind, anchor_node, emit)), Some((name_kind, name_text))) =
                 (def_anchor, &def_name)
             {
                 // The name must come from the same kind as the anchor.
@@ -2084,6 +2124,14 @@ impl Extractor for TreeSitterExtractor {
                         .ok()
                         .and_then(|t| t.lines().next())
                         .map(|l| l.chars().take(200).collect::<String>());
+                    // Same kind-equality guard for the owner splice: a stray `.owner`
+                    // capture of a different kind in the same match is ignored.
+                    let owner = match &def_owner {
+                        Some((owner_kind, owner_name)) if *owner_kind == anchor_kind => {
+                            Some(owner_name.clone())
+                        }
+                        _ => None,
+                    };
                     pending.push(PendingDef {
                         kind: anchor_kind.to_string(),
                         name: name_text.clone(),
@@ -2091,6 +2139,8 @@ impl Extractor for TreeSitterExtractor {
                         end: anchor_node.end_byte(),
                         span: ts_span(anchor_node),
                         signature,
+                        emit,
+                        owner,
                     });
                 }
             }
@@ -2237,7 +2287,20 @@ impl Extractor for TreeSitterExtractor {
             pending = deduped;
 
             for p in &pending {
-                let chain = enclosing_chain(&pending, p.start, p.end);
+                // Non-emitting anchors (`@code_<kind>.anchor`) exist ONLY as containment
+                // anchors for the enclosing_chain walk above: no Node, no DefRec (so
+                // `def_symbol_at` framework joins never land on the anchor range), and —
+                // because Contains edges are emitted per DefRec below — no Contains edge.
+                if !p.emit {
+                    continue;
+                }
+                let mut chain = enclosing_chain(&pending, p.start, p.end);
+                // `@code_<kind>.owner`: the owner type name captured in the def's own match
+                // (Go receiver, C++ `Foo::` qualifier, Ruby `def self.m`) becomes the
+                // INNERMOST Type descriptor — where containment can never supply it.
+                if let Some(owner) = &p.owner {
+                    chain.push(Descriptor::new(owner.clone(), Suffix::Type));
+                }
                 let symbol = def_symbol(&scheme, &module, &chain, &p.name, def_suffix(&p.kind));
                 let mut node = Node::new(
                     symbol.clone(),
@@ -6623,11 +6686,10 @@ public class PlainListener {
 
     #[test]
     fn identity_field_object_literal_residual() {
-        // KNOWN RESIDUAL (MI-ATK-1): `x = { save(){} }` — the field `x` is NOT captured as a def
-        // (the query requires an arrow value), so the walk cannot see it as a container: the
-        // object-literal `save` nests under `class A` and MERGES with the real A.save() method.
-        // When the extraction-gaps lane captures object-valued fields as Term defs, this test
-        // MUST be consciously updated to assert the split instead.
+        // FLIPPED (scm-anchors D6, was MI-ATK-1): `x = { save(){} }` — the object-valued
+        // field `x` IS now captured as a Term-suffixed Field def, so the walk sees it as a
+        // container and the literal's `save` TRUNCATES at it: module-flat `src/a/save().`,
+        // DISTINCT from the real `A#save().`.
         let code = "class A { save(): void {} x = { save() {} } }\n";
         let ex = TreeSitterExtractor::for_language("typescript")
             .unwrap()
@@ -6635,21 +6697,65 @@ public class PlainListener {
             .unwrap();
         let save_syms: HashSet<String> = symbols_named(&ex, "save").into_iter().collect();
         assert_eq!(
-            save_syms.len(),
-            1,
-            "both saves collide into one id (the pinned residual); got {save_syms:?}"
+            save_syms,
+            [
+                "ts-typescript . . . src/a/A#save().".to_string(),
+                "ts-typescript . . . src/a/save().".to_string(),
+            ]
+            .into(),
+            "the class method and the literal member must mint DISTINCT ids"
         );
         assert!(
-            save_syms.contains("ts-typescript . . . src/a/A#save()."),
-            "the merged id is the type-nested one; got {save_syms:?}"
+            has_symbol(&ex, "ts-typescript . . . src/a/A#x."),
+            "the object-valued field must be a def nested under A; xs = {:?}",
+            symbols_named(&ex, "x")
+        );
+
+        // NEW RESIDUAL (pinned): the split moves the literal member's pooling from
+        // per-class to PER-MODULE — the module-flat `src/b/save().` id is shared by
+        // (a) any same-named module-level function and (b) same-named members of
+        // OTHER object-literal fields in the same module. Expressing them distinctly
+        // needs object-literal descriptors — a scheme change, not a query edit
+        // (ADR-002 residual entry).
+        let pooled = "function save() {}\nclass B { x = { save() {} }; y = { save() {} }; }\n";
+        let ex2 = TreeSitterExtractor::for_language("typescript")
+            .unwrap()
+            .extract(&sf("src/b.ts", "typescript", pooled))
+            .unwrap();
+        let pooled_saves: HashSet<String> = symbols_named(&ex2, "save").into_iter().collect();
+        assert_eq!(
+            pooled_saves,
+            ["ts-typescript . . . src/b/save().".to_string()].into(),
+            "KNOWN RESIDUAL RESOLVED? module fn + two literals' members no longer \
+             pool at one module-flat id — object-literal descriptors landed; \
+             re-point this residual pin"
+        );
+
+        // RESIDUAL (pinned): computed-name fields (`[k] = {…}`) stay uncaptured —
+        // their literal members still nest under the class and merge with the
+        // class's real methods. Capturing them needs a name for the field, which a
+        // computed key does not statically have.
+        let computed = "class A { save(): void {} [\"k\"] = { save() {} } }\n";
+        let ex3 = TreeSitterExtractor::for_language("typescript")
+            .unwrap()
+            .extract(&sf("src/c.ts", "typescript", computed))
+            .unwrap();
+        let computed_saves: HashSet<String> = symbols_named(&ex3, "save").into_iter().collect();
+        assert_eq!(
+            computed_saves,
+            ["ts-typescript . . . src/c/A#save().".to_string()].into(),
+            "KNOWN RESIDUAL RESOLVED? a computed-name field's literal member no \
+             longer merges with the class method — re-point this residual pin"
         );
     }
 
     // ── Equal-range anchor artifacts (MI-R1-1) ─────────────────────────────────
-    // python.scm's ORM field patterns (SQLAlchemy + Django) anchor @code_field.def at the
-    // WHOLE class_definition, so the Term-suffixed field record is range-equal to the class
-    // record. enclosing_chain drops such anchor artifacts from the container walk; these tests
-    // pin the three shapes that were broken (or tie-order-fragile) without the drop.
+    // enclosing_chain drops non-Type records range-equal to a Type record from the container
+    // walk. python.scm's ORM patterns — the last real producer of such records — now anchor
+    // @code_field.def at the field's own statement (scm-anchors D7), so the drop is DEFENSIVE:
+    // a fleet guard against any future wide anchor. These tests pin the three shapes that were
+    // broken (or tie-order-fragile) without it; the direct unit test below keeps the guard
+    // non-vacuously tested now that no built-in query produces the artifact.
 
     #[test]
     fn identity_orm_equal_range_anchor_nested_models_do_not_collide() {
@@ -6726,14 +6832,11 @@ public class PlainListener {
 
     #[test]
     fn identity_field_orm_equal_range_residual() {
-        // KNOWN RESIDUAL (MI-R1-1b): the ORM field's OWN id cannot take its class as owner —
-        // the field record is range-equal to the class record, and a range-equal container is
-        // indistinguishable from a duplicate capture of the def itself. Nested: `t` mints
-        // `A#t.` (owner should be A#Model#); flat: `title` stays module-flat (owner should be
-        // Article#) — so two same-named fields in two flat sibling classes still collide.
-        // Fixing this needs python.scm to anchor @code_field.def at the assignment node, not
-        // the class_definition — extraction-gaps lane (merge note in docs/recon/
-        // method-identity.md §8). When that lands, update these assertions to the real owners.
+        // FLIPPED (scm-anchors D7, was MI-R1-1b): @code_field.def now anchors at the field's
+        // OWN expression_statement, so the field record is strictly inside its class and takes
+        // its REAL owner chain — nested `t` mints `A#Model#t.` (was the wrong-owner `A#t.`),
+        // and a top-level model's field nests under its class (`Article#title.`, was
+        // module-flat, where two same-named fields of sibling models collided).
         let nested = "class A:\n    class Model:\n        t = models.CharField(max_length=1)\n";
         let ex = TreeSitterExtractor::for_language("python")
             .unwrap()
@@ -6741,8 +6844,8 @@ public class PlainListener {
             .unwrap();
         assert_eq!(
             symbols_named(&ex, "t"),
-            vec!["ts-python . . . app/r/A#t.".to_string()],
-            "pinned wrong-owner residual: the field skips its range-equal class"
+            vec!["ts-python . . . app/r/A#Model#t.".to_string()],
+            "the statement-anchored field must take its full real owner chain"
         );
         let flat = "class Article:\n    title = models.CharField(max_length=1)\n";
         let ex2 = TreeSitterExtractor::for_language("python")
@@ -6751,8 +6854,117 @@ public class PlainListener {
             .unwrap();
         assert_eq!(
             symbols_named(&ex2, "title"),
-            vec!["ts-python . . . app/s/title.".to_string()],
-            "pinned residual: a top-level ORM field stays module-flat"
+            vec!["ts-python . . . app/s/Article#title.".to_string()],
+            "a top-level ORM field must nest under its class"
+        );
+    }
+
+    #[test]
+    fn enclosing_chain_drops_equal_range_anchor_artifacts() {
+        // Direct MI-R1-1 guard: no built-in query produces equal-range anchor artifacts any
+        // more (python.scm was the last producer, re-anchored in scm-anchors D7), so this
+        // handcrafted PendingDef list keeps the defensive drop non-vacuously tested: a
+        // non-Type record range-equal to a Type record must NOT truncate the chain of defs
+        // inside that range.
+        let mk = |kind: &str, name: &str, start: usize, end: usize| PendingDef {
+            kind: kind.to_string(),
+            name: name.to_string(),
+            start,
+            end,
+            span: Span::ZERO,
+            signature: None,
+            emit: true,
+            owner: None,
+        };
+        let pending = vec![
+            mk("class", "M", 0, 100),
+            mk("field", "t", 0, 100), // equal-range Term artifact (a wide anchor)
+            mk("function", "save", 10, 20),
+        ];
+        let chain = enclosing_chain(&pending, 10, 20);
+        assert_eq!(
+            chain,
+            vec![Descriptor::new("M", Suffix::Type)],
+            "the equal-range Term artifact must be dropped, not truncate the chain"
+        );
+    }
+
+    // ── Scheme-3 identity roles: `.anchor` + `.owner` (scm-anchors D1) ──────────
+
+    #[test]
+    fn classify_capture_maps_anchor_and_owner_roles() {
+        assert!(matches!(
+            classify_capture("code_struct.anchor"),
+            CaptureRole::DefAnchor {
+                kind: "struct",
+                emit: false
+            }
+        ));
+        assert!(matches!(
+            classify_capture("code_method.owner"),
+            CaptureRole::DefOwner { kind: "method" }
+        ));
+        // The emitting channels are unchanged.
+        assert!(matches!(
+            classify_capture("code_struct.def"),
+            CaptureRole::DefAnchor {
+                kind: "struct",
+                emit: true
+            }
+        ));
+        assert!(matches!(
+            classify_capture("code_variable"),
+            CaptureRole::DefAnchor {
+                kind: "variable",
+                emit: true
+            }
+        ));
+    }
+
+    #[test]
+    fn identity_anchor_mints_no_node_no_contains_no_defrec() {
+        // The Rust impl anchor is the first `.anchor` consumer: it must nest the
+        // method (P#m().) WITHOUT minting a Node, a Contains edge, or a DefRec
+        // (def_symbol_at join target) for the impl_item range.
+        let code = "pub struct P { pub x: f64 }\nimpl P { fn m(&self) {} }\n";
+        let ex = TreeSitterExtractor::for_language("rust")
+            .unwrap()
+            .extract(&sf("src/p.rs", "rust", code))
+            .unwrap();
+        // The method nests under P via the anchor.
+        assert!(
+            has_symbol(&ex, "ts-rust . . . src/p/P#m()."),
+            "impl method must nest under P#; ms = {:?}",
+            symbols_named(&ex, "m")
+        );
+        // Exactly ONE node named P — the struct. The impl anchor mints nothing.
+        let p_nodes: Vec<_> = ex
+            .nodes
+            .iter()
+            .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == "P")
+            .collect();
+        assert_eq!(p_nodes.len(), 1, "anchor must not mint a node: {p_nodes:?}");
+        let impl_off = code.find("impl P").unwrap() as u32;
+        assert_ne!(
+            p_nodes[0].location.span.start_byte, impl_off,
+            "the single P node must be the struct, not the impl block"
+        );
+        // One File→def Contains edge per EMITTED definition record — the anchor
+        // adds none (this is the identity_contains_edges_stay_file_to_def
+        // invariant holding by construction for non-emitting anchors).
+        let contains = ex
+            .local_edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Contains)
+            .count();
+        let def_count = ex
+            .nodes
+            .iter()
+            .filter(|n| !matches!(n.kind, NodeKind::File | NodeKind::Import))
+            .count();
+        assert_eq!(
+            contains, def_count,
+            "anchor must not add a Contains edge (no DefRec is created for it)"
         );
     }
 }

@@ -29,6 +29,17 @@
   value: (arrow_function)
 ) @code_method.def
 
+; Object-valued class fields: `x = { ... }` / `#x = { ... }` become Term-suffixed
+; Field defs (scm-anchors D6): the field is then a container in the
+; enclosing_chain walk, so the literal's members TRUNCATE at it (module-flat)
+; instead of nesting under the class and merging with the class's real methods.
+; Computed-name fields (`[k] = { ... }`) stay uncaptured — documented residual
+; (their literal members still merge with same-named class methods).
+(public_field_definition
+  name: [(property_identifier) (private_property_identifier)] @code_field.name
+  value: (object)
+) @code_field.def
+
 ; Interface method signatures: interface Foo { bar(x: T): R; }
 (interface_body
   (method_signature

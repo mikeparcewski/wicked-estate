@@ -29,6 +29,47 @@ impl Point {
     }
 }
 
+pub struct Rect {
+    pub w: f64,
+    pub h: f64,
+}
+
+// Second impl with a same-named method: scheme 3 nests it under Rect#, distinct
+// from Point#translate(). (scm-anchors D3).
+impl Rect {
+    pub fn translate(&mut self, dx: f64, dy: f64) {
+        self.w += dx;
+        self.h += dy;
+    }
+}
+
+pub struct Holder<T> {
+    pub v: T,
+}
+
+// Anchor branch: generic_type — `impl Holder<T>` anchors under Holder.
+impl<T> Holder<T> {
+    pub fn get(&self) -> &T {
+        &self.v
+    }
+}
+
+// Anchor branch: trait impl with plain type_identifier.
+impl Drawable for Rect {
+    fn draw(&self) {}
+}
+
+// Anchor branch: scoped_type_identifier — anchors under Widget.
+impl Drawable for crate::ext::Widget {
+    fn draw(&self) {}
+}
+
+// Anchor branch: path-qualified generic (generic_type over scoped_type_identifier)
+// — anchors under Wrap.
+impl<T> Drawable for crate::ext::Wrap<T> {
+    fn draw(&self) {}
+}
+
 pub fn distance(a: &Point, b: &Point) -> Distance {
     let dx = a.x - b.x;
     let dy = a.y - b.y;

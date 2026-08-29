@@ -100,6 +100,30 @@ function/method/Term body stays module-flat (`Symbol::Local` remains unadopted).
 the rename-stability argument above — renaming a function must not churn the ids of things
 declared inside it.
 
+### Scheme 3 — query-level identity roles (`.anchor` / `.owner`)
+
+Scheme 2 could only nest under an ENCLOSING, EMITTED definition. Scheme 3 (scm-anchors lane,
+`docs/recon/scm-anchors.md`) adds two generic capture roles so query files can supply the owner
+where scheme 2 structurally could not — zero per-language Rust (rules-as-data):
+
+- **`@code_<kind>.anchor`** — a NON-EMITTING containment anchor: the captured container enters
+  the chain walk as a Type container but mints no Node/DefRec/Contains edge. Consumers: Rust
+  `impl_item` (methods nest under the impl's `type:` name — `impl Foo` and `impl Trait for Foo`
+  both under `Foo#`), Ruby `class << self` (members nest as `C#self#m().`).
+- **`@code_<kind>.owner`** — an owner TYPE NAME captured in the def's own match, spliced as the
+  INNERMOST Type descriptor where no containing node exists. Consumers: Go receivers
+  (`<module>/T#M().` — value/pointer/generic/parenthesized receivers share one shape), C++
+  `Foo::`/`Foo<T>::` out-of-line qualifiers (`<module>/Foo#reset().`), Ruby `def self.m`
+  (converges with `class << self` on `C#self#m().`).
+
+Binding rule for query edits (R-DEF-LOSS): an owner/anchor capture added to an EXISTING def
+pattern must be optional (`?`) so a shape outside the enumerated alternation degrades to an
+OWNERLESS def, never a dropped def — a def may lose its owner, never its extraction.
+
+Object-valued TS/JS class fields (`x = { save(){} }`, `#x = { … }`) are additionally captured as
+Term-suffixed Field defs, so their literal members truncate at the field (module-flat) instead of
+merging with the class's real methods.
+
 ### Stability semantics — two new rows
 
 | Change | Identity | Why it is correct |
@@ -107,36 +131,69 @@ declared inside it.
 | Rename / move the enclosing type | **new identity for its members** | different logical path — same rule as a module move |
 | Move a member between two types in one file | **new identity** | it is a different logical symbol |
 
-### Accepted residuals (all fixture-pinned in `treesitter.rs` `identity_*` tests)
+### Accepted residuals (all fixture-pinned in `treesitter.rs` `identity_*` tests or
+`tests/languages.rs` known_defect pins)
+
+Closed by scheme 3 (their pins flipped in the scm-anchors lane): the object-literal-field merge
+(`identity_field_object_literal_residual`, now asserting the split), the ORM equal-range
+wrong-owner ids (`identity_field_orm_equal_range_residual`, now asserting real owners —
+python.scm anchors `@code_field.def` at the field's own statement), and the Rust-impl /
+Go-receiver / Ruby-singleton owner gaps (distinctness tests + flipped pins per language).
+
+Still open:
 
 - Function-local definitions (nested functions, arrows bound inside a method, object-literal
   methods) keep `<module>/name<suffix>` and still collide with each other and with a same-named
   module-level definition — smaller, visible residuals that were previously hidden inside the
   bigger merge.
-- `class A { save(){} x = { save(){} } }`: the object-valued field `x` is not captured as a
-  definition (the TS query requires an arrow value), so the inner `save` nests under `A` and
-  merges with the real `A.save()` (`identity_field_object_literal_residual`). Fix belongs in the
-  query file (capture object-valued `public_field_definition` as a Term def) — extraction-gaps
-  lane.
-- ORM fields anchored at the whole class (`python.scm` SQLAlchemy/Django patterns) mint a
-  wrong-owner id for the FIELD itself: the field record is range-equal to its class record, and a
-  range-equal container is indistinguishable from a duplicate capture of the def, so the class
-  can never enter the field's own chain. Nested `class A: class Model: t = CharField(…)` mints
-  `A#t.` (owner should be `A#Model#`); a top-level model's field stays module-flat, so two
-  same-named fields in two sibling models still collide
-  (`identity_field_orm_equal_range_residual`). Fix belongs in the query file (anchor
-  `@code_field.def` at the assignment node, not the `class_definition`) — extraction-gaps lane.
+- Object-literal field members pool PER-MODULE: the split moves `x = { save(){} }`'s member from
+  the class merge to module-flat `src/m/save().`, shared with any same-named module-level
+  function and with other literals' same-named members. Distinct ids need object-literal
+  descriptors — a scheme change (pinned inside `identity_field_object_literal_residual`).
+- TS/JS computed-name fields (`[k] = { … }`) stay uncaptured; their literal members still nest
+  under the class and merge with same-named real methods (pinned, same test).
 - Overloads within one type still collapse: `disambiguator` stays `None` (pinned by
   `identity_disambiguator_is_none`).
-- Languages whose owner is not an enclosing definition anchor still collide: Rust `impl` blocks
-  (only the inner `function_item` is captured), Go receiver methods, Ruby `class << self`. Query
-  anchors are the fix (rules-as-data) — extraction-gaps lane.
+- Rust: two trait impls on ONE type merge (`Ta for Foo` / `Tb for Foo` both anchor under `Foo#`
+  — `rust_same_type_trait_impls_collision_known_defect`); unanchorable impl targets (`&Foo`,
+  tuples, `dyn Trait`) match no anchor branch and their methods stay module-flat.
+- Ruby: `def Foo.m` / `def obj.m` keep OWNERLESS defs (nested under the enclosing class by
+  containment), so `def Foo.m` still merges with instance `def m` — an owner splice for constant
+  receivers needs a program-recorded convention (pinned inside
+  `ruby_singleton_vs_instance_collision_known_defect`). `class << Foo` reopens `Foo#`'s
+  namespace (unchanged).
+- C++: decltype/dependent_name-scoped out-of-line members keep OWNERLESS module-flat defs
+  (pinned); multi-level qualification (`Ns::Foo::bar` at file scope) is unmatched; and the
+  member proto/def CROSS-FILE single-id hazard — `foo.h` prototype and `foo.cpp` out-of-line
+  definition mint ONE id, so `nodes.file` flaps, `remove_file` deletes by file, and the digest
+  skip never re-extracts the survivor — is pinned
+  (`cpp_member_proto_def_cross_file_single_id_hazard`) pending the program's M4 header/impl
+  identity decision (store-side fix filed there).
+- C++, namespace direction of the qualifier ambiguity (review round 2, R2-COR-1): a
+  namespace-qualified free-function definition at file scope (`void ns::helper(int) {}`,
+  legal per [namespace.memdef] when the overload is declared in the namespace) mints
+  `<module>/ns#helper().` with kind **Method** — the same id an in-namespace
+  `void helper() {}` definition mints with kind **Function** (containment nests it under the
+  namespace anchor). Cross-kind same-id → store re-kind flap. `qualified_identifier.scope`
+  parses class and namespace qualifiers identically (`namespace_identifier`), so no
+  query-level fix exists; pinned
+  (`cpp_namespace_qualified_free_fn_cross_kind_collision_known_defect`) and folded into the
+  same M4 identity decision.
+- Fleet-audit hand-off (merge note M6): Swift `extension Foo` members are module-flat and two
+  extensions' same-named methods collide (pinned,
+  `swift_extension_methods_collision_known_defect` — fixable per-language with `.anchor`); Lua
+  colon-methods (`function Obj:method()`) do not capture the receiver `Obj`; Kotlin anonymous
+  `companion object` is not a container (its members nest under the class).
 
 ### Migration — `SYMBOL_ID_SCHEME` and the `id_scheme` gate
 
-`wicked_estate_extract::SYMBOL_ID_SCHEME = "2"`. `index_path_as` compares the per-repo
+`wicked_estate_extract::SYMBOL_ID_SCHEME = "3"` (bumped from "2" by the scm-anchors lane in the
+same commit as its first id-changing query edit; scheme 2 never shipped in a release, so released
+users migrate once for both). `index_path_as` compares the per-repo
 `id_scheme` meta key (absent = "1") and forces a full re-extraction on ANY previously-indexed
-repo whose stored scheme differs — the binary version did not change, so the `indexed_version`
+repo whose stored scheme differs. The gate fires PER REPO LABEL on that label's next index — a
+multi-repo DB holds mixed schemes until every label re-indexes, and the mismatch warning is
+CLI-only (the MCP server surfaces nothing) — the binary version did not change, so the `indexed_version`
 gate alone would skip every unchanged digest and leave a silently mixed graph. The key is written
 only AFTER the re-extraction completes (unlike the version/rules gates, which write at the check
 site): a crash or Ctrl-C mid-migration leaves the old key and the gate re-fires idempotently,
@@ -148,7 +205,9 @@ need `--embeddings` re-run; agent-held `--symbol` ids from `resolve --json` go s
 `wicked-estate scip <root>` after the forced re-extract** — `remove_file` deletes the
 confidence-1.0 SCIP edges by file, so the forced pass removes them. SCIP *correlation* is
 span-based and unaffected; nested ids give previously-merged members distinct spans — an
-improvement.
+improvement. **Re-inject overlay xedges / re-run the bus/command injection pipelines** after the
+forced re-extract — injected edges keyed on old ids are not carried over, and they typically land
+on handler METHODS, exactly the Rust-impl/Go-receiver id classes scheme 3 churns.
 
 **Downgrade hazard:** a pre-scheme binary of the SAME version writing into a scheme-2 DB re-mints
 flat ids for any changed file — the old binary does not read the key, and the version gate cannot

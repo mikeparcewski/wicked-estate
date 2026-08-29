@@ -210,9 +210,15 @@ fn rust_characterization() {
     assert_def(&ex, lang, "distance", &NodeKind::Function);
     assert_def(&ex, lang, "main_entry", &NodeKind::Function);
     // impl-block method: emitted ONCE by the general function pattern (§11 — the
-    // impl-scoped duplicate Method pattern was deleted; kind stays Function until
-    // the method-identity lane adds enclosing-type identity).
+    // impl-scoped duplicate Method pattern was deleted; kind stays Function, the
+    // impl anchor supplies enclosing-type identity without emitting).
     assert_def(&ex, lang, "translate", &NodeKind::Function);
+    // scm-anchors D3: one method per impl-anchor branch (zero-def-loss pins —
+    // these defs must survive any future narrowing of the anchor alternation).
+    assert_def(&ex, lang, "Rect", &NodeKind::Struct);
+    assert_def(&ex, lang, "Holder", &NodeKind::Struct);
+    assert_def(&ex, lang, "get", &NodeKind::Function); // impl Holder<T> (generic_type)
+    assert_def(&ex, lang, "draw", &NodeKind::Function); // trait impls (plain/scoped/scoped-generic)
     // new kinds
     assert_def(&ex, lang, "MAX_DISTANCE", &NodeKind::Constant);
     assert_def(&ex, lang, "ORIGIN", &NodeKind::Constant);
@@ -291,6 +297,9 @@ fn typescript_characterization() {
     assert_def(&ex, lang, "DEFAULT_TIMEOUT", &NodeKind::Constant);
     assert_def(&ex, lang, "createEmitter", &NodeKind::Function); // arrow fn
     assert_def(&ex, lang, "retryCount", &NodeKind::Variable);
+    // scm-anchors D6: object-valued class fields (public + private name branch)
+    assert_def(&ex, lang, "hooks", &NodeKind::Field);
+    assert_def(&ex, lang, "#internals", &NodeKind::Field);
     assert_def_floor(&ex, lang, 10);
 
     // calls
@@ -327,6 +336,9 @@ fn tsx_characterization() {
     assert_def(&ex, lang, "ThemeMode", &NodeKind::TypeAlias);
     assert_def(&ex, lang, "DEFAULT_THEME", &NodeKind::Constant);
     assert_def(&ex, lang, "handleClick", &NodeKind::Function); // arrow fn
+    // scm-anchors D6: object-valued class fields (public + private name branch)
+    assert_def(&ex, lang, "palette", &NodeKind::Field);
+    assert_def(&ex, lang, "#cache", &NodeKind::Field);
     assert_def_floor(&ex, lang, 8);
 
     // calls
@@ -363,6 +375,9 @@ fn javascript_characterization() {
     assert_def(&ex, lang, "DEFAULT_DELAY", &NodeKind::Constant);
     assert_def(&ex, lang, "createHandler", &NodeKind::Function); // arrow fn
     assert_def(&ex, lang, "instanceCount", &NodeKind::Variable);
+    // scm-anchors D6: object-valued class fields (public + private name branch)
+    assert_def(&ex, lang, "hooks", &NodeKind::Field);
+    assert_def(&ex, lang, "#internals", &NodeKind::Field);
     assert_def_floor(&ex, lang, 10);
 
     // calls
@@ -391,6 +406,15 @@ fn go_characterization() {
     assert_def(&ex, lang, "Area", &NodeKind::Method);
     assert_def(&ex, lang, "Distance", &NodeKind::Function);
     assert_def(&ex, lang, "Describe", &NodeKind::Function);
+    // scm-anchors D4: one method per receiver-alternation branch — zero-def-loss
+    // pins (R-DEF-LOSS): a future narrowing of the receiver alternation that
+    // DROPS a shape's def turns one of these red.
+    assert_def(&ex, lang, "Norm", &NodeKind::Method); // value: (p Point)
+    assert_def(&ex, lang, "Len", &NodeKind::Method); // generic: (c Cache[K, V])
+    assert_def(&ex, lang, "Get", &NodeKind::Method); // pointer-generic: (c *Cache[K, V])
+    assert_def(&ex, lang, "Width", &NodeKind::Method); // parenthesized: (b (Bounds))
+    assert_def(&ex, lang, "Height", &NodeKind::Method); // parenthesized-pointer: (b (*Bounds))
+    assert_def(&ex, lang, "Cache", &NodeKind::Struct);
     // new kinds
     assert_def(&ex, lang, "Pi", &NodeKind::Constant);
     assert_def(&ex, lang, "MaxPoints", &NodeKind::Constant);
@@ -412,7 +436,7 @@ fn go_characterization() {
     assert_def(&ex, lang, "Matrix", &NodeKind::TypeAlias);
     // D04-2 guard: the constrained type: alternation must NOT re-kind structs or
     // interfaces (a catch-all here turns assert_no_conflicting_def_ids red).
-    assert_def_floor(&ex, lang, 10);
+    assert_def_floor(&ex, lang, 15);
 
     // calls
     assert_call(&ex, lang, "Sqrt");
@@ -1399,23 +1423,29 @@ fn go_const_vs_struct_field_symbolids_are_distinct() {
     );
 }
 
-/// EG-R1-1, re-pinned after scheme 2 (PARTIALLY resolved): the three
-/// same-named `reset` nodes used to share ONE SymbolId. Type-nested identity
-/// separates the IN-CLASS prototype (it nests under `Foo#`), which this test
-/// now asserts. STILL DEFECTIVE (pinned below): the out-of-line
-/// `void Foo::reset()` definition sits at file scope with no enclosing Type
-/// node, so it still shares `…/reset().` with the free function — a
-/// cross-kind (Method vs Function) collision. Owner: the program-level D6d
-/// header/impl + free-function identity follow-up
-/// (docs/recon/extraction-gaps.md §8 merge note 2).
+/// EG-R1-1, RESOLVED in two steps: scheme 2 nested the in-class prototype
+/// under `Foo#`; the scm-anchors D8 qualifier owner now nests the out-of-line
+/// `void Foo::reset()` definition under `Foo#` too — so the previously-pinned
+/// residual (out-of-line def sharing the free function's `…/reset().`) is
+/// FLIPPED to distinct ids per the pin's own instruction. The proto and the
+/// out-of-line def now share ONE id — asserted NEUTRALLY: single-id member
+/// semantics pending the program's M4 header/impl identity decision (see
+/// `cpp_member_proto_def_cross_file_single_id_hazard`); if that decision is
+/// distinct-decl identity, the equality assertion flips WITH the decision.
+/// Template-scoped members anchor under the bare type via the template_type
+/// branch; decltype-scoped qualifiers keep their def OWNERLESS (R-DEF-LOSS —
+/// a def may lose its owner, never its extraction).
 #[test]
 fn cpp_out_of_line_member_vs_free_function_collision_known_defect() {
     let lang = "cpp";
+    let text = "class Foo { public: void reset(); };\nvoid Foo::reset() {}\nvoid reset() {}\n\
+                template <typename T> class Bar { public: void tinit(); };\n\
+                template <typename T> void Bar<T>::tinit() {}\n\
+                struct Q { int q; };\nQ qv;\nvoid decltype(qv)::weird() {}\n";
     let sf = SourceFile {
         path: "probe_collide.cpp".to_string(),
         language: Language::new(lang),
-        text: "class Foo { public: void reset(); };\nvoid Foo::reset() {}\nvoid reset() {}\n"
-            .to_string(),
+        text: text.to_string(),
     };
     let ex = TreeSitterExtractor::for_language(lang)
         .unwrap()
@@ -1437,37 +1467,478 @@ fn cpp_out_of_line_member_vs_free_function_collision_known_defect() {
             && kinds.iter().filter(|k| *k == "Function").count() == 1,
         "[{lang}] expected 2x Method + 1x Function, got {kinds:?}"
     );
-    // The scheme-2 fix half: the in-class prototype nests under Foo# and is
-    // distinct from the free function.
     let free_id = resets
         .iter()
         .find(|n| format!("{:?}", n.kind) == "Function")
         .map(|n| n.symbol.clone())
         .expect("free fn node");
+    // With the D8 owner, BOTH the in-class proto and the out-of-line def nest
+    // under Foo# — two nodes, one id shape.
     let nested: Vec<_> = resets
         .iter()
         .filter(|n| n.symbol.as_str().contains("Foo#"))
         .collect();
     assert_eq!(
         nested.len(),
-        1,
-        "[{lang}] the in-class prototype must nest under Foo# (scheme 2); got {resets:?}"
+        2,
+        "[{lang}] proto AND out-of-line def must both nest under Foo#; got {resets:?}"
     );
-    assert_ne!(
-        nested[0].symbol, free_id,
-        "[{lang}] REGRESSION: the type-nested prototype id collapsed into the free fn's id"
-    );
-    // The residual defect half (D6d seam, still pinned): the out-of-line
-    // member definition carries no enclosing Type node and still shares the
-    // free function's file-scope id. When D6d lands, flip this to assert_ne.
+    // Locate the out-of-line def by SPAN (both Foo# nodes are Methods now).
+    let out_of_line_off = text.find("void Foo::reset").unwrap() as u32;
     let out_of_line = resets
         .iter()
-        .find(|n| format!("{:?}", n.kind) == "Method" && !n.symbol.as_str().contains("Foo#"))
+        .find(|n| n.location.span.start_byte == out_of_line_off)
         .expect("out-of-line member def node");
+    let proto = nested
+        .iter()
+        .find(|n| n.location.span.start_byte != out_of_line_off)
+        .expect("in-class proto node");
+    // NEUTRAL single-id assertion (pending M4 — NOT a correctness claim): the
+    // proto and the out-of-line def currently mint one id. See the cross-file
+    // hazard pin for why this is a recorded trade, not a feature.
     assert_eq!(
+        out_of_line.symbol, proto.symbol,
+        "[{lang}] proto/def single-id member semantics changed — if the M4 \
+         decision landed distinct-decl identity, flip this assertion with it"
+    );
+    // THE FLIP (per the original pin's instruction): the out-of-line member no
+    // longer shares the free function's id.
+    assert_ne!(
         out_of_line.symbol, free_id,
-        "[{lang}] KNOWN DEFECT RESOLVED? the out-of-line Foo::reset no longer \
-         shares the free reset's SymbolId — the D6d identity owner landed. \
-         Flip this half to assert distinct ids."
+        "[{lang}] REGRESSION: Foo::reset collapsed into the free reset's id again"
+    );
+    // Template-scoped out-of-line member anchors under the bare type name.
+    let tinits: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == "tinit")
+        .collect();
+    assert_eq!(
+        tinits.len(),
+        2,
+        "[{lang}] proto + out-of-line tinit expected"
+    );
+    for n in &tinits {
+        assert_eq!(
+            n.symbol.as_str(),
+            "ts-cpp . . . probe_collide/Bar#tinit().",
+            "[{lang}] Bar<T>::tinit must anchor under Bar# (template_type branch)"
+        );
+    }
+    // R-DEF-LOSS: a decltype-scoped qualifier keeps its DEF, ownerless (flat).
+    let weird = ex
+        .nodes
+        .iter()
+        .find(|n| !matches!(n.kind, NodeKind::File) && n.name == "weird")
+        .expect("decltype-scoped def must still extract (zero-def-loss)");
+    assert_eq!(
+        weird.symbol.as_str(),
+        "ts-cpp . . . probe_collide/weird().",
+        "[{lang}] decltype scope degrades to an ownerless module-flat def"
+    );
+}
+
+/// scm-anchors D8 HAZARD PIN (F13): with the qualifier owner, a member
+/// declared in `foo.h` (D6b in-class prototype) and defined out-of-line in
+/// `foo.cpp` mint ONE SymbolId across TWO files — `module_path` strips one
+/// extension, so both files share module `foo`. Store consequences (the F7
+/// mechanism at member level): `nodes.file` flaps last-write-wins per
+/// incremental run, `remove_file` deletes by file, and the digest skip never
+/// re-extracts the survivor — deleting/renaming one file of the pair can drop
+/// the live node until the other file changes. The store-side fix is filed via
+/// merge note M4 (program header/impl identity decision; store paths are the
+/// scm-anchors lane's MUST-NOT-TOUCH). FLIP INSTRUCTION (gated on M4): if the
+/// decision is distinct-decl identity, flip to assert DISTINCT ids; if it is
+/// one-logical-symbol with the store fixed, retire this pin into a store
+/// conformance test.
+#[test]
+fn cpp_member_proto_def_cross_file_single_id_hazard() {
+    let lang = "cpp";
+    let header = SourceFile {
+        path: "foo.h".to_string(),
+        language: Language::new(lang),
+        text: "class Foo { public: void reset(); };\n".to_string(),
+    };
+    let src = SourceFile {
+        path: "foo.cpp".to_string(),
+        language: Language::new(lang),
+        text: "void Foo::reset() {}\n".to_string(),
+    };
+    let extractor = TreeSitterExtractor::for_language(lang).unwrap();
+    let hx = extractor.extract(&header).expect("header extraction");
+    let cx = extractor.extract(&src).expect("cpp extraction");
+    let proto = hx
+        .nodes
+        .iter()
+        .find(|n| !matches!(n.kind, NodeKind::File) && n.name == "reset")
+        .expect("header proto node");
+    let def = cx
+        .nodes
+        .iter()
+        .find(|n| !matches!(n.kind, NodeKind::File) && n.name == "reset")
+        .expect("out-of-line def node");
+    assert_eq!(
+        proto.symbol, def.symbol,
+        "[{lang}] HAZARD SHAPE CHANGED: the .h proto and .cpp def no longer mint \
+         one cross-file id — apply this pin's M4-gated flip instruction"
+    );
+    assert_eq!(
+        proto.symbol.as_str(),
+        "ts-cpp . . . foo/Foo#reset().",
+        "[{lang}] both files share module `foo` (one extension stripped)"
+    );
+}
+
+/// Review round 2 (R2-COR-1) — the D8 qualifier ambiguity, NAMESPACE direction,
+/// pinned: `qualified_identifier.scope`'s namespace_identifier branch cannot
+/// distinguish a class qualifier from a namespace qualifier, so a
+/// namespace-qualified FREE-function definition at file scope
+/// (`void ns::helper(int) {}`) mints `<module>/ns#helper().` with kind Method —
+/// the SAME SymbolId an in-namespace definition (`namespace ns { void helper()
+/// {} }`, nested under the `ns#` namespace anchor by containment) mints with
+/// kind Function. Cross-kind same-id = the store re-kind-flap class #129
+/// eradicated. The fixture is legal, compilable C++ (`cc -fsyntax-only` clean):
+/// a qualified out-of-line definition requires a prior in-namespace declaration
+/// ([namespace.memdef]), so it defines the declared `helper(int)` overload; the
+/// D6d-deferred free prototype is uncaptured, which is why exactly two nodes
+/// mint. No query-level fix exists — the grammar parses both qualifier classes
+/// as namespace_identifier and kind is decided by the capture — so this is
+/// folded into the program's M4 header/impl identity decision
+/// (docs/recon/scm-anchors.md §8). FLIP INSTRUCTION (gated on M4): when the M4
+/// decision records an identity convention for qualified out-of-line
+/// definitions, flip this to assert whatever it decides — distinct ids, or one
+/// id with one consistent kind — and retire the cross-kind pair.
+#[test]
+fn cpp_namespace_qualified_free_fn_cross_kind_collision_known_defect() {
+    let lang = "cpp";
+    let sf = SourceFile {
+        path: "probe_ns_free.cpp".to_string(),
+        language: Language::new(lang),
+        text: "namespace ns {\nvoid helper() {}\nvoid helper(int);\n}\n\
+               void ns::helper(int x) {}\n"
+            .to_string(),
+    };
+    let ex = TreeSitterExtractor::for_language(lang)
+        .unwrap()
+        .extract(&sf)
+        .expect("extraction must succeed");
+    let helpers: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == "helper")
+        .collect();
+    assert_eq!(
+        helpers.len(),
+        2,
+        "[{lang}] expected in-namespace def + qualified free def (the free \
+         prototype is D6d-deferred); got {helpers:?}"
+    );
+    let kinds: std::collections::HashSet<String> =
+        helpers.iter().map(|n| format!("{:?}", n.kind)).collect();
+    assert_eq!(
+        kinds,
+        ["Function".to_string(), "Method".to_string()].into(),
+        "[{lang}] KIND SHAPE CHANGED: expected the cross-kind Function/Method \
+         pair — if one kind now wins, apply this pin's M4-gated flip instruction"
+    );
+    for n in &helpers {
+        assert_eq!(
+            n.symbol.as_str(),
+            "ts-cpp . . . probe_ns_free/ns#helper().",
+            "[{lang}] KNOWN DEFECT RESOLVED? the namespace-qualified free def \
+             and the in-namespace def no longer share one id — apply this \
+             pin's M4-gated flip instruction"
+        );
+    }
+}
+
+/// scm-anchors D3 (scheme 3): impl-block methods nest under the impl's `type:`
+/// name via the NON-EMITTING `@code_struct.anchor` — two impls' same-named
+/// methods mint DISTINCT ids, and every alternation branch (plain, generic,
+/// scoped, scoped-generic) anchors under the bare type name.
+#[test]
+fn rust_impl_methods_nest_under_type() {
+    let lang = "rust";
+    let sf = SourceFile {
+        path: "probe_impl.rs".to_string(),
+        language: Language::new(lang),
+        text: "struct A;\nstruct B;\n\
+               impl A { fn save(&self) {} }\n\
+               impl B { fn save(&self) {} }\n\
+               trait Tr { fn draw(&self); }\n\
+               struct H<T>(T);\n\
+               impl<T> H<T> { fn get(&self) {} }\n\
+               impl Tr for crate::ext::W { fn draw(&self) {} }\n\
+               impl<T> Tr for crate::ext::G<T> { fn draw(&self) {} }\n"
+            .to_string(),
+    };
+    let ex = TreeSitterExtractor::for_language(lang)
+        .unwrap()
+        .extract(&sf)
+        .expect("extraction must succeed");
+    let all: Vec<&str> = ex.nodes.iter().map(|n| n.symbol.as_str()).collect();
+    // Every anchor branch nests under the bare type name.
+    for sym in [
+        "ts-rust . . . probe_impl/A#save().", // type_identifier
+        "ts-rust . . . probe_impl/B#save().", // type_identifier (2nd impl)
+        "ts-rust . . . probe_impl/H#get().",  // generic_type
+        "ts-rust . . . probe_impl/W#draw().", // scoped_type_identifier
+        "ts-rust . . . probe_impl/G#draw().", // generic_type over scoped_type_identifier
+    ] {
+        assert!(
+            all.contains(&sym),
+            "[{lang}] expected {sym}; symbols = {all:?}"
+        );
+    }
+    // The anchor is non-emitting: no phantom node named after a type at an impl
+    // range — exactly one node each for A and B (the struct defs).
+    for ty in ["A", "B"] {
+        let n = ex
+            .nodes
+            .iter()
+            .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == ty)
+            .count();
+        assert_eq!(
+            n, 1,
+            "[{lang}] impl anchor must not mint a second `{ty}` node"
+        );
+    }
+}
+
+/// scm-anchors D3 residual, pinned: two trait impls on ONE type still collide —
+/// `impl Ta for Foo` and `impl Tb for Foo` both anchor under Foo (the `trait:`
+/// field is deliberately not captured), so both `fmt` defs mint `Foo#fmt().`.
+/// Distinguishing them needs a trait-qualified descriptor or a disambiguator
+/// (`identity_disambiguator_is_none` pins None) — a program-level identity
+/// convention, not a query edit. When one is recorded, flip this to assert
+/// DISTINCT ids per trait impl.
+#[test]
+fn rust_same_type_trait_impls_collision_known_defect() {
+    let lang = "rust";
+    let sf = SourceFile {
+        path: "probe_trait_impls.rs".to_string(),
+        language: Language::new(lang),
+        text: "struct Foo;\ntrait Ta { fn fmt(&self); }\ntrait Tb { fn fmt(&self); }\n\
+               impl Ta for Foo { fn fmt(&self) {} }\n\
+               impl Tb for Foo { fn fmt(&self) {} }\n"
+            .to_string(),
+    };
+    let ex = TreeSitterExtractor::for_language(lang)
+        .unwrap()
+        .extract(&sf)
+        .expect("extraction must succeed");
+    let fmts: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == "fmt")
+        .collect();
+    assert_eq!(
+        fmts.len(),
+        2,
+        "[{lang}] two fmt defs expected; got {fmts:?}"
+    );
+    assert_eq!(
+        fmts[0].symbol, fmts[1].symbol,
+        "[{lang}] KNOWN DEFECT RESOLVED? two trait impls' same-named methods no \
+         longer share Foo#fmt(). — a trait-qualified identity convention landed. \
+         Flip this pin to assert distinct ids."
+    );
+    assert_eq!(
+        fmts[0].symbol.as_str(),
+        "ts-rust . . . probe_trait_impls/Foo#fmt().",
+        "[{lang}] the merged id is the type-nested one"
+    );
+}
+
+/// scm-anchors D4 (scheme 3): Go receiver methods nest under the receiver's
+/// base type name via `@code_method.owner` — two types' same-named methods
+/// mint DISTINCT ids, and every receiver-alternation branch resolves to the
+/// same bare type name (value and pointer receivers share one shape).
+#[test]
+fn go_receiver_methods_nest_under_receiver_type() {
+    let lang = "go";
+    let sf = SourceFile {
+        path: "probe_recv.go".to_string(),
+        language: Language::new(lang),
+        text: "package p\n\
+               type A struct{}\ntype B struct{}\ntype C[K any] struct{}\n\
+               func (a A) M()    {}\n\
+               func (b B) M()    {}\n\
+               func (a *A) P()   {}\n\
+               func (c C[K]) G() {}\n\
+               func (c *C[K]) H() {}\n\
+               func (a (A)) Q()  {}\n\
+               func (a (*A)) R() {}\n"
+            .to_string(),
+    };
+    let ex = TreeSitterExtractor::for_language(lang)
+        .unwrap()
+        .extract(&sf)
+        .expect("extraction must succeed");
+    let all: Vec<&str> = ex.nodes.iter().map(|n| n.symbol.as_str()).collect();
+    // One id shape per branch — value/pointer/parenthesized receivers of one
+    // type all anchor under the same bare name.
+    for sym in [
+        "ts-go . . . probe_recv/A#M().", // value: (a A)
+        "ts-go . . . probe_recv/B#M().", // value, second type — the collision fix
+        "ts-go . . . probe_recv/A#P().", // pointer: (a *A)
+        "ts-go . . . probe_recv/C#G().", // generic: (c C[K])
+        "ts-go . . . probe_recv/C#H().", // pointer-generic: (c *C[K])
+        "ts-go . . . probe_recv/A#Q().", // parenthesized: (a (A))
+        "ts-go . . . probe_recv/A#R().", // parenthesized-pointer: (a (*A))
+    ] {
+        assert!(
+            all.contains(&sym),
+            "[{lang}] expected {sym}; symbols = {all:?}"
+        );
+    }
+    // The headline distinctness: A#M() != B#M().
+    let ms: std::collections::HashSet<&str> = ex
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == "M")
+        .map(|n| n.symbol.as_str())
+        .collect();
+    assert_eq!(
+        ms.len(),
+        2,
+        "[{lang}] REGRESSION: two receiver types' M() share one SymbolId; got {ms:?}"
+    );
+}
+
+/// Ruby singleton-method identity (scm-anchors D5), FLIPPED after the fix:
+/// the non-emitting `(self)` singleton_class anchor + the OPTIONAL
+/// `object: (self)? @code_method.owner` splice make BOTH singleton spellings
+/// (`def self.m` and `class << self; def m`) converge on `C#self#<name>().`,
+/// distinct from the instance `C#<name>().` — previously all three merged
+/// into one SymbolId (pinned by the first version of this test).
+/// R-DEF-LOSS pins kept: `def C.k` / `def obj.j` (non-self receivers) still
+/// extract, ownerless — and `def C.k` therefore still merges with instance
+/// `def k` (the pinned residual, flip instruction inline below).
+#[test]
+fn ruby_singleton_vs_instance_collision_known_defect() {
+    let lang = "ruby";
+    let sf = SourceFile {
+        path: "probe_singleton.rb".to_string(),
+        language: Language::new(lang),
+        text: "class C\n\
+               \x20 def m; end\n\
+               \x20 def self.m; end\n\
+               \x20 def n; end\n\
+               \x20 class << self\n\
+               \x20   def n; end\n\
+               \x20   def s; end\n\
+               \x20 end\n\
+               \x20 def self.s; end\n\
+               \x20 def k; end\n\
+               \x20 def C.k; end\n\
+               \x20 def obj.j; end\n\
+               end\n"
+            .to_string(),
+    };
+    let ex = TreeSitterExtractor::for_language(lang)
+        .unwrap()
+        .extract(&sf)
+        .expect("extraction must succeed");
+    let distinct = |name: &str| -> std::collections::HashSet<String> {
+        ex.nodes
+            .iter()
+            .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == name)
+            .map(|n| n.symbol.as_str().to_string())
+            .collect()
+    };
+    // FIXED (was the pinned defect): instance `def m` and `def self.m` mint
+    // DISTINCT ids — the owner splice nests the singleton method under self.
+    let ms = distinct("m");
+    assert_eq!(
+        ms.len(),
+        2,
+        "[{lang}] REGRESSION: `def m` vs `def self.m` merged again; got {ms:?}"
+    );
+    assert!(ms.contains("ts-ruby . . . probe_singleton/C#m()."));
+    assert!(ms.contains("ts-ruby . . . probe_singleton/C#self#m()."));
+    // FIXED: `class << self; def n` no longer merges with instance `def n` —
+    // the non-emitting singleton_class anchor nests it under self.
+    let ns = distinct("n");
+    assert_eq!(
+        ns.len(),
+        2,
+        "[{lang}] REGRESSION: `class << self` member vs instance method merged \
+         again; got {ns:?}"
+    );
+    assert!(ns.contains("ts-ruby . . . probe_singleton/C#n()."));
+    assert!(ns.contains("ts-ruby . . . probe_singleton/C#self#n()."));
+    // Both singleton spellings of `s` converge on the SAME id — C#self#s(). —
+    // the reason the anchor is named "self" (one Ruby class-method, one id).
+    let ss = distinct("s");
+    assert_eq!(
+        ss,
+        ["ts-ruby . . . probe_singleton/C#self#s().".to_string()].into(),
+        "[{lang}] `def self.s` and `class << self; def s` must mint ONE shape"
+    );
+    // R-DEF-LOSS pins: non-self singleton receivers EXTRACT today (ownerless,
+    // nested under C by containment) — the owner edit must not drop them.
+    assert_def(&ex, lang, "j", &NodeKind::Method); // def obj.j
+    let ks: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == "k")
+        .collect();
+    assert_eq!(
+        ks.len(),
+        2,
+        "[{lang}] instance `def k` AND `def C.k` must both extract; got {ks:?}"
+    );
+    // Residual (kept after the fix, own flip instruction): `def C.k` stays
+    // ownerless and still merges with instance `def k` — an owner splice for
+    // constant receivers would mint C#C#k()., an unrecorded convention.
+    assert_eq!(
+        distinct("k").len(),
+        1,
+        "[{lang}] KNOWN RESIDUAL RESOLVED? `def C.k` no longer merges with \
+         instance `def k` — a constant-receiver owner convention landed; \
+         re-point this residual pin."
+    );
+}
+
+/// Fleet-audit hit (scm-anchors S7 / merge note M6), pinned: Swift
+/// `extension Foo { func m() {} }` is uncaptured as a container — swift.scm
+/// keyword-gates class_declaration on "class"/"struct"/"enum", and an
+/// extension's `name:` is a `user_type`, not a `type_identifier` — so
+/// extension methods stay module-flat and TWO extensions' same-named methods
+/// share one SymbolId (the exact Rust-impl F1 shape). Now expressible as pure
+/// query data: a NON-EMITTING `@code_struct.anchor` on the extension's
+/// user_type (the scheme-3 role this lane added). FLIP INSTRUCTION: when the
+/// Swift anchor lands, assert A#run(). != B#run(). instead.
+#[test]
+fn swift_extension_methods_collision_known_defect() {
+    let lang = "swift";
+    let sf = SourceFile {
+        path: "probe_ext.swift".to_string(),
+        language: Language::new(lang),
+        text: "struct A {}\nstruct B {}\n\
+               extension A { func run() {} }\n\
+               extension B { func run() {} }\n"
+            .to_string(),
+    };
+    let ex = TreeSitterExtractor::for_language(lang)
+        .unwrap()
+        .extract(&sf)
+        .expect("extraction must succeed");
+    let runs: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == "run")
+        .collect();
+    assert_eq!(
+        runs.len(),
+        2,
+        "[{lang}] both extension methods must extract (module-flat); got {runs:?}"
+    );
+    assert_eq!(
+        runs[0].symbol, runs[1].symbol,
+        "[{lang}] KNOWN DEFECT RESOLVED? two extensions' same-named methods no \
+         longer collide — the extension .anchor landed. Flip this pin to \
+         assert distinct ids."
     );
 }

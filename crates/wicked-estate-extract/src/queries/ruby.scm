@@ -12,6 +12,15 @@
   body: (_) @code_class.body
 ) @code_class.def
 
+; `class << self` — a NON-EMITTING containment anchor named "self" (scm-anchors
+; D5, scheme 3): its members nest as `C#self#m().`, converging with `def self.m`
+; (owner splice below) on ONE id shape, distinct from the instance `C#m().`.
+; No node is minted — no principled node exists for the singleton class itself.
+(singleton_class
+  value: (self) @code_class.name
+  body: (_) @code_class.body
+) @code_class.anchor
+
 ; Module definitions
 (module
   name: (constant) @code_module.name
@@ -26,8 +35,17 @@
   body: (_)? @code_method.body
 ) @code_method.def
 
-; Singleton method definitions (class methods)
+; Singleton method definitions (class methods). `def self.m` splices "self" as
+; the owner, minting `C#self#m().` — the SAME shape `class << self` members get
+; via the anchor above, so both spellings of a Ruby class-method converge on one
+; id, distinct from the instance `C#m().` (scm-anchors D5). R-DEF-LOSS: the
+; object constraint is OPTIONAL (`?`) — singleton_method.object admits the OPEN
+; _arg expression set (tree-sitter-ruby 0.23.1), so a non-self alternation can
+; never be exhaustive; `def Foo.m` / `def obj.m` keep their defs OWNERLESS
+; (nested under the enclosing class by containment, still merging with the
+; instance method — the fixture-pinned residual with its own flip instruction).
 (singleton_method
+  object: (self)? @code_method.owner
   name: [(identifier) (setter) (operator)] @code_method.name
   parameters: (method_parameters)? @code_method.params
   body: (_)? @code_method.body

@@ -24,6 +24,9 @@ let retryCount = 0;
 export class DataPipeline implements Processor {
     private emitter: EventEmitter;
     private readonly name: string = "pipeline";
+    // scm-anchors D6: object-valued fields (public + private) are Field defs
+    hooks = { onDone() {} };
+    #internals = { reset() {} };
 
     constructor() {
         this.emitter = new EventEmitter();
