@@ -101,11 +101,13 @@ fn maybe_print_staleness(store: &dyn wicked_estate_store::GraphStoreMutExt, db: 
     }
 }
 
-/// Warn when the database was indexed under a different binary version.
-/// Extraction fixes (e.g. COBOL paragraph spans) are not backfilled — a re-index is required.
-/// Annotations are stored separately and are preserved across re-indexes.
+/// Warn when the database was indexed under a different binary version or an older symbol-id
+/// scheme. Extraction fixes (e.g. COBOL paragraph spans) are not backfilled — a re-index is
+/// required. An id-scheme change churns definition ids: annotations/xedges keyed on the old ids
+/// are NOT carried over.
 fn maybe_warn_version_mismatch(store: &dyn wicked_estate_store::GraphStoreMutExt, db: &str) {
     let current = env!("CARGO_PKG_VERSION");
+    let current_scheme = wicked_estate_extract::SYMBOL_ID_SCHEME;
     // A labelled repo records its binary version under `repo:<label>:indexed_version` and never
     // the bare key, so reading only the bare one made this warning silently unreachable on every
     // multi-repo graph — the graphs most likely to hold rows from a stale binary, since each repo
@@ -114,20 +116,56 @@ fn maybe_warn_version_mismatch(store: &dyn wicked_estate_store::GraphStoreMutExt
     if !repos.is_empty() {
         for rec in repos {
             let key = wicked_estate::repo_scope::meta_key(Some(&rec.label), "indexed_version");
-            let Some(indexed) = store.meta_get_key(&key) else {
-                continue;
-            };
-            if indexed != current {
+            if let Some(indexed) = store.meta_get_key(&key) {
+                if indexed != current {
+                    eprintln!(
+                        "VERSION MISMATCH: '{label}' in {db} was indexed with v{indexed}, current \
+                         binary is v{current}. Re-index to apply extraction fixes: \
+                         `wicked-estate index {root} --repo {label}`.",
+                        label = rec.label,
+                        root = rec.root,
+                    );
+                }
+            }
+            // The registry row is evidence the repo was indexed; an absent scheme key means the
+            // implicit flat scheme "1".
+            let scheme_key = wicked_estate::repo_scope::meta_key(Some(&rec.label), "id_scheme");
+            let scheme = store
+                .meta_get_key(&scheme_key)
+                .unwrap_or_else(|| "1".to_string());
+            if scheme != current_scheme {
                 eprintln!(
-                    "VERSION MISMATCH: '{label}' in {db} was indexed with v{indexed}, current \
-                     binary is v{current}. Re-index to apply extraction fixes: \
-                     `wicked-estate index {root} --repo {label}` (your annotations are preserved).",
+                    "SYMBOL-ID SCHEME MISMATCH: '{label}' in {db} holds scheme-{scheme} ids; \
+                     symbol ids under types changed — annotations/xedges keyed on old ids are NOT \
+                     carried over. Re-index: `wicked-estate index {root} --repo {label}`.",
                     label = rec.label,
                     root = rec.root,
                 );
             }
         }
         return;
+    }
+    // Un-labelled graph. Warn on the scheme only when something was actually indexed —
+    // `indexed_files` is the same evidence the index-time gate keys on, and it covers
+    // pre-version DBs (which have nodes + digests but no `indexed_version` key).
+    let previously_indexed = store
+        .indexed_files()
+        .map(|f| !f.is_empty())
+        .unwrap_or(false);
+    if previously_indexed {
+        let scheme = store
+            .meta_get_key("id_scheme")
+            .unwrap_or_else(|| "1".to_string());
+        if scheme != current_scheme {
+            let root_hint = store
+                .meta_get_key("indexed_root")
+                .unwrap_or_else(|| "<path>".to_string());
+            eprintln!(
+                "SYMBOL-ID SCHEME MISMATCH: {db} holds scheme-{scheme} ids; symbol ids under \
+                 types changed — annotations/xedges keyed on old ids are NOT carried over. \
+                 Re-index: `wicked-estate index {root_hint}`."
+            );
+        }
     }
     let indexed = match store.meta_get_key("indexed_version") {
         Some(v) => v,
@@ -139,8 +177,7 @@ fn maybe_warn_version_mismatch(store: &dyn wicked_estate_store::GraphStoreMutExt
             .unwrap_or_else(|| "<path>".to_string());
         eprintln!(
             "VERSION MISMATCH: {db} was indexed with v{indexed}, current binary is v{current}. \
-             Re-index to apply extraction fixes: `wicked-estate index {root_hint}` \
-             (your annotations are preserved)."
+             Re-index to apply extraction fixes: `wicked-estate index {root_hint}`."
         );
     }
 }
