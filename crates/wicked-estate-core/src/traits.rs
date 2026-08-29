@@ -42,6 +42,15 @@ pub trait Extractor: Send + Sync {
 
 /// RESOLVE phase: turn unresolved refs into edges using the whole-project symbol index.
 /// Swappable behind this trait so resolution evolves without re-parsing (Wave 1.1).
+///
+/// ## Contract (unresolved accounting — `docs/ENGINE-CONTRACT.md` §2.1)
+///
+/// A resolver **binds** a reference by returning an edge that carries the reference's exact
+/// location **and** kind — attribution is by `(edge.location, edge.kind)`; an edge with a
+/// different kind, or `location: None`, binds nothing (it is still returned and may survive
+/// dedup). `resolve()` must be **deterministic per ref** — calling it with a single-ref slice
+/// must give that ref's portion of the batch answer — because the accounting re-runs it per
+/// ref for references that share `(location, kind)`.
 pub trait Resolver: Send + Sync {
     /// Stable id recorded on every edge this resolver emits (e.g. "import-map-py").
     fn id(&self) -> &str;
@@ -138,7 +147,8 @@ pub trait GraphRead: Send {
     fn all_edges(&self) -> Result<Vec<Edge>>;
     /// Unresolved references whose written name matches `name` — i.e. potential MISSING callers of
     /// a symbol with that name. Powers honest blast-radius coverage: never silently claim
-    /// "no dependents" when calls to that name went unresolved.
+    /// "no dependents" when calls to that name went unresolved. Rows are per unresolved
+    /// reference (per site), defined once in `docs/ENGINE-CONTRACT.md` §2.1.
     fn unresolved_refs_for_name(&self, name: &str) -> Result<Vec<UnresolvedRef>>;
     /// The stored content digest for `file`, if indexed (incremental change detection). (Wave 2.6)
     fn file_digest(&self, file: &str) -> Result<Option<String>>;
@@ -232,8 +242,9 @@ pub trait GraphWrite {
     fn upsert_nodes(&mut self, nodes: &[Node]) -> Result<()>;
     /// Upsert edges; on a `dedup_key` collision the higher-confidence edge wins.
     fn upsert_edges(&mut self, edges: &[Edge]) -> Result<()>;
-    /// Persist references the resolver could NOT bind. Keeping them is what lets blast-radius
-    /// report its coverage instead of silently under-reporting (the soundness contract).
+    /// Persist references the resolver could NOT bind (one row per unresolved reference —
+    /// `docs/ENGINE-CONTRACT.md` §2.1). Keeping them is what lets blast-radius report its
+    /// coverage instead of silently under-reporting (the soundness contract).
     fn upsert_unresolved_refs(&mut self, refs: &[UnresolvedRef]) -> Result<()>;
     /// Remove everything that originated from `file` (its nodes, edges, unresolved refs) — used by
     /// incremental re-indexing to replace a changed file's contributions atomically. (Wave 2.6)

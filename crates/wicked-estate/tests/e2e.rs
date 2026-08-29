@@ -202,3 +202,168 @@ fn incremental_deleted_file_removes_symbols() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+// ── Unresolved accounting (engine defect #3, docs/ENGINE-CONTRACT.md §2.1) ───────────────────
+
+/// Fixture A — repeat call sites and repeat imports of BOUND relationships must not be
+/// persisted as unresolved; a genuinely unbound name must keep its row.
+///
+/// HEAD baselines (location-keyed persistence, recorded before this fix): `g` = 2 rows
+/// (sites 2 and 3 of the deduped Calls edge), `h` = 1 row.
+///
+/// `h` is also the direct Finding-7 regression (F7): same `from`, same kind, one bound
+/// raw_name (`g`) and one unbound (`h`) — the exact under-count input of the retired
+/// `(source, kind)` telemetry key from 7c9caf0.
+#[test]
+fn unresolved_accounting_repeat_sites_are_not_unresolved() {
+    use wicked_estate_core::{EdgeKind, GraphRead};
+
+    let dir = fresh_dir("unres_a");
+    fs::write(
+        dir.join("src/mod.ts"),
+        "export function g() {}\nexport function k() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/main.ts"),
+        "import {g, k} from './mod';\nimport type {G} from './mod';\nexport function f() { g(); g(); g(); h(); k(); }\n",
+    )
+    .unwrap();
+
+    let mut store = SqliteStore::in_memory().expect("open sqlite");
+    wicked_estate::index_path(&mut store, &dir).expect("index_path");
+
+    // Exactly one Calls edge lands on the node named `g` (three call sites, one relationship).
+    let g_calls: Vec<_> = store
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| {
+            e.kind == EdgeKind::Calls
+                && store
+                    .get_node(&e.target)
+                    .unwrap()
+                    .is_some_and(|n| n.name == "g")
+        })
+        .collect();
+    assert_eq!(g_calls.len(), 1, "one deduped Calls edge onto g");
+
+    // No site of the bound f→g relationship is unresolved (HEAD wrote 2 rows here).
+    assert!(
+        store.unresolved_refs_for_name("g").unwrap().is_empty(),
+        "repeat call sites of a bound relationship must not be unresolved"
+    );
+    // The genuinely unbound call keeps its row (honest coverage).
+    assert_eq!(
+        store.unresolved_refs_for_name("h").unwrap().len(),
+        1,
+        "a call to an undefined name stays unresolved"
+    );
+
+    // Persistence and stats agree: the store's total is exactly the rows we can enumerate.
+    // The Imports rows are whatever the shipped resolvers leave (no relative-import resolver
+    // in this lane — merge note M3): the identity holds for any count.
+    let h_rows = store.unresolved_refs_for_name("h").unwrap().len() as u64;
+    let import_rows = store.unresolved_refs_for_name("'./mod'").unwrap().len() as u64;
+    assert_eq!(
+        store.stats().unwrap().unresolved_ref_count,
+        h_rows + import_rows,
+        "stats total == sum of enumerable unresolved rows"
+    );
+
+    // Incremental: a changed file's rows are rebuilt from scratch, never accumulated (D3).
+    fs::write(
+        dir.join("src/main.ts"),
+        "import {g, k} from './mod';\nimport type {G} from './mod';\nexport function f() { g(); g(); g(); g(); h(); h(); k(); }\n",
+    )
+    .unwrap();
+    wicked_estate::index_path(&mut store, &dir).expect("re-index after change");
+    assert!(
+        store.unresolved_refs_for_name("g").unwrap().is_empty(),
+        "4th call site still not unresolved"
+    );
+    assert_eq!(
+        store.unresolved_refs_for_name("h").unwrap().len(),
+        2,
+        "rows rebuilt (2 h sites), not accumulated"
+    );
+
+    // Deleting the file removes its unresolved rows via remove_file.
+    fs::remove_file(dir.join("src/main.ts")).unwrap();
+    wicked_estate::index_path(&mut store, &dir).expect("re-index after delete");
+    assert!(store.unresolved_refs_for_name("h").unwrap().is_empty());
+    assert!(
+        store
+            .unresolved_refs_for_name("'./mod'")
+            .unwrap()
+            .is_empty()
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Fixture B1 — multi-target heritage clause: `class C implements A, B` puts BOTH Implements
+/// refs at one `(location, kind)` (one query match per type_identifier, same class anchor), so
+/// only the collision pass can attribute the single edge for `A` to the right ref.
+///
+/// HEAD baseline: 0 rows for `B` — the kind-less `HashSet<Location>` let the `A` edge's
+/// location "cover" the `B` ref. This test is the end-to-end proof of the collision pass.
+#[test]
+fn unresolved_accounting_multi_target_heritage_collision() {
+    use wicked_estate_core::GraphRead;
+
+    let dir = fresh_dir("unres_b1");
+    fs::write(
+        dir.join("src/c1.ts"),
+        "interface A {}\nclass C implements A, B {}\n",
+    )
+    .unwrap();
+
+    let mut store = SqliteStore::in_memory().expect("open sqlite");
+    wicked_estate::index_path(&mut store, &dir).expect("index_path");
+
+    assert!(
+        store.unresolved_refs_for_name("A").unwrap().is_empty(),
+        "the bound Implements target A has no unresolved row"
+    );
+    assert_eq!(
+        store.unresolved_refs_for_name("B").unwrap().len(),
+        1,
+        "the undefined Implements target B keeps exactly one row (HEAD wrote 0)"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Fixture B2 — mixed-kind heritage clause: `class C extends A implements B` puts an Extends
+/// ref and an Implements ref at ONE span with DIFFERENT kinds. The kind-in-bucket key alone
+/// fixes this case (no collision pass involved — do not re-attribute it to the pass).
+///
+/// HEAD baseline: 0 rows for `B` — the kind-less Location set let the Extends edge for `A`
+/// "cover" the Implements ref for `B`.
+#[test]
+fn unresolved_accounting_kind_distinguishes_shared_span() {
+    use wicked_estate_core::GraphRead;
+
+    let dir = fresh_dir("unres_b2");
+    fs::write(
+        dir.join("src/c2.ts"),
+        "class A {}\nclass C extends A implements B {}\n",
+    )
+    .unwrap();
+
+    let mut store = SqliteStore::in_memory().expect("open sqlite");
+    wicked_estate::index_path(&mut store, &dir).expect("index_path");
+
+    assert!(
+        store.unresolved_refs_for_name("A").unwrap().is_empty(),
+        "the bound Extends target A has no unresolved row"
+    );
+    assert_eq!(
+        store.unresolved_refs_for_name("B").unwrap().len(),
+        1,
+        "the undefined Implements target B keeps exactly one row (HEAD wrote 0)"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
