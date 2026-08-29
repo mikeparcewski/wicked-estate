@@ -33,15 +33,24 @@
 //!
 //! ## Timeout
 //!
-//! Reads use a 10-second per-request timeout via `set_read_timeout` on the stdout pipe's
-//! underlying fd. This prevents hangs on a slow or crashed server.
+//! A dedicated reader thread (the *frame pump*) owns the server's stdout, parses complete
+//! Content-Length frames, and hands each parsed message over an `mpsc` channel. Every request
+//! computes a **deadline** (`now + budget`, default 10s, injectable via
+//! [`LspClient::spawn_with_timeout`] / [`LspTier::with_timeout`]) once, and each channel receive
+//! waits only for the *remaining* time — so a chatty server that streams notifications but never
+//! answers still errs at the deadline. The mechanism is pure std and identical on Unix and
+//! Windows. On a timeout the child is killed and (in [`LspTier`]) the client is evicted, because
+//! a transport that timed out can no longer be trusted. Known limit: writes (`stdin.write_all`)
+//! are not yet bounded — a server that stops *reading* can still stall a very large payload
+//! (W3.6 implementation concern, see ADR-009).
 
 use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Read, Write},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::atomic::{AtomicI64, Ordering},
-    time::Duration,
+    sync::mpsc::{self, Receiver, RecvTimeoutError},
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -158,83 +167,101 @@ pub(crate) fn read_frame<R: BufRead>(reader: &mut R) -> Result<Vec<u8>> {
 
 // ── transport ─────────────────────────────────────────────────────────────────
 
-/// Low-level framing transport over a server's stdio pipes.
-struct RpcTransport {
-    stdin: ChildStdin,
-    reader: BufReader<TimeoutReader>,
-}
+/// Default per-request budget. Injectable via [`LspClient::spawn_with_timeout`] and
+/// [`LspTier::with_timeout`].
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Wraps `ChildStdout` with a read timeout using `set_read_timeout` on the
-/// underlying raw fd.  Falls back gracefully if the OS doesn't support it.
-struct TimeoutReader {
-    inner: ChildStdout,
-}
-
-impl TimeoutReader {
-    fn new(stdout: ChildStdout, timeout: Duration) -> Self {
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let fd = stdout.as_raw_fd();
-            // Convert to a TcpStream-compatible struct to reuse set_read_timeout.
-            // We use setsockopt directly via libc or the nix crate — but to avoid extra deps
-            // we use the `timeval` approach via unsafe.
-            let tv = libc::timeval {
-                tv_sec: timeout.as_secs() as libc::time_t,
-                tv_usec: timeout.subsec_micros() as libc::suseconds_t,
-            };
-            unsafe {
-                libc::setsockopt(
-                    fd,
-                    libc::SOL_SOCKET,
-                    libc::SO_RCVTIMEO,
-                    &tv as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::timeval>() as libc::socklen_t,
-                );
+/// Spawn the frame-pump thread: it owns the read side, parses complete Content-Length frames,
+/// and sends each parsed message over the returned channel. Frames are parsed *in the thread*,
+/// so a caller-side timeout never leaves a half-read frame in a caller-visible buffer.
+///
+/// The thread exits when the stream ends/errs (the terminal `Err` is forwarded once) or when
+/// the receiving transport is dropped (the `send` fails).
+fn spawn_frame_pump<R: Read + Send + 'static>(reader: R) -> Receiver<Result<Vec<u8>>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("lsp-frame-pump".into())
+        .spawn(move || {
+            let mut reader = BufReader::new(reader);
+            loop {
+                match read_frame(&mut reader) {
+                    Ok(frame) => {
+                        if tx.send(Ok(frame)).is_err() {
+                            return; // transport dropped — stop pumping
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        return; // EOF or framing error — the stream is done either way
+                    }
+                }
             }
-            let _ = timeout; // suppress unused warning in fallback path
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (timeout,); // not implemented on non-unix; reads may block
-        }
-        TimeoutReader { inner: stdout }
-    }
+        })
+        .expect("spawning the LSP frame-pump thread must not fail");
+    rx
 }
 
-impl Read for TimeoutReader {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.inner.read(buf)
-    }
+/// Low-level framing transport over a server's stdio pipes.
+///
+/// Reading goes through the frame pump (see [`spawn_frame_pump`]); every receive is bounded by
+/// a per-request deadline computed once in [`RpcTransport::await_response`].
+struct RpcTransport {
+    writer: Box<dyn Write + Send>,
+    frames: Receiver<Result<Vec<u8>>>,
+    timeout: Duration,
 }
 
 impl RpcTransport {
-    fn new(stdin: ChildStdin, stdout: ChildStdout) -> Self {
-        let timeout = Duration::from_secs(10);
-        let reader = BufReader::new(TimeoutReader::new(stdout, timeout));
-        RpcTransport { stdin, reader }
+    fn new<W, R>(writer: W, reader: R, timeout: Duration) -> Self
+    where
+        W: Write + Send + 'static,
+        R: Read + Send + 'static,
+    {
+        RpcTransport {
+            writer: Box::new(writer),
+            frames: spawn_frame_pump(reader),
+            timeout,
+        }
     }
 
     /// Send a framed request and return the raw JSON body of the response (skips notifications).
     fn send_and_receive(&mut self, id: i64, method: &str, params: Value) -> Result<Value> {
         let frame = encode_request(id, method, params);
-        self.stdin.write_all(&frame)?;
-        self.stdin.flush()?;
+        self.writer.write_all(&frame)?;
+        self.writer.flush()?;
         self.await_response(id)
     }
 
     /// Send a notification (fire-and-forget — no response expected).
     fn send_notification(&mut self, method: &str, params: Value) -> Result<()> {
         let frame = encode_notification(method, params);
-        self.stdin.write_all(&frame)?;
-        self.stdin.flush()?;
+        self.writer.write_all(&frame)?;
+        self.writer.flush()?;
         Ok(())
     }
 
-    /// Read frames, skipping notifications, until a response for `expected_id` arrives.
+    /// Receive the next parsed frame, waiting no longer than the remaining time to `deadline`.
+    fn recv_frame_by(&self, deadline: Instant) -> Result<Vec<u8>> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match self.frames.recv_timeout(remaining) {
+            Ok(frame) => frame,
+            Err(RecvTimeoutError::Timeout) => Err(Error::Resolution(format!(
+                "LSP: request timed out after {:?}",
+                self.timeout
+            ))),
+            Err(RecvTimeoutError::Disconnected) => Err(Error::Resolution(
+                "LSP: reader thread terminated (server stdout closed)".into(),
+            )),
+        }
+    }
+
+    /// Read frames, skipping notifications, until a response for `expected_id` arrives — or the
+    /// per-request deadline passes. The deadline is computed ONCE per request: notification
+    /// frames arriving in between never restart the clock.
     fn await_response(&mut self, expected_id: i64) -> Result<Value> {
+        let deadline = Instant::now() + self.timeout;
         loop {
-            let raw = read_frame(&mut self.reader)?;
+            let raw = self.recv_frame_by(deadline)?;
             let v: Value = serde_json::from_slice(&raw)?;
 
             // If the message has no `id` field it is a server-pushed notification — skip.
@@ -261,6 +288,24 @@ impl RpcTransport {
                 )));
             }
             return Ok(resp.result);
+        }
+    }
+}
+
+/// True when `err` means the transport itself can no longer be trusted (timeout, closed or
+/// desynced stream, I/O failure) — as opposed to a server-delivered error response
+/// (`LSP error <code>: …`) or a local precondition failure (`server not available`, unreadable
+/// file), after which the connection remains healthy. All matched strings are minted in this
+/// module.
+fn is_transport_fatal(err: &Error) -> bool {
+    match err {
+        Error::Io(_) | Error::Json(_) => true,
+        _ => {
+            let msg = err.to_string();
+            msg.contains("LSP: request timed out")
+                || msg.contains("LSP: reader thread terminated")
+                || msg.contains("LSP: server closed stdout")
+                || msg.contains("LSP: framing error")
         }
     }
 }
@@ -361,17 +406,32 @@ fn probe_binary(bin: &str) -> bool {
 /// A running LSP server connection. Spawned once per [`LspTier`] lookup; kept alive for the
 /// duration of a query session.
 pub struct LspClient {
-    _child: Child,
+    child: Child,
     transport: RpcTransport,
     /// The root URI the server was initialized against.
     root_uri: String,
+    /// Set once the child has been killed — `Drop` then skips the graceful shutdown.
+    dead: bool,
 }
 
 impl LspClient {
-    /// Spawn the server, perform `initialize` + `initialized` handshake, and return a ready client.
+    /// Spawn the server, perform `initialize` + `initialized` handshake, and return a ready
+    /// client, with the default per-request budget ([`DEFAULT_TIMEOUT`]).
     ///
     /// `root_dir` is the absolute path to the workspace root (passed as `rootUri`).
     pub fn spawn(binary: &str, args: &[String], root_dir: &str) -> Result<Self> {
+        Self::spawn_with_timeout(binary, args, root_dir, DEFAULT_TIMEOUT)
+    }
+
+    /// [`LspClient::spawn`] with an explicit per-request budget. The budget bounds every
+    /// response wait, including the `initialize` handshake — a wedged server is killed and
+    /// reaped before this returns `Err`.
+    pub fn spawn_with_timeout(
+        binary: &str,
+        args: &[String],
+        root_dir: &str,
+        timeout: Duration,
+    ) -> Result<Self> {
         let mut child = Command::new(binary)
             .args(args)
             .stdin(Stdio::piped())
@@ -382,14 +442,30 @@ impl LspClient {
 
         let stdin = child.stdin.take().expect("stdin piped");
         let stdout = child.stdout.take().expect("stdout piped");
-        let mut transport = RpcTransport::new(stdin, stdout);
+        let transport = RpcTransport::new(stdin, stdout, timeout);
 
         let root_uri = path_to_file_uri(root_dir);
+        let mut client = LspClient {
+            child,
+            transport,
+            root_uri,
+            dead: false,
+        };
 
+        if let Err(e) = client.handshake() {
+            // Wedged or broken server — no graceful shutdown, just kill + reap.
+            client.kill();
+            return Err(e);
+        }
+        Ok(client)
+    }
+
+    /// `initialize` request + `initialized` notification.
+    fn handshake(&mut self) -> Result<()> {
         let id = next_id();
         let init_params = serde_json::json!({
             "processId": std::process::id(),
-            "rootUri": root_uri,
+            "rootUri": self.root_uri,
             "capabilities": {
                 "textDocument": {
                     "definition": { "dynamicRegistration": false },
@@ -402,16 +478,19 @@ impl LspClient {
             },
             "initializationOptions": null
         });
-
-        transport.send_and_receive(id, "initialize", init_params)?;
+        self.transport
+            .send_and_receive(id, "initialize", init_params)?;
         // Fire the `initialized` notification (no response).
-        transport.send_notification("initialized", serde_json::json!({}))?;
+        self.transport
+            .send_notification("initialized", serde_json::json!({}))
+    }
 
-        Ok(LspClient {
-            _child: child,
-            transport,
-            root_uri,
-        })
+    /// Kill the server process immediately (no graceful shutdown) and reap it.
+    /// Used when the transport can no longer be trusted (timeout, desync).
+    fn kill(&mut self) {
+        self.dead = true;
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 
     // ── textDocument/didOpen ──────────────────────────────────────────────────
@@ -513,10 +592,17 @@ impl LspClient {
 
 impl Drop for LspClient {
     fn drop(&mut self) {
-        // Best-effort shutdown — ignore errors (child may have already exited).
-        let id = next_id();
-        let _ = self.transport.send_and_receive(id, "shutdown", Value::Null);
-        let _ = self.transport.send_notification("exit", Value::Null);
+        if !self.dead {
+            // Best-effort graceful shutdown, bounded by the per-request budget (the frame pump
+            // makes the response wait finite). Errors ignored — the child may already be gone.
+            let id = next_id();
+            let _ = self.transport.send_and_receive(id, "shutdown", Value::Null);
+            let _ = self.transport.send_notification("exit", Value::Null);
+        }
+        // Reap unconditionally so no child outlives its client (kill on an already-exited
+        // process is a harmless error; wait returns the cached status).
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -550,6 +636,8 @@ pub struct LspTier {
     /// language → live client. Clients are spawned lazily on first use.
     clients: HashMap<String, LspClient>,
     root_dir: String,
+    /// Per-request budget for clients spawned by this tier.
+    timeout: Duration,
 }
 
 impl LspTier {
@@ -559,6 +647,7 @@ impl LspTier {
             registry: ServerRegistry::standard(),
             clients: HashMap::new(),
             root_dir: root_dir.into(),
+            timeout: DEFAULT_TIMEOUT,
         }
     }
 
@@ -568,7 +657,15 @@ impl LspTier {
             registry,
             clients: HashMap::new(),
             root_dir: root_dir.into(),
+            timeout: DEFAULT_TIMEOUT,
         }
+    }
+
+    /// Builder-style override of the per-request budget. Applies to clients spawned after the
+    /// call (existing live clients keep the budget they were spawned with).
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     /// Get-or-spawn the client for `language`. Returns an error if the server is unavailable.
@@ -579,10 +676,31 @@ impl LspTier {
                 self.registry.command_for(language).ok_or_else(|| {
                     Error::Resolution(format!("server not available: no LSP server registered for language '{language}' (or binary not on PATH)"))
                 })?;
-            let client = LspClient::spawn(&bin, &args, &self.root_dir)?;
+            let client = LspClient::spawn_with_timeout(&bin, &args, &self.root_dir, self.timeout)?;
             self.clients.insert(language.to_string(), client);
         }
         Ok(self.clients.get_mut(language).expect("just inserted"))
+    }
+
+    /// If `res` is a transport-fatal error (timeout, closed/desynced stream, I/O failure),
+    /// kill and evict the language's client so the next query respawns a fresh server —
+    /// a client that timed out would otherwise poison every later query on its language.
+    /// Server-delivered error responses and local precondition failures keep the client.
+    fn evict_if_fatal<T>(&mut self, language: &str, res: Result<T>) -> Result<T> {
+        if let Err(e) = &res {
+            if is_transport_fatal(e) {
+                if let Some(mut client) = self.clients.remove(language) {
+                    client.kill();
+                }
+            }
+        }
+        res
+    }
+
+    /// Test-only visibility into the client cache (eviction assertions).
+    #[cfg(test)]
+    fn has_client(&self, language: &str) -> bool {
+        self.clients.contains_key(language)
     }
 
     // ── public methods ─────────────────────────────────────────────────────────
@@ -595,7 +713,10 @@ impl LspTier {
         line: u32,
         col: u32,
     ) -> Result<Vec<Location>> {
-        self.client(language)?.definition(file_uri, line, col)
+        let res = self
+            .client(language)
+            .and_then(|c| c.definition(file_uri, line, col));
+        self.evict_if_fatal(language, res)
     }
 
     /// Return all reference locations for the symbol at `(line, col)` in `file_uri`.
@@ -607,8 +728,10 @@ impl LspTier {
         col: u32,
         include_declaration: bool,
     ) -> Result<Vec<Location>> {
-        self.client(language)?
-            .references(file_uri, line, col, include_declaration)
+        let res = self
+            .client(language)
+            .and_then(|c| c.references(file_uri, line, col, include_declaration));
+        self.evict_if_fatal(language, res)
     }
 
     /// Return the hover/type info for the symbol at `(line, col)` in `file_uri`.
@@ -619,7 +742,10 @@ impl LspTier {
         line: u32,
         col: u32,
     ) -> Result<Option<HoverResult>> {
-        self.client(language)?.hover(file_uri, line, col)
+        let res = self
+            .client(language)
+            .and_then(|c| c.hover(file_uri, line, col));
+        self.evict_if_fatal(language, res)
     }
 }
 
@@ -995,6 +1121,196 @@ mod tests {
             assert_eq!(
                 path_to_file_uri("/home/user/project"),
                 "file:///home/user/project"
+            );
+        }
+    }
+
+    // ── timeout mechanism (frame pump + per-request deadline) ────────────────
+    //
+    // Pure-std readers, no cfg — these run identically on Unix and Windows, so the
+    // cross-platform claim is tested, not asserted. The leaked pump threads exit with
+    // the test process.
+
+    /// A `Read` that never produces a byte (simulates a wedged server stdout).
+    struct BlockForever;
+
+    impl Read for BlockForever {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            std::thread::sleep(Duration::from_secs(600));
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn transport_times_out_on_a_reader_that_never_produces_a_frame() {
+        let budget = Duration::from_millis(300);
+        let mut t = RpcTransport::new(std::io::sink(), BlockForever, budget);
+        let start = Instant::now();
+        let err = t.await_response(1).unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(
+            err.to_string().contains("timed out"),
+            "expected a timeout error, got: {err}"
+        );
+        assert!(
+            elapsed >= budget,
+            "returned before the deadline: {elapsed:?}"
+        );
+        assert!(
+            elapsed < budget + Duration::from_secs(5),
+            "timeout not honored — took {elapsed:?} for a {budget:?} budget"
+        );
+    }
+
+    /// A `Read` that yields a well-formed **notification** frame every `delay`, forever —
+    /// a chatty-but-never-answering server (rust-analyzer cold indexing, tsserver telemetry).
+    struct ChattyReader {
+        frame: Vec<u8>,
+        pos: usize,
+        delay: Duration,
+    }
+
+    impl Read for ChattyReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos == 0 {
+                std::thread::sleep(self.delay);
+            }
+            let n = buf.len().min(self.frame.len() - self.pos);
+            buf[..n].copy_from_slice(&self.frame[self.pos..self.pos + n]);
+            self.pos = (self.pos + n) % self.frame.len();
+            Ok(n)
+        }
+    }
+
+    /// Deadline semantics, not per-message budget: notification frames arriving faster than
+    /// the budget must NOT restart the clock. Under per-message `recv_timeout(budget)`
+    /// semantics this test would never return (each notification arrives well within the
+    /// budget and the await loop re-reads) — reaching the assertions at all proves the
+    /// deadline is computed once per request.
+    #[test]
+    fn notification_chatter_does_not_restart_the_request_clock() {
+        let budget = Duration::from_millis(400);
+        let chatty = ChattyReader {
+            frame: encode_notification(
+                "window/logMessage",
+                serde_json::json!({"type": 3, "message": "still indexing…"}),
+            ),
+            pos: 0,
+            delay: budget / 4,
+        };
+        let mut t = RpcTransport::new(std::io::sink(), chatty, budget);
+        let start = Instant::now();
+        let err = t.await_response(7).unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(
+            err.to_string().contains("timed out"),
+            "expected a timeout error, got: {err}"
+        );
+        assert!(
+            elapsed >= budget,
+            "errored before the deadline: {elapsed:?}"
+        );
+        assert!(
+            elapsed < budget + Duration::from_secs(5),
+            "deadline not honored under notification chatter — took {elapsed:?}"
+        );
+    }
+
+    // ── eviction on timeout (D3) ──────────────────────────────────────────────
+
+    /// A fake language server that answers `initialize` correctly, ignores notifications,
+    /// then wedges (never replies) on the first real request. This is the only shape that
+    /// reaches `LspTier`'s eviction path: a `sleep` masquerade times out inside
+    /// `LspClient::spawn`'s handshake, *before* the client is ever inserted into the map.
+    const WEDGE_SERVER_PY: &str = r#"
+import json, sys, time
+
+def read_msg():
+    length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            sys.exit(0)
+        stripped = line.strip()
+        if not stripped:
+            break
+        if stripped.lower().startswith(b"content-length:"):
+            length = int(stripped.split(b":", 1)[1])
+    return json.loads(sys.stdin.buffer.read(length))
+
+def send(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    msg = read_msg()
+    if "id" in msg and msg.get("method") == "initialize":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"capabilities": {}}})
+    elif "id" in msg:
+        time.sleep(600)  # wedge: never reply to any further request
+    # notifications: ignored
+"#;
+
+    /// Probe-and-skip helper: first python interpreter on PATH (macOS/Linux `python3`,
+    /// Windows Git Bash/native `python`).
+    fn python_on_path() -> Option<&'static str> {
+        ["python3", "python"].into_iter().find(|b| probe_binary(b))
+    }
+
+    #[test]
+    fn tier_evicts_and_kills_the_client_when_a_request_times_out() {
+        let Some(interp) = python_on_path() else {
+            println!("[lsp] SKIP: no python interpreter on PATH; eviction path not exercised");
+            return;
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let script = tmp.path().join("wedge_server.py");
+        std::fs::write(&script, WEDGE_SERVER_PY).unwrap();
+        let src = tmp.path().join("main.wl");
+        std::fs::write(&src, "hello wedge\n").unwrap();
+
+        let mut reg = ServerRegistry::standard();
+        reg.register(
+            "wedgelang",
+            interp,
+            vec![script.to_str().unwrap().to_string()],
+        );
+
+        let budget = Duration::from_millis(700);
+        let mut tier =
+            LspTier::with_registry(tmp.path().to_str().unwrap(), reg).with_timeout(budget);
+        let uri = path_to_file_uri(src.to_str().unwrap());
+
+        let start = Instant::now();
+        let err = tier.definition("wedgelang", &uri, 0, 0).unwrap_err();
+        let elapsed = start.elapsed();
+
+        assert!(
+            err.to_string().contains("timed out"),
+            "expected a timeout error (the fake server answered initialize, then wedged), got: {err}"
+        );
+        assert!(
+            elapsed < budget + Duration::from_secs(8),
+            "timeout not honored — took {elapsed:?} for a {budget:?} budget"
+        );
+        // The wedged client MUST be gone: one timeout must not poison every later query.
+        assert!(
+            !tier.has_client("wedgelang"),
+            "client must be evicted from the tier after a request timeout"
+        );
+        // The child must be killed: pgrep by the (unique) tempdir script path, where available.
+        if probe_binary("pgrep") {
+            let out = Command::new("pgrep")
+                .args(["-f", script.to_str().unwrap()])
+                .output()
+                .expect("pgrep runs");
+            assert!(
+                !out.status.success(),
+                "wedged server child survived eviction: pids {}",
+                String::from_utf8_lossy(&out.stdout)
             );
         }
     }
