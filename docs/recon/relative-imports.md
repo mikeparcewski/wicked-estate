@@ -500,6 +500,84 @@ report; kinds are JSON strings (`'"imports"'`).
 | Resolver timing | studio release run, resolve phase wall-clock; S9 synthetic corpus timed in release (wall-clock lives HERE, not in the unit suite — ATT-INV-5) | seconds, not minutes |
 | Bench | `bench-before` vs lane `--release` on axios+studio+crew | receipts diffed; only expected fields move |
 
+### Results (measured 2026-08-28 by the executing agent; commands in the lane report)
+
+BEFORE = main checkout `target/release/wicked-estate` on `measure/*-before.db`; AFTER = lane
+`target/{debug,release}/wicked-estate` on `measure/*-after.db`. Adjudication scripts:
+`<lane>/measure/adjudicate.py` (part a) + `<lane>/measure/oracle.mjs` (part b,
+`ts.resolveModuleName`, typescript 5.9.3 from wicked-studio's node_modules).
+
+| Measurement | studio | crew | edge-corpus | edge-corpus2 |
+|---|---|---|---|---|
+| File→File `relative-import` edges added | **+1,362** | **+430** | 11 | 12 |
+| Unresolved relative pairs (distinct file+spec) | 1,291 → **42** (−97%) | 426 → **20** (−95%) | 11 → 2 | 13 → 3 |
+| Unresolved relative rows (location-keyed, lane E) | 1,311 → 77 | 439 → 28 | 11 → 2 | 13 → 3 |
+| Adjudication (a) exact-join existence | **1362/1362** | **430/430** | 11/11 | 12/12 |
+| Adjudication (b) ambiguous join points → oracle | 0 cases | 0 cases | 2/2 agree | 2/2 agree |
+| `edges_by_kind[imports]` | 2,259 → 3,701 | 1,020 → 1,473 | 11 → 24 | 13 → 27 |
+
+Notes: the raw-row counts rise vs the review's projection because S3 ADDS ref sites
+(export-from / require / dynamic import) — the pair counts are the honest measure (lane E).
+The real corpora have ZERO ambiguous join points (no `a.ts`+`a/index.ts` siblings, no
+`x.ts`+`x.css` stem collisions at any bound join point), so part (b) ran on the synthetic
+corpora's 4 ambiguous cases — 4/4 oracle agreement (`./a`→`a.ts` over `a/index.ts`,
+`./b`→`b.ts` over `b.css`, both corpora).
+
+Corpus per-line tables: edge-corpus **11 binds / 2 parks** (escape ×2); edge-corpus2
+**12 binds / 3 parks** (escape ×2 + `./foo2`); `./c`→`c/index.ts`, `./q.js`→`q.ts`,
+`./foo.d.ts`, `./index`, `./utils/index`, css/json literals all bound; export-from `'./y'`
+and require `'./z'` produce refs AND bind. Dynamic `import()`/`import=require` proven by the
+S3 fixtures + the S6 temp-fixture test (14 binds / 3 parks) — not present in the read-only
+corpora (FEAS-2), as re-derived.
+
+**Blast-radius cross-binary parity (the gate that caught FEAS-1's second defect):** the
+contains-only transit rule shipped first DROPPED file-scope caller Files (top-level call
+sites are attributed to the File symbol) — studio `apiBase` lost 27 test files (134→107).
+Rule corrected to any-non-Imports-source-edge (commit `07d4c24`); after the fix the dependent
+SETs are IDENTICAL cross-binary: studio `apiBase` 134/134, `threadKey` 88/88, `makeView`
+110/110; crew `missingArtifacts`, `run_bounded` identical. File-start blast-radius on
+`src/api/client.ts` (studio) returns 238 importer files, bounded: 164 kept +
+`truncated_dependents: 74` under the 25K CLI bound.
+
+**Rank:** AFTER top-20 has **0 File/Import** rows on studio AND crew (BEFORE: studio 4/20,
+crew 5/20 with `import/json/` at #1). Stale-cache live check: the lane binary on the UNTOUCHED
+`crew-before.db` serves `Method delete` at #1 — `Import json` is cleaned at cache-read (BR-1);
+the BEFORE binary on the same db still shows it. crew's top symbol changes identity as owned.
+
+**Consumers:** entrypoints (2480/2480 studio, 1669/1669 crew) and dead-code (2149/2149,
+1604/1604) unchanged. Leaves +28 studio / +5 crew — NEW Import nodes minted by the S3 capture
+forms (an effect of capture coverage, not of File→File edges). Communities: 73→58 studio,
+31→29 crew (recorded; exemplar behavior pinned by the ATT-INV-3 test).
+
+**Timing:** studio relative-import resolve phase (release, one-off `Instant`, reverted):
+**2.64 ms** for 44,233 refs → 1,435 edges (dedup to 1,362 stored). The committed S9 guard:
+20k files / 100k refs, probes ≤ refs × 14, exactly one map build; release run of that test
+finishes in under a second (see lane report). The review's O(refs × files) projection for this
+corpus was ~2.3 s.
+
+**Bench (S10):** `bench-before` (built at d7d3b58) vs the lane `--release` bench on
+axios v1.7.9 + studio + crew — receipt committed as `docs/benchmarks/capability-report.md`
+(+ new `coverage-matrix.md`). Only expected fields moved: `resolver_breakdown` gains the
+`relative-import` row in the HIGH band (231 / 1362 / 430 edges @ 0.900), `unresolved_ref_count`
+falls, crew `query_symbol` json→delete (owned), studio `blast_radius_node_count` unchanged
+(171, same start). axios `blast_radius_node_count` 98→108 at the bench's DEPTH-3 cap is a
+horizon effect — import edges shorten paths, pulling caller-container Files inside the cap;
+the depth-12 dependent SET of the same symbol is identical cross-binary (156 rows). Bench
+suites green (10 unit + 5 integration).
+
+**Deviations from the plan's letter (recorded):** (1) the S3 per-form assertions live in a NEW
+integration test file `crates/wicked-estate-extract/tests/js_ts_import_captures.rs` rather
+than in `treesitter.rs`'s unit module — the extraction-gaps lane owns `treesitter.rs`, and S3's
+file list allowed only `.scm` + fixtures, so the tests went into an additive file. (2)
+`multi_repo::labelled_relative_imports_match_plain` builds its own fixture instead of extending
+`make_repo` — the shared fixture's file set is pinned by the other tests' assertions. (3) The
+S4 contains-only transit rule was replaced mid-lane by the any-non-Imports-source-edge rule
+(commit 07d4c24) after the cross-binary gate caught file-scope caller Files being dropped —
+Decision G's parity argument now rests on "every HEAD File dependent is the source of the
+non-Imports edge the walk reached it by". (4) `leaves` counts rise slightly (+28 studio,
++5 crew): the S3 capture forms mint NEW Import nodes (leaves), an effect of capture coverage,
+not of File→File edges — entrypoints/dead-code are byte-identical.
+
 ---
 
 ## 6. Not in scope (with finding ids)
