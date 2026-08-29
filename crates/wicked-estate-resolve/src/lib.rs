@@ -68,13 +68,17 @@ impl Resolver for NameResolver {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-/// Parent directory of a file path, or the path itself if no separator is found.
+/// Parent directory of a file path, or `""` when the path has no separator (a root-level file).
+///
+/// Root-level files share the empty directory, so `ScopedNameResolver`'s same-dir tier ranks two
+/// root-level files as same-dir, and `ImportMapResolver`'s relative-path resolution binds a
+/// root-level `./x` import (`file_matches_module` special-cases `ref_dir.is_empty()`).
 fn dir_of(file: &str) -> &str {
     // Works for both Unix (`/`) and Windows (`\`) paths in repo-relative strings.
     if let Some(pos) = file.rfind(['/', '\\']) {
         &file[..pos]
     } else {
-        file
+        ""
     }
 }
 
@@ -2447,6 +2451,116 @@ mod tests {
             (edges[0].confidence.get() - 0.6).abs() < 1e-6,
             "NameResolver's 0.6-conf edge should win over synth's 0.5; got {}",
             edges[0].confidence.get()
+        );
+    }
+
+    // ── dir_of / root-level file tests (D6) ──────────────────────────────────
+
+    #[test]
+    fn dir_of_root_level_is_empty() {
+        assert_eq!(
+            dir_of("a.ts"),
+            "",
+            "separator-less path has the empty (root) directory"
+        );
+        assert_eq!(dir_of("src/a.ts"), "src");
+        assert_eq!(dir_of("src\\a.ts"), "src", "Windows separator");
+    }
+
+    /// Two root-level files must rank as same-dir (0.62), beating a sub-directory homonym.
+    /// Under the old `dir_of` ("path itself when no separator") both candidates scored
+    /// CrossFile and the tie parked the ref.
+    #[test]
+    fn scoped_resolver_ranks_two_root_files_same_dir() {
+        let caller = {
+            let mut n = node_at("caller", "a.ts");
+            n.symbol =
+                Symbol::global("test", None, vec![Descriptor::method("root_caller", None)]).id();
+            n
+        };
+        let foo_root = {
+            let mut n = node_at("foo", "b.ts");
+            n.symbol =
+                Symbol::global("test", None, vec![Descriptor::method("foo_root", None)]).id();
+            n
+        };
+        let foo_sub = {
+            let mut n = node_at("foo", "sub/c.ts");
+            n.symbol = Symbol::global("test", None, vec![Descriptor::method("foo_sub", None)]).id();
+            n
+        };
+        let index = VecIndex(vec![caller.clone(), foo_root.clone(), foo_sub]);
+        let r = UnresolvedRef {
+            from: caller.symbol,
+            raw_name: "foo".to_string(),
+            kind: EdgeKind::Calls,
+            location: Location::new("a.ts", Span::ZERO),
+            hints: Default::default(),
+        };
+        let edges = ScopedNameResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(edges.len(), 1, "root-level same-dir candidate must win");
+        assert_eq!(edges[0].target, foo_root.symbol);
+        assert!(
+            (edges[0].confidence.get() - 0.62).abs() < 1e-6,
+            "same-dir confidence must be 0.62, got {}",
+            edges[0].confidence.get()
+        );
+        assert_eq!(
+            edges[0].metadata.get("scope").and_then(|v| v.as_str()),
+            Some("same-dir")
+        );
+    }
+
+    /// A root-level `./b` import-map hint must bind: `file_matches_module` joins the (now empty)
+    /// ref dir with the spec instead of producing the bogus `a.ts/./b`.
+    #[test]
+    fn import_map_resolver_binds_root_level_relative_import() {
+        let caller_sym = Symbol::global(
+            "test",
+            None,
+            vec![Descriptor::method("rootimp_caller", None)],
+        )
+        .id();
+        let foo_root = {
+            let mut n = node_at("foo", "b.ts");
+            n.symbol = Symbol::global(
+                "test",
+                None,
+                vec![Descriptor::method("rootimp_foo_b", None)],
+            )
+            .id();
+            n
+        };
+        let foo_sub = {
+            let mut n = node_at("foo", "sub/c.ts");
+            n.symbol = Symbol::global(
+                "test",
+                None,
+                vec![Descriptor::method("rootimp_foo_c", None)],
+            )
+            .id();
+            n
+        };
+        let index = VecIndex(vec![foo_root.clone(), foo_sub]);
+        let mut r = UnresolvedRef::new(
+            caller_sym,
+            "foo",
+            EdgeKind::Calls,
+            Location::new("a.ts", Span::ZERO),
+        );
+        r.hints
+            .insert("imports".to_string(), serde_json::json!({ "foo": "./b" }));
+        let edges = ImportMapResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(edges.len(), 1, "root-level ./b relative import must bind");
+        assert_eq!(edges[0].target, foo_root.symbol);
+        assert!(
+            (edges[0].confidence.get() - 0.63).abs() < 1e-6,
+            "import-map confidence must be 0.63, got {}",
+            edges[0].confidence.get()
+        );
+        assert_eq!(
+            edges[0].metadata.get("via").and_then(|v| v.as_str()),
+            Some("import-map")
         );
     }
 }
