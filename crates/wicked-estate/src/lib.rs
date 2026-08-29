@@ -53,7 +53,8 @@ use wicked_estate_extract::{
     treesitter::{TreeSitterExtractor, extractor_for_extension, is_minified_or_huge},
 };
 use wicked_estate_resolve::{
-    ImportMapResolver, InfraResolver, NameResolver, ScopedNameResolver, resolve_all,
+    ImportMapResolver, InfraResolver, NameResolver, RulesBridgeResolver, ScopedNameResolver,
+    resolve_all,
 };
 use wicked_estate_retrieve::Embedder;
 use wicked_estate_store::GraphStoreMutExt;
@@ -944,6 +945,7 @@ pub fn index_path_as(
             &ScopedNameResolver,
             &ImportMapResolver,
             &InfraResolver,
+            &RulesBridgeResolver,
         ];
         let resolved = resolve_all(resolvers, &all_refs, &index)?;
         // Estate cross-domain join: RACF profiles → the datasets/MQ assets they protect, by RACF
@@ -1902,6 +1904,56 @@ mod tests {
             "InfraResolver must resolve the depends_on ref"
         );
         assert_eq!(edges[0].target, resource_sym);
+    }
+
+    /// The index slice composition resolves `rules-engine:*` bridge refs: a RuleSet node in the
+    /// index + a bridge ref through the SAME resolver set `index_path` uses (built explicitly
+    /// here, not by reproducing the anchored slice literal) yields an InvokedBy edge from
+    /// `RulesBridgeResolver`. Before the wiring, those refs were never produced under `index`.
+    #[test]
+    fn index_slice_resolves_rules_engine_bridge_refs() {
+        use wicked_estate_core::{EdgeKind, GraphWrite, NodeKind, UnresolvedRef};
+
+        let ruleset_sym = wicked_estate_core::Symbol::synthetic("drl", "pricing").id();
+        let ruleset_node = Node::new(
+            ruleset_sym.clone(),
+            NodeKind::RuleSet,
+            "com.example.pricing",
+            Language::new("drl"),
+            Location::new("rules/pricing.drl", Span::ZERO),
+        );
+        let caller_sym = wicked_estate_core::Symbol::file("src/PricingService.java").id();
+
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store.upsert_nodes(&[ruleset_node]).unwrap();
+        store.commit_batch().unwrap();
+
+        let index = InMemoryIndex::build(&store, None).unwrap();
+        let refs = vec![UnresolvedRef::new(
+            caller_sym.clone(),
+            "rules-engine:ibm-odm",
+            EdgeKind::InvokedBy,
+            Location::new("src/PricingService.java", Span::ZERO),
+        )];
+        let edges = resolve_all(
+            &[
+                &NameResolver,
+                &ScopedNameResolver,
+                &ImportMapResolver,
+                &InfraResolver,
+                &RulesBridgeResolver,
+            ],
+            &refs,
+            &index,
+        )
+        .unwrap();
+        assert_eq!(edges.len(), 1, "the bridge ref must resolve");
+        assert_eq!(edges[0].source, caller_sym);
+        assert_eq!(edges[0].target, ruleset_sym);
+        assert_eq!(edges[0].kind, EdgeKind::InvokedBy);
+        assert_eq!(edges[0].resolved_by, "rules-bridge-resolver");
+        assert!((edges[0].confidence.get() - 0.5).abs() < 1e-6);
     }
 
     // ── Task A: SKIPPED_MINIFIED notice ──────────────────────────────────────
