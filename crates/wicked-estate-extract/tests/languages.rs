@@ -116,6 +116,22 @@ fn assert_no_conflicting_def_ids(extraction: &wicked_estate_core::Extraction, la
     );
 }
 
+/// Assert that NO non-File node with this name exists (negative pin for phantom
+/// emissions — e.g. C++ forward declarations must not mint Class/Struct nodes).
+#[track_caller]
+fn assert_no_def(extraction: &wicked_estate_core::Extraction, lang: &str, name: &str) {
+    let hits: Vec<String> = extraction
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == name)
+        .map(|n| format!("{:?}", n.kind))
+        .collect();
+    assert!(
+        hits.is_empty(),
+        "[{lang}] expected NO definition named {name:?}, found kinds: {hits:?}"
+    );
+}
+
 /// Assert a call ref with `raw_name` exists.
 #[track_caller]
 fn assert_call(extraction: &wicked_estate_core::Extraction, lang: &str, name: &str) {
@@ -529,6 +545,30 @@ fn cpp_characterization() {
     assert_def(&ex, lang, "MAX_SCALE", &NodeKind::Constant); // #define
     assert_def(&ex, lang, "Scalar", &NodeKind::TypeAlias); // using Scalar = double
     assert_def(&ex, lang, "uint32", &NodeKind::TypeAlias); // typedef unsigned int uint32
+    // D04-5/D6b: member prototypes (incl. the pure virtual, which parses as
+    // field_declaration) and D6e out-of-line member definitions
+    assert_def(&ex, lang, "bar", &NodeKind::Method);
+    assert_def(&ex, lang, "reset", &NodeKind::Method); // proto + Counter::reset def
+    assert_def(&ex, lang, "pure", &NodeKind::Method);
+    assert_def(&ex, lang, "m", &NodeKind::Method);
+    // D6c: member fields (plain / static / pointer / array declarators)
+    assert_def(&ex, lang, "count", &NodeKind::Field);
+    assert_def(&ex, lang, "shared", &NodeKind::Field);
+    assert_def(&ex, lang, "ptr", &NodeKind::Field);
+    assert_def(&ex, lang, "vals", &NodeKind::Field);
+    assert_def(&ex, lang, "a", &NodeKind::Field);
+    assert_def(&ex, lang, "x", &NodeKind::Field); // Vector3 member
+    // D6a negatives: forward declarations and elaborated uses must not mint nodes
+    assert_no_def(&ex, lang, "Widget");
+    let vector3_nodes = ex
+        .nodes
+        .iter()
+        .filter(|n| n.name == "Vector3" && !matches!(n.kind, NodeKind::File))
+        .count();
+    assert_eq!(
+        vector3_nodes, 1,
+        "[cpp] `struct Vector3 *elaborated_use;` must not mint a second Vector3 node"
+    );
     assert_def_floor(&ex, lang, 8);
 
     // calls

@@ -36,6 +36,27 @@ private:
     }
 };
 
+class Widget; // forward declaration — must NOT emit a Class node
+struct Vector3 *elaborated_use; // elaborated use — must NOT emit a second Struct
+
+class Counter {
+public:
+    int bar(int x);            // member prototype -> Method
+    void reset();              // member prototype -> Method
+    virtual void pure() = 0;   // pure virtual (field_declaration) -> Method
+    int count;                 // -> Field
+    static int shared;         // -> Field
+    int *ptr;                  // pointer field -> Field
+    double vals[4];            // array field -> Field
+};
+
+void Counter::reset() {}       // out-of-line member definition -> Method
+
+struct Grid {
+    int a;                     // -> Field
+    void m();                  // member prototype -> Method
+};
+
 double dot(const Vector3& a, const Vector3& b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
