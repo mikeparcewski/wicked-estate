@@ -66,10 +66,11 @@ contract, `docs/agent-behavior-rules.md` R7; the definition — one row per unre
 is `docs/ENGINE-CONTRACT.md` §2.1).  A consuming agent sees the coverage percentage and
 can weight its confidence accordingly.
 
-## 2026-08 — symbol-id scheme 2 re-baseline note
+## 2026-08 — symbol-id scheme 3 re-baseline note
 
 The node/edge/coverage numbers pinned in `capability-report.md` and `multi-repo-validation.md`
-predate the ADR-002 amendment (type-nested definition identity, symbol-id scheme 2). After the
+predate the ADR-002 amendment (type-nested definition identity — shipped as symbol-id scheme 3; scheme 2 was its
+unreleased first cut, superseded in place). After the
 scheme change, previously-merged same-named members become distinct nodes (`method`/`function`
 counts rise where collisions existed), and `blast_radius_coverage_pct` is expected DOWN on
 collision-heavy repos: the 0.65 scoped-name edges into merged nodes were false precision
