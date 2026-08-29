@@ -1,0 +1,329 @@
+# Recon + change plan — resolver-precision lane
+
+**Base:** `d7d3b58` on `lane/resolver-precision` (verified: `git rev-parse --short HEAD` → `d7d3b58`,
+`git merge-base --is-ancestor d7d3b58 HEAD` → ok).
+**Resolves:** review `estate-review/REVIEW-adversarial-2026-08-28.md` Doc 02 (all D02-* sources),
+PER-10, D03-2@repro:baseline-stats (cross-language edges), D01-3@audit:doc01 + D02-11 (`dir_of`),
+D02-6/D02-8 (`RulesBridgeResolver`), D02-5 (lsp orphan), D02-7 (ADR-007 / activation table),
+D02-4 (synthesizer test). Engine defects #2 (kind-blind `NameResolver`), #4 (`dir_of`), #5 (docs),
+#6 (unwired `RulesBridgeResolver`).
+**Format:** CLAUDE.md §10 (findings acted on → decisions → steps → compat → falsifier → not-in-scope →
+merge notes). Every line cited was opened in this worktree at `d7d3b58`.
+**Revision r2 (2026-08-28):** resolves attack findings FEAS-1 (added/recall-widened edges now measured,
+adjudicated, and falsified — F16, D1/D3/D5 placement statements, Q4b, falsifier clause 7) and FEAS-2
+(svelte/vue/html family rows — F17, D14); folds in minor fixes FEAS-3 (drift-test anchor), FEAS-4
+(dedup-ordering test kept), FEAS-5 (`node_lang`/`VecIndex::plain` instead of a 48-call-site signature
+change), FEAS-6 (bench gate stated explicitly).
+
+Baseline in the lane target dir (`CARGO_TARGET_DIR=<lane>/target cargo test -p wicked-estate-resolve`):
+61 unit + 1 `lsp_live` + 4 `scip_edges` passed; doc-tests 1 passed, **1 ignored**
+(`lsp.rs - lsp::LspTier (line 532)`). `-p wicked-estate`: 126 passed, 0 ignored.
+
+---
+
+## 1. Findings acted on (with citations)
+
+| # | Finding | Evidence (file:line, opened) |
+|---|---|---|
+| F1 | `NameResolver` emits an edge of the ref's own kind to ANY unique `by_name` hit; the only filters are uniqueness and self. No kind, language or Import-node check. | `crates/wicked-estate-resolve/src/lib.rs:46-66` (`if let [only] = candidates.as_slice() { if only.symbol != r.from { Edge::new(..., r.kind.clone(), ...) } }`) |
+| F2 | The intended contract was callable-only for Calls: `InfraResolver`'s docstring asserts "`NameResolver` and `ScopedNameResolver` only emit edges when candidates are callable" — false for `NameResolver`. | `lib.rs:433-436` |
+| F3 | `ScopedNameResolver` (`lib.rs:150-153` retain `is_callable`, `:156` self-drop, `:197-199` unique best tier) and `ImportMapResolver` (`:353-354`) already filter Calls to callables; neither has a language guard. `ScopedNameResolver` emits cross-family Calls edges on the corpora (studio `python→tsx` 12, crew `python→typescript` 4 + `python→javascript` 1). | `lib.rs:143-227`, `:330-390`; sqlite on `scratchpad/repro/{studio,crew}-before.db` (§6 queries) |
+| F4 | BEFORE Calls edges by (resolver, target kind), full-repo DBs: **studio** name-resolver function 912 / method 144 / constant 139 / import 22 / class 14 / variable 13 / interface 1, scoped function 1829 / method 6, import-map function 178; **crew** name-resolver method 251 / function 247 / class 136 / import 62 / variable 15 / constant 13, scoped function 912 / method 181, import-map function 9. Non-Calls name-resolver edges: studio 0; crew 2 `extends→interface` (legitimate). | sqlite `repro/studio-before.db` (4,671 nodes), `repro/crew-before.db` (2,933 nodes) — query Q1 in §6 |
+| F5 | Cross-language Calls edges (on `nodes.language`, the plain manifest name — NOT the `ts-<lang>` SymbolId scheme, `treesitter.rs:1705,1733`): studio `tsx↔typescript` 690 (correct, same family), `python→typescript` 173 + `python→tsx` 77+12 + `tsx→python` 18 + `typescript→python` 2 = **282 wrong**; crew `javascript↔typescript` 41 (correct), `typescript→python` 54, `typescript→bash` 15, `javascript→python` 6, `python→typescript` 4, `bash→typescript` 2, `python→javascript` 1 = **82 wrong**. | query Q3 in §6 |
+| F6 | Studio `constant` targets: 117/139 are function-valued bindings (`const useRuntimeStore = create<RuntimeStore>((set) => ({`, `const x = vi.fn()`); arrow-function consts already mint a `Function` node (`typescript.scm:13-16`) so these are the residue no AST query classifies. `class` targets are `new X()` construction sites (`new ApiError(...)`, `new CoreAdapter()`), captured as `@call.function` by design (`typescript.scm:192-202`, test `treesitter.rs:3952-3979`). `EdgeKind::Instantiates` (`core/src/edge.rs:99`) is emitted by nothing; every consumer gates on `Calls|Imports` (`rank/src/lib.rs:156`, `community.rs:269,450,598`, `cluster_summary.rs:137`, `main.rs:1632,1694,1699`, `retrieve/src/lib.rs:1055`, `bench capability.rs:445`). | risk recon + sqlite signature sample |
+| F7 | Mainframe cross-language Calls edges target `NodeKind::Module` (COBOL program = `@code_module`, `cobol.scm:8-12`, `treesitter.rs:1358`) and are pinned by a permanent regression test: JCL step → PAYROLL, HLASM → PAYROLL, COBOL → TAXSUB. cobol/jcl/hlasm have **no row** in `languages.toml`. | `crates/wicked-estate/tests/cross_language_estate.rs:97-125`; `grep name = "cobol"` → 0 |
+| F8 | `dir_of` returns the path itself when there is no separator, per its docstring. Consumers: `ScopedNameResolver` (`:164`, `:172`) and `ImportMapResolver` (`:363`). `file_matches_module` already has a dead `if ref_dir.is_empty()` branch — the contract the callers assumed. | `lib.rs:71-79`, `:262-274` |
+| F9 | `RulesBridgeResolver` (`lib.rs:539-628`) is pub, documented as wired (`extra_edge.rs:387-389`), the only consumer of `rules-engine:*` refs (`extra_edge.rs:348-367`), and absent from the production slice `[NameResolver, ScopedNameResolver, ImportMapResolver, InfraResolver]`. Never wired on any branch: `git log --all -S RulesBridgeResolver -- crates/wicked-estate/src` → empty. | `crates/wicked-estate/src/lib.rs:923-928` |
+| F10 | A bridge rule with `[rule.emit_edge]` ALSO emits a direct `InvokedBy` file→synthetic-RuleSet edge at Heuristic 0.5 with `Provenance::Extractor(rule)` (`extra_edge.rs:311-345`). SqliteStore upsert uses `>=` and resolved edges are written after local edges, so a wired bridge resolver overwrites that edge's `resolved_by`/provenance. `DrlExtractor` (dispatched at `lib.rs:94`) mints a real `RuleSet` per `package`. `OdmExtractor` is NOT dispatched by `index_path`. | `sqlite.rs:1591-1596`; `crates/wicked-estate/src/lib.rs:87-98`, `:882/:906/:947`; `drl.rs:91-98` |
+| F11 | `MethodResolutionSynthesizer` (`lib.rs:653-700`): Calls-only, retain `is_callable`, self-drop, unique → emit at 0.5. Exactly `ScopedNameResolver`'s Calls filters at lower confidence; `resolve_all` dedup replaces only on strictly greater confidence (`:836-841`). Emit set ⊆ Scoped's — a theorem. History: `git log -S MethodResolutionSynthesizer` → `d9a4390` (docs README), `797ce58` (initial) only. Zero references outside `resolve/src/lib.rs` for `MethodResolutionSynthesizer`, `measure_synth_precision`, `SYNTH_PRECISION_FLOOR`, `ast-synth-method` (bench: 0 hits). `Provenance::Synthesizer` IS used by overlay (`xedge.rs:91,362`) and stays. | `lib.rs:653-804`; `git log -S measure_synth_precision` → `797ce58` only |
+| F12 | ADR-007 "as shipped" stack is false (`docs/adr/ADR-007-tsg-superseded-by-scip.md:38-43`) and repeated at `resolve/README.md:33-46`, `lib.rs:816-822`, `WAVE-PLAN.md:42/64/114/118`; `WAVE-PLAN.md:117` mis-orders the ladder (`ImportMap(0.60–0.65) < Heuristic(0.5)`); ENGINE-CONTRACT §3 (`:44-55`) has no activation column; `FEATURES.md:173` lists the synthesizer as delivered. | opened |
+| F13 | `lsp.rs` (989 lines, single commit `797ce58`): no `impl Resolver`, no `Edge`, no production caller (`grep lsp main.rs mcp/src` → 0); 20 unit tests + `tests/lsp_live.rs` (probe-and-skip, passes here). Doctest at `lsp.rs:531-535` is ```` ```ignore ```` — the crate's only ignored test (`docs/TESTING.md:20`, CLAUDE.md "0 ignored"). `LspTier::new(impl Into<String>)` (`:545`), `definition(&mut self, language, file_uri, line, col) -> Result<Vec<Location>>` (`:579-588`) — the snippet references only pub API. LOCKED: "LSP is on-demand only, never bulk". | opened |
+| F14 | A resolver change is not retroactive on an existing DB: only changed files' refs are re-resolved (`lib.rs:908-915`), early return when nothing changed (`:712-714`), full re-extract only on `CARGO_PKG_VERSION` change (`:555-565`) or `index --force` (`main.rs:1012-1019`). | opened |
+| F15 | `wicked-estate-resolve` depends on core/serde/serde_json/scip/protobuf/observe — NOT on extract; `languages.toml` is unreachable from resolvers. `wicked-estate` depends on both (`Cargo.toml:21-22`). Precedent for a resolver-serving default method on `SymbolIndex`: `all_nodes()` (`core/src/traits.rs:28-32`, added by `3d34ac8`; UFCS-clash scar `c7dd5ce` — pick a name no inherent method uses; `grep 'fn language_family'` → 0). `LanguageSpec` (`extract/src/lib.rs:146-156`) has no `deny_unknown_fields`; no external struct-literal construction exists. | opened |
+| F16 | **Recall-widening populations exist (FEAS-1).** Any retain that runs BEFORE a uniqueness/ranking decision can MINT edges that did not exist before, not only remove them. Corpus proof: crew — `raw_name` `code`, 205 typescript Calls refs in `unresolved_refs`, `by_name` candidates = `"variable"` (bash, `scripts/verify-ecosystem.sh`) + `"type_alias"` (css, `site/src/styles/crew.css`); the D1 deny-list drops the type_alias, the bash variable becomes the unique survivor — only a POST-uniqueness family guard stops 205 new wrong edges. studio — `raw_name` `p`, 2 tsx refs, candidates `"type_alias"` (html, `e2e/fixtures/doc-fixture.html`) + `"function"` (tsx, `src/components/RunTimeline.tsx`) → 2 new same-family edges after the deny-list (intended, documented, measured). In `ScopedNameResolver` a python-Function + typescript-Function homonym flips tie→park to unique→0.60 once the family retain runs pre-ranking. | sqlite on `repro/{crew,studio}-before.db` (`unresolved_refs` + `by_name` reconstruction); `lib.rs:150-177` (retains precede ranking) |
+| F17 | **The family default `family.unwrap_or(name)` makes svelte, vue, and html their own families (FEAS-2).** `languages.toml`: `svelte` (structural, `["symbols"]`), `vue` (structural, `["symbols"]`), `html` (document, `["symbols"]`) — all mint nodes whose `nodes.language` is the manifest name (`treesitter.rs:1705`). Functions declared in `.svelte`/`.vue` script blocks are legitimate Calls targets from typescript/javascript sources and would be blocked by the guard. The studio/crew corpora contain **zero** svelte/vue files (studio file-node languages: tsx 235, typescript 164, python 61, css 6, json 5, javascript 5, html 2, markdown 1), so M3 = 0 after cannot detect the gap — only unit tests can pin it. | `languages.toml` svelte/vue/html rows (opened above); studio-before.db language histogram |
+
+---
+
+## 2. Decisions (each with rationale grounded above)
+
+| # | Question | Decision | Why |
+|---|---|---|---|
+| D1 | Calls target-kind set for `NameResolver` | **DENY-list, not allow-list.** For every ref kind: reject `NodeKind::Import`. For `Calls` refs additionally reject `Interface, Trait, TypeAlias, Enum, Field, Parameter, File, Namespace, Rule, RuleSet, Condition, Action, Fact`. Keep `Function, Method, Constructor, Class, Struct, Module, Constant, Variable, Macro, Synthetic, Other(_)`. | F4/F6: `Class` = `new X()` construction sites (150 real edges across corpora); `Constant`/`Variable` = 130 function-valued bindings in studio with no AST signal to split them from the 34 non-function ones (accepted precision cost, reported in §6); `Module` required by F7 (JCL/HLASM/COBOL programs) — an allow-list of `is_callable` breaks `cross_language_estate.rs`. `Import` (22+62) and `Interface` (1) are the review's definitively-wrong classes. A deny-list is kind-generic (no per-language arms — "Rules as DATA"). **Placement (FEAS-1): the deny-list retain runs PRE-uniqueness in `NameResolver` — deliberately recall-widening**: dropping a deny-listed homonym can make a legitimate candidate unique (F16 studio `p`: html type_alias dropped → tsx function binds — the intended recovery). Every edge this mints is captured by Q4b, adjudicated (20-sample), and falsified by clause 7. |
+| D2 | Re-kind `new X()` to `Instantiates`? | **No, not in this program.** Class stays an allowed Calls target. Merge note to extraction-gaps lane. | F6: every ranking/traversal/blast-radius consumer follows `Calls|Imports` only; an `Instantiates` edge would silently delete 150 class dependents from blast-radius/PageRank/communities. Re-kinding needs the `.scm` change AND a consumer-widening change in the same PR; neither is this lane's file set. |
+| D3 | Does `ScopedNameResolver`/`ImportMapResolver` adopt the deny-list? | **No.** They keep their `is_callable` retain (stricter, unchanged). They DO adopt the Import-node exclusion and the family guard through the shared helper. | Widening Scoped's candidate pool changes its tie semantics (a Function + Class homonym in different files goes from "emit to the Function" to "tie → park") — a separate recall change with its own measurement. §11 says fix the class at the seam: the seam here is the admissibility helper, called by all three. **Placement (FEAS-1): in Scoped/ImportMap both new retains run PRE-ranking, alongside the existing `is_callable` retain (`lib.rs:150-153` / `:353-354`) — recall-widening within scope tiers**: a python-Function + typescript-Function homonym flips tie→park to unique→0.60 (F16). This is deliberate — a same-family candidate in a scope tier is exactly what Scoped exists to bind — and every minted edge is captured by Q4b and falsified by clause 7. |
+| D4 | Family-table transport | **`family` field in `languages.toml` (DATA) + `SymbolIndex::language_family(&self, lang: &str) -> Option<String>` default `None`, overridden by `InMemoryIndex` from `wicked_estate_extract::registry()`.** Not a resolver constructor. | F15: resolve cannot read the toml; a constructor edits the slice literal the relative-imports lane also edits. Default trait method has precedent (`all_nodes`) and is additive. Rows: `family = "javascript"` on `javascript`, `tsx`, `typescript`, **`svelte`, `vue`** (D14/F17 — five lines total). `LanguageSpec::family()` returns `family.unwrap_or(name)`. |
+| D5 | Family-guard semantics | **Block only when BOTH ends resolve to a known family and the families differ. Unknown/absent ⇒ allow.** Source language = `index.get(&r.from).map(|n| n.language)`; missing from-node ⇒ allow. Applies to every ref kind through the helper. | F7: cobol/jcl/hlasm/racf/text/synthetic/tfstate have no manifest row and must keep resolving. F5: `tsx↔typescript` (690) and `javascript↔typescript` (41) must survive — they share `family = "javascript"`. Every toml language without an explicit family is its own family, so `python→typescript`, `typescript→bash`, `typescript→json` are blocked. **Placement (FEAS-1): in `NameResolver` the family guard runs POST-uniqueness, on the sole survivor** — strictly narrowing, never edge-minting; it is the only thing standing between the deny-list and 205 new `typescript→bash` edges on crew (F16 `code`). In Scoped/ImportMap it runs pre-ranking (D3). |
+| D6 | `dir_of` semantic | **Return `""` for separator-less paths.** | F8: `file_matches_module` already special-cases `ref_dir.is_empty()`; two root-level files become SameDir (0.62) instead of comparing `a.ts == b.ts`; root-level `./foo` import-map refs bind instead of joining `a.ts/./foo`. Relative-imports lane does not call `dir_of` (its brief). **This too is recall-widening (FEAS-1): a root-level file pair flips CrossFile-tie→park to SameDir-winner→0.62; the minted edges land in Q4b and are adjudicated like every other addition.** |
+| D7 | Wire `RulesBridgeResolver` as-is? | **Yes, one line, appended after `&InfraResolver,`. Keep N×M (every bridge ref → every `RuleSet`) semantics and the equal-confidence overwrite of the extractor's own synthetic-RuleSet edge; document both; scheme matching is a follow-up.** | F9/F10: the short-circuit makes it free when no bridge refs exist; `RuleSet` nodes carry no engine scheme to match against today (inventing one is an extractor change). The overwrite changes `resolved_by` from the rule name to `rules-bridge-resolver` and provenance to Heuristic on the same `(file, synthetic RuleSet, InvokedBy)` key — no consumer keys on the rule name (RulesInventory filters `EdgeKind::InvokedBy` only, `retrieve/src/lib.rs:2502-2545`). The e2e test asserts the overwritten state explicitly so a future change is deliberate. |
+| D8 | Synthesizer fate | **RETIRE (§8): delete `MethodResolutionSynthesizer`, `measure_synth_precision`, `SynthPrecision`, `SYNTH_PRECISION_FLOOR`, their 5 tests, and every doc reference. Keep `Provenance::Synthesizer`.** | F11: born in `797ce58`, never in any production slice on any branch, no bench consumer (WAVE-PLAN:118 / ADR-007 item 4 are false), emit set ⊆ Scoped by construction; the precision API has no subject and no consumer once the synth is gone (keeping it creates a fresh §5 orphan). Public-API removal on a published 0.14.x crate → CHANGELOG entry + semver note (D11). |
+| D9 | ADR-007 correction style | **Append a dated "Superseded note (2026-08-28)"; do not rewrite the original text.** Re-ground the TSG supersession on SCIP + `ScopedNameResolver` alone. | Brief: no silent history rewrite. F11 removes one of the ADR's three stated pillars; the decision still holds on the other two (SCIP 1.0 dominates on dedup; Scoped covers same-file/dir). |
+| D10 | Activation-table drift guard | **ENGINE-CONTRACT §3.1 table + a comment line above the slice pointing at it + a `#[cfg(test)]` textual guard in `crates/wicked-estate/src/lib.rs` that parses the slice literal out of `include_str!("lib.rs")` and the `index/watch = yes` rows out of `docs/ENGINE-CONTRACT.md` and asserts set equality.** | The brief limits the slice edit to one added line, so the literal cannot be refactored into a named function; a textual guard is the only drift check that leaves the literal untouched. It will fail when the relative-imports lane adds its resolver until they add a table row — that is the intended behaviour (merge note). |
+| D11 | Release/compat | **No resolver-fingerprint mechanism in this lane.** State in CHANGELOG that existing DBs keep stale edges until the next version bump (which forces full re-extract, F14) or `index --force`; flag that removing pub items from `wicked-estate-resolve` requires the next release to be `0.15.0` under cargo 0.x semver. | Smallest change; the release protocol already bumps `CARGO_PKG_VERSION`. Fingerprinting is a follow-up (merge note). |
+| D12 | lsp.rs | **Keep. Doctest → ```` ```no_run ```` with hidden `# fn main() -> wicked_estate_core::Result<()> { … # Ok(()) }` lines. Document status (client library, W3.3 AC met by `tests/lsp_live.rs`, no Resolver impl by design, on-demand consumer not built) in ENGINE-CONTRACT §3.1 + ADR-007 note. Record the exact consumer as a follow-up: an on-demand single-symbol `definition`/`references` MCP/CLI tool with the `resolve.lsp` span (`docs/recon/otel-instrumentation-audit.md:141,197`).** | LOCKED decision; F13: the snippet compiles against pub API; `no_run` precedent at `lib.rs:446`. No `#[allow(dead_code)]`. |
+| D13 | Generator script | **Do not edit `scripts/gen-language-manifest.py`.** Add a registry unit test in extract asserting `typescript`, `tsx`, `javascript`, `svelte`, `vue` share one family so a regeneration that drops the field fails a test. Merge note to extraction-gaps lane (script + header claim are theirs). | The script is already stale (emits `tree-sitter-{name}` grammars vs the vendored/arborium rows) — nobody runs it; the test is the real guard. |
+| D14 | svelte / vue / html family membership (FEAS-2) | **svelte and vue get `family = "javascript"` (toml diff = five `family` lines total). html stays its own family, by explicit decision, pinned by a unit test.** | F17: functions declared in `.svelte`/`.vue` script blocks are JS-family callables a TS/JS caller legitimately binds to; leaving them to the `unwrap_or(name)` default would block those edges silently, and the corpora (zero svelte/vue files) make M3 blind to it — so the behaviour is pinned by `family_guard_allows_vue_to_typescript_node` instead of a corpus number. html is tier `document` (`languages.toml` html row): its symbol nodes (e.g. the studio `p` type_alias in `e2e/fixtures/doc-fixture.html`) are markup artefacts, not callables — a TS Calls ref must NOT bind into an html file, pinned by `family_guard_blocks_html_to_typescript_ref`. Still "the family table is DATA": the decision lives in the toml rows + tests, not Rust arms. |
+| D15 | Added-edge measurement policy (FEAS-1) | **Every measurement, adjudication and falsifier clause that exists for REMOVED Calls edges exists symmetrically for ADDED edges**: Q4b (`a LEFT JOIN b`), grouped by resolver × target kind × family pair; 20-sample adjudication with `file:line` opened; falsifier clause 7. | Three of the lane's changes are recall-widening in homonym populations (F16); a plan that measures only losses cannot see a minted wrong edge. The symmetric query is the cheapest complete detector; the two F16 shapes become unit tests (S2) so the mechanism is pinned even off-corpus. |
+
+---
+
+## 3. Steps
+
+Each step is one commit, green on its own (`cargo build/test/clippy -p <crate>` for every touched crate,
+`cargo fmt -p <crate>`, `--no-verify`). Commit style from `git log --oneline -15`: `type(scope): message`.
+
+### S1 — `fix(resolve): dir_of returns "" for root-level files`
+- **Files:** `crates/wicked-estate-resolve/src/lib.rs` (`dir_of` `:71-79` + docstring; tests module).
+- **Change:** `else { "" }`; docstring "or `""` when the path has no separator (root-level file)".
+- **Tests (new, in `mod tests`):** `dir_of_root_level_is_empty` (`"a.ts"→""`, `"src/a.ts"→"src"`, `"src\\a.ts"→"src"`); `scoped_resolver_ranks_two_root_files_same_dir` (caller in `a.ts`, candidates `b.ts` + `sub/c.ts` → 1 edge to `b.ts`, confidence 0.62, `metadata.scope == "same-dir"`); `import_map_resolver_binds_root_level_relative_import` (caller `a.ts`, hints `{"imports":{"foo":"./b"}}`, candidates `b.ts` + `sub/c.ts` → 1 edge to `b.ts` at 0.63).
+- **Deletes:** the false docstring clause. Nothing else.
+- **Proof:** `cargo test -p wicked-estate-resolve` → 61 + 3 = 64 unit (report exact); synthetic two-root-file corpus BEFORE = 0 Calls edges / `foo` parked (measured, §6 M5) vs AFTER = 1 edge (`import-map-resolver`, 0.63).
+
+### S2 — `fix(resolve): admissibility seam — no Import targets, kind deny-list for Calls, language-family guard`
+- **Files:**
+  - `crates/wicked-estate-core/src/traits.rs` — add `fn language_family(&self, _language: &str) -> Option<String> { None }` to `SymbolIndex` (after `all_nodes`, same doc style).
+  - `crates/wicked-estate-extract/src/lib.rs` — `LanguageSpec`: `#[serde(default)] pub family: Option<String>` + `pub fn family(&self) -> &str`; test `js_family_languages_share_one_family` (asserts `typescript`/`tsx`/`javascript`/`svelte`/`vue` share one family AND `html` does not — pins D14).
+  - `crates/wicked-estate-extract/languages.toml` — add `family = "javascript"` to the `javascript` (`:250`), `tsx` (`:489`), `typescript` (`:496`), `svelte` (`:468-472`), `vue` (`:524-528`) rows (D14). **Diff limited to those five lines.** `html` gets no family line — its own family by the `unwrap_or(name)` default, deliberate (D14).
+  - `crates/wicked-estate/src/lib.rs` — `InMemoryIndex`: new field `families: HashMap<String, String>` built once in `build()` from `wicked_estate_extract::registry()` (`name → family()`); override `language_family`. No slice edit in this step.
+  - `crates/wicked-estate-resolve/src/lib.rs` — helpers next to `is_callable` (`:82-87`):
+    - `fn admissible_target(ref_kind: &EdgeKind, cand: &NodeKind) -> bool` (Import rejected for all kinds; Calls deny-list per D1).
+    - `fn same_family(index: &dyn SymbolIndex, from: &SymbolId, cand: &Node) -> bool` (D5; one `index.get(&r.from)` per ref — hoist it out of the candidate loop).
+    - `NameResolver::resolve` (`:46-66`): `candidates.retain(|n| admissible_target(&r.kind, &n.kind))` **PRE-uniqueness** (deliberately recall-widening, D1/F16); then `same_family` **POST-uniqueness on the sole survivor** (strictly narrowing, D5 — the guard that stops F16's 205 crew `code` → bash edges). Docstring updated to state both placements.
+    - `ScopedNameResolver::resolve` (`:148-156`): add `retain(admissible_target)` + `retain(same_family)` alongside the existing `is_callable` retain (kept) — **pre-ranking, recall-widening within scope tiers (D3/F16)**.
+    - `ImportMapResolver::resolve` (`:353-356`): same two retains alongside `is_callable` (kept) — same pre-ranking placement.
+    - `InfraResolver` docstring `:433-436`: rewrite to the true contract — `ScopedNameResolver`/`ImportMapResolver` keep callables only for Calls; `NameResolver` rejects the D1 deny-list (which does NOT include `Other(..)`, so a unique resource node named like a code call CAN still bind at `NameResolver` unless the family guard blocks it); `InfraResolver` requires a resource candidate. State exactly what is filtered; report the AFTER `Calls → other` count in M1 so the residual is a number, not a claim.
+  - `crates/wicked-estate/tests/` — new `resolver_precision_index.rs`: temp repo with `api.py` (`import json` + a call) and `client.ts` (`res.json()`), indexed via `index_path` into `SqliteStore::in_memory()`; assert 0 Calls edges whose target kind is `Import` and 0 Calls edges whose source/target families differ; plus `cross_language_estate.rs` stays green (the counter-example).
+- **Tests (resolve `mod tests`). FEAS-5: do NOT change `node_at`'s signature (24+24 existing call sites) — add a new helper `node_lang(name, file, lang)` and keep `VecIndex` construction compatible via `VecIndex::plain(nodes)` (existing shape) plus a family-aware constructor (`VecIndex::with_families(nodes, families)`) that overrides `language_family`; only the new family tests use the new helpers:**
+  `name_resolver_never_binds_calls_to_import_node`, `name_resolver_never_binds_calls_to_interface`, `name_resolver_keeps_class_and_constant_targets_for_calls` (D1 kept set), `name_resolver_keeps_extends_to_interface` (crew's 2 legit edges), `family_guard_blocks_python_ref_to_typescript_node`, `family_guard_allows_tsx_ref_to_typescript_node`, `family_guard_allows_unknown_family_jcl_to_cobol`, `family_guard_allows_missing_from_node`, `scoped_resolver_applies_family_guard`;
+  **FEAS-1 shape tests (F16):** `deny_list_survivor_blocked_by_family_guard` (crew `code` shape — deny-listed css type_alias homonym + cross-family bash variable survivor → **0 edges**), `deny_list_unshadows_same_family_callable` (studio `p` shape — deny-listed html type_alias homonym + same-family tsx function → **exactly the 1 intended new edge**, resolver `name-resolver` 0.60), `scoped_family_retain_unshadows_same_family_homonym` (python-Function + typescript-Function homonym: BEFORE-semantics tie→park, AFTER unique→0.60 — pins the D3 recall-widening as intended);
+  **FEAS-2 pinning tests (D14):** `family_guard_allows_vue_to_typescript_node` (vue-declared function binds from a typescript Calls ref), `family_guard_blocks_html_to_typescript_ref` (html-declared symbol never binds from a typescript ref).
+- **Deletes:** the false `InfraResolver` docstring claim (`:433-436`).
+- **Proof:** `cargo test -p wicked-estate-core -p …` (per crate: core, extract, resolve, wicked-estate) counts reported exactly; `cargo test -p wicked-estate --test cross_language_estate --test multi_repo --test e2e` green; §6 M1–M4 AFTER numbers: Calls→Import = 0, Calls→Interface = 0, cross-family Calls = 0 on studio and crew; **M4b (Q4b): added-edge histogram + 20-sample adjudication, 0 added edges with deny-listed target kind or cross-family ends (falsifier clause 7)**.
+
+### S3 — `feat(index): wire RulesBridgeResolver into the index slice`
+- **Files:** `crates/wicked-estate/src/lib.rs` — exactly one added line `&RulesBridgeResolver,` after `&InfraResolver,` (`:927`) + the `use` import; new `crates/wicked-estate/tests/rules_bridge_index.rs` (modelled on `tests/extra_edge_index.rs:12-90`).
+- **Fixture:** temp root with `.wicked-estate-extractors/odm.toml` = the `ODM_BRIDGE_RULE` text (`extra_edge.rs:706-722`), `src/PricingService.java` containing `IlrContext.execute()`, and `rules/pricing.drl` with `package com.example.pricing` + one rule (DrlExtractor mints a real `RuleSet` the TOML rule does not know about).
+- **Assertions:** (a) an `InvokedBy` edge source = `Symbol::file("src/PricingService.java")`, target = the DRL `RuleSet`, `resolved_by == "rules-bridge-resolver"`, confidence 0.5; (b) the synthetic `odm:pricing-rules` edge exists and now carries `resolved_by == "rules-bridge-resolver"` (documents the D7 overwrite); (c) no `unresolved_refs` row with `raw_name` starting `rules-engine:`; (d) `RulesInventory` lists the java file under `invoked_by` (via `wicked_estate_retrieve`, if its constructor is reachable from the test — else assert on `all_edges()` only and say so).
+- **Also:** unit test in `crates/wicked-estate/src/lib.rs` beside `index_path_uses_infra_resolver_for_resource_refs` (`:1837`) using `MemStore` + `InMemoryIndex` + a `RuleSet` node + a `rules-engine:x` ref through the same slice composition.
+- **Deletes:** nothing (this is an addition; the "what does it retire" answer is the false claim at `extra_edge.rs:387-389` becomes true).
+- **Proof/falsifier:** run the e2e test with the slice line temporarily removed → must FAIL on (a) and (c) (record the failing assertion text), then restore → PASS. BEFORE binary on the same fixture dir: 0 edges with `resolved_by='rules-bridge-resolver'`, `rules-engine:ibm-odm` present in `unresolved_refs` (§6 M6).
+
+### S4 — `refactor(resolve): retire MethodResolutionSynthesizer and the unused precision monitor`
+- **Files:** `crates/wicked-estate-resolve/src/lib.rs` — delete `:630-700` (struct + impl), `:702-804` (`SYNTH_PRECISION_FLOOR`, `SynthPrecision`, `measure_synth_precision`), tests at `:2172`, `:2226`, `:2272`, `:2319`, `:2408`, the `resolve_all` doc block `:816-822` (replace with the real order: `NameResolver → ScopedNameResolver → ImportMapResolver → InfraResolver → RulesBridgeResolver`, "dedup keeps max confidence; order is irrelevant to the result"); `crates/wicked-estate-resolve/README.md:11,24,28-29,33-46`; `FEATURES.md:173`; `CHANGELOG.md` `[Unreleased]` → `### Removed` entry naming the four pub items + the semver note (D11).
+- **Add:** `slice_plus_unique_callable_heuristic_adds_no_edge` — the structural regression the review asked for (D02-9): over a homonym population, `resolve_all([Name, Scoped, ImportMap, Infra])` equals the same slice plus an inline test resolver that emits unique-callable Calls at Heuristic 0.5.
+- **Add (FEAS-4 — the deleted synth test at `:2405-2434` was the only coverage of `resolve_all`'s max-confidence dedup with a lower-confidence resolver ordered LAST):** `resolve_all_dedup_keeps_higher_confidence_regardless_of_order` — using the same inline Heuristic-0.5 test resolver, assert the surviving edge keeps the higher tier's confidence (0.60/0.65) and `resolved_by` both when the heuristic runs first AND when it runs last (covers the `>`-not-`>=` branch at `:836-841` and the "order is irrelevant" claim the rewritten `resolve_all` doc makes).
+- **Deletes:** 171 lines of code, 5 tests, 3 pub items + 1 pub struct. Keeps `Provenance::Synthesizer` (overlay consumer).
+- **Proof:** `grep -rn 'MethodResolutionSynthesizer\|measure_synth_precision\|SYNTH_PRECISION_FLOOR\|SynthPrecision\|ast-synth-method' . --include='*.rs' --include='*.md' --include='*.toml'` → 0 hits outside `docs/adr/ADR-007` (which keeps the historical mention under the superseding note) and `docs/plan/WAVE-PLAN.md` rows marked retired (S5); `cargo test -p wicked-estate-resolve` count reported (expected 64 + 9 − 5 + 1 = 69 unit; report exact).
+
+### S5 — `docs(resolve): ADR-007 superseding note, ENGINE-CONTRACT tier-activation table, ladder fixes`
+- **Files:** `docs/adr/ADR-007-tsg-superseded-by-scip.md` (append section "Superseded note — 2026-08-28": the `:38-43` block was never the production slice; real slice literal; synthesizer retired; precision dashboard never existed in bench; lsp.rs status per D12; TSG decision re-grounded on SCIP + Scoped); `docs/ENGINE-CONTRACT.md` §3 → add §3.1 "Tier activation (derived from `crates/wicked-estate/src/lib.rs` `index_path_as` slice)" with columns `resolver id | tier | confidence | index/watch | scip (+external bytes) | no production path | notes`, rows: `tree-sitter` Parsed 1.0 (extractor local edges) · `name-resolver` ImportMap 0.60 · `scoped-name-resolver` ImportMap 0.60/0.62/0.65 · `import-map-resolver` ImportMap 0.63 · `infra-resolver` Parsed 1.0 · `rules-bridge-resolver` Heuristic 0.5 · `estate-racf` Parsed 1.0 / Heuristic 0.5 (`estate_edges`, same pass) · extra-edge rules Heuristic 0.5 `Provenance::Extractor(rule)` · `scip` Scip 1.0 (`wicked-estate scip`, requires index bytes) · `Tsg` enum variant only, no impl · `Lsp` tier constant only, client library, no edge path · `ast-synth-method` retired 2026-08-28; plus the re-index note (D11) and the N×M / overwrite note (D7). `docs/plan/WAVE-PLAN.md:42,64,114,117,118` → mark W3.1/W3.5 "retired 2026-08-28 (ADR-007 superseding note)" rather than deleting rows; fix `:117` ladder to `Tags(0.3) < Heuristic(0.5) < ImportMap(0.60–0.65) < Tsg(0.8) < Scip/Lsp(1.0)`. `README.md:142,147` wording check (147 becomes true after S3). `crates/wicked-estate/src/lib.rs` — one comment line above the existing `// InfraResolver handles…` comment (`:920`): `// Activation table: docs/ENGINE-CONTRACT.md §3.1 — guarded by tests::slice_matches_engine_contract_table.` and that test (D10). **Anchor spec (FEAS-3 — `lib.rs` has more than one `let resolvers: &[&dyn Resolver] = &[` literal, e.g. the test at `:1877-1882`, and S3's unit test could add another):** the drift test parses the ONE literal that immediately follows the new comment line (the comment is the anchor and thereby earns its existence), asserts `matches.len() == 1`, and reads the doc via `std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/ENGINE-CONTRACT.md"))` (repo precedent: `wicked-estate-knowledge/src/lib.rs:42`, `wicked-estate-mcp/tests/conformance_schemas.rs:63` — not a relative `include_str!` into docs). The S3 unit test must NOT reproduce the anchored literal shape — it asserts via `resolve_all` with an explicitly-built list.
+- **Deletes:** the wrong stack statements (replaced, not removed from ADR history).
+- **Proof:** `cargo test -p wicked-estate slice_matches_engine_contract_table` passes; falsifier: add a bogus `yes` row to the doc → test fails (record, revert).
+
+### S6 — `docs(resolve): lsp.rs status + un-ignore the LspTier doctest`
+- **Files:** `crates/wicked-estate-resolve/src/lsp.rs:525-535` (module/struct doc: status line per D12; ```` ```no_run ```` with hidden `fn main() -> wicked_estate_core::Result<()>` wrapper and `use wicked_estate_resolve::lsp::LspTier;`); `crates/wicked-estate-resolve/README.md` lsp bullet (add "no `Resolver` impl by design; consumer = follow-up"); `docs/plan/WAVE-PLAN.md` W3.3 row → add the named follow-up task id (allocate the next free W-id in the plan, e.g. `W3.6 — on-demand LSP consumer: MCP/CLI single-symbol definition/references tool, `resolve.lsp` span`).
+- **Deletes:** the ```` ```ignore ```` marker.
+- **Proof:** `cargo test -p wicked-estate-resolve --doc` → `N passed; 0 failed; 0 ignored` (record N).
+
+### S7 — measurements (no code) → append §6 results to this file, commit `docs(recon): resolver-precision before/after measurements`.
+- **Bench gate (FEAS-6, CLAUDE.md §9):** the agent-eval benchmark's `baseline_corpus()` clones axios/flask/tree-sitter from GitHub (`wicked-estate-bench/src/lib.rs:99-122` — network) and its capability gate follows `Calls|Imports` (`capability.rs:445`), so the removed/added Calls edges are in its blast radius. S7 either runs `CARGO_TARGET_DIR=<lane>/target cargo test -p wicked-estate-bench` and reports the exact result, or — if the clone is unreachable from this environment — records "bench corpus is network-cloned, not runnable in this lane" as an explicit §7-evidence not-yet-true item, with the studio/crew before/after Calls deltas (M1–M4 incl. Q4b) standing in as the regression evidence. One of the two statements MUST appear in the S7 results; silence is not an option.
+
+---
+
+## 4. Compatibility + migration
+
+- **Schema/wire:** none. No node/edge shape change; `SymbolIndex` gains a default method (additive); `LanguageSpec` gains a defaulted pub field (no external struct-literal constructor found).
+- **Stored graphs:** existing DBs keep the wrong Calls edges until a full re-extract (F14). The next release bumps `CARGO_PKG_VERSION` → `force_full` fires on the next `index`; otherwise `wicked-estate index --force`. CHANGELOG states this. Consumers that never pass `--force` (crew `graph.ts:592` refresh, garden client) see the fix only after the version bump — merge note.
+- **Behaviour visible to consumers (numbers, not shapes):** Calls edges drop by ~305 (studio) / ~144 (crew) wrong edges (§6 exact); the corresponding refs move back to `unresolved_refs` (unresolved-accounting lane must subtract this delta — merge note); **a smaller population of Calls edges is ADDED by the recall-widening placements (F16/D15) — measured by Q4b, adjudicated, and reported with the same rigor as the removals (net unresolved delta = removals − additions, M7)**; entrypoints/dead-code lists gain the nodes that lost a false in-edge (e.g. the Python `import json` node, `interface Notification`); BlastRadius `unresolved_callers` rises for those names; RulesInventory `invoked_by` becomes populated under `index` for repos with rules-engine bridge rules.
+- **Public API removal (wicked-estate-resolve):** `MethodResolutionSynthesizer`, `measure_synth_precision`, `SynthPrecision`, `SYNTH_PRECISION_FLOOR`. Under cargo 0.x semver this is a breaking change → the release that ships it must be `0.15.0`, not `0.14.7`. Release owner decides; CHANGELOG entry lands here either way.
+- **Windows:** stored paths are `/`-normalised at ingest (`crates/wicked-estate/src/lib.rs:326-331`); `dir_of`'s `\` arm keeps working for synthetic inputs and is covered by the new test.
+
+## 5. Falsifier (for the whole lane)
+
+Run on the lane debug binary against fresh DBs (§6 commands): if ANY of these holds after S1–S6, the lane is not done —
+(1) `count(Calls edges with target.kind='"import"') > 0` on studio or crew; (2) `count(Calls with source family ≠ target family) > 0` where family = `languages.toml` family (`typescript/tsx/javascript → javascript`); (3) `cargo test -p wicked-estate --test cross_language_estate` fails; (4) `tests/rules_bridge_index.rs` passes with the slice line removed; (5) `cargo test -p wicked-estate-resolve` reports any `ignored`; (6) the 20-edge removed-sample adjudication finds a removed edge that was correct AND is not in the reported regression classes (non-function `Constant`/`Variable`, `Other`); (7) **(FEAS-1)** any ADDED Calls edge (Q4b) whose target kind is on the D1 deny-list, OR whose source/target families differ, OR any member of the 20-edge added-sample adjudication that is judged wrong at its `file:line`.
+
+## 6. Measurement protocol (BEFORE = `/Users/michael.parcewski/Projects/wicked/wicked-estate/target/release/wicked-estate` 0.14.6; AFTER = `<lane>/target/debug/wicked-estate`)
+
+`M=<lane>/measure; mkdir -p $M`. Sanity: BEFORE studio must reproduce 189/1,245 non-callable name-resolver Calls targets and crew 226/724 (the review's numbers, `repro/*-before.db`); if not, the release binary is not the HEAD engine — stop and say so.
+
+```
+# fresh DBs — never re-index an existing DB (F14 hides the delta)
+rm -f $M/studio-before.db $M/studio-after.db $M/crew-before.db $M/crew-after.db
+BEFORE index /Users/michael.parcewski/Projects/wicked/wicked-studio --db $M/studio-before.db
+AFTER  index /Users/michael.parcewski/Projects/wicked/wicked-studio --db $M/studio-after.db
+BEFORE index /Users/michael.parcewski/Projects/wicked/wicked-crew   --db $M/crew-before.db
+AFTER  index /Users/michael.parcewski/Projects/wicked/wicked-crew   --db $M/crew-after.db
+/usr/bin/sqlite3 $M/studio-after.db .schema   # once; kinds are JSON strings like '"calls"'
+```
+- **Q1 (M1) Calls by resolver × target kind:** `select json_extract(e.data,'$.resolved_by') rb, tn.kind, count(*) from edges e join nodes tn on tn.symbol=e.target where e.kind='"calls"' group by 1,2 order by 1,3 desc;`
+- **Q2 (M2) Calls → Import / Interface:** same with `and tn.kind in ('"import"','"interface"')` — expect 0 after.
+- **Q3 (M3) cross-family Calls:** `select sn.language, tn.language, json_extract(e.data,'$.resolved_by'), count(*) from edges e join nodes sn on sn.symbol=e.source join nodes tn on tn.symbol=e.target where e.kind='"calls"' and sn.language<>tn.language group by 1,2,3;` — then collapse `{typescript,tsx,javascript}` to one family; expect 0 cross-family rows after; report the same-family rows (690 / 41) as retained.
+- **Q4 (M4) removed edges + adjudication:** `attach '$M/studio-before.db' as b; attach '$M/studio-after.db' as a; select b.edges.source, b.edges.target, json_extract(b.edges.data,'$.resolved_by') from b.edges left join a.edges on a.edges.source=b.edges.source and a.edges.target=b.edges.target and a.edges.kind=b.edges.kind where b.edges.kind='"calls"' and a.edges.source is null;` — total lost per (resolver, target kind, family pair); sample 20 with `order by random() limit 20` (seed recorded), open each source `file:line` from `location`, classify wrong/right. Report retained-but-non-callable counts (`constant`/`variable` non-function) as the known precision cost with numbers; report any lost function-valued-constant edge as a regression with numbers (expected 0 — D1 keeps Constant/Variable).
+- **Q4b (M4b, FEAS-1) ADDED edges + adjudication — the symmetric query:** `select a.edges.source, a.edges.target, json_extract(a.edges.data,'$.resolved_by') from a.edges left join b.edges on b.edges.source=a.edges.source and b.edges.target=a.edges.target and b.edges.kind=a.edges.kind where a.edges.kind='"calls"' and b.edges.source is null;` — total added per (resolver × target kind × source-family/target-family pair); sample 20 with `order by random() limit 20` (same recorded seed discipline), open each source `file:line`, classify right/wrong exactly like the removed sample. Expected populations: the F16 `p`-shape unshadowings (name-resolver) and Scoped same-family homonym unshadowings; expected ZERO added edges with deny-listed target kinds or cross-family ends (falsifier clause 7). Run on both corpora; if the added count is > the sample size, also report the full (resolver, kind, family-pair) histogram so no class hides in the tail.
+- **M5 root-level corpus:** `$M/rootfiles/{a.ts,b.ts,sub/c.ts}` (`a.ts`: `import {foo} from './b'; foo();`; `b.ts`/`sub/c.ts`: `export function foo(){}`) — BEFORE: 0 Calls edges, `foo` parked (already measured by tests recon); AFTER: 1 edge, resolver + confidence reported; Scoped same-dir count via `metadata.scope`.
+- **M6 RulesBridge fixture:** the S3 fixture dir indexed by BEFORE and AFTER; `select count(*) from edges where json_extract(data,'$.resolved_by')='rules-bridge-resolver'` (0 → N) and `select raw_name from unresolved_refs where raw_name like 'rules-engine:%'` (1 → 0).
+- **M7 unresolved delta** (for the accounting lane): `select count(*) from unresolved_refs where kind='"calls"'` before/after on both corpora (BEFORE studio 38,536, crew 15,945 per consumers recon). Report the NET delta and its two components separately: refs returned by removals (Q4) minus refs consumed by additions (Q4b) — the accounting lane needs both signs.
+- **M8 wall-clock:** `time` of the AFTER `index` on crew (debug) — reported as a bound only; not comparable to the release BEFORE.
+
+## 7. Not in scope
+- Any Imports-ref resolver or relative-path helper (relative-imports lane).
+- `crates/wicked-estate/src/lib.rs:937-946` unresolved accounting; `resolve lib.rs:891-912` telemetry counters (unresolved-accounting lane).
+- Definition `SymbolId` construction in `treesitter.rs` (method-identity lane).
+- `.scm` files; `new X()` → `Instantiates`; `languages.toml` rows beyond the three `family` lines; `scripts/gen-language-manifest.py` (extraction-gaps lane).
+- Widening `ScopedNameResolver`/`ImportMapResolver` beyond `is_callable` (D3); receiver-type hints; RuleSet scheme matching; resolver-fingerprint forced re-resolve; the on-demand LSP consumer itself.
+- Python module-level calls attributed to a preceding `Constant` via `enclosing()` (`treesitter.rs:1521-1525`) — extraction-side artefact seen in the studio sample; reported, not fixed.
+
+## 8. Merge notes (for the program lead / other lanes)
+- **relative-imports:** this lane adds ONE line `&RulesBridgeResolver,` after `&InfraResolver,` in the slice literal (`crates/wicked-estate/src/lib.rs:923-928`) and ONE comment line ≥2 lines above it; if you append at the same spot expect a trivial conflict — keep both lines. The activation-table drift test (`slice_matches_engine_contract_table`) will fail on your branch until you add a row for your resolver to `docs/ENGINE-CONTRACT.md` §3.1. `NameResolver`/`ScopedNameResolver` now reject `NodeKind::Import` targets and cross-family candidates for EVERY ref kind (including Imports refs they see today); the helper is kind-agnostic — if your resolver binds Imports refs, call `admissible_target`/`same_family` too or say why not. `dir_of` now returns `""` for root files — you said you do not use it; `ImportMapResolver`'s Calls path does, so root-level import-map edges will appear in AFTER numbers (M5).
+- **extraction-gaps:** `languages.toml` gains `family = "javascript"` on FIVE rows — `javascript`/`tsx`/`typescript`/`svelte`/`vue` (D14; still within the brief's "new field only" allowance) — and `LanguageSpec` gains `family: Option<String>`; `html` deliberately gets NO family line (its own family — a TS Calls ref must not bind into an html document, D14). `scripts/gen-language-manifest.py` must learn the field (or the GENERATED header claim must be corrected) — a regeneration today would drop it and fail `js_family_languages_share_one_family`. Decision D2: `new X()` stays a Calls edge; if you re-kind it to `Instantiates`, the same PR must widen `rank/src/lib.rs:156`, `community.rs:269/450/598`, `cluster_summary.rs:137`, `main.rs:1632/1694/1699`, `retrieve/src/lib.rs:1055`, `bench capability.rs:445` to `Calls|Imports|Instantiates` and remove `Class`/`Struct` from this lane's Calls allow-set in the same change.
+- **unresolved-accounting:** expect unresolved Calls refs to RISE by ≈ the number of removed edges (M7 gives the exact delta per corpus); both lanes must measure on fresh DBs from the same base.
+- **method-identity:** nothing here keys on the SymbolId string format; independent.
+- **program lead:** (a) release must be `0.15.0` if the pub-API removal ships (D11); (b) follow-ups to file: RuleSet engine-scheme matching for `RulesBridgeResolver`; resolver-fingerprint in `meta` to force re-resolve without a version bump (pattern: `extra_rules_digest`, `lib.rs:571-583`); the on-demand LSP consumer (D12); crew `graph.ts:592` refresh should pass `--force` after an engine upgrade.
+
+---
+
+## 9. S7 — before/after measurement results (2026-08-28, implementation complete)
+
+**Binaries.** BEFORE = `/Users/michael.parcewski/Projects/wicked/wicked-estate/target/release/wicked-estate`
+(0.14.6, HEAD engine). AFTER = the lane debug binary built from `lane/resolver-precision`
+(S1–S6 landed). Fresh DBs under `<lane>/measure/` (`studio-before/after.db`, `crew-before/after.db`),
+full-repo indexes of `/Users/michael.parcewski/Projects/wicked/wicked-studio` and `…/wicked-crew`.
+
+**Sanity gate: PASSED exactly.** BEFORE reproduces the review's numbers to the digit —
+studio 1,245 name-resolver Calls edges, non-callable targets 189 (constant 139 / import 22 /
+class 14 / variable 13 / interface 1); crew 724, non-callable 226 (class 136 / import 62 /
+variable 15 / constant 13). The BEFORE engine is proven; deltas below are valid.
+
+### M1 — Calls edges by resolver × target kind
+
+| corpus | resolver | target kind | BEFORE | AFTER |
+|---|---|---|---|---|
+| studio | name-resolver | function | 912 | 644 |
+| studio | name-resolver | method | 144 | 144 |
+| studio | name-resolver | constant | 139 | 139 |
+| studio | name-resolver | import | 22 | **0** |
+| studio | name-resolver | class | 14 | 14 |
+| studio | name-resolver | variable | 13 | 13 |
+| studio | name-resolver | interface | 1 | **0** |
+| studio | scoped-name-resolver | function | 1,829 | 1,821 |
+| studio | scoped-name-resolver | method | 6 | 2 |
+| studio | import-map-resolver | function | 178 | 178 |
+| crew | name-resolver | method | 251 | 250 |
+| crew | name-resolver | function | 247 | 246 |
+| crew | name-resolver | class | 136 | 136 |
+| crew | name-resolver | import | 62 | **0** |
+| crew | name-resolver | variable | 15 | **0** |
+| crew | name-resolver | constant | 13 | 13 |
+| crew | scoped-name-resolver | function | 912 | 907 |
+| crew | scoped-name-resolver | method | 181 | 181 |
+| crew | import-map-resolver | function | 9 | 9 |
+
+Total Calls edges: studio 3,258 → 2,955 (**−303**); crew 1,826 → 1,742 (**−84**).
+
+### M2 — Calls → Import / Interface: **0 after** on both corpora (falsifier clause 1 clear).
+
+### M3 — cross-language Calls
+
+AFTER, the only cross-`nodes.language` rows left are same-family: studio tsx↔typescript
+453+220+13+4 = **690 retained** (the expected number); crew javascript↔typescript 35+6 =
+**41 retained**. Cross-FAMILY rows: **0** on both corpora (falsifier clause 2 clear). Removed
+cross-family populations: studio python→typescript 173, python→tsx 77+12(+4 scoped method),
+tsx→python 18, typescript→python 2 import-targets; crew typescript→python 54 + javascript→python 6
+(all Calls→Import), typescript→bash 15 (variable), bash→typescript 2, python→typescript 4 +
+python→javascript 1 (scoped).
+
+### M4 — removed edges + 20-sample adjudication: **20/20 wrong**
+
+Removed histogram (resolver × target kind × src-lang → tgt-lang): studio 303 total — 173
+py→ts fn, 77 py→tsx fn, 19 py→py Calls→Import, 18 tsx→py fn, 8+4 scoped py→tsx, 2 ts→py import,
+1 tsx→tsx import, 1 ts→ts interface. Crew 84 — 54 ts→py import, 15 ts→bash variable, 6 js→py
+import, 4+1 scoped py→ts/js, 2 py→py import, 1+1 bash→ts.
+
+Sample: 20 edges (12 studio rows 1,26,…,276 of 303; 8 crew rows 1,11,…,71 of 84 — deterministic
+every-Nth over `order by source,target`; sqlite has no seedable random(), method recorded in lieu
+of a seed). Every site opened at its 1-based `file:line`; all 20 adjudicated **WRONG**:
+
+- studio: `within(...)` (tsx, @testing-library import) → python `within`; python `ok: bool`
+  annotation → ts function `bool` (readiness.ts); `page.mouse.move(…)` → ts `move`
+  (useTriageCursor.ts); 5× python `str(…)` builtin → tsx `str` (RunTimeline.tsx); 3×
+  `console_errors.append(…)` list builtin → ts `append` (docThread.ts); playwright `dl.body()` →
+  tsx test method `body`.
+- crew: 5× `res.json()` (js/ts) → the python `import json` node (e2e/insight_rail_test.py);
+  3× `Buffer.from(…)` → bash variable `from` (scripts/verify-selftest.sh).
+
+**Regression classes: zero losses.** No removed edge had a Constant target (the function-valued
+`const` bindings are all retained — M1 shows constant 139/13 unchanged); the 13 studio variable
+targets are retained; the only variable-target removals are crew's 15 cross-family ts→bash
+(adjudicated wrong). Falsifier clause 6 clear.
+
+### M4b — ADDED edges (FEAS-1, Q4b): **0 on both corpora**
+
+The symmetric LEFT JOIN (after \ before) returns zero rows for studio and crew — the three
+recall-widening placements minted no edge on these corpora (no deny-listed-homonym-shadowing or
+cross-family-homonym-tie population outside the ones that produce 0-edge outcomes). The 20-edge
+added-sample adjudication is therefore vacuous; falsifier clause 7 clear. The F16 mechanisms are
+pinned by unit tests instead (`deny_list_unshadows_same_family_callable`,
+`deny_list_survivor_blocked_by_family_guard`, `scoped_family_retain_unshadows_same_family_homonym`,
+`scoped_resolver_ranks_two_root_files_same_dir`), as the plan required for corpus-blind shapes.
+
+### M5 — root-level two-file corpus
+
+`{a.ts (import {foo} from './b'; foo()), b.ts, sub/c.ts}`: BEFORE = 0 Calls edges, `foo` parked in
+`unresolved_refs`. AFTER = exactly 1 Calls edge, `import-map-resolver`, confidence 0.63,
+`metadata.via=import-map`, nothing parked. (The Scoped same-dir 0.62 path is pinned by the
+`scoped_resolver_ranks_two_root_files_same_dir` unit test — with the import hint present,
+import-map's 0.63 wins dedup, which the AFTER row shows.)
+
+### M6 — RulesBridge fixture (the S3 e2e fixture, indexed by both binaries)
+
+BEFORE: 0 edges with `resolved_by='rules-bridge-resolver'`; `rules-engine:ibm-odm` parked in
+`unresolved_refs`. AFTER: **2** rules-bridge-resolver InvokedBy edges at 0.5
+(`src/PricingService.java` → DRL RuleSet `com.example.pricing`, and → the synthetic
+`odm:pricing-rules` RuleSet — the documented D7 overwrite); 0 parked `rules-engine:*` refs.
+Code falsifier also run (S3 commit): `tests/rules_bridge_index.rs` FAILS with the slice line
+removed, PASSES restored (clause 4 clear).
+
+### M7 — unresolved delta (for the unresolved-accounting lane)
+
+| corpus | kind | BEFORE | AFTER | Δ |
+|---|---|---|---|---|
+| studio | calls | 38,536 | 38,839 | **+303** (= removals; additions 0) |
+| studio | imports | 1,857 | 2,285 | **+428** |
+| studio | total | 40,400 | 41,131 | +731 |
+| crew | calls | 18,407 | 18,491 | **+84** (= removals; additions 0) |
+| crew | imports | 1,020 | 1,052 | **+32** |
+| crew | total | 19,437 | 19,553 | +116 |
+
+Net Calls delta = removals − additions = +303/+84 exactly. The **imports rise needs explaining
+and is correct behaviour**: those Imports refs previously "resolved" by NameResolver binding them
+to Import NODES — a reference site binding to another reference site. The in-memory edges made
+the location-based accounting count the refs as resolved, while the store rows collided with the
+extractor's own local imports edges on the (source,target,kind) PK — which is why imports edge
+counts are IDENTICAL before/after (studio 2,259, crew 1,020) and the non-Calls removed-edge set
+is EMPTY. D1's Import-target rejection applies to every ref kind, so these refs are now honestly
+parked. (BEFORE crew calls-unresolved here is 18,407, not the 15,945 the consumers recon quoted —
+that figure was from an older corpus state; the sanity gate for THIS measurement is the
+189/1,245 + 226/724 reproduction, which passed exactly.)
+
+### M8 — wall-clock bound
+
+AFTER (debug) full index of crew: 4.05 s wall. Not comparable to the release BEFORE; recorded as
+a bound only.
+
+### §9 bench gate (FEAS-6)
+
+`CARGO_TARGET_DIR=<lane>/target cargo test -p wicked-estate-bench` → **5 passed; 0 failed;
+0 ignored** (fixture-repo benchmark tests, incl. `footprint_and_speed_within_ceilings`). The full
+agent-eval run over the network-cloned baseline corpus (axios/flask/tree-sitter,
+`bench/src/lib.rs baseline_corpus()`) was NOT executed in this lane — explicit §7 not-yet-true
+item; the studio/crew before/after Calls deltas above (M1–M4b, including the empty Q4b) stand as
+the regression evidence for the capability gate that follows Calls|Imports.
+
+### Verdicts against the lane falsifier (§5)
+
+1. Calls→Import after: 0 ✓ · 2. cross-family Calls after: 0 (same-family 690/41 retained) ✓ ·
+3. `cross_language_estate` green (S2 run) ✓ · 4. rules_bridge_index falsifier FAILS-without/
+PASSES-with the slice line ✓ · 5. `cargo test -p wicked-estate-resolve`: 75 unit + 4 scip +
+1 lsp_live + 2 doc, **0 ignored** ✓ · 6. removed-sample: 20/20 wrong, no regression-class loss ✓ ·
+7. added edges: 0, sample vacuous ✓ · 8. BEFORE reproduced 189/1,245 and 226/724 exactly ✓.

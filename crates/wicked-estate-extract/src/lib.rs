@@ -153,11 +153,23 @@ pub struct LanguageSpec {
     pub tier: ExtractTier,
     #[serde(default)]
     pub caps: Vec<ExtractCap>,
+    /// Language family for the resolvers' cross-family guard (D5). Languages sharing a family
+    /// may bind each other's symbols (typescript/tsx/javascript/svelte/vue = `"javascript"`).
+    /// Absent ⇒ the language is its own family (see [`LanguageSpec::family`]).
+    #[serde(default)]
+    pub family: Option<String>,
 }
 
 impl LanguageSpec {
     pub fn supports(&self, cap: ExtractCap) -> bool {
         self.caps.contains(&cap)
+    }
+
+    /// The language family: the explicit `family` manifest field, or the language's own name.
+    /// Every manifest language therefore HAS a family; only languages absent from the manifest
+    /// (mainframe extractors, synthetic tags) have none — the resolver guard allows those.
+    pub fn family(&self) -> &str {
+        self.family.as_deref().unwrap_or(&self.name)
     }
 }
 
@@ -255,5 +267,30 @@ mod tests {
             by_extension(".py").map(|l| l.name),
             Some("python".to_string())
         );
+    }
+
+    /// D14: the JS-family languages share ONE family (so tsx↔typescript edges survive the
+    /// cross-family guard, and svelte/vue script-block callables stay bindable from TS/JS),
+    /// while html is deliberately its OWN family (a TS Calls ref must not bind into markup).
+    /// This test is the guard against a manifest regeneration dropping the `family` field.
+    #[test]
+    fn js_family_languages_share_one_family() {
+        let r = registry();
+        let fam = |name: &str| {
+            r.iter()
+                .find(|l| l.name == name)
+                .unwrap_or_else(|| panic!("language {name} must be in the manifest"))
+                .family()
+                .to_string()
+        };
+        for lang in ["typescript", "tsx", "javascript", "svelte", "vue"] {
+            assert_eq!(
+                fam(lang),
+                "javascript",
+                "{lang} must be in the javascript family"
+            );
+        }
+        assert_eq!(fam("html"), "html", "html must be its own family (D14)");
+        assert_ne!(fam("html"), fam("typescript"));
     }
 }

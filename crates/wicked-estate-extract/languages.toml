@@ -252,6 +252,7 @@ ext = ["js", "jsx", "mjs", "cjs"]
 grammar = "tree-sitter-javascript"
 tier = "structural"
 caps = ["symbols", "calls", "imports"]
+family = "javascript"
 
 [[language]]
 name = "julia"
@@ -470,6 +471,7 @@ ext = ["svelte"]
 grammar = "arborium-svelte"
 tier = "structural"
 caps = ["symbols"]
+family = "javascript"
 
 [[language]]
 name = "swift"
@@ -491,6 +493,7 @@ ext = ["tsx"]
 grammar = "tree-sitter-tsx"
 tier = "structural"
 caps = ["symbols", "calls", "imports", "extends", "implements"]
+family = "javascript"
 
 [[language]]
 name = "typescript"
@@ -498,6 +501,7 @@ ext = ["ts"]
 grammar = "tree-sitter-typescript"
 tier = "structural"
 caps = ["symbols", "calls", "imports", "extends", "implements"]
+family = "javascript"
 
 [[language]]
 name = "udev"
@@ -526,6 +530,7 @@ ext = ["vue"]
 grammar = "arborium-vue"
 tier = "structural"
 caps = ["symbols"]
+family = "javascript"
 
 [[language]]
 name = "xml"

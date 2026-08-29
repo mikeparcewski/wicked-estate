@@ -24,7 +24,7 @@ swappable impl behind a seam. This is why the work fanned out safely in parallel
 |---|---|
 | `wicked-estate-core` | Types + the five traits + the GraphStore **conformance kit** (the spine) |
 | `wicked-estate-extract` | `Extractor` impls — tree-sitter (91 langs) + grammar-less line/macro extractors |
-| `wicked-estate-resolve` | `Resolver` impls — name / scoped / import-map / infra / method-synth / SCIP / estate / on-demand LSP |
+| `wicked-estate-resolve` | `Resolver` impls — name / scoped / import-map / infra / rules-bridge / SCIP / estate / on-demand LSP |
 | `wicked-estate-store` | `GraphStore` impls — `MemStore` (reference) + `SqliteStore` (default) |
 | `wicked-estate-rank` | `Ranker` — personalized PageRank over CALLS/IMPORTS |
 | `wicked-estate-retrieve` | `RetrievalTool` impls — the agent-facing query API + RRF hybrid + embedders |
@@ -170,7 +170,6 @@ a `SymbolIndex` and emit confidence-rated `Edge`s. `resolve_all` runs a cascade 
 - `ScopedNameResolver` ✅ — prefers same-file then same-directory candidate (records the reason in edge metadata).
 - `ImportMapResolver` ✅ — uses the per-file import map (`UnresolvedRef.hints["imports"]`) to cut same-name ambiguity.
 - `InfraResolver` ✅ — resolves IaC/tfstate resource refs (resource-to-resource only).
-- `MethodResolutionSynthesizer` ✅ — AST-based call-site synthesizer at Heuristic tier (only when exactly one callable candidate).
 - `scip_edges()` ✅ — ingests a SCIP index (`index.scip`), correlates occurrences to nodes, emits **precise** Scip-tier edges (the precise call tier; supersedes TSG per ADR-007).
 - `estate_edges()` ✅ — **cross-domain estate join** (see §7): RACF profiles → datasets / MQ assets by **RACF generic-pattern matching** (`%` / `*` / `**`, most-specific-wins), exact→Parsed, generic→Heuristic.
 - **On-demand LSP** (`lsp.rs`) ✅ — minimal JSON-RPC stdio client driving installed language servers
