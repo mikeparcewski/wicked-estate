@@ -41,7 +41,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use wicked_estate_core::{EdgeKind, GraphRead, Result, SymbolId};
 
-use crate::ranked_symbols;
+use crate::ranked_symbols_unfiltered;
 
 // ─── public types ─────────────────────────────────────────────────────────────
 
@@ -101,8 +101,11 @@ pub fn summarize_communities(
     }
 
     // ── 1. Global PageRank over the whole store (one pass, shared across all communities) ──
+    // Deliberately UNFILTERED (lane relative-imports ATT-INV-3): this is a score LOOKUP for
+    // every community member, not a top-N — the hotspot filter would zero File/Import members
+    // (`unwrap_or(0.0)` below) and degrade Import-heavy communities to id-ordered exemplars.
     let pr_scores: HashMap<SymbolId, f32> = {
-        let pairs = ranked_symbols(store, &[], usize::MAX)?;
+        let pairs = ranked_symbols_unfiltered(store, &[], usize::MAX)?;
         pairs.into_iter().collect()
     };
 

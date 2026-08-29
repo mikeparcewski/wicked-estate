@@ -1516,11 +1516,12 @@ fn main() -> Result<()> {
 
             // Exclude structural-only and rules-engine kinds; keep code-bearing kinds.
             // Namespace/Synthetic/Rule*/Condition/Action/Fact are not user code symbols.
+            // File and Import are NOT listed: important_symbols never returns them — the
+            // ranked_symbols seam filters live results and the cache-read path cleans stale
+            // pre-upgrade caches (lane relative-imports Decision H / BR-1).
             let excluded = [
-                NodeKind::File,
                 NodeKind::Module,
                 NodeKind::Namespace,
-                NodeKind::Import,
                 NodeKind::Constant,
                 NodeKind::Variable,
                 NodeKind::Field,

@@ -1206,9 +1206,20 @@ pub fn important_symbols(store: &dyn GraphStoreMutExt, top_n: usize) -> Result<V
     if let Some(cached) = store.cache_get_key("pagerank.top") {
         if let Ok(ranked) = serde_json::from_str::<Vec<(String, f32)>>(&cached) {
             let mut out = Vec::new();
-            for (sym_str, score) in ranked.into_iter().take(top_n) {
+            for (sym_str, score) in ranked {
+                if out.len() >= top_n {
+                    break;
+                }
                 let id = SymbolId(sym_str);
                 if let Some(node) = store.get_node(&id)? {
+                    // BR-1 (lane relative-imports): a pre-upgrade `pagerank.top` cache on an
+                    // un-reindexed DB still carries File/Import rows (the write path filters
+                    // them now, but old caches persist until a re-index). Clean them at READ
+                    // time so no consumer of important_symbols ever serves one — the
+                    // precondition for graph-view dropping its post-hoc exclusion.
+                    if matches!(node.kind, NodeKind::File | NodeKind::Import) {
+                        continue;
+                    }
                     out.push((node, score));
                 }
             }
@@ -1819,6 +1830,99 @@ mod tests {
         assert!(
             !top.is_empty(),
             "important_symbols must return at least one result"
+        );
+    }
+
+    /// Lane relative-imports S5 (Decision H): after a real index, important_symbols never
+    /// returns a File or Import node — the ranked seam filters live results and the cache
+    /// write is already filtered.
+    #[test]
+    fn important_symbols_has_no_file_or_import_nodes() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("a.ts"),
+            "import { f } from './b';\nexport function g() { return f(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("b.ts"),
+            "export function f() { return 1; }\n",
+        )
+        .unwrap();
+
+        let mut store = MemStore::new();
+        index_path(&mut store, tmp.path()).unwrap();
+
+        let top = important_symbols(&store, 50).unwrap();
+        assert!(!top.is_empty(), "ranked results expected");
+        for (node, _) in &top {
+            assert!(
+                !matches!(node.kind, NodeKind::File | NodeKind::Import),
+                "File/Import must never rank as a hotspot: {:?} {}",
+                node.kind,
+                node.symbol.as_str()
+            );
+        }
+    }
+
+    /// Lane relative-imports S5 (BR-1): a STALE pre-upgrade `pagerank.top` cache containing
+    /// File/Import ids is cleaned at READ time — the ids are never returned and `top_n` is
+    /// still filled from the remaining rows. This is the precondition for graph-view dropping
+    /// its post-hoc exclusion.
+    #[test]
+    fn important_symbols_drops_file_import_from_stale_cache() {
+        use wicked_estate_core::GraphWrite;
+        let mut store = MemStore::new();
+        let file_node = Node::new(
+            wicked_estate_core::Symbol::file("a.ts").id(),
+            NodeKind::File,
+            "a.ts",
+            Language::new("typescript"),
+            Location::new("a.ts", Span::ZERO),
+        );
+        let import_node = Node::new(
+            SymbolId("import:./hub".into()),
+            NodeKind::Import,
+            "./hub",
+            Language::new("typescript"),
+            Location::new("a.ts", Span::ZERO),
+        );
+        let fn_x = Node::new(
+            SymbolId("fn_x".into()),
+            NodeKind::Function,
+            "fn_x",
+            Language::new("typescript"),
+            Location::new("a.ts", Span::ZERO),
+        );
+        let fn_y = Node::new(
+            SymbolId("fn_y".into()),
+            NodeKind::Function,
+            "fn_y",
+            Language::new("typescript"),
+            Location::new("a.ts", Span::ZERO),
+        );
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[file_node.clone(), import_node.clone(), fn_x, fn_y])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        // Hand-seed the cache the way a PRE-upgrade binary wrote it: File/Import rows on top.
+        let stale = serde_json::to_string(&vec![
+            (file_node.symbol.0.clone(), 0.9_f32),
+            (import_node.symbol.0.clone(), 0.8_f32),
+            ("fn_x".to_string(), 0.5_f32),
+            ("fn_y".to_string(), 0.4_f32),
+        ])
+        .unwrap();
+        store.cache_put_key("pagerank.top", &stale);
+
+        let top = important_symbols(&store, 2).unwrap();
+        let ids: Vec<&str> = top.iter().map(|(n, _)| n.symbol.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["fn_x", "fn_y"],
+            "stale File/Import cache rows skipped, top_n filled from the remaining rows"
         );
     }
 
