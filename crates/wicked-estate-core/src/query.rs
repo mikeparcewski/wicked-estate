@@ -77,13 +77,17 @@ impl Subgraph {
     /// locked "follow every dependency edge kind" decision, `TraversalSpec::blast_radius`);
     /// this classifies the RESULT:
     ///
-    /// - **Non-File start**: keep a File node iff this subgraph holds a `Contains` edge from it
-    ///   to a reached non-File node. The start's own containing file and every caller's
+    /// - **Non-File start**: keep a File node iff this subgraph holds ANY non-`Imports` edge
+    ///   whose source is that File. The start's own containing file and every caller's
     ///   containing file pass (their `Contains` edge to the start/caller is walked, so it is in
-    ///   `edges`); a File reached only through File→File import edges has no such edge here and
-    ///   is dropped. This is exact HEAD-parity for symbol starts: before File→File edges
-    ///   existed, every File in a dependents subgraph was reached via `Contains` — see
-    ///   docs/recon/relative-imports.md Decision G (FEAS-1).
+    ///   `edges`); a file with FILE-SCOPE call sites (a test file whose top-level code calls
+    ///   the start — the ref's `from` is the File symbol itself) passes via its `Calls` edge;
+    ///   a File reached only through File→File import edges has no such edge here and is
+    ///   dropped. This is exact pre-File→File-edge parity for symbol starts: every File in a
+    ///   HEAD dependents subgraph was reached through some non-`Imports` edge it is the source
+    ///   of, and that edge is always collected once its target is visited — see
+    ///   docs/recon/relative-imports.md Decision G (FEAS-1; the first contains-only cut of
+    ///   this rule dropped file-scope callers, caught by the cross-binary §5 gate).
     /// - **File start** (`start_kind = Some(NodeKind::File)`): keep everything — the importing
     ///   files ARE the blast radius of a file.
     ///
@@ -93,19 +97,15 @@ impl Subgraph {
         if matches!(start_kind, Some(NodeKind::File)) {
             return self.nodes.iter().filter(|n| &n.symbol != start).collect();
         }
-        // Non-File nodes reached by the walk (the start included — its containing file's
-        // Contains edge targets the start itself).
-        let non_file: std::collections::HashSet<&str> = self
-            .nodes
-            .iter()
-            .filter(|n| !matches!(n.kind, NodeKind::File))
-            .map(|n| n.symbol.as_str())
-            .collect();
-        // Files with a Contains edge (in THIS subgraph) to a reached non-File node.
-        let contains_holding: std::collections::HashSet<&str> = self
+        // Files that are the SOURCE of any walked non-Imports edge (Contains to a reached
+        // symbol, a file-scope Calls/References site, an estate `uses`/`accesses` edge …).
+        // Every edge in `self.edges` was collected because its target is a visited node, so
+        // source membership here is exactly "this File depends on something reached by a
+        // dependency kind other than a file import".
+        let dependency_files: std::collections::HashSet<&str> = self
             .edges
             .iter()
-            .filter(|e| e.kind == EdgeKind::Contains && non_file.contains(e.target.as_str()))
+            .filter(|e| e.kind != EdgeKind::Imports)
             .map(|e| e.source.as_str())
             .collect();
         self.nodes
@@ -115,7 +115,7 @@ impl Subgraph {
                     return false;
                 }
                 match n.kind {
-                    NodeKind::File => contains_holding.contains(n.symbol.as_str()),
+                    NodeKind::File => dependency_files.contains(n.symbol.as_str()),
                     _ => true,
                 }
             })
@@ -275,6 +275,44 @@ mod code_dependents_tests {
         assert!(
             deps.is_empty(),
             "transit File dropped under the contains rule even without a start kind"
+        );
+    }
+
+    /// A file whose FILE-SCOPE code calls the start (the extractor attributes top-level call
+    /// sites to the File symbol itself — every test file does this) is a genuine dependent at
+    /// HEAD via its Calls edge and must be KEPT; the first contains-only rule dropped it
+    /// (caught by the cross-binary §5 gate on wicked-studio: 27 test files vanished from
+    /// apiBase's blast radius).
+    #[test]
+    fn symbol_start_keeps_file_scope_caller_files() {
+        let sym_f = SymbolId("f".into());
+        let file_test = Symbol::file("tests/x.test.ts").id();
+        let file_transit = Symbol::file("t.ts").id();
+        let sub = Subgraph {
+            nodes: vec![
+                node(&sym_f, NodeKind::Function, "b.ts"),
+                node(&file_test, NodeKind::File, "tests/x.test.ts"),
+                node(&file_transit, NodeKind::File, "t.ts"),
+            ],
+            edges: vec![
+                // top-level `apiBase()` in the test file: Calls with the FILE as source
+                edge(&file_test, &sym_f, EdgeKind::Calls),
+                // and the same file also imports the start's file — must not demote it
+                edge(&file_test, &Symbol::file("b.ts").id(), EdgeKind::Imports),
+                edge(&file_transit, &Symbol::file("b.ts").id(), EdgeKind::Imports),
+            ],
+            depths: Default::default(),
+            truncated: false,
+        };
+        let deps = sub.code_dependents(&sym_f, Some(&NodeKind::Function));
+        let ids: Vec<&str> = deps.iter().map(|n| n.symbol.as_str()).collect();
+        assert!(
+            ids.contains(&file_test.as_str()),
+            "a file-scope caller File is a real dependent and stays: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&file_transit.as_str()),
+            "an import-only transit File is still dropped: {ids:?}"
         );
     }
 }
