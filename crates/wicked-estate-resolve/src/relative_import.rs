@@ -1053,7 +1053,9 @@ mod resolver_tests {
         let relative = resolver();
         let low = LowConfImportsResolver;
         let resolvers: &[&dyn Resolver] = &[&low, &relative];
-        let edges = resolve_all_with_coverage(resolvers, &[rel_ref("src/main.ts", "./w")], &index).unwrap().edges;
+        let edges = resolve_all_with_coverage(resolvers, &[rel_ref("src/main.ts", "./w")], &index)
+            .unwrap()
+            .edges;
         assert_eq!(edges.len(), 1, "one deduped edge: {edges:?}");
         assert_eq!(edges[0].resolved_by, RELATIVE_IMPORT_RESOLVER_ID);
         assert!((edges[0].confidence.get() - 0.9).abs() < 1e-6);

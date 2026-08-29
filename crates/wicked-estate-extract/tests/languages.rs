@@ -1471,4 +1471,3 @@ fn cpp_out_of_line_member_vs_free_function_collision_known_defect() {
          Flip this half to assert distinct ids."
     );
 }
-

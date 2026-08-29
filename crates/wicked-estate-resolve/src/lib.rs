@@ -1510,7 +1510,9 @@ mod tests {
         };
 
         let resolvers: &[&dyn Resolver] = &[&NameResolver, &ScopedNameResolver];
-        let edges = resolve_all_with_coverage(resolvers, &[r], &index).unwrap().edges;
+        let edges = resolve_all_with_coverage(resolvers, &[r], &index)
+            .unwrap()
+            .edges;
 
         // Exactly one deduplicated edge.
         assert_eq!(edges.len(), 1, "dedup should yield one edge");
@@ -1733,7 +1735,9 @@ mod tests {
 
         let resolvers: &[&dyn wicked_estate_core::Resolver] =
             &[&NameResolver, &ScopedNameResolver, &ImportMapResolver];
-        let edges = resolve_all_with_coverage(resolvers, &[r], &index).unwrap().edges;
+        let edges = resolve_all_with_coverage(resolvers, &[r], &index)
+            .unwrap()
+            .edges;
 
         assert_eq!(edges.len(), 1, "expected exactly one deduplicated edge");
         assert_eq!(
@@ -1781,7 +1785,9 @@ mod tests {
         ];
 
         let resolvers: &[&dyn Resolver] = &[&NameResolver];
-        let mut edges = resolve_all_with_coverage(resolvers, &refs, &index).unwrap().edges;
+        let mut edges = resolve_all_with_coverage(resolvers, &refs, &index)
+            .unwrap()
+            .edges;
         edges.sort_by_key(|e| e.target.0.clone());
 
         assert_eq!(edges.len(), 2, "two distinct edges should be preserved");
@@ -1836,7 +1842,9 @@ mod tests {
 
         // Run low-confidence first.
         let resolvers_lo_hi: &[&dyn Resolver] = &[&low, &high];
-        let edges = resolve_all_with_coverage(resolvers_lo_hi, &[], &index).unwrap().edges;
+        let edges = resolve_all_with_coverage(resolvers_lo_hi, &[], &index)
+            .unwrap()
+            .edges;
         assert_eq!(edges.len(), 1);
         assert!(
             (edges[0].confidence.get() - 0.9).abs() < 1e-6,
@@ -1845,7 +1853,9 @@ mod tests {
 
         // Run high-confidence first.
         let resolvers_hi_lo: &[&dyn Resolver] = &[&high, &low];
-        let edges2 = resolve_all_with_coverage(resolvers_hi_lo, &[], &index).unwrap().edges;
+        let edges2 = resolve_all_with_coverage(resolvers_hi_lo, &[], &index)
+            .unwrap()
+            .edges;
         assert_eq!(edges2.len(), 1);
         assert!(
             (edges2[0].confidence.get() - 0.9).abs() < 1e-6,
@@ -2120,7 +2130,9 @@ mod tests {
         ];
 
         let resolvers: &[&dyn Resolver] = &[&NameResolver, &InfraResolver];
-        let mut edges = resolve_all_with_coverage(resolvers, &refs, &index).unwrap().edges;
+        let mut edges = resolve_all_with_coverage(resolvers, &refs, &index)
+            .unwrap()
+            .edges;
         edges.sort_by_key(|e| e.source.0.clone());
 
         assert_eq!(
@@ -2878,7 +2890,6 @@ mod tests {
         assert_eq!(res.unresolved.len(), 1, "but it binds nothing");
     }
 
-
     /// Studio `p` shape: a deny-listed html type_alias homonym shadows a same-family tsx
     /// function. Dropping the type_alias pre-uniqueness is the INTENDED recovery → exactly one
     /// new name-resolver edge at 0.60.
@@ -3072,8 +3083,12 @@ mod tests {
             &UniqueCallableHeuristic,
         ];
 
-        let mut a = resolve_all_with_coverage(base, &refs, &index).unwrap().edges;
-        let mut b = resolve_all_with_coverage(with_synth, &refs, &index).unwrap().edges;
+        let mut a = resolve_all_with_coverage(base, &refs, &index)
+            .unwrap()
+            .edges;
+        let mut b = resolve_all_with_coverage(with_synth, &refs, &index)
+            .unwrap()
+            .edges;
         let key = |e: &Edge| {
             (
                 e.source.to_string(),
@@ -3111,7 +3126,9 @@ mod tests {
             &[&UniqueCallableHeuristic as &dyn Resolver, &NameResolver] as &[&dyn Resolver],
             &[&NameResolver as &dyn Resolver, &UniqueCallableHeuristic],
         ] {
-            let edges = resolve_all_with_coverage(resolvers, std::slice::from_ref(&r), &index).unwrap().edges;
+            let edges = resolve_all_with_coverage(resolvers, std::slice::from_ref(&r), &index)
+                .unwrap()
+                .edges;
             assert_eq!(edges.len(), 1, "dedup must yield one edge");
             assert_eq!(edges[0].target, target.symbol);
             assert_eq!(
