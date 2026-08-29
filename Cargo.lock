@@ -10309,7 +10309,6 @@ dependencies = [
 name = "wicked-estate-resolve"
 version = "0.15.0"
 dependencies = [
- "libc",
  "protobuf",
  "scip",
  "serde",

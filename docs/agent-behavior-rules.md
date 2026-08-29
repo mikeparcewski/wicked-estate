@@ -36,6 +36,12 @@ Embed `commits_behind` (git rev-list since DB mtime) in every response's `diagno
 When the agent must read files because the graph couldn't answer, emit a visible `GRAPH-FALLBACK:`
 marker and count it. Fallback rate is the coverage-gap KPI (prior art Rule 31, W7.3).
 
+Sibling markers for the edit-plane LSP tools (ADR-009, same channel, same loudness rule):
+`LSP-FALLBACK:` when a missing language server makes the tool serve labeled graph results
+instead of live LSP answers, and `LSP-TRUNCATED: <served>/<total>` when a References answer
+was capped (R4). Both ride `RetrievalResult.diagnostics` (MCP) / an additive JSON field
+(CLI) — never extra stdout lines, never stderr.
+
 ## R7 — Confidence is visible, low-confidence is labeled
 Heuristic/low-confidence edges must be marked so the agent weighs them appropriately; never present
 a 0.5-confidence synthesized edge as if it were a 1.0 SCIP fact.

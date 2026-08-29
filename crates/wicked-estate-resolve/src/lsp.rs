@@ -33,15 +33,26 @@
 //!
 //! ## Timeout
 //!
-//! Reads use a 10-second per-request timeout via `set_read_timeout` on the stdout pipe's
-//! underlying fd. This prevents hangs on a slow or crashed server.
+//! A dedicated reader thread (the *frame pump*) owns the server's stdout, parses complete
+//! Content-Length frames, and hands each parsed message over a **bounded** `mpsc` channel
+//! (backpressure caps memory under a flooding server). Every request computes a **deadline**
+//! (`now + budget`, default 10s, injectable via [`LspClient::spawn_with_timeout`] /
+//! [`LspTier::with_timeout`]) once; each receive first checks the wall clock against the
+//! deadline (a queued frame never extends a request past it) and then waits only for the
+//! *remaining* time — so a chatty server that streams notifications but never answers, even
+//! gap-free, still errs at the deadline. The mechanism is pure std and identical on Unix and
+//! Windows. On a timeout the child is killed and (in [`LspTier`]) the client is evicted, because
+//! a transport that timed out can no longer be trusted. Known limit: writes (`stdin.write_all`)
+//! are not yet bounded — a server that stops *reading* can still stall a very large payload
+//! (W3.6 implementation concern, see ADR-009).
 
 use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Read, Write},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::atomic::{AtomicI64, Ordering},
-    time::Duration,
+    sync::mpsc::{self, Receiver, RecvTimeoutError},
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -122,6 +133,27 @@ pub(crate) fn encode_notification(method: &str, params: Value) -> Vec<u8> {
     out
 }
 
+/// Encode a JSON-RPC **response** (to a server→client request) with LSP framing.
+/// `id` echoes the server's request id verbatim.
+pub(crate) fn encode_response(id: &Value, result: Value) -> Vec<u8> {
+    #[derive(Serialize)]
+    struct Resp<'a> {
+        jsonrpc: &'a str,
+        id: &'a Value,
+        result: Value,
+    }
+    let body = serde_json::to_vec(&Resp {
+        jsonrpc: "2.0",
+        id,
+        result,
+    })
+    .expect("response serialization is infallible");
+    let header = format!("Content-Length: {}\r\n\r\n", body.len());
+    let mut out = header.into_bytes();
+    out.extend_from_slice(&body);
+    out
+}
+
 /// Read one framed message from `reader`.
 ///
 /// Parses `Content-Length: N\r\n\r\n` then reads exactly N bytes.  Skips any
@@ -158,86 +190,137 @@ pub(crate) fn read_frame<R: BufRead>(reader: &mut R) -> Result<Vec<u8>> {
 
 // ── transport ─────────────────────────────────────────────────────────────────
 
-/// Low-level framing transport over a server's stdio pipes.
-struct RpcTransport {
-    stdin: ChildStdin,
-    reader: BufReader<TimeoutReader>,
-}
+/// Default per-request budget. Injectable via [`LspClient::spawn_with_timeout`] and
+/// [`LspTier::with_timeout`].
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Wraps `ChildStdout` with a read timeout using `set_read_timeout` on the
-/// underlying raw fd.  Falls back gracefully if the OS doesn't support it.
-struct TimeoutReader {
-    inner: ChildStdout,
-}
+/// Frame-pump channel bound. A flooding server fills this and then blocks in the pump thread
+/// (backpressure) rather than growing process memory without limit.
+const FRAME_CHANNEL_BOUND: usize = 64;
 
-impl TimeoutReader {
-    fn new(stdout: ChildStdout, timeout: Duration) -> Self {
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let fd = stdout.as_raw_fd();
-            // Convert to a TcpStream-compatible struct to reuse set_read_timeout.
-            // We use setsockopt directly via libc or the nix crate — but to avoid extra deps
-            // we use the `timeval` approach via unsafe.
-            let tv = libc::timeval {
-                tv_sec: timeout.as_secs() as libc::time_t,
-                tv_usec: timeout.subsec_micros() as libc::suseconds_t,
-            };
-            unsafe {
-                libc::setsockopt(
-                    fd,
-                    libc::SOL_SOCKET,
-                    libc::SO_RCVTIMEO,
-                    &tv as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::timeval>() as libc::socklen_t,
-                );
+/// Spawn the frame-pump thread: it owns the read side, parses complete Content-Length frames,
+/// and sends each parsed message over the returned channel. Frames are parsed *in the thread*,
+/// so a caller-side timeout never leaves a half-read frame in a caller-visible buffer.
+///
+/// The thread exits when the stream ends/errs (the terminal `Err` is forwarded once) or when
+/// the receiving transport is dropped (the `send` fails).
+fn spawn_frame_pump<R: Read + Send + 'static>(reader: R) -> Receiver<Result<Vec<u8>>> {
+    // Bounded: a flooding server blocks the pump (backpressure into the OS pipe buffer)
+    // instead of growing the channel without limit. The consumer never blocks on `send`,
+    // so this cannot deadlock; a dropped receiver still unblocks `send` with `Err`.
+    let (tx, rx) = mpsc::sync_channel(FRAME_CHANNEL_BOUND);
+    std::thread::Builder::new()
+        .name("lsp-frame-pump".into())
+        .spawn(move || {
+            let mut reader = BufReader::new(reader);
+            loop {
+                match read_frame(&mut reader) {
+                    Ok(frame) => {
+                        if tx.send(Ok(frame)).is_err() {
+                            return; // transport dropped — stop pumping
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        return; // EOF or framing error — the stream is done either way
+                    }
+                }
             }
-            let _ = timeout; // suppress unused warning in fallback path
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (timeout,); // not implemented on non-unix; reads may block
-        }
-        TimeoutReader { inner: stdout }
-    }
+        })
+        .expect("spawning the LSP frame-pump thread must not fail");
+    rx
 }
 
-impl Read for TimeoutReader {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.inner.read(buf)
-    }
+/// Low-level framing transport over a server's stdio pipes.
+///
+/// Reading goes through the frame pump (see [`spawn_frame_pump`]); every receive is bounded by
+/// a per-request deadline computed once in [`RpcTransport::await_response`].
+struct RpcTransport {
+    writer: Box<dyn Write + Send>,
+    frames: Receiver<Result<Vec<u8>>>,
+    timeout: Duration,
 }
 
 impl RpcTransport {
-    fn new(stdin: ChildStdin, stdout: ChildStdout) -> Self {
-        let timeout = Duration::from_secs(10);
-        let reader = BufReader::new(TimeoutReader::new(stdout, timeout));
-        RpcTransport { stdin, reader }
+    fn new<W, R>(writer: W, reader: R, timeout: Duration) -> Self
+    where
+        W: Write + Send + 'static,
+        R: Read + Send + 'static,
+    {
+        RpcTransport {
+            writer: Box::new(writer),
+            frames: spawn_frame_pump(reader),
+            timeout,
+        }
     }
 
     /// Send a framed request and return the raw JSON body of the response (skips notifications).
     fn send_and_receive(&mut self, id: i64, method: &str, params: Value) -> Result<Value> {
         let frame = encode_request(id, method, params);
-        self.stdin.write_all(&frame)?;
-        self.stdin.flush()?;
+        self.writer.write_all(&frame)?;
+        self.writer.flush()?;
         self.await_response(id)
     }
 
     /// Send a notification (fire-and-forget — no response expected).
     fn send_notification(&mut self, method: &str, params: Value) -> Result<()> {
         let frame = encode_notification(method, params);
-        self.stdin.write_all(&frame)?;
-        self.stdin.flush()?;
+        self.writer.write_all(&frame)?;
+        self.writer.flush()?;
         Ok(())
     }
 
-    /// Read frames, skipping notifications, until a response for `expected_id` arrives.
+    /// Receive the next parsed frame, waiting no longer than the remaining time to `deadline`.
+    ///
+    /// The deadline is checked against the wall clock BEFORE touching the channel: a queued
+    /// frame must never extend a request past its deadline. Without this check,
+    /// `recv_timeout(ZERO)` returns `Ok` whenever a frame is already buffered, so a server
+    /// emitting gap-free notifications (the channel permanently non-empty) would bypass the
+    /// deadline entirely and hang `await_response` forever.
+    fn recv_frame_by(&self, deadline: Instant) -> Result<Vec<u8>> {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(Error::Resolution(format!(
+                "LSP: request timed out after {:?}",
+                self.timeout
+            )));
+        }
+        match self.frames.recv_timeout(deadline - now) {
+            Ok(frame) => frame,
+            Err(RecvTimeoutError::Timeout) => Err(Error::Resolution(format!(
+                "LSP: request timed out after {:?}",
+                self.timeout
+            ))),
+            Err(RecvTimeoutError::Disconnected) => Err(Error::Resolution(
+                "LSP: reader thread terminated (server stdout closed)".into(),
+            )),
+        }
+    }
+
+    /// Read frames, skipping notifications, until a response for `expected_id` arrives — or the
+    /// per-request deadline passes. The deadline is computed ONCE per request: notification
+    /// frames arriving in between never restart the clock.
     fn await_response(&mut self, expected_id: i64) -> Result<Value> {
+        let deadline = Instant::now() + self.timeout;
         loop {
-            let raw = read_frame(&mut self.reader)?;
+            let raw = self.recv_frame_by(deadline)?;
             let v: Value = serde_json::from_slice(&raw)?;
 
-            // If the message has no `id` field it is a server-pushed notification — skip.
+            // Any message carrying `method` is never our response: either a server-pushed
+            // notification (no id — skip) or a server→client REQUEST (id + method — reply,
+            // so spec-compliant servers don't stall waiting on us). Without this guard a
+            // server request whose id collides with ours deserializes as our response with
+            // `result` defaulting to Null — a silent false "no definition".
+            if let Some(method) = v.get("method").and_then(Value::as_str) {
+                if let Some(req_id) = v.get("id") {
+                    let req_id = req_id.clone();
+                    let method = method.to_string();
+                    self.reply_to_server_request(&req_id, &method, v.get("params"))?;
+                }
+                continue;
+            }
+
+            // No `method`, no `id`: malformed — skip tolerantly.
             if v.get("id").is_none() {
                 continue;
             }
@@ -263,9 +346,79 @@ impl RpcTransport {
             return Ok(resp.result);
         }
     }
+
+    /// Reply to a server→client request: `null` for everything except
+    /// `workspace/configuration`, which per LSP 3.17 must receive an **array with one
+    /// element per requested item** — a bare `null` there is spec-invalid and can stall
+    /// pyright right after `didOpen`.
+    fn reply_to_server_request(
+        &mut self,
+        id: &Value,
+        method: &str,
+        params: Option<&Value>,
+    ) -> Result<()> {
+        let result = if method == "workspace/configuration" {
+            let n = params
+                .and_then(|p| p.get("items"))
+                .and_then(Value::as_array)
+                .map(|items| items.len())
+                .unwrap_or(1);
+            Value::Array(vec![Value::Null; n])
+        } else {
+            Value::Null
+        };
+        let frame = encode_response(id, result);
+        self.writer.write_all(&frame)?;
+        self.writer.flush()?;
+        Ok(())
+    }
+}
+
+/// True when `err` means the transport itself can no longer be trusted (timeout, closed or
+/// desynced stream, I/O failure) — as opposed to a server-delivered error response
+/// (`LSP error <code>: …`) or a local precondition failure (`server not available`, unreadable
+/// file), after which the connection remains healthy. All matched strings are minted in this
+/// module.
+fn is_transport_fatal(err: &Error) -> bool {
+    match err {
+        Error::Io(_) | Error::Json(_) => true,
+        _ => {
+            let msg = err.to_string();
+            msg.contains("LSP: request timed out")
+                || msg.contains("LSP: reader thread terminated")
+                || msg.contains("LSP: server closed stdout")
+                || msg.contains("LSP: framing error")
+        }
+    }
 }
 
 // ── server registry ───────────────────────────────────────────────────────────
+
+/// Grammar-name → LSP `languageId` for the rows where they differ (identity otherwise).
+/// DATA next to the registry (rules-as-data); moves wholesale into the W3.6 registry data
+/// file (ADR-009). LSP requires e.g. `typescriptreact` for `.tsx` documents — announcing
+/// `typescript` makes tsserver mis-parse JSX.
+const LANGUAGE_ID_OVERRIDES: &[(&str, &str)] =
+    &[("tsx", "typescriptreact"), ("jsx", "javascriptreact")];
+
+/// The LSP-standard `languageId` for a tree-sitter grammar name.
+pub fn lsp_language_id(grammar: &str) -> &str {
+    LANGUAGE_ID_OVERRIDES
+        .iter()
+        .find(|(g, _)| *g == grammar)
+        .map(|(_, l)| *l)
+        .unwrap_or(grammar)
+}
+
+/// One registry row: how to launch a language's server and which LSP `languageId` to
+/// announce in `textDocument/didOpen` for its documents.
+#[derive(Debug, Clone)]
+pub struct ServerEntry {
+    pub binary: String,
+    pub args: Vec<String>,
+    /// LSP-standard languageId (differs from the grammar name for tsx/jsx).
+    pub language_id: String,
+}
 
 /// Maps tree-sitter grammar language names → server invocation command.
 ///
@@ -273,8 +426,8 @@ impl RpcTransport {
 /// from `PATH`.
 #[derive(Debug, Clone)]
 pub struct ServerRegistry {
-    /// language → (binary, args)
-    entries: HashMap<String, (String, Vec<String>)>,
+    /// language → registry row.
+    entries: HashMap<String, ServerEntry>,
 }
 
 impl Default for ServerRegistry {
@@ -287,41 +440,31 @@ impl ServerRegistry {
     /// The built-in registry: TypeScript/JavaScript, Rust, Python.
     pub fn standard() -> Self {
         let mut entries = HashMap::new();
+        for lang in ["typescript", "tsx", "javascript", "jsx"] {
+            entries.insert(
+                lang.to_string(),
+                ServerEntry {
+                    binary: "typescript-language-server".to_string(),
+                    args: vec!["--stdio".to_string()],
+                    language_id: lsp_language_id(lang).to_string(),
+                },
+            );
+        }
         entries.insert(
-            "typescript".to_string(),
-            (
-                "typescript-language-server".to_string(),
-                vec!["--stdio".to_string()],
-            ),
+            "rust".to_string(),
+            ServerEntry {
+                binary: "rust-analyzer".to_string(),
+                args: vec![],
+                language_id: "rust".to_string(),
+            },
         );
-        entries.insert(
-            "tsx".to_string(),
-            (
-                "typescript-language-server".to_string(),
-                vec!["--stdio".to_string()],
-            ),
-        );
-        entries.insert(
-            "javascript".to_string(),
-            (
-                "typescript-language-server".to_string(),
-                vec!["--stdio".to_string()],
-            ),
-        );
-        entries.insert(
-            "jsx".to_string(),
-            (
-                "typescript-language-server".to_string(),
-                vec!["--stdio".to_string()],
-            ),
-        );
-        entries.insert("rust".to_string(), ("rust-analyzer".to_string(), vec![]));
         entries.insert(
             "python".to_string(),
-            (
-                "pyright-langserver".to_string(),
-                vec!["--stdio".to_string()],
-            ),
+            ServerEntry {
+                binary: "pyright-langserver".to_string(),
+                args: vec!["--stdio".to_string()],
+                language_id: "python".to_string(),
+            },
         );
         ServerRegistry { entries }
     }
@@ -329,18 +472,30 @@ impl ServerRegistry {
     /// Look up the binary + args for `language`. Returns `None` when the language is not
     /// registered or the binary is not on PATH.
     pub fn command_for(&self, language: &str) -> Option<(String, Vec<String>)> {
-        let (bin, args) = self.entries.get(language)?;
-        if probe_binary(bin) {
-            Some((bin.clone(), args.clone()))
+        let entry = self.entries.get(language)?;
+        if probe_binary(&entry.binary) {
+            Some((entry.binary.clone(), entry.args.clone()))
         } else {
             None
         }
     }
 
-    /// Register a custom language server. Replaces an existing entry.
+    /// The LSP `languageId` to announce for `language`'s documents, if registered.
+    pub fn language_id_for(&self, language: &str) -> Option<&str> {
+        self.entries.get(language).map(|e| e.language_id.as_str())
+    }
+
+    /// Register a custom language server. Replaces an existing entry. The `languageId`
+    /// is derived from the grammar name via [`lsp_language_id`].
     pub fn register(&mut self, language: &str, binary: &str, args: Vec<String>) {
-        self.entries
-            .insert(language.to_string(), (binary.to_string(), args));
+        self.entries.insert(
+            language.to_string(),
+            ServerEntry {
+                binary: binary.to_string(),
+                args,
+                language_id: lsp_language_id(language).to_string(),
+            },
+        );
     }
 }
 
@@ -361,17 +516,36 @@ fn probe_binary(bin: &str) -> bool {
 /// A running LSP server connection. Spawned once per [`LspTier`] lookup; kept alive for the
 /// duration of a query session.
 pub struct LspClient {
-    _child: Child,
+    child: Child,
     transport: RpcTransport,
     /// The root URI the server was initialized against.
     root_uri: String,
+    /// Set once the child has been killed — `Drop` then skips the graceful shutdown.
+    dead: bool,
+    /// didOpen cache: file URI → content digest. Owned by the client (not the tier) so
+    /// eviction drops it with the client — a respawned server re-opens documents naturally
+    /// instead of inheriting stale "already open" claims.
+    open_docs: HashMap<String, u64>,
 }
 
 impl LspClient {
-    /// Spawn the server, perform `initialize` + `initialized` handshake, and return a ready client.
+    /// Spawn the server, perform `initialize` + `initialized` handshake, and return a ready
+    /// client, with the default per-request budget ([`DEFAULT_TIMEOUT`]).
     ///
     /// `root_dir` is the absolute path to the workspace root (passed as `rootUri`).
     pub fn spawn(binary: &str, args: &[String], root_dir: &str) -> Result<Self> {
+        Self::spawn_with_timeout(binary, args, root_dir, DEFAULT_TIMEOUT)
+    }
+
+    /// [`LspClient::spawn`] with an explicit per-request budget. The budget bounds every
+    /// response wait, including the `initialize` handshake — a wedged server is killed and
+    /// reaped before this returns `Err`.
+    pub fn spawn_with_timeout(
+        binary: &str,
+        args: &[String],
+        root_dir: &str,
+        timeout: Duration,
+    ) -> Result<Self> {
         let mut child = Command::new(binary)
             .args(args)
             .stdin(Stdio::piped())
@@ -382,14 +556,31 @@ impl LspClient {
 
         let stdin = child.stdin.take().expect("stdin piped");
         let stdout = child.stdout.take().expect("stdout piped");
-        let mut transport = RpcTransport::new(stdin, stdout);
+        let transport = RpcTransport::new(stdin, stdout, timeout);
 
         let root_uri = path_to_file_uri(root_dir);
+        let mut client = LspClient {
+            child,
+            transport,
+            root_uri,
+            dead: false,
+            open_docs: HashMap::new(),
+        };
 
+        if let Err(e) = client.handshake() {
+            // Wedged or broken server — no graceful shutdown, just kill + reap.
+            client.kill();
+            return Err(e);
+        }
+        Ok(client)
+    }
+
+    /// `initialize` request + `initialized` notification.
+    fn handshake(&mut self) -> Result<()> {
         let id = next_id();
         let init_params = serde_json::json!({
             "processId": std::process::id(),
-            "rootUri": root_uri,
+            "rootUri": self.root_uri,
             "capabilities": {
                 "textDocument": {
                     "definition": { "dynamicRegistration": false },
@@ -402,16 +593,19 @@ impl LspClient {
             },
             "initializationOptions": null
         });
-
-        transport.send_and_receive(id, "initialize", init_params)?;
+        self.transport
+            .send_and_receive(id, "initialize", init_params)?;
         // Fire the `initialized` notification (no response).
-        transport.send_notification("initialized", serde_json::json!({}))?;
+        self.transport
+            .send_notification("initialized", serde_json::json!({}))
+    }
 
-        Ok(LspClient {
-            _child: child,
-            transport,
-            root_uri,
-        })
+    /// Kill the server process immediately (no graceful shutdown) and reap it.
+    /// Used when the transport can no longer be trusted (timeout, desync).
+    fn kill(&mut self) {
+        self.dead = true;
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 
     // ── textDocument/didOpen ──────────────────────────────────────────────────
@@ -432,6 +626,38 @@ impl LspClient {
                 }
             }),
         )
+    }
+
+    /// Ensure the server has the **current** content of `file_uri` open: read the file,
+    /// digest it, and send `textDocument/didOpen` when unseen — or `didClose` + `didOpen`
+    /// when the content changed since it was last opened (minimal correct sync; no
+    /// `didChange` incremental protocol). LSP servers return empty results for unopened
+    /// documents, so every position query must go through here.
+    pub fn ensure_open(&mut self, file_uri: &str, language_id: &str) -> Result<()> {
+        let path = file_uri_to_path(file_uri)?;
+        let text = std::fs::read_to_string(&path).map_err(|e| {
+            Error::Resolution(format!("LSP: cannot read file for didOpen: {path}: {e}"))
+        })?;
+        let digest = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut h);
+            h.finish()
+        };
+        match self.open_docs.get(file_uri) {
+            Some(&d) if d == digest => return Ok(()), // already open with this content
+            Some(_) => {
+                // Content changed on disk since didOpen: close, then reopen below.
+                self.transport.send_notification(
+                    "textDocument/didClose",
+                    serde_json::json!({ "textDocument": { "uri": file_uri } }),
+                )?;
+            }
+            None => {}
+        }
+        self.did_open(file_uri, language_id, &text)?;
+        self.open_docs.insert(file_uri.to_string(), digest);
+        Ok(())
     }
 
     // ── textDocument/definition ───────────────────────────────────────────────
@@ -513,10 +739,17 @@ impl LspClient {
 
 impl Drop for LspClient {
     fn drop(&mut self) {
-        // Best-effort shutdown — ignore errors (child may have already exited).
-        let id = next_id();
-        let _ = self.transport.send_and_receive(id, "shutdown", Value::Null);
-        let _ = self.transport.send_notification("exit", Value::Null);
+        if !self.dead {
+            // Best-effort graceful shutdown, bounded by the per-request budget (the frame pump
+            // makes the response wait finite). Errors ignored — the child may already be gone.
+            let id = next_id();
+            let _ = self.transport.send_and_receive(id, "shutdown", Value::Null);
+            let _ = self.transport.send_notification("exit", Value::Null);
+        }
+        // Reap unconditionally so no child outlives its client (kill on an already-exited
+        // process is a harmless error; wait returns the cached status).
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -550,6 +783,8 @@ pub struct LspTier {
     /// language → live client. Clients are spawned lazily on first use.
     clients: HashMap<String, LspClient>,
     root_dir: String,
+    /// Per-request budget for clients spawned by this tier.
+    timeout: Duration,
 }
 
 impl LspTier {
@@ -559,6 +794,7 @@ impl LspTier {
             registry: ServerRegistry::standard(),
             clients: HashMap::new(),
             root_dir: root_dir.into(),
+            timeout: DEFAULT_TIMEOUT,
         }
     }
 
@@ -568,7 +804,15 @@ impl LspTier {
             registry,
             clients: HashMap::new(),
             root_dir: root_dir.into(),
+            timeout: DEFAULT_TIMEOUT,
         }
+    }
+
+    /// Builder-style override of the per-request budget. Applies to clients spawned after the
+    /// call (existing live clients keep the budget they were spawned with).
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     /// Get-or-spawn the client for `language`. Returns an error if the server is unavailable.
@@ -579,10 +823,45 @@ impl LspTier {
                 self.registry.command_for(language).ok_or_else(|| {
                     Error::Resolution(format!("server not available: no LSP server registered for language '{language}' (or binary not on PATH)"))
                 })?;
-            let client = LspClient::spawn(&bin, &args, &self.root_dir)?;
+            let client = LspClient::spawn_with_timeout(&bin, &args, &self.root_dir, self.timeout)?;
             self.clients.insert(language.to_string(), client);
         }
         Ok(self.clients.get_mut(language).expect("just inserted"))
+    }
+
+    /// If `res` is a transport-fatal error (timeout, closed/desynced stream, I/O failure),
+    /// kill and evict the language's client so the next query respawns a fresh server —
+    /// a client that timed out would otherwise poison every later query on its language.
+    /// Server-delivered error responses and local precondition failures keep the client.
+    fn evict_if_fatal<T>(&mut self, language: &str, res: Result<T>) -> Result<T> {
+        if let Err(e) = &res {
+            if is_transport_fatal(e) {
+                if let Some(mut client) = self.clients.remove(language) {
+                    client.kill();
+                }
+            }
+        }
+        res
+    }
+
+    /// Test-only visibility into the client cache (eviction assertions).
+    #[cfg(test)]
+    fn has_client(&self, language: &str) -> bool {
+        self.clients.contains_key(language)
+    }
+
+    /// Get-or-spawn the client for `language` and make sure `file_uri`'s current content is
+    /// open on it with the registry's `languageId` — LSP servers return empty results for
+    /// unopened documents (the didOpen defect this fixes).
+    fn prepared_client(&mut self, language: &str, file_uri: &str) -> Result<&mut LspClient> {
+        let language_id = self
+            .registry
+            .language_id_for(language)
+            .unwrap_or(language)
+            .to_string();
+        let client = self.client(language)?;
+        client.ensure_open(file_uri, &language_id)?;
+        Ok(client)
     }
 
     // ── public methods ─────────────────────────────────────────────────────────
@@ -595,7 +874,10 @@ impl LspTier {
         line: u32,
         col: u32,
     ) -> Result<Vec<Location>> {
-        self.client(language)?.definition(file_uri, line, col)
+        let res = self
+            .prepared_client(language, file_uri)
+            .and_then(|c| c.definition(file_uri, line, col));
+        self.evict_if_fatal(language, res)
     }
 
     /// Return all reference locations for the symbol at `(line, col)` in `file_uri`.
@@ -607,8 +889,10 @@ impl LspTier {
         col: u32,
         include_declaration: bool,
     ) -> Result<Vec<Location>> {
-        self.client(language)?
-            .references(file_uri, line, col, include_declaration)
+        let res = self
+            .prepared_client(language, file_uri)
+            .and_then(|c| c.references(file_uri, line, col, include_declaration));
+        self.evict_if_fatal(language, res)
     }
 
     /// Return the hover/type info for the symbol at `(line, col)` in `file_uri`.
@@ -619,7 +903,10 @@ impl LspTier {
         line: u32,
         col: u32,
     ) -> Result<Option<HoverResult>> {
-        self.client(language)?.hover(file_uri, line, col)
+        let res = self
+            .prepared_client(language, file_uri)
+            .and_then(|c| c.hover(file_uri, line, col));
+        self.evict_if_fatal(language, res)
     }
 }
 
@@ -721,6 +1008,60 @@ pub fn path_to_file_uri(path: &str) -> String {
     } else {
         // Unix: path always starts with '/'.
         format!("file://{path}")
+    }
+}
+
+/// Convert a `file://` URI back to a filesystem path — the inverse of [`path_to_file_uri`].
+///
+/// Percent-decodes `%XX` escapes (servers return e.g. `%20` for spaces) and handles the
+/// Windows drive-letter form (`file:///C:/dir` → `C:\dir`). The drive form is detected by
+/// shape, not by `cfg`, so the helper is testable on every platform. A naive
+/// `strip_prefix("file://")` would silently break every query on Windows and on any path
+/// containing spaces.
+pub fn file_uri_to_path(uri: &str) -> Result<String> {
+    let rest = uri
+        .strip_prefix("file://")
+        .ok_or_else(|| Error::Resolution(format!("LSP: not a file:// URI: {uri}")))?;
+    let decoded = percent_decode(rest);
+    // Windows drive form: "/C:" or "/C:/dir" → "C:\dir".
+    let bytes = decoded.as_bytes();
+    let is_drive_form = bytes.len() >= 3
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':'
+        && (bytes.len() == 3 || bytes[3] == b'/');
+    if is_drive_form {
+        Ok(decoded[1..].replace('/', "\\"))
+    } else {
+        Ok(decoded)
+    }
+}
+
+/// Percent-decode `%XX` hex escapes (std-only). Invalid escapes pass through verbatim.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push(hi * 16 + lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -995,6 +1336,358 @@ mod tests {
             assert_eq!(
                 path_to_file_uri("/home/user/project"),
                 "file:///home/user/project"
+            );
+        }
+    }
+
+    // ── languageId mapping (pure data) ────────────────────────────────────────
+
+    #[test]
+    fn language_id_mapping_data() {
+        assert_eq!(lsp_language_id("tsx"), "typescriptreact");
+        assert_eq!(lsp_language_id("jsx"), "javascriptreact");
+        assert_eq!(lsp_language_id("typescript"), "typescript");
+        assert_eq!(lsp_language_id("rust"), "rust");
+        // Registry rows carry the mapping.
+        let reg = ServerRegistry::standard();
+        assert_eq!(reg.language_id_for("tsx"), Some("typescriptreact"));
+        assert_eq!(reg.language_id_for("jsx"), Some("javascriptreact"));
+        assert_eq!(reg.language_id_for("python"), Some("python"));
+        assert_eq!(reg.language_id_for("cobol"), None);
+    }
+
+    // ── file_uri_to_path (inverse of path_to_file_uri) ────────────────────────
+
+    #[test]
+    fn file_uri_to_path_unix_percent_decoding() {
+        assert_eq!(
+            file_uri_to_path("file:///home/user/my%20project/a.ts").unwrap(),
+            "/home/user/my project/a.ts"
+        );
+    }
+
+    #[test]
+    fn file_uri_to_path_windows_drive_uri() {
+        // Shape-detected, so this runs (and must pass) on every platform.
+        assert_eq!(
+            file_uri_to_path("file:///C:/Users/dev/proj/a.ts").unwrap(),
+            "C:\\Users\\dev\\proj\\a.ts"
+        );
+        assert_eq!(
+            file_uri_to_path("file:///c:/dir%20x/y.py").unwrap(),
+            "c:\\dir x\\y.py"
+        );
+    }
+
+    #[test]
+    fn file_uri_to_path_rejects_non_file_uri() {
+        let err = file_uri_to_path("https://example.com/a.ts").unwrap_err();
+        assert!(err.to_string().contains("not a file:// URI"), "got: {err}");
+    }
+
+    #[test]
+    fn file_uri_round_trips_with_path_to_file_uri() {
+        // path_to_file_uri is cfg-gated, so exercise the current platform's branch.
+        let path = if cfg!(windows) {
+            "C:\\Users\\dev\\round trip"
+        } else {
+            "/tmp/round trip/dir"
+        };
+        assert_eq!(file_uri_to_path(&path_to_file_uri(path)).unwrap(), path);
+    }
+
+    // ── await_response: server→client requests are never our response (D8) ───
+
+    /// A `Write` that captures everything for later assertions.
+    #[derive(Clone)]
+    struct SharedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Deterministic misparse test (scripted frames, no live server): a notification, then a
+    /// server→client request whose `id` COLLIDES with the expected response id, then the real
+    /// response. The old code deserialized the server request as our response with `result`
+    /// defaulting to `Null` — a silent false "no definition". Also asserts the replies:
+    /// `workspace/configuration` gets a null-array sized to `params.items.len()` (LSP 3.17 —
+    /// a bare null there can stall pyright); other server requests get a bare null.
+    #[test]
+    fn await_response_skips_server_requests_and_replies_correctly() {
+        let expected_id = 42;
+        let mut script = Vec::new();
+        script.extend(encode_notification(
+            "window/logMessage",
+            serde_json::json!({"type": 3, "message": "preamble"}),
+        ));
+        script.extend(encode_request(
+            expected_id, // deliberate id collision with our request
+            "workspace/configuration",
+            serde_json::json!({"items": [{"section": "python"}, {"section": "js"}]}),
+        ));
+        script.extend(encode_request(
+            expected_id,
+            "window/workDoneProgress/create",
+            serde_json::json!({"token": "t1"}),
+        ));
+        script.extend(encode_response(
+            &serde_json::json!(expected_id),
+            serde_json::json!({"ok": true}),
+        ));
+
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut t = RpcTransport::new(
+            SharedWriter(written.clone()),
+            std::io::Cursor::new(script),
+            Duration::from_secs(5),
+        );
+
+        let result = t.await_response(expected_id).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!({"ok": true}),
+            "the REAL response must be returned, not the colliding server request's default-Null"
+        );
+
+        let bytes = written.lock().unwrap().clone();
+        let out = String::from_utf8(bytes).unwrap();
+        assert!(
+            out.contains(r#""result":[null,null]"#),
+            "workspace/configuration must get one null per requested item, got: {out}"
+        );
+        assert!(
+            out.contains(r#""result":null"#),
+            "other server requests must get a bare null reply, got: {out}"
+        );
+    }
+
+    // ── timeout mechanism (frame pump + per-request deadline) ────────────────
+    //
+    // Pure-std readers, no cfg — these run identically on Unix and Windows, so the
+    // cross-platform claim is tested, not asserted. The leaked pump threads exit with
+    // the test process.
+
+    /// A `Read` that never produces a byte (simulates a wedged server stdout).
+    struct BlockForever;
+
+    impl Read for BlockForever {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            std::thread::sleep(Duration::from_secs(600));
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn transport_times_out_on_a_reader_that_never_produces_a_frame() {
+        let budget = Duration::from_millis(300);
+        let mut t = RpcTransport::new(std::io::sink(), BlockForever, budget);
+        let start = Instant::now();
+        let err = t.await_response(1).unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(
+            err.to_string().contains("timed out"),
+            "expected a timeout error, got: {err}"
+        );
+        assert!(
+            elapsed >= budget,
+            "returned before the deadline: {elapsed:?}"
+        );
+        assert!(
+            elapsed < budget + Duration::from_secs(5),
+            "timeout not honored — took {elapsed:?} for a {budget:?} budget"
+        );
+    }
+
+    /// A `Read` that yields a well-formed **notification** frame every `delay`, forever —
+    /// a chatty-but-never-answering server (rust-analyzer cold indexing, tsserver telemetry).
+    struct ChattyReader {
+        frame: Vec<u8>,
+        pos: usize,
+        delay: Duration,
+    }
+
+    impl Read for ChattyReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos == 0 {
+                std::thread::sleep(self.delay);
+            }
+            let n = buf.len().min(self.frame.len() - self.pos);
+            buf[..n].copy_from_slice(&self.frame[self.pos..self.pos + n]);
+            self.pos = (self.pos + n) % self.frame.len();
+            Ok(n)
+        }
+    }
+
+    /// Deadline semantics, not per-message budget: notification frames arriving faster than
+    /// the budget must NOT restart the clock. Under per-message `recv_timeout(budget)`
+    /// semantics this test would never return (each notification arrives well within the
+    /// budget and the await loop re-reads) — reaching the assertions at all proves the
+    /// deadline is computed once per request.
+    #[test]
+    fn notification_chatter_does_not_restart_the_request_clock() {
+        let budget = Duration::from_millis(400);
+        let chatty = ChattyReader {
+            frame: encode_notification(
+                "window/logMessage",
+                serde_json::json!({"type": 3, "message": "still indexing…"}),
+            ),
+            pos: 0,
+            delay: budget / 4,
+        };
+        let mut t = RpcTransport::new(std::io::sink(), chatty, budget);
+        let start = Instant::now();
+        let err = t.await_response(7).unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(
+            err.to_string().contains("timed out"),
+            "expected a timeout error, got: {err}"
+        );
+        assert!(
+            elapsed >= budget,
+            "errored before the deadline: {elapsed:?}"
+        );
+        assert!(
+            elapsed < budget + Duration::from_secs(5),
+            "deadline not honored under notification chatter — took {elapsed:?}"
+        );
+    }
+
+    /// Gap-FREE notification flood: the pump keeps the channel permanently non-empty, so a
+    /// receive with zero remaining budget would still return `Ok` and the await loop would
+    /// never observe a timeout — `await_response` hangs forever and memory grows without
+    /// bound. Pinned by the wall-clock deadline check in `recv_frame_by` (checked before
+    /// touching the channel) plus the bounded pump channel. Under the old
+    /// `recv_timeout(remaining)`-only semantics this test hangs past the assertion window.
+    #[test]
+    fn gapless_notification_flood_still_errs_at_the_deadline() {
+        let budget = Duration::from_millis(300);
+        let flood = ChattyReader {
+            frame: encode_notification(
+                "window/logMessage",
+                serde_json::json!({"type": 3, "message": "flood"}),
+            ),
+            pos: 0,
+            delay: Duration::ZERO, // back-to-back frames — the channel never drains empty
+        };
+        let mut t = RpcTransport::new(std::io::sink(), flood, budget);
+        let start = Instant::now();
+        let err = t.await_response(11).unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(
+            err.to_string().contains("timed out"),
+            "expected a timeout error, got: {err}"
+        );
+        assert!(
+            elapsed >= budget,
+            "errored before the deadline: {elapsed:?}"
+        );
+        assert!(
+            elapsed < budget + Duration::from_secs(3),
+            "hang under gap-free flood — took {elapsed:?} for a {budget:?} budget"
+        );
+    }
+
+    // ── eviction on timeout (D3) ──────────────────────────────────────────────
+
+    /// A fake language server that answers `initialize` correctly, ignores notifications,
+    /// then wedges (never replies) on the first real request. This is the only shape that
+    /// reaches `LspTier`'s eviction path: a `sleep` masquerade times out inside
+    /// `LspClient::spawn`'s handshake, *before* the client is ever inserted into the map.
+    const WEDGE_SERVER_PY: &str = r#"
+import json, sys, time
+
+def read_msg():
+    length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            sys.exit(0)
+        stripped = line.strip()
+        if not stripped:
+            break
+        if stripped.lower().startswith(b"content-length:"):
+            length = int(stripped.split(b":", 1)[1])
+    return json.loads(sys.stdin.buffer.read(length))
+
+def send(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    msg = read_msg()
+    if "id" in msg and msg.get("method") == "initialize":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"capabilities": {}}})
+    elif "id" in msg:
+        time.sleep(600)  # wedge: never reply to any further request
+    # notifications: ignored
+"#;
+
+    /// Probe-and-skip helper: first python interpreter on PATH (macOS/Linux `python3`,
+    /// Windows Git Bash/native `python`).
+    fn python_on_path() -> Option<&'static str> {
+        ["python3", "python"].into_iter().find(|b| probe_binary(b))
+    }
+
+    #[test]
+    fn tier_evicts_and_kills_the_client_when_a_request_times_out() {
+        let Some(interp) = python_on_path() else {
+            println!("[lsp] SKIP: no python interpreter on PATH; eviction path not exercised");
+            return;
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let script = tmp.path().join("wedge_server.py");
+        std::fs::write(&script, WEDGE_SERVER_PY).unwrap();
+        let src = tmp.path().join("main.wl");
+        std::fs::write(&src, "hello wedge\n").unwrap();
+
+        let mut reg = ServerRegistry::standard();
+        reg.register(
+            "wedgelang",
+            interp,
+            vec![script.to_str().unwrap().to_string()],
+        );
+
+        let budget = Duration::from_millis(700);
+        let mut tier =
+            LspTier::with_registry(tmp.path().to_str().unwrap(), reg).with_timeout(budget);
+        let uri = path_to_file_uri(src.to_str().unwrap());
+
+        let start = Instant::now();
+        let err = tier.definition("wedgelang", &uri, 0, 0).unwrap_err();
+        let elapsed = start.elapsed();
+
+        assert!(
+            err.to_string().contains("timed out"),
+            "expected a timeout error (the fake server answered initialize, then wedged), got: {err}"
+        );
+        assert!(
+            elapsed < budget + Duration::from_secs(8),
+            "timeout not honored — took {elapsed:?} for a {budget:?} budget"
+        );
+        // The wedged client MUST be gone: one timeout must not poison every later query.
+        assert!(
+            !tier.has_client("wedgelang"),
+            "client must be evicted from the tier after a request timeout"
+        );
+        // The child must be killed: pgrep by the (unique) tempdir script path, where available.
+        if probe_binary("pgrep") {
+            let out = Command::new("pgrep")
+                .args(["-f", script.to_str().unwrap()])
+                .output()
+                .expect("pgrep runs");
+            assert!(
+                !out.status.success(),
+                "wedged server child survived eviction: pids {}",
+                String::from_utf8_lossy(&out.stdout)
             );
         }
     }
