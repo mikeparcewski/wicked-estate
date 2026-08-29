@@ -566,13 +566,17 @@ static LANG_TABLE: &[LangEntry] = &[
     },
     LangEntry {
         name: "c",
-        ext: &["c", "h"],
+        ext: &["c"],
         make_language: lang_c,
         query_src: C_QUERY,
     },
     LangEntry {
+        // .h routes to cpp, NOT c (D04-6/D2): the cpp grammar parses C, but the C
+        // grammar cannot parse C++ headers — under the c row, every class/namespace/
+        // method in a .h vanished. Single owner: keep this list in sync with
+        // languages.toml (extractor_for_extension is first-match).
         name: "cpp",
-        ext: &["cpp", "cc", "cxx", "hpp", "hh"],
+        ext: &["cpp", "cc", "cxx", "hpp", "hh", "h"],
         make_language: lang_cpp,
         query_src: CPP_QUERY,
     },

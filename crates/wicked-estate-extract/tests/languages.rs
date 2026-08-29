@@ -584,6 +584,40 @@ fn cpp_characterization() {
     assert_import_node(&ex, lang, "cmath");
 }
 
+// ── C/C++ headers (.h → cpp routing, D04-6/D2) ───────────────────────────────
+
+#[test]
+fn h_characterization() {
+    // Loaded through extractor_for_extension("h") ON PURPOSE — this is the
+    // routing-sensitive path. Under the old c-row ownership the C grammar dropped
+    // every class/namespace/method in the header (fixture.h: 12 declared / 3
+    // emitted, `class Foo` gone).
+    let lang = "cpp";
+    let ex = wicked_estate_extract::treesitter::extractor_for_extension("h")
+        .expect(".h must have an extractor")
+        .extract(&load_fixture("sample.h", lang))
+        .expect("extraction must succeed");
+    assert_no_conflicting_def_ids(&ex, lang);
+
+    assert_def(&ex, lang, "Foo", &NodeKind::Class);
+    assert_def(&ex, lang, "Bar", &NodeKind::Struct);
+    assert_def(&ex, lang, "inlineDef", &NodeKind::Method);
+    assert_def(&ex, lang, "definedHere", &NodeKind::Function);
+    assert_def(&ex, lang, "bar", &NodeKind::Method);
+    assert_def(&ex, lang, "reset", &NodeKind::Method);
+    assert_def(&ex, lang, "pure", &NodeKind::Method);
+    assert_def(&ex, lang, "m", &NodeKind::Method);
+    assert_def(&ex, lang, "count", &NodeKind::Field);
+    assert_def(&ex, lang, "shared", &NodeKind::Field);
+    assert_def(&ex, lang, "a", &NodeKind::Field);
+    // `int freestanding();` (free prototype) deliberately NOT asserted — DEFERRED
+    // (D6d: free-function header/impl node identity needs a program-level owner).
+    assert_def_floor(&ex, lang, 11);
+
+    assert_import(&ex, lang, "<cstdint>");
+    assert_import_node(&ex, lang, "cstdint");
+}
+
 // ── C# ────────────────────────────────────────────────────────────────────────
 
 #[test]

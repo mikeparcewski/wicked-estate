@@ -52,7 +52,7 @@ caps = ["symbols", "calls", "imports"]
 
 [[language]]
 name = "c"
-ext = ["c", "h"]
+ext = ["c"]
 grammar = "tree-sitter-c"
 tier = "structural"
 caps = ["symbols", "calls", "imports"]
@@ -87,7 +87,7 @@ caps = ["symbols"]
 
 [[language]]
 name = "cpp"
-ext = ["cpp", "cc", "cxx", "hpp", "hh"]
+ext = ["cpp", "cc", "cxx", "hpp", "hh", "h"]
 grammar = "tree-sitter-cpp"
 tier = "structural"
 caps = ["symbols", "calls", "imports"]

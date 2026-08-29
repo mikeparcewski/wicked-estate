@@ -473,6 +473,19 @@ fn per_language_extraction_produces_nodes() {
 }
 
 #[test]
+fn h_extension_routes_to_cpp() {
+    // D04-6/D2: .h owned by the c row sent every header to the C grammar, which
+    // cannot parse C++ — classes/namespaces/methods vanished. The cpp grammar
+    // parses C, so .h has a SINGLE owner: cpp (LANG_TABLE + languages.toml agree).
+    let ex = extractor_for_extension("h").expect(".h must be wired");
+    assert_eq!(
+        ex.languages(),
+        vec![Language("cpp".to_string())],
+        ".h must route to the cpp extractor"
+    );
+}
+
+#[test]
 fn fixture_files_produce_nodes() {
     let fixtures_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let caps_map = ext_caps();
