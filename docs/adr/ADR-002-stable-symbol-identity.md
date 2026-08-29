@@ -1,3 +1,9 @@
+---
+id: wicked-estate-adr-002
+title: "Stable Symbol Identity"
+status: active
+date: 2026-06-12
+---
 # ADR-002 — Stable Symbol Identity
 
 **Status:** Accepted · **Date:** 2026-06-12 · **Wave:** W0.3

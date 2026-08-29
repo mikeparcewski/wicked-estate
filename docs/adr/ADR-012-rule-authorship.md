@@ -1,3 +1,9 @@
+---
+id: wicked-estate-adr-012
+title: "Rule authorship: git is the source of truth, promotion only by doc PR, no `rules.write` MCP tool"
+status: active
+date: 2026-08-29
+---
 # ADR-012 — Rule authorship: git is the source of truth, promotion only by doc PR, no `rules.write` MCP tool
 
 **Status:** Accepted · **Date:** 2026-08-29 · **Lane:** rules-surface (arch-R8)

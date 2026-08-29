@@ -1,3 +1,9 @@
+---
+id: wicked-estate-adr-005
+title: "wicked_estate as a Brain: Content Store, Query Cache, Cross-Graph"
+status: active
+date: 2026-06-12
+---
 # ADR-005 — wicked_estate as a Brain: Content Store, Query Cache, Cross-Graph
 
 **Status:** Accepted (design); mostly not built — build path is Waves W5 (partial) + W11/W12 · **Date:** 2026-06-12

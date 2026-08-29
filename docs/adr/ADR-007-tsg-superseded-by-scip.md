@@ -1,3 +1,9 @@
+---
+id: wicked-estate-adr-007
+title: "Stack-Graphs TSG Port (W3.2) Superseded for SCIP-Covered Languages"
+status: active
+date: 2026-06-13
+---
 # ADR-007 — Stack-Graphs TSG Port (W3.2) Superseded for SCIP-Covered Languages
 
 **Status:** Accepted

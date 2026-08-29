@@ -1,3 +1,9 @@
+---
+id: wicked-estate-adr-003
+title: "Storage Backends & External-Database Readiness"
+status: active
+date: 2026-06-12
+---
 # ADR-003 — Storage Backends & External-Database Readiness
 
 **Status:** Accepted (design); SQLite built, external backends designed-not-built · **Date:** 2026-06-12

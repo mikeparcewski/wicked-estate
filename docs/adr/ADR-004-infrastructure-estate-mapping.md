@@ -1,3 +1,9 @@
+---
+id: wicked-estate-adr-004
+title: "Infrastructure & Estate Mapping (IaC + Live Cloud + Drift)"
+status: active
+date: 2026-06-12
+---
 # ADR-004 — Infrastructure & Estate Mapping (IaC + Live Cloud + Drift)
 
 **Status:** Accepted (design); not built — build path is Waves W9/W10 · **Date:** 2026-06-12

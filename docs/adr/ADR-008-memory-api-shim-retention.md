@@ -1,3 +1,9 @@
+---
+id: wicked-estate-adr-008
+title: "Retain `wicked-estate-memory-api` as a Re-Export Shim"
+status: active
+date: 2026-07-21
+---
 # ADR-008 — Retain `wicked-estate-memory-api` as a Re-Export Shim
 
 **Status:** Accepted
