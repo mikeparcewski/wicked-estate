@@ -5,7 +5,7 @@ MCP stdio server that exposes the wicked-estate retrieval tools to LLM agents ov
 ## What it does
 
 - Implements the MCP stdio transport (newline-delimited JSON-RPC 2.0) by hand — synchronous, no async overhead on a local stdio server.
-- Routes `tools/list` and `tools/call` via unified dispatch across **23 tools**: 10 estate tools (in `wicked-estate-retrieve`), 6 memory tools (`src/tools/memory.rs`), and 7 knowledge tools (`src/tools/knowledge.rs`).
+- Routes `tools/list` and `tools/call` via unified dispatch across **24 tools**: 11 estate tools (in `wicked-estate-retrieve`, incl. `rules.recall`), 6 memory tools (`src/tools/memory.rs`), and 7 knowledge tools (`src/tools/knowledge.rs`).
 - Injects a W7.4 staleness diagnostic (`STALENESS: commits_behind=N`) into every `tools/call` response when the server can determine commits landed since the last index run.
 - Advertises `SemanticSearch` in `tools/list` only when a `VectorStore` is wired in at startup.
 - `handle_request` and `handle_request_ctx` are pure functions (no I/O) so all routing logic is fully unit-tested without a running server.

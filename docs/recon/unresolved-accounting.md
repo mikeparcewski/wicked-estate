@@ -149,7 +149,9 @@ histogram + collision-call count on the fixture and studio runs.
 
 ### D2 — Repeat-site visibility: NO in this lane; `evidence_count` is off the table permanently
 
-`Edge.evidence_count` is wicked-brain's confirm/contradict audit counter (`edge.rs:126-133`: "Structurally-derived
+<!-- historical -->
+`Edge.evidence_count` is retired wicked-brain's confirm/contradict audit counter, inherited in the
+consolidation (`edge.rs:126-133`: "Structurally-derived
 code edges leave it at 0; knowledge relations set it via `knowledge.relate`"), landed in `f79ef57` (PR #95). It
 participates in the store merge rule in all three backends — `ON CONFLICT ... WHERE excluded.confidence >=
 edges.confidence OR excluded.evidence_count > edges.evidence_count` (`sqlite.rs:1591-1597`, `postgres.rs:731-739`,
@@ -159,6 +161,7 @@ MemStore `store/src/lib.rs:357-360`) — the knowledge crate depends on that bra
 re-indexed 0.6 NameResolver edge carrying `sites=3` overwrite a SCIP 1.0 edge with `evidence_count=0`, (ii) be reset
 to 0 by `wicked-estate scip` (`Edge::new` → 0, `lib.rs:1179-1194` upserts without `remove_file`), and (iii) rewrite
 the brain-consolidation contract. Rejected.
+<!-- /historical -->
 
 A locations list on `Edge` reverses the W11 slim decision (`schema.sql:88-95`, "~8× disk reduction") and inflates
 every edge-carrying surface (traverse `edge_json`, `export`, `edge_history`) by up to 148 (studio) / 169 (crew)

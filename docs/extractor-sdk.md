@@ -29,43 +29,42 @@ section provides the conceptual model and a reference for the capture convention
 | `<name>.scm` | `crates/wicked-estate-extract/src/queries/<name>.scm` | Tree-sitter query that maps parse-tree nodes to wicked-estate captures. |
 | `LangEntry` | `static LANG_TABLE` in `crates/wicked-estate-extract/src/treesitter.rs` | Wires the grammar crate + compiled query into the runtime dispatch table. Also holds the `ext` field used for extension-to-extractor routing. |
 
-The `registry()` function in `crates/wicked-estate-extract/src/lib.rs` iterates `LANG_TABLE` and exposes
-it to the pipeline. The `covers_prior art_language_parity` test asserts `registry().len() >= 73`
-— this is the regression gate that prevents silent drops.
+The `registry()` function in `crates/wicked-estate-extract/src/lib.rs` parses the manifest
+(`languages.toml` is embedded at build time via `include_str!`) and exposes it to the pipeline;
+`LANG_TABLE` is the runtime dispatch table for the wired grammars. The `covers_language_parity`
+test asserts `registry().len() >= 73` — this is the regression gate that prevents silent drops.
 
 ### Language count as of this writing
 
-75 languages are wired in `LANG_TABLE` (verified by counting `LangEntry` items). 98 rows exist
-in `languages.toml` (the manifest also tracks future candidates and deferred grammars).
+**114 languages** in `languages.toml` (the canonical count — the manifest is the source of
+truth), of which **103 are wired in `LANG_TABLE`** (verified by counting `LangEntry` items);
+the remaining rows are document-tier or aspirational (manifest row, extractor pending). The
+generated `docs/language-coverage-matrix.md` carries the per-language breakdown.
 
-The WAVE-PLAN headline "76 languages" includes COBOL (wired via `arborium-cobol`). The precise
-wired count is in `LANG_TABLE`; the manifest count is aspirational and includes rows for
-grammars that are deferred pending the tree-sitter 0.25 workspace upgrade.
+### Grammar families: official crates + arborium (ABI 13–15)
 
-### Grammar ABI split: tree-sitter 0.24 vs arborium (ABI-15 / 0.25)
+The workspace runs the **tree-sitter 0.25 runtime**, which accepts grammar ABI 13–15.
 
-The workspace currently runs **tree-sitter 0.24**, which supports grammar ABI 13 and 14 only.
-
-Many community grammars have moved to ABI 15 (the tree-sitter 0.25 grammar API). The
-`arborium` family of crates repackages these ABI-15 grammars so they compile against the 0.25
-runtime that arborium bundles — allowing them to coexist in the same Cargo workspace as the
-0.24-based grammars.
+Many community grammars ship at ABI 15 (the tree-sitter 0.25 grammar API). The
+`arborium` family of crates repackages these ABI-15 grammars behind a uniform `language()`
+API — they coexist in the same Cargo workspace as the older ABI-13/14 official
+`tree-sitter-*` crates.
 
 **Rule of thumb:**
 
-- Grammar available on crates.io at ABI 14 → use the crate directly (e.g. `tree-sitter-rust`,
-  `tree-sitter-python`, `tree-sitter-go 0.21.x`).
-- Grammar only available at ABI 15 → use the `arborium-<name>` crate (e.g. `arborium-cobol`,
-  `arborium-hcl`, `arborium-ada`, and ~49 others already in use).
-- Grammar crate causes a link error `"expected ABI 14, got 15"` → the pinned version is wrong;
-  use the last ABI-14 release or switch to the arborium variant.
+- Grammar available on crates.io as an official `tree-sitter-*` crate → use it directly
+  (e.g. `tree-sitter-rust`, `tree-sitter-python`).
+- Grammar only available at ABI 15, or with an inconsistent crate API → use the
+  `arborium-<name>` crate (e.g. `arborium-cobol`, `arborium-hcl`, `arborium-ada`, and dozens
+  of others already in use).
+- Grammar crate causes an ABI link error → the pinned version is out of the 13–15 window;
+  bump it or switch to the arborium variant.
 
 COBOL is wired via `arborium-cobol` (ABI 15), making it a concrete example of the arborium
 path. The `treesitter.rs` comment block on each `lang_*` function documents the exact ABI.
 
-When the workspace adopts tree-sitter 0.25 workspace-wide, the ABI-14 crates can be upgraded
-and the `arborium-*` indirection becomes optional for those languages. That change touches
-`Cargo.toml` and the `lang_*` functions, not the `.scm` files or `languages.toml`.
+Upgrading a language from an ABI-13/14 crate to a newer grammar touches `Cargo.toml` and the
+`lang_*` functions, not the `.scm` files or `languages.toml`.
 
 ### The `.scm` capture convention
 
@@ -149,7 +148,7 @@ The test asserts `Some` and checks extraction produces at least the expected nod
 [ ] LangEntry in LANG_TABLE
 [ ] Smoke test passing
 [ ] cargo build --workspace  0 warnings
-[ ] cargo test --workspace   covers_prior art_language_parity passes
+[ ] cargo test --workspace   covers_language_parity passes
 [ ] cargo clippy --workspace --all-targets -- -D warnings  clean
 ```
 
@@ -353,7 +352,7 @@ for edges) makes the result idempotent across re-runs.
 
 - `crates/wicked-estate-extract/src/extra_edge.rs` — `ExtraEdgeExtractor` source + inline doc
 - `crates/wicked-estate-extract/src/treesitter.rs` — `LANG_TABLE`, `LangEntry`, language fns
-- `crates/wicked-estate-extract/languages.toml` — language manifest (98 rows; 75 wired as of this writing)
+- `crates/wicked-estate-extract/languages.toml` — language manifest (114 rows; 103 wired as of this writing)
 - `docs/add-lang.md` — full add-language checklist + ABI constraint table
 - `docs/language-coverage-matrix.md` — auto-generated matrix
 - the design notes — rules-as-data rationale

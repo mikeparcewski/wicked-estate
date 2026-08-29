@@ -287,10 +287,8 @@ Languages with an active extractor (tree-sitter grammar compiled in, `.scm` embe
 
 ## ABI note
 
-All wired grammars use **ABI 14** (tree-sitter 0.24 supports ABI 13–14).
-Grammars at ABI 15 (`tree-sitter-go` ≥0.25, `tree-sitter-bash` ≥0.25,
-`tree-sitter-javascript` ≥0.25, `tree-sitter-c` 0.24.x,
-`tree-sitter-c-sharp` ≥0.23.x, `tree-sitter-hcl` any version) were dropped.
-The `≥73` parity test gates regressions. Upgrade these entries when tree-sitter 0.25
-is adopted workspace-wide.
+The workspace runs the **tree-sitter 0.25 runtime**, which accepts grammar ABI 13–15.
+Official `tree-sitter-*` crates are pinned at ABI 13/14; `arborium-*` crates ship
+ABI-15 grammars (e.g. `arborium-cobol`). See `docs/extractor-sdk.md` for the
+grammar-family split. The `≥73` parity test gates regressions.
 

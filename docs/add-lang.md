@@ -50,13 +50,14 @@ caps = ["symbols", "calls", "imports", "extends"]
 **`caps` values:** `symbols`, `calls`, `imports`, `extends`, `implements`. These must match what
 your `.scm` file actually captures — they feed the generated matrix, not the extractor itself.
 
-The `≥73` parity test in `crates/wicked-estate-extract/src/lib.rs::covers_prior art_language_parity`
-asserts `registry().len() >= 73`. Adding a row keeps it green; removing one will fail it.
+The `≥73` parity test in `crates/wicked-estate-extract/src/lib.rs::covers_language_parity`
+asserts `registry().len() >= 73` (a floor — the manifest holds 114 languages today). Adding a row keeps it green; removing one will fail it.
 
 ### Step 2 — Write `crates/wicked-estate-extract/src/queries/<name>.scm`
 
 The query file uses the [prior art capture convention][cqconv] — the same `.scm` format
-prior art and prior art use. One format drives all 73 languages; the extractor is generic.
+prior art ships. One format drives all 114 manifest languages (103 wired for tree-sitter
+extraction); the extractor is generic.
 
 **Capture families and what they produce:**
 
@@ -193,7 +194,7 @@ import kotlin.io.println
 }
 ```
 
-This test is the regression gate. The `≥73` parity test (`covers_prior art_language_parity`)
+This test is the regression gate. The `≥73` parity test (`covers_language_parity`)
 ensures the manifest count never drops; per-language smoke tests ensure extraction actually
 works. Both must be green before you mark the language done.
 
@@ -257,7 +258,7 @@ python3 scripts/gen-coverage-matrix.py --check
 [ ] LANG_TABLE entry added in treesitter.rs
 [ ] Smoke / characterization test added
 [ ] cargo build --workspace  → 0 warnings
-[ ] cargo test --workspace   → covers_prior art_language_parity passes + new smoke test passes
+[ ] cargo test --workspace   → covers_language_parity passes + new smoke test passes
 [ ] cargo clippy --workspace --all-targets -- -D warnings  → clean
 [ ] python3 scripts/gen-coverage-matrix.py  → docs/language-coverage-matrix.md regenerated
 ```
@@ -268,7 +269,7 @@ python3 scripts/gen-coverage-matrix.py --check
 
 - `crates/wicked-estate-extract/languages.toml` — the manifest
 - `crates/wicked-estate-extract/src/treesitter.rs` — `LANG_TABLE`, existing language fns, `IaCExtractor`
-- `crates/wicked-estate-extract/src/lib.rs` — `registry()`, `covers_prior art_language_parity` test
+- `crates/wicked-estate-extract/src/lib.rs` — `registry()`, `covers_language_parity` test
 - `docs/language-coverage-matrix.md` — generated matrix (do not edit by hand)
 - `scripts/gen-coverage-matrix.py` — matrix generator
 - the design notes — rules-as-data rationale

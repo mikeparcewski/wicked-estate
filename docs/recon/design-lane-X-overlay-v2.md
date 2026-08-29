@@ -388,9 +388,12 @@ semantically per-engine. This is the explicit 28-method delegation the gate requ
 v1 said "reuse `memory-subscriber.mjs`." The gate (R-X5): that's scaffolding, not the subscriber,
 and a coarse-event-driven full re-query is O(xedge_rows)/reindex. **Spec it as real, bounded work:**
 
+<!-- historical -->
 - **Net-new component:** an `xedge-reconcile` subscriber (its own process or a task in the xedge
   writer). It *reuses the cursor-poll MECHANICS* — durable cursor + TTL self-heal + DLQ + dedup,
-  the `wicked-brain/server/lib/memory-subscriber.mjs:1-55` pattern (`event-catalog-contract.md:27-32`)
+  the `wicked-brain/server/lib/memory-subscriber.mjs:1-55` pattern (retired 2026-08; frozen
+  archive) (`event-catalog-contract.md:27-32`)
+<!-- /historical -->
   — but is a distinct subscriber with its OWN cursor, subscribing to the pinned coarse events
   `wicked.estate.indexed` / `wicked.knowledge.ingested` / `wicked.memory.captured`
   (`event-catalog-contract.md:17,20,22`). "Reuse the library, build the subscriber" — owned as

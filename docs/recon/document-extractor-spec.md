@@ -11,10 +11,13 @@
 > **lightweight ontology carried in the same graph**, so knowledge, code, and memory share one
 > traversable store. This is the one capability with zero coverage in estate + wicked-memory today.
 >
-> Retirement gate: replacing wicked-brain is **blocked** on a real recall head-to-head that does not
-> exist yet — see `docs/recon/baseline-recall-eval.md` (current 100% is the LongMemEval `_oracle`
-> plumbing pass, not a retrieval signal; no brain arm exists). Build the extractor in parallel; do
+<!-- historical -->
+> Retirement gate (since resolved — wicked-brain retired 2026-08): replacing wicked-brain was
+> **blocked** on a real recall head-to-head that did not exist yet — see
+> `docs/recon/baseline-recall-eval.md` (the 100% at time of writing was the LongMemEval `_oracle`
+> plumbing pass, not a retrieval signal; no brain arm existed). Build the extractor in parallel; do
 > NOT retire brain until the baseline lands.
+<!-- /historical -->
 >
 > Verdict: **no new crate.** A feature-gated module in `wicked-estate-extract`, a decode/contract
 > branch in the `wicked-estate` binary, and two resolvers. Decode, semantic chunking, vision, and

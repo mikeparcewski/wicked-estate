@@ -9,13 +9,14 @@ tree-sitter + SQLite.
 This document is an exhaustive inventory — no stone left unturned. Each feature is tagged:
 **✅ built+tested** · **🟡 partial / not-yet-benchmarked** · **🟦 designed, not built** (the seam exists).
 
-> **Status at time of writing:** `cargo test --workspace` = **649 passing, 0 failed, 0 ignored**;
-> `cargo build --workspace` = 0 warnings; `cargo clippy --workspace --all-targets -D warnings` clean.
-> Binary: `wicked-estate` (+ `wicked-estate-mcp`). Crates: `wicked-estate-core … wicked-estate-observe`.
+> **Status at time of writing (2026-08-29, main):** `cargo test --workspace` = **1,370 passing,
+> 0 failed, 1 ignored** (one marker-ignored doc-test); `cargo build --workspace` = 0 warnings;
+> `cargo clippy --workspace --all-targets -D warnings` clean.
+> Binaries: `wicked-estate` + `wicked-estate-mcp`. 15 crates, `wicked-estate-core … wicked-estate-observe`.
 
 ---
 
-## 1. Architecture — the trait spine + 9 crates
+## 1. Architecture — the trait spine + 15 crates
 
 The whole engine programs against **five traits** in `wicked-estate-core` (the spine); everything else is a
 swappable impl behind a seam. This is why the work fanned out safely in parallel.
@@ -23,14 +24,20 @@ swappable impl behind a seam. This is why the work fanned out safely in parallel
 | Crate | Role |
 |---|---|
 | `wicked-estate-core` | Types + the five traits + the GraphStore **conformance kit** (the spine) |
-| `wicked-estate-extract` | `Extractor` impls — tree-sitter (91 langs) + grammar-less line/macro extractors |
-| `wicked-estate-resolve` | `Resolver` impls — name / scoped / import-map / infra / rules-bridge / SCIP / estate / on-demand LSP |
+| `wicked-estate-extract` | `Extractor` impls — tree-sitter (103 wired of the 114 manifest languages) + grammar-less line/macro extractors |
+| `wicked-estate-resolve` | `Resolver` impls — name / scoped / import-map / relative-import / infra / rules-bridge / SCIP / estate; LSP client library (consumer designed, ADR-009) |
 | `wicked-estate-store` | `GraphStore` impls — `MemStore` (reference) + `SqliteStore` (default) |
 | `wicked-estate-rank` | `Ranker` — personalized PageRank over CALLS/IMPORTS |
 | `wicked-estate-retrieve` | `RetrievalTool` impls — the agent-facing query API + RRF hybrid + embedders |
 | `wicked-estate-mcp` | MCP server exposing the retrieval tools over JSON-RPC |
 | `wicked-estate` | the `wicked-estate` binary |
 | `wicked-estate-bench` | agent-eval benchmark harness + capability matrix (the truth oracle) |
+| `wicked-estate-observe` | OTLP HTTP/JSON exporter (`OtlpSink`) + emission sites (§13) |
+| `wicked-estate-overlay` | internal — absorbed from wicked-overlay (XedgeStore cross-engine search layer) |
+| `wicked-estate-memory-core` | internal — absorbed from wicked-memory (`MemoryApi` trait + request/query types) |
+| `wicked-estate-memory` | internal — absorbed from wicked-memory (memory engine impl) |
+| `wicked-estate-knowledge` | internal — absorbed from wicked-knowledge (knowledge engine impl) |
+| `wicked-estate-memory-api` | internal — absorbed from wicked-memory (shim crate for clean re-exports, ADR-008) |
 
 **The five traits** (`wicked-estate-core/src/traits.rs`): ✅
 - `Extractor` — source file → `Extraction { nodes, local_edges, refs }`
@@ -56,8 +63,9 @@ Both `MemStore` and `SqliteStore` pass it.
 
 ## 2. Language extraction
 
-**Coverage: 100 languages in the manifest** (65 structural / 18 tags / 17 document), **91 actually
-wired** for tree-sitter extraction + **6 grammar-less mainframe extractors**.
+**Coverage: 114 languages in the manifest** (79 structural / 18 tags / 17 document — the manifest,
+`languages.toml`, is the canonical count), **103 wired** for tree-sitter extraction + **6
+grammar-less mainframe extractors**.
 
 ### Rules-as-data (the core design) ✅
 - Languages are **data**, not code: `wicked-estate-extract/languages.toml` (one row per language) + a
@@ -163,24 +171,38 @@ specimens: Drools DRL, OPA/Rego, Corticon, FICO Blaze.
 ## 3. Resolution (two-phase EXTRACT → RESOLVE)
 
 Resolution is swappable and **never requires re-parsing**. Resolvers consume `UnresolvedRef`s +
-a `SymbolIndex` and emit confidence-rated `Edge`s. `resolve_all` runs a cascade and dedups by
-`(source, target, kind)`, keeping the highest-confidence edge.
+a `SymbolIndex` and emit confidence-rated `Edge`s. `resolve_all_with_coverage` — the **single**
+entry point since 0.15.0 (the edges-only `resolve_all` wrapper was removed; per-ref coverage
+accounting is not optional) — runs the cascade, attributes edges to references per site, and
+dedups by `(source, target, kind)`, keeping the highest-confidence edge.
 
 **Resolution tiers** (`ResolutionTier`, cheap→precise, each with a default confidence): ✅
-`Parsed` (1.0) · `Tags` · `ImportMap` (0.63) · `Heuristic` (0.5) · `Tsg` · `Scip` (1.0) · `Lsp` (1.0).
+`Parsed` (1.0) · `Tags` (0.3) · `ImportMap` (0.6) · `Heuristic` (0.5) · `Tsg` (0.8) · `Scip` (1.0) · `Lsp` (1.0).
 
 **Resolver impls** (`wicked-estate-resolve`):
 - `NameResolver` ✅ — binds a ref to a project symbol by **unique** name (ambiguous → deferred).
 - `ScopedNameResolver` ✅ — prefers same-file then same-directory candidate (records the reason in edge metadata).
 - `ImportMapResolver` ✅ — uses the per-file import map (`UnresolvedRef.hints["imports"]`) to cut same-name ambiguity.
+- `RelativeImportResolver` ✅ — binds quoted relative specifiers (`./x`, `../y`) in JS/TS/TSX to their
+  target File node as `Imports` edges (`resolved_by = relative-import`, ImportMap tier with a per-edge
+  0.9 override; exact joined-path match, root-guarded, ambiguity parks).
 - `InfraResolver` ✅ — resolves IaC/tfstate resource refs (resource-to-resource only).
+- `RulesBridgeResolver` ✅ — connects code call sites to real `RuleSet` nodes (`rules-engine:*`
+  InvokedBy edges; wired into the production `index` slice since 0.15.0).
 - `scip_edges()` ✅ — ingests a SCIP index (`index.scip`), correlates occurrences to nodes, emits **precise** Scip-tier edges (the precise call tier; supersedes TSG per ADR-007).
 - `estate_edges()` ✅ — **cross-domain estate join** (see §7): RACF profiles → datasets / MQ assets by **RACF generic-pattern matching** (`%` / `*` / `**`, most-specific-wins), exact→Parsed, generic→Heuristic.
-- **On-demand LSP** (`lsp.rs`) ✅ — minimal JSON-RPC stdio client driving installed language servers
-  (typescript-language-server, rust-analyzer, pyright) for precise single-symbol definition/refs/hover.
-  **On-demand only — never bulk.**
+- **On-demand LSP client library** (`lsp.rs`) 🟡 — a working JSON-RPC stdio client driving installed
+  language servers (typescript-language-server, rust-analyzer, pyright) for precise single-symbol
+  definition/refs/hover. **Built as a library; it has no production caller yet** — the sanctioned
+  consumer is the intent-routed **edit plane** (`Definition`/`References`/`Hover`, exactly one
+  `(file, line, col)` per call; designed in ADR-009, implementation is the W3.6 lane). The locked
+  decision stands: **on-demand only — never bulk**; the understand plane (BlastRadius, Lineage,
+  search) never consults LSP.
 
-Layered order: tags → import-map → TSG(→SCIP) → on-demand LSP.
+Production `index`/`watch` resolver slice (activation table: `docs/ENGINE-CONTRACT.md` §3.1):
+`NameResolver → ScopedNameResolver → ImportMapResolver → RelativeImportResolver → InfraResolver →
+RulesBridgeResolver` — order-independent (dedup keeps the max-confidence edge per key). SCIP edges
+ingest separately via `wicked-estate scip`; LSP joins when the ADR-009 edit plane lands.
 
 ---
 
@@ -219,7 +241,9 @@ Full `GraphRead` + `GraphWrite` + `GraphStoreMutExt` implementation backed by Po
   without it so `cargo test --workspace` is always offline-safe).
 - Global process-wide `OnceLock<Runtime>` keeps the connection-pool keepalive tasks alive across
   blocking calls (important detail: per-call runtime teardown kills pool background tasks).
-- `SurrealDB` is a benched challenger; `IndraDB` excluded (ADR-003).
+- `SurrealStore` (`--features surrealdb`) is the W1.5 bake-off challenger — built and
+  conformance-tested behind its feature flag, but NOT wired into the `open_store` factory (a
+  `surrealdb://` spec errors) and with no bake-off verdict yet; `IndraDB` excluded (ADR-003).
 
 ---
 
@@ -232,8 +256,14 @@ Full `GraphRead` + `GraphWrite` + `GraphStoreMutExt` implementation backed by Po
 - `BlastRadius` ✅ — transitive **dependents** of a symbol (now follows **all** edge kinds, not just
   Calls — so estate `uses`/`protects`/`accesses` dependents surface; closes the silent-under-report bug).
 - `Lineage` ✅ — dependency/ancestry direction.
-- `ContextPack` ✅ — scoped, budget-bounded context bundle for an agent prompt.
+- `ContextBundle` ✅ — the MCP-exposed scoped, ranked context bundle (source + callers + dependencies).
+- `ContextPack` ✅ — budget-bounded context variant (in-crate; not on the MCP surface).
 - `FetchContent` ✅ — source slice retrieval.
+- `RulesInventory` ✅ — lists rule engines + rule sets and the code that calls them (§2 rules layer).
+- `rules.recall` ✅ — faceted, severity-ordered recall of conformance `Rule` nodes (`PAT-*`/`POL-*`);
+  facets: language/layer/framework (wildcard), severity/rule_type (exact), scope subtree prefix.
+- `RankHotspots` ✅ — top symbols by PageRank × change-frequency churn.
+- `Communities` ✅ — detected symbol communities (graph clusters).
 - `SemanticSearch` ✅ — embedding ANN (optional; needs a VectorStore).
 
 **Hybrid retrieval** ✅ — graph + FTS5 core, embeddings an **optional** sidecar, fused via **RRF**
@@ -308,18 +338,26 @@ Treats infrastructure + mainframe as **just more languages/collectors** feeding 
 ---
 
 ## 9. MCP server ✅
-`wicked-estate-mcp` / `wicked-estate-mcp` — JSON-RPC: `tools/list` returns the retrieval tools with derived JSON
-Schema; `tools/call` dispatches + wraps results in the MCP envelope. `all_tools()` (no semantic) /
-`all_tools_with_semantic(vector_store)`. Implements the R1–R7 behavior contract.
+`wicked-estate-mcp` — JSON-RPC: `tools/list` returns the tools with derived JSON Schema;
+`tools/call` dispatches + wraps results in the MCP envelope. **24 tools across 3 domains** with all
+stores open: 11 unconditional estate read tools (`all_tools()` — SearchEntity, RetrieveEntity,
+TraverseGraph, BlastRadius, FetchContent, ContextBundle, RulesInventory, `rules.recall`,
+RankHotspots, Communities, Lineage), 6 `memory.*` + 7 `knowledge.*` tools, plus `SemanticSearch`
+when embeddings are present (`live_semantic_search` → `handle_request_with_semantic`). The v1 MCP
+surface is read-only — no mutating tool is listed (write is CLI-only; rule authorship flows only
+through human-merged doc PRs, ADR-012). Implements the R1–R7 behavior contract.
 
 ---
 
 ## 10. CLI (`wicked-estate`) ✅
-`index <path> [--db] [--history] [--embeddings]` · `scip <root> [--scip-file]` · `tfstate <file>` ·
-`drift` · `query <name>` · `blast-radius <name>` · `rank` · `stats` (incl. git provenance) ·
+`index <path> [--db] [--repo <label>] [--history] [--embeddings] [--force]` · `scip <root>
+[--scip-file]` · `tfstate <file>` · `import-telemetry` · `drift` · `query <name>` ·
+`blast-radius <name>` · `rank` (alias `hotspots`) · `stats` (incl. git provenance) · `graph-view` ·
 `source <name>` · `semantic <query>` · `cross-graph <name> --db a --db b …` · `compact` ·
 `watch <path> [--history]` · `subscribe [--since <seq>]` · `semantics <symbol> [--description]
-[--requirement] [--validated]` · `by-requirement <REQ>`.
+[--requirement] [--validated]` · `by-requirement <REQ>` · `clusters` · `context` · `annotate` ·
+`annotations` · `stale-annotations` · `fingerprint` · `changed-since` · `entrypoints` · `leaves` ·
+`dead-code` · `nodes` · `resolve` · `correspond` · `export` · `plugins list`.
 
 ---
 
@@ -328,7 +366,8 @@ Schema; `tools/call` dispatches + wraps results in the MCP envelope. `all_tools(
   never panics if git absent/not-a-repo. Surfaced by `stats`.
 - **Per-file git sha** — `file_git_sha`; content rows keyed by sha.
 - **Incremental index** — only changed/new files re-extracted (unchanged skipped by digest); `remove_file`
-  clears nodes/edges/content/embeddings + archives edges to history.
+  clears nodes/edges/content/embeddings + archives edges to history — **target-aware** since 0.15.0:
+  a shared `Import` node that other files' edges still reference is kept and re-homed, not deleted (#132).
 - **Edge-history (read-only log)** — opt-in `--history`; old edges archived by `git_sha` on file change
   (`edge_history(file)` → `HistoricalEdge[]`), pruned beyond retention by `compact`.
 - **Watch mode** — initial index then reactive re-index on file changes (notify/debouncer).
@@ -380,7 +419,8 @@ not regress.
 ---
 
 ## 16. Quality gates & CI ✅
-- Gates (every change): `cargo build --workspace` (0 warnings) · `cargo test --workspace` (617) ·
+- Gates (every change): `cargo build --workspace` (0 warnings) · `cargo test --workspace` (1,370 at
+  time of writing — the count is stale after any new crate; re-run before re-claiming) ·
   `cargo clippy --workspace --all-targets -D warnings` · GraphStore conformance · agent-eval bench.
 - **No grandfathering**: 0 `#[allow]`, 0 `#[ignore]`; lints fixed in code.
 - **GitHub Actions CI** (`.github/workflows/ci.yml`): `gate` job (fmt · build · clippy · test, offline)
@@ -390,10 +430,14 @@ not regress.
 ---
 
 ## 17. Locked decisions (ADRs)
-- **ADR-001** graph schema · **ADR-002** stable symbol identity (no content-hash IDs) ·
+- **ADR-001** graph schema · **ADR-002** stable symbol identity (no content-hash IDs; scheme-3
+  type-nested definition ids since 0.15.0) ·
   **ADR-003** storage backends (SQLite default; SurrealDB challenger; IndraDB excluded; external-DB seam) ·
   **ADR-004** infrastructure/estate mapping · **ADR-005** code-graph-as-a-brain ·
-  **ADR-006** observability OTel adapter · **ADR-007** TSG superseded by SCIP.
+  **ADR-006** observability OTel adapter · **ADR-007** TSG superseded by SCIP ·
+  **ADR-008** memory-api shim retention · **ADR-009** intent-routed LSP (edit plane = the only
+  sanctioned LSP consumer; W3.6) · **ADR-010** parser-plugin overrides (query-only + double-opt-in
+  full) · **ADR-012** rule authorship (no `rules.write` MCP tool — human-merged doc PRs only).
 - Competitive analysis behind every decision: `docs/DESIGN-NOTES.md`.
 
 ---
@@ -408,7 +452,7 @@ not regress.
   and org-wide drift sweep are Wave 9/10. GCP callers may assume `open_cloud_collector("gcp")`
   works — it does not yet.
 - **Semantic embedder tests** are **feature-gated** (need a model download) — they run in the CI
-  `semantic-embedders` lane, **not** in the default 617.
+  `semantic-embedders` lane, **not** in the default workspace suite.
 - **Semantic retrieval quality** proven by an ordering property on small inputs, **not** a retrieval
   benchmark; the agent-eval benchmark still uses the lexical default embedder.
 - **`find_by_requirement`** is exact-string, not fuzzy.

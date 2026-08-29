@@ -75,9 +75,11 @@ DESIGN ONLY. Reviewer + antagonist attack it next. Every claim cites real code.
   design-gate-verdicts.md:70). Knowledge `governs` edges are CROSS-engine (knowledge concept → code
   symbol) → they belong in xedge, not estate's native edge space (DEC-1 cascade,
   design-gate-verdicts.md:69).
+<!-- historical -->
 - **Bus seam already exists** for reconciliation: cursor-poll + durable cursor + TTL self-heal + DLQ
-  + dedup, in `wicked-brain/server/lib/memory-subscriber.mjs:1-55` (the catalog's
-  `memory-subscriber.mjs` reuse target, event-catalog-contract.md:27-32). Event names are PINNED in
+  + dedup, in `wicked-brain/server/lib/memory-subscriber.mjs:1-55` (retired 2026-08; frozen
+  archive — the catalog's `memory-subscriber.mjs` reuse target, event-catalog-contract.md:27-32).
+<!-- /historical --> Event names are PINNED in
   `event-catalog-contract.md:14-26` (`wicked.estate.indexed`, `wicked.knowledge.ingested`, etc.).
 
 ---
@@ -310,9 +312,11 @@ xedge cannot see. Two layers, both loud:
   (event-catalog-contract.md:17); the change-log seam is `GraphRead::changes_since(cursor)` +
   `GraphWrite::log_change` (`core/src/traits.rs:109-111,162-165`). Memory emits
   `wicked.memory.captured` (catalog:20); knowledge `wicked.knowledge.ingested` (catalog:22).
+<!-- historical -->
 - **xedge runs a reconcile subscriber** reusing the existing cursor-poll primitive (durable cursor +
-  TTL self-heal + DLQ + dedup, `wicked-brain/server/lib/memory-subscriber.mjs:1-55`; the catalog's
-  designated reuse, event-catalog-contract.md:27-32). On `wicked.estate.indexed` it does
+  TTL self-heal + DLQ + dedup, `wicked-brain/server/lib/memory-subscriber.mjs:1-55`, retired
+  2026-08; the catalog's designated reuse, event-catalog-contract.md:27-32).
+<!-- /historical --> On `wicked.estate.indexed` it does
   **trigger→re-query** (events are COARSE — counts, not symbols, catalog:9-12): re-query estate for
   the set of estate ids xedge references, diff against live, and `prune_endpoint`/`rename_endpoint`
   the rows whose estate endpoint vanished or moved. Rename uses estate's stable-id property: a true
