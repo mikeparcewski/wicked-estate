@@ -442,9 +442,10 @@ impl KnowledgeEngine {
     /// predicate is applied twice: pushed into the FTS candidate query (store-side, pre-`limit` —
     /// top-k isolation for nodes written ≥ 0.16, which stamp `Node.scope`) and re-checked on every
     /// hydrated candidate's metadata scope — the authoritative filter, which also covers the
-    /// vector (ANN) lane and legacy nodes whose scope predates `Node.scope` stamping (those can
-    /// only surface via the vector lane under a scoped recall; re-ingest to give them full
-    /// scoped-FTS visibility).
+    /// vector (ANN) lane and legacy nodes whose scope predates `Node.scope` stamping (under a
+    /// canonical-prefix scoped recall those can only surface via the vector lane — a kind-wildcard
+    /// prefix skips the pushdown, so FTS still sees them; re-ingest to give them full scoped-FTS
+    /// visibility either way).
     ///
     /// A prefix ending in `:` is a kind wildcard (`"wiki:"` = every `wiki:<area>` subtree) — see
     /// [`scope_in_prefix`]; such prefixes are filtered engine-side only (no store pushdown).
