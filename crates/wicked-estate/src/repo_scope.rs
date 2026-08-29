@@ -22,9 +22,16 @@
 //! One id shape stays shared, unavoidably: an import target that was never resolved to a
 //! definition is identified by the module SPECIFIER, not by a path — `node:fs`, an npm package,
 //! and equally a relative `./index` — so repos importing the same specifier share one node row
-//! whose `file` column belongs to whichever repo wrote it last. Removing that file leaves the
-//! other repos' edges to it dangling until they re-index. The same wart already exists between two
-//! FILES in one repo; namespacing cannot reach it because the id carries no path to namespace.
+//! whose `file` column belongs to whichever repo wrote it last. The same wart already exists
+//! between two FILES in one repo; namespacing cannot reach it because the id carries no path to
+//! namespace. Ownership of that column mutates through THREE paths, none repo-aware: (1) any
+//! importer's re-index takes it (last-writer-wins upsert); (2) removing the owner re-homes the
+//! node to the MIN(file) of its surviving importers' edges (`remove_file`'s shared-Import keep,
+//! incr-integrity lane) — possibly ACROSS repo prefixes, so a path-prefix-scoped view can show an
+//! edge whose target node is filtered out; (3) the last importer's removal deletes it. The edges
+//! themselves are safe: removing the owner no longer dangles the other repos' edges (the node is
+//! kept while any survivor edge targets it — pinned by
+//! `cross_repo_shared_import_survives_owner_repo_deletion`).
 //!
 //! ## Provenance
 //!
