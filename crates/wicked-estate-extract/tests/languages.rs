@@ -397,6 +397,15 @@ fn go_characterization() {
     assert_def(&ex, lang, "Area", &NodeKind::Method);
     assert_def(&ex, lang, "Distance", &NodeKind::Function);
     assert_def(&ex, lang, "Describe", &NodeKind::Function);
+    // scm-anchors D4: one method per receiver-alternation branch — zero-def-loss
+    // pins (R-DEF-LOSS): a future narrowing of the receiver alternation that
+    // DROPS a shape's def turns one of these red.
+    assert_def(&ex, lang, "Norm", &NodeKind::Method); // value: (p Point)
+    assert_def(&ex, lang, "Len", &NodeKind::Method); // generic: (c Cache[K, V])
+    assert_def(&ex, lang, "Get", &NodeKind::Method); // pointer-generic: (c *Cache[K, V])
+    assert_def(&ex, lang, "Width", &NodeKind::Method); // parenthesized: (b (Bounds))
+    assert_def(&ex, lang, "Height", &NodeKind::Method); // parenthesized-pointer: (b (*Bounds))
+    assert_def(&ex, lang, "Cache", &NodeKind::Struct);
     // new kinds
     assert_def(&ex, lang, "Pi", &NodeKind::Constant);
     assert_def(&ex, lang, "MaxPoints", &NodeKind::Constant);
@@ -418,7 +427,7 @@ fn go_characterization() {
     assert_def(&ex, lang, "Matrix", &NodeKind::TypeAlias);
     // D04-2 guard: the constrained type: alternation must NOT re-kind structs or
     // interfaces (a catch-all here turns assert_no_conflicting_def_ids red).
-    assert_def_floor(&ex, lang, 10);
+    assert_def_floor(&ex, lang, 15);
 
     // calls
     assert_call(&ex, lang, "Sqrt");
@@ -1573,5 +1582,61 @@ fn rust_same_type_trait_impls_collision_known_defect() {
         fmts[0].symbol.as_str(),
         "ts-rust . . . probe_trait_impls/Foo#fmt().",
         "[{lang}] the merged id is the type-nested one"
+    );
+}
+
+/// scm-anchors D4 (scheme 3): Go receiver methods nest under the receiver's
+/// base type name via `@code_method.owner` — two types' same-named methods
+/// mint DISTINCT ids, and every receiver-alternation branch resolves to the
+/// same bare type name (value and pointer receivers share one shape).
+#[test]
+fn go_receiver_methods_nest_under_receiver_type() {
+    let lang = "go";
+    let sf = SourceFile {
+        path: "probe_recv.go".to_string(),
+        language: Language::new(lang),
+        text: "package p\n\
+               type A struct{}\ntype B struct{}\ntype C[K any] struct{}\n\
+               func (a A) M()    {}\n\
+               func (b B) M()    {}\n\
+               func (a *A) P()   {}\n\
+               func (c C[K]) G() {}\n\
+               func (c *C[K]) H() {}\n\
+               func (a (A)) Q()  {}\n\
+               func (a (*A)) R() {}\n"
+            .to_string(),
+    };
+    let ex = TreeSitterExtractor::for_language(lang)
+        .unwrap()
+        .extract(&sf)
+        .expect("extraction must succeed");
+    let all: Vec<&str> = ex.nodes.iter().map(|n| n.symbol.as_str()).collect();
+    // One id shape per branch — value/pointer/parenthesized receivers of one
+    // type all anchor under the same bare name.
+    for sym in [
+        "ts-go . . . probe_recv/A#M().", // value: (a A)
+        "ts-go . . . probe_recv/B#M().", // value, second type — the collision fix
+        "ts-go . . . probe_recv/A#P().", // pointer: (a *A)
+        "ts-go . . . probe_recv/C#G().", // generic: (c C[K])
+        "ts-go . . . probe_recv/C#H().", // pointer-generic: (c *C[K])
+        "ts-go . . . probe_recv/A#Q().", // parenthesized: (a (A))
+        "ts-go . . . probe_recv/A#R().", // parenthesized-pointer: (a (*A))
+    ] {
+        assert!(
+            all.contains(&sym),
+            "[{lang}] expected {sym}; symbols = {all:?}"
+        );
+    }
+    // The headline distinctness: A#M() != B#M().
+    let ms: std::collections::HashSet<&str> = ex
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == "M")
+        .map(|n| n.symbol.as_str())
+        .collect();
+    assert_eq!(
+        ms.len(),
+        2,
+        "[{lang}] REGRESSION: two receiver types' M() share one SymbolId; got {ms:?}"
     );
 }

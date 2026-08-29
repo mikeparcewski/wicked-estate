@@ -8,8 +8,27 @@
   body: (block) @code_function.body
 ) @code_function.def
 
-; Method declarations
+; Method declarations — the receiver's base type name is the method's OWNER
+; (scm-anchors D4, scheme 3): a Go method is a top-level SIBLING of its type, so
+; no containment anchor can ever exist; @code_method.owner splices the receiver
+; type as the innermost Type descriptor (`<module>/T#M().`), separating two
+; types' same-named methods. R-DEF-LOSS: the whole receiver sub-pattern is
+; OPTIONAL (`?`) — a receiver shape outside the six-branch alternation degrades
+; to an OWNERLESS module-flat def, never a dropped def. Branches enumerated
+; against tree-sitter-go 0.23.4 node-types.json (pointer_type and
+; parenthesized_type wrap the open _type supertype): T, *T, T[K], *T[K], (T),
+; ((*T)) — one fixture method + assert_def per branch pins each shape.
 (method_declaration
+  receiver: (parameter_list
+    (parameter_declaration
+      type: [
+        (type_identifier) @code_method.owner
+        (pointer_type (type_identifier) @code_method.owner)
+        (generic_type type: (type_identifier) @code_method.owner)
+        (pointer_type (generic_type type: (type_identifier) @code_method.owner))
+        (parenthesized_type (type_identifier) @code_method.owner)
+        (parenthesized_type (pointer_type (type_identifier) @code_method.owner))
+      ]))?
   name: (field_identifier) @code_method.name
   parameters: (parameter_list) @code_method.params
   result: (_)? @code_method.return_type
