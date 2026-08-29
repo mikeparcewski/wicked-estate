@@ -1337,8 +1337,9 @@ function Storage() {
           ['writers', 'concurrent — the whole team writes'],
           ['traversal', 'server-side WITH RECURSIVE, in-DB'],
           ['switching', 'one profile switch — same schema, no re-index'],
+          ['mcp server', 'not yet — SQLite-only today; fails loud under team (named follow-up)'],
         ],
-        note: '--features postgres · fail-loud: a typo’d profile errors, never silently local',
+        note: '--features postgres · fail-loud: a typo’d profile or an unsupported surface errors, never silently local',
       }
     : {
         cmd: 'wicked-estate index . --db graph.db',
@@ -1358,11 +1359,14 @@ function Storage() {
           title={<>SQLite by default. <span style={{ color: 'var(--accent)' }}>One profile switch</span> to a shared team backend.</>}
         >
           <p className="max-w-3xl">
-            The same engine and the same 23 tools run on either backend through one{' '}
-            <span className="font-mono text-sm font-semibold">open_store(spec)</span> factory — no caller changes,
-            no re-index. The Postgres backend passes the same store-conformance suite in CI, and the{' '}
-            <span className="font-mono text-sm font-semibold">WICKED_RUNTIME=team</span> profile seam retargets the
-            whole foundation with one environment variable. Local-first is a feature, not a ceiling.
+            The engine's store path — the CLI, indexing, the full graph surface — runs on either backend through
+            one <span className="font-mono text-sm font-semibold">open_store(spec)</span> factory: no caller changes,
+            no re-index, and the Postgres backend passes the same store-conformance suite in CI. The{' '}
+            <span className="font-mono text-sm font-semibold">WICKED_RUNTIME=team</span> profile seam retargets it
+            with one environment variable. The MCP server — the 23 tools — is{' '}
+            <span className="text-ink">SQLite-only today</span>: under the team profile it fails loud at startup
+            instead of silently falling back to local; Postgres for the MCP surface is the named follow-up.
+            Local-first is a feature, not a ceiling.
           </p>
         </TopHead>
 
@@ -1508,6 +1512,105 @@ export function GetStarted() {
   )
 }
 
+// ── 5b · WHAT v0.15.0 SHIPS — the release the "Grounded to" stamp points at ─────
+// Grounded to v0.15.0 (tag = 8aa4554, all four in the release): CHANGELOG.md
+// [0.15.0], docs/adr/ADR-002 (scheme-3 amendment, #136), docs/adr/ADR-010
+// (plugin overrides, #135 — shipped code), docs/adr/ADR-009 (intent-routed LSP
+// — ACCEPTED DESIGN, implementation is the W3.6 lane; phase-0 lsp.rs fixes
+// landed with it), docs/MIGRATION-0.15.md (the re-index runbook).
+// EDITORIAL RULE: status tags below mirror the ADR Status lines — never promote
+// "accepted design" to shipped without the implementing commit in the release.
+const V0150: { name: string; status: 'shipped' | 'accepted design' | 'runbook'; body: React.ReactNode; href: string; link: string }[] = [
+  {
+    name: 'Scheme-3 symbol identity',
+    status: 'shipped',
+    href: 'https://github.com/mikeparcewski/wicked-estate/blob/main/docs/adr/ADR-002-stable-symbol-identity.md',
+    link: 'ADR-002 (amendment)',
+    body: (
+      <>Definitions now nest under their owning type — <span className="font-mono text-[0.75rem] text-ink">Repo#save().</span>,
+      not a module-flat <span className="font-mono text-[0.75rem] text-ink">save().</span> — so same-named definitions
+      in one module no longer collapse into a single node that calls then “resolved” into at 0.65. Rust impl methods,
+      Go receiver methods, Ruby singleton members, and C++ out-of-line members all move from module-flat to type-nested.</>
+    ),
+  },
+  {
+    name: 'Parser-plugin overrides',
+    status: 'shipped',
+    href: 'https://github.com/mikeparcewski/wicked-estate/blob/main/docs/adr/ADR-010-plugin-overrides.md',
+    link: 'ADR-010',
+    body: (
+      <>“Built-ins always win” is repealed. A drop-in plugin can now override a built-in language: query-only — a
+      manifest plus your <span className="font-mono text-[0.75rem] text-ink">.scm</span> on the shipped grammar, no
+      shared library — or a full grammar swap behind an explicit double opt-in
+      (<span className="font-mono text-[0.75rem] text-ink">override = true</span> +{' '}
+      <span className="font-mono text-[0.75rem] text-ink">WICKED_ESTATE_PLUGIN_OVERRIDE</span>). Patch a query gap
+      locally without waiting for a release.</>
+    ),
+  },
+  {
+    name: 'Intent-routed LSP',
+    status: 'accepted design',
+    href: 'https://github.com/mikeparcewski/wicked-estate/blob/main/docs/adr/ADR-009-intent-routed-lsp.md',
+    link: 'ADR-009',
+    body: (
+      <>The sanctioned consumer for the in-tree LSP client library, defined so bulk routing can’t happen by accident:
+      edit-plane queries (exactly one file · line · col) go <span className="text-ink">LSP-first</span>, and a missing
+      server warns and serves graph results — never a silent substitution; understand-plane queries (blast radius,
+      lineage, search) never consult LSP. Phase-0 fixes (transport timeout, didOpen) landed with the ADR;
+      implementation is the W3.6 lane.</>
+    ),
+  },
+  {
+    name: 'Migration: one re-index per repo',
+    status: 'runbook',
+    href: 'https://github.com/mikeparcewski/wicked-estate/blob/main/docs/MIGRATION-0.15.md',
+    link: 'docs/MIGRATION-0.15.md',
+    body: (
+      <>Scheme 3 re-mints definition ids, so each previously-indexed repo is fully re-extracted on its next{' '}
+      <span className="font-mono text-[0.75rem] text-ink">index</span> — two per-repo gates, loud on stderr,
+      crash-idempotent. No schema migration: the database file opens unchanged; rows rebuild. Re-run{' '}
+      <span className="font-mono text-[0.75rem] text-ink">scip</span> and{' '}
+      <span className="font-mono text-[0.75rem] text-ink">--embeddings</span>, and re-inject overlay edges after.</>
+    ),
+  },
+]
+
+function WhatShipped() {
+  return (
+    <Section id="v0150">
+      <div className="max-w-6xl mx-auto w-full">
+        <div className="mb-4 w-full text-left">
+          <span className="kicker">New in this release</span>
+          <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink leading-[0.98]">
+            What <span style={{ color: 'var(--accent)' }}>v0.15.0</span> ships.
+          </h2>
+          <p className="mt-1.5 text-sm text-muted font-sans leading-tight max-w-3xl">
+            The release this page is grounded to. Two shipped changes to the record itself, the accepted
+            design for the next resolution consumer, and the runbook for bringing a 0.14.x graph across.
+            Full detail: the{' '}
+            <a className="underline text-ink" href="https://github.com/mikeparcewski/wicked-estate/blob/main/CHANGELOG.md" target="_blank" rel="noreferrer">CHANGELOG</a>.
+          </p>
+        </div>
+
+        <div className="grid sm:grid-cols-2 gap-2.5">
+          {V0150.map(item => (
+            <div key={item.name} className="rock-panel p-0">
+              <div className="flex items-center gap-2.5 px-4 py-2 border-b border-hairline-strong">
+                <span className="font-display font-black text-ink text-[0.95rem] flex-1" style={{ fontStretch: '108%' }}>{item.name}</span>
+                <span className={item.status === 'shipped' ? 'tag tag-accent' : 'tag'}>{item.status}</span>
+              </div>
+              <div className="px-4 py-3">
+                <p className="text-sm text-muted font-sans leading-snug">{item.body}</p>
+                <a className="depth underline mt-2 inline-block" href={item.href} target="_blank" rel="noreferrer">{item.link} →</a>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </Section>
+  )
+}
+
 // ── Content ──────────────────────────────────────────────────────────────────
 // The SameGarden four-plane map (shared wicked-web chrome, an Astro component)
 // renders between this island and the GetStarted island — see index.astro.
@@ -1521,6 +1624,7 @@ export default function Content() {
       <BinaryTail />
       <ProvenanceSeam />
       <Storage />
+      <WhatShipped />
     </>
   )
 }

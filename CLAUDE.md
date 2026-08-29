@@ -1,11 +1,16 @@
-# wicked-estate — unified MCP foundation (v0.13.1)
+# wicked-estate — unified MCP foundation (v0.15.0)
 
-## Contributor wiki
+## Contributor docs
 
-Contributor wiki: ./wiki
+Contributor docs: [`docs/`](./docs/)
 
-Invariants, contracts, and extension recipes live there. This pointer is
-the machine-readable anchor agents grep for.
+Invariants and contracts: [`docs/ENGINE-CONTRACT.md`](./docs/ENGINE-CONTRACT.md).
+Extension recipes: [`docs/add-lang.md`](./docs/add-lang.md) (new language),
+[`docs/extractor-sdk.md`](./docs/extractor-sdk.md) (drop-in edge rules),
+[`PLUGIN.md`](./PLUGIN.md) (runtime grammar plugins). Decision records:
+[`docs/adr/`](./docs/adr/). Onboarding: [`docs/getting-started.md`](./docs/getting-started.md).
+Upgrading from 0.14.x: [`docs/MIGRATION-0.15.md`](./docs/MIGRATION-0.15.md).
+This pointer block is the machine-readable anchor agents grep for.
 
 Rust MCP server: **code graph + memory + knowledge** in a single binary, 23 tools across 3 domains.
 Turns a repo into a queryable graph (symbols, calls, imports, edges injected by event bus and commands)

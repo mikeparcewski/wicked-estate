@@ -66,6 +66,28 @@ jobs:
           print(f"Bumped semver strings to {new_ver}")
           EOF
 
+      # The Claude-plugin manifest carries its own version field outside Cargo's
+      # reach — it shipped 0.13.1 across the 0.14.x/0.15.0 releases because
+      # nothing bumped it. Sync it in the same release commit.
+      - name: bump Claude-plugin manifest version
+        env:
+          NEW_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, pathlib
+          new_ver = os.environ["NEW_VERSION"]
+          p = pathlib.Path("plugins/wicked-estate/.claude-plugin/plugin.json")
+          data = json.loads(p.read_text())
+          old = data["version"]
+          # Surgical string replace (not json.dumps) to preserve formatting.
+          text = p.read_text()
+          needle = f'"version": "{old}"'
+          if text.count(needle) != 1:
+              raise SystemExit(f"expected exactly one {needle!r} in {p}")
+          p.write_text(text.replace(needle, f'"version": "{new_ver}"'))
+          print(f"Bumped plugin manifest {old} -> {new_ver}")
+          EOF
+
       - name: update Cargo.lock
         run: cargo check --workspace --quiet
 
@@ -74,8 +96,13 @@ jobs:
       # drifted, publishing would fail MID-SEQUENCE after leaf crates are already
       # irreversibly live (caret semantics: ^0.15.0 excludes 0.16.0). This guard
       # goes red BEFORE the tag exists; bump the pins manually on a branch first.
-      - name: guard — internal version pins in sync
-        run: cargo test -p wicked-estate --test version_pins
+      # plugin_manifest_version is the same guard for the Claude-plugin manifest
+      # (belt to the bump step's braces — a red run here means the bump step and
+      # the guard disagree, i.e. someone edited one path and not the other).
+      - name: guard — internal version pins + plugin manifest in sync
+        run: |
+          cargo test -p wicked-estate --test version_pins
+          cargo test -p wicked-estate --test plugin_manifest_version
 
       - name: commit and tag
         env:
@@ -83,7 +110,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock
+          git add Cargo.toml Cargo.lock plugins/wicked-estate/.claude-plugin/plugin.json
           git diff --cached --quiet || git commit -m "chore(release): v${NEW_VERSION}"
           git tag "v${NEW_VERSION}"
           git push origin HEAD:main
