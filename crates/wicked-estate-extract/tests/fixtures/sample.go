@@ -10,6 +10,10 @@ const MaxPoints = 1000
 
 type Degrees = float64
 
+type UserID string
+type Handler func(x int) error
+type Matrix [][]float64
+
 type Point struct {
 	X float64
 	Y float64
@@ -22,6 +26,10 @@ type Shape interface {
 type Circle struct {
 	Center Point
 	Radius float64
+}
+
+type Bounds struct {
+	minX, minY float64
 }
 
 var defaultOrigin Point

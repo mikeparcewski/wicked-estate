@@ -383,6 +383,19 @@ fn go_characterization() {
     // struct captures (added to go.scm)
     assert_def(&ex, lang, "Point", &NodeKind::Struct);
     assert_def(&ex, lang, "Circle", &NodeKind::Struct);
+    assert_def(&ex, lang, "Shape", &NodeKind::Interface);
+    // D04-1: struct fields (multi-name `minX, minY float64` emits one Field per name)
+    assert_def(&ex, lang, "X", &NodeKind::Field);
+    assert_def(&ex, lang, "Y", &NodeKind::Field);
+    assert_def(&ex, lang, "Radius", &NodeKind::Field);
+    assert_def(&ex, lang, "minX", &NodeKind::Field);
+    assert_def(&ex, lang, "minY", &NodeKind::Field);
+    // D04-1/D04-10: defined (non-struct) types — deliberate TypeAlias approximation
+    assert_def(&ex, lang, "UserID", &NodeKind::TypeAlias);
+    assert_def(&ex, lang, "Handler", &NodeKind::TypeAlias);
+    assert_def(&ex, lang, "Matrix", &NodeKind::TypeAlias);
+    // D04-2 guard: the constrained type: alternation must NOT re-kind structs or
+    // interfaces (a catch-all here turns assert_no_conflicting_def_ids red).
     assert_def_floor(&ex, lang, 10);
 
     // calls
