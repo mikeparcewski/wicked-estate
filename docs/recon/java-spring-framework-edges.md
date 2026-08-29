@@ -34,6 +34,12 @@ then emits nodes/refs/edges. Adding a new relationship class = a new `CaptureRol
 
 ## SymbolId scheme (verified empirically against the def loop, NOT the prompt's recon)
 
+> **2026-08 update:** the section below is HISTORY — it described scheme 1. Since the ADR-002
+> amendment (symbol-id scheme 2) the def loop DOES nest members under their enclosing types
+> (`OrderController/OrderController#listOrders().`), and the framework emitters no longer
+> hand-build ids at all: they join onto the actual def node via `def_symbol_at` /
+> `def_symbol` — the only definition-id constructors on the tree-sitter seam.
+
 The def loop builds **2-descriptor** global symbols, it does NOT nest method under class:
 `Symbol::global("ts-java", None, [Descriptor(module_path, Namespace), Descriptor(name, suffix)])`
 where `module_path` = path without extension, `def_suffix("class")=Type`, `def_suffix("method")=Method`.
