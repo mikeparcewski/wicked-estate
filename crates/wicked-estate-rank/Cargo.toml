@@ -16,6 +16,6 @@ petgraph = "0.6.5"
 serde.workspace = true
 
 [dev-dependencies]
-wicked-estate-store = { path = "../wicked-estate-store", version = "0.14.2" }
+wicked-estate-store = { path = "../wicked-estate-store", version = "0.15.0" }
 proptest = "1"
 
