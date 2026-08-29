@@ -1,6 +1,6 @@
 //! End-to-end plugin-override behaviour through the CLI, one FRESH PROCESS per invocation
 //! (`CARGO_BIN_EXE_wicked-estate`), so multi-configuration flows are legal here — the in-process
-//! registry is a `OnceLock` and could never see a second configuration (ADR-009 test rules).
+//! registry is a `OnceLock` and could never see a second configuration (ADR-010 test rules).
 //!
 //! Covers: the loud broken-override fallback that must NOT delete previously-indexed files (the
 //! inherited silent-deletion scar), the `plugin_overrides` digest cycle driven by SEMANTIC byte

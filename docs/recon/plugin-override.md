@@ -36,7 +36,7 @@ without a release.
 
 ## 2. Decisions (all explicit — no TBD)
 
-**D1 — New `docs/adr/ADR-009-plugin-overrides.md`, not an amendment.** ADR-001..008 exist; none
+**D1 — New `docs/adr/ADR-010-plugin-overrides.md`, not an amendment.** ADR-001..008 exist; none
 covers runtime plugins (F-history). Style: ADR-002-amendment convention — a `Resolves:` line
 citing the review lineage (doc-04: every gap query-level, unpatchable without a release), quote
 the two superseded sentences verbatim (`plugin.rs:20-21`, `PLUGIN.md:26-28`) and `de24d66`'s
@@ -134,7 +134,7 @@ language is REFUSED loudly — the claim is dropped and stderr names the extensi
 owner (`GRAMMAR-OVERRIDE: extension 'py' is owned by built-in 'python' — claim dropped (name
 'python' in WICKED_ESTATE_PLUGIN_OVERRIDE to allow)`) — unless that owning language is ALSO named
 in `WICKED_ESTATE_PLUGIN_OVERRIDE`.** A plugin overriding typescript can never silently hijack
-`.py`; the double opt-in is per captured language, not per plugin. Stated in ADR-009 + PLUGIN.md;
+`.py`; the double opt-in is per captured language, not per plugin. Stated in ADR-010 + PLUGIN.md;
 unit-tested (S2).
 
 **D11 — Same-language override collision: disable BOTH, loud stderr naming both dirs — and this
@@ -195,15 +195,15 @@ control fails loudly instead of the override test passing vacuously.
 access; the bench binary is its own process so OnceLock timing is safe — with one stderr line
 (`bench: WICKED_ESTATE_PLUGINS pinned to empty dir for hermetic baselines`). Unconditional: bench
 numbers must never depend on who runs them; anyone researching plugin-influenced numbers edits the
-harness deliberately. Named in ADR-009 as the bench-exposure closure.
+harness deliberately. Named in ADR-010 as the bench-exposure closure.
 
 ## 3. Steps
 
 Ordering: S1 (ADR) and S2 (registry) first — S3-S5 program against S2's public functions.
 Each step compiles green per-crate (`cargo build/test/clippy -p <crate>`, lane CARGO_TARGET_DIR).
 
-**S1 — ADR-009.**
-- Files: `docs/adr/ADR-009-plugin-overrides.md` (new).
+**S1 — ADR-010.**
+- Files: `docs/adr/ADR-010-plugin-overrides.md` (new).
 - Change: precedence model (D1), safety rules (D7 both-tier fallback, ABI gate unchanged, D10
   double opt-in + cross-language ext-claim refusal, D11 cross-mode duplicates, D12 target
   validation), digest design + write-last divergence from extra_rules (D3-D6, incl. the
@@ -488,7 +488,7 @@ non-override paths — not a dev-machine plugin artifact. Doc falsifier: the SCO
 | I1 / PO-ATK-1 (major) | D14 rewritten: file boundaries = configuration boundaries. S7(a) replacement proof now uses two LANG_TABLE entries (typescript superset + tsx namespace-only) in ONE configuration — legal per D9, not a D11 duplicate. Full-override gate split into three one-configuration files (S7(c')). Multi-config flows live only in the CLI subprocess harness (S7(d)). |
 | I2 (major) | D7 extended to the grammar tier: armed override's query eagerly compiled against its own plugin grammar at load; failure → GRAMMAR-OVERRIDE marker + disarm to built-in grammar+query + dropped from the effective set. F2 updated (from_grammar `.ok()?` named). New cc-gated subprocess test leg S7(d)(1b): bad grammar-tier query → language alive, no deletions. |
 | I3 (major) | D10 cross-language capture rule: a claimed extension owned by a different LANG_TABLE entry is refused loudly unless that owner is also named in the env var. S2 unit tests + S7(c') integration assertion (.py not hijacked). In ADR + PLUGIN.md. |
-| I4 / BR-1 (major) | New D16 + step S6b: `wicked-estate-bench/src/main.rs` pins `WICKED_ESTATE_PLUGINS` to an empty temp dir at startup (own process, OnceLock-safe), stderr notice, named in ADR-009. F14 records the evidence. |
+| I4 / BR-1 (major) | New D16 + step S6b: `wicked-estate-bench/src/main.rs` pins `WICKED_ESTATE_PLUGINS` to an empty temp dir at startup (own process, OnceLock-safe), stderr notice, named in ADR-010. F14 records the evidence. |
 | PO-ATK-2 (major) | S6 grep scoped to the five user-facing doc surfaces, verbatim command recorded; docs/recon + docs/adr deliberately excluded (they quote the superseded sentence by design). |
 | PO-ATK-3 (major) | S8 split: (1a) demonstrative diff on the namespace-bearing fixture repo; (1b) wicked-studio superset-override run reframed as EXPECTED-ZERO no-regression diff with the pass condition stated. F10 records the corpus grep (0 namespace declarations in both corpora). |
 | PO-ATK-4 (major) | no_shadow.rs given two explicit legs: no-cc leg asserts the D12 refusal (find_by_name none + built-in unchanged — a real assertion, not a vacuous pass); cc-gated leg loads a real dylib named typescript with an unarmed ts claim and asserts built-in wins at BOTH lookup sites. Armed-ext-claim (honored) + foreign-ext (refused) assertions added to override_both_signals.rs. |
@@ -504,4 +504,4 @@ non-override paths — not a dev-machine plugin artifact. Doc falsifier: the SCO
 | PO-ATK-5 (minor) | "touch" eliminated: S7(d)(2) and S8(3) specify a semantic byte edit with a node-set diff as evidence. |
 | PO-ATK-6 (minor) | F15 + S2 file list: `pub(crate) fn builtin_language` accessor in treesitter.rs; choice named in S2. |
 | PO-ATK-7 (minor) | S6 delete list corrected to PLUGIN.md:27 / FEATURES.md:123 / nginx README:36 (verified this revision); README + add-lang moved to the update list. |
-| PO-ATK-8 (minor) | (a) fifth `plugins list` state DISABLED-duplicate (S5, asserted S7(d)(3)); (b) unconditional-registry-load sentence owned by ADR-009 (D1). |
+| PO-ATK-8 (minor) | (a) fifth `plugins list` state DISABLED-duplicate (S5, asserted S7(d)(3)); (b) unconditional-registry-load sentence owned by ADR-010 (D1). |

@@ -1,4 +1,4 @@
-# ADR-009 — Plugin overrides of built-in languages
+# ADR-010 — Plugin overrides of built-in languages
 
 **Status:** Accepted · **Date:** 2026-08-29 · **Lane:** plugin-override
 **Implements:** `crates/wicked-estate-extract/src/plugin.rs` (registry + precedence),

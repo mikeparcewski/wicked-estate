@@ -120,7 +120,7 @@ get hand-written line/macro extractors:
   `lib<name>.{so,dylib,dll}` (compiled tree-sitter grammar) + `<name>.scm` (query) + `plugin.toml`
   (manifest) — into `$WICKED_ESTATE_PLUGINS` (default `~/.wicked-estate/plugins`).
 - Loaded at startup via `libloading` (`dlopen`), ABI-checked (13–15), and registered. Precedence is
-  three-tiered (ADR-009): built-in < query-only override (`override_query` in the manifest — user
+  three-tiered (ADR-010): built-in < query-only override (`override_query` in the manifest — user
   `.scm`, shipped grammar) < full grammar override (`override = true` AND the language named in
   `WICKED_ESTATE_PLUGIN_OVERRIDE`). An additive plugin (no override fields) still cannot shadow a
   built-in; an unloadable or ABI-incompatible plugin is skipped with a warning, never aborts; a

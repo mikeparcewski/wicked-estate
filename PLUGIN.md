@@ -24,7 +24,7 @@ A plugin is a directory with three files:
 
 The plugins directory is `$WICKED_ESTATE_PLUGINS` if set, otherwise `~/.wicked-estate/plugins`.
 At startup wicked-estate scans it. Precedence is three-tiered
-([ADR-009](docs/adr/ADR-009-plugin-overrides.md)): **built-in < query-only override < full grammar
+([ADR-010](docs/adr/ADR-010-plugin-overrides.md)): **built-in < query-only override < full grammar
 override**. A plugin with no override fields is *additive* — lookups check built-in languages
 first, then plugins, so an additive plugin cannot shadow a built-in. Override plugins (below)
 deliberately can. A plugin that fails to load (missing symbol, unreadable query, incompatible ABI)
@@ -49,7 +49,7 @@ Two more fields exist for overriding built-ins — `override_query` and `overrid
 the next section. Unknown manifest keys are warned about by name (a typo like `override-query`
 is visible, never silently dropped).
 
-## Overriding a built-in language (ADR-009)
+## Overriding a built-in language (ADR-010)
 
 Built-in queries have gaps, and grammars age. Overrides let you patch either locally, without
 waiting for a release. Two tiers:

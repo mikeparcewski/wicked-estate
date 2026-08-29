@@ -18,12 +18,12 @@
 //!
 //! The plugins directory is `$WICKED_ESTATE_PLUGINS` if set, else `~/.wicked-estate/plugins`.
 //!
-//! ## Precedence (ADR-009)
+//! ## Precedence (ADR-010)
 //!
 //! Three tiers: **built-in < query-only override < full grammar override.**
 //!
 //! - A plugin with no override fields is *additive*: lookups consult [`LANG_TABLE`] first, then
-//!   loaded plugins, so an additive plugin never shadows a built-in (the pre-ADR-009 behaviour,
+//!   loaded plugins, so an additive plugin never shadows a built-in (the pre-ADR-010 behaviour,
 //!   unchanged).
 //! - `override_query = "<lang>"` in `plugin.toml` makes the plugin a **query-only override**:
 //!   its `.scm` replaces the built-in query for that `LANG_TABLE` entry, on the shipped grammar.
@@ -87,11 +87,11 @@ pub struct PluginManifest {
     /// Informational: extraction capabilities (`symbols`, `calls`, …).
     #[serde(default)]
     pub caps: Vec<String>,
-    /// Query-only override (ADR-009 tier 2): names the built-in `LANG_TABLE` entry whose query
+    /// Query-only override (ADR-010 tier 2): names the built-in `LANG_TABLE` entry whose query
     /// this plugin's `.scm` replaces. Shipped grammar, user query; no library involved.
     #[serde(default)]
     pub override_query: Option<String>,
-    /// Full grammar override flag (ADR-009 tier 3). Armed only when the language is ALSO named in
+    /// Full grammar override flag (ADR-010 tier 3). Armed only when the language is ALSO named in
     /// `WICKED_ESTATE_PLUGIN_OVERRIDE` — the flag alone is inert. (`override` is a Rust keyword,
     /// hence the rename.)
     #[serde(default, rename = "override")]
@@ -113,7 +113,7 @@ pub struct LoadedPlugin {
     _lib: libloading::Library,
 }
 
-/// A query-only override of a built-in language (ADR-009 tier 2): shipped grammar, user query.
+/// A query-only override of a built-in language (ADR-010 tier 2): shipped grammar, user query.
 pub struct QueryOverride {
     /// The overridden `LANG_TABLE` entry name.
     pub lang: String,
@@ -123,13 +123,13 @@ pub struct QueryOverride {
     /// cached bytes — never a fresh disk read).
     pub query_src: String,
     /// Eager compile result against the built-in grammar. `Err` means the built-in query stays in
-    /// use (loud fallback, ADR-009).
+    /// use (loud fallback, ADR-010).
     pub compiled: Result<(), String>,
     /// 16-hex digest of the cached query bytes (descriptor line component).
     pub digest: String,
 }
 
-/// An ARMED, eagerly-compiled full grammar override of a built-in language (ADR-009 tier 3).
+/// An ARMED, eagerly-compiled full grammar override of a built-in language (ADR-010 tier 3).
 /// Only overrides that passed both opt-in signals AND the eager query compile appear here.
 pub struct GrammarOverride {
     /// The overridden `LANG_TABLE` entry name.
@@ -138,7 +138,7 @@ pub struct GrammarOverride {
     pub dir: PathBuf,
     /// The dlopen'd grammar + cached query (compile against it verified at load).
     pub plugin: LoadedPlugin,
-    /// Extension claims that survived the cross-language ownership filter (ADR-009: a claim on an
+    /// Extension claims that survived the cross-language ownership filter (ADR-010: a claim on an
     /// extension owned by a DIFFERENT built-in is dropped unless that owner is also named in
     /// `WICKED_ESTATE_PLUGIN_OVERRIDE`).
     pub extensions: Vec<String>,
@@ -172,7 +172,7 @@ pub fn plugins_dir() -> Option<PathBuf> {
 }
 
 /// `WICKED_ESTATE_PLUGIN_OVERRIDE` parsed as comma-separated exact language names. Read once at
-/// first registry access (OnceLock semantics, ADR-009); no wildcard.
+/// first registry access (OnceLock semantics, ADR-010); no wildcard.
 fn override_env_list() -> Vec<String> {
     std::env::var("WICKED_ESTATE_PLUGIN_OVERRIDE")
         .ok()
@@ -185,7 +185,7 @@ fn override_env_list() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Is the full grammar override of `lang` armed? Pure double-opt-in rule (ADR-009): the manifest
+/// Is the full grammar override of `lang` armed? Pure double-opt-in rule (ADR-010): the manifest
 /// flag AND the env list must both name it. Pure so the four-way matrix is unit-testable without
 /// a dylib or env mutation.
 pub fn grammar_override_armed(manifest_flag: bool, env_list: &[String], lang: &str) -> bool {
@@ -195,7 +195,7 @@ pub fn grammar_override_armed(manifest_flag: bool, env_list: &[String], lang: &s
 /// Everything the registry knows: additive plugins, overrides (effective and failed), listing
 /// rows, and the canonical override descriptor.
 struct Registry {
-    /// Additive (non-override) plugins — the pre-ADR-009 registry, semantics unchanged.
+    /// Additive (non-override) plugins — the pre-ADR-010 registry, semantics unchanged.
     plugins: Vec<LoadedPlugin>,
     /// Query-only overrides for built-in languages (compiled-ok AND failed; failed ones stay
     /// listed but out of the effective set).
@@ -204,7 +204,7 @@ struct Registry {
     grammar_overrides: Vec<GrammarOverride>,
     /// Rows for `plugins list` (includes inert/failed/disabled override plugins).
     listings: Vec<PluginListing>,
-    /// Canonical descriptor of the EFFECTIVE override set (ADR-009): sorted
+    /// Canonical descriptor of the EFFECTIVE override set (ADR-010): sorted
     /// `<lang>|<mode>|<dir basename>|<digest>` lines; empty when none. Both the index gate value
     /// and the audit record.
     descriptor: String,
@@ -261,7 +261,7 @@ pub fn grammar_override_for_ext(ext: &str) -> Option<&'static GrammarOverride> {
 }
 
 /// The canonical descriptor of the effective override set — the `plugin_overrides` meta-key value
-/// (gate + audit record, ADR-009). Empty string when no override is active.
+/// (gate + audit record, ADR-010). Empty string when no override is active.
 pub fn override_state() -> &'static str {
     &registry().descriptor
 }
@@ -317,7 +317,7 @@ fn build_registry(dir: Option<&Path>, env_list: &[String]) -> Registry {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return empty; // no plugins dir → no plugins (not an error)
     };
-    // Deterministic order (ADR-009): sorted by path, so the registry, `plugins list`, and the
+    // Deterministic order (ADR-010): sorted by path, so the registry, `plugins list`, and the
     // override descriptor never depend on read_dir order.
     let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
     dirs.sort();
@@ -335,7 +335,7 @@ fn build_registry(dir: Option<&Path>, env_list: &[String]) -> Registry {
         }
     }
 
-    // Duplicate refusal (ADR-009), including cross-mode: two override records for one language
+    // Duplicate refusal (ADR-010), including cross-mode: two override records for one language
     // disable each other loudly. Deterministic refusal beats a silent arbitrary winner.
     let mut lang_dirs: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for c in &classified {
@@ -426,7 +426,7 @@ fn build_registry(dir: Option<&Path>, env_list: &[String]) -> Registry {
     reg
 }
 
-/// Canonical descriptor of the EFFECTIVE override set (ADR-009): sorted
+/// Canonical descriptor of the EFFECTIVE override set (ADR-010): sorted
 /// `<lang>|<mode>|<dir basename>|<digest>` lines. Only compiled-ok query overrides and armed,
 /// compile-verified grammar overrides are effective — a failed or inert override drops out, so a
 /// graph previously extracted under it honestly re-extracts under the built-in.
@@ -494,7 +494,7 @@ fn classify_one(
         );
     }
 
-    // ── Tier 2: query-only override (manifest-only activation, ADR-009) ──────────────────────
+    // ── Tier 2: query-only override (manifest-only activation, ADR-010) ──────────────────────
     if let Some(lang) = &m.override_query {
         let Some(language) = crate::treesitter::builtin_language(lang) else {
             return Err(format!(
@@ -517,7 +517,7 @@ fn classify_one(
         }
         let query_src = std::fs::read_to_string(dir.join(&m.query))
             .map_err(|e| format!("read query `{}`: {e}", m.query))?;
-        // Eager compile against the built-in grammar (ADR-009): a broken override must fall back
+        // Eager compile against the built-in grammar (ADR-010): a broken override must fall back
         // to the built-in query LOUDLY at load — never inherit the silent-deletion `.ok()?` path.
         let compiled = match tree_sitter::Query::new(&language, &query_src) {
             Ok(q) => {
@@ -579,7 +579,7 @@ fn classify_one(
         return Ok(Some(Classified::Additive(plugin)));
     }
 
-    // ── Tier 3: grammar override — double opt-in (ADR-009) ───────────────────────────────────
+    // ── Tier 3: grammar override — double opt-in (ADR-010) ───────────────────────────────────
     let lang = m.name.clone();
     if !grammar_override_armed(true, env_list, &lang) {
         // Manifest flag without the env var: fully INERT — not registered anywhere, only listed.
@@ -594,7 +594,7 @@ fn classify_one(
         })));
     }
 
-    // Eager compile against the plugin's OWN grammar (ADR-009): an armed override with a broken
+    // Eager compile against the plugin's OWN grammar (ADR-010): an armed override with a broken
     // query disarms to built-in grammar + built-in query, loudly — the `from_grammar` silent
     // `.ok()?` path must never see a user query for a built-in language.
     match tree_sitter::Query::new(&plugin.language, &plugin.query_src) {
@@ -617,7 +617,7 @@ fn classify_one(
         }
     }
 
-    // Cross-language extension capture rule (ADR-009): a claimed extension owned by a DIFFERENT
+    // Cross-language extension capture rule (ADR-010): a claimed extension owned by a DIFFERENT
     // built-in language is refused unless that owner is also named in the env list. The double
     // opt-in is per captured language, not per plugin.
     let extensions = filter_ext_claims(&lang, &plugin.extensions, env_list);
@@ -649,7 +649,7 @@ fn classify_one(
     )))
 }
 
-/// Apply the cross-language extension capture rule (ADR-009) to an armed override's claims:
+/// Apply the cross-language extension capture rule (ADR-010) to an armed override's claims:
 /// keep an extension owned by the overridden language itself or by no built-in; drop — loudly —
 /// one owned by a different built-in language, unless that owner is also named in `env_list`.
 fn filter_ext_claims(lang: &str, claims: &[String], env_list: &[String]) -> Vec<String> {

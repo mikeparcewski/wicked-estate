@@ -3463,7 +3463,7 @@ fn main() -> Result<()> {
                         println!("plugins dir: {}", d.display());
                     }
                     // Listings cover additive plugins AND every override plugin dir — active,
-                    // FAILED (built-in in use), armed, INERT, and DISABLED-duplicate (ADR-009).
+                    // FAILED (built-in in use), armed, INERT, and DISABLED-duplicate (ADR-010).
                     let listings = wicked_estate_extract::plugin::listings();
                     if listings.is_empty() {
                         println!(

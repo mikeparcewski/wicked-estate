@@ -1199,7 +1199,7 @@ static LANG_TABLE: &[LangEntry] = &[
 
 /// Built-in grammar for a [`LANG_TABLE`] entry name. `LANG_TABLE` is private to this module; the
 /// plugin registry needs the grammar to eagerly compile a query-only override's `.scm` against it
-/// at load time (ADR-009) — this accessor is that seam.
+/// at load time (ADR-010) — this accessor is that seam.
 pub(crate) fn builtin_language(name: &str) -> Option<tree_sitter::Language> {
     LANG_TABLE
         .iter()
@@ -1208,7 +1208,7 @@ pub(crate) fn builtin_language(name: &str) -> Option<tree_sitter::Language> {
 }
 
 /// The [`LANG_TABLE`] entry name owning a file extension (no dot, lowercase), if any. Drives the
-/// cross-language extension-capture rule for grammar overrides (ADR-009).
+/// cross-language extension-capture rule for grammar overrides (ADR-010).
 pub(crate) fn builtin_owner_of_ext(ext: &str) -> Option<&'static str> {
     LANG_TABLE
         .iter()
@@ -1236,7 +1236,7 @@ impl TreeSitterExtractor {
     /// unavailable rather than a panic at extract time).
     pub fn for_language(name: &str) -> Option<Self> {
         if let Some(entry) = LANG_TABLE.iter().find(|e| e.name == name) {
-            // ADR-009 tier 3: an ARMED grammar override (double opt-in, eagerly compile-verified
+            // ADR-010 tier 3: an ARMED grammar override (double opt-in, eagerly compile-verified
             // at registry load) replaces both grammar and query. A disarmed-by-compile-failure
             // override never reaches this arm, so `from_grammar`'s silent `.ok()?` never sees a
             // user query for a built-in language.
@@ -1244,7 +1244,7 @@ impl TreeSitterExtractor {
                 return Self::from_grammar(&g.lang, g.plugin.language.clone(), &g.plugin.query_src);
             }
             let language = (entry.make_language)();
-            // ADR-009 tier 2: a compiled-ok query-only override replaces the built-in query on
+            // ADR-010 tier 2: a compiled-ok query-only override replaces the built-in query on
             // the built-in grammar. A failed override returns None from `override_query_for`
             // (loud fallback fired at registry load) — the built-in query stays in use: an
             // override can never make a built-in language unavailable.
@@ -1295,7 +1295,7 @@ impl TreeSitterExtractor {
 /// a superset of what is actually wired). Returns `None` when no wired grammar claims the extension.
 pub fn extractor_for_extension(ext: &str) -> Option<TreeSitterExtractor> {
     let needle = ext.trim_start_matches('.').to_ascii_lowercase();
-    // ADR-009 tier 3: an ARMED grammar override's SURVIVING extension claims (post the
+    // ADR-010 tier 3: an ARMED grammar override's SURVIVING extension claims (post the
     // cross-language ownership filter) win before the built-in extension match. Query-only
     // overrides need no hook here — the built-in match below delegates to `for_language`,
     // which applies them.

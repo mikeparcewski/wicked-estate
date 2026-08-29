@@ -1,4 +1,4 @@
-//! Non-override plugins still NEVER shadow a built-in (ADR-009 keeps tier 1 additive), and a
+//! Non-override plugins still NEVER shadow a built-in (ADR-010 keeps tier 1 additive), and a
 //! library-less non-override manifest is refused — two real legs, neither vacuous:
 //!
 //! - always: a LIBRARY-LESS manifest with no override fields is refused by the

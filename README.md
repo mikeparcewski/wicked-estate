@@ -137,7 +137,7 @@ wicked-estate watch ./my-project --db graph.db
   linked into the (MIT) core — so a grammar under a license incompatible with MIT (GPL, etc.) stays
   isolated. A plugin can also **override a built-in language** — patch a query gap locally
   (`override_query`) or swap the whole grammar under an explicit double opt-in (`override = true`
-  + `WICKED_ESTATE_PLUGIN_OVERRIDE`), loudly announced and audit-tracked (ADR-009).
+  + `WICKED_ESTATE_PLUGIN_OVERRIDE`), loudly announced and audit-tracked (ADR-010).
   `wicked-estate plugins list` shows what's loaded; see [PLUGIN.md](./PLUGIN.md) and the
   [nginx example](./examples/plugins/nginx).
 - **Precise blast-radius** — bounded reverse-reachability over *all* dependency edge kinds (not just

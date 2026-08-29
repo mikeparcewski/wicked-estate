@@ -1,4 +1,4 @@
-//! ADR-009 tier 2, proven in ONE registry configuration (the registry is a process-wide
+//! ADR-010 tier 2, proven in ONE registry configuration (the registry is a process-wide
 //! `OnceLock`, so file boundaries = configuration boundaries): the plugins dir holds a SUPERSET
 //! query override for `typescript` (built-in query + an `internal_module` pattern) and a
 //! NAMESPACE-ONLY override for `tsx` (legal — overrides match per LANG_TABLE entry, so this is

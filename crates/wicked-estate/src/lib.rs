@@ -616,12 +616,12 @@ pub fn index_path_as(
     }
     store.meta_set_key(&digest_key, &extra_digest);
 
-    // Plugin-override gate (ADR-009): a parser-plugin override (query-only or armed grammar)
+    // Plugin-override gate (ADR-010): a parser-plugin override (query-only or armed grammar)
     // changes extraction output without touching a single source byte, so stored graphs indexed
     // under a different override state must fully re-extract. The per-repo `plugin_overrides`
     // meta key holds the canonical descriptor of the effective override set; reading
     // `override_state()` here makes plugin-registry loading unconditional on every index run
-    // (dlopen moves from first-lookup to index start — owned by ADR-009). The digest inside each
+    // (dlopen moves from first-lookup to index start — owned by ADR-010). The digest inside each
     // descriptor line is over the registry's CACHED bytes — what extraction will actually use —
     // never a fresh disk read, so a long-lived process stays old-query/old-digest consistent.
     //
@@ -851,7 +851,7 @@ pub fn index_path_as(
         if !scheme_gate {
             store.meta_set_key(&scheme_key, SYMBOL_ID_SCHEME);
         }
-        // Same write-last discipline for the plugin-override key (ADR-009): certify only a run
+        // Same write-last discipline for the plugin-override key (ADR-010): certify only a run
         // whose gate did not fire.
         if !override_gate {
             store.meta_set_key(&override_key, cur_overrides);
@@ -1137,7 +1137,7 @@ pub fn index_path_as(
     // so an interrupted migration re-fires the scheme gate instead of certifying a mixed DB.
     // (See the gate above for why this deliberately differs from the version/rules gates.)
     store.meta_set_key(&scheme_key, SYMBOL_ID_SCHEME);
-    // The plugin-override key follows the same write-LAST rule (ADR-009): stamped only once the
+    // The plugin-override key follows the same write-LAST rule (ADR-010): stamped only once the
     // re-extraction under the current override state durably completed.
     store.meta_set_key(&override_key, cur_overrides);
 

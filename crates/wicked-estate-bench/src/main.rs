@@ -15,7 +15,7 @@ use wicked_estate_bench::capability::{print_summary_table, run_benchmark};
 use wicked_estate_bench::memory_recall::{GATE, run_memory_recall_bench};
 
 fn main() -> Result<()> {
-    // Hermeticity pin (ADR-009 / D16): the bench is the repo's truth oracle, and a plugin
+    // Hermeticity pin (ADR-010 / D16): the bench is the repo's truth oracle, and a plugin
     // override on the dev machine would silently move built-in-language baselines. Pin the
     // plugins dir to a fresh empty temp dir BEFORE any indexing — unconditional, so bench
     // numbers never depend on who runs them. This binary is its own process, so setting the
