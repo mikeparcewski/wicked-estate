@@ -395,3 +395,21 @@ Run on a machine with `typescript-language-server` on PATH, `CARGO_TARGET_DIR` s
 | FEAS-6 (BEFORE measurement mechanics unstated; release-binary BEFORE inapplicable) | minor | S3 gains explicit commit-ordered mechanics (test-first commit fails red = BEFORE; post-fix green = AFTER); S5 + falsifier 2 state the release-binary BEFORE is inapplicable (lsp.rs unreachable from the binary, F3) and why the substitute is honest. |
 
 No objections rejected — every attack issue was verified against the cited lines and accepted.
+
+## Fixer round 1 — correctness-1-C1 (gapless-flood deadline bypass)
+
+The plan's fix (a) mechanism — "deadline computed once, each `recv_timeout` waits only the
+remaining time" — was insufficient as stated: `recv_timeout(ZERO)` returns `Ok` when a frame
+is already queued, so a server emitting gap-free notifications (channel permanently non-empty)
+bypassed the deadline entirely and `await_response` hung forever, plus unbounded channel
+growth. The plan's own falsifier 1 caught it. Resolution (commit 6b8e0ba):
+
+- `recv_frame_by` now checks the wall clock against the deadline BEFORE touching the channel
+  (`lsp.rs`, RpcTransport); overshoot is bounded by one frame parse.
+- The frame-pump channel is bounded (`sync_channel(FRAME_CHANNEL_BOUND = 64)`) — a flooding
+  server blocks the pump (backpressure into the OS pipe buffer) instead of growing memory.
+- Pinned by `gapless_notification_flood_still_errs_at_the_deadline` (ChattyReader, delay ZERO,
+  300ms budget). Red-check evidence: with BOTH hunks reverted the test hangs past a 60s cap;
+  with only the deadline check reverted it passes racily (the bounded channel lets the queue
+  drain when the consumer outruns the pump) — which is why the deterministic guarantee is the
+  wall-clock check, and the bound is the memory cap, not the timeout mechanism.
