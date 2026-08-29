@@ -69,6 +69,14 @@ jobs:
       - name: update Cargo.lock
         run: cargo check --workspace --quiet
 
+      # The regex above rewrites ONLY the root Cargo.toml. The per-crate internal
+      # pins (crates/*/Cargo.toml) are NOT synced by this workflow — if they have
+      # drifted, publishing would fail MID-SEQUENCE after leaf crates are already
+      # irreversibly live (caret semantics: ^0.15.0 excludes 0.16.0). This guard
+      # goes red BEFORE the tag exists; bump the pins manually on a branch first.
+      - name: guard — internal version pins in sync
+        run: cargo test -p wicked-estate --test version_pins
+
       - name: commit and tag
         env:
           NEW_VERSION: ${{ github.event.inputs.version }}

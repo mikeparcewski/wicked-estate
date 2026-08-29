@@ -25,7 +25,7 @@ Postgres. Solo laptop to enterprise CI fleet, same engine, same queries.
 [![CI](https://github.com/mikeparcewski/wicked-estate/actions/workflows/ci.yml/badge.svg)](https://github.com/mikeparcewski/wicked-estate/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-> **Status:** v0.14.5 — `cargo test --workspace` is **1,100+ tests passing, 0 failed, 0 ignored**;
+> **Status:** v0.15.0 — `cargo test --workspace` is **1,281 tests passing, 0 failed, 1 ignored** (one marker-ignored doc-test);
 > 0 build warnings; clippy `-D warnings` clean. Greenfield, pre-1.0. **Published to crates.io.** See
 > [FEATURES.md](./FEATURES.md) for the exhaustive, honestly-tagged capability inventory
 > (✅ built / 🟡 partial / 🟦 designed-not-built).

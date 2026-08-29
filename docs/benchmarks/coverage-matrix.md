@@ -4,23 +4,13 @@
 > **Node count** = extraction richness; **Kinds** = which symbol types were extracted;
 > **Has calls** = whether any `Calls` edges were produced for nodes in that language.
 
-## axios
-
-| Language | Nodes | Has calls | Kinds present |
-|----------|-------|-----------|---------------|
-| `javascript` | 900 | yes | `class`, `constant`, `file`, `function`, `import`, `method`, `variable` |
-| `markdown` | 187 | no | `file`, `module` |
-| `typescript` | 153 | yes | `class`, `constant`, `enum`, `file`, `function`, `import`, `interface`, `method`, `type_alias` |
-| `json` | 132 | no | `file`, `struct` |
-| `html` | 130 | no | `file`, `function`, `type_alias` |
-
 ## wicked-studio
 
 | Language | Nodes | Has calls | Kinds present |
 |----------|-------|-----------|---------------|
-| `tsx` | 2251 | yes | `class`, `constant`, `file`, `function`, `import`, `interface`, `method`, `type_alias`, `variable` |
-| `typescript` | 1193 | yes | `class`, `constant`, `file`, `function`, `import`, `interface`, `method`, `type_alias`, `variable` |
-| `python` | 909 | yes | `class`, `constant`, `file`, `function`, `import` |
+| `tsx` | 2254 | yes | `class`, `constant`, `file`, `function`, `import`, `interface`, `method`, `type_alias`, `variable` |
+| `typescript` | 1196 | yes | `class`, `constant`, `file`, `function`, `import`, `interface`, `method`, `type_alias`, `variable` |
+| `python` | 911 | yes | `class`, `constant`, `file`, `function`, `import` |
 | `css` | 251 | no | `file`, `function`, `import`, `type_alias` |
 | `json` | 40 | no | `file`, `struct` |
 | `javascript` | 24 | no | `constant`, `file`, `function`, `import`, `method` |
@@ -31,7 +21,7 @@
 
 | Language | Nodes | Has calls | Kinds present |
 |----------|-------|-----------|---------------|
-| `typescript` | 1840 | yes | `class`, `constant`, `file`, `function`, `import`, `interface`, `method`, `type_alias`, `variable` |
+| `typescript` | 1884 | yes | `class`, `constant`, `file`, `function`, `import`, `interface`, `method`, `type_alias`, `variable` |
 | `css` | 467 | no | `file`, `function`, `type_alias` |
 | `javascript` | 307 | yes | `constant`, `file`, `function`, `import`, `method`, `variable` |
 | `json` | 93 | no | `file`, `struct` |
