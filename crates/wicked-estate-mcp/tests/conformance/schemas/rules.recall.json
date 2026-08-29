@@ -1,0 +1,41 @@
+{
+  "captured_from": "wicked-estate-mcp-0.16.0 (arch-R2: new tool)",
+  "description": "Faceted, severity-ordered conformance-rule recall (read-only; no rules.write counterpart exists by doctrine, ADR-012).",
+  "inputSchema": {
+    "properties": {
+      "framework": {
+        "type": "string"
+      },
+      "language": {
+        "type": "string"
+      },
+      "layer": {
+        "type": "string"
+      },
+      "limit": {
+        "type": "integer"
+      },
+      "rule_type": {
+        "enum": [
+          "pattern",
+          "policy"
+        ],
+        "type": "string"
+      },
+      "scope": {
+        "type": "string"
+      },
+      "severity": {
+        "enum": [
+          "info",
+          "warn",
+          "error",
+          "critical"
+        ],
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "name": "rules.recall"
+}

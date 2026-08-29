@@ -10327,6 +10327,7 @@ version = "0.15.0"
 dependencies = [
  "fastembed",
  "model2vec-rs",
+ "serde",
  "serde_json",
  "wicked-estate-core",
  "wicked-estate-rank",

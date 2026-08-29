@@ -1,9 +1,12 @@
 {
-  "captured_from": "wicked-knowledge-0.12.1",
+  "captured_from": "wicked-estate-mcp-0.16.0 (arch-R5: +scope_prefix, additive optional param)",
   "description": "Standalone recall: the most relevant token-budgeted knowledge slice for a query (keyword \u222a vector, RRF-fused).",
   "inputSchema": {
     "properties": {
       "query": {
+        "type": "string"
+      },
+      "scope_prefix": {
         "type": "string"
       },
       "token_budget": {

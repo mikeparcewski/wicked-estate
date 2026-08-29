@@ -32,7 +32,7 @@ use wicked_estate_knowledge::KnowledgeApi;
 use wicked_estate_memory_core::MemoryApi;
 use wicked_estate_retrieve::{
     BlastRadius, Communities, ContextBundle, FetchContent, Lineage, RankHotspots, RetrieveEntity,
-    RulesInventory, SearchEntity, SemanticSearch, TraverseGraph,
+    RulesInventory, RulesRecall, SearchEntity, SemanticSearch, TraverseGraph,
 };
 
 pub mod resources;
@@ -48,19 +48,24 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 // Tool registry
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// All always-on retrieval tools in declaration order — the **10 unconditional read tools** (the
-/// DoD-A4 floor): the original 7 plus the promoted `RankHotspots`, `Communities`, and `Lineage`
-/// (each a real `RetrievalTool` over the read-only `&dyn GraphRead` surface; `Lineage` already
-/// existed in `wicked-estate-retrieve` but was absent here — C-A3).
+/// All always-on retrieval tools in declaration order — the **11 unconditional read tools** (the
+/// DoD-A4 floor, raised from 10 by arch-R2's `rules.recall`): the original 7 plus the promoted
+/// `RankHotspots`, `Communities`, and `Lineage` (each a real `RetrievalTool` over the read-only
+/// `&dyn GraphRead` surface; `Lineage` already existed in `wicked-estate-retrieve` but was absent
+/// here — C-A3), plus `rules.recall` (faceted, severity-ordered conformance-rule recall — the
+/// wire twin of wicked-governance's Rust-only `recall_rules`).
 ///
 /// SemanticSearch is **not** here — it is stateful (owns a `VectorStore` connection), so it cannot
 /// be a zero-sized entry rebuilt per request. It is constructed once at startup via
 /// [`live_semantic_search`] and threaded into [`handle_request_with_semantic`], which merges it
 /// with this list (when the dim-guard passes) to form the live dispatch registry. So `tools/list`
-/// returns **10 or 11** tools: the 10 here unconditionally, +1 when semantic is available.
+/// returns **11 or 12** tools: the 11 here unconditionally, +1 when semantic is available.
 ///
 /// `Annotate` is intentionally **absent**: the v1 MCP surface is read-only (write is CLI-only,
-/// design §2.2/§2.3), so no mutating tool appears in `tools/list`.
+/// design §2.2/§2.3), so no mutating tool appears in `tools/list`. The same doctrine covers rules:
+/// there is deliberately NO `rules.write` (or any rule-mutation) tool — rule authorship flows only
+/// through human-merged doc PRs + `wicked-core rules ingest` (evaluator≠creator, ADR-012;
+/// conformance-tested in `tests/rules_surface.rs`).
 pub fn all_tools() -> Vec<Box<dyn RetrievalTool>> {
     vec![
         Box::new(SearchEntity),
@@ -70,6 +75,7 @@ pub fn all_tools() -> Vec<Box<dyn RetrievalTool>> {
         Box::new(FetchContent),
         Box::new(ContextBundle),
         Box::new(RulesInventory),
+        Box::new(RulesRecall),
         Box::new(RankHotspots),
         Box::new(Communities),
         Box::new(Lineage),
@@ -255,6 +261,47 @@ fn rules_inventory_schema() -> Value {
     })
 }
 
+fn rules_recall_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "language": {
+                "type": "string",
+                "description": "Wildcard facet: match rules targeting this language OR rules with no language facet. Omit to match all."
+            },
+            "layer": {
+                "type": "string",
+                "description": "Wildcard facet: match rules targeting this layer OR rules with no layer facet."
+            },
+            "framework": {
+                "type": "string",
+                "description": "Wildcard facet: match rules targeting this framework OR rules with no framework facet."
+            },
+            "severity": {
+                "type": "string",
+                "enum": ["info", "warn", "error", "critical"],
+                "description": "Exact match on rule severity."
+            },
+            "rule_type": {
+                "type": "string",
+                "enum": ["pattern", "policy"],
+                "description": "Exact match on rule type (PAT-* pattern / POL-* policy)."
+            },
+            "scope": {
+                "type": "string",
+                "description": "Restrict to a scope subtree by canonical path prefix (e.g. \"wiki:architecture\")."
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Result cap (default 100, max 500). Truncation is reported in diagnostics.",
+                "default": 100,
+                "maximum": 500
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
 fn lineage_schema() -> Value {
     json!({
         "type": "object",
@@ -332,6 +379,7 @@ pub fn input_schema(name: &str) -> Option<Value> {
         "ContextBundle" => Some(context_bundle_schema()),
         "SemanticSearch" => Some(semantic_search_schema()),
         "RulesInventory" => Some(rules_inventory_schema()),
+        "rules.recall" => Some(rules_recall_schema()),
         "RankHotspots" => Some(rank_hotspots_schema()),
         "Communities" => Some(communities_schema()),
         "Lineage" => Some(lineage_schema()),
@@ -636,7 +684,7 @@ pub struct DomainHandles<'a> {
 
 /// Unified routing entry-point: estate tools + optional memory/knowledge tools + resources/prompts.
 ///
-/// `domains = None` → estate-only mode (10/11 tools). `domains = Some(...)` → 23+ tools, resources,
+/// `domains = None` → estate-only mode (11/12 tools). `domains = Some(...)` → 24+ tools, resources,
 /// and prompts. Memory/knowledge tools that arrive without domains return a clean JSON-RPC error.
 /// `semantic` is the live SemanticSearch instance; when `None` the tool is neither advertised nor
 /// dispatchable (consistent fail-closed, same as the dim-guard behaviour in the old path).
@@ -673,8 +721,8 @@ pub fn handle_request_unified(
             let tool = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             match tool {
                 "SearchEntity" | "RetrieveEntity" | "TraverseGraph" | "BlastRadius"
-                | "FetchContent" | "ContextBundle" | "RulesInventory" | "RankHotspots"
-                | "Communities" | "Lineage" => {
+                | "FetchContent" | "ContextBundle" | "RulesInventory" | "rules.recall"
+                | "RankHotspots" | "Communities" | "Lineage" => {
                     handle_tools_call_ctx(&id, &params, store, ctx, None)
                 }
 
@@ -730,6 +778,7 @@ pub fn response_cacheable(tool: &str) -> bool {
             | "FetchContent"
             | "ContextBundle"
             | "RulesInventory"
+            | "rules.recall"
             | "RankHotspots"
             | "Communities"
             | "Lineage"
@@ -793,8 +842,8 @@ fn knowledge_tool_schemas() -> Vec<Value> {
         json!({"name":"knowledge.ingest","description":"Ingest a document as doc + chunk nodes.","inputSchema":{"type":"object","required":["title","chunks"],"properties":{"title":{"type":"string"},"chunks":{"type":"array","items":{"type":"string"}},"scope":{"type":"string"},"source":{"type":"string"}}}}),
         json!({"name":"knowledge.write","description":"Write ONE knowledge node.","inputSchema":{"type":"object","required":["content"],"properties":{"content":{"type":"string"},"class":{"type":"string","enum":["doc","section","chunk","concept"]},"scope":{"type":"string"},"source":{"type":"string"}}}}),
         json!({"name":"knowledge.relate","description":"Add a typed relation between two knowledge nodes, with confidence + evidence_count + provenance.","inputSchema":{"type":"object","required":["src","tgt","rel"],"properties":{"src":{"type":"string"},"tgt":{"type":"string"},"rel":{"type":"string"},"confidence":{"type":"number"},"evidence_count":{"type":"integer","minimum":0,"maximum":4294967295u64,"description":"audit counter: confirmations/contradictions (default 0; non-negative, fits u32, else -32602)"},"provenance":{"type":"string"}}}}),
-        json!({"name":"knowledge.recall","description":"Hybrid recall (FTS + vector, RRF fused) over the knowledge base. Each item carries node_id, class, label, body_snippet, score, and source (provenance set at ingest, e.g. a file path or URL; empty string when not recorded).","inputSchema":{"type":"object","required":["query"],"properties":{"query":{"type":"string"},"token_budget":{"type":"integer","default":2000}}}}),
-        json!({"name":"knowledge.coverage","description":"Coverage: node counts per class.","inputSchema":{"type":"object","properties":{"class":{"type":"string","enum":["doc","section","chunk","concept"]}}}}),
+        json!({"name":"knowledge.recall","description":"Hybrid recall (FTS + vector, RRF fused) over the knowledge base. Each item carries node_id, class, label, body_snippet, score, and source (provenance set at ingest, e.g. a file path or URL; empty string when not recorded). Pass scope_prefix to restrict recall to a scope subtree (the wiki convention scopes guidance as wiki:<area> with stable source URIs).","inputSchema":{"type":"object","required":["query"],"properties":{"query":{"type":"string"},"token_budget":{"type":"integer","default":2000},"scope_prefix":{"type":"string","description":"Optional subtree filter: only knowledge whose scope equals this prefix or DESCENDS from it (same predicate as memory.recall scope_prefix, e.g. \"wiki:\" or \"wiki:architecture\"). \"\" = root subtree = everything. Omitted or null = no scope filtering."}}}}),
+        json!({"name":"knowledge.coverage","description":"Coverage: node counts per class, optionally within a scope subtree.","inputSchema":{"type":"object","properties":{"class":{"type":"string","enum":["doc","section","chunk","concept"]},"scope_prefix":{"type":"string","description":"Optional subtree filter (same predicate as knowledge.recall scope_prefix)."}}}}),
         json!({"name":"knowledge.relate_code","description":"Link a knowledge node to estate code symbols via xedge.","inputSchema":{"type":"object","required":["knowledge_id","code_ids"],"properties":{"knowledge_id":{"type":"string"},"code_ids":{"type":"array","items":{"type":"string"}}}}}),
         json!({"name":"knowledge.recall_about_code","description":"Recall knowledge linked to code symbols (cross-store lookup).","inputSchema":{"type":"object","required":["code_ids"],"properties":{"code_ids":{"type":"array","items":{"type":"string"}}}}}),
     ]
@@ -888,15 +937,16 @@ mod tests {
 
     // ── tools/list ────────────────────────────────────────────────────────────
 
-    /// DoD-A4: `tools/list` exposes the **10 unconditional read tools** as a floor, with
-    /// `SemanticSearch` conditionally present (the dim-guard), so the count is **10 or 11**.
+    /// DoD-A4: `tools/list` exposes the **11 unconditional read tools** as a floor (raised from
+    /// 10 by arch-R2's `rules.recall`), with `SemanticSearch` conditionally present (the
+    /// dim-guard), so the count is **11 or 12**.
     ///
     /// `handle_request` wires no semantic tool (`None`), so the dim-guard cannot pass and the bare
-    /// floor is exactly 10. The conditional 11th is covered by the dim-guard gate tests
+    /// floor is exactly 11. The conditional 12th is covered by the dim-guard gate tests
     /// (`semantic_advertised_*` / `semantic_not_advertised_*`) which drive
     /// `handle_request_with_semantic` with a live `Some(&tool)`.
     #[test]
-    fn tools_list_returns_ten_unconditional_tools() {
+    fn tools_list_returns_eleven_unconditional_tools() {
         let store = fixture();
         let req = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} });
         let resp = handle_request(&store, &req);
@@ -906,8 +956,8 @@ mod tests {
             .expect("tools must be array");
         assert_eq!(
             tools.len(),
-            10,
-            "the unconditional read-tool floor is exactly 10 (no semantic wired); got {}",
+            11,
+            "the unconditional read-tool floor is exactly 11 (no semantic wired); got {}",
             tools.len()
         );
         // Annotate must NOT be on the read-only MCP surface (design §2.3).
@@ -918,11 +968,11 @@ mod tests {
         );
     }
 
-    /// DoD-A4: when SemanticSearch IS wired and the dim-guard passes, the count rises to **11** —
-    /// the 10 unconditional + the conditional semantic tool. Falsifier for the floor being a hard
+    /// DoD-A4: when SemanticSearch IS wired and the dim-guard passes, the count rises to **12** —
+    /// the 11 unconditional + the conditional semantic tool. Falsifier for the floor being a hard
     /// ceiling.
     #[test]
-    fn tools_list_returns_eleven_with_semantic_available() {
+    fn tools_list_returns_twelve_with_semantic_available() {
         let store = fixture();
         let fake = FakeSemantic;
         // Matching id + dim → dim-guard passes → SemanticSearch advertised as the 11th tool.
@@ -941,14 +991,14 @@ mod tests {
         let tools = resp["result"]["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            11,
-            "10 unconditional + 1 conditional SemanticSearch = 11; got {}",
+            12,
+            "11 unconditional + 1 conditional SemanticSearch = 12; got {}",
             tools.len()
         );
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(
             names.contains(&"SemanticSearch"),
-            "SemanticSearch must be the 11th"
+            "SemanticSearch must be the 12th"
         );
     }
 
@@ -973,6 +1023,7 @@ mod tests {
             "FetchContent",
             "ContextBundle",
             "RulesInventory",
+            "rules.recall",
             "RankHotspots",
             "Communities",
             "Lineage",
@@ -2177,12 +2228,14 @@ mod tests {
             &mut self,
             _: &str,
             _: usize,
+            _: Option<&str>,
             _: i64,
         ) -> anyhow::Result<Vec<wicked_estate_knowledge::KnowledgeItem>> {
             Ok(vec![])
         }
         fn coverage(
             &self,
+            _: Option<&str>,
             _: Option<&str>,
         ) -> anyhow::Result<wicked_estate_knowledge::KnowledgeCoverage> {
             Ok(wicked_estate_knowledge::KnowledgeCoverage {
@@ -2260,8 +2313,8 @@ mod tests {
     }
 
     #[test]
-    fn unified_tools_list_with_domains_returns_23_tools() {
-        // tools/list with domains=Some → 10 estate + 6 memory + 7 knowledge = 23 tools.
+    fn unified_tools_list_with_domains_returns_24_tools() {
+        // tools/list with domains=Some → 11 estate + 6 memory + 7 knowledge = 24 tools.
         // (SemanticSearch absent: no matching dim-guard in default McpContext)
         let store = fixture();
         let req = json!({ "jsonrpc": "2.0", "id": 203, "method": "tools/list", "params": {} });
@@ -2284,8 +2337,8 @@ mod tests {
             .expect("tools must be array");
         assert_eq!(
             tools.len(),
-            23,
-            "10 estate + 6 memory + 7 knowledge = 23; got {}",
+            24,
+            "11 estate + 6 memory + 7 knowledge = 24; got {}",
             tools.len()
         );
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -2301,15 +2354,15 @@ mod tests {
     }
 
     #[test]
-    fn unified_tools_list_without_domains_returns_10_tools() {
+    fn unified_tools_list_without_domains_returns_11_tools() {
         let store = fixture();
         let req = json!({ "jsonrpc": "2.0", "id": 204, "method": "tools/list", "params": {} });
         let resp = handle_request_unified(&store, &req, &McpContext::default(), None, None);
         let tools = resp["result"]["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            10,
-            "without domains: 10 estate tools only; got {}",
+            11,
+            "without domains: 11 estate tools only; got {}",
             tools.len()
         );
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();

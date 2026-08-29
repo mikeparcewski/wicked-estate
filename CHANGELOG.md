@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **`rules.recall` MCP tool (arch-R2/AW-4)** — faceted, severity-ordered recall of conformance `Rule` nodes (`PAT-*`/`POL-*`), the wire twin of wicked-governance's Rust-only `recall_rules`. Facets: `language`/`layer`/`framework` (wildcard — a rule without the facet applies to all values), `severity`/`rule_type` (exact), `scope` (subtree prefix, e.g. `wiki:architecture`), `limit` (default 100, max 500 — truncation is a loud diagnostic). Retired rules are withdrawn; foreign `Rule` nodes (rules-engine extractor output) are counted, never errored on; an empty result is a diagnostic, never `isError` (R1). Raises the unconditional estate tool floor 10 → 11 (24 tools with all domains). Response-cacheable (pure graph read).
+- **`knowledge.recall {scope_prefix}` + `knowledge.coverage {scope_prefix}` (arch-R5/AW-8)** — optional subtree filter mirroring `memory.recall`'s wire contract exactly (omitted/`null` = no filtering, the previous behavior; `""` = root subtree = everything; a present non-string is `-32602`). The predicate is pushed into the FTS candidate query pre-`limit` (top-k isolation) and re-checked on every hydrated candidate (covers the vector lane). New knowledge writes stamp the canonical scope on `Node.scope`; nodes written before this release carry scope only in metadata and surface under a canonical-prefix scoped recall only via the vector lane (a trailing-colon kind-wildcard prefix such as `"wiki:"` skips the store pushdown, so FTS still sees them) — re-ingest for full scoped-FTS visibility. Scoping convention: wiki guidance ingests under `wiki:<area>` scopes with stable source URIs (`wiki://<page>#<anchor>` or repo-relative doc paths) and embeds the enforceable twin's `PAT-`/`POL-` id in chunk text.
+- **ADR-012 (arch-R8/AW-11)** — the rule-authorship contract: git-tracked docs are the source of truth, promotion to an enforceable rule happens only via a human-merged doc PR + `wicked-core rules ingest`, and there is deliberately NO `rules.write` (or any rule-mutation) MCP tool. Conformance-tested against the actual advertised tool registry (`crates/wicked-estate-mcp/tests/rules_surface.rs`).
+
+### Fixed
+- **`RulesInventory` Rule-node blindness (arch-R2)** — the tool ignored individual `NodeKind::Rule` nodes while its description claimed "(RuleSet, Rule)". It now reports `rule_nodes: {total, in_rule_sets, ungrouped}`, emits a diagnostic pointing ungrouped rules at `rules.recall`, and its description matches what it returns.
+- **Rust API (0.16 breaking):** `KnowledgeApi::recall`/`KnowledgeEngine::recall` gain a `scope_prefix: Option<&str>` parameter; `KnowledgeApi::coverage` and `KnowledgeEngine::count`/`all_nodes` gain the same. MCP wire stays backward-compatible (the new params are optional).
+
 ## [0.15.0] — 2026-08-29
 
 ### Removed

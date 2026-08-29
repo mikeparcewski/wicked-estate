@@ -1,7 +1,7 @@
 //! S4 attribution gate tests — verify that `source` (knowledge.recall) and `scope`
 //! (memory.recall) survive the full MCP dispatch pipeline and appear on the wire.
 //!
-//! These tests exercise the combined-domain `handle_request_unified` path (the 23-tool server)
+//! These tests exercise the combined-domain `handle_request_unified` path (the 24-tool server)
 //! using in-memory engines so there is no fixture-DB dependency.
 
 use std::sync::Arc;
