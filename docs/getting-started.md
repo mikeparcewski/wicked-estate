@@ -1,7 +1,12 @@
 # Getting Started with wicked-estate
 
-**W8.4** — build, index, query, and connect an agent. Real output from v0.13.0 on a two-file
-Python repo.
+**W8.4** — build, index, query, and connect an agent. Current as of **v0.15.0** (sample
+transcripts below were captured on 0.13–0.15 builds; exact counts vary by version).
+
+> **Upgrading from 0.14.x or earlier?** 0.15.0 re-mints definition SymbolIds (symbol-id scheme 3)
+> and forces a full re-extraction of each previously indexed repo — read
+> [`docs/MIGRATION-0.15.md`](./MIGRATION-0.15.md) first (embeddings, SCIP edges, and annotations
+> on churned ids need re-running).
 
 ---
 
@@ -15,8 +20,8 @@ Produces two binaries:
 
 | Binary | Purpose |
 |--------|---------|
-| `target/release/wicked-estate` | CLI — index, query, blast-radius, rank, source, stats, scip, semantic, watch, subscribe, compact, tfstate, drift, cross-graph, clusters |
-| `target/release/wicked-estate-mcp` | MCP stdio server — 23 tools (10 estate + 6 memory + 7 knowledge) for LLM agents |
+| `target/release/wicked-estate` | CLI — index, query, blast-radius, rank, source, stats, scip, semantic, watch, subscribe, compact, tfstate, drift, cross-graph, clusters, context, annotate, nodes, resolve, export, plugins list, … |
+| `target/release/wicked-estate-mcp` | MCP stdio server — 24 tools (11 estate + 6 memory + 7 knowledge) for LLM agents |
 
 Zero runtime deps. Single static binary on each target.
 
@@ -67,10 +72,11 @@ indexed ./demo (/tmp/demo.db) → 8 nodes, 11 edges, 2 files
 extension maps to no wired extractor are silently skipped. Check `wicked-estate stats` after
 indexing to confirm coverage.
 
-Wired extractors (as of v0.13.0): **rust**, **python**, **typescript**, **tsx**, **javascript**,
-**go**, **java**, **c**, **cpp**, **csharp**, **ruby**, **bash**, **yaml**, **json**, plus
-**cloudformation** and **kubernetes** via the `IaCExtractor`. See
-`docs/language-coverage-matrix.md` for the full matrix.
+Wired extractors (v0.15.0): **103 of the 114 manifest languages** have wired tree-sitter
+extractors, plus **6 grammar-less mainframe extractors** (JCL, HLASM, RACF, IMS, MQ, CICS/EXEC
+SQL) and IaC via **cloudformation**/**kubernetes** sniff-dispatch. See
+`docs/language-coverage-matrix.md` (generated) for the full per-language matrix, and
+`wicked-estate plugins list` for runtime-loaded grammar plugins.
 
 ---
 
@@ -313,7 +319,7 @@ wicked-estate-mcp --db /path/to/graph.db
 # or: WICKED_ESTATE_DB=:memory: wicked-estate-mcp
 ```
 
-### The 23 tools (10 estate + 6 memory + 7 knowledge)
+### The 24 tools (11 estate + 6 memory + 7 knowledge)
 
 #### Estate tools
 
@@ -326,6 +332,7 @@ wicked-estate-mcp --db /path/to/graph.db
 | `FetchContent` | Retrieve the source text stored for a symbol. Required: `symbol`. |
 | `ContextBundle` | Return a scoped, ranked context bundle for a symbol — source + callers + dependencies. |
 | `RulesInventory` | List rule engines and rule sets in the graph; link rule sets to calling code. |
+| `rules.recall` | Faceted, severity-ordered recall of conformance `Rule` nodes (`PAT-*`/`POL-*`) — facets: language/layer/framework (wildcard), severity/rule_type (exact), scope subtree prefix. |
 | `RankHotspots` | Return the top N symbols by PageRank × change-frequency churn score. |
 | `Communities` | List detected symbol communities (Louvain clusters) in the graph. |
 | `Lineage` | Trace data-lineage edges (origin → transformation → sink) for a symbol. |

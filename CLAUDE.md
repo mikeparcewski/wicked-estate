@@ -12,7 +12,7 @@ Extension recipes: [`docs/add-lang.md`](./docs/add-lang.md) (new language),
 Upgrading from 0.14.x: [`docs/MIGRATION-0.15.md`](./docs/MIGRATION-0.15.md).
 This pointer block is the machine-readable anchor agents grep for.
 
-Rust MCP server: **code graph + memory + knowledge** in a single binary, 23 tools across 3 domains.
+Rust MCP server: **code graph + memory + knowledge** in a single binary, 24 tools across 3 domains.
 Turns a repo into a queryable graph (symbols, calls, imports, edges injected by event bus and commands)
 and pairs it with a semantic memory store and a wiki/document knowledge store — all local-first,
 zero infra, SQLite-backed. Built **fleet-parallel behind a fixed trait spine**. Live design:
@@ -169,8 +169,9 @@ See the ADRs / contract for rationale; reopen only with new evidence.
 - **Greenfield Rust, single static binary.** (the design notes)
 - **Storage:** SQLite + FTS5 + sqlite-vec is the local-first default; **Postgres is built behind
   `--features postgres`** (`PostgresStore` — concurrent team writers + server-side `WITH RECURSIVE`
-  traversal, same `open_store` factory, no re-index); **SurrealDB** is a benched challenger (still
-  designed, not built); **IndraDB excluded.** Storage lives behind `GraphRead` + `GraphWrite` (+ the
+  traversal, same `open_store` factory, no re-index); **SurrealDB** is the W1.5 bake-off
+  challenger (`SurrealStore`, built + conformance-tested behind `--features surrealdb`; no
+  `open_store` factory arm, no bake-off verdict); **IndraDB excluded.** Storage lives behind `GraphRead` + `GraphWrite` (+ the
   `GraphStore` supertrait) and a single `open_store(spec)` factory, so a backend drops in as one
   module + one factory arm with **zero caller changes**. Retrieval negotiates `StoreCapabilities`.
   (the design notes, `docs/adr/ADR-003`)
@@ -178,13 +179,18 @@ See the ADRs / contract for rationale; reopen only with new evidence.
 - **Edge direction:** `source = dependent`, `target = dependency`. Blast-radius = dependents.
   (`docs/ENGINE-CONTRACT.md`)
 - **Two-phase EXTRACT → RESOLVE**; resolution is swappable and never requires re-parsing.
-- **Layered resolution** (tags → import-map → TSG → SCIP → on-demand LSP). **LSP is on-demand
-  only, never bulk.**
-- **Language coverage:** parity with the set (**73 today**) **and add-more-without-surgery**
+- **Layered resolution** — the production `index`/`watch` slice is name → scoped → import-map →
+  relative-import → infra → rules-bridge (order-independent; dedup keeps the max-confidence edge;
+  activation table in `docs/ENGINE-CONTRACT.md` §3.1), with SCIP as the precise ingestion tier
+  (TSG superseded, `docs/adr/ADR-007`). The LSP client (`lsp.rs`) is a built library whose only
+  sanctioned consumer is the intent-routed edit plane (`docs/adr/ADR-009`, W3.6 — designed, not
+  yet wired). **LSP is on-demand only, never bulk.**
+- **Language coverage:** parity with the set (**114 in the manifest today** — `languages.toml` is
+  the canonical count; the parity test gates a `≥73` floor) **and add-more-without-surgery**
   — languages are *data* (`crates/wicked-estate-extract/languages.toml`): a row + a `<name>.scm` file, no core
-  change. The capability matrix is **generated** from that data (the thing prior art hand-maintained,
- ); precise axes (extends-vs-implements, cross-file refs) come from the resolution tiers, not
-  tree-sitter. The `≥73` parity test gates regressions.
+  change. The capability matrix is **generated** from that data (the thing prior art
+  hand-maintained); precise axes (extends-vs-implements, cross-file refs) come from the resolution
+  tiers, not tree-sitter.
 - **Hybrid retrieval** = graph + FTS5 core, embeddings an **optional** sidecar fused via RRF.
 - **Estate mapping is in scope** (designed, `ADR-004`): IaC (Terraform/CFN/ARM/Bicep/K8s/Pulumi) is
   *just more languages* (resources = nodes, depends-on = edges, no schema change); live cloud state
@@ -225,16 +231,16 @@ provenance) — track them as a future WAVE task before relying on review alone.
 crates/
   wicked-estate-core/         types + the five traits + conformance kit   (the spine — change with care)
   wicked-estate-extract/      tree-sitter Extractor impls (one module per language)
-  wicked-estate-resolve/      Resolver impls: import-map / SCIP / TSG / on-demand LSP
+  wicked-estate-resolve/      Resolver impls: name/scoped/import-map/relative-import/infra/rules-bridge + SCIP ingest + LSP client library (ADR-009)
   wicked-estate-store/        GraphStore impls: MemStore, SqliteStore (+ SurrealDB bake-off)
   wicked-estate-rank/         Ranker: (personalized) PageRank over CALLS/IMPORTS
-  wicked-estate-retrieve/     RetrievalTool: graph+FTS5+RRF hybrid retrieval (10 estate tools)
+  wicked-estate-retrieve/     RetrievalTool: graph+FTS5+RRF hybrid retrieval (11 estate tools)
   wicked-estate-overlay/      XedgeStore: injected cross-repo edges (event→consumer, cmd→agent)
   wicked-estate-memory-core/  Memory types + MemoryApi trait + fuzzy/salience/scope logic
   wicked-estate-memory/       MemoryEngine + consolidation + cross-recall (6 memory tools)
   wicked-estate-memory-api/   Re-export shim for memory public API
   wicked-estate-knowledge/    KnowledgeEngine: wiki ingest/recall/relate/coverage (7 knowledge tools)
-  wicked-estate-mcp/          MCP server — 23 tools across 3 domains; main.rs 4-store init
+  wicked-estate-mcp/          MCP server — 24 tools across 3 domains; main.rs 4-store init
   wicked-estate/              `wicked-estate` watcher binary (emit events on file change)
   wicked-estate-bench/        agent-eval benchmark harness — the truth oracle
 ```

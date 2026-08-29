@@ -1,11 +1,16 @@
 # Brain → estate consolidation: telemetry & relation-signal import contract
 
+<!-- historical -->
+> **Historical:** this contract documents the import from **wicked-brain** (retired 2026-08,
+> consolidated into wicked-estate). It is kept as the record of what was imported and how.
+
 Stage S1 of the wicked-brain → wicked-estate consolidation. wicked-brain's tuned
 ranking signals live only in its `.brain.db` (not in the markdown), so a naive
 re-ingest silently drops them. This gives estate a **real, lossless destination**
 for all four and defines the exact import surface the brain-side export tool targets.
 
 Source of truth for the brain side: `wicked-brain/server/lib/sqlite-search.mjs`.
+<!-- /historical -->
 
 ## The four signals
 
