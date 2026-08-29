@@ -688,3 +688,32 @@ re-extraction (deleted-only scope, ATT-INV-2).
   restored; the pre-fix lane binary returned "no resolved dependents"). On `studio-after.db`
   (File→File edges present) the lane binary returns 240 Files — direct plus TRANSITIVE
   importers, the documented File/Import-start semantics change, all rows File nodes.
+
+## Round-2 review fixes (2026-08-28)
+
+- **RI-R2-1 (major):** trailing-slash DIRECTORY specifiers false-bound to a FILE candidate.
+  `join_with_root_guard` filters empty segments, erasing the trailing slash, so `'./x/'` was
+  indistinguishable from `'./x'` and the probe builder ran the file slots (literal/remap/probe)
+  ahead of index — `'./x/'` with `src/x.ts` + `src/x/index.ts` bound `src/x.ts`; `'./'` from
+  `src/a.ts` with a root-level `src.ts` bound `src.ts`, a file OUTSIDE the named directory.
+  TS (bundler/node16), Node CJS `require('./x/')`, and every bundler resolve a trailing-slash
+  specifier ONLY to the directory index (Node ESM rejects it outright). Fix: directory-ness is
+  read off the DEQUOTED SPEC before joining (`spec.ends_with('/')`); a directory specifier
+  builds probes from the index slots only. Regression tests (`relative_import.rs` resolver
+  tests): `trailing_slash_spec_binds_directory_index_only` (`./x/` → `x/index.ts` over `x.ts`),
+  `dot_slash_spec_binds_own_directory_index_never_parent_file` (`./` → `src/index.ts`, never
+  root-level `src.ts`), `trailing_slash_spec_without_index_parks`,
+  `parent_dir_trailing_slash_spec_binds_parent_index` (`'../'` binds the parent's index; from a
+  depth-1 importer it resolves to the repo root and the root guard PARKS — recorded limit, same
+  conservative arm as every root-resolving spec; likewise a bare `'.'`/`'..'` spec never enters
+  the resolver at all — the `./`-or-`../` prefix gate skips it — a park, never a bind).
+  **Oracle-coverage note:** the §5 "100%" adjudication never exercised this class — grep over
+  wicked-studio/src and wicked-crew (`['"](\./|\.\./)['"]` and `\.\.?/…/['"]`, node_modules
+  excluded) finds ZERO trailing-slash or bare-directory relative import sites, the same
+  corpora-blindness the round-0 review called out for the original patch. The adjudicator
+  (part a) WOULD have flagged the `'./'`→`src.ts` shape (wrong join point) but no corpus row
+  ever produced it; the class is now pinned by unit tests instead of corpus luck.
+  Re-measured post-fix (studio-after-r2.db / crew-after-r2.db, lane debug binary): edge SETS
+  byte-identical to the recorded §5 runs (studio 1362/1362 relative-import edges, crew 430/430,
+  `diff` of ordered source→target dumps empty), adjudication part (a) 1362/1362 + 430/430,
+  0 oracle cases, edge-corpus 11 binds / edge-corpus2 12 binds — unchanged, as predicted.

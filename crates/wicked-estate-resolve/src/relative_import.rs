@@ -291,26 +291,41 @@ impl RelativeImportResolver {
             };
 
             // Probe list in the data-defined slot order (Decision C).
-            let (stem, ext) = parse_spec_ext(&joined, conv);
+            //
+            // A trailing-slash specifier names a DIRECTORY: TS (bundler/node16), Node CJS
+            // `require('./x/')`, and every bundler resolve it ONLY to the directory index
+            // (Node ESM rejects it outright) — a same-stem FILE is never a legal candidate,
+            // so the literal/remap/probe slots are skipped entirely (round-2 RI-R2-1;
+            // `join_with_root_guard` erases the trailing slash, so it must be read off the
+            // spec BEFORE joining).
             let mut probes: Vec<(String, &'static str)> = Vec::new();
-            match ext {
-                SpecExt::Known(e) => {
-                    if let Some(remapped) = conv.remap.get(&e) {
-                        for re in remapped {
-                            probes.push((format!("{stem}.{re}"), "remap"));
-                        }
-                    } else {
-                        probes.push((joined.clone(), "literal"));
+            if spec.ends_with('/') {
+                for ix in &conv.index_names {
+                    for pe in &conv.probe_exts {
+                        probes.push((format!("{joined}/{ix}.{pe}"), "index"));
                     }
                 }
-                SpecExt::Unknown => probes.push((joined.clone(), "literal")),
-                SpecExt::None => {
-                    for pe in &conv.probe_exts {
-                        probes.push((format!("{joined}.{pe}"), "probe"));
+            } else {
+                let (stem, ext) = parse_spec_ext(&joined, conv);
+                match ext {
+                    SpecExt::Known(e) => {
+                        if let Some(remapped) = conv.remap.get(&e) {
+                            for re in remapped {
+                                probes.push((format!("{stem}.{re}"), "remap"));
+                            }
+                        } else {
+                            probes.push((joined.clone(), "literal"));
+                        }
                     }
-                    for ix in &conv.index_names {
+                    SpecExt::Unknown => probes.push((joined.clone(), "literal")),
+                    SpecExt::None => {
                         for pe in &conv.probe_exts {
-                            probes.push((format!("{joined}/{ix}.{pe}"), "index"));
+                            probes.push((format!("{joined}.{pe}"), "probe"));
+                        }
+                        for ix in &conv.index_names {
+                            for pe in &conv.probe_exts {
+                                probes.push((format!("{joined}/{ix}.{pe}"), "index"));
+                            }
                         }
                     }
                 }
@@ -695,6 +710,69 @@ mod resolver_tests {
         assert_eq!(
             targets_of(&index, rel_ref("src/main.ts", "./a")),
             vec!["src/a.ts"]
+        );
+    }
+
+    #[test]
+    fn trailing_slash_spec_binds_directory_index_only() {
+        // './x/' names a DIRECTORY: x/index.ts wins even with x.ts present — the file is
+        // never a legal candidate for a trailing-slash specifier (RI-R2-1).
+        let index = VecIndex(vec![
+            file_node("src/main.ts", "typescript"),
+            file_node("src/x.ts", "typescript"),
+            file_node("src/x/index.ts", "typescript"),
+        ]);
+        assert_eq!(
+            targets_of(&index, rel_ref("src/main.ts", "./x/")),
+            vec!["src/x/index.ts"]
+        );
+    }
+
+    #[test]
+    fn dot_slash_spec_binds_own_directory_index_never_parent_file() {
+        // './' from src/a.ts is src/index.ts — never the root-level FILE src.ts, which sits
+        // OUTSIDE the directory the spec names (RI-R2-1).
+        let index = VecIndex(vec![
+            file_node("src/a.ts", "typescript"),
+            file_node("src.ts", "typescript"),
+            file_node("src/index.ts", "typescript"),
+        ]);
+        assert_eq!(
+            targets_of(&index, rel_ref("src/a.ts", "./")),
+            vec!["src/index.ts"]
+        );
+    }
+
+    #[test]
+    fn trailing_slash_spec_without_index_parks() {
+        // './x/' with x.ts present but NO x/index.* must PARK — a file is not a directory
+        // (RI-R2-1: park, never bind).
+        let index = VecIndex(vec![
+            file_node("src/main.ts", "typescript"),
+            file_node("src/x.ts", "typescript"),
+        ]);
+        assert!(targets_of(&index, rel_ref("src/main.ts", "./x/")).is_empty());
+    }
+
+    #[test]
+    fn parent_dir_trailing_slash_spec_binds_parent_index() {
+        // '../' from src/sub/a.ts is src/index.ts; from a depth-1 importer it would
+        // resolve to the repo root, which the root guard parks (recorded in the recon doc).
+        let index = VecIndex(vec![
+            file_node("src/sub/a.ts", "typescript"),
+            file_node("src/index.ts", "typescript"),
+        ]);
+        assert_eq!(
+            targets_of(&index, rel_ref("src/sub/a.ts", "../")),
+            vec!["src/index.ts"]
+        );
+        let root_index = VecIndex(vec![
+            file_node("src/a.ts", "typescript"),
+            file_node("index.ts", "typescript"),
+        ]);
+        assert!(
+            targets_of(&root_index, rel_ref("src/a.ts", "../")).is_empty(),
+            "'../' resolving to the repo root parks (root guard), never binds"
         );
     }
 
