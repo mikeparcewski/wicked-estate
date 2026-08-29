@@ -157,6 +157,273 @@ pub fn parse_spec_ext(path: &str, conv: &LanguageConventions) -> (String, SpecEx
     (path.to_string(), SpecExt::None)
 }
 
+// ── RelativeImportResolver ────────────────────────────────────────────────────
+
+use wicked_estate_core::{
+    Confidence, Edge, EdgeKind, NodeKind, ResolutionTier, Resolver, Result as CoreResult, SymbolId,
+    SymbolIndex, UnresolvedRef,
+};
+
+/// Stable id recorded on every edge this resolver emits.
+pub const RELATIVE_IMPORT_RESOLVER_ID: &str = "relative-import";
+
+/// Per-edge confidence override (Decision E, docs/recon/relative-imports.md): the joined-path
+/// match is deterministic and adjudicated 100% on disk, but the resolver cannot see
+/// `tsconfig.paths`, symlinks, or a case-insensitive FS — 0.9, not 1.0, and above the
+/// `ImportMap` tier default (0.6). Documented in docs/ENGINE-CONTRACT.md: this deliberately wins
+/// `resolve_all`'s max-confidence dedup against a Tsg-default (0.8) `Imports` edge.
+const RELATIVE_IMPORT_CONFIDENCE: f32 = 0.9;
+
+/// Counters returned by [`RelativeImportResolver::resolve_with_stats`] so the complexity guard
+/// (S9) can pin O(files + refs): the candidate map is built at most ONCE per resolve call, and
+/// every candidate check is one exact hash probe.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ResolveStats {
+    /// Exact hash-map probes performed across all refs.
+    pub probes: usize,
+    /// How many times the File-node map was built (must be ≤ 1 per resolve call).
+    pub map_builds: usize,
+}
+
+/// Binds relative JS/TS `Imports` refs (`'./foo'`, `'../bar'`) to their target File node.
+///
+/// - **Exact resolution only**: `parent_dir(importer) + spec`, normalised segment-wise with a
+///   ROOT GUARD — a `..` that would pop below the repo root (or below the `--repo` label prefix
+///   given at construction) parks the ref. No suffix matching exists on this path.
+/// - **Conventions as data**: extension/index/remap behaviour comes from
+///   `import-conventions.toml` per importer language ([`ImportConventions`]); an importer whose
+///   language has no row is skipped.
+/// - **O(files + refs)**: one `HashMap<full stored path, SymbolId>` over `NodeKind::File` nodes
+///   per resolve call; every probe is an exact full path in the data-defined slot order, first
+///   hit wins. Duplicate full paths are structurally impossible (`Symbol::file` derives the id
+///   from the path) — `debug_assert`ed on insert.
+/// - Emits `Imports` File→File at tier `ImportMap`, confidence 0.9,
+///   `resolved_by = "relative-import"`, `metadata.via = "relative-path"`,
+///   `metadata.rule ∈ {literal, remap, probe, index}`, `location = ref.location`.
+#[derive(Debug)]
+pub struct RelativeImportResolver {
+    /// The `--repo` label prefix (`"<label>/"`) every stored path of this run carries, or `None`
+    /// for an unlabelled repo. The root guard counts `..` pops against the importer's depth
+    /// BELOW this prefix, so a labelled repo parks exactly where a plain one does.
+    prefix: Option<String>,
+    conventions: ImportConventions,
+}
+
+impl RelativeImportResolver {
+    pub fn new(scope_prefix: Option<&str>) -> Self {
+        Self {
+            prefix: scope_prefix.map(str::to_string),
+            conventions: ImportConventions::embedded(),
+        }
+    }
+
+    /// [`Resolver::resolve`] plus the [`ResolveStats`] counters (complexity guard, S9).
+    pub fn resolve_with_stats(
+        &self,
+        refs: &[UnresolvedRef],
+        index: &dyn SymbolIndex,
+    ) -> CoreResult<(Vec<Edge>, ResolveStats)> {
+        let mut stats = ResolveStats::default();
+        let mut out = Vec::new();
+        // Built lazily, at most once: full stored path → (File SymbolId, language name).
+        let mut file_map: Option<HashMap<String, (SymbolId, String)>> = None;
+
+        for r in refs {
+            if r.kind != EdgeKind::Imports {
+                continue;
+            }
+            let spec = dequote(&r.raw_name);
+            if !(spec.starts_with("./") || spec.starts_with("../")) {
+                continue; // bare / alias specifiers are out of scope (Decision D)
+            }
+
+            if file_map.is_none() {
+                stats.map_builds += 1;
+                let mut m: HashMap<String, (SymbolId, String)> = HashMap::new();
+                for n in index.all_nodes()? {
+                    if n.kind == NodeKind::File {
+                        let key = normalise_seps(&n.location.file);
+                        let prev = m.insert(key, (n.symbol.clone(), n.language.0.clone()));
+                        // Symbol::file derives the id from the path and stores key nodes by
+                        // id, so a colliding full path cannot come from a real index
+                        // (Decision C / ATT-INV-4).
+                        debug_assert!(
+                            prev.is_none(),
+                            "duplicate File path in index: {}",
+                            n.location.file
+                        );
+                    }
+                }
+                if m.is_empty() {
+                    // D01-8: an empty index silently no-ops every ref — say so once.
+                    eprintln!("relative-import: index has zero File nodes — nothing to bind");
+                }
+                file_map = Some(m);
+            }
+            let map = file_map.as_ref().expect("built above");
+            if map.is_empty() {
+                continue;
+            }
+
+            let importer_path = normalise_seps(&r.location.file);
+            // Importer language from the index's own File node — never guessed from the ext.
+            let Some((_, importer_lang)) = map.get(&importer_path) else {
+                continue;
+            };
+            let Some(conv) = self.conventions.for_language(importer_lang) else {
+                continue; // no conventions row for this language — skip (Decision B)
+            };
+
+            // Strip the label prefix so the root guard counts depth below the label.
+            let rel_importer = match &self.prefix {
+                Some(p) => match importer_path.strip_prefix(p.as_str()) {
+                    Some(rest) => rest,
+                    None => continue, // ref from outside this run's scope — not ours
+                },
+                None => importer_path.as_str(),
+            };
+
+            let dir = parent_dir(rel_importer);
+            let Some(joined) = join_with_root_guard(dir, spec) else {
+                continue; // root escape → PARK, never bind (Decision A)
+            };
+
+            // Probe list in the data-defined slot order (Decision C).
+            let (stem, ext) = parse_spec_ext(&joined, conv);
+            let mut probes: Vec<(String, &'static str)> = Vec::new();
+            match ext {
+                SpecExt::Known(e) => {
+                    if let Some(remapped) = conv.remap.get(&e) {
+                        for re in remapped {
+                            probes.push((format!("{stem}.{re}"), "remap"));
+                        }
+                    } else {
+                        probes.push((joined.clone(), "literal"));
+                    }
+                }
+                SpecExt::Unknown => probes.push((joined.clone(), "literal")),
+                SpecExt::None => {
+                    for pe in &conv.probe_exts {
+                        probes.push((format!("{joined}.{pe}"), "probe"));
+                    }
+                    for ix in &conv.index_names {
+                        for pe in &conv.probe_exts {
+                            probes.push((format!("{joined}/{ix}.{pe}"), "index"));
+                        }
+                    }
+                }
+            }
+
+            for (cand, rule) in probes {
+                stats.probes += 1;
+                let full = match &self.prefix {
+                    Some(p) => format!("{p}{cand}"),
+                    None => cand,
+                };
+                if let Some((target, _)) = map.get(&full) {
+                    if *target == r.from {
+                        break; // self-import: no self-edges
+                    }
+                    let mut edge = Edge::new(
+                        r.from.clone(),
+                        target.clone(),
+                        EdgeKind::Imports,
+                        ResolutionTier::ImportMap,
+                        RELATIVE_IMPORT_RESOLVER_ID,
+                    )
+                    .with_location(r.location.clone());
+                    edge.confidence = Confidence::new(RELATIVE_IMPORT_CONFIDENCE);
+                    edge.metadata.insert(
+                        "via".to_string(),
+                        serde_json::Value::String("relative-path".to_string()),
+                    );
+                    edge.metadata.insert(
+                        "rule".to_string(),
+                        serde_json::Value::String(rule.to_string()),
+                    );
+                    out.push(edge);
+                    break; // first slot with a hit wins — later slots never probed
+                }
+            }
+        }
+        Ok((out, stats))
+    }
+}
+
+impl Resolver for RelativeImportResolver {
+    fn id(&self) -> &str {
+        RELATIVE_IMPORT_RESOLVER_ID
+    }
+
+    fn tier(&self) -> ResolutionTier {
+        ResolutionTier::ImportMap
+    }
+
+    fn resolve(&self, refs: &[UnresolvedRef], index: &dyn SymbolIndex) -> CoreResult<Vec<Edge>> {
+        self.resolve_with_stats(refs, index).map(|(edges, _)| edges)
+    }
+}
+
+// ── path helpers (own — `dir_of` and `normalise_relative_path` are NOT used: the
+//    resolver-precision lane owns them, and both false-bind; review doc 01) ─────
+
+/// Strip one pair of matching quotes from an extracted import specifier (`"'./foo'"` → `./foo`).
+fn dequote(raw: &str) -> &str {
+    let s = raw.trim();
+    if s.len() >= 2
+        && ((s.starts_with('\'') && s.ends_with('\''))
+            || (s.starts_with('"') && s.ends_with('"'))
+            || (s.starts_with('`') && s.ends_with('`')))
+    {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
+}
+
+/// Stored paths are `/`-normalised at index time; a `\` can still arrive from a hand-built
+/// index or a Windows-era row — normalise defensively.
+fn normalise_seps(path: &str) -> String {
+    if path.contains('\\') {
+        path.replace('\\', "/")
+    } else {
+        path.to_string()
+    }
+}
+
+/// Parent directory of a repo-relative file path: `""` for a root-level file, `"a"` for
+/// `"a/b.ts"`. (The existing `dir_of` returns the FILENAME for a root-level file — the inverted
+/// root behaviour in review doc 01.)
+fn parent_dir(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(pos) => &path[..pos],
+        None => "",
+    }
+}
+
+/// Join `dir` + `spec` segment-wise. Returns `None` (PARK) when a `..` would pop below the
+/// repo root — the silent-pop underflow in `normalise_relative_path` is the false-bind class
+/// this replaces (D01-1) — or when the spec resolves to the root itself.
+fn join_with_root_guard(dir: &str, spec: &str) -> Option<String> {
+    let mut parts: Vec<&str> = dir
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+    for seg in spec.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            other => parts.push(other),
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join("/"))
+}
+
 #[cfg(test)]
 mod loader_tests {
     use super::*;
@@ -244,5 +511,456 @@ mod loader_tests {
             err.contains("duplicate ext 'ts'"),
             "duplicate must be rejected at load: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod resolver_tests {
+    use super::*;
+    use crate::resolve_all;
+    use wicked_estate_core::{Language, Location, Node, Provenance, Span, Symbol};
+
+    /// Minimal in-memory index (mirrors the lib.rs test harness — kept local so this module
+    /// stays self-contained).
+    struct VecIndex(Vec<Node>);
+
+    impl SymbolIndex for VecIndex {
+        fn by_name(&self, name: &str) -> Vec<Node> {
+            self.0.iter().filter(|n| n.name == name).cloned().collect()
+        }
+        fn get(&self, id: &SymbolId) -> Option<Node> {
+            self.0.iter().find(|n| &n.symbol == id).cloned()
+        }
+        fn all_nodes(&self) -> CoreResult<Vec<Node>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn file_node(path: &str, lang: &str) -> Node {
+        Node::new(
+            Symbol::file(path).id(),
+            NodeKind::File,
+            path,
+            Language::new(lang),
+            Location::new(path, Span::ZERO),
+        )
+    }
+
+    /// An Imports ref exactly as the extractor emits it: `from` = the importer's File symbol,
+    /// `raw_name` = the QUOTED specifier, location = the importer file.
+    fn rel_ref(from_path: &str, spec: &str) -> UnresolvedRef {
+        UnresolvedRef::new(
+            Symbol::file(from_path).id(),
+            format!("'{spec}'"),
+            EdgeKind::Imports,
+            Location::new(from_path, Span::ZERO),
+        )
+    }
+
+    fn resolver() -> RelativeImportResolver {
+        RelativeImportResolver::new(None)
+    }
+
+    /// Resolve one ref against an index; return the target paths of the emitted edges.
+    fn targets_of(index: &VecIndex, r: UnresolvedRef) -> Vec<String> {
+        let edges = resolver().resolve(&[r], index).unwrap();
+        edges
+            .iter()
+            .map(|e| {
+                index
+                    .get(&e.target)
+                    .expect("edge target must be an indexed node")
+                    .location
+                    .file
+            })
+            .collect()
+    }
+
+    #[test]
+    fn plain_unique_spec_binds() {
+        let index = VecIndex(vec![
+            file_node("src/main.ts", "typescript"),
+            file_node("src/w.ts", "typescript"),
+        ]);
+        assert_eq!(
+            targets_of(&index, rel_ref("src/main.ts", "./w")),
+            vec!["src/w.ts"]
+        );
+    }
+
+    #[test]
+    fn js_spec_remaps_per_importer_language() {
+        // Both q.ts and q.js on disk: a TS importer resolves './q.js' to q.ts (tsc nodenext);
+        // a JS importer resolves the literal q.js (Node). Both decided by DATA, not code.
+        let index = VecIndex(vec![
+            file_node("src/main.ts", "typescript"),
+            file_node("src/main.js", "javascript"),
+            file_node("src/q.ts", "typescript"),
+            file_node("src/q.js", "javascript"),
+        ]);
+        assert_eq!(
+            targets_of(&index, rel_ref("src/main.ts", "./q.js")),
+            vec!["src/q.ts"],
+            "TS importer: remap.js probes q.ts first"
+        );
+        assert_eq!(
+            targets_of(&index, rel_ref("src/main.js", "./q.js")),
+            vec!["src/q.js"],
+            "JS importer: literal q.js wins"
+        );
+        // TS importer with ONLY q.ts present still binds (the emitted-output spec form).
+        let index2 = VecIndex(vec![
+            file_node("src/main.ts", "typescript"),
+            file_node("src/q.ts", "typescript"),
+        ]);
+        assert_eq!(
+            targets_of(&index2, rel_ref("src/main.ts", "./q.js")),
+            vec!["src/q.ts"]
+        );
+    }
+
+    #[test]
+    fn directory_index_binds() {
+        let index = VecIndex(vec![
+            file_node("src/main.ts", "typescript"),
+            file_node("src/c/index.ts", "typescript"),
+        ]);
+        assert_eq!(
+            targets_of(&index, rel_ref("src/main.ts", "./c")),
+            vec!["src/c/index.ts"]
+        );
+    }
+
+    #[test]
+    fn explicit_index_specs_bind() {
+        let index = VecIndex(vec![
+            file_node("src/main.ts", "typescript"),
+            file_node("src/utils/index.ts", "typescript"),
+            file_node("src/index.ts", "typescript"),
+        ]);
+        assert_eq!(
+            targets_of(&index, rel_ref("src/main.ts", "./utils/index")),
+            vec!["src/utils/index.ts"]
+        );
+        assert_eq!(
+            targets_of(&index, rel_ref("src/main.ts", "./index")),
+            vec!["src/index.ts"]
+        );
+    }
+
+    #[test]
+    fn dts_spec_binds_literal() {
+        let index = VecIndex(vec![
+            file_node("src/main.ts", "typescript"),
+            file_node("src/foo.d.ts", "typescript"),
+        ]);
+        assert_eq!(
+            targets_of(&index, rel_ref("src/main.ts", "./foo.d.ts")),
+            vec!["src/foo.d.ts"]
+        );
+    }
+
+    #[test]
+    fn file_beats_directory_index() {
+        // a.ts AND a/index.ts: TS order is deterministic — a.ts wins, no ambiguity park.
+        let index = VecIndex(vec![
+            file_node("src/main.ts", "typescript"),
+            file_node("src/a.ts", "typescript"),
+            file_node("src/a/index.ts", "typescript"),
+        ]);
+        assert_eq!(
+            targets_of(&index, rel_ref("src/main.ts", "./a")),
+            vec!["src/a.ts"]
+        );
+    }
+
+    #[test]
+    fn family_ext_beats_foreign_ext() {
+        // b.ts AND b.css: './b' probes the TS family only — b.ts, never b.css.
+        let index = VecIndex(vec![
+            file_node("src/main.ts", "typescript"),
+            file_node("src/b.ts", "typescript"),
+            file_node("src/b.css", "css"),
+        ]);
+        assert_eq!(
+            targets_of(&index, rel_ref("src/main.ts", "./b")),
+            vec!["src/b.ts"]
+        );
+    }
+
+    #[test]
+    fn foreign_ext_is_literal_only() {
+        let index = VecIndex(vec![
+            file_node("src/main.ts", "typescript"),
+            file_node("src/styles.css", "css"),
+        ]);
+        // Explicit './styles.css' binds the literal file (a stylesheet IS a dependency).
+        assert_eq!(
+            targets_of(&index, rel_ref("src/main.ts", "./styles.css")),
+            vec!["src/styles.css"]
+        );
+        // Extensionless './styles' must NOT probe .css — parks.
+        assert!(targets_of(&index, rel_ref("src/main.ts", "./styles")).is_empty());
+    }
+
+    #[test]
+    fn suffix_match_class_parks() {
+        // './foo2' with no src/foo2.* — site/src/foo2.ts must NOT bind (the review's
+        // false-bind: cand_stem.ends_with("/{logical}")).
+        let index = VecIndex(vec![
+            file_node("src/main.ts", "typescript"),
+            file_node("site/src/foo2.ts", "typescript"),
+        ]);
+        assert!(targets_of(&index, rel_ref("src/main.ts", "./foo2")).is_empty());
+    }
+
+    #[test]
+    fn root_escape_parks_even_when_a_suffix_path_exists() {
+        // '../../../../escape/x' from src/deep/nested/esc.ts pops below the root by one —
+        // PARK, even though escape/x.ts exists (the review's normalise_relative_path
+        // silent-pop false-bind).
+        let index = VecIndex(vec![
+            file_node("src/deep/nested/esc.ts", "typescript"),
+            file_node("escape/x.ts", "typescript"),
+        ]);
+        assert!(
+            targets_of(
+                &index,
+                rel_ref("src/deep/nested/esc.ts", "../../../../escape/x")
+            )
+            .is_empty()
+        );
+        // The in-bounds '..' chain still binds.
+        assert_eq!(
+            targets_of(
+                &index,
+                rel_ref("src/deep/nested/esc.ts", "../../../escape/x")
+            ),
+            vec!["escape/x.ts"]
+        );
+    }
+
+    #[test]
+    fn root_level_importer_binds_and_parks_correctly() {
+        // dir_of("index.ts") returns "index.ts" (the filename) — the inverted-root defect.
+        // parent_dir returns "" so './config' binds and '../foo' parks.
+        let index = VecIndex(vec![
+            file_node("index.ts", "typescript"),
+            file_node("config.ts", "typescript"),
+            file_node("foo.ts", "typescript"),
+        ]);
+        assert_eq!(
+            targets_of(&index, rel_ref("index.ts", "./config")),
+            vec!["config.ts"]
+        );
+        assert!(targets_of(&index, rel_ref("index.ts", "../foo")).is_empty());
+    }
+
+    #[test]
+    fn bare_specifier_is_skipped() {
+        let index = VecIndex(vec![
+            file_node("src/main.ts", "typescript"),
+            file_node("react.ts", "typescript"),
+        ]);
+        assert!(targets_of(&index, rel_ref("src/main.ts", "react")).is_empty());
+    }
+
+    #[test]
+    fn backslash_importer_path_is_normalised() {
+        let index = VecIndex(vec![
+            file_node("src/main.ts", "typescript"),
+            file_node("src/w.ts", "typescript"),
+        ]);
+        // The ref's location arrives with Windows separators; stored File nodes are '/'.
+        let r = UnresolvedRef::new(
+            Symbol::file("src/main.ts").id(),
+            "'./w'",
+            EdgeKind::Imports,
+            Location::new("src\\main.ts", Span::ZERO),
+        );
+        let edges = resolver().resolve(&[r], &index).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(
+            index.get(&edges[0].target).unwrap().location.file,
+            "src/w.ts"
+        );
+    }
+
+    #[test]
+    fn labelled_prefix_guards_the_label_root() {
+        // Under --repo repoa, stored paths carry 'repoa/'. '../../repoa/src/b' from
+        // repoa/src/a.ts escapes the LABEL root (depth below the prefix) — PARK, even though
+        // the full-store path 'repoa/src/b.ts' exists. './b' binds.
+        let index = VecIndex(vec![
+            file_node("repoa/src/a.ts", "typescript"),
+            file_node("repoa/src/b.ts", "typescript"),
+        ]);
+        let resolver = RelativeImportResolver::new(Some("repoa/"));
+        let park = resolver
+            .resolve(&[rel_ref("repoa/src/a.ts", "../../repoa/src/b")], &index)
+            .unwrap();
+        assert!(park.is_empty(), "label-root escape must park: {park:?}");
+        let bind = resolver
+            .resolve(&[rel_ref("repoa/src/a.ts", "./b")], &index)
+            .unwrap();
+        assert_eq!(bind.len(), 1);
+        assert_eq!(
+            index.get(&bind[0].target).unwrap().location.file,
+            "repoa/src/b.ts"
+        );
+    }
+
+    #[test]
+    fn unknown_importer_language_is_skipped() {
+        let index = VecIndex(vec![
+            file_node("src/main.rs", "rust"),
+            file_node("src/w.rs", "rust"),
+        ]);
+        assert!(targets_of(&index, rel_ref("src/main.rs", "./w")).is_empty());
+    }
+
+    #[test]
+    fn non_import_refs_are_skipped() {
+        let index = VecIndex(vec![
+            file_node("src/main.ts", "typescript"),
+            file_node("src/w.ts", "typescript"),
+        ]);
+        let r = UnresolvedRef::new(
+            Symbol::file("src/main.ts").id(),
+            "'./w'",
+            EdgeKind::Calls,
+            Location::new("src/main.ts", Span::ZERO),
+        );
+        assert!(resolver().resolve(&[r], &index).unwrap().is_empty());
+    }
+
+    #[test]
+    fn every_edge_field_is_pinned() {
+        let index = VecIndex(vec![
+            file_node("src/main.ts", "typescript"),
+            file_node("src/w.ts", "typescript"),
+        ]);
+        let r = rel_ref("src/main.ts", "./w");
+        let edges = resolver()
+            .resolve(std::slice::from_ref(&r), &index)
+            .unwrap();
+        assert_eq!(edges.len(), 1);
+        let e = &edges[0];
+        assert_eq!(e.kind, EdgeKind::Imports);
+        assert_eq!(e.source, Symbol::file("src/main.ts").id());
+        assert_eq!(e.target, Symbol::file("src/w.ts").id());
+        assert_eq!(
+            e.location.as_ref(),
+            Some(&r.location),
+            "the edge must carry the REF's location — that is what marks the ref resolved (D01-11)"
+        );
+        assert_eq!(e.resolved_by, RELATIVE_IMPORT_RESOLVER_ID);
+        assert_eq!(e.provenance, Provenance::ImportMap);
+        assert!((e.confidence.get() - 0.9).abs() < 1e-6, "0.9 override");
+        assert_eq!(
+            e.metadata.get("via").and_then(|v| v.as_str()),
+            Some("relative-path")
+        );
+        assert_eq!(
+            e.metadata.get("rule").and_then(|v| v.as_str()),
+            Some("probe")
+        );
+    }
+
+    #[test]
+    fn rule_metadata_names_the_probe_slot() {
+        let index = VecIndex(vec![
+            file_node("src/main.ts", "typescript"),
+            file_node("src/q.ts", "typescript"),
+            file_node("src/styles.css", "css"),
+            file_node("src/c/index.ts", "typescript"),
+        ]);
+        let rule_of = |spec: &str| -> String {
+            let edges = resolver()
+                .resolve(&[rel_ref("src/main.ts", spec)], &index)
+                .unwrap();
+            edges[0]
+                .metadata
+                .get("rule")
+                .and_then(|v| v.as_str())
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(rule_of("./q.js"), "remap");
+        assert_eq!(rule_of("./styles.css"), "literal");
+        assert_eq!(rule_of("./q"), "probe");
+        assert_eq!(rule_of("./c"), "index");
+    }
+
+    #[test]
+    fn resolve_all_keeps_the_higher_confidence_relative_edge() {
+        // The 0.9 override must win resolve_all's max-confidence dedup over a lower-confidence
+        // duplicate of the SAME (source, target, kind) — Decision E / ATT-INV-6.
+        struct LowConfImportsResolver;
+        impl Resolver for LowConfImportsResolver {
+            fn id(&self) -> &str {
+                "low-conf-imports"
+            }
+            fn tier(&self) -> ResolutionTier {
+                ResolutionTier::Tsg // 0.8 default — the strongest tier that emits today
+            }
+            fn resolve(
+                &self,
+                refs: &[UnresolvedRef],
+                _index: &dyn SymbolIndex,
+            ) -> CoreResult<Vec<Edge>> {
+                Ok(refs
+                    .iter()
+                    .map(|r| {
+                        Edge::new(
+                            r.from.clone(),
+                            Symbol::file("src/w.ts").id(),
+                            EdgeKind::Imports,
+                            ResolutionTier::Tsg,
+                            "low-conf-imports",
+                        )
+                        .with_location(r.location.clone())
+                    })
+                    .collect())
+            }
+        }
+
+        let index = VecIndex(vec![
+            file_node("src/main.ts", "typescript"),
+            file_node("src/w.ts", "typescript"),
+        ]);
+        let relative = resolver();
+        let low = LowConfImportsResolver;
+        let resolvers: &[&dyn Resolver] = &[&low, &relative];
+        let edges = resolve_all(resolvers, &[rel_ref("src/main.ts", "./w")], &index).unwrap();
+        assert_eq!(edges.len(), 1, "one deduped edge: {edges:?}");
+        assert_eq!(edges[0].resolved_by, RELATIVE_IMPORT_RESOLVER_ID);
+        assert!((edges[0].confidence.get() - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolution_is_deterministic() {
+        let index = VecIndex(vec![
+            file_node("src/main.ts", "typescript"),
+            file_node("src/a.ts", "typescript"),
+            file_node("src/a/index.ts", "typescript"),
+            file_node("src/q.ts", "typescript"),
+            file_node("src/q.js", "javascript"),
+            file_node("src/c/index.ts", "typescript"),
+        ]);
+        let refs = vec![
+            rel_ref("src/main.ts", "./a"),
+            rel_ref("src/main.ts", "./q.js"),
+            rel_ref("src/main.ts", "./c"),
+        ];
+        let run = || {
+            resolver()
+                .resolve(&refs, &index)
+                .unwrap()
+                .iter()
+                .map(|e| (e.source.0.clone(), e.target.0.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(run(), run(), "same input twice → identical output");
     }
 }
