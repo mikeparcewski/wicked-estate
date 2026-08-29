@@ -555,6 +555,14 @@ previously-green identity/characterization test was weakened rather than re-poin
   single-id hazard (D8/F13) is live until the M4 store issue is resolved; if
   `cargo test -p wicked-estate-bench` went red from id churn (recorded verbatim in this lane's
   close-out), regenerate the bench receipts in the train.
+  **Committed home (review round 1, impact-1-IMP-1):** the user-facing half of this note now
+  lives in the repo itself — `CHANGELOG.md` `[Unreleased]` carries the scheme-3 entry (superseding
+  the stale scheme-2 text in place, same discipline as the `treesitter.rs` scheme doc): the five
+  newly-churned id classes, the per-label re-index gate + CLI-only warning, the SCIP/xedge/
+  embeddings re-run instructions, and the live C++ cross-file proto/def single-id hazard. M1 was
+  previously routed only through this lane's uncommitted report prose — a plan defect: release
+  content must land in a committed artifact, not hand-off text. The release lane still owns the
+  train composition and the bench-receipt regeneration.
 - **M2 (method-identity lane, informational):** rust.scm's :24-30 NOTE ownership claim resolved
   here; `identity_field_object_literal_residual` and `identity_field_orm_equal_range_residual`
   flipped here per their embedded instructions; MI-R1-1 kept with a direct test, its python producer
