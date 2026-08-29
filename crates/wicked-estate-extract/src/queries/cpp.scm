@@ -57,6 +57,15 @@
 ; nodes.file flaps last-write-wins, remove_file deletes by file, the digest skip
 ; never re-extracts the survivor. Store-side fix filed via merge note M4 (the
 ; program's header/impl identity decision).
+; HAZARD, namespace direction (R2-COR-1; pinned by
+; cpp_namespace_qualified_free_fn_cross_kind_collision_known_defect): the
+; qualifier ambiguity cuts BOTH ways — a NAMESPACE qualifier also parses as
+; namespace_identifier, so `void ns::helper(int) {}` at file scope mints
+; `<module>/ns#helper().` with kind Method: the SAME id an in-namespace
+; `void helper() {}` definition mints with kind Function (containment nests it
+; under the `ns#` namespace anchor). Cross-kind same-id → store re-kind flap.
+; No query-level fix exists (the grammar cannot separate class from namespace
+; qualifiers); folded into the M4 identity decision.
 (function_definition
   declarator: (function_declarator
     declarator: (qualified_identifier

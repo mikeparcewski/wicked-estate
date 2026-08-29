@@ -579,6 +579,19 @@ previously-green identity/characterization test was weakened rather than re-poin
   terms, and the member-level single-id shape this lane introduces (D8) stays pinned as
   `cpp_member_proto_def_cross_file_single_id_hazard` with its flip instruction gated on this
   decision.
+  **Round-2 extension (review R2-COR-1) — the D8 stance analysis covered only the
+  class-qualifier direction; the namespace direction was a plan miss.** `qualified_identifier.scope`
+  parses class and namespace qualifiers identically (`namespace_identifier`), so the D8 owner
+  capture makes a namespace-qualified free-function definition at file scope
+  (`void ns::helper(int) {}` — legal single-file C++ when the overload is declared in the
+  namespace, [namespace.memdef]) mint `<module>/ns#helper().` with kind Method: the SAME id an
+  in-namespace `void helper() {}` definition mints with kind Function via the namespace
+  containment anchor. Cross-kind same-id → the store re-kind flap #129 eradicated; the F13
+  cross-file mechanism stacks on top when header/impl modules coincide. No query-level fix exists;
+  pinned as `cpp_namespace_qualified_free_fn_cross_kind_collision_known_defect` (M4-gated flip
+  instruction) and recorded in ADR-002's residual list + the cpp.scm hazard comment. The M4
+  decision must therefore also cover the identity/kind convention for QUALIFIED OUT-OF-LINE
+  definitions whose qualifier class is grammar-ambiguous, not only header/impl proto+def pairing.
 - **M5 (doc-03 owner):** `ruby.scm:100 @call.object` untouched and still unconsumed — unchanged input
   for the self-receiver resolver work.
 - **M6 (program owner — fleet audit hand-off, per ATK-4/§11):** the S7 fleet audit's hit list of

@@ -1589,6 +1589,69 @@ fn cpp_member_proto_def_cross_file_single_id_hazard() {
     );
 }
 
+/// Review round 2 (R2-COR-1) — the D8 qualifier ambiguity, NAMESPACE direction,
+/// pinned: `qualified_identifier.scope`'s namespace_identifier branch cannot
+/// distinguish a class qualifier from a namespace qualifier, so a
+/// namespace-qualified FREE-function definition at file scope
+/// (`void ns::helper(int) {}`) mints `<module>/ns#helper().` with kind Method —
+/// the SAME SymbolId an in-namespace definition (`namespace ns { void helper()
+/// {} }`, nested under the `ns#` namespace anchor by containment) mints with
+/// kind Function. Cross-kind same-id = the store re-kind-flap class #129
+/// eradicated. The fixture is legal, compilable C++ (`cc -fsyntax-only` clean):
+/// a qualified out-of-line definition requires a prior in-namespace declaration
+/// ([namespace.memdef]), so it defines the declared `helper(int)` overload; the
+/// D6d-deferred free prototype is uncaptured, which is why exactly two nodes
+/// mint. No query-level fix exists — the grammar parses both qualifier classes
+/// as namespace_identifier and kind is decided by the capture — so this is
+/// folded into the program's M4 header/impl identity decision
+/// (docs/recon/scm-anchors.md §8). FLIP INSTRUCTION (gated on M4): when the M4
+/// decision records an identity convention for qualified out-of-line
+/// definitions, flip this to assert whatever it decides — distinct ids, or one
+/// id with one consistent kind — and retire the cross-kind pair.
+#[test]
+fn cpp_namespace_qualified_free_fn_cross_kind_collision_known_defect() {
+    let lang = "cpp";
+    let sf = SourceFile {
+        path: "probe_ns_free.cpp".to_string(),
+        language: Language::new(lang),
+        text: "namespace ns {\nvoid helper() {}\nvoid helper(int);\n}\n\
+               void ns::helper(int x) {}\n"
+            .to_string(),
+    };
+    let ex = TreeSitterExtractor::for_language(lang)
+        .unwrap()
+        .extract(&sf)
+        .expect("extraction must succeed");
+    let helpers: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == "helper")
+        .collect();
+    assert_eq!(
+        helpers.len(),
+        2,
+        "[{lang}] expected in-namespace def + qualified free def (the free \
+         prototype is D6d-deferred); got {helpers:?}"
+    );
+    let kinds: std::collections::HashSet<String> =
+        helpers.iter().map(|n| format!("{:?}", n.kind)).collect();
+    assert_eq!(
+        kinds,
+        ["Function".to_string(), "Method".to_string()].into(),
+        "[{lang}] KIND SHAPE CHANGED: expected the cross-kind Function/Method \
+         pair — if one kind now wins, apply this pin's M4-gated flip instruction"
+    );
+    for n in &helpers {
+        assert_eq!(
+            n.symbol.as_str(),
+            "ts-cpp . . . probe_ns_free/ns#helper().",
+            "[{lang}] KNOWN DEFECT RESOLVED? the namespace-qualified free def \
+             and the in-namespace def no longer share one id — apply this \
+             pin's M4-gated flip instruction"
+        );
+    }
+}
+
 /// scm-anchors D3 (scheme 3): impl-block methods nest under the impl's `type:`
 /// name via the NON-EMITTING `@code_struct.anchor` — two impls' same-named
 /// methods mint DISTINCT ids, and every alternation branch (plain, generic,

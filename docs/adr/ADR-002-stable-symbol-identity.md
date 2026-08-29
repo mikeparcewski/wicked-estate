@@ -169,6 +169,16 @@ Still open:
   skip never re-extracts the survivor — is pinned
   (`cpp_member_proto_def_cross_file_single_id_hazard`) pending the program's M4 header/impl
   identity decision (store-side fix filed there).
+- C++, namespace direction of the qualifier ambiguity (review round 2, R2-COR-1): a
+  namespace-qualified free-function definition at file scope (`void ns::helper(int) {}`,
+  legal per [namespace.memdef] when the overload is declared in the namespace) mints
+  `<module>/ns#helper().` with kind **Method** — the same id an in-namespace
+  `void helper() {}` definition mints with kind **Function** (containment nests it under the
+  namespace anchor). Cross-kind same-id → store re-kind flap. `qualified_identifier.scope`
+  parses class and namespace qualifiers identically (`namespace_identifier`), so no
+  query-level fix exists; pinned
+  (`cpp_namespace_qualified_free_fn_cross_kind_collision_known_defect`) and folded into the
+  same M4 identity decision.
 - Fleet-audit hand-off (merge note M6): Swift `extension Foo` members are module-flat and two
   extensions' same-named methods collide (pinned,
   `swift_extension_methods_collision_known_defect` — fixable per-language with `.anchor`); Lua
