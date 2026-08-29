@@ -227,18 +227,24 @@ fn write_tsx_fixture(dir: &std::path::Path) {
 }
 
 /// Bounded retry (tsserver builds its project model asynchronously after didOpen):
-/// up to 20 attempts, 250ms apart — never a single fixed sleep. Returns the last outcome.
+/// up to 20 attempts, 250ms apart — never a single fixed sleep. Succeeds once a location
+/// lands in the file matching `expect_uri_substr` (mid-load, tsserver answers with the
+/// local import-specifier binding before it can follow the import cross-file); otherwise
+/// returns the last outcome for the failure message.
 fn retry_definition(
     tier: &mut LspTier,
     language: &str,
     uri: &str,
     line: u32,
     col: u32,
+    expect_uri_substr: &str,
 ) -> Result<Vec<Location>, String> {
     let mut last: Result<Vec<Location>, String> = Err("never attempted".to_string());
     for _ in 0..20 {
         match tier.definition(language, uri, line, col) {
-            Ok(locs) if !locs.is_empty() => return Ok(locs),
+            Ok(locs) if locs.iter().any(|l| l.uri.contains(expect_uri_substr)) => {
+                return Ok(locs);
+            }
             Ok(locs) => last = Ok(locs),
             Err(e) => last = Err(e.to_string()),
         }
@@ -267,7 +273,7 @@ fn lsp_tier_definition_roundtrip_including_tsx() {
     let app_uri = path_to_file_uri(root.join("src/app.tsx").to_str().unwrap());
 
     // ── .ts path ──────────────────────────────────────────────────────────────
-    let defs = retry_definition(&mut tier, "typescript", &main_uri, 2, 20);
+    let defs = retry_definition(&mut tier, "typescript", &main_uri, 2, 20, "greeter");
     match &defs {
         Ok(locs) => assert!(
             locs.iter().any(|l| l.uri.contains("greeter")),
@@ -281,7 +287,7 @@ fn lsp_tier_definition_roundtrip_including_tsx() {
     println!("[lsp_live] tier definition (.ts): {:?}", defs.unwrap()[0]);
 
     // ── .tsx path (languageId mapping tsx→typescriptreact) ───────────────────
-    let defs_tsx = retry_definition(&mut tier, "tsx", &app_uri, 3, 16);
+    let defs_tsx = retry_definition(&mut tier, "tsx", &app_uri, 3, 16, "greeter");
     match &defs_tsx {
         Ok(locs) => assert!(
             locs.iter().any(|l| l.uri.contains("greeter")),
@@ -293,7 +299,10 @@ fn lsp_tier_definition_roundtrip_including_tsx() {
              mapping is broken"
         ),
     }
-    println!("[lsp_live] tier definition (.tsx): {:?}", defs_tsx.unwrap()[0]);
+    println!(
+        "[lsp_live] tier definition (.tsx): {:?}",
+        defs_tsx.unwrap()[0]
+    );
 
     // ── cache path: a second query on the same (already-open) file succeeds ──
     let again = tier

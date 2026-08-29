@@ -131,6 +131,27 @@ pub(crate) fn encode_notification(method: &str, params: Value) -> Vec<u8> {
     out
 }
 
+/// Encode a JSON-RPC **response** (to a server→client request) with LSP framing.
+/// `id` echoes the server's request id verbatim.
+pub(crate) fn encode_response(id: &Value, result: Value) -> Vec<u8> {
+    #[derive(Serialize)]
+    struct Resp<'a> {
+        jsonrpc: &'a str,
+        id: &'a Value,
+        result: Value,
+    }
+    let body = serde_json::to_vec(&Resp {
+        jsonrpc: "2.0",
+        id,
+        result,
+    })
+    .expect("response serialization is infallible");
+    let header = format!("Content-Length: {}\r\n\r\n", body.len());
+    let mut out = header.into_bytes();
+    out.extend_from_slice(&body);
+    out
+}
+
 /// Read one framed message from `reader`.
 ///
 /// Parses `Content-Length: N\r\n\r\n` then reads exactly N bytes.  Skips any
@@ -264,7 +285,21 @@ impl RpcTransport {
             let raw = self.recv_frame_by(deadline)?;
             let v: Value = serde_json::from_slice(&raw)?;
 
-            // If the message has no `id` field it is a server-pushed notification — skip.
+            // Any message carrying `method` is never our response: either a server-pushed
+            // notification (no id — skip) or a server→client REQUEST (id + method — reply,
+            // so spec-compliant servers don't stall waiting on us). Without this guard a
+            // server request whose id collides with ours deserializes as our response with
+            // `result` defaulting to Null — a silent false "no definition".
+            if let Some(method) = v.get("method").and_then(Value::as_str) {
+                if let Some(req_id) = v.get("id") {
+                    let req_id = req_id.clone();
+                    let method = method.to_string();
+                    self.reply_to_server_request(&req_id, &method, v.get("params"))?;
+                }
+                continue;
+            }
+
+            // No `method`, no `id`: malformed — skip tolerantly.
             if v.get("id").is_none() {
                 continue;
             }
@@ -290,6 +325,32 @@ impl RpcTransport {
             return Ok(resp.result);
         }
     }
+
+    /// Reply to a server→client request: `null` for everything except
+    /// `workspace/configuration`, which per LSP 3.17 must receive an **array with one
+    /// element per requested item** — a bare `null` there is spec-invalid and can stall
+    /// pyright right after `didOpen`.
+    fn reply_to_server_request(
+        &mut self,
+        id: &Value,
+        method: &str,
+        params: Option<&Value>,
+    ) -> Result<()> {
+        let result = if method == "workspace/configuration" {
+            let n = params
+                .and_then(|p| p.get("items"))
+                .and_then(Value::as_array)
+                .map(|items| items.len())
+                .unwrap_or(1);
+            Value::Array(vec![Value::Null; n])
+        } else {
+            Value::Null
+        };
+        let frame = encode_response(id, result);
+        self.writer.write_all(&frame)?;
+        self.writer.flush()?;
+        Ok(())
+    }
 }
 
 /// True when `err` means the transport itself can no longer be trusted (timeout, closed or
@@ -312,14 +373,40 @@ fn is_transport_fatal(err: &Error) -> bool {
 
 // ── server registry ───────────────────────────────────────────────────────────
 
+/// Grammar-name → LSP `languageId` for the rows where they differ (identity otherwise).
+/// DATA next to the registry (rules-as-data); moves wholesale into the W3.6 registry data
+/// file (ADR-009). LSP requires e.g. `typescriptreact` for `.tsx` documents — announcing
+/// `typescript` makes tsserver mis-parse JSX.
+const LANGUAGE_ID_OVERRIDES: &[(&str, &str)] =
+    &[("tsx", "typescriptreact"), ("jsx", "javascriptreact")];
+
+/// The LSP-standard `languageId` for a tree-sitter grammar name.
+pub fn lsp_language_id(grammar: &str) -> &str {
+    LANGUAGE_ID_OVERRIDES
+        .iter()
+        .find(|(g, _)| *g == grammar)
+        .map(|(_, l)| *l)
+        .unwrap_or(grammar)
+}
+
+/// One registry row: how to launch a language's server and which LSP `languageId` to
+/// announce in `textDocument/didOpen` for its documents.
+#[derive(Debug, Clone)]
+pub struct ServerEntry {
+    pub binary: String,
+    pub args: Vec<String>,
+    /// LSP-standard languageId (differs from the grammar name for tsx/jsx).
+    pub language_id: String,
+}
+
 /// Maps tree-sitter grammar language names → server invocation command.
 ///
 /// Lookup via [`ServerRegistry::command_for`]; returns `None` when the binary is absent
 /// from `PATH`.
 #[derive(Debug, Clone)]
 pub struct ServerRegistry {
-    /// language → (binary, args)
-    entries: HashMap<String, (String, Vec<String>)>,
+    /// language → registry row.
+    entries: HashMap<String, ServerEntry>,
 }
 
 impl Default for ServerRegistry {
@@ -332,41 +419,31 @@ impl ServerRegistry {
     /// The built-in registry: TypeScript/JavaScript, Rust, Python.
     pub fn standard() -> Self {
         let mut entries = HashMap::new();
+        for lang in ["typescript", "tsx", "javascript", "jsx"] {
+            entries.insert(
+                lang.to_string(),
+                ServerEntry {
+                    binary: "typescript-language-server".to_string(),
+                    args: vec!["--stdio".to_string()],
+                    language_id: lsp_language_id(lang).to_string(),
+                },
+            );
+        }
         entries.insert(
-            "typescript".to_string(),
-            (
-                "typescript-language-server".to_string(),
-                vec!["--stdio".to_string()],
-            ),
+            "rust".to_string(),
+            ServerEntry {
+                binary: "rust-analyzer".to_string(),
+                args: vec![],
+                language_id: "rust".to_string(),
+            },
         );
-        entries.insert(
-            "tsx".to_string(),
-            (
-                "typescript-language-server".to_string(),
-                vec!["--stdio".to_string()],
-            ),
-        );
-        entries.insert(
-            "javascript".to_string(),
-            (
-                "typescript-language-server".to_string(),
-                vec!["--stdio".to_string()],
-            ),
-        );
-        entries.insert(
-            "jsx".to_string(),
-            (
-                "typescript-language-server".to_string(),
-                vec!["--stdio".to_string()],
-            ),
-        );
-        entries.insert("rust".to_string(), ("rust-analyzer".to_string(), vec![]));
         entries.insert(
             "python".to_string(),
-            (
-                "pyright-langserver".to_string(),
-                vec!["--stdio".to_string()],
-            ),
+            ServerEntry {
+                binary: "pyright-langserver".to_string(),
+                args: vec!["--stdio".to_string()],
+                language_id: "python".to_string(),
+            },
         );
         ServerRegistry { entries }
     }
@@ -374,18 +451,30 @@ impl ServerRegistry {
     /// Look up the binary + args for `language`. Returns `None` when the language is not
     /// registered or the binary is not on PATH.
     pub fn command_for(&self, language: &str) -> Option<(String, Vec<String>)> {
-        let (bin, args) = self.entries.get(language)?;
-        if probe_binary(bin) {
-            Some((bin.clone(), args.clone()))
+        let entry = self.entries.get(language)?;
+        if probe_binary(&entry.binary) {
+            Some((entry.binary.clone(), entry.args.clone()))
         } else {
             None
         }
     }
 
-    /// Register a custom language server. Replaces an existing entry.
+    /// The LSP `languageId` to announce for `language`'s documents, if registered.
+    pub fn language_id_for(&self, language: &str) -> Option<&str> {
+        self.entries.get(language).map(|e| e.language_id.as_str())
+    }
+
+    /// Register a custom language server. Replaces an existing entry. The `languageId`
+    /// is derived from the grammar name via [`lsp_language_id`].
     pub fn register(&mut self, language: &str, binary: &str, args: Vec<String>) {
-        self.entries
-            .insert(language.to_string(), (binary.to_string(), args));
+        self.entries.insert(
+            language.to_string(),
+            ServerEntry {
+                binary: binary.to_string(),
+                args,
+                language_id: lsp_language_id(language).to_string(),
+            },
+        );
     }
 }
 
@@ -412,6 +501,10 @@ pub struct LspClient {
     root_uri: String,
     /// Set once the child has been killed — `Drop` then skips the graceful shutdown.
     dead: bool,
+    /// didOpen cache: file URI → content digest. Owned by the client (not the tier) so
+    /// eviction drops it with the client — a respawned server re-opens documents naturally
+    /// instead of inheriting stale "already open" claims.
+    open_docs: HashMap<String, u64>,
 }
 
 impl LspClient {
@@ -450,6 +543,7 @@ impl LspClient {
             transport,
             root_uri,
             dead: false,
+            open_docs: HashMap::new(),
         };
 
         if let Err(e) = client.handshake() {
@@ -511,6 +605,38 @@ impl LspClient {
                 }
             }),
         )
+    }
+
+    /// Ensure the server has the **current** content of `file_uri` open: read the file,
+    /// digest it, and send `textDocument/didOpen` when unseen — or `didClose` + `didOpen`
+    /// when the content changed since it was last opened (minimal correct sync; no
+    /// `didChange` incremental protocol). LSP servers return empty results for unopened
+    /// documents, so every position query must go through here.
+    pub fn ensure_open(&mut self, file_uri: &str, language_id: &str) -> Result<()> {
+        let path = file_uri_to_path(file_uri)?;
+        let text = std::fs::read_to_string(&path).map_err(|e| {
+            Error::Resolution(format!("LSP: cannot read file for didOpen: {path}: {e}"))
+        })?;
+        let digest = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut h);
+            h.finish()
+        };
+        match self.open_docs.get(file_uri) {
+            Some(&d) if d == digest => return Ok(()), // already open with this content
+            Some(_) => {
+                // Content changed on disk since didOpen: close, then reopen below.
+                self.transport.send_notification(
+                    "textDocument/didClose",
+                    serde_json::json!({ "textDocument": { "uri": file_uri } }),
+                )?;
+            }
+            None => {}
+        }
+        self.did_open(file_uri, language_id, &text)?;
+        self.open_docs.insert(file_uri.to_string(), digest);
+        Ok(())
     }
 
     // ── textDocument/definition ───────────────────────────────────────────────
@@ -703,6 +829,20 @@ impl LspTier {
         self.clients.contains_key(language)
     }
 
+    /// Get-or-spawn the client for `language` and make sure `file_uri`'s current content is
+    /// open on it with the registry's `languageId` — LSP servers return empty results for
+    /// unopened documents (the didOpen defect this fixes).
+    fn prepared_client(&mut self, language: &str, file_uri: &str) -> Result<&mut LspClient> {
+        let language_id = self
+            .registry
+            .language_id_for(language)
+            .unwrap_or(language)
+            .to_string();
+        let client = self.client(language)?;
+        client.ensure_open(file_uri, &language_id)?;
+        Ok(client)
+    }
+
     // ── public methods ─────────────────────────────────────────────────────────
 
     /// Return definition location(s) for the symbol at `(line, col)` in `file_uri`.
@@ -714,7 +854,7 @@ impl LspTier {
         col: u32,
     ) -> Result<Vec<Location>> {
         let res = self
-            .client(language)
+            .prepared_client(language, file_uri)
             .and_then(|c| c.definition(file_uri, line, col));
         self.evict_if_fatal(language, res)
     }
@@ -729,7 +869,7 @@ impl LspTier {
         include_declaration: bool,
     ) -> Result<Vec<Location>> {
         let res = self
-            .client(language)
+            .prepared_client(language, file_uri)
             .and_then(|c| c.references(file_uri, line, col, include_declaration));
         self.evict_if_fatal(language, res)
     }
@@ -743,7 +883,7 @@ impl LspTier {
         col: u32,
     ) -> Result<Option<HoverResult>> {
         let res = self
-            .client(language)
+            .prepared_client(language, file_uri)
             .and_then(|c| c.hover(file_uri, line, col));
         self.evict_if_fatal(language, res)
     }
@@ -847,6 +987,60 @@ pub fn path_to_file_uri(path: &str) -> String {
     } else {
         // Unix: path always starts with '/'.
         format!("file://{path}")
+    }
+}
+
+/// Convert a `file://` URI back to a filesystem path — the inverse of [`path_to_file_uri`].
+///
+/// Percent-decodes `%XX` escapes (servers return e.g. `%20` for spaces) and handles the
+/// Windows drive-letter form (`file:///C:/dir` → `C:\dir`). The drive form is detected by
+/// shape, not by `cfg`, so the helper is testable on every platform. A naive
+/// `strip_prefix("file://")` would silently break every query on Windows and on any path
+/// containing spaces.
+pub fn file_uri_to_path(uri: &str) -> Result<String> {
+    let rest = uri
+        .strip_prefix("file://")
+        .ok_or_else(|| Error::Resolution(format!("LSP: not a file:// URI: {uri}")))?;
+    let decoded = percent_decode(rest);
+    // Windows drive form: "/C:" or "/C:/dir" → "C:\dir".
+    let bytes = decoded.as_bytes();
+    let is_drive_form = bytes.len() >= 3
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':'
+        && (bytes.len() == 3 || bytes[3] == b'/');
+    if is_drive_form {
+        Ok(decoded[1..].replace('/', "\\"))
+    } else {
+        Ok(decoded)
+    }
+}
+
+/// Percent-decode `%XX` hex escapes (std-only). Invalid escapes pass through verbatim.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push(hi * 16 + lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -1123,6 +1317,133 @@ mod tests {
                 "file:///home/user/project"
             );
         }
+    }
+
+    // ── languageId mapping (pure data) ────────────────────────────────────────
+
+    #[test]
+    fn language_id_mapping_data() {
+        assert_eq!(lsp_language_id("tsx"), "typescriptreact");
+        assert_eq!(lsp_language_id("jsx"), "javascriptreact");
+        assert_eq!(lsp_language_id("typescript"), "typescript");
+        assert_eq!(lsp_language_id("rust"), "rust");
+        // Registry rows carry the mapping.
+        let reg = ServerRegistry::standard();
+        assert_eq!(reg.language_id_for("tsx"), Some("typescriptreact"));
+        assert_eq!(reg.language_id_for("jsx"), Some("javascriptreact"));
+        assert_eq!(reg.language_id_for("python"), Some("python"));
+        assert_eq!(reg.language_id_for("cobol"), None);
+    }
+
+    // ── file_uri_to_path (inverse of path_to_file_uri) ────────────────────────
+
+    #[test]
+    fn file_uri_to_path_unix_percent_decoding() {
+        assert_eq!(
+            file_uri_to_path("file:///home/user/my%20project/a.ts").unwrap(),
+            "/home/user/my project/a.ts"
+        );
+    }
+
+    #[test]
+    fn file_uri_to_path_windows_drive_uri() {
+        // Shape-detected, so this runs (and must pass) on every platform.
+        assert_eq!(
+            file_uri_to_path("file:///C:/Users/dev/proj/a.ts").unwrap(),
+            "C:\\Users\\dev\\proj\\a.ts"
+        );
+        assert_eq!(
+            file_uri_to_path("file:///c:/dir%20x/y.py").unwrap(),
+            "c:\\dir x\\y.py"
+        );
+    }
+
+    #[test]
+    fn file_uri_to_path_rejects_non_file_uri() {
+        let err = file_uri_to_path("https://example.com/a.ts").unwrap_err();
+        assert!(err.to_string().contains("not a file:// URI"), "got: {err}");
+    }
+
+    #[test]
+    fn file_uri_round_trips_with_path_to_file_uri() {
+        // path_to_file_uri is cfg-gated, so exercise the current platform's branch.
+        let path = if cfg!(windows) {
+            "C:\\Users\\dev\\round trip"
+        } else {
+            "/tmp/round trip/dir"
+        };
+        assert_eq!(file_uri_to_path(&path_to_file_uri(path)).unwrap(), path);
+    }
+
+    // ── await_response: server→client requests are never our response (D8) ───
+
+    /// A `Write` that captures everything for later assertions.
+    #[derive(Clone)]
+    struct SharedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Deterministic misparse test (scripted frames, no live server): a notification, then a
+    /// server→client request whose `id` COLLIDES with the expected response id, then the real
+    /// response. The old code deserialized the server request as our response with `result`
+    /// defaulting to `Null` — a silent false "no definition". Also asserts the replies:
+    /// `workspace/configuration` gets a null-array sized to `params.items.len()` (LSP 3.17 —
+    /// a bare null there can stall pyright); other server requests get a bare null.
+    #[test]
+    fn await_response_skips_server_requests_and_replies_correctly() {
+        let expected_id = 42;
+        let mut script = Vec::new();
+        script.extend(encode_notification(
+            "window/logMessage",
+            serde_json::json!({"type": 3, "message": "preamble"}),
+        ));
+        script.extend(encode_request(
+            expected_id, // deliberate id collision with our request
+            "workspace/configuration",
+            serde_json::json!({"items": [{"section": "python"}, {"section": "js"}]}),
+        ));
+        script.extend(encode_request(
+            expected_id,
+            "window/workDoneProgress/create",
+            serde_json::json!({"token": "t1"}),
+        ));
+        script.extend(encode_response(
+            &serde_json::json!(expected_id),
+            serde_json::json!({"ok": true}),
+        ));
+
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut t = RpcTransport::new(
+            SharedWriter(written.clone()),
+            std::io::Cursor::new(script),
+            Duration::from_secs(5),
+        );
+
+        let result = t.await_response(expected_id).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!({"ok": true}),
+            "the REAL response must be returned, not the colliding server request's default-Null"
+        );
+
+        let bytes = written.lock().unwrap().clone();
+        let out = String::from_utf8(bytes).unwrap();
+        assert!(
+            out.contains(r#""result":[null,null]"#),
+            "workspace/configuration must get one null per requested item, got: {out}"
+        );
+        assert!(
+            out.contains(r#""result":null"#),
+            "other server requests must get a bare null reply, got: {out}"
+        );
     }
 
     // ── timeout mechanism (frame pump + per-request deadline) ────────────────
