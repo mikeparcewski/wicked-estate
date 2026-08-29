@@ -528,10 +528,22 @@ impl Drop for LspClient {
 /// `definition` / `references` / `hover` methods that map a `(language, file, line, col)`
 /// tuple to precise LSP results.
 ///
-/// Usage pattern:
-/// ```ignore
+/// **Status (2026-08-28, ADR-007 superseding note):** a *client library* by design — no
+/// `Resolver` impl, no `Edge` emission, never in a bulk resolver slice, per the locked decision
+/// "LSP is on-demand only, never bulk". The W3.3 AC is met by `tests/lsp_live.rs`
+/// (probe-and-skip against installed servers). The on-demand consumer (an MCP/CLI single-symbol
+/// definition/references tool, `resolve.lsp` span) is the W3.6 follow-up in the wave plan.
+///
+/// Usage pattern (`no_run`: spawns a real language server):
+/// ```no_run
+/// # fn main() -> wicked_estate_core::Result<()> {
+/// use wicked_estate_resolve::lsp::LspTier;
+///
 /// let mut tier = LspTier::new("/path/to/project");
 /// let defs = tier.definition("typescript", "file:///path/to/foo.ts", 10, 5)?;
+/// # let _ = defs;
+/// # Ok(())
+/// # }
 /// ```
 pub struct LspTier {
     registry: ServerRegistry,

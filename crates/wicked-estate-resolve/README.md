@@ -10,7 +10,7 @@ Cross-file reference resolvers: binds `UnresolvedRef` values emitted by extracto
 - `InfraResolver` binds IaC resource-to-resource `depends_on` references at Parsed confidence (1.0) without interfering with code resolvers.
 - `resolve_all` runs multiple resolvers and deduplicates by `(source, target, kind)`, keeping the highest-confidence edge.
 - `scip_edges` ingests a SCIP `index.scip` protobuf and emits confidence-1.0 edges by correlating SCIP occurrences to tree-sitter-derived nodes.
-- `lsp` provides an on-demand JSON-RPC stdio client for `typescript-language-server`, `rust-analyzer`, and `pyright-langserver` — on-demand single-symbol queries only, never bulk.
+- `lsp` provides an on-demand JSON-RPC stdio client for `typescript-language-server`, `rust-analyzer`, and `pyright-langserver` — on-demand single-symbol queries only, never bulk. A client library by design: no `Resolver` impl, no edge emission; the on-demand consumer (MCP/CLI definition/references tool) is the W3.6 follow-up.
 
 ## Key types / traits
 
