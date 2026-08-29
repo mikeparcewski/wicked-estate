@@ -573,3 +573,150 @@ fn incremental_importer_of_new_target_stays_parked_until_touched() {
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// F2 add-half (incr-integrity lane): rename the target AND update the importer in the SAME
+/// run → the importer's ref binds to the NEW file in that one run (the resolve index is built
+/// from ALL nodes after the WRITE phase, so c.ts's File node is visible). Exactly one
+/// File→File edge to src/c.ts, no unresolved row, no dangling edges.
+#[test]
+fn incremental_rename_with_updated_importer_rebinds_same_run() {
+    use wicked_estate_core::GraphRead;
+    let dir = fresh_dir("incr_rename_add");
+    fs::write(
+        dir.join("src/a.ts"),
+        "import { b } from './b';\nexport const a = 1;\n",
+    )
+    .unwrap();
+    fs::write(dir.join("src/b.ts"), "export const b = 1;\n").unwrap();
+
+    let mut store = SqliteStore::in_memory().unwrap();
+    wicked_estate::index_path(&mut store, &dir).unwrap();
+
+    // Rename b→c AND update the importer, then ONE index run.
+    fs::rename(dir.join("src/b.ts"), dir.join("src/c.ts")).unwrap();
+    fs::write(
+        dir.join("src/a.ts"),
+        "import { b } from './c';\nexport const a = 1;\n",
+    )
+    .unwrap();
+    wicked_estate::index_path(&mut store, &dir).unwrap();
+
+    let rel: Vec<_> = store
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.resolved_by == "relative-import")
+        .collect();
+    assert_eq!(
+        rel.len(),
+        1,
+        "exactly one File→File edge after the same-run rename+update: {rel:?}"
+    );
+    assert_eq!(
+        store
+            .get_node(&rel[0].target)
+            .unwrap()
+            .expect("live target")
+            .location
+            .file,
+        "src/c.ts",
+        "the edge binds to the NEW file"
+    );
+    // Bound in the same run — no unresolved row for either spec.
+    assert!(
+        store.unresolved_refs_for_name("'./c'").unwrap().is_empty(),
+        "'./c' bound, no park"
+    );
+    assert!(
+        store.unresolved_refs_for_name("'./b'").unwrap().is_empty(),
+        "the old spec's row was replaced by the importer's re-extraction"
+    );
+    for e in store.all_edges().unwrap() {
+        assert!(
+            store.get_node(&e.source).unwrap().is_some()
+                && store.get_node(&e.target).unwrap().is_some(),
+            "dangling edge: {} -> {} ({:?})",
+            e.source.as_str(),
+            e.target.as_str(),
+            e.kind
+        );
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// F2 split two-run variant: run 1 renames the target only (importer unchanged → honest park,
+/// remove-half); run 2 updates the importer → rebind. No dangling edges after EITHER run.
+#[test]
+fn incremental_rename_split_runs_park_then_rebind() {
+    use wicked_estate_core::{EdgeKind, GraphRead};
+    let dir = fresh_dir("incr_rename_split");
+    fs::write(
+        dir.join("src/a.ts"),
+        "import { b } from './b';\nexport const a = 1;\n",
+    )
+    .unwrap();
+    fs::write(dir.join("src/b.ts"), "export const b = 1;\n").unwrap();
+
+    let mut store = SqliteStore::in_memory().unwrap();
+    wicked_estate::index_path(&mut store, &dir).unwrap();
+
+    let no_dangling = |store: &SqliteStore, when: &str| {
+        for e in store.all_edges().unwrap() {
+            assert!(
+                store.get_node(&e.source).unwrap().is_some()
+                    && store.get_node(&e.target).unwrap().is_some(),
+                "dangling edge {when}: {} -> {} ({:?})",
+                e.source.as_str(),
+                e.target.as_str(),
+                e.kind
+            );
+        }
+    };
+    let rel_edges = |store: &SqliteStore| -> Vec<(String, String)> {
+        store
+            .all_edges()
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.resolved_by == "relative-import")
+            .map(|e| (e.source.0.clone(), e.target.0.clone()))
+            .collect()
+    };
+
+    // Run 1: rename only. The importer is unchanged → its ref RE-PARKS (rebinding a
+    // non-updated './b' to c.ts would assert a false edge — kept honest, D7).
+    fs::rename(dir.join("src/b.ts"), dir.join("src/c.ts")).unwrap();
+    wicked_estate::index_path(&mut store, &dir).unwrap();
+    assert!(
+        rel_edges(&store).is_empty(),
+        "run 1: no File→File edge may survive the rename"
+    );
+    assert!(
+        store
+            .unresolved_refs_for_name("'./b'")
+            .unwrap()
+            .iter()
+            .any(|r| r.kind == EdgeKind::Imports && r.location.file == "src/a.ts"),
+        "run 1: honest park for the old spec"
+    );
+    no_dangling(&store, "after run 1");
+
+    // Run 2: the importer catches up.
+    fs::write(
+        dir.join("src/a.ts"),
+        "import { b } from './c';\nexport const a = 1;\n",
+    )
+    .unwrap();
+    wicked_estate::index_path(&mut store, &dir).unwrap();
+    let rel = rel_edges(&store);
+    assert_eq!(rel.len(), 1, "run 2: rebound to the new file: {rel:?}");
+    assert!(
+        store.unresolved_refs_for_name("'./c'").unwrap().is_empty(),
+        "run 2: bound, no park for './c'"
+    );
+    assert!(
+        store.unresolved_refs_for_name("'./b'").unwrap().is_empty(),
+        "run 2: the stale './b' park was dropped with a.ts's re-extraction"
+    );
+    no_dangling(&store, "after run 2");
+    let _ = fs::remove_dir_all(&dir);
+}

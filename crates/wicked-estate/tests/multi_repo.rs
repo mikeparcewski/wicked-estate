@@ -648,3 +648,91 @@ fn labelled_relative_imports_match_plain() {
         );
     }
 }
+
+/// Shared Import node across REPOS (incr-integrity lane): the spec-keyed symbol carries no repo
+/// label, so repos importing the same spec share ONE node row. Deleting the owning repo's
+/// importer must keep the node for the other repo (re-homed across repo prefixes — the
+/// documented ownership wart now has a third mutation path) and leave 0 dangling edges.
+#[test]
+fn cross_repo_shared_import_survives_owner_repo_deletion() {
+    use wicked_estate_core::NodeKind;
+    let root = fresh_dir("shared_import");
+    let write_importer = |repo: &str| {
+        fs::create_dir_all(root.join(repo).join("src")).unwrap();
+        fs::write(
+            root.join(repo).join("src/index.ts"),
+            "import crypto from 'node:crypto';\nexport const v = 1;\n",
+        )
+        .unwrap();
+    };
+    write_importer("repoA");
+    write_importer("repoB");
+    // repoB gets a second file so its post-deletion re-index still has content.
+    fs::write(
+        root.join("repoB").join("src/other.ts"),
+        "export const w = 2;\n",
+    )
+    .unwrap();
+
+    let mut store = SqliteStore::open(root.join("shared.db")).unwrap();
+    wicked_estate::index_path_as(&mut store, &root.join("repoA"), Some("repoa")).unwrap();
+    wicked_estate::index_path_as(&mut store, &root.join("repoB"), Some("repob")).unwrap();
+
+    let import_node = |store: &SqliteStore| {
+        store
+            .all_nodes()
+            .unwrap()
+            .into_iter()
+            .find(|n| n.kind == NodeKind::Import && n.name == "node:crypto")
+    };
+    // Ownership: repob indexed LAST → it owns the shared, label-less node (the wart).
+    let node = import_node(&store).expect("shared import node");
+    assert_eq!(
+        node.location.file, "repob/src/index.ts",
+        "precondition: the repo we delete from is the current owner"
+    );
+
+    // Delete repoB's importer; re-index ONLY repoB (deletion-only for that repo).
+    fs::remove_file(root.join("repoB").join("src/index.ts")).unwrap();
+    wicked_estate::index_path_as(&mut store, &root.join("repoB"), Some("repob")).unwrap();
+
+    let node = import_node(&store)
+        .expect("repo B's deletion must not destroy repo A's shared Import node");
+    // Deterministic post-re-home owner: MIN over survivor edge files — only repoa's remains.
+    assert_eq!(
+        node.location.file, "repoa/src/index.ts",
+        "kept node re-homed ACROSS the repo prefix to the surviving importer (exact MIN(file))"
+    );
+    // Repo A's File→Import edge is live.
+    let importer_edges: Vec<_> = store
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == EdgeKind::Imports && e.target == node.symbol)
+        .collect();
+    assert_eq!(
+        importer_edges.len(),
+        1,
+        "exactly repo A's edge: {importer_edges:?}"
+    );
+    assert_eq!(
+        store
+            .get_node(&importer_edges[0].source)
+            .unwrap()
+            .expect("live source")
+            .location
+            .file,
+        "repoa/src/index.ts"
+    );
+    // No dangling edges anywhere.
+    for e in store.all_edges().unwrap() {
+        assert!(
+            store.get_node(&e.source).unwrap().is_some()
+                && store.get_node(&e.target).unwrap().is_some(),
+            "dangling edge: {} -> {} ({:?})",
+            e.source.as_str(),
+            e.target.as_str(),
+            e.kind
+        );
+    }
+}
