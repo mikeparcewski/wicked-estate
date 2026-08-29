@@ -5,3 +5,7 @@ license: MIT
 settings:
   debug: false
   workers: 4
+
+# EG-COR-1 regression pin: a leading-colon key is a REAL name (legacy Rails
+# database.yml symbol-key idiom) — the extractor must store it verbatim.
+:adapter: postgres

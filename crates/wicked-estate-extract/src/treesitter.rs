@@ -566,13 +566,17 @@ static LANG_TABLE: &[LangEntry] = &[
     },
     LangEntry {
         name: "c",
-        ext: &["c", "h"],
+        ext: &["c"],
         make_language: lang_c,
         query_src: C_QUERY,
     },
     LangEntry {
+        // .h routes to cpp, NOT c (D04-6/D2): the cpp grammar parses C, but the C
+        // grammar cannot parse C++ headers — under the c row, every class/namespace/
+        // method in a .h vanished. Single owner: keep this list in sync with
+        // languages.toml (extractor_for_extension is first-match).
         name: "cpp",
-        ext: &["cpp", "cc", "cxx", "hpp", "hh"],
+        ext: &["cpp", "cc", "cxx", "hpp", "hh", "h"],
         make_language: lang_cpp,
         query_src: CPP_QUERY,
     },
@@ -1390,6 +1394,42 @@ fn strip_literal_quotes(raw: &str) -> String {
     s.to_string()
 }
 
+/// Strip a single leading `:` from a captured DEFINITION name so symbol-literal
+/// def sites store the real method name (Ruby `alias_method :new_name, :old` —
+/// the captured `simple_symbol` text is `:new_name`; a stored `:new_name` is
+/// unqueryable by its real name, the §11 quote-leak scar). Generic — no
+/// per-language logic. Applied ONLY when the query opts in with the
+/// `@code_<kind>.name.symbol` capture suffix (EG-COR-1): colon-leading names are
+/// LEGITIMATE in def position elsewhere in the fleet (CSS `:root`/`:hover`
+/// selectors, YAML `:adapter:` symbol keys), so stripping on the plain
+/// `.name` channel silently rewrote stored names + SymbolIds fleet-wide.
+/// `::X` (scope resolution) and a bare `:` are unchanged.
+fn strip_leading_symbol_colon(name: String) -> String {
+    if let Some(rest) = name.strip_prefix(':') {
+        if !rest.is_empty() && !rest.starts_with(':') {
+            return rest.to_string();
+        }
+    }
+    name
+}
+
+/// Normalize a captured DEFINITION name: strip paired quotes (VB6-style quoted def
+/// names). Deliberately does NOT strip `<…>` the way [`strip_literal_quotes`] does
+/// for import paths — operator method names like Ruby's `<=>` and `<<` are real
+/// definition names and must be stored verbatim (the angle case would truncate
+/// `<=>` to `=`). Leading-`:` stripping is NOT done here: it is opt-in per query
+/// via the `.name.symbol` capture suffix (see [`strip_leading_symbol_colon`]),
+/// because CSS/YAML def names legitimately start with `:`.
+fn strip_def_name(raw: &str) -> String {
+    let s = raw.trim();
+    if s.len() >= 2
+        && ((s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"')))
+    {
+        return s[1..s.len() - 1].to_string();
+    }
+    s.to_string()
+}
+
 // ── Import-map extraction helpers ────────────────────────────────────────────
 
 /// Extract a name→module map from a single import match given the full statement text and the
@@ -1533,7 +1573,11 @@ enum CaptureRole<'a> {
     /// `@code_<kind>.def` / `@code_<kind>` / `@code_<kind>.arrow` — anchor node for a definition.
     DefAnchor { kind: &'a str },
     /// `@code_<kind>.name` — the identifier for a definition of `<kind>`.
-    DefName { kind: &'a str },
+    /// `symbol` is true for the `@code_<kind>.name.symbol` variant: the captured
+    /// text is a symbol literal (Ruby `:name`) whose leading `:` must be stripped
+    /// to get the real definition name. Plain `.name` captures keep a leading `:`
+    /// verbatim (CSS `:root`, YAML `:adapter` are real names).
+    DefName { kind: &'a str, symbol: bool },
     /// `@call.function` — a direct function call name.
     CallFunction,
     /// `@call.method` — a method call name.
@@ -1634,7 +1678,13 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
                 return CaptureRole::DefAnchor { kind };
             }
             if suffix == "name" {
-                return CaptureRole::DefName { kind };
+                return CaptureRole::DefName {
+                    kind,
+                    symbol: false,
+                };
+            }
+            if suffix == "name.symbol" {
+                return CaptureRole::DefName { kind, symbol: true };
             }
             // Everything else (.params, .body, .return_type, .value, .type, .base,
             // .annotation, …) is auxiliary — ignored.
@@ -1805,8 +1855,14 @@ impl Extractor for TreeSitterExtractor {
                         // Last anchor wins if duplicated (shouldn't happen in well-formed query)
                         def_anchor = Some((kind, c.node));
                     }
-                    CaptureRole::DefName { kind } => {
-                        def_name = Some((kind, strip_literal_quotes(&text)));
+                    CaptureRole::DefName { kind, symbol } => {
+                        let name = strip_def_name(&text);
+                        let name = if symbol {
+                            strip_leading_symbol_colon(name)
+                        } else {
+                            name
+                        };
+                        def_name = Some((kind, name));
                     }
                     CaptureRole::CallFunction => {
                         call_fn = Some((text, pos, span));
@@ -2769,6 +2825,46 @@ mod tests {
         assert_eq!(strip_literal_quotes("\"SUBPROG\""), "SUBPROG");
         assert_eq!(strip_literal_quotes("<stdio.h>"), "stdio.h");
         assert_eq!(strip_literal_quotes("plainName"), "plainName");
+    }
+
+    #[test]
+    fn strip_leading_symbol_colon_symbol_captures_only() {
+        // Ruby symbol arguments at DEF sites lose the leading `:` so the stored
+        // name is the real method name (`alias_method :other_name, :x` → other_name).
+        // Applied ONLY for `.name.symbol` captures — NOT the plain `.name` channel.
+        assert_eq!(strip_leading_symbol_colon(":x".to_string()), "x");
+        assert_eq!(
+            strip_leading_symbol_colon(":other_name".to_string()),
+            "other_name"
+        );
+        // Scope resolution and a bare colon are NOT symbol literals — unchanged.
+        assert_eq!(strip_leading_symbol_colon("::X".to_string()), "::X");
+        assert_eq!(strip_leading_symbol_colon(":".to_string()), ":");
+        assert_eq!(strip_leading_symbol_colon("plain".to_string()), "plain");
+        // Pin the seam split: strip_literal_quotes alone must keep a leading `:`
+        // (refs/imports/routes/events go through it WITHOUT the colon strip —
+        // elisp keywords / racket symbols legitimately start with `:` there).
+        assert_eq!(strip_literal_quotes(":keyword"), ":keyword");
+    }
+
+    #[test]
+    fn strip_def_name_keeps_operator_names_and_strips_quotes() {
+        // Operator method names must be stored verbatim — the import-path angle
+        // strip would truncate `<=>` to `=` and `<<` to the empty string.
+        assert_eq!(strip_def_name("<=>"), "<=>");
+        assert_eq!(strip_def_name("<<"), "<<");
+        assert_eq!(strip_def_name("[]"), "[]");
+        // Quoted def names (VB6 precedent) still reduce to the bare name.
+        assert_eq!(strip_def_name("'Quoted'"), "Quoted");
+        assert_eq!(strip_def_name("\"Quoted\""), "Quoted");
+        // EG-COR-1: the plain def-name channel must KEEP a leading `:` — CSS
+        // `:root`/`:hover` selectors and YAML `:adapter` symbol keys are real
+        // definition names in those grammars; stripping here silently rewrote
+        // stored names + SymbolIds fleet-wide. Colon-stripping is opt-in per
+        // query via the `.name.symbol` capture suffix.
+        assert_eq!(strip_def_name(":root"), ":root");
+        assert_eq!(strip_def_name(":other_name"), ":other_name");
+        assert_eq!(strip_def_name("plain"), "plain");
     }
 
     // ── Existing tests (must stay green) ─────────────────────────────────────

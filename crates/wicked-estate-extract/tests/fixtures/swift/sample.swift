@@ -120,6 +120,12 @@ struct Payment: Identifiable, Codable, Validatable {
 final class PaymentLedger {
     private var payments: [String: Payment] = [:]
 
+    init() {}
+
+    deinit {
+        payments.removeAll()
+    }
+
     var count: Int { payments.count }
 
     func insert(_ payment: Payment) throws {

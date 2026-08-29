@@ -6,9 +6,34 @@ DEFAULT_ENCODING = 'utf-8'
 
 module Processing
   class DataStore
+    attr_reader :balance
+    attr_accessor :label, :notes
+
     def initialize
       @records = []
     end
+
+    def name=(v)
+      @name = v
+    end
+
+    def [](k)
+      @records[k]
+    end
+
+    def <=>(other)
+      0
+    end
+
+    def ==(other)
+      false
+    end
+
+    def original
+      @records.length
+    end
+    alias new_name original
+    alias_method :other_name, :original
 
     def add(record)
       @records << normalize(record)
