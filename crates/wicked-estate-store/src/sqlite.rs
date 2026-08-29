@@ -200,6 +200,31 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
         )
         .map_err(st)?;
     }
+    // Admissibility F-B: byte-exact site identity on unresolved_refs. Additive columns with
+    // DEFAULT 0 (the Span::ZERO sentinel synthetic refs carry by design), each checked and
+    // added independently; the `!ucols.is_empty()` guard skips a DB with no unresolved_refs
+    // table yet (SCHEMA's CREATE covers fresh opens). Pre-existing rows read back span-zero
+    // until their file is re-persisted — no data rewrite.
+    let mut ustmt = conn
+        .prepare("PRAGMA table_info(unresolved_refs)")
+        .map_err(st)?;
+    let ucols: Vec<String> = ustmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(st)?
+        .filter_map(|r| r.ok())
+        .collect();
+    if !ucols.is_empty() && !ucols.iter().any(|c| c == "start_byte") {
+        conn.execute_batch(
+            "ALTER TABLE unresolved_refs ADD COLUMN start_byte INTEGER NOT NULL DEFAULT 0;",
+        )
+        .map_err(st)?;
+    }
+    if !ucols.is_empty() && !ucols.iter().any(|c| c == "end_byte") {
+        conn.execute_batch(
+            "ALTER TABLE unresolved_refs ADD COLUMN end_byte INTEGER NOT NULL DEFAULT 0;",
+        )
+        .map_err(st)?;
+    }
     Ok(())
 }
 
@@ -1619,9 +1644,10 @@ impl GraphWrite for SqliteStore {
 
     fn upsert_unresolved_refs(&mut self, refs: &[UnresolvedRef]) -> Result<()> {
         // Intern all from_sym strings first, before prepare_cached borrows conn.
-        // Persist COVERAGE fidelity only: from_sym, raw_name, kind, file, line.
-        // The full span and hints are intentionally NOT persisted (the in-memory resolve pass
-        // owns those).  This is a deliberate ~8× disk reduction vs the old `data` JSON blob.
+        // Persist COVERAGE + exact-site fidelity: from_sym, raw_name, kind, file, line,
+        // start_byte, end_byte (admissibility F-B — byte-exact site identity). Hints and the
+        // remaining span fields (cols, end_line) are intentionally NOT persisted (the in-memory
+        // resolve pass owns those). Still a deliberate ~8× disk reduction vs the old `data` blob.
         let from_sids: Vec<i64> = refs
             .iter()
             .map(|r| self.intern(&r.from.0))
@@ -1629,16 +1655,20 @@ impl GraphWrite for SqliteStore {
         let mut stmt = self
             .conn
             .prepare_cached(
-                "INSERT INTO unresolved_refs(from_sym, raw_name, kind, file, line) \
-                 VALUES(?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO unresolved_refs(from_sym, raw_name, kind, file, line, start_byte, end_byte) \
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )
             .map_err(st)?;
         for (r, from_sid) in refs.iter().zip(from_sids.iter()) {
             let kind = serde_json::to_string(&r.kind)?;
             let file = &r.location.file;
             let line = r.location.span.start_line as i64;
-            stmt.execute(params![from_sid, r.raw_name, kind, file, line])
-                .map_err(st)?;
+            let start_byte = r.location.span.start_byte as i64;
+            let end_byte = r.location.span.end_byte as i64;
+            stmt.execute(params![
+                from_sid, r.raw_name, kind, file, line, start_byte, end_byte
+            ])
+            .map_err(st)?;
         }
         Ok(())
     }
@@ -2426,7 +2456,7 @@ impl GraphRead for SqliteStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT s.sym, u.raw_name, u.kind, u.file, u.line \
+                "SELECT s.sym, u.raw_name, u.kind, u.file, u.line, u.start_byte, u.end_byte \
                  FROM unresolved_refs u \
                  JOIN symbols s ON s.sid = u.from_sym \
                  WHERE u.raw_name=?1",
@@ -2440,19 +2470,24 @@ impl GraphRead for SqliteStore {
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
                     r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?,
                 ))
             })
             .map_err(st)?;
         let mut out = Vec::new();
         for row in rows {
-            let (from_sym, raw_name, kind_json, file, line) = row.map_err(st)?;
+            let (from_sym, raw_name, kind_json, file, line, start_byte, end_byte) =
+                row.map_err(st)?;
             let kind = serde_json::from_str(&kind_json)?;
+            // start_byte/end_byte read from their columns (admissibility F-B); the remaining
+            // span fields are not persisted and reconstruct as 0.
             let location = Location::new(
                 file,
                 Span {
                     start_line: line as u32,
-                    start_byte: 0,
-                    end_byte: 0,
+                    start_byte: start_byte as u32,
+                    end_byte: end_byte as u32,
                     start_col: 0,
                     end_line: 0,
                     end_col: 0,
@@ -3828,6 +3863,8 @@ mod tests {
                 "src/lib.rs",
                 Span {
                     start_line: 42,
+                    start_byte: 1234,
+                    end_byte: 1242,
                     ..Span::ZERO
                 },
             ),
@@ -3841,6 +3878,9 @@ mod tests {
         assert_eq!(found[0].kind, EdgeKind::Calls);
         assert_eq!(found[0].location.file, "src/lib.rs");
         assert_eq!(found[0].location.span.start_line, 42);
+        // Admissibility F-B: byte-exact site identity round-trips through the typed columns.
+        assert_eq!(found[0].location.span.start_byte, 1234);
+        assert_eq!(found[0].location.span.end_byte, 1242);
 
         let stats = store.stats().unwrap();
         assert_eq!(
@@ -3872,6 +3912,94 @@ mod tests {
             result.is_err(),
             "data column must not exist in the new schema"
         );
+    }
+
+    #[test]
+    fn sqlite_legacy_unresolved_refs_gains_byte_columns() {
+        // Admissibility F-B back-compat proof (the conformance suite can't express it — it
+        // always opens through SCHEMA): a DB created by an OLDER build has an unresolved_refs
+        // table WITHOUT start_byte/end_byte. `CREATE TABLE IF NOT EXISTS` never reshapes it, so
+        // without the migration the widened 7-column INSERT hard-fails at the first index. The
+        // idempotent migration must add both columns with DEFAULT 0 (the Span::ZERO sentinel),
+        // backfilling pre-existing rows with NO data rewrite.
+        let conn = Connection::open_in_memory().expect("in-memory conn");
+        // A current-shape annotations table so the (unconditional-on-absence) annotation ALTERs
+        // in migrate_schema no-op — this test isolates the unresolved_refs migration.
+        conn.execute_batch(
+            "CREATE TABLE annotations (
+               id                INTEGER PRIMARY KEY AUTOINCREMENT,
+               node_sym          INTEGER NOT NULL,
+               key               TEXT NOT NULL,
+               value             TEXT NOT NULL,
+               confidence        REAL    NOT NULL DEFAULT 1.0,
+               provenance        TEXT    NOT NULL DEFAULT '',
+               author            TEXT    NOT NULL DEFAULT '',
+               ts                INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+               type              TEXT    NOT NULL DEFAULT 'note',
+               source_type       TEXT    NOT NULL DEFAULT 'unspecified',
+               extraction_method TEXT    NOT NULL DEFAULT 'manual',
+               last_verified     INTEGER NOT NULL DEFAULT 0
+             );",
+        )
+        .expect("create current-shape annotations table");
+        // Recreate the OLD unresolved_refs schema exactly (five columns, no byte spans).
+        conn.execute_batch(
+            "CREATE TABLE unresolved_refs (
+               id       INTEGER PRIMARY KEY,
+               from_sym INTEGER NOT NULL,
+               raw_name TEXT NOT NULL,
+               kind     TEXT NOT NULL,
+               file     TEXT NOT NULL DEFAULT '',
+               line     INTEGER NOT NULL DEFAULT 0
+             );",
+        )
+        .expect("create legacy unresolved_refs table");
+        conn.execute(
+            "INSERT INTO unresolved_refs(from_sym, raw_name, kind, file, line) \
+             VALUES (1, 'legacy_ghost', '\"calls\"', 'src/old.rs', 9)",
+            [],
+        )
+        .expect("insert legacy row");
+
+        // Precondition: the byte columns do not exist.
+        {
+            let mut stmt = conn.prepare("PRAGMA table_info(unresolved_refs)").unwrap();
+            let cols: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect();
+            assert!(
+                !cols.iter().any(|c| c == "start_byte") && !cols.iter().any(|c| c == "end_byte"),
+                "precondition: legacy table must lack the byte columns"
+            );
+        }
+
+        migrate_schema(&conn).expect("migration must add the byte columns");
+
+        // The legacy row backfills to the span-zero sentinel (unknown site) on read.
+        let (raw, sb, eb): (String, i64, i64) = conn
+            .query_row(
+                "SELECT raw_name, start_byte, end_byte FROM unresolved_refs \
+                 WHERE raw_name='legacy_ghost'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("legacy row must be readable after migration");
+        assert_eq!(raw, "legacy_ghost");
+        assert_eq!(sb, 0, "pre-existing row backfills start_byte=0");
+        assert_eq!(eb, 0, "pre-existing row backfills end_byte=0");
+
+        // The widened 7-column INSERT the write path uses now succeeds on the migrated table.
+        conn.execute(
+            "INSERT INTO unresolved_refs(from_sym, raw_name, kind, file, line, start_byte, end_byte) \
+             VALUES (1, 'new_ghost', '\"calls\"', 'src/new.rs', 3, 57, 63)",
+            [],
+        )
+        .expect("widened insert must succeed after migration");
+
+        // Idempotent: a second run is a no-op.
+        migrate_schema(&conn).expect("second migration run must be a no-op");
     }
 
     // ── W11 slim: content zstd compress/decompress round-trip ────────────────

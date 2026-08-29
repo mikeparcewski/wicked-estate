@@ -2510,11 +2510,23 @@ impl Extractor for TreeSitterExtractor {
 // was found on crates.io as of the time this was written.  HCL extraction is
 // deferred until tree-sitter 0.25 is adopted workspace-wide.
 
+/// The IaC LOGICAL languages: content-sniffed (no file extension of their own), extracted by
+/// [`IaCExtractor`], registered OUTSIDE `languages.toml` (a manifest row would double-list them
+/// in the generated coverage matrix — the script special-cases them from this extractor).
+///
+/// SINGLE SOURCE for both consumers: [`IaCExtractor::for_language`] matches against this list,
+/// and the resolver pass's family table (`wicked-estate`'s `InMemoryIndex`) registers each entry
+/// as its OWN family so the D5 cross-family guard blocks code→resource name-binds on the
+/// name-resolver path (a hand-copied second list would drift exactly the way json's missing
+/// manifest row did). `InfraResolver`'s exclusive-resource-name bind carries no family check
+/// and is unaffected (a deliberate, separate carve-out).
+pub const LOGICAL_LANGUAGES: &[&str] = &["cloudformation", "kubernetes"];
+
 /// An IaC-specific extractor for CloudFormation and Kubernetes YAML manifests.
 ///
 /// Parses with the tree-sitter-yaml grammar, then walks the concrete syntax tree
 /// to extract infrastructure resources as [`NodeKind::Other("resource")`] nodes.
-/// Registered as logical languages `"cloudformation"` and `"kubernetes"` so they
+/// Registered as the logical languages in [`LOGICAL_LANGUAGES`] so they
 /// are distinct from generic `"yaml"` extraction.
 pub struct IaCExtractor {
     lang_name: String,
@@ -2522,15 +2534,16 @@ pub struct IaCExtractor {
 }
 
 impl IaCExtractor {
-    /// Build an extractor for `"cloudformation"` or `"kubernetes"`.
-    /// Returns `None` for any other name.
+    /// Build an extractor for a [`LOGICAL_LANGUAGES`] member (`"cloudformation"` or
+    /// `"kubernetes"`). Returns `None` for any other name.
     pub fn for_language(name: &str) -> Option<Self> {
-        match name {
-            "cloudformation" | "kubernetes" => Some(Self {
+        if LOGICAL_LANGUAGES.contains(&name) {
+            Some(Self {
                 lang_name: name.to_string(),
                 language: tree_sitter_yaml::LANGUAGE.into(),
-            }),
-            _ => None,
+            })
+        } else {
+            None
         }
     }
 
@@ -3070,6 +3083,25 @@ mod tests {
         assert!(TreeSitterExtractor::for_language("rust").is_some());
         assert!(TreeSitterExtractor::for_language("typescript").is_some());
         assert!(TreeSitterExtractor::for_language("go").is_some());
+    }
+
+    /// ADM-ATT-3 pin: `IaCExtractor::for_language` accepts EXACTLY the [`LOGICAL_LANGUAGES`]
+    /// members and nothing else — the const is the single source both this constructor and the
+    /// resolver-pass family table consume, so a drift between them fails here.
+    #[test]
+    fn iac_for_language_matches_logical_languages_exactly() {
+        for name in LOGICAL_LANGUAGES {
+            assert!(
+                IaCExtractor::for_language(name).is_some(),
+                "LOGICAL_LANGUAGES member {name} must construct an IaCExtractor"
+            );
+        }
+        for name in ["yaml", "json", "terraform", "tfstate", ""] {
+            assert!(
+                IaCExtractor::for_language(name).is_none(),
+                "{name} is not a logical IaC language"
+            );
+        }
     }
 
     #[test]

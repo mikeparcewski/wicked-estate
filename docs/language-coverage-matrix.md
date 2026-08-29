@@ -32,7 +32,7 @@ Note: `extends`/`implements` in the manifest reflect what the `.scm` query captu
 (tree-sitter, intra-file). Cross-file resolution of heritage requires the `precise` tier
 (SCIP/TSG/LSP — Waves W2.2/W3.2/W3.3).
 
-**113 languages in manifest · 102 wired (extractor present) · 11 aspirational (manifest row, extractor pending)**
+**114 languages in manifest · 103 wired (extractor present) · 11 aspirational (manifest row, extractor pending)**
 
 ## Full matrix
 
@@ -134,6 +134,7 @@ Note: `extends`/`implements` in the manifest reflect what the `.scm` query captu
 | `html` | yes | `document` | S | `.html`, `.htm` |
 | `ini` | yes | `document` | S | `.ini` |
 | `jsdoc` | yes | `document` | S | `.jsdoc` |
+| `json` | yes | `document` | S | `.json` |
 | `kdl` | yes | `document` | S | `.kdl` |
 | `postscript` | yes | `document` | S | `.ps`, `.eps` |
 | `regex` | yes | `document` | S | `.re` |
@@ -170,7 +171,6 @@ Add a `[[language]]` row to `languages.toml` to complete the registration.
 | Language | Wired? | Tier | Capabilities | Extensions |
 |----------|:------:|------|:------------:|------------|
 | `cobol` | yes | `tags` | S | — |
-| `json` | yes | `document` | S | `.json` |
 | `rpg` | yes | `tags` | S | — |
 
 ## Wired languages summary
@@ -275,6 +275,7 @@ Languages with an active extractor (tree-sitter grammar compiled in, `.scm` embe
 | `html` | `document` | S | `.html`, `.htm` |
 | `ini` | `document` | S | `.ini` |
 | `jsdoc` | `document` | S | `.jsdoc` |
+| `json` | `document` | S | `.json` |
 | `kdl` | `document` | S | `.kdl` |
 | `postscript` | `document` | S | `.ps`, `.eps` |
 | `regex` | `document` | S | `.re` |
@@ -282,7 +283,6 @@ Languages with an active extractor (tree-sitter grammar compiled in, `.scm` embe
 | `ron` | `document` | S | `.ron` |
 | `yaml` | `document` | S | `.yaml`, `.yml` |
 | `cloudformation` | `structural` | S·C | `.yaml`, `.yml`, `.json` |
-| `json` | `document` | S | `.json` |
 | `kubernetes` | `structural` | S | `.yaml`, `.yml` |
 
 ## ABI note

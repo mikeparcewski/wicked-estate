@@ -10,7 +10,7 @@
 //! by the SCIP/TSG/LSP resolution tiers (`wicked-estate-resolve`), not by tree-sitter.
 
 pub mod treesitter;
-pub use treesitter::{IaCExtractor, SYMBOL_ID_SCHEME, TreeSitterExtractor};
+pub use treesitter::{IaCExtractor, LOGICAL_LANGUAGES, SYMBOL_ID_SCHEME, TreeSitterExtractor};
 
 /// Runtime language plugins — drop-in tree-sitter grammars loaded from a plugins directory.
 pub mod plugin;
@@ -113,7 +113,8 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ExtractTier {
-    /// Config/markup — indexed as a document, no code symbols.
+    /// Config/markup — symbols only (keys/sections/anchors from `.scm` queries), no
+    /// call/import refs. yaml/html/json ship at this tier and DO mint symbol nodes.
     Document,
     /// Grammar registered, captures not yet wired.
     Detected,
@@ -292,5 +293,27 @@ mod tests {
         }
         assert_eq!(fam("html"), "html", "html must be its own family (D14)");
         assert_ne!(fam("html"), fam("typescript"));
+    }
+
+    /// Admissibility residual F-A: json MUST have a manifest row with an OWN-NAME family, so the
+    /// D5 cross-family guard blocks TS/tsx/bash name-binds into JSON key nodes (402 Calls edges
+    /// at 0.6 on command_iq before this row existed). Guards a manifest regeneration dropping
+    /// the row — same hazard class the js-family test pins.
+    #[test]
+    fn json_row_pins_own_name_family() {
+        let json = by_name("json").expect("json must have a languages.toml row");
+        assert_eq!(json.family(), "json", "json must be its OWN family");
+        assert_eq!(
+            json.tier,
+            ExtractTier::Document,
+            "document tier (yaml/html precedent)"
+        );
+        assert_eq!(json.ext, vec!["json".to_string()]);
+        assert_eq!(json.grammar, "tree-sitter-json");
+        assert!(json.supports(ExtractCap::Symbols));
+        assert!(
+            !json.supports(ExtractCap::Calls) && !json.supports(ExtractCap::Imports),
+            "json.scm mints zero call/import refs; the manifest must not claim otherwise"
+        );
     }
 }

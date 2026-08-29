@@ -150,10 +150,12 @@ fn from_family(index: &dyn SymbolIndex, from: &wicked_estate_core::SymbolId) -> 
         .and_then(|n| index.language_family(n.language.as_str()))
 }
 
-/// Cross-family guard (D5): block a candidate only when BOTH ends carry a **known**
-/// `languages.toml` family and the families differ. Unknown/absent family (mainframe langs
-/// registered outside the manifest, `synthetic`/`tfstate` tags) or a missing from-node ⇒ allow —
-/// a strict guard would kill the shipped JCL/HLASM→COBOL joins.
+/// Cross-family guard (D5): block a candidate only when BOTH ends carry a **known** family and
+/// the families differ. The family table is data: every `languages.toml` row (json included —
+/// admissibility F-A) plus the IaC logical languages (kubernetes/cloudformation, own-name
+/// families via `wicked-estate-extract`'s `LOGICAL_LANGUAGES`). Unknown/absent family
+/// (mainframe langs registered outside the manifest, `synthetic`/`tfstate` tags) or a missing
+/// from-node ⇒ allow — a strict guard would kill the shipped JCL/HLASM→COBOL joins.
 fn family_compatible(
     index: &dyn SymbolIndex,
     from_family: Option<&str>,
@@ -538,10 +540,15 @@ impl wicked_estate_core::Resolver for ImportMapResolver {
 /// `Calls` refs (Function/Method/Constructor), so they never bind a resource node.
 /// [`NameResolver`] rejects the D1 deny-list (`Import` for every ref kind; for `Calls` also
 /// Interface/Trait/TypeAlias/Enum/Field/Parameter/File/Namespace and the rules-engine kinds) —
-/// the deny-list does NOT include `Other(..)`, so a unique resource node named like a code call
-/// CAN still bind at `NameResolver` unless the cross-family guard blocks it (resource nodes
-/// carry non-manifest language tags, so the guard allows them). `InfraResolver` in turn requires
-/// at least one candidate to be a resource node before it acts, so it will not fire on code refs.
+/// the deny-list does NOT include `Other(..)`, but kubernetes/cloudformation resource nodes now
+/// carry OWN-NAME families (`wicked-estate-extract`'s `LOGICAL_LANGUAGES`, admissibility F-A),
+/// so the cross-family guard blocks the **name-resolver path** for code→resource binds. What
+/// remains is `InfraResolver`'s own exclusive-resource-name carve-out below: a code Calls ref
+/// whose raw name resolves EXCLUSIVELY to resource nodes still binds here at Parsed/1.0 with no
+/// family check (the deliberate CFN-`!Ref` path) — a separate, pre-existing behavior. Resource
+/// nodes from OTHER origins (`tfstate`) stay family-None by design (D5/F7: drift joins must
+/// keep resolving). `InfraResolver` in turn requires at least one candidate to be a resource
+/// node before it acts, so it will not fire on code refs.
 ///
 /// ## Ambiguity rule
 ///
@@ -2583,6 +2590,71 @@ mod tests {
         let edges = NameResolver.resolve(&[r], &index).unwrap();
         assert_eq!(edges.len(), 1, "missing from-node must not block");
         assert_eq!(edges[0].target, target.symbol);
+    }
+
+    /// Admissibility F-A sibling (k8s leg, unit-pinned — no end-to-end fixture can observe this:
+    /// `InfraResolver`'s exclusive-resource-name bind fires at 1.0 with no family check and
+    /// dedupes the 0.6 edge away): with kubernetes registered as its OWN family, a js/ts Calls
+    /// ref whose unique surviving candidate is a k8s resource node must NOT bind on the
+    /// name-resolver path. `Other("resource")` passes the D1 deny-list, so the family guard is
+    /// the only thing standing.
+    #[test]
+    fn family_guard_blocks_javascript_ref_to_kubernetes_resource() {
+        let caller = node_lang("fg_js_caller", "caller", "app.ts", "typescript");
+        let resource = node_kind_lang(
+            "fg_k8s_res",
+            "payments",
+            "deploy.yaml",
+            "kubernetes",
+            NodeKind::Other("resource".to_string()),
+        );
+        let index = VecIndex::with_families(
+            vec![caller.clone(), resource],
+            &[("typescript", "javascript"), ("kubernetes", "kubernetes")],
+        );
+        let r = UnresolvedRef::new(
+            caller.symbol,
+            "payments",
+            EdgeKind::Calls,
+            Location::new("app.ts", Span::ZERO),
+        );
+        assert!(
+            NameResolver.resolve(&[r], &index).unwrap().is_empty(),
+            "code→k8s-resource name-bind must be blocked by the family guard"
+        );
+    }
+
+    /// Same-family k8s→k8s refs must keep resolving after the own-name family registration
+    /// (the guard narrows cross-family only — rule-B over-blocking is the failure mode).
+    #[test]
+    fn family_guard_allows_kubernetes_to_kubernetes() {
+        let dep = node_kind_lang(
+            "fg_k8s_dep",
+            "web",
+            "web.yaml",
+            "kubernetes",
+            NodeKind::Other("resource".to_string()),
+        );
+        let svc = node_kind_lang(
+            "fg_k8s_svc",
+            "web-svc",
+            "svc.yaml",
+            "kubernetes",
+            NodeKind::Other("resource".to_string()),
+        );
+        let index = VecIndex::with_families(
+            vec![dep.clone(), svc.clone()],
+            &[("kubernetes", "kubernetes")],
+        );
+        let r = UnresolvedRef::new(
+            dep.symbol,
+            "web-svc",
+            EdgeKind::Calls,
+            Location::new("web.yaml", Span::ZERO),
+        );
+        let edges = NameResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(edges.len(), 1, "same-family k8s→k8s must survive the guard");
+        assert_eq!(edges[0].target, svc.symbol);
     }
 
     /// ScopedNameResolver applies the same family guard (shared helper, D3).

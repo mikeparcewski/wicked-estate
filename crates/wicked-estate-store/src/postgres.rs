@@ -198,8 +198,15 @@ CREATE TABLE IF NOT EXISTS unresolved_refs (
   raw_name TEXT NOT NULL,
   kind     TEXT NOT NULL,
   file     TEXT NOT NULL DEFAULT '',
-  line     BIGINT NOT NULL DEFAULT 0
+  line     BIGINT NOT NULL DEFAULT 0,
+  start_byte BIGINT NOT NULL DEFAULT 0,
+  end_byte   BIGINT NOT NULL DEFAULT 0
 );
+-- Admissibility F-B: byte-exact site identity, additive on legacy tables (the CREATE above is
+-- a no-op there, so each column needs its own ADD). DEFAULT 0 = unknown/synthetic (Span::ZERO);
+-- pre-existing rows read back span-zero until their file is re-persisted — no data rewrite.
+ALTER TABLE unresolved_refs ADD COLUMN IF NOT EXISTS start_byte BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE unresolved_refs ADD COLUMN IF NOT EXISTS end_byte BIGINT NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_unresolved_refs_name ON unresolved_refs(raw_name);
 CREATE INDEX IF NOT EXISTS idx_unresolved_refs_file ON unresolved_refs(file);
 
@@ -757,16 +764,20 @@ impl GraphWrite for PostgresStore {
             let kind = serde_json::to_string(&r.kind)?;
             let file = &r.location.file;
             let line = r.location.span.start_line as i64;
+            let start_byte = r.location.span.start_byte as i64;
+            let end_byte = r.location.span.end_byte as i64;
             rt_block(
                 sqlx::query(
-                    "INSERT INTO unresolved_refs(from_sym, raw_name, kind, file, line)
-                     VALUES($1, $2, $3, $4, $5)",
+                    "INSERT INTO unresolved_refs(from_sym, raw_name, kind, file, line, start_byte, end_byte)
+                     VALUES($1, $2, $3, $4, $5, $6, $7)",
                 )
                 .bind(&r.from.0)
                 .bind(&r.raw_name)
                 .bind(&kind)
                 .bind(file)
                 .bind(line)
+                .bind(start_byte)
+                .bind(end_byte)
                 .execute(h.as_conn()),
             )
             .map_err(st)?;
@@ -1471,7 +1482,7 @@ impl GraphRead for PostgresStore {
         let mut h = self.conn()?;
         rt_block(async {
             let rows = sqlx::query(
-                "SELECT from_sym, raw_name, kind, file, line \
+                "SELECT from_sym, raw_name, kind, file, line, start_byte, end_byte \
                  FROM unresolved_refs WHERE raw_name = $1",
             )
             .bind(name)
@@ -1484,14 +1495,18 @@ impl GraphRead for PostgresStore {
                 let kind_json: String = row.try_get("kind")?;
                 let file: String = row.try_get("file")?;
                 let line: i64 = row.try_get("line")?;
+                let start_byte: i64 = row.try_get("start_byte")?;
+                let end_byte: i64 = row.try_get("end_byte")?;
                 let kind = serde_json::from_str(&kind_json)
                     .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+                // start_byte/end_byte read from their columns (admissibility F-B); the
+                // remaining span fields are not persisted and reconstruct as 0.
                 let location = Location::new(
                     file,
                     Span {
                         start_line: line as u32,
-                        start_byte: 0,
-                        end_byte: 0,
+                        start_byte: start_byte as u32,
+                        end_byte: end_byte as u32,
                         start_col: 0,
                         end_line: 0,
                         end_col: 0,

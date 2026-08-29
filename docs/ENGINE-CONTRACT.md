@@ -69,7 +69,11 @@ the accounting re-runs it per ref for shared-key references.
   a repeated import of one module) are NOT unresolved. Site multiplicity of a bound relationship
   is **persisted nowhere** — no count, no locations list.
 - Every site of an **unbound** relationship keeps its own row (honest, per-site coverage: a name
-  with zero candidates — a test framework's `expect` — keeps every row).
+  with zero candidates — a test framework's `expect` — keeps every row). The persisted row is
+  `(from_sym, raw_name, kind, file, line, start_byte, end_byte)` — site identity is byte-exact,
+  so two same-line sites (`q(); q();`) are distinguishable in SQL with no on-disk adjudication.
+  `start_byte = end_byte = 0` means unknown/synthetic (`Span::ZERO` refs — RulesBridge,
+  extra-edge rules — and rows persisted before the byte columns existed carry it legitimately).
 - Consumers of this definition: persistence (`index_path` → `upsert_unresolved_refs`), the
   `wicked_estate.resolve.unresolved` telemetry counter, `unresolved_refs_for_name`
   (blast-radius coverage — text CLI, `--json`, and the MCP `BlastRadius` tool), and
