@@ -1658,6 +1658,106 @@ impl GraphWrite for SqliteStore {
             v.flatten().unwrap_or_default()
         };
 
+        // Step 1b: shared-Import keep + re-home (incr-integrity lane, D1/D2/D4).
+        //
+        // A `NodeKind::Import` node is keyed by the module SPECIFIER, not a path, so every file
+        // importing the same spec shares ONE node row whose `file` column belongs to whichever
+        // importer wrote it last. Deleting it here would strand every OTHER importer's
+        // File→Import edge (dangling until silently pruned — permanent honest-accounting loss).
+        //
+        // A node located in `file` is KEPT when it is an Import node AND at least one SURVIVOR
+        // edge still targets it. The ONE survivor predicate (computed once per call, reused for
+        // the Step-3 FTS/embeddings skip, the Step-4 node keep, and the re-home target):
+        //
+        //   survivor := target = sid AND file NOT IN ('', ?1)
+        //               AND source NOT IN (SELECT symbol FROM nodes WHERE file = ?1)
+        //
+        // `''` is excluded because `edges.file` defaults to `''` (schema.sql) and `''` sorts
+        // before every real path — admitting it into MIN(file) would re-home the node to a path
+        // no remove_file call ever matches (permanent orphan). Edges whose source lives in the
+        // removed file are excluded because the Step-4 edge DELETE kills them in this same call.
+        // Both exclusions are exactly the rows Step 4 removes, so evaluating the predicate here
+        // (pre-delete) equals evaluating it post-delete.
+        //
+        // A kept node is RE-HOMED to the deterministic MIN(file) over its survivor edges (both
+        // the `nodes.file` column AND `location` inside the `data` JSON — readers deserialize
+        // `data`, the delete/keep checks match the column; either half alone re-creates the
+        // island/exclusion traps). Re-homing makes the keep self-terminating: when the last
+        // importer is removed the node is homed there, no survivor exists, the normal delete
+        // fires — no orphan GC pass needed.
+        struct KeptImport {
+            sid: i64,
+            new_file: String,
+            new_data: String,
+        }
+        let import_kind = serde_json::to_string(&NodeKind::Import)?;
+        let kept: Vec<KeptImport> = {
+            let mut candidates: Vec<(i64, String, Option<String>)> = Vec::new();
+            {
+                let mut stmt = self
+                    .conn
+                    .prepare(
+                        "SELECT n.symbol, n.data, \
+                                (SELECT MIN(e.file) FROM edges e \
+                                  WHERE e.target = n.symbol \
+                                    AND e.file NOT IN ('', ?1) \
+                                    AND e.source NOT IN \
+                                        (SELECT symbol FROM nodes WHERE file = ?1)) \
+                         FROM nodes n \
+                         WHERE n.file = ?1 AND n.kind = ?2",
+                    )
+                    .map_err(st)?;
+                let rows = stmt
+                    .query_map(params![file, import_kind], |r| {
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                        ))
+                    })
+                    .map_err(st)?;
+                for row in rows {
+                    candidates.push(row.map_err(st)?);
+                }
+            }
+            let mut kept = Vec::new();
+            for (sid, data, new_home) in candidates {
+                let Some(new_file) = new_home else { continue };
+                // The survivor edge at MIN(file) supplies the new location (file + span); if its
+                // data JSON carries no location (schema-legal), fall back to a zero span.
+                let edge_json: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT e.data FROM edges e \
+                         WHERE e.target = ?1 AND e.file = ?2 \
+                           AND e.source NOT IN (SELECT symbol FROM nodes WHERE file = ?3) \
+                         ORDER BY e.kind, e.source LIMIT 1",
+                        params![sid, new_file, file],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(st)?;
+                let new_loc = edge_json
+                    .and_then(|j| serde_json::from_str::<Edge>(&j).ok())
+                    .and_then(|e| e.location)
+                    .unwrap_or_else(|| {
+                        wicked_estate_core::Location::new(
+                            new_file.clone(),
+                            wicked_estate_core::Span::ZERO,
+                        )
+                    });
+                let mut node: Node = serde_json::from_str(&data)?;
+                node.location = new_loc;
+                kept.push(KeptImport {
+                    sid,
+                    new_file,
+                    new_data: serde_json::to_string(&node)?,
+                });
+            }
+            kept
+        };
+        let kept_sids: HashSet<i64> = kept.iter().map(|k| k.sid).collect();
+
         // Step 2: if history is enabled, archive the current edges for this file into edge_history
         // BEFORE deleting them. Each edge is stored with the file's current git_sha.
         //
@@ -1703,21 +1803,30 @@ impl GraphWrite for SqliteStore {
         // Step 3: delete FTS rows and embeddings for nodes that belong to this file.
         // nodes.symbol is now INTEGER (sid); resolve to string via symbols table for FTS
         // (nodes_fts.symbol is TEXT) and embeddings (embeddings.symbol is TEXT).
+        // KEPT Import nodes are skipped (D5): a kept node must keep its FTS/embedding rows or it
+        // survives the graph but vanishes from search. Skip-not-reinsert — re-inserting would
+        // duplicate the FTS row when the owner is edited-and-still-imports (the incremental path
+        // re-upserts via upsert_nodes_skip_fts + bulk rebuild keyed by CURRENT nodes.file).
         let syms: Vec<String> = {
             let mut stmt = self
                 .conn
                 .prepare(
-                    "SELECT s.sym FROM nodes n \
+                    "SELECT n.symbol, s.sym FROM nodes n \
                      JOIN symbols s ON s.sid = n.symbol \
                      WHERE n.file=?1",
                 )
                 .map_err(st)?;
             let rows = stmt
-                .query_map(params![file], |r| r.get::<_, String>(0))
+                .query_map(params![file], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })
                 .map_err(st)?;
             let mut v = Vec::new();
             for row in rows {
-                v.push(row.map_err(st)?);
+                let (sid, sym) = row.map_err(st)?;
+                if !kept_sids.contains(&sid) {
+                    v.push(sym);
+                }
             }
             v
         };
@@ -1744,6 +1853,18 @@ impl GraphWrite for SqliteStore {
                 params![file],
             )
             .map_err(st)?;
+        // Re-home KEPT Import nodes BEFORE the node delete: once `nodes.file` moves to the
+        // survivor's path, the plain by-file DELETE below no longer matches them. Both
+        // representations move together (column for the delete/keep checks, data JSON for
+        // every reader).
+        for k in &kept {
+            self.conn
+                .execute(
+                    "UPDATE nodes SET file=?2, data=?3 WHERE symbol=?1",
+                    params![k.sid, k.new_file, k.new_data],
+                )
+                .map_err(st)?;
+        }
         self.conn
             .execute("DELETE FROM nodes WHERE file=?1", params![file])
             .map_err(st)?;
@@ -4727,5 +4848,158 @@ mod tests {
             "since=2000 (inclusive) excludes the ts=1000 miss"
         );
         assert!(recent.iter().all(|m| m.searched_at >= 2000));
+    }
+
+    // ── Shared-Import remove_file: sqlite-leg assertions (incr-integrity lane, D5) ──────────
+
+    /// The kind filter in remove_file binds the serde form of `NodeKind::Import` directly, so it
+    /// cannot drift — this test pins the quote-including shape of that value (§11 quote-leak
+    /// scar: the stored TEXT is `"import"` WITH the JSON quotes, matched in raw SQL as
+    /// `'"import"'`).
+    #[test]
+    fn import_kind_serde_form_is_quoted_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&NodeKind::Import).unwrap(),
+            "\"import\"",
+            "NodeKind::Import must serialize to the quote-including literal the kind column stores"
+        );
+    }
+
+    fn shared_import_fixture(store: &mut SqliteStore) {
+        use wicked_estate_core::{EdgeKind, Language, Location, ResolutionTier, Span};
+        let file_node = |name: &str, path: &str| {
+            Node::new(
+                sym(name),
+                NodeKind::File,
+                name,
+                Language::new("rust"),
+                Location::new(path, Span::ZERO),
+            )
+        };
+        let import_node = |name: &str, home: &str| {
+            Node::new(
+                sym(name),
+                NodeKind::Import,
+                name,
+                Language::new("rust"),
+                Location::new(home, Span::ZERO),
+            )
+        };
+        let imports = |a: &str, b: &str, at: &str| {
+            Edge::new(
+                sym(a),
+                sym(b),
+                EdgeKind::Imports,
+                ResolutionTier::Parsed,
+                "test",
+            )
+            .with_location(Location::new(at, Span::ZERO))
+        };
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                file_node("fa", "imp/a.rs"),
+                file_node("fo", "imp/o.rs"),
+                import_node("shared_spec", "imp/o.rs"), // owner: imp/o.rs
+            ])
+            .unwrap();
+        store
+            .upsert_edges(&[
+                imports("fa", "shared_spec", "imp/a.rs"),
+                imports("fo", "shared_spec", "imp/o.rs"),
+            ])
+            .unwrap();
+        store.commit_batch().unwrap();
+    }
+
+    fn fts_rows_for(store: &SqliteStore, sym_str: &str) -> i64 {
+        store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM nodes_fts WHERE symbol=?1",
+                params![sym_str],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// D5: a KEPT Import node keeps its FTS row and its embedding; the removed owner's own
+    /// (non-kept) nodes lose both.
+    #[test]
+    fn remove_owner_keeps_fts_and_embedding_for_kept_import_node() {
+        let mut store = open();
+        shared_import_fixture(&mut store);
+        store
+            .set_embedding(&sym("shared_spec"), &unit_vec(4, 0))
+            .unwrap();
+        store.set_embedding(&sym("fo"), &unit_vec(4, 1)).unwrap();
+
+        store.remove_file("imp/o.rs").unwrap();
+
+        // Kept node: graph row re-homed, FTS row intact, embedding intact.
+        let kept = store.get_node(&sym("shared_spec")).unwrap().unwrap();
+        assert_eq!(kept.location.file, "imp/a.rs", "re-homed to the survivor");
+        assert_eq!(
+            fts_rows_for(&store, "shared_spec"),
+            1,
+            "the kept Import node keeps exactly one nodes_fts row"
+        );
+        assert!(
+            store.embedding(&sym("shared_spec")).unwrap().is_some(),
+            "the kept Import node keeps its embedding row"
+        );
+        // Non-kept nodes of the removed file: FTS + embedding rows gone.
+        assert_eq!(
+            fts_rows_for(&store, "fo"),
+            0,
+            "the removed owner File node loses its FTS row"
+        );
+        assert!(
+            store.embedding(&sym("fo")).unwrap().is_none(),
+            "the removed owner File node loses its embedding row"
+        );
+    }
+
+    /// D5 skip-not-reinsert: the incremental owner-EDIT path (remove_file + skip-FTS re-upsert +
+    /// bulk FTS rebuild keyed by CURRENT nodes.file) must end with EXACTLY ONE nodes_fts row for
+    /// the still-imported spec — a delete-then-reinsert implementation of the keep would leave 2.
+    #[test]
+    fn owner_edited_still_imports_leaves_exactly_one_fts_row() {
+        use wicked_estate_core::{Language, Location, Span};
+        let mut store = open();
+        shared_import_fixture(&mut store);
+        assert_eq!(fts_rows_for(&store, "shared_spec"), 1, "baseline");
+
+        // Incremental owner edit: remove, then re-extract with the import still present.
+        store.begin_batch().unwrap();
+        store.remove_file("imp/o.rs").unwrap();
+        store
+            .upsert_nodes_no_fts(&[
+                Node::new(
+                    sym("fo"),
+                    NodeKind::File,
+                    "fo",
+                    Language::new("rust"),
+                    Location::new("imp/o.rs", Span::ZERO),
+                ),
+                Node::new(
+                    sym("shared_spec"),
+                    NodeKind::Import,
+                    "shared_spec",
+                    Language::new("rust"),
+                    Location::new("imp/o.rs", Span::ZERO),
+                ),
+            ])
+            .unwrap();
+        store.rebuild_fts_for_files(&["imp/o.rs"]).unwrap();
+        store.commit_batch().unwrap();
+
+        assert_eq!(
+            fts_rows_for(&store, "shared_spec"),
+            1,
+            "exactly one FTS row after the owner-edited-still-imports cycle (2 = the keep \
+             re-inserted instead of skipping; 0 = the keep dropped search visibility)"
+        );
+        assert_eq!(fts_rows_for(&store, "fo"), 1, "owner File node rebuilt");
     }
 }

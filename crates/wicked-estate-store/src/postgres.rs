@@ -823,6 +823,87 @@ impl GraphWrite for PostgresStore {
             }
         }
 
+        // Step 2b: shared-Import keep + re-home (incr-integrity lane, D1/D2/D4 — mirrors
+        // SqliteStore; see the comment there). ONE survivor predicate, computed once per call:
+        // an edge targeting the candidate whose file is neither '' nor $1 and whose source does
+        // not live in $1 (both exclusions are exactly what the Step-3 DELETE removes, so the
+        // pre-delete evaluation equals post-delete state). Kept nodes are re-homed to MIN(file)
+        // over the survivors — BOTH the `nodes.file` column and the `location` in the data JSON.
+        let import_kind = serde_json::to_string(&NodeKind::Import)?;
+        struct KeptImport {
+            symbol: String,
+            new_file: String,
+            new_data: String,
+        }
+        let kept: Vec<KeptImport> = {
+            let candidates: Vec<(String, String, Option<String>)> = rt_block(async {
+                let rows = sqlx::query(
+                    "SELECT n.symbol, n.data, \
+                            (SELECT MIN(e.file) FROM edges e \
+                              WHERE e.target = n.symbol \
+                                AND e.file NOT IN ('', $1) \
+                                AND e.source NOT IN \
+                                    (SELECT symbol FROM nodes WHERE file = $1)) AS new_home \
+                     FROM nodes n \
+                     WHERE n.file = $1 AND n.kind = $2",
+                )
+                .bind(file)
+                .bind(&import_kind)
+                .fetch_all(h.as_conn())
+                .await?;
+                let mut v = Vec::new();
+                for row in rows {
+                    v.push((
+                        row.try_get::<String, _>("symbol")?,
+                        row.try_get::<String, _>("data")?,
+                        row.try_get::<Option<String>, _>("new_home")?,
+                    ));
+                }
+                Ok::<_, sqlx::Error>(v)
+            })
+            .map_err(st)?;
+            let mut kept = Vec::new();
+            for (symbol, data, new_home) in candidates {
+                let Some(new_file) = new_home else { continue };
+                // The survivor edge at MIN(file) supplies the new location (file + span).
+                let edge_json: Option<String> = rt_block(async {
+                    let row = sqlx::query(
+                        "SELECT e.data FROM edges e \
+                         WHERE e.target = $1 AND e.file = $2 \
+                           AND e.source NOT IN (SELECT symbol FROM nodes WHERE file = $3) \
+                         ORDER BY e.kind, e.source LIMIT 1",
+                    )
+                    .bind(&symbol)
+                    .bind(&new_file)
+                    .bind(file)
+                    .fetch_optional(h.as_conn())
+                    .await?;
+                    Ok::<_, sqlx::Error>(match row {
+                        Some(r) => Some(r.try_get::<String, _>("data")?),
+                        None => None,
+                    })
+                })
+                .map_err(st)?;
+                let new_loc = edge_json
+                    .and_then(|j| serde_json::from_str::<Edge>(&j).ok())
+                    .and_then(|e| e.location)
+                    .unwrap_or_else(|| {
+                        wicked_estate_core::Location::new(
+                            new_file.clone(),
+                            wicked_estate_core::Span::ZERO,
+                        )
+                    });
+                let mut node: Node = serde_json::from_str(&data)?;
+                node.location = new_loc;
+                kept.push(KeptImport {
+                    symbol,
+                    new_file,
+                    new_data: serde_json::to_string(&node)?,
+                });
+            }
+            kept
+        };
+
         // Step 3: delete edges BEFORE nodes (subquery on nodes must still be valid).
         rt_block(
             sqlx::query(
@@ -835,7 +916,18 @@ impl GraphWrite for PostgresStore {
         )
         .map_err(st)?;
 
-        // Step 4: delete nodes, unresolved_refs, files row.
+        // Step 4: re-home kept Import nodes (so the by-file DELETE below no longer matches
+        // them), then delete nodes, unresolved_refs, files row.
+        for k in &kept {
+            rt_block(
+                sqlx::query("UPDATE nodes SET file = $2, data = $3 WHERE symbol = $1")
+                    .bind(&k.symbol)
+                    .bind(&k.new_file)
+                    .bind(&k.new_data)
+                    .execute(h.as_conn()),
+            )
+            .map_err(st)?;
+        }
         rt_block(
             sqlx::query("DELETE FROM nodes WHERE file = $1")
                 .bind(file)

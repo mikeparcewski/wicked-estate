@@ -255,8 +255,19 @@ pub trait GraphWrite {
     /// `docs/ENGINE-CONTRACT.md` §2.1). Keeping them is what lets blast-radius report its
     /// coverage instead of silently under-reporting (the soundness contract).
     fn upsert_unresolved_refs(&mut self, refs: &[UnresolvedRef]) -> Result<()>;
-    /// Remove everything that originated from `file` (its nodes, edges, unresolved refs) — used by
-    /// incremental re-indexing to replace a changed file's contributions atomically. (Wave 2.6)
+    /// Remove `file`'s contributions (its nodes, edges, unresolved refs) — used by incremental
+    /// re-indexing to replace a changed file's contributions atomically. (Wave 2.6)
+    ///
+    /// Exception (incr-integrity lane): a [`NodeKind::Import`](crate::node::NodeKind::Import)
+    /// node located in `file` is KEPT when
+    /// at least one *survivor* edge still targets it — an edge whose file is neither `''` nor
+    /// `file` and whose source node does not live in `file`. Import nodes are keyed by module
+    /// SPECIFIER (shared by every importer of the same spec); deleting the shared node when one
+    /// importer goes away would strand every other importer's `File→Import` edge. A kept node is
+    /// re-homed (both its `file` column and its `location`) to the deterministic MIN(file) over
+    /// its survivor edges, so removing the LAST importer deletes it through the normal path.
+    /// Every other node kind is removed unconditionally. Pinned by the conformance kit's
+    /// shared-Import cases.
     fn remove_file(&mut self, file: &str) -> Result<()>;
     /// Record a content digest for `file` (incremental change detection — fast xxh3). (Wave 2.6)
     fn set_file_digest(&mut self, file: &str, digest: &str) -> Result<()>;
