@@ -570,6 +570,11 @@ fn csharp_characterization() {
     assert_def(&ex, lang, "_log", &NodeKind::Field);
     assert_def(&ex, lang, "_callCount", &NodeKind::Field);
     assert_def(&ex, lang, "_formatter", &NodeKind::Field);
+    // D04-8: properties — auto, expression-bodied, and computed forms all emit
+    // (property role -> NodeKind::Field)
+    assert_def(&ex, lang, "Id", &NodeKind::Field);
+    assert_def(&ex, lang, "Name", &NodeKind::Field);
+    assert_def(&ex, lang, "Total", &NodeKind::Field);
     assert_def_floor(&ex, lang, 12);
 
     // calls (invocation expressions captured as method-access or bare identifier)

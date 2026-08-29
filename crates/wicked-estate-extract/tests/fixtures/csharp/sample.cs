@@ -9,6 +9,9 @@ namespace Example.Services
     {
         private readonly IOrderRepository _repository;
 
+        public int RetryLimit { get; set; }
+        public bool HasRepository => _repository != null;
+
         public OrderService(IOrderRepository repository)
         {
             _repository = repository;

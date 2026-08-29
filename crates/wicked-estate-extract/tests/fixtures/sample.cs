@@ -20,6 +20,11 @@ namespace CodeIntel.Processing
         private readonly List<string> _log = new();
         private int _callCount;
 
+        public int Id { get; set; }
+        public string Name => _name;
+        public int Total { get { return _callCount; } }
+        private string _name = "";
+
         public string Format(string input)
         {
             var trimmed = Trim(input);
