@@ -1423,23 +1423,29 @@ fn go_const_vs_struct_field_symbolids_are_distinct() {
     );
 }
 
-/// EG-R1-1, re-pinned after scheme 2 (PARTIALLY resolved): the three
-/// same-named `reset` nodes used to share ONE SymbolId. Type-nested identity
-/// separates the IN-CLASS prototype (it nests under `Foo#`), which this test
-/// now asserts. STILL DEFECTIVE (pinned below): the out-of-line
-/// `void Foo::reset()` definition sits at file scope with no enclosing Type
-/// node, so it still shares `…/reset().` with the free function — a
-/// cross-kind (Method vs Function) collision. Owner: the program-level D6d
-/// header/impl + free-function identity follow-up
-/// (docs/recon/extraction-gaps.md §8 merge note 2).
+/// EG-R1-1, RESOLVED in two steps: scheme 2 nested the in-class prototype
+/// under `Foo#`; the scm-anchors D8 qualifier owner now nests the out-of-line
+/// `void Foo::reset()` definition under `Foo#` too — so the previously-pinned
+/// residual (out-of-line def sharing the free function's `…/reset().`) is
+/// FLIPPED to distinct ids per the pin's own instruction. The proto and the
+/// out-of-line def now share ONE id — asserted NEUTRALLY: single-id member
+/// semantics pending the program's M4 header/impl identity decision (see
+/// `cpp_member_proto_def_cross_file_single_id_hazard`); if that decision is
+/// distinct-decl identity, the equality assertion flips WITH the decision.
+/// Template-scoped members anchor under the bare type via the template_type
+/// branch; decltype-scoped qualifiers keep their def OWNERLESS (R-DEF-LOSS —
+/// a def may lose its owner, never its extraction).
 #[test]
 fn cpp_out_of_line_member_vs_free_function_collision_known_defect() {
     let lang = "cpp";
+    let text = "class Foo { public: void reset(); };\nvoid Foo::reset() {}\nvoid reset() {}\n\
+                template <typename T> class Bar { public: void tinit(); };\n\
+                template <typename T> void Bar<T>::tinit() {}\n\
+                struct Q { int q; };\nQ qv;\nvoid decltype(qv)::weird() {}\n";
     let sf = SourceFile {
         path: "probe_collide.cpp".to_string(),
         language: Language::new(lang),
-        text: "class Foo { public: void reset(); };\nvoid Foo::reset() {}\nvoid reset() {}\n"
-            .to_string(),
+        text: text.to_string(),
     };
     let ex = TreeSitterExtractor::for_language(lang)
         .unwrap()
@@ -1461,38 +1467,125 @@ fn cpp_out_of_line_member_vs_free_function_collision_known_defect() {
             && kinds.iter().filter(|k| *k == "Function").count() == 1,
         "[{lang}] expected 2x Method + 1x Function, got {kinds:?}"
     );
-    // The scheme-2 fix half: the in-class prototype nests under Foo# and is
-    // distinct from the free function.
     let free_id = resets
         .iter()
         .find(|n| format!("{:?}", n.kind) == "Function")
         .map(|n| n.symbol.clone())
         .expect("free fn node");
+    // With the D8 owner, BOTH the in-class proto and the out-of-line def nest
+    // under Foo# — two nodes, one id shape.
     let nested: Vec<_> = resets
         .iter()
         .filter(|n| n.symbol.as_str().contains("Foo#"))
         .collect();
     assert_eq!(
         nested.len(),
-        1,
-        "[{lang}] the in-class prototype must nest under Foo# (scheme 2); got {resets:?}"
+        2,
+        "[{lang}] proto AND out-of-line def must both nest under Foo#; got {resets:?}"
     );
-    assert_ne!(
-        nested[0].symbol, free_id,
-        "[{lang}] REGRESSION: the type-nested prototype id collapsed into the free fn's id"
-    );
-    // The residual defect half (D6d seam, still pinned): the out-of-line
-    // member definition carries no enclosing Type node and still shares the
-    // free function's file-scope id. When D6d lands, flip this to assert_ne.
+    // Locate the out-of-line def by SPAN (both Foo# nodes are Methods now).
+    let out_of_line_off = text.find("void Foo::reset").unwrap() as u32;
     let out_of_line = resets
         .iter()
-        .find(|n| format!("{:?}", n.kind) == "Method" && !n.symbol.as_str().contains("Foo#"))
+        .find(|n| n.location.span.start_byte == out_of_line_off)
         .expect("out-of-line member def node");
+    let proto = nested
+        .iter()
+        .find(|n| n.location.span.start_byte != out_of_line_off)
+        .expect("in-class proto node");
+    // NEUTRAL single-id assertion (pending M4 — NOT a correctness claim): the
+    // proto and the out-of-line def currently mint one id. See the cross-file
+    // hazard pin for why this is a recorded trade, not a feature.
     assert_eq!(
+        out_of_line.symbol, proto.symbol,
+        "[{lang}] proto/def single-id member semantics changed — if the M4 \
+         decision landed distinct-decl identity, flip this assertion with it"
+    );
+    // THE FLIP (per the original pin's instruction): the out-of-line member no
+    // longer shares the free function's id.
+    assert_ne!(
         out_of_line.symbol, free_id,
-        "[{lang}] KNOWN DEFECT RESOLVED? the out-of-line Foo::reset no longer \
-         shares the free reset's SymbolId — the D6d identity owner landed. \
-         Flip this half to assert distinct ids."
+        "[{lang}] REGRESSION: Foo::reset collapsed into the free reset's id again"
+    );
+    // Template-scoped out-of-line member anchors under the bare type name.
+    let tinits: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == "tinit")
+        .collect();
+    assert_eq!(
+        tinits.len(),
+        2,
+        "[{lang}] proto + out-of-line tinit expected"
+    );
+    for n in &tinits {
+        assert_eq!(
+            n.symbol.as_str(),
+            "ts-cpp . . . probe_collide/Bar#tinit().",
+            "[{lang}] Bar<T>::tinit must anchor under Bar# (template_type branch)"
+        );
+    }
+    // R-DEF-LOSS: a decltype-scoped qualifier keeps its DEF, ownerless (flat).
+    let weird = ex
+        .nodes
+        .iter()
+        .find(|n| !matches!(n.kind, NodeKind::File) && n.name == "weird")
+        .expect("decltype-scoped def must still extract (zero-def-loss)");
+    assert_eq!(
+        weird.symbol.as_str(),
+        "ts-cpp . . . probe_collide/weird().",
+        "[{lang}] decltype scope degrades to an ownerless module-flat def"
+    );
+}
+
+/// scm-anchors D8 HAZARD PIN (F13): with the qualifier owner, a member
+/// declared in `foo.h` (D6b in-class prototype) and defined out-of-line in
+/// `foo.cpp` mint ONE SymbolId across TWO files — `module_path` strips one
+/// extension, so both files share module `foo`. Store consequences (the F7
+/// mechanism at member level): `nodes.file` flaps last-write-wins per
+/// incremental run, `remove_file` deletes by file, and the digest skip never
+/// re-extracts the survivor — deleting/renaming one file of the pair can drop
+/// the live node until the other file changes. The store-side fix is filed via
+/// merge note M4 (program header/impl identity decision; store paths are the
+/// scm-anchors lane's MUST-NOT-TOUCH). FLIP INSTRUCTION (gated on M4): if the
+/// decision is distinct-decl identity, flip to assert DISTINCT ids; if it is
+/// one-logical-symbol with the store fixed, retire this pin into a store
+/// conformance test.
+#[test]
+fn cpp_member_proto_def_cross_file_single_id_hazard() {
+    let lang = "cpp";
+    let header = SourceFile {
+        path: "foo.h".to_string(),
+        language: Language::new(lang),
+        text: "class Foo { public: void reset(); };\n".to_string(),
+    };
+    let src = SourceFile {
+        path: "foo.cpp".to_string(),
+        language: Language::new(lang),
+        text: "void Foo::reset() {}\n".to_string(),
+    };
+    let extractor = TreeSitterExtractor::for_language(lang).unwrap();
+    let hx = extractor.extract(&header).expect("header extraction");
+    let cx = extractor.extract(&src).expect("cpp extraction");
+    let proto = hx
+        .nodes
+        .iter()
+        .find(|n| !matches!(n.kind, NodeKind::File) && n.name == "reset")
+        .expect("header proto node");
+    let def = cx
+        .nodes
+        .iter()
+        .find(|n| !matches!(n.kind, NodeKind::File) && n.name == "reset")
+        .expect("out-of-line def node");
+    assert_eq!(
+        proto.symbol, def.symbol,
+        "[{lang}] HAZARD SHAPE CHANGED: the .h proto and .cpp def no longer mint \
+         one cross-file id — apply this pin's M4-gated flip instruction"
+    );
+    assert_eq!(
+        proto.symbol.as_str(),
+        "ts-cpp . . . foo/Foo#reset().",
+        "[{lang}] both files share module `foo` (one extension stripped)"
     );
 }
 

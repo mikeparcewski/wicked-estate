@@ -40,14 +40,30 @@
   )
 ) @code_method.def
 
-; Out-of-line member definitions: `void Foo::reset() {}` (D6e) — captured by
-; nothing before (only identifier/field_identifier declarators matched). Single-
+; Out-of-line member definitions: `void Foo::reset() {}` (D6e) — the qualifier
+; is the member's OWNER (scm-anchors D8, scheme 3). qualified_identifier.scope
+; admits exactly {namespace_identifier, template_type, decltype, dependent_name}
+; (tree-sitter-cpp 0.23.4 node-types.json); a class-name qualifier parses as
+; namespace_identifier, so `void Foo::reset() {}` mints `<module>/Foo#reset().`
+; and `void Foo<T>::reset() {}` anchors under Foo via the template_type branch.
+; R-DEF-LOSS: the scope alternation is OPTIONAL (`?`) — decltype/dependent_name
+; qualifiers degrade to OWNERLESS module-flat defs, never dropped defs. Single-
 ; level qualification only: `void Ns::Foo::bar()` at file scope nests
 ; qualified_identifiers and is not matched (write the definition inside its
 ; namespace to be captured).
+; HAZARD (pinned by cpp_member_proto_def_cross_file_single_id_hazard): with the
+; owner, a foo.h in-class prototype (D6b) and the foo.cpp out-of-line definition
+; mint ONE SymbolId across TWO files (module_path strips one extension) —
+; nodes.file flaps last-write-wins, remove_file deletes by file, the digest skip
+; never re-extracts the survivor. Store-side fix filed via merge note M4 (the
+; program's header/impl identity decision).
 (function_definition
   declarator: (function_declarator
     declarator: (qualified_identifier
+      scope: [
+        (namespace_identifier) @code_method.owner
+        (template_type name: (type_identifier) @code_method.owner)
+      ]?
       name: (identifier) @code_method.name)
   )
 ) @code_method.def
@@ -56,9 +72,13 @@
 ; field_declaration wrapping a function_declarator (D6b). This also classifies
 ; pure virtuals (`virtual void pure() = 0;` parses as field_declaration).
 ; NOTE: FREE function prototypes (`int freestanding();` at namespace scope) are
-; DEFERRED — a header prototype and its .cpp definition share a SymbolId (module
-; strips the extension), and remove_file + the digest skip make that a data-loss
-; path; free-function node identity needs a program-level owner first (D6d).
+; STILL DEFERRED (D6d; docs/recon/scm-anchors.md D8) — the recorded deferral
+; terms require a program-level owner AND an identity DECISION for header/impl
+; proto+def node identity, and only the owner is recorded: a header prototype
+; and its .cpp definition share a SymbolId (module strips one extension), and
+; remove_file + the digest skip make that a data-loss path whose fix is
+; store-side (merge note M4). The ready per-parent pattern set lives in
+; docs/recon/extraction-gaps.md §D6(d).
 (field_declaration
   declarator: (function_declarator
     declarator: (field_identifier) @code_method.name)
