@@ -180,3 +180,150 @@ AFTER  index /Users/michael.parcewski/Projects/wicked/wicked-crew   --db $M/crew
 - **unresolved-accounting:** expect unresolved Calls refs to RISE by ≈ the number of removed edges (M7 gives the exact delta per corpus); both lanes must measure on fresh DBs from the same base.
 - **method-identity:** nothing here keys on the SymbolId string format; independent.
 - **program lead:** (a) release must be `0.15.0` if the pub-API removal ships (D11); (b) follow-ups to file: RuleSet engine-scheme matching for `RulesBridgeResolver`; resolver-fingerprint in `meta` to force re-resolve without a version bump (pattern: `extra_rules_digest`, `lib.rs:571-583`); the on-demand LSP consumer (D12); crew `graph.ts:592` refresh should pass `--force` after an engine upgrade.
+
+---
+
+## 9. S7 — before/after measurement results (2026-08-28, implementation complete)
+
+**Binaries.** BEFORE = `/Users/michael.parcewski/Projects/wicked/wicked-estate/target/release/wicked-estate`
+(0.14.6, HEAD engine). AFTER = the lane debug binary built from `lane/resolver-precision`
+(S1–S6 landed). Fresh DBs under `<lane>/measure/` (`studio-before/after.db`, `crew-before/after.db`),
+full-repo indexes of `/Users/michael.parcewski/Projects/wicked/wicked-studio` and `…/wicked-crew`.
+
+**Sanity gate: PASSED exactly.** BEFORE reproduces the review's numbers to the digit —
+studio 1,245 name-resolver Calls edges, non-callable targets 189 (constant 139 / import 22 /
+class 14 / variable 13 / interface 1); crew 724, non-callable 226 (class 136 / import 62 /
+variable 15 / constant 13). The BEFORE engine is proven; deltas below are valid.
+
+### M1 — Calls edges by resolver × target kind
+
+| corpus | resolver | target kind | BEFORE | AFTER |
+|---|---|---|---|---|
+| studio | name-resolver | function | 912 | 644 |
+| studio | name-resolver | method | 144 | 144 |
+| studio | name-resolver | constant | 139 | 139 |
+| studio | name-resolver | import | 22 | **0** |
+| studio | name-resolver | class | 14 | 14 |
+| studio | name-resolver | variable | 13 | 13 |
+| studio | name-resolver | interface | 1 | **0** |
+| studio | scoped-name-resolver | function | 1,829 | 1,821 |
+| studio | scoped-name-resolver | method | 6 | 2 |
+| studio | import-map-resolver | function | 178 | 178 |
+| crew | name-resolver | method | 251 | 250 |
+| crew | name-resolver | function | 247 | 246 |
+| crew | name-resolver | class | 136 | 136 |
+| crew | name-resolver | import | 62 | **0** |
+| crew | name-resolver | variable | 15 | **0** |
+| crew | name-resolver | constant | 13 | 13 |
+| crew | scoped-name-resolver | function | 912 | 907 |
+| crew | scoped-name-resolver | method | 181 | 181 |
+| crew | import-map-resolver | function | 9 | 9 |
+
+Total Calls edges: studio 3,258 → 2,955 (**−303**); crew 1,826 → 1,742 (**−84**).
+
+### M2 — Calls → Import / Interface: **0 after** on both corpora (falsifier clause 1 clear).
+
+### M3 — cross-language Calls
+
+AFTER, the only cross-`nodes.language` rows left are same-family: studio tsx↔typescript
+453+220+13+4 = **690 retained** (the expected number); crew javascript↔typescript 35+6 =
+**41 retained**. Cross-FAMILY rows: **0** on both corpora (falsifier clause 2 clear). Removed
+cross-family populations: studio python→typescript 173, python→tsx 77+12(+4 scoped method),
+tsx→python 18, typescript→python 2 import-targets; crew typescript→python 54 + javascript→python 6
+(all Calls→Import), typescript→bash 15 (variable), bash→typescript 2, python→typescript 4 +
+python→javascript 1 (scoped).
+
+### M4 — removed edges + 20-sample adjudication: **20/20 wrong**
+
+Removed histogram (resolver × target kind × src-lang → tgt-lang): studio 303 total — 173
+py→ts fn, 77 py→tsx fn, 19 py→py Calls→Import, 18 tsx→py fn, 8+4 scoped py→tsx, 2 ts→py import,
+1 tsx→tsx import, 1 ts→ts interface. Crew 84 — 54 ts→py import, 15 ts→bash variable, 6 js→py
+import, 4+1 scoped py→ts/js, 2 py→py import, 1+1 bash→ts.
+
+Sample: 20 edges (12 studio rows 1,26,…,276 of 303; 8 crew rows 1,11,…,71 of 84 — deterministic
+every-Nth over `order by source,target`; sqlite has no seedable random(), method recorded in lieu
+of a seed). Every site opened at its 1-based `file:line`; all 20 adjudicated **WRONG**:
+
+- studio: `within(...)` (tsx, @testing-library import) → python `within`; python `ok: bool`
+  annotation → ts function `bool` (readiness.ts); `page.mouse.move(…)` → ts `move`
+  (useTriageCursor.ts); 5× python `str(…)` builtin → tsx `str` (RunTimeline.tsx); 3×
+  `console_errors.append(…)` list builtin → ts `append` (docThread.ts); playwright `dl.body()` →
+  tsx test method `body`.
+- crew: 5× `res.json()` (js/ts) → the python `import json` node (e2e/insight_rail_test.py);
+  3× `Buffer.from(…)` → bash variable `from` (scripts/verify-selftest.sh).
+
+**Regression classes: zero losses.** No removed edge had a Constant target (the function-valued
+`const` bindings are all retained — M1 shows constant 139/13 unchanged); the 13 studio variable
+targets are retained; the only variable-target removals are crew's 15 cross-family ts→bash
+(adjudicated wrong). Falsifier clause 6 clear.
+
+### M4b — ADDED edges (FEAS-1, Q4b): **0 on both corpora**
+
+The symmetric LEFT JOIN (after \ before) returns zero rows for studio and crew — the three
+recall-widening placements minted no edge on these corpora (no deny-listed-homonym-shadowing or
+cross-family-homonym-tie population outside the ones that produce 0-edge outcomes). The 20-edge
+added-sample adjudication is therefore vacuous; falsifier clause 7 clear. The F16 mechanisms are
+pinned by unit tests instead (`deny_list_unshadows_same_family_callable`,
+`deny_list_survivor_blocked_by_family_guard`, `scoped_family_retain_unshadows_same_family_homonym`,
+`scoped_resolver_ranks_two_root_files_same_dir`), as the plan required for corpus-blind shapes.
+
+### M5 — root-level two-file corpus
+
+`{a.ts (import {foo} from './b'; foo()), b.ts, sub/c.ts}`: BEFORE = 0 Calls edges, `foo` parked in
+`unresolved_refs`. AFTER = exactly 1 Calls edge, `import-map-resolver`, confidence 0.63,
+`metadata.via=import-map`, nothing parked. (The Scoped same-dir 0.62 path is pinned by the
+`scoped_resolver_ranks_two_root_files_same_dir` unit test — with the import hint present,
+import-map's 0.63 wins dedup, which the AFTER row shows.)
+
+### M6 — RulesBridge fixture (the S3 e2e fixture, indexed by both binaries)
+
+BEFORE: 0 edges with `resolved_by='rules-bridge-resolver'`; `rules-engine:ibm-odm` parked in
+`unresolved_refs`. AFTER: **2** rules-bridge-resolver InvokedBy edges at 0.5
+(`src/PricingService.java` → DRL RuleSet `com.example.pricing`, and → the synthetic
+`odm:pricing-rules` RuleSet — the documented D7 overwrite); 0 parked `rules-engine:*` refs.
+Code falsifier also run (S3 commit): `tests/rules_bridge_index.rs` FAILS with the slice line
+removed, PASSES restored (clause 4 clear).
+
+### M7 — unresolved delta (for the unresolved-accounting lane)
+
+| corpus | kind | BEFORE | AFTER | Δ |
+|---|---|---|---|---|
+| studio | calls | 38,536 | 38,839 | **+303** (= removals; additions 0) |
+| studio | imports | 1,857 | 2,285 | **+428** |
+| studio | total | 40,400 | 41,131 | +731 |
+| crew | calls | 18,407 | 18,491 | **+84** (= removals; additions 0) |
+| crew | imports | 1,020 | 1,052 | **+32** |
+| crew | total | 19,437 | 19,553 | +116 |
+
+Net Calls delta = removals − additions = +303/+84 exactly. The **imports rise needs explaining
+and is correct behaviour**: those Imports refs previously "resolved" by NameResolver binding them
+to Import NODES — a reference site binding to another reference site. The in-memory edges made
+the location-based accounting count the refs as resolved, while the store rows collided with the
+extractor's own local imports edges on the (source,target,kind) PK — which is why imports edge
+counts are IDENTICAL before/after (studio 2,259, crew 1,020) and the non-Calls removed-edge set
+is EMPTY. D1's Import-target rejection applies to every ref kind, so these refs are now honestly
+parked. (BEFORE crew calls-unresolved here is 18,407, not the 15,945 the consumers recon quoted —
+that figure was from an older corpus state; the sanity gate for THIS measurement is the
+189/1,245 + 226/724 reproduction, which passed exactly.)
+
+### M8 — wall-clock bound
+
+AFTER (debug) full index of crew: 4.05 s wall. Not comparable to the release BEFORE; recorded as
+a bound only.
+
+### §9 bench gate (FEAS-6)
+
+`CARGO_TARGET_DIR=<lane>/target cargo test -p wicked-estate-bench` → **5 passed; 0 failed;
+0 ignored** (fixture-repo benchmark tests, incl. `footprint_and_speed_within_ceilings`). The full
+agent-eval run over the network-cloned baseline corpus (axios/flask/tree-sitter,
+`bench/src/lib.rs baseline_corpus()`) was NOT executed in this lane — explicit §7 not-yet-true
+item; the studio/crew before/after Calls deltas above (M1–M4b, including the empty Q4b) stand as
+the regression evidence for the capability gate that follows Calls|Imports.
+
+### Verdicts against the lane falsifier (§5)
+
+1. Calls→Import after: 0 ✓ · 2. cross-family Calls after: 0 (same-family 690/41 retained) ✓ ·
+3. `cross_language_estate` green (S2 run) ✓ · 4. rules_bridge_index falsifier FAILS-without/
+PASSES-with the slice line ✓ · 5. `cargo test -p wicked-estate-resolve`: 75 unit + 4 scip +
+1 lsp_live + 2 doc, **0 ignored** ✓ · 6. removed-sample: 20/20 wrong, no regression-class loss ✓ ·
+7. added edges: 0, sample vacuous ✓ · 8. BEFORE reproduced 189/1,245 and 226/724 exactly ✓.
