@@ -1641,17 +1641,15 @@ fn go_receiver_methods_nest_under_receiver_type() {
     );
 }
 
-/// Ruby singleton-method identity (scm-anchors D5), pinned BEFORE the fix:
-/// `def self.m` matches the unconstrained singleton_method pattern and
-/// `class << self` matches nothing (the singleton_class pattern requires
-/// `value: (constant)`), so BOTH singleton spellings merge with the instance
-/// method of the same name at `C#<name>().` — one SymbolId, and the store's
-/// ON CONFLICT(symbol) upsert collapses class-side and instance-side into one
-/// node. Fix (next commit): a non-emitting `(self)` singleton_class anchor +
-/// an OPTIONAL `object: (self)? @code_method.owner` splice — both spellings
-/// converge on `C#self#<name>().`, distinct from the instance id.
-/// R-DEF-LOSS pins: `def C.k` / `def obj.j` (non-self receivers) extract
-/// TODAY and must survive the owner edit unchanged (ownerless).
+/// Ruby singleton-method identity (scm-anchors D5), FLIPPED after the fix:
+/// the non-emitting `(self)` singleton_class anchor + the OPTIONAL
+/// `object: (self)? @code_method.owner` splice make BOTH singleton spellings
+/// (`def self.m` and `class << self; def m`) converge on `C#self#<name>().`,
+/// distinct from the instance `C#<name>().` — previously all three merged
+/// into one SymbolId (pinned by the first version of this test).
+/// R-DEF-LOSS pins kept: `def C.k` / `def obj.j` (non-self receivers) still
+/// extract, ownerless — and `def C.k` therefore still merges with instance
+/// `def k` (the pinned residual, flip instruction inline below).
 #[test]
 fn ruby_singleton_vs_instance_collision_known_defect() {
     let lang = "ruby";
@@ -1684,25 +1682,35 @@ fn ruby_singleton_vs_instance_collision_known_defect() {
             .map(|n| n.symbol.as_str().to_string())
             .collect()
     };
-    // KNOWN DEFECT (pinned): instance `def m` and `def self.m` share ONE id.
+    // FIXED (was the pinned defect): instance `def m` and `def self.m` mint
+    // DISTINCT ids — the owner splice nests the singleton method under self.
     let ms = distinct("m");
     assert_eq!(
         ms.len(),
-        1,
-        "[{lang}] KNOWN DEFECT RESOLVED? `def m` vs `def self.m` no longer merge \
-         — flip this pin to assert C#m(). != C#self#m()."
+        2,
+        "[{lang}] REGRESSION: `def m` vs `def self.m` merged again; got {ms:?}"
     );
     assert!(ms.contains("ts-ruby . . . probe_singleton/C#m()."));
-    // KNOWN DEFECT (pinned): `class << self; def n` merges with instance `def n`.
+    assert!(ms.contains("ts-ruby . . . probe_singleton/C#self#m()."));
+    // FIXED: `class << self; def n` no longer merges with instance `def n` —
+    // the non-emitting singleton_class anchor nests it under self.
     let ns = distinct("n");
     assert_eq!(
         ns.len(),
-        1,
-        "[{lang}] KNOWN DEFECT RESOLVED? `class << self` member vs instance \
-         method no longer merge — flip this pin to assert distinct ids."
+        2,
+        "[{lang}] REGRESSION: `class << self` member vs instance method merged \
+         again; got {ns:?}"
     );
-    // Both singleton spellings of `s` share one id today (both flat merges).
-    assert_eq!(distinct("s").len(), 1);
+    assert!(ns.contains("ts-ruby . . . probe_singleton/C#n()."));
+    assert!(ns.contains("ts-ruby . . . probe_singleton/C#self#n()."));
+    // Both singleton spellings of `s` converge on the SAME id — C#self#s(). —
+    // the reason the anchor is named "self" (one Ruby class-method, one id).
+    let ss = distinct("s");
+    assert_eq!(
+        ss,
+        ["ts-ruby . . . probe_singleton/C#self#s().".to_string()].into(),
+        "[{lang}] `def self.s` and `class << self; def s` must mint ONE shape"
+    );
     // R-DEF-LOSS pins: non-self singleton receivers EXTRACT today (ownerless,
     // nested under C by containment) — the owner edit must not drop them.
     assert_def(&ex, lang, "j", &NodeKind::Method); // def obj.j
