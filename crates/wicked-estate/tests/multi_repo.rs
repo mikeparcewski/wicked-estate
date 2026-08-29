@@ -590,3 +590,62 @@ fn scip_ingest_rejects_a_forged_label() {
         "a VALID label must get past validation to the file read: {err}"
     );
 }
+
+/// Lane relative-imports S6: the root guard counts depth below the LABEL prefix, so a labelled
+/// repo binds and parks exactly where the plain one does. `./util` binds in both;
+/// `../../repoa/src/util` — which under a prefix-blind guard would false-bind the labelled
+/// store's own `repoa/src/util.ts` — parks in BOTH. (Uses its own fixture rather than extending
+/// `make_repo`: the shared fixture's file set is pinned by the other tests' assertions.)
+#[test]
+fn labelled_relative_imports_match_plain() {
+    let root = fresh_dir("relimp_label");
+    let repo = root.join("repoA");
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/util.ts"), "export const u = 1;\n").unwrap();
+    fs::write(
+        repo.join("src/index.ts"),
+        "import './util';\nimport '../../repoa/src/util';\nexport const i = 1;\n",
+    )
+    .unwrap();
+
+    let mut plain = SqliteStore::open(root.join("plain.db")).unwrap();
+    let plain_stats = wicked_estate::index_path(&mut plain, &repo).unwrap();
+    let mut labelled = SqliteStore::open(root.join("labelled.db")).unwrap();
+    let labelled_stats =
+        wicked_estate::index_path_as(&mut labelled, &repo, Some("repoa")).unwrap();
+
+    assert_eq!(
+        plain_stats.edge_count, labelled_stats.edge_count,
+        "plain and labelled graphs must have the same edge count"
+    );
+
+    let rel_edges = |store: &SqliteStore| -> Vec<(String, String)> {
+        store
+            .all_edges()
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.resolved_by == "relative-import")
+            .map(|e| (e.source.0.clone(), e.target.0.clone()))
+            .collect()
+    };
+    let p = rel_edges(&plain);
+    let l = rel_edges(&labelled);
+    assert_eq!(p.len(), 1, "plain: only './util' binds: {p:?}");
+    assert_eq!(
+        l.len(),
+        1,
+        "labelled: the escaping spec must PARK, not bind repoa/src/util.ts: {l:?}"
+    );
+    assert!(l[0].1.contains("repoa/src/util.ts"), "{l:?}");
+
+    // The escaping spec is parked in both stores.
+    for store in [&plain, &labelled] {
+        assert!(
+            !store
+                .unresolved_refs_for_name("'../../repoa/src/util'")
+                .unwrap()
+                .is_empty(),
+            "escaping spec must be parked"
+        );
+    }
+}

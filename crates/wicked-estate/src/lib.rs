@@ -920,10 +920,14 @@ pub fn index_path_as(
         let index = InMemoryIndex::build(reader, scope.as_deref())?;
         // InfraResolver handles IaC/tfstate resource refs; it does not interfere with code
         // resolvers (it only fires when raw_name maps exclusively to resource nodes).
+        // RelativeImportResolver binds relative JS/TS Imports refs to their target File node
+        // (exact-path, root-guarded against the repo/label root; lane relative-imports).
+        let relative = wicked_estate_resolve::RelativeImportResolver::new(scope.as_deref());
         let resolvers: &[&dyn Resolver] = &[
             &NameResolver,
             &ScopedNameResolver,
             &ImportMapResolver,
+            &relative,
             &InfraResolver,
         ];
         let resolved = resolve_all(resolvers, &all_refs, &index)?;
