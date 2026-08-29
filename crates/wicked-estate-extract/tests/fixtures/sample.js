@@ -8,6 +8,10 @@ const createHandler = (fn) => (data) => fn(data);
 let instanceCount = 0;
 
 class EventBus {
+    // scm-anchors D6: object-valued fields (public + private) are Field defs
+    hooks = { onDone() {} };
+    #internals = { reset() {} };
+
     constructor() {
         this.listeners = {};
     }

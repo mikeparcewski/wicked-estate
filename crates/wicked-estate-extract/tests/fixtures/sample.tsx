@@ -16,6 +16,9 @@ export const DEFAULT_THEME: Theme = Theme.Light;
 
 export class ThemeProvider {
     current: Theme = Theme.Light;
+    // scm-anchors D6: object-valued fields (public + private) are Field defs
+    palette = { swatch() {} };
+    #cache = { clear() {} };
 
     toggle(): void {
         this.current = this.current === Theme.Light ? Theme.Dark : Theme.Light;

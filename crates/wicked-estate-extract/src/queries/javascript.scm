@@ -50,6 +50,17 @@
   value: (arrow_function)
 ) @code_method.def
 
+; Object-valued class fields: `x = { ... }` / `#x = { ... }` become Term-suffixed
+; Field defs (scm-anchors D6) — same intent as typescript.scm, spelled on the JS
+; grammar's field_definition/property: shape (verified against tree-sitter-
+; javascript 0.23.1 node-types.json). The literal's members truncate at the Term
+; field (module-flat) instead of merging with the class's real methods.
+; Computed-name fields (`[k] = { ... }`) stay uncaptured — documented residual.
+(field_definition
+  property: [(property_identifier) (private_property_identifier)] @code_field.name
+  value: (object)
+) @code_field.def
+
 ; ── Scoped constant/variable capture ────────────────────────────────────────
 ; Only MEANINGFUL declarations are captured:
 ;   (a) top-level — lexical_declaration/variable_declaration that are direct

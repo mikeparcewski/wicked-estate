@@ -297,6 +297,9 @@ fn typescript_characterization() {
     assert_def(&ex, lang, "DEFAULT_TIMEOUT", &NodeKind::Constant);
     assert_def(&ex, lang, "createEmitter", &NodeKind::Function); // arrow fn
     assert_def(&ex, lang, "retryCount", &NodeKind::Variable);
+    // scm-anchors D6: object-valued class fields (public + private name branch)
+    assert_def(&ex, lang, "hooks", &NodeKind::Field);
+    assert_def(&ex, lang, "#internals", &NodeKind::Field);
     assert_def_floor(&ex, lang, 10);
 
     // calls
@@ -333,6 +336,9 @@ fn tsx_characterization() {
     assert_def(&ex, lang, "ThemeMode", &NodeKind::TypeAlias);
     assert_def(&ex, lang, "DEFAULT_THEME", &NodeKind::Constant);
     assert_def(&ex, lang, "handleClick", &NodeKind::Function); // arrow fn
+    // scm-anchors D6: object-valued class fields (public + private name branch)
+    assert_def(&ex, lang, "palette", &NodeKind::Field);
+    assert_def(&ex, lang, "#cache", &NodeKind::Field);
     assert_def_floor(&ex, lang, 8);
 
     // calls
@@ -369,6 +375,9 @@ fn javascript_characterization() {
     assert_def(&ex, lang, "DEFAULT_DELAY", &NodeKind::Constant);
     assert_def(&ex, lang, "createHandler", &NodeKind::Function); // arrow fn
     assert_def(&ex, lang, "instanceCount", &NodeKind::Variable);
+    // scm-anchors D6: object-valued class fields (public + private name branch)
+    assert_def(&ex, lang, "hooks", &NodeKind::Field);
+    assert_def(&ex, lang, "#internals", &NodeKind::Field);
     assert_def_floor(&ex, lang, 10);
 
     // calls

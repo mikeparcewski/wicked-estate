@@ -6642,11 +6642,10 @@ public class PlainListener {
 
     #[test]
     fn identity_field_object_literal_residual() {
-        // KNOWN RESIDUAL (MI-ATK-1): `x = { save(){} }` — the field `x` is NOT captured as a def
-        // (the query requires an arrow value), so the walk cannot see it as a container: the
-        // object-literal `save` nests under `class A` and MERGES with the real A.save() method.
-        // When the extraction-gaps lane captures object-valued fields as Term defs, this test
-        // MUST be consciously updated to assert the split instead.
+        // FLIPPED (scm-anchors D6, was MI-ATK-1): `x = { save(){} }` — the object-valued
+        // field `x` IS now captured as a Term-suffixed Field def, so the walk sees it as a
+        // container and the literal's `save` TRUNCATES at it: module-flat `src/a/save().`,
+        // DISTINCT from the real `A#save().`.
         let code = "class A { save(): void {} x = { save() {} } }\n";
         let ex = TreeSitterExtractor::for_language("typescript")
             .unwrap()
@@ -6654,13 +6653,55 @@ public class PlainListener {
             .unwrap();
         let save_syms: HashSet<String> = symbols_named(&ex, "save").into_iter().collect();
         assert_eq!(
-            save_syms.len(),
-            1,
-            "both saves collide into one id (the pinned residual); got {save_syms:?}"
+            save_syms,
+            [
+                "ts-typescript . . . src/a/A#save().".to_string(),
+                "ts-typescript . . . src/a/save().".to_string(),
+            ]
+            .into(),
+            "the class method and the literal member must mint DISTINCT ids"
         );
         assert!(
-            save_syms.contains("ts-typescript . . . src/a/A#save()."),
-            "the merged id is the type-nested one; got {save_syms:?}"
+            has_symbol(&ex, "ts-typescript . . . src/a/A#x."),
+            "the object-valued field must be a def nested under A; xs = {:?}",
+            symbols_named(&ex, "x")
+        );
+
+        // NEW RESIDUAL (pinned): the split moves the literal member's pooling from
+        // per-class to PER-MODULE — the module-flat `src/b/save().` id is shared by
+        // (a) any same-named module-level function and (b) same-named members of
+        // OTHER object-literal fields in the same module. Expressing them distinctly
+        // needs object-literal descriptors — a scheme change, not a query edit
+        // (ADR-002 residual entry).
+        let pooled = "function save() {}\nclass B { x = { save() {} }; y = { save() {} }; }\n";
+        let ex2 = TreeSitterExtractor::for_language("typescript")
+            .unwrap()
+            .extract(&sf("src/b.ts", "typescript", pooled))
+            .unwrap();
+        let pooled_saves: HashSet<String> = symbols_named(&ex2, "save").into_iter().collect();
+        assert_eq!(
+            pooled_saves,
+            ["ts-typescript . . . src/b/save().".to_string()].into(),
+            "KNOWN RESIDUAL RESOLVED? module fn + two literals' members no longer \
+             pool at one module-flat id — object-literal descriptors landed; \
+             re-point this residual pin"
+        );
+
+        // RESIDUAL (pinned): computed-name fields (`[k] = {…}`) stay uncaptured —
+        // their literal members still nest under the class and merge with the
+        // class's real methods. Capturing them needs a name for the field, which a
+        // computed key does not statically have.
+        let computed = "class A { save(): void {} [\"k\"] = { save() {} } }\n";
+        let ex3 = TreeSitterExtractor::for_language("typescript")
+            .unwrap()
+            .extract(&sf("src/c.ts", "typescript", computed))
+            .unwrap();
+        let computed_saves: HashSet<String> = symbols_named(&ex3, "save").into_iter().collect();
+        assert_eq!(
+            computed_saves,
+            ["ts-typescript . . . src/c/A#save().".to_string()].into(),
+            "KNOWN RESIDUAL RESOLVED? a computed-name field's literal member no \
+             longer merges with the class method — re-point this residual pin"
         );
     }
 
