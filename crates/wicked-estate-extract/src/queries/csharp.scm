@@ -45,6 +45,13 @@
   body: (block) @code_method.body
 ) @code_method.def
 
+; Property declarations — auto (`int Id { get; set; }`), expression-bodied
+; (`string Name => _name;`), and computed (`int Total { get { … } }`) all carry a
+; required name: field in 0.21.3. The `property` role maps to NodeKind::Field (D04-8)
+(property_declaration
+  name: (identifier) @code_property.name
+) @code_property.def
+
 ; Field declarations (includes const, readonly, static fields)
 (field_declaration
   (variable_declaration

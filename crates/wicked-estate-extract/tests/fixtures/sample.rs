@@ -22,6 +22,13 @@ pub trait Drawable {
     fn draw(&self);
 }
 
+impl Point {
+    pub fn translate(&mut self, dx: f64, dy: f64) {
+        self.x += dx;
+        self.y += dy;
+    }
+}
+
 pub fn distance(a: &Point, b: &Point) -> Distance {
     let dx = a.x - b.x;
     let dy = a.y - b.y;

@@ -11,6 +11,12 @@ type Point struct {
 	X, Y float64
 }
 
+// Label is a defined (non-struct) type.
+type Label string
+
+// PointFilter is a defined function type.
+type PointFilter func(p Point) bool
+
 // distance returns the Euclidean distance between two points.
 func distance(a, b Point) float64 {
 	dx := a.X - b.X

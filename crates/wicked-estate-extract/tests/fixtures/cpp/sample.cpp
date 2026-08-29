@@ -52,12 +52,17 @@ public:
 
     size_t rows() const { return rows_; }
     size_t cols() const { return cols_; }
+    void clear();
 
 private:
     size_t rows_;
     size_t cols_;
     std::vector<double> data_;
 };
+
+void Matrix::clear() {
+    data_.assign(rows_ * cols_, 0.0);
+}
 
 int main() {
     Matrix a(2, 3);

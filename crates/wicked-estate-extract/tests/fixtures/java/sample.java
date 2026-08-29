@@ -4,6 +4,10 @@ import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
+@interface Audited {
+    String reason() default "";
+}
+
 public class UserService {
     private final UserRepository repository;
 

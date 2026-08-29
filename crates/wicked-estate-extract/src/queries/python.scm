@@ -12,17 +12,14 @@
   superclasses: (argument_list (identifier) @code_extends.target)
 ) @code_extends.def
 
-; Methods (functions inside classes)
-(class_definition
-  body: (block
-    (function_definition
-      name: (identifier) @code_method.name
-      body: (block) @code_method.body
-    ) @code_method.def
-  )
-)
+; NOTE (§11): there is deliberately NO class-body Method pattern here. The general
+; function pattern below already matches methods; a second class-scoped pattern
+; emitted every method twice on the same SymbolId with a different kind
+; (Method + Function), and the store's last-write-wins upsert silently re-kinded
+; them. Restoring Method kind belongs with enclosing-type identity (method-identity
+; lane), not with a duplicate pattern.
 
-; Function definitions (top-level and nested outside class)
+; Function definitions (top-level, nested, and inside classes)
 (function_definition
   name: (identifier) @code_function.name
   body: (block) @code_function.body

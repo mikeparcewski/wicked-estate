@@ -31,8 +31,42 @@
   name: (identifier) @code_function.name
 ) @code_function.def
 
-; Type aliases (typedef)
+; Type aliases (typedef) — two-pattern set (§11 / D04).
+; The old unconstrained pattern double-matched the self-naming idiom
+; `typedef struct X X;`: it minted a TypeAlias with the SAME SymbolId as the real
+; Struct definition, and the store's last-write-wins upsert re-kinded whichever
+; matched first. (i) tag-named typedefs emit only when the alias name differs from
+; the tag name; (ii) anonymous-tag and non-tag typedefs (the common
+; `typedef struct { … } Name;` header idiom, plain `typedef unsigned int uint;`)
+; always emit. Predicates sit INSIDE the outermost parens (they are ignored outside).
 (type_definition
+  type: (struct_specifier name: (type_identifier) @_tag_name)
+  declarator: (type_identifier) @code_type.name
+  (#not-eq? @_tag_name @code_type.name)
+) @code_type.def
+
+(type_definition
+  type: (enum_specifier name: (type_identifier) @_tag_name)
+  declarator: (type_identifier) @code_type.name
+  (#not-eq? @_tag_name @code_type.name)
+) @code_type.def
+
+(type_definition
+  type: (union_specifier name: (type_identifier) @_tag_name)
+  declarator: (type_identifier) @code_type.name
+  (#not-eq? @_tag_name @code_type.name)
+) @code_type.def
+
+(type_definition
+  type: [
+    (struct_specifier !name)
+    (enum_specifier !name)
+    (union_specifier !name)
+    (primitive_type)
+    (sized_type_specifier)
+    (type_identifier)
+    (macro_type_specifier)
+  ]
   declarator: (type_identifier) @code_type.name
 ) @code_type.def
 
