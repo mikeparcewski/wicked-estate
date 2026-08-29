@@ -30,6 +30,15 @@ pub trait SymbolIndex {
     fn all_nodes(&self) -> Result<Vec<Node>> {
         Ok(vec![])
     }
+    /// The language family `language` belongs to, from the language manifest
+    /// (`wicked-estate-extract/languages.toml` — e.g. typescript/tsx/javascript/svelte/vue all
+    /// map to `"javascript"`). Used by the resolvers' cross-family guard: a ref whose source and
+    /// candidate both carry a **known** family may only bind within that family. `None` = unknown
+    /// (not in the manifest — mainframe langs, synthetic/file tags) and the guard must allow.
+    /// The default returns `None`; index implementations backed by the extract registry override it.
+    fn language_family(&self, _language: &str) -> Option<String> {
+        None
+    }
 }
 
 /// EXTRACT phase: parse one file into nodes + intra-file edges + unresolved refs.

@@ -247,6 +247,11 @@ fn base_extraction(
 struct InMemoryIndex {
     by_name: HashMap<String, Vec<Node>>,
     by_id: HashMap<SymbolId, Node>,
+    /// language name → family, from `wicked_estate_extract::registry()` (the manifest is the
+    /// data source — D5: the family table is DATA, not per-language Rust arms). Languages
+    /// absent from the manifest (mainframe extractors, `synthetic`/`tfstate` tags) are absent
+    /// here too, so `language_family` returns `None` and the resolver guard allows them.
+    families: HashMap<String, String>,
 }
 
 impl InMemoryIndex {
@@ -264,7 +269,18 @@ impl InMemoryIndex {
             by_name.entry(n.name.clone()).or_default().push(n.clone());
             by_id.insert(n.symbol.clone(), n);
         }
-        Ok(Self { by_name, by_id })
+        let families = wicked_estate_extract::registry()
+            .into_iter()
+            .map(|l| {
+                let fam = l.family().to_string();
+                (l.name, fam)
+            })
+            .collect();
+        Ok(Self {
+            by_name,
+            by_id,
+            families,
+        })
     }
 
     /// Every node, for passes that derive edges from the whole population (the estate join) —
@@ -283,6 +299,9 @@ impl SymbolIndex for InMemoryIndex {
     }
     fn all_nodes(&self) -> wicked_estate_core::Result<Vec<Node>> {
         Ok(self.by_id.values().cloned().collect())
+    }
+    fn language_family(&self, language: &str) -> Option<String> {
+        self.families.get(language).cloned()
     }
 }
 

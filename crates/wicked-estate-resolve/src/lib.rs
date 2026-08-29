@@ -46,10 +46,20 @@ impl Resolver for NameResolver {
     fn resolve(&self, refs: &[UnresolvedRef], index: &dyn SymbolIndex) -> Result<Vec<Edge>> {
         let mut out = Vec::new();
         for r in refs {
-            let candidates = index.by_name(&r.raw_name);
+            let mut candidates = index.by_name(&r.raw_name);
+            // Kind admissibility (D1) runs PRE-uniqueness — deliberately recall-widening:
+            // dropping a deny-listed homonym (e.g. an html type_alias) can make a legitimate
+            // same-family callable unique. Every edge this mints is measured (Q4b).
+            candidates.retain(|n| admissible_target(&r.kind, &n.kind));
             // Unique resolution only — ambiguity is deferred to a precise tier (W2.2+).
             if let [only] = candidates.as_slice() {
                 if only.symbol != r.from {
+                    // Family guard (D5) runs POST-uniqueness on the sole survivor — strictly
+                    // narrowing, never edge-minting (it is what stops a typescript ref whose
+                    // only admissible homonym is a bash variable from binding cross-family).
+                    if !family_compatible(index, from_family(index, &r.from).as_deref(), only) {
+                        continue;
+                    }
                     let edge = Edge::new(
                         r.from.clone(),
                         only.symbol.clone(),
@@ -88,6 +98,67 @@ fn is_callable(kind: &NodeKind) -> bool {
         kind,
         NodeKind::Function | NodeKind::Method | NodeKind::Constructor
     )
+}
+
+/// Target-kind admissibility (the D1 deny-list — shared by every name-based resolver).
+///
+/// - [`NodeKind::Import`] nodes are never edge targets, for ANY ref kind: an import node is a
+///   *reference site*, not a definition (a TS `res.json()` call must not bind to a Python
+///   `import json` node).
+/// - For [`EdgeKind::Calls`] refs, kinds that are definitively not call targets are rejected:
+///   type-level declarations (`Interface`/`Trait`/`TypeAlias`/`Enum`), value slots
+///   (`Field`/`Parameter`), containers (`File`/`Namespace`) and rules-engine entities (those
+///   bind through `RulesBridgeResolver`, not by name).
+/// - Kept for Calls: `Function`/`Method`/`Constructor`, `Class`/`Struct` (a `new X()`
+///   construction site is captured as `@call.function` by design), `Module` (JCL/HLASM/COBOL
+///   program calls target `Module` nodes — pinned by `tests/cross_language_estate.rs`),
+///   `Constant`/`Variable` (function-valued bindings: `const f = () => …`, `vi.fn()`),
+///   `Macro`, `Synthetic`, and `Other(_)`.
+fn admissible_target(ref_kind: &EdgeKind, cand_kind: &NodeKind) -> bool {
+    if matches!(cand_kind, NodeKind::Import) {
+        return false;
+    }
+    if *ref_kind != EdgeKind::Calls {
+        return true;
+    }
+    !matches!(
+        cand_kind,
+        NodeKind::Interface
+            | NodeKind::Trait
+            | NodeKind::TypeAlias
+            | NodeKind::Enum
+            | NodeKind::Field
+            | NodeKind::Parameter
+            | NodeKind::File
+            | NodeKind::Namespace
+            | NodeKind::Rule
+            | NodeKind::RuleSet
+            | NodeKind::Condition
+            | NodeKind::Action
+            | NodeKind::Fact
+    )
+}
+
+/// Language family of the ref's source node, when both the node and a manifest family exist.
+fn from_family(index: &dyn SymbolIndex, from: &wicked_estate_core::SymbolId) -> Option<String> {
+    index
+        .get(from)
+        .and_then(|n| index.language_family(n.language.as_str()))
+}
+
+/// Cross-family guard (D5): block a candidate only when BOTH ends carry a **known**
+/// `languages.toml` family and the families differ. Unknown/absent family (mainframe langs
+/// registered outside the manifest, `synthetic`/`tfstate` tags) or a missing from-node ⇒ allow —
+/// a strict guard would kill the shipped JCL/HLASM→COBOL joins.
+fn family_compatible(
+    index: &dyn SymbolIndex,
+    from_family: Option<&str>,
+    cand: &wicked_estate_core::Node,
+) -> bool {
+    match (from_family, index.language_family(cand.language.as_str())) {
+        (Some(f), Some(c)) => f == c,
+        _ => true,
+    }
 }
 
 // ── ScopedNameResolver ───────────────────────────────────────────────────────
@@ -151,6 +222,9 @@ impl Resolver for ScopedNameResolver {
         for r in refs {
             let mut candidates = index.by_name(&r.raw_name);
 
+            // Kind admissibility (D1): Import nodes are never targets, for any ref kind.
+            candidates.retain(|n| admissible_target(&r.kind, &n.kind));
+
             // For method-like edge kinds, narrow the pool to callable nodes.
             if matches!(r.kind, EdgeKind::Calls) {
                 candidates.retain(|n| is_callable(&n.kind));
@@ -158,6 +232,18 @@ impl Resolver for ScopedNameResolver {
 
             // Remove self-candidates immediately.
             candidates.retain(|n| n.symbol != r.from);
+
+            if candidates.is_empty() {
+                continue;
+            }
+
+            // Cross-family guard (D5), PRE-ranking — recall-widening within scope tiers by
+            // design: a same-family candidate in a scope tier is exactly what this resolver
+            // exists to bind, so dropping a cross-family homonym can flip tie→park into a
+            // unique winner. Measured by Q4b; pinned by
+            // scoped_family_retain_unshadows_same_family_homonym.
+            let from_fam = from_family(index, &r.from);
+            candidates.retain(|n| family_compatible(index, from_fam.as_deref(), n));
 
             if candidates.is_empty() {
                 continue;
@@ -354,10 +440,20 @@ impl wicked_estate_core::Resolver for ImportMapResolver {
                 None => continue, // this name isn't in the import map — skip
             };
 
-            // Collect callable candidates for this name.
+            // Collect callable candidates for this name (D1 admissibility + D5 family guard
+            // run pre-ranking, alongside the callable filter — same placement as
+            // ScopedNameResolver).
             let mut candidates = index.by_name(&r.raw_name);
+            candidates.retain(|n| admissible_target(&r.kind, &n.kind));
             candidates.retain(|n| is_callable(&n.kind));
             candidates.retain(|n| n.symbol != r.from); // no self-edges
+
+            if candidates.is_empty() {
+                continue;
+            }
+
+            let from_fam = from_family(index, &r.from);
+            candidates.retain(|n| family_compatible(index, from_fam.as_deref(), n));
 
             if candidates.is_empty() {
                 continue;
@@ -434,10 +530,14 @@ impl wicked_estate_core::Resolver for ImportMapResolver {
 ///
 /// ## Non-interference with code resolvers
 ///
-/// [`NameResolver`] and [`ScopedNameResolver`] only emit edges when candidates are callable or
-/// match function/method/constructor nodes. Since resource nodes are `NodeKind::Other("resource")`
-/// they are not callable, so those resolvers skip them. `InfraResolver` in turn requires at least
-/// one candidate to be a resource node before it acts, so it will not fire on code refs.
+/// [`ScopedNameResolver`] and [`ImportMapResolver`] keep **callable** candidates only for
+/// `Calls` refs (Function/Method/Constructor), so they never bind a resource node.
+/// [`NameResolver`] rejects the D1 deny-list (`Import` for every ref kind; for `Calls` also
+/// Interface/Trait/TypeAlias/Enum/Field/Parameter/File/Namespace and the rules-engine kinds) —
+/// the deny-list does NOT include `Other(..)`, so a unique resource node named like a code call
+/// CAN still bind at `NameResolver` unless the cross-family guard blocks it (resource nodes
+/// carry non-manifest language tags, so the guard allows them). `InfraResolver` in turn requires
+/// at least one candidate to be a resource node before it acts, so it will not fire on code refs.
 ///
 /// ## Ambiguity rule
 ///
@@ -1180,6 +1280,8 @@ mod tests {
     }
 
     /// Minimal in-memory index for unit tests (avoids depending on wicked-estate-store).
+    /// No family table — `language_family` stays the trait default (`None`), so the
+    /// cross-family guard allows everything (the pre-guard behaviour existing tests pin).
     struct VecIndex(Vec<Node>);
 
     impl SymbolIndex for VecIndex {
@@ -1192,6 +1294,61 @@ mod tests {
         fn all_nodes(&self) -> wicked_estate_core::Result<Vec<Node>> {
             Ok(self.0.clone())
         }
+    }
+
+    impl VecIndex {
+        /// The existing shape, named (FEAS-5).
+        fn plain(nodes: Vec<Node>) -> Self {
+            VecIndex(nodes)
+        }
+        /// Family-aware index for the D5 guard tests: `families` = (language, family) rows,
+        /// mirroring what `languages.toml` provides in production.
+        fn with_families(nodes: Vec<Node>, families: &[(&str, &str)]) -> FamilyIndex {
+            FamilyIndex {
+                inner: VecIndex(nodes),
+                families: families
+                    .iter()
+                    .map(|(l, f)| (l.to_string(), f.to_string()))
+                    .collect(),
+            }
+        }
+    }
+
+    /// VecIndex + a language→family table (overrides `language_family`).
+    struct FamilyIndex {
+        inner: VecIndex,
+        families: std::collections::HashMap<String, String>,
+    }
+
+    impl SymbolIndex for FamilyIndex {
+        fn by_name(&self, name: &str) -> Vec<Node> {
+            self.inner.by_name(name)
+        }
+        fn get(&self, id: &SymbolId) -> Option<Node> {
+            self.inner.get(id)
+        }
+        fn all_nodes(&self) -> wicked_estate_core::Result<Vec<Node>> {
+            self.inner.all_nodes()
+        }
+        fn language_family(&self, language: &str) -> Option<String> {
+            self.families.get(language).cloned()
+        }
+    }
+
+    /// A node with an explicit language and a symbol id derived from `sym_tag` (so homonyms get
+    /// distinct ids), kind `Function` unless overridden via [`node_kind_lang`].
+    fn node_lang(sym_tag: &str, name: &str, file: &str, lang: &str) -> Node {
+        node_kind_lang(sym_tag, name, file, lang, NodeKind::Function)
+    }
+
+    fn node_kind_lang(sym_tag: &str, name: &str, file: &str, lang: &str, kind: NodeKind) -> Node {
+        Node::new(
+            Symbol::global("test", None, vec![Descriptor::method(sym_tag, None)]).id(),
+            kind,
+            name,
+            Language::new(lang),
+            Location::new(file, Span::ZERO),
+        )
     }
 
     fn node_at(name: &str, file: &str) -> Node {
@@ -2561,6 +2718,381 @@ mod tests {
         assert_eq!(
             edges[0].metadata.get("via").and_then(|v| v.as_str()),
             Some("import-map")
+        );
+    }
+
+    // ── admissibility + family-guard tests (D1/D5, engine defect #2) ──────────
+
+    /// A TS `res.json()` call must not bind to a Python `import json` node — Import nodes are
+    /// reference sites, never definitions (rejected for EVERY ref kind).
+    #[test]
+    fn name_resolver_never_binds_calls_to_import_node() {
+        let caller = node_lang("nrimp_caller", "caller", "client.ts", "typescript");
+        let import_node =
+            node_kind_lang("nrimp_json", "json", "api.py", "python", NodeKind::Import);
+        let index = VecIndex::plain(vec![caller.clone(), import_node]);
+        let r = UnresolvedRef::new(
+            caller.symbol.clone(),
+            "json",
+            EdgeKind::Calls,
+            Location::new("client.ts", Span::ZERO),
+        );
+        assert!(NameResolver.resolve(&[r], &index).unwrap().is_empty());
+
+        // Import rejection applies to non-Calls kinds too.
+        let r2 = UnresolvedRef::new(
+            caller.symbol,
+            "json",
+            EdgeKind::References,
+            Location::new("client.ts", Span::ZERO),
+        );
+        assert!(NameResolver.resolve(&[r2], &index).unwrap().is_empty());
+    }
+
+    /// `new Notification()` must not bind to `interface Notification` (deny-listed for Calls).
+    #[test]
+    fn name_resolver_never_binds_calls_to_interface() {
+        let caller = node_lang("nrif_caller", "caller", "app.ts", "typescript");
+        let iface = node_kind_lang(
+            "nrif_notif",
+            "Notification",
+            "types.ts",
+            "typescript",
+            NodeKind::Interface,
+        );
+        let index = VecIndex::plain(vec![caller.clone(), iface]);
+        let r = UnresolvedRef::new(
+            caller.symbol,
+            "Notification",
+            EdgeKind::Calls,
+            Location::new("app.ts", Span::ZERO),
+        );
+        assert!(NameResolver.resolve(&[r], &index).unwrap().is_empty());
+    }
+
+    /// D1 keep-set: `new X()` construction sites (Class) and function-valued bindings (Constant)
+    /// stay legitimate unique Calls targets.
+    #[test]
+    fn name_resolver_keeps_class_and_constant_targets_for_calls() {
+        let caller = node_lang("nrkeep_caller", "caller", "app.ts", "typescript");
+        let class_node = node_kind_lang(
+            "nrkeep_api",
+            "ApiError",
+            "errors.ts",
+            "typescript",
+            NodeKind::Class,
+        );
+        let const_node = node_kind_lang(
+            "nrkeep_store",
+            "useRuntimeStore",
+            "store.ts",
+            "typescript",
+            NodeKind::Constant,
+        );
+        let index = VecIndex::plain(vec![caller.clone(), class_node.clone(), const_node.clone()]);
+        let refs = vec![
+            UnresolvedRef::new(
+                caller.symbol.clone(),
+                "ApiError",
+                EdgeKind::Calls,
+                Location::new("app.ts", Span::ZERO),
+            ),
+            UnresolvedRef::new(
+                caller.symbol,
+                "useRuntimeStore",
+                EdgeKind::Calls,
+                Location::new("app.ts", Span::ZERO),
+            ),
+        ];
+        let edges = NameResolver.resolve(&refs, &index).unwrap();
+        assert_eq!(edges.len(), 2, "Class and Constant Calls targets are kept");
+        let targets: Vec<_> = edges.iter().map(|e| e.target.clone()).collect();
+        assert!(targets.contains(&class_node.symbol));
+        assert!(targets.contains(&const_node.symbol));
+    }
+
+    /// The Calls deny-list must not leak into other ref kinds: `extends → interface` is legal
+    /// (crew ships 2 such name-resolver edges).
+    #[test]
+    fn name_resolver_keeps_extends_to_interface() {
+        let sub = node_kind_lang("nrext_sub", "Sub", "sub.ts", "typescript", NodeKind::Class);
+        let iface = node_kind_lang(
+            "nrext_base",
+            "Base",
+            "base.ts",
+            "typescript",
+            NodeKind::Interface,
+        );
+        let index = VecIndex::plain(vec![sub.clone(), iface.clone()]);
+        let r = UnresolvedRef::new(
+            sub.symbol,
+            "Base",
+            EdgeKind::Extends,
+            Location::new("sub.ts", Span::ZERO),
+        );
+        let edges = NameResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(
+            edges.len(),
+            1,
+            "Extends → Interface must survive the deny-list"
+        );
+        assert_eq!(edges[0].target, iface.symbol);
+    }
+
+    /// D5: python → typescript is cross-family (both known, different) → blocked.
+    #[test]
+    fn family_guard_blocks_python_ref_to_typescript_node() {
+        let caller = node_lang("fg_py_caller", "caller", "api.py", "python");
+        let target = node_lang("fg_ts_fn", "handle", "app.ts", "typescript");
+        let index = VecIndex::with_families(
+            vec![caller.clone(), target],
+            &[("python", "python"), ("typescript", "javascript")],
+        );
+        let r = UnresolvedRef::new(
+            caller.symbol,
+            "handle",
+            EdgeKind::Calls,
+            Location::new("api.py", Span::ZERO),
+        );
+        assert!(NameResolver.resolve(&[r], &index).unwrap().is_empty());
+    }
+
+    /// D5: tsx → typescript share family `javascript` → allowed.
+    #[test]
+    fn family_guard_allows_tsx_ref_to_typescript_node() {
+        let caller = node_lang("fg_tsx_caller", "caller", "App.tsx", "tsx");
+        let target = node_lang("fg_ts_target", "handle", "app.ts", "typescript");
+        let index = VecIndex::with_families(
+            vec![caller.clone(), target.clone()],
+            &[("tsx", "javascript"), ("typescript", "javascript")],
+        );
+        let r = UnresolvedRef::new(
+            caller.symbol,
+            "handle",
+            EdgeKind::Calls,
+            Location::new("App.tsx", Span::ZERO),
+        );
+        let edges = NameResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(edges.len(), 1, "same-family (javascript) must bind");
+        assert_eq!(edges[0].target, target.symbol);
+    }
+
+    /// D5/F7: jcl and cobol have NO manifest row (unknown family) → guard allows; the target is
+    /// a `Module` node (a COBOL program), which the D1 keep-set admits for Calls.
+    #[test]
+    fn family_guard_allows_unknown_family_jcl_to_cobol() {
+        let step = node_kind_lang(
+            "fg_jcl_step",
+            "STEP1",
+            "payroll.jcl",
+            "jcl",
+            NodeKind::Other("job_step".to_string()),
+        );
+        let program = node_kind_lang(
+            "fg_cobol_prog",
+            "PAYROLL",
+            "payroll.cbl",
+            "cobol",
+            NodeKind::Module,
+        );
+        // Families table deliberately does NOT know jcl/cobol (like the real manifest).
+        let index = VecIndex::with_families(
+            vec![step.clone(), program.clone()],
+            &[("typescript", "javascript")],
+        );
+        let r = UnresolvedRef::new(
+            step.symbol,
+            "PAYROLL",
+            EdgeKind::Calls,
+            Location::new("payroll.jcl", Span::ZERO),
+        );
+        let edges = NameResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(edges.len(), 1, "unknown-family mainframe join must survive");
+        assert_eq!(edges[0].target, program.symbol);
+    }
+
+    /// D5: a ref whose `from` symbol has no node in the index (extractor-synthetic sources) has
+    /// no source family → allow.
+    #[test]
+    fn family_guard_allows_missing_from_node() {
+        let target = node_lang("fg_missing_target", "helper", "util.ts", "typescript");
+        let index = VecIndex::with_families(
+            vec![target.clone()],
+            &[("typescript", "javascript"), ("python", "python")],
+        );
+        let ghost_from =
+            Symbol::global("test", None, vec![Descriptor::method("fg_ghost", None)]).id();
+        let r = UnresolvedRef::new(
+            ghost_from,
+            "helper",
+            EdgeKind::Calls,
+            Location::new("ghost.py", Span::ZERO),
+        );
+        let edges = NameResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(edges.len(), 1, "missing from-node must not block");
+        assert_eq!(edges[0].target, target.symbol);
+    }
+
+    /// ScopedNameResolver applies the same family guard (shared helper, D3).
+    #[test]
+    fn scoped_resolver_applies_family_guard() {
+        let caller = node_lang("sfg_caller", "caller", "app.ts", "typescript");
+        let target = node_lang("sfg_pyfn", "compute", "calc.py", "python");
+        let index = VecIndex::with_families(
+            vec![caller.clone(), target],
+            &[("typescript", "javascript"), ("python", "python")],
+        );
+        let r = UnresolvedRef::new(
+            caller.symbol,
+            "compute",
+            EdgeKind::Calls,
+            Location::new("app.ts", Span::ZERO),
+        );
+        assert!(ScopedNameResolver.resolve(&[r], &index).unwrap().is_empty());
+    }
+
+    // ── F16 shape tests (FEAS-1: recall-widening placements pinned) ───────────
+
+    /// Crew `code` shape: candidates = a deny-listed css type_alias + a cross-family bash
+    /// variable. The deny-list makes the bash variable the unique survivor; ONLY the
+    /// post-uniqueness family guard stops the wrong edge → 0 edges.
+    #[test]
+    fn deny_list_survivor_blocked_by_family_guard() {
+        let caller = node_lang("f16_code_caller", "caller", "src/api.ts", "typescript");
+        let css_alias = node_kind_lang(
+            "f16_code_css",
+            "code",
+            "site/src/styles/crew.css",
+            "css",
+            NodeKind::TypeAlias,
+        );
+        let bash_var = node_kind_lang(
+            "f16_code_bash",
+            "code",
+            "scripts/verify-ecosystem.sh",
+            "bash",
+            NodeKind::Variable,
+        );
+        let index = VecIndex::with_families(
+            vec![caller.clone(), css_alias, bash_var],
+            &[
+                ("typescript", "javascript"),
+                ("css", "css"),
+                ("bash", "bash"),
+            ],
+        );
+        let r = UnresolvedRef::new(
+            caller.symbol,
+            "code",
+            EdgeKind::Calls,
+            Location::new("src/api.ts", Span::ZERO),
+        );
+        assert!(
+            NameResolver.resolve(&[r], &index).unwrap().is_empty(),
+            "the deny-list unshadows the bash variable; the family guard must block it"
+        );
+    }
+
+    /// Studio `p` shape: a deny-listed html type_alias homonym shadows a same-family tsx
+    /// function. Dropping the type_alias pre-uniqueness is the INTENDED recovery → exactly one
+    /// new name-resolver edge at 0.60.
+    #[test]
+    fn deny_list_unshadows_same_family_callable() {
+        let caller = node_lang("f16_p_caller", "caller", "src/App.tsx", "tsx");
+        let html_alias = node_kind_lang(
+            "f16_p_html",
+            "p",
+            "e2e/fixtures/doc-fixture.html",
+            "html",
+            NodeKind::TypeAlias,
+        );
+        let tsx_fn = node_lang("f16_p_fn", "p", "src/components/RunTimeline.tsx", "tsx");
+        let index = VecIndex::with_families(
+            vec![caller.clone(), html_alias, tsx_fn.clone()],
+            &[("tsx", "javascript"), ("html", "html")],
+        );
+        let r = UnresolvedRef::new(
+            caller.symbol,
+            "p",
+            EdgeKind::Calls,
+            Location::new("src/App.tsx", Span::ZERO),
+        );
+        let edges = NameResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(edges.len(), 1, "the tsx function must be unshadowed");
+        assert_eq!(edges[0].target, tsx_fn.symbol);
+        assert_eq!(edges[0].resolved_by, "name-resolver");
+        assert!((edges[0].confidence.get() - 0.60).abs() < 1e-6);
+    }
+
+    /// Scoped pre-ranking family retain: a python-Function + typescript-Function cross-file
+    /// homonym pair flips tie→park into unique→0.60 — deliberate recall-widening (D3).
+    #[test]
+    fn scoped_family_retain_unshadows_same_family_homonym() {
+        let caller = node_lang("f16_sc_caller", "caller", "src/a.ts", "typescript");
+        let py_fn = node_lang("f16_sc_py", "process", "jobs/run.py", "python");
+        let ts_fn = node_lang("f16_sc_ts", "process", "lib/process.ts", "typescript");
+        let index = VecIndex::with_families(
+            vec![caller.clone(), py_fn, ts_fn.clone()],
+            &[("typescript", "javascript"), ("python", "python")],
+        );
+        let r = UnresolvedRef::new(
+            caller.symbol,
+            "process",
+            EdgeKind::Calls,
+            Location::new("src/a.ts", Span::ZERO),
+        );
+        let edges = ScopedNameResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(
+            edges.len(),
+            1,
+            "dropping the cross-family homonym must leave a unique cross-file winner"
+        );
+        assert_eq!(edges[0].target, ts_fn.symbol);
+        assert!((edges[0].confidence.get() - 0.60).abs() < 1e-6);
+    }
+
+    // ── D14 pinning tests (FEAS-2: the corpora have zero svelte/vue files) ────
+
+    /// A function declared in a `.vue` script block is a legitimate target for a typescript
+    /// Calls ref — vue is in the javascript family.
+    #[test]
+    fn family_guard_allows_vue_to_typescript_node() {
+        let caller = node_lang("d14_vue_caller", "caller", "src/main.ts", "typescript");
+        let vue_fn = node_lang("d14_vue_fn", "mount", "src/App.vue", "vue");
+        let index = VecIndex::with_families(
+            vec![caller.clone(), vue_fn.clone()],
+            &[("typescript", "javascript"), ("vue", "javascript")],
+        );
+        let r = UnresolvedRef::new(
+            caller.symbol,
+            "mount",
+            EdgeKind::Calls,
+            Location::new("src/main.ts", Span::ZERO),
+        );
+        let edges = NameResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(edges.len(), 1, "vue is javascript-family; must bind");
+        assert_eq!(edges[0].target, vue_fn.symbol);
+    }
+
+    /// html is its OWN family (D14): even a callable-kinded symbol minted from markup must not
+    /// bind from a typescript Calls ref.
+    #[test]
+    fn family_guard_blocks_html_to_typescript_ref() {
+        let caller = node_lang("d14_html_caller", "caller", "src/main.ts", "typescript");
+        let html_sym = node_lang("d14_html_fn", "render", "docs/page.html", "html");
+        let index = VecIndex::with_families(
+            vec![caller.clone(), html_sym],
+            &[("typescript", "javascript"), ("html", "html")],
+        );
+        let r = UnresolvedRef::new(
+            caller.symbol,
+            "render",
+            EdgeKind::Calls,
+            Location::new("src/main.ts", Span::ZERO),
+        );
+        assert!(
+            NameResolver.resolve(&[r], &index).unwrap().is_empty(),
+            "html is its own family; a TS Calls ref must not bind into markup"
         );
     }
 }
