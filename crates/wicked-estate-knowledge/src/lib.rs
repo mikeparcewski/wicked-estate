@@ -156,14 +156,16 @@ pub fn tool_defs() -> Value {
             "description": "Standalone recall: the most relevant token-budgeted knowledge slice for a query (keyword ∪ vector, RRF-fused). Each item in `items` carries `node_id`, `class`, `label`, `body_snippet`, `score`, and `source` (provenance set at ingest, e.g. a file path or URL; empty string when not recorded).",
             "inputSchema": { "type": "object", "required": ["query"], "properties": {
                 "query": {"type": "string"},
-                "token_budget": {"type": "integer"}
+                "token_budget": {"type": "integer"},
+                "scope_prefix": {"type": "string", "description": "Optional subtree filter: only knowledge whose scope equals this prefix or DESCENDS from it (same predicate as memory.recall scope_prefix; the wiki convention scopes guidance as wiki:<area>). \"\" = root subtree = everything. Omitted or null = no scope filtering."}
             }}
         },
         {
             "name": "knowledge.coverage",
-            "description": "Coverage: node counts (optionally per class) and the count of logged recall misses (gap-hunting input).",
+            "description": "Coverage: node counts (optionally per class, optionally within a scope subtree) and the count of logged recall misses (gap-hunting input).",
             "inputSchema": { "type": "object", "properties": {
-                "class": {"type": "string", "enum": ["doc","section","chunk","concept"]}
+                "class": {"type": "string", "enum": ["doc","section","chunk","concept"]},
+                "scope_prefix": {"type": "string", "description": "Optional subtree filter (same predicate as knowledge.recall scope_prefix)."}
             }}
         },
         {
@@ -340,8 +342,25 @@ fn handle_call(
                 .get("token_budget")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(2000) as usize;
+            // Optional subtree filter (arch-R5), mirroring memory.recall's wire contract:
+            // omitted/null = no scope filtering (pre-0.16 behavior exactly); "" = root subtree =
+            // everything; a present NON-string value is invalid params (fail loud — silently
+            // ignoring it would answer from the WRONG visibility set).
+            let scope_prefix: Option<String> = match a.get("scope_prefix") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(sp)) => Some(sp.clone()),
+                Some(other) => {
+                    return err(
+                        id,
+                        -32602,
+                        &format!(
+                            "invalid scope_prefix: expected a string scope-path prefix, got {other}"
+                        ),
+                    );
+                }
+            };
             engine
-                .recall(&q, budget, now)
+                .recall(&q, budget, scope_prefix.as_deref(), now)
                 .map(|hits| {
                     if hits.is_empty() {
                         content("(no relevant knowledge)".into())
@@ -363,8 +382,9 @@ fn handle_call(
         }
         "knowledge.coverage" => {
             let class = s("class").map(|c| class_of(&c));
+            let scope_prefix = s("scope_prefix");
             engine
-                .count(class)
+                .count(class, scope_prefix.as_deref())
                 .map(|n| {
                     content(format!(
                         "{n} knowledge node(s); {} recall miss(es) logged",
@@ -964,13 +984,24 @@ pub trait KnowledgeApi {
         evidence_count: u32,
         provenance: &str,
     ) -> anyhow::Result<String>;
+    /// Recall the most relevant token-budgeted knowledge slice for `query`. `scope_prefix`
+    /// (arch-R5, mirroring `memory.recall`'s wire contract): `Some(prefix)` restricts recall to
+    /// knowledge whose scope equals the prefix or descends from it (`Some("")` = root subtree =
+    /// everything); `None` = no scope filtering.
     fn recall(
         &mut self,
         query: &str,
         token_budget: usize,
+        scope_prefix: Option<&str>,
         now: i64,
     ) -> anyhow::Result<Vec<KnowledgeItem>>;
-    fn coverage(&self, class: Option<&str>) -> anyhow::Result<KnowledgeCoverage>;
+    /// Node counts, optionally per class and/or within a scope subtree (`scope_prefix`, same
+    /// predicate as [`KnowledgeApi::recall`] — mirrors `memory.coverage`).
+    fn coverage(
+        &self,
+        class: Option<&str>,
+        scope_prefix: Option<&str>,
+    ) -> anyhow::Result<KnowledgeCoverage>;
     fn relate_code(
         &mut self,
         knowledge_id: &str,
@@ -1036,9 +1067,10 @@ impl KnowledgeApi for KnowledgeEngine {
         &mut self,
         query: &str,
         token_budget: usize,
+        scope_prefix: Option<&str>,
         now: i64,
     ) -> anyhow::Result<Vec<KnowledgeItem>> {
-        let hits = KnowledgeEngine::recall(self, query, token_budget, now)?;
+        let hits = KnowledgeEngine::recall(self, query, token_budget, scope_prefix, now)?;
         Ok(hits
             .into_iter()
             .map(|h| KnowledgeItem {
@@ -1052,12 +1084,16 @@ impl KnowledgeApi for KnowledgeEngine {
             .collect())
     }
 
-    fn coverage(&self, class: Option<&str>) -> anyhow::Result<KnowledgeCoverage> {
+    fn coverage(
+        &self,
+        class: Option<&str>,
+        scope_prefix: Option<&str>,
+    ) -> anyhow::Result<KnowledgeCoverage> {
         let kclass = class.map(class_of);
-        let total = KnowledgeEngine::count(self, kclass)? as u32;
+        let total = KnowledgeEngine::count(self, kclass, scope_prefix)? as u32;
         let mut by_class: HashMap<String, u32> = HashMap::new();
         for &kc in &[KClass::Doc, KClass::Section, KClass::Chunk, KClass::Concept] {
-            let n = KnowledgeEngine::count(self, Some(kc))? as u32;
+            let n = KnowledgeEngine::count(self, Some(kc), scope_prefix)? as u32;
             by_class.insert(kc.as_kind().to_string(), n);
         }
         Ok(KnowledgeCoverage {

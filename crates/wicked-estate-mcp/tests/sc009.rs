@@ -3,8 +3,8 @@
 //! Covers:
 //! - SC-009: Opens all 4 fixture DBs and verifies 4 read operations each return non-empty results.
 //! - DB compatibility (DoD §2.6): Each v0.12.x fixture opens without error (no migration required).
-//! - Tools count: `tools/list` with all 4 stores open returns exactly 23 tools
-//!   (10 estate + 6 memory + 7 knowledge; SemanticSearch absent — no embedder meta in fixtures).
+//! - Tools count: `tools/list` with all 4 stores open returns exactly 24 tools
+//!   (11 estate + 6 memory + 7 knowledge; SemanticSearch absent — no embedder meta in fixtures).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -248,8 +248,8 @@ fn sc009_all_four_stores_open_and_all_reads_return_nonempty() {
          (xedge tgt_epoch=0 == estate symbol epoch=0, edge must resolve); got: {about_inner}"
     );
 
-    // ── tools/list with all 4 stores open → exactly 23 tools ─────────────────
-    // 10 estate (unconditional) + 6 memory + 7 knowledge = 23.
+    // ── tools/list with all 4 stores open → exactly 24 tools ─────────────────
+    // 11 estate (unconditional, incl. rules.recall) + 6 memory + 7 knowledge = 24.
     // SemanticSearch is absent: McpContext::default() has embedder_meta_id=None → dim-guard fails.
 
     let req_list = json!({
@@ -276,9 +276,9 @@ fn sc009_all_four_stores_open_and_all_reads_return_nonempty() {
         .unwrap_or_else(|| panic!("tools/list: 'tools' must be array; got: {resp_list}"));
     assert_eq!(
         tools.len(),
-        23,
-        "tools/list with all 4 stores must return exactly 23 tools \
-         (10 estate + 6 memory + 7 knowledge); got {}: {:?}",
+        24,
+        "tools/list with all 4 stores must return exactly 24 tools \
+         (11 estate + 6 memory + 7 knowledge); got {}: {:?}",
         tools.len(),
         tools
             .iter()

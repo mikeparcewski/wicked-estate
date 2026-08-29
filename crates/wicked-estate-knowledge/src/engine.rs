@@ -12,7 +12,7 @@
 use uuid::Uuid;
 use wicked_estate_core::{
     Confidence, Direction, Edge, EdgeKind, GraphRead, GraphWrite, Language, Location, Node,
-    NodeKind, ResolutionTier, Result, Span, Symbol, SymbolId, SymbolQuery,
+    NodeKind, ResolutionTier, Result, Scope, Span, Symbol, SymbolId, SymbolQuery,
 };
 use wicked_estate_memory_core::{Candidate, Tier, budget_pack, rrf_fuse};
 use wicked_estate_overlay::XedgeStore;
@@ -106,6 +106,12 @@ impl KNode {
     }
 
     /// Materialize as an estate `Node` (kind `Other("k*")`, fields in `metadata`).
+    ///
+    /// The scope is stamped TWICE: canonically on `Node.scope` (so the store-side
+    /// `SymbolQuery::scope_prefix` predicate — pushed into FTS candidate retrieval BEFORE any
+    /// `limit`, multi-tenant isolation — can see it) and verbatim in `metadata` (the wire field
+    /// [`KNode::from_node`] hydrates). Nodes written before scope stamping (≤ 0.15) carry scope
+    /// only in metadata; see [`KnowledgeEngine::recall`] for how they behave under a scoped recall.
     pub fn to_node(&self) -> Node {
         let mut node = Node::new(
             self.symbol(),
@@ -113,7 +119,8 @@ impl KNode {
             self.content.clone(),
             Language::new("knowledge"),
             Location::new("knowledge", Span::ZERO),
-        );
+        )
+        .with_scope(Scope::parse(&self.scope));
         let m = &mut node.metadata;
         m.insert(meta_keys::KCLASS.into(), self.class.as_kind().into());
         m.insert(meta_keys::CONTENT.into(), self.content.clone().into());
@@ -170,6 +177,23 @@ pub struct RecallMiss {
     pub ts: i64,
     pub result_count: usize,
     pub top_score: f64,
+}
+
+/// Knowledge scope-subtree predicate (arch-R5): the estate-wide segment-aware
+/// `Scope::path_in_prefix` (`""` = everything, `"wiki:architecture"` = that scope + descendants,
+/// mid-segment prefixes match nothing), EXTENDED with one knowledge-side form — a prefix ending in
+/// `:` is a **kind wildcard**: `"wiki:"` matches every scope whose segment at that position
+/// carries the `wiki` kind (`wiki:architecture`, `wiki:event-grammar`, …). Memory's predicate has
+/// no such form (a partial segment matches nothing there); the extension is what lets one recall
+/// span every `wiki:<area>` subtree, per the wiki scoping convention.
+fn scope_in_prefix(scope: &str, prefix: &str) -> bool {
+    let canonical = Scope::parse(scope);
+    if prefix.ends_with(':') {
+        // Kind wildcard: compare against the canonical rendering — the colon bounds the kind, so
+        // "wiki:" cannot match a "wikix:…" scope, and "org:acme/unit:" scopes to acme's units.
+        return canonical.as_path().starts_with(prefix);
+    }
+    canonical.path_in_prefix(prefix)
 }
 
 /// The knowledge engine: its OWN single-writer SqliteStore (own file → own FTS, DEC-1).
@@ -283,13 +307,24 @@ impl KnowledgeEngine {
         self.store.get_node(id)
     }
 
-    /// Count knowledge nodes (optionally of one class).
-    pub fn count(&self, class: Option<KClass>) -> Result<usize> {
-        Ok(self.all_nodes(class)?.len())
+    /// Count knowledge nodes (optionally of one class, optionally within a scope subtree).
+    pub fn count(&self, class: Option<KClass>, scope_prefix: Option<&str>) -> Result<usize> {
+        Ok(self.all_nodes(class, scope_prefix)?.len())
     }
 
-    /// All knowledge nodes (optionally of one class) decoded.
-    pub fn all_nodes(&self, class: Option<KClass>) -> Result<Vec<KNode>> {
+    /// All knowledge nodes (optionally of one class, optionally within a scope subtree) decoded.
+    ///
+    /// The scope predicate (arch-R5) is applied on the HYDRATED metadata scope — the field every
+    /// knowledge node has carried since ingest gained `scope` — not pushed into
+    /// `SymbolQuery::scope_prefix`, because nodes written before 0.16 predate `Node.scope`
+    /// stamping and a store-side predicate would silently exclude them from an unlimited full
+    /// scan that has no top-k to isolate. Same subtree semantics either way
+    /// (`Scope::path_in_prefix`).
+    pub fn all_nodes(
+        &self,
+        class: Option<KClass>,
+        scope_prefix: Option<&str>,
+    ) -> Result<Vec<KNode>> {
         let kinds = match class {
             Some(c) => vec![NodeKind::Other(c.as_kind().into())],
             None => [KClass::Doc, KClass::Section, KClass::Chunk, KClass::Concept]
@@ -303,14 +338,32 @@ impl KnowledgeEngine {
             kinds,
             language: None,
             limit: None,
-            scope_prefix: None,
+            scope_prefix: None, // predicate applied below on the hydrated metadata scope
         })?;
-        Ok(nodes.iter().filter_map(KNode::from_node).collect())
+        Ok(nodes
+            .iter()
+            .filter_map(KNode::from_node)
+            .filter(|kn| match scope_prefix {
+                Some(p) => scope_in_prefix(&kn.scope, p),
+                None => true,
+            })
+            .collect())
     }
 
     /// One BM25-ordered FTS candidate list, scoped to the given knowledge kinds. `text` is
     /// phrase-quoted by the store, so a multi-token string requires ADJACENT tokens.
-    fn fts_list(&self, text: &str, kinds: &[NodeKind]) -> Result<Vec<SymbolId>> {
+    ///
+    /// A canonical `scope_prefix` (arch-R5) is pushed into the store predicate, which filters
+    /// BEFORE the `limit` truncation — so a scoped query's top-k is never crowded out by other
+    /// scopes' BM25 hits (the `SymbolQuery::scope_prefix` isolation contract). A kind-wildcard
+    /// prefix (trailing `:`, e.g. `"wiki:"`) is NOT pushed down (the store predicate is strict);
+    /// [`scope_in_prefix`] filters those post-hydration in the caller.
+    fn fts_list(
+        &self,
+        text: &str,
+        kinds: &[NodeKind],
+        scope_prefix: Option<&str>,
+    ) -> Result<Vec<SymbolId>> {
         Ok(self
             .store
             .find_symbols(&SymbolQuery {
@@ -319,7 +372,12 @@ impl KnowledgeEngine {
                 kinds: kinds.to_vec(),
                 language: None,
                 limit: Some(self.k),
-                scope_prefix: None,
+                // Store-side pushdown only for canonical prefixes — the store predicate is the
+                // strict segment-aware one and would match NOTHING for a kind-wildcard ("wiki:")
+                // prefix; those are filtered post-hydration by `scope_in_prefix` instead.
+                scope_prefix: scope_prefix
+                    .filter(|p| !p.ends_with(':'))
+                    .map(str::to_string),
             })?
             .iter()
             .map(|n| n.symbol.clone())
@@ -336,7 +394,7 @@ impl KnowledgeEngine {
     /// its unigrams. The per-term lists alone lose that adjacency — measured on the S3 parity
     /// bench as estate's one outright class loss vs wicked-brain FTS (symbolish r@10 0.494 vs
     /// 0.786). Skipped when the query is already a single bare term (identical list, no signal).
-    fn keyword_candidates(&self, query: &str) -> Result<Vec<SymbolId>> {
+    fn keyword_candidates(&self, query: &str, scope_prefix: Option<&str>) -> Result<Vec<SymbolId>> {
         let mut terms: Vec<String> = query
             .split(|c: char| !c.is_alphanumeric())
             .filter(|w| w.len() >= 2)
@@ -356,13 +414,13 @@ impl KnowledgeEngine {
         let phrase = query.trim();
         let single_bare_term = terms.len() == 1 && terms[0] == phrase.to_lowercase();
         if !phrase.is_empty() && !single_bare_term {
-            let l = self.fts_list(phrase, &recall_kinds)?;
+            let l = self.fts_list(phrase, &recall_kinds, scope_prefix)?;
             if !l.is_empty() {
                 lists.push(l);
             }
         }
         for term in terms {
-            let l = self.fts_list(&term, &recall_kinds)?;
+            let l = self.fts_list(&term, &recall_kinds, scope_prefix)?;
             if !l.is_empty() {
                 lists.push(l);
             }
@@ -377,8 +435,33 @@ impl KnowledgeEngine {
     /// Standalone knowledge recall. **REUSES** the `-core` pipeline: keyword (FTS OR-terms) ∪ vector
     /// (ANN), fused by `rrf_fuse`, packed by `budget_pack` — the SAME fusion/budget math memory uses
     /// (R3: no second `recall_impl`). Logs a miss when the top score falls at/below the floor.
-    pub fn recall(&mut self, query: &str, token_budget: usize, now: i64) -> Result<Vec<KRecalled>> {
-        let kw = self.keyword_candidates(query)?;
+    ///
+    /// `scope_prefix` (arch-R5, mirroring `memory.recall`'s wire contract): when present, only
+    /// knowledge whose scope equals the prefix or descends from it is recalled (`""` = root
+    /// subtree = everything; `None` = no scope filtering — the pre-0.16 behavior exactly). The
+    /// predicate is applied twice: pushed into the FTS candidate query (store-side, pre-`limit` —
+    /// top-k isolation for nodes written ≥ 0.16, which stamp `Node.scope`) and re-checked on every
+    /// hydrated candidate's metadata scope — the authoritative filter, which also covers the
+    /// vector (ANN) lane and legacy nodes whose scope predates `Node.scope` stamping (those can
+    /// only surface via the vector lane under a scoped recall; re-ingest to give them full
+    /// scoped-FTS visibility).
+    ///
+    /// A prefix ending in `:` is a kind wildcard (`"wiki:"` = every `wiki:<area>` subtree) — see
+    /// [`scope_in_prefix`]; such prefixes are filtered engine-side only (no store pushdown).
+    ///
+    /// Scoping convention (arch-R5): the architecture wiki ingests under `wiki:<area>` scopes
+    /// (`wiki:architecture`, `wiki:event-grammar`, …) with `source` = a stable URI (repo-relative
+    /// doc path or `wiki://<page>#<anchor>`), and chunks embed their enforceable twin's
+    /// `PAT-`/`POL-` rule id in the chunk TEXT — so one recall surfaces the guidance, its citation,
+    /// and the id `rules.recall` enforces deterministically.
+    pub fn recall(
+        &mut self,
+        query: &str,
+        token_budget: usize,
+        scope_prefix: Option<&str>,
+        now: i64,
+    ) -> Result<Vec<KRecalled>> {
+        let kw = self.keyword_candidates(query, scope_prefix)?;
 
         // Vector (ANN) candidates — only when the embedder carries real semantic signal. The
         // dependency-free HashEmbedder fallback is a lexical hash: fusing its neighbours as a
@@ -418,6 +501,14 @@ impl KnowledgeEngine {
             let Some(kn) = KNode::from_node(&node) else {
                 continue;
             };
+            // Authoritative scope check (arch-R5): the hydrated metadata scope, canonically
+            // parsed, must fall within the requested subtree. Covers the vector lane (which has
+            // no store-side predicate) and agrees with the FTS pushdown for ≥0.16 nodes.
+            if let Some(prefix) = scope_prefix {
+                if !scope_in_prefix(&kn.scope, prefix) {
+                    continue;
+                }
+            }
             let doc_group = self
                 .store
                 .neighbors(&id, Direction::Dependencies)?
@@ -464,7 +555,7 @@ impl KnowledgeEngine {
         if out.is_empty() || top <= self.recall_floor {
             self.misses.push(RecallMiss {
                 query: query.to_string(),
-                scope: String::new(),
+                scope: scope_prefix.unwrap_or_default().to_string(),
                 ts: now,
                 result_count: out.len(),
                 top_score: top,
@@ -566,13 +657,121 @@ mod tests {
             .unwrap();
         assert_eq!(chunks.len(), 2, "two non-empty chunks written");
         let hits = e
-            .recall("how does billing charge customers", 2000, 2)
+            .recall("how does billing charge customers", 2000, None, 2)
             .unwrap();
         assert!(
             hits.iter().any(|h| h.content.contains("Stripe")),
             "recall must surface the ingested Stripe chunk, got: {:?}",
             hits.iter().map(|h| &h.content).collect::<Vec<_>>()
         );
+    }
+
+    /// arch-R5: `scope_prefix` restricts recall to a scope subtree — the `wiki:<area>` convention.
+    /// The same lexical query matches chunks in BOTH scopes; only the prefix separates them.
+    #[test]
+    fn recall_scope_prefix_restricts_to_subtree() {
+        let mut e = KnowledgeEngine::in_memory().unwrap();
+        e.ingest(
+            "Architecture wiki: planes",
+            &["The estate graph is the center of gravity for architecture guidance.".into()],
+            "wiki:architecture",
+            "wiki://architecture#planes",
+            1,
+        )
+        .unwrap();
+        e.ingest(
+            "Session note",
+            &["Random note that also mentions architecture guidance loosely.".into()],
+            "project:pay",
+            "notes/session.md",
+            1,
+        )
+        .unwrap();
+
+        // Scoped to the wiki subtree: only the wiki chunk may surface.
+        let wiki_hits = e
+            .recall("architecture guidance", 2000, Some("wiki:architecture"), 2)
+            .unwrap();
+        assert!(
+            !wiki_hits.is_empty(),
+            "scoped recall must surface the wiki chunk"
+        );
+        assert!(
+            wiki_hits
+                .iter()
+                .all(|h| h.source == "wiki://architecture#planes"),
+            "scoped recall must return ONLY wiki-scoped knowledge; got sources {:?}",
+            wiki_hits.iter().map(|h| &h.source).collect::<Vec<_>>()
+        );
+
+        // Kind wildcard (the AW-8 acceptance form): "wiki:" spans every wiki:<area> subtree.
+        let kind_hits = e
+            .recall("architecture guidance", 2000, Some("wiki:"), 2)
+            .unwrap();
+        assert!(
+            !kind_hits.is_empty()
+                && kind_hits
+                    .iter()
+                    .all(|h| h.source == "wiki://architecture#planes"),
+            "scope_prefix \"wiki:\" must return wiki-only guidance with citations; got {:?}",
+            kind_hits.iter().map(|h| &h.source).collect::<Vec<_>>()
+        );
+
+        // Sibling subtree: nothing (segment-aware — "wiki:arch" must not match "wiki:architecture").
+        let sibling_hits = e
+            .recall("architecture guidance", 2000, Some("wiki:arch"), 2)
+            .unwrap();
+        assert!(
+            sibling_hits.is_empty(),
+            "a mid-segment prefix must match nothing; got {:?}",
+            sibling_hits.iter().map(|h| &h.source).collect::<Vec<_>>()
+        );
+
+        // "" = root subtree = everything; None = no filtering (both scopes visible either way).
+        for scope in [Some(""), None] {
+            let all_hits = e.recall("architecture guidance", 2000, scope, 2).unwrap();
+            let sources: Vec<&String> = all_hits.iter().map(|h| &h.source).collect();
+            assert!(
+                sources.iter().any(|s| *s == "wiki://architecture#planes")
+                    && sources.iter().any(|s| *s == "notes/session.md"),
+                "scope_prefix={scope:?} must see both scopes; got {sources:?}"
+            );
+        }
+    }
+
+    /// arch-R5: scoped `count` (the knowledge.coverage path) uses the same subtree predicate.
+    #[test]
+    fn count_scope_prefix_restricts_to_subtree() {
+        let mut e = KnowledgeEngine::in_memory().unwrap();
+        e.ingest(
+            "Wiki doc",
+            &["wiki chunk".into()],
+            "wiki:estate",
+            "wiki://estate",
+            1,
+        )
+        .unwrap();
+        e.ingest(
+            "Other doc",
+            &["other chunk".into()],
+            "project:pay",
+            "docs/other.md",
+            1,
+        )
+        .unwrap();
+        // Each ingest wrote 1 kdoc + 1 kchunk.
+        assert_eq!(e.count(None, None).unwrap(), 4, "unscoped = everything");
+        assert_eq!(
+            e.count(None, Some("wiki:estate")).unwrap(),
+            2,
+            "scoped count must see only the wiki subtree"
+        );
+        assert_eq!(
+            e.count(Some(KClass::Chunk), Some("wiki:estate")).unwrap(),
+            1,
+            "class + scope compose"
+        );
+        assert_eq!(e.count(None, Some("")).unwrap(), 4, "\"\" = root subtree");
     }
 
     #[test]
@@ -591,7 +790,7 @@ mod tests {
         // Query tokens overlap the chunk lexically: with the hash-fallback embedder the vector
         // list is gated (is_semantic=false), so keyword candidates must carry the hit themselves
         // (the old "how does payment work" phrasing only ever matched via hash-vector noise).
-        let hits = e.recall("stripe charge events", 2000, 2).unwrap();
+        let hits = e.recall("stripe charge events", 2000, None, 2).unwrap();
         assert!(!hits.is_empty(), "recall must return at least one hit");
         let hit = &hits[0];
         assert!(
@@ -635,7 +834,7 @@ mod tests {
         ))
         .unwrap();
 
-        let hits = e.recall("prompt_submit.py", 4000, 2).unwrap();
+        let hits = e.recall("prompt_submit.py", 4000, None, 2).unwrap();
         assert!(!hits.is_empty(), "recall must return hits");
         assert!(
             hits[0].content.contains("prompt_submit.py"),
@@ -673,7 +872,7 @@ mod tests {
         )
         .unwrap();
 
-        let hits = e.recall("gate policy", 6000, 2).unwrap();
+        let hits = e.recall("gate policy", 6000, None, 2).unwrap();
         let from_a = hits.iter().filter(|h| h.source == "gate-policy.md").count();
         assert_eq!(
             from_a,
@@ -721,7 +920,7 @@ mod tests {
             e.write(&KNode::new(KClass::Chunk, "zebra quagga", "s", "z.md", 1))
                 .unwrap();
             // Query shares NO tokens with the doc — only the vector path can surface it.
-            e.recall("unrelated words", 2000, 2).unwrap()
+            e.recall("unrelated words", 2000, None, 2).unwrap()
         };
 
         assert!(
@@ -740,13 +939,13 @@ mod tests {
         // here. all_nodes only ever returns k* nodes (no dilution is even possible).
         let mut e = KnowledgeEngine::in_memory().unwrap();
         e.ingest("D", &["one chunk".into()], "s", "src", 1).unwrap();
-        let all = e.all_nodes(None).unwrap();
+        let all = e.all_nodes(None, None).unwrap();
         assert!(
             all.iter()
                 .all(|n| matches!(n.class, KClass::Doc | KClass::Chunk))
         );
-        assert_eq!(e.count(Some(KClass::Doc)).unwrap(), 1);
-        assert_eq!(e.count(Some(KClass::Chunk)).unwrap(), 1);
+        assert_eq!(e.count(Some(KClass::Doc), None).unwrap(), 1);
+        assert_eq!(e.count(Some(KClass::Chunk), None).unwrap(), 1);
     }
 
     #[test]

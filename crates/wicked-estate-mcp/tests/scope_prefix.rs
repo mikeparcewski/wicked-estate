@@ -1,5 +1,6 @@
-//! `memory.recall scope_prefix` wire tests — the subtree-inclusive recall param must survive the
-//! full MCP dispatch pipeline (`handle_request_unified`).
+//! `memory.recall` / `knowledge.recall` `scope_prefix` wire tests — the subtree-inclusive recall
+//! param must survive the full MCP dispatch pipeline (`handle_request_unified`). knowledge.recall
+//! mirrors memory.recall's wire contract (arch-R5).
 //!
 //! Semantics under test (see `ScopeFilter` in `wicked-estate-memory`):
 //! - no `scope_prefix` ⇒ existing inheritance behavior EXACTLY (a root-scoped recall does NOT see
@@ -236,5 +237,165 @@ fn recall_rejects_non_string_scope_prefix() {
     assert!(
         resp.get("error").is_none(),
         "null scope_prefix must be treated as omitted: {resp}"
+    );
+}
+
+// ── knowledge.recall scope_prefix (arch-R5 — mirrors memory.recall's wire contract) ────────────
+
+/// Seed the knowledge engine with lexically-identical chunks in three scopes: root, the
+/// `wiki:architecture` subtree (the arch-R5 wiki convention), and a `project:pay` sibling.
+fn seed_knowledge(store: &MemStore, memory: &mut MemoryEngine, knowledge: &mut KnowledgeEngine) {
+    for (scope, source, chunk) in [
+        ("", "notes/root.md", "root wicked estate guidance"),
+        (
+            "wiki:architecture",
+            "wiki://architecture#planes",
+            "wiki wicked estate guidance about the planes",
+        ),
+        (
+            "project:pay",
+            "docs/pay.md",
+            "sibling wicked estate guidance in a project",
+        ),
+    ] {
+        let resp = call(
+            store,
+            memory,
+            knowledge,
+            10,
+            "knowledge.ingest",
+            json!({"title": format!("doc at {scope:?}"), "chunks": [chunk], "scope": scope, "source": source}),
+        );
+        assert!(
+            resp.get("error").is_none(),
+            "seed ingest at scope '{scope}' failed: {resp}"
+        );
+    }
+}
+
+/// Run a knowledge.recall and return the items' `source` strings.
+fn krecall_sources(
+    store: &MemStore,
+    memory: &mut MemoryEngine,
+    knowledge: &mut KnowledgeEngine,
+    args: Value,
+) -> Vec<String> {
+    let resp = call(store, memory, knowledge, 11, "knowledge.recall", args);
+    assert!(
+        resp.get("error").is_none(),
+        "knowledge.recall: unexpected JSON-RPC error: {resp}"
+    );
+    let inner = inner_json(&resp);
+    inner["items"]
+        .as_array()
+        .expect("knowledge.recall must return an `items` array")
+        .iter()
+        .map(|i| i["source"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// The AW-8 acceptance shape: `knowledge.recall {scope_prefix: "wiki:"}` (kind wildcard — every
+/// `wiki:<area>` subtree) and `{scope_prefix: "wiki:architecture"}` (one area) both return
+/// wiki-only guidance, each item citing its stable source URI. Sibling scopes and root are excluded.
+#[test]
+fn knowledge_recall_scope_prefix_returns_wiki_only_guidance_with_citations() {
+    let (store, mut memory, mut knowledge) = seeded();
+    seed_knowledge(&store, &mut memory, &mut knowledge);
+
+    for prefix in ["wiki:", "wiki:architecture"] {
+        let sources = krecall_sources(
+            &store,
+            &mut memory,
+            &mut knowledge,
+            json!({"query": "wicked estate guidance", "scope_prefix": prefix}),
+        );
+        assert!(
+            !sources.is_empty(),
+            "scope_prefix {prefix:?}: scoped knowledge.recall must surface the wiki chunk"
+        );
+        assert!(
+            sources.iter().all(|s| s == "wiki://architecture#planes"),
+            "scope_prefix {prefix:?} must return ONLY wiki-scoped knowledge, each citing its \
+             stable URI; got {sources:?}"
+        );
+    }
+}
+
+/// No `scope_prefix` ⇒ pre-0.16 behavior exactly (no scope filtering — all scopes visible);
+/// `""` ⇒ the root subtree = everything, same visibility spelled explicitly.
+#[test]
+fn knowledge_recall_without_scope_prefix_sees_every_scope() {
+    let (store, mut memory, mut knowledge) = seeded();
+    seed_knowledge(&store, &mut memory, &mut knowledge);
+
+    for args in [
+        json!({"query": "wicked estate guidance", "token_budget": 4000}),
+        json!({"query": "wicked estate guidance", "token_budget": 4000, "scope_prefix": ""}),
+    ] {
+        let sources = krecall_sources(&store, &mut memory, &mut knowledge, args.clone());
+        for expected in ["notes/root.md", "wiki://architecture#planes", "docs/pay.md"] {
+            assert!(
+                sources.iter().any(|s| s == expected),
+                "args {args} must see {expected}; got {sources:?}"
+            );
+        }
+    }
+}
+
+/// A present NON-string `scope_prefix` on knowledge.recall is invalid params (-32602) — the same
+/// fail-loud rule as memory.recall's; explicit null stays valid (= omitted).
+#[test]
+fn knowledge_recall_rejects_non_string_scope_prefix() {
+    let (store, mut memory, mut knowledge) = seeded();
+    seed_knowledge(&store, &mut memory, &mut knowledge);
+
+    for bad in [json!(42), json!({"p": "x"}), json!(["wiki:"]), json!(true)] {
+        let resp = call(
+            &store,
+            &mut memory,
+            &mut knowledge,
+            12,
+            "knowledge.recall",
+            json!({"query": "wicked estate guidance", "scope_prefix": bad}),
+        );
+        let err = resp
+            .get("error")
+            .unwrap_or_else(|| panic!("non-string scope_prefix {bad} must be rejected: {resp}"));
+        assert_eq!(err["code"].as_i64().unwrap(), -32602, "scope_prefix {bad}");
+    }
+    let resp = call(
+        &store,
+        &mut memory,
+        &mut knowledge,
+        13,
+        "knowledge.recall",
+        json!({"query": "wicked estate guidance", "scope_prefix": Value::Null}),
+    );
+    assert!(
+        resp.get("error").is_none(),
+        "null scope_prefix must be treated as omitted: {resp}"
+    );
+}
+
+/// knowledge.coverage accepts the same subtree filter (mirrors memory.coverage).
+#[test]
+fn knowledge_coverage_scope_prefix_counts_only_the_subtree() {
+    let (store, mut memory, mut knowledge) = seeded();
+    seed_knowledge(&store, &mut memory, &mut knowledge);
+
+    let resp = call(
+        &store,
+        &mut memory,
+        &mut knowledge,
+        14,
+        "knowledge.coverage",
+        json!({"scope_prefix": "wiki:architecture"}),
+    );
+    assert!(resp.get("error").is_none(), "coverage failed: {resp}");
+    let inner = inner_json(&resp);
+    assert_eq!(
+        inner["total"].as_u64().unwrap(),
+        2,
+        "wiki subtree holds exactly 1 kdoc + 1 kchunk; got {inner}"
     );
 }

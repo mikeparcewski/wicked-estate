@@ -145,7 +145,22 @@ fn dispatch_recall(id: &Value, args: &Value, knowledge: &mut dyn KnowledgeApi, n
         .get("token_budget")
         .and_then(|v| v.as_u64())
         .unwrap_or(2000) as usize;
-    match knowledge.recall(&query, token_budget, now) {
+    // Optional subtree filter (arch-R5), mirroring memory.recall's wire contract exactly:
+    // omitted/null ⇒ no scope filtering (the pre-0.16 behavior); "" ⇒ root subtree = everything;
+    // a present NON-string value is invalid params (fail loud — silently ignoring it would answer
+    // from the WRONG visibility set, the same rule as memory.recall's scope_prefix).
+    let scope_prefix: Option<String> = match args.get("scope_prefix") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(other) => {
+            return json_rpc_error(
+                id,
+                -32602,
+                &format!("invalid scope_prefix: expected a string scope-path prefix, got {other}"),
+            );
+        }
+    };
+    match knowledge.recall(&query, token_budget, scope_prefix.as_deref(), now) {
         Ok(items) => {
             let wire: Vec<Value> = items
                 .into_iter()
@@ -159,7 +174,9 @@ fn dispatch_recall(id: &Value, args: &Value, knowledge: &mut dyn KnowledgeApi, n
 
 fn dispatch_coverage(id: &Value, args: &Value, knowledge: &dyn KnowledgeApi) -> Value {
     let class = args.get("class").and_then(|v| v.as_str());
-    match knowledge.coverage(class) {
+    // Optional subtree filter — mirrors memory.coverage's lenient scope_prefix handling.
+    let scope_prefix = args.get("scope_prefix").and_then(|v| v.as_str());
+    match knowledge.coverage(class, scope_prefix) {
         Ok(cov) => mcp_result(id, serde_json::to_value(&cov).unwrap_or(json!({}))),
         Err(e) => json_rpc_error(id, -32603, &e.to_string()),
     }

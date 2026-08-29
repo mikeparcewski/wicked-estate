@@ -13,7 +13,8 @@
 //! | `Communities`      | Louvain communities + summaries (W4.1)                |
 //! | `ContextPack`      | Token-budgeted ranked elided-stub context (W4.2)      |
 //! | `SemanticSearch`   | Embedding-based ANN search (W5.2)                     |
-//! | `RulesInventory`   | List all rules-engine nodes + invoking code (W15)     |
+//! | `RulesInventory`   | List RuleSet engines + invoking code, count Rule nodes (W15) |
+//! | `rules.recall`     | Faceted, severity-ordered conformance-rule recall (arch-R2) |
 //!
 //! Agent-behavior rules honored:
 //! * R1 — never `isError: true`; empty results come back as empty `content` + diagnostic.
@@ -34,6 +35,11 @@ use wicked_estate_core::{
 pub mod context_bundle;
 pub use context_bundle::ContextBundle;
 
+// arch-R2 — faceted conformance-rule recall over MCP (the wire twin of wicked-governance's
+// Rust-only `recall_rules`).
+pub mod rules_recall;
+pub use rules_recall::RulesRecall;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -44,7 +50,7 @@ fn opt_u64(v: &Value, key: &str) -> Option<u64> {
 }
 
 /// Emit a staleness note reminding the MCP layer to embed `commits_behind`.
-fn staleness_note() -> String {
+pub(crate) fn staleness_note() -> String {
     "STALENESS: commits_behind not available at this layer — embed git rev-list delta in the MCP response".to_string()
 }
 
@@ -2531,12 +2537,17 @@ impl RetrievalTool for SemanticSearch {
 ///     { "symbol": "…", "name": "…", "kind": "rule_set", "file": "…",
 ///       "invoked_by": [ "src/caller.rs::run_rules", … ] }
 ///   ],
-///   "total": 1
+///   "total": 1,
+///   "rule_nodes": { "total": 3, "in_rule_sets": 2, "ungrouped": 1 }
 /// }
 /// ```
 /// * `engines` — one entry per `NodeKind::RuleSet` node in the graph.
 /// * `invoked_by` — symbols that carry an `InvokedBy` edge whose **target** is this
 ///   RuleSet (i.e. code → rules engine boundary).
+/// * `rule_nodes` — count of individual `NodeKind::Rule` nodes (arch-R2 blindness fix:
+///   these were previously invisible here despite the description claiming otherwise).
+///   `in_rule_sets` counts rules reachable from a RuleSet via a `Contains` edge;
+///   `ungrouped` counts the rest — recall them faceted via `rules.recall`.
 /// * The result is bounded by the graph size; no pagination parameter is needed because
 ///   real codebases seldom have more than a handful of rules engines.
 #[derive(Debug, Default)]
@@ -2548,9 +2559,11 @@ impl RetrievalTool for RulesInventory {
     }
 
     fn description(&self) -> &str {
-        "List all rules-engine nodes (RuleSet, Rule) in the graph and the code that invokes them. \
-         Use this to discover what business rules engines are present and which code files call \
-         them. Returns: [{name, kind, file, invoked_by: [code_files]}]"
+        "List the rules-engine RuleSet nodes in the graph with the code that invokes them, plus \
+         counts of individual Rule nodes (grouped vs ungrouped). Use this to discover what \
+         business rules engines and conformance rules are present; use rules.recall for faceted, \
+         severity-ordered recall of the Rule nodes themselves. Returns: {engines: [{name, kind, \
+         file, invoked_by: [code_files]}], total, rule_nodes: {total, in_rule_sets, ungrouped}}"
     }
 
     fn invoke(&self, store: &dyn GraphRead, _request: &Value) -> Result<RetrievalResult> {
@@ -2585,6 +2598,37 @@ impl RetrievalTool for RulesInventory {
             .collect();
 
         let total = engines.len();
+
+        // arch-R2 blindness fix: individual `NodeKind::Rule` nodes (e.g. conformance rules minted
+        // by wicked-governance, or rules-engine extractor output) were previously invisible here
+        // even though the tool description claimed to cover them. Count them — grouped (reachable
+        // from a RuleSet via a `Contains` edge, either direction) vs ungrouped — and point at
+        // `rules.recall` for the faceted recall of the nodes themselves.
+        let rule_set_ids: HashSet<&SymbolId> = rule_sets.iter().map(|rs| &rs.symbol).collect();
+        let grouped_rule_ids: HashSet<&SymbolId> = all_edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Contains)
+            .filter_map(|e| {
+                if rule_set_ids.contains(&e.source) {
+                    Some(&e.target)
+                } else if rule_set_ids.contains(&e.target) {
+                    Some(&e.source)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let rule_nodes: Vec<_> = all_nodes
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Rule))
+            .collect();
+        let rules_total = rule_nodes.len();
+        let rules_grouped = rule_nodes
+            .iter()
+            .filter(|n| grouped_rule_ids.contains(&n.symbol))
+            .count();
+        let rules_ungrouped = rules_total - rules_grouped;
+
         let mut diag = vec![staleness_note()];
         if engines.is_empty() {
             diag.push(
@@ -2593,9 +2637,23 @@ impl RetrievalTool for RulesInventory {
                     .to_string(),
             );
         }
+        if rules_ungrouped > 0 {
+            diag.push(format!(
+                "RulesInventory: {rules_ungrouped} ungrouped Rule node(s) present (not contained \
+                 in any RuleSet) — recall them faceted via rules.recall"
+            ));
+        }
 
         Ok(RetrievalResult {
-            content: json!({ "engines": engines, "total": total }),
+            content: json!({
+                "engines": engines,
+                "total": total,
+                "rule_nodes": {
+                    "total": rules_total,
+                    "in_rule_sets": rules_grouped,
+                    "ungrouped": rules_ungrouped,
+                },
+            }),
             diagnostics: diag,
         })
     }
@@ -4626,6 +4684,65 @@ mod tests {
         assert!(
             invoked_by.is_empty(),
             "no InvokedBy edges → invoked_by must be empty"
+        );
+    }
+
+    /// arch-R2 blindness fix: individual Rule nodes must be COUNTED (grouped vs ungrouped), and
+    /// ungrouped ones must produce a diagnostic pointing at rules.recall — previously the tool
+    /// ignored `NodeKind::Rule` entirely while its description claimed "(RuleSet, Rule)".
+    #[test]
+    fn rules_inventory_counts_rule_nodes_grouped_and_ungrouped() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node(
+                    "rs::pricing",
+                    "PricingRules",
+                    NodeKind::RuleSet,
+                    "rules/pricing.drl",
+                    1,
+                ),
+                make_node(
+                    "rule::grouped",
+                    "grouped_rule",
+                    NodeKind::Rule,
+                    "rules/pricing.drl",
+                    5,
+                ),
+                make_node(
+                    "rule::ungrouped",
+                    "PAT-001",
+                    NodeKind::Rule,
+                    "conformance_rule/PAT-001",
+                    0,
+                ),
+            ])
+            .unwrap();
+        // RuleSet --Contains--> grouped rule.
+        store
+            .upsert_edges(&[Edge::new(
+                SymbolId("rs::pricing".to_string()),
+                SymbolId("rule::grouped".to_string()),
+                EdgeKind::Contains,
+                ResolutionTier::Parsed,
+                "test-fixture",
+            )])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        let res = RulesInventory.invoke(&store, &json!({})).unwrap();
+
+        let rule_nodes = &res.content["rule_nodes"];
+        assert_eq!(rule_nodes["total"].as_u64().unwrap(), 2);
+        assert_eq!(rule_nodes["in_rule_sets"].as_u64().unwrap(), 1);
+        assert_eq!(rule_nodes["ungrouped"].as_u64().unwrap(), 1);
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.contains("ungrouped Rule node") && d.contains("rules.recall")),
+            "ungrouped rules must be reported with a pointer to rules.recall; got {:?}",
+            res.diagnostics
         );
     }
 
