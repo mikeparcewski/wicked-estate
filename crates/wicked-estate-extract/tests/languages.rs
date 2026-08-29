@@ -210,9 +210,15 @@ fn rust_characterization() {
     assert_def(&ex, lang, "distance", &NodeKind::Function);
     assert_def(&ex, lang, "main_entry", &NodeKind::Function);
     // impl-block method: emitted ONCE by the general function pattern (§11 — the
-    // impl-scoped duplicate Method pattern was deleted; kind stays Function until
-    // the method-identity lane adds enclosing-type identity).
+    // impl-scoped duplicate Method pattern was deleted; kind stays Function, the
+    // impl anchor supplies enclosing-type identity without emitting).
     assert_def(&ex, lang, "translate", &NodeKind::Function);
+    // scm-anchors D3: one method per impl-anchor branch (zero-def-loss pins —
+    // these defs must survive any future narrowing of the anchor alternation).
+    assert_def(&ex, lang, "Rect", &NodeKind::Struct);
+    assert_def(&ex, lang, "Holder", &NodeKind::Struct);
+    assert_def(&ex, lang, "get", &NodeKind::Function); // impl Holder<T> (generic_type)
+    assert_def(&ex, lang, "draw", &NodeKind::Function); // trait impls (plain/scoped/scoped-generic)
     // new kinds
     assert_def(&ex, lang, "MAX_DISTANCE", &NodeKind::Constant);
     assert_def(&ex, lang, "ORIGIN", &NodeKind::Constant);
@@ -1469,5 +1475,103 @@ fn cpp_out_of_line_member_vs_free_function_collision_known_defect() {
         "[{lang}] KNOWN DEFECT RESOLVED? the out-of-line Foo::reset no longer \
          shares the free reset's SymbolId — the D6d identity owner landed. \
          Flip this half to assert distinct ids."
+    );
+}
+
+/// scm-anchors D3 (scheme 3): impl-block methods nest under the impl's `type:`
+/// name via the NON-EMITTING `@code_struct.anchor` — two impls' same-named
+/// methods mint DISTINCT ids, and every alternation branch (plain, generic,
+/// scoped, scoped-generic) anchors under the bare type name.
+#[test]
+fn rust_impl_methods_nest_under_type() {
+    let lang = "rust";
+    let sf = SourceFile {
+        path: "probe_impl.rs".to_string(),
+        language: Language::new(lang),
+        text: "struct A;\nstruct B;\n\
+               impl A { fn save(&self) {} }\n\
+               impl B { fn save(&self) {} }\n\
+               trait Tr { fn draw(&self); }\n\
+               struct H<T>(T);\n\
+               impl<T> H<T> { fn get(&self) {} }\n\
+               impl Tr for crate::ext::W { fn draw(&self) {} }\n\
+               impl<T> Tr for crate::ext::G<T> { fn draw(&self) {} }\n"
+            .to_string(),
+    };
+    let ex = TreeSitterExtractor::for_language(lang)
+        .unwrap()
+        .extract(&sf)
+        .expect("extraction must succeed");
+    let all: Vec<&str> = ex.nodes.iter().map(|n| n.symbol.as_str()).collect();
+    // Every anchor branch nests under the bare type name.
+    for sym in [
+        "ts-rust . . . probe_impl/A#save().", // type_identifier
+        "ts-rust . . . probe_impl/B#save().", // type_identifier (2nd impl)
+        "ts-rust . . . probe_impl/H#get().",  // generic_type
+        "ts-rust . . . probe_impl/W#draw().", // scoped_type_identifier
+        "ts-rust . . . probe_impl/G#draw().", // generic_type over scoped_type_identifier
+    ] {
+        assert!(
+            all.contains(&sym),
+            "[{lang}] expected {sym}; symbols = {all:?}"
+        );
+    }
+    // The anchor is non-emitting: no phantom node named after a type at an impl
+    // range — exactly one node each for A and B (the struct defs).
+    for ty in ["A", "B"] {
+        let n = ex
+            .nodes
+            .iter()
+            .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == ty)
+            .count();
+        assert_eq!(
+            n, 1,
+            "[{lang}] impl anchor must not mint a second `{ty}` node"
+        );
+    }
+}
+
+/// scm-anchors D3 residual, pinned: two trait impls on ONE type still collide —
+/// `impl Ta for Foo` and `impl Tb for Foo` both anchor under Foo (the `trait:`
+/// field is deliberately not captured), so both `fmt` defs mint `Foo#fmt().`.
+/// Distinguishing them needs a trait-qualified descriptor or a disambiguator
+/// (`identity_disambiguator_is_none` pins None) — a program-level identity
+/// convention, not a query edit. When one is recorded, flip this to assert
+/// DISTINCT ids per trait impl.
+#[test]
+fn rust_same_type_trait_impls_collision_known_defect() {
+    let lang = "rust";
+    let sf = SourceFile {
+        path: "probe_trait_impls.rs".to_string(),
+        language: Language::new(lang),
+        text: "struct Foo;\ntrait Ta { fn fmt(&self); }\ntrait Tb { fn fmt(&self); }\n\
+               impl Ta for Foo { fn fmt(&self) {} }\n\
+               impl Tb for Foo { fn fmt(&self) {} }\n"
+            .to_string(),
+    };
+    let ex = TreeSitterExtractor::for_language(lang)
+        .unwrap()
+        .extract(&sf)
+        .expect("extraction must succeed");
+    let fmts: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == "fmt")
+        .collect();
+    assert_eq!(
+        fmts.len(),
+        2,
+        "[{lang}] two fmt defs expected; got {fmts:?}"
+    );
+    assert_eq!(
+        fmts[0].symbol, fmts[1].symbol,
+        "[{lang}] KNOWN DEFECT RESOLVED? two trait impls' same-named methods no \
+         longer share Foo#fmt(). — a trait-qualified identity convention landed. \
+         Flip this pin to assert distinct ids."
+    );
+    assert_eq!(
+        fmts[0].symbol.as_str(),
+        "ts-rust . . . probe_trait_impls/Foo#fmt().",
+        "[{lang}] the merged id is the type-nested one"
     );
 }

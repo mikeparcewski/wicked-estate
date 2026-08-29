@@ -1346,12 +1346,16 @@ fn module_path(path: &str) -> String {
 ///
 /// Scheme "1" (implicit, never stored): exactly two descriptors — `[module/, name<suffix>]` —
 /// so every same-named definition in one module minted the SAME id and the store's
-/// `ON CONFLICT(symbol) DO UPDATE` collapsed them into one node. Scheme "2" nests definition
+/// `ON CONFLICT(symbol) DO UPDATE` collapsed them into one node. Scheme "2" nested definition
 /// identity under the contiguous run of Type-suffixed enclosing definitions
-/// (`<module>/Repo#save().`) — see the 2026-08 amendment in
+/// (`<module>/Repo#save().`). Scheme "3" adds the two generic query-level identity roles
+/// (`@code_<kind>.anchor` — a non-emitting containment anchor, e.g. a Rust `impl` block — and
+/// `@code_<kind>.owner` — an owner type name spliced as the innermost Type descriptor where no
+/// containing node exists, e.g. a Go receiver or a C++ `Foo::` qualifier), so members whose
+/// owner is not an enclosing definition node nest too — see the 2026-08 amendment in
 /// `docs/adr/ADR-002-stable-symbol-identity.md`. Stored per repo as the `id_scheme` meta key;
 /// a mismatch forces a full re-extraction so a DB never mixes schemes.
-pub const SYMBOL_ID_SCHEME: &str = "2";
+pub const SYMBOL_ID_SCHEME: &str = "3";
 
 fn def_suffix(kind: &str) -> Suffix {
     match kind {
@@ -1373,6 +1377,19 @@ struct PendingDef {
     end: usize,
     span: Span,
     signature: Option<String>,
+    /// `false` for `@code_<kind>.anchor` records: the record participates in
+    /// [`enclosing_chain`] as a containment anchor but pass 2 mints NO Node, NO
+    /// `DefRec` (so framework `def_symbol_at` joins never land on the anchor
+    /// range), and NO Contains edge for it. Constraint (documented at the
+    /// `.anchor` role): an anchor pattern must never be range-equal + same-name
+    /// with an emitting def — the `(start, end, name)` dedup below would keep an
+    /// uncontracted-order winner.
+    emit: bool,
+    /// `@code_<kind>.owner` captured in the same match: the owner TYPE NAME of a
+    /// def whose owner is not an enclosing node (Go receiver, C++ `Foo::`
+    /// qualifier, Ruby `def self.m`). Pass 2 appends it as the INNERMOST Type
+    /// descriptor after [`enclosing_chain`].
+    owner: Option<String>,
 }
 
 /// The chain of Type descriptors a definition nests under (ADR-002 amendment, 2026-08).
@@ -1672,8 +1689,17 @@ fn enclosing(defs: &[DefRec], pos: usize) -> Option<SymbolId> {
 /// What role a capture name plays in the prior art convention.
 #[derive(Debug)]
 enum CaptureRole<'a> {
-    /// `@code_<kind>.def` / `@code_<kind>` / `@code_<kind>.arrow` — anchor node for a definition.
-    DefAnchor { kind: &'a str },
+    /// `@code_<kind>.def` / `@code_<kind>` / `@code_<kind>.arrow` — anchor node for a definition
+    /// (`emit: true`), or `@code_<kind>.anchor` — a NON-EMITTING containment anchor
+    /// (`emit: false`): it enters the pending-def list so members nest under it in
+    /// [`enclosing_chain`], but pass 2 mints no Node / DefRec / Contains edge for it
+    /// (Rust `impl` blocks, Ruby `class << self` — minting them would create phantom
+    /// or duplicate nodes, the #129 double-emit class).
+    DefAnchor { kind: &'a str, emit: bool },
+    /// `@code_<kind>.owner` — the owner TYPE NAME captured in the same match as a def whose
+    /// owner is not an enclosing node (Go receivers, C++ `Foo::` qualifiers, Ruby `def self.m`).
+    /// Spliced as the innermost Type descriptor of that def's id in pass 2.
+    DefOwner { kind: &'a str },
     /// `@code_<kind>.name` — the identifier for a definition of `<kind>`.
     /// `symbol` is true for the `@code_<kind>.name.symbol` variant: the captured
     /// text is a symbol literal (Ruby `:name`) whose leading `:` must be stripped
@@ -1777,7 +1803,13 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
             let kind = &rest[..dot];
             let suffix = &rest[dot + 1..];
             if suffix == "def" || suffix == "arrow" || suffix == "decl" {
-                return CaptureRole::DefAnchor { kind };
+                return CaptureRole::DefAnchor { kind, emit: true };
+            }
+            if suffix == "anchor" {
+                return CaptureRole::DefAnchor { kind, emit: false };
+            }
+            if suffix == "owner" {
+                return CaptureRole::DefOwner { kind };
             }
             if suffix == "name" {
                 return CaptureRole::DefName {
@@ -1792,7 +1824,10 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
             // .annotation, …) is auxiliary — ignored.
         } else {
             // @code_<kind> with no dot — treat as def anchor (e.g. @code_variable, @code_module)
-            return CaptureRole::DefAnchor { kind: rest };
+            return CaptureRole::DefAnchor {
+                kind: rest,
+                emit: true,
+            };
         }
     }
 
@@ -1926,8 +1961,9 @@ impl Extractor for TreeSitterExtractor {
 
             // Per-kind: (anchor_node, name_text)
             // We support one def per kind per match (tree-sitter match semantics).
-            let mut def_anchor: Option<(&str, tree_sitter::Node)> = None; // (kind, node)
+            let mut def_anchor: Option<(&str, tree_sitter::Node, bool)> = None; // (kind, node, emit)
             let mut def_name: Option<(&str, String)> = None; // (kind, text)
+            let mut def_owner: Option<(&str, String)> = None; // (kind, owner type name)
 
             let mut call_fn: Option<(String, usize, Span)> = None; // (name, pos, span)
             let mut call_method: Option<(String, usize, Span)> = None;
@@ -1959,9 +1995,12 @@ impl Extractor for TreeSitterExtractor {
                 let pos = c.node.start_byte();
 
                 match classify_capture(cap) {
-                    CaptureRole::DefAnchor { kind } => {
+                    CaptureRole::DefAnchor { kind, emit } => {
                         // Last anchor wins if duplicated (shouldn't happen in well-formed query)
-                        def_anchor = Some((kind, c.node));
+                        def_anchor = Some((kind, c.node, emit));
+                    }
+                    CaptureRole::DefOwner { kind } => {
+                        def_owner = Some((kind, text));
                     }
                     CaptureRole::DefName { kind, symbol } => {
                         let name = strip_def_name(&text);
@@ -2030,7 +2069,7 @@ impl Extractor for TreeSitterExtractor {
             // ── Process definitions ─────────────────────────────────────────
             // No id is minted here: the enclosing Type chain needs the FULL definition list,
             // which only exists after the match loop (pass 2 below).
-            if let (Some((anchor_kind, anchor_node)), Some((name_kind, name_text))) =
+            if let (Some((anchor_kind, anchor_node, emit)), Some((name_kind, name_text))) =
                 (def_anchor, &def_name)
             {
                 // The name must come from the same kind as the anchor.
@@ -2041,6 +2080,14 @@ impl Extractor for TreeSitterExtractor {
                         .ok()
                         .and_then(|t| t.lines().next())
                         .map(|l| l.chars().take(200).collect::<String>());
+                    // Same kind-equality guard for the owner splice: a stray `.owner`
+                    // capture of a different kind in the same match is ignored.
+                    let owner = match &def_owner {
+                        Some((owner_kind, owner_name)) if *owner_kind == anchor_kind => {
+                            Some(owner_name.clone())
+                        }
+                        _ => None,
+                    };
                     pending.push(PendingDef {
                         kind: anchor_kind.to_string(),
                         name: name_text.clone(),
@@ -2048,6 +2095,8 @@ impl Extractor for TreeSitterExtractor {
                         end: anchor_node.end_byte(),
                         span: ts_span(anchor_node),
                         signature,
+                        emit,
+                        owner,
                     });
                 }
             }
@@ -2194,7 +2243,20 @@ impl Extractor for TreeSitterExtractor {
             pending = deduped;
 
             for p in &pending {
-                let chain = enclosing_chain(&pending, p.start, p.end);
+                // Non-emitting anchors (`@code_<kind>.anchor`) exist ONLY as containment
+                // anchors for the enclosing_chain walk above: no Node, no DefRec (so
+                // `def_symbol_at` framework joins never land on the anchor range), and —
+                // because Contains edges are emitted per DefRec below — no Contains edge.
+                if !p.emit {
+                    continue;
+                }
+                let mut chain = enclosing_chain(&pending, p.start, p.end);
+                // `@code_<kind>.owner`: the owner type name captured in the def's own match
+                // (Go receiver, C++ `Foo::` qualifier, Ruby `def self.m`) becomes the
+                // INNERMOST Type descriptor — where containment can never supply it.
+                if let Some(owner) = &p.owner {
+                    chain.push(Descriptor::new(owner.clone(), Suffix::Type));
+                }
                 let symbol = def_symbol(&scheme, &module, &chain, &p.name, def_suffix(&p.kind));
                 let mut node = Node::new(
                     symbol.clone(),
@@ -6710,6 +6772,85 @@ public class PlainListener {
             symbols_named(&ex2, "title"),
             vec!["ts-python . . . app/s/title.".to_string()],
             "pinned residual: a top-level ORM field stays module-flat"
+        );
+    }
+
+    // ── Scheme-3 identity roles: `.anchor` + `.owner` (scm-anchors D1) ──────────
+
+    #[test]
+    fn classify_capture_maps_anchor_and_owner_roles() {
+        assert!(matches!(
+            classify_capture("code_struct.anchor"),
+            CaptureRole::DefAnchor {
+                kind: "struct",
+                emit: false
+            }
+        ));
+        assert!(matches!(
+            classify_capture("code_method.owner"),
+            CaptureRole::DefOwner { kind: "method" }
+        ));
+        // The emitting channels are unchanged.
+        assert!(matches!(
+            classify_capture("code_struct.def"),
+            CaptureRole::DefAnchor {
+                kind: "struct",
+                emit: true
+            }
+        ));
+        assert!(matches!(
+            classify_capture("code_variable"),
+            CaptureRole::DefAnchor {
+                kind: "variable",
+                emit: true
+            }
+        ));
+    }
+
+    #[test]
+    fn identity_anchor_mints_no_node_no_contains_no_defrec() {
+        // The Rust impl anchor is the first `.anchor` consumer: it must nest the
+        // method (P#m().) WITHOUT minting a Node, a Contains edge, or a DefRec
+        // (def_symbol_at join target) for the impl_item range.
+        let code = "pub struct P { pub x: f64 }\nimpl P { fn m(&self) {} }\n";
+        let ex = TreeSitterExtractor::for_language("rust")
+            .unwrap()
+            .extract(&sf("src/p.rs", "rust", code))
+            .unwrap();
+        // The method nests under P via the anchor.
+        assert!(
+            has_symbol(&ex, "ts-rust . . . src/p/P#m()."),
+            "impl method must nest under P#; ms = {:?}",
+            symbols_named(&ex, "m")
+        );
+        // Exactly ONE node named P — the struct. The impl anchor mints nothing.
+        let p_nodes: Vec<_> = ex
+            .nodes
+            .iter()
+            .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == "P")
+            .collect();
+        assert_eq!(p_nodes.len(), 1, "anchor must not mint a node: {p_nodes:?}");
+        let impl_off = code.find("impl P").unwrap() as u32;
+        assert_ne!(
+            p_nodes[0].location.span.start_byte, impl_off,
+            "the single P node must be the struct, not the impl block"
+        );
+        // One File→def Contains edge per EMITTED definition record — the anchor
+        // adds none (this is the identity_contains_edges_stay_file_to_def
+        // invariant holding by construction for non-emitting anchors).
+        let contains = ex
+            .local_edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Contains)
+            .count();
+        let def_count = ex
+            .nodes
+            .iter()
+            .filter(|n| !matches!(n.kind, NodeKind::File | NodeKind::Import))
+            .count();
+        assert_eq!(
+            contains, def_count,
+            "anchor must not add a Contains edge (no DefRec is created for it)"
         );
     }
 }
