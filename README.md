@@ -135,7 +135,10 @@ wicked-estate watch ./my-project --db graph.db
 - **Runtime language plugins** — drop a compiled tree-sitter grammar + `.scm` query + manifest into
   the plugins dir and it loads at startup, no recompile. The grammar is a separate artifact, never
   linked into the (MIT) core — so a grammar under a license incompatible with MIT (GPL, etc.) stays
-  isolated. `wicked-estate plugins list` shows what's loaded; see [PLUGIN.md](./PLUGIN.md) and the
+  isolated. A plugin can also **override a built-in language** — patch a query gap locally
+  (`override_query`) or swap the whole grammar under an explicit double opt-in (`override = true`
+  + `WICKED_ESTATE_PLUGIN_OVERRIDE`), loudly announced and audit-tracked (ADR-009).
+  `wicked-estate plugins list` shows what's loaded; see [PLUGIN.md](./PLUGIN.md) and the
   [nginx example](./examples/plugins/nginx).
 - **Precise blast-radius** — bounded reverse-reachability over *all* dependency edge kinds (not just
   calls), so it never silently under-reports.
@@ -213,7 +216,8 @@ Languages are data, not code. Add a row to `crates/wicked-estate-extract/languag
 
 To add a language **without recompiling the core** — or to use a grammar under a license
 incompatible with MIT — ship it as a **[runtime plugin](./PLUGIN.md)** instead: a compiled grammar +
-query + manifest dropped into the plugins dir, loaded at startup. See the
+query + manifest dropped into the plugins dir, loaded at startup. Plugins can also override a
+built-in language's query or grammar (see PLUGIN.md, "Overriding a built-in language"). See the
 [nginx example](./examples/plugins/nginx).
 
 ## Honest status (not yet true)
