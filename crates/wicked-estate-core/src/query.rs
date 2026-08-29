@@ -88,13 +88,18 @@ impl Subgraph {
     ///   of, and that edge is always collected once its target is visited — see
     ///   docs/recon/relative-imports.md Decision G (FEAS-1; the first contains-only cut of
     ///   this rule dropped file-scope callers, caught by the cross-binary §5 gate).
-    /// - **File start** (`start_kind = Some(NodeKind::File)`): keep everything — the importing
-    ///   files ARE the blast radius of a file.
+    /// - **File or Import start** (`start_kind = Some(File | Import)`): keep everything — the
+    ///   importing files ARE the blast radius of a file or of a dependency (Import) node. An
+    ///   Import start MUST NOT use the non-File rule: in a Dependents walk from an Import node
+    ///   every reached File's only subgraph source-edges are `Imports`, so the filter would
+    ///   silently zero the result — a regression against HEAD on untouched pre-upgrade DBs
+    ///   (`blast-radius react` on studio returned 95 importer Files; round-1
+    ///   REV1-IMPORT-START).
     ///
     /// The start node itself is never returned. Kept Files' min-depths may shift when an import
     /// edge offers a shorter path; callers must not depend on File-row depths.
     pub fn code_dependents(&self, start: &SymbolId, start_kind: Option<&NodeKind>) -> Vec<&Node> {
-        if matches!(start_kind, Some(NodeKind::File)) {
+        if matches!(start_kind, Some(NodeKind::File | NodeKind::Import)) {
             return self.nodes.iter().filter(|n| &n.symbol != start).collect();
         }
         // Files that are the SOURCE of any walked non-Imports edge (Contains to a reached
@@ -253,6 +258,37 @@ mod code_dependents_tests {
         let deps = sub.code_dependents(&file_b, Some(&NodeKind::File));
         let ids: Vec<&str> = deps.iter().map(|n| n.symbol.as_str()).collect();
         assert_eq!(ids.len(), 2, "both importers kept: {ids:?}");
+        assert!(ids.contains(&file_a.as_str()));
+        assert!(ids.contains(&file_t.as_str()));
+    }
+
+    /// An Import start keeps every reached node — the importing files ARE the blast radius of
+    /// a dependency node (round-1 REV1-IMPORT-START). Under the non-File rule this subgraph
+    /// returns NOTHING: every File's only source-edges here are `Imports`, so `blast-radius
+    /// react` on an untouched pre-upgrade DB went from 95 importer Files (HEAD) to zero.
+    #[test]
+    fn import_start_keeps_importer_files() {
+        let imp = SymbolId("import/react/".into());
+        let file_a = Symbol::file("a.ts").id();
+        let file_t = Symbol::file("t.ts").id();
+        let sub = Subgraph {
+            nodes: vec![
+                node(&imp, NodeKind::Import, "a.ts"),
+                node(&file_a, NodeKind::File, "a.ts"),
+                node(&file_t, NodeKind::File, "t.ts"),
+            ],
+            edges: vec![
+                // a.ts imports react (File → Import node, as the extractor emits it)
+                edge(&file_a, &imp, EdgeKind::Imports),
+                // t.ts imports a.ts (the lane's File→File edge) — transitive importer
+                edge(&file_t, &file_a, EdgeKind::Imports),
+            ],
+            depths: Default::default(),
+            truncated: false,
+        };
+        let deps = sub.code_dependents(&imp, Some(&NodeKind::Import));
+        let ids: Vec<&str> = deps.iter().map(|n| n.symbol.as_str()).collect();
+        assert_eq!(ids.len(), 2, "both importer Files kept: {ids:?}");
         assert!(ids.contains(&file_a.as_str()));
         assert!(ids.contains(&file_t.as_str()));
     }

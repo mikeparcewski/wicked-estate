@@ -682,4 +682,9 @@ re-extraction (deleted-only scope, ATT-INV-2).
   start on untouched pre-upgrade DBs (every reached File's only source-edges are Imports →
   all dropped; HEAD returned 95 importer Files for `react` on studio). Import nodes now take
   the keep-everything arm with File — the importing files ARE the blast radius of a dependency
-  node. Core unit test + cross-binary check recorded below.
+  node. Core unit test: `import_start_keeps_importer_files` (query.rs). Cross-binary §5 check
+  (Import-node start added to the protocol): `blast-radius react` on an UNTOUCHED copy of
+  `studio-before.db` — HEAD release binary 95 Files, lane debug binary 95 Files (parity
+  restored; the pre-fix lane binary returned "no resolved dependents"). On `studio-after.db`
+  (File→File edges present) the lane binary returns 240 Files — direct plus TRANSITIVE
+  importers, the documented File/Import-start semantics change, all rows File nodes.
