@@ -1347,25 +1347,23 @@ fn yaml_without_resources_emits_no_cfn_resources() {
     );
 }
 
-// ── Known cross-kind SymbolId collisions — executable handoff pins ─────────────
+// ── Cross-kind SymbolId collisions — re-pinned after symbol-id scheme 2 ────────
 //
-// These two tests CHARACTERIZE defects this lane found but does not own: the
-// SymbolId scheme (definition-symbol construction, treesitter.rs ~1858-1905) is
-// the method-identity lane's seam. Each test asserts the CURRENT (defective)
-// behavior so the handoff is executable, not prose: when the method-identity
-// lane ships identity that separates these ids, the test FAILS loudly and must
-// be flipped to assert distinct SymbolIds. They deliberately do NOT go through
-// `assert_no_conflicting_def_ids` (which treats this exact shape as a defect —
-// the fixtures avoid these constructs so the fleet guard stays meaningful).
+// These two tests were authored by the extraction-gaps lane as executable
+// known-defect pins (asserting the then-colliding ids). The method-identity
+// lane's type-nested identity (scheme 2) landed and separated the ids that
+// have an ENCLOSING Type anchor, so — per the pins' own flip instructions —
+// they now assert the fix where it applies, and keep pinning the residual
+// file-scope collision that scheme 2 deliberately does not own (the D6d
+// header/impl + free-function identity seam, program follow-up).
 
-/// EG-COR-2: a package-level `const X` and a struct field `X` in the same Go
-/// file emit the SAME SymbolId with CONFLICTING kinds (Constant vs Field) —
-/// both def suffixes fall through to `Suffix::Term` and the id carries no
-/// enclosing type. The store upsert (last-write-wins) silently re-kinds one.
-/// Owner: method-identity lane (enclosing-type identity must cover non-method
-/// Term-suffix members, not only methods).
+/// EG-COR-2 (RESOLVED by scheme 2): a package-level `const X` and a struct
+/// field `X` used to emit the SAME SymbolId with CONFLICTING kinds (Constant
+/// vs Field), and the store upsert silently re-kinded one. Type-nested
+/// identity now nests the field under its enclosing struct's Type anchor
+/// (`…/X.` vs `…/S#X.`), so the two definitions mint DISTINCT ids.
 #[test]
-fn go_const_vs_struct_field_symbolid_collision_known_defect() {
+fn go_const_vs_struct_field_symbolids_are_distinct() {
     let lang = "go";
     let sf = SourceFile {
         path: "probe_collide.go".to_string(),
@@ -1393,27 +1391,25 @@ fn go_const_vs_struct_field_symbolid_collision_known_defect() {
         ["Constant".to_string(), "Field".to_string()].into(),
         "[{lang}] expected Constant + Field emissions"
     );
-    // The defect: one SymbolId for both. Flip to assert_ne once identity is fixed.
-    assert_eq!(
+    // The fix (symbol-id scheme 2): distinct ids — the field nests under S#.
+    assert_ne!(
         xs[0].symbol, xs[1].symbol,
-        "[{lang}] KNOWN DEFECT RESOLVED? const X and field X no longer share a \
-         SymbolId — the method-identity lane's fix landed. Flip this test to \
-         assert distinct ids and delete the defect note in \
-         docs/recon/extraction-gaps.md §4/§8."
+        "[{lang}] REGRESSION: const X and field X share one SymbolId again — \
+         scheme-2 type-nested identity stopped separating them"
     );
 }
 
-/// EG-R1-1: a member method prototype, its out-of-line definition, and a free
-/// function of the same name emit THREE nodes on ONE SymbolId with CONFLICTING
-/// kinds (Method, Method, Function) — `def_suffix` maps both "function" and
-/// "method" to `Suffix::Method` and the id carries no enclosing type. Newly
-/// reachable via the D6b member-prototype and D6e out-of-line patterns (at base
-/// only the free Function was emitted). The std::swap idiom (member swap proto
-/// plus free swap in one header) is the textbook shape. Owner: method-identity
-/// lane — its identity fix must cover the Function/Method suffix collision,
-/// not only method-vs-method.
+/// EG-R1-1, re-pinned after scheme 2 (PARTIALLY resolved): the three
+/// same-named `reset` nodes used to share ONE SymbolId. Type-nested identity
+/// separates the IN-CLASS prototype (it nests under `Foo#`), which this test
+/// now asserts. STILL DEFECTIVE (pinned below): the out-of-line
+/// `void Foo::reset()` definition sits at file scope with no enclosing Type
+/// node, so it still shares `…/reset().` with the free function — a
+/// cross-kind (Method vs Function) collision. Owner: the program-level D6d
+/// header/impl + free-function identity follow-up
+/// (docs/recon/extraction-gaps.md §8 merge note 2).
 #[test]
-fn cpp_free_function_vs_member_method_symbolid_collision_known_defect() {
+fn cpp_out_of_line_member_vs_free_function_collision_known_defect() {
     let lang = "cpp";
     let sf = SourceFile {
         path: "probe_collide.cpp".to_string(),
@@ -1441,14 +1437,38 @@ fn cpp_free_function_vs_member_method_symbolid_collision_known_defect() {
             && kinds.iter().filter(|k| *k == "Function").count() == 1,
         "[{lang}] expected 2x Method + 1x Function, got {kinds:?}"
     );
-    // The defect: one SymbolId for all three. Flip once identity is fixed.
-    let ids: std::collections::HashSet<&str> = resets.iter().map(|n| n.symbol.as_str()).collect();
+    // The scheme-2 fix half: the in-class prototype nests under Foo# and is
+    // distinct from the free function.
+    let free_id = resets
+        .iter()
+        .find(|n| format!("{:?}", n.kind) == "Function")
+        .map(|n| n.symbol.clone())
+        .expect("free fn node");
+    let nested: Vec<_> = resets
+        .iter()
+        .filter(|n| n.symbol.as_str().contains("Foo#"))
+        .collect();
     assert_eq!(
-        ids.len(),
+        nested.len(),
         1,
-        "[{lang}] KNOWN DEFECT RESOLVED? member Foo::reset and free reset no \
-         longer share a SymbolId — the method-identity lane's fix landed. Flip \
-         this test to assert distinct ids and delete the defect note in \
-         docs/recon/extraction-gaps.md §4/§8."
+        "[{lang}] the in-class prototype must nest under Foo# (scheme 2); got {resets:?}"
+    );
+    assert_ne!(
+        nested[0].symbol, free_id,
+        "[{lang}] REGRESSION: the type-nested prototype id collapsed into the free fn's id"
+    );
+    // The residual defect half (D6d seam, still pinned): the out-of-line
+    // member definition carries no enclosing Type node and still shares the
+    // free function's file-scope id. When D6d lands, flip this to assert_ne.
+    let out_of_line = resets
+        .iter()
+        .find(|n| format!("{:?}", n.kind) == "Method" && !n.symbol.as_str().contains("Foo#"))
+        .expect("out-of-line member def node");
+    assert_eq!(
+        out_of_line.symbol, free_id,
+        "[{lang}] KNOWN DEFECT RESOLVED? the out-of-line Foo::reset no longer \
+         shares the free reset's SymbolId — the D6d identity owner landed. \
+         Flip this half to assert distinct ids."
     );
 }
+
