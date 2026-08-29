@@ -731,182 +731,6 @@ impl Resolver for RulesBridgeResolver {
     }
 }
 
-// ── MethodResolutionSynthesizer ────────────────────────────────────────────────
-
-/// AST-based synthesizer: resolves call-site references by looking up the called name in the
-/// parsed node index.
-///
-/// **Algorithm:**
-/// 1. Only acts on refs whose `kind` is [`EdgeKind::Calls`].
-/// 2. Calls `index.by_name(&ref.raw_name)` and retains only callable nodes
-///    (Function / Method / Constructor).
-/// 3. Removes self-candidates.
-/// 4. If **exactly one** callable candidate remains → emit a `Calls` edge at
-///    [`ResolutionTier::Heuristic`] (confidence 0.5).
-/// 5. If **zero or more than one** candidates remain → emit nothing (honest non-resolution;
-///    ambiguity is deferred to a precise tier).
-///
-/// This synthesizer operates entirely on the parsed node index (AST-derived facts), never on
-/// raw source text. That is the core distinction from the old regex-over-source approach.
-///
-/// Position in the resolver cascade: placed **after** the higher-confidence resolvers
-/// ([`NameResolver`], [`ScopedNameResolver`], [`ImportMapResolver`]) in [`resolve_all`] so it
-/// only fills gaps; the dedup step in `resolve_all` discards this synthesizer's lower-confidence
-/// edge whenever a higher-confidence resolver already resolved the same relationship.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct MethodResolutionSynthesizer;
-
-impl Resolver for MethodResolutionSynthesizer {
-    fn id(&self) -> &str {
-        "ast-synth-method"
-    }
-
-    fn tier(&self) -> ResolutionTier {
-        ResolutionTier::Heuristic
-    }
-
-    fn resolve(&self, refs: &[UnresolvedRef], index: &dyn SymbolIndex) -> Result<Vec<Edge>> {
-        let mut out = Vec::new();
-
-        for r in refs {
-            // Only synthesize for call-site references.
-            if r.kind != EdgeKind::Calls {
-                continue;
-            }
-
-            // Look up all nodes that carry this name in the parsed index.
-            let mut candidates = index.by_name(&r.raw_name);
-
-            // Narrow to callable nodes (the parsed graph distinguishes callables).
-            candidates.retain(|n| is_callable(&n.kind));
-
-            // No self-edges.
-            candidates.retain(|n| n.symbol != r.from);
-
-            // Exact one candidate → synthesis is unambiguous.
-            if let [only] = candidates.as_slice() {
-                let edge = Edge::new(
-                    r.from.clone(),
-                    only.symbol.clone(),
-                    EdgeKind::Calls,
-                    ResolutionTier::Heuristic,
-                    self.id(),
-                )
-                .with_location(r.location.clone());
-                out.push(edge);
-            }
-            // >1 → ambiguous; emit nothing (honest non-resolution).
-            // 0  → unknown; emit nothing.
-        }
-
-        Ok(out)
-    }
-}
-
-// ── Precision monitoring ───────────────────────────────────────────────────────
-
-/// The minimum acceptable precision for any synthesizer.
-///
-/// A synthesizer whose edge-level precision falls below this floor is caught by
-/// [`measure_synth_precision`] + [`SynthPrecision::is_acceptable`]. The value mirrors the
-/// research finding that heuristic synthesis at < 70% precision creates more noise than signal
-///.
-pub const SYNTH_PRECISION_FLOOR: f64 = 0.7;
-
-/// Per-synthesizer precision measurement over a gold-labelled reference set.
-///
-/// Produced by [`measure_synth_precision`].
-#[derive(Debug, Clone)]
-pub struct SynthPrecision {
-    /// The resolver id of the measured synthesizer (from [`Resolver::id`]).
-    pub resolver_id: String,
-    /// Number of edges the synthesizer emitted.
-    pub emitted: usize,
-    /// Number of emitted edges whose target matched the gold map.
-    pub correct: usize,
-    /// `correct / emitted`, or `1.0` when `emitted == 0` (vacuously precise).
-    pub precision: f64,
-}
-
-impl SynthPrecision {
-    /// Returns `true` iff the synthesizer meets the [`SYNTH_PRECISION_FLOOR`].
-    pub fn is_acceptable(&self) -> bool {
-        self.precision >= SYNTH_PRECISION_FLOOR
-    }
-}
-
-/// Run `synth` against `refs` + `index` and score the resulting edges against a gold map.
-///
-/// # Gold map format
-///
-/// `gold` maps `(from_symbol_id, raw_name)` → expected `target_symbol_id`. An emitted edge is
-/// counted as **correct** when `gold.get(&(edge.source.clone(), ref_raw_name.clone()))` equals
-/// `Some(&edge.target)`.
-///
-/// # Matching emitted edges back to raw_name
-///
-/// Because `Edge` does not carry the `raw_name`, this function correlates each emitted edge back
-/// to its originating ref via `(source, kind) == (ref.from, ref.kind)` matching. When multiple
-/// refs share the same source+kind (uncommon in practice), the first match wins; precision
-/// scoring is statistical and a one-off ambiguity does not skew the result meaningfully.
-pub fn measure_synth_precision(
-    synth: &dyn Resolver,
-    refs: &[UnresolvedRef],
-    index: &dyn SymbolIndex,
-    gold: &std::collections::HashMap<
-        (wicked_estate_core::SymbolId, String),
-        wicked_estate_core::SymbolId,
-    >,
-) -> SynthPrecision {
-    // Run the synthesizer; ignore errors (a failing synthesizer has precision 0).
-    let edges = match synth.resolve(refs, index) {
-        Ok(e) => e,
-        Err(_) => {
-            return SynthPrecision {
-                resolver_id: synth.id().to_string(),
-                emitted: 0,
-                correct: 0,
-                precision: 1.0, // vacuously precise: nothing emitted
-            };
-        }
-    };
-
-    let emitted = edges.len();
-    if emitted == 0 {
-        return SynthPrecision {
-            resolver_id: synth.id().to_string(),
-            emitted: 0,
-            correct: 0,
-            precision: 1.0,
-        };
-    }
-
-    let mut correct = 0usize;
-
-    for edge in &edges {
-        // Correlate the edge back to its originating ref to retrieve raw_name.
-        let raw_name = refs
-            .iter()
-            .find(|r| r.from == edge.source && r.kind == edge.kind)
-            .map(|r| r.raw_name.as_str())
-            .unwrap_or("");
-
-        let key = (edge.source.clone(), raw_name.to_string());
-        if gold.get(&key) == Some(&edge.target) {
-            correct += 1;
-        }
-    }
-
-    let precision = correct as f64 / emitted as f64;
-
-    SynthPrecision {
-        resolver_id: synth.id().to_string(),
-        emitted,
-        correct,
-        precision,
-    }
-}
-
 // ── resolve_all ───────────────────────────────────────────────────────────────
 
 /// Run multiple resolvers over the same `refs` + `index`, then deduplicate the resulting edges
@@ -914,16 +738,21 @@ pub fn measure_synth_precision(
 ///
 /// This lets the pipeline compose cheap resolvers (e.g. [`NameResolver`] for unique names) with
 /// scope-aware ones (e.g. [`ScopedNameResolver`]) without emitting duplicate edges. A precise
-/// tier resolver (SCIP/TSG/LSP) added later will naturally win because its edges carry higher
+/// tier resolver (SCIP/LSP) added later will naturally win because its edges carry higher
 /// confidence.
 ///
-/// **Resolver order for the full code pipeline (recommended):**
+/// **The production `index`/`watch` slice** (`wicked-estate`'s `index_path`; the activation table
+/// lives in `docs/ENGINE-CONTRACT.md` §3.1):
 /// ```text
-/// ImportMapResolver → ScopedNameResolver → NameResolver → MethodResolutionSynthesizer
+/// NameResolver → ScopedNameResolver → ImportMapResolver → InfraResolver → RulesBridgeResolver
 /// ```
-/// `MethodResolutionSynthesizer` is listed last so Heuristic (0.5) edges only fill gaps left by
-/// the higher-confidence ImportMap (0.6–0.65) resolvers; `resolve_all` keeps the max-confidence
-/// edge on dedup.
+/// Dedup keeps the max-confidence edge per key, so resolver ORDER is irrelevant to the result
+/// (pinned by `resolve_all_dedup_keeps_higher_confidence_regardless_of_order`).
+///
+/// `MethodResolutionSynthesizer` (a Heuristic-0.5 unique-callable Calls synthesizer) was retired
+/// 2026-08-28: its emit set was a strict subset of `ScopedNameResolver`'s Calls path at lower
+/// confidence, so it could never add an edge (see ADR-007's superseding note; pinned by
+/// `slice_plus_unique_callable_heuristic_adds_no_edge`).
 pub fn resolve_all(
     resolvers: &[&dyn Resolver],
     refs: &[UnresolvedRef],
@@ -2325,292 +2154,6 @@ mod tests {
         );
     }
 
-    // ── MethodResolutionSynthesizer tests ────────────────────────────────────
-
-    /// Happy path: exactly one callable `foo` in the index → synthesizer emits a Heuristic
-    /// Calls edge with confidence 0.5 and provenance Heuristic.
-    #[test]
-    fn synth_method_emits_heuristic_edge_for_unique_callable() {
-        // Build a unique method `foo` on type `Bar` (symbol id distinct from the caller).
-        let foo_sym = Symbol::global("test", None, vec![Descriptor::method("Bar.foo", None)]).id();
-        let foo_node = Node::new(
-            foo_sym.clone(),
-            NodeKind::Method,
-            "foo",
-            Language::new("rust"),
-            Location::new("bar.rs", Span::ZERO),
-        );
-
-        let caller_sym =
-            Symbol::global("test", None, vec![Descriptor::method("caller_synth", None)]).id();
-
-        let index = VecIndex(vec![foo_node]);
-
-        let r = UnresolvedRef::new(
-            caller_sym.clone(),
-            "foo",
-            EdgeKind::Calls,
-            Location::new("main.rs", Span::ZERO),
-        );
-
-        let edges = MethodResolutionSynthesizer.resolve(&[r], &index).unwrap();
-
-        assert_eq!(
-            edges.len(),
-            1,
-            "unique callable should produce exactly one edge; got {}",
-            edges.len()
-        );
-        assert_eq!(edges[0].source, caller_sym, "source must be the caller");
-        assert_eq!(edges[0].target, foo_sym, "target must be Bar.foo");
-        assert_eq!(edges[0].kind, EdgeKind::Calls, "kind must be Calls");
-        // Heuristic tier → confidence 0.5.
-        assert!(
-            (edges[0].confidence.get() - 0.5).abs() < 1e-6,
-            "Heuristic tier confidence must be 0.5, got {}",
-            edges[0].confidence.get()
-        );
-        // Provenance must be Heuristic (set by the tier, never hand-set).
-        assert_eq!(
-            edges[0].provenance,
-            wicked_estate_core::Provenance::Heuristic,
-            "provenance must be Heuristic"
-        );
-        assert_eq!(
-            edges[0].resolved_by, "ast-synth-method",
-            "resolved_by must be the synthesizer id"
-        );
-    }
-
-    /// Ambiguity: two methods named `foo` → synthesizer emits nothing (honest non-resolution).
-    #[test]
-    fn synth_method_emits_nothing_for_ambiguous_callables() {
-        let foo1_sym =
-            Symbol::global("test", None, vec![Descriptor::method("foo_impl_1", None)]).id();
-        let foo2_sym =
-            Symbol::global("test", None, vec![Descriptor::method("foo_impl_2", None)]).id();
-
-        let foo1 = Node::new(
-            foo1_sym,
-            NodeKind::Method,
-            "foo",
-            Language::new("rust"),
-            Location::new("a.rs", Span::ZERO),
-        );
-        let foo2 = Node::new(
-            foo2_sym,
-            NodeKind::Method,
-            "foo",
-            Language::new("rust"),
-            Location::new("b.rs", Span::ZERO),
-        );
-
-        let caller_sym =
-            Symbol::global("test", None, vec![Descriptor::method("caller_amb", None)]).id();
-
-        let index = VecIndex(vec![foo1, foo2]);
-
-        let r = UnresolvedRef::new(
-            caller_sym,
-            "foo",
-            EdgeKind::Calls,
-            Location::new("main.rs", Span::ZERO),
-        );
-
-        let edges = MethodResolutionSynthesizer.resolve(&[r], &index).unwrap();
-        assert!(
-            edges.is_empty(),
-            "ambiguous callables must produce no edge (honest non-resolution); got {}",
-            edges.len()
-        );
-    }
-
-    // ── Precision monitor tests ───────────────────────────────────────────────
-
-    /// The good synthesizer (MethodResolutionSynthesizer) scores >= SYNTH_PRECISION_FLOOR
-    /// on a clean gold set; is_acceptable() is true.
-    #[test]
-    fn precision_monitor_passes_for_correct_synthesizer() {
-        use std::collections::HashMap;
-
-        let foo_sym = Symbol::global("test", None, vec![Descriptor::method("pm_foo", None)]).id();
-        let caller_sym =
-            Symbol::global("test", None, vec![Descriptor::method("pm_caller", None)]).id();
-
-        let foo_node = Node::new(
-            foo_sym.clone(),
-            NodeKind::Function,
-            "foo",
-            Language::new("rust"),
-            Location::new("lib.rs", Span::ZERO),
-        );
-        let index = VecIndex(vec![foo_node]);
-
-        let r = UnresolvedRef::new(
-            caller_sym.clone(),
-            "foo",
-            EdgeKind::Calls,
-            Location::new("main.rs", Span::ZERO),
-        );
-
-        // Gold: caller calling "foo" should resolve to foo_sym.
-        let mut gold = HashMap::new();
-        gold.insert((caller_sym.clone(), "foo".to_string()), foo_sym.clone());
-
-        let result = measure_synth_precision(&MethodResolutionSynthesizer, &[r], &index, &gold);
-
-        assert_eq!(result.emitted, 1, "one ref should produce one emitted edge");
-        assert_eq!(result.correct, 1, "the one edge should be correct");
-        assert!(
-            (result.precision - 1.0).abs() < 1e-9,
-            "precision should be 1.0, got {}",
-            result.precision
-        );
-        assert!(
-            result.is_acceptable(),
-            "precision {} should be >= floor {}",
-            result.precision,
-            SYNTH_PRECISION_FLOOR
-        );
-    }
-
-    /// A deliberately bad synthesizer always binds to the WRONG target.
-    /// measure_synth_precision returns precision < SYNTH_PRECISION_FLOOR; is_acceptable() false.
-    #[test]
-    fn precision_monitor_catches_bad_synthesizer() {
-        use std::collections::HashMap;
-
-        // The bad synthesizer always emits an edge to a WRONG target symbol,
-        // regardless of what the index or ref says.
-        struct BadSynthesizer {
-            wrong_target: wicked_estate_core::SymbolId,
-        }
-
-        impl Resolver for BadSynthesizer {
-            fn id(&self) -> &str {
-                "bad-synth"
-            }
-            fn tier(&self) -> ResolutionTier {
-                ResolutionTier::Heuristic
-            }
-            fn resolve(
-                &self,
-                refs: &[UnresolvedRef],
-                _index: &dyn SymbolIndex,
-            ) -> Result<Vec<Edge>> {
-                let mut out = Vec::new();
-                for r in refs {
-                    if r.kind == EdgeKind::Calls {
-                        let edge = Edge::new(
-                            r.from.clone(),
-                            self.wrong_target.clone(),
-                            EdgeKind::Calls,
-                            ResolutionTier::Heuristic,
-                            self.id(),
-                        );
-                        out.push(edge);
-                    }
-                }
-                Ok(out)
-            }
-        }
-
-        let correct_target =
-            Symbol::global("test", None, vec![Descriptor::method("bs_correct", None)]).id();
-        let wrong_target =
-            Symbol::global("test", None, vec![Descriptor::method("bs_wrong", None)]).id();
-
-        let index = VecIndex(vec![]);
-
-        // Three refs — all will be resolved to wrong_target by BadSynthesizer.
-        let refs: Vec<UnresolvedRef> = (0..3)
-            .map(|i| {
-                let from = Symbol::global(
-                    "test",
-                    None,
-                    vec![Descriptor::method(format!("bs_caller_{i}"), None)],
-                )
-                .id();
-                UnresolvedRef::new(
-                    from,
-                    format!("fn_{i}"),
-                    EdgeKind::Calls,
-                    Location::new("main.rs", Span::ZERO),
-                )
-            })
-            .collect();
-
-        // Gold says all should resolve to correct_target; bad synth will emit wrong_target.
-        let mut gold = HashMap::new();
-        for r in &refs {
-            gold.insert((r.from.clone(), r.raw_name.clone()), correct_target.clone());
-        }
-
-        let bad = BadSynthesizer { wrong_target };
-        let result = measure_synth_precision(&bad, &refs, &index, &gold);
-
-        assert_eq!(result.emitted, 3, "bad synth should emit 3 edges");
-        assert_eq!(result.correct, 0, "none should be correct");
-        assert!(
-            result.precision < SYNTH_PRECISION_FLOOR,
-            "bad synth precision {} must be below floor {}",
-            result.precision,
-            SYNTH_PRECISION_FLOOR
-        );
-        assert!(
-            !result.is_acceptable(),
-            "bad synth should not be acceptable"
-        );
-    }
-
-    /// MethodResolutionSynthesizer wired into resolve_all at the END of the resolver list:
-    /// higher-confidence resolvers' edges win; synthesizer fills gaps only.
-    #[test]
-    fn synth_wired_into_resolve_all_fills_gaps_only() {
-        // A unique `zap` function in the index — NameResolver resolves it at conf 0.6.
-        // MethodResolutionSynthesizer also resolves it at conf 0.5.
-        // After dedup, the NameResolver's 0.6-confidence edge must win.
-        let zap_sym = Symbol::global("test", None, vec![Descriptor::method("zap_fn", None)]).id();
-        let caller_sym =
-            Symbol::global("test", None, vec![Descriptor::method("zap_caller", None)]).id();
-
-        let zap_node = Node::new(
-            zap_sym.clone(),
-            NodeKind::Function,
-            "zap",
-            Language::new("rust"),
-            Location::new("lib.rs", Span::ZERO),
-        );
-        let index = VecIndex(vec![zap_node]);
-
-        let r = UnresolvedRef {
-            from: caller_sym.clone(),
-            raw_name: "zap".to_string(),
-            kind: EdgeKind::Calls,
-            location: Location::new("main.rs", Span::ZERO),
-            hints: Default::default(),
-        };
-
-        // Run with NameResolver first, then MethodResolutionSynthesizer.
-        let resolvers: &[&dyn Resolver] = &[&NameResolver, &MethodResolutionSynthesizer];
-        let edges = resolve_all(resolvers, &[r], &index).unwrap();
-
-        assert_eq!(
-            edges.len(),
-            1,
-            "dedup should yield one edge; got {}",
-            edges.len()
-        );
-        assert_eq!(edges[0].target, zap_sym);
-        // NameResolver at ImportMap tier → confidence 0.6; synth at Heuristic → 0.5.
-        // The higher-confidence edge (0.6) must survive.
-        assert!(
-            (edges[0].confidence.get() - 0.6).abs() < 1e-6,
-            "NameResolver's 0.6-conf edge should win over synth's 0.5; got {}",
-            edges[0].confidence.get()
-        );
-    }
-
     // ── dir_of / root-level file tests (D6) ──────────────────────────────────
 
     #[test]
@@ -3094,5 +2637,149 @@ mod tests {
             NameResolver.resolve(&[r], &index).unwrap().is_empty(),
             "html is its own family; a TS Calls ref must not bind into markup"
         );
+    }
+
+    // ── resolve_all structural regressions (D02-9 / FEAS-4) ───────────────────
+
+    /// A resolver that emits unique-callable Calls at Heuristic 0.5 — exactly the retired
+    /// `MethodResolutionSynthesizer`'s algorithm, inlined so the structural theorem stays
+    /// testable without shipping the dead code.
+    struct UniqueCallableHeuristic;
+
+    impl Resolver for UniqueCallableHeuristic {
+        fn id(&self) -> &str {
+            "test-unique-callable-heuristic"
+        }
+        fn tier(&self) -> ResolutionTier {
+            ResolutionTier::Heuristic
+        }
+        fn resolve(&self, refs: &[UnresolvedRef], index: &dyn SymbolIndex) -> Result<Vec<Edge>> {
+            let mut out = Vec::new();
+            for r in refs {
+                if r.kind != EdgeKind::Calls {
+                    continue;
+                }
+                let mut candidates = index.by_name(&r.raw_name);
+                candidates.retain(|n| is_callable(&n.kind));
+                candidates.retain(|n| n.symbol != r.from);
+                if let [only] = candidates.as_slice() {
+                    out.push(
+                        Edge::new(
+                            r.from.clone(),
+                            only.symbol.clone(),
+                            EdgeKind::Calls,
+                            ResolutionTier::Heuristic,
+                            self.id(),
+                        )
+                        .with_location(r.location.clone()),
+                    );
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    /// D02-9: a unique-callable Heuristic-0.5 synthesizer adds NOTHING to the production slice —
+    /// its emit set is a strict subset of `ScopedNameResolver`'s Calls path (same by_name, same
+    /// callable retain, same self-drop, lower confidence). This is the structural reason
+    /// `MethodResolutionSynthesizer` was retired.
+    #[test]
+    fn slice_plus_unique_callable_heuristic_adds_no_edge() {
+        // A homonym population: unique callables, ambiguous callables, non-callables, self-calls.
+        let caller = node_lang("d029_caller", "caller", "src/a.ts", "typescript");
+        let unique_fn = node_lang("d029_unique", "unique_fn", "src/b.ts", "typescript");
+        let amb1 = node_lang("d029_amb1", "amb", "src/c.ts", "typescript");
+        let amb2 = node_lang("d029_amb2", "amb", "src/d.ts", "typescript");
+        let konst = node_kind_lang(
+            "d029_const",
+            "cfg",
+            "src/e.ts",
+            "typescript",
+            NodeKind::Constant,
+        );
+        let nodes = vec![caller.clone(), unique_fn, amb1, amb2, konst];
+        let index = VecIndex::plain(nodes);
+        let mk = |name: &str| {
+            UnresolvedRef::new(
+                caller.symbol.clone(),
+                name,
+                EdgeKind::Calls,
+                Location::new("src/a.ts", Span::ZERO),
+            )
+        };
+        let refs = vec![
+            mk("unique_fn"),
+            mk("amb"),
+            mk("cfg"),
+            mk("caller"),
+            mk("ghost"),
+        ];
+
+        let base: &[&dyn Resolver] = &[
+            &NameResolver,
+            &ScopedNameResolver,
+            &ImportMapResolver,
+            &InfraResolver,
+        ];
+        let with_synth: &[&dyn Resolver] = &[
+            &NameResolver,
+            &ScopedNameResolver,
+            &ImportMapResolver,
+            &InfraResolver,
+            &UniqueCallableHeuristic,
+        ];
+
+        let mut a = resolve_all(base, &refs, &index).unwrap();
+        let mut b = resolve_all(with_synth, &refs, &index).unwrap();
+        let key = |e: &Edge| {
+            (
+                e.source.to_string(),
+                e.target.to_string(),
+                format!("{:?}", e.kind),
+                e.resolved_by.clone(),
+            )
+        };
+        a.sort_by_key(&key);
+        b.sort_by_key(&key);
+        assert_eq!(
+            a.iter().map(&key).collect::<Vec<_>>(),
+            b.iter().map(&key).collect::<Vec<_>>(),
+            "the heuristic must add no edge and win no dedup over the production slice"
+        );
+    }
+
+    /// FEAS-4: `resolve_all`'s max-confidence dedup is order-independent — the surviving edge
+    /// keeps the higher tier's confidence and resolved_by whether the Heuristic-0.5 resolver runs
+    /// FIRST (exercises the `>`-not-`>=` replace branch) or LAST (exercises or_insert-then-keep).
+    /// This replaces the coverage the retired synthesizer's resolve_all test provided.
+    #[test]
+    fn resolve_all_dedup_keeps_higher_confidence_regardless_of_order() {
+        let caller = node_lang("feas4_caller", "caller", "src/a.ts", "typescript");
+        let target = node_lang("feas4_target", "zap", "src/b.ts", "typescript");
+        let index = VecIndex::plain(vec![caller.clone(), target.clone()]);
+        let r = UnresolvedRef::new(
+            caller.symbol.clone(),
+            "zap",
+            EdgeKind::Calls,
+            Location::new("src/a.ts", Span::ZERO),
+        );
+
+        for resolvers in [
+            &[&UniqueCallableHeuristic as &dyn Resolver, &NameResolver] as &[&dyn Resolver],
+            &[&NameResolver as &dyn Resolver, &UniqueCallableHeuristic],
+        ] {
+            let edges = resolve_all(resolvers, std::slice::from_ref(&r), &index).unwrap();
+            assert_eq!(edges.len(), 1, "dedup must yield one edge");
+            assert_eq!(edges[0].target, target.symbol);
+            assert_eq!(
+                edges[0].resolved_by, "name-resolver",
+                "the higher-confidence resolver must win regardless of order"
+            );
+            assert!(
+                (edges[0].confidence.get() - 0.6).abs() < 1e-6,
+                "the surviving edge must keep the higher confidence, got {}",
+                edges[0].confidence.get()
+            );
+        }
     }
 }
