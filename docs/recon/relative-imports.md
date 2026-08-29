@@ -608,7 +608,10 @@ not of File→File edges — entrypoints/dead-code are byte-identical.
   limitation, `lib.rs:18-25`): Decision J deliberately scopes forcing to DELETED targets
   (ATT-INV-2) — this lane's File→File edges need nothing more; the broader Calls staleness is a
   separate change with its own O(fan-in) cost/measurement question.
-- Shared-by-specifier Import node identity (`repo_scope.rs:22-27` wart): unchanged.
+- Shared-by-specifier Import node identity (`repo_scope.rs` wart): the identity shape is
+  unchanged, but its dangle consequence was fixed by the incr-integrity lane — `remove_file` now
+  keeps + re-homes a shared Import node while survivor edges target it (see
+  `docs/ENGINE-CONTRACT.md` §4).
 - Pre-existing ignored doctests in resolve and extract (engine defect #5): reported as unchanged.
 
 ---

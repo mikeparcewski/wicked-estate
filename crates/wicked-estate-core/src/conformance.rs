@@ -501,12 +501,15 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
 
     // --- Wave 2.6: remove_file removes that file's nodes ---
     // The fixture nodes all have location.file == "src/lib.rs" (set by func_node above).
-    // After remove_file("src/lib.rs") none of them should remain.
+    // After remove_file("src/lib.rs") none of them should remain. Scope (incr-integrity lane):
+    // this unconditional removal covers every NON-Import node kind; a shared `NodeKind::Import`
+    // node with survivor edges is instead kept + re-homed — pinned by the shared-Import section
+    // at the end of this suite.
     store.remove_file("src/lib.rs").expect("remove_file");
     let remaining = store.all_nodes().expect("all_nodes after remove_file");
     assert!(
         remaining.iter().all(|n| n.location.file != "src/lib.rs"),
-        "remove_file must remove all nodes whose location.file matches; remaining: {:?}",
+        "remove_file must remove all (non-Import) nodes whose location.file matches; remaining: {:?}",
         remaining
             .iter()
             .map(|n| &n.location.file)
@@ -1420,4 +1423,277 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
         "a symbol whose FIRST node was epoch 0 must bump to >=1 once it is deleted and re-added; \
          got {edge_reused}"
     );
+
+    // ── Shared-Import remove_file semantics (incr-integrity lane) ────────────────────────────
+    // An Import node is keyed by module SPECIFIER and shared by every importer of the same
+    // spec, so remove_file must KEEP it while survivor edges target it, RE-HOME it (both the
+    // file column and the data-JSON location — the JSON path is asserted by the get_node
+    // read-back, the column path by the last-importer delete matching the new home), and
+    // delete it through the normal path once the last importer is gone. The suite runs with
+    // history ON, so the owner-removal case also pins the archival boundary: the owner's own
+    // File→Import edge is archived, surviving importers' edges stay live and unarchived.
+    let import_node = |name: &str, home: &str| {
+        Node::new(
+            sym(name),
+            NodeKind::Import,
+            name,
+            Language::new("rust"),
+            Location::new(home, Span::ZERO),
+        )
+    };
+    let file_node = |name: &str, path: &str| {
+        Node::new(
+            sym(name),
+            NodeKind::File,
+            name,
+            Language::new("rust"),
+            Location::new(path, Span::ZERO),
+        )
+    };
+    let imports = |a: &str, b: &str, at: &str| {
+        Edge::new(
+            sym(a),
+            sym(b),
+            EdgeKind::Imports,
+            ResolutionTier::Parsed,
+            "conformance",
+        )
+        .with_location(Location::new(at, Span::ZERO))
+    };
+    let edges_to = |store: &S, name: &str| -> Vec<Edge> {
+        store
+            .all_edges()
+            .expect("all_edges")
+            .into_iter()
+            .filter(|e| e.target == sym(name))
+            .collect()
+    };
+
+    // (SI-1) Owner removal keeps + re-homes; last-importer removal deletes (falsifier 7).
+    store.begin_batch().expect("begin si1");
+    store
+        .upsert_nodes(&[
+            file_node("si_file_a", "imp/a.rs"),
+            file_node("si_file_b", "imp/b.rs"),
+            import_node("si_import", "imp/b.rs"), // owner: imp/b.rs (last writer)
+        ])
+        .expect("upsert si1 nodes");
+    store
+        .upsert_edges(&[
+            imports("si_file_a", "si_import", "imp/a.rs"),
+            imports("si_file_b", "si_import", "imp/b.rs"),
+        ])
+        .expect("upsert si1 edges");
+    store.commit_batch().expect("commit si1");
+
+    store
+        .remove_file("imp/b.rs")
+        .expect("remove owner imp/b.rs");
+    let kept = store
+        .get_node(&sym("si_import"))
+        .expect("get_node si_import")
+        .expect("shared Import node must SURVIVE the owner's removal while imp/a.rs imports it");
+    assert_eq!(
+        kept.location.file, "imp/a.rs",
+        "kept Import node must be re-homed to the surviving importer (data-JSON location)"
+    );
+    let to_import = edges_to(store, "si_import");
+    assert_eq!(
+        to_import.len(),
+        1,
+        "exactly the surviving importer's edge remains: {to_import:?}"
+    );
+    assert_eq!(
+        to_import[0].source,
+        sym("si_file_a"),
+        "the surviving edge is imp/a.rs's File→Import edge"
+    );
+    assert!(
+        store
+            .get_node(&sym("si_file_b"))
+            .expect("get_node si_file_b")
+            .is_none(),
+        "the owner's File node itself is removed unconditionally"
+    );
+    // History boundary: the owner's edge was archived under the OWNER's file; the survivor's
+    // edge is live and outside imp/a.rs's archive set.
+    let hist_b = store.edge_history("imp/b.rs").expect("edge_history b");
+    assert!(
+        hist_b
+            .iter()
+            .any(|h| h.edge.source == sym("si_file_b") && h.edge.target == sym("si_import")),
+        "the removed owner's File→Import edge must be archived under imp/b.rs"
+    );
+    let hist_a = store.edge_history("imp/a.rs").expect("edge_history a");
+    assert!(
+        !hist_a
+            .iter()
+            .any(|h| h.edge.source == sym("si_file_a") && h.edge.target == sym("si_import")),
+        "the SURVIVING importer's edge must NOT be archived (it is live)"
+    );
+
+    // Last importer: the earlier re-home moved the FILE COLUMN too, or this delete would not
+    // match the node and it would island forever.
+    store
+        .remove_file("imp/a.rs")
+        .expect("remove last importer imp/a.rs");
+    assert!(
+        store
+            .get_node(&sym("si_import"))
+            .expect("get_node si_import after last importer")
+            .is_none(),
+        "removing the LAST importer must delete the Import node (self-terminating re-home; \
+         a column-only or JSON-only re-home fails here)"
+    );
+    assert!(
+        edges_to(store, "si_import").is_empty(),
+        "no edges to the deleted Import node may remain"
+    );
+    assert!(
+        !store
+            .all_nodes()
+            .expect("all_nodes after si1")
+            .iter()
+            .any(|n| n.symbol == sym("si_import")),
+        "no island Import node may remain (falsifier 7)"
+    );
+
+    // (SI-2) One-run BATCH delete of owner + a non-owner with a third importer surviving: the
+    // keep-check and re-home are evaluated PER remove_file CALL against current rows, never a
+    // batch-start snapshot — a snapshot would re-home onto the doomed sibling (imp2/c1).
+    store.begin_batch().expect("begin si2");
+    store
+        .upsert_nodes(&[
+            file_node("si2_c1", "imp2/c1.rs"),
+            file_node("si2_c2", "imp2/c2.rs"),
+            file_node("si2_c3", "imp2/c3.rs"),
+            import_node("si2_import", "imp2/c3.rs"), // owner: c3
+        ])
+        .expect("upsert si2 nodes");
+    store
+        .upsert_edges(&[
+            imports("si2_c1", "si2_import", "imp2/c1.rs"),
+            imports("si2_c2", "si2_import", "imp2/c2.rs"),
+            imports("si2_c3", "si2_import", "imp2/c3.rs"),
+        ])
+        .expect("upsert si2 edges");
+    store.commit_batch().expect("commit si2");
+
+    store.begin_batch().expect("begin si2 removal");
+    store.remove_file("imp2/c3.rs").expect("batch remove owner");
+    store
+        .remove_file("imp2/c1.rs")
+        .expect("batch remove interim home");
+    store.commit_batch().expect("commit si2 removal");
+    let kept2 = store
+        .get_node(&sym("si2_import"))
+        .expect("get_node si2_import")
+        .expect("Import node must survive a batch that leaves one importer alive");
+    assert_eq!(
+        kept2.location.file, "imp2/c2.rs",
+        "per-call re-home: after removing c3 (home→c1) and then c1, the node lives at c2 — \
+         a batch-start snapshot would have left it homed at the deleted c1"
+    );
+    let to2 = edges_to(store, "si2_import");
+    assert_eq!(
+        to2.len(),
+        1,
+        "only the live importer's edge remains: {to2:?}"
+    );
+    assert_eq!(to2[0].source, sym("si2_c2"), "c2's edge survives");
+    store
+        .remove_file("imp2/c2.rs")
+        .expect("remove si2 last importer");
+    assert!(
+        store
+            .get_node(&sym("si2_import"))
+            .expect("get_node si2_import end")
+            .is_none(),
+        "si2 cleanup: last importer removal deletes the node"
+    );
+
+    // (SI-3) One-run batch removing ALL importers: node gone, no island (falsifier 7, batch shape).
+    store.begin_batch().expect("begin si3");
+    store
+        .upsert_nodes(&[
+            file_node("si3_d1", "imp3/d1.rs"),
+            file_node("si3_d2", "imp3/d2.rs"),
+            import_node("si3_import", "imp3/d1.rs"), // owner: d1 — removed FIRST below
+        ])
+        .expect("upsert si3 nodes");
+    store
+        .upsert_edges(&[
+            imports("si3_d1", "si3_import", "imp3/d1.rs"),
+            imports("si3_d2", "si3_import", "imp3/d2.rs"),
+        ])
+        .expect("upsert si3 edges");
+    store.commit_batch().expect("commit si3");
+    store.begin_batch().expect("begin si3 removal");
+    store.remove_file("imp3/d1.rs").expect("batch remove d1");
+    store.remove_file("imp3/d2.rs").expect("batch remove d2");
+    store.commit_batch().expect("commit si3 removal");
+    assert!(
+        store
+            .get_node(&sym("si3_import"))
+            .expect("get_node si3_import")
+            .is_none(),
+        "a one-run batch removing ALL importers must leave no island Import node"
+    );
+    assert!(
+        edges_to(store, "si3_import").is_empty(),
+        "no edges to si3_import may remain after all importers are gone"
+    );
+
+    // (SI-4) A locationless ('') edge is NOT a survivor (falsifier 8): it must neither keep the
+    // node alive nor win the MIN(file) re-home ('' sorts before every real path but is a path
+    // no remove_file call ever matches).
+    store.begin_batch().expect("begin si4");
+    store
+        .upsert_nodes(&[
+            file_node("si4_owner", "imp4/o.rs"),
+            file_node("si4_a", "imp4/a.rs"),
+            func_node("si4_z"), // lives in src/lib.rs — outside the removed files
+            import_node("si4_import", "imp4/o.rs"), // owner: o.rs
+        ])
+        .expect("upsert si4 nodes");
+    store
+        .upsert_edges(&[
+            imports("si4_owner", "si4_import", "imp4/o.rs"),
+            imports("si4_a", "si4_import", "imp4/a.rs"),
+            // Locationless edge (schema-legal): no with_location → file '' in column stores.
+            Edge::new(
+                sym("si4_z"),
+                sym("si4_import"),
+                EdgeKind::Imports,
+                ResolutionTier::Parsed,
+                "conformance",
+            ),
+        ])
+        .expect("upsert si4 edges");
+    store.commit_batch().expect("commit si4");
+
+    store.remove_file("imp4/o.rs").expect("remove si4 owner");
+    let kept4 = store
+        .get_node(&sym("si4_import"))
+        .expect("get_node si4_import")
+        .expect("si4 node survives via the real-file survivor");
+    assert_eq!(
+        kept4.location.file, "imp4/a.rs",
+        "re-home must pick the real survivor file, never '' (falsifier 8)"
+    );
+    store
+        .remove_file("imp4/a.rs")
+        .expect("remove si4 last real importer");
+    assert!(
+        store
+            .get_node(&sym("si4_import"))
+            .expect("get_node si4_import after real importers gone")
+            .is_none(),
+        "a node referenced ONLY by a locationless ('') edge is DELETED, not kept (falsifier 8)"
+    );
+    // The '' edge's fate is store-specific (it dangles in column stores until pruned); prune to
+    // leave the suite's graph clean either way.
+    store
+        .prune_dangling_edges()
+        .expect("prune after si4 cleanup");
 }

@@ -214,29 +214,89 @@ impl GraphWrite for SurrealStore {
                 .take(0)
                 .map_err(se)?;
 
-            let mut syms_to_delete: Vec<String> = Vec::new();
+            let mut file_nodes: Vec<Node> = Vec::new();
             for v in rows {
                 if let surrealdb::Value::Object(obj) = v {
                     if let Some(surrealdb::Value::Strand(s)) = obj.get("data") {
                         if let Ok(n) = serde_json::from_str::<Node>(s.as_str()) {
                             if n.location.file == file {
-                                syms_to_delete.push(n.symbol.0.clone());
+                                file_nodes.push(n);
                             }
                         }
                     }
                 }
             }
+            let file_syms: HashSet<String> =
+                file_nodes.iter().map(|n| n.symbol.0.clone()).collect();
 
-            for sym in &syms_to_delete {
-                db.query("DELETE node WHERE symbol=$sym")
-                    .bind(("sym", sym.clone()))
-                    .await
-                    .map_err(se)?;
-                // Also remove edges involving this symbol.
-                db.query("DELETE edge_rel WHERE src=$sym OR tgt=$sym")
-                    .bind(("sym", sym.clone()))
-                    .await
-                    .map_err(se)?;
+            // Shared-Import keep + re-home (incr-integrity lane, D1/D2/D4). Surreal's edge
+            // delete is `src=$sym OR tgt=$sym` — for a removed Import node that would delete
+            // the OTHER importers' edges outright (immediate loss, not a dangle), so the keep
+            // must ALSO suppress the tgt half of the edge delete (D9). Survivor predicate
+            // (same as SqliteStore): an edge targeting the node whose location file is neither
+            // '' nor this file and whose source does not live in this file. Kept nodes are
+            // re-homed to the survivor with the deterministic MIN location file (single
+            // representation here: the data JSON).
+            for n in &file_nodes {
+                let sym = n.symbol.0.clone();
+                let mut kept_loc: Option<wicked_estate_core::Location> = None;
+                if n.kind == NodeKind::Import {
+                    let edge_rows: Vec<surrealdb::Value> = db
+                        .query("SELECT data FROM edge_rel WHERE tgt=$sym")
+                        .bind(("sym", sym.clone()))
+                        .await
+                        .map_err(se)?
+                        .take(0)
+                        .map_err(se)?;
+                    for v in edge_rows {
+                        if let surrealdb::Value::Object(obj) = v {
+                            if let Some(surrealdb::Value::Strand(s)) = obj.get("data") {
+                                if let Ok(e) = serde_json::from_str::<Edge>(s.as_str()) {
+                                    if file_syms.contains(&e.source.0) {
+                                        continue;
+                                    }
+                                    let Some(loc) = e.location else { continue };
+                                    if loc.file.is_empty() || loc.file == file {
+                                        continue;
+                                    }
+                                    let better = match &kept_loc {
+                                        None => true,
+                                        Some(k) => loc.file < k.file,
+                                    };
+                                    if better {
+                                        kept_loc = Some(loc);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(loc) = kept_loc {
+                    // KEEP: re-home the node, suppress the node delete AND the tgt-edge
+                    // delete; the node's own outgoing edges still die (SqliteStore parity).
+                    let mut rehomed = n.clone();
+                    rehomed.location = loc;
+                    let data = serde_json::to_string(&rehomed).map_err(se)?;
+                    db.query("UPDATE node SET data=$data WHERE symbol=$sym")
+                        .bind(("sym", sym.clone()))
+                        .bind(("data", data))
+                        .await
+                        .map_err(se)?;
+                    db.query("DELETE edge_rel WHERE src=$sym")
+                        .bind(("sym", sym.clone()))
+                        .await
+                        .map_err(se)?;
+                } else {
+                    db.query("DELETE node WHERE symbol=$sym")
+                        .bind(("sym", sym.clone()))
+                        .await
+                        .map_err(se)?;
+                    // Also remove edges involving this symbol.
+                    db.query("DELETE edge_rel WHERE src=$sym OR tgt=$sym")
+                        .bind(("sym", sym.clone()))
+                        .await
+                        .map_err(se)?;
+                }
             }
 
             // Remove unresolved refs from this file.

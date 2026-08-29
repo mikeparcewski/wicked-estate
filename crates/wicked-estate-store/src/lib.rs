@@ -409,8 +409,43 @@ impl GraphWrite for MemStore {
             }
         }
 
+        // Step 3b: shared-Import keep + re-home (incr-integrity lane, D1/D2/D4 — mirrors
+        // SqliteStore). An Import node located in this file is KEPT when at least one SURVIVOR
+        // edge still targets it: an edge whose location file is neither '' nor this file and
+        // whose source does not live in this file (both exclusions are exactly what the Step-4
+        // retain below deletes, so pre-delete evaluation equals post-delete state). The kept
+        // node is re-homed to the survivor edge with the deterministic MIN location file, so the
+        // keep self-terminates when the last importer is removed.
+        let mut kept_syms: HashSet<SymbolId> = HashSet::new();
+        {
+            let mut rehomes: Vec<(SymbolId, wicked_estate_core::Location)> = Vec::new();
+            for n in self.nodes.values() {
+                if n.location.file != file || n.kind != NodeKind::Import {
+                    continue;
+                }
+                let survivor_loc = self
+                    .edges
+                    .iter()
+                    .filter(|e| e.target == n.symbol && !file_symbols.contains(&e.source))
+                    .filter_map(|e| e.location.as_ref())
+                    .filter(|l| !l.file.is_empty() && l.file != file)
+                    .min_by(|a, b| a.file.cmp(&b.file));
+                if let Some(loc) = survivor_loc {
+                    rehomes.push((n.symbol.clone(), loc.clone()));
+                }
+            }
+            for (sym, loc) in rehomes {
+                if let Some(n) = self.nodes.get_mut(&sym) {
+                    n.location = loc;
+                }
+                kept_syms.insert(sym);
+            }
+        }
+
         // Step 4: remove nodes, edges, unresolved refs, digest, git_sha pointer.
-        // file_symbols was already computed in Step 2 above.
+        // file_symbols was already computed in Step 2 above (it still CONTAINS kept symbols, so
+        // a kept node's own outgoing edges die below — SqliteStore parity); kept nodes no longer
+        // match the by-file retain because they were re-homed above.
         self.nodes.retain(|_, n| n.location.file != file);
         self.edges.retain(|e| {
             let loc_file = e.location.as_ref().map(|l| l.file.as_str()).unwrap_or("");
@@ -421,9 +456,11 @@ impl GraphWrite for MemStore {
         self.file_git_shas.remove(file);
         // NOTE: do NOT remove from self.content — content is content-addressed and may be
         // retained for history; orphans are pruned in compact().
-        // Remove embeddings for all removed symbols.
+        // Remove embeddings for all removed symbols (kept Import nodes keep theirs — D5).
         for sym in &file_symbols {
-            self.embeddings.remove(sym);
+            if !kept_syms.contains(sym) {
+                self.embeddings.remove(sym);
+            }
         }
         Ok(())
     }

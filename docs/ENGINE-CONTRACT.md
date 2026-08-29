@@ -151,6 +151,22 @@ Read methods (`get_node`, `find_symbols`, `neighbors`, `traverse`, `stats`) are 
 (`max_depth` + `max_nodes` required; unbounded whole-graph walks are out — see research/09).
 Any new store MUST pass `wicked_estate_core::conformance::graph_store_suite`.
 
+**`remove_file` and shared Import nodes (incr-integrity lane).** `remove_file(f)` removes `f`'s
+nodes, edges, and unresolved rows — with ONE exception: a `NodeKind::Import` node located in `f`
+is **kept** when at least one *survivor* edge still targets it (an edge whose file is neither `''`
+nor `f` and whose source node does not live in `f`). Import nodes are keyed by module specifier
+and shared by every importer of the same spec; the unconditional delete used to strand every other
+importer's `File→Import` edge (dangling after a deletion-only run, then silently pruned — a §2.1
+violation). A kept node is re-homed — both its `file` column and its `location` — to the
+deterministic MIN(file) over its survivor edges, so removing the LAST importer deletes it through
+the normal path (no islands, no GC pass). Evaluated per `remove_file` call, never against a
+batch-start snapshot. Pinned by the conformance kit's shared-Import section.
+
+**Healing an already-damaged DB.** A graph written by a binary from before this fix may carry the
+residual dangling edges; they keep the old fate (pruned with a `GRAPH-CLEANUP` log line on the
+next run WITH changes). The documented heal is a one-off `wicked-estate index <path> --force` full
+re-index.
+
 ## 5. Rules engine node and edge kinds (W15)
 
 Rules engine entities use first-class `NodeKind` and `EdgeKind` variants:
