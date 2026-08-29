@@ -1,0 +1,267 @@
+# Plan — W3.6 intent-routed LSP: ADR-009 + phase-0 lsp.rs fixes
+
+Lane `lsp-w36`, branch `design/w36-lsp-intent`, base 764622f (main). Planner output per §10.
+Inputs: `estate-review/REVIEW-adversarial-2026-08-28.md` (engine defect #5, D02-5, D03-10, PER-8),
+`review-artifacts/findings.json`, `estate-review/RECON-lsp-intent-installer.md` +
+`review-artifacts/lsp-recon.json`, plus a 4-lens lane recon (history/consumers/tests/risks) run at 764622f.
+
+## 1. Findings acted on (with citations verified at 764622f)
+
+| # | Finding | Evidence | Disposition |
+|---|---|---|---|
+| F1 | **Timeout is dead code**: `libc::setsockopt(SO_RCVTIMEO)` on the child's stdout **pipe** fd → ENOTSOCK, return value discarded; non-Unix branch is an explicit no-op; the 10s `Duration` in `RpcTransport::new` is never enforced. Module header (`lsp.rs:33-36`) advertises the broken mechanism as working. | `crates/wicked-estate-resolve/src/lsp.rs:173-203` (setsockopt + no-op), `:205-209` (blocking passthrough), `:213` (hardcoded 10s), `:33-36` (lying header) | Phase-0 fix (a), step S2 |
+| F2 | **`LspTier` never sends `textDocument/didOpen`**: `definition/references/hover` (`lsp.rs:591-623`) call `self.client(language)?` then query directly; `did_open` exists (`lsp.rs:423-435`) but its only callers are the live test (`tests/lsp_live.rs:126-131`), which drives `LspClient` manually and so masks the defect. tsserver/pyright return empty for unopened docs. No languageId mapping exists (LSP requires `typescriptreact` for `.tsx`). | `lsp.rs:591-623`, `:423-435`, `:288-326` (registry keys), `tests/lsp_live.rs:76-131` | Phase-0 fix (b), step S3 |
+| F3 | **lsp.rs is a §5 orphan** (review engine defect #5; D02-5): no `Resolver` impl, no `Edge`, no production caller. The `ignore`d-doctest half of the finding is already fixed on main — `lsp.rs:537-538` is ` ```no_run ` since #126 (0e5f4ca). | REVIEW:160; findings D02-5; `git log --oneline -- crates/wicked-estate-resolve/src/lsp.rs` → only 797ce58 + 0e5f4ca | ADR-009 defines the consumer (W3.6); phase-0 stays a client library, step S4 |
+| F4 | **The prior recon is stale in a load-bearing way**: W3.6 (`docs/plan/WAVE-PLAN.md:119`), the §3.1 Lsp row (`docs/ENGINE-CONTRACT.md:140`), and the drift test (`crates/wicked-estate/src/lib.rs:2836`) all exist **on main** via #126 — not "only on lane B's unmerged branch". Every ADR citation is re-derived at 764622f, none copied from the recon. | Files at 764622f as cited | All doc steps cite main |
+| F5 | **Recon gap 9 closed — there is no rmcp router**: MCP dispatch is hand-rolled (`handle_request_unified`, `mcp/src/lib.rs:661-666`); resources are a `OnceLock<Vec<McpResource>>` with `content: &'static str` (`resources.rs:8-10, 83-92`). A runtime-rendered installer skill is a local type widening, not a framework question. | grep `rmcp` over all Cargo.toml → 0 hits | ADR §installer, step S4 |
+| F6 | **Recon gap closed — languageId mappings**: only two non-identity mappings needed over the 6 registry keys: `tsx→typescriptreact`, `jsx→javascriptreact`; identity for typescript/javascript/rust/python. | `lsp.rs:288-326`; LSP spec languageId vocabulary | Step S3 |
+| F7 | **Drift-test interaction is bounded**: `slice_matches_engine_contract_table` asserts the anchor comment `// Activation table: docs/ENGINE-CONTRACT.md §3.1` appears exactly once in `wicked-estate/src/lib.rs`, parses the slice literal after it, and compares only §3.1 rows containing `yes (slice)`. The Lsp row's **notes cell is invisible to the test**; phase-0 changes neither the slice nor any `yes (slice)` row. | `crates/wicked-estate/src/lib.rs:1014, 2836-2900`; `docs/ENGINE-CONTRACT.md:140` | Steps S4/S5 constraints |
+| F8 | **crew drops stderr and JSON.parses the whole stdout** of estate query arms (`exec.ts:98`; `graph.ts:1004-1010, 1041-1045`); stderr is logged only for the index arm. Any fallback marker must be an additive field inside the JSON payload / `RetrievalResult.diagnostics` — extra stdout lines break `JSON.parse`, stderr is invisible. | wicked-crew sources at cited lines (read-only reference) | ADR §warn-and-serve, step S4 |
+| F9 | **Two mechanical MCP tripwires for the future consumer**: `response_cacheable_covers_exactly_the_graph_read_tools` asserts every `all_tools()` member is cacheable (`mcp/src/lib.rs:2327-2345`; allowlist `:723-739`); `conformance_schemas.rs:1-11` asserts tools/list is exactly 10+6+7 with golden files. `SemanticSearch` is the stateful-dispatch precedent (`lib.rs:56`). | Files at 764622f | ADR consumer-contract, step S4 |
+| F10 | **Adjacent hang/corruption classes** the timeout fix must not leave behind: `Drop` does a blocking graceful shutdown and never kills/waits the child (`lsp.rs:514-521`, `:364`); a timed-out client left in `LspTier.clients` (`:551, :575-586`, no eviction) poisons every later query (and a mid-frame timeout desyncs the `BufReader`); `await_response` treats any id-carrying message as our response — a server→client request deserializes with `result` defaulting to `Null` (`:74-75`, `:241-255`, `NEXT_ID` from 1 at `:53`) → silent false `Ok(empty)`. | `lsp.rs` at cited lines | Steps S2/S3 (bounded scope, see D4/D8) |
+| F11 | **`libc` is used only by the broken block** (`resolve/Cargo.toml:24`; uses confined to `lsp.rs:180-194`). §8: the fix must delete the dependency. | grep at 764622f | Step S2 deletes |
+| F12 | **Locked-decision lineage is unbroken**: DESIGN-NOTES.md:28-29 → CLAUDE.md Locked decisions ("LSP is on-demand only, never bulk") → WAVE-PLAN:119 AC → ENGINE-CONTRACT:140 → REVIEW:124 explicit Reject of LSP escalation. ADR-009 relitigates nothing; it defines the sanctioned on-demand consumer. | Files at cited lines | ADR §planes, step S4 |
+| F13 | **Coverage reality**: `ServerRegistry::standard()` = 6 keys → 3 servers vs 104 wired languages (`LANG_TABLE` count re-verified at 764622f); registry keys are tree-sitter grammar names; `symbols.language` exists in the schema (`store/src/schema.sql:42`). | `lsp.rs:288-326`; awk over `extract/src/treesitter.rs` | ADR §capability + §data promotion |
+| F14 | **All three registry servers are installed on this machine** (`/opt/homebrew/bin/{typescript-language-server,pyright-langserver,rust-analyzer}`); `lsp_live` passes live in ~4.2s. The BEFORE/AFTER didOpen measurement is runnable here; the probe-and-skip pattern (`tests/lsp_live.rs:1-25`, no `#[ignore]`) is the sanctioned shape for optional-binary tests. | which output; test run at 764622f | Steps S3/S5 measurements |
+
+## 2. Decisions (all explicit — no TBD)
+
+- **D1 — Timeout mechanism: one reader thread per client + `mpsc::recv_timeout`, on all platforms.**
+  A dedicated thread owns the child's stdout, parses complete Content-Length frames, and sends each
+  parsed message over a channel; callers `recv_timeout(budget)`. Why: `poll`/`select` is Unix-only and a
+  `cfg`-split would recreate the shipped-untested-branch defect (`lsp.rs:196-199` is the scar); the
+  thread+channel shape is pure std, works identically on Unix and Windows (global cross-platform rule),
+  and lets the same change delete `TimeoutReader`, both `cfg` blocks, and the `libc` dependency (§8).
+  Frames are parsed **in the thread**, so a timeout never leaves a half-read frame in a caller-visible
+  buffer (kills the mid-frame-desync class, F10).
+- **D2 — Timeout is injectable**: constructor parameter with a 10s default (`with_timeout` on
+  `LspTier`/registry entry level). Why: the wedged-server test must run at ~500ms not 10s wall; W3.6
+  needs per-surface budgets (crew's 30s vs rust-analyzer cold start); nothing pins 10s beyond the
+  original (false) header comment.
+- **D3 — On timeout: kill the child, evict the client from `LspTier.clients`, return `Err`.** Why:
+  without eviction one 10s failure becomes permanent failure for the session (F10, cache poisoning);
+  the transport cannot be trusted after a timeout by construction.
+- **D4 — `Drop` gets a bounded shutdown then `kill()` + `wait()`.** In phase-0 scope. Why: `Drop` reads
+  through the same transport — the reader-thread fix bounds the read anyway, but the never-killed child
+  (`:364`) means the wedged-server test would leak a `sleep` per run and the future MCP warm pool would
+  accumulate zombies. Smallest complete fix owns the child lifetime; a query-path-only fix fails its own
+  test hygienically.
+- **D5 — languageId mapping is a field on the registry entry, not a new file and not match arms.** Each
+  `ServerRegistry` entry carries `language_id` (tsx→`typescriptreact`, jsx→`javascriptreact`, identity
+  otherwise), keyed by tree-sitter grammar names as today. Why: "DATA next to ServerRegistry" (brief)
+  without minting a fourth registry surface that the ADR's data-file promotion (D12) would immediately
+  replace; one table moves wholesale at W3.6. Keys stay grammar names so the capability report is a
+  straight join against `symbols.language` (F13).
+- **D6 — Opened-docs cache is digest-keyed (`uri → content hash`), `didClose`+`didOpen` on change.**
+  Why: the file is read anyway to build didOpen, hashing it is free (std `DefaultHasher`, no new deps);
+  a once-only `HashSet` serves stale text on exactly the files the edit plane exists for (F10
+  stale-open-docs). `didChange` sync is deliberately NOT implemented — close/reopen is the minimal
+  correct move for a stateless-per-query client library.
+- **D7 — `LspTier` query paths do: registry lookup → file read → didOpen (cached per D6) → query.**
+  File-read failure is a normal `Err` (no panic); files above 2 MB are opened without content
+  re-send suppression games — no size cap in phase-0 (the write-side hang class is out of scope, see
+  Not-in-scope; documented as a known limit in the module header).
+- **D8 — `await_response` learns to distinguish by the `method` key.** Messages carrying `method` are
+  never treated as our response; server→client **requests** (id + method) get a generic `null` result
+  reply so spec-compliant servers don't stall. Why: didOpen increases server chatter
+  (workspace/configuration, workDoneProgress/create), and the current code can deserialize a server
+  request as our response with `result=Null` → silent false "no definition" (F10). This is the minimal
+  guard that makes the didOpen fix provable rather than flaky; per-client id offsets are NOT added
+  (the method-key check alone removes the misparse).
+- **D9 — Test shapes.** (1) A platform-independent mechanism unit test: the frame pump generic over
+  `R: Read + Send + 'static`, fed a `Read` impl that blocks forever (Condvar park) — asserts
+  `Err` within budget; pure std, compiles and runs on Windows, so the cross-platform claim is tested,
+  not asserted. (2) Integration `tests/lsp_timeout.rs`: register `sleep 600` as a masquerading server
+  via `ServerRegistry::register`, assert `LspTier::definition` returns `Err` within budget+margin, child
+  killed on both paths (drop guard); probe-and-skip on the `sleep` binary (honest skip on Windows —
+  the mechanism test above is the cross-platform coverage; no `#[ignore]` anywhere). (3) A live
+  probe-and-skip test driving `LspTier::definition` (not `LspClient`) on the `write_ts_fixture` layout
+  plus a `.tsx` file (proves the languageId mapping against the real server); bounded retry loop, not a
+  fixed 500ms sleep. (4) A pure-data unit test for the languageId table.
+- **D10 — Planes are defined by query shape, falsifiably.** EDIT plane = exactly one
+  `(file, line, col)` position per call, single symbol, single repo, answered live by LSP;
+  **no array parameters, no file-enumeration parameters, no glob/name parameters** — bulk routing is
+  type-impossible, not policy-forbidden. UNDERSTAND plane = set-valued/graph-shaped
+  (BlastRadius/Lineage/SearchEntity/hotspots), answered from the store, LSP never consulted.
+  Definition-by-NAME (no position) is an understand-plane graph lookup by definition. Coordinate
+  contract pinned in the ADR: LSP-native 0-based lines, UTF-16 columns; the tools take LSP coordinates
+  and the ADR documents the graph-node→position handoff hazard (byte spans, stale vs live text). Why:
+  no prior art exists (recon gap 1) — ADR-009 is the defining document, and the review rejected LSP
+  escalation (REVIEW:124); the locked bulk ban must survive an implementer who never read it.
+- **D11 — Warn-and-serve channel is a wire contract.** Missing LSP ⇒ serve graph results labeled with a
+  sibling marker `LSP-FALLBACK:` in `RetrievalResult.diagnostics` (MCP; exactly R6's `GRAPH-FALLBACK`
+  precedent, `docs/agent-behavior-rules.md:34-45`) and an additive field inside the existing JSON stdout
+  payload (CLI twins). Extra stdout lines and stderr are banned for query arms, citing crew's code (F8).
+  Hover has no graph analogue: fallback for Hover is explicit absence + marker, never a simulated hover.
+  References-fallback is labeled as incoming Calls/Imports at graph confidence — partial by construction.
+- **D12 — ServerRegistry is promoted to DATA at W3.6 implementation, not phase-0.** One data file
+  (grammar-name key → server binary+args → languageId → one pinned official docs/package pointer →
+  optional `no_known_server` flag), `include_str`-loaded in languages.toml generated-artifact style.
+  Why: rules-as-data (Universal Don'ts) with the in-repo precedent of #126's family-as-data move;
+  phase-0 keeps the table in Rust because promoting a 6-row table twice (once without the pointer
+  column, once with) is churn without a consumer. The ADR states the 6-key/3-server vs 104-language gap
+  and the expansion path (go, java, csharp, c/cpp, ruby, php, kotlin… next; legacy families flagged
+  `no_known_server`).
+- **D13 — Capability vocabulary: `ok` / `missing` / `no-server-known` / `not-in-registry`.** The brief's
+  "no-server-exists" is rendered as `no-server-known`, sourced only from curated `no_known_server` rows
+  in the data file — nonexistence is a rotting claim (someone ships a COBOL LSP); a language with no row
+  reports `not-in-registry`. Languages enumerated per repo from `SELECT DISTINCT language FROM symbols`
+  (repo-scoped; zero schema change, F13). Report cached with an explicit `refresh` parameter and
+  post-install write-through re-probe — PATH changes are invisible to any mtime key, and garden's
+  persistent stdio broker would otherwise serve stale `missing` forever.
+- **D14 — MCP dispatch shape for the future tools (ADR contract, not phase-0 code):**
+  Definition/References/Hover/LspCapabilities are constructed with owned state and dispatched **outside**
+  `all_tools()` (SemanticSearch precedent, `mcp/src/lib.rs:56`), never added to `response_cacheable`
+  (fail-safe default already excludes them, `:719`). W3.6 implementation AC must include: conformance
+  count bump + golden schema files, a cache-exclusion test in the `cache_staleness.rs`
+  real-binary-over-stdio style, and the five "23 tools" doc claims (README.md:150/:191, CLAUDE.md:10/:232,
+  docs/mcp-integration.md:30). Tools are advertised unconditionally; a missing server is a
+  warn-and-serve answer, not a hidden tool.
+- **D15 — Installer skill: runtime-rendered `skill://` resource, pointer model, instruct-only.**
+  Rendered from the D12 data file by widening `McpResource.content` from `&'static str` to
+  `Cow<'static, str>` (F5 — hand-rolled router, local change; the compile-time claim at
+  `resources.rs:1-2` gets amended in the same change). No curated install-command registry: one pinned
+  official docs/package pointer per server; the agent fetches current instructions, executes under its
+  own permission gate, re-probes the registry's **exact binary name** (npm `pyright` provides
+  `pyright-langserver` — verify the binary, not "install succeeded"); offline degrades to the package
+  name. Boundary stated verbatim in the ADR: **wicked-installer remains the sole scripted-install
+  surface; this skill instructs, never executes; language servers stay out of registry.json.**
+- **D16 — Demand-driven 1.0 write-back is an explicitly deferred optional phase** with named unsolved
+  preconditions: scheme-2 id churn + `prune_dangling_edges` decay (write-back edges silently vanish on
+  the next index and nothing re-emits them), UTF-16-vs-byte span correlation, ON CONFLICT keep-higher
+  staleness, and mtime-cache thrash (each write-back clears the whole MCP response cache). The ADR
+  describes the scip file+span correlation seam as the mechanism and lists these as gate criteria — it
+  does not call the phase straightforward.
+- **D17 — Drift-guard discipline**: phase-0 changes no activation ⇒ §3.1 untouched (the test reads only
+  `yes (slice)` rows, F7). When the consumer lands, only the Lsp row's **notes** cell changes and its
+  activation cell must remain a non-`yes (slice)` value ("no — on-demand MCP/CLI only"). New code in
+  `wicked-estate/src/lib.rs` must never repeat the anchor string `// Activation table:
+  docs/ENGINE-CONTRACT.md §3.1` (uniqueness assert). Stated in the ADR.
+- **D18 — Doc corrections ride along**: lsp.rs module header §Timeout rewritten to name the real
+  mechanism (F1); WAVE-PLAN W3.3's "10s per-request timeout" line becomes true and is reworded to name
+  the mechanism; W3.6 row updated to point at ADR-009. Garden issue #347 re-scope note is **written into
+  the ADR** (estate owns probe/serve/route; #347 re-scoped to CC-plugin wiring that consumes estate's
+  surface) — no garden repo edits from this lane.
+- **D19 — ADR number is 009** (docs/adr/ has 001–008), flagged provisional in merge notes (concurrent
+  lanes may collide; renumber at merge is a filename+title change only).
+
+## 3. Step list
+
+### S1 — this plan (done by this commit)
+- **Files**: `docs/recon/lsp-w36.md` (new).
+- **Tests**: none (doc). **Deletes**: nothing.
+
+### S2 — phase-0 fix (a): working cross-platform read timeout
+- **Files**: `crates/wicked-estate-resolve/src/lsp.rs`, `crates/wicked-estate-resolve/Cargo.toml`,
+  new `crates/wicked-estate-resolve/tests/lsp_timeout.rs`.
+- **Change**: replace `TimeoutReader` with a frame-pump reader thread (generic over
+  `R: Read + Send + 'static`) sending parsed frames over `mpsc`; `recv_timeout` at call sites;
+  injectable timeout (D2); on timeout kill child + evict from `LspTier.clients` + `Err` (D3); `Drop` =
+  bounded shutdown then `kill()`+`wait()` (D4); rewrite module header §Timeout (D18).
+- **Tests**: (i) unit: blocking-`Read` frame pump returns `Err` within budget (all platforms);
+  (ii) integration `lsp_timeout.rs`: `sleep 600` masquerade via `ServerRegistry::register`,
+  `LspTier::definition` → `Err` within budget+margin, no hang, child killed (drop guard), probe-and-skip
+  on `sleep`; (iii) existing 19 lsp.rs unit tests + `lsp_live` stay green (they reference neither
+  `TimeoutReader` nor tier internals).
+- **Deletes**: `TimeoutReader` struct, the `cfg(unix)` setsockopt block, the `cfg(not(unix))` no-op,
+  `libc = "0.2"` from Cargo.toml (F11), the false §Timeout header text.
+
+### S3 — phase-0 fix (b): didOpen + languageId + opened-docs cache
+- **Files**: `crates/wicked-estate-resolve/src/lsp.rs`, `crates/wicked-estate-resolve/tests/lsp_live.rs`
+  (additive test fns only).
+- **Change**: `language_id` field on registry entries (D5); `LspTier::definition/references/hover` do
+  file read → digest-keyed didOpen (didClose+didOpen on digest change, D6/D7); `await_response`
+  method-key guard + null replies to server→client requests (D8). `lsp.rs` remains a client library:
+  no `Resolver` impl, no `Edge`, no slice wiring.
+- **Tests**: pure-data languageId unit test; live probe-and-skip test driving **`LspTier::definition`**
+  on the TS fixture + a `.tsx` file, asserting non-empty, bounded retry (D9); two consecutive queries on
+  the same file succeed (cache path, live); BEFORE measurement recorded by running the new live test
+  against the pre-S3 tier (empty result) and AFTER against the fixed tier (non-empty) — both command
+  lines and outputs recorded verbatim per the measurement protocol.
+- **Deletes**: none — defect fix on an existing path; nothing is replaced (stated per §8; the deletion
+  ledger for this lane lives in S2).
+
+### S4 — ADR-009 + doc updates
+- **Files**: new `docs/adr/ADR-009-intent-routed-lsp.md`; `docs/plan/WAVE-PLAN.md` (W3.6 row → ADR-009;
+  W3.3 timeout wording, D18); `docs/ENGINE-CONTRACT.md` (Lsp row **notes cell only**, D17);
+  `docs/agent-behavior-rules.md` (sibling `LSP-FALLBACK:` marker row beside `GRAPH-FALLBACK`, D11).
+- **Change**: ADR sections = planes by query shape (D10); warn-and-serve wire contract (D11); capability
+  report + vocabulary (D13); MCP dispatch contract + W3.6 implementation AC list (D14); installer skill,
+  pointer model, wicked-installer boundary verbatim (D15); ServerRegistry→data promotion + coverage gap
+  + expansion path (D12); deferred write-back with gate criteria (D16); drift-guard discipline + "phase-0
+  changes no activation" statement (D17); garden #347 re-scope note (D18); crew budget note (CLI twin is
+  structurally cold; warm sessions owned by the MCP server process; injectable timeout is the seam, D2).
+- **Tests**: `cargo test -p wicked-estate slice_matches_engine_contract_table` green (proves §3.1
+  discipline); `cargo test -p wicked-estate-resolve` green. Grep-check: the anchor string appears once in
+  `wicked-estate/src/lib.rs` (unchanged).
+- **Deletes**: the stale W3.3 timeout claim text (replaced by the true statement); nothing else.
+
+### S5 — verification + measurements (evidence block)
+- **Commands (record verbatim)**: `cargo build -p wicked-estate-resolve`,
+  `cargo test -p wicked-estate-resolve`, `cargo clippy -p wicked-estate-resolve -- -D warnings`,
+  `cargo fmt -p wicked-estate-resolve`, `cargo test -p wicked-estate` (drift test), all with
+  `CARGO_TARGET_DIR=<lane>/target`. Wedged-server wall-clock recorded (must be ≪ 10s with the injected
+  budget). didOpen BEFORE/AFTER outputs from S3. Probe results recorded (all three servers present on
+  this machine — green-via-live, not green-via-skip; state which, F14).
+- **Bench**: non-regression claimed as a statement, not a run — lsp.rs has no production caller, no
+  edge emission, so no bench number can move; cited as such in the evidence block (§7).
+
+## 4. Compatibility + migration
+
+- **Stored graphs**: zero impact. Phase-0 emits no edges, touches no store code, no schema, no re-index,
+  no migration. The ADR's deferred write-back phase would upsert 1.0 edges onto existing
+  `(source,target,kind)` triples (schema.sql:72-81; keep-higher per ENGINE-CONTRACT:112) — no migration
+  then either, but bench `ConfidenceBands.exact` and capability receipts move at that point (rebaseline
+  via garden's gate-benchmark-rebaseline); explicitly deferred with gate criteria (D16).
+- **Consumers**: crew/garden/studio see no behaviour change — lsp.rs has zero consumers outside its own
+  crate at 764622f; crew's estate calls are all understand-plane. The public API of `wicked-estate-resolve`
+  gains `with_timeout`-style constructors and a `language_id` registry field (additive); `TimeoutReader`
+  and `RpcTransport` are private, so their replacement is invisible.
+- **MCP surface**: unchanged in phase-0 (no new tools, tools/list still 10+6+7, resources unchanged).
+  The consumer-phase changes (count bump, goldens, cache exclusion, `Cow` content) are specified as W3.6
+  implementation AC in ADR-009, to be made deliberately, not patched around.
+- **Windows**: the reader-thread mechanism is the same code on all platforms; the mechanism unit test is
+  the cross-platform proof (pure std, no cfg). The `sleep`-masquerade integration test honestly skips
+  where `sleep` is absent.
+
+## 5. Falsifier
+
+Run on a machine with `typescript-language-server` on PATH, `CARGO_TARGET_DIR` set to the lane target:
+
+1. `cargo test -p wicked-estate-resolve --test lsp_timeout` — if any test hangs past budget+margin, or a
+   `sleep` child survives the run (`pgrep -f 'sleep 600'`), fix (a) is falsified.
+2. The new `LspTier::definition` live test run against the **pre-S3** tier must return empty, and against
+   the post-S3 tier non-empty on the same fixture — if the BEFORE run is already non-empty, blocker (b)
+   was misdiagnosed; if the AFTER run is empty, the fix failed.
+3. `cargo test -p wicked-estate slice_matches_engine_contract_table` must pass with zero edits to the
+   slice literal or any `yes (slice)` row — if it required an edit, this lane changed activation and
+   violated its own scope.
+4. `grep -rn libc crates/wicked-estate-resolve/` must return 0 hits after S2 — a hit means §8 was
+   violated.
+
+## 6. Not in scope (this lane)
+
+- Any `Resolver` impl, `Edge` emission, or slice wiring for lsp.rs (locked; W3.6 implementation lane).
+- New MCP tools / CLI arms (Definition/References/Hover/LspCapabilities/doctor) — designed in ADR-009,
+  built by the W3.6 implementation lane.
+- The ServerRegistry→data-file promotion and the installer-skill resource itself (designed here,
+  built at W3.6 implementation, D12/D15).
+- Write-side (`stdin.write_all`) timeout and didOpen payload size caps — the wedged-writer class is
+  documented in ADR-009 as a W3.6-implementation concern; phase-0 fixes the read path the brief names.
+- `didChange` incremental sync, per-client id offsets, keying warm clients by `(binary,args,root)`
+  (dedup of the 4-keys→1-tsserver fan-out) — noted in ADR-009 as W3.6 implementation items.
+- Garden repo edits (#347 is re-scoped by a note in the ADR only); wicked-installer, crew, studio.
+- MUST-NOT-TOUCH honored: version files, the resolve admissibility block
+  (`resolve/src/lib.rs:54-121`), `remove_file` paths (`store/src/lib.rs`), `extract/src/plugin.rs`.
+
+## 7. Merge notes for other lanes
+
+- **ADR-009 number is provisional** (docs/adr/ has 001–008 at 764622f). If a concurrent lane lands an
+  ADR first, renumber this one at merge — filename + title only, no content coupling.
+- This lane edits `docs/plan/WAVE-PLAN.md` (W3.3 wording + W3.6 row), `docs/ENGINE-CONTRACT.md`
+  (Lsp row notes cell only), and `docs/agent-behavior-rules.md` (one marker row). Any lane touching the
+  same rows should merge textually; no lane should flip the Lsp activation cell.
+- No lane may introduce the string `// Activation table: docs/ENGINE-CONTRACT.md §3.1` anywhere in
+  `crates/wicked-estate/src/lib.rs` — the drift test asserts uniqueness.
+- `crates/wicked-estate-resolve/src/lsp.rs`, `tests/lsp_live.rs`, new `tests/lsp_timeout.rs`, and
+  `resolve/Cargo.toml` are owned by this lane for the duration.
