@@ -88,18 +88,24 @@ CREATE INDEX IF NOT EXISTS idx_edges_file ON edges(file);
 -- Kept to power honest blast-radius coverage (never silently claim "no dependents" when
 -- calls to that name went unresolved). raw_name is indexed for exact-name lookup.
 --
--- Disk-footprint design (W11 slim): columns are typed minimal — from_sym, raw_name, kind,
--- file, line.  The full span and hints are intentionally NOT persisted; the in-memory
--- resolve pass owns those.  This is a deliberate ~8× disk reduction vs the old `data` JSON
--- blob (~1.2KB/row).  Coverage fidelity is preserved: from_sym + raw_name + kind + file +
--- line are sufficient for honest blast-radius and resolver queries.
+-- Disk-footprint design (W11 slim, amended by admissibility F-B): columns are typed minimal —
+-- from_sym, raw_name, kind, file, line, start_byte, end_byte.  Hints and the remaining span
+-- fields (cols, end_line) are intentionally NOT persisted; the in-memory resolve pass owns
+-- those.  Still a deliberate ~8× disk reduction vs the old `data` JSON blob (~1.2KB/row).
+-- The byte columns make site identity EXACT: two same-line sites (`q(); q();`) carry distinct
+-- start_byte, so duplicate-site proofs are pure SQL instead of on-disk adjudication (the
+-- closure's 1215 line-level "duplicate" groups were all real distinct same-line sites).
+-- start_byte = end_byte = 0 means unknown/synthetic (Span::ZERO refs — RulesBridge,
+-- extra-edge — and rows written before these columns existed carry it legitimately).
 CREATE TABLE IF NOT EXISTS unresolved_refs (
   id       INTEGER PRIMARY KEY,
   from_sym INTEGER NOT NULL,     -- sid FK → symbols.sid of the referencing symbol
   raw_name TEXT NOT NULL,        -- the written name at the call/import site
   kind     TEXT NOT NULL,        -- serialized EdgeKind (same encoding as edges.kind)
   file     TEXT NOT NULL DEFAULT '', -- repo-relative source file (Wave 2.6 incremental)
-  line     INTEGER NOT NULL DEFAULT 0 -- start_line of the reference site
+  line     INTEGER NOT NULL DEFAULT 0, -- start_line of the reference site
+  start_byte INTEGER NOT NULL DEFAULT 0, -- byte offset of the site start (0 = unknown/synthetic)
+  end_byte   INTEGER NOT NULL DEFAULT 0  -- byte offset of the site end   (0 = unknown/synthetic)
 );
 CREATE INDEX IF NOT EXISTS idx_unresolved_refs_name ON unresolved_refs(raw_name);
 CREATE INDEX IF NOT EXISTS idx_unresolved_refs_file ON unresolved_refs(file);

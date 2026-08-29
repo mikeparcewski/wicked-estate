@@ -337,6 +337,41 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
         .expect("empty lookup ok");
     assert!(none.is_empty(), "no unresolved refs for unknown name");
 
+    // --- unresolved refs: NON-ZERO span round-trip (admissibility F-B) ---
+    // Exact-site identity is byte-exact: the store must persist and return the ref's
+    // start_line + start_byte + end_byte (the persisted subset — cols/end_line are not part of
+    // the contract), so two same-line sites are distinguishable without on-disk adjudication.
+    let spanned_ref = UnresolvedRef::new(
+        sym("a"),
+        "spanned_ghost",
+        EdgeKind::Calls,
+        Location::new(
+            "src/lib.rs",
+            Span {
+                start_line: 7,
+                start_byte: 120,
+                end_byte: 133,
+                ..Span::ZERO
+            },
+        ),
+    );
+    store
+        .upsert_unresolved_refs(std::slice::from_ref(&spanned_ref))
+        .expect("upsert spanned unresolved ref");
+    let found = store
+        .unresolved_refs_for_name("spanned_ghost")
+        .expect("unresolved_refs_for_name spanned");
+    assert_eq!(found.len(), 1, "one spanned ref expected");
+    assert_eq!(
+        found[0].location.span.start_line, 7,
+        "start_line round-trips"
+    );
+    assert_eq!(
+        found[0].location.span.start_byte, 120,
+        "start_byte round-trips"
+    );
+    assert_eq!(found[0].location.span.end_byte, 133, "end_byte round-trips");
+
     // --- Wave 2.6: file digest round-trip ---
     // set_file_digest / file_digest must survive an upsert (second write overwrites first).
     store
