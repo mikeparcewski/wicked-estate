@@ -254,6 +254,18 @@ tier = "structural"
 caps = ["symbols", "calls", "imports"]
 family = "javascript"
 
+# json is wired (LANG_TABLE + json.scm mint top-level keys as Struct symbol nodes, zero
+# call/import refs). This row gives it an OWN-NAME family for the resolvers' D5 cross-family
+# guard: without it `language_family("json")` was None and a unique JSON key named like a
+# method (`optional`, `parse`) bound TS/tsx/bash Calls refs at 0.6 (402 edges on command_iq).
+# tier=document per the yaml/html config-markup precedent (symbols only).
+[[language]]
+name = "json"
+ext = ["json"]
+grammar = "tree-sitter-json"
+tier = "document"
+caps = ["symbols"]
+
 [[language]]
 name = "julia"
 ext = ["jl"]

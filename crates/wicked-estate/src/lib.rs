@@ -263,9 +263,12 @@ struct InMemoryIndex {
     by_name: HashMap<String, Vec<Node>>,
     by_id: HashMap<SymbolId, Node>,
     /// language name → family, from `wicked_estate_extract::registry()` (the manifest is the
-    /// data source — D5: the family table is DATA, not per-language Rust arms). Languages
-    /// absent from the manifest (mainframe extractors, `synthetic`/`tfstate` tags) are absent
-    /// here too, so `language_family` returns `None` and the resolver guard allows them.
+    /// data source — D5: the family table is DATA, not per-language Rust arms) PLUS the
+    /// content-sniffed IaC logical languages (`wicked_estate_extract::LOGICAL_LANGUAGES` —
+    /// kubernetes/cloudformation, own-name families, so a code Calls ref cannot name-bind to a
+    /// resource node; `InfraResolver`'s exclusive-resource-name bind has no family check and is
+    /// unaffected). Languages absent from BOTH (mainframe extractors, `synthetic`/`tfstate`
+    /// tags) stay absent, so `language_family` returns `None` and the resolver guard allows them.
     families: HashMap<String, String>,
 }
 
@@ -284,13 +287,19 @@ impl InMemoryIndex {
             by_name.entry(n.name.clone()).or_default().push(n.clone());
             by_id.insert(n.symbol.clone(), n);
         }
-        let families = wicked_estate_extract::registry()
+        let mut families: HashMap<String, String> = wicked_estate_extract::registry()
             .into_iter()
             .map(|l| {
                 let fam = l.family().to_string();
                 (l.name, fam)
             })
             .collect();
+        // The IaC logical languages are registered outside the manifest (content-sniffed, no
+        // extension); give each an OWN-NAME family from the same single-source const the
+        // extractor uses, so the D5 guard sees them (F-A sibling class, §11).
+        for name in wicked_estate_extract::LOGICAL_LANGUAGES {
+            families.insert((*name).to_string(), (*name).to_string());
+        }
         Ok(Self {
             by_name,
             by_id,
@@ -1740,6 +1749,37 @@ mod tests {
         );
         n.metadata = meta;
         n
+    }
+
+    /// Admissibility F-A (§11 sibling class): the resolver pass's family table must carry the
+    /// IaC logical languages (own-name families, from the single-source
+    /// `wicked_estate_extract::LOGICAL_LANGUAGES`) and the json manifest row, while the
+    /// deliberately family-None languages (tfstate, mainframe — D5/F7 "must keep resolving")
+    /// stay absent.
+    #[test]
+    fn resolver_family_table_carries_iac_logical_languages_and_json() {
+        use wicked_estate_core::SymbolIndex;
+        let store = MemStore::new();
+        let index = InMemoryIndex::build(&store, None).unwrap();
+        for name in wicked_estate_extract::LOGICAL_LANGUAGES {
+            assert_eq!(
+                index.language_family(name).as_deref(),
+                Some(*name),
+                "logical language {name} must be its own family"
+            );
+        }
+        assert_eq!(
+            index.language_family("json").as_deref(),
+            Some("json"),
+            "json must carry its own-name family (manifest row)"
+        );
+        for name in ["tfstate", "cobol", "jcl", "hlasm", "synthetic"] {
+            assert_eq!(
+                index.language_family(name),
+                None,
+                "{name} must stay family-None (D5/F7: must keep resolving)"
+            );
+        }
     }
 
     // ── Task C: estate_drift ─────────────────────────────────────────────────

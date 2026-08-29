@@ -226,7 +226,6 @@ def generate_matrix(languages, wired_names):
 
     # Languages wired but not yet in the TOML manifest
     # cloudformation/kubernetes: IaCExtractor (YAML grammar + tree-walk, no .scm)
-    # json: in LANG_TABLE but manifest row not yet added
     iac_names = {"cloudformation", "kubernetes"}
     manifest_only_extra = [n for n in iac_only if n not in iac_names]
     iac_extra = [n for n in iac_only if n in iac_names]
@@ -258,10 +257,7 @@ def generate_matrix(languages, wired_names):
         lines.append("| Language | Wired? | Tier | Capabilities | Extensions |")
         lines.append("|----------|:------:|------|:------------:|------------|")
         for name in sorted(manifest_only_extra):
-            if name == "json":
-                lines.append("| `json` | yes | `document` | S | `.json` |")
-            else:
-                lines.append(f"| `{name}` | yes | `tags` | S | — |")
+            lines.append(f"| `{name}` | yes | `tags` | S | — |")
 
     # Wired-only summary table
     lines.append("")
@@ -287,8 +283,6 @@ def generate_matrix(languages, wired_names):
             lines.append("| `cloudformation` | `structural` | S·C | `.yaml`, `.yml`, `.json` |")
         elif name == "kubernetes":
             lines.append("| `kubernetes` | `structural` | S | `.yaml`, `.yml` |")
-        elif name == "json":
-            lines.append("| `json` | `document` | S | `.json` |")
 
     lines.append("")
     lines.append("## ABI note")
