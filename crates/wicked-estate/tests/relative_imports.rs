@@ -169,3 +169,84 @@ fn relative_imports_bind_file_to_file() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// The registry cross-check promised by docs/recon/relative-imports.md Decision B (round-1
+/// RI-R1-2): the resolver matches conventions rows to importers by the EXTRACT REGISTRY's
+/// `language.name` (`relative_import.rs`: an importer whose language has no row is silently
+/// skipped — `else { continue }`). `languages.toml` is script-generated, so a future rename of
+/// `javascript`/`tsx`/`typescript` would silently kill relative-import binding for that
+/// language with no failing test. Pin the coupling from the conventions side.
+#[test]
+fn import_conventions_languages_exist_in_registry() {
+    let conv = wicked_estate_resolve::relative_import::ImportConventions::embedded();
+    let names = conv.language_names();
+    assert!(
+        !names.is_empty(),
+        "embedded import-conventions.toml must have rows"
+    );
+    for name in names {
+        assert!(
+            wicked_estate_extract::by_name(name).is_some(),
+            "import-conventions.toml row '{name}' has no language named '{name}' in the \
+             extract registry (languages.toml) — every ref of that language would silently \
+             skip relative-import resolution"
+        );
+    }
+}
+
+/// One end-to-end bind each for a `.tsx` and a `.js` IMPORTER through the real registry +
+/// `index_path` (round-1 RI-R1-2: the e2e fixture importers above are all `.ts`, so a
+/// registry-name drift for `tsx`/`javascript` was invisible).
+#[test]
+fn tsx_and_js_importers_bind_through_the_real_registry() {
+    use wicked_estate_core::{EdgeKind, GraphRead};
+
+    let dir = fresh_dir("tsx_js_importers");
+    fs::write(
+        dir.join("src/app.tsx"),
+        "import { helper } from './helper';\nexport function App() { return helper(); }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/helper.tsx"),
+        "export function helper() { return 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/node.js"),
+        "const { pure } = require('./pure');\nfunction run() { return pure(); }\nmodule.exports = { run };\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/pure.js"),
+        "module.exports = { pure: () => 1 };\n",
+    )
+    .unwrap();
+
+    let mut store = SqliteStore::in_memory().unwrap();
+    wicked_estate::index_path(&mut store, &dir).unwrap();
+
+    let mut bound: Vec<(String, String)> = store
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == EdgeKind::Imports && e.resolved_by == "relative-import")
+        .map(|e| {
+            let src = store.get_node(&e.source).unwrap().expect("source node");
+            let tgt = store.get_node(&e.target).unwrap().expect("target node");
+            (src.location.file, tgt.location.file)
+        })
+        .collect();
+    bound.sort();
+
+    assert_eq!(
+        bound,
+        vec![
+            ("src/app.tsx".to_string(), "src/helper.tsx".to_string()),
+            ("src/node.js".to_string(), "src/pure.js".to_string()),
+        ],
+        "a .tsx importer and a .js importer must each bind via their registry language name"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

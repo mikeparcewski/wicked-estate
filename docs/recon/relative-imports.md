@@ -665,3 +665,21 @@ re-extraction (deleted-only scope, ATT-INV-2).
   `docs/benchmarks/capability-report.md` (regenerated receipt). Nobody else claims these.
 - **Integration order:** if lane E's unresolved definition lands first, re-run the §5 unresolved
   counts on the merged base; the pair-keyed count is the one that survives either order.
+
+## Round-1 review fixes (2026-08-28)
+
+- **R1-CORR-1 / RI-R1-1 (blocking):** `parse_spec_ext` byte-sliced `last_seg[1..]` — any
+  relative specifier whose last segment leads with a multi-byte char panicked and aborted the
+  whole index run. Now char-wise (`chars().skip(1)`); unit tests cover bind/park/known-ext/
+  unknown-ext/dotfile non-ASCII forms (`relative_import.rs` loader + resolver tests).
+- **R1-CORR-2:** graph-view `excluded` restoration — see the Decision H correction above.
+- **RI-R1-2:** the Decision B registry cross-check test promised by this plan (and claimed in
+  the S1 implementer report) had never been written — `language_names()` was orphan pub API.
+  Now real: `import_conventions_languages_exist_in_registry` +
+  `tsx_and_js_importers_bind_through_the_real_registry` in
+  `crates/wicked-estate/tests/relative_imports.rs`. The S1 report's tests_run claim was wrong.
+- **REV1-IMPORT-START:** `Subgraph::code_dependents` zeroed blast-radius for an IMPORT-node
+  start on untouched pre-upgrade DBs (every reached File's only source-edges are Imports →
+  all dropped; HEAD returned 95 importer Files for `react` on studio). Import nodes now take
+  the keep-everything arm with File — the importing files ARE the blast radius of a dependency
+  node. Core unit test + cross-binary check recorded below.
