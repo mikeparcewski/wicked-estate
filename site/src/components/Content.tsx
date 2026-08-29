@@ -14,7 +14,7 @@ import { useState, useEffect, useRef } from 'react'
    every fact stamped with confidence + provenance. The signature motion is a
    DRILL that reads the core — sections demo themselves before you touch them.
 
-   Grounded to v0.14.4 (crates.io): 102 wired tree-sitter languages
+   Grounded to v0.14.6 (crates.io): 102 wired tree-sitter languages
    (languages-as-data — 113 in the manifest), ExtraEdge TOML rules injecting
    the edges grep never sees (event→consumer, command→agent), every edge
    {confidence, provenance, resolved_by}, memory scopes with subtree
@@ -138,7 +138,7 @@ function Hero() {
       <div className="max-w-6xl mx-auto w-full grid lg:grid-cols-[1.08fr_0.92fr] gap-14 items-center">
         {/* Left — the thesis, committed in sentence one */}
         <div className="text-left">
-          <span className="kicker">wicked-estate · the foundation · v0.14.4 · crates.io</span>
+          <span className="kicker">wicked-estate · the foundation · v0.14.6 · crates.io</span>
           <h1 className="mt-4 font-display font-black text-ink text-[clamp(2.1rem,10vw,3rem)] sm:text-6xl lg:text-[4.2rem] leading-[0.92]" style={{ fontStretch: '112%' }}>
             Code graph.<br />Memory.<br />Knowledge.<br />
             <span style={{ color: 'var(--accent)' }}>One binary.</span>
@@ -941,7 +941,7 @@ function FiveStrata() {
 }
 
 // ── 3b · THE FULL TOOLFACE — every tool + skill an agent can call ───────────────
-// Grounded to v0.14.4. Tools: crates/wicked-estate-mcp/src/lib.rs (dispatch +
+// Grounded to v0.14.6. Tools: crates/wicked-estate-mcp/src/lib.rs (dispatch +
 // memory/knowledge schemas), README.md §MCP. Skills: crates/*/skills/*/SKILL.md.
 type ToolDomain = { no: string; name: string; note: string; tools: { name: string; purpose: string }[] }
 
@@ -1001,7 +1001,7 @@ const AGENT_SKILLS: { name: string; purpose: string }[] = [
 const CAPABILITIES: string[] = [
   'Injected edges · ExtraEdge TOML rules · event→consumer · command→agent',
   'Every edge: confidence + provenance + resolved_by',
-  '7 resolution tiers · Parsed → SCIP → LSP',
+  'Tiered resolution · Parsed & SCIP 1.0 → Tags 0.3 · highest wins',
   'Rules engines in the same graph · ODM · DMN · Drools',
   'Requirement ↔ code traceability',
   'Typed annotations · survive re-index',
@@ -1035,7 +1035,7 @@ function FullToolface() {
             Not one “search” tool bolted onto a repo — the full MCP surface an agent can call, plus the skills
             (playbooks) that drive them. The graph domain is the code graph; memory and knowledge are where the{' '}
             wicked-brain consolidation landed — one store, one identity, a{' '}
-            <span className="text-ink">lossless import contract</span> so nothing tuned was dropped. Grounded to v0.14.4.
+            <span className="text-ink">lossless import contract</span> so nothing tuned was dropped. Grounded to v0.14.6.
           </p>
         </div>
 
@@ -1095,9 +1095,132 @@ function FullToolface() {
           </div>
         </div>
 
-        {/* cross-cutting capabilities most agents never know the record has */}
+        {/* cross-cutting capabilities most agents never know the record has —
+            long chips must WRAP on phones (.tag is nowrap and the page clips
+            horizontal overflow, so nowrap here silently truncates at 390px) */}
         <div className="mt-2 flex flex-wrap gap-1.5">
-          {CAPABILITIES.map(c => <span key={c} className="tag">{c}</span>)}
+          {CAPABILITIES.map(c => <span key={c} className="tag" style={{ whiteSpace: 'normal' }}>{c}</span>)}
+        </div>
+      </div>
+    </Section>
+  )
+}
+
+// ── 3c · THE REST OF THE BINARY — the shipped long tail the MCP surface rides on ─
+// Grounded to v0.14.6: the CLI usage block + match arms (crates/wicked-estate/src/main.rs
+// — 33 subcommands), PLUGIN.md (runtime grammars), ADR-004 + `tfstate`/`drift`
+// (infrastructure estate), crates/wicked-estate-mcp/src/resources.rs (skill:// resources),
+// docs/language-coverage-matrix.md (IaC dialects wired as languages).
+type TailGroup = { name: string; note: string; items: { name: string; purpose: string }[] }
+
+const TAIL_GROUPS: TailGroup[] = [
+  {
+    name: 'Keep it fresh', note: 'reactive',
+    items: [
+      { name: 'watch',           purpose: 'Full index once, then re-index on every file change.' },
+      { name: 'subscribe',       purpose: 'Poll the change log since a sequence number — JSON lines.' },
+      { name: 'changed-since',   purpose: 'Symbols in files changed since a git SHA.' },
+      { name: 'index --history', purpose: 'Opt-in edge-history archival — off by default, no bloat.' },
+    ],
+  },
+  {
+    name: 'Sharpen it', note: 'opt-in precision',
+    items: [
+      { name: 'scip',               purpose: 'Ingest a SCIP index — precise, confidence-1.0 resolution.' },
+      { name: 'index --embeddings', purpose: 'Compute and store embedding vectors at index time.' },
+      { name: 'semantic',           purpose: 'Embedding-based symbol search over that index.' },
+      { name: 'clusters',           purpose: 'Louvain communities over calls + imports; semantic weighting too.' },
+    ],
+  },
+  {
+    name: 'Scale it out', note: 'multi-repo',
+    items: [
+      { name: 'index --repo', purpose: 'Co-locate many repos in one db — paths namespaced, nothing collides.' },
+      { name: 'cross-graph',  purpose: 'Federated search + blast radius across separate graphs.' },
+      { name: 'correspond',   purpose: 'Score matching symbols across two graphs.' },
+      { name: 'export',       purpose: 'The whole graph as NDJSON or JSON.' },
+    ],
+  },
+  {
+    name: 'Read the shape', note: 'one-liners',
+    items: [
+      { name: 'entrypoints', purpose: 'Symbols with no callers or importers.' },
+      { name: 'leaves',      purpose: 'Symbols that call or import nothing.' },
+      { name: 'dead-code',   purpose: 'Symbols with no edges at all.' },
+      { name: 'context',     purpose: 'Ranked context for a symbol, within a character budget.' },
+      { name: 'fingerprint', purpose: 'A stable hex fingerprint per symbol.' },
+    ],
+  },
+  {
+    name: 'Pin the meaning', note: 'semantics',
+    items: [
+      { name: 'annotate',          purpose: 'Typed, confidence-scored notes — they survive re-index.' },
+      { name: 'annotations',       purpose: 'Read them back by type, advisory-flagged.' },
+      { name: 'stale-annotations', purpose: 'What needs re-verification, by last-verified cutoff.' },
+      { name: 'semantics',         purpose: 'Set a symbol’s description, requirement, validated flag.' },
+      { name: 'by-requirement',    purpose: 'Every symbol satisfying a requirement id.' },
+      { name: 'resolve',           purpose: 'A name → its stable SymbolId(s), before any write.' },
+    ],
+  },
+  {
+    name: 'Map the estate', note: 'IaC · ADR-004',
+    items: [
+      { name: 'iac as languages', purpose: 'HCL · Bicep · ARM · Kubernetes YAML — resource declarations indexed like code.' },
+      { name: 'tfstate',          purpose: 'Ingest live Terraform state as resource nodes.' },
+      { name: 'drift',            purpose: 'IaC vs live — managed · undeployed · unmanaged.' },
+    ],
+  },
+]
+
+// the long tail past the grid — runtime + housekeeping, each a shipped surface
+const TAIL_CHIPS: string[] = [
+  'Runtime language plugins · drop-in tree-sitter grammars · no rebuild · license-isolated',
+  'skill:// · the six playbooks served as MCP resources',
+  'import-telemetry · bulk access-log + search-miss import',
+  'stats · graph counts + git provenance',
+  'source · bulk source slices by file, cluster, or symbol list',
+  'compact · prune cruft + VACUUM',
+]
+
+function BinaryTail() {
+  return (
+    <Section id="binary">
+      <div className="max-w-6xl mx-auto w-full">
+        <div className="mb-2.5 w-full text-left">
+          <span className="kicker">The rest of the binary</span>
+          <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink leading-[0.98]">
+            The MCP surface is how agents read it. <span style={{ color: 'var(--accent)' }}>The CLI ships the long tail.</span>
+          </h2>
+          <p className="mt-1.5 text-sm text-muted font-sans leading-tight max-w-3xl">
+            Thirty-three subcommands in the same binary, against the same record: a watch mode that
+            re-indexes as you edit, a precise SCIP tier, multi-repo federation, IaC drift against live
+            Terraform state, drop-in language plugins. No sidecar, no daemon farm — one{' '}
+            <span className="font-mono text-ink">wicked-estate</span>.
+          </p>
+        </div>
+
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+          {TAIL_GROUPS.map(g => (
+            <div key={g.name} className="rock-panel p-0">
+              <div className="flex items-center gap-2.5 px-4 py-1.5 border-b border-hairline-strong">
+                <span className="font-display font-black text-ink text-[0.95rem] flex-1" style={{ fontStretch: '108%' }}>{g.name}</span>
+                <span className="tag tag-accent">{g.note}</span>
+              </div>
+              <div className="divide-y divide-hairline">
+                {g.items.map(t => (
+                  <div key={t.name} className="px-4 py-[2px] flex items-baseline gap-2">
+                    <span className="font-mono text-[0.7rem] font-semibold text-ink shrink-0">{t.name}</span>
+                    <span className="depth flex-1 min-w-0 text-right" style={{ whiteSpace: 'normal', lineHeight: 1.25 }}>{t.purpose}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* long chips wrap (see the CAPABILITIES row note — .tag is nowrap) */}
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {TAIL_CHIPS.map(c => <span key={c} className="tag" style={{ whiteSpace: 'normal' }}>{c}</span>)}
         </div>
       </div>
     </Section>
@@ -1105,21 +1228,23 @@ function FullToolface() {
 }
 
 // ── 4 · PROVENANCE SEAM — cycle the collisions; the winning label pops ──────────
+// The shipping tier ladder + default confidences — ResolutionTier::default_confidence,
+// crates/wicked-estate-core/src/edge.rs.
 const TIERS: { tier: string; conf: number; who: string }[] = [
-  { tier: 'Parsed',     conf: 1.0, who: 'Direct AST facts' },
-  { tier: 'SCIP / LSP', conf: 1.0, who: 'Precise indexers · on-demand' },
-  { tier: 'TSG',        conf: 0.8, who: 'Stack-graph name resolution' },
-  { tier: 'ImportMap',  conf: 0.6, who: 'Import-map heuristics' },
-  { tier: 'Tags',       conf: 0.3, who: 'Tree-sitter tag scan only' },
+  { tier: 'Parsed',    conf: 1.0, who: 'Direct AST facts' },
+  { tier: 'SCIP',      conf: 1.0, who: 'Precise indexer output' },
+  { tier: 'ImportMap', conf: 0.6, who: 'Import-map heuristics' },
+  { tier: 'Heuristic', conf: 0.5, who: 'AST synthesizers' },
+  { tier: 'Tags',      conf: 0.3, who: 'Tree-sitter tag scan only' },
 ]
 
 // each collision: the same (source,target,kind) edge proposed by several tiers.
 // higher tier wins; the losers are superseded. `proposed` = tier indices in play.
 const COLLISIONS: { edge: string; kind: string; proposed: number[] }[] = [
-  { edge: 'checkout → applyDiscount', kind: 'calls', proposed: [0, 3, 4] },
-  { edge: 'price.ts → utils', kind: 'imports', proposed: [1, 3] },
+  { edge: 'checkout → applyDiscount', kind: 'calls', proposed: [0, 2, 4] },
+  { edge: 'price.ts → utils', kind: 'imports', proposed: [1, 2] },
   { edge: 'referralFlow → applyDiscount', kind: 'calls', proposed: [4] },
-  { edge: 'service → handler', kind: 'implements', proposed: [1, 2] },
+  { edge: 'service → handler', kind: 'implements', proposed: [1, 3] },
 ]
 
 function ProvenanceSeam() {
@@ -1393,6 +1518,7 @@ export default function Content() {
       <AgentIDE />
       <FiveStrata />
       <FullToolface />
+      <BinaryTail />
       <ProvenanceSeam />
       <Storage />
     </>
