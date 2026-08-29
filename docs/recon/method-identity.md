@@ -673,3 +673,99 @@ All majors accepted; nothing rejected. Minors folded in.
 | MI-A3 (minor) | Falsifier 2 + S4 gain the `%#save().` companion query (exactly 3 rows). |
 | MI-A4 (minor) | S2 test 1 requires the seeded flat node's `Location.file` to be the read-back rel path (`remove_file` deletes `WHERE file=?1`, `sqlite.rs:1747-1749`). |
 | MI-A5 (minor) | Downgrade hazard documented (D7, §4, S3); only the new binary can warn; next release's version bump closes it. |
+
+## 8. Measurements (implementation run, 2026-08-28)
+
+Implemented as commits `ec5e2bf` (S0+S1+S1b, extract crate), `f8d69fc` (S2, gate + tests),
+`63b251a` (S3, docs) on `lane/method-identity`. BEFORE =
+`/Users/michael.parcewski/Projects/wicked/wicked-estate/target/release/wicked-estate` (0.14.6
+release, HEAD engine); AFTER = the lane worktree's debug binary. Corpora pinned:
+wicked-studio `564d6963fdfd94d47cf7f5a3d76acf8932dd1317`, wicked-crew
+`b890f41fc23c0635ce22d8185015ff3f70f4a8d8`. Fixture = the S0 file copied to
+`measure/doc03proj/src/fixture.ts`. All sqlite3 queries ran against `nodes JOIN symbols ON
+symbols.sid = nodes.symbol`; kinds are stored as JSON strings (`'"method"'`).
+
+### S0 red run (at d7d3b58, recorded verbatim)
+
+`cargo test -p wicked-estate-extract --lib identity_` → **4 failed / 3 passed** exactly as
+planned: tests 1, 2, 6, 7 FAILED — `identity_nests_methods_under_enclosing_type` printed the
+collision (`saves = ["…src/method_identity/save()."] ×5`), `identity_refs_from_carry_the_type`
+printed flat `update()./flush().` froms, `identity_dedupes_duplicate_anchors` got flat
+`src/ent/save().`, `identity_field_object_literal_residual` got flat `src/a/save().`;
+tests 3, 4, 5 passed (they pin behaviour that must survive). 347 other unit tests filtered out
+(the baseline count).
+
+### Nodes by kind (BEFORE → AFTER)
+
+| DB | method | function | calls edges | unresolved calls | scoped-name edges | name-resolver | import-map | (file,name,kind) groups >1 | method ids containing `#` |
+|---|---|---|---|---|---|---|---|---|---|
+| studio | 20 → **26** | 1573 → **1575** | 3258 → 3257 | 38536 → 38537 | 1835 → 1834 | 1245 → 1245 | 178 → 178 | 0 → **7** | 0 → **18** |
+| crew | 183 → **197** | 728 → 728 | 1826 → **1815** | 18407 → **18418** | 1093 → **1083** | 724 → 723 | 9 → 9 | 0 → **9** | 0 → **189** |
+| doc03 | 4 → **7** | 2 → 2 | 6 → **2** | 2 → **6** | 5 → **1** | 1 → 1 | 0 → 0 | 0 → **1** | 0 → **5** |
+
+Reading: method counts rise exactly where collisions existed (crew +14, studio +6 — the split
+groups are enumerable, below). The `(file,name,kind) >1` column is only observable AFTER: BEFORE,
+the same-named defs had already collapsed into ONE row. Every Calls-edge drop is at the
+`scoped-name-resolver` (0.65) tier plus one `name-resolver` edge per corpus whose target name
+stopped being globally unique once split — and each drop is compensated 1:1 by an unresolved-row
+rise (crew: −11 edges / +11 unresolved) — the §9/MI-ATK-3 verdict rule: precision corrections,
+not recall regressions; every other tier's counts hold (import-map exactly unchanged).
+
+Split groups AFTER (all `COUNT>1` rows): studio — `do_GET`×2, `log_message`×2 (python),
+`constructor`×2/×2/×3/×2, `close`×2; crew — `verify`×2 (`api/auth.ts`), `constructor`
+×3/×4/×2/×2 (incl. the predicted `core/adapter.ts` 4-class file), `asAdapter`×2 in four test
+files.
+
+### Falsifier 2 (MI-A3), on doc03-after.db — both halves verbatim
+
+```
+sym LIKE '%#save().'  → exactly 3 rows: Cache#save()., Repo#save()., Store#save().
+sym LIKE '%/save().'  → exactly 1 row:  src/fixture/save().   (lit.save + method-local arrow, the D1 residual)
+```
+
+### Multiplicity (search, NOT blast-radius — BR-3)
+
+`wicked-estate query save --db doc03-after.db` → **4 match(es)**: Method save at
+fixture.ts:2 (Repo), :4 (Cache), :7 (Store), :8 (the flat residual). `by_name` is `Node.name` —
+name-keyed surfaces return the same names with more hits; proof on crew:
+`query verify --db crew-after.db` → 2 matches (auth.ts:97, :431), previously ONE merged node.
+
+### Blast-radius (fixture): dependents SHRINK by design, unresolved RISES and is visible
+
+- BEFORE `blast-radius save --json`: 6 dependents (File, cb, flush, run, top, update),
+  `"unresolved": 2`. The update/flush/cb/run/top rows exist ONLY via the 0.65 scoped-name edges
+  into the merged node — D03-2's false edges.
+- AFTER: 1 dependent (the File node, via Contains), `"unresolved": 6`. The rise is present in
+  BOTH the `--json` document and the text `coverage:` line
+  (`coverage: 1 resolved dependent(s); 6 unresolved call(s) reference 'save' — …`) — the R7
+  honesty contract studio/crew consume.
+- Corpora per-name dependent deltas (dependents, unresolved): crew `verify` 45→1 (6→8) — the
+  merged node was globally unique so NameResolver resolved every bare `verify(…)` call into it at
+  0.9; split, the resolver parks. crew `asAdapter` 7→4 (20→27). crew `constructor` 14→14 (0→0)
+  — constructor calls arrive as `new X()` refs, not `constructor` refs, so nothing pointed at the
+  merged node by that name. No monotonicity claim in either direction.
+
+### No-force migration (falsifier 4)
+
+```
+cp doc03-before.db doc03-migrate.db
+$AFTER index doc03proj --db doc03-migrate.db        # NO --force
+  → stderr: "SYMBOL-ID SCHEME changed (v1 → v2): forcing full re-extraction"
+  → 15 nodes, 16 edges, 1 files
+sym LIKE '%update().' OR '%flush().' → ONLY Repo#update()., Cache#flush().
+sym LIKE '%/update().' OR '%/flush().' → 0 rows   (zero stale flat ids)
+meta id_scheme → 2
+```
+
+### Test matrix (all at the final tree)
+
+| Command | Result |
+|---|---|
+| `cargo test -p wicked-estate-extract` | 355 unit + all integration suites ok (3 doctests + 1 pre-existing ignored doctest, `extra_edge.rs:193`, unchanged) |
+| `cargo test -p wicked-estate` | 47 lib + 20 main + all integration ok (incl. 5 new `id_scheme` tests) |
+| `cargo test -p wicked-estate-resolve` | **61 unit / 1 lsp_live / 4 scip_edges** — unchanged (falsifier 5); +1 pre-existing ignored doctest, unchanged |
+| `cargo test -p wicked-estate-bench` | 10 unit + 5 integration ok (`footprint_and_speed_within_ceilings` holds, BR-4) |
+| `cargo clippy -p wicked-estate-extract/-estate --all-targets -- -D warnings` | 0 warnings |
+
+SCIP note for real DBs: the forced migration pass deletes SCIP-tier edges by file — re-run
+`wicked-estate scip <root>` after migrating (BR-5; stated in the ADR amendment + CHANGELOG).
