@@ -144,6 +144,14 @@ Re-index note: a resolver change is not retroactive on an existing DB — `index
 changed files only. A `CARGO_PKG_VERSION` bump forces a full re-extract on the next `index`;
 `wicked-estate index --force` is the manual path.
 
+On-demand LSP note (`docs/adr/ADR-009-intent-routed-lsp.md`): the Lsp row above is
+deliberately unchanged by the phase-0 lsp.rs fixes (transport deadline timeout, didOpen) —
+phase-0 changes **no activation**. ADR-009 defines the W3.6 consumer: position-anchored
+edit-plane MCP tools + CLI twins that call `LspTier` on demand, outside every resolver
+slice; the understand plane (BlastRadius/Lineage/SearchEntity/hotspots) never consults LSP.
+When that consumer lands, only the Lsp row's notes cell changes, and its activation cell
+stays out of the slice-guarded set.
+
 ## 4. GraphStore contract
 
 Read methods (`get_node`, `find_symbols`, `neighbors`, `traverse`, `stats`) are `&self`; mutation
