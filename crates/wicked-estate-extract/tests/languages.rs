@@ -1837,3 +1837,45 @@ fn ruby_singleton_vs_instance_collision_known_defect() {
          re-point this residual pin."
     );
 }
+
+/// Fleet-audit hit (scm-anchors S7 / merge note M6), pinned: Swift
+/// `extension Foo { func m() {} }` is uncaptured as a container — swift.scm
+/// keyword-gates class_declaration on "class"/"struct"/"enum", and an
+/// extension's `name:` is a `user_type`, not a `type_identifier` — so
+/// extension methods stay module-flat and TWO extensions' same-named methods
+/// share one SymbolId (the exact Rust-impl F1 shape). Now expressible as pure
+/// query data: a NON-EMITTING `@code_struct.anchor` on the extension's
+/// user_type (the scheme-3 role this lane added). FLIP INSTRUCTION: when the
+/// Swift anchor lands, assert A#run(). != B#run(). instead.
+#[test]
+fn swift_extension_methods_collision_known_defect() {
+    let lang = "swift";
+    let sf = SourceFile {
+        path: "probe_ext.swift".to_string(),
+        language: Language::new(lang),
+        text: "struct A {}\nstruct B {}\n\
+               extension A { func run() {} }\n\
+               extension B { func run() {} }\n"
+            .to_string(),
+    };
+    let ex = TreeSitterExtractor::for_language(lang)
+        .unwrap()
+        .extract(&sf)
+        .expect("extraction must succeed");
+    let runs: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == "run")
+        .collect();
+    assert_eq!(
+        runs.len(),
+        2,
+        "[{lang}] both extension methods must extract (module-flat); got {runs:?}"
+    );
+    assert_eq!(
+        runs[0].symbol, runs[1].symbol,
+        "[{lang}] KNOWN DEFECT RESOLVED? two extensions' same-named methods no \
+         longer collide — the extension .anchor landed. Flip this pin to \
+         assert distinct ids."
+    );
+}
