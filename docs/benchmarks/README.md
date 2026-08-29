@@ -30,7 +30,7 @@ JSON is printed to stdout for machine consumption.
 | `db_bytes` | Sum of `.db` + `.db-wal` + `.db-shm` after on-disk index | Storage overhead is bounded (regression gate) |
 | `bytes_per_node` | `db_bytes / node_count` | Per-symbol cost; gate: `< 12_000 bytes/node` |
 | `who_calls_count` | Depth-3 blast-radius via `blast_radius_by_name` | The engine knows exactly who depends on a symbol |
-| `blast_radius_coverage_pct` | `resolved / (resolved + unresolved_refs_for_name)` | Honest coverage: unresolved callers are counted, not hidden |
+| `blast_radius_coverage_pct` | `resolved / (resolved + unresolved_refs_for_name)` | Honest coverage: unresolved callers (ENGINE-CONTRACT §2.1) are counted, not hidden |
 | `context_pack_est_tokens` | `top-15 symbol stubs (chars / 4)` | One retrieval costs ~N tokens, not whole-file reads |
 | `languages` | Node count per `Language` tag | Polyglot repos are indexed; coverage is verifiable |
 | `edges_by_kind_vec` | Edge count per `EdgeKind`, sorted by count | Call, import, and type edges are all present |
@@ -62,5 +62,6 @@ resolver could not bind some call-sites to a node.  Common causes:
 - Incremental resolution not yet at the SCIP/LSP tier for this language
 
 The engine always surfaces unresolved refs rather than silently under-reporting (soundness
-contract, `docs/agent-behavior-rules.md` R7).  A consuming agent sees the coverage percentage and
+contract, `docs/agent-behavior-rules.md` R7; the definition — one row per unresolved reference —
+is `docs/ENGINE-CONTRACT.md` §2.1).  A consuming agent sees the coverage percentage and
 can weight its confidence accordingly.

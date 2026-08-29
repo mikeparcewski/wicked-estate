@@ -762,7 +762,9 @@ impl RetrievalTool for TraverseGraph {
 /// The start symbol itself is excluded from `dependents`.
 /// `unresolved_callers` counts call-site references to the symbol's name that the resolver
 /// could not bind — potential dependents that may be missing from `dependents`.  Always
-/// present, even when zero.
+/// present, even when zero.  Unresolved is defined once in `docs/ENGINE-CONTRACT.md` §2.1
+/// (per unresolved reference); the number of call sites of a *bound* relationship is
+/// persisted nowhere, so this count never includes repeat sites of resolved calls.
 /// `summary` gives an at-a-glance picture (counts by kind, hottest files, highest-PageRank
 /// dependents) so an agent can triage a large blast without reading every entry (R4-friendly).
 #[derive(Debug, Default)]

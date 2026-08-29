@@ -1354,6 +1354,8 @@ fn main() -> Result<()> {
                 }
             }
             // Honest coverage — never let the absence of dependents read as "safe to change".
+            // `unresolved` counts per-site unresolved references, defined once in
+            // docs/ENGINE-CONTRACT.md §2.1.
             if !json_out {
                 println!(
                     "coverage: {} resolved dependent(s); {unresolved} unresolved call(s) reference \
@@ -1384,8 +1386,8 @@ fn main() -> Result<()> {
             let s = store.stats().map_err(to_any)?;
             let db_mb = s.db_size_bytes as f64 / 1_048_576.0;
             println!(
-                "nodes={} edges={} files={} db={:.1}MB",
-                s.node_count, s.edge_count, s.file_count, db_mb
+                "nodes={} edges={} files={} unresolved={} db={:.1}MB",
+                s.node_count, s.edge_count, s.file_count, s.unresolved_ref_count, db_mb
             );
             for (k, v) in &s.edges_by_kind {
                 println!("  edge {k} = {v}");

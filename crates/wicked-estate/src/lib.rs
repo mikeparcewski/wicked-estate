@@ -22,7 +22,8 @@
 //! or until F itself changes. The full fix is to re-resolve direct importers of changed files
 //! (an O(fanout) pass over the import graph). That is future work — see the design notes.
 //! The current approach is correct for the changed files' own edges; only the cross-file
-//! "unchanged imports changed" case is deferred.
+//! "unchanged imports changed" case is deferred. This limitation is exception 1 of the
+//! unresolved-references definition in `docs/ENGINE-CONTRACT.md` §2.1.
 //!
 //! ## Many repos, one graph
 //!
@@ -53,7 +54,7 @@ use wicked_estate_extract::{
     treesitter::{TreeSitterExtractor, extractor_for_extension, is_minified_or_huge},
 };
 use wicked_estate_resolve::{
-    ImportMapResolver, InfraResolver, NameResolver, ScopedNameResolver, resolve_all,
+    ImportMapResolver, InfraResolver, NameResolver, ScopedNameResolver, resolve_all_with_coverage,
 };
 use wicked_estate_retrieve::Embedder;
 use wicked_estate_store::GraphStoreMutExt;
@@ -913,7 +914,7 @@ pub fn index_path_as(
     // by a changed file C will not have its call to S re-resolved here. F's UnresolvedRef for S
     // persists until F itself changes or a full re-index is done. Full fix: re-resolve direct
     // importers of changed files (O(fanout) pass over the import graph) — see the design notes
-    let (resolved, estate) = {
+    let (resolution, estate) = {
         let reader: &dyn GraphRead = &*store;
         // Scoped to this repo: a labelled run resolves against its own nodes only, so a name that
         // is unique inside the repo stays unique no matter how many repos share the graph.
@@ -926,27 +927,21 @@ pub fn index_path_as(
             &ImportMapResolver,
             &InfraResolver,
         ];
-        let resolved = resolve_all(resolvers, &all_refs, &index)?;
+        let resolution = resolve_all_with_coverage(resolvers, &all_refs, &index)?;
         // Estate cross-domain join: RACF profiles → the datasets/MQ assets they protect, by RACF
         // generic profile matching (most-specific wins). Derived from the full node population (a
         // profile pattern can match assets declared in any file), reusing the index just built.
         let estate = wicked_estate_resolve::estate_edges(index.nodes());
-        (resolved, estate)
+        (resolution, estate)
     };
 
-    // Compute unresolved refs (same logic as full index).
-    let resolved_locations: HashSet<Location> =
-        resolved.iter().filter_map(|e| e.location.clone()).collect();
-    let unresolved: Vec<_> = all_refs
-        .iter()
-        .filter(|r| !resolved_locations.contains(&r.location))
-        .cloned()
-        .collect();
-
+    // Unresolved refs come from the same attribution as the edges — the one definition in
+    // docs/ENGINE-CONTRACT.md §2.1 (a ref is unresolved iff no resolver emitted an edge
+    // attributed to it, per site).
     store.begin_batch()?;
-    store.upsert_edges(&resolved)?;
+    store.upsert_edges(&resolution.edges)?;
     store.upsert_edges(&estate)?;
-    store.upsert_unresolved_refs(&unresolved)?;
+    store.upsert_unresolved_refs(&resolution.unresolved)?;
     store.commit_batch()?;
 
     // W11.3: populate the pagerank.top cache so subsequent `rank`/`important_symbols` calls
@@ -1837,8 +1832,8 @@ mod tests {
     fn index_path_uses_infra_resolver_for_resource_refs() {
         use wicked_estate_core::{EdgeKind, GraphWrite, NodeKind, UnresolvedRef};
         // Build a store with a resource node and an unresolved ref to it.
-        // index_path is not called here (that needs a real dir); we verify resolve_all
-        // with InfraResolver by calling it directly.
+        // index_path is not called here (that needs a real dir); we verify the production
+        // resolve path (resolve_all_with_coverage) with InfraResolver by calling it directly.
         let resource_name = "aws_instance.web";
         let resource_sym = wicked_estate_core::Symbol::synthetic("tfstate", resource_name).id();
         let resource_node = Node::new(
@@ -1876,13 +1871,17 @@ mod tests {
             &ImportMapResolver,
             &InfraResolver,
         ];
-        let edges = resolve_all(resolvers, &refs, &index).unwrap();
+        let resolution = resolve_all_with_coverage(resolvers, &refs, &index).unwrap();
         assert_eq!(
-            edges.len(),
+            resolution.edges.len(),
             1,
             "InfraResolver must resolve the depends_on ref"
         );
-        assert_eq!(edges[0].target, resource_sym);
+        assert_eq!(resolution.edges[0].target, resource_sym);
+        assert!(
+            resolution.unresolved.is_empty(),
+            "the bound depends_on ref must not be counted unresolved"
+        );
     }
 
     // ── Task A: SKIPPED_MINIFIED notice ──────────────────────────────────────

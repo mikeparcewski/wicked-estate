@@ -805,33 +805,89 @@ pub fn measure_synth_precision(
 
 // ── resolve_all ───────────────────────────────────────────────────────────────
 
-/// Run multiple resolvers over the same `refs` + `index`, then deduplicate the resulting edges
-/// by `(source, target, kind)`, keeping the **highest-confidence** edge for each key.
+/// The full output of a resolve pass: the deduplicated edges plus the references no resolver
+/// bound — computed once, from the same attribution, so persistence and telemetry can never
+/// disagree about what "unresolved" means (`docs/ENGINE-CONTRACT.md` §2.1).
+#[derive(Debug, Clone, Default)]
+pub struct Resolution {
+    /// Deduplicated edges, one per `(source, target, kind)`, highest confidence kept.
+    pub edges: Vec<Edge>,
+    /// References no resolver emitted an edge for (per site — one entry per reference).
+    pub unresolved: Vec<UnresolvedRef>,
+}
+
+/// Run multiple resolvers over the same `refs` + `index`; return the deduplicated edges **and**
+/// the unresolved references, under one definition (`docs/ENGINE-CONTRACT.md` §2.1):
 ///
-/// This lets the pipeline compose cheap resolvers (e.g. [`NameResolver`] for unique names) with
-/// scope-aware ones (e.g. [`ScopedNameResolver`]) without emitting duplicate edges. A precise
-/// tier resolver (SCIP/TSG/LSP) added later will naturally win because its edges carry higher
-/// confidence.
+/// > A reference is **unresolved** iff no resolver emitted an edge attributed to it — an edge
+/// > carrying the reference's exact `(location, kind)` — after per-ref re-resolution of
+/// > references that share `(location, kind)`.
+///
+/// Attribution is per reference (`bound: Vec<bool>` by ref index): an output edge whose
+/// `(location, kind)` matches exactly one reference binds that reference. When several
+/// references share one `(location, kind)` (multi-target heritage clauses, rules-engine refs at
+/// `Span::ZERO`), a single edge at that key is ambiguous; the **collision pass** re-runs
+/// `resolver.resolve` with a single-ref slice for each still-unbound reference of that key and
+/// binds the ones that yield an edge at their `(location, kind)`. Cost bound: one extra resolve
+/// call per (resolver, unbound shared-key ref) — exact because `Resolver::resolve` is per-ref
+/// deterministic (the contract on the trait).
+///
+/// Edges with `location: None`, or whose kind matches no reference at their location, attribute
+/// to nothing — they are still returned and may survive dedup.
+///
+/// Edge dedup is unchanged: by `(source, target, kind)`, keeping the **highest-confidence** edge
+/// (strict `>`, first-seen wins ties). A precise tier resolver (SCIP/TSG/LSP) added later
+/// naturally wins because its edges carry higher confidence.
 ///
 /// **Resolver order for the full code pipeline (recommended):**
 /// ```text
 /// ImportMapResolver → ScopedNameResolver → NameResolver → MethodResolutionSynthesizer
 /// ```
 /// `MethodResolutionSynthesizer` is listed last so Heuristic (0.5) edges only fill gaps left by
-/// the higher-confidence ImportMap (0.6–0.65) resolvers; `resolve_all` keeps the max-confidence
-/// edge on dedup.
-pub fn resolve_all(
+/// the higher-confidence ImportMap (0.6–0.65) resolvers.
+pub fn resolve_all_with_coverage(
     resolvers: &[&dyn Resolver],
     refs: &[UnresolvedRef],
     index: &dyn SymbolIndex,
-) -> Result<Vec<Edge>> {
-    use std::collections::HashMap;
+) -> Result<Resolution> {
+    use std::collections::{HashMap, HashSet};
+
+    // Bucket refs once by (file, span, kind). No JSON serialisation on this path — EdgeKind and
+    // Span derive Hash + Eq. bucket_ids maps a key to an index into `buckets`.
+    let mut bucket_ids: HashMap<(&str, wicked_estate_core::Span, &EdgeKind), usize> =
+        HashMap::new();
+    let mut buckets: Vec<Vec<usize>> = Vec::new();
+    for (i, r) in refs.iter().enumerate() {
+        let key = (r.location.file.as_str(), r.location.span, &r.kind);
+        let id = *bucket_ids.entry(key).or_insert_with(|| {
+            buckets.push(Vec::new());
+            buckets.len() - 1
+        });
+        buckets[id].push(i);
+    }
+
+    let mut bound: Vec<bool> = vec![false; refs.len()];
+    // (resolver_idx, bucket_id) pairs whose bucket holds >1 refs and received an edge — each
+    // pair is re-run at most once in the collision pass.
+    let mut collided: HashSet<(usize, usize)> = HashSet::new();
 
     let mut best: HashMap<(String, String, String), Edge> = HashMap::new();
 
-    for resolver in resolvers {
+    for (resolver_idx, resolver) in resolvers.iter().enumerate() {
         let edges = resolver.resolve(refs, index)?;
         for edge in edges {
+            // Attribution: an edge binds the ref(s) at its exact (location, kind).
+            if let Some(loc) = &edge.location {
+                if let Some(&bucket_id) = bucket_ids.get(&(loc.file.as_str(), loc.span, &edge.kind))
+                {
+                    match buckets[bucket_id].as_slice() {
+                        [only] => bound[*only] = true,
+                        _ => {
+                            collided.insert((resolver_idx, bucket_id));
+                        }
+                    }
+                }
+            }
             let key = edge.dedup_key();
             best.entry(key)
                 .and_modify(|incumbent| {
@@ -841,6 +897,57 @@ pub fn resolve_all(
                 })
                 .or_insert(edge);
         }
+    }
+
+    // Collision pass: shared-(location, kind) refs are attributed individually by re-running the
+    // resolver with a single-ref slice. Cost: one resolve call per (resolver, unbound
+    // shared-key ref). The edges it returns are already in `best` (per-ref determinism), so
+    // only the binding is recorded here.
+    #[cfg(any(test, debug_assertions))]
+    let mut collision_calls: usize = 0;
+    for &(resolver_idx, bucket_id) in &collided {
+        for &i in &buckets[bucket_id] {
+            if bound[i] {
+                continue;
+            }
+            let r = &refs[i];
+            #[cfg(any(test, debug_assertions))]
+            {
+                collision_calls += 1;
+            }
+            let edges = resolvers[resolver_idx].resolve(std::slice::from_ref(r), index)?;
+            if edges
+                .iter()
+                .any(|e| e.kind == r.kind && e.location.as_ref().is_some_and(|l| *l == r.location))
+            {
+                bound[i] = true;
+            }
+        }
+    }
+
+    let unresolved: Vec<UnresolvedRef> = refs
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !bound[*i])
+        .map(|(_, r)| r.clone())
+        .collect();
+
+    // Debug-only instrumentation (bucket-size histogram + collision-pass call count) for the
+    // measurement protocol; silent unless WICKED_ESTATE_COVERAGE_DEBUG is set.
+    #[cfg(any(test, debug_assertions))]
+    if std::env::var_os("WICKED_ESTATE_COVERAGE_DEBUG").is_some() {
+        let mut histogram: std::collections::BTreeMap<usize, usize> =
+            std::collections::BTreeMap::new();
+        for b in &buckets {
+            *histogram.entry(b.len()).or_insert(0) += 1;
+        }
+        eprintln!(
+            "coverage-debug: refs={} buckets={} bucket_size_histogram={:?} collision_calls={}",
+            refs.len(),
+            buckets.len(),
+            histogram,
+            collision_calls
+        );
     }
 
     let resolved_edges: Vec<Edge> = best.into_values().collect();
@@ -888,29 +995,9 @@ pub fn resolve_all(
             }
         }
 
-        // Counter: unresolved refs.
-        // Track which refs were resolved by (source_id, kind_string) — this correctly counts
-        // edges whose `location` is `None` as resolved, fixing the inflated-unresolved bug
-        // (Finding 7): previously `.filter_map(|e| e.location.as_ref())` silently dropped
-        // None-location edges, leaving their originating refs uncancelled from the counter.
-        let resolved_ref_keys: std::collections::HashSet<(String, String)> = resolved_edges
-            .iter()
-            .map(|e| {
-                (
-                    e.source.0.clone(),
-                    serde_json::to_string(&e.kind).unwrap_or_default(),
-                )
-            })
-            .collect();
-        let unresolved_count = refs
-            .iter()
-            .filter(|r| {
-                !resolved_ref_keys.contains(&(
-                    r.from.0.clone(),
-                    serde_json::to_string(&r.kind).unwrap_or_default(),
-                ))
-            })
-            .count() as i64;
+        // Counter: unresolved refs — the same per-ref attribution the caller persists
+        // (docs/ENGINE-CONTRACT.md §2.1), so the counter and the store can never disagree.
+        let unresolved_count = unresolved.len() as i64;
         if unresolved_count > 0 {
             let metric = Metric {
                 name: "wicked_estate.resolve.unresolved".to_string(),
@@ -933,7 +1020,24 @@ pub fn resolve_all(
         }
     }
 
-    Ok(resolved_edges)
+    Ok(Resolution {
+        edges: resolved_edges,
+        unresolved,
+    })
+}
+
+/// Edges-only view of [`resolve_all_with_coverage`]. Production callers must use the coverage
+/// form — it is the single source of the unresolved set (`docs/ENGINE-CONTRACT.md` §2.1).
+///
+/// Kept only so test call sites edited by concurrent lanes don't conflict; removal (renaming
+/// all call sites to `resolve_all_with_coverage`) is a tracked remainder for the post-lane
+/// integration merge (docs/recon/unresolved-accounting.md, merge note M2).
+pub fn resolve_all(
+    resolvers: &[&dyn Resolver],
+    refs: &[UnresolvedRef],
+    index: &dyn SymbolIndex,
+) -> Result<Vec<Edge>> {
+    Ok(resolve_all_with_coverage(resolvers, refs, index)?.edges)
 }
 
 // ── scip_edges ────────────────────────────────────────────────────────────────
@@ -2448,5 +2552,252 @@ mod tests {
             "NameResolver's 0.6-conf edge should win over synth's 0.5; got {}",
             edges[0].confidence.get()
         );
+    }
+    // ── resolve_all_with_coverage tests (unresolved accounting, ENGINE-CONTRACT §2.1) ────────
+    //
+    // T2-T9 use a mock resolver with an explicit binding table — accounting tests must not
+    // encode NameResolver kind semantics (owned by the resolver-precision lane). T1 is the
+    // single real-slice smoke test.
+
+    /// A span whose only distinguishing feature is its start line — enough for distinct
+    /// `(location, kind)` bucket keys.
+    fn span_at(line: u32) -> Span {
+        Span {
+            start_byte: line * 100,
+            end_byte: line * 100 + 10,
+            start_line: line,
+            start_col: 0,
+            end_line: line,
+            end_col: 10,
+        }
+    }
+
+    /// Mock resolver driven by an explicit binding table: it emits one edge per ref that
+    /// matches a `(raw_name, location, kind)` row, at that ref's `(location, kind)` — unless
+    /// `emit_kind` overrides the kind (T9) or `strip_location` drops the location (T7).
+    /// Stateless per-ref loop, so it satisfies the `Resolver` per-ref determinism contract.
+    struct BindingMock {
+        table: Vec<(String, Location, EdgeKind)>,
+        emit_kind: Option<EdgeKind>,
+        strip_location: bool,
+    }
+
+    impl BindingMock {
+        fn binding(table: Vec<(&str, Location, EdgeKind)>) -> Self {
+            Self {
+                table: table
+                    .into_iter()
+                    .map(|(n, l, k)| (n.to_string(), l, k))
+                    .collect(),
+                emit_kind: None,
+                strip_location: false,
+            }
+        }
+    }
+
+    impl Resolver for BindingMock {
+        fn id(&self) -> &str {
+            "binding-mock"
+        }
+        fn tier(&self) -> ResolutionTier {
+            ResolutionTier::ImportMap
+        }
+        fn resolve(
+            &self,
+            refs: &[UnresolvedRef],
+            _index: &dyn SymbolIndex,
+        ) -> wicked_estate_core::Result<Vec<Edge>> {
+            let mut out = Vec::new();
+            for r in refs {
+                let bound = self
+                    .table
+                    .iter()
+                    .any(|(n, l, k)| *n == r.raw_name && *l == r.location && *k == r.kind);
+                if bound {
+                    let kind = self.emit_kind.clone().unwrap_or_else(|| r.kind.clone());
+                    let mut e = Edge::new(
+                        r.from.clone(),
+                        sym(&format!("target_{}", r.raw_name)),
+                        kind,
+                        ResolutionTier::ImportMap,
+                        "binding-mock",
+                    );
+                    if !self.strip_location {
+                        e = e.with_location(r.location.clone());
+                    }
+                    out.push(e);
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    fn calls_ref_at(from: &str, to_name: &str, file: &str, line: u32) -> UnresolvedRef {
+        UnresolvedRef::new(
+            sym(from),
+            to_name,
+            EdgeKind::Calls,
+            Location::new(file, span_at(line)),
+        )
+    }
+
+    /// T1 — real-slice smoke test: three call sites of one bound relationship are all
+    /// attributed; none is "unresolved" (the engine-defect-#3 over-count).
+    #[test]
+    fn coverage_repeat_call_sites_are_not_unresolved() {
+        let index = VecIndex(vec![node("g")]);
+        let refs = vec![
+            calls_ref_at("f", "g", "main.ts", 3),
+            calls_ref_at("f", "g", "main.ts", 4),
+            calls_ref_at("f", "g", "main.ts", 5),
+        ];
+        let resolvers: &[&dyn Resolver] = &[&NameResolver];
+        let res = resolve_all_with_coverage(resolvers, &refs, &index).unwrap();
+        assert_eq!(res.edges.len(), 1, "one deduped Calls edge f→g");
+        assert!(
+            res.unresolved.is_empty(),
+            "no site of a bound relationship is unresolved; got {:?}",
+            res.unresolved
+        );
+    }
+
+    /// T2 — honest coverage: every site of an UNBOUND relationship stays unresolved (per site).
+    #[test]
+    fn coverage_keeps_every_site_of_an_unbound_relationship() {
+        let index = VecIndex(vec![]);
+        let refs = vec![
+            calls_ref_at("f", "h", "main.ts", 3),
+            calls_ref_at("f", "h", "main.ts", 7),
+        ];
+        let mock = BindingMock::binding(vec![]);
+        let resolvers: &[&dyn Resolver] = &[&mock];
+        let res = resolve_all_with_coverage(resolvers, &refs, &index).unwrap();
+        assert!(res.edges.is_empty());
+        assert_eq!(res.unresolved.len(), 2, "rows are per site");
+    }
+
+    /// T3 — the attribution key includes kind: a Calls edge at L binds the Calls ref at L,
+    /// never the Imports ref at the same location.
+    #[test]
+    fn attribution_key_includes_kind() {
+        let index = VecIndex(vec![]);
+        let loc = Location::new("main.ts", span_at(1));
+        let calls = UnresolvedRef::new(sym("f"), "x", EdgeKind::Calls, loc.clone());
+        let imports = UnresolvedRef::new(sym("f"), "x", EdgeKind::Imports, loc.clone());
+        let mock = BindingMock::binding(vec![("x", loc.clone(), EdgeKind::Calls)]);
+        let resolvers: &[&dyn Resolver] = &[&mock];
+        let res = resolve_all_with_coverage(resolvers, &[calls, imports], &index).unwrap();
+        assert_eq!(res.edges.len(), 1);
+        assert_eq!(res.unresolved.len(), 1);
+        assert_eq!(res.unresolved[0].kind, EdgeKind::Imports);
+    }
+
+    /// T4 — the collision pass attributes shared-`(location, kind)` refs individually
+    /// (multi-target heritage clause shape: `class C implements A, B` with only `A` bound).
+    #[test]
+    fn collision_pass_attributes_shared_key_refs_individually() {
+        let index = VecIndex(vec![]);
+        let loc = Location::new("c1.ts", span_at(1));
+        let ref_a = UnresolvedRef::new(sym("C"), "A", EdgeKind::Implements, loc.clone());
+        let ref_b = UnresolvedRef::new(sym("C"), "B", EdgeKind::Implements, loc.clone());
+        let mock = BindingMock::binding(vec![("A", loc.clone(), EdgeKind::Implements)]);
+        let resolvers: &[&dyn Resolver] = &[&mock];
+        let res = resolve_all_with_coverage(resolvers, &[ref_a, ref_b], &index).unwrap();
+        assert_eq!(res.edges.len(), 1, "the edge for A survives");
+        assert_eq!(
+            res.unresolved.len(),
+            1,
+            "exactly the unbound sibling stays unresolved"
+        );
+        assert_eq!(res.unresolved[0].raw_name, "B");
+    }
+
+    /// T5 — repeat import statements of one module are one relationship: 1 edge, 0 unresolved.
+    #[test]
+    fn repeat_import_statements_are_not_unresolved() {
+        let index = VecIndex(vec![]);
+        let loc0 = Location::new("main.ts", span_at(0));
+        let loc1 = Location::new("main.ts", span_at(1));
+        let r0 = UnresolvedRef::new(sym("main"), "'./mod'", EdgeKind::Imports, loc0.clone());
+        let r1 = UnresolvedRef::new(sym("main"), "'./mod'", EdgeKind::Imports, loc1.clone());
+        let mock = BindingMock::binding(vec![
+            ("'./mod'", loc0, EdgeKind::Imports),
+            ("'./mod'", loc1, EdgeKind::Imports),
+        ]);
+        let resolvers: &[&dyn Resolver] = &[&mock];
+        let res = resolve_all_with_coverage(resolvers, &[r0, r1], &index).unwrap();
+        assert_eq!(
+            res.edges.len(),
+            1,
+            "same (source, target, kind) dedups to one"
+        );
+        assert!(res.unresolved.is_empty());
+    }
+
+    /// T6 — accounting is scoped per ref: a bound `sa/` ref never cancels an `sb/` ref that
+    /// shares its raw_name and kind (multi-repo labelled graphs, D4).
+    #[test]
+    fn accounting_is_scoped_per_ref() {
+        let index = VecIndex(vec![]);
+        let loc_sa = Location::new("sa/src/x.ts", span_at(2));
+        let loc_sb = Location::new("sb/src/x.ts", span_at(2));
+        let r_sa = UnresolvedRef::new(sym("sa_f"), "g", EdgeKind::Calls, loc_sa.clone());
+        let r_sb = UnresolvedRef::new(sym("sb_f"), "g", EdgeKind::Calls, loc_sb.clone());
+        let mock = BindingMock::binding(vec![("g", loc_sa, EdgeKind::Calls)]);
+        let resolvers: &[&dyn Resolver] = &[&mock];
+        let res = resolve_all_with_coverage(resolvers, &[r_sa, r_sb], &index).unwrap();
+        assert_eq!(res.unresolved.len(), 1);
+        assert_eq!(res.unresolved[0].location.file, "sb/src/x.ts");
+    }
+
+    /// T7 — an edge with `location: None` attributes to nothing but is still returned
+    /// (Resolver contract, location half).
+    #[test]
+    fn edges_without_location_attribute_nothing() {
+        let index = VecIndex(vec![]);
+        let loc = Location::new("main.ts", span_at(1));
+        let r = UnresolvedRef::new(sym("f"), "g", EdgeKind::Calls, loc.clone());
+        let mock = BindingMock {
+            strip_location: true,
+            ..BindingMock::binding(vec![("g", loc, EdgeKind::Calls)])
+        };
+        let resolvers: &[&dyn Resolver] = &[&mock];
+        let res = resolve_all_with_coverage(resolvers, &[r], &index).unwrap();
+        assert_eq!(res.edges.len(), 1, "the edge is still returned");
+        assert_eq!(res.unresolved.len(), 1, "but it binds nothing");
+    }
+
+    /// T8 — a bound site never cancels a sibling site sharing `(from, raw_name, kind)` at a
+    /// different location (`this.save()` vs `cache.save()` — the receiver-inference safety
+    /// that rejects the relationship-keyed definition, A1).
+    #[test]
+    fn a_bound_site_does_not_cancel_a_sibling_site() {
+        let index = VecIndex(vec![]);
+        let loc1 = Location::new("svc.ts", span_at(10));
+        let loc2 = Location::new("svc.ts", span_at(20));
+        let r1 = UnresolvedRef::new(sym("f"), "save", EdgeKind::Calls, loc1.clone());
+        let r2 = UnresolvedRef::new(sym("f"), "save", EdgeKind::Calls, loc2.clone());
+        let mock = BindingMock::binding(vec![("save", loc1, EdgeKind::Calls)]);
+        let resolvers: &[&dyn Resolver] = &[&mock];
+        let res = resolve_all_with_coverage(resolvers, &[r1, r2], &index).unwrap();
+        assert_eq!(res.unresolved.len(), 1);
+        assert_eq!(res.unresolved[0].location, loc2);
+    }
+
+    /// T9 — an edge whose kind differs from the ref at its location binds nothing
+    /// (Resolver contract, kind half).
+    #[test]
+    fn edge_kind_must_match_ref_kind() {
+        let index = VecIndex(vec![]);
+        let loc = Location::new("main.ts", span_at(1));
+        let r = UnresolvedRef::new(sym("f"), "g", EdgeKind::Calls, loc.clone());
+        let mock = BindingMock {
+            emit_kind: Some(EdgeKind::Imports),
+            ..BindingMock::binding(vec![("g", loc, EdgeKind::Calls)])
+        };
+        let resolvers: &[&dyn Resolver] = &[&mock];
+        let res = resolve_all_with_coverage(resolvers, &[r], &index).unwrap();
+        assert_eq!(res.edges.len(), 1, "the edge is still returned");
+        assert_eq!(res.unresolved.len(), 1, "but it binds nothing");
     }
 }

@@ -305,21 +305,30 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
         EdgeKind::Calls,
         Location::new("src/lib.rs", Span::ZERO),
     );
+    // A second ghost ref in a DIFFERENT file: remove_file (checked further down) must drop
+    // only src/lib.rs's row and keep this one (rows are per unresolved reference —
+    // docs/ENGINE-CONTRACT.md §2.1).
+    let ghost_ref_other = UnresolvedRef::new(
+        sym("a"),
+        "ghost",
+        EdgeKind::Calls,
+        Location::new("src/other.rs", Span::ZERO),
+    );
     store
-        .upsert_unresolved_refs(&[ghost_ref])
+        .upsert_unresolved_refs(&[ghost_ref, ghost_ref_other])
         .expect("upsert_unresolved_refs");
 
     let found = store
         .unresolved_refs_for_name("ghost")
         .expect("unresolved_refs_for_name");
-    assert_eq!(found.len(), 1, "one unresolved ref for 'ghost'");
-    assert_eq!(found[0].raw_name, "ghost");
-    assert_eq!(found[0].from, sym("a"));
+    assert_eq!(found.len(), 2, "two unresolved refs for 'ghost' (per site)");
+    assert!(found.iter().all(|r| r.raw_name == "ghost"));
+    assert!(found.iter().all(|r| r.from == sym("a")));
 
     let stats_after = store.stats().expect("stats after unresolved upsert");
     assert_eq!(
-        stats_after.unresolved_ref_count, 1,
-        "stats must reflect the stored unresolved ref"
+        stats_after.unresolved_ref_count, 2,
+        "stats must reflect the stored unresolved refs"
     );
 
     // A name with no refs returns an empty vec, not an error.
@@ -502,6 +511,27 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
             .iter()
             .map(|n| &n.location.file)
             .collect::<Vec<_>>()
+    );
+
+    // remove_file also drops the file's unresolved rows — the per-file delete path that keeps
+    // unresolved accounting per resolve pass (docs/ENGINE-CONTRACT.md §2.1): the src/lib.rs
+    // ghost row is gone, the src/other.rs one survives.
+    let ghost_after = store
+        .unresolved_refs_for_name("ghost")
+        .expect("unresolved_refs_for_name after remove_file");
+    assert_eq!(
+        ghost_after.len(),
+        1,
+        "remove_file must drop only the removed file's unresolved rows"
+    );
+    assert_eq!(ghost_after[0].location.file, "src/other.rs");
+    assert_eq!(
+        store
+            .stats()
+            .expect("stats after remove_file")
+            .unresolved_ref_count,
+        1,
+        "stats must reflect the per-file unresolved delete"
     );
 
     // --- prune_dangling_edges: removes edges to missing nodes; keeps valid edges ---

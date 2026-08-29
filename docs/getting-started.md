@@ -116,8 +116,9 @@ The coverage line is mandatory (agent-behavior rule R3). It tells you:
 
 - **resolved dependent(s)** — edges the resolver could assign a target. These are the dependents
   the graph *knows about*.
-- **unresolved call(s)** — `@call.function` / `@call.method` captures that matched the symbol's
-  name in source but whose callers could not be resolved (ambiguous, or no SCIP precise tier).
+- **unresolved call(s)** — references to the symbol's name for which no resolver emitted an
+  attributed edge (see `docs/ENGINE-CONTRACT.md` §2.1 — one count per unresolved reference;
+  repeat call sites of an already-resolved relationship are never counted).
 
 A non-zero unresolved count means the blast-radius is a lower bound. The `scip` command raises
 this to a `confidence:1.0` precise tier for TypeScript/JavaScript repos.
@@ -205,8 +206,9 @@ wicked-estate scip ./my-ts-project
 # scip: ingested 412 precise edge(s) from ./my-ts-project/index.scip into .wicked-estate/graph.db
 ```
 
-After `scip`, blast-radius results for TypeScript symbols carry `confidence:1.0` edges and
-the unresolved-call count should drop significantly.
+After `scip`, blast-radius results for TypeScript symbols carry `confidence:1.0` edges.
+Existing `unresolved_refs` rows are NOT pruned by the ingest itself — they are rebuilt the next
+time their file is re-indexed (`docs/ENGINE-CONTRACT.md` §2.1, exception 2).
 
 **Requirements:** Node.js + `npx` available. The project must have `tsconfig.json` and
 `node_modules` installed. If `npx` is not available, run

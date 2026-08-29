@@ -102,7 +102,8 @@ pub struct RepoMetrics {
     pub node_count: u64,
     /// Total graph edges.
     pub edge_count: u64,
-    /// Cross-file references that could not be resolved (coverage signal).
+    /// Cross-file references that could not be resolved (coverage signal), one per
+    /// unresolved reference — `docs/ENGINE-CONTRACT.md` §2.1.
     pub unresolved_ref_count: u64,
     /// Node counts keyed by JSON-serialised `NodeKind`.
     pub nodes_by_kind: BTreeMap<String, u64>,
@@ -705,9 +706,12 @@ pub fn write_markdown_report(metrics: &[RepoMetrics], report_path: &Path) -> Res
     )?;
     writeln!(
         f,
-        "(`unresolved_refs_for_name`). A lower percentage signals incomplete resolution, not"
+        "(`unresolved_refs_for_name`, defined in `docs/ENGINE-CONTRACT.md` §2.1). A lower"
     )?;
-    writeln!(f, "fewer callers.")?;
+    writeln!(
+        f,
+        "percentage signals incomplete resolution, not fewer callers."
+    )?;
     writeln!(f)?;
     writeln!(f, "## Results")?;
     writeln!(f)?;
