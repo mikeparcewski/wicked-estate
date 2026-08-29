@@ -10200,6 +10200,7 @@ dependencies = [
  "wicked-estate-tree-sitter-vb6",
  "wicked-estate-tree-sitter-vba",
  "wicked-estate-tree-sitter-vbscript",
+ "xxhash-rust",
 ]
 
 [[package]]
