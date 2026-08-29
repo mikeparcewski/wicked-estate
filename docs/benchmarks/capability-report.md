@@ -1,5 +1,12 @@
 # wicked_estate capability benchmark
 
+> **Note (admissibility residuals, 2026-08-29):** the pinned figures below were measured
+> BEFORE the json/IaC family-guard fix (the Calls→data-target class — 402 edges on
+> command_iq-class corpora — was still present) and before `unresolved_refs` gained byte-span
+> columns. Post-fix before/after deltas for the command_iq/studio/crew corpora live in the
+> fixing PR's evidence (`measure/bench-before.json` vs `measure/bench-after.json`); this file
+> is deliberately annotated, not regenerated — it pins a different corpus set.
+
 > **Waves W1.6 / W8.1** — engine capability receipt.  \
 > The full agent A/B (baseline vs treatment with an LLM in the loop) is future work.
 > This report measures what the engine itself delivers: index speed, graph completeness,

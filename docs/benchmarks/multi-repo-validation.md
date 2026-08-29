@@ -1,5 +1,10 @@
 # Multi-codebase validation — must-have-value receipts
 
+> **Note (admissibility residuals, 2026-08-29):** these figures predate the json/IaC
+> family-guard fix (Calls→data-target class present at measurement time) and the
+> `unresolved_refs` byte-span columns. Annotated, not regenerated — the corpus set differs
+> from the fixing PR's measured before/after receipts.
+
 **Date:** 2026-06-13. **Binary:** `target/release/wicked-estate` (release). **Gate at run:** workspace
 build 0 warnings · 410 tests · clippy clean.
 
