@@ -44,6 +44,12 @@
 ;
 ; Gate: the RHS call function name must be one of the recognised SQLAlchemy constructors.
 ; This avoids capturing every class-level assignment — only ORM-shaped RHS.
+;
+; @code_field.def anchors at the field's OWN expression_statement (scm-anchors D7):
+; anchoring at the whole class_definition made the field record range-equal to the
+; class record, so the field could never take its class as owner (the MI-R1-1b
+; residual) — statement-anchored, the field nests normally (`Article#title.`,
+; `A#Model#t.`).
 
 (class_definition
   body: (block
@@ -53,10 +59,10 @@
         right: (call
           function: (identifier) @_sa_func)
       )
-    )
+    ) @code_field.def
   )
   (#any-of? @_sa_func "Column" "mapped_column" "relationship" "Mapped" "deferred" "synonym")
-) @code_field.def
+)
 
 ; ── Django ORM ────────────────────────────────────────────────────────────────
 ; Class-level models.XField(...) assignment → NodeKind::Field
@@ -69,6 +75,7 @@
 ;   author   = models.ForeignKey("auth.User", on_delete=models.CASCADE)
 ;   pub_date = models.DateTimeField(auto_now_add=True)
 
+; @code_field.def statement-anchored — same rationale as the SQLAlchemy pattern above.
 (class_definition
   body: (block
     (expression_statement
@@ -79,10 +86,10 @@
             attribute: (identifier) @_dj_field_type)
         )
       )
-    )
+    ) @code_field.def
   )
   (#match? @_dj_field_type "^(CharField|TextField|IntegerField|FloatField|DecimalField|BooleanField|NullBooleanField|DateField|DateTimeField|TimeField|DurationField|FileField|ImageField|URLField|EmailField|SlugField|UUIDField|GenericIPAddressField|IPAddressField|BinaryField|ForeignKey|OneToOneField|ManyToManyField|AutoField|BigAutoField|SmallAutoField|BigIntegerField|SmallIntegerField|PositiveIntegerField|PositiveSmallIntegerField|JSONField)$")
-) @code_field.def
+)
 
 ; Import statements
 (import_statement

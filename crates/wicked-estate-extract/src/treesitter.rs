@@ -1404,11 +1404,12 @@ struct PendingDef {
 ///
 /// Anchor-artifact exception (MI-R1-1): a non-Type pending def whose byte range EQUALS a
 /// Type-suffixed pending def's range is the same syntactic node re-captured by a second query
-/// pattern — an anchor artifact, not a real inner scope. python.scm's ORM field patterns anchor
-/// `@code_field.def` at the WHOLE `class_definition`, so without this exception the equal-range
-/// Term (a) truncated the Type chain of every member of a nested ORM class (re-minting the D03
-/// collision) and (b) left the flat two-model case correct only by uncontracted match order.
-/// Such records are dropped from the container walk before truncation applies.
+/// pattern — an anchor artifact, not a real inner scope. Such records are dropped from the
+/// container walk before truncation applies. DEFENSIVE: the last real producer (python.scm's
+/// ORM field patterns, which anchored `@code_field.def` at the WHOLE `class_definition`) was
+/// re-anchored at the field's own statement in the scm-anchors lane; the drop stays as a
+/// fleet-wide guard against the recurrence class (73 query files, any future wide anchor),
+/// tested directly by `enclosing_chain_drops_equal_range_anchor_artifacts`.
 fn enclosing_chain(pending: &[PendingDef], start: usize, end: usize) -> Vec<Descriptor> {
     let mut containers: Vec<&PendingDef> = pending
         .iter()
@@ -6706,10 +6707,12 @@ public class PlainListener {
     }
 
     // ── Equal-range anchor artifacts (MI-R1-1) ─────────────────────────────────
-    // python.scm's ORM field patterns (SQLAlchemy + Django) anchor @code_field.def at the
-    // WHOLE class_definition, so the Term-suffixed field record is range-equal to the class
-    // record. enclosing_chain drops such anchor artifacts from the container walk; these tests
-    // pin the three shapes that were broken (or tie-order-fragile) without the drop.
+    // enclosing_chain drops non-Type records range-equal to a Type record from the container
+    // walk. python.scm's ORM patterns — the last real producer of such records — now anchor
+    // @code_field.def at the field's own statement (scm-anchors D7), so the drop is DEFENSIVE:
+    // a fleet guard against any future wide anchor. These tests pin the three shapes that were
+    // broken (or tie-order-fragile) without it; the direct unit test below keeps the guard
+    // non-vacuously tested now that no built-in query produces the artifact.
 
     #[test]
     fn identity_orm_equal_range_anchor_nested_models_do_not_collide() {
@@ -6786,14 +6789,11 @@ public class PlainListener {
 
     #[test]
     fn identity_field_orm_equal_range_residual() {
-        // KNOWN RESIDUAL (MI-R1-1b): the ORM field's OWN id cannot take its class as owner —
-        // the field record is range-equal to the class record, and a range-equal container is
-        // indistinguishable from a duplicate capture of the def itself. Nested: `t` mints
-        // `A#t.` (owner should be A#Model#); flat: `title` stays module-flat (owner should be
-        // Article#) — so two same-named fields in two flat sibling classes still collide.
-        // Fixing this needs python.scm to anchor @code_field.def at the assignment node, not
-        // the class_definition — extraction-gaps lane (merge note in docs/recon/
-        // method-identity.md §8). When that lands, update these assertions to the real owners.
+        // FLIPPED (scm-anchors D7, was MI-R1-1b): @code_field.def now anchors at the field's
+        // OWN expression_statement, so the field record is strictly inside its class and takes
+        // its REAL owner chain — nested `t` mints `A#Model#t.` (was the wrong-owner `A#t.`),
+        // and a top-level model's field nests under its class (`Article#title.`, was
+        // module-flat, where two same-named fields of sibling models collided).
         let nested = "class A:\n    class Model:\n        t = models.CharField(max_length=1)\n";
         let ex = TreeSitterExtractor::for_language("python")
             .unwrap()
@@ -6801,8 +6801,8 @@ public class PlainListener {
             .unwrap();
         assert_eq!(
             symbols_named(&ex, "t"),
-            vec!["ts-python . . . app/r/A#t.".to_string()],
-            "pinned wrong-owner residual: the field skips its range-equal class"
+            vec!["ts-python . . . app/r/A#Model#t.".to_string()],
+            "the statement-anchored field must take its full real owner chain"
         );
         let flat = "class Article:\n    title = models.CharField(max_length=1)\n";
         let ex2 = TreeSitterExtractor::for_language("python")
@@ -6811,8 +6811,38 @@ public class PlainListener {
             .unwrap();
         assert_eq!(
             symbols_named(&ex2, "title"),
-            vec!["ts-python . . . app/s/title.".to_string()],
-            "pinned residual: a top-level ORM field stays module-flat"
+            vec!["ts-python . . . app/s/Article#title.".to_string()],
+            "a top-level ORM field must nest under its class"
+        );
+    }
+
+    #[test]
+    fn enclosing_chain_drops_equal_range_anchor_artifacts() {
+        // Direct MI-R1-1 guard: no built-in query produces equal-range anchor artifacts any
+        // more (python.scm was the last producer, re-anchored in scm-anchors D7), so this
+        // handcrafted PendingDef list keeps the defensive drop non-vacuously tested: a
+        // non-Type record range-equal to a Type record must NOT truncate the chain of defs
+        // inside that range.
+        let mk = |kind: &str, name: &str, start: usize, end: usize| PendingDef {
+            kind: kind.to_string(),
+            name: name.to_string(),
+            start,
+            end,
+            span: Span::ZERO,
+            signature: None,
+            emit: true,
+            owner: None,
+        };
+        let pending = vec![
+            mk("class", "M", 0, 100),
+            mk("field", "t", 0, 100), // equal-range Term artifact (a wide anchor)
+            mk("function", "save", 10, 20),
+        ];
+        let chain = enclosing_chain(&pending, 10, 20);
+        assert_eq!(
+            chain,
+            vec![Descriptor::new("M", Suffix::Type)],
+            "the equal-range Term artifact must be dropped, not truncate the chain"
         );
     }
 
