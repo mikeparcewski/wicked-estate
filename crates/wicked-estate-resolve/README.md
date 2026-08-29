@@ -9,7 +9,7 @@ Cross-file reference resolvers: binds `UnresolvedRef` values emitted by extracto
 - `ImportMapResolver` uses the per-file `hints["imports"]` map recorded during extraction to narrow ambiguous same-name candidates to the specific imported file (confidence 0.63).
 - `InfraResolver` binds IaC resource-to-resource `depends_on` references at Parsed confidence (1.0) without interfering with code resolvers.
 - `MethodResolutionSynthesizer` fills remaining gaps with a Heuristic (0.5) edge when exactly one callable candidate exists.
-- `resolve_all` runs multiple resolvers and deduplicates by `(source, target, kind)`, keeping the highest-confidence edge.
+- `resolve_all_with_coverage` runs multiple resolvers, deduplicates edges by `(source, target, kind)` keeping the highest-confidence edge, and returns the unresolved references under the one definition in `docs/ENGINE-CONTRACT.md` §2.1 (a reference is unresolved iff no resolver emitted an edge attributed to it — same `(location, kind)`). `resolve_all` is the edges-only view, kept for existing test call sites.
 - `scip_edges` ingests a SCIP `index.scip` protobuf and emits confidence-1.0 edges by correlating SCIP occurrences to tree-sitter-derived nodes.
 - `lsp` provides an on-demand JSON-RPC stdio client for `typescript-language-server`, `rust-analyzer`, and `pyright-langserver` — on-demand single-symbol queries only, never bulk.
 
@@ -22,7 +22,9 @@ Cross-file reference resolvers: binds `UnresolvedRef` values emitted by extracto
 | `ImportMapResolver` | `Resolver` impl: import-map scoped binding (0.63, `metadata["via"]="import-map"`). |
 | `InfraResolver` | `Resolver` impl: IaC resource deps at Parsed tier (1.0). |
 | `MethodResolutionSynthesizer` | `Resolver` impl: Heuristic fallback (0.5) for unique callable candidates. |
-| `resolve_all(resolvers, refs, index)` | Run N resolvers, deduplicate edges keeping max confidence. |
+| `Resolution` | `{ edges, unresolved }` — one resolve pass's full output. |
+| `resolve_all_with_coverage(resolvers, refs, index)` | Run N resolvers; deduplicated edges + per-reference unresolved set (ENGINE-CONTRACT §2.1). |
+| `resolve_all(resolvers, refs, index)` | Edges-only view of `resolve_all_with_coverage` (kept for test call sites). |
 | `scip_edges(index_bytes, nodes)` | Parse a SCIP index protobuf; emit `ResolutionTier::Scip` edges. |
 | `RulesBridgeResolver` | W15.13 — connects code call sites to real RuleSet nodes. Handles `UnresolvedRef`s with `raw_name = "rules-engine:<scheme>"` emitted by `ExtraEdgeExtractor`. Queries all `NodeKind::RuleSet` nodes and emits `InvokedBy` edges at `ResolutionTier::Heuristic`. |
 | `SynthPrecision` | Precision measurement result for a synthesizer against a gold-labelled ref set. |
@@ -32,7 +34,8 @@ Cross-file reference resolvers: binds `UnresolvedRef` values emitted by extracto
 
 ```rust
 use wicked_estate_resolve::{
-    resolve_all, ImportMapResolver, ScopedNameResolver, NameResolver, MethodResolutionSynthesizer,
+    resolve_all_with_coverage, ImportMapResolver, ScopedNameResolver, NameResolver,
+    MethodResolutionSynthesizer,
 };
 use wicked_estate_core::Resolver;
 
@@ -43,7 +46,9 @@ let resolvers: &[&dyn Resolver] = &[
     &NameResolver,
     &MethodResolutionSynthesizer,
 ];
-let edges = resolve_all(resolvers, &unresolved_refs, &symbol_index)?;
+let resolution = resolve_all_with_coverage(resolvers, &unresolved_refs, &symbol_index)?;
+// resolution.edges     → deduplicated edges (highest confidence per (source, target, kind))
+// resolution.unresolved → references no resolver bound (persist per ENGINE-CONTRACT §2.1)
 ```
 
 ## Crate features
