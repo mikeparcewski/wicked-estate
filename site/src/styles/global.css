@@ -96,11 +96,9 @@ html[data-theme="light"], html[data-theme="dark"] {
        PROXIMITY, not mandatory — the shared chrome's default (tokens.css), which
        this file used to override. The override was justified by "every .strata is
        sized to the visible band (100svh − topbar), never taller than the snapport,
-       so a whole section can always be shown — no trap". That premise was false when
-       it was written (#toolface measured 786px against a 636px snapport) and it is
-       true again now (#123 brought every section inside the band, with slack, guarded
-       by tests/e2e/section-fits.spec.ts) — but proximity is still the right setting,
-       for the second reason below. Under `mandatory` the browser refuses to rest anywhere but
+       so a whole section can always be shown — no trap". Measured at 1440x700 that
+       premise is false: the hero is 750px and #toolface 786px against a 636px
+       snapport. Under `mandatory` the browser refuses to come to rest anywhere but
        a snap point (plus the slack inside an over-tall snap area), so a stratum
        that exactly fits has exactly ONE resting place and you cannot stop part-way
        down it to read. Measured, wheeling 320px at a time from the top: mandatory
@@ -175,9 +173,6 @@ html[data-theme="light"], html[data-theme="dark"] {
     border: 1px solid var(--hairline-strong);
     white-space: nowrap;
   }
-  /* Chip-row variant: 10 capability chips wrap to three rows at 1152px, so each
-     chip's vertical padding is paid three times over in section height. */
-  .tag-tight { font-size: 0.58rem; padding: 2px 7px; line-height: 1.35; }
   .tag-accent {
     color: var(--accent);
     border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline));
@@ -203,35 +198,6 @@ html[data-theme="light"], html[data-theme="dark"] {
     opacity: 0.7;
   }
   .rock-panel > * { position: relative; z-index: 1; }
-
-  /* ── Toolface rows — the 23 MCP tools + the 6 agent skills ───────────────
-     The densest block on the site: three panels, ten rows in the tallest, and
-     every row's purpose wraps to two lines at any realistic column width. Row
-     height is therefore paid TEN TIMES over in the Graph panel, which is what
-     made #toolface 786px against a 636px budget (issue #123). Kept as explicit
-     component classes rather than utility soup so the two numbers that decide
-     the section's height — the purpose font-size and its line-height — are in
-     one place and obviously load-bearing.
-
-     Do not restore a per-row vertical padding here without re-measuring: at ten
-     rows, 2px of padding is 20px of section, and the section has ~30px of slack. */
-  .tool-row {
-    display: flex; align-items: baseline; gap: 8px; padding: 1px 14px;
-  }
-  .tool-row-name {
-    flex-shrink: 0; font-family: "JetBrains Mono", ui-monospace, monospace;
-    font-size: 0.66rem; font-weight: 600; color: var(--ink);
-  }
-  .tool-row-purpose {
-    flex: 1; min-width: 0; text-align: right;
-    font-family: "JetBrains Mono", ui-monospace, monospace;
-    font-size: 0.6rem; line-height: 1.2; letter-spacing: 0.02em; color: var(--faint);
-  }
-  /* the in-repo agent skills use the same row rhythm, in a 3-up grid */
-  .skill-row {
-    display: flex; align-items: baseline; gap: 8px; padding: 3px 14px;
-    box-shadow: inset 0 0 0 0.5px var(--hairline);
-  }
 
   /* ── Depth marker ───────────────────────────────────────────────────────── */
   .depth {
@@ -314,7 +280,7 @@ html[data-theme="light"], html[data-theme="dark"] {
   /* ── CTA buttons ─────────────────────────────────────────────────────────── */
   .btn-primary {
     display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-    padding: 11px 24px;
+    padding: 13px 26px;
     background: var(--accent); color: var(--on-accent);
     font-family: "JetBrains Mono", monospace; font-size: 0.78rem; font-weight: 700; letter-spacing: 0.04em;
     border-radius: 10px; border: none; cursor: pointer; text-decoration: none;
@@ -324,7 +290,7 @@ html[data-theme="light"], html[data-theme="dark"] {
 
   .btn-outline {
     display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-    padding: 11px 24px; background: transparent; color: var(--ink);
+    padding: 13px 26px; background: transparent; color: var(--ink);
     font-family: "JetBrains Mono", monospace; font-size: 0.78rem; font-weight: 500; letter-spacing: 0.04em;
     border-radius: 10px; border: 1px solid var(--hairline-strong); cursor: pointer; text-decoration: none;
     transition: border-color 0.2s var(--ease), color 0.2s var(--ease);
@@ -334,7 +300,7 @@ html[data-theme="light"], html[data-theme="dark"] {
   /* ── Small pill toggle ───────────────────────────────────────────────────── */
   .seg {
     font-family: "JetBrains Mono", monospace; font-size: 0.72rem; font-weight: 600;
-    padding: 7px 16px; border-radius: 9px; cursor: pointer;
+    padding: 9px 18px; border-radius: 9px; cursor: pointer;
     border: 1px solid var(--hairline-strong); background: transparent; color: var(--muted);
     transition: all 0.2s var(--ease);
   }
@@ -431,7 +397,7 @@ html[data-theme="light"], html[data-theme="dark"] {
 
   /* ── chrome bar ─────────────────────────────────────────────────────────── */
   .ide-chrome {
-    display: flex; align-items: center; gap: 12px; padding: 6px 14px;
+    display: flex; align-items: center; gap: 12px; padding: 9px 14px;
     background: linear-gradient(180deg, color-mix(in oklab, var(--ink) 8%, var(--rock)), var(--rock));
     border-bottom: 1px solid var(--hairline-strong);
   }
@@ -455,18 +421,18 @@ html[data-theme="light"], html[data-theme="dark"] {
   .ide-explorer {
     border-right: 1px solid var(--hairline-strong);
     background: color-mix(in oklab, var(--ink) 3%, var(--rock));
-    padding: 8px 9px; display: flex; flex-direction: column; gap: 8px; min-width: 0;
+    padding: 11px 10px; display: flex; flex-direction: column; gap: 13px; min-width: 0;
   }
   @media (max-width: 1023px) { .ide-explorer { border-right: 0; border-bottom: 1px solid var(--hairline-strong); } }
   .ide-sec-label {
     display: block; font-size: 0.55rem; letter-spacing: 0.2em; text-transform: uppercase;
-    color: var(--faint); padding: 0 6px 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    color: var(--faint); padding: 0 6px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .ide-tree, .ide-actions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+  .ide-tree, .ide-actions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
 
   .ide-file {
     width: 100%; display: flex; align-items: center; gap: 8px;
-    padding: 3px 8px; border-radius: 7px; cursor: pointer; text-align: left;
+    padding: 6px 8px; border-radius: 7px; cursor: pointer; text-align: left;
     background: transparent; border: 1px solid transparent; color: var(--muted);
     transition: background 0.16s var(--ease), border-color 0.16s var(--ease), color 0.16s var(--ease);
   }
@@ -492,7 +458,7 @@ html[data-theme="light"], html[data-theme="dark"] {
   /* command rows (the accessible parallel to the right-click menu) */
   .ide-action {
     width: 100%; display: flex; align-items: center; gap: 8px;
-    padding: 3px 8px; border-radius: 7px; cursor: pointer; text-align: left;
+    padding: 6px 8px; border-radius: 7px; cursor: pointer; text-align: left;
     background: transparent; border: 1px solid transparent; color: var(--muted);
     transition: background 0.16s var(--ease), border-color 0.16s var(--ease), color 0.16s var(--ease);
   }
@@ -517,20 +483,20 @@ html[data-theme="light"], html[data-theme="dark"] {
     background: color-mix(in oklab, var(--ink) 2%, var(--rock));
   }
   .ide-tab {
-    display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px;
+    display: inline-flex; align-items: center; gap: 7px; padding: 8px 12px;
     border-bottom: 2px solid transparent; margin-bottom: -1px; font-size: 0.72rem; color: var(--ink);
   }
   .ide-tab[data-on="true"] { border-bottom-color: var(--accent); background: color-mix(in oklab, var(--accent) 6%, transparent); }
   .ide-tab-name { font-weight: 600; }
-  .ide-crumb { margin-left: auto; padding: 6px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .ide-crumb { margin-left: auto; padding: 8px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 
   /* ── the code pane (with cursor + context menu overlay) ─────────────────── */
   .ide-code {
     position: relative; overflow: visible;
-    padding: 5px 6px 6px; background: color-mix(in oklab, var(--ink) 3%, transparent);
+    padding: 8px 6px 10px; background: color-mix(in oklab, var(--ink) 3%, transparent);
     border-bottom: 1px solid var(--hairline);
   }
-  .ide-code-pre { margin: 0; font-size: 0.72rem; line-height: 1.5; overflow-x: auto; }
+  .ide-code-pre { margin: 0; font-size: 0.72rem; line-height: 1.62; overflow-x: auto; }
   .ide-code-pre code { display: block; }
   .ide-code-line { display: flex; align-items: baseline; white-space: pre; }
   .ide-code-ln {
@@ -581,7 +547,7 @@ html[data-theme="light"], html[data-theme="dark"] {
 
   /* ── confidence gutter ──────────────────────────────────────────────────── */
   .ide-gutter {
-    display: flex; align-items: center; gap: 12px; padding: 5px 14px;
+    display: flex; align-items: center; gap: 12px; padding: 7px 14px;
     border-bottom: 1px solid var(--hairline);
     background: color-mix(in oklab, var(--ink) 4%, transparent);
   }
@@ -600,7 +566,7 @@ html[data-theme="light"], html[data-theme="dark"] {
     border-bottom: 1px solid var(--hairline);
   }
   .ide-dock-tab {
-    display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px;
+    display: inline-flex; align-items: center; gap: 7px; padding: 7px 11px;
     font-size: 0.62rem; letter-spacing: 0.02em; color: var(--muted); cursor: pointer;
     background: transparent; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px;
     transition: color 0.15s var(--ease), border-color 0.15s var(--ease);
@@ -616,19 +582,16 @@ html[data-theme="light"], html[data-theme="dark"] {
      so the whole section holds a constant outer height across the gesture cycle — zero
      vertical bounce. The tallest states (the all-details peek, the 4-row memory panel)
      scroll internally within this reserved area.
-
-     WHICH COLUMN IS THE TALL ONE decides whether this number does anything. .ide-body
-     is a two-column grid, so the section pays for max(explorer, editor). Before the
-     #123 density pass the explorer's ten command rows made IT the tall half (423px vs
-     the editor's 398px) and shrinking the dock bought nothing — 24vh→22vh moved #query
-     716px → 716px. The explorer rows are now tight, the editor is the tall half, and
-     this height is once again a real lever. Re-measure before assuming either way. */
+     Do NOT shrink this to make #query fit a short viewport: at 1440x700 the explorer
+     column (423px) is the taller half of .ide-body, so trimming the dock costs the
+     reader dock rows and buys the section nothing. Measured: 24vh→22vh moved #query
+     716px → 716px. Trim the explorer rows instead. */
   .ide-dock-body {
-    padding: 4px 16px 7px 14px; overflow-y: auto; scrollbar-gutter: stable;
-    height: min(22vh, 158px); animation: ide-dock-in 0.28s var(--ease) both;
+    padding: 5px 16px 9px 14px; overflow-y: auto; scrollbar-gutter: stable;
+    height: min(24vh, 194px); animation: ide-dock-in 0.28s var(--ease) both;
   }
   @media (max-width: 1023px) { .ide-dock-body { height: auto; min-height: 150px; scrollbar-gutter: auto; } }
-  .ide-dock-head { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; padding: 2px 0 4px; }
+  .ide-dock-head { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; padding: 4px 0 5px; }
   .ide-dock-title { font-family: "Archivo", ui-sans-serif, sans-serif; font-weight: 800; font-size: 0.82rem; color: var(--ink); }
   .ide-dock-sub { }
   .ide-wiki-ref {
@@ -638,7 +601,7 @@ html[data-theme="light"], html[data-theme="dark"] {
   .ide-wiki-inline { margin-left: 0; }
 
   /* result rows (code intelligence + knowledge) */
-  .ide-line { display: flex; gap: 10px; padding: 2px 0; align-items: flex-start; }
+  .ide-line { display: flex; gap: 10px; padding: 3px 0; align-items: flex-start; }
   .ide-ln {
     flex-shrink: 0; width: 20px; text-align: right; padding-top: 1px;
     font-size: 0.6rem; color: color-mix(in oklab, var(--ink) 28%, transparent);
@@ -662,7 +625,7 @@ html[data-theme="light"], html[data-theme="dark"] {
 
   /* ── the Memory panel ───────────────────────────────────────────────────── */
   .ide-mem {
-    display: flex; gap: 10px; padding: 5px 8px 5px 6px; align-items: flex-start;
+    display: flex; gap: 10px; padding: 6px 8px 6px 6px; align-items: flex-start;
     border-left: 2px solid transparent; border-radius: 0 6px 6px 0;
     transition: opacity 0.25s var(--ease), background 0.25s var(--ease), border-color 0.25s var(--ease);
   }
@@ -689,7 +652,7 @@ html[data-theme="light"], html[data-theme="dark"] {
 
   /* ── status bar ─────────────────────────────────────────────────────────── */
   .ide-statusbar {
-    display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; padding: 5px 14px;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 7px 14px;
     border-top: 1px solid var(--hairline-strong);
     background: linear-gradient(180deg, var(--rock), color-mix(in oklab, var(--ink) 7%, var(--rock)));
   }
@@ -697,7 +660,7 @@ html[data-theme="light"], html[data-theme="dark"] {
   .ide-status-seg { font-size: 0.58rem; letter-spacing: 0.05em; color: var(--muted); }
   .ide-status-seg[data-accent="true"] { color: var(--accent); font-weight: 700; }
   .ide-sep { font-size: 0.58rem; color: var(--faint); }
-  .ide-status-legend { margin-left: auto; display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+  .ide-status-legend { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .ide-legend-label { font-size: 0.53rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--faint); }
   .ide-legend-item { display: inline-flex; align-items: center; gap: 5px; }
 
@@ -804,16 +767,12 @@ html body::after {
 .strata, .same-garden { position: relative; box-shadow: inset 0 1px 0 var(--band-edge); }
 .strata-solid { background-color: var(--band-solid-bg); }
 
-/* The agent's-IDE section is the hero's "Read the record ↓" anchor target. The html
+/* The agent's-IDE section is the hero's "Read the core ↓" anchor target. The html
    scroll-padding-top already offsets anchor landings by the topbar height, but the
-   headline then sits flush against the bar with no breathing room, so this adds a gap.
-
-   It is BUDGET, not decoration: it pushes the snapped section further down the screen,
-   so #query's real height allowance is 100svh − topbar-h − THIS. It was 14px against a
-   section that had nothing to spare; the header above the IDE window is tight enough now
-   that 8px reads the same. tests/e2e/section-fits.spec.ts subtracts it from the budget,
-   so raising it again shows up as lost slack rather than as a section off the bottom. */
-#query { scroll-margin-top: 8px; }
+   headline then sits flush against the bar with no breathing room. A small
+   scroll-margin-top adds a clean gap below the topbar without over-pushing the
+   section (which would drop the status bar below the fold on short viewports). */
+#query { scroll-margin-top: 14px; }
 
 /* ── Scroll-lock to section + per-section viewport sizing ──────────────────
    Each stratum fills the viewport and snaps to the top; `safe center` vertical

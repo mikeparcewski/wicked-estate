@@ -96,16 +96,13 @@ function Section({
   )
 }
 
-// full-container-width, left-aligned header for sections whose title sits ON TOP of content.
-// The type scale here is load-bearing for section height: every .strata section has to fit
-// 100svh − topbar, and this head is the first thing every one of them spends. It was
-// 2.7rem/mb-8/mt-4 and cost #storage 277px of a 636px budget — see tests/e2e/section-fits.spec.ts.
+// full-container-width, left-aligned header for sections whose title sits ON TOP of content
 function TopHead({ kicker, title, children }: { kicker: string; title: React.ReactNode; children?: React.ReactNode }) {
   return (
-    <div className="mb-5 w-full text-left">
+    <div className="mb-8 w-full text-left">
       <span className="kicker">{kicker}</span>
-      <h2 className="mt-2.5 font-display text-2xl sm:text-[2.15rem] font-black text-ink w-full leading-[1.0]">{title}</h2>
-      {children && <div className="mt-2.5 text-[0.95rem] text-ink w-full font-sans leading-[1.55] max-w-none">{children}</div>}
+      <h2 className="mt-4 font-display text-3xl sm:text-[2.7rem] font-black text-ink w-full leading-[0.98]">{title}</h2>
+      {children && <div className="mt-4 text-ink w-full font-sans leading-relaxed max-w-none">{children}</div>}
     </div>
   )
 }
@@ -137,28 +134,28 @@ function Hero() {
   }, [activeRow])
 
   return (
-    <Section className="strata--hero !pt-20 overflow-hidden">
-      <div className="max-w-6xl mx-auto w-full grid lg:grid-cols-[1.08fr_0.92fr] gap-12 items-center">
+    <Section className="strata--hero !pt-24 overflow-hidden">
+      <div className="max-w-6xl mx-auto w-full grid lg:grid-cols-[1.08fr_0.92fr] gap-14 items-center">
         {/* Left — the thesis, committed in sentence one */}
         <div className="text-left">
           <span className="kicker">wicked-estate · the foundation · v0.14.4 · crates.io</span>
-          <h1 className="mt-3 font-display font-black text-ink text-[clamp(2.1rem,10vw,3rem)] sm:text-5xl lg:text-[3.5rem] leading-[0.94]" style={{ fontStretch: '112%' }}>
+          <h1 className="mt-4 font-display font-black text-ink text-[clamp(2.1rem,10vw,3rem)] sm:text-6xl lg:text-[4.2rem] leading-[0.92]" style={{ fontStretch: '112%' }}>
             Code graph.<br />Memory.<br />Knowledge.<br />
             <span style={{ color: 'var(--accent)' }}>One binary.</span>
           </h1>
-          <p className="mt-4 text-[1.05rem] text-muted leading-[1.5] max-w-xl font-sans">
+          <p className="mt-5 text-lg text-muted leading-relaxed max-w-xl font-sans">
             The <span className="text-ink">system of record</span> for your codebase — one local-first MCP server,{' '}
             <span className="text-ink">23 tools across 3 domains</span>. What breaks if you change it, the decision
             behind it, the doc that explains it — including the{' '}
-            <span className="text-ink">injected edges grep never sees</span>, every fact stamped with confidence and
-            provenance.
+            <span className="text-ink">injected edges grep never sees</span>. Every fact stamped with confidence and
+            provenance: a heuristic is never handed to an agent as a fact.
           </p>
-          <p className="mt-2.5 text-sm text-muted leading-[1.5] max-w-xl font-sans">
-            Zero infrastructure by default — one SQLite file, nothing leaves your box. And it earned the job: its
-            hybrid retrieval is <span className="text-ink">parity-benchmarked in the open</span> against the
+          <p className="mt-3 text-sm text-muted leading-relaxed max-w-xl font-sans">
+            Zero infrastructure by default — one SQLite file, nothing leaves your box. And it earned the job:
+            its hybrid retrieval is <span className="text-ink">parity-benchmarked in the open</span> against the
             dedicated search system it replaced.
           </p>
-          <div className="mt-4 flex flex-col sm:flex-row gap-3">
+          <div className="mt-5 flex flex-col sm:flex-row gap-3">
             <a href="#query" className="btn-primary">Read the record ↓</a>
             <a href="https://github.com/mikeparcewski/wicked-estate" target="_blank" rel="noreferrer" className="btn-outline">
               <GitHubIcon /> View on GitHub
@@ -349,16 +346,13 @@ const DOCK_TABS: { id: DockTab; label: string }[] = [
 ]
 
 // provenance legend for the status bar
-// Notes are terse on purpose: six chip+note pairs plus the left-hand status wrapped
-// the bar onto a second row at 1280px, and the bar is inside the section's height
-// budget (tests/e2e/section-fits.spec.ts).
 const PROV_LEGEND: { prov: string; note: string; accent?: boolean }[] = [
   { prov: 'Parsed', note: 'AST · 1.0', accent: true },
   { prov: 'SCIP', note: 'indexer · 1.0', accent: true },
-  { prov: 'Injected', note: 'ExtraEdge', accent: true },
-  { prov: 'Memory', note: 'salience' },
-  { prov: 'Knowledge', note: 'RRF' },
-  { prov: 'Tags', note: '0.3' },
+  { prov: 'Injected', note: 'ExtraEdge rule', accent: true },
+  { prov: 'Memory', note: 'recalled · salience' },
+  { prov: 'Knowledge', note: 'wiki · RRF' },
+  { prov: 'Tags', note: 'tag-scan · 0.3' },
 ]
 
 function confColor(conf: number) {
@@ -731,17 +725,18 @@ function AgentIDE() {
     <Section id="query" solid>
       <div className="max-w-6xl mx-auto w-full" ref={rootRef}>
         {/* section header — using an IDE that actually knows your system */}
-        <div className="mb-1.5 w-full text-left">
+        <div className="mb-3 w-full text-left max-w-3xl">
           <span className="kicker">The agent&apos;s IDE</span>
-          <h2 className="mt-1.5 font-display text-2xl sm:text-[1.7rem] font-black text-ink leading-[1.0] max-w-3xl">
+          <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink leading-[0.98]">
             The agent doesn&apos;t grep. It edits in an IDE that <span style={{ color: 'var(--accent)' }}>knows your whole system.</span>
           </h2>
-          <p className="mt-1.5 text-[0.82rem] text-muted font-sans leading-tight max-w-5xl">
-            Right-click a symbol for every caller, click a class for its whole picture, trace the requirement it
-            satisfies, recall the <span className="text-ink">decision</span> behind it, pull the{' '}
-            <span className="text-ink">wiki</span>, see the blast radius. Every answer a live fact with{' '}
-            <span className="text-ink">confidence + provenance</span> — drop the dial and the low-confidence guesses
-            fall out, labeled, never silently promoted.
+          <p className="mt-1.5 text-sm text-muted font-sans leading-tight">
+            Right-click a symbol for every caller, click a class for its whole picture, trace the requirement it satisfies,
+            recall the <span className="text-ink">decision</span> behind it, pull the <span className="text-ink">wiki</span>,
+            see the blast radius — what an agent can do while editing when it reads the record instead of grepping.
+            Code intelligence, memory and knowledge, every answer a live fact with{' '}
+            <span className="text-ink">confidence + provenance</span>; drop the dial and the low-confidence guesses
+            fall out, labeled — never silently promoted.
           </p>
         </div>
 
@@ -887,14 +882,14 @@ function FiveStrata() {
           kicker="The five strata"
           title={<>Five bands. One record. <span style={{ color: 'var(--accent)' }}>One symbol identity.</span></>}
         >
-          <p className="max-w-4xl">
+          <p className="max-w-3xl">
             Not a pile of scanners — a single continuous body, cut into bands. Each keyed to the same stable{' '}
             <span className="font-mono text-sm font-semibold">(scheme, qualified-name)</span> that survives reformatting,
             moves, and re-index.
           </p>
         </TopHead>
 
-        <div className="mb-2">
+        <div className="mb-3">
           <button
             className="demo-pill"
             data-live={String(!pinned)}
@@ -916,7 +911,7 @@ function FiveStrata() {
                   key={s.id}
                   onMouseEnter={() => setActive(i)}
                   onClick={() => { setPinned(true); setActive(i) }}
-                  className="relative flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-5 px-5 py-2.5 border-b border-hairline last:border-b-0 transition-all duration-300 cursor-pointer"
+                  className="relative flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-6 px-6 py-3.5 border-b border-hairline last:border-b-0 transition-all duration-300 cursor-pointer"
                   style={{
                     background: on
                       ? 'color-mix(in oklab, var(--accent) 9%, transparent)'
@@ -924,20 +919,20 @@ function FiveStrata() {
                     boxShadow: on ? 'inset 3px 0 0 var(--accent)' : 'none',
                   }}
                 >
-                  <div className="flex items-center gap-3 sm:w-60 shrink-0">
-                    <span className="font-display font-black text-xl tabular-nums" style={{ fontStretch: '108%', color: on ? 'var(--accent)' : 'var(--faint)' }}>{s.no}</span>
+                  <div className="flex items-center gap-4 sm:w-64 shrink-0">
+                    <span className="font-display font-black text-2xl tabular-nums" style={{ fontStretch: '108%', color: on ? 'var(--accent)' : 'var(--faint)' }}>{s.no}</span>
                     <div>
-                      <div className="font-display font-black text-ink text-base leading-tight" style={{ fontStretch: '108%' }}>{s.name}</div>
-                      <div className="depth">{s.depth} · {s.tools}</div>
+                      <div className="font-display font-black text-ink text-lg leading-tight" style={{ fontStretch: '108%' }}>{s.name}</div>
+                      <div className="depth mt-0.5">{s.depth} · {s.tools}</div>
                     </div>
                   </div>
-                  <p className="text-[0.82rem] font-sans flex-1 leading-[1.45] transition-colors" style={{ color: on ? 'var(--ink)' : 'var(--muted)' }}>{s.copy}</p>
+                  <p className="text-sm font-sans flex-1 leading-relaxed transition-colors" style={{ color: on ? 'var(--ink)' : 'var(--muted)' }}>{s.copy}</p>
                 </div>
               )
             })}
           </div>
         </div>
-        <p className="mt-3 font-mono text-[0.68rem] text-faint">
+        <p className="mt-4 font-mono text-xs text-faint">
           Code graph · injected edges · memory · knowledge · provenance — one binary, every fact stamped with confidence and provenance.
         </p>
       </div>
@@ -955,26 +950,26 @@ const TOOL_DOMAINS: ToolDomain[] = [
     no: '01', name: 'Graph', note: '10 estate tools',
     tools: [
       { name: 'SearchEntity',   purpose: 'Find symbols by name or kind; optional source inline.' },
-      { name: 'RetrieveEntity', purpose: 'Full dossier: callers, edges, annotations, requirement.' },
+      { name: 'RetrieveEntity', purpose: 'One symbol’s full dossier — callers, edges, annotations, requirement.' },
       { name: 'TraverseGraph',  purpose: 'Bounded walk out over calls and imports.' },
       { name: 'BlastRadius',    purpose: 'Every dependent — what breaks if you change it.' },
       { name: 'Lineage',        purpose: 'The dependency chain a symbol rests on, transitively.' },
-      { name: 'RankHotspots',   purpose: 'Most-connected symbols by PageRank — where to start.' },
+      { name: 'RankHotspots',   purpose: 'Most-connected symbols by PageRank — where to start reading.' },
       { name: 'Communities',    purpose: 'Clusters the graph into modules.' },
       { name: 'ContextBundle',  purpose: 'Scoped, prompt-ready context pack for a symbol.' },
       { name: 'FetchContent',   purpose: 'The stored source for a symbol or file.' },
-      { name: 'RulesInventory', purpose: 'ODM · DMN · Drools · CLIPS engines + their callers.' },
+      { name: 'RulesInventory', purpose: 'Rules engines (ODM · DMN · Drools · CLIPS) + the code that calls them.' },
     ],
   },
   {
     no: '02', name: 'Memory', note: '6 memory tools',
     tools: [
-      { name: 'memory.capture',  purpose: 'Capture a node — episodic, semantic, procedural, archival.' },
+      { name: 'memory.capture',  purpose: 'Capture a memory node (episodic / semantic / procedural / archival).' },
       { name: 'memory.recall',   purpose: 'Token-budgeted recall relevant to a query in scope.' },
       { name: 'memory.learn',    purpose: 'Store a semantic fact and link it to code symbols atomically.' },
       { name: 'memory.reflect',  purpose: 'Distil episodic memories in a scope into semantic facts.' },
       { name: 'memory.coverage', purpose: 'Node counts by tier and kind.' },
-      { name: 'memory.erase',    purpose: 'Hard-delete everything under a scope prefix.' },
+      { name: 'memory.erase',    purpose: 'Hard-delete every memory under a scope prefix — erasability as governance.' },
     ],
   },
   {
@@ -1024,49 +1019,40 @@ const BENCH = {
     { metric: 'overall r@10', estate: '0.849', fts: '0.437' },
     { metric: 'overall MRR',  estate: '0.810', fts: '0.571' },
   ],
-  note: 'Ahead on four of five query classes; within 2.2% on the fifth — identifier-shaped queries, the FTS system’s home turf.',
+  note: 'Ahead on four of five query classes; within 2.2% on the fifth (identifier-shaped queries — the FTS system’s home turf).',
 }
 
 function FullToolface() {
   return (
     <Section id="toolface" solid>
-      {/* Wider measure than its neighbours (max-w-6xl) on purpose: this section's cost is
-          23 tool rows whose purpose column was squeezed to ~250px, so nearly every one
-          wrapped to two lines and the ten-row Graph panel paid for it ten times. The extra
-          ~45px of measure buys back a line on several rows — cheaper than cutting copy. */}
-      <div className="max-w-7xl mx-auto w-full">
-        <div className="mb-2 w-full text-left">
+      <div className="max-w-6xl mx-auto w-full">
+        <div className="mb-2.5 w-full text-left">
           <span className="kicker">Everything an agent can call</span>
-          <h2 className="mt-1.5 font-display text-2xl sm:text-[1.8rem] font-black text-ink leading-[1.0]">
+          <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink leading-[0.98]">
             23 MCP tools. 6 agent skills. <span style={{ color: 'var(--accent)' }}>One binary.</span>
           </h2>
-          <p className="mt-1.5 text-[0.82rem] text-muted font-sans leading-tight max-w-5xl">
+          <p className="mt-1.5 text-sm text-muted font-sans leading-tight max-w-3xl">
             Not one “search” tool bolted onto a repo — the full MCP surface an agent can call, plus the skills
-            (playbooks) that drive them. Memory and knowledge are where the wicked-brain consolidation landed:
-            one store, one identity, a <span className="text-ink">lossless import contract</span> so nothing tuned
-            was dropped. Grounded to v0.14.4.
+            (playbooks) that drive them. The graph domain is the code graph; memory and knowledge are where the{' '}
+            wicked-brain consolidation landed — one store, one identity, a{' '}
+            <span className="text-ink">lossless import contract</span> so nothing tuned was dropped. Grounded to v0.14.4.
           </p>
         </div>
 
-        {/* The three MCP domains — every tool name + one-line purpose.
-            NOT three equal columns. The grid is as tall as its TALLEST panel, and the
-            panels hold 10 / 6 / 7 rows, so width spent on Memory is width that can never
-            shorten the section while width spent on Graph can: a wider purpose column
-            un-wraps its rows, and Graph pays for a wrapped row ten times. Memory has four
-            rows of headroom to give away. */}
-        <div className="grid lg:grid-cols-[1.20fr_0.74fr_1.06fr] gap-2">
+        {/* the three MCP domains — every tool name + one-line purpose */}
+        <div className="grid lg:grid-cols-3 gap-2.5">
           {TOOL_DOMAINS.map(d => (
             <div key={d.name} className="rock-panel p-0">
-              <div className="flex items-center gap-2.5 px-4 py-1 border-b border-hairline-strong">
-                <span className="font-display font-black text-[0.95rem] tabular-nums" style={{ fontStretch: '108%', color: 'var(--accent)' }}>{d.no}</span>
-                <span className="font-display font-black text-ink text-[0.9rem] flex-1" style={{ fontStretch: '108%' }}>{d.name}</span>
+              <div className="flex items-center gap-2.5 px-4 py-1.5 border-b border-hairline-strong">
+                <span className="font-display font-black text-base tabular-nums" style={{ fontStretch: '108%', color: 'var(--accent)' }}>{d.no}</span>
+                <span className="font-display font-black text-ink text-[0.95rem] flex-1" style={{ fontStretch: '108%' }}>{d.name}</span>
                 <span className="tag tag-accent">{d.note}</span>
               </div>
               <div className="divide-y divide-hairline">
                 {d.tools.map(t => (
-                  <div key={t.name} className="tool-row">
-                    <span className="tool-row-name">{t.name}</span>
-                    <span className="tool-row-purpose">{t.purpose}</span>
+                  <div key={t.name} className="px-4 py-[2px] flex items-baseline gap-2">
+                    <span className="font-mono text-[0.7rem] font-semibold text-ink shrink-0">{t.name}</span>
+                    <span className="depth flex-1 min-w-0 text-right" style={{ whiteSpace: 'normal', lineHeight: 1.25 }}>{t.purpose}</span>
                   </div>
                 ))}
               </div>
@@ -1074,45 +1060,44 @@ function FullToolface() {
           ))}
         </div>
 
-        {/* the retrieval receipt — the bench that gated the consolidation. One row, not
-            two: the label, the corpus and both metrics read as a single receipt line. */}
-        <div className="mt-1 rock-panel p-0" id="bench">
-          <div className="px-4 py-1.5 flex flex-wrap items-baseline gap-x-5 gap-y-1">
+        {/* the retrieval receipt — the bench that gated the consolidation */}
+        <div className="mt-2 rock-panel p-0" id="bench">
+          <div className="flex items-center gap-3 px-4 py-2 border-b border-hairline-strong flex-wrap">
             <span className="kicker" style={{ color: 'var(--accent)' }}>The retrieval receipt</span>
+            <span className="depth">parity bench · 60 queries × 5 classes · identical 357-doc corpus · vs the dedicated FTS search it replaced</span>
+          </div>
+          <div className="px-4 py-2.5 flex flex-wrap items-center gap-x-6 gap-y-2">
             {BENCH.rows.map(r => (
               <span key={r.metric} className="inline-flex items-baseline gap-2">
                 <span className="depth">{r.metric}</span>
-                <span className="font-mono text-[0.82rem] font-bold" style={{ color: 'var(--accent)' }}>{r.estate}</span>
+                <span className="font-mono text-sm font-bold" style={{ color: 'var(--accent)' }}>{r.estate}</span>
                 <span className="depth">vs</span>
-                <span className="font-mono text-[0.82rem] text-muted">{r.fts}</span>
+                <span className="font-mono text-sm text-muted">{r.fts}</span>
               </span>
             ))}
-            <span className="depth flex-1 min-w-[20rem]" style={{ whiteSpace: 'normal' }}>
-              60 queries × 5 classes, identical 357-doc corpus, vs the dedicated FTS search it replaced. {BENCH.note}
-            </span>
+            <span className="text-xs text-muted font-sans flex-1 min-w-[16rem]">{BENCH.note}</span>
           </div>
         </div>
 
         {/* the agent skills — the playbooks that ship with estate */}
-        <div className="mt-1 rock-panel p-0">
-          <div className="flex items-center gap-3 px-4 py-1.5 border-b border-hairline-strong">
-            {/* no "6 skills" chip — the section headline already says "6 agent skills",
-                and the chip's own height set this header's height */}
+        <div className="mt-2 rock-panel p-0">
+          <div className="flex items-center gap-3 px-4 py-2 border-b border-hairline-strong">
             <span className="kicker">Agent skills · in-repo playbooks</span>
+            <span className="tag ml-auto">6 skills</span>
           </div>
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 divide-y sm:divide-y-0 divide-hairline">
             {AGENT_SKILLS.map(s => (
-              <div key={s.name} className="skill-row">
-                <span className="tool-row-name">{s.name}</span>
-                <span className="tool-row-purpose">{s.purpose}</span>
+              <div key={s.name} className="px-4 py-[7px] flex items-baseline gap-2" style={{ boxShadow: 'inset 0 0 0 0.5px var(--hairline)' }}>
+                <span className="font-mono text-[0.7rem] font-semibold text-ink shrink-0">{s.name}</span>
+                <span className="depth flex-1 min-w-0 text-right" style={{ whiteSpace: 'normal', lineHeight: 1.25 }}>{s.purpose}</span>
               </div>
             ))}
           </div>
         </div>
 
         {/* cross-cutting capabilities most agents never know the record has */}
-        <div className="mt-1 flex flex-wrap gap-1">
-          {CAPABILITIES.map(c => <span key={c} className="tag tag-tight">{c}</span>)}
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {CAPABILITIES.map(c => <span key={c} className="tag">{c}</span>)}
         </div>
       </div>
     </Section>
@@ -1247,7 +1232,7 @@ function Storage() {
           kicker="One record, solo or shared"
           title={<>SQLite by default. <span style={{ color: 'var(--accent)' }}>One profile switch</span> to a shared team backend.</>}
         >
-          <p className="max-w-4xl">
+          <p className="max-w-3xl">
             The same engine and the same 23 tools run on either backend through one{' '}
             <span className="font-mono text-sm font-semibold">open_store(spec)</span> factory — no caller changes,
             no re-index. The Postgres backend passes the same store-conformance suite in CI, and the{' '}
@@ -1256,25 +1241,25 @@ function Storage() {
           </p>
         </TopHead>
 
-        <div className="inline-flex flex-wrap gap-1.5 p-1 rounded-xl mb-4" style={{ background: 'var(--rock)', border: '1px solid var(--hairline-strong)' }}>
+        <div className="inline-flex flex-wrap gap-1.5 p-1.5 rounded-xl mb-5" style={{ background: 'var(--rock)', border: '1px solid var(--hairline-strong)' }}>
           <button className="seg" data-on={!shared} onClick={() => setShared(false)}>SQLite · solo</button>
           <button className="seg" data-on={shared} onClick={() => setShared(true)}>PostgreSQL · shared team</button>
         </div>
 
         <div className="rock-panel p-0">
-          <div className="px-5 py-2.5 border-b border-hairline-strong flex items-center gap-3">
+          <div className="px-5 py-3 border-b border-hairline-strong flex items-center gap-3">
             <span className="w-2 h-2 rounded-full" style={{ background: shared ? 'var(--accent)' : 'var(--muted)' }} />
             <span className="font-mono text-sm text-ink">{view.cmd}</span>
           </div>
           <div className="divide-y divide-hairline">
             {view.rows.map(([k, v]) => (
-              <div key={k} className="flex gap-4 px-5 py-2.5">
+              <div key={k} className="flex gap-4 px-5 py-3.5">
                 <span className="font-mono text-xs text-muted w-40 shrink-0">{k}</span>
-                <span className="text-[0.82rem] text-ink font-sans">{v}</span>
+                <span className="text-sm text-ink font-sans">{v}</span>
               </div>
             ))}
           </div>
-          <div className="px-5 py-2.5 border-t border-hairline-strong">
+          <div className="px-5 py-3 border-t border-hairline-strong">
             <span className="depth" style={{ color: shared ? 'var(--accent)' : 'var(--faint)' }}>{view.note}</span>
           </div>
         </div>

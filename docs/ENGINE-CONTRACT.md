@@ -111,6 +111,32 @@ labelled graph.
 
 On a `(source, target, kind)` collision the **higher-confidence** edge wins (`Edge::dedup_key`).
 
+### 3.1 Tier activation (derived from the `index_path` resolver slice in `crates/wicked-estate/src/lib.rs`)
+
+Which edge producers actually RUN, per entry point. "yes (slice)" rows are exactly the members of
+the production resolver slice — guarded against drift by
+`wicked-estate`'s `tests::slice_matches_engine_contract_table`, which parses the slice literal
+(anchored by its `// Activation table:` comment) and this table.
+
+| resolver id | tier | confidence | activation | notes |
+|---|---|---|---|---|
+| tree-sitter extractors (local edges) | `Parsed` | 1.0 | yes (extract phase) | intra-file `Contains`/`Defines`, written before resolution |
+| `name-resolver` | `ImportMap` | 0.60 | yes (slice) | unique-name binding; kind deny-list runs pre-uniqueness, cross-family guard post-uniqueness |
+| `scoped-name-resolver` | `ImportMap` | 0.60 / 0.62 / 0.65 | yes (slice) | callable-only for Calls; same-file / same-dir / cross-file ranking; family guard pre-ranking |
+| `import-map-resolver` | `ImportMap` | 0.63 | yes (slice) | `hints["imports"]`-scoped binding, `via=import-map` |
+| `infra-resolver` | `Parsed` | 1.0 | yes (slice) | IaC resource refs only (resource-to-resource, or exclusively-resource names) |
+| `rules-bridge-resolver` | `Heuristic` | 0.5 | yes (slice) | `rules-engine:*` refs → every `RuleSet` node (N×M by design; no engine-scheme match yet). Overwrites the extractor's own synthetic-RuleSet `InvokedBy` edge on equal confidence (sqlite upsert `>=`) — asserted by `tests/rules_bridge_index.rs` |
+| `estate-racf` (`estate_edges`) | `Parsed` / `Heuristic` | 1.0 / 0.5 | yes (estate pass, same index run) | RACF profile → protected assets, exact→Parsed / generic→Heuristic |
+| extra-edge rules (`ExtraEdgeExtractor`) | `Heuristic` | 0.5 | yes (extract phase) | `Provenance::Extractor(rule)`; drop-in `.wicked-estate-extractors/*.toml` |
+| `scip` (`scip_edges`) | `Scip` | 1.0 | no — separate `wicked-estate scip` command, requires external `index.scip` bytes | precise tier; dominates on dedup |
+| `Tsg` | `Tsg` | 0.8 | no production path | enum variant only, no `Resolver` impl (superseded — ADR-007) |
+| `Lsp` (`lsp.rs`) | `Lsp` | 1.0 | no production path | client library by design (locked: on-demand only, never bulk); no `Resolver` impl, no edge emission; consumer = W3.6 follow-up |
+| `ast-synth-method` | `Heuristic` | 0.5 | retired 2026-08-28 | emit set ⊂ `scoped-name-resolver`; never in any production slice (ADR-007 superseding note) |
+
+Re-index note: a resolver change is not retroactive on an existing DB — `index` re-resolves
+changed files only. A `CARGO_PKG_VERSION` bump forces a full re-extract on the next `index`;
+`wicked-estate index --force` is the manual path.
+
 ## 4. GraphStore contract
 
 Read methods (`get_node`, `find_symbols`, `neighbors`, `traverse`, `stats`) are `&self`; mutation

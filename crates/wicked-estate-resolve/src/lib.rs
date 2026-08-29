@@ -46,10 +46,20 @@ impl Resolver for NameResolver {
     fn resolve(&self, refs: &[UnresolvedRef], index: &dyn SymbolIndex) -> Result<Vec<Edge>> {
         let mut out = Vec::new();
         for r in refs {
-            let candidates = index.by_name(&r.raw_name);
+            let mut candidates = index.by_name(&r.raw_name);
+            // Kind admissibility (D1) runs PRE-uniqueness — deliberately recall-widening:
+            // dropping a deny-listed homonym (e.g. an html type_alias) can make a legitimate
+            // same-family callable unique. Every edge this mints is measured (Q4b).
+            candidates.retain(|n| admissible_target(&r.kind, &n.kind));
             // Unique resolution only — ambiguity is deferred to a precise tier (W2.2+).
             if let [only] = candidates.as_slice() {
                 if only.symbol != r.from {
+                    // Family guard (D5) runs POST-uniqueness on the sole survivor — strictly
+                    // narrowing, never edge-minting (it is what stops a typescript ref whose
+                    // only admissible homonym is a bash variable from binding cross-family).
+                    if !family_compatible(index, from_family(index, &r.from).as_deref(), only) {
+                        continue;
+                    }
                     let edge = Edge::new(
                         r.from.clone(),
                         only.symbol.clone(),
@@ -68,13 +78,17 @@ impl Resolver for NameResolver {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-/// Parent directory of a file path, or the path itself if no separator is found.
+/// Parent directory of a file path, or `""` when the path has no separator (a root-level file).
+///
+/// Root-level files share the empty directory, so `ScopedNameResolver`'s same-dir tier ranks two
+/// root-level files as same-dir, and `ImportMapResolver`'s relative-path resolution binds a
+/// root-level `./x` import (`file_matches_module` special-cases `ref_dir.is_empty()`).
 fn dir_of(file: &str) -> &str {
     // Works for both Unix (`/`) and Windows (`\`) paths in repo-relative strings.
     if let Some(pos) = file.rfind(['/', '\\']) {
         &file[..pos]
     } else {
-        file
+        ""
     }
 }
 
@@ -84,6 +98,67 @@ fn is_callable(kind: &NodeKind) -> bool {
         kind,
         NodeKind::Function | NodeKind::Method | NodeKind::Constructor
     )
+}
+
+/// Target-kind admissibility (the D1 deny-list — shared by every name-based resolver).
+///
+/// - [`NodeKind::Import`] nodes are never edge targets, for ANY ref kind: an import node is a
+///   *reference site*, not a definition (a TS `res.json()` call must not bind to a Python
+///   `import json` node).
+/// - For [`EdgeKind::Calls`] refs, kinds that are definitively not call targets are rejected:
+///   type-level declarations (`Interface`/`Trait`/`TypeAlias`/`Enum`), value slots
+///   (`Field`/`Parameter`), containers (`File`/`Namespace`) and rules-engine entities (those
+///   bind through `RulesBridgeResolver`, not by name).
+/// - Kept for Calls: `Function`/`Method`/`Constructor`, `Class`/`Struct` (a `new X()`
+///   construction site is captured as `@call.function` by design), `Module` (JCL/HLASM/COBOL
+///   program calls target `Module` nodes — pinned by `tests/cross_language_estate.rs`),
+///   `Constant`/`Variable` (function-valued bindings: `const f = () => …`, `vi.fn()`),
+///   `Macro`, `Synthetic`, and `Other(_)`.
+fn admissible_target(ref_kind: &EdgeKind, cand_kind: &NodeKind) -> bool {
+    if matches!(cand_kind, NodeKind::Import) {
+        return false;
+    }
+    if *ref_kind != EdgeKind::Calls {
+        return true;
+    }
+    !matches!(
+        cand_kind,
+        NodeKind::Interface
+            | NodeKind::Trait
+            | NodeKind::TypeAlias
+            | NodeKind::Enum
+            | NodeKind::Field
+            | NodeKind::Parameter
+            | NodeKind::File
+            | NodeKind::Namespace
+            | NodeKind::Rule
+            | NodeKind::RuleSet
+            | NodeKind::Condition
+            | NodeKind::Action
+            | NodeKind::Fact
+    )
+}
+
+/// Language family of the ref's source node, when both the node and a manifest family exist.
+fn from_family(index: &dyn SymbolIndex, from: &wicked_estate_core::SymbolId) -> Option<String> {
+    index
+        .get(from)
+        .and_then(|n| index.language_family(n.language.as_str()))
+}
+
+/// Cross-family guard (D5): block a candidate only when BOTH ends carry a **known**
+/// `languages.toml` family and the families differ. Unknown/absent family (mainframe langs
+/// registered outside the manifest, `synthetic`/`tfstate` tags) or a missing from-node ⇒ allow —
+/// a strict guard would kill the shipped JCL/HLASM→COBOL joins.
+fn family_compatible(
+    index: &dyn SymbolIndex,
+    from_family: Option<&str>,
+    cand: &wicked_estate_core::Node,
+) -> bool {
+    match (from_family, index.language_family(cand.language.as_str())) {
+        (Some(f), Some(c)) => f == c,
+        _ => true,
+    }
 }
 
 // ── ScopedNameResolver ───────────────────────────────────────────────────────
@@ -147,6 +222,9 @@ impl Resolver for ScopedNameResolver {
         for r in refs {
             let mut candidates = index.by_name(&r.raw_name);
 
+            // Kind admissibility (D1): Import nodes are never targets, for any ref kind.
+            candidates.retain(|n| admissible_target(&r.kind, &n.kind));
+
             // For method-like edge kinds, narrow the pool to callable nodes.
             if matches!(r.kind, EdgeKind::Calls) {
                 candidates.retain(|n| is_callable(&n.kind));
@@ -154,6 +232,18 @@ impl Resolver for ScopedNameResolver {
 
             // Remove self-candidates immediately.
             candidates.retain(|n| n.symbol != r.from);
+
+            if candidates.is_empty() {
+                continue;
+            }
+
+            // Cross-family guard (D5), PRE-ranking — recall-widening within scope tiers by
+            // design: a same-family candidate in a scope tier is exactly what this resolver
+            // exists to bind, so dropping a cross-family homonym can flip tie→park into a
+            // unique winner. Measured by Q4b; pinned by
+            // scoped_family_retain_unshadows_same_family_homonym.
+            let from_fam = from_family(index, &r.from);
+            candidates.retain(|n| family_compatible(index, from_fam.as_deref(), n));
 
             if candidates.is_empty() {
                 continue;
@@ -350,10 +440,20 @@ impl wicked_estate_core::Resolver for ImportMapResolver {
                 None => continue, // this name isn't in the import map — skip
             };
 
-            // Collect callable candidates for this name.
+            // Collect callable candidates for this name (D1 admissibility + D5 family guard
+            // run pre-ranking, alongside the callable filter — same placement as
+            // ScopedNameResolver).
             let mut candidates = index.by_name(&r.raw_name);
+            candidates.retain(|n| admissible_target(&r.kind, &n.kind));
             candidates.retain(|n| is_callable(&n.kind));
             candidates.retain(|n| n.symbol != r.from); // no self-edges
+
+            if candidates.is_empty() {
+                continue;
+            }
+
+            let from_fam = from_family(index, &r.from);
+            candidates.retain(|n| family_compatible(index, from_fam.as_deref(), n));
 
             if candidates.is_empty() {
                 continue;
@@ -430,10 +530,14 @@ impl wicked_estate_core::Resolver for ImportMapResolver {
 ///
 /// ## Non-interference with code resolvers
 ///
-/// [`NameResolver`] and [`ScopedNameResolver`] only emit edges when candidates are callable or
-/// match function/method/constructor nodes. Since resource nodes are `NodeKind::Other("resource")`
-/// they are not callable, so those resolvers skip them. `InfraResolver` in turn requires at least
-/// one candidate to be a resource node before it acts, so it will not fire on code refs.
+/// [`ScopedNameResolver`] and [`ImportMapResolver`] keep **callable** candidates only for
+/// `Calls` refs (Function/Method/Constructor), so they never bind a resource node.
+/// [`NameResolver`] rejects the D1 deny-list (`Import` for every ref kind; for `Calls` also
+/// Interface/Trait/TypeAlias/Enum/Field/Parameter/File/Namespace and the rules-engine kinds) —
+/// the deny-list does NOT include `Other(..)`, so a unique resource node named like a code call
+/// CAN still bind at `NameResolver` unless the cross-family guard blocks it (resource nodes
+/// carry non-manifest language tags, so the guard allows them). `InfraResolver` in turn requires
+/// at least one candidate to be a resource node before it acts, so it will not fire on code refs.
 ///
 /// ## Ambiguity rule
 ///
@@ -627,182 +731,6 @@ impl Resolver for RulesBridgeResolver {
     }
 }
 
-// ── MethodResolutionSynthesizer ────────────────────────────────────────────────
-
-/// AST-based synthesizer: resolves call-site references by looking up the called name in the
-/// parsed node index.
-///
-/// **Algorithm:**
-/// 1. Only acts on refs whose `kind` is [`EdgeKind::Calls`].
-/// 2. Calls `index.by_name(&ref.raw_name)` and retains only callable nodes
-///    (Function / Method / Constructor).
-/// 3. Removes self-candidates.
-/// 4. If **exactly one** callable candidate remains → emit a `Calls` edge at
-///    [`ResolutionTier::Heuristic`] (confidence 0.5).
-/// 5. If **zero or more than one** candidates remain → emit nothing (honest non-resolution;
-///    ambiguity is deferred to a precise tier).
-///
-/// This synthesizer operates entirely on the parsed node index (AST-derived facts), never on
-/// raw source text. That is the core distinction from the old regex-over-source approach.
-///
-/// Position in the resolver cascade: placed **after** the higher-confidence resolvers
-/// ([`NameResolver`], [`ScopedNameResolver`], [`ImportMapResolver`]) in [`resolve_all`] so it
-/// only fills gaps; the dedup step in `resolve_all` discards this synthesizer's lower-confidence
-/// edge whenever a higher-confidence resolver already resolved the same relationship.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct MethodResolutionSynthesizer;
-
-impl Resolver for MethodResolutionSynthesizer {
-    fn id(&self) -> &str {
-        "ast-synth-method"
-    }
-
-    fn tier(&self) -> ResolutionTier {
-        ResolutionTier::Heuristic
-    }
-
-    fn resolve(&self, refs: &[UnresolvedRef], index: &dyn SymbolIndex) -> Result<Vec<Edge>> {
-        let mut out = Vec::new();
-
-        for r in refs {
-            // Only synthesize for call-site references.
-            if r.kind != EdgeKind::Calls {
-                continue;
-            }
-
-            // Look up all nodes that carry this name in the parsed index.
-            let mut candidates = index.by_name(&r.raw_name);
-
-            // Narrow to callable nodes (the parsed graph distinguishes callables).
-            candidates.retain(|n| is_callable(&n.kind));
-
-            // No self-edges.
-            candidates.retain(|n| n.symbol != r.from);
-
-            // Exact one candidate → synthesis is unambiguous.
-            if let [only] = candidates.as_slice() {
-                let edge = Edge::new(
-                    r.from.clone(),
-                    only.symbol.clone(),
-                    EdgeKind::Calls,
-                    ResolutionTier::Heuristic,
-                    self.id(),
-                )
-                .with_location(r.location.clone());
-                out.push(edge);
-            }
-            // >1 → ambiguous; emit nothing (honest non-resolution).
-            // 0  → unknown; emit nothing.
-        }
-
-        Ok(out)
-    }
-}
-
-// ── Precision monitoring ───────────────────────────────────────────────────────
-
-/// The minimum acceptable precision for any synthesizer.
-///
-/// A synthesizer whose edge-level precision falls below this floor is caught by
-/// [`measure_synth_precision`] + [`SynthPrecision::is_acceptable`]. The value mirrors the
-/// research finding that heuristic synthesis at < 70% precision creates more noise than signal
-///.
-pub const SYNTH_PRECISION_FLOOR: f64 = 0.7;
-
-/// Per-synthesizer precision measurement over a gold-labelled reference set.
-///
-/// Produced by [`measure_synth_precision`].
-#[derive(Debug, Clone)]
-pub struct SynthPrecision {
-    /// The resolver id of the measured synthesizer (from [`Resolver::id`]).
-    pub resolver_id: String,
-    /// Number of edges the synthesizer emitted.
-    pub emitted: usize,
-    /// Number of emitted edges whose target matched the gold map.
-    pub correct: usize,
-    /// `correct / emitted`, or `1.0` when `emitted == 0` (vacuously precise).
-    pub precision: f64,
-}
-
-impl SynthPrecision {
-    /// Returns `true` iff the synthesizer meets the [`SYNTH_PRECISION_FLOOR`].
-    pub fn is_acceptable(&self) -> bool {
-        self.precision >= SYNTH_PRECISION_FLOOR
-    }
-}
-
-/// Run `synth` against `refs` + `index` and score the resulting edges against a gold map.
-///
-/// # Gold map format
-///
-/// `gold` maps `(from_symbol_id, raw_name)` → expected `target_symbol_id`. An emitted edge is
-/// counted as **correct** when `gold.get(&(edge.source.clone(), ref_raw_name.clone()))` equals
-/// `Some(&edge.target)`.
-///
-/// # Matching emitted edges back to raw_name
-///
-/// Because `Edge` does not carry the `raw_name`, this function correlates each emitted edge back
-/// to its originating ref via `(source, kind) == (ref.from, ref.kind)` matching. When multiple
-/// refs share the same source+kind (uncommon in practice), the first match wins; precision
-/// scoring is statistical and a one-off ambiguity does not skew the result meaningfully.
-pub fn measure_synth_precision(
-    synth: &dyn Resolver,
-    refs: &[UnresolvedRef],
-    index: &dyn SymbolIndex,
-    gold: &std::collections::HashMap<
-        (wicked_estate_core::SymbolId, String),
-        wicked_estate_core::SymbolId,
-    >,
-) -> SynthPrecision {
-    // Run the synthesizer; ignore errors (a failing synthesizer has precision 0).
-    let edges = match synth.resolve(refs, index) {
-        Ok(e) => e,
-        Err(_) => {
-            return SynthPrecision {
-                resolver_id: synth.id().to_string(),
-                emitted: 0,
-                correct: 0,
-                precision: 1.0, // vacuously precise: nothing emitted
-            };
-        }
-    };
-
-    let emitted = edges.len();
-    if emitted == 0 {
-        return SynthPrecision {
-            resolver_id: synth.id().to_string(),
-            emitted: 0,
-            correct: 0,
-            precision: 1.0,
-        };
-    }
-
-    let mut correct = 0usize;
-
-    for edge in &edges {
-        // Correlate the edge back to its originating ref to retrieve raw_name.
-        let raw_name = refs
-            .iter()
-            .find(|r| r.from == edge.source && r.kind == edge.kind)
-            .map(|r| r.raw_name.as_str())
-            .unwrap_or("");
-
-        let key = (edge.source.clone(), raw_name.to_string());
-        if gold.get(&key) == Some(&edge.target) {
-            correct += 1;
-        }
-    }
-
-    let precision = correct as f64 / emitted as f64;
-
-    SynthPrecision {
-        resolver_id: synth.id().to_string(),
-        emitted,
-        correct,
-        precision,
-    }
-}
-
 // ── resolve_all ───────────────────────────────────────────────────────────────
 
 /// The full output of a resolve pass: the deduplicated edges plus the references no resolver
@@ -839,12 +767,18 @@ pub struct Resolution {
 /// (strict `>`, first-seen wins ties). A precise tier resolver (SCIP/TSG/LSP) added later
 /// naturally wins because its edges carry higher confidence.
 ///
-/// **Resolver order for the full code pipeline (recommended):**
+/// **The production `index`/`watch` slice** (`wicked-estate`'s `index_path`; the activation table
+/// lives in `docs/ENGINE-CONTRACT.md` §3.1):
 /// ```text
-/// ImportMapResolver → ScopedNameResolver → NameResolver → MethodResolutionSynthesizer
+/// NameResolver → ScopedNameResolver → ImportMapResolver → InfraResolver → RulesBridgeResolver
 /// ```
-/// `MethodResolutionSynthesizer` is listed last so Heuristic (0.5) edges only fill gaps left by
-/// the higher-confidence ImportMap (0.6–0.65) resolvers.
+/// Dedup keeps the max-confidence edge per key, so resolver ORDER is irrelevant to the result
+/// (pinned by `resolve_all_dedup_keeps_higher_confidence_regardless_of_order`).
+///
+/// `MethodResolutionSynthesizer` (a Heuristic-0.5 unique-callable Calls synthesizer) was retired
+/// 2026-08-28: its emit set was a strict subset of `ScopedNameResolver`'s Calls path at lower
+/// confidence, so it could never add an edge (see ADR-007's superseding note; pinned by
+/// `slice_plus_unique_callable_heuristic_adds_no_edge`).
 pub fn resolve_all_with_coverage(
     resolvers: &[&dyn Resolver],
     refs: &[UnresolvedRef],
@@ -1280,6 +1214,8 @@ mod tests {
     }
 
     /// Minimal in-memory index for unit tests (avoids depending on wicked-estate-store).
+    /// No family table — `language_family` stays the trait default (`None`), so the
+    /// cross-family guard allows everything (the pre-guard behaviour existing tests pin).
     struct VecIndex(Vec<Node>);
 
     impl SymbolIndex for VecIndex {
@@ -1292,6 +1228,61 @@ mod tests {
         fn all_nodes(&self) -> wicked_estate_core::Result<Vec<Node>> {
             Ok(self.0.clone())
         }
+    }
+
+    impl VecIndex {
+        /// The existing shape, named (FEAS-5).
+        fn plain(nodes: Vec<Node>) -> Self {
+            VecIndex(nodes)
+        }
+        /// Family-aware index for the D5 guard tests: `families` = (language, family) rows,
+        /// mirroring what `languages.toml` provides in production.
+        fn with_families(nodes: Vec<Node>, families: &[(&str, &str)]) -> FamilyIndex {
+            FamilyIndex {
+                inner: VecIndex(nodes),
+                families: families
+                    .iter()
+                    .map(|(l, f)| (l.to_string(), f.to_string()))
+                    .collect(),
+            }
+        }
+    }
+
+    /// VecIndex + a language→family table (overrides `language_family`).
+    struct FamilyIndex {
+        inner: VecIndex,
+        families: std::collections::HashMap<String, String>,
+    }
+
+    impl SymbolIndex for FamilyIndex {
+        fn by_name(&self, name: &str) -> Vec<Node> {
+            self.inner.by_name(name)
+        }
+        fn get(&self, id: &SymbolId) -> Option<Node> {
+            self.inner.get(id)
+        }
+        fn all_nodes(&self) -> wicked_estate_core::Result<Vec<Node>> {
+            self.inner.all_nodes()
+        }
+        fn language_family(&self, language: &str) -> Option<String> {
+            self.families.get(language).cloned()
+        }
+    }
+
+    /// A node with an explicit language and a symbol id derived from `sym_tag` (so homonyms get
+    /// distinct ids), kind `Function` unless overridden via [`node_kind_lang`].
+    fn node_lang(sym_tag: &str, name: &str, file: &str, lang: &str) -> Node {
+        node_kind_lang(sym_tag, name, file, lang, NodeKind::Function)
+    }
+
+    fn node_kind_lang(sym_tag: &str, name: &str, file: &str, lang: &str, kind: NodeKind) -> Node {
+        Node::new(
+            Symbol::global("test", None, vec![Descriptor::method(sym_tag, None)]).id(),
+            kind,
+            name,
+            Language::new(lang),
+            Location::new(file, Span::ZERO),
+        )
     }
 
     fn node_at(name: &str, file: &str) -> Node {
@@ -2268,289 +2259,385 @@ mod tests {
         );
     }
 
-    // ── MethodResolutionSynthesizer tests ────────────────────────────────────
+    // ── dir_of / root-level file tests (D6) ──────────────────────────────────
 
-    /// Happy path: exactly one callable `foo` in the index → synthesizer emits a Heuristic
-    /// Calls edge with confidence 0.5 and provenance Heuristic.
     #[test]
-    fn synth_method_emits_heuristic_edge_for_unique_callable() {
-        // Build a unique method `foo` on type `Bar` (symbol id distinct from the caller).
-        let foo_sym = Symbol::global("test", None, vec![Descriptor::method("Bar.foo", None)]).id();
-        let foo_node = Node::new(
-            foo_sym.clone(),
-            NodeKind::Method,
-            "foo",
-            Language::new("rust"),
-            Location::new("bar.rs", Span::ZERO),
-        );
-
-        let caller_sym =
-            Symbol::global("test", None, vec![Descriptor::method("caller_synth", None)]).id();
-
-        let index = VecIndex(vec![foo_node]);
-
-        let r = UnresolvedRef::new(
-            caller_sym.clone(),
-            "foo",
-            EdgeKind::Calls,
-            Location::new("main.rs", Span::ZERO),
-        );
-
-        let edges = MethodResolutionSynthesizer.resolve(&[r], &index).unwrap();
-
+    fn dir_of_root_level_is_empty() {
         assert_eq!(
-            edges.len(),
-            1,
-            "unique callable should produce exactly one edge; got {}",
-            edges.len()
+            dir_of("a.ts"),
+            "",
+            "separator-less path has the empty (root) directory"
         );
-        assert_eq!(edges[0].source, caller_sym, "source must be the caller");
-        assert_eq!(edges[0].target, foo_sym, "target must be Bar.foo");
-        assert_eq!(edges[0].kind, EdgeKind::Calls, "kind must be Calls");
-        // Heuristic tier → confidence 0.5.
+        assert_eq!(dir_of("src/a.ts"), "src");
+        assert_eq!(dir_of("src\\a.ts"), "src", "Windows separator");
+    }
+
+    /// Two root-level files must rank as same-dir (0.62), beating a sub-directory homonym.
+    /// Under the old `dir_of` ("path itself when no separator") both candidates scored
+    /// CrossFile and the tie parked the ref.
+    #[test]
+    fn scoped_resolver_ranks_two_root_files_same_dir() {
+        let caller = {
+            let mut n = node_at("caller", "a.ts");
+            n.symbol =
+                Symbol::global("test", None, vec![Descriptor::method("root_caller", None)]).id();
+            n
+        };
+        let foo_root = {
+            let mut n = node_at("foo", "b.ts");
+            n.symbol =
+                Symbol::global("test", None, vec![Descriptor::method("foo_root", None)]).id();
+            n
+        };
+        let foo_sub = {
+            let mut n = node_at("foo", "sub/c.ts");
+            n.symbol = Symbol::global("test", None, vec![Descriptor::method("foo_sub", None)]).id();
+            n
+        };
+        let index = VecIndex(vec![caller.clone(), foo_root.clone(), foo_sub]);
+        let r = UnresolvedRef {
+            from: caller.symbol,
+            raw_name: "foo".to_string(),
+            kind: EdgeKind::Calls,
+            location: Location::new("a.ts", Span::ZERO),
+            hints: Default::default(),
+        };
+        let edges = ScopedNameResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(edges.len(), 1, "root-level same-dir candidate must win");
+        assert_eq!(edges[0].target, foo_root.symbol);
         assert!(
-            (edges[0].confidence.get() - 0.5).abs() < 1e-6,
-            "Heuristic tier confidence must be 0.5, got {}",
+            (edges[0].confidence.get() - 0.62).abs() < 1e-6,
+            "same-dir confidence must be 0.62, got {}",
             edges[0].confidence.get()
         );
-        // Provenance must be Heuristic (set by the tier, never hand-set).
         assert_eq!(
-            edges[0].provenance,
-            wicked_estate_core::Provenance::Heuristic,
-            "provenance must be Heuristic"
-        );
-        assert_eq!(
-            edges[0].resolved_by, "ast-synth-method",
-            "resolved_by must be the synthesizer id"
+            edges[0].metadata.get("scope").and_then(|v| v.as_str()),
+            Some("same-dir")
         );
     }
 
-    /// Ambiguity: two methods named `foo` → synthesizer emits nothing (honest non-resolution).
+    /// A root-level `./b` import-map hint must bind: `file_matches_module` joins the (now empty)
+    /// ref dir with the spec instead of producing the bogus `a.ts/./b`.
     #[test]
-    fn synth_method_emits_nothing_for_ambiguous_callables() {
-        let foo1_sym =
-            Symbol::global("test", None, vec![Descriptor::method("foo_impl_1", None)]).id();
-        let foo2_sym =
-            Symbol::global("test", None, vec![Descriptor::method("foo_impl_2", None)]).id();
-
-        let foo1 = Node::new(
-            foo1_sym,
-            NodeKind::Method,
-            "foo",
-            Language::new("rust"),
-            Location::new("a.rs", Span::ZERO),
-        );
-        let foo2 = Node::new(
-            foo2_sym,
-            NodeKind::Method,
-            "foo",
-            Language::new("rust"),
-            Location::new("b.rs", Span::ZERO),
-        );
-
-        let caller_sym =
-            Symbol::global("test", None, vec![Descriptor::method("caller_amb", None)]).id();
-
-        let index = VecIndex(vec![foo1, foo2]);
-
-        let r = UnresolvedRef::new(
+    fn import_map_resolver_binds_root_level_relative_import() {
+        let caller_sym = Symbol::global(
+            "test",
+            None,
+            vec![Descriptor::method("rootimp_caller", None)],
+        )
+        .id();
+        let foo_root = {
+            let mut n = node_at("foo", "b.ts");
+            n.symbol = Symbol::global(
+                "test",
+                None,
+                vec![Descriptor::method("rootimp_foo_b", None)],
+            )
+            .id();
+            n
+        };
+        let foo_sub = {
+            let mut n = node_at("foo", "sub/c.ts");
+            n.symbol = Symbol::global(
+                "test",
+                None,
+                vec![Descriptor::method("rootimp_foo_c", None)],
+            )
+            .id();
+            n
+        };
+        let index = VecIndex(vec![foo_root.clone(), foo_sub]);
+        let mut r = UnresolvedRef::new(
             caller_sym,
             "foo",
             EdgeKind::Calls,
-            Location::new("main.rs", Span::ZERO),
+            Location::new("a.ts", Span::ZERO),
         );
-
-        let edges = MethodResolutionSynthesizer.resolve(&[r], &index).unwrap();
+        r.hints
+            .insert("imports".to_string(), serde_json::json!({ "foo": "./b" }));
+        let edges = ImportMapResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(edges.len(), 1, "root-level ./b relative import must bind");
+        assert_eq!(edges[0].target, foo_root.symbol);
         assert!(
-            edges.is_empty(),
-            "ambiguous callables must produce no edge (honest non-resolution); got {}",
-            edges.len()
+            (edges[0].confidence.get() - 0.63).abs() < 1e-6,
+            "import-map confidence must be 0.63, got {}",
+            edges[0].confidence.get()
+        );
+        assert_eq!(
+            edges[0].metadata.get("via").and_then(|v| v.as_str()),
+            Some("import-map")
         );
     }
 
-    // ── Precision monitor tests ───────────────────────────────────────────────
+    // ── admissibility + family-guard tests (D1/D5, engine defect #2) ──────────
 
-    /// The good synthesizer (MethodResolutionSynthesizer) scores >= SYNTH_PRECISION_FLOOR
-    /// on a clean gold set; is_acceptable() is true.
+    /// A TS `res.json()` call must not bind to a Python `import json` node — Import nodes are
+    /// reference sites, never definitions (rejected for EVERY ref kind).
     #[test]
-    fn precision_monitor_passes_for_correct_synthesizer() {
-        use std::collections::HashMap;
-
-        let foo_sym = Symbol::global("test", None, vec![Descriptor::method("pm_foo", None)]).id();
-        let caller_sym =
-            Symbol::global("test", None, vec![Descriptor::method("pm_caller", None)]).id();
-
-        let foo_node = Node::new(
-            foo_sym.clone(),
-            NodeKind::Function,
-            "foo",
-            Language::new("rust"),
-            Location::new("lib.rs", Span::ZERO),
-        );
-        let index = VecIndex(vec![foo_node]);
-
+    fn name_resolver_never_binds_calls_to_import_node() {
+        let caller = node_lang("nrimp_caller", "caller", "client.ts", "typescript");
+        let import_node =
+            node_kind_lang("nrimp_json", "json", "api.py", "python", NodeKind::Import);
+        let index = VecIndex::plain(vec![caller.clone(), import_node]);
         let r = UnresolvedRef::new(
-            caller_sym.clone(),
-            "foo",
+            caller.symbol.clone(),
+            "json",
             EdgeKind::Calls,
-            Location::new("main.rs", Span::ZERO),
+            Location::new("client.ts", Span::ZERO),
         );
+        assert!(NameResolver.resolve(&[r], &index).unwrap().is_empty());
 
-        // Gold: caller calling "foo" should resolve to foo_sym.
-        let mut gold = HashMap::new();
-        gold.insert((caller_sym.clone(), "foo".to_string()), foo_sym.clone());
-
-        let result = measure_synth_precision(&MethodResolutionSynthesizer, &[r], &index, &gold);
-
-        assert_eq!(result.emitted, 1, "one ref should produce one emitted edge");
-        assert_eq!(result.correct, 1, "the one edge should be correct");
-        assert!(
-            (result.precision - 1.0).abs() < 1e-9,
-            "precision should be 1.0, got {}",
-            result.precision
+        // Import rejection applies to non-Calls kinds too.
+        let r2 = UnresolvedRef::new(
+            caller.symbol,
+            "json",
+            EdgeKind::References,
+            Location::new("client.ts", Span::ZERO),
         );
-        assert!(
-            result.is_acceptable(),
-            "precision {} should be >= floor {}",
-            result.precision,
-            SYNTH_PRECISION_FLOOR
-        );
+        assert!(NameResolver.resolve(&[r2], &index).unwrap().is_empty());
     }
 
-    /// A deliberately bad synthesizer always binds to the WRONG target.
-    /// measure_synth_precision returns precision < SYNTH_PRECISION_FLOOR; is_acceptable() false.
+    /// `new Notification()` must not bind to `interface Notification` (deny-listed for Calls).
     #[test]
-    fn precision_monitor_catches_bad_synthesizer() {
-        use std::collections::HashMap;
-
-        // The bad synthesizer always emits an edge to a WRONG target symbol,
-        // regardless of what the index or ref says.
-        struct BadSynthesizer {
-            wrong_target: wicked_estate_core::SymbolId,
-        }
-
-        impl Resolver for BadSynthesizer {
-            fn id(&self) -> &str {
-                "bad-synth"
-            }
-            fn tier(&self) -> ResolutionTier {
-                ResolutionTier::Heuristic
-            }
-            fn resolve(
-                &self,
-                refs: &[UnresolvedRef],
-                _index: &dyn SymbolIndex,
-            ) -> Result<Vec<Edge>> {
-                let mut out = Vec::new();
-                for r in refs {
-                    if r.kind == EdgeKind::Calls {
-                        let edge = Edge::new(
-                            r.from.clone(),
-                            self.wrong_target.clone(),
-                            EdgeKind::Calls,
-                            ResolutionTier::Heuristic,
-                            self.id(),
-                        );
-                        out.push(edge);
-                    }
-                }
-                Ok(out)
-            }
-        }
-
-        let correct_target =
-            Symbol::global("test", None, vec![Descriptor::method("bs_correct", None)]).id();
-        let wrong_target =
-            Symbol::global("test", None, vec![Descriptor::method("bs_wrong", None)]).id();
-
-        let index = VecIndex(vec![]);
-
-        // Three refs — all will be resolved to wrong_target by BadSynthesizer.
-        let refs: Vec<UnresolvedRef> = (0..3)
-            .map(|i| {
-                let from = Symbol::global(
-                    "test",
-                    None,
-                    vec![Descriptor::method(format!("bs_caller_{i}"), None)],
-                )
-                .id();
-                UnresolvedRef::new(
-                    from,
-                    format!("fn_{i}"),
-                    EdgeKind::Calls,
-                    Location::new("main.rs", Span::ZERO),
-                )
-            })
-            .collect();
-
-        // Gold says all should resolve to correct_target; bad synth will emit wrong_target.
-        let mut gold = HashMap::new();
-        for r in &refs {
-            gold.insert((r.from.clone(), r.raw_name.clone()), correct_target.clone());
-        }
-
-        let bad = BadSynthesizer { wrong_target };
-        let result = measure_synth_precision(&bad, &refs, &index, &gold);
-
-        assert_eq!(result.emitted, 3, "bad synth should emit 3 edges");
-        assert_eq!(result.correct, 0, "none should be correct");
-        assert!(
-            result.precision < SYNTH_PRECISION_FLOOR,
-            "bad synth precision {} must be below floor {}",
-            result.precision,
-            SYNTH_PRECISION_FLOOR
+    fn name_resolver_never_binds_calls_to_interface() {
+        let caller = node_lang("nrif_caller", "caller", "app.ts", "typescript");
+        let iface = node_kind_lang(
+            "nrif_notif",
+            "Notification",
+            "types.ts",
+            "typescript",
+            NodeKind::Interface,
         );
-        assert!(
-            !result.is_acceptable(),
-            "bad synth should not be acceptable"
+        let index = VecIndex::plain(vec![caller.clone(), iface]);
+        let r = UnresolvedRef::new(
+            caller.symbol,
+            "Notification",
+            EdgeKind::Calls,
+            Location::new("app.ts", Span::ZERO),
         );
+        assert!(NameResolver.resolve(&[r], &index).unwrap().is_empty());
     }
 
-    /// MethodResolutionSynthesizer wired into resolve_all at the END of the resolver list:
-    /// higher-confidence resolvers' edges win; synthesizer fills gaps only.
+    /// D1 keep-set: `new X()` construction sites (Class) and function-valued bindings (Constant)
+    /// stay legitimate unique Calls targets.
     #[test]
-    fn synth_wired_into_resolve_all_fills_gaps_only() {
-        // A unique `zap` function in the index — NameResolver resolves it at conf 0.6.
-        // MethodResolutionSynthesizer also resolves it at conf 0.5.
-        // After dedup, the NameResolver's 0.6-confidence edge must win.
-        let zap_sym = Symbol::global("test", None, vec![Descriptor::method("zap_fn", None)]).id();
-        let caller_sym =
-            Symbol::global("test", None, vec![Descriptor::method("zap_caller", None)]).id();
-
-        let zap_node = Node::new(
-            zap_sym.clone(),
-            NodeKind::Function,
-            "zap",
-            Language::new("rust"),
-            Location::new("lib.rs", Span::ZERO),
+    fn name_resolver_keeps_class_and_constant_targets_for_calls() {
+        let caller = node_lang("nrkeep_caller", "caller", "app.ts", "typescript");
+        let class_node = node_kind_lang(
+            "nrkeep_api",
+            "ApiError",
+            "errors.ts",
+            "typescript",
+            NodeKind::Class,
         );
-        let index = VecIndex(vec![zap_node]);
+        let const_node = node_kind_lang(
+            "nrkeep_store",
+            "useRuntimeStore",
+            "store.ts",
+            "typescript",
+            NodeKind::Constant,
+        );
+        let index = VecIndex::plain(vec![caller.clone(), class_node.clone(), const_node.clone()]);
+        let refs = vec![
+            UnresolvedRef::new(
+                caller.symbol.clone(),
+                "ApiError",
+                EdgeKind::Calls,
+                Location::new("app.ts", Span::ZERO),
+            ),
+            UnresolvedRef::new(
+                caller.symbol,
+                "useRuntimeStore",
+                EdgeKind::Calls,
+                Location::new("app.ts", Span::ZERO),
+            ),
+        ];
+        let edges = NameResolver.resolve(&refs, &index).unwrap();
+        assert_eq!(edges.len(), 2, "Class and Constant Calls targets are kept");
+        let targets: Vec<_> = edges.iter().map(|e| e.target.clone()).collect();
+        assert!(targets.contains(&class_node.symbol));
+        assert!(targets.contains(&const_node.symbol));
+    }
 
-        let r = UnresolvedRef {
-            from: caller_sym.clone(),
-            raw_name: "zap".to_string(),
-            kind: EdgeKind::Calls,
-            location: Location::new("main.rs", Span::ZERO),
-            hints: Default::default(),
-        };
-
-        // Run with NameResolver first, then MethodResolutionSynthesizer.
-        let resolvers: &[&dyn Resolver] = &[&NameResolver, &MethodResolutionSynthesizer];
-        let edges = resolve_all(resolvers, &[r], &index).unwrap();
-
+    /// The Calls deny-list must not leak into other ref kinds: `extends → interface` is legal
+    /// (crew ships 2 such name-resolver edges).
+    #[test]
+    fn name_resolver_keeps_extends_to_interface() {
+        let sub = node_kind_lang("nrext_sub", "Sub", "sub.ts", "typescript", NodeKind::Class);
+        let iface = node_kind_lang(
+            "nrext_base",
+            "Base",
+            "base.ts",
+            "typescript",
+            NodeKind::Interface,
+        );
+        let index = VecIndex::plain(vec![sub.clone(), iface.clone()]);
+        let r = UnresolvedRef::new(
+            sub.symbol,
+            "Base",
+            EdgeKind::Extends,
+            Location::new("sub.ts", Span::ZERO),
+        );
+        let edges = NameResolver.resolve(&[r], &index).unwrap();
         assert_eq!(
             edges.len(),
             1,
-            "dedup should yield one edge; got {}",
-            edges.len()
+            "Extends → Interface must survive the deny-list"
         );
-        assert_eq!(edges[0].target, zap_sym);
-        // NameResolver at ImportMap tier → confidence 0.6; synth at Heuristic → 0.5.
-        // The higher-confidence edge (0.6) must survive.
+        assert_eq!(edges[0].target, iface.symbol);
+    }
+
+    /// D5: python → typescript is cross-family (both known, different) → blocked.
+    #[test]
+    fn family_guard_blocks_python_ref_to_typescript_node() {
+        let caller = node_lang("fg_py_caller", "caller", "api.py", "python");
+        let target = node_lang("fg_ts_fn", "handle", "app.ts", "typescript");
+        let index = VecIndex::with_families(
+            vec![caller.clone(), target],
+            &[("python", "python"), ("typescript", "javascript")],
+        );
+        let r = UnresolvedRef::new(
+            caller.symbol,
+            "handle",
+            EdgeKind::Calls,
+            Location::new("api.py", Span::ZERO),
+        );
+        assert!(NameResolver.resolve(&[r], &index).unwrap().is_empty());
+    }
+
+    /// D5: tsx → typescript share family `javascript` → allowed.
+    #[test]
+    fn family_guard_allows_tsx_ref_to_typescript_node() {
+        let caller = node_lang("fg_tsx_caller", "caller", "App.tsx", "tsx");
+        let target = node_lang("fg_ts_target", "handle", "app.ts", "typescript");
+        let index = VecIndex::with_families(
+            vec![caller.clone(), target.clone()],
+            &[("tsx", "javascript"), ("typescript", "javascript")],
+        );
+        let r = UnresolvedRef::new(
+            caller.symbol,
+            "handle",
+            EdgeKind::Calls,
+            Location::new("App.tsx", Span::ZERO),
+        );
+        let edges = NameResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(edges.len(), 1, "same-family (javascript) must bind");
+        assert_eq!(edges[0].target, target.symbol);
+    }
+
+    /// D5/F7: jcl and cobol have NO manifest row (unknown family) → guard allows; the target is
+    /// a `Module` node (a COBOL program), which the D1 keep-set admits for Calls.
+    #[test]
+    fn family_guard_allows_unknown_family_jcl_to_cobol() {
+        let step = node_kind_lang(
+            "fg_jcl_step",
+            "STEP1",
+            "payroll.jcl",
+            "jcl",
+            NodeKind::Other("job_step".to_string()),
+        );
+        let program = node_kind_lang(
+            "fg_cobol_prog",
+            "PAYROLL",
+            "payroll.cbl",
+            "cobol",
+            NodeKind::Module,
+        );
+        // Families table deliberately does NOT know jcl/cobol (like the real manifest).
+        let index = VecIndex::with_families(
+            vec![step.clone(), program.clone()],
+            &[("typescript", "javascript")],
+        );
+        let r = UnresolvedRef::new(
+            step.symbol,
+            "PAYROLL",
+            EdgeKind::Calls,
+            Location::new("payroll.jcl", Span::ZERO),
+        );
+        let edges = NameResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(edges.len(), 1, "unknown-family mainframe join must survive");
+        assert_eq!(edges[0].target, program.symbol);
+    }
+
+    /// D5: a ref whose `from` symbol has no node in the index (extractor-synthetic sources) has
+    /// no source family → allow.
+    #[test]
+    fn family_guard_allows_missing_from_node() {
+        let target = node_lang("fg_missing_target", "helper", "util.ts", "typescript");
+        let index = VecIndex::with_families(
+            vec![target.clone()],
+            &[("typescript", "javascript"), ("python", "python")],
+        );
+        let ghost_from =
+            Symbol::global("test", None, vec![Descriptor::method("fg_ghost", None)]).id();
+        let r = UnresolvedRef::new(
+            ghost_from,
+            "helper",
+            EdgeKind::Calls,
+            Location::new("ghost.py", Span::ZERO),
+        );
+        let edges = NameResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(edges.len(), 1, "missing from-node must not block");
+        assert_eq!(edges[0].target, target.symbol);
+    }
+
+    /// ScopedNameResolver applies the same family guard (shared helper, D3).
+    #[test]
+    fn scoped_resolver_applies_family_guard() {
+        let caller = node_lang("sfg_caller", "caller", "app.ts", "typescript");
+        let target = node_lang("sfg_pyfn", "compute", "calc.py", "python");
+        let index = VecIndex::with_families(
+            vec![caller.clone(), target],
+            &[("typescript", "javascript"), ("python", "python")],
+        );
+        let r = UnresolvedRef::new(
+            caller.symbol,
+            "compute",
+            EdgeKind::Calls,
+            Location::new("app.ts", Span::ZERO),
+        );
+        assert!(ScopedNameResolver.resolve(&[r], &index).unwrap().is_empty());
+    }
+
+    // ── F16 shape tests (FEAS-1: recall-widening placements pinned) ───────────
+
+    /// Crew `code` shape: candidates = a deny-listed css type_alias + a cross-family bash
+    /// variable. The deny-list makes the bash variable the unique survivor; ONLY the
+    /// post-uniqueness family guard stops the wrong edge → 0 edges.
+    #[test]
+    fn deny_list_survivor_blocked_by_family_guard() {
+        let caller = node_lang("f16_code_caller", "caller", "src/api.ts", "typescript");
+        let css_alias = node_kind_lang(
+            "f16_code_css",
+            "code",
+            "site/src/styles/crew.css",
+            "css",
+            NodeKind::TypeAlias,
+        );
+        let bash_var = node_kind_lang(
+            "f16_code_bash",
+            "code",
+            "scripts/verify-ecosystem.sh",
+            "bash",
+            NodeKind::Variable,
+        );
+        let index = VecIndex::with_families(
+            vec![caller.clone(), css_alias, bash_var],
+            &[
+                ("typescript", "javascript"),
+                ("css", "css"),
+                ("bash", "bash"),
+            ],
+        );
+        let r = UnresolvedRef::new(
+            caller.symbol,
+            "code",
+            EdgeKind::Calls,
+            Location::new("src/api.ts", Span::ZERO),
+        );
         assert!(
-            (edges[0].confidence.get() - 0.6).abs() < 1e-6,
-            "NameResolver's 0.6-conf edge should win over synth's 0.5; got {}",
-            edges[0].confidence.get()
+            NameResolver.resolve(&[r], &index).unwrap().is_empty(),
+            "the deny-list unshadows the bash variable; the family guard must block it"
         );
     }
     // ── resolve_all_with_coverage tests (unresolved accounting, ENGINE-CONTRACT §2.1) ────────
@@ -2799,5 +2886,253 @@ mod tests {
         let res = resolve_all_with_coverage(resolvers, &[r], &index).unwrap();
         assert_eq!(res.edges.len(), 1, "the edge is still returned");
         assert_eq!(res.unresolved.len(), 1, "but it binds nothing");
+    }
+
+
+    /// Studio `p` shape: a deny-listed html type_alias homonym shadows a same-family tsx
+    /// function. Dropping the type_alias pre-uniqueness is the INTENDED recovery → exactly one
+    /// new name-resolver edge at 0.60.
+    #[test]
+    fn deny_list_unshadows_same_family_callable() {
+        let caller = node_lang("f16_p_caller", "caller", "src/App.tsx", "tsx");
+        let html_alias = node_kind_lang(
+            "f16_p_html",
+            "p",
+            "e2e/fixtures/doc-fixture.html",
+            "html",
+            NodeKind::TypeAlias,
+        );
+        let tsx_fn = node_lang("f16_p_fn", "p", "src/components/RunTimeline.tsx", "tsx");
+        let index = VecIndex::with_families(
+            vec![caller.clone(), html_alias, tsx_fn.clone()],
+            &[("tsx", "javascript"), ("html", "html")],
+        );
+        let r = UnresolvedRef::new(
+            caller.symbol,
+            "p",
+            EdgeKind::Calls,
+            Location::new("src/App.tsx", Span::ZERO),
+        );
+        let edges = NameResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(edges.len(), 1, "the tsx function must be unshadowed");
+        assert_eq!(edges[0].target, tsx_fn.symbol);
+        assert_eq!(edges[0].resolved_by, "name-resolver");
+        assert!((edges[0].confidence.get() - 0.60).abs() < 1e-6);
+    }
+
+    /// Scoped pre-ranking family retain: a python-Function + typescript-Function cross-file
+    /// homonym pair flips tie→park into unique→0.60 — deliberate recall-widening (D3).
+    #[test]
+    fn scoped_family_retain_unshadows_same_family_homonym() {
+        let caller = node_lang("f16_sc_caller", "caller", "src/a.ts", "typescript");
+        let py_fn = node_lang("f16_sc_py", "process", "jobs/run.py", "python");
+        let ts_fn = node_lang("f16_sc_ts", "process", "lib/process.ts", "typescript");
+        let index = VecIndex::with_families(
+            vec![caller.clone(), py_fn, ts_fn.clone()],
+            &[("typescript", "javascript"), ("python", "python")],
+        );
+        let r = UnresolvedRef::new(
+            caller.symbol,
+            "process",
+            EdgeKind::Calls,
+            Location::new("src/a.ts", Span::ZERO),
+        );
+        let edges = ScopedNameResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(
+            edges.len(),
+            1,
+            "dropping the cross-family homonym must leave a unique cross-file winner"
+        );
+        assert_eq!(edges[0].target, ts_fn.symbol);
+        assert!((edges[0].confidence.get() - 0.60).abs() < 1e-6);
+    }
+
+    // ── D14 pinning tests (FEAS-2: the corpora have zero svelte/vue files) ────
+
+    /// A function declared in a `.vue` script block is a legitimate target for a typescript
+    /// Calls ref — vue is in the javascript family.
+    #[test]
+    fn family_guard_allows_vue_to_typescript_node() {
+        let caller = node_lang("d14_vue_caller", "caller", "src/main.ts", "typescript");
+        let vue_fn = node_lang("d14_vue_fn", "mount", "src/App.vue", "vue");
+        let index = VecIndex::with_families(
+            vec![caller.clone(), vue_fn.clone()],
+            &[("typescript", "javascript"), ("vue", "javascript")],
+        );
+        let r = UnresolvedRef::new(
+            caller.symbol,
+            "mount",
+            EdgeKind::Calls,
+            Location::new("src/main.ts", Span::ZERO),
+        );
+        let edges = NameResolver.resolve(&[r], &index).unwrap();
+        assert_eq!(edges.len(), 1, "vue is javascript-family; must bind");
+        assert_eq!(edges[0].target, vue_fn.symbol);
+    }
+
+    /// html is its OWN family (D14): even a callable-kinded symbol minted from markup must not
+    /// bind from a typescript Calls ref.
+    #[test]
+    fn family_guard_blocks_html_to_typescript_ref() {
+        let caller = node_lang("d14_html_caller", "caller", "src/main.ts", "typescript");
+        let html_sym = node_lang("d14_html_fn", "render", "docs/page.html", "html");
+        let index = VecIndex::with_families(
+            vec![caller.clone(), html_sym],
+            &[("typescript", "javascript"), ("html", "html")],
+        );
+        let r = UnresolvedRef::new(
+            caller.symbol,
+            "render",
+            EdgeKind::Calls,
+            Location::new("src/main.ts", Span::ZERO),
+        );
+        assert!(
+            NameResolver.resolve(&[r], &index).unwrap().is_empty(),
+            "html is its own family; a TS Calls ref must not bind into markup"
+        );
+    }
+
+    // ── resolve_all structural regressions (D02-9 / FEAS-4) ───────────────────
+
+    /// A resolver that emits unique-callable Calls at Heuristic 0.5 — exactly the retired
+    /// `MethodResolutionSynthesizer`'s algorithm, inlined so the structural theorem stays
+    /// testable without shipping the dead code.
+    struct UniqueCallableHeuristic;
+
+    impl Resolver for UniqueCallableHeuristic {
+        fn id(&self) -> &str {
+            "test-unique-callable-heuristic"
+        }
+        fn tier(&self) -> ResolutionTier {
+            ResolutionTier::Heuristic
+        }
+        fn resolve(&self, refs: &[UnresolvedRef], index: &dyn SymbolIndex) -> Result<Vec<Edge>> {
+            let mut out = Vec::new();
+            for r in refs {
+                if r.kind != EdgeKind::Calls {
+                    continue;
+                }
+                let mut candidates = index.by_name(&r.raw_name);
+                candidates.retain(|n| is_callable(&n.kind));
+                candidates.retain(|n| n.symbol != r.from);
+                if let [only] = candidates.as_slice() {
+                    out.push(
+                        Edge::new(
+                            r.from.clone(),
+                            only.symbol.clone(),
+                            EdgeKind::Calls,
+                            ResolutionTier::Heuristic,
+                            self.id(),
+                        )
+                        .with_location(r.location.clone()),
+                    );
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    /// D02-9: a unique-callable Heuristic-0.5 synthesizer adds NOTHING to the production slice —
+    /// its emit set is a strict subset of `ScopedNameResolver`'s Calls path (same by_name, same
+    /// callable retain, same self-drop, lower confidence). This is the structural reason
+    /// `MethodResolutionSynthesizer` was retired.
+    #[test]
+    fn slice_plus_unique_callable_heuristic_adds_no_edge() {
+        // A homonym population: unique callables, ambiguous callables, non-callables, self-calls.
+        let caller = node_lang("d029_caller", "caller", "src/a.ts", "typescript");
+        let unique_fn = node_lang("d029_unique", "unique_fn", "src/b.ts", "typescript");
+        let amb1 = node_lang("d029_amb1", "amb", "src/c.ts", "typescript");
+        let amb2 = node_lang("d029_amb2", "amb", "src/d.ts", "typescript");
+        let konst = node_kind_lang(
+            "d029_const",
+            "cfg",
+            "src/e.ts",
+            "typescript",
+            NodeKind::Constant,
+        );
+        let nodes = vec![caller.clone(), unique_fn, amb1, amb2, konst];
+        let index = VecIndex::plain(nodes);
+        let mk = |name: &str| {
+            UnresolvedRef::new(
+                caller.symbol.clone(),
+                name,
+                EdgeKind::Calls,
+                Location::new("src/a.ts", Span::ZERO),
+            )
+        };
+        let refs = vec![
+            mk("unique_fn"),
+            mk("amb"),
+            mk("cfg"),
+            mk("caller"),
+            mk("ghost"),
+        ];
+
+        let base: &[&dyn Resolver] = &[
+            &NameResolver,
+            &ScopedNameResolver,
+            &ImportMapResolver,
+            &InfraResolver,
+        ];
+        let with_synth: &[&dyn Resolver] = &[
+            &NameResolver,
+            &ScopedNameResolver,
+            &ImportMapResolver,
+            &InfraResolver,
+            &UniqueCallableHeuristic,
+        ];
+
+        let mut a = resolve_all(base, &refs, &index).unwrap();
+        let mut b = resolve_all(with_synth, &refs, &index).unwrap();
+        let key = |e: &Edge| {
+            (
+                e.source.to_string(),
+                e.target.to_string(),
+                format!("{:?}", e.kind),
+                e.resolved_by.clone(),
+            )
+        };
+        a.sort_by_key(&key);
+        b.sort_by_key(&key);
+        assert_eq!(
+            a.iter().map(&key).collect::<Vec<_>>(),
+            b.iter().map(&key).collect::<Vec<_>>(),
+            "the heuristic must add no edge and win no dedup over the production slice"
+        );
+    }
+
+    /// FEAS-4: `resolve_all`'s max-confidence dedup is order-independent — the surviving edge
+    /// keeps the higher tier's confidence and resolved_by whether the Heuristic-0.5 resolver runs
+    /// FIRST (exercises the `>`-not-`>=` replace branch) or LAST (exercises or_insert-then-keep).
+    /// This replaces the coverage the retired synthesizer's resolve_all test provided.
+    #[test]
+    fn resolve_all_dedup_keeps_higher_confidence_regardless_of_order() {
+        let caller = node_lang("feas4_caller", "caller", "src/a.ts", "typescript");
+        let target = node_lang("feas4_target", "zap", "src/b.ts", "typescript");
+        let index = VecIndex::plain(vec![caller.clone(), target.clone()]);
+        let r = UnresolvedRef::new(
+            caller.symbol.clone(),
+            "zap",
+            EdgeKind::Calls,
+            Location::new("src/a.ts", Span::ZERO),
+        );
+
+        for resolvers in [
+            &[&UniqueCallableHeuristic as &dyn Resolver, &NameResolver] as &[&dyn Resolver],
+            &[&NameResolver as &dyn Resolver, &UniqueCallableHeuristic],
+        ] {
+            let edges = resolve_all(resolvers, std::slice::from_ref(&r), &index).unwrap();
+            assert_eq!(edges.len(), 1, "dedup must yield one edge");
+            assert_eq!(edges[0].target, target.symbol);
+            assert_eq!(
+                edges[0].resolved_by, "name-resolver",
+                "the higher-confidence resolver must win regardless of order"
+            );
+            assert!(
+                (edges[0].confidence.get() - 0.6).abs() < 1e-6,
+                "the surviving edge must keep the higher confidence, got {}",
+                edges[0].confidence.get()
+            );
+        }
     }
 }

@@ -54,7 +54,8 @@ use wicked_estate_extract::{
     treesitter::{TreeSitterExtractor, extractor_for_extension, is_minified_or_huge},
 };
 use wicked_estate_resolve::{
-    ImportMapResolver, InfraResolver, NameResolver, ScopedNameResolver, resolve_all_with_coverage,
+    ImportMapResolver, InfraResolver, NameResolver, RulesBridgeResolver, ScopedNameResolver,
+    resolve_all_with_coverage,
 };
 use wicked_estate_retrieve::Embedder;
 use wicked_estate_store::GraphStoreMutExt;
@@ -248,6 +249,11 @@ fn base_extraction(
 struct InMemoryIndex {
     by_name: HashMap<String, Vec<Node>>,
     by_id: HashMap<SymbolId, Node>,
+    /// language name → family, from `wicked_estate_extract::registry()` (the manifest is the
+    /// data source — D5: the family table is DATA, not per-language Rust arms). Languages
+    /// absent from the manifest (mainframe extractors, `synthetic`/`tfstate` tags) are absent
+    /// here too, so `language_family` returns `None` and the resolver guard allows them.
+    families: HashMap<String, String>,
 }
 
 impl InMemoryIndex {
@@ -265,7 +271,18 @@ impl InMemoryIndex {
             by_name.entry(n.name.clone()).or_default().push(n.clone());
             by_id.insert(n.symbol.clone(), n);
         }
-        Ok(Self { by_name, by_id })
+        let families = wicked_estate_extract::registry()
+            .into_iter()
+            .map(|l| {
+                let fam = l.family().to_string();
+                (l.name, fam)
+            })
+            .collect();
+        Ok(Self {
+            by_name,
+            by_id,
+            families,
+        })
     }
 
     /// Every node, for passes that derive edges from the whole population (the estate join) —
@@ -284,6 +301,9 @@ impl SymbolIndex for InMemoryIndex {
     }
     fn all_nodes(&self) -> wicked_estate_core::Result<Vec<Node>> {
         Ok(self.by_id.values().cloned().collect())
+    }
+    fn language_family(&self, language: &str) -> Option<String> {
+        self.families.get(language).cloned()
     }
 }
 
@@ -919,6 +939,7 @@ pub fn index_path_as(
         // Scoped to this repo: a labelled run resolves against its own nodes only, so a name that
         // is unique inside the repo stays unique no matter how many repos share the graph.
         let index = InMemoryIndex::build(reader, scope.as_deref())?;
+        // Activation table: docs/ENGINE-CONTRACT.md §3.1 — guarded by tests::slice_matches_engine_contract_table.
         // InfraResolver handles IaC/tfstate resource refs; it does not interfere with code
         // resolvers (it only fires when raw_name maps exclusively to resource nodes).
         let resolvers: &[&dyn Resolver] = &[
@@ -926,6 +947,7 @@ pub fn index_path_as(
             &ScopedNameResolver,
             &ImportMapResolver,
             &InfraResolver,
+            &RulesBridgeResolver,
         ];
         let resolution = resolve_all_with_coverage(resolvers, &all_refs, &index)?;
         // Estate cross-domain join: RACF profiles → the datasets/MQ assets they protect, by RACF
@@ -1884,6 +1906,54 @@ mod tests {
         );
     }
 
+    /// The index slice composition resolves `rules-engine:*` bridge refs: a RuleSet node in the
+    /// index + a bridge ref through the SAME resolver set `index_path` uses (built explicitly
+    /// here, not by reproducing the anchored slice literal) yields an InvokedBy edge from
+    /// `RulesBridgeResolver`. Before the wiring, those refs were never produced under `index`.
+    #[test]
+    fn index_slice_resolves_rules_engine_bridge_refs() {
+        use wicked_estate_core::{EdgeKind, GraphWrite, NodeKind, UnresolvedRef};
+
+        let ruleset_sym = wicked_estate_core::Symbol::synthetic("drl", "pricing").id();
+        let ruleset_node = Node::new(
+            ruleset_sym.clone(),
+            NodeKind::RuleSet,
+            "com.example.pricing",
+            Language::new("drl"),
+            Location::new("rules/pricing.drl", Span::ZERO),
+        );
+        let caller_sym = wicked_estate_core::Symbol::file("src/PricingService.java").id();
+
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store.upsert_nodes(&[ruleset_node]).unwrap();
+        store.commit_batch().unwrap();
+
+        let index = InMemoryIndex::build(&store, None).unwrap();
+        let refs = vec![UnresolvedRef::new(
+            caller_sym.clone(),
+            "rules-engine:ibm-odm",
+            EdgeKind::InvokedBy,
+            Location::new("src/PricingService.java", Span::ZERO),
+        )];
+        let resolvers: &[&dyn Resolver] = &[
+            &NameResolver,
+            &ScopedNameResolver,
+            &ImportMapResolver,
+            &InfraResolver,
+            &RulesBridgeResolver,
+        ];
+        let edges = resolve_all_with_coverage(resolvers, &refs, &index)
+            .unwrap()
+            .edges;
+        assert_eq!(edges.len(), 1, "the bridge ref must resolve");
+        assert_eq!(edges[0].source, caller_sym);
+        assert_eq!(edges[0].target, ruleset_sym);
+        assert_eq!(edges[0].kind, EdgeKind::InvokedBy);
+        assert_eq!(edges[0].resolved_by, "rules-bridge-resolver");
+        assert!((edges[0].confidence.get() - 0.5).abs() < 1e-6);
+    }
+
     // ── Task A: SKIPPED_MINIFIED notice ──────────────────────────────────────
 
     #[test]
@@ -2563,5 +2633,79 @@ mod tests {
             Some("hash:v1")
         );
         assert_eq!(store.meta_get_key("embedder_dim").as_deref(), Some("128"));
+    }
+
+    // ── D10: activation-table drift guard ────────────────────────────────────
+
+    /// The production resolver slice and ENGINE-CONTRACT §3.1's "yes (slice)" rows must be the
+    /// same set. The slice literal is found by its anchor comment (built at runtime so this
+    /// test's own source never matches); the doc is read via CARGO_MANIFEST_DIR (repo precedent:
+    /// wicked-estate-knowledge/src/lib.rs, wicked-estate-mcp/tests/conformance_schemas.rs).
+    /// When a lane adds a resolver to the slice, this test fails until the doc gains its row —
+    /// that is the intended behaviour.
+    #[test]
+    fn slice_matches_engine_contract_table() {
+        let src = include_str!("lib.rs");
+        // Runtime-built anchor so the anchor comment matches exactly once in this file.
+        let anchor = format!("{} Activation table: docs/ENGINE-CONTRACT.md §3.1", "//");
+        let matches: Vec<usize> = src.match_indices(&anchor).map(|(i, _)| i).collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "the anchor comment must appear exactly once (found {})",
+            matches.len()
+        );
+
+        // Parse the ONE slice literal immediately following the anchor comment.
+        let after = &src[matches[0]..];
+        let open = after
+            .find("= &[")
+            .expect("slice literal must follow the anchor comment");
+        let body_start = matches[0] + open + 4;
+        let body_end = body_start
+            + src[body_start..]
+                .find("];")
+                .expect("slice literal must close");
+        let body = &src[body_start..body_end];
+        let slice_ids: std::collections::BTreeSet<String> = body
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(|t| {
+                let name = t.trim_start_matches('&');
+                // Map struct name → resolver id via the real instances (no string duplication).
+                let id: &str = match name {
+                    "NameResolver" => NameResolver.id(),
+                    "ScopedNameResolver" => ScopedNameResolver.id(),
+                    "ImportMapResolver" => ImportMapResolver.id(),
+                    "InfraResolver" => InfraResolver.id(),
+                    "RulesBridgeResolver" => RulesBridgeResolver.id(),
+                    other => panic!(
+                        "unknown resolver `{other}` in the slice — add its arm here AND its row to \
+                         docs/ENGINE-CONTRACT.md §3.1"
+                    ),
+                };
+                id.to_string()
+            })
+            .collect();
+
+        let doc = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/ENGINE-CONTRACT.md"
+        ))
+        .expect("docs/ENGINE-CONTRACT.md must be readable from the crate dir");
+        let doc_ids: std::collections::BTreeSet<String> = doc
+            .lines()
+            .filter(|l| l.starts_with('|') && l.contains("yes (slice)"))
+            .map(|l| {
+                let first_cell = l.trim_start_matches('|').split('|').next().unwrap().trim();
+                first_cell.trim_matches('`').to_string()
+            })
+            .collect();
+
+        assert_eq!(
+            slice_ids, doc_ids,
+            "the index_path resolver slice and ENGINE-CONTRACT §3.1's `yes (slice)` rows drifted apart"
+        );
     }
 }
