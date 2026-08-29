@@ -32,6 +32,13 @@ version = "0.0.1"   # bump this (semver) before every release
 Internal deps are pinned to this version (`{ path = "...", version = "0.0.1" }`), so cargo rewrites
 them to plain `version` deps on publish. Keep them in sync with the workspace version.
 
+> ⚠️ `.github/workflows/release.yml` does **not** sync the per-crate pins in
+> `crates/*/Cargo.toml` — its regex rewrites only the root `Cargo.toml`. Do not dispatch it for a
+> minor bump unless its `version_pins` guard step is present and green; bump the pins manually on a
+> branch first. Drifted pins fail publish **mid-sequence** (caret semantics: `^0.14.2` excludes
+> `0.15.0`), after leaf crates are already irreversibly published. The guard test is
+> `crates/wicked-estate/tests/version_pins.rs`.
+
 ## 2. Validate the leaf crate (optional)
 
 `cargo publish --dry-run` only fully works for the dependency-free leaf, because dependent crates
