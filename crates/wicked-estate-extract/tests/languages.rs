@@ -1640,3 +1640,90 @@ fn go_receiver_methods_nest_under_receiver_type() {
         "[{lang}] REGRESSION: two receiver types' M() share one SymbolId; got {ms:?}"
     );
 }
+
+/// Ruby singleton-method identity (scm-anchors D5), pinned BEFORE the fix:
+/// `def self.m` matches the unconstrained singleton_method pattern and
+/// `class << self` matches nothing (the singleton_class pattern requires
+/// `value: (constant)`), so BOTH singleton spellings merge with the instance
+/// method of the same name at `C#<name>().` — one SymbolId, and the store's
+/// ON CONFLICT(symbol) upsert collapses class-side and instance-side into one
+/// node. Fix (next commit): a non-emitting `(self)` singleton_class anchor +
+/// an OPTIONAL `object: (self)? @code_method.owner` splice — both spellings
+/// converge on `C#self#<name>().`, distinct from the instance id.
+/// R-DEF-LOSS pins: `def C.k` / `def obj.j` (non-self receivers) extract
+/// TODAY and must survive the owner edit unchanged (ownerless).
+#[test]
+fn ruby_singleton_vs_instance_collision_known_defect() {
+    let lang = "ruby";
+    let sf = SourceFile {
+        path: "probe_singleton.rb".to_string(),
+        language: Language::new(lang),
+        text: "class C\n\
+               \x20 def m; end\n\
+               \x20 def self.m; end\n\
+               \x20 def n; end\n\
+               \x20 class << self\n\
+               \x20   def n; end\n\
+               \x20   def s; end\n\
+               \x20 end\n\
+               \x20 def self.s; end\n\
+               \x20 def k; end\n\
+               \x20 def C.k; end\n\
+               \x20 def obj.j; end\n\
+               end\n"
+            .to_string(),
+    };
+    let ex = TreeSitterExtractor::for_language(lang)
+        .unwrap()
+        .extract(&sf)
+        .expect("extraction must succeed");
+    let distinct = |name: &str| -> std::collections::HashSet<String> {
+        ex.nodes
+            .iter()
+            .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == name)
+            .map(|n| n.symbol.as_str().to_string())
+            .collect()
+    };
+    // KNOWN DEFECT (pinned): instance `def m` and `def self.m` share ONE id.
+    let ms = distinct("m");
+    assert_eq!(
+        ms.len(),
+        1,
+        "[{lang}] KNOWN DEFECT RESOLVED? `def m` vs `def self.m` no longer merge \
+         — flip this pin to assert C#m(). != C#self#m()."
+    );
+    assert!(ms.contains("ts-ruby . . . probe_singleton/C#m()."));
+    // KNOWN DEFECT (pinned): `class << self; def n` merges with instance `def n`.
+    let ns = distinct("n");
+    assert_eq!(
+        ns.len(),
+        1,
+        "[{lang}] KNOWN DEFECT RESOLVED? `class << self` member vs instance \
+         method no longer merge — flip this pin to assert distinct ids."
+    );
+    // Both singleton spellings of `s` share one id today (both flat merges).
+    assert_eq!(distinct("s").len(), 1);
+    // R-DEF-LOSS pins: non-self singleton receivers EXTRACT today (ownerless,
+    // nested under C by containment) — the owner edit must not drop them.
+    assert_def(&ex, lang, "j", &NodeKind::Method); // def obj.j
+    let ks: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == "k")
+        .collect();
+    assert_eq!(
+        ks.len(),
+        2,
+        "[{lang}] instance `def k` AND `def C.k` must both extract; got {ks:?}"
+    );
+    // Residual (kept after the fix, own flip instruction): `def C.k` stays
+    // ownerless and still merges with instance `def k` — an owner splice for
+    // constant receivers would mint C#C#k()., an unrecorded convention.
+    assert_eq!(
+        distinct("k").len(),
+        1,
+        "[{lang}] KNOWN RESIDUAL RESOLVED? `def C.k` no longer merges with \
+         instance `def k` — a constant-receiver owner convention landed; \
+         re-point this residual pin."
+    );
+}
