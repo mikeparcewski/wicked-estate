@@ -1,3 +1,9 @@
+---
+id: wicked-estate-adr-010
+title: "Plugin overrides of built-in languages"
+status: active
+date: 2026-08-29
+---
 # ADR-010 — Plugin overrides of built-in languages
 
 **Status:** Accepted · **Date:** 2026-08-29 · **Lane:** plugin-override

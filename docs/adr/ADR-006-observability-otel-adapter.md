@@ -1,3 +1,9 @@
+---
+id: wicked-estate-adr-006
+title: "OpenTelemetry Observability Adapter Seam"
+status: active
+date: 2026-06-13
+---
 # ADR-006 — OpenTelemetry Observability Adapter Seam
 
 **Status:** Accepted (design); data model + trait + NoopSink + factory built — OTLP network

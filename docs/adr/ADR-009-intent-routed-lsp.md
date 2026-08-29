@@ -1,3 +1,9 @@
+---
+id: wicked-estate-adr-009
+title: "Intent-routed LSP: the W3.6 on-demand consumer"
+status: active
+date: 2026-08-29
+---
 # ADR-009 — Intent-routed LSP: the W3.6 on-demand consumer
 
 **Status:** Accepted (design) — implementation is the W3.6 lane. Phase-0 fixes (transport

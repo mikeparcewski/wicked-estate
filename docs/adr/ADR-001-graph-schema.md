@@ -1,3 +1,9 @@
+---
+id: wicked-estate-adr-001
+title: "Graph Schema v2"
+status: active
+date: 2026-06-12
+---
 # ADR-001 — Graph Schema v2
 
 **Status:** Accepted · **Date:** 2026-06-12 · **Wave:** W0.2
