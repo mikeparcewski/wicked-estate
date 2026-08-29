@@ -30,6 +30,19 @@
   body: (interface_body) @code_interface.body
 ) @code_interface.def
 
+; Annotation type declarations (`public @interface Marker { … }`) — the generic
+; interface role expresses them; no dedicated role needed (D04-7)
+(annotation_type_declaration
+  name: (identifier) @code_interface.name
+  body: (annotation_type_body) @code_interface.body
+) @code_interface.def
+
+; Annotation type elements (`String value();`, `int priority() default 0;`) —
+; they are the annotation's members, emitted as methods (D04-7)
+(annotation_type_element_declaration
+  name: (identifier) @code_method.name
+) @code_method.def
+
 ; Method declarations
 (method_declaration
   type: (_) @code_method.return_type

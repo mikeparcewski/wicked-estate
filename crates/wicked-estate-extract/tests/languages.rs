@@ -430,6 +430,11 @@ fn java_characterization() {
     assert_def(&ex, lang, "format", &NodeKind::Method);
     assert_def(&ex, lang, "count", &NodeKind::Method);
     assert_def(&ex, lang, "run", &NodeKind::Method);
+    // D04-7: @interface declarations map to the generic interface role; their
+    // elements are the annotation's members (methods)
+    assert_def(&ex, lang, "Marker", &NodeKind::Interface);
+    assert_def(&ex, lang, "value", &NodeKind::Method);
+    assert_def(&ex, lang, "priority", &NodeKind::Method);
     // new kinds: fields (Java's `static final` in a class body is field_declaration,
     // not constant_declaration — constant_declaration is interface-only in the grammar)
     assert_def(&ex, lang, "MAX_ITEMS", &NodeKind::Field);
