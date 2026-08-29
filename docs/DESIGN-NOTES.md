@@ -34,6 +34,14 @@ the way it is. Each one is a scar: the failure mode it prevents is worse than it
 - **One fix is a hypothesis about every language.** Extractors built in parallel share defect
   classes; when you fix one (e.g. a quote-leak in string-literal call targets), re-audit the rest and
   fix at the shared seam, not in N copies.
+- **Deliberate kind approximations (2026-08 extraction-gaps pass).** Go defined types
+  (`type UserID string`) are distinct types, not aliases, but emit as the generic `type` role →
+  `NodeKind::TypeAlias` — correct `Name#` id suffix, zero core change; a dedicated kind would touch
+  the ADR-001 spine for no consumer benefit. Swift heritage emits **Extends for everything** in an
+  inheritance clause: superclass and protocol conformance are syntactically indistinguishable in
+  tree-sitter-swift, and `enum E: Int` emits Extends→Int (the raw-value type); `extension Foo: P`
+  is not matched. Both are documented in the query files; precise extends-vs-implements comes from
+  the resolution tiers, not tree-sitter.
 
 ## Traversal & retrieval
 

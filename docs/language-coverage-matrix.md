@@ -43,13 +43,13 @@ Note: `extends`/`implements` in the manifest reflect what the `.scm` query captu
 | `arm` | yes | `structural` | S·I | `.arm.json` |
 | `awk` | yes | `structural` | S·C | `.awk` |
 | `bicep` | yes | `structural` | S·C·I | `.bicep` |
-| `c` | yes | `structural` | S·C·I | `.c`, `.h` |
+| `c` | yes | `structural` | S·C·I | `.c` |
 | `cfml` | yes | `structural` | S·C | `.cfm`, `.cfc` |
 | `cfscript` | yes | `structural` | S·C | `.cfs` |
 | `clojure` | yes | `structural` | S·C | `.clj`, `.cljs`, `.cljc`, `.edn` |
 | `cmake` | yes | `structural` | S·C | `.cmake` |
 | `commonlisp` | yes | `structural` | S | `.lisp`, `.cl` |
-| `cpp` | yes | `structural` | S·C·I | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh` |
+| `cpp` | yes | `structural` | S·C·I | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, `.h` |
 | `crystal_formula` | yes | `structural` | S·C | `.crf` |
 | `csharp` | yes | `structural` | S·C·I·E | `.cs` |
 | `css` | yes | `structural` | S·I | `.css` |
@@ -184,13 +184,13 @@ Languages with an active extractor (tree-sitter grammar compiled in, `.scm` embe
 | `arm` | `structural` | S·I | `.arm.json` |
 | `awk` | `structural` | S·C | `.awk` |
 | `bicep` | `structural` | S·C·I | `.bicep` |
-| `c` | `structural` | S·C·I | `.c`, `.h` |
+| `c` | `structural` | S·C·I | `.c` |
 | `cfml` | `structural` | S·C | `.cfm`, `.cfc` |
 | `cfscript` | `structural` | S·C | `.cfs` |
 | `clojure` | `structural` | S·C | `.clj`, `.cljs`, `.cljc`, `.edn` |
 | `cmake` | `structural` | S·C | `.cmake` |
 | `commonlisp` | `structural` | S | `.lisp`, `.cl` |
-| `cpp` | `structural` | S·C·I | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh` |
+| `cpp` | `structural` | S·C·I | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, `.h` |
 | `crystal_formula` | `structural` | S·C | `.crf` |
 | `csharp` | `structural` | S·C·I·E | `.cs` |
 | `css` | `structural` | S·I | `.css` |
