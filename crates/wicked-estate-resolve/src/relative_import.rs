@@ -149,9 +149,11 @@ pub fn parse_spec_ext(path: &str, conv: &LanguageConventions) -> (String, SpecEx
             }
         }
     }
-    // Unknown extension: a '.' after the first character of the last segment (a leading dot is a
-    // dotfile, not an extension).
-    if last_seg[1.min(last_seg.len())..].contains('.') {
+    // Unknown extension: a '.' after the first CHARACTER of the last segment (a leading dot is a
+    // dotfile, not an extension). Char-wise skip, never a byte slice — `last_seg[1..]` panics
+    // when the segment leads with a multi-byte char (`'./éclair'`), aborting the whole index run
+    // (review round-1 R1-CORR-1 / RI-R1-1).
+    if last_seg.chars().skip(1).any(|c| c == '.') {
         return (path.to_string(), SpecExt::Unknown);
     }
     (path.to_string(), SpecExt::None)
@@ -480,6 +482,28 @@ mod loader_tests {
     }
 
     #[test]
+    fn multibyte_leading_segment_never_panics() {
+        // R1-CORR-1 / RI-R1-1: `last_seg[1..]` panicked inside 'é' (byte 1 is not a char
+        // boundary) and aborted the whole index run. The check is char-wise now.
+        let conv = ImportConventions::embedded();
+        let (stem, ext) = parse_spec_ext("src/éclair", ts(&conv));
+        assert_eq!((stem.as_str(), ext), ("src/éclair", SpecExt::None));
+        // Single multi-byte char segment (the minimal crasher).
+        assert_eq!(parse_spec_ext("ü", ts(&conv)).1, SpecExt::None);
+        // Multi-byte lead WITH a dot after the first char: unknown ext, literal probe only.
+        let (stem, ext) = parse_spec_ext("Übersicht.css", ts(&conv));
+        assert_eq!((stem.as_str(), ext), ("Übersicht.css", SpecExt::Unknown));
+        // Multi-byte lead with a KNOWN ext still strips it.
+        let (stem, ext) = parse_spec_ext("src/éclair.ts", ts(&conv));
+        assert_eq!(
+            (stem.as_str(), ext),
+            ("src/éclair", SpecExt::Known("ts".into()))
+        );
+        // A multi-byte DOTFILE is a dotfile, not an extension.
+        assert_eq!(parse_spec_ext(".émacs", ts(&conv)).1, SpecExt::None);
+    }
+
+    #[test]
     fn every_probe_ext_is_a_known_ext() {
         // The embedded file passes the loader's own validation; assert the property directly
         // so a future edit that weakens the loader still fails here.
@@ -754,6 +778,25 @@ mod resolver_tests {
             vec!["config.ts"]
         );
         assert!(targets_of(&index, rel_ref("index.ts", "../foo")).is_empty());
+    }
+
+    #[test]
+    fn multibyte_specifier_binds_and_parks_without_panicking() {
+        // R1-CORR-1 / RI-R1-1: an extensionless spec whose last segment leads with a multi-byte
+        // char ('./éclair') crashed the resolver (byte slice at index 1). Bind + park variants.
+        let index = VecIndex(vec![
+            file_node("src/main.ts", "typescript"),
+            file_node("src/éclair.ts", "typescript"),
+        ]);
+        assert_eq!(
+            targets_of(&index, rel_ref("src/main.ts", "./éclair")),
+            vec!["src/éclair.ts"],
+            "non-ASCII extensionless spec binds via probe_exts"
+        );
+        assert!(
+            targets_of(&index, rel_ref("src/main.ts", "./Übersicht")).is_empty(),
+            "non-ASCII spec with no candidate parks, never panics"
+        );
     }
 
     #[test]
