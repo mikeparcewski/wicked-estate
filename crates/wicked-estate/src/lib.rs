@@ -2869,6 +2869,12 @@ mod tests {
                     "ImportMapResolver" => ImportMapResolver.id(),
                     "InfraResolver" => InfraResolver.id(),
                     "RulesBridgeResolver" => RulesBridgeResolver.id(),
+                    // let-bound in the slice (needs the repo scope at construction time)
+                    "relative" => {
+                        return wicked_estate_resolve::RelativeImportResolver::new(None)
+                            .id()
+                            .to_string();
+                    }
                     other => panic!(
                         "unknown resolver `{other}` in the slice — add its arm here AND its row to \
                          docs/ENGINE-CONTRACT.md §3.1"
