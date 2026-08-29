@@ -323,6 +323,13 @@ After any public-type-adjacent change: none expected (no core types touched).
   `remove_file` of one file drops the survivor until the other re-indexes. Handed to the
   method-identity lane (its enclosing-type work covers METHOD ids) in merge notes with the repro
   shape; free-function identity needs a program-level owner before D6(d) lands (merge note 2).
+- **[EG-R1-1] Cross-KIND collision variant (blocking visibility)**: the bullet above is the
+  same-kind flap; there is ALSO a Function-vs-Method kind conflict on one SymbolId — a free
+  function and a same-named member method (proto/out-of-line def) now collide, and the store
+  upsert re-kinds whichever lands last. Newly reachable via D6b/D6e (at base only the free
+  Function was emitted). Repro, prevalence, owner requirement, and the executable pin are in §9;
+  handoff in merge note 1(d). Sibling non-method Term-suffix collisions (Go const-vs-field, C++
+  #define-vs-field) in §9 EG-COR-2 / merge note 1(e).
 - **c/cpp self-typedef**: the `typedef struct X X;` idiom stops minting a TypeAlias node (kept for
   differently-named AND anonymous typedefs, D8). Stored graphs lose one phantom row per idiom
   occurrence — the row was already unreliable (kind flapped Struct/TypeAlias by match order).
@@ -434,7 +441,14 @@ characterization test, OR any commit on the lane branch is not green (§9).
    `Foo::bar` def → one id; both nodes NEW in this lane, collapse additive, but `file` flaps and
    `remove_file` of one file drops the survivor) sits at the symbol-construction seam you own;
    (c) when you add enclosing types, Python/Rust methods should regain NodeKind::Method — this
-   lane deliberately left them Function to preserve stored kinds.
+   lane deliberately left them Function to preserve stored kinds; (d) **[EG-R1-1] your identity
+   fix must cover the Function/Method suffix collision, not only method-vs-method** — a free
+   function and a same-named member method share one SymbolId with CONFLICTING kinds (repro +
+   executable pin in §9); (e) **[EG-COR-2] and the non-method `Suffix::Term` collisions** — Go
+   `const X` vs struct field `X` (Constant vs Field, one id), C++ `#define` vs member field —
+   repro + executable pin in §9. Both pins
+   (`{go_const_vs_struct_field,cpp_free_function_vs_member_method}_..._known_defect`,
+   tests/languages.rs) assert the defective shape and carry flip instructions for your landing.
 2. **program (BLOCKING for D6d)**: free-function header/impl node identity has NO owner in
    RESOLUTION-PROGRAM.md (method-identity = method ids; resolve = edges). D6(d) free prototypes
    stay deferred until the program records an owner + decision — the S11 tree-sitter-corpus
@@ -454,10 +468,64 @@ characterization test, OR any commit on the lane branch is not green (§9).
    out-of-line def + b.cpp call. Needs a measured decision (prefer definition-with-body /
    non-header candidate).
 5. **This lane's Rust touches** (for conflict awareness): `treesitter.rs:569/575` (routing table);
-   NEW helper fn beside `strip_literal_quotes` (~:1382) + ONE call-site change at :1809 (DefName
-   arm only — the other five strip channels untouched, D3) + unit tests ~2765. Nothing in
-   1858-1905.
+   NEW helper fn beside `strip_literal_quotes` (~:1382) + the DefName enum/classifier/arm changes
+   for the `.name.symbol` opt-in suffix (SUPERSEDES the original D3 always-strip call-site — see
+   §9 EG-COR-1; the other five strip channels untouched) + unit tests. Nothing in 1858-1905.
 6. **doc-03/resolve work**: `ruby.scm:69-72` `@call.object` kept as your declared input (D13) —
    wire a handler or delete it when doc 03's self-receiver resolver lands.
 7. `.h` moves to a SINGLE owner (cpp) in both LANG_TABLE and languages.toml — no dual listing;
    anyone adding an extension must edit both files (no test enforces sync; follow-up candidate).
+
+## 9. Round-1 fixer corrections (EG-COR-1, EG-COR-2, EG-R1-1)
+
+### EG-COR-1 — the generic def-name colon strip was WRONG (fixed)
+
+The D3 decision routed every `CaptureRole::DefName` capture through a leading-`:` strip. That
+audited the five ref/import/route/event channels but not DEF-name shapes across the 73 wired
+languages: CSS pseudo-class selectors (`css.scm:13` captures `(selectors)` as `@code_type.name` —
+`:root`, `:hover`, `:focus-visible`) and YAML symbol keys (`yaml.scm:9`, legacy Rails
+`:adapter:`) legitimately start with `:` in DEF position. The strip silently renamed them and
+re-schemed their SymbolIds fleet-wide — the exact failure D3 claimed to avoid.
+
+**Fix (supersedes D3's mechanism and merge note 5's description):** the plain `.name` channel is
+quote-strip-only again (`strip_def_name`, no colon handling). Colon-stripping is opt-in per query
+via a new generic capture suffix `@code_<kind>.name.symbol` (`classify_capture` →
+`DefName { symbol: true }`) — still zero per-language Rust; only `ruby.scm`'s two
+`simple_symbol` def captures (alias_method, attr_*) use it. Regression pins:
+`strip_def_name(":root") == ":root"` unit pin (treesitter.rs tests), new `css_characterization`
+(`:root`/`:focus-visible` as TypeAlias from `fixtures/css/sample.css`) and a `:adapter` Struct pin
+in `yaml_characterization` (`fixtures/sample.yaml`). Ruby behavior unchanged
+(`other_name`/`balance` still emitted bare — `ruby_characterization` green).
+
+### EG-COR-2 — Go const-vs-field cross-kind SymbolId collision (recorded, NOT fixed in-lane)
+
+**not_done — owner: method-identity lane.** A package-level `const X` and a struct field `X`
+emit the SAME SymbolId with CONFLICTING kinds; the store upsert re-kinds one. Both def suffixes
+fall through to `Suffix::Term` (`def_suffix`, treesitter.rs — "constant" and "field" both hit the
+catch-all) and the id carries no enclosing type. Concrete repro (lane build,
+`dump_ndjson` on `package p; const X = 1; type S struct { X int }`):
+`ts-go . . . probe_collide/X.` → sym_kind `constant` (line 2) AND `field` (line 3). The same
+widened surface exists for C++ `#define` Constants vs the new member-field Fields (both
+`Suffix::Term`). Newly reachable via this lane's D04-2 struct-field pattern (`go.scm` field
+capture); the fleet guard can't see it because no fixture contains the construct — by design:
+the executable handoff is the dedicated pin
+`go_const_vs_struct_field_symbolid_collision_known_defect` (tests/languages.rs), which asserts
+the CURRENT defective shape and fails loudly (with flip instructions) when the method-identity
+lane's identity fix lands. Requirement on that lane: enclosing-type identity must cover
+non-method `Suffix::Term` members (const/field/#define), not only methods.
+
+### EG-R1-1 — C++ free-Function vs member-Method cross-kind collision (recorded, NOT fixed in-lane)
+
+**Blocking-visibility for the method-identity lane.** `def_suffix` maps both "function" and
+"method" to `Suffix::Method`, so a member method and a same-named free function in one module
+share one SymbolId with CONFLICTING kinds. 3-line repro (lane build):
+`class Foo { public: void reset(); }; void Foo::reset() {} void reset() {}` emits THREE nodes on
+`ts-cpp . . . probe_collide/reset().` — kinds method (D6b proto), method (D6e out-of-line def),
+function (free def). This pre-exists for in-class definitions vs free functions, but at base the
+proto and out-of-line def were uncaptured, so a bare header prototype now suffices to trigger it —
+the std::swap idiom (member `swap` proto + free `swap` in one header) is the textbook shape.
+Prevalence on the 232-file tree-sitter corpus was 0 same-file kind conflicts (C-heavy corpus —
+weak evidence, not absence). Requirement on the method-identity lane: the identity fix must cover
+the Function/Method suffix collision, not only method-vs-method (merge note 1(d)). Executable pin:
+`cpp_free_function_vs_member_method_symbolid_collision_known_defect` (tests/languages.rs), same
+flip-on-fix contract as the Go pin.

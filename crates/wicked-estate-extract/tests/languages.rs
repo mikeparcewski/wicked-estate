@@ -855,6 +855,29 @@ fn json_characterization() {
     );
 }
 
+// ── CSS ───────────────────────────────────────────────────────────────────────
+
+#[test]
+fn css_characterization() {
+    let lang = "css";
+    let ex = TreeSitterExtractor::for_language(lang)
+        .unwrap()
+        .extract(&load_fixture("css/sample.css", lang))
+        .expect("extraction must succeed");
+    assert_no_conflicting_def_ids(&ex, lang);
+
+    // EG-COR-1 regression pin: pseudo-class selectors are REAL definition names —
+    // the leading `:` must survive (a generic def-name colon strip once rewrote
+    // `:root` → `root`, changing stored names + SymbolIds fleet-wide).
+    assert_def(&ex, lang, ":root", &NodeKind::TypeAlias);
+    assert_def(&ex, lang, ":focus-visible", &NodeKind::TypeAlias);
+    // Ordinary selectors + @keyframes (Function role) still emit.
+    assert_def(&ex, lang, ".btn", &NodeKind::TypeAlias);
+    assert_def(&ex, lang, "fade-in", &NodeKind::Function);
+    assert_def(&ex, lang, "spin", &NodeKind::Function);
+    assert_def_floor(&ex, lang, 10);
+}
+
 // ── YAML ──────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -872,7 +895,10 @@ fn yaml_characterization() {
     assert_def(&ex, lang, "description", &NodeKind::Struct);
     assert_def(&ex, lang, "license", &NodeKind::Struct);
     assert_def(&ex, lang, "settings", &NodeKind::Struct);
-    assert_def_floor(&ex, lang, 5);
+    // EG-COR-1 regression pin: a leading-colon symbol key (legacy Rails idiom)
+    // is a REAL name — the def-name seam must not strip its `:`.
+    assert_def(&ex, lang, ":adapter", &NodeKind::Struct);
+    assert_def_floor(&ex, lang, 6);
 
     // YAML has no calls or imports
     let call_count = ex.refs.iter().filter(|r| r.kind == EdgeKind::Calls).count();
@@ -1318,5 +1344,111 @@ fn yaml_without_resources_emits_no_cfn_resources() {
     assert!(
         resources.is_empty(),
         "non-CFN YAML must not produce resource nodes; got {resources:?}"
+    );
+}
+
+// ── Known cross-kind SymbolId collisions — executable handoff pins ─────────────
+//
+// These two tests CHARACTERIZE defects this lane found but does not own: the
+// SymbolId scheme (definition-symbol construction, treesitter.rs ~1858-1905) is
+// the method-identity lane's seam. Each test asserts the CURRENT (defective)
+// behavior so the handoff is executable, not prose: when the method-identity
+// lane ships identity that separates these ids, the test FAILS loudly and must
+// be flipped to assert distinct SymbolIds. They deliberately do NOT go through
+// `assert_no_conflicting_def_ids` (which treats this exact shape as a defect —
+// the fixtures avoid these constructs so the fleet guard stays meaningful).
+
+/// EG-COR-2: a package-level `const X` and a struct field `X` in the same Go
+/// file emit the SAME SymbolId with CONFLICTING kinds (Constant vs Field) —
+/// both def suffixes fall through to `Suffix::Term` and the id carries no
+/// enclosing type. The store upsert (last-write-wins) silently re-kinds one.
+/// Owner: method-identity lane (enclosing-type identity must cover non-method
+/// Term-suffix members, not only methods).
+#[test]
+fn go_const_vs_struct_field_symbolid_collision_known_defect() {
+    let lang = "go";
+    let sf = SourceFile {
+        path: "probe_collide.go".to_string(),
+        language: Language::new(lang),
+        text: "package p\nconst X = 1\ntype S struct { X int }\n".to_string(),
+    };
+    let ex = TreeSitterExtractor::for_language(lang)
+        .unwrap()
+        .extract(&sf)
+        .expect("extraction must succeed");
+    let xs: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == "X")
+        .collect();
+    assert_eq!(
+        xs.len(),
+        2,
+        "[{lang}] expected const X + field X, got {xs:?}"
+    );
+    let kinds: std::collections::HashSet<String> =
+        xs.iter().map(|n| format!("{:?}", n.kind)).collect();
+    assert_eq!(
+        kinds,
+        ["Constant".to_string(), "Field".to_string()].into(),
+        "[{lang}] expected Constant + Field emissions"
+    );
+    // The defect: one SymbolId for both. Flip to assert_ne once identity is fixed.
+    assert_eq!(
+        xs[0].symbol, xs[1].symbol,
+        "[{lang}] KNOWN DEFECT RESOLVED? const X and field X no longer share a \
+         SymbolId — the method-identity lane's fix landed. Flip this test to \
+         assert distinct ids and delete the defect note in \
+         docs/recon/extraction-gaps.md §4/§8."
+    );
+}
+
+/// EG-R1-1: a member method prototype, its out-of-line definition, and a free
+/// function of the same name emit THREE nodes on ONE SymbolId with CONFLICTING
+/// kinds (Method, Method, Function) — `def_suffix` maps both "function" and
+/// "method" to `Suffix::Method` and the id carries no enclosing type. Newly
+/// reachable via the D6b member-prototype and D6e out-of-line patterns (at base
+/// only the free Function was emitted). The std::swap idiom (member swap proto
+/// plus free swap in one header) is the textbook shape. Owner: method-identity
+/// lane — its identity fix must cover the Function/Method suffix collision,
+/// not only method-vs-method.
+#[test]
+fn cpp_free_function_vs_member_method_symbolid_collision_known_defect() {
+    let lang = "cpp";
+    let sf = SourceFile {
+        path: "probe_collide.cpp".to_string(),
+        language: Language::new(lang),
+        text: "class Foo { public: void reset(); };\nvoid Foo::reset() {}\nvoid reset() {}\n"
+            .to_string(),
+    };
+    let ex = TreeSitterExtractor::for_language(lang)
+        .unwrap()
+        .extract(&sf)
+        .expect("extraction must succeed");
+    let resets: Vec<_> = ex
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind, NodeKind::File) && n.name == "reset")
+        .collect();
+    assert_eq!(
+        resets.len(),
+        3,
+        "[{lang}] expected proto + out-of-line def + free fn, got {resets:?}"
+    );
+    let kinds: Vec<String> = resets.iter().map(|n| format!("{:?}", n.kind)).collect();
+    assert!(
+        kinds.iter().filter(|k| *k == "Method").count() == 2
+            && kinds.iter().filter(|k| *k == "Function").count() == 1,
+        "[{lang}] expected 2x Method + 1x Function, got {kinds:?}"
+    );
+    // The defect: one SymbolId for all three. Flip once identity is fixed.
+    let ids: std::collections::HashSet<&str> = resets.iter().map(|n| n.symbol.as_str()).collect();
+    assert_eq!(
+        ids.len(),
+        1,
+        "[{lang}] KNOWN DEFECT RESOLVED? member Foo::reset and free reset no \
+         longer share a SymbolId — the method-identity lane's fix landed. Flip \
+         this test to assert distinct ids and delete the defect note in \
+         docs/recon/extraction-gaps.md §4/§8."
     );
 }

@@ -43,12 +43,14 @@
 ; name), anchored with `.`. Capturing every symbol would also emit a def for the
 ; OLD name with the same SymbolId AND same kind as the real method, and the store
 ; upsert would flap the real method's location (invisible to the kind-conflict
-; guard). The leading `:` is stripped at the def-name seam (strip_leading_symbol_colon).
+; guard). The `.name.symbol` suffix opts in to the leading-`:` strip
+; (strip_leading_symbol_colon) — the plain `.name` channel keeps colons verbatim
+; because CSS/YAML def names legitimately start with `:` (EG-COR-1).
 (call
   method: (identifier) @_alias_kw
   arguments: (argument_list
     .
-    (simple_symbol) @code_method.name)
+    (simple_symbol) @code_method.name.symbol)
   (#eq? @_alias_kw "alias_method")
 ) @code_method.def
 
@@ -57,7 +59,7 @@
 (call
   method: (identifier) @_attr_kw
   arguments: (argument_list
-    (simple_symbol) @code_method.name)
+    (simple_symbol) @code_method.name.symbol)
   (#any-of? @_attr_kw "attr_reader" "attr_writer" "attr_accessor")
 ) @code_method.def
 
