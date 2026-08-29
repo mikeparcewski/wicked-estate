@@ -18,18 +18,47 @@
   body: (_) @code_module.body
 ) @code_module.def
 
-; Method definitions
+; Method definitions — name alternation covers plain methods, setters
+; (`def name=`), and operators (`def []`, `def <=>`, `def ==`, `def <<`) (D04-4)
 (method
-  name: (identifier) @code_method.name
+  name: [(identifier) (setter) (operator)] @code_method.name
   parameters: (method_parameters)? @code_method.params
   body: (_)? @code_method.body
 ) @code_method.def
 
 ; Singleton method definitions (class methods)
 (singleton_method
-  name: (identifier) @code_method.name
+  name: [(identifier) (setter) (operator)] @code_method.name
   parameters: (method_parameters)? @code_method.params
   body: (_)? @code_method.body
+) @code_method.def
+
+; `alias new_name old_name` — the NEW name (first operand, field name:) becomes a
+; Method definition (D04-4)
+(alias
+  name: (_method_name) @code_method.name
+) @code_method.def
+
+; `alias_method :new_name, :old_name` — capture ONLY the first symbol (the new
+; name), anchored with `.`. Capturing every symbol would also emit a def for the
+; OLD name with the same SymbolId AND same kind as the real method, and the store
+; upsert would flap the real method's location (invisible to the kind-conflict
+; guard). The leading `:` is stripped at the def-name seam (strip_leading_symbol_colon).
+(call
+  method: (identifier) @_alias_kw
+  arguments: (argument_list
+    .
+    (simple_symbol) @code_method.name)
+  (#eq? @_alias_kw "alias_method")
+) @code_method.def
+
+; attr_reader / attr_writer / attr_accessor — every symbol argument defines a
+; method (`attr_accessor :a, :b` emits one Method per symbol) (D04-4)
+(call
+  method: (identifier) @_attr_kw
+  arguments: (argument_list
+    (simple_symbol) @code_method.name)
+  (#any-of? @_attr_kw "attr_reader" "attr_writer" "attr_accessor")
 ) @code_method.def
 
 ; Class-level constants (UPPER_CASE or CamelCase — Ruby constant node)

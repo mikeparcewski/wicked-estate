@@ -6,6 +6,8 @@ DEFAULT_SEPARATOR = ','
 
 module Codec
   class Encoder
+    attr_reader :sep
+
     def initialize(sep = DEFAULT_SEPARATOR)
       @sep = sep
       @seen = Set.new
@@ -23,6 +25,16 @@ module Codec
 
     def reset
       @seen.clear
+    end
+    alias clear reset
+    alias_method :wipe, :reset
+
+    def size=(n)
+      @size = n
+    end
+
+    def [](key)
+      @seen.include?(key)
     end
 
     private

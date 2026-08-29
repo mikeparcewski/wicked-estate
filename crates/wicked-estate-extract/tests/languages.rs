@@ -601,6 +601,30 @@ fn ruby_characterization() {
     // new kinds: Ruby UPPER_CASE constants
     assert_def(&ex, lang, "MAX_RECORDS", &NodeKind::Constant);
     assert_def(&ex, lang, "DEFAULT_ENCODING", &NodeKind::Constant);
+    // D04-4: setters, operators, alias, alias_method, attr_* — all Methods, all
+    // stored under their BARE names (leading `:` stripped at the def-name seam)
+    assert_def(&ex, lang, "name=", &NodeKind::Method);
+    assert_def(&ex, lang, "[]", &NodeKind::Method);
+    assert_def(&ex, lang, "<=>", &NodeKind::Method);
+    assert_def(&ex, lang, "==", &NodeKind::Method);
+    assert_def(&ex, lang, "new_name", &NodeKind::Method); // alias new_name original
+    assert_def(&ex, lang, "other_name", &NodeKind::Method); // alias_method :other_name, :original
+    assert_def(&ex, lang, "balance", &NodeKind::Method); // attr_reader
+    assert_def(&ex, lang, "label", &NodeKind::Method); // attr_accessor (1st symbol)
+    assert_def(&ex, lang, "notes", &NodeKind::Method); // attr_accessor (2nd symbol)
+    // FEAS-1 pin: alias_method must capture ONLY the new name — a second capture of
+    // the OLD name would mint a spurious Method with the real method's SymbolId and
+    // the SAME kind, which assert_no_conflicting_def_ids cannot see (same-kind).
+    let original_nodes = ex
+        .nodes
+        .iter()
+        .filter(|n| n.name == "original" && !matches!(n.kind, NodeKind::File))
+        .count();
+    assert_eq!(
+        original_nodes, 1,
+        "[ruby] exactly one node named `original` expected (the real def); \
+         alias/alias_method must not re-emit the old name"
+    );
     assert_def_floor(&ex, lang, 9);
 
     // calls
