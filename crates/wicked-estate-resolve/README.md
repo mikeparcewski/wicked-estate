@@ -8,7 +8,7 @@ Cross-file reference resolvers: binds `UnresolvedRef` values emitted by extracto
 - `ScopedNameResolver` prefers same-file (0.65) then same-directory (0.62) candidates before falling back to cross-file (0.60); records the disambiguation reason in edge metadata.
 - `ImportMapResolver` uses the per-file `hints["imports"]` map recorded during extraction to narrow ambiguous same-name candidates to the specific imported file (confidence 0.63).
 - `InfraResolver` binds IaC resource-to-resource `depends_on` references at Parsed confidence (1.0) without interfering with code resolvers.
-- `resolve_all_with_coverage` runs multiple resolvers, deduplicates edges by `(source, target, kind)` keeping the highest-confidence edge, and returns the unresolved references under the one definition in `docs/ENGINE-CONTRACT.md` §2.1 (a reference is unresolved iff no resolver emitted an edge attributed to it — same `(location, kind)`). `resolve_all` is the edges-only view, kept for existing test call sites.
+- `resolve_all_with_coverage` runs multiple resolvers, deduplicates edges by `(source, target, kind)` keeping the highest-confidence edge, and returns the unresolved references under the one definition in `docs/ENGINE-CONTRACT.md` §2.1 (a reference is unresolved iff no resolver emitted an edge attributed to it — same `(location, kind)`).
 - `scip_edges` ingests a SCIP `index.scip` protobuf and emits confidence-1.0 edges by correlating SCIP occurrences to tree-sitter-derived nodes.
 - `lsp` provides an on-demand JSON-RPC stdio client for `typescript-language-server`, `rust-analyzer`, and `pyright-langserver` — on-demand single-symbol queries only, never bulk. A client library by design: no `Resolver` impl, no edge emission; the on-demand consumer (MCP/CLI definition/references tool) is the W3.6 follow-up.
 
@@ -22,7 +22,6 @@ Cross-file reference resolvers: binds `UnresolvedRef` values emitted by extracto
 | `InfraResolver` | `Resolver` impl: IaC resource deps at Parsed tier (1.0). |
 | `Resolution` | `{ edges, unresolved }` — one resolve pass's full output. |
 | `resolve_all_with_coverage(resolvers, refs, index)` | Run N resolvers; deduplicated edges + per-reference unresolved set (ENGINE-CONTRACT §2.1). |
-| `resolve_all(resolvers, refs, index)` | Edges-only view of `resolve_all_with_coverage` (kept for test call sites). |
 | `scip_edges(index_bytes, nodes)` | Parse a SCIP index protobuf; emit `ResolutionTier::Scip` edges. |
 | `RulesBridgeResolver` | W15.13 — connects code call sites to real RuleSet nodes. Handles `UnresolvedRef`s with `raw_name = "rules-engine:<scheme>"` emitted by `ExtraEdgeExtractor`. Queries all `NodeKind::RuleSet` nodes and emits `InvokedBy` edges at `ResolutionTier::Heuristic`. |
 

@@ -13,8 +13,9 @@
 //! by `wicked-estate-extract` to bind a call to the specific file the symbol was imported from, cutting through
 //! same-name ambiguity without requiring a precise-tier tool. Confidence 0.63, `via=import-map`.
 //!
-//! [`resolve_all`] runs multiple resolvers and deduplicate edges by `(source, target, kind)`,
-//! keeping the highest-confidence edge when resolvers produce the same relationship.
+//! [`resolve_all_with_coverage`] runs multiple resolvers, deduplicates edges by
+//! `(source, target, kind)` keeping the highest-confidence edge, and returns the per-reference
+//! unresolved set (`docs/ENGINE-CONTRACT.md` §2.1).
 //!
 //! [`lsp`] is the on-demand LSP tier: a minimal JSON-RPC stdio client that drives installed
 //! language servers (`typescript-language-server`, `rust-analyzer`, `pyright-langserver`) for
@@ -548,11 +549,11 @@ impl wicked_estate_core::Resolver for ImportMapResolver {
 /// (left for a future precise IaC resolver — analogous to how `NameResolver` handles ambiguous
 /// code names).
 ///
-/// ## Recommended resolver set for `resolve_all`
+/// ## Recommended resolver set for `resolve_all_with_coverage`
 ///
 /// ```rust,no_run
 /// use wicked_estate_resolve::{InfraResolver, NameResolver, ScopedNameResolver, ImportMapResolver};
-/// use wicked_estate_resolve::resolve_all;
+/// use wicked_estate_resolve::resolve_all_with_coverage;
 /// use wicked_estate_core::{Resolver, SymbolIndex, UnresolvedRef};
 ///
 /// // Code pipeline (no InfraResolver — it does not interfere but adds noise):
@@ -734,7 +735,7 @@ impl Resolver for RulesBridgeResolver {
     }
 }
 
-// ── resolve_all ───────────────────────────────────────────────────────────────
+// ── resolve_all_with_coverage ───────────────────────────────────────────────────────────────
 
 /// The full output of a resolve pass: the deduplicated edges plus the references no resolver
 /// bound — computed once, from the same attribution, so persistence and telemetry can never
@@ -961,20 +962,6 @@ pub fn resolve_all_with_coverage(
         edges: resolved_edges,
         unresolved,
     })
-}
-
-/// Edges-only view of [`resolve_all_with_coverage`]. Production callers must use the coverage
-/// form — it is the single source of the unresolved set (`docs/ENGINE-CONTRACT.md` §2.1).
-///
-/// Kept only so test call sites edited by concurrent lanes don't conflict; removal (renaming
-/// all call sites to `resolve_all_with_coverage`) is a tracked remainder for the post-lane
-/// integration merge (docs/recon/unresolved-accounting.md, merge note M2).
-pub fn resolve_all(
-    resolvers: &[&dyn Resolver],
-    refs: &[UnresolvedRef],
-    index: &dyn SymbolIndex,
-) -> Result<Vec<Edge>> {
-    Ok(resolve_all_with_coverage(resolvers, refs, index)?.edges)
 }
 
 // ── scip_edges ────────────────────────────────────────────────────────────────
@@ -1494,9 +1481,9 @@ mod tests {
         assert!(edges.is_empty(), "self-edge should not be emitted");
     }
 
-    // ── resolve_all tests ────────────────────────────────────────────────────
+    // ── resolve_all_with_coverage dedup tests ────────────────────────────────────────────────────
 
-    /// resolve_all deduplicates by (source, target, kind) and keeps the MAX-confidence edge.
+    /// resolve_all_with_coverage deduplicates by (source, target, kind) and keeps the MAX-confidence edge.
     #[test]
     fn resolve_all_keeps_max_confidence_edge() {
         // A unique `beta` in the index — both NameResolver and ScopedNameResolver will
@@ -1523,7 +1510,7 @@ mod tests {
         };
 
         let resolvers: &[&dyn Resolver] = &[&NameResolver, &ScopedNameResolver];
-        let edges = resolve_all(resolvers, &[r], &index).unwrap();
+        let edges = resolve_all_with_coverage(resolvers, &[r], &index).unwrap().edges;
 
         // Exactly one deduplicated edge.
         assert_eq!(edges.len(), 1, "dedup should yield one edge");
@@ -1731,7 +1718,7 @@ mod tests {
         let _ = (edges, index); // suppress unused warnings
     }
 
-    /// `resolve_all` with ImportMapResolver in the slice: import-scoped edge wins over name-only.
+    /// `resolve_all_with_coverage` with ImportMapResolver in the slice: import-scoped edge wins over name-only.
     #[test]
     fn resolve_all_with_import_map_resolver_wins_over_name_only() {
         // Two `process` functions: one in b.ts, one in c.ts.
@@ -1746,7 +1733,7 @@ mod tests {
 
         let resolvers: &[&dyn wicked_estate_core::Resolver] =
             &[&NameResolver, &ScopedNameResolver, &ImportMapResolver];
-        let edges = resolve_all(resolvers, &[r], &index).unwrap();
+        let edges = resolve_all_with_coverage(resolvers, &[r], &index).unwrap().edges;
 
         assert_eq!(edges.len(), 1, "expected exactly one deduplicated edge");
         assert_eq!(
@@ -1759,7 +1746,7 @@ mod tests {
         );
     }
 
-    /// resolve_all with two independent (source,target,kind) edges keeps both.
+    /// resolve_all_with_coverage with two independent (source,target,kind) edges keeps both.
     #[test]
     fn resolve_all_preserves_distinct_edges() {
         let a_sym = Symbol::global("test", None, vec![Descriptor::method("ra", None)]).id();
@@ -1794,7 +1781,7 @@ mod tests {
         ];
 
         let resolvers: &[&dyn Resolver] = &[&NameResolver];
-        let mut edges = resolve_all(resolvers, &refs, &index).unwrap();
+        let mut edges = resolve_all_with_coverage(resolvers, &refs, &index).unwrap().edges;
         edges.sort_by_key(|e| e.target.0.clone());
 
         assert_eq!(edges.len(), 2, "two distinct edges should be preserved");
@@ -1849,7 +1836,7 @@ mod tests {
 
         // Run low-confidence first.
         let resolvers_lo_hi: &[&dyn Resolver] = &[&low, &high];
-        let edges = resolve_all(resolvers_lo_hi, &[], &index).unwrap();
+        let edges = resolve_all_with_coverage(resolvers_lo_hi, &[], &index).unwrap().edges;
         assert_eq!(edges.len(), 1);
         assert!(
             (edges[0].confidence.get() - 0.9).abs() < 1e-6,
@@ -1858,7 +1845,7 @@ mod tests {
 
         // Run high-confidence first.
         let resolvers_hi_lo: &[&dyn Resolver] = &[&high, &low];
-        let edges2 = resolve_all(resolvers_hi_lo, &[], &index).unwrap();
+        let edges2 = resolve_all_with_coverage(resolvers_hi_lo, &[], &index).unwrap().edges;
         assert_eq!(edges2.len(), 1);
         assert!(
             (edges2[0].confidence.get() - 0.9).abs() < 1e-6,
@@ -2113,7 +2100,7 @@ mod tests {
         );
     }
 
-    /// resolve_all with InfraResolver: infra edges are kept, code edges are kept,
+    /// resolve_all_with_coverage with InfraResolver: infra edges are kept, code edges are kept,
     /// no cross-contamination.
     #[test]
     fn resolve_all_with_infra_resolver_keeps_both_infra_and_code_edges() {
@@ -2133,7 +2120,7 @@ mod tests {
         ];
 
         let resolvers: &[&dyn Resolver] = &[&NameResolver, &InfraResolver];
-        let mut edges = resolve_all(resolvers, &refs, &index).unwrap();
+        let mut edges = resolve_all_with_coverage(resolvers, &refs, &index).unwrap().edges;
         edges.sort_by_key(|e| e.source.0.clone());
 
         assert_eq!(
@@ -2995,7 +2982,7 @@ mod tests {
         );
     }
 
-    // ── resolve_all structural regressions (D02-9 / FEAS-4) ───────────────────
+    // ── resolve_all_with_coverage structural regressions (D02-9 / FEAS-4) ───────────────────
 
     /// A resolver that emits unique-callable Calls at Heuristic 0.5 — exactly the retired
     /// `MethodResolutionSynthesizer`'s algorithm, inlined so the structural theorem stays
@@ -3085,8 +3072,8 @@ mod tests {
             &UniqueCallableHeuristic,
         ];
 
-        let mut a = resolve_all(base, &refs, &index).unwrap();
-        let mut b = resolve_all(with_synth, &refs, &index).unwrap();
+        let mut a = resolve_all_with_coverage(base, &refs, &index).unwrap().edges;
+        let mut b = resolve_all_with_coverage(with_synth, &refs, &index).unwrap().edges;
         let key = |e: &Edge| {
             (
                 e.source.to_string(),
@@ -3104,10 +3091,10 @@ mod tests {
         );
     }
 
-    /// FEAS-4: `resolve_all`'s max-confidence dedup is order-independent — the surviving edge
+    /// FEAS-4: `resolve_all_with_coverage`'s max-confidence dedup is order-independent — the surviving edge
     /// keeps the higher tier's confidence and resolved_by whether the Heuristic-0.5 resolver runs
     /// FIRST (exercises the `>`-not-`>=` replace branch) or LAST (exercises or_insert-then-keep).
-    /// This replaces the coverage the retired synthesizer's resolve_all test provided.
+    /// This replaces the coverage the retired synthesizer's resolve_all_with_coverage test provided.
     #[test]
     fn resolve_all_dedup_keeps_higher_confidence_regardless_of_order() {
         let caller = node_lang("feas4_caller", "caller", "src/a.ts", "typescript");
@@ -3124,7 +3111,7 @@ mod tests {
             &[&UniqueCallableHeuristic as &dyn Resolver, &NameResolver] as &[&dyn Resolver],
             &[&NameResolver as &dyn Resolver, &UniqueCallableHeuristic],
         ] {
-            let edges = resolve_all(resolvers, std::slice::from_ref(&r), &index).unwrap();
+            let edges = resolve_all_with_coverage(resolvers, std::slice::from_ref(&r), &index).unwrap().edges;
             assert_eq!(edges.len(), 1, "dedup must yield one edge");
             assert_eq!(edges[0].target, target.symbol);
             assert_eq!(

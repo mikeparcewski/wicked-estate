@@ -173,7 +173,7 @@ pub const RELATIVE_IMPORT_RESOLVER_ID: &str = "relative-import";
 /// match is deterministic and adjudicated 100% on disk, but the resolver cannot see
 /// `tsconfig.paths`, symlinks, or a case-insensitive FS — 0.9, not 1.0, and above the
 /// `ImportMap` tier default (0.6). Documented in docs/ENGINE-CONTRACT.md: this deliberately wins
-/// `resolve_all`'s max-confidence dedup against a Tsg-default (0.8) `Imports` edge.
+/// `resolve_all_with_coverage`'s max-confidence dedup against a Tsg-default (0.8) `Imports` edge.
 const RELATIVE_IMPORT_CONFIDENCE: f32 = 0.9;
 
 /// Counters returned by [`RelativeImportResolver::resolve_with_stats`] so the complexity guard
@@ -556,7 +556,7 @@ mod loader_tests {
 #[cfg(test)]
 mod resolver_tests {
     use super::*;
-    use crate::resolve_all;
+    use crate::resolve_all_with_coverage;
     use wicked_estate_core::{Language, Location, Node, Provenance, Span, Symbol};
 
     /// Minimal in-memory index (mirrors the lib.rs test harness — kept local so this module
@@ -1015,7 +1015,7 @@ mod resolver_tests {
 
     #[test]
     fn resolve_all_keeps_the_higher_confidence_relative_edge() {
-        // The 0.9 override must win resolve_all's max-confidence dedup over a lower-confidence
+        // The 0.9 override must win resolve_all_with_coverage's max-confidence dedup over a lower-confidence
         // duplicate of the SAME (source, target, kind) — Decision E / ATT-INV-6.
         struct LowConfImportsResolver;
         impl Resolver for LowConfImportsResolver {
@@ -1053,7 +1053,7 @@ mod resolver_tests {
         let relative = resolver();
         let low = LowConfImportsResolver;
         let resolvers: &[&dyn Resolver] = &[&low, &relative];
-        let edges = resolve_all(resolvers, &[rel_ref("src/main.ts", "./w")], &index).unwrap();
+        let edges = resolve_all_with_coverage(resolvers, &[rel_ref("src/main.ts", "./w")], &index).unwrap().edges;
         assert_eq!(edges.len(), 1, "one deduped edge: {edges:?}");
         assert_eq!(edges[0].resolved_by, RELATIVE_IMPORT_RESOLVER_ID);
         assert!((edges[0].confidence.get() - 0.9).abs() < 1e-6);
