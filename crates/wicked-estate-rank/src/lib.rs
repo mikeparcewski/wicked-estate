@@ -32,8 +32,8 @@
 use petgraph::Direction;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
-use std::collections::HashMap;
-use wicked_estate_core::{EdgeKind, GraphRead, Ranker, Result, SymbolId};
+use std::collections::{HashMap, HashSet};
+use wicked_estate_core::{EdgeKind, GraphRead, NodeKind, Ranker, Result, SymbolId};
 
 pub mod cluster_summary;
 pub mod community;
@@ -124,6 +124,23 @@ impl PageRank {
 
 impl Ranker for PageRank {
     fn rank(&self, store: &dyn GraphRead, seeds: &[SymbolId]) -> Result<HashMap<SymbolId, f32>> {
+        // Thin wrapper: the public trait signature is unchanged; the excluded-id set is a
+        // crate-internal concern (see `rank_with_excluded`).
+        pagerank_inner(store, seeds, self.damping, self.max_iter, self.epsilon)
+            .map(|(scores, _)| scores)
+    }
+}
+
+impl PageRank {
+    /// [`Ranker::rank`] plus the set of File/Import node ids (collected in the same
+    /// `all_nodes` pass — zero extra store reads). `ranked_symbols` filters its RESULTS
+    /// against this set so structural nodes never rank as hotspots, while the nodes stay in
+    /// the graph for mass flow (lane relative-imports Decision H).
+    pub(crate) fn rank_with_excluded(
+        &self,
+        store: &dyn GraphRead,
+        seeds: &[SymbolId],
+    ) -> Result<(HashMap<SymbolId, f32>, HashSet<SymbolId>)> {
         pagerank_inner(store, seeds, self.damping, self.max_iter, self.epsilon)
     }
 }
@@ -180,13 +197,21 @@ fn pagerank_inner(
     damping: f32,
     max_iter: usize,
     epsilon: f32,
-) -> Result<HashMap<SymbolId, f32>> {
+) -> Result<(HashMap<SymbolId, f32>, HashSet<SymbolId>)> {
     let all_nodes = store.all_nodes()?;
     let n = all_nodes.len();
 
     if n == 0 {
-        return Ok(HashMap::new());
+        return Ok((HashMap::new(), HashSet::new()));
     }
+
+    // File/Import ids, collected in the SAME pass — the ids `ranked_symbols` filters from its
+    // results (Decision H). They stay in the graph itself so rank mass still flows through them.
+    let excluded: HashSet<SymbolId> = all_nodes
+        .iter()
+        .filter(|node| matches!(node.kind, NodeKind::File | NodeKind::Import))
+        .map(|node| node.symbol.clone())
+        .collect();
 
     let (graph, node_index) = build_graph(store)?;
 
@@ -271,7 +296,7 @@ fn pagerank_inner(
         .map(|idx| (graph[idx].clone(), rank[idx.index()]))
         .collect();
 
-    Ok(result)
+    Ok((result, excluded))
 }
 
 // ─── convenience function ────────────────────────────────────────────────────
@@ -292,10 +317,37 @@ pub fn ranked_symbols(
     top_n: usize,
 ) -> Result<Vec<(SymbolId, f32)>> {
     let pr = PageRank::new();
-    let scores = pr.rank(store, seeds)?;
+    let (scores, excluded) = pr.rank_with_excluded(store, seeds)?;
 
-    let mut pairs: Vec<(SymbolId, f32)> = scores.into_iter().collect();
+    // File/Import nodes never rank as hotspots (lane relative-imports Decision H, PER-2):
+    // with File→File import edges in the graph, import fan-in would otherwise put File and
+    // Import nodes in every top-N. Filtered BEFORE the truncate so top_n stays full.
+    let mut pairs: Vec<(SymbolId, f32)> = scores
+        .into_iter()
+        .filter(|(id, _)| !excluded.contains(id))
+        .collect();
     // Sort descending by score, then by symbol id for determinism on ties.
+    pairs.sort_unstable_by(|(id_a, s_a), (id_b, s_b)| {
+        s_b.partial_cmp(s_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| id_a.0.cmp(&id_b.0))
+    });
+    pairs.truncate(top_n);
+    Ok(pairs)
+}
+
+/// [`ranked_symbols`] WITHOUT the File/Import filter — crate-internal, used only by
+/// `cluster_summary` as a score-LOOKUP table: community exemplars must keep their real
+/// PageRank scores for File/Import members, or an Import-heavy community degrades to
+/// id-ordered exemplars (`unwrap_or(0.0)`; lane relative-imports ATT-INV-3).
+pub(crate) fn ranked_symbols_unfiltered(
+    store: &dyn GraphRead,
+    seeds: &[SymbolId],
+    top_n: usize,
+) -> Result<Vec<(SymbolId, f32)>> {
+    let pr = PageRank::new();
+    let scores = pr.rank(store, seeds)?;
+    let mut pairs: Vec<(SymbolId, f32)> = scores.into_iter().collect();
     pairs.sort_unstable_by(|(id_a, s_a), (id_b, s_b)| {
         s_b.partial_cmp(s_a)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -647,6 +699,103 @@ mod tests {
             "leaf (sink) must outrank root; leaf={}, root={}",
             scores[&sym("leaf")],
             scores[&sym("root")]
+        );
+    }
+
+    // ── Lane relative-imports S5: hotspot filter + unfiltered cluster lookup ──
+
+    fn make_kind_node(id: &str, kind: NodeKind) -> Node {
+        Node {
+            symbol: sym(id),
+            kind,
+            name: id.to_string(),
+            language: Language("typescript".into()),
+            location: Location::new("f.ts", Span::ZERO),
+            signature: None,
+            doc: None,
+            metadata: Default::default(),
+            scope: Default::default(),
+        }
+    }
+
+    /// File and Import nodes never appear in ranked_symbols results, no matter how much
+    /// import fan-in they collect — and top_n is filled from the remaining code symbols
+    /// (filter BEFORE truncate).
+    #[test]
+    fn file_and_import_nodes_never_in_ranked_results() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_kind_node("file:a", NodeKind::File),
+                make_kind_node("file:b", NodeKind::File),
+                make_kind_node("file:c", NodeKind::File),
+                make_kind_node("import:./hub", NodeKind::Import),
+                make_kind_node("fn_x", NodeKind::Function),
+                make_kind_node("fn_y", NodeKind::Function),
+            ])
+            .unwrap();
+        store
+            .upsert_edges(&[
+                // Heavy import fan-in onto the Import node and a hub File.
+                make_imports_edge("file:a", "import:./hub"),
+                make_imports_edge("file:b", "import:./hub"),
+                make_imports_edge("file:c", "import:./hub"),
+                make_imports_edge("file:a", "file:b"),
+                make_imports_edge("file:c", "file:b"),
+                // One real call so the code symbols have structure.
+                make_calls_edge("fn_x", "fn_y"),
+            ])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        let top = ranked_symbols(&store, &[], 4).unwrap();
+        let ids: Vec<&str> = top.iter().map(|(id, _)| id.0.as_str()).collect();
+        assert!(
+            ids.iter().all(|id| *id == "fn_x" || *id == "fn_y"),
+            "only code symbols may rank: {ids:?}"
+        );
+        assert_eq!(ids.len(), 2, "top_n filled from the remaining code symbols");
+    }
+
+    /// cluster_summary's exemplar scores are deliberately UNFILTERED (ATT-INV-3): an
+    /// Import-heavy community's top_symbols must be ordered by real PageRank — the Import hub
+    /// (max fan-in) first — not degraded to id-ordered exemplars by a zeroed score lookup.
+    #[test]
+    fn cluster_summary_exemplars_unchanged_by_rank_filter() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_kind_node("zz_import:./hub", NodeKind::Import),
+                make_kind_node("aa_fn", NodeKind::Function),
+                make_kind_node("bb_fn", NodeKind::Function),
+                make_kind_node("file:a", NodeKind::File),
+                make_kind_node("file:b", NodeKind::File),
+                make_kind_node("file:c", NodeKind::File),
+            ])
+            .unwrap();
+        store
+            .upsert_edges(&[
+                // The Import node receives ALL the fan-in → highest PageRank in the community.
+                make_imports_edge("file:a", "zz_import:./hub"),
+                make_imports_edge("file:b", "zz_import:./hub"),
+                make_imports_edge("file:c", "zz_import:./hub"),
+                make_imports_edge("aa_fn", "zz_import:./hub"),
+                make_imports_edge("bb_fn", "zz_import:./hub"),
+                make_calls_edge("aa_fn", "bb_fn"),
+            ])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        let community = vec![sym("zz_import:./hub"), sym("aa_fn"), sym("bb_fn")];
+        let summaries = summarize_communities(&store, &[community], 1.0).unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(
+            summaries[0].top_symbols[0], "zz_import:./hub",
+            "the Import hub has the community's highest PageRank and must lead top_symbols — \
+             a filtered (zeroed) lookup would sort it last by id: {:?}",
+            summaries[0].top_symbols
         );
     }
 }

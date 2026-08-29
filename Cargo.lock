@@ -10315,6 +10315,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "toml",
  "wicked-estate-core",
  "wicked-estate-observe",
  "wicked-estate-store",

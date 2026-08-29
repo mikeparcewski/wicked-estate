@@ -367,3 +367,209 @@ fn unresolved_accounting_kind_distinguishes_shared_span() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+// ── Lane relative-imports S7: importer re-extraction for DELETED targets ──────
+
+/// Rename the TARGET of a relative import: the importer must be re-extracted and its ref
+/// re-parked — no stale edge, no dangling edge, an unresolved row for the old spec (PER-5,
+/// D01-4; a rename is delete-B + new-C).
+#[test]
+fn incremental_target_rename_reparks_importer() {
+    use wicked_estate_core::{EdgeKind, GraphRead};
+    let dir = fresh_dir("incr_rename");
+    fs::write(
+        dir.join("src/a.ts"),
+        "import { b } from './b';\nexport const a = 1;\n",
+    )
+    .unwrap();
+    fs::write(dir.join("src/b.ts"), "export const b = 1;\n").unwrap();
+
+    let mut store = SqliteStore::in_memory().unwrap();
+    wicked_estate::index_path(&mut store, &dir).unwrap();
+
+    let rel_edges = |store: &SqliteStore| -> Vec<(String, String)> {
+        store
+            .all_edges()
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.resolved_by == "relative-import")
+            .map(|e| (e.source.0.clone(), e.target.0.clone()))
+            .collect()
+    };
+    let before = rel_edges(&store);
+    assert_eq!(before.len(), 1, "a.ts → b.ts bound: {before:?}");
+
+    // Rename b.ts → c.ts and re-index.
+    fs::rename(dir.join("src/b.ts"), dir.join("src/c.ts")).unwrap();
+    wicked_estate::index_path(&mut store, &dir).unwrap();
+
+    let after = rel_edges(&store);
+    assert!(
+        after.is_empty(),
+        "no relative-import edge may survive the rename: {after:?}"
+    );
+    // No dangling edges anywhere (every endpoint resolves to a live node).
+    for e in store.all_edges().unwrap() {
+        assert!(
+            store.get_node(&e.source).unwrap().is_some()
+                && store.get_node(&e.target).unwrap().is_some(),
+            "dangling edge: {} -> {} ({:?})",
+            e.source.as_str(),
+            e.target.as_str(),
+            e.kind
+        );
+    }
+    // The importer was re-extracted and its ref RE-PARKED.
+    let parked = store.unresolved_refs_for_name("'./b'").unwrap();
+    assert!(
+        parked
+            .iter()
+            .any(|r| r.kind == EdgeKind::Imports && r.location.file == "src/a.ts"),
+        "an unresolved row for a.ts \"'./b'\" must exist after the rename: {parked:?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Modify (not delete) the target: the importer's edge survives by store semantics and the
+/// importer is NOT re-extracted — the change log carries no entry for a.ts (deleted-only
+/// forcing, ATT-INV-2).
+#[test]
+fn incremental_target_modified_keeps_importer_edge() {
+    use wicked_estate_core::GraphRead;
+    let dir = fresh_dir("incr_modify");
+    fs::write(
+        dir.join("src/a.ts"),
+        "import { b } from './b';\nexport const a = 1;\n",
+    )
+    .unwrap();
+    fs::write(dir.join("src/b.ts"), "export const b = 1;\n").unwrap();
+
+    let mut store = SqliteStore::in_memory().unwrap();
+    wicked_estate::index_path(&mut store, &dir).unwrap();
+    let cursor = store
+        .changes_since(0)
+        .unwrap()
+        .last()
+        .map(|c| c.seq)
+        .unwrap_or(0);
+
+    // Modify b.ts in place; re-index.
+    fs::write(
+        dir.join("src/b.ts"),
+        "export const b = 2;\nexport const b2 = 3;\n",
+    )
+    .unwrap();
+    wicked_estate::index_path(&mut store, &dir).unwrap();
+
+    // Edge intact.
+    let rel: Vec<_> = store
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.resolved_by == "relative-import")
+        .collect();
+    assert_eq!(rel.len(), 1, "a.ts → b.ts must survive a target MODIFY");
+
+    // a.ts was NOT re-extracted: the new change-log tail has entries for b.ts only.
+    let tail = store.changes_since(cursor).unwrap();
+    assert!(
+        !tail.is_empty(),
+        "b.ts modification must be logged: {tail:?}"
+    );
+    assert!(
+        tail.iter().all(|c| c.target != "src/a.ts"),
+        "modifying the TARGET must not force the importer (deleted-only scope): {tail:?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Deleting a target forces its DIRECT importers only — no transitive cascade (Decision J
+/// step 2): a imports b, z imports a; deleting b re-extracts a but never touches z.
+#[test]
+fn incremental_delete_does_not_cascade() {
+    use wicked_estate_core::GraphRead;
+    let dir = fresh_dir("incr_cascade");
+    fs::write(
+        dir.join("src/z.ts"),
+        "import { a } from './a';\nexport const z = 1;\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/a.ts"),
+        "import { b } from './b';\nexport const a = 1;\n",
+    )
+    .unwrap();
+    fs::write(dir.join("src/b.ts"), "export const b = 1;\n").unwrap();
+
+    let mut store = SqliteStore::in_memory().unwrap();
+    wicked_estate::index_path(&mut store, &dir).unwrap();
+    let cursor = store
+        .changes_since(0)
+        .unwrap()
+        .last()
+        .map(|c| c.seq)
+        .unwrap_or(0);
+
+    fs::remove_file(dir.join("src/b.ts")).unwrap();
+    wicked_estate::index_path(&mut store, &dir).unwrap();
+
+    let tail = store.changes_since(cursor).unwrap();
+    assert!(
+        tail.iter().any(|c| c.target == "src/a.ts"),
+        "the direct importer a.ts must be re-extracted: {tail:?}"
+    );
+    assert!(
+        tail.iter().all(|c| c.target != "src/z.ts"),
+        "z.ts (importer-of-the-importer) must NOT be touched — single-pass, no cascade: {tail:?}"
+    );
+    // z's own edge to a survives (a's File node was re-created under the same id).
+    let z_edges: Vec<_> = store
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.resolved_by == "relative-import" && e.source.0.contains("z.ts"))
+        .collect();
+    assert_eq!(z_edges.len(), 1, "z → a must survive: {z_edges:?}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The residual hole, documented as an ASSERTION (not skipped): an importer whose ref was
+/// PARKED (target absent at index time) is not re-resolved when the target is later added —
+/// no edge exists to discover it by (module doc "Known limitations", D01-7 audit).
+#[test]
+fn incremental_importer_of_new_target_stays_parked_until_touched() {
+    use wicked_estate_core::GraphRead;
+    let dir = fresh_dir("incr_parked");
+    fs::write(
+        dir.join("src/a.ts"),
+        "import { b } from './b';\nexport const a = 1;\n",
+    )
+    .unwrap();
+
+    let mut store = SqliteStore::in_memory().unwrap();
+    wicked_estate::index_path(&mut store, &dir).unwrap();
+    assert!(
+        !store.unresolved_refs_for_name("'./b'").unwrap().is_empty(),
+        "ref parked while the target is absent"
+    );
+
+    // Add the target and re-index: a.ts is unchanged, so its parked ref stays parked.
+    fs::write(dir.join("src/b.ts"), "export const b = 1;\n").unwrap();
+    wicked_estate::index_path(&mut store, &dir).unwrap();
+
+    let rel: Vec<_> = store
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.resolved_by == "relative-import")
+        .collect();
+    assert!(
+        rel.is_empty(),
+        "documented residual: the parked ref is NOT re-resolved until a.ts changes: {rel:?}"
+    );
+    assert!(
+        !store.unresolved_refs_for_name("'./b'").unwrap().is_empty(),
+        "the unresolved row persists"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
