@@ -39,6 +39,29 @@ them to plain `version` deps on publish. Keep them in sync with the workspace ve
 > `0.15.0`), after leaf crates are already irreversibly published. The guard test is
 > `crates/wicked-estate/tests/version_pins.rs`.
 
+### 1b. Sync the Claude-plugin manifest
+
+`plugins/wicked-estate/.claude-plugin/plugin.json` carries its **own** `"version"` field, outside
+Cargo's reach — no cargo command bumps it, and it shipped `0.13.1` across the 0.14.x/0.15.0
+releases because this step didn't exist. Set it to the same version as `[workspace.package]` in
+the same change:
+
+```jsonc
+// plugins/wicked-estate/.claude-plugin/plugin.json
+"version": "0.0.1"   // must equal the workspace version
+```
+
+Two mechanisms keep this from regressing:
+
+- `.github/workflows/release.yml` bumps the manifest alongside `Cargo.toml` and stages it into the
+  release commit.
+- The guard test `crates/wicked-estate/tests/plugin_manifest_version.rs` (same pattern as
+  `version_pins.rs`) fails `cargo test --workspace` — the CI gate on every PR — and the release
+  workflow's guard step whenever the manifest and the workspace version disagree.
+
+A manual/local release must bump the manifest by hand (this step); the guard makes forgetting it a
+red build, not a silent drift.
+
 ## 2. Validate the leaf crate (optional)
 
 `cargo publish --dry-run` only fully works for the dependency-free leaf, because dependent crates
