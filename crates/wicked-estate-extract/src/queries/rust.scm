@@ -21,15 +21,12 @@
   name: (type_identifier) @code_trait.name
 ) @code_trait.def
 
-; impl blocks — methods inside impl
-(impl_item
-  body: (declaration_list
-    (function_item
-      name: (identifier) @code_method.name
-      body: (block) @code_method.body
-    ) @code_method.def
-  )
-)
+; NOTE (§11): there is deliberately NO impl-body Method pattern here. The general
+; function pattern above already matches impl methods; a second impl-scoped pattern
+; emitted every method twice on the same SymbolId with a different kind
+; (Method + Function), and the store's last-write-wins upsert silently re-kinded
+; them. Restoring Method kind belongs with enclosing-type identity (method-identity
+; lane), not with a duplicate pattern.
 
 ; Constants
 (const_item name: (identifier) @code_constant.name) @code_constant.def

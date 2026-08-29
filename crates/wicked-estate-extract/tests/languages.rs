@@ -77,6 +77,45 @@ fn assert_def_floor(extraction: &wicked_estate_core::Extraction, lang: &str, flo
     );
 }
 
+/// §11 fleet-wide guard: within one extraction, no SymbolId may be emitted with more
+/// than one distinct NodeKind among non-File nodes. The store's upsert is
+/// last-write-wins (`ON CONFLICT(symbol) DO UPDATE SET … kind=excluded.kind`), so a
+/// kind conflict here means the stored graph silently re-kinds a definition — the
+/// D04-2 defect class (Go catch-all re-kinding Struct→TypeAlias; Python/Rust
+/// Method-vs-Function double-emits; C self-typedef TypeAlias-vs-Struct). Same-kind
+/// duplicates are deliberately NOT flagged: same-named symbols in different scopes
+/// share ids until the method-identity lane adds enclosing-type identity.
+#[track_caller]
+fn assert_no_conflicting_def_ids(extraction: &wicked_estate_core::Extraction, lang: &str) {
+    use std::collections::HashMap;
+    let mut by_id: HashMap<&str, Vec<(String, u32)>> = HashMap::new();
+    for n in extraction
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind, NodeKind::File))
+    {
+        by_id
+            .entry(n.symbol.as_str())
+            .or_default()
+            .push((format!("{:?}", n.kind), n.location.span.start_line));
+    }
+    let mut conflicts: Vec<String> = by_id
+        .iter()
+        .filter(|(_, v)| {
+            let first = &v[0].0;
+            v.iter().any(|(k, _)| k != first)
+        })
+        .map(|(id, v)| format!("  {id} -> {v:?}"))
+        .collect();
+    conflicts.sort();
+    assert!(
+        conflicts.is_empty(),
+        "[{lang}] SymbolId(s) emitted with conflicting NodeKinds — the store upsert \
+         (last-write-wins) would silently re-kind these definitions:\n{}",
+        conflicts.join("\n")
+    );
+}
+
 /// Assert a call ref with `raw_name` exists.
 #[track_caller]
 fn assert_call(extraction: &wicked_estate_core::Extraction, lang: &str, name: &str) {
@@ -146,6 +185,7 @@ fn rust_characterization() {
         .unwrap()
         .extract(&load_fixture("sample.rs", lang))
         .expect("extraction must succeed");
+    assert_no_conflicting_def_ids(&ex, lang);
 
     // definitions
     assert_def(&ex, lang, "Point", &NodeKind::Struct);
@@ -153,6 +193,10 @@ fn rust_characterization() {
     assert_def(&ex, lang, "Drawable", &NodeKind::Trait);
     assert_def(&ex, lang, "distance", &NodeKind::Function);
     assert_def(&ex, lang, "main_entry", &NodeKind::Function);
+    // impl-block method: emitted ONCE by the general function pattern (§11 — the
+    // impl-scoped duplicate Method pattern was deleted; kind stays Function until
+    // the method-identity lane adds enclosing-type identity).
+    assert_def(&ex, lang, "translate", &NodeKind::Function);
     // new kinds
     assert_def(&ex, lang, "MAX_DISTANCE", &NodeKind::Constant);
     assert_def(&ex, lang, "ORIGIN", &NodeKind::Constant);
@@ -179,6 +223,7 @@ fn python_characterization() {
         .unwrap()
         .extract(&load_fixture("sample.py", lang))
         .expect("extraction must succeed");
+    assert_no_conflicting_def_ids(&ex, lang);
 
     // definitions
     assert_def(&ex, lang, "FileProcessor", &NodeKind::Class);
@@ -212,6 +257,7 @@ fn typescript_characterization() {
         .unwrap()
         .extract(&load_fixture("sample.ts", lang))
         .expect("extraction must succeed");
+    assert_no_conflicting_def_ids(&ex, lang);
 
     // definitions: interface, enum, class, methods, functions
     assert_def(&ex, lang, "Processor", &NodeKind::Interface);
@@ -252,6 +298,7 @@ fn tsx_characterization() {
         .unwrap()
         .extract(&load_fixture("sample.tsx", lang))
         .expect("extraction must succeed");
+    assert_no_conflicting_def_ids(&ex, lang);
 
     // definitions
     assert_def(&ex, lang, "ButtonProps", &NodeKind::Interface);
@@ -285,6 +332,7 @@ fn javascript_characterization() {
         .unwrap()
         .extract(&load_fixture("sample.js", lang))
         .expect("extraction must succeed");
+    assert_no_conflicting_def_ids(&ex, lang);
 
     // definitions: class + methods + free functions
     assert_def(&ex, lang, "EventBus", &NodeKind::Class);
@@ -321,6 +369,7 @@ fn go_characterization() {
         .unwrap()
         .extract(&load_fixture("sample.go", lang))
         .expect("extraction must succeed");
+    assert_no_conflicting_def_ids(&ex, lang);
 
     assert_def(&ex, lang, "NewCircle", &NodeKind::Function);
     assert_def(&ex, lang, "Area", &NodeKind::Method);
@@ -358,6 +407,7 @@ fn java_characterization() {
         .unwrap()
         .extract(&load_fixture("sample.java", lang))
         .expect("extraction must succeed");
+    assert_no_conflicting_def_ids(&ex, lang);
 
     // definitions: classes + methods
     assert_def(&ex, lang, "DataProcessor", &NodeKind::Class);
@@ -397,6 +447,7 @@ fn c_characterization() {
         .unwrap()
         .extract(&load_fixture("sample.c", lang))
         .expect("extraction must succeed");
+    assert_no_conflicting_def_ids(&ex, lang);
 
     // The C query captures every `struct Vector2` usage (type declarations inside
     // function bodies too), so we just pin the ones we care about:
@@ -409,7 +460,20 @@ fn c_characterization() {
     // new kinds: macros as constants, typedef as type_alias
     assert_def(&ex, lang, "MAX_VECTORS", &NodeKind::Constant);
     assert_def(&ex, lang, "EPSILON", &NodeKind::Constant);
-    assert_def(&ex, lang, "Vector2", &NodeKind::TypeAlias); // typedef struct Vector2 Vector2
+    // §11: the self-naming idiom `typedef struct Vector2 Vector2;` no longer mints a
+    // TypeAlias — it shared the Struct's SymbolId and the store re-kinded it. The
+    // differently-named and non-tag forms still emit:
+    assert_def(&ex, lang, "Vec2", &NodeKind::TypeAlias); // typedef struct Vector2 Vec2
+    assert_def(&ex, lang, "uint", &NodeKind::TypeAlias); // typedef unsigned int uint
+    let vector2_nodes = ex
+        .nodes
+        .iter()
+        .filter(|n| n.name == "Vector2" && !matches!(n.kind, NodeKind::File))
+        .count();
+    assert_eq!(
+        vector2_nodes, 1,
+        "[c] `typedef struct Vector2 Vector2;` must not mint a second Vector2 node"
+    );
     assert_def_floor(&ex, lang, 8);
 
     // calls
@@ -435,6 +499,7 @@ fn cpp_characterization() {
         .unwrap()
         .extract(&load_fixture("sample.cpp", lang))
         .expect("extraction must succeed");
+    assert_no_conflicting_def_ids(&ex, lang);
 
     // definitions
     assert_def(&ex, lang, "Vector3", &NodeKind::Struct);
@@ -470,6 +535,7 @@ fn csharp_characterization() {
         .unwrap()
         .extract(&load_fixture("sample.cs", lang))
         .expect("extraction must succeed");
+    assert_no_conflicting_def_ids(&ex, lang);
 
     // definitions
     assert_def(&ex, lang, "IFormatter", &NodeKind::Interface);
@@ -507,6 +573,7 @@ fn ruby_characterization() {
         .unwrap()
         .extract(&load_fixture("sample.rb", lang))
         .expect("extraction must succeed");
+    assert_no_conflicting_def_ids(&ex, lang);
 
     // definitions
     // Processing is a Ruby module → NodeKind::Module (correct mapping; old query mapped to Class)
@@ -546,6 +613,7 @@ fn bash_characterization() {
         .unwrap()
         .extract(&load_fixture("sample.sh", lang))
         .expect("extraction must succeed");
+    assert_no_conflicting_def_ids(&ex, lang);
 
     // definitions
     assert_def(&ex, lang, "log_message", &NodeKind::Function);
@@ -581,6 +649,7 @@ fn json_characterization() {
         .unwrap()
         .extract(&load_fixture("sample.json", lang))
         .expect("extraction must succeed");
+    assert_no_conflicting_def_ids(&ex, lang);
 
     // JSON: top-level object keys captured as Struct definitions
     assert_def(&ex, lang, "name", &NodeKind::Struct);
@@ -607,6 +676,7 @@ fn yaml_characterization() {
         .unwrap()
         .extract(&load_fixture("sample.yaml", lang))
         .expect("extraction must succeed");
+    assert_no_conflicting_def_ids(&ex, lang);
 
     // YAML: top-level block-mapping keys captured as Struct definitions
     assert_def(&ex, lang, "name", &NodeKind::Struct);
@@ -635,6 +705,7 @@ fn orm_sqlalchemy_models_and_columns() {
         .unwrap()
         .extract(&load_fixture("orm_sqlalchemy.py", lang))
         .expect("extraction must succeed");
+    assert_no_conflicting_def_ids(&ex, lang);
 
     // ── Model classes captured as NodeKind::Class ───────────────────────────
     // Base, User, Post — all are class_definition nodes, existing query fires.
@@ -681,6 +752,7 @@ fn orm_django_models_and_fields() {
         .unwrap()
         .extract(&load_fixture("orm_django.py", lang))
         .expect("extraction must succeed");
+    assert_no_conflicting_def_ids(&ex, lang);
 
     // ── Model classes captured as NodeKind::Class ───────────────────────────
     assert_def(&ex, lang, "Category", &NodeKind::Class);
@@ -726,6 +798,7 @@ fn orm_typeorm_entities_and_columns() {
         .unwrap()
         .extract(&load_fixture("orm_typeorm.ts", lang))
         .expect("extraction must succeed");
+    assert_no_conflicting_def_ids(&ex, lang);
 
     // ── @Entity decorated classes → NodeKind::Class ─────────────────────────
     assert_def(&ex, lang, "User", &NodeKind::Class);

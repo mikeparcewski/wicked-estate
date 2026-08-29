@@ -5,6 +5,7 @@
 #define EPSILON 1e-9
 
 typedef struct Vector2 Vector2;
+typedef struct Vector2 Vec2;
 typedef unsigned int uint;
 
 struct Vector2 {
