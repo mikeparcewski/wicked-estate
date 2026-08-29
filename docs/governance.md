@@ -35,7 +35,7 @@ it:
    - **≥ 100% of budget → BLOCK** (exit 1, commit rejected).
 5. Surfaces the `coverage:` line from every blast-radius call verbatim, so the
    developer sees that the count is a **lower bound** (best-effort static resolution,
-   unresolved references reported separately).
+   unresolved references — `docs/ENGINE-CONTRACT.md` §2.1 — reported separately).
 
 **Fail-open semantics:** if `wicked-estate` is not built, `.wicked-estate/graph.db` does not
 exist, or any individual symbol call times out (default: 10s), the gate skips rather

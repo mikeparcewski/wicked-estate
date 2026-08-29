@@ -219,7 +219,7 @@ Follow OTel naming: dots, not underscores; lowercase; include units. All are cum
 | `wicked_estate.mcp.cache.misses` | Counter | `1` | `tier` (l1/l2) | Cache misses in MCP main loop |
 | `wicked_estate.db.query.duration` | Histogram | `ms` | `op` (find_symbols/traverse/upsert_nodes/rebuild_fts) | SQLite operation latency |
 | `wicked_estate.db.fts_rebuild.duration` | Histogram | `ms` | (none) | Specifically track the FTS rebuild (was 50s, now 0.085s — regression-sensitive) |
-| `wicked_estate.resolve.unresolved` | Counter | `1` | `language`, `tier` (name/import-map/heuristic) | Refs that no resolver could bind — precision coverage gap |
+| `wicked_estate.resolve.unresolved` | Counter | `1` | `language`, `tier` (name/import-map/heuristic) | Refs unresolved per `docs/ENGINE-CONTRACT.md` §2.1 (per reference) — precision coverage gap |
 | `wicked_estate.resolve.edges` | Counter | `1` | `tier`, `language` | Edges emitted per resolution tier |
 | `wicked_estate.extract.duration` | Histogram | `ms` | `language` | Per-language extractor latency (aggregate, not per-file) |
 | `wicked_estate.extract.errors` | Counter | `1` | `language` | Files that failed extraction |

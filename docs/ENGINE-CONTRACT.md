@@ -41,6 +41,63 @@ future store are verified against it in conformance.
 - Cross-file references are emitted as `UnresolvedRef` (by name + hints) and bound later.
 - Resolvers are **swappable**: changing resolution never requires re-parsing.
 
+### 2.1 Unresolved references — the one definition
+
+> A reference is **unresolved** iff no resolver emitted an edge **attributed to it** — an edge
+> carrying the reference's exact `(location, kind)` — after per-ref re-resolution of references
+> that share `(location, kind)`. One `unresolved_refs` row per unresolved reference (per site).
+
+This is the only place the definition is written out; every other surface cites it.
+
+**How attribution works** (`wicked_estate_resolve::resolve_all_with_coverage`): references are
+bucketed once by `(location.file, location.span, kind)`. An output edge with a location binds the
+single reference at its exact `(location, kind)`. When several references share one
+`(location, kind)` — multi-target heritage clauses (`class C implements A, B`), rules-engine refs
+at `Span::ZERO` — a single edge at that key is ambiguous, so the **collision pass** re-runs the
+resolver with a single-ref slice for each still-unbound reference of that key and binds the ones
+that yield an edge at their `(location, kind)`.
+
+**Resolver contract** (also on the `Resolver` trait doc): a binding edge carries the reference's
+exact location **and** kind; an edge with a different kind, or `location: None`, binds nothing
+(it is still returned and may survive dedup). `resolve()` must be deterministic per ref —
+calling it with a single-ref slice must give that ref's portion of the batch answer — because
+the accounting re-runs it per ref for shared-key references.
+
+**Consequences:**
+
+- Repeat sites of a **bound** relationship (the 2nd..Nth call from one function to one target,
+  a repeated import of one module) are NOT unresolved. Site multiplicity of a bound relationship
+  is **persisted nowhere** — no count, no locations list.
+- Every site of an **unbound** relationship keeps its own row (honest, per-site coverage: a name
+  with zero candidates — a test framework's `expect` — keeps every row).
+- Consumers of this definition: persistence (`index_path` → `upsert_unresolved_refs`), the
+  `wicked_estate.resolve.unresolved` telemetry counter, `unresolved_refs_for_name`
+  (blast-radius coverage — text CLI, `--json`, and the MCP `BlastRadius` tool), and
+  `GraphStats.unresolved_ref_count` (`stats` prints it as `unresolved=N`).
+
+**Computed per resolve pass.** Rows reflect the last pass over each file: changed and deleted
+files hit `remove_file` (which drops their unresolved rows) before re-extraction. Exceptions,
+all documented:
+
+1. **Unchanged importers** — a ref in an unchanged file stays unresolved until that file changes
+   or a full re-index runs (the module-doc Known Limitation of `wicked-estate/src/lib.rs`).
+2. **`scip` ingest does not prune** — SCIP edges land, but existing `unresolved_refs` rows are
+   pruned only on the next re-index of their file. Deferred, not impossible: a Calls-only prune
+   by `(from_sym, kind, target.name == raw_name)` is the named follow-up; a general prune fails
+   on Imports (quoted specifier vs canonical node name).
+3. **`tfstate` ingest** persists collector refs without a resolve pass — by design (no resolvers
+   exist for them).
+
+**Re-index across versions.** A version bump forces full re-extraction on the next `index` (the
+per-repo `indexed_version` meta key is compared to the binary version), so stored graphs
+self-heal across releases. A **same-version** binary re-extracts only changed files — mixing
+definitions silently — so after upgrading a dev build in place, run `wicked-estate index <path>
+--force` once.
+
+**Known consumer-side coarseness (pre-existing):** `unresolved_refs_for_name` matches by written
+name only — it counts Imports rows in a "call(s)" line and sums across co-located repos in a
+labelled graph.
+
 ## 3. Confidence tiers (cheap → precise)
 
 | Tier | Default confidence | Who emits it |

@@ -20,6 +20,8 @@ tools that fail. A tool that exists must work.
 A graph that covers some languages/files but silently omits others misleads the agent into thinking
 it has the whole picture. Always surface coverage as a `diagnostic` ("graph covers TS/Python; 3
 Go files not indexed") so the agent knows when to fall back. Track coverage as a first-class signal.
+Unresolved references are defined once in `docs/ENGINE-CONTRACT.md` §2.1; the coverage line counts
+them per site.
 
 ## R4 — Cap tool output (~25K chars)
 Beyond ~25K characters the agent externalizes/ignores the output. Rank (PageRank, W4.1) and budget

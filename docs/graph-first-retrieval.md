@@ -160,7 +160,8 @@ coverage: 14 resolved dependent(s); 3 unresolved call(s) reference 'SchemaRegist
 ```
 
 The agent reads this literally: 14 is a lower bound. 3 more may exist. The answer is
-not "37 uses" — it is "14 confirmed + 3 unresolved."
+not "37 uses" — it is "14 confirmed + 3 unresolved." (Unresolved is defined in
+`docs/ENGINE-CONTRACT.md` §2.1 — per unresolved reference.)
 
 ---
 

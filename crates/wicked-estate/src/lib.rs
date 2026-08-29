@@ -22,7 +22,8 @@
 //! or until F itself changes. The full fix is to re-resolve direct importers of changed files
 //! (an O(fanout) pass over the import graph). That is future work — see the design notes.
 //! The current approach is correct for the changed files' own edges; only the cross-file
-//! "unchanged imports changed" case is deferred.
+//! "unchanged imports changed" case is deferred. This limitation is exception 1 of the
+//! unresolved-references definition in `docs/ENGINE-CONTRACT.md` §2.1.
 //!
 //! ## Many repos, one graph
 //!

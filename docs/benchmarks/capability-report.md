@@ -18,245 +18,154 @@ The `.db` + `.db-wal` + `.db-shm` files are summed and the store is deleted on e
 
 **Blast-radius coverage:** `resolved callers / (resolved + unresolved)` for the top symbol.
 Unresolved = calls to that name that the resolver could not bind to a node
-(`unresolved_refs_for_name`). A lower percentage signals incomplete resolution, not
-fewer callers.
+(`unresolved_refs_for_name`, defined in `docs/ENGINE-CONTRACT.md` §2.1). A lower
+percentage signals incomplete resolution, not fewer callers.
 
 ## Results
 
 | Repo | Index (ms) | Files | Nodes | Edges | Unresolved | Footprint (bytes) | bytes/node | Search (µs) | Blast-radius (µs) | BR coverage% | Who-calls | Context chars | Est. tokens |
 |------|-----------|-------|-------|-------|-----------|------------------|-----------|------------|------------------|-------------|----------|--------------|------------|
-| wicked_estate | 329 | 68 | 1434 | 3162 | 6125 | 6168576 | 4302 | 31 | 6348 | 59.3 | 421 | 1941 | 485 |
-| prior art | 259 | 94 | 730 | 1425 | 5868 | 3362816 | 4607 | 12 | 195 | 100.0 | 8 | 1676 | 419 |
-| prior art | 3406 | 3311 | 41685 | 96433 | 164319 | 210321408 | 5045 | 14 | 49590 | 96.0 | 5000 | 2010 | 502 |
-| prior art | 3066 | 2512 | 22937 | 53594 | 187872 | 160448512 | 6995 | 14 | 33048 | 65.8 | 2754 | 2147 | 536 |
+| wicked-studio | 2398 | 479 | 4671 | 9229 | 34083 | 15708160 | 3363 | 27 | 7192 | 100.0 | 171 | 1866 | 466 |
+| wicked-crew | 1500 | 213 | 2933 | 5392 | 16322 | 10153984 | 3462 | 27 | 4986 | 100.0 | 107 | 1740 | 435 |
+
+> **Corpus change (2026-08-28):** three of the four previous rows were external "prior art" repos not present in this workspace; this report is regenerated on wicked-studio + wicked-crew under the per-reference unresolved definition (`docs/ENGINE-CONTRACT.md` §2.1). Rows are not comparable to the previous report.
 
 ## Per-repo receipts
 
-### wicked_estate
+### wicked-studio
 
-**Path:** `/Users/michael.parcewski/Projects/wicked_estate`  
-**Index time:** 329ms  
-**Edge coverage:** 34.0%  
-**Footprint:** 6168576 bytes  (4302 bytes/node)  
+**Path:** `/Users/michael.parcewski/Projects/wicked/wicked-studio`  
+**Index time:** 2398ms  
+**Edge coverage:** 21.3%  
+**Footprint:** 15708160 bytes  (3363 bytes/node)  
 
 **Nodes by language:**
 
 | Language | Nodes |
 |----------|-------|
-| `rust` | 1163 |
-| `python` | 74 |
-| `typescript` | 34 |
-| `bash` | 28 |
-| `javascript` | 19 |
-| `csharp` | 17 |
-| `cpp` | 15 |
-| `go` | 14 |
-| `java` | 14 |
-| `ruby` | 14 |
-| `tsx` | 13 |
-| `c` | 11 |
-| `json` | 6 |
-| `yaml` | 6 |
-| `cloudformation` | 3 |
-| `kubernetes` | 3 |
+| `tsx` | 2232 |
+| `typescript` | 1184 |
+| `python` | 909 |
+| `css` | 251 |
+| `json` | 40 |
+| `javascript` | 24 |
+| `html` | 20 |
+| `markdown` | 11 |
 
 **Nodes by kind:**
 
-- `"class"`: 18
-- `"constant"`: 87
-- `"enum"`: 32
-- `"field"`: 39
-- `"file"`: 68
-- `"function"`: 907
-- `"import"`: 84
-- `"interface"`: 4
-- `"method"`: 28
-- `"module"`: 1
-- `"struct"`: 113
-- `"trait"`: 13
-- `"type_alias"`: 12
-- `"variable"`: 24
-- `{"other":"resource"}`: 4
+- `"class"`: 20
+- `"constant"`: 1408
+- `"file"`: 479
+- `"function"`: 1573
+- `"import"`: 483
+- `"interface"`: 266
+- `"method"`: 20
+- `"module"`: 10
+- `"struct"`: 35
+- `"type_alias"`: 328
+- `"variable"`: 49
 
 **Edges by kind:**
 
 | Edge kind | Count |
 |-----------|-------|
-| `"calls"` | 1756 |
-| `"contains"` | 1282 |
-| `"imports"` | 120 |
+| `"contains"` | 3709 |
+| `"calls"` | 3258 |
+| `"imports"` | 2259 |
 | `"extends"` | 3 |
-| `"implements"` | 1 |
 
-**Capability receipts for top symbol `new`:**
-
-| Metric | Value | What it proves |
-|--------|-------|----------------|
-| who-calls count | 421 | Precise blast-radius: these nodes depend on `new` |
-| blast-radius coverage | 59.3% | Fraction of callers the resolver bound (lower → incomplete resolution) |
-| context-pack chars | 1941 | Agent receives 1941 chars of scoped context |
-| context-pack est. tokens | ~485 | Estimated LLM token cost for one context retrieval |
-| context-pack symbols | 15 | Symbols ranked into the pack |
-| search latency | 31µs | Time to locate symbol by name |
-| blast-radius latency | 6348µs | Time for depth-3 dependent traversal |
-
-### prior art
-
-**Path:** `/Users/michael.parcewski/Projects/wicked/prior art`  
-**Index time:** 259ms  
-**Edge coverage:** 19.5%  
-**Footprint:** 3362816 bytes  (4607 bytes/node)  
-
-**Nodes by language:**
-
-| Language | Nodes |
-|----------|-------|
-| `javascript` | 623 |
-| `json` | 107 |
-
-**Nodes by kind:**
-
-- `"class"`: 9
-- `"constant"`: 150
-- `"file"`: 94
-- `"function"`: 234
-- `"import"`: 66
-- `"method"`: 68
-- `"struct"`: 91
-- `"variable"`: 18
-
-**Edges by kind:**
-
-| Edge kind | Count |
-|-----------|-------|
-| `"contains"` | 570 |
-| `"calls"` | 527 |
-| `"imports"` | 328 |
-
-**Capability receipts for top symbol `walk`:**
+**Capability receipts for top symbol `render`:**
 
 | Metric | Value | What it proves |
 |--------|-------|----------------|
-| who-calls count | 8 | Precise blast-radius: these nodes depend on `walk` |
+| who-calls count | 171 | Precise blast-radius: these nodes depend on `render` |
 | blast-radius coverage | 100.0% | Fraction of callers the resolver bound (lower → incomplete resolution) |
-| context-pack chars | 1676 | Agent receives 1676 chars of scoped context |
-| context-pack est. tokens | ~419 | Estimated LLM token cost for one context retrieval |
+| context-pack chars | 1866 | Agent receives 1866 chars of scoped context |
+| context-pack est. tokens | ~466 | Estimated LLM token cost for one context retrieval |
 | context-pack symbols | 15 | Symbols ranked into the pack |
-| search latency | 12µs | Time to locate symbol by name |
-| blast-radius latency | 195µs | Time for depth-3 dependent traversal |
+| search latency | 27µs | Time to locate symbol by name |
+| blast-radius latency | 7192µs | Time for depth-3 dependent traversal |
 
-### prior art
+**Resolution precision (by tier) — W3.5:**
 
-**Path:** `/Users/michael.parcewski/Projects/prior art`  
-**Index time:** 3406ms  
-**Edge coverage:** 37.0%  
-**Footprint:** 210321408 bytes  (5045 bytes/node)  
+> **Precision caveat:** confidence is a *proxy*, not ground-truth precision.
+> True precision (fraction of edges that are correct) requires labeled data.
+> Low-confidence-heavy resolvers (high `low` band) should be flagged for manual review.
+
+| Resolver | Edges | Mean conf | exact (=1.0) | high [0.8,1.0) | medium [0.5,0.8) | low [0.0,0.5) |
+|----------|-------|-----------|-------------|----------------|-----------------|--------------|
+| `tree-sitter` | 5968 | 1.000 | 5968 | 0 | 0 | 0 |
+| `scoped-name-resolver` | 1838 | 0.638 | 0 | 0 | 1838 | 0 |
+| `name-resolver` | 1245 | 0.600 | 0 | 0 | 1245 | 0 |
+| `import-map-resolver` | 178 | 0.630 | 0 | 0 | 178 | 0 |
+
+### wicked-crew
+
+**Path:** `/Users/michael.parcewski/Projects/wicked/wicked-crew`  
+**Index time:** 1500ms  
+**Edge coverage:** 24.8%  
+**Footprint:** 10153984 bytes  (3462 bytes/node)  
 
 **Nodes by language:**
 
 | Language | Nodes |
 |----------|-------|
-| `go` | 32675 |
-| `bash` | 3099 |
-| `rust` | 2636 |
-| `tsx` | 1262 |
-| `yaml` | 843 |
-| `typescript` | 842 |
-| `json` | 311 |
-| `python` | 10 |
-| `javascript` | 7 |
+| `typescript` | 1838 |
+| `css` | 467 |
+| `javascript` | 304 |
+| `json` | 93 |
+| `bash` | 84 |
+| `markdown` | 83 |
+| `python` | 64 |
 
 **Nodes by kind:**
 
-- `"class"`: 7
-- `"constant"`: 4743
-- `"enum"`: 67
-- `"file"`: 3311
-- `"function"`: 21018
-- `"import"`: 588
-- `"interface"`: 359
-- `"method"`: 1567
-- `"struct"`: 3085
-- `"trait"`: 11
-- `"type_alias"`: 111
-- `"variable"`: 6818
+- `"class"`: 28
+- `"constant"`: 491
+- `"file"`: 213
+- `"function"`: 728
+- `"import"`: 183
+- `"interface"`: 233
+- `"method"`: 183
+- `"module"`: 74
+- `"struct"`: 79
+- `"type_alias"`: 500
+- `"variable"`: 221
 
 **Edges by kind:**
 
 | Edge kind | Count |
 |-----------|-------|
-| `"calls"` | 44475 |
-| `"contains"` | 37786 |
-| `"imports"` | 14166 |
-| `"extends"` | 3 |
-| `"implements"` | 3 |
+| `"contains"` | 2537 |
+| `"calls"` | 1826 |
+| `"imports"` | 1020 |
+| `"extends"` | 9 |
 
-**Capability receipts for top symbol `Parallel`:**
-
-| Metric | Value | What it proves |
-|--------|-------|----------------|
-| who-calls count | 5000 | Precise blast-radius: these nodes depend on `Parallel` |
-| blast-radius coverage | 96.0% | Fraction of callers the resolver bound (lower → incomplete resolution) |
-| context-pack chars | 2010 | Agent receives 2010 chars of scoped context |
-| context-pack est. tokens | ~502 | Estimated LLM token cost for one context retrieval |
-| context-pack symbols | 15 | Symbols ranked into the pack |
-| search latency | 14µs | Time to locate symbol by name |
-| blast-radius latency | 49590µs | Time for depth-3 dependent traversal |
-
-### prior art
-
-**Path:** `/Users/michael.parcewski/Projects/prior art`  
-**Index time:** 3066ms  
-**Edge coverage:** 22.2%  
-**Footprint:** 160448512 bytes  (6995 bytes/node)  
-
-**Nodes by language:**
-
-| Language | Nodes |
-|----------|-------|
-| `typescript` | 16575 |
-| `tsx` | 2285 |
-| `json` | 1333 |
-| `javascript` | 1251 |
-| `python` | 1098 |
-| `bash` | 385 |
-| `yaml` | 10 |
-
-**Nodes by kind:**
-
-- `"class"`: 320
-- `"constant"`: 3993
-- `"enum"`: 1
-- `"file"`: 2512
-- `"function"`: 6871
-- `"import"`: 2074
-- `"interface"`: 1755
-- `"method"`: 2785
-- `"struct"`: 1142
-- `"type_alias"`: 1006
-- `"variable"`: 478
-
-**Edges by kind:**
-
-| Edge kind | Count |
-|-----------|-------|
-| `"calls"` | 23059 |
-| `"contains"` | 18351 |
-| `"imports"` | 12128 |
-| `"implements"` | 30 |
-| `"extends"` | 26 |
-
-**Capability receipts for top symbol `map`:**
+**Capability receipts for top symbol `json`:**
 
 | Metric | Value | What it proves |
 |--------|-------|----------------|
-| who-calls count | 2754 | Precise blast-radius: these nodes depend on `map` |
-| blast-radius coverage | 65.8% | Fraction of callers the resolver bound (lower → incomplete resolution) |
-| context-pack chars | 2147 | Agent receives 2147 chars of scoped context |
-| context-pack est. tokens | ~536 | Estimated LLM token cost for one context retrieval |
+| who-calls count | 107 | Precise blast-radius: these nodes depend on `json` |
+| blast-radius coverage | 100.0% | Fraction of callers the resolver bound (lower → incomplete resolution) |
+| context-pack chars | 1740 | Agent receives 1740 chars of scoped context |
+| context-pack est. tokens | ~435 | Estimated LLM token cost for one context retrieval |
 | context-pack symbols | 15 | Symbols ranked into the pack |
-| search latency | 14µs | Time to locate symbol by name |
-| blast-radius latency | 33048µs | Time for depth-3 dependent traversal |
+| search latency | 27µs | Time to locate symbol by name |
+| blast-radius latency | 4986µs | Time for depth-3 dependent traversal |
+
+**Resolution precision (by tier) — W3.5:**
+
+> **Precision caveat:** confidence is a *proxy*, not ground-truth precision.
+> True precision (fraction of edges that are correct) requires labeled data.
+> Low-confidence-heavy resolvers (high `low` band) should be flagged for manual review.
+
+| Resolver | Edges | Mean conf | exact (=1.0) | high [0.8,1.0) | medium [0.5,0.8) | low [0.0,0.5) |
+|----------|-------|-----------|-------------|----------------|-----------------|--------------|
+| `tree-sitter` | 3557 | 1.000 | 3557 | 0 | 0 | 0 |
+| `scoped-name-resolver` | 1100 | 0.643 | 0 | 0 | 1100 | 0 |
+| `name-resolver` | 726 | 0.600 | 0 | 0 | 726 | 0 |
+| `import-map-resolver` | 9 | 0.630 | 0 | 0 | 9 | 0 |
 
 ## Regression ceilings
 
