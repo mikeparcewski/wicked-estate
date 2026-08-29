@@ -15,6 +15,19 @@ use wicked_estate_bench::capability::{print_summary_table, run_benchmark};
 use wicked_estate_bench::memory_recall::{GATE, run_memory_recall_bench};
 
 fn main() -> Result<()> {
+    // Hermeticity pin (ADR-010 / D16): the bench is the repo's truth oracle, and a plugin
+    // override on the dev machine would silently move built-in-language baselines. Pin the
+    // plugins dir to a fresh empty temp dir BEFORE any indexing — unconditional, so bench
+    // numbers never depend on who runs them. This binary is its own process, so setting the
+    // env before the first registry access is OnceLock-safe.
+    let plugin_pin = std::env::temp_dir().join(format!("we-bench-plugins-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&plugin_pin);
+    // SAFETY: single-threaded at this point — first statement of main, before any spawn.
+    unsafe {
+        std::env::set_var("WICKED_ESTATE_PLUGINS", &plugin_pin);
+    }
+    eprintln!("bench: WICKED_ESTATE_PLUGINS pinned to empty dir for hermetic baselines");
+
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.iter().any(|a| a == "--recall") {

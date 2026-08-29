@@ -21,6 +21,8 @@ tree-sitter = "0.25"
 # so the core stays clean; the grammars themselves are separate artifacts, never linked in here.
 libloading = "0.8"
 tree-sitter-language = "0.1"
+# Override-descriptor digests (ADR-010) — same digest family the indexer already uses.
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # ABI-14 grammars — compatible with tree-sitter 0.24 (ABI 13-14 supported)
 tree-sitter-rust = "0.23"
 tree-sitter-python = "0.23"

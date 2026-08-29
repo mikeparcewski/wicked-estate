@@ -625,6 +625,54 @@ pub fn index_path_as(
     }
     store.meta_set_key(&digest_key, &extra_digest);
 
+    // Plugin-override gate (ADR-010): a parser-plugin override (query-only or armed grammar)
+    // changes extraction output without touching a single source byte, so stored graphs indexed
+    // under a different override state must fully re-extract. The per-repo `plugin_overrides`
+    // meta key holds the canonical descriptor of the effective override set; reading
+    // `override_state()` here makes plugin-registry loading unconditional on every index run
+    // (dlopen moves from first-lookup to index start — owned by ADR-010). The digest inside each
+    // descriptor line is over the registry's CACHED bytes — what extraction will actually use —
+    // never a fresh disk read, so a long-lived process stays old-query/old-digest consistent.
+    //
+    // Like the id-scheme gate (and deliberately UNLIKE the two gates above), the key is written
+    // write-LAST: at run end and in the gate-guarded no-change early return — a crash mid-run
+    // leaves the old key and the gate re-fires. Idempotent, never falsely certified.
+    let override_key = repo_scope::meta_key(repo, "plugin_overrides");
+    let prev_overrides = store.meta_get_key(&override_key).unwrap_or_default();
+    let cur_overrides = wicked_estate_extract::plugin::override_state();
+    for line in cur_overrides.lines() {
+        let mut parts = line.split('|');
+        let lang = parts.next().unwrap_or("?");
+        let mode = parts.next().unwrap_or("?");
+        let dir = parts.next().unwrap_or("?");
+        if mode == "grammar" {
+            eprintln!("GRAMMAR OVERRIDE active: {lang} <- {dir}");
+        } else {
+            eprintln!("query override active: {lang} <- {dir}");
+        }
+    }
+    let override_gate = prev_overrides != cur_overrides;
+    if override_gate {
+        if prev_version.is_some() {
+            // The old->new descriptor-line diff makes the CLI-vs-editor env-skew footgun
+            // diagnosable from the output alone.
+            eprintln!("PLUGIN-OVERRIDE state changed: forcing full re-extraction");
+            for l in prev_overrides
+                .lines()
+                .filter(|l| !cur_overrides.lines().any(|c| c == *l))
+            {
+                eprintln!("- {l}");
+            }
+            for l in cur_overrides
+                .lines()
+                .filter(|l| !prev_overrides.lines().any(|p| p == *l))
+            {
+                eprintln!("+ {l}");
+            }
+        }
+        force_full = true;
+    }
+
     // Symbol-id scheme gate (ADR-002 amendment): rows minted under an older id scheme must be
     // fully re-extracted or the graph silently mixes flat and type-nested ids behind unchanged
     // digests. Fires on ANY previously-indexed repo — `previously_indexed` is label-scoped and is
@@ -811,6 +859,11 @@ pub fn index_path_as(
         // the old key so the gate re-fires next time (idempotent, never falsely certified).
         if !scheme_gate {
             store.meta_set_key(&scheme_key, SYMBOL_ID_SCHEME);
+        }
+        // Same write-last discipline for the plugin-override key (ADR-010): certify only a run
+        // whose gate did not fire.
+        if !override_gate {
+            store.meta_set_key(&override_key, cur_overrides);
         }
         return store.stats();
     }
@@ -1093,6 +1146,9 @@ pub fn index_path_as(
     // so an interrupted migration re-fires the scheme gate instead of certifying a mixed DB.
     // (See the gate above for why this deliberately differs from the version/rules gates.)
     store.meta_set_key(&scheme_key, SYMBOL_ID_SCHEME);
+    // The plugin-override key follows the same write-LAST rule (ADR-010): stamped only once the
+    // re-extraction under the current override state durably completed.
+    store.meta_set_key(&override_key, cur_overrides);
 
     let stats = store.stats()?;
     // Warn when the DB crosses 500 MB — a signal to run `compact`.

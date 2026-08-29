@@ -11,8 +11,10 @@ compiled-in dispatch logic; wicked-estate routes through data instead.
 > **Don't want to recompile the core — or your grammar's license is incompatible with MIT?** Ship the
 > language as a **runtime plugin** instead: a compiled grammar + query + manifest dropped into the
 > plugins dir, loaded at startup with no rebuild and full license isolation. See
-> [PLUGIN.md](../PLUGIN.md) and the [nginx example](../examples/plugins/nginx). The steps below are
-> for adding a language **built into** wicked-estate.
+> [PLUGIN.md](../PLUGIN.md) and the [nginx example](../examples/plugins/nginx). To **patch a
+> built-in language's query** locally (or swap its grammar), use a plugin *override* — PLUGIN.md,
+> "Overriding a built-in language". The steps below are for adding a language **built into**
+> wicked-estate.
 
 ---
 

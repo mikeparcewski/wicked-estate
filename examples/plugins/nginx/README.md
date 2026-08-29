@@ -33,8 +33,9 @@ That's it — wicked-estate now recognises nginx:
 wicked-estate index ./my-nginx-config --db graph.db   # .nginxconf / .conf files
 ```
 
-The loader consults built-in languages first, then plugins, so a plugin never shadows a built-in.
-Incompatible or unloadable plugins are skipped with a warning rather than aborting.
+The loader consults built-in languages first, then additive plugins like this one — overriding a
+built-in takes explicit override fields in the manifest (see PLUGIN.md, "Overriding a built-in
+language"). Incompatible or unloadable plugins are skipped with a warning rather than aborting.
 
 ## Authoring your own
 
