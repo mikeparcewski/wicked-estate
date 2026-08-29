@@ -3462,18 +3462,25 @@ fn main() -> Result<()> {
                     if let Some(d) = wicked_estate_extract::plugin::plugins_dir() {
                         println!("plugins dir: {}", d.display());
                     }
-                    let loaded = wicked_estate_extract::plugin::loaded();
-                    if loaded.is_empty() {
+                    // Listings cover additive plugins AND every override plugin dir — active,
+                    // FAILED (built-in in use), armed, INERT, and DISABLED-duplicate (ADR-009).
+                    let listings = wicked_estate_extract::plugin::listings();
+                    if listings.is_empty() {
                         println!(
                             "(no plugins loaded — drop a plugin dir into the plugins dir; see PLUGIN.md)"
                         );
                     } else {
-                        for p in loaded {
+                        for l in listings {
+                            let status = l
+                                .status
+                                .as_deref()
+                                .map(|s| format!("  {s}"))
+                                .unwrap_or_default();
                             println!(
-                                "{}  exts=[{}]  license={}",
-                                p.name,
-                                p.extensions.join(", "),
-                                p.license.as_deref().unwrap_or("unspecified"),
+                                "{}  exts=[{}]  license={}{status}",
+                                l.name,
+                                l.extensions.join(", "),
+                                l.license.as_deref().unwrap_or("unspecified"),
                             );
                         }
                     }
