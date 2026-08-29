@@ -63,7 +63,7 @@ use wicked_estate_core::{
 use wicked_estate_extract::{
     BlazeBrlExtractor, CicsSqlExtractor, DrlExtractor, ExtraEdgeExtractor, HlasmExtractor,
     IaCExtractor, ImsExtractor, JclExtractor, MqExtractor, RacfExtractor, RegoRulesExtractor,
-    TfstateCollector,
+    SYMBOL_ID_SCHEME, TfstateCollector,
     treesitter::{TreeSitterExtractor, extractor_for_extension, is_minified_or_huge},
 };
 use wicked_estate_resolve::{
@@ -616,6 +616,32 @@ pub fn index_path_as(
     }
     store.meta_set_key(&digest_key, &extra_digest);
 
+    // Symbol-id scheme gate (ADR-002 amendment): rows minted under an older id scheme must be
+    // fully re-extracted or the graph silently mixes flat and type-nested ids behind unchanged
+    // digests. Fires on ANY previously-indexed repo — `previously_indexed` is label-scoped and is
+    // direct evidence of a prior index, unlike the version key, which pre-version DBs lack (they
+    // hold nodes + digests but no `indexed_version`; keying on it would skip exactly the stalest
+    // stores). Absent scheme key = scheme "1" (the implicit flat scheme).
+    //
+    // Deliberately UNLIKE the two gates above, the key is NOT written here: it is written only
+    // after the re-extraction completed (end of this fn, plus the gate-guarded no-change early
+    // return below). Writing at the check site would let a crash mid-run leave a DB stamped with
+    // the new scheme whose rows are still old — permanently mixed, because every later run skips
+    // the unchanged digests. Written last, a crash leaves the old key and the gate re-fires:
+    // idempotent.
+    let scheme_key = repo_scope::meta_key(repo, "id_scheme");
+    let prev_scheme = store.meta_get_key(&scheme_key);
+    let scheme_gate =
+        !previously_indexed.is_empty() && prev_scheme.as_deref() != Some(SYMBOL_ID_SCHEME);
+    if scheme_gate {
+        force_full = true;
+        eprintln!(
+            "SYMBOL-ID SCHEME changed (v{prev} → v{cur}): forcing full re-extraction",
+            prev = prev_scheme.as_deref().unwrap_or("1"),
+            cur = SYMBOL_ID_SCHEME,
+        );
+    }
+
     // W7: persist the git provenance collected above. A labelled run writes `repo:<label>:*` and
     // leaves the singular `repo_*` keys untouched — that is what stops the second repo indexed
     // into a graph from clobbering the first's commit/branch/remote/dirty.
@@ -771,6 +797,12 @@ pub fn index_path_as(
 
     // If nothing changed, skip all phases.
     if changed.is_empty() {
+        // Stamp the id scheme only when the gate did NOT fire this run: a fresh DB or an
+        // already-current one gets the key; a gate-fired run that found zero source files leaves
+        // the old key so the gate re-fires next time (idempotent, never falsely certified).
+        if !scheme_gate {
+            store.meta_set_key(&scheme_key, SYMBOL_ID_SCHEME);
+        }
         return store.stats();
     }
 
@@ -1047,6 +1079,11 @@ pub fn index_path_as(
     if let Err(e) = store.incremental_vacuum() {
         eprintln!("warning: incremental_vacuum failed (non-fatal): {e}");
     }
+
+    // The id-scheme key is written LAST — only after extraction + resolution durably completed —
+    // so an interrupted migration re-fires the scheme gate instead of certifying a mixed DB.
+    // (See the gate above for why this deliberately differs from the version/rules gates.)
+    store.meta_set_key(&scheme_key, SYMBOL_ID_SCHEME);
 
     let stats = store.stats()?;
     // Warn when the DB crosses 500 MB — a signal to run `compact`.

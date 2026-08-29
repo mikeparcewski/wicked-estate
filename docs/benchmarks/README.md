@@ -65,3 +65,15 @@ The engine always surfaces unresolved refs rather than silently under-reporting 
 contract, `docs/agent-behavior-rules.md` R7; the definition — one row per unresolved reference —
 is `docs/ENGINE-CONTRACT.md` §2.1).  A consuming agent sees the coverage percentage and
 can weight its confidence accordingly.
+
+## 2026-08 — symbol-id scheme 2 re-baseline note
+
+The node/edge/coverage numbers pinned in `capability-report.md` and `multi-repo-validation.md`
+predate the ADR-002 amendment (type-nested definition identity, symbol-id scheme 2). After the
+scheme change, previously-merged same-named members become distinct nodes (`method`/`function`
+counts rise where collisions existed), and `blast_radius_coverage_pct` is expected DOWN on
+collision-heavy repos: the 0.65 scoped-name edges into merged nodes were false precision
+(review finding D03-2), and the resolver now parks those refs as unresolved instead. That is a
+precision correction, not a regression — the verdict rule is the per-`resolved_by` breakdown
+(edges removed at the 0.65 scoped-name tier toward previously-merged nodes are corrections;
+every other tier's counts must hold). Re-run the bench binary to re-baseline.

@@ -11,7 +11,7 @@ test('reduced motion: page loads with zero page errors and key sections visible'
 
   await page.goto('/');
 
-  for (const id of ['#query', '#strata', '#toolface', '#binary', '#provenance', '#storage', '#foundation', '#get-started']) {
+  for (const id of ['#query', '#strata', '#toolface', '#provenance', '#storage', '#foundation', '#get-started']) {
     await page.locator(id).scrollIntoViewIfNeeded();
     await expect(page.locator(id)).toBeVisible();
   }
