@@ -72,7 +72,20 @@ A definition's descriptors are `[module/] ++ [T1#, T2#, …] ++ [name<suffix>]`,
 definition**, outer → inner. Computed by walking ALL containing definitions (strict containment,
 duplicates by `(start, end, name)` deduped) innermost → outermost, collecting Type descriptors,
 and **stopping at the first container that is not Type-suffixed** — Method, Function, and Term
-containers all truncate the chain. Worked strings:
+containers all truncate the chain.
+
+Anchor-artifact exception: a non-Type pending definition whose byte range EQUALS a Type-suffixed
+pending definition's range is the same syntactic node re-captured by a second query pattern (e.g.
+python.scm's ORM field patterns anchor `@code_field.def` at the WHOLE `class_definition`), not a
+real inner scope — such records are dropped from the container walk before truncation applies.
+Without the drop, the equal-range Term truncated the chain of every member of a nested ORM class
+(re-minting the collision this amendment removes) and left the flat two-model case correct only
+by uncontracted `QueryCursor::matches` order. Pinned by
+`identity_orm_equal_range_anchor_nested_models_do_not_collide`,
+`identity_orm_equal_range_anchor_keeps_full_type_chain`,
+`identity_orm_two_flat_models_save_deterministic`.
+
+Worked strings:
 
 | Definition | Scheme 1 (flat) | Scheme 2 |
 |---|---|---|
@@ -105,6 +118,14 @@ declared inside it.
   merges with the real `A.save()` (`identity_field_object_literal_residual`). Fix belongs in the
   query file (capture object-valued `public_field_definition` as a Term def) — extraction-gaps
   lane.
+- ORM fields anchored at the whole class (`python.scm` SQLAlchemy/Django patterns) mint a
+  wrong-owner id for the FIELD itself: the field record is range-equal to its class record, and a
+  range-equal container is indistinguishable from a duplicate capture of the def, so the class
+  can never enter the field's own chain. Nested `class A: class Model: t = CharField(…)` mints
+  `A#t.` (owner should be `A#Model#`); a top-level model's field stays module-flat, so two
+  same-named fields in two sibling models still collide
+  (`identity_field_orm_equal_range_residual`). Fix belongs in the query file (anchor
+  `@code_field.def` at the assignment node, not the `class_definition`) — extraction-gaps lane.
 - Overloads within one type still collapse: `disambiguator` stays `None` (pinned by
   `identity_disambiguator_is_none`).
 - Languages whose owner is not an enclosing definition anchor still collide: Rust `impl` blocks

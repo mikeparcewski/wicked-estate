@@ -642,6 +642,18 @@ Merge notes → **extraction-gaps lane** (query files; this lane does not edit `
   `class A { save(){} x = { save(){} } }` merges the field-literal `save` into `A#save().` — the
   truncation rule fixes it with zero Rust change the moment the capture exists; update
   `identity_field_object_literal_residual` when it lands.
+- `python.scm` (NEW, from MI-R1-1): the SQLAlchemy (`:51-62`) and Django (`:75-88`) ORM field
+  patterns anchor `@code_field.def` at the WHOLE `class_definition`, so the field record is
+  range-equal to its class record. The generic seam now drops such anchor artifacts from the
+  container walk (members of ORM classes nest correctly), but the FIELD's own id cannot take its
+  class as owner while the anchor stays there — nested `class A: class Model: t = CharField(…)`
+  mints `A#t.` (owner should be `A#Model#`), and top-level model fields stay module-flat (two
+  same-named fields in two sibling models collide). Move `@code_field.def` onto the
+  `(assignment)` (or `(expression_statement)`) node; when it lands, update
+  `identity_field_orm_equal_range_residual` to assert the real owners. Every other language's
+  field pattern anchors at the field's own node (`field_declaration`, `enum_member`,
+  `data_description`, `public_field_definition`, …) — verified by grep over all
+  `@code_field.def` anchors; python is the only equal-range case today.
 
 Merge notes → **resolver-precision lane**: after this lane, `by_name("save")` returns N nodes for
 N types in one file; `ScopedNameResolver` parks them. The `from` id now carries the enclosing
@@ -769,3 +781,52 @@ meta id_scheme → 2
 
 SCIP note for real DBs: the forced migration pass deletes SCIP-tier edges by file — re-run
 `wicked-estate scip <root>` after migrating (BR-5; stated in the ADR amendment + CHANGELOG).
+
+## 9. Round-1 fixer resolutions (2026-08-28, issues MI-R1-1 correctness + evidence)
+
+Both round-1 issues describe one defect and are **accepted**: python.scm's ORM field patterns
+(SQLAlchemy `queries/python.scm:51-62`, Django `:75-88`) anchor `@code_field.def` at the WHOLE
+`class_definition`, so the Term-suffixed field record is range-equal to the class record and
+(a) truncated the Type chain of every member of a nested ORM class — both nested `Model.save`s
+minted the SAME `…/Model#save().` id, the exact D03 collision re-introduced; (b) dropped nesting
+levels (`Model#save().` instead of `Outer#Model#save().`) while the class itself minted
+`Outer#Model#` — inconsistent hierarchy; (c) left the common flat two-model shape correct only
+via the stable sort's pending-order tie, which `QueryCursor::matches` does not contract.
+
+**Fix (generic seam, no `.scm` change):** `enclosing_chain` now drops, before truncation, any
+non-Type container whose exact `(start, end)` range is also occupied by a Type-suffixed container
+— an equal-range double-anchor is the same syntactic node captured by a second pattern, not a
+real inner scope (`treesitter.rs`, the `type_ranges` + `retain` block in `enclosing_chain`).
+Verified minted ids after the fix: nested two-outer shape → `A#Model#save().` / `B#Model#save().`
+(distinct, 2 ids); single-outer → `Outer#Model#save().` + `Outer#Model#`; flat Django+SQLAlchemy
+two-model → `Article#save().` / `Comment#save().` deterministically. Pinned as
+`identity_orm_equal_range_anchor_nested_models_do_not_collide`,
+`identity_orm_equal_range_anchor_keeps_full_type_chain`,
+`identity_orm_two_flat_models_save_deterministic`.
+
+**Residual (pinned + documented, not fixable at the generic seam):** the ORM field's OWN id —
+the class is range-equal to the field record itself, so it can never enter the field's chain
+(range-equality is also what excludes a def's duplicate captures). Nested `t` mints `A#t.`
+(wrong owner); top-level model fields stay module-flat, so same-named fields in sibling models
+collide. Pinned by `identity_field_orm_equal_range_residual`; added to the ADR-002 amendment's
+residual list; python.scm anchor move recorded as a §6 merge note to the extraction-gaps lane.
+
+**Fleet check (§11):** grep over every `@code_field.def` anchor in `queries/*.scm` — apex, cobol,
+csharp, d, java, pony, solidity, typescript all anchor at the field's own node; python's two ORM
+patterns are the only equal-range anchors today. The drop is generic and covers any future
+sibling.
+
+**No-movement falsifiers (fix affects only equal-range-anchor shapes):** rebuilt the AFTER
+binary post-fix and re-indexed into fresh DBs — `doc03-r1.db` vs `doc03-after.db`: 15 nodes,
+identical kind histogram, calls edges 2 = 2, falsifier 2 verbatim (`%#save().` → exactly
+Cache/Repo/Store, `%/save().` → exactly one flat residual), full symbol-set `diff` empty;
+`studio-r1.db` vs `studio-after.db` and `crew-r1.db` vs `crew-after.db`: full symbol-set
+`diff` empty (neither corpus contains a python ORM field shape — grep for
+`models\.\w+Field|mapped_column|= Column\(` over both repos: 0 files).
+
+**Gates at the fixed tree:** `cargo test -p wicked-estate-extract` — 359 lib (355 + 4 new
+identity tests) + all integration suites ok; `cargo test -p wicked-estate-resolve` — 61 unit /
+1 lsp_live / 4 scip_edges, unchanged; `cargo clippy -p wicked-estate-extract --all-targets --
+-D warnings` — 0 warnings; `cargo fmt -p wicked-estate-extract` applied.
+
+No `id_scheme` bump: scheme 2 has not shipped — the fix lands inside the same unreleased scheme.
