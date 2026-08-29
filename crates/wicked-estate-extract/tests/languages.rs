@@ -651,6 +651,73 @@ fn ruby_characterization() {
     assert_import_node(&ex, lang, "digest");
 }
 
+// ── Swift ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn swift_characterization() {
+    let lang = "swift";
+    let ex = TreeSitterExtractor::for_language(lang)
+        .unwrap()
+        .extract(&load_fixture("sample.swift", lang))
+        .expect("extraction must succeed");
+    assert_no_conflicting_def_ids(&ex, lang);
+
+    // type definitions
+    assert_def(&ex, lang, "Point", &NodeKind::Struct);
+    assert_def(&ex, lang, "Box", &NodeKind::Class);
+    assert_def(&ex, lang, "Container", &NodeKind::Class);
+    assert_def(&ex, lang, "Mode", &NodeKind::Enum);
+    // D04-3: properties — stored (`var x`), immutable (`let y`), computed
+    // (`var sum { … }`), static (`static let origin`), and enum computed (`label`)
+    assert_def(&ex, lang, "x", &NodeKind::Field);
+    assert_def(&ex, lang, "y", &NodeKind::Field);
+    assert_def(&ex, lang, "sum", &NodeKind::Field);
+    assert_def(&ex, lang, "origin", &NodeKind::Field);
+    assert_def(&ex, lang, "item", &NodeKind::Field);
+    assert_def(&ex, lang, "count", &NodeKind::Field);
+    assert_def(&ex, lang, "label", &NodeKind::Field);
+    // D04-3: init/deinit — the def anchor needs a name capture; the anonymous
+    // "init"/"deinit" tokens are the names
+    assert_def(&ex, lang, "init", &NodeKind::Method);
+    assert_def(&ex, lang, "deinit", &NodeKind::Method);
+    // functions (methods inside type bodies stay Function — kind upgrade belongs
+    // to enclosing-type identity, method-identity lane)
+    assert_def(&ex, lang, "moved", &NodeKind::Function);
+    assert_def(&ex, lang, "localScope", &NodeKind::Function);
+    // D5 negative: function-local `let hidden` must NOT emit a Field — the
+    // property patterns are scoped to class_body/enum_class_body
+    assert!(
+        !ex.nodes
+            .iter()
+            .any(|n| n.name == "hidden" && !matches!(n.kind, NodeKind::File)),
+        "[swift] function-local `let hidden` must not be captured; got: {:?}",
+        ex.nodes
+            .iter()
+            .filter(|n| n.name == "hidden")
+            .map(|n| format!("{:?}", n.kind))
+            .collect::<Vec<_>>()
+    );
+    assert_def_floor(&ex, lang, 15);
+
+    // D04-9: the `extends` cap is now real — `class Container: Box` emits an
+    // Extends ref (superclass/protocol conflation is a documented approximation)
+    assert!(
+        ex.refs
+            .iter()
+            .any(|r| r.raw_name == "Box" && r.kind == EdgeKind::Extends),
+        "[swift] expected Extends ref -> Box; actual extends refs: {:?}",
+        ex.refs
+            .iter()
+            .filter(|r| r.kind == EdgeKind::Extends)
+            .map(|r| r.raw_name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    // imports
+    assert_import(&ex, lang, "Foundation");
+    assert_import_node(&ex, lang, "Foundation");
+}
+
 // ── Bash ──────────────────────────────────────────────────────────────────────
 
 #[test]
