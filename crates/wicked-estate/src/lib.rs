@@ -938,6 +938,7 @@ pub fn index_path_as(
         // Scoped to this repo: a labelled run resolves against its own nodes only, so a name that
         // is unique inside the repo stays unique no matter how many repos share the graph.
         let index = InMemoryIndex::build(reader, scope.as_deref())?;
+        // Activation table: docs/ENGINE-CONTRACT.md §3.1 — guarded by tests::slice_matches_engine_contract_table.
         // InfraResolver handles IaC/tfstate resource refs; it does not interfere with code
         // resolvers (it only fires when raw_name maps exclusively to resource nodes).
         let resolvers: &[&dyn Resolver] = &[
@@ -2635,5 +2636,79 @@ mod tests {
             Some("hash:v1")
         );
         assert_eq!(store.meta_get_key("embedder_dim").as_deref(), Some("128"));
+    }
+
+    // ── D10: activation-table drift guard ────────────────────────────────────
+
+    /// The production resolver slice and ENGINE-CONTRACT §3.1's "yes (slice)" rows must be the
+    /// same set. The slice literal is found by its anchor comment (built at runtime so this
+    /// test's own source never matches); the doc is read via CARGO_MANIFEST_DIR (repo precedent:
+    /// wicked-estate-knowledge/src/lib.rs, wicked-estate-mcp/tests/conformance_schemas.rs).
+    /// When a lane adds a resolver to the slice, this test fails until the doc gains its row —
+    /// that is the intended behaviour.
+    #[test]
+    fn slice_matches_engine_contract_table() {
+        let src = include_str!("lib.rs");
+        // Runtime-built anchor so the anchor comment matches exactly once in this file.
+        let anchor = format!("{} Activation table: docs/ENGINE-CONTRACT.md §3.1", "//");
+        let matches: Vec<usize> = src.match_indices(&anchor).map(|(i, _)| i).collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "the anchor comment must appear exactly once (found {})",
+            matches.len()
+        );
+
+        // Parse the ONE slice literal immediately following the anchor comment.
+        let after = &src[matches[0]..];
+        let open = after
+            .find("= &[")
+            .expect("slice literal must follow the anchor comment");
+        let body_start = matches[0] + open + 4;
+        let body_end = body_start
+            + src[body_start..]
+                .find("];")
+                .expect("slice literal must close");
+        let body = &src[body_start..body_end];
+        let slice_ids: std::collections::BTreeSet<String> = body
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(|t| {
+                let name = t.trim_start_matches('&');
+                // Map struct name → resolver id via the real instances (no string duplication).
+                let id: &str = match name {
+                    "NameResolver" => NameResolver.id(),
+                    "ScopedNameResolver" => ScopedNameResolver.id(),
+                    "ImportMapResolver" => ImportMapResolver.id(),
+                    "InfraResolver" => InfraResolver.id(),
+                    "RulesBridgeResolver" => RulesBridgeResolver.id(),
+                    other => panic!(
+                        "unknown resolver `{other}` in the slice — add its arm here AND its row to \
+                         docs/ENGINE-CONTRACT.md §3.1"
+                    ),
+                };
+                id.to_string()
+            })
+            .collect();
+
+        let doc = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/ENGINE-CONTRACT.md"
+        ))
+        .expect("docs/ENGINE-CONTRACT.md must be readable from the crate dir");
+        let doc_ids: std::collections::BTreeSet<String> = doc
+            .lines()
+            .filter(|l| l.starts_with('|') && l.contains("yes (slice)"))
+            .map(|l| {
+                let first_cell = l.trim_start_matches('|').split('|').next().unwrap().trim();
+                first_cell.trim_matches('`').to_string()
+            })
+            .collect();
+
+        assert_eq!(
+            slice_ids, doc_ids,
+            "the index_path resolver slice and ENGINE-CONTRACT §3.1's `yes (slice)` rows drifted apart"
+        );
     }
 }
