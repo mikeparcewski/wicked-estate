@@ -25,27 +25,25 @@ percentage signals incomplete resolution, not fewer callers.
 
 | Repo | Index (ms) | Files | Nodes | Edges | Unresolved | Footprint (bytes) | bytes/node | Search (µs) | Blast-radius (µs) | BR coverage% | Who-calls | Context chars | Est. tokens |
 |------|-----------|-------|-------|-------|-----------|------------------|-----------|------------|------------------|-------------|----------|--------------|------------|
-| wicked-studio | 2398 | 479 | 4671 | 9229 | 34083 | 15708160 | 3363 | 27 | 7192 | 100.0 | 171 | 1866 | 466 |
-| wicked-crew | 1500 | 213 | 2933 | 5392 | 16322 | 10153984 | 3462 | 27 | 4986 | 100.0 | 107 | 1740 | 435 |
-
-> **Corpus change (2026-08-28):** three of the four previous rows were external "prior art" repos not present in this workspace; this report is regenerated on wicked-studio + wicked-crew under the per-reference unresolved definition (`docs/ENGINE-CONTRACT.md` §2.1). Rows are not comparable to the previous report.
+| wicked-studio | 1279 | 479 | 4707 | 10375 | 34097 | 16371712 | 3478 | 12 | 1699 | 100.0 | 171 | 1965 | 491 |
+| wicked-crew | 1451 | 214 | 2982 | 5831 | 16786 | 10604544 | 3556 | 10 | 2098 | 100.0 | 155 | 1856 | 464 |
 
 ## Per-repo receipts
 
 ### wicked-studio
 
 **Path:** `/Users/michael.parcewski/Projects/wicked/wicked-studio`  
-**Index time:** 2398ms  
-**Edge coverage:** 21.3%  
-**Footprint:** 15708160 bytes  (3363 bytes/node)  
+**Index time:** 1279ms  
+**Edge coverage:** 23.3%  
+**Footprint:** 16371712 bytes  (3478 bytes/node)  
 
 **Nodes by language:**
 
 | Language | Nodes |
 |----------|-------|
-| `tsx` | 2232 |
-| `typescript` | 1184 |
-| `python` | 909 |
+| `tsx` | 2254 |
+| `typescript` | 1196 |
+| `python` | 911 |
 | `css` | 251 |
 | `json` | 40 |
 | `javascript` | 24 |
@@ -57,10 +55,10 @@ percentage signals incomplete resolution, not fewer callers.
 - `"class"`: 20
 - `"constant"`: 1408
 - `"file"`: 479
-- `"function"`: 1573
-- `"import"`: 483
+- `"function"`: 1575
+- `"import"`: 511
 - `"interface"`: 266
-- `"method"`: 20
+- `"method"`: 26
 - `"module"`: 10
 - `"struct"`: 35
 - `"type_alias"`: 328
@@ -70,9 +68,9 @@ percentage signals incomplete resolution, not fewer callers.
 
 | Edge kind | Count |
 |-----------|-------|
-| `"contains"` | 3709 |
-| `"calls"` | 3258 |
-| `"imports"` | 2259 |
+| `"contains"` | 3717 |
+| `"imports"` | 3701 |
+| `"calls"` | 2954 |
 | `"extends"` | 3 |
 
 **Capability receipts for top symbol `render`:**
@@ -81,11 +79,11 @@ percentage signals incomplete resolution, not fewer callers.
 |--------|-------|----------------|
 | who-calls count | 171 | Precise blast-radius: these nodes depend on `render` |
 | blast-radius coverage | 100.0% | Fraction of callers the resolver bound (lower → incomplete resolution) |
-| context-pack chars | 1866 | Agent receives 1866 chars of scoped context |
-| context-pack est. tokens | ~466 | Estimated LLM token cost for one context retrieval |
+| context-pack chars | 1965 | Agent receives 1965 chars of scoped context |
+| context-pack est. tokens | ~491 | Estimated LLM token cost for one context retrieval |
 | context-pack symbols | 15 | Symbols ranked into the pack |
-| search latency | 27µs | Time to locate symbol by name |
-| blast-radius latency | 7192µs | Time for depth-3 dependent traversal |
+| search latency | 12µs | Time to locate symbol by name |
+| blast-radius latency | 1699µs | Time for depth-3 dependent traversal |
 
 **Resolution precision (by tier) — W3.5:**
 
@@ -95,25 +93,26 @@ percentage signals incomplete resolution, not fewer callers.
 
 | Resolver | Edges | Mean conf | exact (=1.0) | high [0.8,1.0) | medium [0.5,0.8) | low [0.0,0.5) |
 |----------|-------|-----------|-------------|----------------|-----------------|--------------|
-| `tree-sitter` | 5968 | 1.000 | 5968 | 0 | 0 | 0 |
-| `scoped-name-resolver` | 1838 | 0.638 | 0 | 0 | 1838 | 0 |
-| `name-resolver` | 1245 | 0.600 | 0 | 0 | 1245 | 0 |
+| `tree-sitter` | 6056 | 1.000 | 6056 | 0 | 0 | 0 |
+| `scoped-name-resolver` | 1825 | 0.639 | 0 | 0 | 1825 | 0 |
+| `relative-import` | 1362 | 0.900 | 0 | 1362 | 0 | 0 |
+| `name-resolver` | 954 | 0.600 | 0 | 0 | 954 | 0 |
 | `import-map-resolver` | 178 | 0.630 | 0 | 0 | 178 | 0 |
 
 ### wicked-crew
 
 **Path:** `/Users/michael.parcewski/Projects/wicked/wicked-crew`  
-**Index time:** 1500ms  
-**Edge coverage:** 24.8%  
-**Footprint:** 10153984 bytes  (3462 bytes/node)  
+**Index time:** 1451ms  
+**Edge coverage:** 25.8%  
+**Footprint:** 10604544 bytes  (3556 bytes/node)  
 
 **Nodes by language:**
 
 | Language | Nodes |
 |----------|-------|
-| `typescript` | 1838 |
+| `typescript` | 1884 |
 | `css` | 467 |
-| `javascript` | 304 |
+| `javascript` | 307 |
 | `json` | 93 |
 | `bash` | 84 |
 | `markdown` | 83 |
@@ -122,37 +121,37 @@ percentage signals incomplete resolution, not fewer callers.
 **Nodes by kind:**
 
 - `"class"`: 28
-- `"constant"`: 491
-- `"file"`: 213
-- `"function"`: 728
-- `"import"`: 183
-- `"interface"`: 233
-- `"method"`: 183
+- `"constant"`: 498
+- `"file"`: 214
+- `"function"`: 743
+- `"import"`: 188
+- `"interface"`: 238
+- `"method"`: 197
 - `"module"`: 74
 - `"struct"`: 79
 - `"type_alias"`: 500
-- `"variable"`: 221
+- `"variable"`: 223
 
 **Edges by kind:**
 
 | Edge kind | Count |
 |-----------|-------|
-| `"contains"` | 2537 |
-| `"calls"` | 1826 |
-| `"imports"` | 1020 |
+| `"contains"` | 2580 |
+| `"calls"` | 1758 |
+| `"imports"` | 1484 |
 | `"extends"` | 9 |
 
-**Capability receipts for top symbol `json`:**
+**Capability receipts for top symbol `call`:**
 
 | Metric | Value | What it proves |
 |--------|-------|----------------|
-| who-calls count | 107 | Precise blast-radius: these nodes depend on `json` |
+| who-calls count | 155 | Precise blast-radius: these nodes depend on `call` |
 | blast-radius coverage | 100.0% | Fraction of callers the resolver bound (lower → incomplete resolution) |
-| context-pack chars | 1740 | Agent receives 1740 chars of scoped context |
-| context-pack est. tokens | ~435 | Estimated LLM token cost for one context retrieval |
+| context-pack chars | 1856 | Agent receives 1856 chars of scoped context |
+| context-pack est. tokens | ~464 | Estimated LLM token cost for one context retrieval |
 | context-pack symbols | 15 | Symbols ranked into the pack |
-| search latency | 27µs | Time to locate symbol by name |
-| blast-radius latency | 4986µs | Time for depth-3 dependent traversal |
+| search latency | 10µs | Time to locate symbol by name |
+| blast-radius latency | 2098µs | Time for depth-3 dependent traversal |
 
 **Resolution precision (by tier) — W3.5:**
 
@@ -162,9 +161,10 @@ percentage signals incomplete resolution, not fewer callers.
 
 | Resolver | Edges | Mean conf | exact (=1.0) | high [0.8,1.0) | medium [0.5,0.8) | low [0.0,0.5) |
 |----------|-------|-----------|-------------|----------------|-----------------|--------------|
-| `tree-sitter` | 3557 | 1.000 | 3557 | 0 | 0 | 0 |
-| `scoped-name-resolver` | 1100 | 0.643 | 0 | 0 | 1100 | 0 |
-| `name-resolver` | 726 | 0.600 | 0 | 0 | 726 | 0 |
+| `tree-sitter` | 3631 | 1.000 | 3631 | 0 | 0 | 0 |
+| `scoped-name-resolver` | 1101 | 0.644 | 0 | 0 | 1101 | 0 |
+| `name-resolver` | 657 | 0.600 | 0 | 0 | 657 | 0 |
+| `relative-import` | 433 | 0.900 | 0 | 433 | 0 | 0 |
 | `import-map-resolver` | 9 | 0.630 | 0 | 0 | 9 | 0 |
 
 ## Regression ceilings
