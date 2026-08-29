@@ -807,28 +807,41 @@ impl RetrievalTool for BlastRadius {
 
         // Resolve the symbol's simple name (for unresolved-ref lookup).  If the symbol is in
         // the graph, use its recorded name; otherwise fall back to the last segment of the id.
-        let symbol_name: String = store
-            .get_node(&start)?
-            .map(|n| n.name.clone())
-            .unwrap_or_else(|| {
-                // Best-effort: strip package prefix and use the last "."-delimited segment.
-                id_str
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or(id_str.as_str())
-                    .to_string()
-            });
+        let start_node = store.get_node(&start)?;
+        let symbol_name: String =
+            start_node
+                .as_ref()
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|| {
+                    // Best-effort: strip package prefix and use the last "."-delimited segment.
+                    id_str
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or(id_str.as_str())
+                        .to_string()
+                });
 
         // Unresolved-ref coverage: calls/imports to `symbol_name` the resolver could not bind.
         let unresolved_callers = store.unresolved_refs_for_name(&symbol_name)?.len();
 
-        // Dependent nodes (start excluded), kept as a Vec<&Node> so we can both render them and
-        // compute the summary without a second pass over the subgraph.
-        let dependent_nodes: Vec<&wicked_estate_core::Node> = subgraph
+        // Dependent nodes (start excluded), classified through the contains-aware transit rule
+        // (Subgraph::code_dependents): a symbol start keeps only Files that Contain a reached
+        // non-File node (exact pre-File→File-edge parity); a File start keeps every importer.
+        let dependent_nodes: Vec<&wicked_estate_core::Node> =
+            subgraph.code_dependents(&start, start_node.as_ref().map(|n| &n.kind));
+        // Files cut by the rule (import transit) — surfaced loudly, never silently (R7/R3).
+        let reached_minus_start = subgraph
             .nodes
             .iter()
             .filter(|n| n.symbol.as_str() != id_str)
-            .collect();
+            .count();
+        let transit_files_cut = reached_minus_start.saturating_sub(dependent_nodes.len());
+        if transit_files_cut > 0 {
+            diag.push(format!(
+                "blast-radius: {transit_files_cut} importing file(s) excluded from dependents \
+                 (File transit; a file-node start returns them)"
+            ));
+        }
 
         let dependents: Vec<Value> = dependent_nodes
             .iter()
@@ -868,8 +881,6 @@ impl RetrievalTool for BlastRadius {
             "edge_count": edge_count,
         });
 
-        let total = dependents.len();
-
         if dependents.is_empty() {
             diag.push(format!(
                 "BlastRadius: no dependents found for '{id_str}' (it may be a leaf or not yet indexed)"
@@ -880,6 +891,29 @@ impl RetrievalTool for BlastRadius {
                 "BlastRadius: result truncated at depth={max_depth} / max_nodes=5000"
             ));
         }
+
+        // R4 (DoD-A8) — a File-node start returns every transitive importer at depth 8, so the
+        // dependents array can blow the 25K-char budget on a wide graph. Cap it like Lineage
+        // does, with a loud truncation diagnostic. The summary/confidence envelope is measured,
+        // not guessed, so the cap accounts for the real payload.
+        let envelope_overhead = 400
+            + serde_json::to_string(&summary)
+                .map(|s| s.len())
+                .unwrap_or(0)
+            + serde_json::to_string(&conf_json)
+                .map(|s| s.len())
+                .unwrap_or(0);
+        let (dependents, dropped) = cap_rows_to_budget(dependents, envelope_overhead);
+        if dropped > 0 {
+            diag.push(format!(
+                "BlastRadius: result truncated to {} dependent(s) to stay under the \
+                 {}-char R4 budget ({} dropped); lower `depth`",
+                dependents.len(),
+                R4_CHAR_BUDGET,
+                dropped
+            ));
+        }
+        let total = dependents.len();
 
         // Coverage note — always emitted (even when unresolved_callers == 0) so callers always
         // know the completeness posture of the result.
@@ -894,7 +928,7 @@ impl RetrievalTool for BlastRadius {
             content: json!({
                 "dependents": dependents,
                 "total": total,
-                "truncated": subgraph.truncated,
+                "truncated": subgraph.truncated || dropped > 0,
                 "unresolved_callers": unresolved_callers,
                 "confidence": conf_json,
                 "summary": summary,
@@ -1644,10 +1678,18 @@ pub fn render_context(
 
     // Append any candidates not yet in the ranked list (they scored below the cap).
     // Seeds are guaranteed to appear in the ranked list because of their high teleport weight,
-    // but neighbourhood nodes may not be.
+    // but neighbourhood nodes may not be. File/Import nodes gathered by the Both-direction
+    // traversal are filtered here (BR-3, lane relative-imports): once File→File import edges
+    // exist, every importer/imported File of a seed's file lands in the candidate set and
+    // would pad the pack tail with path stubs instead of code.
     let ranked_set: HashSet<SymbolId> = ordered.iter().cloned().collect();
     for id in &candidate_ids {
         if !ranked_set.contains(id) {
+            if let Some(n) = store.get_node(id)? {
+                if matches!(n.kind, NodeKind::File | NodeKind::Import) {
+                    continue;
+                }
+            }
             ordered.push(id.clone());
         }
     }
@@ -4837,6 +4879,206 @@ mod tests {
         assert!(
             !res.diagnostics.iter().any(|d| d.contains("R4 budget")),
             "no R4 truncation diag on a narrow graph; got {:?}",
+            res.diagnostics
+        );
+    }
+
+    // ── Lane relative-imports S4: contains-aware File transit rule + File-start R4 bound ──
+
+    fn make_edge(src: &str, tgt: &str, kind: EdgeKind) -> Edge {
+        Edge::new(
+            SymbolId(src.to_string()),
+            SymbolId(tgt.to_string()),
+            kind,
+            ResolutionTier::Parsed,
+            "test-fixture",
+        )
+    }
+
+    /// FileA{g} calls FileB{f}. The dependent SET of `f` must be identical with and without
+    /// the A→B Imports edge (and the A→ImportNode edge): {g, FileB, FileA} — exact
+    /// pre-File→File-edge parity including the caller-container File (FEAS-1). File-row depths
+    /// are deliberately NOT asserted (an import edge may shorten a File's min-depth), and the
+    /// confidence block is deliberately NOT asserted equal (transit edges enter the stats by
+    /// design, BR-4).
+    #[test]
+    fn blast_radius_unchanged_when_only_import_edges_added() {
+        let build = |with_import_edges: bool| -> MemStore {
+            let mut store = MemStore::new();
+            store.begin_batch().unwrap();
+            store
+                .upsert_nodes(&[
+                    make_node("f", "f_fn", NodeKind::Function, "b.ts", 1),
+                    make_node("g", "g_fn", NodeKind::Function, "a.ts", 1),
+                    make_node("file:a.ts", "a.ts", NodeKind::File, "a.ts", 0),
+                    make_node("file:b.ts", "b.ts", NodeKind::File, "b.ts", 0),
+                    make_node("import:./b", "./b", NodeKind::Import, "a.ts", 1),
+                ])
+                .unwrap();
+            let mut edges = vec![
+                make_edge("g", "f", EdgeKind::Calls),
+                make_edge("file:b.ts", "f", EdgeKind::Contains),
+                make_edge("file:a.ts", "g", EdgeKind::Contains),
+                make_edge("file:a.ts", "import:./b", EdgeKind::Imports),
+            ];
+            if with_import_edges {
+                edges.push(make_edge("file:a.ts", "file:b.ts", EdgeKind::Imports));
+            }
+            store.upsert_edges(&edges).unwrap();
+            store.commit_batch().unwrap();
+            store
+        };
+
+        let dependents_of_f = |store: &MemStore| -> std::collections::BTreeSet<String> {
+            let res = BlastRadius
+                .invoke(store, &json!({ "symbol": "f" }))
+                .unwrap();
+            res.content["dependents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| d["symbol"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        let without = dependents_of_f(&build(false));
+        let with = dependents_of_f(&build(true));
+        let expected: std::collections::BTreeSet<String> = ["g", "file:a.ts", "file:b.ts"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            without, expected,
+            "HEAD shape: caller + both containing files"
+        );
+        assert_eq!(
+            with, without,
+            "adding ONLY import edges must not change a symbol's dependent set"
+        );
+    }
+
+    /// A transit importer file (reachable only through File→File Imports) is cut from a symbol
+    /// start's dependents, with the loud diagnostic present.
+    #[test]
+    fn blast_radius_symbol_start_cuts_transit_files_with_diagnostic() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node("f", "f_fn", NodeKind::Function, "b.ts", 1),
+                make_node("file:b.ts", "b.ts", NodeKind::File, "b.ts", 0),
+                make_node("file:t.ts", "t.ts", NodeKind::File, "t.ts", 0),
+            ])
+            .unwrap();
+        store
+            .upsert_edges(&[
+                make_edge("file:b.ts", "f", EdgeKind::Contains),
+                make_edge("file:t.ts", "file:b.ts", EdgeKind::Imports),
+            ])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        let res = BlastRadius
+            .invoke(&store, &json!({ "symbol": "f" }))
+            .unwrap();
+        let ids: Vec<&str> = res.content["dependents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["symbol"].as_str().unwrap())
+            .collect();
+        assert!(
+            ids.contains(&"file:b.ts"),
+            "own containing file kept: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"file:t.ts"),
+            "import-transit file must be cut: {ids:?}"
+        );
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("File transit")),
+            "the cut must be loud (R7/R3): {:?}",
+            res.diagnostics
+        );
+    }
+
+    /// A File start returns its importing files — that is the feature (garden's file-path
+    /// blast-radius; review engine defect #8 turns from inert to working).
+    #[test]
+    fn blast_radius_of_a_file_lists_importing_files() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node("file:b.ts", "b.ts", NodeKind::File, "b.ts", 0),
+                make_node("file:a.ts", "a.ts", NodeKind::File, "a.ts", 0),
+                make_node("file:t.ts", "t.ts", NodeKind::File, "t.ts", 0),
+            ])
+            .unwrap();
+        store
+            .upsert_edges(&[
+                make_edge("file:a.ts", "file:b.ts", EdgeKind::Imports),
+                make_edge("file:t.ts", "file:a.ts", EdgeKind::Imports),
+            ])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        let res = BlastRadius
+            .invoke(&store, &json!({ "symbol": "file:b.ts" }))
+            .unwrap();
+        let ids: Vec<&str> = res.content["dependents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["symbol"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"file:a.ts"), "direct importer: {ids:?}");
+        assert!(ids.contains(&"file:t.ts"), "transitive importer: {ids:?}");
+    }
+
+    /// R4 ceiling on the lane's own feature: a File start with wide importer fan-in stays
+    /// under 25K chars with the truncation diagnostic present (mirrors DoD-A8, BR-2).
+    #[test]
+    fn blast_radius_file_start_output_capped_under_r4() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        let n = 400usize;
+        let mut nodes: Vec<Node> = (0..n)
+            .map(|i| {
+                let file = format!("src/very/deeply/nested/module/path/importer_{i:05}.ts");
+                make_node(&format!("file:{file}"), &file, NodeKind::File, &file, 0)
+            })
+            .collect();
+        nodes.push(make_node(
+            "file:hub.ts",
+            "hub.ts",
+            NodeKind::File,
+            "hub.ts",
+            0,
+        ));
+        store.upsert_nodes(&nodes).unwrap();
+        let edges: Vec<Edge> = (0..n)
+            .map(|i| {
+                let file = format!("src/very/deeply/nested/module/path/importer_{i:05}.ts");
+                make_edge(&format!("file:{file}"), "file:hub.ts", EdgeKind::Imports)
+            })
+            .collect();
+        store.upsert_edges(&edges).unwrap();
+        store.commit_batch().unwrap();
+
+        let res = BlastRadius
+            .invoke(&store, &json!({ "symbol": "file:hub.ts" }))
+            .unwrap();
+        let payload = serde_json::to_string(&res.content).unwrap();
+        assert!(
+            payload.len() < R4_CHAR_BUDGET,
+            "File-start BlastRadius payload must be < {R4_CHAR_BUDGET} chars, got {}",
+            payload.len()
+        );
+        assert_eq!(res.content["truncated"], json!(true));
+        assert!(
+            res.diagnostics.iter().any(|d| d.contains("R4 budget")),
+            "loud truncation diagnostic required: {:?}",
             res.diagnostics
         );
     }

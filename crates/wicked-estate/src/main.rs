@@ -1323,24 +1323,16 @@ fn main() -> Result<()> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos() as u64;
+            // Bound the row count so the payload stays parseable by machine consumers: crew
+            // reads this via execCapped, where an oversized payload is TRUNCATED mid-document
+            // and JSON.parse throws. 25K chars (the R4 budget) with an ADDITIVE
+            // `truncated_dependents` count — crew reads only `dependents`/`unresolved`.
+            let (kept, dropped) = cap_blast_radius_rows(&deps);
             if json_out {
                 // Machine consumers (wicked-crew studio) get the same honesty contract as the
                 // text path: dependents PLUS the unresolved count — absence of dependents must
                 // never silently read as "safe to change".
-                let out = serde_json::json!({
-                    "target": name,
-                    "dependents": deps
-                        .iter()
-                        .map(|n| serde_json::json!({
-                            "id": n.symbol.as_str(),
-                            "name": n.name,
-                            "kind": &n.kind,
-                            "file": n.location.file,
-                            "line": n.location.span.start_line + 1,
-                        }))
-                        .collect::<Vec<_>>(),
-                    "unresolved": unresolved,
-                });
+                let out = blast_radius_json(name, &deps[..kept], dropped, unresolved);
                 println!(
                     "{}",
                     serde_json::to_string(&out).map_err(|e| anyhow::anyhow!(e))?
@@ -1349,8 +1341,11 @@ fn main() -> Result<()> {
                 println!("no resolved dependents for '{name}' (symbol may not be indexed)");
             } else {
                 println!("{} symbol(s) depend on '{name}':", deps.len());
-                for n in &deps {
+                for n in deps.iter().take(kept) {
                     println!("  {:?} {} ({})", n.kind, n.name, loc(n));
+                }
+                if dropped > 0 {
+                    println!("  …and {dropped} more (output bounded at 25K chars)");
                 }
             }
             // Honest coverage — never let the absence of dependents read as "safe to change".
@@ -3602,6 +3597,115 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Serialized-size bound for the CLI blast-radius output (mirrors the retrieval tools'
+/// R4 budget). crew parses the `--json` document from `execCapped` stdout, where an oversized
+/// payload is cut mid-document and `JSON.parse` throws — bounding it here fixes that.
+const BLAST_RADIUS_CHAR_BUDGET: usize = 25_000;
+
+/// One serialized dependent row for the blast-radius `--json` output.
+fn blast_radius_row(n: &wicked_estate_core::Node) -> serde_json::Value {
+    serde_json::json!({
+        "id": n.symbol.as_str(),
+        "name": n.name,
+        "kind": &n.kind,
+        "file": n.location.file,
+        "line": n.location.span.start_line + 1,
+    })
+}
+
+/// Largest dependents prefix whose serialized rows fit the char budget. Returns
+/// `(kept, dropped)`. Binary search on prefix length — O(log n · serialize).
+fn cap_blast_radius_rows(deps: &[wicked_estate_core::Node]) -> (usize, usize) {
+    let fits = |k: usize| -> bool {
+        let rows: Vec<serde_json::Value> = deps[..k].iter().map(blast_radius_row).collect();
+        serde_json::to_string(&rows).is_ok_and(|s| s.len() <= BLAST_RADIUS_CHAR_BUDGET - 200)
+    };
+    if fits(deps.len()) {
+        return (deps.len(), 0);
+    }
+    let (mut lo, mut hi) = (0usize, deps.len());
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    (lo, deps.len() - lo)
+}
+
+/// The blast-radius `--json` document. `truncated_dependents` is ADDITIVE — existing consumers
+/// (crew `projects/graph.ts`) read only `dependents` and `unresolved`.
+fn blast_radius_json(
+    name: &str,
+    kept: &[wicked_estate_core::Node],
+    dropped: usize,
+    unresolved: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "target": name,
+        "dependents": kept.iter().map(blast_radius_row).collect::<Vec<_>>(),
+        "unresolved": unresolved,
+        "truncated_dependents": dropped,
+    })
+}
+
+#[cfg(test)]
+mod blast_radius_json_tests {
+    use super::{BLAST_RADIUS_CHAR_BUDGET, blast_radius_json, cap_blast_radius_rows};
+    use wicked_estate_core::{Language, Location, Node, NodeKind, Span, SymbolId};
+
+    fn wide_node(i: usize) -> Node {
+        Node::new(
+            SymbolId(format!(
+                "crate::very::deeply::nested::module::path::number::{i:05}::long_symbol_{i:05}"
+            )),
+            NodeKind::Function,
+            format!("a_long_descriptive_function_name_number_{i:05}"),
+            Language::new("rust"),
+            Location::new(
+                format!("src/very/deeply/nested/module/path/file_{i:05}.rs"),
+                Span::ZERO,
+            ),
+        )
+    }
+
+    /// The JSON document stays parseable under the bound, reports the cut ADDITIVELY
+    /// (`truncated_dependents`), and keeps the keys crew reads (`dependents`, `unresolved`).
+    #[test]
+    fn json_output_is_bounded_and_truncation_is_additive() {
+        let deps: Vec<Node> = (0..2000).map(wide_node).collect();
+        let (kept, dropped) = cap_blast_radius_rows(&deps);
+        assert!(dropped > 0, "2000 wide rows must exceed the budget");
+        assert_eq!(kept + dropped, deps.len());
+        let out = blast_radius_json("core_fn", &deps[..kept], dropped, 3);
+        let s = serde_json::to_string(&out).unwrap();
+        assert!(
+            s.len() <= BLAST_RADIUS_CHAR_BUDGET,
+            "payload {} > {BLAST_RADIUS_CHAR_BUDGET}",
+            s.len()
+        );
+        // The pre-existing contract keys crew parses are intact…
+        assert!(out["dependents"].is_array());
+        assert_eq!(out["unresolved"], serde_json::json!(3));
+        assert_eq!(out["target"], serde_json::json!("core_fn"));
+        // …and the new key is additive.
+        assert_eq!(out["truncated_dependents"], serde_json::json!(dropped));
+    }
+
+    /// A small result is untouched: every row kept, `truncated_dependents: 0`.
+    #[test]
+    fn small_result_is_not_capped() {
+        let deps: Vec<Node> = (0..3).map(wide_node).collect();
+        let (kept, dropped) = cap_blast_radius_rows(&deps);
+        assert_eq!((kept, dropped), (3, 0));
+        let out = blast_radius_json("f", &deps, 0, 0);
+        assert_eq!(out["dependents"].as_array().unwrap().len(), 3);
+        assert_eq!(out["truncated_dependents"], serde_json::json!(0));
+    }
 }
 
 #[cfg(test)]

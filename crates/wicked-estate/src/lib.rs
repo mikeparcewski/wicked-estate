@@ -1105,14 +1105,18 @@ pub fn search(store: &dyn GraphRead, name: &str) -> Result<Vec<Node>> {
 }
 
 /// Blast radius: transitive dependents (callers) of every symbol named `name`, up to `depth`.
+///
+/// The traversal walks ALL edge kinds (the locked decision); the RESULT is classified through
+/// `Subgraph::code_dependents` so import-transit File nodes never surface as dependents of a
+/// symbol, while a File start keeps its importers (lane relative-imports Decision G).
 pub fn blast_radius_by_name(store: &dyn GraphRead, name: &str, depth: u32) -> Result<Vec<Node>> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for sym in search(store, name)? {
         let sub = store.traverse(&sym.symbol, &TraversalSpec::blast_radius(depth))?;
-        for n in sub.nodes {
-            if n.symbol != sym.symbol && seen.insert(n.symbol.clone()) {
-                out.push(n);
+        for n in sub.code_dependents(&sym.symbol, Some(&sym.kind)) {
+            if seen.insert(n.symbol.clone()) {
+                out.push(n.clone());
             }
         }
     }
