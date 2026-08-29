@@ -9,7 +9,7 @@ mainframe/IaC estate layer.
 The plugin launches the `wicked-estate-mcp` binary — install it and build a graph first:
 
 ```sh
-cargo install wicked-estate                            # provides wicked-estate + wicked-estate-mcp on PATH
+cargo install wicked-estate wicked-estate-mcp         # two crates: the CLI + the MCP server binary
 wicked-estate index . --db .wicked-estate/graph.db     # one-time (or `wicked-estate watch .` to keep it fresh)
 ```
 

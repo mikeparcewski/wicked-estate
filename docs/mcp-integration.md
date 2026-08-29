@@ -12,7 +12,7 @@ copy-paste recipes for **Claude Code, Cursor, Antigravity, and Codex**.
 ## Prerequisites (once)
 
 ```sh
-cargo install wicked-estate              # puts wicked-estate + wicked-estate-mcp on PATH
+cargo install wicked-estate wicked-estate-mcp   # two crates — the CLI + the MCP server
 wicked-estate index /path/to/repo --db /path/to/repo/.wicked-estate/graph.db
 ```
 
@@ -68,7 +68,7 @@ claude mcp list          # verify
 ```
 
 The plugin lives in `plugins/wicked-estate/` (manifest + a `.mcp.json` pointing at
-`${CLAUDE_PROJECT_DIR}/.wicked-estate/graph.db`). Prereq either way: `cargo install wicked-estate`.
+`${CLAUDE_PROJECT_DIR}/.wicked-estate/graph.db`). Prereq either way: `cargo install wicked-estate wicked-estate-mcp`.
 
 ## Cursor
 
