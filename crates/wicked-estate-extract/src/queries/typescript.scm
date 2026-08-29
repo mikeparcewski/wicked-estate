@@ -173,6 +173,30 @@
   source: (string) @import.source
 ) @import
 
+; Re-exports with a source are imports too: `export * from './y'`, `export { a } from './y'`.
+(export_statement
+  source: (string) @import.source
+) @import
+
+; Dynamic import: `import('./dyn')` — the grammar exposes `import` as a callable keyword.
+(call_expression
+  function: (import)
+  arguments: (arguments . (string) @import.source)
+) @import
+
+; CommonJS require: `require('./z')` — gated on the callee text so ordinary calls never match.
+(call_expression
+  function: (identifier) @_req
+  arguments: (arguments . (string) @import.source)
+  (#eq? @_req "require")
+) @import
+
+; TS import-equals: `import r = require('./req')`.
+(import_statement
+  (import_require_clause
+    source: (string) @import.source)
+) @import
+
 ; ── Call sites ───────────────────────────────────────────────────────────────
 
 ; Function calls — simple: foo()

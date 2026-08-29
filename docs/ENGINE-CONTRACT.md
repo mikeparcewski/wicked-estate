@@ -111,6 +111,12 @@ labelled graph.
 
 On a `(source, target, kind)` collision the **higher-confidence** edge wins (`Edge::dedup_key`).
 
+`RelativeImportResolver` (`resolved_by = relative-import`) emits File→File `Imports` edges under
+the `ImportMap` tier with a **per-edge override of 0.9** (an exact joined-path match, adjudicated
+on disk; 0.9 not 1.0 because `tsconfig.paths`, symlinks, and case-insensitive filesystems are
+unseen). By design this wins `resolve_all`'s max-confidence dedup over a Tsg-default (0.8)
+`Imports` edge — a future precise `Imports` emitter must exceed 0.9 or revisit that decision.
+
 ### 3.1 Tier activation (derived from the `index_path` resolver slice in `crates/wicked-estate/src/lib.rs`)
 
 Which edge producers actually RUN, per entry point. "yes (slice)" rows are exactly the members of

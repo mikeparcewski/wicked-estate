@@ -25,6 +25,9 @@ pub mod lsp;
 pub mod estate;
 pub use estate::estate_edges;
 
+pub mod relative_import;
+pub use relative_import::RelativeImportResolver;
+
 use wicked_estate_core::{
     Edge, EdgeKind, NodeKind, ResolutionTier, Resolver, Result, SymbolIndex, UnresolvedRef,
 };
@@ -2887,6 +2890,7 @@ mod tests {
         assert_eq!(res.edges.len(), 1, "the edge is still returned");
         assert_eq!(res.unresolved.len(), 1, "but it binds nothing");
     }
+
 
     /// Studio `p` shape: a deny-listed html type_alias homonym shadows a same-family tsx
     /// function. Dropping the type_alias pre-uniqueness is the INTENDED recovery → exactly one

@@ -15,15 +15,28 @@
 //! "every node in the store". A store may be shared with a writer that keeps non-source nodes in
 //! it; sweeping those is data loss, not incremental indexing (FINDING-067).
 //!
-//! ### Known limitation
+//! ### Importer re-extraction scope (lane relative-imports, Decision J)
 //!
-//! An unchanged file F that calls a symbol S newly added by a changed file C will NOT have its
-//! call to S re-resolved in this run. F's UnresolvedRef for S persists until the next full-index
-//! or until F itself changes. The full fix is to re-resolve direct importers of changed files
-//! (an O(fanout) pass over the import graph). That is future work — see the design notes.
-//! The current approach is correct for the changed files' own edges; only the cross-file
-//! "unchanged imports changed" case is deferred. This limitation is exception 1 of the
-//! unresolved-references definition in `docs/ENGINE-CONTRACT.md` §2.1.
+//! - **DELETED (or renamed) file**: its direct importers — files with a `File → File` `Imports`
+//!   edge into it — are FORCED through re-extraction in the same run, so their relative-import
+//!   refs re-park honestly instead of silently losing the edge to `prune_dangling_edges`.
+//!   The importer set is collected BEFORE the removal batch (the batch destroys the very edges
+//!   the discovery walks) and only from the original deleted list — no transitive cascade.
+//! - **MODIFIED file**: nothing is forced. The importer's `File → File` edge survives
+//!   `remove_file` by store semantics (the DELETE matches `file = ?1 OR source IN
+//!   nodes-of-file`; the importer's edge has `file = importer`), and the target's File node is
+//!   re-created under the same path-keyed SymbolId before `prune_dangling_edges` runs — the
+//!   edge stays valid with zero importer re-extraction. Forcing importers on modification
+//!   would re-parse every importer of a hub file on every save, for nothing.
+//!
+//! ### Known limitations (still true)
+//!
+//! An unchanged file F that CALLS a symbol S newly added by a changed file C will NOT have its
+//! call to S re-resolved in this run — F's UnresolvedRef persists until F changes or a full
+//! re-index. Likewise an importer whose relative-import ref was PARKED (target absent) is not
+//! re-resolved when the target is later added: no edge exists to discover it by (D01-7 audit).
+//! This limitation is exception 1 of the unresolved-references definition in
+//! `docs/ENGINE-CONTRACT.md` §2.1.
 //!
 //! ## Many repos, one graph
 //!
@@ -706,6 +719,29 @@ pub fn index_path_as(
         .filter(|p| !current_rel_paths.contains(*p))
         .cloned()
         .collect();
+    // Lane relative-imports (Decision J): collect each DELETED file's direct importers — files
+    // holding a File→File `Imports` edge into it — BEFORE the removal batch, which destroys the
+    // very edges this discovery walks. The set is computed once, from the original deleted list
+    // only (no transitive cascade), and forces those files through re-extraction below so their
+    // relative-import refs re-park honestly. A merely-MODIFIED target needs nothing: its
+    // importers' edges survive `remove_file` by store semantics (see the module doc).
+    let mut forced_importers: HashSet<String> = HashSet::new();
+    for path in &deleted {
+        let target_id = Symbol::file(path.clone()).id();
+        for e in store.neighbors(&target_id, wicked_estate_core::Direction::Dependents)? {
+            if e.kind != EdgeKind::Imports {
+                continue;
+            }
+            if let Some(n) = store.get_node(&e.source)? {
+                if matches!(n.kind, NodeKind::File) {
+                    forced_importers.insert(n.location.file.clone());
+                }
+            }
+        }
+    }
+    for d in &deleted {
+        forced_importers.remove(d); // a deleted importer is gone, not re-extracted
+    }
     if !deleted.is_empty() {
         store.begin_batch()?;
         for path in &deleted {
@@ -721,7 +757,11 @@ pub fn index_path_as(
     let mut unchanged_count: usize = 0;
     for fw in work {
         let stored = store.file_digest(&fw.rel)?;
-        if !force_full && stored.as_deref() == Some(&fw.digest) {
+        // A direct importer of a DELETED file is forced into `changed` even with a matching
+        // digest (Decision J): consulted HERE, while the FileWork is still alive — the
+        // unchanged arm drops it.
+        let forced = forced_importers.contains(&fw.rel);
+        if !force_full && !forced && stored.as_deref() == Some(&fw.digest) {
             // UNCHANGED: skip extraction entirely; its nodes/edges already in the store.
             unchanged_count += 1;
         } else {
@@ -930,10 +970,10 @@ pub fn index_path_as(
     // Build the in-memory index from ALL nodes (unchanged + newly written). Resolve only the refs
     // that came from the changed files. The resolved edges are written to the store.
     //
-    // KNOWN LIMITATION (see module doc): an unchanged file F that imports a symbol S newly added
-    // by a changed file C will not have its call to S re-resolved here. F's UnresolvedRef for S
-    // persists until F itself changes or a full re-index is done. Full fix: re-resolve direct
-    // importers of changed files (O(fanout) pass over the import graph) — see the design notes
+    // Importer scope (see the module doc): direct importers of DELETED files were already
+    // forced into `changed` above (Decision J). Still-true limitation: an unchanged file F
+    // whose CALL to a symbol S newly added by a changed file C stays unresolved until F itself
+    // changes or a full re-index; same for a parked relative import whose target appears later.
     let (resolution, estate) = {
         let reader: &dyn GraphRead = &*store;
         // Scoped to this repo: a labelled run resolves against its own nodes only, so a name that
@@ -942,10 +982,14 @@ pub fn index_path_as(
         // Activation table: docs/ENGINE-CONTRACT.md §3.1 — guarded by tests::slice_matches_engine_contract_table.
         // InfraResolver handles IaC/tfstate resource refs; it does not interfere with code
         // resolvers (it only fires when raw_name maps exclusively to resource nodes).
+        // RelativeImportResolver binds relative JS/TS Imports refs to their target File node
+        // (exact-path, root-guarded against the repo/label root; lane relative-imports).
+        let relative = wicked_estate_resolve::RelativeImportResolver::new(scope.as_deref());
         let resolvers: &[&dyn Resolver] = &[
             &NameResolver,
             &ScopedNameResolver,
             &ImportMapResolver,
+            &relative,
             &InfraResolver,
             &RulesBridgeResolver,
         ];
@@ -1122,14 +1166,18 @@ pub fn search(store: &dyn GraphRead, name: &str) -> Result<Vec<Node>> {
 }
 
 /// Blast radius: transitive dependents (callers) of every symbol named `name`, up to `depth`.
+///
+/// The traversal walks ALL edge kinds (the locked decision); the RESULT is classified through
+/// `Subgraph::code_dependents` so import-transit File nodes never surface as dependents of a
+/// symbol, while a File start keeps its importers (lane relative-imports Decision G).
 pub fn blast_radius_by_name(store: &dyn GraphRead, name: &str, depth: u32) -> Result<Vec<Node>> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for sym in search(store, name)? {
         let sub = store.traverse(&sym.symbol, &TraversalSpec::blast_radius(depth))?;
-        for n in sub.nodes {
-            if n.symbol != sym.symbol && seen.insert(n.symbol.clone()) {
-                out.push(n);
+        for n in sub.code_dependents(&sym.symbol, Some(&sym.kind)) {
+            if seen.insert(n.symbol.clone()) {
+                out.push(n.clone());
             }
         }
     }
@@ -1219,9 +1267,20 @@ pub fn important_symbols(store: &dyn GraphStoreMutExt, top_n: usize) -> Result<V
     if let Some(cached) = store.cache_get_key("pagerank.top") {
         if let Ok(ranked) = serde_json::from_str::<Vec<(String, f32)>>(&cached) {
             let mut out = Vec::new();
-            for (sym_str, score) in ranked.into_iter().take(top_n) {
+            for (sym_str, score) in ranked {
+                if out.len() >= top_n {
+                    break;
+                }
                 let id = SymbolId(sym_str);
                 if let Some(node) = store.get_node(&id)? {
+                    // BR-1 (lane relative-imports): a pre-upgrade `pagerank.top` cache on an
+                    // un-reindexed DB still carries File/Import rows (the write path filters
+                    // them now, but old caches persist until a re-index). Clean them at READ
+                    // time so no consumer of important_symbols ever serves one — the
+                    // precondition for graph-view dropping its post-hoc exclusion.
+                    if matches!(node.kind, NodeKind::File | NodeKind::Import) {
+                        continue;
+                    }
                     out.push((node, score));
                 }
             }
@@ -1832,6 +1891,99 @@ mod tests {
         assert!(
             !top.is_empty(),
             "important_symbols must return at least one result"
+        );
+    }
+
+    /// Lane relative-imports S5 (Decision H): after a real index, important_symbols never
+    /// returns a File or Import node — the ranked seam filters live results and the cache
+    /// write is already filtered.
+    #[test]
+    fn important_symbols_has_no_file_or_import_nodes() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("a.ts"),
+            "import { f } from './b';\nexport function g() { return f(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("b.ts"),
+            "export function f() { return 1; }\n",
+        )
+        .unwrap();
+
+        let mut store = MemStore::new();
+        index_path(&mut store, tmp.path()).unwrap();
+
+        let top = important_symbols(&store, 50).unwrap();
+        assert!(!top.is_empty(), "ranked results expected");
+        for (node, _) in &top {
+            assert!(
+                !matches!(node.kind, NodeKind::File | NodeKind::Import),
+                "File/Import must never rank as a hotspot: {:?} {}",
+                node.kind,
+                node.symbol.as_str()
+            );
+        }
+    }
+
+    /// Lane relative-imports S5 (BR-1): a STALE pre-upgrade `pagerank.top` cache containing
+    /// File/Import ids is cleaned at READ time — the ids are never returned and `top_n` is
+    /// still filled from the remaining rows. This is the precondition for graph-view dropping
+    /// its post-hoc exclusion.
+    #[test]
+    fn important_symbols_drops_file_import_from_stale_cache() {
+        use wicked_estate_core::GraphWrite;
+        let mut store = MemStore::new();
+        let file_node = Node::new(
+            wicked_estate_core::Symbol::file("a.ts").id(),
+            NodeKind::File,
+            "a.ts",
+            Language::new("typescript"),
+            Location::new("a.ts", Span::ZERO),
+        );
+        let import_node = Node::new(
+            SymbolId("import:./hub".into()),
+            NodeKind::Import,
+            "./hub",
+            Language::new("typescript"),
+            Location::new("a.ts", Span::ZERO),
+        );
+        let fn_x = Node::new(
+            SymbolId("fn_x".into()),
+            NodeKind::Function,
+            "fn_x",
+            Language::new("typescript"),
+            Location::new("a.ts", Span::ZERO),
+        );
+        let fn_y = Node::new(
+            SymbolId("fn_y".into()),
+            NodeKind::Function,
+            "fn_y",
+            Language::new("typescript"),
+            Location::new("a.ts", Span::ZERO),
+        );
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[file_node.clone(), import_node.clone(), fn_x, fn_y])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        // Hand-seed the cache the way a PRE-upgrade binary wrote it: File/Import rows on top.
+        let stale = serde_json::to_string(&vec![
+            (file_node.symbol.0.clone(), 0.9_f32),
+            (import_node.symbol.0.clone(), 0.8_f32),
+            ("fn_x".to_string(), 0.5_f32),
+            ("fn_y".to_string(), 0.4_f32),
+        ])
+        .unwrap();
+        store.cache_put_key("pagerank.top", &stale);
+
+        let top = important_symbols(&store, 2).unwrap();
+        let ids: Vec<&str> = top.iter().map(|(n, _)| n.symbol.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["fn_x", "fn_y"],
+            "stale File/Import cache rows skipped, top_n filled from the remaining rows"
         );
     }
 
