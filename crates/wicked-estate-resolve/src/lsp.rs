@@ -34,11 +34,13 @@
 //! ## Timeout
 //!
 //! A dedicated reader thread (the *frame pump*) owns the server's stdout, parses complete
-//! Content-Length frames, and hands each parsed message over an `mpsc` channel. Every request
-//! computes a **deadline** (`now + budget`, default 10s, injectable via
-//! [`LspClient::spawn_with_timeout`] / [`LspTier::with_timeout`]) once, and each channel receive
-//! waits only for the *remaining* time — so a chatty server that streams notifications but never
-//! answers still errs at the deadline. The mechanism is pure std and identical on Unix and
+//! Content-Length frames, and hands each parsed message over a **bounded** `mpsc` channel
+//! (backpressure caps memory under a flooding server). Every request computes a **deadline**
+//! (`now + budget`, default 10s, injectable via [`LspClient::spawn_with_timeout`] /
+//! [`LspTier::with_timeout`]) once; each receive first checks the wall clock against the
+//! deadline (a queued frame never extends a request past it) and then waits only for the
+//! *remaining* time — so a chatty server that streams notifications but never answers, even
+//! gap-free, still errs at the deadline. The mechanism is pure std and identical on Unix and
 //! Windows. On a timeout the child is killed and (in [`LspTier`]) the client is evicted, because
 //! a transport that timed out can no longer be trusted. Known limit: writes (`stdin.write_all`)
 //! are not yet bounded — a server that stops *reading* can still stall a very large payload
@@ -192,6 +194,10 @@ pub(crate) fn read_frame<R: BufRead>(reader: &mut R) -> Result<Vec<u8>> {
 /// [`LspTier::with_timeout`].
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Frame-pump channel bound. A flooding server fills this and then blocks in the pump thread
+/// (backpressure) rather than growing process memory without limit.
+const FRAME_CHANNEL_BOUND: usize = 64;
+
 /// Spawn the frame-pump thread: it owns the read side, parses complete Content-Length frames,
 /// and sends each parsed message over the returned channel. Frames are parsed *in the thread*,
 /// so a caller-side timeout never leaves a half-read frame in a caller-visible buffer.
@@ -199,7 +205,10 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The thread exits when the stream ends/errs (the terminal `Err` is forwarded once) or when
 /// the receiving transport is dropped (the `send` fails).
 fn spawn_frame_pump<R: Read + Send + 'static>(reader: R) -> Receiver<Result<Vec<u8>>> {
-    let (tx, rx) = mpsc::channel();
+    // Bounded: a flooding server blocks the pump (backpressure into the OS pipe buffer)
+    // instead of growing the channel without limit. The consumer never blocks on `send`,
+    // so this cannot deadlock; a dropped receiver still unblocks `send` with `Err`.
+    let (tx, rx) = mpsc::sync_channel(FRAME_CHANNEL_BOUND);
     std::thread::Builder::new()
         .name("lsp-frame-pump".into())
         .spawn(move || {
@@ -262,9 +271,21 @@ impl RpcTransport {
     }
 
     /// Receive the next parsed frame, waiting no longer than the remaining time to `deadline`.
+    ///
+    /// The deadline is checked against the wall clock BEFORE touching the channel: a queued
+    /// frame must never extend a request past its deadline. Without this check,
+    /// `recv_timeout(ZERO)` returns `Ok` whenever a frame is already buffered, so a server
+    /// emitting gap-free notifications (the channel permanently non-empty) would bypass the
+    /// deadline entirely and hang `await_response` forever.
     fn recv_frame_by(&self, deadline: Instant) -> Result<Vec<u8>> {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match self.frames.recv_timeout(remaining) {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(Error::Resolution(format!(
+                "LSP: request timed out after {:?}",
+                self.timeout
+            )));
+        }
+        match self.frames.recv_timeout(deadline - now) {
             Ok(frame) => frame,
             Err(RecvTimeoutError::Timeout) => Err(Error::Resolution(format!(
                 "LSP: request timed out after {:?}",
@@ -1534,6 +1555,41 @@ mod tests {
         assert!(
             elapsed < budget + Duration::from_secs(5),
             "deadline not honored under notification chatter — took {elapsed:?}"
+        );
+    }
+
+    /// Gap-FREE notification flood: the pump keeps the channel permanently non-empty, so a
+    /// receive with zero remaining budget would still return `Ok` and the await loop would
+    /// never observe a timeout — `await_response` hangs forever and memory grows without
+    /// bound. Pinned by the wall-clock deadline check in `recv_frame_by` (checked before
+    /// touching the channel) plus the bounded pump channel. Under the old
+    /// `recv_timeout(remaining)`-only semantics this test hangs past the assertion window.
+    #[test]
+    fn gapless_notification_flood_still_errs_at_the_deadline() {
+        let budget = Duration::from_millis(300);
+        let flood = ChattyReader {
+            frame: encode_notification(
+                "window/logMessage",
+                serde_json::json!({"type": 3, "message": "flood"}),
+            ),
+            pos: 0,
+            delay: Duration::ZERO, // back-to-back frames — the channel never drains empty
+        };
+        let mut t = RpcTransport::new(std::io::sink(), flood, budget);
+        let start = Instant::now();
+        let err = t.await_response(11).unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(
+            err.to_string().contains("timed out"),
+            "expected a timeout error, got: {err}"
+        );
+        assert!(
+            elapsed >= budget,
+            "errored before the deadline: {elapsed:?}"
+        );
+        assert!(
+            elapsed < budget + Duration::from_secs(3),
+            "hang under gap-free flood — took {elapsed:?} for a {budget:?} budget"
         );
     }
 
