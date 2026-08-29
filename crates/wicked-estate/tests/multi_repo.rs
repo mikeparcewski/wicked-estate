@@ -611,8 +611,7 @@ fn labelled_relative_imports_match_plain() {
     let mut plain = SqliteStore::open(root.join("plain.db")).unwrap();
     let plain_stats = wicked_estate::index_path(&mut plain, &repo).unwrap();
     let mut labelled = SqliteStore::open(root.join("labelled.db")).unwrap();
-    let labelled_stats =
-        wicked_estate::index_path_as(&mut labelled, &repo, Some("repoa")).unwrap();
+    let labelled_stats = wicked_estate::index_path_as(&mut labelled, &repo, Some("repoa")).unwrap();
 
     assert_eq!(
         plain_stats.edge_count, labelled_stats.edge_count,

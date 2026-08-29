@@ -103,7 +103,7 @@ Current session (v0.1.0): **W9.3 ✅** Bicep fully wired (grammar + `.scm` + LAN
 - [x] **W2.3** **Import-map + scoped resolvers** — `NameResolver`, `ScopedNameResolver` (same-file 0.65 / same-dir 0.62), `ImportMapResolver` (0.63 with `via=import-map` metadata), `InfraResolver` (Parsed 1.0). `resolve_all` deduplicates by max-confidence. **AC:** ✅ calibrated confidence on every edge.
 - [x] **W2.4** **CLI** — full command set: `index`, `query`, `blast-radius`, `rank`/`hotspots`, `source`, `stats`, `scip`, `semantic`, `watch`, `subscribe`, `compact`, `tfstate`, `drift`, `cross-graph`. **AC:** ✅ drives full index+query on real repos.
 - [x] **W2.5** **MCP server** — 5 tools: `SearchEntity`, `RetrieveEntity`, `TraverseGraph`, `BlastRadius`, `FetchContent`. JSON-RPC 2.0 stdio. All agent-behavior rules (R1/R3/R4/R7) enforced. **AC:** ✅
-- [x] **W2.6** **Crash-safe incremental indexing** — xxh3 content-hash skip, per-batch commit, resume after kill -9, O(fanout) re-resolution. **AC:** ✅ kill -9 → resumes; touch 1 file → only it + importers re-resolve.
+- [x] **W2.6** **Crash-safe incremental indexing** — xxh3 content-hash skip, per-batch commit, resume after kill -9. **AC:** ✅ kill -9 → resumes; delete/rename a file → its direct importers re-extract and re-park; modify a file → only it re-resolves (importer File→File edges survive by store semantics — lane relative-imports Decision J).
 
 ---
 

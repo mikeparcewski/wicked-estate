@@ -65,21 +65,21 @@ fn relative_imports_bind_file_to_file() {
     w(
         "src/main.ts",
         concat!(
-            "import { T } from './foo.d.ts';\n",          // 1  bind src/foo.d.ts
-            "import { u } from './utils/index';\n",       // 2  bind src/utils/index.ts
-            "import { i } from './index';\n",             // 3  bind src/index.ts
-            "import { a } from './a';\n",                 // 4  bind src/a.ts (over a/index.ts)
-            "import './styles.css';\n",                   // 5  bind src/styles.css (literal)
-            "import data from './data.json';\n",          // 6  bind src/data.json (literal)
-            "export * from './y';\n",                     // 7  bind src/y.ts (export-from)
-            "const z = require('./z');\n",                // 8  bind src/z.js (require)
-            "import { w } from './w';\n",                 // 9  bind src/w.ts
-            "import { q } from './q.js';\n",              // 10 bind src/q.ts (remap)
-            "import { b } from './b';\n",                 // 11 bind src/b.ts (over b.css)
-            "import { c } from './c';\n",                 // 12 bind src/c/index.ts (dir index)
-            "const dyn = import('./dyn');\n",             // 13 bind src/dyn.ts (dynamic import)
-            "import req = require('./req');\n",           // 14 bind src/req.ts (import=require)
-            "import { foo2 } from './foo2';\n",           // PARK: only site/src/foo2.ts exists
+            "import { T } from './foo.d.ts';\n",    // 1  bind src/foo.d.ts
+            "import { u } from './utils/index';\n", // 2  bind src/utils/index.ts
+            "import { i } from './index';\n",       // 3  bind src/index.ts
+            "import { a } from './a';\n",           // 4  bind src/a.ts (over a/index.ts)
+            "import './styles.css';\n",             // 5  bind src/styles.css (literal)
+            "import data from './data.json';\n",    // 6  bind src/data.json (literal)
+            "export * from './y';\n",               // 7  bind src/y.ts (export-from)
+            "const z = require('./z');\n",          // 8  bind src/z.js (require)
+            "import { w } from './w';\n",           // 9  bind src/w.ts
+            "import { q } from './q.js';\n",        // 10 bind src/q.ts (remap)
+            "import { b } from './b';\n",           // 11 bind src/b.ts (over b.css)
+            "import { c } from './c';\n",           // 12 bind src/c/index.ts (dir index)
+            "const dyn = import('./dyn');\n",       // 13 bind src/dyn.ts (dynamic import)
+            "import req = require('./req');\n",     // 14 bind src/req.ts (import=require)
+            "import { foo2 } from './foo2';\n",     // PARK: only site/src/foo2.ts exists
         ),
     );
     w(

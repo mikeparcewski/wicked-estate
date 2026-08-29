@@ -15,14 +15,26 @@
 //! "every node in the store". A store may be shared with a writer that keeps non-source nodes in
 //! it; sweeping those is data loss, not incremental indexing (FINDING-067).
 //!
-//! ### Known limitation
+//! ### Importer re-extraction scope (lane relative-imports, Decision J)
 //!
-//! An unchanged file F that calls a symbol S newly added by a changed file C will NOT have its
-//! call to S re-resolved in this run. F's UnresolvedRef for S persists until the next full-index
-//! or until F itself changes. The full fix is to re-resolve direct importers of changed files
-//! (an O(fanout) pass over the import graph). That is future work — see the design notes.
-//! The current approach is correct for the changed files' own edges; only the cross-file
-//! "unchanged imports changed" case is deferred.
+//! - **DELETED (or renamed) file**: its direct importers — files with a `File → File` `Imports`
+//!   edge into it — are FORCED through re-extraction in the same run, so their relative-import
+//!   refs re-park honestly instead of silently losing the edge to `prune_dangling_edges`.
+//!   The importer set is collected BEFORE the removal batch (the batch destroys the very edges
+//!   the discovery walks) and only from the original deleted list — no transitive cascade.
+//! - **MODIFIED file**: nothing is forced. The importer's `File → File` edge survives
+//!   `remove_file` by store semantics (the DELETE matches `file = ?1 OR source IN
+//!   nodes-of-file`; the importer's edge has `file = importer`), and the target's File node is
+//!   re-created under the same path-keyed SymbolId before `prune_dangling_edges` runs — the
+//!   edge stays valid with zero importer re-extraction. Forcing importers on modification
+//!   would re-parse every importer of a hub file on every save, for nothing.
+//!
+//! ### Known limitations (still true)
+//!
+//! An unchanged file F that CALLS a symbol S newly added by a changed file C will NOT have its
+//! call to S re-resolved in this run — F's UnresolvedRef persists until F changes or a full
+//! re-index. Likewise an importer whose relative-import ref was PARKED (target absent) is not
+//! re-resolved when the target is later added: no edge exists to discover it by (D01-7 audit).
 //!
 //! ## Many repos, one graph
 //!
@@ -685,6 +697,29 @@ pub fn index_path_as(
         .filter(|p| !current_rel_paths.contains(*p))
         .cloned()
         .collect();
+    // Lane relative-imports (Decision J): collect each DELETED file's direct importers — files
+    // holding a File→File `Imports` edge into it — BEFORE the removal batch, which destroys the
+    // very edges this discovery walks. The set is computed once, from the original deleted list
+    // only (no transitive cascade), and forces those files through re-extraction below so their
+    // relative-import refs re-park honestly. A merely-MODIFIED target needs nothing: its
+    // importers' edges survive `remove_file` by store semantics (see the module doc).
+    let mut forced_importers: HashSet<String> = HashSet::new();
+    for path in &deleted {
+        let target_id = Symbol::file(path.clone()).id();
+        for e in store.neighbors(&target_id, wicked_estate_core::Direction::Dependents)? {
+            if e.kind != EdgeKind::Imports {
+                continue;
+            }
+            if let Some(n) = store.get_node(&e.source)? {
+                if matches!(n.kind, NodeKind::File) {
+                    forced_importers.insert(n.location.file.clone());
+                }
+            }
+        }
+    }
+    for d in &deleted {
+        forced_importers.remove(d); // a deleted importer is gone, not re-extracted
+    }
     if !deleted.is_empty() {
         store.begin_batch()?;
         for path in &deleted {
@@ -700,7 +735,11 @@ pub fn index_path_as(
     let mut unchanged_count: usize = 0;
     for fw in work {
         let stored = store.file_digest(&fw.rel)?;
-        if !force_full && stored.as_deref() == Some(&fw.digest) {
+        // A direct importer of a DELETED file is forced into `changed` even with a matching
+        // digest (Decision J): consulted HERE, while the FileWork is still alive — the
+        // unchanged arm drops it.
+        let forced = forced_importers.contains(&fw.rel);
+        if !force_full && !forced && stored.as_deref() == Some(&fw.digest) {
             // UNCHANGED: skip extraction entirely; its nodes/edges already in the store.
             unchanged_count += 1;
         } else {
@@ -909,10 +948,10 @@ pub fn index_path_as(
     // Build the in-memory index from ALL nodes (unchanged + newly written). Resolve only the refs
     // that came from the changed files. The resolved edges are written to the store.
     //
-    // KNOWN LIMITATION (see module doc): an unchanged file F that imports a symbol S newly added
-    // by a changed file C will not have its call to S re-resolved here. F's UnresolvedRef for S
-    // persists until F itself changes or a full re-index is done. Full fix: re-resolve direct
-    // importers of changed files (O(fanout) pass over the import graph) — see the design notes
+    // Importer scope (see the module doc): direct importers of DELETED files were already
+    // forced into `changed` above (Decision J). Still-true limitation: an unchanged file F
+    // whose CALL to a symbol S newly added by a changed file C stays unresolved until F itself
+    // changes or a full re-index; same for a parked relative import whose target appears later.
     let (resolved, estate) = {
         let reader: &dyn GraphRead = &*store;
         // Scoped to this repo: a labelled run resolves against its own nodes only, so a name that
