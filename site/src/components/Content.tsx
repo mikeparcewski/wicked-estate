@@ -145,7 +145,7 @@ function Hero() {
           </h1>
           <p className="mt-5 text-lg text-muted leading-relaxed max-w-xl font-sans">
             The <span className="text-ink">system of record</span> for your codebase — one local-first MCP server,{' '}
-            <span className="text-ink">23 tools across 3 domains</span>. What breaks if you change it, the decision
+            <span className="text-ink">24 tools across 3 domains</span>. What breaks if you change it, the decision
             behind it, the doc that explains it — including the{' '}
             <span className="text-ink">injected edges grep never sees</span>. Every fact stamped with confidence and
             provenance: a heuristic is never handed to an agent as a fact.
@@ -941,13 +941,13 @@ function FiveStrata() {
 }
 
 // ── 3b · THE FULL TOOLFACE — every tool + skill an agent can call ───────────────
-// Grounded to v0.15.0. Tools: crates/wicked-estate-mcp/src/lib.rs (dispatch +
+// Grounded to v0.15.1 (adds rules.recall). Tools: crates/wicked-estate-mcp/src/lib.rs (dispatch +
 // memory/knowledge schemas), README.md §MCP. Skills: crates/*/skills/*/SKILL.md.
 type ToolDomain = { no: string; name: string; note: string; tools: { name: string; purpose: string }[] }
 
 const TOOL_DOMAINS: ToolDomain[] = [
   {
-    no: '01', name: 'Graph', note: '10 estate tools',
+    no: '01', name: 'Graph', note: '11 estate tools',
     tools: [
       { name: 'SearchEntity',   purpose: 'Find symbols by name or kind; optional source inline.' },
       { name: 'RetrieveEntity', purpose: 'One symbol’s full dossier — callers, edges, annotations, requirement.' },
@@ -959,6 +959,7 @@ const TOOL_DOMAINS: ToolDomain[] = [
       { name: 'ContextBundle',  purpose: 'Scoped, prompt-ready context pack for a symbol.' },
       { name: 'FetchContent',   purpose: 'The stored source for a symbol or file.' },
       { name: 'RulesInventory', purpose: 'Rules engines (ODM · DMN · Drools · CLIPS) + the code that calls them.' },
+      { name: 'rules.recall',   purpose: 'Which architecture-wiki conformance rules apply — faceted, severity-ordered, every hit citing its source doc.' },
     ],
   },
   {
@@ -1365,7 +1366,7 @@ function Storage() {
             one <span className="font-mono text-sm font-semibold">open_store(spec)</span> factory: no caller changes,
             no re-index, and the Postgres backend passes the same store-conformance suite in CI. The{' '}
             <span className="font-mono text-sm font-semibold">WICKED_RUNTIME=team</span> profile seam retargets it
-            with one environment variable. The MCP server — the 23 tools — is{' '}
+            with one environment variable. The MCP server — the 24 tools — is{' '}
             <span className="text-ink">SQLite-only today</span>: under the team profile it fails loud at startup
             instead of silently falling back to local; Postgres for the MCP surface is the named follow-up.
             Local-first is a feature, not a ceiling.
@@ -1498,7 +1499,7 @@ export function GetStarted() {
         </div>
 
         <p className="mt-4 font-mono text-[0.6rem] text-faint tracking-wide">
-          Use an absolute DB path — clients launch from an unpredictable working directory. Same 23 tools in Cursor, Codex, and Antigravity.
+          Use an absolute DB path — clients launch from an unpredictable working directory. Same 24 tools in Cursor, Codex, and Antigravity.
         </p>
 
         <div className="mt-9 flex flex-col sm:flex-row gap-3">
