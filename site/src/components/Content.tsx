@@ -1011,9 +1011,11 @@ const CAPABILITIES: string[] = [
   '+ SemanticSearch, an 11th graph tool, when an embedder is wired',
 ]
 
+// historical
 // The retrieval receipt — the S3 parity bench that gated the wicked-brain
 // consolidation: 60 queries × 5 classes over an identical 357-doc corpus,
 // estate's knowledge surface vs the dedicated FTS search it replaced.
+// /historical
 const BENCH = {
   rows: [
     { metric: 'overall r@10', estate: '0.849', fts: '0.437' },
@@ -1034,7 +1036,7 @@ function FullToolface() {
           <p className="mt-1.5 text-sm text-muted font-sans leading-tight max-w-3xl">
             Not one “search” tool bolted onto a repo — the full MCP surface an agent can call, plus the skills
             (playbooks) that drive them. The graph domain is the code graph; memory and knowledge are where the{' '}
-            wicked-brain consolidation landed — one store, one identity, a{' '}
+            wicked-brain consolidation landed — one store, one identity, a{' '}{/* historical */}
             <span className="text-ink">lossless import contract</span> so nothing tuned was dropped. Grounded to v0.15.0.
           </p>
         </div>
