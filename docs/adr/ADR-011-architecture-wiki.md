@@ -102,7 +102,7 @@ applies_to: [<scopes>]           # optional — repos/planes/phases the decision
   scoping (wicked-apps-core `APPLIES_TO`).
 - The full adapter convention (`enforcement_class`, `scope`, `domain`, `confidence`, `targets`,
   `## Rules` items) remains available to any ADR that mints enforceable rules — like this one.
-- **Retired-source provenance:** ADRs lifted from retired repos (wicked-brain, wicked-testing)
+- **Retired-source provenance:** ADRs lifted from retired repos (wicked-brain, wicked-testing) <!-- historical -->
   ingest read-only with retired-source provenance ranked below live sources.
 
 Normalized under this contract as of 2026-08-29: estate `docs/adr/ADR-001..012` (011 = this
