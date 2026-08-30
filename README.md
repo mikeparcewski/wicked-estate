@@ -204,6 +204,20 @@ swappable impl behind a seam:
 
 Register it in **Claude Code, Cursor, Antigravity, or Codex**. Per-client config: **[docs/mcp-integration.md](./docs/mcp-integration.md)**.
 
+### The architecture wiki
+
+Estate is also the serving layer of the wicked ecosystem's **graph-backed architecture wiki**
+([ADR-011](./docs/adr/ADR-011-architecture-wiki.md)): doctrine authored as frontmattered markdown
+docs, projected into the graph as conformance rules and knowledge chunks, and recalled with
+citations —
+
+- **`rules.recall`** — which rules apply to what you're doing (faceted by
+  language/layer/framework, severity-ordered, every hit citing `<doc>@<blob sha>#<RULE-ID>`);
+- **`knowledge.recall`** with `{"scope_prefix": "wiki:"}` — the rationale and ADR text behind them.
+
+Authoring, seeding, retiring, and monitoring live in wicked-core's operator guide:
+**[wicked-core/crates/wicked-governance/WIKI.md](https://github.com/mikeparcewski/wicked-core/blob/main/crates/wicked-governance/WIKI.md)**.
+
 ```sh
 wicked-estate index ./my-project --db .wicked-estate/graph.db
 # Claude Code (or install the plugin: /plugin marketplace add mikeparcewski/wicked-estate):
