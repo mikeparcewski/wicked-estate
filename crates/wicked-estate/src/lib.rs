@@ -29,13 +29,32 @@
 //!   edge stays valid with zero importer re-extraction. Forcing importers on modification
 //!   would re-parse every importer of a hub file on every save, for nothing.
 //!
+//! ### Parked-ref back-fill (lane importer-backfill, #141)
+//!
+//! The reverse of Decision J — Decision J walks existing edges to re-park refs when their target
+//! is DELETED; a PARKED ref waiting on a target that later APPEARS has no edge to be discovered
+//! by (D01-7 audit). The back-fill pass closes that: after the main resolve pass, exactly the
+//! parked rows this run's additions could bind are re-resolved:
+//!
+//! - **name lane**: each distinct name extracted this run is probed against the indexed
+//!   `unresolved_refs.raw_name` column (one exact indexed lookup per name — never a table scan),
+//!   so an unchanged file F whose call to S parked gets its edge the run a changed file defines S;
+//! - **import lane**: when the run indexes at least one NEW file path, the parked relative-import
+//!   rows are fetched in one kind-scoped pass and re-resolved against the File map, so a parked
+//!   `./b` binds the run `b.ts` appears (target-add, or completing a rename whose importers were
+//!   fixed in an earlier run).
+//!
+//! A re-resolved row is DELETED in the same batch that writes its edge; a still-parked candidate
+//! is left in place, never re-inserted — the pass is idempotent (edge upsert dedups by key), and
+//! its counts are logged (`BACKFILL: …`) and attached to the index span.
+//!
 //! ### Known limitations (still true)
 //!
-//! An unchanged file F that CALLS a symbol S newly added by a changed file C will NOT have its
-//! call to S re-resolved in this run — F's UnresolvedRef persists until F changes or a full
-//! re-index. Likewise an importer whose relative-import ref was PARKED (target absent) is not
-//! re-resolved when the target is later added: no edge exists to discover it by (D01-7 audit).
-//! This limitation is exception 1 of the unresolved-references definition in
+//! A ref parked for AMBIGUITY is re-checked only when a same-name definition is (re-)extracted —
+//! a deletion that makes an ambiguous name unique does not trigger re-resolution. Stored parked
+//! rows carry no hints (only the 7 site columns persist), so hint-driven resolution
+//! (`ImportMapResolver`) never fires on back-fill. Both self-heal when the ref's own file changes
+//! or a full re-index runs. See exception 1 of the unresolved-references definition in
 //! `docs/ENGINE-CONTRACT.md` §2.1.
 //!
 //! ## Many repos, one graph
@@ -838,6 +857,10 @@ pub fn index_path_as(
     // ── Split CHANGED/NEW from UNCHANGED ────────────────────────────────────────────────────
     let mut changed: Vec<FileWork> = Vec::new();
     let mut unchanged_count: usize = 0;
+    // Paths with NO digest row — never indexed before (or removed and re-created since). The
+    // count gates the back-fill pass's import lane below: only a NEW File path can be what a
+    // parked relative-import ref was waiting for.
+    let mut new_file_count: usize = 0;
     for fw in work {
         let stored = store.file_digest(&fw.rel)?;
         // A direct importer of a DELETED file is forced into `changed` even with a matching
@@ -848,6 +871,9 @@ pub fn index_path_as(
             // UNCHANGED: skip extraction entirely; its nodes/edges already in the store.
             unchanged_count += 1;
         } else {
+            if stored.is_none() {
+                new_file_count += 1;
+            }
             changed.push(fw);
         }
     }
@@ -1065,35 +1091,36 @@ pub fn index_path_as(
     // that came from the changed files. The resolved edges are written to the store.
     //
     // Importer scope (see the module doc): direct importers of DELETED files were already
-    // forced into `changed` above (Decision J). Still-true limitation: an unchanged file F
-    // whose CALL to a symbol S newly added by a changed file C stays unresolved until F itself
-    // changes or a full re-index; same for a parked relative import whose target appears later.
-    let (resolution, estate) = {
+    // forced into `changed` above (Decision J); previously-PARKED refs whose target appeared
+    // this run are re-resolved by the back-fill pass below (lane importer-backfill, #141).
+    //
+    // The index owns its data (clones of all nodes), so it outlives the read borrow and is
+    // shared with the back-fill pass.
+    let index = {
         let reader: &dyn GraphRead = &*store;
         // Scoped to this repo: a labelled run resolves against its own nodes only, so a name that
         // is unique inside the repo stays unique no matter how many repos share the graph.
-        let index = InMemoryIndex::build(reader, scope.as_deref())?;
-        // Activation table: docs/ENGINE-CONTRACT.md §3.1 — guarded by tests::slice_matches_engine_contract_table.
-        // InfraResolver handles IaC/tfstate resource refs; it does not interfere with code
-        // resolvers (it only fires when raw_name maps exclusively to resource nodes).
-        // RelativeImportResolver binds relative JS/TS Imports refs to their target File node
-        // (exact-path, root-guarded against the repo/label root; lane relative-imports).
-        let relative = wicked_estate_resolve::RelativeImportResolver::new(scope.as_deref());
-        let resolvers: &[&dyn Resolver] = &[
-            &NameResolver,
-            &ScopedNameResolver,
-            &ImportMapResolver,
-            &relative,
-            &InfraResolver,
-            &RulesBridgeResolver,
-        ];
-        let resolution = resolve_all_with_coverage(resolvers, &all_refs, &index)?;
-        // Estate cross-domain join: RACF profiles → the datasets/MQ assets they protect, by RACF
-        // generic profile matching (most-specific wins). Derived from the full node population (a
-        // profile pattern can match assets declared in any file), reusing the index just built.
-        let estate = wicked_estate_resolve::estate_edges(index.nodes());
-        (resolution, estate)
+        InMemoryIndex::build(reader, scope.as_deref())?
     };
+    // Activation table: docs/ENGINE-CONTRACT.md §3.1 — guarded by tests::slice_matches_engine_contract_table.
+    // InfraResolver handles IaC/tfstate resource refs; it does not interfere with code
+    // resolvers (it only fires when raw_name maps exclusively to resource nodes).
+    // RelativeImportResolver binds relative JS/TS Imports refs to their target File node
+    // (exact-path, root-guarded against the repo/label root; lane relative-imports).
+    let relative = wicked_estate_resolve::RelativeImportResolver::new(scope.as_deref());
+    let resolvers: &[&dyn Resolver] = &[
+        &NameResolver,
+        &ScopedNameResolver,
+        &ImportMapResolver,
+        &relative,
+        &InfraResolver,
+        &RulesBridgeResolver,
+    ];
+    let resolution = resolve_all_with_coverage(resolvers, &all_refs, &index)?;
+    // Estate cross-domain join: RACF profiles → the datasets/MQ assets they protect, by RACF
+    // generic profile matching (most-specific wins). Derived from the full node population (a
+    // profile pattern can match assets declared in any file), reusing the index just built.
+    let estate = wicked_estate_resolve::estate_edges(index.nodes());
 
     // Unresolved refs come from the same attribution as the edges — the one definition in
     // docs/ENGINE-CONTRACT.md §2.1 (a ref is unresolved iff no resolver emitted an edge
@@ -1103,6 +1130,95 @@ pub fn index_path_as(
     store.upsert_edges(&estate)?;
     store.upsert_unresolved_refs(&resolution.unresolved)?;
     store.commit_batch()?;
+
+    // ── BACK-FILL previously-parked refs (lane importer-backfill, #141) ─────────────────────
+    // The main pass resolves CHANGED files' refs only; a ref parked in an EARLIER run — an
+    // unchanged importer of `./b` whose `b.ts` just appeared, an unchanged caller of a symbol
+    // a changed file just defined — has no edge to be discovered by (D01-7). Re-resolve exactly
+    // the parked rows this run's additions could bind (see the module doc for the two lanes).
+    //
+    // Exclusions: refs from files (re-)extracted THIS run (their rows were just rewritten by
+    // the main pass), and — on a labelled run — refs outside this repo's scope (edges must not
+    // resolve across repos). Idempotent by construction: a re-resolved row is DELETED in the
+    // same batch that writes its edge (edge upsert dedups by key, so a replay is a no-op); a
+    // still-parked candidate is left in place, NEVER re-inserted. Stored rows carry no hints,
+    // so hint-driven resolution (ImportMapResolver) does not fire here — same as a full
+    // re-index would do for a hint-less ref, and strictly more than the pre-#141 behaviour.
+    //
+    // Skipped under force_full (everything was just re-resolved) and when no file is unchanged
+    // (a surviving candidate can only live in an unchanged file) — so a first index and a full
+    // re-extract pay nothing.
+    let mut backfill_resolved = 0usize;
+    let mut backfill_still_parked = 0usize;
+    if !force_full && unchanged_count > 0 {
+        let changed_files: HashSet<&str> = changed.iter().map(|fw| fw.rel.as_str()).collect();
+        let admissible = |r: &wicked_estate_core::UnresolvedRef| {
+            !changed_files.contains(r.location.file.as_str())
+                && scope
+                    .as_deref()
+                    .is_none_or(|p| r.location.file.starts_with(p))
+        };
+        // Persisted site identity — the 7 columns the store keeps per parked row.
+        fn site_key(
+            r: &wicked_estate_core::UnresolvedRef,
+        ) -> (String, String, EdgeKind, String, u32, u32, u32) {
+            (
+                r.from.0.clone(),
+                r.raw_name.clone(),
+                r.kind.clone(),
+                r.location.file.clone(),
+                r.location.span.start_line,
+                r.location.span.start_byte,
+                r.location.span.end_byte,
+            )
+        }
+        let mut seen: HashSet<(String, String, EdgeKind, String, u32, u32, u32)> = HashSet::new();
+        let mut candidates: Vec<wicked_estate_core::UnresolvedRef> = Vec::new();
+        // Name lane: one exact indexed lookup per distinct extracted name.
+        let mut probed: HashSet<&str> = HashSet::new();
+        for (_, extraction, _) in &extractions {
+            for n in &extraction.nodes {
+                if n.name.is_empty() || !probed.insert(n.name.as_str()) {
+                    continue;
+                }
+                for r in store.unresolved_refs_for_name(&n.name)? {
+                    if admissible(&r) && seen.insert(site_key(&r)) {
+                        candidates.push(r);
+                    }
+                }
+            }
+        }
+        // Import lane: only a NEW File path can bind a parked relative import.
+        if new_file_count > 0 {
+            for r in store.parked_relative_import_refs()? {
+                if admissible(&r) && seen.insert(site_key(&r)) {
+                    candidates.push(r);
+                }
+            }
+        }
+        if !candidates.is_empty() {
+            let backfill = resolve_all_with_coverage(resolvers, &candidates, &index)?;
+            let still: HashSet<_> = backfill.unresolved.iter().map(site_key).collect();
+            let bound: Vec<wicked_estate_core::UnresolvedRef> = candidates
+                .iter()
+                .filter(|r| !still.contains(&site_key(r)))
+                .cloned()
+                .collect();
+            backfill_resolved = bound.len();
+            backfill_still_parked = backfill.unresolved.len();
+            if !bound.is_empty() || !backfill.edges.is_empty() {
+                store.begin_batch()?;
+                store.upsert_edges(&backfill.edges)?;
+                store.delete_unresolved_refs(&bound)?;
+                store.commit_batch()?;
+            }
+            // Honest telemetry: what got back-filled, what is still waiting.
+            eprintln!(
+                "BACKFILL: re-resolved {backfill_resolved} previously-parked ref(s) into edges; \
+                 {backfill_still_parked} candidate(s) still parked"
+            );
+        }
+    }
 
     // W11.3: populate the pagerank.top cache so subsequent `rank`/`important_symbols` calls
     // can serve from cache instead of recomputing. Best-effort: failure is non-fatal.
@@ -1199,6 +1315,16 @@ pub fn index_path_as(
             wicked_estate_core::observability::KeyValue::int(
                 "wicked_estate.edges",
                 stats.edge_count as i64,
+            ),
+            // Back-fill pass accounting (lane importer-backfill, #141): parked refs this run
+            // re-resolved into edges vs candidates that remain parked.
+            wicked_estate_core::observability::KeyValue::int(
+                "wicked_estate.backfill_resolved",
+                backfill_resolved as i64,
+            ),
+            wicked_estate_core::observability::KeyValue::int(
+                "wicked_estate.backfill_still_parked",
+                backfill_still_parked as i64,
             ),
         ],
         events: vec![],

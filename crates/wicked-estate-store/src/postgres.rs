@@ -491,6 +491,89 @@ impl PostgresStore {
         Ok(())
     }
 
+    /// Every parked `Imports` row whose written specifier is relative (`./` / `../`, possibly
+    /// quoted) — one kind-scoped SQL pass, relative-spec check in Rust. Backs the trait method
+    /// of the same name on `GraphStoreMutExt` (the back-fill candidate fetch, wicked-estate#141).
+    pub fn parked_relative_import_refs(&self) -> Result<Vec<UnresolvedRef>> {
+        use wicked_estate_core::{EdgeKind, Location, Span};
+        let kind_json = serde_json::to_string(&EdgeKind::Imports)?;
+        let mut h = self.conn()?;
+        rt_block(async {
+            let rows = sqlx::query(
+                "SELECT from_sym, raw_name, kind, file, line, start_byte, end_byte \
+                 FROM unresolved_refs WHERE kind = $1",
+            )
+            .bind(&kind_json)
+            .fetch_all(h.as_conn())
+            .await?;
+            let mut out = Vec::new();
+            for row in rows {
+                let raw_name: String = row.try_get("raw_name")?;
+                if !crate::is_relative_import_spec(&raw_name) {
+                    continue;
+                }
+                let from_sym: String = row.try_get("from_sym")?;
+                let kind_json: String = row.try_get("kind")?;
+                let file: String = row.try_get("file")?;
+                let line: i64 = row.try_get("line")?;
+                let start_byte: i64 = row.try_get("start_byte")?;
+                let end_byte: i64 = row.try_get("end_byte")?;
+                let kind = serde_json::from_str(&kind_json)
+                    .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+                // Same reconstruction as unresolved_refs_for_name: persisted site columns only.
+                let location = Location::new(
+                    file,
+                    Span {
+                        start_line: line as u32,
+                        start_byte: start_byte as u32,
+                        end_byte: end_byte as u32,
+                        start_col: 0,
+                        end_line: 0,
+                        end_col: 0,
+                    },
+                );
+                out.push(UnresolvedRef {
+                    from: SymbolId(from_sym),
+                    raw_name,
+                    kind,
+                    location,
+                    hints: Default::default(),
+                });
+            }
+            Ok::<Vec<UnresolvedRef>, sqlx::Error>(out)
+        })
+        .map_err(st)
+    }
+
+    /// Delete unresolved rows by persisted site identity (all 7 columns
+    /// `upsert_unresolved_refs` writes; `from_sym` is stored as TEXT on this backend). Returns
+    /// rows deleted. Backs the trait method of the same name on `GraphStoreMutExt`.
+    pub fn delete_unresolved_refs(&mut self, refs: &[UnresolvedRef]) -> Result<usize> {
+        let mut h = self.conn()?;
+        let mut deleted = 0usize;
+        for r in refs {
+            let kind = serde_json::to_string(&r.kind)?;
+            let res = rt_block(
+                sqlx::query(
+                    "DELETE FROM unresolved_refs \
+                     WHERE from_sym = $1 AND raw_name = $2 AND kind = $3 AND file = $4 \
+                       AND line = $5 AND start_byte = $6 AND end_byte = $7",
+                )
+                .bind(&r.from.0)
+                .bind(&r.raw_name)
+                .bind(&kind)
+                .bind(&r.location.file)
+                .bind(r.location.span.start_line as i64)
+                .bind(r.location.span.start_byte as i64)
+                .bind(r.location.span.end_byte as i64)
+                .execute(h.as_conn()),
+            )
+            .map_err(st)?;
+            deleted += res.rows_affected() as usize;
+        }
+        Ok(deleted)
+    }
+
     // ── recursive CTE traversal ──────────────────────────────────────────────
 
     fn cte_reach(

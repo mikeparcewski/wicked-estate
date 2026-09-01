@@ -99,6 +99,29 @@ fn postgres_store_satisfies_graph_store_contract() {
     wicked_estate_core::conformance::graph_store_suite(&mut store);
 }
 
+/// The back-fill support surface (#141) on a live Postgres — the SAME shared body the
+/// Mem/Sqlite unit tests pin, so the PG implementations of `parked_relative_import_refs`
+/// and `delete_unresolved_refs` cannot drift without a test signal.
+#[test]
+fn postgres_store_satisfies_backfill_support_contract() {
+    let url = match std::env::var("TEST_POSTGRES_URL") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("postgres_conformance: TEST_POSTGRES_URL not set — skipping");
+            return;
+        }
+    };
+    let _guard = PG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lease = PgTestLease::acquire(&url);
+
+    drop_all_tables(&url);
+
+    let mut store = wicked_estate_store::PostgresStore::open(&url).expect("open postgres store");
+    wicked_estate_store::backfill_conformance::backfill_support_suite(&mut store);
+}
+
 fn node(name: &str, file: &str) -> Node {
     Node::new(
         SymbolId(format!("torn:{name}")),
