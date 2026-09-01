@@ -1135,6 +1135,60 @@ pub trait GraphStoreMutExt: GraphStore {
     fn incremental_vacuum(&mut self) -> wicked_estate_core::Result<()> {
         Ok(())
     }
+
+    /// Every currently-parked `Imports` reference whose written specifier is RELATIVE
+    /// (`./…` / `../…`, possibly quoted) — the candidate set for the indexer's back-fill pass
+    /// (lane importer-backfill, wicked-estate#141). One kind-scoped pass over `unresolved_refs`;
+    /// bare/alias specifiers (`react`, `@scope/pkg`) are excluded because only relative specs can
+    /// bind to a newly-indexed File path. Rows come back exactly as
+    /// [`GraphRead::unresolved_refs_for_name`](wicked_estate_core::GraphRead::unresolved_refs_for_name)
+    /// reconstructs them (persisted site columns; no hints, cols/end_line zero).
+    fn parked_relative_import_refs(&self) -> wicked_estate_core::Result<Vec<UnresolvedRef>>;
+
+    /// Delete `unresolved_refs` rows by persisted SITE identity — `(from, raw_name, kind, file,
+    /// line, start_byte, end_byte)`, exactly the columns `upsert_unresolved_refs` writes. Used by
+    /// the back-fill pass to retire a parked row in the same batch that writes its resolved edge,
+    /// so coverage accounting never double-reports a site as both bound and parked. A site with
+    /// duplicate rows loses ALL of them; a ref that matches nothing deletes nothing. Returns the
+    /// number of rows deleted.
+    fn delete_unresolved_refs(
+        &mut self,
+        refs: &[UnresolvedRef],
+    ) -> wicked_estate_core::Result<usize>;
+}
+
+/// True when a written import specifier is RELATIVE (`./` / `../`) after stripping one pair of
+/// matching quotes. Local mirror of the resolver's `dequote` semantics — the store crate must not
+/// depend on `wicked-estate-resolve` (dependency direction: both sit on `wicked-estate-core`).
+pub(crate) fn is_relative_import_spec(raw: &str) -> bool {
+    let s = raw.trim();
+    let s = if s.len() >= 2
+        && ((s.starts_with('\'') && s.ends_with('\''))
+            || (s.starts_with('"') && s.ends_with('"'))
+            || (s.starts_with('`') && s.ends_with('`')))
+    {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    };
+    s.starts_with("./") || s.starts_with("../")
+}
+
+/// The persisted site identity of an unresolved row — the 7 columns `upsert_unresolved_refs`
+/// writes. Comparison key for `delete_unresolved_refs` (full struct equality would be wrong:
+/// in-memory rows may still carry hints/cols that were never persisted).
+pub(crate) fn unresolved_site_key(
+    r: &UnresolvedRef,
+) -> (String, String, EdgeKind, String, u32, u32, u32) {
+    (
+        r.from.0.clone(),
+        r.raw_name.clone(),
+        r.kind.clone(),
+        r.location.file.clone(),
+        r.location.span.start_line,
+        r.location.span.start_byte,
+        r.location.span.end_byte,
+    )
 }
 
 impl GraphStoreMutExt for SqliteStore {
@@ -1168,6 +1222,17 @@ impl GraphStoreMutExt for SqliteStore {
     fn incremental_vacuum(&mut self) -> wicked_estate_core::Result<()> {
         self.incremental_vacuum()
     }
+
+    fn parked_relative_import_refs(&self) -> wicked_estate_core::Result<Vec<UnresolvedRef>> {
+        self.parked_relative_import_refs()
+    }
+
+    fn delete_unresolved_refs(
+        &mut self,
+        refs: &[UnresolvedRef],
+    ) -> wicked_estate_core::Result<usize> {
+        self.delete_unresolved_refs(refs)
+    }
 }
 
 impl GraphStoreMutExt for MemStore {
@@ -1199,6 +1264,26 @@ impl GraphStoreMutExt for MemStore {
     /// MemStore has no FTS shadow table — no-op.
     fn bulk_rebuild_fts_for_files(&mut self, _files: &[&str]) -> wicked_estate_core::Result<()> {
         Ok(())
+    }
+
+    fn parked_relative_import_refs(&self) -> wicked_estate_core::Result<Vec<UnresolvedRef>> {
+        Ok(self
+            .unresolved
+            .iter()
+            .filter(|r| r.kind == EdgeKind::Imports && is_relative_import_spec(&r.raw_name))
+            .cloned()
+            .collect())
+    }
+
+    fn delete_unresolved_refs(
+        &mut self,
+        refs: &[UnresolvedRef],
+    ) -> wicked_estate_core::Result<usize> {
+        let keys: HashSet<_> = refs.iter().map(unresolved_site_key).collect();
+        let before = self.unresolved.len();
+        self.unresolved
+            .retain(|r| !keys.contains(&unresolved_site_key(r)));
+        Ok(before - self.unresolved.len())
     }
 }
 
@@ -1256,6 +1341,17 @@ impl GraphStoreMutExt for PostgresStore {
     /// PostgresStore uses column-level trigram index — no separate FTS table to rebuild.
     fn bulk_rebuild_fts_for_files(&mut self, _files: &[&str]) -> wicked_estate_core::Result<()> {
         Ok(())
+    }
+
+    fn parked_relative_import_refs(&self) -> wicked_estate_core::Result<Vec<UnresolvedRef>> {
+        self.parked_relative_import_refs()
+    }
+
+    fn delete_unresolved_refs(
+        &mut self,
+        refs: &[UnresolvedRef],
+    ) -> wicked_estate_core::Result<usize> {
+        self.delete_unresolved_refs(refs)
     }
 }
 
@@ -1961,5 +2057,124 @@ mod runtime_profile_tests {
             resolve_store_spec_from(None, Some("team"), Some(&padded), None, DEFAULT).unwrap(),
             PG
         );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests — back-fill support surface (lane importer-backfill, wicked-estate#141):
+// `parked_relative_import_refs` + `delete_unresolved_refs`, pinned on BOTH default
+// backends through the same body so MemStore stays an honest reference for SqliteStore.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod backfill_support_tests {
+    use super::*;
+    use wicked_estate_core::{Location, Span};
+
+    fn uref(
+        from: &str,
+        raw: &str,
+        kind: EdgeKind,
+        file: &str,
+        line: u32,
+        sb: u32,
+    ) -> UnresolvedRef {
+        UnresolvedRef::new(
+            SymbolId(from.to_string()),
+            raw,
+            kind,
+            Location::new(
+                file,
+                Span {
+                    start_line: line,
+                    start_byte: sb,
+                    end_byte: sb + 4,
+                    start_col: 0,
+                    end_line: 0,
+                    end_col: 0,
+                },
+            ),
+        )
+    }
+
+    /// The shared contract body. Seeds four parked rows and checks:
+    /// - `parked_relative_import_refs` returns exactly the RELATIVE `Imports` rows
+    ///   (quoted and bare-relative), excluding bare specifiers and non-Imports kinds;
+    /// - `delete_unresolved_refs` deletes by site identity only (other rows survive),
+    ///   is idempotent (second delete = 0), removes ALL rows of a duplicated site,
+    ///   and matches nothing for a never-stored symbol.
+    fn backfill_support_contract(store: &mut dyn GraphStoreMutExt) {
+        let quoted = uref("ts:a.ts:file", "'./b'", EdgeKind::Imports, "a.ts", 1, 10);
+        let bare_rel = uref("ts:a.ts:file", "../up/x", EdgeKind::Imports, "a.ts", 2, 40);
+        let bare_pkg = uref("ts:a.ts:file", "react", EdgeKind::Imports, "a.ts", 3, 70);
+        let rel_call = uref("ts:a.ts:fn:g", "./c", EdgeKind::Calls, "a.ts", 4, 90);
+        store
+            .upsert_unresolved_refs(&[
+                quoted.clone(),
+                bare_rel.clone(),
+                bare_pkg.clone(),
+                rel_call.clone(),
+            ])
+            .unwrap();
+
+        // Candidate fetch: only the two RELATIVE Imports rows.
+        let mut parked: Vec<String> = store
+            .parked_relative_import_refs()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.raw_name)
+            .collect();
+        parked.sort();
+        assert_eq!(
+            parked,
+            vec!["'./b'".to_string(), "../up/x".to_string()],
+            "kind- and spec-filtering must exclude bare specifiers and non-Imports rows"
+        );
+
+        // Delete by site identity: only the named site goes; second delete finds nothing.
+        assert_eq!(
+            store
+                .delete_unresolved_refs(std::slice::from_ref(&quoted))
+                .unwrap(),
+            1
+        );
+        assert_eq!(store.delete_unresolved_refs(&[quoted]).unwrap(), 0);
+        assert_eq!(
+            store.parked_relative_import_refs().unwrap().len(),
+            1,
+            "the other relative row must survive"
+        );
+        // Untouched rows of other kinds/specs survive too.
+        assert_eq!(store.unresolved_refs_for_name("react").unwrap().len(), 1);
+        assert_eq!(store.unresolved_refs_for_name("./c").unwrap().len(), 1);
+
+        // A duplicated site (double insert) loses ALL its rows in one delete.
+        store
+            .upsert_unresolved_refs(std::slice::from_ref(&bare_rel))
+            .unwrap();
+        assert_eq!(store.unresolved_refs_for_name("../up/x").unwrap().len(), 2);
+        assert_eq!(store.delete_unresolved_refs(&[bare_rel]).unwrap(), 2);
+        assert!(store.parked_relative_import_refs().unwrap().is_empty());
+
+        // A never-stored from-symbol matches nothing (and must not error).
+        let ghost = uref(
+            "ts:ghost.ts:file",
+            "'./b'",
+            EdgeKind::Imports,
+            "ghost.ts",
+            1,
+            0,
+        );
+        assert_eq!(store.delete_unresolved_refs(&[ghost]).unwrap(), 0);
+    }
+
+    #[test]
+    fn backfill_support_mem() {
+        backfill_support_contract(&mut MemStore::new());
+    }
+
+    #[test]
+    fn backfill_support_sqlite() {
+        backfill_support_contract(&mut SqliteStore::in_memory().unwrap());
     }
 }

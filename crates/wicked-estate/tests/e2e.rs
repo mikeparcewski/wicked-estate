@@ -533,11 +533,13 @@ fn incremental_delete_does_not_cascade() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// The residual hole, documented as an ASSERTION (not skipped): an importer whose ref was
-/// PARKED (target absent at index time) is not re-resolved when the target is later added —
-/// no edge exists to discover it by (module doc "Known limitations", D01-7 audit).
+/// The D01-7 residual hole, CLOSED by the back-fill pass (lane importer-backfill, #141): an
+/// importer whose ref was PARKED (target absent at index time) IS re-resolved the run the
+/// target appears — the import lane matches newly-indexed File paths against parked rows, so
+/// the edge lands without a.ts ever changing. (Pre-#141 this test asserted the opposite; the
+/// full arc lives in tests/backfill.rs.)
 #[test]
-fn incremental_importer_of_new_target_stays_parked_until_touched() {
+fn incremental_importer_of_new_target_backfills_when_target_appears() {
     use wicked_estate_core::GraphRead;
     let dir = fresh_dir("incr_parked");
     fs::write(
@@ -553,7 +555,7 @@ fn incremental_importer_of_new_target_stays_parked_until_touched() {
         "ref parked while the target is absent"
     );
 
-    // Add the target and re-index: a.ts is unchanged, so its parked ref stays parked.
+    // Add the target and re-index: a.ts is unchanged — the edge can only come from back-fill.
     fs::write(dir.join("src/b.ts"), "export const b = 1;\n").unwrap();
     wicked_estate::index_path(&mut store, &dir).unwrap();
 
@@ -563,13 +565,18 @@ fn incremental_importer_of_new_target_stays_parked_until_touched() {
         .into_iter()
         .filter(|e| e.resolved_by == "relative-import")
         .collect();
-    assert!(
-        rel.is_empty(),
-        "documented residual: the parked ref is NOT re-resolved until a.ts changes: {rel:?}"
+    assert_eq!(
+        rel.len(),
+        1,
+        "the parked ref must back-fill into exactly one File→File edge: {rel:?}"
     );
     assert!(
-        !store.unresolved_refs_for_name("'./b'").unwrap().is_empty(),
-        "the unresolved row persists"
+        rel[0].source.0.contains("a.ts") && rel[0].target.0.contains("b.ts"),
+        "endpoints must be importer → new target: {rel:?}"
+    );
+    assert!(
+        store.unresolved_refs_for_name("'./b'").unwrap().is_empty(),
+        "the retired parked row must not persist"
     );
     let _ = fs::remove_dir_all(&dir);
 }

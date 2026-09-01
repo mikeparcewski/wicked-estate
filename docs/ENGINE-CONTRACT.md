@@ -83,8 +83,16 @@ the accounting re-runs it per ref for shared-key references.
 files hit `remove_file` (which drops their unresolved rows) before re-extraction. Exceptions,
 all documented:
 
-1. **Unchanged importers** — a ref in an unchanged file stays unresolved until that file changes
-   or a full re-index runs (the module-doc Known Limitation of `wicked-estate/src/lib.rs`).
+1. **Unchanged importers/callers** — mostly closed by the back-fill pass (lane
+   importer-backfill, #141): when a run (re-)extracts a definition name, parked refs with that
+   exact `raw_name` are re-resolved (indexed lookup per name); when a run indexes a NEW file
+   path, parked relative-import refs are re-resolved against the File map. A re-resolved row is
+   deleted in the same batch that writes its edge; a still-parked row stays put, never
+   re-inserted. Residual (the module-doc Known Limitations of `wicked-estate/src/lib.rs`): a
+   ref parked for AMBIGUITY is re-checked only when a same-name definition is (re-)extracted —
+   a deletion that makes the name unique does not trigger it — and back-fill resolves without
+   hints (`ImportMapResolver` never fires on stored rows). Those refs still wait for their
+   file to change or a full re-index.
 2. **`scip` ingest does not prune** — SCIP edges land, but existing `unresolved_refs` rows are
    pruned only on the next re-index of their file. Deferred, not impossible: a Calls-only prune
    by `(from_sym, kind, target.name == raw_name)` is the named follow-up; a general prune fails

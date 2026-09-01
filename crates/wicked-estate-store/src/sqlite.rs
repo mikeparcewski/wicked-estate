@@ -1368,6 +1368,107 @@ impl SqliteStore {
             .map_err(st)
     }
 
+    /// Every parked `Imports` row whose written specifier is relative (`./` / `../`, possibly
+    /// quoted) — one kind-scoped SQL pass, relative-spec check in Rust (the quote variants make
+    /// a SQL prefix predicate noisy for no gain). Backs the trait method of the same name on
+    /// `GraphStoreMutExt` (the indexer's back-fill candidate fetch, wicked-estate#141).
+    pub fn parked_relative_import_refs(&self) -> Result<Vec<UnresolvedRef>> {
+        use wicked_estate_core::{Location, Span};
+        // Same on-disk encoding upsert_unresolved_refs writes (serde JSON string, quotes kept).
+        let kind_json = serde_json::to_string(&EdgeKind::Imports)?;
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT s.sym, u.raw_name, u.kind, u.file, u.line, u.start_byte, u.end_byte \
+                 FROM unresolved_refs u \
+                 JOIN symbols s ON s.sid = u.from_sym \
+                 WHERE u.kind=?1",
+            )
+            .map_err(st)?;
+        let rows = stmt
+            .query_map(params![kind_json], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?,
+                ))
+            })
+            .map_err(st)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (from_sym, raw_name, kind_json, file, line, start_byte, end_byte) =
+                row.map_err(st)?;
+            if !crate::is_relative_import_spec(&raw_name) {
+                continue;
+            }
+            let kind = serde_json::from_str(&kind_json)?;
+            // Same reconstruction as unresolved_refs_for_name: persisted site columns only.
+            let location = Location::new(
+                file,
+                Span {
+                    start_line: line as u32,
+                    start_byte: start_byte as u32,
+                    end_byte: end_byte as u32,
+                    start_col: 0,
+                    end_line: 0,
+                    end_col: 0,
+                },
+            );
+            out.push(UnresolvedRef {
+                from: SymbolId(from_sym),
+                raw_name,
+                kind,
+                location,
+                hints: Default::default(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Delete unresolved rows by persisted site identity (all 7 columns
+    /// `upsert_unresolved_refs` writes). A never-interned `from` symbol matches nothing.
+    /// Returns rows deleted (a duplicated site loses all its rows). Backs the trait method of
+    /// the same name on `GraphStoreMutExt`.
+    pub fn delete_unresolved_refs(&mut self, refs: &[UnresolvedRef]) -> Result<usize> {
+        let mut deleted = 0usize;
+        let mut sid_stmt = self
+            .conn
+            .prepare_cached("SELECT sid FROM symbols WHERE sym=?1")
+            .map_err(st)?;
+        let mut del_stmt = self
+            .conn
+            .prepare_cached(
+                "DELETE FROM unresolved_refs \
+                 WHERE from_sym=?1 AND raw_name=?2 AND kind=?3 AND file=?4 \
+                   AND line=?5 AND start_byte=?6 AND end_byte=?7",
+            )
+            .map_err(st)?;
+        for r in refs {
+            let sid: Option<i64> = sid_stmt
+                .query_row(params![r.from.0], |row| row.get(0))
+                .optional()
+                .map_err(st)?;
+            let Some(sid) = sid else { continue };
+            let kind = serde_json::to_string(&r.kind)?;
+            deleted += del_stmt
+                .execute(params![
+                    sid,
+                    r.raw_name,
+                    kind,
+                    r.location.file,
+                    r.location.span.start_line as i64,
+                    r.location.span.start_byte as i64,
+                    r.location.span.end_byte as i64,
+                ])
+                .map_err(st)?;
+        }
+        Ok(deleted)
+    }
+
     /// Reachable set from `start` in one direction, via a bounded recursive CTE → {sym: min depth}.
     ///
     /// The CTE traverses edges by INTEGER sid (fast integer comparisons); the start sid is looked
