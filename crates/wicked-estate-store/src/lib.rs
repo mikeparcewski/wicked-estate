@@ -2061,13 +2061,15 @@ mod runtime_profile_tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Tests — back-fill support surface (lane importer-backfill, wicked-estate#141):
-// `parked_relative_import_refs` + `delete_unresolved_refs`, pinned on BOTH default
-// backends through the same body so MemStore stays an honest reference for SqliteStore.
+// Back-fill support conformance (lane importer-backfill, wicked-estate#141):
+// `parked_relative_import_refs` + `delete_unresolved_refs`, pinned on EVERY backend
+// through one shared body — MemStore stays an honest reference for SqliteStore, and
+// tests/postgres_conformance.rs runs the same suite against a live Postgres when
+// `TEST_POSTGRES_URL` is set. `#[doc(hidden)]`: a test contract, not API surface.
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
-mod backfill_support_tests {
+#[doc(hidden)]
+pub mod backfill_conformance {
     use super::*;
     use wicked_estate_core::{Location, Span};
 
@@ -2103,7 +2105,7 @@ mod backfill_support_tests {
     /// - `delete_unresolved_refs` deletes by site identity only (other rows survive),
     ///   is idempotent (second delete = 0), removes ALL rows of a duplicated site,
     ///   and matches nothing for a never-stored symbol.
-    fn backfill_support_contract(store: &mut dyn GraphStoreMutExt) {
+    pub fn backfill_support_suite(store: &mut dyn GraphStoreMutExt) {
         let quoted = uref("ts:a.ts:file", "'./b'", EdgeKind::Imports, "a.ts", 1, 10);
         let bare_rel = uref("ts:a.ts:file", "../up/x", EdgeKind::Imports, "a.ts", 2, 40);
         let bare_pkg = uref("ts:a.ts:file", "react", EdgeKind::Imports, "a.ts", 3, 70);
@@ -2167,14 +2169,20 @@ mod backfill_support_tests {
         );
         assert_eq!(store.delete_unresolved_refs(&[ghost]).unwrap(), 0);
     }
+}
+
+#[cfg(test)]
+mod backfill_support_tests {
+    use super::backfill_conformance::backfill_support_suite;
+    use super::*;
 
     #[test]
     fn backfill_support_mem() {
-        backfill_support_contract(&mut MemStore::new());
+        backfill_support_suite(&mut MemStore::new());
     }
 
     #[test]
     fn backfill_support_sqlite() {
-        backfill_support_contract(&mut SqliteStore::in_memory().unwrap());
+        backfill_support_suite(&mut SqliteStore::in_memory().unwrap());
     }
 }
