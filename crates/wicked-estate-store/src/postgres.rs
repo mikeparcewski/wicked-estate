@@ -192,7 +192,8 @@ INSERT INTO node_files(symbol, file, is_def, data)
               THEN 0 ELSE 1 END,
          data
   FROM nodes
-  WHERE NOT EXISTS (SELECT 1 FROM node_files);
+  WHERE NOT EXISTS (SELECT 1 FROM node_files)
+ON CONFLICT (symbol, file) DO NOTHING;
 
 -- M8/DoD-XA4: per-symbol live-node epoch. Postgres keys nodes on the symbol string and DELETEs the
 -- node row on remove_file, so the epoch needs a dedicated table that SURVIVES remove_file (the

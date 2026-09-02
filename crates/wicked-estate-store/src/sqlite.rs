@@ -259,7 +259,7 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
                 .map_err(st)?;
             if nf_empty {
                 conn.execute_batch(
-                    "INSERT INTO node_files(symbol, file, is_def, data) \
+                    "INSERT OR IGNORE INTO node_files(symbol, file, is_def, data) \
                      SELECT symbol, file, \
                             CASE WHEN json_extract(data, '$.metadata.is_declaration') \
                                  THEN 0 ELSE 1 END, \
