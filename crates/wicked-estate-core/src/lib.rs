@@ -37,7 +37,9 @@ pub use change::{Change, ChangeOp};
 pub use edge::{Confidence, Direction, Edge, EdgeKind, Provenance, ResolutionTier};
 pub use error::{Error, Result};
 pub use history::HistoricalEdge;
-pub use node::{Language, Location, Metadata, Node, NodeKind, SourceFile, Span};
+pub use node::{
+    DECLARATION_METADATA_KEY, Language, Location, Metadata, Node, NodeKind, SourceFile, Span,
+};
 pub use observability::{
     AggregationTemporality, AttributeValue, ExportError, ExportResult, ExporterConfig,
     HistogramDataPoint, InMemorySink, InstrumentKind, InstrumentationScope, KeyValue, LogRecord,

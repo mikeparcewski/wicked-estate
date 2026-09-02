@@ -96,6 +96,15 @@ pub enum NodeKind {
 /// Free-form, JSON-typed extension bag (matches the edge/node metadata pattern).
 pub type Metadata = serde_json::Map<String, serde_json::Value>;
 
+/// Metadata key marking a node record as a DECLARATION contribution (M4 / Option A,
+/// wicked-estate#152). One logical symbol may be contributed by more than one file — a C/C++
+/// header prototype and its out-of-line definition mint ONE [`SymbolId`] across TWO files — and
+/// the store keeps a per-`(symbol, file)` contribution record, preferring the DEFINITION
+/// contribution as the node's primary `location`/`kind`. This flag is METADATA, never identity:
+/// it changes which contribution the store surfaces as primary, not the id anything mints.
+/// Extractors set it on prototype/forward-declaration captures; absent means definition.
+pub const DECLARATION_METADATA_KEY: &str = "is_declaration";
+
 /// A node in the code graph. The [`SymbolId`] is its stable primary key; `location` is mutable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Node {
@@ -141,6 +150,27 @@ impl Node {
     pub fn with_scope(mut self, scope: crate::scope::Scope) -> Self {
         self.scope = scope;
         self
+    }
+
+    /// Mark this node record as a DECLARATION contribution (builder) — see
+    /// [`DECLARATION_METADATA_KEY`]. Metadata only, never part of the [`SymbolId`].
+    pub fn as_declaration(mut self) -> Self {
+        self.metadata.insert(
+            DECLARATION_METADATA_KEY.to_string(),
+            serde_json::Value::Bool(true),
+        );
+        self
+    }
+
+    /// Whether this node record is a DECLARATION contribution (`metadata["is_declaration"]`
+    /// truthy). Definition records — the default, including every record written before the flag
+    /// existed — return `false`. Stores use this to prefer the definition contribution when one
+    /// symbol is contributed by multiple files (M4 / Option A, wicked-estate#152).
+    pub fn is_declaration(&self) -> bool {
+        self.metadata
+            .get(DECLARATION_METADATA_KEY)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
     }
 }
 

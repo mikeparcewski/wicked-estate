@@ -1510,7 +1510,7 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
         .upsert_nodes(&[
             file_node("si_file_a", "imp/a.rs"),
             file_node("si_file_b", "imp/b.rs"),
-            import_node("si_import", "imp/b.rs"), // owner: imp/b.rs (last writer)
+            import_node("si_import", "imp/b.rs"), // homed at imp/b.rs (its one contribution)
         ])
         .expect("upsert si1 nodes");
     store
@@ -1731,4 +1731,270 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
     store
         .prune_dangling_edges()
         .expect("prune after si4 cleanup");
+}
+
+/// Multi-file symbol contributions (M4 / Option A — wicked-estate#152). Run on a FRESH store,
+/// like [`traverse_multi_matches_union_of_traverse`]; a separate suite so backends outside the
+/// shipped trio can adopt it independently of [`graph_store_suite`].
+///
+/// ONE logical symbol may be contributed by MORE THAN ONE file — the live case is C/C++: a `.h`
+/// member prototype and its out-of-line `.cpp` definition mint one SymbolId across two files
+/// (ADR-002 scheme 3; extract-level pin `cpp_member_proto_def_cross_file_single_id_hazard`, which
+/// this suite retires per its M4 flip instruction). The store contract this suite pins:
+///
+/// 1. **Derived primary, never last-write-wins**: the node's `location`/`kind`/record equal the
+///    PREFERRED contribution — definition before declaration (`Node::is_declaration` metadata),
+///    lexicographic file tiebreak — regardless of extraction ORDER. The incremental file/kind
+///    flap is dead.
+/// 2. **`remove_file` deletes CONTRIBUTIONS**: a node with surviving contributions is re-homed
+///    wholesale to the surviving preferred record; only a contribution-less node is deleted.
+/// 3. **Zero id churn**: edges keyed by the SymbolId survive either file's removal untouched,
+///    and the symbol's epoch never advances while any contribution survives (the node was never
+///    deleted, so a later re-add is an update, not a reuse).
+pub fn multi_file_contribution_suite<S: GraphStore>(store: &mut S) {
+    const DECL_FILE: &str = "mf/a_header.h"; // lexicographically FIRST — a file-order tiebreak
+    const DEF_FILE: &str = "mf/z_impl.cpp"; //  alone would wrongly pick the header.
+    let span_at = |b: u32| Span {
+        start_byte: b,
+        end_byte: b + 4,
+        start_line: b,
+        start_col: 0,
+        end_line: b,
+        end_col: 4,
+    };
+    // The declaration contribution: header prototype — marked via the metadata flag, with its own
+    // kind/doc/span so wholesale projection (never a field merge) is observable.
+    let decl = {
+        let mut n = Node::new(
+            sym("mf_reset"),
+            NodeKind::Method,
+            "mf_reset",
+            Language::new("cpp"),
+            Location::new(DECL_FILE, span_at(1)),
+        )
+        .as_declaration();
+        n.doc = Some("decl doc".to_string());
+        n
+    };
+    // The definition contribution: out-of-line impl. A DIFFERENT kind pins the deterministic kind
+    // reconciliation (the primary contribution's kind wins — no cross-run kind flap).
+    let def = {
+        let mut n = Node::new(
+            sym("mf_reset"),
+            NodeKind::Function,
+            "mf_reset",
+            Language::new("cpp"),
+            Location::new(DEF_FILE, span_at(7)),
+        );
+        n.doc = Some("def doc".to_string());
+        n
+    };
+    let caller = Node::new(
+        sym("mf_caller"),
+        NodeKind::Function,
+        "mf_caller",
+        Language::new("cpp"),
+        Location::new("mf/caller.cpp", Span::ZERO),
+    );
+
+    // (MF-1) Index both files, WORST order for last-write-wins: definition first, declaration
+    // last. One node; the primary must be the DEFINITION record even though (a) the declaration
+    // wrote last and (b) the declaration's file sorts first.
+    store.begin_batch().expect("begin mf1");
+    store
+        .upsert_nodes(&[def.clone(), caller.clone()])
+        .expect("upsert def + caller");
+    store
+        .upsert_nodes(std::slice::from_ref(&decl))
+        .expect("upsert decl");
+    store
+        .upsert_edges(&[calls("mf_caller", "mf_reset")])
+        .expect("upsert caller edge");
+    store.commit_batch().expect("commit mf1");
+
+    let one = |store: &S| -> Vec<Node> {
+        store
+            .all_nodes()
+            .expect("all_nodes")
+            .into_iter()
+            .filter(|n| n.symbol == sym("mf_reset"))
+            .collect()
+    };
+    assert_eq!(
+        one(store).len(),
+        1,
+        "proto + def are ONE logical symbol — exactly one node row"
+    );
+    let got = store
+        .get_node(&sym("mf_reset"))
+        .expect("get_node mf_reset")
+        .expect("node exists");
+    assert_eq!(
+        got.location.file, DEF_FILE,
+        "primary must be the DEFINITION contribution — not the last writer, not the \
+         lexicographically-first file"
+    );
+    assert_eq!(
+        got.kind,
+        NodeKind::Function,
+        "kind is the primary (definition) contribution's kind — deterministic reconciliation"
+    );
+    assert_eq!(
+        got.doc.as_deref(),
+        Some("def doc"),
+        "the primary record projects WHOLESALE (definition's doc, no field merge)"
+    );
+
+    // The flap is dead: re-writing the declaration again (an incremental re-index of the header)
+    // must NOT steal the primary.
+    store
+        .upsert_nodes(std::slice::from_ref(&decl))
+        .expect("re-upsert decl");
+    let got = store
+        .get_node(&sym("mf_reset"))
+        .expect("get_node after decl re-upsert")
+        .expect("node exists");
+    assert_eq!(
+        got.location.file, DEF_FILE,
+        "LAST-WRITE-WINS FLAP: re-indexing the header stole the primary from the definition"
+    );
+
+    // (MF-2) Remove the HEADER: the node survives (definition contribution remains), stays
+    // definition-primary, and the edge keyed by the SymbolId is untouched (zero id churn).
+    store.remove_file(DECL_FILE).expect("remove header");
+    let got = store
+        .get_node(&sym("mf_reset"))
+        .expect("get_node after header removal")
+        .expect("node must SURVIVE the header's removal — the .cpp still contributes it");
+    assert_eq!(got.location.file, DEF_FILE, "still definition-primary");
+    let dependents = store
+        .neighbors(&sym("mf_reset"), Direction::Dependents)
+        .expect("dependents after header removal");
+    assert_eq!(
+        dependents.len(),
+        1,
+        "the caller's edge survives the header removal untouched (zero id churn)"
+    );
+    assert_eq!(dependents[0].source, sym("mf_caller"));
+    assert_eq!(
+        store
+            .symbol_epoch(&sym("mf_reset"))
+            .expect("epoch after header removal"),
+        Some(0),
+        "a survivor was never deleted — its epoch must not advance"
+    );
+
+    // (MF-3) Idempotent re-index of the header (the incremental path: remove_file, then re-upsert
+    // the same extraction), twice. Primary stays put; still exactly one node; epoch still 0.
+    for round in 0..2 {
+        store.remove_file(DECL_FILE).expect("re-index remove");
+        store
+            .upsert_nodes(std::slice::from_ref(&decl))
+            .expect("re-index upsert");
+        let got = store
+            .get_node(&sym("mf_reset"))
+            .expect("get_node during re-index")
+            .expect("node exists");
+        assert_eq!(
+            got.location.file, DEF_FILE,
+            "idempotent re-index round {round}: primary must be stable"
+        );
+        assert_eq!(one(store).len(), 1, "re-index round {round}: one node");
+    }
+    assert_eq!(
+        store
+            .symbol_epoch(&sym("mf_reset"))
+            .expect("epoch after re-index rounds"),
+        Some(0),
+        "re-indexing a contributing file never deletes the node — epoch stays 0"
+    );
+
+    // (MF-4) Remove the IMPL: the node survives RE-HOMED to the declaration contribution —
+    // declaration-primary, the declaration's kind/doc/flag, edges still intact.
+    store.remove_file(DEF_FILE).expect("remove impl");
+    let got = store
+        .get_node(&sym("mf_reset"))
+        .expect("get_node after impl removal")
+        .expect("node must survive re-homed to the surviving declaration");
+    assert_eq!(
+        got.location.file, DECL_FILE,
+        "re-homed to the surviving (declaration) contribution"
+    );
+    assert_eq!(
+        got.kind,
+        NodeKind::Method,
+        "kind follows the new primary (declaration) contribution"
+    );
+    assert_eq!(
+        got.doc.as_deref(),
+        Some("decl doc"),
+        "the surviving record projects wholesale"
+    );
+    assert!(
+        got.is_declaration(),
+        "the projected record IS the declaration contribution (metadata flag intact)"
+    );
+    assert_eq!(
+        store
+            .neighbors(&sym("mf_reset"), Direction::Dependents)
+            .expect("dependents after impl removal")
+            .len(),
+        1,
+        "the caller's edge survives the impl removal too (zero id churn)"
+    );
+
+    // (MF-5) Remove the header as well — the LAST contribution: now the node is deleted, no
+    // island, and the epoch machinery sees a real delete (a later re-add would be a reuse).
+    store.remove_file(DECL_FILE).expect("remove last file");
+    assert!(
+        store
+            .get_node(&sym("mf_reset"))
+            .expect("get_node after last removal")
+            .is_none(),
+        "removing the LAST contribution deletes the node"
+    );
+    assert!(one(store).is_empty(), "no island node may remain");
+    assert_eq!(
+        store
+            .symbol_epoch(&sym("mf_reset"))
+            .expect("epoch after true delete"),
+        None,
+        "a deleted symbol has no live epoch"
+    );
+
+    // (MF-6) Two DEFINITION contributions, no declaration markers (the pre-marking C/C++ reality):
+    // the primary is the deterministic lexicographic MIN file, INDEPENDENT of upsert order. Two
+    // symbols with mirrored orders pin order-independence.
+    let two_def = |name: &str, file: &str| {
+        Node::new(
+            sym(name),
+            NodeKind::Function,
+            name,
+            Language::new("cpp"),
+            Location::new(file, Span::ZERO),
+        )
+    };
+    store
+        .upsert_nodes(&[two_def("mf_tie", "mf2/b.cpp")])
+        .expect("tie: b first");
+    store
+        .upsert_nodes(&[two_def("mf_tie", "mf2/a.cpp")])
+        .expect("tie: a second");
+    store
+        .upsert_nodes(&[two_def("mf_tie_rev", "mf2/a.cpp")])
+        .expect("tie rev: a first");
+    store
+        .upsert_nodes(&[two_def("mf_tie_rev", "mf2/b.cpp")])
+        .expect("tie rev: b second");
+    for name in ["mf_tie", "mf_tie_rev"] {
+        let got = store
+            .get_node(&sym(name))
+            .expect("get_node tie")
+            .expect("tie node exists");
+        assert_eq!(
+            got.location.file, "mf2/a.cpp",
+            "{name}: equal-role contributions must resolve to the deterministic MIN(file), \
+             independent of write order"
+        );
+    }
 }

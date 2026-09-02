@@ -869,6 +869,18 @@ pub fn index_path_as(
         let forced = forced_importers.contains(&fw.rel);
         if !force_full && !forced && stored.as_deref() == Some(&fw.digest) {
             // UNCHANGED: skip extraction entirely; its nodes/edges already in the store.
+            //
+            // Safe for MULTI-FILE symbols by construction (M4 / Option A — wicked-estate#152):
+            // this skip used to be the third leg of a data-loss triad — `remove_file` deleted a
+            // shared node (a `.h` prototype + `.cpp` definition minting ONE SymbolId) when EITHER
+            // file went away, and the unchanged survivor was never re-extracted, so the node
+            // stayed gone until the survivor itself changed. The store now records per-(symbol,
+            // file) contributions (`node_files`): `remove_file` retires only the removed file's
+            // contribution and re-homes the node onto the surviving file's stored record, so an
+            // unchanged survivor's nodes/edges genuinely ARE "already in the store" — exactly
+            // what this skip assumes. No forced re-extraction of co-declaring files is needed
+            // (contrast the Decision-J forced-importer re-extract above, which exists for parked
+            // RELATIVE-IMPORT refs, a different mechanism).
             unchanged_count += 1;
         } else {
             if stored.is_none() {

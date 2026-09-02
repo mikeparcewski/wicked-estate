@@ -21,17 +21,16 @@
 //!
 //! One id shape stays shared, unavoidably: an import target that was never resolved to a
 //! definition is identified by the module SPECIFIER, not by a path — `node:fs`, an npm package,
-//! and equally a relative `./index` — so repos importing the same specifier share one node row
-//! whose `file` column belongs to whichever repo wrote it last. The same wart already exists
-//! between two FILES in one repo; namespacing cannot reach it because the id carries no path to
-//! namespace. Ownership of that column mutates through THREE paths, none repo-aware: (1) any
-//! importer's re-index takes it (last-writer-wins upsert); (2) removing the owner re-homes the
-//! node to the MIN(file) of its surviving importers' edges (`remove_file`'s shared-Import keep,
-//! incr-integrity lane) — possibly ACROSS repo prefixes, so a path-prefix-scoped view can show an
-//! edge whose target node is filtered out; (3) the last importer's removal deletes it. The edges
-//! themselves are safe: removing the owner no longer dangles the other repos' edges (the node is
-//! kept while any survivor edge targets it — pinned by
-//! `cross_repo_shared_import_survives_owner_repo_deletion`).
+//! and equally a relative `./index` — so repos importing the same specifier share one node row.
+//! The id carries no path, so namespacing cannot split it. Since wicked-estate#152 (multi-file
+//! contributions) the node's `file` column is no longer last-writer-wins: it is the DETERMINISTIC
+//! preferred contribution — the lexicographic MIN(file) across every contributing file, repo
+//! prefixes included — re-derived on upsert and on `remove_file` (which retires the removed
+//! file's contribution and re-homes the node to the preferred survivor, possibly ACROSS repo
+//! prefixes, so a path-prefix-scoped view can show an edge whose target node is filtered out);
+//! the last contributor's removal deletes it. The edges themselves are safe: removing the owner
+//! does not dangle the other repos' edges (the node is kept while any contribution or survivor
+//! edge remains — pinned by `cross_repo_shared_import_survives_owner_repo_deletion`).
 //!
 //! ## Provenance
 //!

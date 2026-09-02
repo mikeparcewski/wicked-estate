@@ -168,6 +168,33 @@ CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
 CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file);
 CREATE INDEX IF NOT EXISTS idx_nodes_scope ON nodes(scope);
 
+-- Multi-file symbol contributions (M4 / Option A — wicked-estate#152), mirroring the SQLite
+-- node_files table (see schema.sql there for the full rationale). One (symbol, file) row per
+-- contributing file; `data` is the full Node JSON as THAT file's extraction produced it; `is_def`
+-- is 0 for a declaration contribution (metadata.is_declaration truthy), 1 otherwise. The nodes row
+-- is the DERIVED preferred contribution (is_def DESC, file ASC — definition wins, deterministic
+-- tiebreak), never last-write-wins; remove_file deletes contributions and re-homes survivors.
+CREATE TABLE IF NOT EXISTS node_files (
+  symbol TEXT   NOT NULL,
+  file   TEXT   NOT NULL,
+  is_def BIGINT NOT NULL DEFAULT 1,
+  data   TEXT   NOT NULL,
+  PRIMARY KEY (symbol, file)
+);
+CREATE INDEX IF NOT EXISTS idx_node_files_file ON node_files(file);
+-- Idempotent backfill for DBs created before node_files existed: seed one definition-preference
+-- contribution per current node from the nodes projection. The NOT EXISTS guard makes this a
+-- single-shot migration — any row in node_files (a fresh DB has none but also has no nodes)
+-- disarms it, so it never duplicates or resurrects contributions on later opens.
+INSERT INTO node_files(symbol, file, is_def, data)
+  SELECT symbol, file,
+         CASE WHEN COALESCE((data::jsonb->'metadata'->>'is_declaration')::boolean, false)
+              THEN 0 ELSE 1 END,
+         data
+  FROM nodes
+  WHERE NOT EXISTS (SELECT 1 FROM node_files)
+ON CONFLICT (symbol, file) DO NOTHING;
+
 -- M8/DoD-XA4: per-symbol live-node epoch. Postgres keys nodes on the symbol string and DELETEs the
 -- node row on remove_file, so the epoch needs a dedicated table that SURVIVES remove_file (the
 -- analogue of SQLite's symbols.gen/had_node columns on the append-only intern table). `had_node` is
@@ -662,6 +689,11 @@ impl PostgresStore {
                 .bind(&syms)
                 .execute(&mut *tx)
                 .await?;
+            // Erasure removes the symbols' contribution records too (wicked-estate#152).
+            sqlx::query("DELETE FROM node_files WHERE symbol = ANY($1)")
+                .bind(&syms)
+                .execute(&mut *tx)
+                .await?;
             let res = sqlx::query("DELETE FROM nodes WHERE symbol = ANY($1)")
                 .bind(&syms)
                 .execute(&mut *tx)
@@ -741,9 +773,7 @@ impl GraphWrite for PostgresStore {
     fn upsert_nodes(&mut self, nodes: &[Node]) -> Result<()> {
         let mut h = self.conn()?;
         for n in nodes {
-            let kind = serde_json::to_string(&n.kind)?;
             let data = serde_json::to_string(n)?;
-            let file = &n.location.file;
 
             // Epoch pre-pass (M8/DoD-XA4), BEFORE the node insert — same rule as the SQLite seam:
             // bump iff this symbol HAD a node (symbol_gen.had_node==1) and has none now (a reuse).
@@ -779,6 +809,44 @@ impl GraphWrite for PostgresStore {
             })
             .map_err(st)?;
 
+            // Multi-file contributions (M4 / Option A — wicked-estate#152), mirroring the SQLite
+            // seam: record this write as the file's CONTRIBUTION, then derive the nodes row from
+            // the PREFERRED contribution (is_def DESC, file ASC — definition-first, deterministic
+            // tiebreak), never last-write-wins.
+            let is_def: i64 = if n.is_declaration() { 0 } else { 1 };
+            let (pref_file, pref_data): (String, String) = rt_block(async {
+                sqlx::query(
+                    "INSERT INTO node_files(symbol, file, is_def, data) VALUES($1, $2, $3, $4)
+                     ON CONFLICT(symbol, file) DO UPDATE SET
+                       is_def = EXCLUDED.is_def, data = EXCLUDED.data",
+                )
+                .bind(&n.symbol.0)
+                .bind(&n.location.file)
+                .bind(is_def)
+                .bind(&data)
+                .execute(h.as_conn())
+                .await?;
+                let row = sqlx::query(
+                    "SELECT file, data FROM node_files WHERE symbol = $1 \
+                     ORDER BY is_def DESC, file ASC LIMIT 1",
+                )
+                .bind(&n.symbol.0)
+                .fetch_one(h.as_conn())
+                .await?;
+                Ok::<(String, String), sqlx::Error>((row.try_get("file")?, row.try_get("data")?))
+            })
+            .map_err(st)?;
+            // Project the preferred record wholesale; skip the JSON re-parse when the record just
+            // written IS the preferred one (the single-contribution common case).
+            let parsed: Option<Node> = if pref_file == n.location.file {
+                None
+            } else {
+                Some(serde_json::from_str(&pref_data)?)
+            };
+            let p: &Node = parsed.as_ref().unwrap_or(n);
+            let p_data: &str = if parsed.is_some() { &pref_data } else { &data };
+            let kind = serde_json::to_string(&p.kind)?;
+
             rt_block(
                 sqlx::query(
                     "INSERT INTO nodes(symbol, name, kind, language, file, data, scope)
@@ -792,12 +860,12 @@ impl GraphWrite for PostgresStore {
                        scope    = EXCLUDED.scope",
                 )
                 .bind(&n.symbol.0)
-                .bind(&n.name)
+                .bind(&p.name)
                 .bind(&kind)
-                .bind(&n.language.0)
-                .bind(file)
-                .bind(&data)
-                .bind(n.scope.as_path())
+                .bind(&p.language.0)
+                .bind(&p.location.file)
+                .bind(p_data)
+                .bind(p.scope.as_path())
                 .execute(h.as_conn()),
             )
             .map_err(st)?;
@@ -883,6 +951,73 @@ impl GraphWrite for PostgresStore {
             )
         })
         .map_err(st)?;
+
+        // Step 1a: multi-file contribution retirement + survivor re-home (M4 / Option A —
+        // wicked-estate#152, mirroring SqliteStore — see the comment there). Delete this file's
+        // CONTRIBUTIONS; a node homed here with contributions surviving in other files is re-homed
+        // wholesale (every projected column + the data JSON) to the preferred survivor
+        // (is_def DESC, file ASC) instead of being deleted. Runs BEFORE the archive/edge/node
+        // steps, so their `nodes.file = $1` sub-selects exclude kept nodes.
+        {
+            struct KeptContribution {
+                symbol: String,
+                node: Node,
+                data: String,
+            }
+            let candidates: Vec<(String, Option<String>)> = rt_block(async {
+                let rows = sqlx::query(
+                    "SELECT n.symbol, \
+                            (SELECT nf.data FROM node_files nf \
+                              WHERE nf.symbol = n.symbol AND nf.file <> $1 \
+                              ORDER BY nf.is_def DESC, nf.file ASC LIMIT 1) AS surv \
+                     FROM nodes n \
+                     WHERE n.file = $1",
+                )
+                .bind(file)
+                .fetch_all(h.as_conn())
+                .await?;
+                let mut v = Vec::new();
+                for row in rows {
+                    v.push((
+                        row.try_get::<String, _>("symbol")?,
+                        row.try_get::<Option<String>, _>("surv")?,
+                    ));
+                }
+                Ok::<_, sqlx::Error>(v)
+            })
+            .map_err(st)?;
+            let mut kept: Vec<KeptContribution> = Vec::new();
+            for (symbol, surv) in candidates {
+                let Some(data) = surv else { continue };
+                let node: Node = serde_json::from_str(&data)?;
+                kept.push(KeptContribution { symbol, node, data });
+            }
+            rt_block(
+                sqlx::query("DELETE FROM node_files WHERE file = $1")
+                    .bind(file)
+                    .execute(h.as_conn()),
+            )
+            .map_err(st)?;
+            for k in &kept {
+                let kind = serde_json::to_string(&k.node.kind)?;
+                rt_block(
+                    sqlx::query(
+                        "UPDATE nodes SET name = $2, kind = $3, language = $4, file = $5, \
+                                          data = $6, scope = $7 \
+                         WHERE symbol = $1",
+                    )
+                    .bind(&k.symbol)
+                    .bind(&k.node.name)
+                    .bind(&kind)
+                    .bind(&k.node.language.0)
+                    .bind(&k.node.location.file)
+                    .bind(&k.data)
+                    .bind(k.node.scope.as_path())
+                    .execute(h.as_conn()),
+                )
+                .map_err(st)?;
+            }
+        }
 
         // Step 2: archive edges to edge_history if history is enabled.
         if self.history_enabled {

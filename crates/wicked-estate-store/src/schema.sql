@@ -52,6 +52,29 @@ CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
 CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file);
 CREATE INDEX IF NOT EXISTS idx_nodes_scope ON nodes(scope);
 
+-- Multi-file symbol contributions (M4 / Option A — wicked-estate#152). ONE logical symbol may be
+-- contributed by MORE THAN ONE file (a C/C++ header member prototype and its out-of-line `.cpp`
+-- definition mint one SymbolId across two files — ADR-002 scheme 3, pinned by
+-- `cpp_member_proto_def_cross_file_single_id_hazard`). This table records every (symbol, file)
+-- contribution: `data` is the full Node JSON exactly as THAT file's extraction produced it, and
+-- `is_def` is 0 when the record is a declaration contribution (`metadata.is_declaration` truthy),
+-- 1 otherwise. The `nodes` row is a DERIVED projection: always equal to the PREFERRED contribution
+-- (`ORDER BY is_def DESC, file ASC LIMIT 1` — definition wins; lexicographic file tiebreak), never
+-- last-write-wins. `remove_file` deletes the removed file's contribution rows and re-homes a node
+-- with surviving contributions to the new preferred record; only a contribution-less node is
+-- deleted. Rows retire ONLY through remove_file (the incremental indexer removes a changed file
+-- before re-upserting it, so a symbol that stops being contributed by a file loses that row).
+-- Existing DBs are backfilled by the idempotent migration in sqlite.rs (one definition-preference
+-- row per current node, seeded from nodes.file/nodes.data).
+CREATE TABLE IF NOT EXISTS node_files (
+  symbol INTEGER NOT NULL,           -- sid FK → symbols.sid
+  file   TEXT    NOT NULL,           -- repo-relative contributing file
+  is_def INTEGER NOT NULL DEFAULT 1, -- 1 = definition contribution, 0 = declaration
+  data   TEXT    NOT NULL,           -- full Node JSON as this file's extraction produced it
+  PRIMARY KEY (symbol, file)
+);
+CREATE INDEX IF NOT EXISTS idx_node_files_file ON node_files(file);
+
 -- W5.1: FTS5 virtual table for BM25 full-text search over name/signature/doc.
 -- `symbol` stores the string SymbolId (TEXT) so the join-back to nodes goes through
 -- symbols.sym → symbols.sid → nodes.symbol (integer).  Kept as TEXT here because FTS5

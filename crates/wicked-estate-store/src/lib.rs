@@ -58,6 +58,12 @@ use wicked_estate_core::{
 #[derive(Debug, Default)]
 pub struct MemStore {
     nodes: HashMap<SymbolId, Node>,
+    /// Multi-file symbol contributions (M4 / Option A — wicked-estate#152): per symbol, the map
+    /// `contributing file → the Node record THAT file's extraction produced`. `nodes` is a derived
+    /// projection of the PREFERRED contribution (definition before declaration, lexicographic file
+    /// tiebreak — see [`preferred_contribution`]); `remove_file` deletes a file's contribution and
+    /// re-homes nodes with survivors instead of deleting them. `BTreeMap` for deterministic order.
+    node_files: HashMap<SymbolId, BTreeMap<String, Node>>,
     edges: Vec<Edge>,
     unresolved: Vec<UnresolvedRef>,
     /// Wave 2.6: file → content digest map for incremental re-indexing.
@@ -211,6 +217,10 @@ impl MemStore {
         self.embeddings.retain(|sym, _| nodes.contains_key(sym));
         let orphan_embeddings = before_emb - self.embeddings.len();
 
+        // (3b) orphan contribution maps: symbol no longer a live node (wicked-estate#152).
+        // Belt-and-braces, uncounted — mirrors SqliteStore::compact.
+        self.node_files.retain(|sym, _| nodes.contains_key(sym));
+
         // (4) orphan content: git_sha not referenced by file_git_shas AND not referenced by
         //     any edge_history row.
         let live_shas: HashSet<&str> = self.file_git_shas.values().map(|s| s.as_str()).collect();
@@ -319,6 +329,18 @@ impl MemStore {
     }
 }
 
+/// The PREFERRED contribution among a symbol's per-file records (M4 / Option A —
+/// wicked-estate#152): definition contributions (`!is_declaration()`) beat declarations; ties
+/// break on the lexicographically smallest file. Mirrors the SQLite
+/// `ORDER BY is_def DESC, file ASC LIMIT 1` exactly — `false < true`, so a definition's
+/// `(is_declaration, file)` key sorts first.
+fn preferred_contribution(contribs: &BTreeMap<String, Node>) -> Option<&Node> {
+    contribs
+        .iter()
+        .min_by_key(|(file, n)| (n.is_declaration(), file.as_str()))
+        .map(|(_, n)| n)
+}
+
 impl GraphWrite for MemStore {
     fn begin_batch(&mut self) -> Result<()> {
         self.in_batch = true;
@@ -340,7 +362,16 @@ impl GraphWrite for MemStore {
                 *self.epoch.entry(n.symbol.clone()).or_insert(0) += 1;
             }
             self.had_node.insert(n.symbol.clone());
-            self.nodes.insert(n.symbol.clone(), n.clone());
+            // Multi-file contributions (M4 / Option A — wicked-estate#152): record the write as
+            // THIS file's contribution, then derive the live node from the PREFERRED contribution
+            // (definition-first, deterministic file tiebreak) — never last-write-wins. A
+            // single-contribution symbol (the common case) projects the record just written.
+            let contribs = self.node_files.entry(n.symbol.clone()).or_default();
+            contribs.insert(n.location.file.clone(), n.clone());
+            let primary = preferred_contribution(contribs)
+                .cloned()
+                .unwrap_or_else(|| n.clone());
+            self.nodes.insert(n.symbol.clone(), primary);
         }
         Ok(())
     }
@@ -376,8 +407,39 @@ impl GraphWrite for MemStore {
         // Step 1: read current git_sha for this file (the version being superseded).
         let current_git_sha = self.file_git_shas.get(file).cloned().unwrap_or_default();
 
+        // Step 1a: multi-file contribution retirement + survivor re-home (M4 / Option A —
+        // wicked-estate#152, mirroring SqliteStore). Delete this file's CONTRIBUTION from every
+        // symbol it contributed to; a node currently homed here that still has contributions from
+        // other files is re-homed WHOLESALE to the preferred survivor (definition-first,
+        // lexicographic file tiebreak) instead of being deleted. This runs BEFORE `file_symbols`
+        // is computed, so the archive filter, edge retain, and node retain below all see kept
+        // nodes at their new home — their out-of-file edges, embeddings, and the node itself
+        // survive. A symbol whose contribution here was not the primary needs no re-home (the
+        // derived-primary invariant: `nodes` already equals a surviving preferred contribution).
+        {
+            let mut rehomes: Vec<(SymbolId, Node)> = Vec::new();
+            self.node_files.retain(|sym, contribs| {
+                if contribs.remove(file).is_some() {
+                    if let Some(primary) = preferred_contribution(contribs) {
+                        rehomes.push((sym.clone(), primary.clone()));
+                    }
+                }
+                !contribs.is_empty()
+            });
+            for (sym, primary) in rehomes {
+                if self
+                    .nodes
+                    .get(&sym)
+                    .is_some_and(|n| n.location.file == file)
+                {
+                    self.nodes.insert(sym, primary);
+                }
+            }
+        }
+
         // Step 2: collect the set of symbols defined in this file BEFORE we remove nodes.
         // We need it for archival (edges whose source is in this file) and for Step 3.
+        // Contribution-kept nodes were already re-homed above, so they are not in this set.
         let file_symbols: HashSet<SymbolId> = self
             .nodes
             .values()

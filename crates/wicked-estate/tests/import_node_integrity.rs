@@ -1,17 +1,21 @@
 //! Shared Import-node integrity across incremental runs (incr-integrity lane).
 //!
 //! The defect these tests pin: a `NodeKind::Import` node is keyed by module SPECIFIER
-//! (`import/<spec>/`, no path), shared by every file importing the same spec, and homed at
-//! whichever importer wrote it LAST (upsert is `ON CONFLICT ... SET file=excluded.file` —
-//! last-writer-wins, pinned by `owner_is_last_writer` below). Removing or editing the owner
-//! deleted the shared node and stranded every other importer's File→Import edge: dangling
-//! after a deletion-only run (83 on a wicked-studio probe repro, 147-class on command_iq),
-//! then silently pruned with no re-park on the next changed run.
+//! (`import/<spec>/`, no path) and shared by every file importing the same spec. It was
+//! originally homed at whichever importer wrote it LAST (`ON CONFLICT ... SET
+//! file=excluded.file`), and removing or editing the owner deleted the shared node and
+//! stranded every other importer's File→Import edge: dangling after a deletion-only run
+//! (83 on a wicked-studio probe repro, 147-class on command_iq), then silently pruned with
+//! no re-park on the next changed run.
 //!
-//! The fix lives at the store seam (`remove_file` keeps + re-homes a shared Import node with
-//! survivor edges) — every 0-dangling assertion here holds on a DELETION-ONLY run, where NO
-//! engine prune executes (the `changed.is_empty()` early return fires before Task D). That is
-//! the evidence the fix is at the right seam, not masked by a prune.
+//! The fix lives at the store seam and now has TWO layers there: multi-file contributions
+//! (M4 / Option A — wicked-estate#152: every importer's extraction contributes the shared
+//! node, ownership is the DETERMINISTIC preferred contribution — lexicographic MIN file among
+//! equal-role contributions, never last-writer-wins — and `remove_file` retires contributions
+//! and re-homes survivors), plus the original Import survivor-edge keep/re-home for nodes
+//! without contribution rows. Every 0-dangling assertion here holds on a DELETION-ONLY run,
+//! where NO engine prune executes (the `changed.is_empty()` early return fires before Task D).
+//! That is the evidence the fix is at the right seam, not masked by a prune.
 
 use std::fs;
 use std::path::PathBuf;
@@ -74,11 +78,13 @@ fn importer_files(store: &SqliteStore, target: &Node) -> Vec<String> {
     v
 }
 
-/// D10 pin: ownership of the shared node is LAST-writer-wins — the repro tests below sequence
-/// runs so the to-be-removed file is the CURRENT owner, and this assertion is what keeps them
-/// from going vacuously green if ownership semantics ever change.
+/// D10 pin, FLIPPED by wicked-estate#152 (it used to pin last-writer-wins): ownership of the
+/// shared node is now the DETERMINISTIC preferred contribution — the lexicographic MIN file
+/// among equal-role contributions — independent of which importer indexed last. The repro tests
+/// below sequence runs against this rule, and this assertion keeps them from going vacuously
+/// green if ownership semantics ever change again.
 #[test]
-fn owner_is_last_writer() {
+fn owner_is_deterministic_not_last_writer() {
     let dir = fresh_dir("owner");
     fs::write(dir.join("src/a.ts"), IMPORTING).unwrap();
     let mut store = SqliteStore::in_memory().unwrap();
@@ -99,8 +105,9 @@ fn owner_is_last_writer() {
             .expect("import node")
             .location
             .file,
-        "src/b.ts",
-        "the LAST writer owns the shared node (ON CONFLICT ... file=excluded.file)"
+        "src/a.ts",
+        "ownership is the deterministic MIN(file) contribution (wicked-estate#152) — a LATER \
+         writer must NOT steal it (the last-write-wins flap is dead)"
     );
     let _ = fs::remove_dir_all(&dir);
 }
@@ -115,32 +122,33 @@ fn owner_delete_keeps_shared_node_for_unchanged_importer() {
     let mut store = SqliteStore::in_memory().unwrap();
     wicked_estate::index_path(&mut store, &dir).unwrap();
 
-    // Sequence ownership: b.ts written in a LATER run becomes the owner (asserted, not assumed).
     fs::write(dir.join("src/b.ts"), IMPORTING).unwrap();
     wicked_estate::index_path(&mut store, &dir).unwrap();
+    // Ownership is deterministic under #152: MIN(file) = a.ts (asserted, not assumed), so a.ts
+    // is the file whose deletion must not take the shared node down.
     assert_eq!(
         crypto_import_node(&store)
             .expect("import node")
             .location
             .file,
-        "src/b.ts",
+        "src/a.ts",
         "precondition: the file we are about to delete is the CURRENT owner"
     );
 
-    // DELETION-ONLY run: a.ts unchanged, b.ts gone → `changed` is empty, the engine early-returns
+    // DELETION-ONLY run: b.ts unchanged, a.ts gone → `changed` is empty, the engine early-returns
     // before Task D — every assertion below holds under the store seam alone (D1).
-    fs::remove_file(dir.join("src/b.ts")).unwrap();
+    fs::remove_file(dir.join("src/a.ts")).unwrap();
     let stats3 = wicked_estate::index_path(&mut store, &dir).unwrap();
 
     let node = crypto_import_node(&store)
         .expect("the shared Import node must SURVIVE its owner's deletion");
     assert_eq!(
-        node.location.file, "src/a.ts",
+        node.location.file, "src/b.ts",
         "kept node re-homed to the surviving importer"
     );
     assert_eq!(
         importer_files(&store, &node),
-        vec!["src/a.ts".to_string()],
+        vec!["src/b.ts".to_string()],
         "exactly the unchanged importer's File→Import edge remains live"
     );
     assert_eq!(
@@ -191,16 +199,16 @@ fn non_owner_delete_leaves_node_and_owner_edge_untouched() {
     let mut store = SqliteStore::in_memory().unwrap();
     wicked_estate::index_path(&mut store, &dir).unwrap();
     fs::write(dir.join("src/b.ts"), IMPORTING).unwrap();
-    wicked_estate::index_path(&mut store, &dir).unwrap(); // owner: src/b.ts
+    wicked_estate::index_path(&mut store, &dir).unwrap(); // owner: src/a.ts (deterministic MIN)
 
-    fs::remove_file(dir.join("src/a.ts")).unwrap();
+    fs::remove_file(dir.join("src/b.ts")).unwrap();
     wicked_estate::index_path(&mut store, &dir).unwrap();
 
     let node = crypto_import_node(&store).expect("node survives a non-owner deletion");
-    assert_eq!(node.location.file, "src/b.ts", "owner unchanged");
+    assert_eq!(node.location.file, "src/a.ts", "owner unchanged");
     assert_eq!(
         importer_files(&store, &node),
-        vec!["src/b.ts".to_string()],
+        vec!["src/a.ts".to_string()],
         "only the owner's edge remains"
     );
     assert_eq!(dangling_edges(&store), Vec::new(), "0 dangling");
@@ -218,20 +226,20 @@ fn owner_edited_to_drop_import_keeps_other_importers_edge() {
     let mut store = SqliteStore::in_memory().unwrap();
     wicked_estate::index_path(&mut store, &dir).unwrap();
     fs::write(dir.join("src/b.ts"), IMPORTING).unwrap();
-    wicked_estate::index_path(&mut store, &dir).unwrap(); // owner: src/b.ts
+    wicked_estate::index_path(&mut store, &dir).unwrap(); // owner: src/a.ts (deterministic MIN)
 
-    fs::write(dir.join("src/b.ts"), "export const v = 2;\n").unwrap();
+    fs::write(dir.join("src/a.ts"), "export const v = 2;\n").unwrap();
     wicked_estate::index_path(&mut store, &dir).unwrap();
 
     let node = crypto_import_node(&store)
         .expect("the shared node must survive the owner dropping its import");
     assert_eq!(
-        node.location.file, "src/a.ts",
+        node.location.file, "src/b.ts",
         "re-homed to the still-importing file"
     );
     assert_eq!(
         importer_files(&store, &node),
-        vec!["src/a.ts".to_string()],
+        vec!["src/b.ts".to_string()],
         "the unchanged importer's edge survives the owner edit AND the same-run prune"
     );
     assert_eq!(dangling_edges(&store), Vec::new(), "0 dangling");
@@ -249,7 +257,7 @@ fn batch_delete_of_owner_and_non_owner_rehomes_to_survivor() {
     let mut store = SqliteStore::in_memory().unwrap();
     wicked_estate::index_path(&mut store, &dir).unwrap();
     fs::write(dir.join("src/b.ts"), IMPORTING).unwrap();
-    wicked_estate::index_path(&mut store, &dir).unwrap(); // owner: src/b.ts
+    wicked_estate::index_path(&mut store, &dir).unwrap(); // owner: src/a.ts (deterministic MIN)
 
     // Delete owner + one non-owner in the SAME run (one removal batch, two remove_file calls).
     fs::remove_file(dir.join("src/a.ts")).unwrap();

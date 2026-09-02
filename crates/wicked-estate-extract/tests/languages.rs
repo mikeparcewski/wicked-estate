@@ -1493,13 +1493,15 @@ fn cpp_out_of_line_member_vs_free_function_collision_known_defect() {
         .iter()
         .find(|n| n.location.span.start_byte != out_of_line_off)
         .expect("in-class proto node");
-    // NEUTRAL single-id assertion (pending M4 — NOT a correctness claim): the
-    // proto and the out-of-line def currently mint one id. See the cross-file
-    // hazard pin for why this is a recorded trade, not a feature.
+    // Single-id assertion — the M4 decision recorded Option A (one logical
+    // symbol, wicked-estate#152), so this is now the correct PERMANENT
+    // assertion, no longer a pending-decision hedge: the proto and the
+    // out-of-line def are one symbol; the store's multi-file contribution
+    // table carries the per-file provenance.
     assert_eq!(
         out_of_line.symbol, proto.symbol,
-        "[{lang}] proto/def single-id member semantics changed — if the M4 \
-         decision landed distinct-decl identity, flip this assertion with it"
+        "[{lang}] proto/def must mint ONE id (M4 Option A) — distinct decl \
+         identity would be an id-shape (scheme) change"
     );
     // THE FLIP (per the original pin's instruction): the out-of-line member no
     // longer shares the free function's id.
@@ -1538,19 +1540,22 @@ fn cpp_out_of_line_member_vs_free_function_collision_known_defect() {
     );
 }
 
-/// scm-anchors D8 HAZARD PIN (F13): with the qualifier owner, a member
-/// declared in `foo.h` (D6b in-class prototype) and defined out-of-line in
-/// `foo.cpp` mint ONE SymbolId across TWO files — `module_path` strips one
-/// extension, so both files share module `foo`. Store consequences (the F7
-/// mechanism at member level): `nodes.file` flaps last-write-wins per
-/// incremental run, `remove_file` deletes by file, and the digest skip never
-/// re-extracts the survivor — deleting/renaming one file of the pair can drop
-/// the live node until the other file changes. The store-side fix is filed via
-/// merge note M4 (program header/impl identity decision; store paths are the
-/// scm-anchors lane's MUST-NOT-TOUCH). FLIP INSTRUCTION (gated on M4): if the
-/// decision is distinct-decl identity, flip to assert DISTINCT ids; if it is
-/// one-logical-symbol with the store fixed, retire this pin into a store
-/// conformance test.
+/// scm-anchors D8 / M4 CONVENTION PIN (formerly HAZARD PIN F13, retired per its
+/// own flip instruction): the M4 decision recorded **Option A — one logical
+/// symbol** (scratch/proposals/ESTATE-M4-DECISION-BRIEF.md, wicked-estate#152).
+/// A member declared in `foo.h` (D6b in-class prototype) and defined
+/// out-of-line in `foo.cpp` minting ONE SymbolId across TWO files —
+/// `module_path` strips one extension, so both files share module `foo` — is
+/// now the RECORDED CONVENTION, not a hazard: the store keeps per-(symbol,
+/// file) contributions (`node_files`), derives a definition-preferred primary
+/// instead of last-write-wins, and `remove_file` re-homes a node whose other
+/// contributing file survives. The former store consequences (file flap /
+/// cross-file delete / digest-skip data loss) are pinned FIXED by the store
+/// conformance suite this pin retired into:
+/// `wicked_estate_core::conformance::multi_file_contribution_suite`, run
+/// against every shipped backend (Mem/Sqlite/Postgres). This test keeps the
+/// extract-level half of the contract: both files MUST keep minting the same
+/// id — distinct decl identity would be an id-shape (scheme) change.
 #[test]
 fn cpp_member_proto_def_cross_file_single_id_hazard() {
     let lang = "cpp";
@@ -1579,8 +1584,9 @@ fn cpp_member_proto_def_cross_file_single_id_hazard() {
         .expect("out-of-line def node");
     assert_eq!(
         proto.symbol, def.symbol,
-        "[{lang}] HAZARD SHAPE CHANGED: the .h proto and .cpp def no longer mint \
-         one cross-file id — apply this pin's M4-gated flip instruction"
+        "[{lang}] M4 CONVENTION BROKEN: the .h proto and .cpp def must mint ONE \
+         cross-file id (Option A, wicked-estate#152) — distinct decl identity \
+         is an id-shape change requiring a scheme bump, not a silent flip"
     );
     assert_eq!(
         proto.symbol.as_str(),
