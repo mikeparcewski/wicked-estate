@@ -1959,6 +1959,39 @@ impl GraphWrite for SqliteStore {
                     ],
                 )
                 .map_err(st)?;
+            // Refresh the FTS shadow to the new primary. A multi-file re-home replaces the node's
+            // record WHOLESALE, and a `.h` prototype and its `.cpp` definition carry DIFFERENT
+            // signatures/docs, so the `nodes_fts` row keyed by this symbol is now stale — it holds
+            // the removed contribution's tokens. Leaving it (the skip-not-reinsert Import D5 rule,
+            // Step 1b) is only safe for Import nodes, which are name-stable and signature-less;
+            // here it would make BM25 search MATCH tokens the surviving record no longer contains
+            // (and miss tokens it newly does). The re-homed node is NOT re-touched by Step 3 (its
+            // `nodes.file` is now the survivor's, excluded from the `file = ?1` sweep), so this
+            // DELETE+INSERT is the only refresh and yields exactly one row. Embeddings (opt-in,
+            // symbol-keyed) are deliberately left to the next `--embeddings` pass — refreshing a
+            // vector needs the embedder, which remove_file has no handle to (same as Step 1b).
+            let sym: String = self
+                .conn
+                .query_row(
+                    "SELECT sym FROM symbols WHERE sid=?1",
+                    params![k.sid],
+                    |r| r.get(0),
+                )
+                .map_err(st)?;
+            self.conn
+                .execute("DELETE FROM nodes_fts WHERE symbol=?1", params![sym])
+                .map_err(st)?;
+            self.conn
+                .execute(
+                    "INSERT INTO nodes_fts(symbol, name, signature, doc) VALUES(?1, ?2, ?3, ?4)",
+                    params![
+                        sym,
+                        k.node.name,
+                        k.node.signature.as_deref().unwrap_or(""),
+                        k.node.doc.as_deref().unwrap_or(""),
+                    ],
+                )
+                .map_err(st)?;
         }
 
         // Step 1b: shared-Import keep + re-home (incr-integrity lane, D1/D2/D4).
@@ -3496,6 +3529,95 @@ mod tests {
                 "re-open must not duplicate or resurrect contributions"
             );
         }
+    }
+
+    /// FTS shadow coherence after a multi-file re-home (wicked-estate#152). SQLite is the only
+    /// backend with a `nodes_fts` BM25 shadow — Mem/Postgres search `nodes` directly — so this is
+    /// a SQLite-only pin. When `remove_file` re-homes a multi-file symbol to a surviving
+    /// contribution whose record carries DIFFERENT signature/doc tokens (a `.cpp` definition body
+    /// vs its `.h` prototype), the shadow must be refreshed to the new primary, not left holding
+    /// the removed contribution's tokens: leaving it makes BM25 MATCH tokens the surviving record
+    /// no longer contains (false positive) and miss tokens it newly does (false negative).
+    #[test]
+    fn sqlite_multi_file_rehome_refreshes_fts() {
+        use wicked_estate_core::{Language, Location, Span};
+        let mut store = open();
+        let mk = |file: &str, sig: &str, doc: &str| {
+            let mut n = Node::new(
+                sym("ts-cpp . . . foo/Foo#reset()."),
+                NodeKind::Function,
+                "reset",
+                Language::new("cpp"),
+                Location::new(file, Span::ZERO),
+            );
+            n.signature = Some(sig.to_string());
+            n.doc = Some(doc.to_string());
+            n
+        };
+        // Two definition contributions, same id, two files. Primary = MIN(file) = "foo.cpp".
+        store
+            .upsert_nodes(&[mk("foo.cpp", "void Foo::reset() { impltoken; }", "impldoc")])
+            .expect("upsert cpp");
+        store
+            .upsert_nodes(&[mk("foo.h", "void reset();", "prototoken")])
+            .expect("upsert h");
+        let text = |store: &SqliteStore, t: &str| -> usize {
+            store
+                .find_symbols(&wicked_estate_core::SymbolQuery {
+                    text: Some(t.to_string()),
+                    ..Default::default()
+                })
+                .expect("find_symbols")
+                .len()
+        };
+        assert_eq!(
+            store
+                .get_node(&sym("ts-cpp . . . foo/Foo#reset()."))
+                .unwrap()
+                .unwrap()
+                .location
+                .file,
+            "foo.cpp"
+        );
+        assert_eq!(
+            text(&store, "impltoken"),
+            1,
+            "primary body token searchable pre-removal"
+        );
+
+        // Remove the primary. The node re-homes to the "foo.h" contribution; its BM25 tokens must
+        // follow. Pre-fix, the shadow kept "foo.cpp"'s tokens (Step-3 skips a re-homed node).
+        store.remove_file("foo.cpp").expect("remove cpp");
+        assert_eq!(
+            store
+                .get_node(&sym("ts-cpp . . . foo/Foo#reset()."))
+                .unwrap()
+                .unwrap()
+                .location
+                .file,
+            "foo.h",
+            "node re-homed to the surviving contribution"
+        );
+        assert_eq!(
+            text(&store, "impltoken"),
+            0,
+            "FALSE POSITIVE: BM25 still matches the removed contribution's body token"
+        );
+        assert_eq!(
+            text(&store, "prototoken"),
+            1,
+            "FALSE NEGATIVE: BM25 misses the surviving (re-homed) record's own token"
+        );
+        // Exactly one shadow row for the symbol — no duplicate, no island.
+        let fts_rows: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM nodes_fts WHERE symbol='ts-cpp . . . foo/Foo#reset().'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count fts");
+        assert_eq!(fts_rows, 1, "exactly one FTS row after re-home");
     }
 
     // --- traverse_multi perf gate (DEC-X2): the multi-seed CTE must issue a recursive-CTE count
