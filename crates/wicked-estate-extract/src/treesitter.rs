@@ -2043,8 +2043,9 @@ impl Extractor for TreeSitterExtractor {
 
             // Per-kind: (anchor_node, name_text)
             // We support one def per kind per match (tree-sitter match semantics).
-            #[allow(clippy::type_complexity)]
-            let mut def_anchor: Option<(&str, tree_sitter::Node, bool, bool)> = None; // (kind, node, emit, decl)
+            // (kind, anchor node, emit, is-declaration)
+            type DefAnchor<'k, 't> = (&'k str, tree_sitter::Node<'t>, bool, bool);
+            let mut def_anchor: Option<DefAnchor> = None;
             let mut def_name: Option<(&str, String)> = None; // (kind, text)
             let mut def_owner: Option<(&str, String)> = None; // (kind, owner type name)
 
