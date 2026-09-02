@@ -196,8 +196,11 @@ Still open:
   (`header_plus_c_stays_two_nodes_cross_grammar_residual`,
   `crates/wicked-estate/tests/free_proto_emission.rs`).
 - C++ free-prototype emission gaps (D6d, all recorded in `cpp.scm`'s pattern comment):
-  a most-vexing-parse declaration at TU/namespace scope matches (it IS a function
-  declaration per [dcl.ambig.res]; body-local MVP is guarded by the per-parent anchoring);
+  a most-vexing-parse declaration at TU/namespace scope CAN match — it IS a function
+  declaration per [dcl.ambig.res], but tree-sitter's resolution of the ambiguity is
+  context-dependent (measured: a lone `Foo f(Foo());` parses as a function declaration and
+  emits; with sibling declarations it parses as an object declaration and does not) —
+  body-local MVP is guarded by the per-parent anchoring either way;
   a body-local prototype inside a preproc block inside a function body leaks through the
   preproc parents; un-braced `extern "C" int f(int);` (parent `linkage_specification`) and
   pointer-returning prototypes (`int* getPtr();`) are not captured — the latter consistent
@@ -257,6 +260,10 @@ founding rule) was never the broken layer.
   (`node_files`); the `nodes` row is a DERIVED projection of the preferred contribution —
   **definition before declaration** (`metadata.is_declaration`, set by the extractor's
   `@code_<kind>.decl` capture role), lexicographic file tiebreak — never last-write-wins.
+  Within a single file the same preference holds: the extractor emits declaration-marked
+  records first, so a definition followed by a same-file redeclaration cannot demote the
+  file's contribution (pinned:
+  `same_file_trailing_redeclaration_stays_definition_primary`).
   `remove_file` retires contributions and re-homes survivors; only a node losing its LAST
   contribution is deleted. This kills all three F7 mechanisms (file/kind flap, cross-file
   delete, digest-skip data loss). Conformance: `multi_file_contribution_suite`, every backend.
@@ -272,13 +279,21 @@ ADR-002 migration fallout for a C++-only shape change) that puts the tree-sitter
 disagreement with the SCIP tier's identity for the same function, and both shipped resolvers
 skip ties — distinct decl ids would park most C/C++ call resolution as unresolved.
 
-### Evidence (S11 prevalence, recorded on wicked-estate#140)
+### Evidence (S11 prevalence, recorded on wicked-estate#140; re-measured post-land)
 
-Bench-pinned `tree-sitter/tree-sitter` corpus, pre-store extraction stream: **today** 6,648
-distinct SymbolIds, 103 (1.55%) multi-file — every one `Import`-kind (the class the store
-already re-homed). **Forward** (D6d landed, no store fix): a name-level proxy finds ~230
-colliding ids (~3.5%), 205 of them the `ts_*` public C API — the entire public surface of a
-typical C library, which is why the store fix landed FIRST (#152) and emission second (#140).
+Bench-pinned `tree-sitter/tree-sitter` corpus, pre-store extraction stream: **today** (pre-D6d
+main) 6,648 distinct SymbolIds from 7,361 emissions, 103 (1.55%) multi-file — every one
+`Import`-kind (the class the store already re-homed). **With D6d landed (measured, not the
+proxy):** +222 free-prototype nodes (192 of them the `ts_*` public C API; 205 have a same-named
+`.c` definition), zero rows lost, zero change outside cpp-routed files — and **zero id-level
+joins on this corpus**: its headers live in different directories than their impl files (module
+paths differ) and the impls are `.c` (the ts-cpp/ts-c cross-grammar seam), so every prototype
+mints a standalone declaration-primary node. The earlier name-level proxy (~230/205) measured
+NAME collisions, not id collisions — it is evidence for the resolver-parking cost of Option B
+(both shipped resolvers match by name), NOT for id-flap exposure on this corpus. The id-join
+class the store fix (#152) protects is same-module proto/def pairs: D6b member prototypes
+(shipping since 0.15.0) and same-stem `.h`/`.cpp` layouts — the dominant C++ project shape —
+which is why the store fix still landed first.
 
 ### Explicitly still open (do NOT read this amendment as fixing them)
 

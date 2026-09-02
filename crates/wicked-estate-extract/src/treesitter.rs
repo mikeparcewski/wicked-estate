@@ -2391,6 +2391,21 @@ impl Extractor for TreeSitterExtractor {
             }
         }
 
+        // ── Within-file definition preference (M4 / Option A, wicked-estate#152) ──
+        // Emit DECLARATION-marked records before definition records (stable sort:
+        // relative order within each class is preserved, so same-role collisions
+        // keep their stream order). The store keeps ONE contribution per
+        // (symbol, file) — the LAST record in the batch wins — so without this a
+        // definition followed by a same-file redeclaration
+        // (`int f(int a) {...}\nint f(int);`, legal C/C++) would let the trailing
+        // prototype DEMOTE the file's contribution to a declaration: wrong
+        // `is_declaration`, wrong primary span. Cross-file preference is the
+        // store's `is_def DESC, file ASC` rule; this ordering makes the same
+        // definition-first preference hold WITHIN a file. Pinned by
+        // `same_file_trailing_redeclaration_stays_definition_primary`
+        // (crates/wicked-estate/tests/free_proto_emission.rs).
+        def_nodes.sort_by_key(|n| !n.is_declaration());
+
         // ── File node + Contains edges ────────────────────────────────────
         let file_symbol = Symbol::file(&file.path).id();
         let mut nodes = Vec::with_capacity(def_nodes.len() + 1 + import_targets.len());

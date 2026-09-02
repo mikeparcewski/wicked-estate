@@ -1438,10 +1438,9 @@ fn go_const_vs_struct_field_symbolids_are_distinct() {
 /// `void Foo::reset()` definition under `Foo#` too — so the previously-pinned
 /// residual (out-of-line def sharing the free function's `…/reset().`) is
 /// FLIPPED to distinct ids per the pin's own instruction. The proto and the
-/// out-of-line def now share ONE id — asserted NEUTRALLY: single-id member
-/// semantics pending the program's M4 header/impl identity decision (see
-/// `cpp_member_proto_def_cross_file_single_id_hazard`); if that decision is
-/// distinct-decl identity, the equality assertion flips WITH the decision.
+/// out-of-line def share ONE id — the PERMANENT assertion since the M4
+/// decision recorded Option A (one logical symbol, ADR-002 third amendment,
+/// wicked-estate#152; see `cpp_member_proto_def_cross_file_single_id_hazard`).
 /// Template-scoped members anchor under the bare type via the template_type
 /// branch; decltype-scoped qualifiers keep their def OWNERLESS (R-DEF-LOSS —
 /// a def may lose its owner, never its extraction).
@@ -1621,7 +1620,9 @@ fn cpp_member_proto_def_cross_file_single_id_hazard() {
 /// `<module>/ns#helper().` — that single id is the convention, not a defect.
 /// The store's contribution table derives ONE deterministic primary kind from
 /// the preferred contribution (definition before declaration, lexicographic
-/// file tiebreak; within one file, that file's extraction stream), replacing
+/// file tiebreak; within one file definition records also outrank declarations
+/// — the extractor emits decl-marked records first — and same-role records
+/// keep stream order), replacing
 /// the last-write-wins re-kind flap the original pin recorded — pinned
 /// store-side by `wicked_estate_core::conformance::multi_file_contribution_suite`.
 ///

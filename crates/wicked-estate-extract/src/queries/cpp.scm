@@ -123,9 +123,12 @@
 ; body-local most-vexing-parse object declarations (`Foo f(Foo());`) sit under
 ; compound_statement — matched by NO pattern here.
 ; ACCEPTED residuals (recorded in ADR-002 §Accepted residuals):
-;   - a most-vexing-parse declaration AT TU/namespace scope still matches (it IS
-;     a function declaration per [dcl.ambig.res]; the review recorded "accept as
-;     documented");
+;   - a most-vexing-parse declaration AT TU/namespace scope CAN still match (it
+;     IS a function declaration per [dcl.ambig.res]; the review recorded "accept
+;     as documented"). Measured: tree-sitter resolves the ambiguity
+;     context-dependently — a lone `Foo f(Foo());` parses as a function
+;     declaration and emits; with sibling declarations it parses as an object
+;     declaration and does not;
 ;   - a body-local prototype inside a preproc block inside a function body
 ;     (`void f() { #ifdef X\n int p(int); #endif }`) leaks through the
 ;     preproc_ifdef/preproc_if parents (negative ancestor predicates are not

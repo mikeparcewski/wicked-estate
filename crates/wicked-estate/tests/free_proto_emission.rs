@@ -199,3 +199,40 @@ fn header_plus_c_stays_two_nodes_cross_grammar_residual() {
     assert!(!def.is_declaration());
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// Within-file definition preference (found by the lane-B adversarial probe): a
+/// definition followed by a same-file REDECLARATION (`int f(int a) {...}` then
+/// `int f(int);` — legal C/C++) must stay definition-primary. The store keeps one
+/// contribution per (symbol, file) with last-record-wins, so the extractor emits
+/// declaration-marked records FIRST (stable sort in treesitter.rs pass 2) — the
+/// trailing prototype must not demote the file's contribution to a declaration.
+/// Both source orders are pinned.
+#[test]
+fn same_file_trailing_redeclaration_stays_definition_primary() {
+    let dir = fresh_dir("wf_order");
+    // def first, redeclaration after — the order that used to demote.
+    fs::write(
+        dir.join("src/one.cpp"),
+        "int foo(int a) { return a; }\nint foo(int);\n",
+    )
+    .unwrap();
+    // decl first, def after — the common order, must also be definition-primary.
+    fs::write(
+        dir.join("src/two.cpp"),
+        "int bar(int);\nint bar(int a) { return a; }\n",
+    )
+    .unwrap();
+    let mut store = SqliteStore::in_memory().unwrap();
+    wicked_estate::index_path(&mut store, &dir).unwrap();
+
+    for name in ["foo", "bar"] {
+        let nodes = defs_named(&store, name);
+        assert_eq!(nodes.len(), 1, "one node for `{name}`");
+        assert!(
+            !nodes[0].is_declaration(),
+            "`{name}`: a same-file redeclaration must NOT demote the definition \
+             to a declaration-primary record (within-file definition preference)"
+        );
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
