@@ -105,6 +105,7 @@ fn marketplace_listing_version_matches_workspace_version() {
     let found = manifest_version(&text);
     assert_eq!(
         found, expected,
-        ".claude-plugin/marketplace.json advertises "{found}" but the workspace version is          "{expected}" — bump the listing in the same change (RELEASING.md step 1b)"
+        ".claude-plugin/marketplace.json advertises {found} but the workspace version is \
+         {expected} — bump the listing in the same change (RELEASING.md step 1b)"
     );
 }
