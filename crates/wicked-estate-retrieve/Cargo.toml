@@ -12,7 +12,7 @@ rust-version.workspace = true
 
 [dependencies]
 wicked-estate-core.workspace = true
-wicked-estate-rank = { path = "../wicked-estate-rank", version = "0.15.1" }
+wicked-estate-rank = { path = "../wicked-estate-rank", version = "0.15.2" }
 wicked-estate-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
