@@ -225,6 +225,51 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
         )
         .map_err(st)?;
     }
+    // Multi-file contributions backfill (M4 / Option A — wicked-estate#152). The `node_files`
+    // table itself comes from SCHEMA's CREATE TABLE IF NOT EXISTS on open; a DB created before it
+    // existed then has the table EMPTY while `nodes` is populated — the emptiness check IS the
+    // version gate (same idiom as the column-presence checks above; a fresh DB has both empty, an
+    // up-to-date DB has one contribution row per node minimum, so the seed runs at most once).
+    // Each existing node seeds exactly one contribution: its current file/data, with `is_def`
+    // derived from the stored JSON's `metadata.is_declaration` (absent → definition, matching the
+    // serde default) — so post-migration the derived-primary invariant "the nodes row equals the
+    // preferred contribution" holds by construction and remove_file's survivor logic sees every
+    // pre-existing node. No data rewrite of `nodes` itself.
+    {
+        let mut nfstmt = conn.prepare("PRAGMA table_info(node_files)").map_err(st)?;
+        let nfcols: Vec<String> = nfstmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .map_err(st)?
+            .filter_map(|r| r.ok())
+            .collect();
+        let mut ncstmt = conn.prepare("PRAGMA table_info(nodes)").map_err(st)?;
+        let nodes_present = ncstmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .map_err(st)?
+            .filter_map(|r| r.ok())
+            .next()
+            .is_some();
+        // Empty PRAGMA = table absent (a legacy fixture that never ran SCHEMA) — skip; the real
+        // open path always creates both tables first.
+        if !nfcols.is_empty() && nodes_present {
+            let nf_empty: bool = conn
+                .query_row("SELECT NOT EXISTS(SELECT 1 FROM node_files)", [], |r| {
+                    r.get::<_, bool>(0)
+                })
+                .map_err(st)?;
+            if nf_empty {
+                conn.execute_batch(
+                    "INSERT INTO node_files(symbol, file, is_def, data) \
+                     SELECT symbol, file, \
+                            CASE WHEN json_extract(data, '$.metadata.is_declaration') \
+                                 THEN 0 ELSE 1 END, \
+                            data \
+                     FROM nodes;",
+                )
+                .map_err(st)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -409,6 +454,29 @@ impl SqliteStore {
             }
         }
 
+        // Multi-file contributions (M4 / Option A — wicked-estate#152). Each upsert records the
+        // node as a per-(symbol, file) CONTRIBUTION, then writes the `nodes` row as a DERIVED
+        // projection of the PREFERRED contribution — definition first (`is_def DESC`), then the
+        // deterministic lexicographic file tiebreak. This kills the last-write-wins file/kind flap:
+        // whichever of `foo.h` / `foo.cpp` extracts last, the primary is re-derived from ALL
+        // contributions, not overwritten by the most recent writer. For the overwhelmingly common
+        // single-contribution node the preferred row is the one just written, so the `nodes` row is
+        // byte-identical to the pre-#152 behavior.
+        let mut cup = self
+            .conn
+            .prepare_cached(
+                "INSERT INTO node_files(symbol, file, is_def, data) VALUES(?1,?2,?3,?4)
+                 ON CONFLICT(symbol, file) DO UPDATE SET
+                   is_def=excluded.is_def, data=excluded.data",
+            )
+            .map_err(st)?;
+        let mut pref = self
+            .conn
+            .prepare_cached(
+                "SELECT file, data FROM node_files WHERE symbol=?1 \
+                 ORDER BY is_def DESC, file ASC LIMIT 1",
+            )
+            .map_err(st)?;
         let mut up = self
             .conn
             .prepare_cached(
@@ -439,28 +507,46 @@ impl SqliteStore {
             None
         };
         for (n, sid) in nodes.iter().zip(sids.iter()) {
-            let kind = serde_json::to_string(&n.kind)?;
             let data = serde_json::to_string(n)?;
-            let file = &n.location.file;
+            let is_def: i64 = if n.is_declaration() { 0 } else { 1 };
+            cup.execute(params![sid, n.location.file, is_def, data])
+                .map_err(st)?;
+            // Re-derive the primary. When the preferred contribution is the record just written
+            // (the single-contribution common case, or this write IS the definition), use `n`
+            // directly — no JSON re-parse. Otherwise the primary is a DIFFERENT file's record:
+            // parse it and project it wholesale, so the node reads exactly as if only the
+            // preferred file had been indexed.
+            let (pref_file, pref_data): (String, String) = pref
+                .query_row(params![sid], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(st)?;
+            let parsed: Option<Node> = if pref_file == n.location.file {
+                None
+            } else {
+                Some(serde_json::from_str(&pref_data)?)
+            };
+            let p: &Node = parsed.as_ref().unwrap_or(n);
+            let p_data: &str = if parsed.is_some() { &pref_data } else { &data };
+            let kind = serde_json::to_string(&p.kind)?;
             up.execute(params![
                 sid,
-                n.name,
+                p.name,
                 kind,
-                n.language.0,
-                file,
-                data,
-                n.scope.as_path()
+                p.language.0,
+                p.location.file,
+                p_data,
+                p.scope.as_path()
             ])
             .map_err(st)?;
             if let Some((fts_del, fts_ins)) = fts.as_mut() {
-                // FTS uses the string symbol directly (nodes_fts.symbol is TEXT).
+                // FTS uses the string symbol directly (nodes_fts.symbol is TEXT) and mirrors the
+                // PRIMARY record (name/signature/doc), matching the derived `nodes` row.
                 fts_del.execute(params![n.symbol.0]).map_err(st)?;
                 fts_ins
                     .execute(params![
                         n.symbol.0,
-                        n.name,
-                        n.signature.as_deref().unwrap_or(""),
-                        n.doc.as_deref().unwrap_or(""),
+                        p.name,
+                        p.signature.as_deref().unwrap_or(""),
+                        p.doc.as_deref().unwrap_or(""),
                     ])
                     .map_err(st)?;
             }
@@ -1129,6 +1215,14 @@ impl SqliteStore {
                     params![s],
                 )
                 .map_err(st)?;
+            // Erasure removes the symbol's whole contribution record too (wicked-estate#152) —
+            // a lingering row would resurrect the node's file provenance on a later re-add.
+            self.conn
+                .execute(
+                    "DELETE FROM node_files WHERE symbol IN (SELECT sid FROM symbols WHERE sym=?1)",
+                    params![s],
+                )
+                .map_err(st)?;
             self.conn
                 .execute("DELETE FROM nodes_fts WHERE symbol=?1", params![s])
                 .map_err(st)?;
@@ -1306,6 +1400,16 @@ impl SqliteStore {
                  WHERE symbol NOT IN ( \
                    SELECT s.sym FROM nodes n JOIN symbols s ON s.sid = n.symbol \
                  )",
+                [],
+            )
+            .map_err(st)?;
+
+        // (3b) orphan contribution rows: symbol no longer a live node (wicked-estate#152).
+        // remove_file / remove_nodes keep the two tables in lockstep; this is belt-and-braces
+        // for rows stranded by out-of-band writes, uncounted (same policy as the WAL step).
+        self.conn
+            .execute(
+                "DELETE FROM node_files WHERE symbol NOT IN (SELECT symbol FROM nodes)",
                 [],
             )
             .map_err(st)?;
@@ -1788,6 +1892,74 @@ impl GraphWrite for SqliteStore {
                 .map_err(st)?;
             v.flatten().unwrap_or_default()
         };
+
+        // Step 1a: multi-file contribution retirement + survivor re-home (M4 / Option A —
+        // wicked-estate#152, generalizing the Step-1b Import keep/re-home to EVERY node kind).
+        //
+        // remove_file deletes this file's CONTRIBUTIONS, not blindly its nodes. A node whose
+        // (symbol, file) contribution is removed but that still has contributions from OTHER files
+        // (a `.h` member prototype whose `.cpp` out-of-line definition still exists, or vice
+        // versa) is RE-HOMED to the preferred surviving contribution (`is_def DESC, file ASC` —
+        // definition first, deterministic tiebreak): every projected column (name, kind, language,
+        // file, scope) AND the data JSON move together, so the node reads exactly as if only the
+        // surviving file had been indexed. Only a node whose LAST contribution is being removed
+        // falls through to the Step-4 delete. The re-home runs BEFORE the archive/FTS/edge steps
+        // below, so every `nodes.file = ?1` sub-select in them excludes kept nodes — their
+        // out-of-file edges, FTS rows, and embeddings survive (skip-not-reinsert, the Import D5
+        // rule). Symbols whose contribution here was NOT the primary need no re-home: the `nodes`
+        // row already equals a surviving preferred contribution (the derived-primary invariant).
+        struct KeptContribution {
+            sid: i64,
+            node: Node,
+            data: String,
+        }
+        let contrib_kept: Vec<KeptContribution> = {
+            let mut kept = Vec::new();
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT n.symbol, \
+                            (SELECT nf.data FROM node_files nf \
+                              WHERE nf.symbol = n.symbol AND nf.file != ?1 \
+                              ORDER BY nf.is_def DESC, nf.file ASC LIMIT 1) \
+                     FROM nodes n \
+                     WHERE n.file = ?1",
+                )
+                .map_err(st)?;
+            let rows = stmt
+                .query_map(params![file], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+                })
+                .map_err(st)?;
+            for row in rows {
+                let (sid, survivor) = row.map_err(st)?;
+                let Some(data) = survivor else { continue };
+                let node: Node = serde_json::from_str(&data)?;
+                kept.push(KeptContribution { sid, node, data });
+            }
+            kept
+        };
+        self.conn
+            .execute("DELETE FROM node_files WHERE file=?1", params![file])
+            .map_err(st)?;
+        for k in &contrib_kept {
+            let kind = serde_json::to_string(&k.node.kind)?;
+            self.conn
+                .execute(
+                    "UPDATE nodes SET name=?2, kind=?3, language=?4, file=?5, data=?6, scope=?7 \
+                     WHERE symbol=?1",
+                    params![
+                        k.sid,
+                        k.node.name,
+                        kind,
+                        k.node.language.0,
+                        k.node.location.file,
+                        k.data,
+                        k.node.scope.as_path()
+                    ],
+                )
+                .map_err(st)?;
+        }
 
         // Step 1b: shared-Import keep + re-home (incr-integrity lane, D1/D2/D4).
         //
@@ -3224,6 +3396,106 @@ mod tests {
 
     fn open() -> SqliteStore {
         SqliteStore::in_memory().expect("in-memory store")
+    }
+
+    /// Migration-on-open (wicked-estate#152): a database created BEFORE the `node_files`
+    /// contribution table existed — simulated faithfully by dropping the table from a
+    /// current-schema DB (every other table at current shape, `nodes` populated) — must, on the
+    /// next open, (a) regain the table via SCHEMA, (b) get one seeded contribution per existing
+    /// node with `is_def` derived from the stored JSON's `metadata.is_declaration`, and (c) have
+    /// those seeded rows participate fully in the survivor logic. The seed is single-shot
+    /// (emptiness-gated), so a later open never duplicates or resurrects contributions.
+    #[test]
+    fn sqlite_pre_contribution_db_migrates_on_open() {
+        use wicked_estate_core::{Language, Location, Span};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("legacy.db");
+        let mknode = |name: &str, file: &str, decl: bool| {
+            let n = Node::new(
+                sym(name),
+                NodeKind::Function,
+                name,
+                Language::new("cpp"),
+                Location::new(file, Span::ZERO),
+            );
+            if decl { n.as_declaration() } else { n }
+        };
+        // (1) Create a current DB with two nodes, then strip the contribution table.
+        {
+            let mut store = SqliteStore::open(&path).expect("create db");
+            store
+                .upsert_nodes(&[
+                    mknode("legacy_decl", "legacy/a.h", true),
+                    mknode("legacy_def", "legacy/b.cpp", false),
+                ])
+                .expect("seed nodes");
+        }
+        {
+            let conn = Connection::open(&path).expect("raw open");
+            conn.execute_batch("DROP TABLE node_files")
+                .expect("strip node_files (pre-#152 fixture)");
+        }
+        // (2) Re-open: SCHEMA re-creates the table; the emptiness-gated migration seeds one
+        // contribution per node.
+        {
+            let mut store = SqliteStore::open(&path).expect("migrating open");
+            let (rows, decl_is_def, def_is_def): (i64, i64, i64) = store
+                .conn
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM node_files), \
+                            (SELECT nf.is_def FROM node_files nf \
+                              JOIN symbols s ON s.sid = nf.symbol WHERE s.sym='legacy_decl'), \
+                            (SELECT nf.is_def FROM node_files nf \
+                              JOIN symbols s ON s.sid = nf.symbol WHERE s.sym='legacy_def')",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .expect("inspect seeded contributions");
+            assert_eq!(rows, 2, "one seeded contribution per pre-existing node");
+            assert_eq!(
+                decl_is_def, 0,
+                "seed must derive is_def from the stored metadata.is_declaration"
+            );
+            assert_eq!(
+                def_is_def, 1,
+                "an unmarked legacy record seeds as a definition"
+            );
+
+            // (3) Seeded rows participate in the survivor logic: add a definition contribution
+            // for the declaration-only symbol; the definition takes the primary; removing it
+            // re-homes the node onto the SEEDED contribution instead of deleting it.
+            store
+                .upsert_nodes(&[mknode("legacy_decl", "legacy/a.cpp", false)])
+                .expect("add def contribution");
+            let got = store
+                .get_node(&sym("legacy_decl"))
+                .expect("get")
+                .expect("node");
+            assert_eq!(
+                got.location.file, "legacy/a.cpp",
+                "the definition contribution takes the primary over the seeded declaration"
+            );
+            store.remove_file("legacy/a.cpp").expect("remove def file");
+            let got = store.get_node(&sym("legacy_decl")).expect("get").expect(
+                "node must survive re-homed to the SEEDED contribution — the migration's point",
+            );
+            assert_eq!(got.location.file, "legacy/a.h");
+            // A single-contribution legacy node still deletes normally.
+            store.remove_file("legacy/b.cpp").expect("remove b");
+            assert!(store.get_node(&sym("legacy_def")).expect("get").is_none());
+        }
+        // (4) Idempotence: a third open must NOT re-seed (node_files is non-empty).
+        {
+            let store = SqliteStore::open(&path).expect("re-open");
+            let rows: i64 = store
+                .conn
+                .query_row("SELECT COUNT(*) FROM node_files", [], |r| r.get(0))
+                .expect("count");
+            assert_eq!(
+                rows, 1,
+                "re-open must not duplicate or resurrect contributions"
+            );
+        }
     }
 
     // --- traverse_multi perf gate (DEC-X2): the multi-seed CTE must issue a recursive-CTE count

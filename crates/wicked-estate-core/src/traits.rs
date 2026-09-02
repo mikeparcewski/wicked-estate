@@ -258,16 +258,30 @@ pub trait GraphWrite {
     /// Remove `file`'s contributions (its nodes, edges, unresolved refs) — used by incremental
     /// re-indexing to replace a changed file's contributions atomically. (Wave 2.6)
     ///
+    /// **Multi-file symbols (M4 / Option A — wicked-estate#152):** "contributions" is literal.
+    /// One logical symbol may be contributed by MORE THAN ONE file (a C/C++ `.h` prototype and
+    /// its `.cpp` out-of-line definition mint ONE [`SymbolId`]); stores record every
+    /// `(symbol, file)` contribution on upsert and derive the node's primary
+    /// `location`/`kind`/record from the PREFERRED contribution — definition
+    /// ([`Node::is_declaration`] false) before declaration, lexicographic file tiebreak — never
+    /// last-write-wins. `remove_file` deletes the removed file's CONTRIBUTION rows; a node with
+    /// surviving contributions is RE-HOMED wholesale to the new preferred record (its edges, keyed
+    /// by symbol id, are untouched — zero id churn), and only a node losing its LAST contribution
+    /// is deleted. Contributions retire ONLY through `remove_file` — the incremental indexer
+    /// removes a changed file before re-upserting it, which is what retires a symbol a file
+    /// stopped contributing. Pinned by the conformance kit's `multi_file_contribution_suite`.
+    ///
     /// Exception (incr-integrity lane): a [`NodeKind::Import`](crate::node::NodeKind::Import)
-    /// node located in `file` is KEPT when
+    /// node located in `file` with NO surviving contribution is still KEPT when
     /// at least one *survivor* edge still targets it — an edge whose file is neither `''` nor
     /// `file` and whose source node does not live in `file`. Import nodes are keyed by module
     /// SPECIFIER (shared by every importer of the same spec); deleting the shared node when one
     /// importer goes away would strand every other importer's `File→Import` edge. A kept node is
     /// re-homed (both its `file` column and its `location`) to the deterministic MIN(file) over
     /// its survivor edges, so removing the LAST importer deletes it through the normal path.
-    /// Every other node kind is removed unconditionally. Pinned by the conformance kit's
-    /// shared-Import cases.
+    /// (In a fully-indexed store every importer's extraction contributes the shared Import node,
+    /// so the contribution mechanism usually re-homes it first; this edge-based keep covers
+    /// nodes written outside file extraction.) Pinned by the conformance kit's shared-Import cases.
     fn remove_file(&mut self, file: &str) -> Result<()>;
     /// Record a content digest for `file` (incremental change detection — fast xxh3). (Wave 2.6)
     fn set_file_digest(&mut self, file: &str, digest: &str) -> Result<()>;

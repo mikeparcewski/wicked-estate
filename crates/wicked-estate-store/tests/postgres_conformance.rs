@@ -70,7 +70,7 @@ fn drop_all_tables(url: &str) {
         sqlx::query(
             "DROP TABLE IF EXISTS \
              annotations, edge_history, changes, meta, cache, content, \
-             unresolved_refs, edges, nodes, files, symbol_gen CASCADE",
+             unresolved_refs, edges, nodes, node_files, files, symbol_gen CASCADE",
         )
         .execute(&pool)
         .await
@@ -97,6 +97,30 @@ fn postgres_store_satisfies_graph_store_contract() {
     let mut store = wicked_estate_store::PostgresStore::open(&url).expect("open postgres store");
     store.set_history_enabled(true).expect("enable history");
     wicked_estate_core::conformance::graph_store_suite(&mut store);
+}
+
+/// Multi-file symbol contributions (M4 / Option A — wicked-estate#152) on a live Postgres — the
+/// SAME shared suite the Mem/Sqlite tests pin (tests/conformance.rs), so the PG `node_files`
+/// contribution table, definition-preferred derived primary, and remove_file survivor re-home
+/// cannot drift without a test signal.
+#[test]
+fn postgres_store_satisfies_multi_file_contribution_contract() {
+    let url = match std::env::var("TEST_POSTGRES_URL") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("postgres_conformance: TEST_POSTGRES_URL not set — skipping");
+            return;
+        }
+    };
+    let _guard = PG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lease = PgTestLease::acquire(&url);
+
+    drop_all_tables(&url);
+
+    let mut store = wicked_estate_store::PostgresStore::open(&url).expect("open postgres store");
+    wicked_estate_core::conformance::multi_file_contribution_suite(&mut store);
 }
 
 /// The back-fill support surface (#141) on a live Postgres — the SAME shared body the
