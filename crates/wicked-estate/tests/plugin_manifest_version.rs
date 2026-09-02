@@ -80,3 +80,32 @@ fn plugin_manifest_version_matches_workspace_version() {
          change as the workspace version (RELEASING.md step 1; release.yml bumps both)"
     );
 }
+
+#[test]
+fn marketplace_listing_version_matches_workspace_version() {
+    // The MARKETPLACE listing (`.claude-plugin/marketplace.json` at the repo root) carries its
+    // own version for this plugin — a third field outside Cargo's reach, and the one the 0.15.2
+    // release review caught still advertising 0.15.1. Same guard, same std-only parsing; the
+    // listing has exactly one "version" key today (asserted by manifest_version).
+    let expected = env!("CARGO_PKG_VERSION");
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let listing = manifest_dir
+        .join("../..")
+        .join(".claude-plugin/marketplace.json");
+    let text = match fs::read_to_string(&listing) {
+        Ok(t) => t,
+        Err(_) => {
+            eprintln!(
+                "SKIPPED marketplace_listing_version: no listing at {} — running outside the                  wicked-estate source tree (e.g. a published .crate).",
+                listing.display()
+            );
+            return;
+        }
+    };
+    let found = manifest_version(&text);
+    assert_eq!(
+        found, expected,
+        ".claude-plugin/marketplace.json advertises {found} but the workspace version is \
+         {expected} — bump the listing in the same change (RELEASING.md step 1b)"
+    );
+}

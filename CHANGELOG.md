@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.15.2] — 2026-09-01
+
+### Fixed
+- **Parked references back-fill when their target arrives** (#141 / #150). A reference to a
+  not-yet-indexed target parked forever — incremental indexing silently under-built the graph vs a
+  full re-index. A later (re-)extraction of the missing definition now re-resolves parked refs into
+  real edges (`BACKFILL: re-resolved N` in the ingest log), idempotently (edge counts stable under
+  re-touch; differential-equivalent to a fresh full index), honestly on ambiguity (a same-basename or
+  near-name arrival re-resolves nothing — the row stays parked), and scope-safely on labelled runs
+  (repo B defining repo A's awaited name never consumes A's parked row). The back-fill support
+  contract runs on all three backends (Mem/Sqlite always; Postgres gated on `TEST_POSTGRES_URL`).
+
 ## [0.15.1] — 2026-08-29
 
 ### Added
