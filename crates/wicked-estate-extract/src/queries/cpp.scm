@@ -51,21 +51,25 @@
 ; level qualification only: `void Ns::Foo::bar()` at file scope nests
 ; qualified_identifiers and is not matched (write the definition inside its
 ; namespace to be captured).
-; HAZARD (pinned by cpp_member_proto_def_cross_file_single_id_hazard): with the
-; owner, a foo.h in-class prototype (D6b) and the foo.cpp out-of-line definition
-; mint ONE SymbolId across TWO files (module_path strips one extension) —
-; nodes.file flaps last-write-wins, remove_file deletes by file, the digest skip
-; never re-extracts the survivor. Store-side fix filed via merge note M4 (the
-; program's header/impl identity decision).
-; HAZARD, namespace direction (R2-COR-1; pinned by
-; cpp_namespace_qualified_free_fn_cross_kind_collision_known_defect): the
-; qualifier ambiguity cuts BOTH ways — a NAMESPACE qualifier also parses as
-; namespace_identifier, so `void ns::helper(int) {}` at file scope mints
-; `<module>/ns#helper().` with kind Method: the SAME id an in-namespace
-; `void helper() {}` definition mints with kind Function (containment nests it
-; under the `ns#` namespace anchor). Cross-kind same-id → store re-kind flap.
-; No query-level fix exists (the grammar cannot separate class from namespace
-; qualifiers); folded into the M4 identity decision.
+; M4 RESOLVED (Option A — one logical symbol; ADR-002 third amendment,
+; wicked-estate#152/#140): a foo.h in-class prototype (D6b) and the foo.cpp
+; out-of-line definition minting ONE SymbolId across TWO files is the RECORDED
+; CONVENTION, made safe store-side — per-(symbol, file) contribution rows, a
+; definition-preferred derived primary, and remove_file survivor re-home
+; replaced the last-write-wins flap / cross-file delete / digest-skip data
+; loss (pinned: cpp_member_proto_def_cross_file_single_id_hazard +
+; wicked_estate_core::conformance::multi_file_contribution_suite).
+; Namespace direction of the qualifier ambiguity (R2-COR-1; pinned by
+; cpp_namespace_qualified_free_fn_cross_kind_collision_known_defect): a
+; NAMESPACE qualifier also parses as namespace_identifier, so
+; `void ns::helper(int) {}` at file scope mints `<module>/ns#helper().` with
+; kind Method — the SAME id an in-namespace `void helper() {}` definition mints
+; with kind Function. No query-level fix exists (the grammar cannot separate
+; class from namespace qualifiers); under the M4 convention the raw extraction
+; stream keeps both kinds and the STORE derives one deterministic primary kind
+; from the preferred contribution. The true fix — the overload disambiguator
+; (parameter-type hash) — remains an OPEN residual, separately pinned
+; (identity_disambiguator_is_none; a scheme change, ADR-002).
 (function_definition
   declarator: (function_declarator
     declarator: (qualified_identifier
@@ -80,18 +84,14 @@
 ; Member function prototypes: `int bar(int);` inside a class/struct body is a
 ; field_declaration wrapping a function_declarator (D6b). This also classifies
 ; pure virtuals (`virtual void pure() = 0;` parses as field_declaration).
-; NOTE: FREE function prototypes (`int freestanding();` at namespace scope) are
-; STILL DEFERRED (D6d; docs/recon/scm-anchors.md D8) — the recorded deferral
-; terms require a program-level owner AND an identity DECISION for header/impl
-; proto+def node identity, and only the owner is recorded: a header prototype
-; and its .cpp definition share a SymbolId (module strips one extension), and
-; remove_file + the digest skip make that a data-loss path whose fix is
-; store-side (merge note M4). The ready per-parent pattern set lives in
-; docs/recon/extraction-gaps.md §D6(d).
+; `.decl` (not `.def`): the record is a DECLARATION contribution (M4 / Option A,
+; wicked-estate#152) — same SymbolId as the out-of-line definition (identity is
+; untouched); the store's multi-file contribution table prefers the DEFINITION
+; record as the node's primary location/kind.
 (field_declaration
   declarator: (function_declarator
     declarator: (field_identifier) @code_method.name)
-) @code_method.def
+) @code_method.decl
 
 ; Member fields (D6c) — an explicit declarator ALTERNATION, not a wildcard: a
 ; wildcard would also capture function_declarator and emit prototypes as Field
@@ -104,6 +104,81 @@
     (reference_declarator (field_identifier) @code_field.name)
   ]
 ) @code_field.def
+
+; FREE function prototypes (D6d, wicked-estate#140) — landed under the M4
+; identity decision: Option A, one logical symbol (ADR-002 third amendment;
+; scratch/proposals/ESTATE-M4-DECISION-BRIEF.md). A header prototype and its
+; impl-file definition mint ONE SymbolId (module_path strips one extension:
+; foo.h + foo.cpp share module `foo`); the prototype JOINS the definition's
+; existing id — zero id churn. `.decl` marks the record as a DECLARATION
+; contribution so the store's multi-file contribution table (#152) keeps the
+; DEFINITION record as the node's primary location/kind; a header-only
+; prototype with no definition mints the id alone as a declaration-primary node.
+;
+; PER-PARENT ANCHORED pattern set (docs/recon/extraction-gaps.md §D6(d)): the
+; review's translation_unit-only anchor captures 0 prototypes in include-guarded
+; headers (the guard wraps everything in preproc_ifdef), so one pattern per
+; legal parent. The anchoring IS the false-positive guard (adversarial review of
+; doc 04): body-local prototypes (`int localProto(int);` inside a function) and
+; body-local most-vexing-parse object declarations (`Foo f(Foo());`) sit under
+; compound_statement — matched by NO pattern here.
+; ACCEPTED residuals (recorded in ADR-002 §Accepted residuals):
+;   - a most-vexing-parse declaration AT TU/namespace scope CAN still match (it
+;     IS a function declaration per [dcl.ambig.res]; the review recorded "accept
+;     as documented"). Measured: tree-sitter resolves the ambiguity
+;     context-dependently — a lone `Foo f(Foo());` parses as a function
+;     declaration and emits; with sibling declarations it parses as an object
+;     declaration and does not;
+;   - a body-local prototype inside a preproc block inside a function body
+;     (`void f() { #ifdef X\n int p(int); #endif }`) leaks through the
+;     preproc_ifdef/preproc_if parents (negative ancestor predicates are not
+;     expressible in tree-sitter queries);
+;   - `extern "C" int f(int);` WITHOUT braces (parent = linkage_specification)
+;     is not captured — the braced `extern "C" { ... }` form rides the
+;     declaration_list parent;
+;   - pointer-returning prototypes (`int* getPtr();`, pointer_declarator wraps
+;     the function_declarator) are not captured — deliberately consistent with
+;     the function_definition patterns above, which have the same shape gap.
+
+; (1) translation-unit scope: `int freestanding();` in an unguarded file
+(translation_unit
+  (declaration
+    declarator: (function_declarator
+      declarator: (identifier) @code_function.name)
+  ) @code_function.decl
+)
+
+; (2) include-guard / #ifdef blocks: the dominant header idiom
+(preproc_ifdef
+  (declaration
+    declarator: (function_declarator
+      declarator: (identifier) @code_function.name)
+  ) @code_function.decl
+)
+
+; (3) #if blocks
+(preproc_if
+  (declaration
+    declarator: (function_declarator
+      declarator: (identifier) @code_function.name)
+  ) @code_function.decl
+)
+
+; (4) namespace bodies and braced `extern "C" { ... }` blocks
+(declaration_list
+  (declaration
+    declarator: (function_declarator
+      declarator: (identifier) @code_function.name)
+  ) @code_function.decl
+)
+
+; (5) template prototypes: `template <typename T> T gamma(T);`
+(template_declaration
+  (declaration
+    declarator: (function_declarator
+      declarator: (identifier) @code_function.name)
+  ) @code_function.decl
+)
 
 ; Object-like macros
 (preproc_def
