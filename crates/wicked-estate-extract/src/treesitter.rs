@@ -2,7 +2,11 @@
 //!
 //! Uses the prior art capture convention:
 //! - Definitions: `@code_<kind>.def` (the whole node) + `@code_<kind>.name` (the identifier).
-//!   Variant anchors accepted: `@code_<kind>` (no suffix) and `@code_<kind>.arrow`.
+//!   Variant anchors accepted: `@code_<kind>` (no suffix), `@code_<kind>.arrow`, and
+//!   `@code_<kind>.decl` — a DECLARATION anchor (prototype/forward declaration): identical
+//!   identity to `.def`, but the minted Node carries the `is_declaration` metadata flag so
+//!   the store's multi-file contribution table prefers a definition record as the primary
+//!   (M4 / Option A, wicked-estate#152).
 //! - Calls: `@call.function` / `@call.method` (name from the captured node text).
 //! - Imports: `@import` (the statement node) with optional `@import.source` (the path node).
 //!   When `.source` is present its text is used; otherwise the `@import` node text is used.
@@ -1428,6 +1432,11 @@ struct PendingDef {
     /// with an emitting def — the `(start, end, name)` dedup below would keep an
     /// uncontracted-order winner.
     emit: bool,
+    /// `true` for `@code_<kind>.decl` records (prototype / forward declaration):
+    /// pass 2 mints the Node with the `is_declaration` metadata flag set (M4 /
+    /// Option A — the store prefers a DEFINITION contribution as the node's
+    /// primary). Identity is untouched: same SymbolId construction as `.def`.
+    decl: bool,
     /// `@code_<kind>.owner` captured in the same match: the owner TYPE NAME of a
     /// def whose owner is not an enclosing node (Go receiver, C++ `Foo::`
     /// qualifier, Ruby `def self.m`). Pass 2 appends it as the INNERMOST Type
@@ -1739,7 +1748,20 @@ enum CaptureRole<'a> {
     /// [`enclosing_chain`], but pass 2 mints no Node / DefRec / Contains edge for it
     /// (Rust `impl` blocks, Ruby `class << self` — minting them would create phantom
     /// or duplicate nodes, the #129 double-emit class).
-    DefAnchor { kind: &'a str, emit: bool },
+    ///
+    /// `@code_<kind>.decl` (`decl: true`) — an emitting anchor for a DECLARATION
+    /// (prototype / forward declaration): identical to `.def` in every identity
+    /// respect (same SymbolId construction, same kind, same Contains edge), but the
+    /// minted Node carries the [`wicked_estate_core::node::DECLARATION_METADATA_KEY`]
+    /// metadata flag (M4 / Option A, wicked-estate#152) so the store's multi-file
+    /// contribution table prefers a DEFINITION contribution as the node's primary
+    /// location/kind. Metadata only — NEVER part of the id: a `.decl` capture and a
+    /// `.def` capture of the same logical symbol mint the SAME SymbolId.
+    DefAnchor {
+        kind: &'a str,
+        emit: bool,
+        decl: bool,
+    },
     /// `@code_<kind>.owner` — the owner TYPE NAME captured in the same match as a def whose
     /// owner is not an enclosing node (Go receivers, C++ `Foo::` qualifiers, Ruby `def self.m`).
     /// Spliced as the innermost Type descriptor of that def's id in pass 2.
@@ -1846,11 +1868,26 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
         if let Some(dot) = rest.find('.') {
             let kind = &rest[..dot];
             let suffix = &rest[dot + 1..];
-            if suffix == "def" || suffix == "arrow" || suffix == "decl" {
-                return CaptureRole::DefAnchor { kind, emit: true };
+            if suffix == "def" || suffix == "arrow" {
+                return CaptureRole::DefAnchor {
+                    kind,
+                    emit: true,
+                    decl: false,
+                };
+            }
+            if suffix == "decl" {
+                return CaptureRole::DefAnchor {
+                    kind,
+                    emit: true,
+                    decl: true,
+                };
             }
             if suffix == "anchor" {
-                return CaptureRole::DefAnchor { kind, emit: false };
+                return CaptureRole::DefAnchor {
+                    kind,
+                    emit: false,
+                    decl: false,
+                };
             }
             if suffix == "owner" {
                 return CaptureRole::DefOwner { kind };
@@ -1871,6 +1908,7 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
             return CaptureRole::DefAnchor {
                 kind: rest,
                 emit: true,
+                decl: false,
             };
         }
     }
@@ -2005,7 +2043,8 @@ impl Extractor for TreeSitterExtractor {
 
             // Per-kind: (anchor_node, name_text)
             // We support one def per kind per match (tree-sitter match semantics).
-            let mut def_anchor: Option<(&str, tree_sitter::Node, bool)> = None; // (kind, node, emit)
+            #[allow(clippy::type_complexity)]
+            let mut def_anchor: Option<(&str, tree_sitter::Node, bool, bool)> = None; // (kind, node, emit, decl)
             let mut def_name: Option<(&str, String)> = None; // (kind, text)
             let mut def_owner: Option<(&str, String)> = None; // (kind, owner type name)
 
@@ -2039,9 +2078,9 @@ impl Extractor for TreeSitterExtractor {
                 let pos = c.node.start_byte();
 
                 match classify_capture(cap) {
-                    CaptureRole::DefAnchor { kind, emit } => {
+                    CaptureRole::DefAnchor { kind, emit, decl } => {
                         // Last anchor wins if duplicated (shouldn't happen in well-formed query)
-                        def_anchor = Some((kind, c.node, emit));
+                        def_anchor = Some((kind, c.node, emit, decl));
                     }
                     CaptureRole::DefOwner { kind } => {
                         def_owner = Some((kind, text));
@@ -2113,7 +2152,7 @@ impl Extractor for TreeSitterExtractor {
             // ── Process definitions ─────────────────────────────────────────
             // No id is minted here: the enclosing Type chain needs the FULL definition list,
             // which only exists after the match loop (pass 2 below).
-            if let (Some((anchor_kind, anchor_node, emit)), Some((name_kind, name_text))) =
+            if let (Some((anchor_kind, anchor_node, emit, decl)), Some((name_kind, name_text))) =
                 (def_anchor, &def_name)
             {
                 // The name must come from the same kind as the anchor.
@@ -2140,6 +2179,7 @@ impl Extractor for TreeSitterExtractor {
                         span: ts_span(anchor_node),
                         signature,
                         emit,
+                        decl,
                         owner,
                     });
                 }
@@ -2310,6 +2350,11 @@ impl Extractor for TreeSitterExtractor {
                     Location::new(&file.path, p.span),
                 );
                 node.signature = p.signature.clone();
+                if p.decl {
+                    // `.decl` capture: mark the record as a DECLARATION contribution
+                    // (metadata only — the id above is identical to a `.def` capture's).
+                    node = node.as_declaration();
+                }
                 def_nodes.push(node);
                 defs.push(DefRec {
                     symbol,
@@ -6874,6 +6919,7 @@ public class PlainListener {
             span: Span::ZERO,
             signature: None,
             emit: true,
+            decl: false,
             owner: None,
         };
         let pending = vec![
@@ -6897,7 +6943,8 @@ public class PlainListener {
             classify_capture("code_struct.anchor"),
             CaptureRole::DefAnchor {
                 kind: "struct",
-                emit: false
+                emit: false,
+                decl: false
             }
         ));
         assert!(matches!(
@@ -6909,14 +6956,26 @@ public class PlainListener {
             classify_capture("code_struct.def"),
             CaptureRole::DefAnchor {
                 kind: "struct",
-                emit: true
+                emit: true,
+                decl: false
             }
         ));
         assert!(matches!(
             classify_capture("code_variable"),
             CaptureRole::DefAnchor {
                 kind: "variable",
-                emit: true
+                emit: true,
+                decl: false
+            }
+        ));
+        // `.decl` — emitting anchor that marks the record as a DECLARATION
+        // contribution (M4 / Option A): same identity channel, metadata flag only.
+        assert!(matches!(
+            classify_capture("code_function.decl"),
+            CaptureRole::DefAnchor {
+                kind: "function",
+                emit: true,
+                decl: true
             }
         ));
     }

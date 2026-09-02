@@ -634,9 +634,19 @@ fn h_characterization() {
     assert_def(&ex, lang, "count", &NodeKind::Field);
     assert_def(&ex, lang, "shared", &NodeKind::Field);
     assert_def(&ex, lang, "a", &NodeKind::Field);
-    // `int freestanding();` (free prototype) deliberately NOT asserted — DEFERRED
-    // (D6d: free-function header/impl node identity needs a program-level owner).
-    assert_def_floor(&ex, lang, 11);
+    // `int freestanding();` — free prototype, emitted since D6d landed under the
+    // M4 Option A decision (wicked-estate#140): kind Function, declaration-marked.
+    assert_def(&ex, lang, "freestanding", &NodeKind::Function);
+    let freestanding = ex
+        .nodes
+        .iter()
+        .find(|n| n.name == "freestanding")
+        .expect("freestanding proto node");
+    assert!(
+        freestanding.is_declaration(),
+        "[{lang}] the free prototype record must be a DECLARATION contribution"
+    );
+    assert_def_floor(&ex, lang, 12);
 
     assert_import(&ex, lang, "<cstdint>");
     assert_import_node(&ex, lang, "cstdint");
@@ -1596,24 +1606,30 @@ fn cpp_member_proto_def_cross_file_single_id_hazard() {
 }
 
 /// Review round 2 (R2-COR-1) — the D8 qualifier ambiguity, NAMESPACE direction,
-/// pinned: `qualified_identifier.scope`'s namespace_identifier branch cannot
-/// distinguish a class qualifier from a namespace qualifier, so a
-/// namespace-qualified FREE-function definition at file scope
-/// (`void ns::helper(int) {}`) mints `<module>/ns#helper().` with kind Method —
-/// the SAME SymbolId an in-namespace definition (`namespace ns { void helper()
-/// {} }`, nested under the `ns#` namespace anchor by containment) mints with
-/// kind Function. Cross-kind same-id = the store re-kind-flap class #129
-/// eradicated. The fixture is legal, compilable C++ (`cc -fsyntax-only` clean):
-/// a qualified out-of-line definition requires a prior in-namespace declaration
-/// ([namespace.memdef]), so it defines the declared `helper(int)` overload; the
-/// D6d-deferred free prototype is uncaptured, which is why exactly two nodes
-/// mint. No query-level fix exists — the grammar parses both qualifier classes
-/// as namespace_identifier and kind is decided by the capture — so this is
-/// folded into the program's M4 header/impl identity decision
-/// (docs/recon/scm-anchors.md §8). FLIP INSTRUCTION (gated on M4): when the M4
-/// decision records an identity convention for qualified out-of-line
-/// definitions, flip this to assert whatever it decides — distinct ids, or one
-/// id with one consistent kind — and retire the cross-kind pair.
+/// FLIPPED per its own M4-gated instruction: the M4 decision recorded
+/// **Option A — one logical symbol** (ADR-002 third amendment,
+/// wicked-estate#152/#140), so this pin now asserts the RECORDED CONVENTION:
+/// one id, with the kind reconciled deterministically by the store.
+///
+/// The grammar ambiguity itself is unchanged and unfixable at query level —
+/// `qualified_identifier.scope` parses class and namespace qualifiers
+/// identically (`namespace_identifier`), so `void ns::helper(int) {}` at file
+/// scope still mints kind Method while the in-namespace `void helper() {}`
+/// definition mints kind Function, and (new since D6d landed) the in-namespace
+/// prototype `void helper(int);` mints a THIRD record: kind Function, marked as
+/// a DECLARATION contribution (`is_declaration` metadata). All three share
+/// `<module>/ns#helper().` — that single id is the convention, not a defect.
+/// The store's contribution table derives ONE deterministic primary kind from
+/// the preferred contribution (definition before declaration, lexicographic
+/// file tiebreak; within one file, that file's extraction stream), replacing
+/// the last-write-wins re-kind flap the original pin recorded — pinned
+/// store-side by `wicked_estate_core::conformance::multi_file_contribution_suite`.
+///
+/// STILL-OPEN residual, named so it is not mistaken for resolved: the two
+/// `helper`s are DIFFERENT OVERLOADS (`helper()` vs `helper(int)`) collapsing
+/// into one id because the overload `disambiguator` stays `None` — a separately
+/// pinned scheme change (`identity_disambiguator_is_none`, ADR-002 §Accepted
+/// residuals). M4/Option A did NOT fix overload identity.
 #[test]
 fn cpp_namespace_qualified_free_fn_cross_kind_collision_known_defect() {
     let lang = "cpp";
@@ -1635,27 +1651,200 @@ fn cpp_namespace_qualified_free_fn_cross_kind_collision_known_defect() {
         .collect();
     assert_eq!(
         helpers.len(),
-        2,
-        "[{lang}] expected in-namespace def + qualified free def (the free \
-         prototype is D6d-deferred); got {helpers:?}"
+        3,
+        "[{lang}] expected in-namespace def + D6d free prototype + qualified \
+         free def; got {helpers:?}"
     );
-    let kinds: std::collections::HashSet<String> =
-        helpers.iter().map(|n| format!("{:?}", n.kind)).collect();
-    assert_eq!(
-        kinds,
-        ["Function".to_string(), "Method".to_string()].into(),
-        "[{lang}] KIND SHAPE CHANGED: expected the cross-kind Function/Method \
-         pair — if one kind now wins, apply this pin's M4-gated flip instruction"
-    );
+    // One logical symbol (M4 Option A): every record shares the id.
     for n in &helpers {
         assert_eq!(
             n.symbol.as_str(),
             "ts-cpp . . . probe_ns_free/ns#helper().",
-            "[{lang}] KNOWN DEFECT RESOLVED? the namespace-qualified free def \
-             and the in-namespace def no longer share one id — apply this \
-             pin's M4-gated flip instruction"
+            "[{lang}] M4 CONVENTION BROKEN: all three records must mint ONE id \
+             (Option A) — distinct identity is an id-shape (scheme) change"
         );
     }
+    // Exactly one record is the declaration contribution — the D6d prototype.
+    let decls: Vec<_> = helpers.iter().filter(|n| n.is_declaration()).collect();
+    assert_eq!(
+        decls.len(),
+        1,
+        "[{lang}] exactly the prototype record carries is_declaration"
+    );
+    assert_eq!(
+        format!("{:?}", decls[0].kind),
+        "Function",
+        "[{lang}] the free prototype mints kind Function"
+    );
+    // The raw extraction stream keeps the cross-kind DEFINITION pair — the
+    // grammar cannot separate class from namespace qualifiers; the store's
+    // preferred-contribution rule (not this stream) decides the primary kind.
+    let def_kinds: std::collections::HashSet<String> = helpers
+        .iter()
+        .filter(|n| !n.is_declaration())
+        .map(|n| format!("{:?}", n.kind))
+        .collect();
+    assert_eq!(
+        def_kinds,
+        ["Function".to_string(), "Method".to_string()].into(),
+        "[{lang}] RAW-STREAM SHAPE CHANGED: the definition records still carry \
+         the Function/Method pair (grammar ambiguity) — if the grammar or the \
+         qualifier capture now disambiguates, update ADR-002's convention record"
+    );
+}
+
+// ── D6d: free-function prototype emission (wicked-estate#140, M4 Option A) ────
+//
+// The per-parent anchored pattern set from docs/recon/extraction-gaps.md §D6(d):
+// translation_unit / preproc_ifdef / preproc_if / declaration_list /
+// template_declaration. The anchoring is the false-positive guard — the
+// review's naive `(declaration (function_declarator (identifier)))` also fired
+// on body-local prototypes and most-vexing-parse object declarations, both of
+// which sit under compound_statement and match NO per-parent pattern.
+
+/// The extraction-gaps probe, pinned: the review's translation_unit-only anchor
+/// captured 0 prototypes in include-guarded headers (everything sits under
+/// preproc_ifdef); the per-parent set captures 3/3 — plus the braced
+/// `extern "C"` block (declaration_list) and `#if` blocks. Every prototype:
+/// kind Function, DECLARATION-marked, id identical to what the definition mints.
+#[test]
+fn cpp_free_proto_include_guarded_header_per_parent_anchors() {
+    let lang = "cpp";
+    let sf = SourceFile {
+        path: "api.h".to_string(),
+        language: Language::new(lang),
+        text: "#ifndef API_H\n#define API_H\n\
+               int alpha(void);\n\
+               namespace ns { int beta(); }\n\
+               template <typename T> T gamma(T v);\n\
+               #endif\n\
+               extern \"C\" {\nvoid c_api(void);\n}\n\
+               #if defined(FEATURE_X)\nint under_if(int);\n#endif\n"
+            .to_string(),
+    };
+    let ex = TreeSitterExtractor::for_language(lang)
+        .unwrap()
+        .extract(&sf)
+        .expect("extraction must succeed");
+    // The probe's 3/3 (guarded TU scope, namespace body, template) + the two
+    // extra parents.
+    for (name, id) in [
+        ("alpha", "ts-cpp . . . api/alpha()."),
+        ("beta", "ts-cpp . . . api/ns#beta()."),
+        ("gamma", "ts-cpp . . . api/gamma()."),
+        ("c_api", "ts-cpp . . . api/c_api()."),
+        ("under_if", "ts-cpp . . . api/under_if()."),
+    ] {
+        let n = ex
+            .nodes
+            .iter()
+            .find(|n| !matches!(n.kind, NodeKind::File) && n.name == name)
+            .unwrap_or_else(|| panic!("[{lang}] free prototype `{name}` must emit a node"));
+        assert_eq!(
+            n.symbol.as_str(),
+            id,
+            "[{lang}] `{name}` must mint the SAME id its definition would (Option A join)"
+        );
+        assert_eq!(
+            format!("{:?}", n.kind),
+            "Function",
+            "[{lang}] `{name}` mints kind Function"
+        );
+        assert!(
+            n.is_declaration(),
+            "[{lang}] `{name}` must be a DECLARATION contribution (is_declaration metadata)"
+        );
+    }
+}
+
+/// The adversarial-review false-positive guards (extra.cpp, findings.json D04
+/// attack): the naive pattern fired on a body-local prototype
+/// (`int localProto(int);`) and a most-vexing-parse object declaration
+/// (`Foo f(Foo());`) — both inside a function body. The per-parent anchoring
+/// excludes compound_statement, so NEITHER emits: 0 false positives on the
+/// probe corpus. (A most-vexing-parse declaration at TU scope still matches —
+/// an ACCEPTED residual recorded in ADR-002 and cpp.scm: per [dcl.ambig.res]
+/// it genuinely IS a function declaration.)
+#[test]
+fn cpp_free_proto_body_local_and_most_vexing_parse_guarded() {
+    let lang = "cpp";
+    let sf = SourceFile {
+        path: "extra.cpp".to_string(),
+        language: Language::new(lang),
+        text: "class Foo {\npublic:\n  Foo() = default;\n  virtual void pure() = 0;\n};\n\
+               void body() {\n  int localProto(int);\n  Foo f(Foo());\n}\n"
+            .to_string(),
+    };
+    let ex = TreeSitterExtractor::for_language(lang)
+        .unwrap()
+        .extract(&sf)
+        .expect("extraction must succeed");
+    // Guard 1: the body-local prototype must NOT emit.
+    assert_no_def(&ex, lang, "localProto");
+    // Guard 2: the most-vexing-parse object declaration must NOT emit.
+    assert_no_def(&ex, lang, "f");
+    // The genuine defs around them still extract (the guard is anchoring, not
+    // a blanket declaration suppression).
+    assert_def(&ex, lang, "Foo", &NodeKind::Class);
+    assert_def(&ex, lang, "body", &NodeKind::Function);
+    assert_def(&ex, lang, "pure", &NodeKind::Method);
+}
+
+/// S11-style cross-file join (M4 Option A, the D6d identity contract): a free
+/// prototype in `api.h` and its definition in `api.cpp` mint ONE SymbolId —
+/// the proto JOINS the definition's existing id (zero id churn; the store's
+/// contribution table keeps per-file provenance and prefers the definition as
+/// primary — proven through the real index path in
+/// crates/wicked-estate/tests/free_proto_emission.rs). The prototype record is
+/// declaration-marked; the definition record is not.
+#[test]
+fn cpp_free_proto_def_cross_file_single_id_join() {
+    let lang = "cpp";
+    let header = SourceFile {
+        path: "api.h".to_string(),
+        language: Language::new(lang),
+        text: "#ifndef API_H\n#define API_H\nint compute(int a, int b);\n#endif\n".to_string(),
+    };
+    let src = SourceFile {
+        path: "api.cpp".to_string(),
+        language: Language::new(lang),
+        text: "int compute(int a, int b) { return a + b; }\n".to_string(),
+    };
+    let extractor = TreeSitterExtractor::for_language(lang).unwrap();
+    let hx = extractor.extract(&header).expect("header extraction");
+    let cx = extractor.extract(&src).expect("cpp extraction");
+    let proto = hx
+        .nodes
+        .iter()
+        .find(|n| !matches!(n.kind, NodeKind::File) && n.name == "compute")
+        .expect("header proto node");
+    let def = cx
+        .nodes
+        .iter()
+        .find(|n| !matches!(n.kind, NodeKind::File) && n.name == "compute")
+        .expect("definition node");
+    assert_eq!(
+        proto.symbol, def.symbol,
+        "[{lang}] proto and def must mint ONE id (module strips one extension)"
+    );
+    assert_eq!(
+        proto.symbol.as_str(),
+        "ts-cpp . . . api/compute().",
+        "[{lang}] both files share module `api`"
+    );
+    assert!(
+        proto.is_declaration(),
+        "[{lang}] the header record is the DECLARATION contribution"
+    );
+    assert!(
+        !def.is_declaration(),
+        "[{lang}] the impl record is the DEFINITION contribution (primary)"
+    );
+    assert_eq!(
+        format!("{:?}", proto.kind),
+        "Function",
+        "[{lang}] proto kind Function — no cross-kind flap for free functions"
+    );
 }
 
 /// scm-anchors D3 (scheme 3): impl-block methods nest under the impl's `type:`

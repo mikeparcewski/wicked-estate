@@ -169,22 +169,39 @@ Still open:
   `ruby_singleton_vs_instance_collision_known_defect`). `class << Foo` reopens `Foo#`'s
   namespace (unchanged).
 - C++: decltype/dependent_name-scoped out-of-line members keep OWNERLESS module-flat defs
-  (pinned); multi-level qualification (`Ns::Foo::bar` at file scope) is unmatched; and the
-  member proto/def CROSS-FILE single-id hazard — `foo.h` prototype and `foo.cpp` out-of-line
-  definition mint ONE id, so `nodes.file` flaps, `remove_file` deletes by file, and the digest
-  skip never re-extracts the survivor — is pinned
-  (`cpp_member_proto_def_cross_file_single_id_hazard`) pending the program's M4 header/impl
-  identity decision (store-side fix filed there).
-- C++, namespace direction of the qualifier ambiguity (review round 2, R2-COR-1): a
-  namespace-qualified free-function definition at file scope (`void ns::helper(int) {}`,
-  legal per [namespace.memdef] when the overload is declared in the namespace) mints
-  `<module>/ns#helper().` with kind **Method** — the same id an in-namespace
-  `void helper() {}` definition mints with kind **Function** (containment nests it under the
-  namespace anchor). Cross-kind same-id → store re-kind flap. `qualified_identifier.scope`
-  parses class and namespace qualifiers identically (`namespace_identifier`), so no
-  query-level fix exists; pinned
-  (`cpp_namespace_qualified_free_fn_cross_kind_collision_known_defect`) and folded into the
-  same M4 identity decision.
+  (pinned); multi-level qualification (`Ns::Foo::bar` at file scope) is unmatched.
+  ~~The member proto/def CROSS-FILE single-id hazard~~ — **RESOLVED by the M4 decision
+  (Option A, third amendment below)**: one id across two files is now the recorded
+  convention, made safe by the store's multi-file contribution table (wicked-estate#152);
+  the former hazard pin (`cpp_member_proto_def_cross_file_single_id_hazard`) is retired
+  into a convention regression guard + the store conformance suite
+  (`multi_file_contribution_suite`).
+- C++, namespace direction of the qualifier ambiguity (review round 2, R2-COR-1): the
+  GRAMMAR ambiguity is unchanged — `qualified_identifier.scope` parses class and namespace
+  qualifiers identically (`namespace_identifier`), so `void ns::helper(int) {}` at file
+  scope still mints kind **Method** on the id an in-namespace `void helper() {}` definition
+  mints with kind **Function**. Under the M4 convention (third amendment below) the shared
+  id is CORRECT (one logical symbol) and the store derives one deterministic primary kind
+  from the preferred contribution, so the re-kind FLAP is dead; the raw extraction stream
+  keeps both kinds (pinned, flipped:
+  `cpp_namespace_qualified_free_fn_cross_kind_collision_known_defect`). The remaining wrong
+  bit is the OVERLOAD collapse feeding it — `helper()` vs `helper(int)` are different
+  functions sharing one id because `disambiguator` stays `None` (see the overload residual
+  above; a scheme change).
+- C/C++ cross-grammar seam (named by the M4 record, D6d): `.h` routes to the C++ grammar
+  (`ts-cpp` ids) while `.c` routes to the C grammar (`ts-c` ids), so a C header prototype
+  and its `.c` definition mint TWO nodes — the declared C API surface is visible (D6d), but
+  it does not unify with the `ts-c` definition. Unification is an id-shape change (churns
+  every C symbol id) and is explicitly OUT of Option A's zero-churn bounds; pinned
+  (`header_plus_c_stays_two_nodes_cross_grammar_residual`,
+  `crates/wicked-estate/tests/free_proto_emission.rs`).
+- C++ free-prototype emission gaps (D6d, all recorded in `cpp.scm`'s pattern comment):
+  a most-vexing-parse declaration at TU/namespace scope matches (it IS a function
+  declaration per [dcl.ambig.res]; body-local MVP is guarded by the per-parent anchoring);
+  a body-local prototype inside a preproc block inside a function body leaks through the
+  preproc parents; un-braced `extern "C" int f(int);` (parent `linkage_specification`) and
+  pointer-returning prototypes (`int* getPtr();`) are not captured — the latter consistent
+  with the function_definition patterns' identical shape gap.
 - Fleet-audit hand-off (merge note M6): Swift `extension Foo` members are module-flat and two
   extensions' same-named methods collide (pinned,
   `swift_extension_methods_collision_known_defect` — fixable per-language with `.anchor`); Lua
@@ -220,3 +237,57 @@ flat ids for any changed file — the old binary does not read the key, and the 
 fire at equal versions. Do not run pre-scheme binaries against a scheme-2 DB; if one did,
 re-index with `--force`. The next release's version bump closes this via the `indexed_version`
 gate.
+
+## Amendment 2026-09 — M4: header/impl proto+def identity = Option A (one logical symbol; NO scheme bump)
+
+The M4 decision the 0.15.0 release deferred (scm-anchors D8; deferral terms in
+`docs/recon/extraction-gaps.md` §D6(d)) is recorded: **a C/C++ prototype and its definition are
+ONE logical symbol** — Option A of `scratch/proposals/ESTATE-M4-DECISION-BRIEF.md` (workspace
+repo). The fix is store-side, not identity-side: identity from the logical name path (this ADR's
+founding rule) was never the broken layer.
+
+### The decision
+
+- **Identity (unchanged — zero id churn, `SYMBOL_ID_SCHEME` stays "3"):** a header prototype and
+  its impl-file definition mint ONE SymbolId (`module_path` strips one extension; `foo.h` and
+  `foo.cpp` share module `foo`). D6d free prototypes (wicked-estate#140) JOIN the id their
+  definitions already mint — no existing id changes shape. A header-only prototype with no
+  definition mints the id alone, as a declaration-primary node.
+- **Store (wicked-estate#152):** nodes gain per-`(symbol, file)` CONTRIBUTION rows
+  (`node_files`); the `nodes` row is a DERIVED projection of the preferred contribution —
+  **definition before declaration** (`metadata.is_declaration`, set by the extractor's
+  `@code_<kind>.decl` capture role), lexicographic file tiebreak — never last-write-wins.
+  `remove_file` retires contributions and re-homes survivors; only a node losing its LAST
+  contribution is deleted. This kills all three F7 mechanisms (file/kind flap, cross-file
+  delete, digest-skip data loss). Conformance: `multi_file_contribution_suite`, every backend.
+- **Kind convention (the R2-COR-1 fold):** the node's primary kind is the preferred
+  contribution's kind. The raw extraction stream may legitimately carry conflicting kinds for
+  one id (the class-vs-namespace qualifier grammar ambiguity has no query-level fix); the store
+  reconciles deterministically, so the #129 re-kind-flap class stays dead.
+
+### Why A over distinct-decl identity (B)
+
+Recorded in full in the decision brief; the deciding asymmetries: B is a scheme-4 bump (full
+ADR-002 migration fallout for a C++-only shape change) that puts the tree-sitter tier in
+disagreement with the SCIP tier's identity for the same function, and both shipped resolvers
+skip ties — distinct decl ids would park most C/C++ call resolution as unresolved.
+
+### Evidence (S11 prevalence, recorded on wicked-estate#140)
+
+Bench-pinned `tree-sitter/tree-sitter` corpus, pre-store extraction stream: **today** 6,648
+distinct SymbolIds, 103 (1.55%) multi-file — every one `Import`-kind (the class the store
+already re-homed). **Forward** (D6d landed, no store fix): a name-level proxy finds ~230
+colliding ids (~3.5%), 205 of them the `ts_*` public C API — the entire public surface of a
+typical C library, which is why the store fix landed FIRST (#152) and emission second (#140).
+
+### Explicitly still open (do NOT read this amendment as fixing them)
+
+- **The overload disambiguator.** Overloads within one type/scope still collapse into one id —
+  `helper()` and `helper(int)` share `…/ns#helper().` — because `disambiguator` stays `None`
+  (pinned: `identity_disambiguator_is_none`). Fixing it (parameter-type hash) is a SCHEME
+  CHANGE with full migration fallout, and it is the true fix under the R2-COR-1 cross-kind
+  pin's fixture. M4/Option A did not touch it.
+- **The C/C++ cross-grammar seam** (`.h`→ts-cpp vs `.c`→ts-c: no unification; see the residual
+  bullet above).
+- The D6d emission-shape residuals recorded in `cpp.scm` (TU-scope most-vexing-parse,
+  preproc-inside-body leak, un-braced `extern "C"`, pointer-returning prototypes).
