@@ -339,6 +339,24 @@ pub struct CompactStats {
     pub history_rows_pruned: usize,
 }
 
+/// Outcome of a [`SqliteStore::checkpoint_truncate`] call — the row `PRAGMA
+/// wal_checkpoint(TRUNCATE)` returns, decoded.
+///
+/// `busy: true` is NOT an error: a concurrent reader (e.g. an `open_readonly` gate-hook
+/// subprocess) still rides the WAL, so the truncate deferred; the caller simply tries again on a
+/// later tick, and the `wal_autocheckpoint` bound set in [`SqliteStore::open`] keeps the log from
+/// starving in the meantime. `Default` is the empty no-op result non-WAL backends return.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WalCheckpointStats {
+    /// True when the TRUNCATE could not fully complete because of concurrent readers/writers —
+    /// the checkpoint deferred (it never blocks or corrupts).
+    pub busy: bool,
+    /// Total frames in the WAL log (`-1` when the database is not in WAL mode).
+    pub log_frames: i64,
+    /// Frames successfully moved into the main database file (`-1` when not in WAL mode).
+    pub checkpointed_frames: i64,
+}
+
 /// SQLite-backed graph store.
 pub struct SqliteStore {
     conn: Connection,
@@ -659,6 +677,12 @@ impl SqliteStore {
         Ok(())
     }
     /// Open an on-disk store (WAL mode), creating the schema if needed.
+    ///
+    /// `wal_autocheckpoint=512` (pages, ≈2MB at the 4KB default page size) halves SQLite's
+    /// default 1000-page threshold: with many `open_readonly` gate-hook subprocesses riding the
+    /// WAL, passive auto-checkpoints frequently land while a reader mark blocks full truncation,
+    /// so a tighter bound is the backstop that keeps the log from outgrowing the database
+    /// between explicit [`checkpoint_truncate`](Self::checkpoint_truncate) calls.
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let conn = Connection::open(path).map_err(st)?;
         conn.execute_batch(
@@ -666,6 +690,7 @@ impl SqliteStore {
              PRAGMA synchronous=NORMAL; \
              PRAGMA auto_vacuum=INCREMENTAL; \
              PRAGMA busy_timeout=30000; \
+             PRAGMA wal_autocheckpoint=512; \
              PRAGMA cache_size=-65536; \
              PRAGMA temp_store=MEMORY; \
              PRAGMA mmap_size=268435456;",
@@ -1453,6 +1478,65 @@ impl SqliteStore {
             orphan_embeddings,
             orphan_content,
             history_rows_pruned,
+        })
+    }
+
+    /// TRUNCATE-checkpoint the WAL — a strict subset of [`compact`](Self::compact) step (6):
+    /// flush committed frames into the main database file and truncate the `-wal` file to zero
+    /// bytes, with none of compact's pruning or `VACUUM`. Cheap enough to run on an idle tick,
+    /// which is exactly where the single-writer actor calls it (WALs must not outgrow their DBs).
+    ///
+    /// Two-phase, never blocking:
+    /// 1. `PASSIVE` — copies every frame that precedes the oldest live reader mark; by
+    ///    definition it never invokes the busy handler, so it always makes progress without
+    ///    waiting on anyone.
+    /// 2. `TRUNCATE` — completes only when no reader still rides the WAL. The connection's
+    ///    `busy_timeout` is temporarily zeroed (and restored before returning) so a concurrent
+    ///    [`open_readonly`](Self::open_readonly) holder makes this return `busy: true`
+    ///    immediately — the checkpoint defers to a later call — instead of stalling the caller
+    ///    for up to the 30s write timeout.
+    ///
+    /// Like `compact`, this is an **inherent** method (an operational/DBA-style operation), not
+    /// part of the `GraphWrite` contract. Readers opened via `open_readonly` are unaffected: a
+    /// completed truncate is invisible to them (SQLite re-reads the emptied log transparently;
+    /// the 256MB `mmap_size` remap is handled internally).
+    pub fn checkpoint_truncate(&mut self) -> Result<WalCheckpointStats> {
+        // Remember the caller's busy timeout so it can be restored on every path below.
+        let prev_timeout: i64 = self
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .map_err(st)?;
+        let outcome = self
+            .conn
+            .execute_batch("PRAGMA busy_timeout=0;")
+            .and_then(|()| {
+                // (1) PASSIVE: move what can move without waiting. Its stats are superseded by
+                // the TRUNCATE row below, which reports the final WAL state.
+                self.conn
+                    .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))
+            })
+            .and_then(|()| {
+                // (2) TRUNCATE: with the busy handler disabled, a live reader yields a
+                // `busy=1` row right away rather than an error or a stall.
+                self.conn
+                    .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, i64>(2)?,
+                        ))
+                    })
+            });
+        // Restore the timeout BEFORE surfacing the checkpoint outcome, so an error can never
+        // leave the writer connection with busy-waiting disabled.
+        self.conn
+            .execute_batch(&format!("PRAGMA busy_timeout={prev_timeout};"))
+            .map_err(st)?;
+        let (busy, log_frames, checkpointed_frames) = outcome.map_err(st)?;
+        Ok(WalCheckpointStats {
+            busy: busy != 0,
+            log_frames,
+            checkpointed_frames,
         })
     }
 
@@ -3429,6 +3513,157 @@ mod tests {
 
     fn open() -> SqliteStore {
         SqliteStore::in_memory().expect("in-memory store")
+    }
+
+    /// Build a minimal on-disk node for the WAL-checkpoint tests below.
+    fn wal_test_node(name: &str) -> Node {
+        use wicked_estate_core::{Language, Location, Span};
+        Node::new(
+            sym(name),
+            NodeKind::Function,
+            name,
+            Language::new("rust"),
+            Location::new(format!("wal_test/{name}.rs"), Span::ZERO),
+        )
+    }
+
+    /// WAL checkpointing (perf #5): a TRUNCATE checkpoint must empty the `-wal` file, reads must
+    /// survive it (the 256MB `mmap_size` remap is SQLite-internal), the WAL must restart cleanly
+    /// for later writes, and the method must leave the connection's pragmas as it found them.
+    #[test]
+    fn checkpoint_truncate_empties_wal_and_reads_survive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ckpt.db");
+        let wal = dir.path().join("ckpt.db-wal");
+
+        let mut store = SqliteStore::open(&path).expect("open store");
+        // open() must arm the autocheckpoint backstop (512 pages ≈ 2MB).
+        let auto: i64 = store
+            .conn
+            .query_row("PRAGMA wal_autocheckpoint", [], |r| r.get(0))
+            .expect("read wal_autocheckpoint");
+        assert_eq!(auto, 512, "open() must set the wal_autocheckpoint backstop");
+
+        let nodes: Vec<Node> = (0..64)
+            .map(|i| wal_test_node(&format!("wal_n{i}")))
+            .collect();
+        store.upsert_nodes(&nodes).expect("seed nodes");
+        let wal_before = std::fs::metadata(&wal)
+            .expect("wal exists after writes")
+            .len();
+        assert!(wal_before > 0, "writes must land in the WAL first");
+
+        let stats = store.checkpoint_truncate().expect("checkpoint");
+        assert!(!stats.busy, "no concurrent reader ⇒ the truncate completes");
+        assert!(stats.log_frames >= 0, "WAL-mode db reports its frame count");
+        assert_eq!(
+            stats.checkpointed_frames, stats.log_frames,
+            "every frame must reach the main db file"
+        );
+        assert_eq!(
+            std::fs::metadata(&wal).expect("wal file kept").len(),
+            0,
+            "TRUNCATE must leave a zero-byte -wal"
+        );
+        // The method restores the busy timeout it found (open() sets 30s).
+        let timeout: i64 = store
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .expect("read busy_timeout");
+        assert_eq!(
+            timeout, 30000,
+            "busy_timeout must be restored after the checkpoint"
+        );
+
+        // Reads survive the truncate…
+        for i in 0..64 {
+            assert!(
+                store
+                    .get_node(&sym(&format!("wal_n{i}")))
+                    .expect("read after truncate")
+                    .is_some(),
+                "node wal_n{i} must survive a TRUNCATE checkpoint"
+            );
+        }
+        // …and the WAL restarts cleanly for later writes.
+        store
+            .upsert_nodes(&[wal_test_node("wal_after")])
+            .expect("write after truncate");
+        assert!(
+            store
+                .get_node(&sym("wal_after"))
+                .expect("read post-truncate write")
+                .is_some()
+        );
+    }
+
+    /// WAL checkpointing (perf #5), the blast-radius contract: a concurrent read-only holder
+    /// (the gate-hook subprocess shape — `open_readonly` rides the WAL) makes TRUNCATE return
+    /// `busy: true` and defer. It must never error, never block on the 30s busy timeout, and
+    /// never disturb the reader's snapshot; once the reader is gone the next call completes.
+    #[test]
+    fn checkpoint_truncate_defers_busy_while_a_reader_rides_the_wal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("busy.db");
+        let wal = dir.path().join("busy.db-wal");
+
+        let mut store = SqliteStore::open(&path).expect("open store");
+        store
+            .upsert_nodes(&[wal_test_node("busy_n0"), wal_test_node("busy_n1")])
+            .expect("seed nodes");
+
+        // A read-only connection with a PINNED snapshot (deferred txn + first read), exactly what
+        // a gate-hook subprocess holds mid-recall. Its read mark sits in the WAL.
+        let reader = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("readonly conn");
+        reader.execute_batch("BEGIN;").expect("begin read txn");
+        let seen_at_begin: i64 = reader
+            .query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
+            .expect("pin the read snapshot");
+        assert_eq!(seen_at_begin, 2);
+
+        // New frames PAST the reader's mark ⇒ neither backfill nor restart can complete.
+        store
+            .upsert_nodes(&[wal_test_node("busy_n2")])
+            .expect("write past the reader mark");
+
+        let deferred = store
+            .checkpoint_truncate()
+            .expect("busy is a result, not an error");
+        assert!(
+            deferred.busy,
+            "a live reader in the WAL must defer the truncate (busy=1), not block or fail"
+        );
+        assert!(
+            std::fs::metadata(&wal).expect("wal exists").len() > 0,
+            "a deferred truncate leaves the WAL in place"
+        );
+        // The reader's snapshot is untouched by the attempt.
+        let seen_after: i64 = reader
+            .query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
+            .expect("reader survives the checkpoint attempt");
+        assert_eq!(seen_after, seen_at_begin, "snapshot isolation must hold");
+
+        // Reader gone ⇒ the deferred checkpoint completes on the next call.
+        reader.execute_batch("COMMIT;").expect("end read txn");
+        drop(reader);
+        let done = store
+            .checkpoint_truncate()
+            .expect("checkpoint after reader");
+        assert!(!done.busy, "no reader left ⇒ the truncate completes");
+        assert_eq!(std::fs::metadata(&wal).expect("wal file kept").len(), 0);
+        for name in ["busy_n0", "busy_n1", "busy_n2"] {
+            assert!(
+                store
+                    .get_node(&sym(name))
+                    .expect("read after truncate")
+                    .is_some(),
+                "node {name} must survive the deferred-then-completed checkpoint"
+            );
+        }
     }
 
     /// Migration-on-open (wicked-estate#152): a database created BEFORE the `node_files`

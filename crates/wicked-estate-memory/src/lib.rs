@@ -215,6 +215,16 @@ impl MemoryEngine {
         self
     }
 
+    /// TRUNCATE-checkpoint the memory store's WAL — a one-line forwarder to the backend
+    /// (`SqliteStore::checkpoint_truncate`: busy-tolerant, never blocking; a `busy` result just
+    /// defers to a later call). Non-WAL backends (Postgres) return empty stats. The `.memext`
+    /// sidecar needs no checkpoint: it is opened in SQLite's default rollback-journal mode.
+    pub fn checkpoint_truncate(
+        &mut self,
+    ) -> wicked_estate_core::Result<wicked_estate_store::WalCheckpointStats> {
+        self.store.checkpoint_truncate()
+    }
+
     /// Set a custom embedder (e.g. estate's `Model2VecEmbedder`/`FastEmbedder` for real semantic
     /// recall, vs the default dependency-free `HashEmbedder`). MUST be set before any `capture`, since
     /// the vector dimension must match across stored memory embeddings and the query. Builder.
@@ -684,6 +694,41 @@ mod tests {
             .recall("billing", ScopeFilter::Ancestors(&scope), &[], 500, 2)
             .unwrap();
         assert!(out.iter().any(|r| r.content.contains("Stripe")));
+    }
+
+    /// WAL checkpointing (perf #5): the engine forwards `checkpoint_truncate` to its backend —
+    /// on a durable SQLite store the `-wal` file must end up empty and recall must survive it.
+    #[test]
+    fn checkpoint_truncate_forwards_to_backend_and_recall_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mem.db");
+        let path_str = path.to_str().unwrap();
+        let mut eng = MemoryEngine::open(path_str).unwrap();
+        let scope = Scope::root();
+        eng.capture(&Memory::new(
+            MemKind::Fact,
+            Tier::Semantic,
+            scope.clone(),
+            "the WAL must not outgrow the database",
+            1,
+        ))
+        .unwrap();
+
+        let stats = eng.checkpoint_truncate().unwrap();
+        assert!(!stats.busy, "no concurrent reader ⇒ the truncate completes");
+        let wal = dir.path().join("mem.db-wal");
+        assert_eq!(
+            std::fs::metadata(&wal).expect("wal file kept").len(),
+            0,
+            "TRUNCATE must leave a zero-byte -wal"
+        );
+        let out = eng
+            .recall("WAL database", ScopeFilter::Ancestors(&scope), &[], 500, 2)
+            .unwrap();
+        assert!(
+            out.iter().any(|r| r.content.contains("outgrow")),
+            "recall must survive a TRUNCATE checkpoint"
+        );
     }
 
     #[test]
