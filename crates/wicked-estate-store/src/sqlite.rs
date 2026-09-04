@@ -1549,8 +1549,16 @@ impl SqliteStore {
             .execute_batch(&format!("PRAGMA busy_timeout={prev_timeout};"))
             .map_err(st)?;
         let (busy, log_frames, checkpointed_frames) = outcome.map_err(st)?;
+        // The busy column's documented domain is exactly {0, 1} (0 = the checkpoint ran to
+        // completion, 1 = a blocking checkpoint could not complete — SQLITE_BUSY equivalent).
+        // The `-1` sentinel applies ONLY to the frame-count columns (a non-WAL database reports
+        // `0, -1, -1`: sqlite3_wal_checkpoint_v2 is a harmless SQLITE_OK no-op there), and real
+        // checkpoint failures (I/O, misuse) surface as statement ERRORS from the pragma — already
+        // propagated as `Err` above — never as row values. Decode `busy` as exactly `== 1` so the
+        // domain is explicit in code, not just in the docs; `non_wal_checkpoint_pragma_contract`
+        // pins the sentinel shape empirically.
         Ok(WalCheckpointStats {
-            busy: busy != 0,
+            busy: busy == 1,
             log_frames,
             checkpointed_frames,
         })
@@ -3610,6 +3618,40 @@ mod tests {
                 .get_node(&sym("wal_after"))
                 .expect("read post-truncate write")
                 .is_some()
+        );
+    }
+
+    /// WAL checkpointing (perf #5): pin SQLite's `wal_checkpoint` row contract that the
+    /// `checkpoint_truncate` decode relies on — on a NON-WAL database the pragma is a harmless
+    /// no-op reporting `busy=0` with the `-1` frame sentinels (the `-1` never appears in the
+    /// busy column; its domain is exactly {0,1}, and real failures surface as statement errors,
+    /// not row values). This is what makes `busy == 1` the complete busy decode.
+    #[test]
+    fn non_wal_checkpoint_pragma_contract() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rollback.db");
+        let conn = Connection::open(&path).expect("raw open");
+        // Explicitly a rollback-journal (non-WAL) database.
+        conn.execute_batch(
+            "PRAGMA journal_mode=DELETE; CREATE TABLE t(x); INSERT INTO t VALUES (1);",
+        )
+        .expect("seed non-WAL db");
+        let (busy, log, ckpt): (i64, i64, i64) = conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .expect("checkpoint on a non-WAL db is a no-op, not an error");
+        assert_eq!(busy, 0, "non-WAL is SQLITE_OK — busy must be 0, never -1");
+        assert_eq!(log, -1, "the -1 sentinel lives in the log column");
+        assert_eq!(ckpt, -1, "…and the checkpointed column");
+        // Matches the no-op Default exactly, so both sources of the struct agree.
+        assert_eq!(
+            WalCheckpointStats {
+                busy: busy == 1,
+                log_frames: log,
+                checkpointed_frames: ckpt
+            },
+            WalCheckpointStats::default()
         );
     }
 
