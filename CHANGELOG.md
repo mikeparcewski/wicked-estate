@@ -13,8 +13,8 @@ _Nothing yet._
   disabled during the attempt, so a concurrent `open_readonly` holder (gate-hook subprocesses)
   makes it return `busy: true` and defer — it never blocks the writer thread and never disturbs a
   reader's snapshot. One-line forwarders on `MemoryEngine` and `KnowledgeEngine` (and a
-  default-no-op `MemStore::checkpoint_truncate`, empty stats on non-WAL backends such as
-  Postgres), so all three estate WALs (`core`/graph, `mem`, `knowledge`) can be checkpointed by
+  default-no-op `MemStore::checkpoint_truncate` returning the `-1` no-WAL sentinel stats on
+  non-WAL backends such as Postgres), so all three estate WALs (`core`/graph, `mem`, `knowledge`) can be checkpointed by
   their owning engines.
 
 ### Changed

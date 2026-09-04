@@ -345,8 +345,10 @@ pub struct CompactStats {
 /// `busy: true` is NOT an error: a concurrent reader (e.g. an `open_readonly` gate-hook
 /// subprocess) still rides the WAL, so the truncate deferred; the caller simply tries again on a
 /// later tick, and the `wal_autocheckpoint` bound set in [`SqliteStore::open`] keeps the log from
-/// starving in the meantime. `Default` is the empty no-op result non-WAL backends return.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// starving in the meantime. `Default` is the no-op result non-WAL backends return, and it carries
+/// the same `-1` "no WAL here" sentinels SQLite itself reports for a non-WAL database — so a
+/// no-op backend is distinguishable from a real WAL that happened to be empty (0 frames).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalCheckpointStats {
     /// True when the TRUNCATE could not fully complete because of concurrent readers/writers —
     /// the checkpoint deferred (it never blocks or corrupts).
@@ -355,6 +357,20 @@ pub struct WalCheckpointStats {
     pub log_frames: i64,
     /// Frames successfully moved into the main database file (`-1` when not in WAL mode).
     pub checkpointed_frames: i64,
+}
+
+impl Default for WalCheckpointStats {
+    /// The no-op result for backends without a SQLite WAL (e.g. Postgres): NOT derived, because
+    /// derived zeros would read as "a WAL with 0 frames, fully checkpointed" — a different claim.
+    /// `-1` matches what `PRAGMA wal_checkpoint` itself returns on a non-WAL database, so the
+    /// documented sentinel holds for every source of this struct.
+    fn default() -> Self {
+        Self {
+            busy: false,
+            log_frames: -1,
+            checkpointed_frames: -1,
+        }
+    }
 }
 
 /// SQLite-backed graph store.
@@ -3594,6 +3610,33 @@ mod tests {
                 .get_node(&sym("wal_after"))
                 .expect("read post-truncate write")
                 .is_some()
+        );
+    }
+
+    /// WAL checkpointing (perf #5): the `Default` no-op result (what non-WAL backends return)
+    /// must carry the documented `-1` "no WAL here" sentinels — NOT derived zeros, which would be
+    /// indistinguishable from a real, fully-checkpointed WAL with 0 frames.
+    #[test]
+    fn default_stats_carry_the_no_wal_sentinels() {
+        let stats = WalCheckpointStats::default();
+        assert!(!stats.busy);
+        assert_eq!(
+            stats.log_frames, -1,
+            "the no-op default must use the -1 sentinel, not 0 (an empty WAL)"
+        );
+        assert_eq!(stats.checkpointed_frames, -1);
+        // And it must differ from a REAL empty-WAL checkpoint (0 frames), which is exactly what
+        // a fresh WAL-mode store reports after a completed truncate.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = SqliteStore::open(dir.path().join("fresh.db")).expect("open store");
+        let real = store.checkpoint_truncate().expect("checkpoint");
+        assert!(
+            real.log_frames >= 0,
+            "a WAL-mode db reports real frame counts"
+        );
+        assert_ne!(
+            real, stats,
+            "a live WAL result must be distinguishable from the non-WAL no-op"
         );
     }
 

@@ -17,7 +17,8 @@ pub trait MemStore: GraphStore {
     /// Hard-delete nodes (+ their FTS/vector rows and incident edges).
     fn remove_nodes(&mut self, ids: &[SymbolId]) -> Result<usize>;
     /// TRUNCATE-checkpoint the backend's WAL (see `SqliteStore::checkpoint_truncate`; busy-tolerant,
-    /// never blocking). Backends without a SQLite WAL keep this default: a no-op with empty stats.
+    /// never blocking). Backends without a SQLite WAL keep this default: a no-op returning the
+    /// `-1` no-WAL sentinel stats (`WalCheckpointStats::default`).
     fn checkpoint_truncate(&mut self) -> Result<WalCheckpointStats> {
         Ok(WalCheckpointStats::default())
     }

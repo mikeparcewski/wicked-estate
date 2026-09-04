@@ -217,7 +217,8 @@ impl MemoryEngine {
 
     /// TRUNCATE-checkpoint the memory store's WAL — a one-line forwarder to the backend
     /// (`SqliteStore::checkpoint_truncate`: busy-tolerant, never blocking; a `busy` result just
-    /// defers to a later call). Non-WAL backends (Postgres) return empty stats. The `.memext`
+    /// defers to a later call). Non-WAL backends (Postgres) return the `-1` no-WAL sentinel
+    /// stats. The `.memext`
     /// sidecar needs no checkpoint: it is opened in SQLite's default rollback-journal mode.
     pub fn checkpoint_truncate(
         &mut self,
