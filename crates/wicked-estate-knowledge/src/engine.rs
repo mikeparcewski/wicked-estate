@@ -268,6 +268,13 @@ impl KnowledgeEngine {
         self
     }
 
+    /// TRUNCATE-checkpoint the knowledge store's WAL — a one-line forwarder to
+    /// `SqliteStore::checkpoint_truncate` (busy-tolerant, never blocking; a `busy` result just
+    /// defers to a later call).
+    pub fn checkpoint_truncate(&mut self) -> Result<wicked_estate_store::WalCheckpointStats> {
+        self.store.checkpoint_truncate()
+    }
+
     /// Write ONE knowledge node (the single-writer path). Node-before-edge ordering (G3) is the
     /// caller's contract for `relate`. Returns the node's stable symbol.
     pub fn write(&mut self, k: &KNode) -> Result<SymbolId> {
@@ -664,6 +671,37 @@ mod tests {
             hits.iter().any(|h| h.content.contains("Stripe")),
             "recall must surface the ingested Stripe chunk, got: {:?}",
             hits.iter().map(|h| &h.content).collect::<Vec<_>>()
+        );
+    }
+
+    /// WAL checkpointing (perf #5): the engine forwards `checkpoint_truncate` to its own
+    /// single-writer store — the `-wal` file must end up empty and recall must survive it.
+    #[test]
+    fn checkpoint_truncate_forwards_to_store_and_recall_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("knowledge.db");
+        let mut e = KnowledgeEngine::open(path.to_str().unwrap()).unwrap();
+        e.ingest(
+            "WAL design",
+            &["The write-ahead log must not outgrow the database it protects.".into()],
+            "wiki:architecture",
+            "wiki://architecture#wal",
+            1,
+        )
+        .unwrap();
+
+        let stats = e.checkpoint_truncate().unwrap();
+        assert!(!stats.busy, "no concurrent reader ⇒ the truncate completes");
+        let wal = dir.path().join("knowledge.db-wal");
+        assert_eq!(
+            std::fs::metadata(&wal).expect("wal file kept").len(),
+            0,
+            "TRUNCATE must leave a zero-byte -wal"
+        );
+        let hits = e.recall("write-ahead log outgrow", 2000, None, 2).unwrap();
+        assert!(
+            hits.iter().any(|h| h.content.contains("outgrow")),
+            "recall must survive a TRUNCATE checkpoint"
         );
     }
 

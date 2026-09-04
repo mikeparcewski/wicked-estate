@@ -6,7 +6,7 @@
 //! `08-FINISH-PLAN.md` M-PG — pgvector for `nearest`, a `remove_nodes` on the PG store).
 
 use wicked_estate_core::{GraphStore, Result, SymbolId};
-use wicked_estate_store::SqliteStore;
+use wicked_estate_store::{SqliteStore, WalCheckpointStats};
 
 /// What the memory engine requires of a storage backend.
 pub trait MemStore: GraphStore {
@@ -16,6 +16,12 @@ pub trait MemStore: GraphStore {
     fn nearest(&self, query_vec: &[f32], k: usize) -> Result<Vec<(SymbolId, f32)>>;
     /// Hard-delete nodes (+ their FTS/vector rows and incident edges).
     fn remove_nodes(&mut self, ids: &[SymbolId]) -> Result<usize>;
+    /// TRUNCATE-checkpoint the backend's WAL (see `SqliteStore::checkpoint_truncate`; busy-tolerant,
+    /// never blocking). Backends without a SQLite WAL keep this default: a no-op returning the
+    /// `-1` no-WAL sentinel stats (`WalCheckpointStats::default`).
+    fn checkpoint_truncate(&mut self) -> Result<WalCheckpointStats> {
+        Ok(WalCheckpointStats::default())
+    }
 }
 
 impl MemStore for SqliteStore {
@@ -28,6 +34,9 @@ impl MemStore for SqliteStore {
     }
     fn remove_nodes(&mut self, ids: &[SymbolId]) -> Result<usize> {
         SqliteStore::remove_nodes(self, ids)
+    }
+    fn checkpoint_truncate(&mut self) -> Result<WalCheckpointStats> {
+        SqliteStore::checkpoint_truncate(self)
     }
 }
 

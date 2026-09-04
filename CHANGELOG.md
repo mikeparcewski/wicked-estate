@@ -4,6 +4,25 @@
 
 _Nothing yet._
 
+## [0.16.1] — 2026-09-03
+
+### Added
+- **`SqliteStore::checkpoint_truncate()` + `WalCheckpointStats` (store).** A TRUNCATE WAL
+  checkpoint that is a strict subset of `compact()` — no pruning, no `VACUUM` — cheap enough for
+  the single-writer actor's idle tick. Two-phase (`PASSIVE` → `TRUNCATE`) with the busy handler
+  disabled during the attempt, so a concurrent `open_readonly` holder (gate-hook subprocesses)
+  makes it return `busy: true` and defer — it never blocks the writer thread and never disturbs a
+  reader's snapshot. One-line forwarders on `MemoryEngine` and `KnowledgeEngine` (and a
+  default-no-op `MemStore::checkpoint_truncate` returning the `-1` no-WAL sentinel stats on
+  non-WAL backends such as Postgres), so all three estate WALs (`core`/graph, `mem`, `knowledge`) can be checkpointed by
+  their owning engines.
+
+### Changed
+- **`PRAGMA wal_autocheckpoint=512` on `SqliteStore::open()`.** Halves SQLite's default
+  1000-page threshold as the backstop against WAL starvation when passive auto-checkpoints keep
+  landing while readers ride the WAL — observed in the field as `-wal` files outgrowing their
+  databases (core.db 3.35MB vs 4.19MB WAL).
+
 ## [0.16.0] — 2026-09-02
 
 ### Fixed
