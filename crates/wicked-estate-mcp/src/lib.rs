@@ -2627,8 +2627,13 @@ mod tests {
             "method": "tools/call",
             "params": { "name": "memory.capture", "arguments": { "content": "x" } }
         });
-        let resp =
-            handle_request_unified(&store, &req, &McpContext::default(), Some(&mut domains), None);
+        let resp = handle_request_unified(
+            &store,
+            &req,
+            &McpContext::default(),
+            Some(&mut domains),
+            None,
+        );
         assert!(
             resp.get("error").is_none(),
             "without --readonly memory.capture must NOT be refused; got {resp}"
