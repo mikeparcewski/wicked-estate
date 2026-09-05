@@ -688,12 +688,39 @@ pub struct DomainHandles<'a> {
 /// and prompts. Memory/knowledge tools that arrive without domains return a clean JSON-RPC error.
 /// `semantic` is the live SemanticSearch instance; when `None` the tool is neither advertised nor
 /// dispatchable (consistent fail-closed, same as the dim-guard behaviour in the old path).
+///
+/// Runs in full read/write mode. For the read-only variant (DES-GROUNDING-001 §3.0) call
+/// [`handle_request_unified_ro`] with `read_only = true`; this wrapper is exactly `read_only = false`.
 pub fn handle_request_unified(
     store: &dyn GraphRead,
     req: &Value,
     ctx: &McpContext,
     domains: Option<&mut DomainHandles<'_>>,
     semantic: Option<&dyn RetrievalTool>,
+) -> Value {
+    handle_request_unified_ro(store, req, ctx, domains, semantic, false)
+}
+
+/// Read-only-aware unified routing — the DES-GROUNDING-001 §3.0 safety keystone.
+///
+/// When `read_only` is `true`, the write/destructive domain tools ([`is_write_tool`]:
+/// `memory.capture`/`memory.erase`/`memory.learn`/`memory.reflect`, `knowledge.ingest`/
+/// `knowledge.write`/`knowledge.relate`/`knowledge.relate_code`) are OMITTED from `tools/list` (the
+/// primary defense —
+/// an agent never sees a tool it cannot call) AND hard-rejected with a JSON-RPC error in
+/// `tools/call` if invoked anyway (the backstop — the write is never executed). Every read/query
+/// tool stays fully functional. `read_only = false` reproduces the pre-existing behaviour exactly.
+///
+/// Enforced here, in the binary, so it protects BOTH carriers (the wrapped `--settings` /
+/// `--mcp-config` path and the ACP `session/new` array) identically — the ACP carrier has no
+/// `permissions.allow` analogue, so only server-side refusal can guard it.
+pub fn handle_request_unified_ro(
+    store: &dyn GraphRead,
+    req: &Value,
+    ctx: &McpContext,
+    domains: Option<&mut DomainHandles<'_>>,
+    semantic: Option<&dyn RetrievalTool>,
+    read_only: bool,
 ) -> Value {
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
@@ -704,7 +731,7 @@ pub fn handle_request_unified(
 
         "notifications/initialized" => Value::Null,
 
-        "tools/list" => tools_list_unified(&id, ctx, domains.is_some()),
+        "tools/list" => tools_list_unified(&id, ctx, domains.is_some(), read_only),
 
         "resources/list" => resources::resources_list(&id),
         "resources/read" => {
@@ -719,6 +746,20 @@ pub fn handle_request_unified(
 
         "tools/call" => {
             let tool = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            // DES-GROUNDING-001 §3.0: in read-only mode refuse every write/destructive tool. They
+            // are already omitted from tools/list (primary defense); this backstop guarantees a
+            // direct call cannot slip through and mutate the operator's memory/knowledge stores. We
+            // return BEFORE the domain dispatch below, so the write is never executed.
+            if read_only && is_write_tool(tool) {
+                return err_response(
+                    &id,
+                    -32601,
+                    &format!(
+                        "tool '{tool}' is disabled: wicked-estate-mcp is running in --readonly \
+                         mode (write/destructive tools are not available)"
+                    ),
+                );
+            }
             match tool {
                 "SearchEntity" | "RetrieveEntity" | "TraverseGraph" | "BlastRadius"
                 | "FetchContent" | "ContextBundle" | "RulesInventory" | "rules.recall"
@@ -786,6 +827,33 @@ pub fn response_cacheable(tool: &str) -> bool {
     )
 }
 
+/// The write/destructive domain tools that read-only mode (`--readonly`, DES-GROUNDING-001 §3.0)
+/// omits from `tools/list` and refuses in `tools/call`.
+///
+/// This is the single source of truth for the split — both [`tools_list_unified`] (omission) and
+/// [`handle_request_unified_ro`] (refusal) consult it. Everything else the server exposes is a pure
+/// read/query and stays available: every graph/estate tool, `RulesInventory`/`rules.recall`,
+/// `SemanticSearch`, and the recalls/coverage of the memory and knowledge domains
+/// (`memory.recall`/`memory.coverage`, `knowledge.recall`/`knowledge.recall_about_code`/
+/// `knowledge.coverage`).
+///
+/// `memory.reflect` is a WRITE: despite its recall-shaped name it distills episodic memories into
+/// **persisted** semantic facts/entities (`MemoryEngine::reflect`, `&mut self`), so in read-only
+/// mode it would still mutate the operator-default memory store — defeating the no-write guarantee.
+pub fn is_write_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "memory.capture"
+            | "memory.erase"
+            | "memory.learn"
+            | "memory.reflect"
+            | "knowledge.ingest"
+            | "knowledge.write"
+            | "knowledge.relate"
+            | "knowledge.relate_code"
+    )
+}
+
 fn handle_initialize_unified(id: &Value) -> Value {
     json!({
         "jsonrpc": "2.0", "id": id,
@@ -797,7 +865,12 @@ fn handle_initialize_unified(id: &Value) -> Value {
     })
 }
 
-fn tools_list_unified(id: &Value, ctx: &McpContext, domains_available: bool) -> Value {
+fn tools_list_unified(
+    id: &Value,
+    ctx: &McpContext,
+    domains_available: bool,
+    read_only: bool,
+) -> Value {
     let base_tools = all_tools();
     let mut tools: Vec<Value> = base_tools
         .iter()
@@ -819,8 +892,16 @@ fn tools_list_unified(id: &Value, ctx: &McpContext, domains_available: bool) -> 
     }
 
     if domains_available {
-        tools.extend(memory_tool_schemas());
-        tools.extend(knowledge_tool_schemas());
+        let mut mem = memory_tool_schemas();
+        let mut know = knowledge_tool_schemas();
+        if read_only {
+            // DES-GROUNDING-001 §3.0: omit the write/destructive tools from the advertised set —
+            // the primary defense. Only the memory/knowledge recalls + coverage survive.
+            mem.retain(|t| !is_write_tool(t["name"].as_str().unwrap_or("")));
+            know.retain(|t| !is_write_tool(t["name"].as_str().unwrap_or("")));
+        }
+        tools.extend(mem);
+        tools.extend(know);
     }
 
     ok_response(id, json!({"tools": tools}))
@@ -2373,6 +2454,193 @@ mod tests {
         assert!(
             !names.contains(&"knowledge.ingest"),
             "knowledge tools must NOT appear without domains"
+        );
+    }
+
+    /// The 8 write/destructive domain tools that `--readonly` must hide + refuse
+    /// (DES-GROUNDING-001 §3.0). Kept in one place so the test and [`is_write_tool`] can't drift.
+    /// `memory.reflect` is here despite its recall-shaped name — it persists distilled facts.
+    const WRITE_TOOLS: [&str; 8] = [
+        "memory.capture",
+        "memory.erase",
+        "memory.learn",
+        "memory.reflect",
+        "knowledge.ingest",
+        "knowledge.write",
+        "knowledge.relate",
+        "knowledge.relate_code",
+    ];
+
+    /// One representative read/query tool from every surface that must survive `--readonly`.
+    const READ_TOOLS_KEPT: [&str; 13] = [
+        "SearchEntity",
+        "RetrieveEntity",
+        "TraverseGraph",
+        "BlastRadius",
+        "FetchContent",
+        "ContextBundle",
+        "RulesInventory",
+        "rules.recall",
+        "memory.recall",
+        "memory.coverage",
+        "knowledge.recall",
+        "knowledge.recall_about_code",
+        "knowledge.coverage",
+    ];
+
+    /// DES-GROUNDING-001 §3.0 safety keystone: in `--readonly` mode `tools/list` OMITS every
+    /// write/destructive tool while keeping all read/query tools, and a write tool called anyway is
+    /// HARD-REJECTED with a JSON-RPC error before any dispatch (the write never executes). Reaching
+    /// the `FakeMemory`/`FakeKnowledge` engines would produce a success MCP result, so a JSON-RPC
+    /// `error` envelope proves the write was refused, not run.
+    #[test]
+    fn readonly_omits_and_refuses_write_tools_keeps_reads() {
+        let store = fixture();
+
+        // is_write_tool is the single source of truth — pin it against both rosters first.
+        for w in WRITE_TOOLS {
+            assert!(is_write_tool(w), "{w} must classify as a write tool");
+        }
+        for r in READ_TOOLS_KEPT {
+            assert!(!is_write_tool(r), "{r} must classify as a read tool");
+        }
+
+        // ── read-only tools/list: writes omitted, reads present ──
+        let ro_names = {
+            let mut fake_mem = FakeMemory;
+            let mut fake_know = FakeKnowledge;
+            let mut domains = DomainHandles {
+                memory: &mut fake_mem
+                    as &mut dyn wicked_estate_memory_core::MemoryApi<Error = anyhow::Error>,
+                knowledge: &mut fake_know as &mut dyn wicked_estate_knowledge::KnowledgeApi,
+            };
+            let resp = handle_request_unified_ro(
+                &store,
+                &tools_list_req(),
+                &McpContext::default(),
+                Some(&mut domains),
+                None,
+                true, // read_only
+            );
+            tool_names(&resp)
+        };
+        for w in WRITE_TOOLS {
+            assert!(
+                !ro_names.contains(&w.to_string()),
+                "--readonly tools/list must OMIT write tool {w}; got {ro_names:?}"
+            );
+        }
+        for r in READ_TOOLS_KEPT {
+            assert!(
+                ro_names.contains(&r.to_string()),
+                "--readonly tools/list must KEEP read tool {r}; got {ro_names:?}"
+            );
+        }
+        // 11 estate + (6 - 4 write) memory + (7 - 4 write) knowledge = 11 + 2 + 3 = 16.
+        assert_eq!(
+            ro_names.len(),
+            16,
+            "read-only domain surface is 11 estate + 2 memory reads + 3 knowledge reads = 16; got {}",
+            ro_names.len()
+        );
+
+        // ── read-only tools/call on every write tool: JSON-RPC error, fake never reached ──
+        for w in WRITE_TOOLS {
+            let mut fake_mem = FakeMemory;
+            let mut fake_know = FakeKnowledge;
+            let mut domains = DomainHandles {
+                memory: &mut fake_mem
+                    as &mut dyn wicked_estate_memory_core::MemoryApi<Error = anyhow::Error>,
+                knowledge: &mut fake_know as &mut dyn wicked_estate_knowledge::KnowledgeApi,
+            };
+            let req = json!({
+                "jsonrpc": "2.0",
+                "id": 900,
+                "method": "tools/call",
+                "params": { "name": w, "arguments": {} }
+            });
+            let resp = handle_request_unified_ro(
+                &store,
+                &req,
+                &McpContext::default(),
+                Some(&mut domains),
+                None,
+                true,
+            );
+            assert!(
+                resp.get("error").is_some(),
+                "write tool {w} under --readonly must return a JSON-RPC error; got {resp}"
+            );
+            assert!(
+                resp.get("result").is_none() || resp["result"].is_null(),
+                "a refused write ({w}) must NOT produce a tool result (the engine must not run); got {resp}"
+            );
+            assert_eq!(resp["id"], 900, "error must echo the request id for {w}");
+        }
+    }
+
+    /// Falsifier for the floor: WITHOUT `--readonly` (`read_only = false`, the default the
+    /// public [`handle_request_unified`] wrapper uses) the write tools are STILL advertised and a
+    /// write call reaches the engine — proving read-only is the only thing that hides/refuses them
+    /// and that default behaviour is unchanged.
+    #[test]
+    fn without_readonly_write_tools_are_advertised_and_dispatch() {
+        let store = fixture();
+
+        // Default (non-readonly) tools/list advertises all 24, writes included.
+        let names = {
+            let mut fake_mem = FakeMemory;
+            let mut fake_know = FakeKnowledge;
+            let mut domains = DomainHandles {
+                memory: &mut fake_mem
+                    as &mut dyn wicked_estate_memory_core::MemoryApi<Error = anyhow::Error>,
+                knowledge: &mut fake_know as &mut dyn wicked_estate_knowledge::KnowledgeApi,
+            };
+            let resp = handle_request_unified(
+                &store,
+                &tools_list_req(),
+                &McpContext::default(),
+                Some(&mut domains),
+                None,
+            );
+            tool_names(&resp)
+        };
+        for w in WRITE_TOOLS {
+            assert!(
+                names.contains(&w.to_string()),
+                "without --readonly the write tool {w} must remain advertised; got {names:?}"
+            );
+        }
+
+        // And a write call reaches the FakeMemory engine (isError:false success result, not a
+        // JSON-RPC error) — i.e. nothing is refused when read_only is false.
+        let mut fake_mem = FakeMemory;
+        let mut fake_know = FakeKnowledge;
+        let mut domains = DomainHandles {
+            memory: &mut fake_mem
+                as &mut dyn wicked_estate_memory_core::MemoryApi<Error = anyhow::Error>,
+            knowledge: &mut fake_know as &mut dyn wicked_estate_knowledge::KnowledgeApi,
+        };
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 901,
+            "method": "tools/call",
+            "params": { "name": "memory.capture", "arguments": { "content": "x" } }
+        });
+        let resp = handle_request_unified(
+            &store,
+            &req,
+            &McpContext::default(),
+            Some(&mut domains),
+            None,
+        );
+        assert!(
+            resp.get("error").is_none(),
+            "without --readonly memory.capture must NOT be refused; got {resp}"
+        );
+        assert!(
+            !resp["result"]["isError"].as_bool().unwrap_or(true),
+            "without --readonly memory.capture must reach the engine and succeed; got {resp}"
         );
     }
 

@@ -8,6 +8,7 @@
 //! ```sh
 //! wicked-estate-mcp --db /path/to/graph.db
 //! wicked-estate-mcp                       # defaults to .wicked-estate/graph.db
+//! wicked-estate-mcp --db graph.db --readonly  # read/query tools only; writes omitted + refused
 //! WICKED_ESTATE_DB=:memory: wicked-estate-mcp
 //! ```
 
@@ -16,7 +17,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use tokio::io::AsyncBufReadExt;
 use wicked_estate_knowledge::{KnowledgeApi, KnowledgeEngine};
-use wicked_estate_mcp::{DomainHandles, McpContext, handle_request_unified};
+use wicked_estate_mcp::{DomainHandles, McpContext, handle_request_unified_ro};
 use wicked_estate_memory::MemoryEngine;
 use wicked_estate_memory_core::MemoryApi;
 use wicked_estate_overlay::XedgeStore;
@@ -60,6 +61,17 @@ fn resolve_db_path() -> Result<String> {
         );
     }
     Ok(spec)
+}
+
+/// Detect the `--readonly` CLI flag (DES-GROUNDING-001 §3.0 safety keystone).
+///
+/// When set, the MCP server advertises and dispatches ONLY read/query tools; the write/destructive
+/// domain tools are omitted from `tools/list` and hard-rejected in `tools/call`. This is what makes
+/// allow-listing the whole estate MCP for a governed worker safe — the server itself refuses to
+/// mutate the operator's memory/knowledge stores. Mirrors the plain `std::env::args()` scan
+/// `resolve_db_path` uses for `--db`.
+fn resolve_read_only() -> bool {
+    std::env::args().skip(1).any(|arg| arg == "--readonly")
 }
 
 fn wicked_home() -> String {
@@ -170,6 +182,8 @@ fn emit_tool_duration(
 #[tokio::main]
 async fn main() -> Result<()> {
     let db_path = resolve_db_path()?;
+    // DES-GROUNDING-001 §3.0: read-only mode — advertise + dispatch only read/query tools.
+    let read_only = resolve_read_only();
 
     // 2. Open async connection pool instead of a single connection.
     let store = wicked_estate::open_async_store(&db_path)
@@ -472,12 +486,13 @@ async fn main() -> Result<()> {
                 memory: m as &mut dyn MemoryApi<Error = anyhow::Error>,
                 knowledge: k as &mut dyn KnowledgeApi,
             });
-            handle_request_unified(
+            handle_request_unified_ro(
                 &sync_store,
                 &req,
                 &ctx_clone,
                 domains.as_mut(),
                 semantic_ref,
+                read_only,
             )
         });
         emit_tool_duration(
