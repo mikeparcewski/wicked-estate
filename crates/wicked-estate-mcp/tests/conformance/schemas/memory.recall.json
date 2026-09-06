@@ -3,6 +3,13 @@
   "description": "Conversational recall: the most relevant, token-budgeted slice for a query. Default visibility is inheritance (memories at `scope` or an ancestor of it); optional scope_prefix flips to subtree-inclusive visibility.",
   "inputSchema": {
     "properties": {
+      "intent": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "description": "The session's intent tuple (axis->value). Recall returns the union of memories whose facets are a subset of this intent, specificity-ranked. Omitted => empty => only unfaceted memories surface.",
+        "type": "object"
+      },
       "query": {
         "type": "string"
       },

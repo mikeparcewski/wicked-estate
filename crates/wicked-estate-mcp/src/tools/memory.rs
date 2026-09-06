@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use wicked_estate_core::{GraphRead, SymbolId};
-use wicked_estate_memory_core::{CaptureRequest, MemoryApi, RecallQuery, Scope};
+use wicked_estate_memory_core::{CaptureRequest, Facets, MemoryApi, RecallQuery, Scope};
 
 pub fn dispatch(
     tool: &str,
@@ -54,6 +54,26 @@ fn fetch_epochs(store: &dyn GraphRead, about: &[String]) -> HashMap<String, u64>
     epochs
 }
 
+/// FAIL-LOUD facet-map parsing for the `facets` (capture) / `intent` (recall) args
+/// (DES-MEM-FACETED-001 §4.5). Mirrors the `scope` validation exactly: omitted / null ⇒ empty
+/// facets; a present value MUST be a JSON object, deserialized through `Facets`' validated serde
+/// path (`TryFrom<BTreeMap>` ⇒ axis `^[a-z][a-z0-9_-]*$`, value non-empty). A malformed axis/value
+/// or a present NON-object (array/string/number/bool) is invalid params (-32602), never silently
+/// dropped — a bad facet silently mis-routes recall. `Ok(Facets)` on success, `Err(error_value)`
+/// (a ready-to-return JSON-RPC error) otherwise.
+fn parse_facets(id: &Value, args: &Value, key: &str) -> Result<Facets, Value> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(Facets::default()),
+        Some(v @ Value::Object(_)) => serde_json::from_value::<Facets>(v.clone())
+            .map_err(|e| json_rpc_error(id, -32602, &format!("invalid {key}: {e}"))),
+        Some(other) => Err(json_rpc_error(
+            id,
+            -32602,
+            &format!("invalid {key}: expected a JSON object of axis:value strings, got {other}"),
+        )),
+    }
+}
+
 fn dispatch_capture(
     id: &Value,
     args: &Value,
@@ -94,6 +114,12 @@ fn dispatch_capture(
             .collect()
     });
     let about_epochs = about.as_ref().map(|a| fetch_epochs(store, a));
+    // Agent-declared facets (DES-MEM-FACETED-001 §4.5): validated fail-loud at the wire, same rule
+    // as `scope`. Omitted/null ⇒ empty facets (legacy, unfaceted capture).
+    let facets = match parse_facets(id, args, "facets") {
+        Ok(f) => f,
+        Err(e) => return e,
+    };
     let mut req = CaptureRequest::default();
     req.content = content;
     req.kind = args
@@ -110,6 +136,7 @@ fn dispatch_capture(
     req.now = now;
     req.about = about;
     req.about_epochs = about_epochs;
+    req.facets = facets;
     match memory.capture(req) {
         Ok(memory_id) => mcp_result(id, json!({"memory_id": memory_id})),
         Err(e) => json_rpc_error(id, -32603, &e.to_string()),
@@ -161,12 +188,18 @@ fn dispatch_recall(
         .get("token_budget")
         .and_then(|v| v.as_u64())
         .unwrap_or(2000) as usize;
+    // Session intent tuple (DES-MEM-FACETED-001 §4.5): validated fail-loud at the wire, same rule as
+    // `scope`/`scope_prefix`. Omitted/null ⇒ empty intent (only unfaceted memories surface).
+    let intent = match parse_facets(id, args, "intent") {
+        Ok(f) => f,
+        Err(e) => return e,
+    };
     // `RecallQuery` is `#[non_exhaustive]` (DES-MEM-FACETED-001 §4.4): build via the constructor +
-    // field assignment, never a struct literal. `intent` stays empty here — the `intent{}` wire
-    // schema is Phase 2.
+    // field assignment, never a struct literal.
     let mut rq = RecallQuery::new(query, scope, token_budget, now);
     rq.scope_prefix = scope_prefix;
     rq.seeds = seeds;
+    rq.intent = intent;
     match memory.recall(&rq) {
         Ok(items) => {
             let wire: Vec<Value> = items
