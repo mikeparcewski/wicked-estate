@@ -404,6 +404,26 @@ pub struct RecalledItem {
     pub scope: String,
 }
 
+/// One memory returned by `memory.list` — the MANAGEMENT browse (DES-MEM-FACETED-001). Unlike
+/// [`RecalledItem`] this is NOT relevance-ranked, token-budgeted, or facet-intent-filtered: it
+/// lists every memory in scope with its `facets` so an operator surface can browse the complete
+/// set and filter by facet client-side. `recall` (the agent primitive) stays intent-scoped; `list`
+/// is the operator primitive that closes the "estate has no list-all" gap (empty-query recall
+/// retrieves nothing, and empty-intent recall excludes faceted memories).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryListItem {
+    pub id: String,
+    pub content: String,
+    pub tier: String,
+    /// The memory node's own hierarchical scope (e.g. `"org:acme/agent:claude"`); `""` = root.
+    pub scope: String,
+    /// The orthogonal facets this memory is tagged with (axis → value). Empty ⇒ unfaceted.
+    #[serde(default)]
+    pub facets: Facets,
+    /// Unix-seconds capture time — a stable sort/display key for the management surface.
+    pub created_at: i64,
+}
+
 /// Memory counts, optionally scoped (MCP: memory.coverage). HC-007 frozen schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryCoverage {
@@ -456,6 +476,14 @@ pub trait MemoryApi {
 
     /// Return memory counts, optionally scoped. `scope_prefix = None` returns global totals.
     fn coverage(&self, scope_prefix: Option<&str>) -> Result<MemoryCoverage, Self::Error>;
+
+    /// List every memory in scope with its facets — the MANAGEMENT browse (DES-MEM-FACETED-001).
+    /// `scope_prefix = None` lists all; `Some(prefix)` restricts to memories whose scope equals or
+    /// descends from `prefix` (same subtree predicate as `erase`/`coverage`). NOT relevance-ranked,
+    /// token-budgeted, or facet-intent-filtered — the whole in-scope set, faceted or not. This is the
+    /// operator counterpart to `recall`: recall is the agent's intent-scoped slice; list is the
+    /// operator's complete inventory.
+    fn list(&self, scope_prefix: Option<&str>) -> Result<Vec<MemoryListItem>, Self::Error>;
 
     // ── Proposal queue (DES-MEM-FACETED-001 §5.0) ─────────────────────────────
     // A type-generic, inert write surface. `submit` writes a `Pending` proposal (SAFE even from a

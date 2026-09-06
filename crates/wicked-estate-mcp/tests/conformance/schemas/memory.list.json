@@ -1,0 +1,13 @@
+{
+  "captured_from": "wicked-estate-mcp-0.16.4",
+  "description": "Management browse: list every memory in scope, each item carrying memory_id, scope, content, tier, facets, and created_at. Unlike memory.recall this is not relevance-ranked, token-budgeted, or facet-intent-filtered.",
+  "inputSchema": {
+    "properties": {
+      "scope_prefix": {
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "name": "memory.list"
+}

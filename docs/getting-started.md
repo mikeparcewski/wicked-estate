@@ -21,7 +21,7 @@ Produces two binaries:
 | Binary | Purpose |
 |--------|---------|
 | `target/release/wicked-estate` | CLI — index, query, blast-radius, rank, source, stats, scip, semantic, watch, subscribe, compact, tfstate, drift, cross-graph, clusters, context, annotate, nodes, resolve, export, plugins list, … |
-| `target/release/wicked-estate-mcp` | MCP stdio server — 24 tools (11 estate + 6 memory + 7 knowledge) for LLM agents |
+| `target/release/wicked-estate-mcp` | MCP stdio server — 25 tools (11 estate + 7 memory + 7 knowledge) for LLM agents |
 
 Zero runtime deps. Single static binary on each target.
 
@@ -319,7 +319,7 @@ wicked-estate-mcp --db /path/to/graph.db
 # or: WICKED_ESTATE_DB=:memory: wicked-estate-mcp
 ```
 
-### The 24 tools (11 estate + 6 memory + 7 knowledge)
+### The 25 tools (11 estate + 7 memory + 7 knowledge)
 
 #### Estate tools
 
@@ -347,6 +347,7 @@ wicked-estate-mcp --db /path/to/graph.db
 | `memory.erase` | Delete a memory by ID. |
 | `memory.learn` | Reinforce or update an existing memory from new evidence. |
 | `memory.coverage` | Report memory store statistics (count by tier, staleness). |
+| `memory.list` | Management browse: list every memory in scope with its facets (not relevance-ranked or intent-filtered — the complete set). |
 
 #### Knowledge tools (absorbed from wicked-knowledge)
 

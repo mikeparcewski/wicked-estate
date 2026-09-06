@@ -1,4 +1,4 @@
-//! MCP dispatch for the 6 `memory.*` tools.
+//! MCP dispatch for the 7 `memory.*` tools.
 
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -24,6 +24,7 @@ pub fn dispatch(
         "memory.erase" => dispatch_erase(id, &args, memory, now),
         "memory.learn" => dispatch_learn(id, &args, store, memory, now),
         "memory.coverage" => dispatch_coverage(id, &args, memory),
+        "memory.list" => dispatch_list(id, &args, memory),
         _ => json_rpc_error(id, -32602, "unknown memory tool"),
     }
 }
@@ -285,6 +286,33 @@ fn dispatch_coverage(
     let scope_prefix = args.get("scope_prefix").and_then(|v| v.as_str());
     match memory.coverage(scope_prefix) {
         Ok(cov) => mcp_result(id, serde_json::to_value(&cov).unwrap_or(json!({}))),
+        Err(e) => json_rpc_error(id, -32603, &e.to_string()),
+    }
+}
+
+/// `memory.list` — the management browse. Returns the COMPLETE in-scope memory set, each item
+/// carrying `facets` (the recall wire omits them and excludes faceted memories under empty intent).
+/// The per-item wire shape mirrors `memory.recall` (`memory_id`/`scope`/`content`/`tier`) plus
+/// `facets` + `created_at`, so an existing recall-item consumer parses it unchanged.
+fn dispatch_list(id: &Value, args: &Value, memory: &dyn MemoryApi<Error = anyhow::Error>) -> Value {
+    let scope_prefix = args.get("scope_prefix").and_then(|v| v.as_str());
+    match memory.list(scope_prefix) {
+        Ok(items) => {
+            let wire: Vec<Value> = items
+                .into_iter()
+                .map(|item| {
+                    json!({
+                        "memory_id":  item.id,
+                        "scope":      item.scope,
+                        "content":    item.content,
+                        "tier":       item.tier,
+                        "facets":     item.facets,
+                        "created_at": item.created_at,
+                    })
+                })
+                .collect();
+            mcp_result(id, json!({"items": wire}))
+        }
         Err(e) => json_rpc_error(id, -32603, &e.to_string()),
     }
 }

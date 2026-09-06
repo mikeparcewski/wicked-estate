@@ -29,14 +29,14 @@ model2vec = ["wicked-estate/model2vec", "wicked-estate-retrieve/model2vec"]
 [dependencies]
 wicked-estate-core.workspace = true
 wicked-estate-store.workspace = true
-wicked-estate-retrieve = { path = "../wicked-estate-retrieve", version = "0.16.2" }
-wicked-estate = { path = "../wicked-estate", version = "0.16.2", features = ["serve"] }
-wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.16.2" }
-wicked-estate-memory = { path = "../wicked-estate-memory", version = "0.16.2" }
-wicked-estate-knowledge = { path = "../wicked-estate-knowledge", version = "0.16.2" }
-wicked-estate-memory-api = { path = "../wicked-estate-memory-api", version = "0.16.2" }
-wicked-estate-memory-core = { path = "../wicked-estate-memory-core", version = "0.16.2" }
-wicked-estate-overlay = { path = "../wicked-estate-overlay", version = "0.16.2" }
+wicked-estate-retrieve = { path = "../wicked-estate-retrieve", version = "0.16.3" }
+wicked-estate = { path = "../wicked-estate", version = "0.16.3", features = ["serve"] }
+wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.16.3" }
+wicked-estate-memory = { path = "../wicked-estate-memory", version = "0.16.3" }
+wicked-estate-knowledge = { path = "../wicked-estate-knowledge", version = "0.16.3" }
+wicked-estate-memory-api = { path = "../wicked-estate-memory-api", version = "0.16.3" }
+wicked-estate-memory-core = { path = "../wicked-estate-memory-core", version = "0.16.3" }
+wicked-estate-overlay = { path = "../wicked-estate-overlay", version = "0.16.3" }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std"] }
