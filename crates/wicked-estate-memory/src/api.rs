@@ -1,7 +1,7 @@
 //! `MemoryApi` (6-method, DES-001 §4.2) implemented for [`crate::MemoryEngine`].
 //! Uses `wicked_estate_memory_core` types directly.
 
-use crate::{MemoryEngine, ScopeFilter};
+use crate::{MemoryEngine, RecallMode, ScopeFilter};
 use std::collections::HashMap;
 use wicked_estate_core::SymbolId;
 use wicked_estate_memory_core::{
@@ -43,7 +43,8 @@ impl MemoryApi for MemoryEngine {
             Scope::parse(&req.scope),
             req.content,
             req.now,
-        );
+        )
+        .with_facets(req.facets);
         let id = mem.symbol().0.clone();
 
         match &req.about {
@@ -79,7 +80,20 @@ impl MemoryApi for MemoryEngine {
             None => ScopeFilter::Ancestors(&scope),
         };
         let seeds: Vec<SymbolId> = q.seeds.iter().cloned().map(SymbolId).collect();
-        let out = MemoryEngine::recall(self, &q.query, filter, &seeds, q.token_budget, q.now)?;
+        // AND-compose the session intent at the recall gate (DES-MEM-FACETED-001 §4.3). The engine's
+        // public `recall` carries no intent, so drive the shared `ranked_candidates` seam directly
+        // with `q.intent` (empty intent ⇒ every UNFACETED memory admitted — faceted memories are
+        // intent-scoped and require matching axes; legacy data is all unfaceted, so recall is
+        // byte-identical), then the same production `pack_recalled` assembly tail.
+        let cands = self.ranked_candidates(
+            &q.query,
+            filter,
+            &seeds,
+            q.now,
+            RecallMode::Hybrid,
+            &q.intent,
+        )?;
+        let out = self.pack_recalled(cands, q.token_budget);
         Ok(out
             .into_iter()
             .map(|r| RecalledItem {
@@ -202,18 +216,13 @@ mod tests {
         )
         .unwrap();
         assert!(!id.is_empty());
-        let out = MemoryApi::recall(
-            &eng,
-            &RecallQuery {
-                query: "what does the user drink".into(),
-                scope: "org:acme/agent:claude".into(),
-                scope_prefix: None,
-                seeds: vec![],
-                token_budget: 500,
-                now: 101,
-            },
-        )
-        .unwrap();
+        let rq = RecallQuery::new(
+            "what does the user drink",
+            "org:acme/agent:claude",
+            500,
+            101,
+        );
+        let out = MemoryApi::recall(&eng, &rq).unwrap();
         assert!(out.iter().any(|r| r.content.contains("oat milk")));
         assert!(out.iter().all(|r| !r.tier.is_empty()));
     }
@@ -235,13 +244,10 @@ mod tests {
             ),
         )
         .unwrap();
-        let q = |scope_prefix: Option<&str>| RecallQuery {
-            query: "brain import leaf".into(),
-            scope: String::new(), // root query scope
-            scope_prefix: scope_prefix.map(str::to_string),
-            seeds: vec![],
-            token_budget: 500,
-            now: 101,
+        let q = |scope_prefix: Option<&str>| {
+            let mut rq = RecallQuery::new("brain import leaf", "", 500, 101); // root query scope
+            rq.scope_prefix = scope_prefix.map(str::to_string);
+            rq
         };
         let inherit = MemoryApi::recall(&eng, &q(None)).unwrap();
         assert!(

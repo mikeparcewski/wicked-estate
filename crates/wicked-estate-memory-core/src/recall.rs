@@ -22,6 +22,11 @@ pub fn rrf_fuse(lists: &[Vec<SymbolId>], k: f64) -> Vec<(SymbolId, f64)> {
     out
 }
 
+/// Facet-specificity boost weight (DES-MEM-FACETED-001 §4.3): a memory that matches `n` intent
+/// facets is boosted by `(1 + β·n)`. A conservative BOOST, not a hard primary sort — a highly
+/// relevant global (0-facet) memory must not be buried under a marginally-relevant faceted one.
+pub const FACET_SPECIFICITY_BETA: f64 = 0.25;
+
 /// A recall candidate with the signals needed to rerank + budget it.
 #[derive(Debug, Clone)]
 pub struct Candidate {
@@ -31,12 +36,20 @@ pub struct Candidate {
     pub rrf: f64,
     pub recency: f64,  // [0,1] from decay()
     pub salience: f64, // [0,1]
+    /// Count of intent facets this memory matched (its specificity; 0 for unfaceted memories or an
+    /// empty intent). Folded into `final_score` as the `(1 + β·specificity)` boost.
+    pub facet_specificity: usize,
 }
 
 impl Candidate {
-    /// Final rerank score (DESIGN §9 step 4): rrf × tier_weight × recency × (1 + α·salience).
+    /// Final rerank score (DESIGN §9 step 4): rrf × tier_weight × recency × (1 + α·salience),
+    /// with the DES-MEM-FACETED-001 §4.3 specificity boost `(1 + β·facet_specificity)` folded in.
     pub fn final_score(&self, alpha: f64) -> f64 {
-        self.rrf * self.tier.weight() * self.recency * (1.0 + alpha * self.salience)
+        self.rrf
+            * self.tier.weight()
+            * self.recency
+            * (1.0 + alpha * self.salience)
+            * (1.0 + FACET_SPECIFICITY_BETA * self.facet_specificity as f64)
     }
     /// Rough token cost (≈ chars/4) for budgeting.
     pub fn token_cost(&self) -> usize {
