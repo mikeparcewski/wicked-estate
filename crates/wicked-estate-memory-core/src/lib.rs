@@ -23,7 +23,7 @@ pub mod scope;
 
 pub use facets::{Facets, facet_admits};
 pub use fuzzy::{fuzzy_candidates, jaccard, normalize};
-pub use proposal::{ApproveOutcome, Proposal, ProposalState};
+pub use proposal::{ApproveOutcome, Proposal, ProposalState, valid_kind_type};
 pub use reason::{Extracted, heuristic_extract, heuristic_same_entity, heuristic_summary};
 pub use recall::{Candidate, budget_pack, rrf_fuse};
 pub use salience::{Salience, decay, p50, salience, wilson_lower_bound};
@@ -164,6 +164,14 @@ impl Memory {
     /// Builder: attach the orthogonal facets this memory is tagged with (its natural axis).
     pub fn with_facets(mut self, facets: Facets) -> Self {
         self.facets = facets;
+        self
+    }
+
+    /// Builder: set a DETERMINISTIC id (overriding the random uuid from [`Memory::new`]). Used when
+    /// a memory must be idempotent under retry — e.g. proposal approval derives the id from the
+    /// proposal id so a re-promote after a crash-before-mark upserts the SAME node (no duplicate).
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = id.into();
         self
     }
 

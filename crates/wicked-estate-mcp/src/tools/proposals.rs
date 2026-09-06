@@ -7,7 +7,9 @@
 
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use wicked_estate_memory_core::{ApproveOutcome, Facets, MemoryApi, Proposal, ProposalState};
+use wicked_estate_memory_core::{
+    ApproveOutcome, Facets, MemoryApi, Proposal, ProposalState, valid_kind_type,
+};
 
 pub fn dispatch(
     tool: &str,
@@ -101,6 +103,17 @@ fn dispatch_submit(
         Some(k) => k.to_string(),
         None => return json_rpc_error(id, -32602, "kind_type (string) required"),
     };
+    // Validate the kind_type SHAPE at the wire (a client argument error ⇒ -32602). With shape
+    // pre-validated here, a subsequent submit_proposal error is an INTERNAL failure (-32603 below).
+    if !valid_kind_type(&kind_type) {
+        return json_rpc_error(
+            id,
+            -32602,
+            &format!(
+                "invalid kind_type {kind_type:?}: expected ^[a-z][a-z0-9_-]*(:[a-z][a-z0-9_-]*)?$"
+            ),
+        );
+    }
     // payload MUST be a JSON object (a present non-object is invalid params, not a silent default).
     let payload = match args.get("payload") {
         Some(v @ Value::Object(_)) => v.clone(),
@@ -114,8 +127,9 @@ fn dispatch_submit(
     let provenance = stamp_provenance();
     match memory.submit_proposal(&kind_type, payload, facets, provenance, now) {
         Ok(proposal_id) => mcp_result(id, json!({"id": proposal_id})),
-        // kind_type validation lives in the engine; surface it as invalid params, not an internal error.
-        Err(e) => json_rpc_error(id, -32602, &e.to_string()),
+        // kind_type/payload shape is validated at the wire above ⇒ an error here is an INTERNAL
+        // failure (e.g. a store write error), not a client argument error.
+        Err(e) => json_rpc_error(id, -32603, &e.to_string()),
     }
 }
 

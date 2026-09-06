@@ -116,8 +116,12 @@ impl MemoryEngine {
                 .get("scope")
                 .map(|s| Scope::parse(s))
                 .unwrap_or_else(Scope::root);
-            let mem =
-                Memory::new(kind, tier, scope, content, now).with_facets(proposal.facets.clone());
+            // Deterministic id from the proposal id ⇒ approval is IDEMPOTENT: if a crash or a
+            // failed state-write leaves the proposal Pending after capture succeeded, a re-approve
+            // upserts the SAME memory node (no duplicate) instead of minting a new random one.
+            let mem = Memory::new(kind, tier, scope, content, now)
+                .with_id(format!("proposal:{}", proposal.id))
+                .with_facets(proposal.facets.clone());
             let active_id = mem.symbol().0.clone();
             self.capture(&mem)?; // active store write → immediately recallable
             ApproveOutcome::Promoted { active_id }
@@ -249,6 +253,34 @@ mod tests {
             .unwrap();
         assert_eq!(approved.len(), 1);
         assert_eq!(approved[0].id, id);
+    }
+
+    #[test]
+    fn approve_promotes_with_a_deterministic_id_for_idempotency() {
+        // The promoted memory's id is DERIVED from the proposal id (not a fresh random uuid), so a
+        // re-promote after a crash-before-mark (proposal still Pending, capture already done)
+        // upserts the SAME memory node by symbol instead of duplicating. Verify the derivation.
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let id = eng
+            .submit_proposal(
+                "memory",
+                serde_json::json!({"content": "deterministic promote", "tier": "semantic"}),
+                Facets::default(),
+                BTreeMap::new(),
+                1,
+            )
+            .unwrap();
+        let active_id = match eng.approve_proposal(&id, 2).unwrap() {
+            ApproveOutcome::Promoted { active_id } => active_id,
+            other => panic!("expected Promoted, got {other:?}"),
+        };
+        let expected = wicked_estate_core::Symbol::synthetic("mem", format!("proposal:{id}"))
+            .id()
+            .0;
+        assert_eq!(
+            active_id, expected,
+            "promoted id must be derived from the proposal id (idempotent re-promote), not random"
+        );
     }
 
     #[test]
