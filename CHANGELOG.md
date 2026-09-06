@@ -2,7 +2,15 @@
 
 ## [Unreleased]
 
-_Nothing yet._
+## [0.16.2] — 2026-09-05
+
+### Added
+- `wicked-estate-mcp --readonly` mode (DES-GROUNDING-001 §3.0 safety keystone, #158): read-only
+  mode advertises + dispatches only the read/query tools and hard-rejects the 8 write/destructive
+  tools (memory.capture/erase/learn/reflect, knowledge.ingest/write/relate/relate_code). Enables
+  governed workers to be allow-listed onto the whole estate MCP for index grounding without
+  exposing a write vector against the operator's stores.
+
 
 ## [0.16.1] — 2026-09-03
 
