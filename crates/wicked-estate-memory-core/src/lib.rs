@@ -340,8 +340,9 @@ pub struct RecallQuery {
     pub now: i64,
     /// The session's intent tuple (DES-MEM-FACETED-001 §4.3). AND-composed with `scope` at the
     /// recall rerank gate: a candidate passes iff `facet_admits(mem.facets, intent).is_some()`.
-    /// Empty (the default) admits every memory (specificity 0), preserving legacy recall exactly.
-    /// `#[serde(default)]` keeps older serialized queries valid.
+    /// Empty (the default) admits every **unfaceted** memory (specificity 0); a faceted memory is
+    /// EXCLUDED unless the intent carries its axes with matching values. Legacy nodes hydrate to no
+    /// facets, so legacy recall is preserved exactly. `#[serde(default)]` keeps old queries valid.
     #[serde(default)]
     pub intent: Facets,
 }

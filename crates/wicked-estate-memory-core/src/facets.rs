@@ -13,11 +13,31 @@ use std::collections::BTreeMap;
 /// An ordered set of `axis → value` facet bindings on a memory (or on a recall intent tuple).
 ///
 /// `BTreeMap` gives deterministic iteration/serialization (mirrors rules' `Targets`), so a memory's
-/// facets round-trip byte-stably through `node.metadata`. Serializes transparently as a JSON object
-/// (`{"cli":"codex","repo":"x"}`).
+/// facets round-trip byte-stably through `node.metadata` as a JSON object (`{"cli":"codex"}`).
+///
+/// Deserialization goes through `TryFrom<BTreeMap<..>>`, so **every** serde path (node hydration,
+/// MCP capture/intent wiring) runs the SAME fail-loud axis/value validation as [`Facets::insert`] —
+/// a malformed facet can never enter through deserialization.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(
+    into = "BTreeMap<String, String>",
+    try_from = "BTreeMap<String, String>"
+)]
 pub struct Facets(BTreeMap<String, String>);
+
+impl From<Facets> for BTreeMap<String, String> {
+    fn from(f: Facets) -> Self {
+        f.0
+    }
+}
+
+impl TryFrom<BTreeMap<String, String>> for Facets {
+    type Error = String;
+    /// Validated construction (the serde deserialization path) — same rules as [`Facets::insert`].
+    fn try_from(map: BTreeMap<String, String>) -> Result<Self, Self::Error> {
+        Facets::try_from_map(map)
+    }
+}
 
 /// An axis is a lowercase token `^[a-z][a-z0-9_-]*$` (aligned to the intent axes: `cli`, `repo`,
 /// `user`, `project`, `tool`, …). Hand-rolled to avoid a regex dependency in the core crate.
@@ -230,5 +250,27 @@ mod tests {
         assert_eq!(v["cli"], "codex");
         let back: Facets = serde_json::from_value(v).unwrap();
         assert_eq!(back, f);
+    }
+
+    #[test]
+    fn deserialization_is_fail_loud() {
+        // The serde path goes through TryFrom, so malformed facets are REJECTED at deserialization
+        // (not silently accepted as a transparent map) — invalid input can never enter via serde.
+        assert!(
+            serde_json::from_value::<Facets>(serde_json::json!({ "CLI": "codex" })).is_err(),
+            "uppercase axis rejected on deserialize"
+        );
+        assert!(
+            serde_json::from_value::<Facets>(serde_json::json!({ "cli": "" })).is_err(),
+            "empty value rejected on deserialize"
+        );
+        assert!(
+            serde_json::from_value::<Facets>(serde_json::json!({ "cli.name": "x" })).is_err(),
+            "dotted axis rejected on deserialize"
+        );
+        // A valid object still deserializes.
+        let ok: Facets =
+            serde_json::from_value(serde_json::json!({ "cli": "codex" })).expect("valid");
+        assert_eq!(ok.get("cli"), Some("codex"));
     }
 }

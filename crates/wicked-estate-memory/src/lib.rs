@@ -630,8 +630,9 @@ impl MemoryEngine {
             // Facet visibility AND-composed with scope at the SAME gate (DES-MEM-FACETED-001 §4.3):
             // a candidate passes iff `facet_admits(mem.facets, intent)` is `Some`. `None` EXCLUDES a
             // memory whose facet constrains an axis the intent does not satisfy (no cross-user /
-            // cross-repo leakage). The `Some(specificity)` becomes the score boost below. Empty
-            // facets / empty intent ⇒ `Some(0)` ⇒ admitted with no boost (legacy behavior).
+            // cross-repo leakage). The `Some(specificity)` becomes the score boost below. A memory
+            // with EMPTY facets ⇒ `Some(0)` ⇒ admitted with no boost regardless of intent (so legacy
+            // unfaceted nodes are unaffected); a FACETED memory under an empty intent is EXCLUDED.
             let Some(facet_specificity) = facet_admits(&mem.facets, intent) else {
                 continue;
             };
