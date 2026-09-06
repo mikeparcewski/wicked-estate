@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.16.3] — 2026-09-06
+
+### Added
+- **Faceted memory — Phase 1+2 (#160).** Memories carry `Facets` (structured, queryable
+  dimensions) and recall admits them through `facet_admits`, so a recall can be scoped by facet
+  in addition to scope/salience; intent recall lets a caller retrieve by the memory's intent
+  dimension rather than raw text match. The facet + intent logic lives in the memory-core layer
+  behind the existing `MemoryApi` trait — no store schema surgery, backward-compatible with
+  facet-less memories written before this release.
+- **MCP facets/intent wire (#161).** The memory MCP tools expose the faceted-recall surface over
+  the wire: recall accepts facet filters and the intent dimension, mirroring the in-process
+  `MemoryApi` contract so a consuming agent can scope recall by facet/intent without a code path
+  distinct from the Rust caller.
+- **Proposal-queue primitive (#162).** New `proposal.submit` / `proposal.list` /
+  `proposal.approve` / `proposal.reject` tools — a durable queue for proposed changes that a
+  human (or a governing caller) reviews and dispositions, so a write can be staged and gated
+  rather than applied directly.
+
 ## [0.16.2] — 2026-09-05
 
 ### Added
