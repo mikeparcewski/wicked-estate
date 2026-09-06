@@ -1,0 +1,16 @@
+{
+  "captured_from": "wicked-estate-mcp-0.16.2",
+  "description": "Reject a pending proposal (marks it rejected; it never becomes active). Operator surface (refused under --readonly).",
+  "inputSchema": {
+    "type": "object",
+    "required": [
+      "id"
+    ],
+    "properties": {
+      "id": {
+        "type": "string"
+      }
+    }
+  },
+  "name": "proposal.reject"
+}

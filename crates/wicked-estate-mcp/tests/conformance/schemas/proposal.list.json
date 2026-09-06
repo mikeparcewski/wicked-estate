@@ -1,0 +1,23 @@
+{
+  "captured_from": "wicked-estate-mcp-0.16.2",
+  "description": "List queued proposals, optionally filtered by kind_type and/or state.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "kind_type": {
+        "type": "string",
+        "description": "Optional exact kind_type filter (e.g. \"memory\" or \"policy:security\")."
+      },
+      "state": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "approved",
+          "rejected"
+        ],
+        "description": "Optional lifecycle-state filter."
+      }
+    }
+  },
+  "name": "proposal.list"
+}

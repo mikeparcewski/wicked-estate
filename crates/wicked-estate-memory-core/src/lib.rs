@@ -10,11 +10,12 @@
 //! Store/retrieval wiring lives in sibling crates (L0 integration).
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use wicked_estate_core::{Language, Location, Node, NodeKind, Span, Symbol, SymbolId};
 
 pub mod facets;
 pub mod fuzzy;
+pub mod proposal;
 pub mod reason;
 pub mod recall;
 pub mod salience;
@@ -22,6 +23,7 @@ pub mod scope;
 
 pub use facets::{Facets, facet_admits};
 pub use fuzzy::{fuzzy_candidates, jaccard, normalize};
+pub use proposal::{ApproveOutcome, Proposal, ProposalState};
 pub use reason::{Extracted, heuristic_extract, heuristic_same_entity, heuristic_summary};
 pub use recall::{Candidate, budget_pack, rrf_fuse};
 pub use salience::{Salience, decay, p50, salience, wilson_lower_bound};
@@ -446,6 +448,41 @@ pub trait MemoryApi {
 
     /// Return memory counts, optionally scoped. `scope_prefix = None` returns global totals.
     fn coverage(&self, scope_prefix: Option<&str>) -> Result<MemoryCoverage, Self::Error>;
+
+    // ── Proposal queue (DES-MEM-FACETED-001 §5.0) ─────────────────────────────
+    // A type-generic, inert write surface. `submit` writes a `Pending` proposal (SAFE even from a
+    // `--readonly` worker — never recalled/applied until approved); `approve`/`reject` are operator
+    // writes to the ACTIVE store. These live on `MemoryApi` because the engine already owns the
+    // `GraphStore`, and `approve` for a `memory` kind_type reuses the memory capture path.
+
+    /// Submit a NEW proposal. State is HARD-CODED `Pending` and the node kind is set internally —
+    /// the caller cannot set either; it only supplies `kind_type`, `payload`, `facets`, and the
+    /// server-stamped `provenance`. Returns the new proposal's id. Fails loud on an invalid
+    /// `kind_type` (`^[a-z][a-z0-9_-]*(:[a-z][a-z0-9_-]*)?$`).
+    fn submit_proposal(
+        &mut self,
+        kind_type: &str,
+        payload: serde_json::Value,
+        facets: Facets,
+        provenance: BTreeMap<String, String>,
+        now: i64,
+    ) -> Result<String, Self::Error>;
+
+    /// List proposals, optionally filtered by `kind_type` and/or `state`.
+    fn list_proposals(
+        &self,
+        kind_type: Option<&str>,
+        state: Option<ProposalState>,
+    ) -> Result<Vec<Proposal>, Self::Error>;
+
+    /// Approve a `Pending` proposal, ROUTED by `kind_type`: `memory` materializes an active,
+    /// recallable memory (⇒ [`ApproveOutcome::Promoted`]); `policy:*` writes nothing and hands the
+    /// payload back for the caller to route into steering (⇒ [`ApproveOutcome::HandedOff`]). Marks
+    /// the proposal `Approved`. Fails loud on an unknown kind_type shape or a non-`Pending` id.
+    fn approve_proposal(&mut self, id: &str, now: i64) -> Result<ApproveOutcome, Self::Error>;
+
+    /// Reject a `Pending` proposal — marks it `Rejected`; it never becomes active.
+    fn reject_proposal(&mut self, id: &str, now: i64) -> Result<(), Self::Error>;
 }
 
 #[cfg(test)]

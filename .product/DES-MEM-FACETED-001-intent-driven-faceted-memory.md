@@ -86,9 +86,27 @@ Closed-but-extensible, aligned to the intent axes: `user:<id>`, `cli:<key>` (cla
 
 ---
 
-## 5. Write side (estate + core) — gated on `os_sandbox`
+## 5. Write side — a built-in proposal queue
 
-### 5.1 The wall is Boundary 1, not path-in-MCP
+> **Design update (2026-09-06, supersedes the capture-file/promotion design AND §5.3's two-MCP split; defers §5.3 `UnionMemStore`).** A JSONL capture-file is a per-solution staging hack (every consumer re-implements parse+validate+promote, and it drags in worktree-reap races + deliver-leak fixes). Replace it with a **first-class proposal queue** in the estate graph. Agents **`propose`** — a *safe* write, because a proposal is inert (never recalled/applied) until approved — and **approval promotes** the payload to the active store. The queue is **type-generic** (memory + policy + future), so it is the one primitive the whole "governed knowledge" surface reuses ([[governed-knowledge-surface]]).
+
+### 5.0 The proposal-queue primitive
+- **Storage — a `proposal` node kind** (mirrors how a memory is a `Node` with `kind=Other("memory")`): `kind=Other("proposal")`, metadata `{ kind_type, payload (JSON), facets, provenance, state, created_at }`.
+  - `kind_type`: `"memory"` | `"policy:<steering_type>"` | future.
+  - `payload`: type-specific (memory: `{content, tier}`; policy: `{rule, severity, …}`).
+  - `facets`: agent-declared orthogonal facets (Phase 1 `Facets`).
+  - `provenance`: run/unit/agent/interaction id — **authority-stamped by the MCP from launch env** (`WICKED_RUN_*`), never trusted from the caller.
+  - `state`: `pending | approved | rejected`.
+  Proposal nodes are **not** memory/rule nodes, so `memory.recall`/`rules.recall` never surface them — a proposal is inert until approved.
+- **Tools (estate MCP):**
+  - **`propose`** — write a `pending` proposal node. This is the worker/agent write surface, and it is **safe by construction** (inert until approved). **Amend `--readonly` to ALLOW `propose`** while still refusing the 8 active-store write tools — the wall is about *active* stores; `propose` touches none. Spam is a nuisance, not pollution: proposals carry provenance (attributable, purgeable), and the approval gate rejects junk.
+  - **`list_proposals`** — query the queue (filter by `kind_type` / `state` / facets). The UI approval-queue's source.
+  - **`approve`** — promote a `pending` proposal to the **active store, routed by `kind_type`**: `memory` → the estate memory store (reuse `memory.capture` with the proposal's facets + stamped provenance); `policy:*` → the steering/rules store (see §5.2 — first cut may hand off to crew's steering-write). Mark the proposal `approved` (or delete). Operator surface — **NOT** exposed to the `--readonly` worker.
+  - **`reject`** — mark `rejected` (or delete). Operator surface.
+- **Why this is better than capture-file/promotion:** proposals are **in the DB the moment they're made** (no worktree-reap race, no leak-safety fix, no per-solution JSONL parser); the worker gets a *safe* write instead of no write; **it decouples the write side from `os_sandbox` entirely** (the worker never touches an active store; the queue is inert regardless of the sandbox); and one primitive serves memory + policy + future types.
+- **Approval model** ([[governed-knowledge-surface]]): auto-approve-with-provenance (proposals land as `pending`; a human confirms in the UI, or a rule auto-approves) is the default; evaluator-review is an option per type/severity. Approval is where "untrusted → trusted" happens; the propose write never is.
+
+### 5.1 The Boundary-1 wall still applies to the ACTIVE stores (raw-write floor)
 Global memory/knowledge are plain SQLite files at `{WICKED_HOME}/{memory,knowledge}.db` (`mcp/src/main.rs:273-279`). `--readonly` (process-global, `:73-75`) and the bash-indexer deny only close the **sanctioned tool surface + named binary** — a worker with filesystem write can raw-open the file. **The hermetic write wall is Boundary 1's OS sandbox** (DES-INPUT-GOV-008): its profile is `(deny file-write*)` then `(allow file-write* (subpath …))` per armed root (`validator.rs:515-535`). The armed write set is the **worktree (primary) + launcher-declared deliverable `extra_write_roots` + (only for an estate-home graph) the exact `<estate_root>/<key>/` graph dir** (`execute_wrapped.rs:1100-1117`). The global stores live in a **different filesystem tree** from all of these (`{WICKED_HOME:-~/.wicked}/…` vs the worktree vs `~/.wicked-estate/repo-graphs/<key>/`), so they are **kernel-denied**. `--readonly` is belt-and-suspenders on the tool path.
 
 **Consequence:** worker memory write-back is only hermetic when `os_sandbox` is ON. With it OFF, `execute_wrapped.rs:805-824` sets `sandbox=None` and nothing prevents a raw file write — so **write-back is hard-DISABLED (not merely "recall-only posture") until the sandbox is on**; workers read global `--readonly` only. This makes safe faceted write-back a concrete value driver for the `os_sandbox` rollout.

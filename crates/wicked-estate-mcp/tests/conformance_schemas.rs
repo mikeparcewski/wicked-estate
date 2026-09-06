@@ -1,15 +1,18 @@
-//! Conformance tests: L2.1–L2.4 — v0.13.0 tools/list vs frozen v0.12.x golden schemas.
+//! Conformance tests: L2.1–L2.5 — v0.13.0+ tools/list vs frozen golden schemas.
 //!
 //! Covers:
-//! - L2.1: All 24 tool names from golden files are present in the live tools/list response.
+//! - L2.1: All 28 tool names from golden files are present in the live tools/list response.
 //! - L2.2: Estate tool required fields and property keys match their golden schemas.
 //! - L2.3: Memory tool required fields and property keys match their golden schemas.
 //! - L2.4: Knowledge tool required fields and property keys match their golden schemas.
-//! - L2.4 (count): tools/list with all domains returns exactly 11 estate + 6 memory + 7 knowledge.
+//! - L2.5: Proposal tool required fields and property keys match their golden schemas.
+//! - L2.4 (count): tools/list with all domains returns exactly 11 estate + 6 memory + 7 knowledge
+//!   + 4 proposal.
 //!
 //! (Counts raised from 23/10 when arch-R2 added `rules.recall` as the 11th estate tool; the
-//! knowledge.recall / knowledge.coverage goldens gained `scope_prefix` with arch-R5 — both
-//! ADDITIVE, optional-param changes re-frozen in the golden files.)
+//! knowledge.recall / knowledge.coverage goldens gained `scope_prefix` with arch-R5; the 4
+//! `proposal.*` tools (DES-MEM-FACETED-001 §5.0) were added ADDITIVELY, raising the total 24 → 28
+//! — all re-frozen in the golden files.)
 //!
 //! Golden files live at `tests/conformance/schemas/<ToolName>.json`.
 //! The v0.12.x fixture DBs live at `tests/fixtures/`.
@@ -60,6 +63,14 @@ const KNOWLEDGE_TOOLS: &[&str] = &[
     "knowledge.coverage",
     "knowledge.relate_code",
     "knowledge.recall_about_code",
+];
+
+/// Proposal-queue tools (DES-MEM-FACETED-001 §5.0) — ADDITIVE goldens, re-frozen alongside memory.
+const PROPOSAL_TOOLS: &[&str] = &[
+    "proposal.submit",
+    "proposal.list",
+    "proposal.approve",
+    "proposal.reject",
 ];
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
@@ -199,6 +210,7 @@ fn conf_all_24_tool_names_present_in_tools_list() {
         .iter()
         .chain(MEMORY_TOOLS.iter())
         .chain(KNOWLEDGE_TOOLS.iter())
+        .chain(PROPOSAL_TOOLS.iter())
         .copied()
         .collect();
 
@@ -333,14 +345,51 @@ fn conf_knowledge_tool_required_fields_match_goldens() {
     }
 }
 
+/// L2.5 — For each proposal tool, the live `inputSchema.required` array and
+/// `inputSchema.properties` key set must match the ADDITIVE golden (DES-MEM-FACETED-001 §5.0).
+#[test]
+fn conf_proposal_tool_required_fields_match_goldens() {
+    let live = tools_list_map_with_domains();
+
+    for &name in PROPOSAL_TOOLS {
+        let golden = load_golden(name);
+        let golden_schema = &golden["inputSchema"];
+
+        let live_tool = live
+            .get(name)
+            .unwrap_or_else(|| panic!("proposal tool '{name}' is missing from tools/list"));
+        let live_schema = &live_tool["inputSchema"];
+
+        // required
+        let golden_req = sorted_required(golden_schema);
+        let live_req = sorted_required(live_schema);
+        assert_eq!(
+            live_req, golden_req,
+            "proposal tool '{name}': inputSchema.required mismatch\
+             \n  live:   {live_req:?}\
+             \n  golden: {golden_req:?}"
+        );
+
+        // properties keys
+        let golden_props = sorted_properties(golden_schema);
+        let live_props = sorted_properties(live_schema);
+        assert_eq!(
+            live_props, golden_props,
+            "proposal tool '{name}': inputSchema.properties key mismatch\
+             \n  live:   {live_props:?}\
+             \n  golden: {golden_props:?}"
+        );
+    }
+}
+
 /// L2.4 (count) — tools/list with all domain handles active must return exactly
-/// 11 estate tools, 6 memory tools, and 7 knowledge tools.
+/// 11 estate tools, 6 memory tools, 7 knowledge tools, and 4 proposal tools.
 ///
 /// Gated out when `fastembed` or `model2vec` features are active because those features
 /// can enable SemanticSearch in the list, changing the total count.
 #[test]
 #[cfg(not(any(feature = "fastembed", feature = "model2vec")))]
-fn conf_tool_count_11_estate_6_memory_7_knowledge() {
+fn conf_tool_count_11_estate_6_memory_7_knowledge_4_proposal() {
     let live = tools_list_map_with_domains();
 
     let estate_count = ESTATE_TOOLS
@@ -352,6 +401,10 @@ fn conf_tool_count_11_estate_6_memory_7_knowledge() {
         .filter(|&&n| live.contains_key(n))
         .count();
     let knowledge_count = KNOWLEDGE_TOOLS
+        .iter()
+        .filter(|&&n| live.contains_key(n))
+        .count();
+    let proposal_count = PROPOSAL_TOOLS
         .iter()
         .filter(|&&n| live.contains_key(n))
         .count();
@@ -375,9 +428,13 @@ fn conf_tool_count_11_estate_6_memory_7_knowledge() {
         "expected 7 knowledge tools, found {knowledge_count}\nall live tools: {all_live:?}"
     );
     assert_eq!(
+        proposal_count, 4,
+        "expected 4 proposal tools, found {proposal_count}\nall live tools: {all_live:?}"
+    );
+    assert_eq!(
         live.len(),
-        24,
-        "expected 24 total tools (11 estate + 6 memory + 7 knowledge), found {}\nall live tools: {all_live:?}",
+        28,
+        "expected 28 total tools (11 estate + 6 memory + 7 knowledge + 4 proposal), found {}\nall live tools: {all_live:?}",
         live.len()
     );
 }

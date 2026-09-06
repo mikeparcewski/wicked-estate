@@ -276,9 +276,9 @@ fn sc009_all_four_stores_open_and_all_reads_return_nonempty() {
         .unwrap_or_else(|| panic!("tools/list: 'tools' must be array; got: {resp_list}"));
     assert_eq!(
         tools.len(),
-        24,
-        "tools/list with all 4 stores must return exactly 24 tools \
-         (11 estate + 6 memory + 7 knowledge); got {}: {:?}",
+        28,
+        "tools/list with all 4 stores must return exactly 28 tools \
+         (11 estate + 6 memory + 7 knowledge + 4 proposal); got {}: {:?}",
         tools.len(),
         tools
             .iter()

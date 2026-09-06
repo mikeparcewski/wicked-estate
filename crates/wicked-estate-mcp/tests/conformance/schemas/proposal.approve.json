@@ -1,0 +1,16 @@
+{
+  "captured_from": "wicked-estate-mcp-0.16.2",
+  "description": "Approve a pending proposal, promoting it to the active store routed by kind_type. Operator surface (refused under --readonly).",
+  "inputSchema": {
+    "type": "object",
+    "required": [
+      "id"
+    ],
+    "properties": {
+      "id": {
+        "type": "string"
+      }
+    }
+  },
+  "name": "proposal.approve"
+}

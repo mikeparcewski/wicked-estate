@@ -1,0 +1,29 @@
+{
+  "captured_from": "wicked-estate-mcp-0.16.2",
+  "description": "Submit an inert proposal to the queue (DES-MEM-FACETED-001 §5.0).",
+  "inputSchema": {
+    "type": "object",
+    "required": [
+      "kind_type",
+      "payload"
+    ],
+    "properties": {
+      "kind_type": {
+        "type": "string",
+        "description": "Validated lowercase token routing approval, optionally with one :sub-type. Matches ^[a-z][a-z0-9_-]*(:[a-z][a-z0-9_-]*)?$ (e.g. \"memory\", \"policy:security\"); invalid => invalid params."
+      },
+      "payload": {
+        "type": "object",
+        "description": "Type-specific payload. memory: {content, tier}; policy: {rule, severity, ...}."
+      },
+      "facets": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        },
+        "description": "Orthogonal intent-matching facets carried onto the promoted artifact. Axis ^[a-z][a-z0-9_-]*$, value non-empty; invalid => invalid params."
+      }
+    }
+  },
+  "name": "proposal.submit"
+}
