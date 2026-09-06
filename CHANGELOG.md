@@ -5,7 +5,7 @@
 ## [0.16.3] — 2026-09-06
 
 ### Added
-- **Faceted memory — Phase 1+2 (#160).** Memories carry `Facets` (structured, queryable
+- **Faceted memory — Phase 1 (#160).** Memories carry `Facets` (structured, queryable
   dimensions) and recall admits them through `facet_admits`, so a recall can be scoped by facet
   in addition to scope/salience; intent recall lets a caller retrieve by the memory's intent
   dimension rather than raw text match. The facet + intent logic lives in the memory-core layer
