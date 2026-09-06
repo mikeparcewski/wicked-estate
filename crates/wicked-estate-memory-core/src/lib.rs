@@ -212,6 +212,15 @@ impl Memory {
             .unwrap_or("")
             .trim_end_matches(':')
             .to_string();
+        // Facets: an ABSENT key ⇒ empty (legacy nodes — universally visible, unchanged behavior).
+        // A PRESENT-but-undecodable/invalid key ⇒ fail CLOSED: skip this memory (`None`) rather
+        // than default it to empty facets (= universally visible), which would strip a malformed
+        // memory's constraints and risk cross-scope/cross-user leakage. Validated deserialization
+        // (`Facets: TryFrom`) means an invalid axis/value here also yields `None`.
+        let facets = match m.get(meta_keys::FACETS) {
+            None => Facets::default(),
+            Some(v) => serde_json::from_value::<Facets>(v.clone()).ok()?,
+        };
         Some(Memory {
             id,
             kind,
@@ -225,13 +234,7 @@ impl Memory {
             access_count: u(meta_keys::ACCESS_COUNT).unwrap_or(0),
             reinforce_pos: u(meta_keys::REINFORCE_POS).unwrap_or(0),
             reinforce_total: u(meta_keys::REINFORCE_TOTAL).unwrap_or(0),
-            // Backfill: there is NO serde on `Memory`, so a missing/undecodable `facets` key is an
-            // EXPLICIT empty default (legacy nodes hydrate to no facets ⇒ unchanged behavior).
-            facets: m
-                .get(meta_keys::FACETS)
-                .cloned()
-                .map(|v| serde_json::from_value(v).unwrap_or_default())
-                .unwrap_or_default(),
+            facets,
         })
     }
 
@@ -539,6 +542,36 @@ mod tests {
             back.facets.is_empty(),
             "legacy node hydrates to empty facets"
         );
+    }
+
+    #[test]
+    fn invalid_facet_metadata_fails_closed() {
+        // A node whose `facets` key is PRESENT but invalid must NOT hydrate to empty facets (which
+        // would strip constraints and make a malformed memory universally visible). from_node fails
+        // CLOSED → None, rather than defaulting to the most-permissive empty facet set.
+        let mem = Memory::new(
+            MemKind::Fact,
+            Tier::Semantic,
+            Scope::parse("org:acme"),
+            "x",
+            1,
+        );
+        let mut node = mem.to_node();
+        node.metadata.insert(
+            meta_keys::FACETS.to_string(),
+            serde_json::json!({ "USER": "bob" }), // uppercase axis fails validation
+        );
+        assert!(
+            Memory::from_node(&node).is_none(),
+            "present-but-invalid facets fail closed (skip the memory), not default to empty"
+        );
+        // The SAME node with a VALID facet blob hydrates fine.
+        node.metadata.insert(
+            meta_keys::FACETS.to_string(),
+            serde_json::json!({ "user": "bob" }),
+        );
+        let back = Memory::from_node(&node).expect("valid facets hydrate");
+        assert_eq!(back.facets.get("user"), Some("bob"));
     }
 
     #[test]
