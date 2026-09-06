@@ -82,8 +82,9 @@ impl MemoryApi for MemoryEngine {
         let seeds: Vec<SymbolId> = q.seeds.iter().cloned().map(SymbolId).collect();
         // AND-compose the session intent at the recall gate (DES-MEM-FACETED-001 §4.3). The engine's
         // public `recall` carries no intent, so drive the shared `ranked_candidates` seam directly
-        // with `q.intent` (empty intent ⇒ every memory admitted, legacy behavior), then the same
-        // production `pack_recalled` assembly tail.
+        // with `q.intent` (empty intent ⇒ every UNFACETED memory admitted — faceted memories are
+        // intent-scoped and require matching axes; legacy data is all unfaceted, so recall is
+        // byte-identical), then the same production `pack_recalled` assembly tail.
         let cands = self.ranked_candidates(
             &q.query,
             filter,
