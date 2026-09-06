@@ -205,7 +205,7 @@ fn sorted_properties(schema: &Value) -> Vec<String> {
 ///
 /// This is the broad membership check: no golden tool may go missing from the live server.
 #[test]
-fn conf_all_24_tool_names_present_in_tools_list() {
+fn conf_all_tool_names_present_in_tools_list() {
     let all_golden_names: Vec<&str> = ESTATE_TOOLS
         .iter()
         .chain(MEMORY_TOOLS.iter())
