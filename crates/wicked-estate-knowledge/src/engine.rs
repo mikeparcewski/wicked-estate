@@ -528,6 +528,7 @@ impl KnowledgeEngine {
                 continue;
             }
             // Knowledge is NOT tiered: neutral recency/salience so the RRF rank drives ordering.
+            // Knowledge has no facets ⇒ specificity 0 (no boost; identical ranking to before).
             cands.push(Candidate {
                 id,
                 content: kn.content,
@@ -535,6 +536,7 @@ impl KnowledgeEngine {
                 rrf,
                 recency: 1.0,
                 salience: 1.0,
+                facet_specificity: 0,
             });
         }
         let packed = budget_pack(cands, token_budget, 0.5);

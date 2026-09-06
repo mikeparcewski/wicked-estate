@@ -13,12 +13,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use wicked_estate_core::{Language, Location, Node, NodeKind, Span, Symbol, SymbolId};
 
+pub mod facets;
 pub mod fuzzy;
 pub mod reason;
 pub mod recall;
 pub mod salience;
 pub mod scope;
 
+pub use facets::{Facets, facet_admits};
 pub use fuzzy::{fuzzy_candidates, jaccard, normalize};
 pub use reason::{Extracted, heuristic_extract, heuristic_same_entity, heuristic_summary};
 pub use recall::{Candidate, budget_pack, rrf_fuse};
@@ -104,6 +106,9 @@ pub mod meta_keys {
     pub const REINFORCE_POS: &str = "reinforce_pos";
     pub const REINFORCE_TOTAL: &str = "reinforce_total";
     pub const SALIENCE: &str = "salience";
+    /// Orthogonal facet map (DES-MEM-FACETED-001 §4.1) — a JSON object `{axis:value}`, written
+    /// ONLY when non-empty so legacy (unfaceted) nodes stay byte-identical.
+    pub const FACETS: &str = "facets";
 }
 
 /// A memory item, before it is written as an estate `Node`. The builder owns the field layout so
@@ -122,6 +127,9 @@ pub struct Memory {
     pub access_count: u64,
     pub reinforce_pos: u64,
     pub reinforce_total: u64,
+    /// Orthogonal, intent-matching facets (DES-MEM-FACETED-001). Empty ⇒ specificity 0 ⇒ always
+    /// admitted (legacy behavior). Agent-declared at capture as the learning's natural axis.
+    pub facets: Facets,
 }
 
 impl Memory {
@@ -147,7 +155,14 @@ impl Memory {
             access_count: 0,
             reinforce_pos: 0,
             reinforce_total: 0,
+            facets: Facets::default(),
         }
+    }
+
+    /// Builder: attach the orthogonal facets this memory is tagged with (its natural axis).
+    pub fn with_facets(mut self, facets: Facets) -> Self {
+        self.facets = facets;
+        self
     }
 
     /// Stable estate symbol id for this memory (`Synthetic{scheme:"mem", id:<uuid-v7>}`).
@@ -210,6 +225,13 @@ impl Memory {
             access_count: u(meta_keys::ACCESS_COUNT).unwrap_or(0),
             reinforce_pos: u(meta_keys::REINFORCE_POS).unwrap_or(0),
             reinforce_total: u(meta_keys::REINFORCE_TOTAL).unwrap_or(0),
+            // Backfill: there is NO serde on `Memory`, so a missing/undecodable `facets` key is an
+            // EXPLICIT empty default (legacy nodes hydrate to no facets ⇒ unchanged behavior).
+            facets: m
+                .get(meta_keys::FACETS)
+                .cloned()
+                .map(|v| serde_json::from_value(v).unwrap_or_default())
+                .unwrap_or_default(),
         })
     }
 
@@ -241,6 +263,12 @@ impl Memory {
             meta_keys::REINFORCE_TOTAL.into(),
             self.reinforce_total.into(),
         );
+        // Facets: written ONLY when non-empty so legacy (unfaceted) nodes stay byte-identical.
+        if !self.facets.is_empty() {
+            if let Ok(v) = serde_json::to_value(&self.facets) {
+                m.insert(meta_keys::FACETS.into(), v);
+            }
+        }
         node
     }
 }
@@ -267,6 +295,10 @@ pub struct CaptureRequest {
     /// pre-fetched estate symbol_epochs for the `about` ids (DES-001 §4.5 ADR-ESTATE-010)
     #[serde(default)]
     pub about_epochs: Option<HashMap<String, u64>>,
+    /// Agent-declared facets (DES-MEM-FACETED-001) — the natural axis this learning is about.
+    /// Defaults empty; landed on the captured memory node.
+    #[serde(default)]
+    pub facets: Facets,
 }
 
 impl Default for CaptureRequest {
@@ -279,12 +311,18 @@ impl Default for CaptureRequest {
             now: 0,
             about: None,
             about_epochs: None,
+            facets: Facets::default(),
         }
     }
 }
 
 /// Conversational recall request (MCP: memory.recall).
+///
+/// `#[non_exhaustive]` (DES-MEM-FACETED-001 §4.4): adding a field is otherwise a compile break for
+/// every cross-crate constructor. External crates build one via [`RecallQuery::new`] + field
+/// assignment, never a struct literal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct RecallQuery {
     pub query: String,
     pub scope: String,
@@ -300,6 +338,40 @@ pub struct RecallQuery {
     pub seeds: Vec<String>,
     pub token_budget: usize,
     pub now: i64,
+    /// The session's intent tuple (DES-MEM-FACETED-001 §4.3). AND-composed with `scope` at the
+    /// recall rerank gate: a candidate passes iff `facet_admits(mem.facets, intent).is_some()`.
+    /// Empty (the default) admits every memory (specificity 0), preserving legacy recall exactly.
+    /// `#[serde(default)]` keeps older serialized queries valid.
+    #[serde(default)]
+    pub intent: Facets,
+}
+
+impl RecallQuery {
+    /// Construct a recall query with the required fields; `scope_prefix`/`seeds`/`intent` default
+    /// (None / empty / no-facets). This is the constructor cross-crate callers use — a
+    /// `#[non_exhaustive]` struct cannot be built with a struct literal from another crate.
+    pub fn new(
+        query: impl Into<String>,
+        scope: impl Into<String>,
+        token_budget: usize,
+        now: i64,
+    ) -> Self {
+        Self {
+            query: query.into(),
+            scope: scope.into(),
+            scope_prefix: None,
+            seeds: Vec::new(),
+            token_budget,
+            now,
+            intent: Facets::default(),
+        }
+    }
+}
+
+impl Default for RecallQuery {
+    fn default() -> Self {
+        Self::new(String::new(), String::new(), 0, 0)
+    }
 }
 
 /// One recalled item returned by memory.recall.
@@ -422,6 +494,67 @@ mod tests {
         assert_eq!(back.created_at, 1234);
         assert_eq!((back.reinforce_pos, back.reinforce_total), (3, 4));
         assert_eq!(back.access_count, 7);
+    }
+
+    #[test]
+    fn memory_facets_roundtrip_through_node() {
+        let facets = Facets::try_from_map([("cli", "codex"), ("repo", "estate")]).unwrap();
+        let mem = Memory::new(
+            MemKind::Skill,
+            Tier::Procedural,
+            Scope::parse("org:acme"),
+            "codex needs workspace-write",
+            42,
+        )
+        .with_facets(facets.clone());
+        let node = mem.to_node();
+        // Persisted as a JSON object under the `facets` meta_key.
+        assert!(
+            node.metadata[meta_keys::FACETS].is_object(),
+            "facets persist as a JSON object"
+        );
+        let back = Memory::from_node(&node).expect("roundtrip");
+        assert_eq!(back.facets, facets, "facets survive to_node → from_node");
+    }
+
+    #[test]
+    fn legacy_node_without_facets_hydrates_to_empty() {
+        // A memory captured before facets existed writes NO `facets` key (to_node skips empty), and
+        // must hydrate to empty facets with byte-identical legacy metadata (no new key added).
+        let mem = Memory::new(
+            MemKind::Fact,
+            Tier::Semantic,
+            Scope::parse("org:acme"),
+            "legacy fact",
+            7,
+        );
+        let node = mem.to_node();
+        assert!(
+            !node.metadata.contains_key(meta_keys::FACETS),
+            "an unfaceted memory must NOT add the facets key (legacy nodes stay byte-identical)"
+        );
+        let back = Memory::from_node(&node).expect("roundtrip");
+        assert!(
+            back.facets.is_empty(),
+            "legacy node hydrates to empty facets"
+        );
+    }
+
+    #[test]
+    fn recall_query_new_and_non_exhaustive() {
+        // The cross-crate constructor path: `new` + field assignment (no struct literal).
+        let mut q = RecallQuery::new("find the codex quirk", "org:acme", 500, 100);
+        assert!(q.scope_prefix.is_none());
+        assert!(q.seeds.is_empty());
+        assert!(q.intent.is_empty());
+        q.intent = Facets::try_from_map([("cli", "codex")]).unwrap();
+        assert_eq!(q.intent.get("cli"), Some("codex"));
+        // Older serialized queries (no intent field) deserialize to empty intent.
+        let de: RecallQuery = serde_json::from_value(
+            serde_json::json!({"query":"x","scope":"","token_budget":10,"now":1}),
+        )
+        .unwrap();
+        assert!(de.intent.is_empty());
     }
 
     #[test]

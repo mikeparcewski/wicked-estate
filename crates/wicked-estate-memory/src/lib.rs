@@ -17,7 +17,8 @@ use wicked_estate_core::{
     Direction, Edge, EdgeKind, NodeKind, ResolutionTier, SymbolId, SymbolQuery,
 };
 use wicked_estate_memory_core::{
-    Candidate, Memory, Salience, Scope, budget_pack, salience as compute_salience,
+    Candidate, Facets, Memory, Salience, Scope, budget_pack, facet_admits,
+    salience as compute_salience,
 };
 use wicked_estate_overlay::XedgeStore;
 use wicked_estate_retrieve::{Embedder, HashEmbedder, hybrid_search};
@@ -472,7 +473,15 @@ impl MemoryEngine {
         token_budget: usize,
         now: i64,
     ) -> wicked_estate_core::Result<Vec<Recalled>> {
-        self.recall_impl(query, scope, seeds, token_budget, now, RecallMode::Hybrid)
+        let cands = self.ranked_candidates(
+            query,
+            scope,
+            seeds,
+            now,
+            RecallMode::Hybrid,
+            &Facets::default(),
+        )?;
+        Ok(self.pack_recalled(cands, token_budget))
     }
 
     /// Single-retriever recall for benchmarking the hybrid uplift (PR-14). Not the production path.
@@ -485,7 +494,8 @@ impl MemoryEngine {
         now: i64,
         mode: RecallMode,
     ) -> wicked_estate_core::Result<Vec<Recalled>> {
-        self.recall_impl(query, scope, seeds, token_budget, now, mode)
+        let cands = self.ranked_candidates(query, scope, seeds, now, mode, &Facets::default())?;
+        Ok(self.pack_recalled(cands, token_budget))
     }
 
     /// **Un-budget-capped ranked recall (T-Y-RANKED).** Return the top-`k` recall candidates in
@@ -512,7 +522,8 @@ impl MemoryEngine {
         now: i64,
         mode: RecallMode,
     ) -> wicked_estate_core::Result<Vec<Recalled>> {
-        let mut cands = self.ranked_candidates(query, scope, seeds, now, mode)?;
+        let mut cands =
+            self.ranked_candidates(query, scope, seeds, now, mode, &Facets::default())?;
         // Final-rerank-score order, descending — NO budget_pack (no token cap, no Working eviction).
         cands.sort_by(|a, b| {
             b.final_score(self.alpha)
@@ -543,11 +554,13 @@ impl MemoryEngine {
             .collect())
     }
 
-    /// The shared recall candidate-generation + rerank + scope-filter seam (the pre-assembly slice).
-    /// Both the production token-budgeted [`Self::recall_impl`] and the un-budget-capped
-    /// [`Self::recall_ranked`] call this, so the two paths share EXACTLY the same retrieval + rerank
-    /// logic and differ only in their final assembly step. Returns reranked [`Candidate`]s in fused
-    /// (RRF) order; the caller applies either `budget_pack` (production) or a top-`k` cut (ranked).
+    /// The shared recall candidate-generation + rerank + scope/facet-filter seam (the pre-assembly
+    /// slice). Both the production token-budgeted paths ([`Self::recall`]/[`Self::recall_mode`] and
+    /// the `MemoryApi::recall` intent seam, which finish via [`Self::pack_recalled`]) and the
+    /// un-budget-capped [`Self::recall_ranked`] call this, so every path shares EXACTLY the same
+    /// retrieval + rerank logic and differs only in its final assembly step. Returns reranked
+    /// [`Candidate`]s in fused (RRF) order; the caller applies either `budget_pack` (production) or
+    /// a top-`k` cut (ranked). `intent` AND-composes the facet predicate at the scope gate.
     fn ranked_candidates(
         &self,
         query: &str,
@@ -555,6 +568,7 @@ impl MemoryEngine {
         seeds: &[SymbolId],
         now: i64,
         mode: RecallMode,
+        intent: &Facets,
     ) -> wicked_estate_core::Result<Vec<Candidate>> {
         // 1. keyword (BM25/FTS) candidates restricted to memory nodes. estate's FTS phrase-matches
         //    the whole `text`, so a multi-word semantic query matches nothing — tokenize into terms
@@ -613,6 +627,14 @@ impl MemoryEngine {
             if !scope.admits(&mem.scope) {
                 continue;
             }
+            // Facet visibility AND-composed with scope at the SAME gate (DES-MEM-FACETED-001 §4.3):
+            // a candidate passes iff `facet_admits(mem.facets, intent)` is `Some`. `None` EXCLUDES a
+            // memory whose facet constrains an axis the intent does not satisfy (no cross-user /
+            // cross-repo leakage). The `Some(specificity)` becomes the score boost below. Empty
+            // facets / empty intent ⇒ `Some(0)` ⇒ admitted with no boost (legacy behavior).
+            let Some(facet_specificity) = facet_admits(&mem.facets, intent) else {
+                continue;
+            };
             let age = (now - mem.created_at).max(0);
             let recency = wicked_estate_memory_core::decay(age, self.sal.lambda_per_day);
             let sal = compute_salience(&self.sal, mem.confidence(), age, mem.access_count);
@@ -626,25 +648,22 @@ impl MemoryEngine {
                 rrf,
                 recency,
                 salience: sal,
+                facet_specificity,
             });
         }
         Ok(cands)
     }
 
-    fn recall_impl(
+    /// Production assembly tail shared by every token-budgeted recall path ([`Self::recall`],
+    /// [`Self::recall_mode`], and the `MemoryApi::recall` intent seam): token-budget the reranked
+    /// candidates via [`budget_pack`] and map them to [`Recalled`], recovering each item's own
+    /// scope for S4 attribution. (`recall_ranked` bypasses this — it does a top-`k` cut instead.)
+    pub(crate) fn pack_recalled(
         &self,
-        query: &str,
-        scope: ScopeFilter<'_>,
-        seeds: &[SymbolId],
+        cands: Vec<Candidate>,
         token_budget: usize,
-        now: i64,
-        mode: RecallMode,
-    ) -> wicked_estate_core::Result<Vec<Recalled>> {
-        let cands = self.ranked_candidates(query, scope, seeds, now, mode)?;
-
-        // token-budgeted assembly (the production path; recall_ranked bypasses this).
-        let pack = budget_pack(cands, token_budget, self.alpha);
-        Ok(pack
+    ) -> Vec<Recalled> {
+        budget_pack(cands, token_budget, self.alpha)
             .into_iter()
             .map(|c| {
                 let score = c.final_score(self.alpha);
@@ -666,7 +685,7 @@ impl MemoryEngine {
                     scope,
                 }
             })
-            .collect())
+            .collect()
     }
 }
 
@@ -925,6 +944,80 @@ mod tests {
             !out.iter().any(|r| r.content.contains("other")),
             "SCOPE ISOLATION VIOLATED: acme recall returned other-org memory: {:?}",
             out.iter().map(|r| &r.content).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn facet_intent_gates_and_boosts_recall() {
+        // DES-MEM-FACETED-001 §4.3: with intent {cli:codex}, an unfaceted memory and a {cli:codex}
+        // memory both surface (the codex one boosted above the unfaceted one), while a {repo:other}
+        // memory is EXCLUDED (it constrains an axis the intent does not carry — no leakage).
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let scope = Scope::root();
+        let now = 1;
+        // Same tier + near-identical bodies so base scores match and the facet boost is the only
+        // differentiator between the global and the {cli:codex} memory.
+        eng.capture(&Memory::new(
+            MemKind::Fact,
+            Tier::Semantic,
+            scope.clone(),
+            "workspace write policy note one",
+            now,
+        ))
+        .unwrap();
+        eng.capture(
+            &Memory::new(
+                MemKind::Fact,
+                Tier::Semantic,
+                scope.clone(),
+                "workspace write policy note two",
+                now,
+            )
+            .with_facets(Facets::try_from_map([("cli", "codex")]).unwrap()),
+        )
+        .unwrap();
+        eng.capture(
+            &Memory::new(
+                MemKind::Fact,
+                Tier::Semantic,
+                scope.clone(),
+                "workspace write policy note three",
+                now,
+            )
+            .with_facets(Facets::try_from_map([("repo", "other")]).unwrap()),
+        )
+        .unwrap();
+
+        let intent = Facets::try_from_map([("cli", "codex")]).unwrap();
+        let cands = eng
+            .ranked_candidates(
+                "workspace write policy note",
+                ScopeFilter::Ancestors(&scope),
+                &[],
+                now,
+                RecallMode::Hybrid,
+                &intent,
+            )
+            .unwrap();
+        let out = eng.pack_recalled(cands, 4000);
+
+        let bodies: Vec<&String> = out.iter().map(|r| &r.content).collect();
+        assert!(
+            !out.iter().any(|r| r.content.contains("note three")),
+            "a {{repo:other}} memory must NOT surface under a cli-only intent (no leakage): {bodies:?}"
+        );
+        let pos_global = out.iter().position(|r| r.content.contains("note one"));
+        let pos_codex = out.iter().position(|r| r.content.contains("note two"));
+        let (pos_global, pos_codex) = (
+            pos_global.expect("the unfaceted memory must surface"),
+            pos_codex.expect("the {cli:codex} memory must surface"),
+        );
+        assert!(
+            pos_codex < pos_global,
+            "the specificity-boosted {{cli:codex}} memory must rank above the unfaceted one; got: {:?}",
+            out.iter()
+                .map(|r| (&r.content, r.score))
+                .collect::<Vec<_>>()
         );
     }
 

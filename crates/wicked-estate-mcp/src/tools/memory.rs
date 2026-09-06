@@ -161,14 +161,12 @@ fn dispatch_recall(
         .get("token_budget")
         .and_then(|v| v.as_u64())
         .unwrap_or(2000) as usize;
-    let rq = RecallQuery {
-        query,
-        scope,
-        scope_prefix,
-        seeds,
-        token_budget,
-        now,
-    };
+    // `RecallQuery` is `#[non_exhaustive]` (DES-MEM-FACETED-001 §4.4): build via the constructor +
+    // field assignment, never a struct literal. `intent` stays empty here — the `intent{}` wire
+    // schema is Phase 2.
+    let mut rq = RecallQuery::new(query, scope, token_budget, now);
+    rq.scope_prefix = scope_prefix;
+    rq.seeds = seeds;
     match memory.recall(&rq) {
         Ok(items) => {
             let wire: Vec<Value> = items
