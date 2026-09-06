@@ -2,11 +2,11 @@
 //! Uses `wicked_estate_memory_core` types directly.
 
 use crate::{MemoryEngine, RecallMode, ScopeFilter};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use wicked_estate_core::SymbolId;
 use wicked_estate_memory_core::{
-    CaptureRequest, MemKind, Memory, MemoryApi, MemoryCoverage, RecallQuery, RecalledItem,
-    ReflectResult, Scope, Tier,
+    ApproveOutcome, CaptureRequest, Facets, MemKind, Memory, MemoryApi, MemoryCoverage, Proposal,
+    ProposalState, RecallQuery, RecalledItem, ReflectResult, Scope, Tier,
 };
 use wicked_estate_overlay::XEdge;
 
@@ -184,6 +184,35 @@ impl MemoryApi for MemoryEngine {
             by_tier,
             by_kind,
         })
+    }
+
+    // ── Proposal queue (DES-MEM-FACETED-001 §5.0) — forwards to the inherent engine methods ──
+
+    fn submit_proposal(
+        &mut self,
+        kind_type: &str,
+        payload: serde_json::Value,
+        facets: Facets,
+        provenance: BTreeMap<String, String>,
+        now: i64,
+    ) -> Result<String, anyhow::Error> {
+        MemoryEngine::submit_proposal(self, kind_type, payload, facets, provenance, now)
+    }
+
+    fn list_proposals(
+        &self,
+        kind_type: Option<&str>,
+        state: Option<ProposalState>,
+    ) -> Result<Vec<Proposal>, anyhow::Error> {
+        MemoryEngine::list_proposals(self, kind_type, state)
+    }
+
+    fn approve_proposal(&mut self, id: &str, now: i64) -> Result<ApproveOutcome, anyhow::Error> {
+        MemoryEngine::approve_proposal(self, id, now)
+    }
+
+    fn reject_proposal(&mut self, id: &str, now: i64) -> Result<(), anyhow::Error> {
+        MemoryEngine::reject_proposal(self, id, now)
     }
 }
 

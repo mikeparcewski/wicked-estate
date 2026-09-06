@@ -775,6 +775,17 @@ pub fn handle_request_unified_ro(
                     None => err_response(&id, -32601, "memory domain not available"),
                 },
 
+                // Proposal queue (DES-MEM-FACETED-001 §5.0). Shares the memory engine handle —
+                // `approve` for a `memory` kind_type reuses the memory capture path. `read_only`
+                // already refused `proposal.approve`/`proposal.reject` above (they are write tools);
+                // `proposal.submit`/`proposal.list` fall through here even in read-only mode.
+                "proposal.submit" | "proposal.list" | "proposal.approve" | "proposal.reject" => {
+                    match domains {
+                        Some(d) => tools::proposals::dispatch(tool, &id, &params, d.memory),
+                        None => err_response(&id, -32601, "proposal domain not available"),
+                    }
+                }
+
                 "knowledge.ingest"
                 | "knowledge.write"
                 | "knowledge.relate"
@@ -840,6 +851,14 @@ pub fn response_cacheable(tool: &str) -> bool {
 /// `memory.reflect` is a WRITE: despite its recall-shaped name it distills episodic memories into
 /// **persisted** semantic facts/entities (`MemoryEngine::reflect`, `&mut self`), so in read-only
 /// mode it would still mutate the operator-default memory store — defeating the no-write guarantee.
+///
+/// **Deliberate proposal-queue exception (DES-MEM-FACETED-001 §5.0):** `proposal.approve` and
+/// `proposal.reject` ARE writes (they mutate the ACTIVE store / decide the queue), so a `--readonly`
+/// worker is refused them. `proposal.submit` is NOT listed here even though it writes a node: a
+/// proposal lands `Pending` and is never recalled or applied until an operator approves it, so it
+/// touches no active store — it is a SAFE write, and a `--readonly` worker is deliberately allowed
+/// to submit (the whole point of the queue: give the sandboxed worker a safe write instead of none).
+/// `proposal.list` is a pure read.
 pub fn is_write_tool(tool: &str) -> bool {
     matches!(
         tool,
@@ -851,6 +870,8 @@ pub fn is_write_tool(tool: &str) -> bool {
             | "knowledge.write"
             | "knowledge.relate"
             | "knowledge.relate_code"
+            | "proposal.approve"
+            | "proposal.reject"
     )
 }
 
@@ -894,14 +915,19 @@ fn tools_list_unified(
     if domains_available {
         let mut mem = memory_tool_schemas();
         let mut know = knowledge_tool_schemas();
+        let mut prop = proposal_tool_schemas();
         if read_only {
             // DES-GROUNDING-001 §3.0: omit the write/destructive tools from the advertised set —
-            // the primary defense. Only the memory/knowledge recalls + coverage survive.
+            // the primary defense. Only the memory/knowledge recalls + coverage survive. For the
+            // proposal queue (DES-MEM-FACETED-001 §5.0) this omits approve/reject but KEEPS the
+            // safe submit + list (proposal.submit is a deliberate safe-write, see is_write_tool).
             mem.retain(|t| !is_write_tool(t["name"].as_str().unwrap_or("")));
             know.retain(|t| !is_write_tool(t["name"].as_str().unwrap_or("")));
+            prop.retain(|t| !is_write_tool(t["name"].as_str().unwrap_or("")));
         }
         tools.extend(mem);
         tools.extend(know);
+        tools.extend(prop);
     }
 
     ok_response(id, json!({"tools": tools}))
@@ -915,6 +941,15 @@ fn memory_tool_schemas() -> Vec<Value> {
         json!({"name":"memory.erase","description":"Hard-delete all memories whose scope starts with the given prefix.","inputSchema":{"type":"object","required":["scope_prefix"],"properties":{"scope_prefix":{"type":"string"}}}}),
         json!({"name":"memory.learn","description":"Store a semantic fact and link it to code symbols atomically.","inputSchema":{"type":"object","required":["content","symbols"],"properties":{"content":{"description":"one specific, non-obvious fact","type":"string"},"scope":{"description":"e.g. project:my-repo","type":"string"},"symbols":{"description":"exact code symbol name(s) this fact concerns","items":{"type":"string"},"type":"array"},"tier":{"description":"semantic=fact/decision, procedural=how-it-works","enum":["semantic","procedural"],"type":"string"}}}}),
         json!({"name":"memory.coverage","description":"Coverage: memory node counts (total, by tier, by kind), optionally scoped.","inputSchema":{"type":"object","properties":{"scope_prefix":{"type":"string"}}}}),
+    ]
+}
+
+fn proposal_tool_schemas() -> Vec<Value> {
+    vec![
+        json!({"name":"proposal.submit","description":"Submit an inert proposal to the queue (DES-MEM-FACETED-001 §5.0). SAFE even under --readonly: it lands `pending` and is never recalled or applied until an operator approves it. Provenance (run/unit/agent) is stamped by the server from its launch env — NEVER taken from args. Returns { id }.","inputSchema":{"type":"object","required":["kind_type","payload"],"properties":{"kind_type":{"type":"string","description":"Validated lowercase token routing approval, optionally with one :sub-type. Matches ^[a-z][a-z0-9_-]*(:[a-z][a-z0-9_-]*)?$ (e.g. \"memory\", \"policy:security\"); invalid ⇒ invalid params."},"payload":{"type":"object","description":"Type-specific payload. memory: {content, tier}; policy: {rule, severity, …}."},"facets":{"type":"object","additionalProperties":{"type":"string"},"description":"Orthogonal intent-matching facets carried onto the promoted artifact (e.g. {\"cli\":\"codex\"}). Axis ^[a-z][a-z0-9_-]*$, value non-empty; invalid ⇒ invalid params."}}}}),
+        json!({"name":"proposal.list","description":"List queued proposals, optionally filtered by kind_type and/or state. The approval-queue's source. Each item carries id, kind_type, payload, facets, provenance, state, created_at.","inputSchema":{"type":"object","properties":{"kind_type":{"type":"string","description":"Optional exact kind_type filter (e.g. \"memory\" or \"policy:security\")."},"state":{"type":"string","enum":["pending","approved","rejected"],"description":"Optional lifecycle-state filter."}}}}),
+        json!({"name":"proposal.approve","description":"Approve a pending proposal, promoting it to the ACTIVE store routed by kind_type: \"memory\" materializes a recallable memory (outcome=promoted, active_id); \"policy:*\" writes nothing and hands the payload back for the caller to route to steering (outcome=handed_off, payload). Operator surface — refused under --readonly.","inputSchema":{"type":"object","required":["id"],"properties":{"id":{"type":"string"}}}}),
+        json!({"name":"proposal.reject","description":"Reject a pending proposal (marks it rejected; it never becomes active). Operator surface — refused under --readonly.","inputSchema":{"type":"object","required":["id"],"properties":{"id":{"type":"string"}}}}),
     ]
 }
 
@@ -2270,6 +2305,35 @@ mod tests {
                 by_kind: Default::default(),
             })
         }
+        fn submit_proposal(
+            &mut self,
+            _: &str,
+            _: serde_json::Value,
+            _: wicked_estate_memory_core::Facets,
+            _: std::collections::BTreeMap<String, String>,
+            _: i64,
+        ) -> Result<String, anyhow::Error> {
+            Ok("fake-proposal-id".to_string())
+        }
+        fn list_proposals(
+            &self,
+            _: Option<&str>,
+            _: Option<wicked_estate_memory_core::ProposalState>,
+        ) -> Result<Vec<wicked_estate_memory_core::Proposal>, anyhow::Error> {
+            Ok(vec![])
+        }
+        fn approve_proposal(
+            &mut self,
+            _: &str,
+            _: i64,
+        ) -> Result<wicked_estate_memory_core::ApproveOutcome, anyhow::Error> {
+            Ok(wicked_estate_memory_core::ApproveOutcome::Promoted {
+                active_id: "fake-active-id".to_string(),
+            })
+        }
+        fn reject_proposal(&mut self, _: &str, _: i64) -> Result<(), anyhow::Error> {
+            Ok(())
+        }
     }
 
     struct FakeKnowledge;
@@ -2394,8 +2458,8 @@ mod tests {
     }
 
     #[test]
-    fn unified_tools_list_with_domains_returns_24_tools() {
-        // tools/list with domains=Some → 11 estate + 6 memory + 7 knowledge = 24 tools.
+    fn unified_tools_list_with_domains_returns_28_tools() {
+        // tools/list with domains=Some → 11 estate + 6 memory + 7 knowledge + 4 proposal = 28 tools.
         // (SemanticSearch absent: no matching dim-guard in default McpContext)
         let store = fixture();
         let req = json!({ "jsonrpc": "2.0", "id": 203, "method": "tools/list", "params": {} });
@@ -2418,8 +2482,8 @@ mod tests {
             .expect("tools must be array");
         assert_eq!(
             tools.len(),
-            24,
-            "11 estate + 6 memory + 7 knowledge = 24; got {}",
+            28,
+            "11 estate + 6 memory + 7 knowledge + 4 proposal = 28; got {}",
             tools.len()
         );
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -2430,6 +2494,10 @@ mod tests {
         assert!(
             names.contains(&"knowledge.ingest"),
             "knowledge tools must appear"
+        );
+        assert!(
+            names.contains(&"proposal.submit"),
+            "proposal tools must appear"
         );
         assert!(names.contains(&"SearchEntity"), "estate tools must appear");
     }
@@ -2457,10 +2525,12 @@ mod tests {
         );
     }
 
-    /// The 8 write/destructive domain tools that `--readonly` must hide + refuse
+    /// The 10 write/destructive domain tools that `--readonly` must hide + refuse
     /// (DES-GROUNDING-001 §3.0). Kept in one place so the test and [`is_write_tool`] can't drift.
     /// `memory.reflect` is here despite its recall-shaped name — it persists distilled facts.
-    const WRITE_TOOLS: [&str; 8] = [
+    /// `proposal.approve`/`proposal.reject` write the active store / decide the queue (but
+    /// `proposal.submit` is a deliberate safe-write kept under --readonly, so it is NOT here).
+    const WRITE_TOOLS: [&str; 10] = [
         "memory.capture",
         "memory.erase",
         "memory.learn",
@@ -2469,10 +2539,13 @@ mod tests {
         "knowledge.write",
         "knowledge.relate",
         "knowledge.relate_code",
+        "proposal.approve",
+        "proposal.reject",
     ];
 
     /// One representative read/query tool from every surface that must survive `--readonly`.
-    const READ_TOOLS_KEPT: [&str; 13] = [
+    /// `proposal.submit` (a safe-write) and `proposal.list` (a pure read) survive too.
+    const READ_TOOLS_KEPT: [&str; 15] = [
         "SearchEntity",
         "RetrieveEntity",
         "TraverseGraph",
@@ -2486,6 +2559,8 @@ mod tests {
         "knowledge.recall",
         "knowledge.recall_about_code",
         "knowledge.coverage",
+        "proposal.submit",
+        "proposal.list",
     ];
 
     /// DES-GROUNDING-001 §3.0 safety keystone: in `--readonly` mode `tools/list` OMITS every
@@ -2536,11 +2611,12 @@ mod tests {
                 "--readonly tools/list must KEEP read tool {r}; got {ro_names:?}"
             );
         }
-        // 11 estate + (6 - 4 write) memory + (7 - 4 write) knowledge = 11 + 2 + 3 = 16.
+        // 11 estate + (6-4 write) memory + (7-4 write) knowledge + (4-2 write) proposal
+        // = 11 + 2 + 3 + 2 = 18.
         assert_eq!(
             ro_names.len(),
-            16,
-            "read-only domain surface is 11 estate + 2 memory reads + 3 knowledge reads = 16; got {}",
+            18,
+            "read-only domain surface is 11 estate + 2 memory reads + 3 knowledge reads + 2 proposal (submit+list) = 18; got {}",
             ro_names.len()
         );
 
@@ -2587,7 +2663,7 @@ mod tests {
     fn without_readonly_write_tools_are_advertised_and_dispatch() {
         let store = fixture();
 
-        // Default (non-readonly) tools/list advertises all 24, writes included.
+        // Default (non-readonly) tools/list advertises all 28, writes included.
         let names = {
             let mut fake_mem = FakeMemory;
             let mut fake_know = FakeKnowledge;

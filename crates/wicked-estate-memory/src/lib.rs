@@ -31,6 +31,8 @@ mod consolidate;
 #[cfg(feature = "cross")]
 pub mod cross;
 mod memext;
+/// Proposal-queue operations on the engine (DES-MEM-FACETED-001 §5.0).
+mod proposal;
 mod store;
 pub use background::{ConsolidationHandle, spawn_consolidation};
 pub use consolidate::ConsolidationReport;
