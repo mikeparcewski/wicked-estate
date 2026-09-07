@@ -306,6 +306,41 @@ fn proposal_submit_validates_memory_tier_and_policy_severity_enums() {
         "a non-string severity must be rejected; got {resp}"
     );
 
+    // A policy must name a VALID steering type — a bare "policy" or an invented suffix is
+    // rejected at submit (it has no steering_type to land against otherwise).
+    for bad_kind in [
+        "policy",
+        "policy:data-integrity",
+        "policy:safety",
+        "policy:consistency",
+    ] {
+        let resp = call(
+            &store,
+            &mut mem,
+            &mut know,
+            "proposal.submit",
+            json!({ "kind_type": bad_kind, "payload": { "rule": "x", "severity": "error" } }),
+            false,
+        );
+        assert_eq!(
+            resp["error"]["code"], -32602,
+            "policy kind_type {bad_kind:?} must be rejected; got {resp}"
+        );
+    }
+    // A valid policy:<type> submits fine.
+    let okp = call(
+        &store,
+        &mut mem,
+        &mut know,
+        "proposal.submit",
+        json!({ "kind_type": "policy:architecture", "payload": { "rule": "x", "severity": "error" } }),
+        false,
+    );
+    assert!(
+        okp.get("error").is_none(),
+        "a valid policy:<type> must submit; got {okp}"
+    );
+
     // Valid values still submit fine.
     let ok = call(
         &store,
