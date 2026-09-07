@@ -8127,9 +8127,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "surrealdb"
-version = "3.1.5"
+version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81ee3110fe3ab8172eb8c135c96ed2d57c7470cdf1ad732d176db95a92c9faab"
+checksum = "74c21f360e9c3705555e5894271e4db622cf055d0faad4169f1ef52d08958705"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
