@@ -294,6 +294,13 @@ fn dispatch_coverage(
 /// carrying `facets` (the recall wire omits them and excludes faceted memories under empty intent).
 /// The per-item wire shape mirrors `memory.recall` (`memory_id`/`scope`/`content`/`tier`) plus
 /// `facets` + `created_at`, so an existing recall-item consumer parses it unchanged.
+///
+/// Deliberately UNBOUNDED (no server-side cap/paging): it is a management inventory primitive
+/// consumed by an operator surface (crew's `/api/v1/memory`, which filters the set), NOT a
+/// `RetrievalTool` feeding an agent's context — so the R4 output cap (which protects agent context)
+/// does not bind it, and capping would hide memories from the operator. Scope the browse with
+/// `scope_prefix` when a subtree is enough; server-side paging is a future enhancement if a store
+/// ever grows past operator scale.
 fn dispatch_list(id: &Value, args: &Value, memory: &dyn MemoryApi<Error = anyhow::Error>) -> Value {
     let scope_prefix = args.get("scope_prefix").and_then(|v| v.as_str());
     match memory.list(scope_prefix) {
