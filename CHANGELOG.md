@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.16.6] — 2026-09-07
+
+### Fixed
+- **`proposal.submit` fail-fast now covers the policy steering-type (#168).** A
+  capture worker also drifts on the policy `kind_type`: a bare `"policy"` (no
+  `:type`) or an invented suffix (`policy:data-integrity`, `policy:safety`,
+  `policy:consistency`) passed the generic shape check but had no steering_type to
+  land against, so it failed only at approval (loud, but after the worker was
+  gone). Require `policy:<type>` where `<type>` is one of the 7 steering types at
+  submit — the worker retries with a valid one — and close the severity-bypass on
+  bare `"policy"`. Completes the enum fail-fast (tier + severity + steering-type).
+
 ## [0.16.5] — 2026-09-07
 
 ### Fixed
