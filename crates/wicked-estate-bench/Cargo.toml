@@ -14,11 +14,11 @@ path = "src/main.rs"
 
 [dependencies]
 wicked-estate-core.workspace = true
-wicked-estate = { path = "../wicked-estate", version = "0.16.3" }
-wicked-estate-store = { path = "../wicked-estate-store", version = "0.16.3" }
-wicked-estate-rank = { path = "../wicked-estate-rank", version = "0.16.3" }
-wicked-estate-memory = { path = "../wicked-estate-memory", version = "0.16.3" }
-wicked-estate-memory-core = { path = "../wicked-estate-memory-core", version = "0.16.3" }
+wicked-estate = { path = "../wicked-estate", version = "0.16.4" }
+wicked-estate-store = { path = "../wicked-estate-store", version = "0.16.4" }
+wicked-estate-rank = { path = "../wicked-estate-rank", version = "0.16.4" }
+wicked-estate-memory = { path = "../wicked-estate-memory", version = "0.16.4" }
+wicked-estate-memory-core = { path = "../wicked-estate-memory-core", version = "0.16.4" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

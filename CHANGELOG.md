@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.16.4] — 2026-09-07
+
 ### Added
 - **`memory.list` — the management browse (DES-MEM-FACETED-001).** A true list primitive:
   `MemoryApi::list(scope_prefix)` + the `memory.list` MCP tool return the COMPLETE in-scope
