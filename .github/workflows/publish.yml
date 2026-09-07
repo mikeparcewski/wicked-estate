@@ -79,3 +79,54 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: bash scripts/publish.sh
+
+  # Cut the GitHub Release once crates.io publish SUCCEEDS. This is the step estate lacked: the
+  # crates were published every release, but nothing created a GitHub Release, so the Releases page
+  # drifted (it sat at v0.14.1 while crates.io shipped through v0.16.6). `needs: publish` means a
+  # release is advertised only for a version that actually published — never a tag whose publish
+  # failed. Idempotent: an existing release (e.g. a hand-backfilled one) is updated in place, so a
+  # re-run / dispatch never errors on "already exists".
+  github-release:
+    name: create GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create/update the GitHub Release against the pushed tag
+    steps:
+      # Same event-gated checkout as the publish job (a dispatch resolves the TAG input; a push
+      # uses the pushed tag). An empty dispatch input already fails the publish job above, and
+      # `needs: publish` gates this one on it, so this job never runs against a bad ref.
+      - name: check out the dispatched TAG (recovery path)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.ref }}
+      - name: check out the pushed tag (normal path)
+        if: github.event_name != 'workflow_dispatch'
+        uses: actions/checkout@v4
+      - name: create or update the GitHub Release from CHANGELOG
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref_name }}"
+          # Notes = this version's CHANGELOG section. Distinguish "no section" (exit 1 → generic
+          # note) from a real script failure (exit 2 → missing/unreadable CHANGELOG, usage bug),
+          # which must FAIL the release rather than silently ship a generic note.
+          set +e
+          python3 scripts/changelog-section.py "$TAG" > /tmp/relnotes.md
+          code=$?
+          set -e
+          if [ "$code" -eq 1 ]; then
+            printf 'Release %s\n' "$TAG" > /tmp/relnotes.md
+          elif [ "$code" -ne 0 ]; then
+            echo "::error::changelog-section.py failed (exit $code) — refusing to publish a release with fallback notes"
+            exit "$code"
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file /tmp/relnotes.md
+            echo "updated existing GitHub Release $TAG"
+          else
+            gh release create "$TAG" --title "$TAG" --notes-file /tmp/relnotes.md --verify-tag
+            echo "created GitHub Release $TAG"
+          fi
