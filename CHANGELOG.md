@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.16.7] — 2026-09-07
+
+### Added
+- **`EdgeKind::SatisfiedBy` for requirement→code traceability (#172).** A first-class
+  edge from a requirement to the code that satisfies it. Direction: `source` =
+  requirement (dependent), `target` = code (dependency), so `BlastRadius(code)`
+  surfaces the requirements a change may break — the traceability query. Mirrors the
+  `Governs` rule→code precedent; serializes snake_case as `"satisfied_by"` and
+  round-trips through the store with no manual mapping. Consumed by wicked-core's
+  requirements-graph keystone (requirement nodes wired to code instead of an orphan
+  island).
+
 ## [0.16.6] — 2026-09-07
 
 ### Fixed
