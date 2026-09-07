@@ -3,7 +3,7 @@
 //! Covers:
 //! - SC-009: Opens all 4 fixture DBs and verifies 4 read operations each return non-empty results.
 //! - DB compatibility (DoD §2.6): Each v0.12.x fixture opens without error (no migration required).
-//! - Tools count: `tools/list` with all 4 stores open returns exactly 24 tools
+//! - Tools count: `tools/list` with all 4 stores open returns exactly 29 tools
 //!   (11 estate + 7 memory + 7 knowledge + 4 proposal; SemanticSearch absent — no embedder meta in fixtures).
 
 use std::path::PathBuf;

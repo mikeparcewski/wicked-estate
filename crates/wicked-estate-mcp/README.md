@@ -5,7 +5,7 @@ MCP stdio server that exposes the wicked-estate retrieval tools to LLM agents ov
 ## What it does
 
 - Implements the MCP stdio transport (newline-delimited JSON-RPC 2.0) by hand — synchronous, no async overhead on a local stdio server.
-- Routes `tools/list` and `tools/call` via unified dispatch across **24 tools**: 11 estate tools (in `wicked-estate-retrieve`, incl. `rules.recall`), 6 memory tools (`src/tools/memory.rs`), and 7 knowledge tools (`src/tools/knowledge.rs`).
+- Routes `tools/list` and `tools/call` via unified dispatch across **29 tools**: 11 estate tools (in `wicked-estate-retrieve`, incl. `rules.recall`), 7 memory tools (`src/tools/memory.rs`), 7 knowledge tools (`src/tools/knowledge.rs`), and 4 proposal-queue tools (`src/tools/proposals.rs`).
 - Injects a W7.4 staleness diagnostic (`STALENESS: commits_behind=N`) into every `tools/call` response when the server can determine commits landed since the last index run.
 - Advertises `SemanticSearch` in `tools/list` only when a `VectorStore` is wired in at startup.
 - `handle_request` and `handle_request_ctx` are pure functions (no I/O) so all routing logic is fully unit-tested without a running server.
@@ -20,8 +20,9 @@ MCP stdio server that exposes the wicked-estate retrieval tools to LLM agents ov
 | `McpContext` | Carries `commits_behind` plus the four `embedder_*` dim-guard fields (runtime vs store-meta id/dim). |
 | `all_tools()` | Returns the ten always-on estate `RetrievalTool` instances (no `SemanticSearch` — it is stateful). |
 | `DomainHandles` | Bundles the memory engine and knowledge engine handles passed into the unified dispatch loop. |
-| `src/tools/memory.rs` | Dispatch path for the 6 memory tools (`memory.capture/recall/reflect/erase/learn/coverage`). |
+| `src/tools/memory.rs` | Dispatch path for the 7 memory tools (`memory.capture/recall/reflect/erase/learn/coverage/list`). |
 | `src/tools/knowledge.rs` | Dispatch path for the 7 knowledge tools (`knowledge.ingest/write/relate/recall/coverage/relate_code/recall_about_code`). |
+| `src/tools/proposals.rs` | Dispatch path for the 4 proposal-queue tools (`proposal.submit/list/approve/reject`). |
 | `live_semantic_search(vec_store)` | Builds the live `SemanticSearch` backed by `default_embedder()` + the supplied `VectorStore`. |
 | `input_schema(name)` | Returns the JSON Schema `inputSchema` for a named tool; used by `tools/list`. |
 

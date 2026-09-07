@@ -2466,7 +2466,7 @@ mod tests {
 
     #[test]
     fn unified_tools_list_with_domains_returns_29_tools() {
-        // tools/list with domains=Some → 11 estate + 6 memory + 7 knowledge + 4 proposal = 28 tools.
+        // tools/list with domains=Some → 11 estate + 7 memory + 7 knowledge + 4 proposal = 29 tools.
         // (SemanticSearch absent: no matching dim-guard in default McpContext)
         let store = fixture();
         let req = json!({ "jsonrpc": "2.0", "id": 203, "method": "tools/list", "params": {} });
