@@ -4,9 +4,11 @@ import { useState, useEffect, useRef } from 'react'
    wicked-estate — THE FOUNDATION · the system of record.
 
    ROLE · estate is the foundation plane of the wicked platform: code graph +
-   memory + knowledge in ONE binary (23 MCP tools across 3 domains). It is the
-   record every agent reads before it acts and writes after it's done — the
-   capability plane reads and writes it through its contract, never around it.
+   memory + knowledge in ONE binary (29 MCP tools across 3 domains). It is the
+   record every plane (crew · garden · studio) reads before it acts and writes
+   after it's done — every plane reads and writes it through its contract, never
+   around it. Steering doctrine projects into it as citable rules; governed
+   knowledge lands through it (agents propose, humans promote).
 
    CONCEPT · "read the record." One durable body you read like a geologist
    reads a drill core: five bands (code graph · injected edges · memory ·
@@ -14,8 +16,8 @@ import { useState, useEffect, useRef } from 'react'
    every fact stamped with confidence + provenance. The signature motion is a
    DRILL that reads the core — sections demo themselves before you touch them.
 
-   Grounded to v0.15.0 (crates.io): 102 wired tree-sitter languages
-   (languages-as-data — 113 in the manifest), ExtraEdge TOML rules injecting
+   Grounded to 0.16.6 (crates.io): 103 wired tree-sitter languages
+   (languages-as-data — 114 in the manifest), ExtraEdge TOML rules injecting
    the edges grep never sees (event→consumer, command→agent), every edge
    {confidence, provenance, resolved_by}, memory scopes with subtree
    recall/erase, hybrid RRF retrieval with a public parity bench
@@ -70,8 +72,8 @@ function useIsMobile(maxWidth = 760) {
 type StratumId = 'graph' | 'injected' | 'memory' | 'knowledge' | 'provenance'
 
 const STRATA: { id: StratumId; no: string; name: string; depth: string; tools: string; copy: string }[] = [
-  { id: 'graph',      no: '01', name: 'Code graph',     depth: '−0.0m',  tools: '102 languages',
-    copy: 'Symbols, calls, imports, heritage — tree-sitter extraction across 102 wired languages. Languages are data, not code: a new one is a manifest row + a query file, zero core change.' },
+  { id: 'graph',      no: '01', name: 'Code graph',     depth: '−0.0m',  tools: '103 languages',
+    copy: 'Symbols, calls, imports, heritage — tree-sitter extraction across 103 wired languages. Languages are data, not code: a new one is a manifest row + a query file, zero core change.' },
   { id: 'injected',   no: '02', name: 'Injected edges', depth: '−4.2m',  tools: 'ExtraEdge TOML',
     copy: 'The relationships grep never sees — event→consumer, command→agent — injected by plain-TOML ExtraEdge rules. A new domain edge type is a rule block, zero Rust; blast-radius crosses the event-bus boundary.' },
   { id: 'memory',     no: '03', name: 'Memory',         depth: '−7.8m',  tools: 'scoped',
@@ -138,14 +140,16 @@ function Hero() {
       <div className="max-w-6xl mx-auto w-full grid lg:grid-cols-[1.08fr_0.92fr] gap-14 items-center">
         {/* Left — the thesis, committed in sentence one */}
         <div className="text-left">
-          <span className="kicker">wicked-estate · the foundation · v0.15.0 · crates.io</span>
+          <span className="kicker">wicked-estate · the foundation · 0.16.6 · crates.io</span>
           <h1 className="mt-4 font-display font-black text-ink text-[clamp(2.1rem,10vw,3rem)] sm:text-6xl lg:text-[4.2rem] leading-[0.92]" style={{ fontStretch: '112%' }}>
             Code graph.<br />Memory.<br />Knowledge.<br />
             <span style={{ color: 'var(--accent)' }}>One binary.</span>
           </h1>
           <p className="mt-5 text-lg text-muted leading-relaxed max-w-xl font-sans">
-            The <span className="text-ink">system of record</span> for your codebase — one local-first MCP server,{' '}
-            <span className="text-ink">24 tools across 3 domains</span>. What breaks if you change it, the decision
+            The <span className="text-ink">system of record</span> for your codebase — the record every plane
+            (crew · garden · studio) <span className="text-ink">queries before it acts and writes after</span>. One
+            local-first MCP server,{' '}
+            <span className="text-ink">29 tools across 3 domains</span>. What breaks if you change it, the decision
             behind it, the doc that explains it — including the{' '}
             <span className="text-ink">injected edges grep never sees</span>. Every fact stamped with confidence and
             provenance: a heuristic is never handed to an agent as a fact.
@@ -208,8 +212,10 @@ function Hero() {
   )
 }
 
-// ── 2 · THE AGENT'S IDE — estate is the IDE the agent edits code in ─────────────
-// The centerpiece. The agent right-clicks a symbol → a context menu of real IDE
+// ── 2 · THE RECORD EVERY PLANE READS — shown as the IDE an agent works it in ────
+// The centerpiece. estate is the record crew/garden/studio query before they act
+// and write after; here it's shown the way an agent works it.
+// The agent right-clicks a symbol → a context menu of real IDE
 // commands → one runs → the result lands in a tabbed dock (Code intelligence ·
 // Memory · Knowledge). Clicking a class shows all its details at once. The dock
 // proves the record gives an agent EVERYTHING — code intelligence (callers /
@@ -646,7 +652,7 @@ function AgentIDE() {
       <Section id="query" solid>
         <div className="max-w-6xl mx-auto w-full" ref={rootRef}>
           <div className="mb-4 w-full text-left">
-            <span className="kicker">The agent&apos;s IDE</span>
+            <span className="kicker">The record every plane reads</span>
             <h2 className="mt-1.5 font-display text-2xl font-black text-ink leading-[0.98]">
               The agent doesn&apos;t grep. It edits in an IDE that <span style={{ color: 'var(--accent)' }}>knows your whole system.</span>
             </h2>
@@ -726,11 +732,13 @@ function AgentIDE() {
       <div className="max-w-6xl mx-auto w-full" ref={rootRef}>
         {/* section header — using an IDE that actually knows your system */}
         <div className="mb-3 w-full text-left max-w-3xl">
-          <span className="kicker">The agent&apos;s IDE</span>
+          <span className="kicker">The record every plane reads</span>
           <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink leading-[0.98]">
             The agent doesn&apos;t grep. It edits in an IDE that <span style={{ color: 'var(--accent)' }}>knows your whole system.</span>
           </h2>
           <p className="mt-1.5 text-sm text-muted font-sans leading-tight">
+            The same record crew, garden, and studio query before they act and write after — here shown the way an agent
+            works it.{' '}
             Right-click a symbol for every caller, click a class for its whole picture, trace the requirement it satisfies,
             recall the <span className="text-ink">decision</span> behind it, pull the <span className="text-ink">wiki</span>,
             see the blast radius — what an agent can do while editing when it reads the record instead of grepping.
@@ -941,7 +949,8 @@ function FiveStrata() {
 }
 
 // ── 3b · THE FULL TOOLFACE — every tool + skill an agent can call ───────────────
-// Grounded to v0.15.1 (adds rules.recall). Tools: crates/wicked-estate-mcp/src/lib.rs (dispatch +
+// Grounded to 0.16.6 (adds memory.list + the proposal queue on the memory domain — agents propose, humans promote).
+// Tools: crates/wicked-estate-mcp/src/lib.rs (dispatch +
 // memory/knowledge schemas), README.md §MCP. Skills: crates/*/skills/*/SKILL.md.
 type ToolDomain = { no: string; name: string; note: string; tools: { name: string; purpose: string }[] }
 
@@ -959,18 +968,23 @@ const TOOL_DOMAINS: ToolDomain[] = [
       { name: 'ContextBundle',  purpose: 'Scoped, prompt-ready context pack for a symbol.' },
       { name: 'FetchContent',   purpose: 'The stored source for a symbol or file.' },
       { name: 'RulesInventory', purpose: 'Rules engines (ODM · DMN · Drools · CLIPS) + the code that calls them.' },
-      { name: 'rules.recall',   purpose: 'Which architecture-wiki conformance rules apply — faceted, severity-ordered, every hit citing its source doc.' },
+      { name: 'rules.recall',   purpose: 'Which steering rules apply — the seven doctrine types projected as citable rules; faceted, severity-ordered, every hit citing its source. The acceptance gate reads this governed record.' },
     ],
   },
   {
-    no: '02', name: 'Memory', note: '6 memory tools',
+    no: '02', name: 'Memory', note: '7 memory + 4 proposal tools',
     tools: [
       { name: 'memory.capture',  purpose: 'Capture a memory node (episodic / semantic / procedural / archival).' },
       { name: 'memory.recall',   purpose: 'Token-budgeted recall relevant to a query in scope.' },
+      { name: 'memory.list',     purpose: 'The complete faceted set — for management, browse, and promote.' },
       { name: 'memory.learn',    purpose: 'Store a semantic fact and link it to code symbols atomically.' },
       { name: 'memory.reflect',  purpose: 'Distil episodic memories in a scope into semantic facts.' },
       { name: 'memory.coverage', purpose: 'Node counts by tier and kind.' },
       { name: 'memory.erase',    purpose: 'Hard-delete every memory under a scope prefix — erasability as governance.' },
+      { name: 'proposal.submit',  purpose: 'The governance queue: an agent proposes a memory capture or a steering-rule change — never a direct write to the record.' },
+      { name: 'proposal.list',    purpose: 'The review queue — every proposal awaiting a human decision.' },
+      { name: 'proposal.approve', purpose: 'A human promotes a proposal into the record.' },
+      { name: 'proposal.reject',  purpose: 'A human declines it — the record stays clean.' },
     ],
   },
   {
@@ -1004,11 +1018,13 @@ const CAPABILITIES: string[] = [
   'Every edge: confidence + provenance + resolved_by',
   'Tiered resolution · Parsed & SCIP 1.0 → Tags 0.3 · highest wins',
   'Rules engines in the same graph · ODM · DMN · Drools',
-  'Requirement ↔ code traceability',
+  'Steering doctrine · seven rule types projected as citable rules · the acceptance gate reads the governed record',
+  'Governed knowledge · agents propose · humans promote',
+  'Requirements graph · requirement ↔ code, the forward view of the app as source of truth',
   'Typed annotations · survive re-index',
   'Memory scopes · subtree recall + erase',
   'SQLite by default · Postgres for teams',
-  '102 wired languages — a manifest row + a query file',
+  '103 wired languages — a manifest row + a query file',
   '+ SemanticSearch, an 11th graph tool, when an embedder is wired',
 ]
 
@@ -1032,17 +1048,18 @@ function FullToolface() {
         <div className="mb-2.5 w-full text-left">
           <span className="kicker">Everything an agent can call</span>
           <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink leading-[0.98]">
-            23 MCP tools. 6 agent skills. <span style={{ color: 'var(--accent)' }}>One binary.</span>
+            29 MCP tools. 6 agent skills. <span style={{ color: 'var(--accent)' }}>One binary.</span>
           </h2>
           <p className="mt-1.5 text-sm text-muted font-sans leading-tight max-w-3xl">
-            Not one “search” tool bolted onto a repo — the full MCP surface an agent can call, plus the skills
+            Not one “search” tool bolted onto a repo — the full MCP surface every plane calls, plus the skills
             (playbooks) that drive them. The graph domain is the code graph; memory and knowledge are where the{' '}
             wicked-brain consolidation landed — one store, one identity, a{' '}{/* historical */}
-            <span className="text-ink">lossless import contract</span> so nothing tuned was dropped. Grounded to v0.15.0.
+            <span className="text-ink">lossless import contract</span> so nothing tuned was dropped; and the proposal
+            queue — the memory domain's governance surface — is where <span className="text-ink">agents propose and humans promote</span>. Grounded to 0.16.6.
           </p>
         </div>
 
-        {/* the three MCP domains — every tool name + one-line purpose */}
+        {/* the three domains — graph, memory (incl. the proposal/governance queue), knowledge */}
         <div className="grid lg:grid-cols-3 gap-2.5">
           {TOOL_DOMAINS.map(d => (
             <div key={d.name} className="rock-panel p-0">
@@ -1110,7 +1127,7 @@ function FullToolface() {
 }
 
 // ── 3c · THE REST OF THE BINARY — the shipped long tail the MCP surface rides on ─
-// Grounded to v0.15.0: the CLI usage block + match arms (crates/wicked-estate/src/main.rs
+// Grounded to 0.16.6: the CLI usage block + match arms (crates/wicked-estate/src/main.rs
 // — 33 subcommands), PLUGIN.md (runtime grammars), ADR-004 + `tfstate`/`drift`
 // (infrastructure estate), crates/wicked-estate-mcp/src/resources.rs (skill:// resources),
 // docs/language-coverage-matrix.md (IaC dialects wired as languages).
@@ -1366,7 +1383,7 @@ function Storage() {
             one <span className="font-mono text-sm font-semibold">open_store(spec)</span> factory: no caller changes,
             no re-index, and the Postgres backend passes the same store-conformance suite in CI. The{' '}
             <span className="font-mono text-sm font-semibold">WICKED_RUNTIME=team</span> profile seam retargets it
-            with one environment variable. The MCP server — the 24 tools — is{' '}
+            with one environment variable. The MCP server — the 29 tools — is{' '}
             <span className="text-ink">SQLite-only today</span>: under the team profile it fails loud at startup
             instead of silently falling back to local; Postgres for the MCP surface is the named follow-up.
             Local-first is a feature, not a ceiling.
@@ -1499,7 +1516,7 @@ export function GetStarted() {
         </div>
 
         <p className="mt-4 font-mono text-[0.6rem] text-faint tracking-wide">
-          Use an absolute DB path — clients launch from an unpredictable working directory. Same 24 tools in Cursor, Codex, and Antigravity.
+          Use an absolute DB path — clients launch from an unpredictable working directory. Same 29 tools in Claude Code, Antigravity, Codex, OpenCode, and Pi.
         </p>
 
         <div className="mt-9 flex flex-col sm:flex-row gap-3">
