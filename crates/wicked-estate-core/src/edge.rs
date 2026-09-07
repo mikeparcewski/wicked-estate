@@ -111,6 +111,12 @@ pub enum EdgeKind {
     Produces,
     /// A code call site triggers a RuleSet (code → rules engine boundary).
     InvokedBy,
+    // ── Requirements / traceability ──────────────────────────────────────────
+    /// A requirement is satisfied by a code symbol. Direction: `source` = requirement (the
+    /// dependent), `target` = code (the dependency) — so `BlastRadius(code)` (dependents of the
+    /// code) surfaces the requirements a change to it may break, exactly the traceability query.
+    /// Mirrors the `Governs` rule→code precedent for the requirements overlay.
+    SatisfiedBy,
     Other(String),
 }
 
@@ -242,5 +248,31 @@ mod tests {
             "confidence":0.5,"provenance":"heuristic","resolved_by":"test"}"#;
         let back: Edge = serde_json::from_str(legacy).unwrap();
         assert_eq!(back.evidence_count, 0);
+    }
+
+    #[test]
+    fn satisfied_by_kind_serdes_snake_case_and_round_trips() {
+        // The requirements-graph traceability edge (requirement→code). The store persists EdgeKind
+        // via serde_json, so it must round-trip as itself — a distinct native variant, NOT coerced
+        // to `Other("satisfied_by")` — so `traverse`/blast-radius can filter on it by kind.
+        let edge = Edge::new(
+            SymbolId("req".into()),
+            SymbolId("code".into()),
+            EdgeKind::SatisfiedBy,
+            ResolutionTier::Heuristic,
+            "domain-graph",
+        );
+        let json = serde_json::to_string(&edge).unwrap();
+        assert!(
+            json.contains(r#""kind":"satisfied_by""#),
+            "SatisfiedBy serializes snake_case, got {json}"
+        );
+        let back: Edge = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, EdgeKind::SatisfiedBy);
+        assert_ne!(
+            back.kind,
+            EdgeKind::Other("satisfied_by".into()),
+            "SatisfiedBy is a first-class variant, not the Other escape hatch"
+        );
     }
 }
