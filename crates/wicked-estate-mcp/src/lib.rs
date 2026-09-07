@@ -770,7 +770,7 @@ pub fn handle_request_unified_ro(
                 "SemanticSearch" => handle_tools_call_ctx(&id, &params, store, ctx, semantic),
 
                 "memory.capture" | "memory.recall" | "memory.reflect" | "memory.erase"
-                | "memory.learn" | "memory.coverage" => match domains {
+                | "memory.learn" | "memory.coverage" | "memory.list" => match domains {
                     Some(d) => tools::memory::dispatch(tool, &id, &params, store, d.memory),
                     None => err_response(&id, -32601, "memory domain not available"),
                 },
@@ -941,6 +941,7 @@ fn memory_tool_schemas() -> Vec<Value> {
         json!({"name":"memory.erase","description":"Hard-delete all memories whose scope starts with the given prefix.","inputSchema":{"type":"object","required":["scope_prefix"],"properties":{"scope_prefix":{"type":"string"}}}}),
         json!({"name":"memory.learn","description":"Store a semantic fact and link it to code symbols atomically.","inputSchema":{"type":"object","required":["content","symbols"],"properties":{"content":{"description":"one specific, non-obvious fact","type":"string"},"scope":{"description":"e.g. project:my-repo","type":"string"},"symbols":{"description":"exact code symbol name(s) this fact concerns","items":{"type":"string"},"type":"array"},"tier":{"description":"semantic=fact/decision, procedural=how-it-works","enum":["semantic","procedural"],"type":"string"}}}}),
         json!({"name":"memory.coverage","description":"Coverage: memory node counts (total, by tier, by kind), optionally scoped.","inputSchema":{"type":"object","properties":{"scope_prefix":{"type":"string"}}}}),
+        json!({"name":"memory.list","description":"Management browse: list EVERY memory in scope, each item carrying memory_id, scope, content, tier, facets (axis→value), and created_at. Unlike memory.recall this is NOT relevance-ranked, token-budgeted, or facet-intent-filtered — it returns the complete in-scope set (faceted memories included), for an operator surface that browses and filters by facet. Use memory.recall for an agent's intent-scoped, query-relevant slice; use memory.list to inventory or manage the store.","inputSchema":{"type":"object","properties":{"scope_prefix":{"type":"string","description":"Optional subtree filter: memories whose scope equals this prefix or DESCENDS from it (same predicate as memory.erase/memory.coverage). \"\", omitted, or null = every memory."}}}}),
     ]
 }
 
@@ -2305,6 +2306,12 @@ mod tests {
                 by_kind: Default::default(),
             })
         }
+        fn list(
+            &self,
+            _: Option<&str>,
+        ) -> Result<Vec<wicked_estate_memory_core::MemoryListItem>, anyhow::Error> {
+            Ok(vec![])
+        }
         fn submit_proposal(
             &mut self,
             _: &str,
@@ -2458,8 +2465,8 @@ mod tests {
     }
 
     #[test]
-    fn unified_tools_list_with_domains_returns_28_tools() {
-        // tools/list with domains=Some → 11 estate + 6 memory + 7 knowledge + 4 proposal = 28 tools.
+    fn unified_tools_list_with_domains_returns_29_tools() {
+        // tools/list with domains=Some → 11 estate + 7 memory + 7 knowledge + 4 proposal = 29 tools.
         // (SemanticSearch absent: no matching dim-guard in default McpContext)
         let store = fixture();
         let req = json!({ "jsonrpc": "2.0", "id": 203, "method": "tools/list", "params": {} });
@@ -2482,8 +2489,8 @@ mod tests {
             .expect("tools must be array");
         assert_eq!(
             tools.len(),
-            28,
-            "11 estate + 6 memory + 7 knowledge + 4 proposal = 28; got {}",
+            29,
+            "11 estate + 7 memory + 7 knowledge + 4 proposal = 29; got {}",
             tools.len()
         );
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -2545,7 +2552,7 @@ mod tests {
 
     /// One representative read/query tool from every surface that must survive `--readonly`.
     /// `proposal.submit` (a safe-write) and `proposal.list` (a pure read) survive too.
-    const READ_TOOLS_KEPT: [&str; 15] = [
+    const READ_TOOLS_KEPT: [&str; 16] = [
         "SearchEntity",
         "RetrieveEntity",
         "TraverseGraph",
@@ -2556,6 +2563,7 @@ mod tests {
         "rules.recall",
         "memory.recall",
         "memory.coverage",
+        "memory.list",
         "knowledge.recall",
         "knowledge.recall_about_code",
         "knowledge.coverage",
@@ -2611,12 +2619,12 @@ mod tests {
                 "--readonly tools/list must KEEP read tool {r}; got {ro_names:?}"
             );
         }
-        // 11 estate + (6-4 write) memory + (7-4 write) knowledge + (4-2 write) proposal
-        // = 11 + 2 + 3 + 2 = 18.
+        // 11 estate + (7-4 write) memory + (7-4 write) knowledge + (4-2 write) proposal
+        // = 11 + 3 + 3 + 2 = 19.
         assert_eq!(
             ro_names.len(),
-            18,
-            "read-only domain surface is 11 estate + 2 memory reads + 3 knowledge reads + 2 proposal (submit+list) = 18; got {}",
+            19,
+            "read-only domain surface is 11 estate + 3 memory reads (recall/coverage/list) + 3 knowledge reads + 2 proposal (submit+list) = 19; got {}",
             ro_names.len()
         );
 

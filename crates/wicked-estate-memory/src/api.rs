@@ -1,12 +1,12 @@
-//! `MemoryApi` (6-method, DES-001 §4.2) implemented for [`crate::MemoryEngine`].
-//! Uses `wicked_estate_memory_core` types directly.
+//! `MemoryApi` (7-method, DES-001 §4.2 + DES-MEM-FACETED-001) implemented for
+//! [`crate::MemoryEngine`]. Uses `wicked_estate_memory_core` types directly.
 
 use crate::{MemoryEngine, RecallMode, ScopeFilter};
 use std::collections::{BTreeMap, HashMap};
 use wicked_estate_core::SymbolId;
 use wicked_estate_memory_core::{
-    ApproveOutcome, CaptureRequest, Facets, MemKind, Memory, MemoryApi, MemoryCoverage, Proposal,
-    ProposalState, RecallQuery, RecalledItem, ReflectResult, Scope, Tier,
+    ApproveOutcome, CaptureRequest, Facets, MemKind, Memory, MemoryApi, MemoryCoverage,
+    MemoryListItem, Proposal, ProposalState, RecallQuery, RecalledItem, ReflectResult, Scope, Tier,
 };
 use wicked_estate_overlay::XEdge;
 
@@ -186,6 +186,31 @@ impl MemoryApi for MemoryEngine {
         })
     }
 
+    fn list(&self, scope_prefix: Option<&str>) -> Result<Vec<MemoryListItem>, anyhow::Error> {
+        // Same node-kind enumeration + subtree filter as `coverage`/`erase` (NOT the query-driven
+        // recall retrieval, which returns nothing for an empty query) so the operator surface sees
+        // the COMPLETE in-scope set. Facets ride through verbatim — no intent exclusion.
+        let mems = self.all_memories()?;
+        let filtered: Vec<Memory> = match scope_prefix {
+            Some(prefix) => mems
+                .into_iter()
+                .filter(|m| m.scope.path_in_prefix(prefix))
+                .collect(),
+            None => mems,
+        };
+        Ok(filtered
+            .into_iter()
+            .map(|m| MemoryListItem {
+                id: m.id,
+                content: m.content,
+                tier: m.tier.as_str().to_string(),
+                scope: m.scope.as_path().to_string(),
+                facets: m.facets,
+                created_at: m.created_at,
+            })
+            .collect())
+    }
+
     // ── Proposal queue (DES-MEM-FACETED-001 §5.0) — forwards to the inherent engine methods ──
 
     fn submit_proposal(
@@ -302,5 +327,73 @@ mod tests {
         let mut eng = MemoryEngine::in_memory().unwrap();
         let r = MemoryApi::capture(&mut eng, make_req("x", "bogus", "episodic", "", 1));
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn api_list_returns_complete_set_with_facets_where_recall_excludes() {
+        // The management browse (DES-MEM-FACETED-001): `list` returns the COMPLETE in-scope set,
+        // faceted memories included, each carrying its facets — precisely the two things
+        // `recall` cannot do for an operator (empty query retrieves nothing; empty intent
+        // excludes faceted memories). This test is the falsifier for both.
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        MemoryApi::capture(
+            &mut eng,
+            make_req(
+                "plain note",
+                "fact",
+                "semantic",
+                "org:acme/agent:claude",
+                100,
+            ),
+        )
+        .unwrap();
+        let facets = {
+            let mut m = BTreeMap::new();
+            m.insert("cli".to_string(), "codex".to_string());
+            Facets::try_from(m).unwrap()
+        };
+        let mut req = make_req(
+            "codex quirk",
+            "fact",
+            "semantic",
+            "org:acme/agent:codex",
+            100,
+        );
+        req.facets = facets;
+        MemoryApi::capture(&mut eng, req).unwrap();
+
+        // list(None): the whole store, faceted + unfaceted, with per-item facets.
+        let all = MemoryApi::list(&eng, None).unwrap();
+        assert_eq!(all.len(), 2, "list returns the complete set: {all:?}");
+        let codex = all
+            .iter()
+            .find(|i| i.content.contains("codex quirk"))
+            .expect("faceted memory must appear in list");
+        assert_eq!(
+            codex.facets.get("cli"),
+            Some("codex"),
+            "list must carry per-item facets: {codex:?}"
+        );
+        let plain = all
+            .iter()
+            .find(|i| i.content.contains("plain note"))
+            .unwrap();
+        assert_eq!(plain.facets, Facets::default(), "unfaceted ⇒ empty facets");
+
+        // scope_prefix restricts to the subtree; a disjoint prefix matches nothing.
+        let only_codex = MemoryApi::list(&eng, Some("org:acme/agent:codex")).unwrap();
+        assert_eq!(only_codex.len(), 1);
+        assert!(only_codex[0].content.contains("codex quirk"));
+        assert!(MemoryApi::list(&eng, Some("org:other")).unwrap().is_empty());
+
+        // The gap `list` closes: empty-intent recall EXCLUDES the faceted memory even with a
+        // matching query and whole-store visibility.
+        let mut rq = RecallQuery::new("codex quirk", "", 500, 101);
+        rq.scope_prefix = Some(String::new());
+        let recalled = MemoryApi::recall(&eng, &rq).unwrap();
+        assert!(
+            !recalled.iter().any(|r| r.content.contains("codex quirk")),
+            "empty-intent recall excludes faceted memories — the reason list exists: {recalled:?}"
+        );
     }
 }

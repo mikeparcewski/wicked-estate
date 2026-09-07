@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+- **`memory.list` — the management browse (DES-MEM-FACETED-001).** A true list primitive:
+  `MemoryApi::list(scope_prefix)` + the `memory.list` MCP tool return the COMPLETE in-scope
+  memory set, each item carrying its `facets`, NOT relevance-ranked, token-budgeted, or
+  facet-intent-filtered. This closes the gap that made the operator memory surface un-inventoried:
+  `memory.recall` retrieves nothing for an empty query and excludes faceted memories under empty
+  intent, so it can never list the store. `list` is a pure read (kept under `--readonly`,
+  uncached); tool count 28 → 29 (7 memory tools). `recall` is unchanged — it stays the agent's
+  intent-scoped slice; `list` is the operator's complete inventory.
+
 ## [0.16.3] — 2026-09-06
 
 ### Added

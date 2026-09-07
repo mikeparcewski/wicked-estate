@@ -12,7 +12,7 @@ Extension recipes: [`docs/add-lang.md`](./docs/add-lang.md) (new language),
 Upgrading from 0.14.x: [`docs/MIGRATION-0.15.md`](./docs/MIGRATION-0.15.md).
 This pointer block is the machine-readable anchor agents grep for.
 
-Rust MCP server: **code graph + memory + knowledge** in a single binary, 24 tools across 3 domains.
+Rust MCP server: **code graph + memory + knowledge** in a single binary, 29 tools across 3 domains.
 Turns a repo into a queryable graph (symbols, calls, imports, edges injected by event bus and commands)
 and pairs it with a semantic memory store and a wiki/document knowledge store — all local-first,
 zero infra, SQLite-backed. Built **fleet-parallel behind a fixed trait spine**. Live design:
@@ -237,10 +237,10 @@ crates/
   wicked-estate-retrieve/     RetrievalTool: graph+FTS5+RRF hybrid retrieval (11 estate tools)
   wicked-estate-overlay/      XedgeStore: injected cross-repo edges (event→consumer, cmd→agent)
   wicked-estate-memory-core/  Memory types + MemoryApi trait + fuzzy/salience/scope logic
-  wicked-estate-memory/       MemoryEngine + consolidation + cross-recall (6 memory tools)
+  wicked-estate-memory/       MemoryEngine + consolidation + cross-recall (7 memory tools)
   wicked-estate-memory-api/   Re-export shim for memory public API
   wicked-estate-knowledge/    KnowledgeEngine: wiki ingest/recall/relate/coverage (7 knowledge tools)
-  wicked-estate-mcp/          MCP server — 24 tools across 3 domains; main.rs 4-store init
+  wicked-estate-mcp/          MCP server — 29 tools across 3 domains; main.rs 4-store init
   wicked-estate/              `wicked-estate` watcher binary (emit events on file change)
   wicked-estate-bench/        agent-eval benchmark harness — the truth oracle
 ```

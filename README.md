@@ -154,12 +154,13 @@ wicked-estate watch ./my-project --db graph.db
 - **Rules engine layer** — IBM ODM BAL/IRL, Camunda DMN, CLIPS/Jess, Drools GDST, Excel/XLSX decision tables, Salesforce Flow, AWS Config Rules, Azure Policy extracted into the same graph as code. NodeKind::{Rule,RuleSet,Condition,Action,Fact} + EdgeKind::{Governs,Evaluates,Produces,InvokedBy}. `RulesInventory` MCP tool lists engines + calling code. `RulesBridgeResolver` connects code call sites to real RuleSet nodes.
 - **Hybrid + semantic retrieval** — graph + FTS5 core, embeddings an optional sidecar fused via RRF.
   Three embedder tiers: lexical (default) → model2vec (static, light) → fastembed (ONNX/BGE).
-- **MCP server** — exposes **24 tools across 3 domains** to agents over JSON-RPC, following a
-  strict runtime-behavior contract (cap output, report staleness, never error-early, label
-  confidence): 11 estate tools (SearchEntity, RetrieveEntity, TraverseGraph, BlastRadius,
-  FetchContent, ContextBundle, RulesInventory, rules.recall, RankHotspots, Communities, Lineage),
-  6 memory tools (memory.capture/recall/reflect/erase/learn/coverage), and 7 knowledge tools
-  (knowledge.ingest/write/relate/recall/coverage/relate_code/recall_about_code).
+- **MCP server** — exposes **29 tools across 3 domains** (estate, memory, knowledge) to agents over
+  JSON-RPC, following a strict runtime-behavior contract (cap output, report staleness, never
+  error-early, label confidence): 11 estate tools (SearchEntity, RetrieveEntity, TraverseGraph,
+  BlastRadius, FetchContent, ContextBundle, RulesInventory, rules.recall, RankHotspots, Communities,
+  Lineage), 7 memory tools (memory.capture/recall/reflect/erase/learn/coverage/list) plus the
+  memory-domain proposal queue's 4 tools (proposal.submit/list/approve/reject), and 7 knowledge
+  tools (knowledge.ingest/write/relate/recall/coverage/relate_code/recall_about_code).
 - **Requirement ↔ code linking** — annotate nodes with `description` / `requirement` /
   `requirement_validated` and query by requirement.
 - **Git-aware + incremental** — per-file git sha, incremental re-index, watch mode, a read-only
@@ -196,11 +197,12 @@ swappable impl behind a seam:
 
 ## MCP
 
-`wicked-estate-mcp` is a stdio MCP server (JSON-RPC 2.0) exposing **24 tools across 3 domains**:
+`wicked-estate-mcp` is a stdio MCP server (JSON-RPC 2.0) exposing **29 tools across 3 domains**:
 
 - **Estate** (11 tools): `SearchEntity`, `RetrieveEntity`, `TraverseGraph`, `BlastRadius`, `FetchContent`, `ContextBundle`, `RulesInventory`, `rules.recall`, `RankHotspots`, `Communities`, `Lineage`
-- **Memory** (6 tools): `memory.capture`, `memory.recall`, `memory.reflect`, `memory.erase`, `memory.learn`, `memory.coverage`
+- **Memory** (7 tools): `memory.capture`, `memory.recall`, `memory.reflect`, `memory.erase`, `memory.learn`, `memory.coverage`, `memory.list`
 - **Knowledge** (7 tools): `knowledge.ingest`, `knowledge.write`, `knowledge.relate`, `knowledge.recall`, `knowledge.coverage`, `knowledge.relate_code`, `knowledge.recall_about_code`
+- **Proposal queue** (4 tools, memory-domain): `proposal.submit`, `proposal.list`, `proposal.approve`, `proposal.reject`
 
 Register it in **Claude Code, Cursor, Antigravity, or Codex**. Per-client config: **[docs/mcp-integration.md](./docs/mcp-integration.md)**.
 

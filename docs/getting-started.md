@@ -21,7 +21,7 @@ Produces two binaries:
 | Binary | Purpose |
 |--------|---------|
 | `target/release/wicked-estate` | CLI — index, query, blast-radius, rank, source, stats, scip, semantic, watch, subscribe, compact, tfstate, drift, cross-graph, clusters, context, annotate, nodes, resolve, export, plugins list, … |
-| `target/release/wicked-estate-mcp` | MCP stdio server — 24 tools (11 estate + 6 memory + 7 knowledge) for LLM agents |
+| `target/release/wicked-estate-mcp` | MCP stdio server — 29 tools (11 estate + 7 memory + 7 knowledge + 4 proposal) for LLM agents |
 
 Zero runtime deps. Single static binary on each target.
 
@@ -319,7 +319,7 @@ wicked-estate-mcp --db /path/to/graph.db
 # or: WICKED_ESTATE_DB=:memory: wicked-estate-mcp
 ```
 
-### The 24 tools (11 estate + 6 memory + 7 knowledge)
+### The 29 tools (11 estate + 7 memory + 7 knowledge + 4 proposal)
 
 #### Estate tools
 
@@ -347,6 +347,7 @@ wicked-estate-mcp --db /path/to/graph.db
 | `memory.erase` | Delete a memory by ID. |
 | `memory.learn` | Reinforce or update an existing memory from new evidence. |
 | `memory.coverage` | Report memory store statistics (count by tier, staleness). |
+| `memory.list` | Management browse: list every memory in scope with its facets (not relevance-ranked or intent-filtered — the complete set). |
 
 #### Knowledge tools (absorbed from wicked-knowledge)
 
@@ -359,6 +360,15 @@ wicked-estate-mcp --db /path/to/graph.db
 | `knowledge.coverage` | Report knowledge store statistics (node count, relation types). |
 | `knowledge.relate_code` | Link a knowledge node to a code symbol in the estate graph. |
 | `knowledge.recall_about_code` | Recall knowledge nodes related to a given code symbol. |
+
+#### Proposal-queue tools (memory-domain, DES-MEM-FACETED-001)
+
+| Tool | Description |
+|------|-------------|
+| `proposal.submit` | Submit a governed-knowledge proposal (memory capture or policy). A SAFE write — lands `Pending`, inert until approved (allowed under `--readonly`). |
+| `proposal.list` | List queued proposals, optionally by kind_type / state. |
+| `proposal.approve` | Approve a proposal → promote it to the active store (memory) or hand it off (policy). |
+| `proposal.reject` | Reject a proposal. |
 
 All tools honor the agent-behavior rules from `docs/agent-behavior-rules.md`:
 

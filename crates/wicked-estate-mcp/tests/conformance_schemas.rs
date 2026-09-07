@@ -1,17 +1,18 @@
 //! Conformance tests: L2.1–L2.5 — v0.13.0+ tools/list vs frozen golden schemas.
 //!
 //! Covers:
-//! - L2.1: All 28 tool names from golden files are present in the live tools/list response.
+//! - L2.1: All 29 tool names from golden files are present in the live tools/list response.
 //! - L2.2: Estate tool required fields and property keys match their golden schemas.
 //! - L2.3: Memory tool required fields and property keys match their golden schemas.
 //! - L2.4: Knowledge tool required fields and property keys match their golden schemas.
 //! - L2.5: Proposal tool required fields and property keys match their golden schemas.
-//! - L2.4 (count): tools/list with all domains returns exactly 11 estate + 6 memory + 7 knowledge
+//! - L2.4 (count): tools/list with all domains returns exactly 11 estate + 7 memory + 7 knowledge
 //!   + 4 proposal.
 //!
 //! (Counts raised from 23/10 when arch-R2 added `rules.recall` as the 11th estate tool; the
 //! knowledge.recall / knowledge.coverage goldens gained `scope_prefix` with arch-R5; the 4
-//! `proposal.*` tools (DES-MEM-FACETED-001 §5.0) were added ADDITIVELY, raising the total 24 → 28
+//! `proposal.*` tools (DES-MEM-FACETED-001 §5.0) were added ADDITIVELY, raising the total 24 → 28;
+//! `memory.list` (the management browse, DES-MEM-FACETED-001) added the 7th memory tool → 29
 //! — all re-frozen in the golden files.)
 //!
 //! Golden files live at `tests/conformance/schemas/<ToolName>.json`.
@@ -53,6 +54,7 @@ const MEMORY_TOOLS: &[&str] = &[
     "memory.erase",
     "memory.learn",
     "memory.coverage",
+    "memory.list",
 ];
 
 const KNOWLEDGE_TOOLS: &[&str] = &[
@@ -383,13 +385,13 @@ fn conf_proposal_tool_required_fields_match_goldens() {
 }
 
 /// L2.4 (count) — tools/list with all domain handles active must return exactly
-/// 11 estate tools, 6 memory tools, 7 knowledge tools, and 4 proposal tools.
+/// 11 estate tools, 7 memory tools, 7 knowledge tools, and 4 proposal tools.
 ///
 /// Gated out when `fastembed` or `model2vec` features are active because those features
 /// can enable SemanticSearch in the list, changing the total count.
 #[test]
 #[cfg(not(any(feature = "fastembed", feature = "model2vec")))]
-fn conf_tool_count_11_estate_6_memory_7_knowledge_4_proposal() {
+fn conf_tool_count_11_estate_7_memory_7_knowledge_4_proposal() {
     let live = tools_list_map_with_domains();
 
     let estate_count = ESTATE_TOOLS
@@ -420,8 +422,8 @@ fn conf_tool_count_11_estate_6_memory_7_knowledge_4_proposal() {
         "expected 11 estate tools, found {estate_count}\nall live tools: {all_live:?}"
     );
     assert_eq!(
-        memory_count, 6,
-        "expected 6 memory tools, found {memory_count}\nall live tools: {all_live:?}"
+        memory_count, 7,
+        "expected 7 memory tools, found {memory_count}\nall live tools: {all_live:?}"
     );
     assert_eq!(
         knowledge_count, 7,
@@ -433,8 +435,8 @@ fn conf_tool_count_11_estate_6_memory_7_knowledge_4_proposal() {
     );
     assert_eq!(
         live.len(),
-        28,
-        "expected 28 total tools (11 estate + 6 memory + 7 knowledge + 4 proposal), found {}\nall live tools: {all_live:?}",
+        29,
+        "expected 29 total tools (11 estate + 7 memory + 7 knowledge + 4 proposal), found {}\nall live tools: {all_live:?}",
         live.len()
     );
 }
