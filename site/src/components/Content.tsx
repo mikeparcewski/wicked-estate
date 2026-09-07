@@ -972,7 +972,7 @@ const TOOL_DOMAINS: ToolDomain[] = [
     ],
   },
   {
-    no: '02', name: 'Memory', note: '7 memory tools',
+    no: '02', name: 'Memory', note: '7 memory + 4 proposal tools',
     tools: [
       { name: 'memory.capture',  purpose: 'Capture a memory node (episodic / semantic / procedural / archival).' },
       { name: 'memory.recall',   purpose: 'Token-budgeted recall relevant to a query in scope.' },
@@ -981,6 +981,10 @@ const TOOL_DOMAINS: ToolDomain[] = [
       { name: 'memory.reflect',  purpose: 'Distil episodic memories in a scope into semantic facts.' },
       { name: 'memory.coverage', purpose: 'Node counts by tier and kind.' },
       { name: 'memory.erase',    purpose: 'Hard-delete every memory under a scope prefix — erasability as governance.' },
+      { name: 'proposal.submit',  purpose: 'The governance queue: an agent proposes a memory capture or a steering-rule change — never a direct write to the record.' },
+      { name: 'proposal.list',    purpose: 'The review queue — every proposal awaiting a human decision.' },
+      { name: 'proposal.approve', purpose: 'A human promotes a proposal into the record.' },
+      { name: 'proposal.reject',  purpose: 'A human declines it — the record stays clean.' },
     ],
   },
   {
@@ -993,15 +997,6 @@ const TOOL_DOMAINS: ToolDomain[] = [
       { name: 'knowledge.relate_code',       purpose: 'Link a knowledge node to code symbols in the graph.' },
       { name: 'knowledge.recall_about_code', purpose: 'Recall knowledge linked to given code symbols.' },
       { name: 'knowledge.coverage',          purpose: 'Node counts per class.' },
-    ],
-  },
-  {
-    no: '04', name: 'Proposal', note: '4 governance tools',
-    tools: [
-      { name: 'proposal.submit',  purpose: 'An agent proposes a memory capture or a steering-rule change — never a direct write to the governed record.' },
-      { name: 'proposal.list',    purpose: 'The review queue — every proposal awaiting a human decision.' },
-      { name: 'proposal.approve', purpose: 'A human promotes a proposal into the record.' },
-      { name: 'proposal.reject',  purpose: 'A human declines it — the record stays clean.' },
     ],
   },
 ]
@@ -1064,8 +1059,8 @@ function FullToolface() {
           </p>
         </div>
 
-        {/* the three domains — graph, memory, knowledge — the proposal queue rides the memory domain */}
-        <div className="grid lg:grid-cols-2 gap-2.5">
+        {/* the three domains — graph, memory (incl. the proposal/governance queue), knowledge */}
+        <div className="grid lg:grid-cols-3 gap-2.5">
           {TOOL_DOMAINS.map(d => (
             <div key={d.name} className="rock-panel p-0">
               <div className="flex items-center gap-2.5 px-4 py-1.5 border-b border-hairline-strong">
