@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.16.5] — 2026-09-07
+
+### Fixed
+- **`proposal.submit` fail-fast on the built-in kinds' key enums (#166).** A memory
+  proposal's `tier` and a policy proposal's `severity` are now validated AT SUBMIT
+  (present-but-invalid, string or not, ⇒ `-32602` naming the valid set), not only
+  at approval. A capture worker (LLM) reliably drifts on the exact tokens — `tier`
+  `"durable"`/`"long_term"`, `severity` `"warning"`/`"high"`/`"medium"` — and because
+  submit was inert the bad value only failed later at approval, after the worker was
+  gone, silently losing the learning. Failing at submit lets the worker see the error
+  and retry with a valid value at capture time. Absent/null uses the downstream default.
+
 ## [0.16.4] — 2026-09-07
 
 ### Added
