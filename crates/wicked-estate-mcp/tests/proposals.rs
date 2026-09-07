@@ -225,3 +225,110 @@ fn proposal_submit_rejects_invalid_kind_type_and_missing_payload() {
         "missing payload must fail loud; got {resp}"
     );
 }
+
+#[test]
+fn proposal_submit_validates_memory_tier_and_policy_severity_enums() {
+    let store = SqliteStore::in_memory().unwrap();
+    let mut mem = MemoryEngine::in_memory().unwrap();
+    let mut know = KnowledgeEngine::in_memory().unwrap();
+
+    // A drifted memory tier ("long_term"/"durable") fails loud at SUBMIT (so the worker corrects
+    // now, not silently at approval).
+    for bad in ["long_term", "durable"] {
+        let resp = call(
+            &store,
+            &mut mem,
+            &mut know,
+            "proposal.submit",
+            json!({ "kind_type": "memory", "payload": { "content": "x", "tier": bad } }),
+            false,
+        );
+        assert_eq!(
+            resp["error"]["code"], -32602,
+            "tier {bad:?} must be rejected; got {resp}"
+        );
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("semantic"),
+            "the error must name the valid tiers; got {resp}"
+        );
+    }
+
+    // A drifted policy severity ("high"/"medium"/"warning") fails loud at SUBMIT.
+    for bad in ["high", "medium", "warning"] {
+        let resp = call(
+            &store,
+            &mut mem,
+            &mut know,
+            "proposal.submit",
+            json!({ "kind_type": "policy:security", "payload": { "rule": "x", "severity": bad } }),
+            false,
+        );
+        assert_eq!(
+            resp["error"]["code"], -32602,
+            "severity {bad:?} must be rejected; got {resp}"
+        );
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("info|warn|error|critical"),
+            "the error must name the valid severities; got {resp}"
+        );
+    }
+
+    // A PRESENT but NON-string tier/severity is invalid too (it must not bypass the guard and
+    // fail only at approval).
+    let resp = call(
+        &store,
+        &mut mem,
+        &mut know,
+        "proposal.submit",
+        json!({ "kind_type": "memory", "payload": { "content": "x", "tier": 3 } }),
+        false,
+    );
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "a non-string tier must be rejected; got {resp}"
+    );
+    let resp = call(
+        &store,
+        &mut mem,
+        &mut know,
+        "proposal.submit",
+        json!({ "kind_type": "policy:security", "payload": { "rule": "x", "severity": ["error"] } }),
+        false,
+    );
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "a non-string severity must be rejected; got {resp}"
+    );
+
+    // Valid values still submit fine.
+    let ok = call(
+        &store,
+        &mut mem,
+        &mut know,
+        "proposal.submit",
+        json!({ "kind_type": "memory", "payload": { "content": "x", "tier": "semantic" } }),
+        false,
+    );
+    assert!(
+        ok.get("error").is_none(),
+        "a valid tier must submit; got {ok}"
+    );
+    let ok = call(
+        &store,
+        &mut mem,
+        &mut know,
+        "proposal.submit",
+        json!({ "kind_type": "policy:security", "payload": { "rule": "x", "severity": "error" } }),
+        false,
+    );
+    assert!(
+        ok.get("error").is_none(),
+        "a valid severity must submit; got {ok}"
+    );
+}

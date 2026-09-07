@@ -123,6 +123,50 @@ fn dispatch_submit(
         Ok(f) => f,
         Err(e) => return e,
     };
+    // Fail-fast on the two built-in kinds' key enums (memory `tier` / policy `severity`). Without
+    // this a worker's drifted value ("long_term", "durable" for tier; "high", "medium", "warning"
+    // for severity) passes the INERT submit and only fails much LATER at approval — long after the
+    // worker that could have corrected it is gone, so the learning is silently lost. Validating at
+    // submit returns a -32602 the worker sees and RETRIES against, at capture time (LLM enum drift is
+    // otherwise unfixable — an accept-and-normalize map over an unbounded synonym space is a guess).
+    // Only a PRESENT value is checked (absent uses the downstream default). This deliberately couples
+    // the generic queue to its two built-in kinds — memory + policy are what the queue exists for.
+    // A PRESENT value must be a string in the enum; absent/null uses the downstream default. A
+    // present NON-string (number/object/bool) is invalid too — it would otherwise bypass this
+    // check and fail only at approval, the very gap this guard closes.
+    if kind_type == "memory" {
+        const TIERS: [&str; 5] = ["working", "episodic", "semantic", "procedural", "archival"];
+        match payload.get("tier") {
+            None | Some(Value::Null) => {}
+            Some(Value::String(t)) if TIERS.contains(&t.as_str()) => {}
+            Some(other) => {
+                return json_rpc_error(
+                    id,
+                    -32602,
+                    &format!(
+                        "invalid memory tier {other}: use EXACTLY one of working|episodic|semantic|procedural|archival \
+                         (a repo fact/decision is \"semantic\"; a how-to/convention is \"procedural\")"
+                    ),
+                );
+            }
+        }
+    } else if kind_type.starts_with("policy:") {
+        const SEVERITIES: [&str; 4] = ["info", "warn", "error", "critical"];
+        match payload.get("severity") {
+            None | Some(Value::Null) => {}
+            Some(Value::String(s)) if SEVERITIES.contains(&s.as_str()) => {}
+            Some(other) => {
+                return json_rpc_error(
+                    id,
+                    -32602,
+                    &format!(
+                        "invalid policy severity {other}: use EXACTLY one of info|warn|error|critical \
+                         (the middle band is \"warn\", not \"warning\"/\"medium\"/\"high\")"
+                    ),
+                );
+            }
+        }
+    }
     // Provenance is stamped by the SERVER from env — never read from args.
     let provenance = stamp_provenance();
     match memory.submit_proposal(&kind_type, payload, facets, provenance, now) {
