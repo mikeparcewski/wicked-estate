@@ -150,7 +150,31 @@ fn dispatch_submit(
                 );
             }
         }
-    } else if kind_type.starts_with("policy:") {
+    } else if kind_type == "policy" || kind_type.starts_with("policy:") {
+        // A policy MUST name a valid steering type as `policy:<type>` — a bare "policy" or an
+        // invented suffix ("policy:data-integrity", "policy:safety") passes the generic kind_type
+        // shape check but has no steering_type to land against, so it fails only at approval. Reject
+        // it here so the worker retries with a real type. (These 7 mirror STEERING_TYPES.)
+        const STEERING_TYPES: [&str; 7] = [
+            "architecture",
+            "development",
+            "security",
+            "testing",
+            "operations",
+            "compliance",
+            "design-ux",
+        ];
+        let steering_type = kind_type.strip_prefix("policy:").unwrap_or("");
+        if !STEERING_TYPES.contains(&steering_type) {
+            return json_rpc_error(
+                id,
+                -32602,
+                &format!(
+                    "invalid policy kind_type {kind_type:?}: use policy:<type> where <type> is EXACTLY one of \
+                     architecture|development|security|testing|operations|compliance|design-ux"
+                ),
+            );
+        }
         const SEVERITIES: [&str; 4] = ["info", "warn", "error", "critical"];
         match payload.get("severity") {
             None | Some(Value::Null) => {}
