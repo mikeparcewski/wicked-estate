@@ -270,7 +270,41 @@ fn proposal_submit_validates_memory_tier_and_policy_severity_enums() {
             resp["error"]["code"], -32602,
             "severity {bad:?} must be rejected; got {resp}"
         );
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("info|warn|error|critical"),
+            "the error must name the valid severities; got {resp}"
+        );
     }
+
+    // A PRESENT but NON-string tier/severity is invalid too (it must not bypass the guard and
+    // fail only at approval).
+    let resp = call(
+        &store,
+        &mut mem,
+        &mut know,
+        "proposal.submit",
+        json!({ "kind_type": "memory", "payload": { "content": "x", "tier": 3 } }),
+        false,
+    );
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "a non-string tier must be rejected; got {resp}"
+    );
+    let resp = call(
+        &store,
+        &mut mem,
+        &mut know,
+        "proposal.submit",
+        json!({ "kind_type": "policy:security", "payload": { "rule": "x", "severity": ["error"] } }),
+        false,
+    );
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "a non-string severity must be rejected; got {resp}"
+    );
 
     // Valid values still submit fine.
     let ok = call(

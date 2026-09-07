@@ -131,29 +131,36 @@ fn dispatch_submit(
     // otherwise unfixable — an accept-and-normalize map over an unbounded synonym space is a guess).
     // Only a PRESENT value is checked (absent uses the downstream default). This deliberately couples
     // the generic queue to its two built-in kinds — memory + policy are what the queue exists for.
+    // A PRESENT value must be a string in the enum; absent/null uses the downstream default. A
+    // present NON-string (number/object/bool) is invalid too — it would otherwise bypass this
+    // check and fail only at approval, the very gap this guard closes.
     if kind_type == "memory" {
-        if let Some(t) = payload.get("tier").and_then(|v| v.as_str()) {
-            const TIERS: [&str; 5] = ["working", "episodic", "semantic", "procedural", "archival"];
-            if !TIERS.contains(&t) {
+        const TIERS: [&str; 5] = ["working", "episodic", "semantic", "procedural", "archival"];
+        match payload.get("tier") {
+            None | Some(Value::Null) => {}
+            Some(Value::String(t)) if TIERS.contains(&t.as_str()) => {}
+            Some(other) => {
                 return json_rpc_error(
                     id,
                     -32602,
                     &format!(
-                        "invalid memory tier {t:?}: use EXACTLY one of working|episodic|semantic|procedural|archival \
+                        "invalid memory tier {other}: use EXACTLY one of working|episodic|semantic|procedural|archival \
                          (a repo fact/decision is \"semantic\"; a how-to/convention is \"procedural\")"
                     ),
                 );
             }
         }
     } else if kind_type.starts_with("policy:") {
-        if let Some(s) = payload.get("severity").and_then(|v| v.as_str()) {
-            const SEVERITIES: [&str; 4] = ["info", "warn", "error", "critical"];
-            if !SEVERITIES.contains(&s) {
+        const SEVERITIES: [&str; 4] = ["info", "warn", "error", "critical"];
+        match payload.get("severity") {
+            None | Some(Value::Null) => {}
+            Some(Value::String(s)) if SEVERITIES.contains(&s.as_str()) => {}
+            Some(other) => {
                 return json_rpc_error(
                     id,
                     -32602,
                     &format!(
-                        "invalid policy severity {s:?}: use EXACTLY one of info|warn|error|critical \
+                        "invalid policy severity {other}: use EXACTLY one of info|warn|error|critical \
                          (the middle band is \"warn\", not \"warning\"/\"medium\"/\"high\")"
                     ),
                 );
