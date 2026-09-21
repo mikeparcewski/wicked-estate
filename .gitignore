@@ -43,3 +43,4 @@ Thumbs.db
 site/*.db.mem*
 site/*.db.knowledge*
 .product/
+node_modules/
