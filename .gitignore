@@ -42,3 +42,5 @@ Thumbs.db
 # checked-in file; this scoping keeps the two from ever interacting.)
 site/*.db.mem*
 site/*.db.knowledge*
+.product/
+node_modules/
