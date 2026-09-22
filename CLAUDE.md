@@ -1,4 +1,4 @@
-# wicked-estate — unified MCP foundation (v0.15.0)
+# wicked-estate — unified MCP foundation (v0.16.7)
 
 ## Contributor docs
 
