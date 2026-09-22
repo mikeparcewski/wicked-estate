@@ -27,8 +27,8 @@ Postgres. Solo laptop to enterprise CI fleet, same engine, same queries.
 [![CI](https://github.com/mikeparcewski/wicked-estate/actions/workflows/ci.yml/badge.svg)](https://github.com/mikeparcewski/wicked-estate/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-> **Status:** v0.15.0 — `cargo test --workspace` is **1,370 tests passing, 0 failed, 1 ignored** (one marker-ignored doc-test; measured 2026-08-29 on main);
-> 0 build warnings; clippy `-D warnings` clean. Greenfield, pre-1.0. **Published to crates.io.** See
+> **Status:** v0.16.7 (published to crates.io 2026-09-07) — 0 build warnings and clippy `-D warnings` clean, both CI-enforced on every push.
+> The last full count recorded here was **1,370 tests passing, 0 failed, 1 ignored** (one marker-ignored doc-test) from `cargo test --workspace` measured 2026-08-29 on 0.15.0; it has not been re-counted since, so read it as a floor, not a current number. Greenfield, pre-1.0. See
 > [FEATURES.md](./FEATURES.md) for the exhaustive, honestly-tagged capability inventory
 > (✅ built / 🟡 partial / 🟦 designed-not-built).
 
