@@ -302,10 +302,10 @@ impl MemoryEngine {
         Ok(ids.len())
     }
 
-    /// Hard-delete the ONE memory whose id or `SymbolId` string equals `id` (graph + FTS + vector
-    /// + sidecar), leaving every other memory in its scope alone. Memory-kind guarded like
-    /// [`Self::erase`]: a code/infra node id never matches. Returns the erased memory's
-    /// `SymbolId`, or `None` when no memory has that id.
+    /// Hard-delete the ONE memory whose id or `SymbolId` string equals `id`, from the graph, FTS,
+    /// vector and sidecar index, leaving every other memory in its scope alone. Memory-kind
+    /// guarded like [`Self::erase`]: a code/infra node id never matches. Returns the erased
+    /// memory's `SymbolId`, or `None` when no memory has that id.
     pub fn erase_id(&mut self, id: &str) -> wicked_estate_core::Result<Option<SymbolId>> {
         let Some(victim) = self
             .all_memories()?
