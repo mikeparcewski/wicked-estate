@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+- **`memory.erase` by `id` erases exactly one memory (studio#206).** `memory.erase` now takes
+  exactly one of `id` or `scope_prefix`. With `id` it hard-deletes only that memory (graph,
+  FTS, vector, sidecar and its xedges) and returns `deleted_count` 1, or 0 when no memory has
+  that id. Both id forms are accepted: the one `memory.list` reports and the `SymbolId` form
+  `memory.capture` and `memory.recall` report. Before this the only erase was by scope prefix,
+  so deleting one row erased every memory that shared its scope. Passing both keys, or neither,
+  is invalid params. Existing `scope_prefix` callers are unchanged. New `MemoryApi::erase_id`.
+
+### Fixed
+- **Indexing skips governed-run worktrees (crew#620).** Both index walks now skip
+  `wicked-worktrees/` (the in-checkout run worktrees, `<repo>/wicked-worktrees/<run>/`), and the
+  hidden-inclusive extra-rule walk also skips `.wicked/worktrees/`. A worktree holds a full repo
+  copy plus the run's unreviewed output, so indexing it duplicated every symbol and served a
+  cancelled run's changes back as the codebase. The two walks now share one skip list.
+
 ## [0.16.7] — 2026-09-07
 
 ### Added

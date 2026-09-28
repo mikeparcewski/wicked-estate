@@ -1,16 +1,18 @@
 {
   "captured_from": "wicked-memory-mcp-0.12.1",
-  "description": "Right-to-erasure: hard-delete all memories under a scope prefix.",
+  "description": "Right-to-erasure: hard-delete one memory by id, or all memories under a scope prefix (exactly one of the two).",
   "inputSchema": {
     "properties": {
+      "id": {
+        "type": "string"
+      },
       "scope_prefix": {
         "type": "string"
       }
     },
-    "required": [
-      "scope_prefix"
-    ],
+    "required": [],
     "type": "object"
   },
-  "name": "memory.erase"
+  "name": "memory.erase",
+  "refrozen": "studio#206: `id` added (single-item erase); `scope_prefix` no longer required, exactly one of the two is enforced by the tool"
 }

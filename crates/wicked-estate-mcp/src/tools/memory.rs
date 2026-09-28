@@ -240,11 +240,25 @@ fn dispatch_erase(
     memory: &mut dyn MemoryApi<Error = anyhow::Error>,
     now: i64,
 ) -> Value {
-    let scope_prefix = match args.get("scope_prefix").and_then(|v| v.as_str()) {
-        Some(s) if !s.is_empty() => s,
-        _ => return json_rpc_error(id, -32602, "scope_prefix (non-empty) required for erase"),
+    // Exactly one target: `id` erases one memory, `scope_prefix` erases a subtree. Both or neither
+    // is invalid params, never a guess: an erase that picks the wider reading loses data.
+    let nonempty = |key: &str| {
+        args.get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
     };
-    match memory.erase(scope_prefix, now) {
+    let result = match (nonempty("id"), nonempty("scope_prefix")) {
+        (Some(mem_id), None) => memory.erase_id(mem_id, now),
+        (None, Some(prefix)) => memory.erase(prefix, now),
+        _ => {
+            return json_rpc_error(
+                id,
+                -32602,
+                "erase needs exactly one of `id` or `scope_prefix` (non-empty string)",
+            );
+        }
+    };
+    match result {
         Ok(n) => mcp_result(id, json!({"deleted_count": n})),
         Err(e) => json_rpc_error(id, -32603, &e.to_string()),
     }

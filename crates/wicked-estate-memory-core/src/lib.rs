@@ -464,6 +464,12 @@ pub trait MemoryApi {
     /// Implementations MUST also remove associated xedge entries (DES-001 §4.4).
     fn erase(&mut self, scope_prefix: &str, now: i64) -> Result<u32, Self::Error>;
 
+    /// Hard-delete exactly one memory: the one whose id (as `list` returns it) or `SymbolId` (as
+    /// `recall` returns it) equals `id`. Returns 1 when it was erased, 0 when no memory has that id
+    /// (idempotent). Other memories in the same scope are untouched. Implementations MUST also
+    /// remove the memory's xedge entries, as `erase` does.
+    fn erase_id(&mut self, id: &str, now: i64) -> Result<u32, Self::Error>;
+
     /// Store a T2/T3-tier fact and create about-edges to `symbols` atomically.
     /// `symbol_epochs` is pre-fetched by the dispatch layer (DES-001 §4.5 ADR-ESTATE-010).
     fn learn(

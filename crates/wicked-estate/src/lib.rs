@@ -348,6 +348,40 @@ impl SymbolIndex for InMemoryIndex {
     }
 }
 
+/// Entry names both walks skip: vendor/build dirs, wicked's own generated measurement artifacts
+/// (see [`collect_source_files`]) and governed-run worktrees.
+///
+/// `wicked-worktrees` is where a run's worktree lives inside the repo checkout
+/// (`<repo>/wicked-worktrees/<run>/`). It holds a full copy of the repo plus the run's unreviewed
+/// creator output (a cancelled run's retained worktree is kept on disk). Indexing it duplicates
+/// every symbol and serves that output back as if it were the codebase (crew#620).
+const SKIPPED_ENTRY_NAMES: &[&str] = &[
+    "target",
+    "node_modules",
+    ".wicked-estate",
+    ".reference",
+    "dist",
+    "build",
+    "coverage-report.json",
+    "requirements_graph.json",
+    "wicked-worktrees",
+];
+
+/// True when a walk must not descend into (or collect) `e`: a [`SKIPPED_ENTRY_NAMES`] entry, or the
+/// hidden-dir worktree root `.wicked/worktrees` (only the hidden-inclusive extra-rule walk reaches
+/// it; the source walk already skips hidden dirs).
+fn is_skipped_entry(e: &ignore::DirEntry) -> bool {
+    let name = e.file_name().to_string_lossy();
+    if SKIPPED_ENTRY_NAMES.contains(&name.as_ref()) {
+        return true;
+    }
+    name == "worktrees"
+        && e.path()
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|p| p == ".wicked")
+}
+
 /// Collect source files under `root` using the `ignore` crate — gitignore-aware, skips hidden +
 /// VCS/build/vendor dirs (so indexing a real repo doesn't drown in `target/`, `node_modules/`, etc.).
 fn collect_source_files(root: &Path) -> Vec<PathBuf> {
@@ -365,19 +399,7 @@ fn collect_source_files(root: &Path) -> Vec<PathBuf> {
         // NEXT coverage run is pinned below 1.0 forever: the measurement corrupts the measurand.
         // Governed worktree runs escape the trap only because their CWD is under `.wicked/` (hidden);
         // this skip closes the hole for every other launch path regardless of where the file lands.
-        .filter_entry(|e| {
-            !matches!(
-                e.file_name().to_string_lossy().as_ref(),
-                "target"
-                    | "node_modules"
-                    | ".wicked-estate"
-                    | ".reference"
-                    | "dist"
-                    | "build"
-                    | "coverage-report.json"
-                    | "requirements_graph.json"
-            )
-        })
+        .filter_entry(|e| !is_skipped_entry(e))
         .build()
         .filter_map(std::result::Result::ok)
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
@@ -462,17 +484,8 @@ fn collect_extra_rule_files(root: &Path, rules: &ExtraEdgeExtractor) -> Vec<Path
         .filter_entry(|e| {
             !matches!(
                 e.file_name().to_string_lossy().as_ref(),
-                ".git"
-                    | ".wicked-estate-extractors"
-                    | "target"
-                    | "node_modules"
-                    | ".wicked-estate"
-                    | ".reference"
-                    | "dist"
-                    | "build"
-                    | "coverage-report.json"
-                    | "requirements_graph.json"
-            )
+                ".git" | ".wicked-estate-extractors"
+            ) && !is_skipped_entry(e)
         })
         .build()
         .filter_map(std::result::Result::ok)
@@ -2673,6 +2686,51 @@ mod tests {
                 .iter()
                 .any(|n| n == "coverage-report.json" || n == "requirements_graph.json"),
             "wicked measurement artifacts must be skipped (self-pollution); got {names:?}"
+        );
+    }
+
+    /// crew#620. A run worktree lives inside the repo checkout (`<repo>/wicked-worktrees/<run>/`)
+    /// and holds a full repo copy plus the run's unreviewed output. Neither walk may collect it,
+    /// nor the hidden `.wicked/worktrees/` root the extra-rule walk reaches. Drop the entries from
+    /// the skip helper and the worktree copies reappear, failing the asserts.
+    #[test]
+    fn walks_skip_run_worktrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("main.rs"), "pub fn foo() {}\n").unwrap();
+        for wt in ["wicked-worktrees/run-1", ".wicked/worktrees/run-2"] {
+            let d = root.join(wt).join(".claude-plugin");
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(root.join(wt).join("main.rs"), "pub fn foo() {}\n").unwrap();
+            std::fs::write(d.join("archetypes.json"), "{}\n").unwrap();
+        }
+        std::fs::create_dir_all(root.join(".claude-plugin")).unwrap();
+        std::fs::write(root.join(".claude-plugin/archetypes.json"), "{}\n").unwrap();
+
+        let rels = |paths: Vec<PathBuf>| -> Vec<String> {
+            let mut v: Vec<String> = paths.iter().map(|p| rel(root, p)).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            rels(collect_source_files(root)),
+            vec!["main.rs".to_string()]
+        );
+
+        let rules = ExtraEdgeExtractor::from_toml_named(&[(
+            "r.toml".to_string(),
+            r#"
+[[rule]]
+name = "archetypes"
+file_glob = "**/archetypes.json"
+pattern = "(?P<k>\\{)"
+"#
+            .to_string(),
+        )])
+        .expect("rule parses");
+        assert_eq!(
+            rels(collect_extra_rule_files(root, &rules)),
+            vec![".claude-plugin/archetypes.json".to_string()]
         );
     }
 

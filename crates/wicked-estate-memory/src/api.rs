@@ -144,6 +144,19 @@ impl MemoryApi for MemoryEngine {
         Ok(count as u32)
     }
 
+    fn erase_id(&mut self, id: &str, _now: i64) -> Result<u32, anyhow::Error> {
+        if id.is_empty() {
+            anyhow::bail!("erase: id must not be empty");
+        }
+        let Some(sym) = MemoryEngine::erase_id(self, id)? else {
+            return Ok(0);
+        };
+        if let Some(xedge) = self.xedge.as_ref() {
+            xedge.delete_by_src_id("memory", &sym.0)?;
+        }
+        Ok(1)
+    }
+
     fn learn(
         &mut self,
         fact: &str,
