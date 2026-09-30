@@ -1084,3 +1084,81 @@ fn nested_and_child_parameters_are_not_absorbed_by_the_owner() {
     let _ = fs::remove_dir_all(class_root);
     let _ = fs::remove_dir_all(root);
 }
+
+/// Adjudication of a codex-cli review finding on the C5a barrier: a NAMED definition nested
+/// inside an anonymous callback is still its own owner, so its `return` must survive.
+#[test]
+fn a_named_definition_nested_in_a_callback_keeps_its_return() {
+    let source = r#"
+        export function outerFn(items: any, value: string): void {
+            items.map(() => {
+                function inner(): string {
+                    return value;
+                }
+                return inner;
+            });
+        }
+    "#;
+    let (root, store) = indexed_typescript("nested_def_in_callback", source);
+    let pairs = semantic_flow_name_pairs(&store);
+    assert!(
+        pairs.contains(&("value".to_string(), "inner.return".to_string())),
+        "a named function nested in a callback must keep its own return flow; got {pairs:?}"
+    );
+    assert!(
+        !pairs.contains(&("value".to_string(), "outerFn.return".to_string())),
+        "…and it must not leak to the enclosing definition; got {pairs:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Adjudication of a codex-cli review finding on the C2 gate: when the store holds NO `flows_to`
+/// edge yet, an edit that makes an existing callee flow-capable must still force its callers —
+/// their call-site facts are transient, so re-extracting only the callee can never mint the
+/// argument→parameter edge, and the incremental graph would diverge from a full index.
+#[test]
+fn an_edit_that_first_makes_a_callee_flow_capable_forces_its_callers() {
+    // Nothing here produces a flows_to edge: the callee's only parameter is destructured, and
+    // no function returns a bare identifier.
+    let callee_v1 = r#"
+        export function send({ trace }: any): void {}
+    "#;
+    let caller = r#"
+        import { send } from './callee';
+        export function drive(secret: string): void {
+            send(secret);
+        }
+    "#;
+    let (root, mut store) = indexed_typescript_files(
+        "flow_capable_transition",
+        &[("callee.ts", callee_v1), ("caller.ts", caller)],
+    );
+    assert!(
+        semantic_flow_edges(&store).is_empty(),
+        "precondition: the store must hold no flows_to edge yet"
+    );
+
+    // The callee's parameter becomes capturable. The caller is untouched on disk.
+    fs::write(
+        root.join("callee.ts"),
+        "\n        export function send(trace: string): void {}\n    ",
+    )
+    .unwrap();
+    wicked_estate::index_path(&mut store, &root).expect("incremental re-index");
+
+    let incremental = semantic_flow_name_pairs(&store);
+
+    let mut fresh = SqliteStore::in_memory().expect("open sqlite");
+    wicked_estate::index_path(&mut fresh, &root).expect("full index of the same tree");
+    let full = semantic_flow_name_pairs(&fresh);
+
+    assert_eq!(
+        incremental, full,
+        "incremental and full value-flow graphs of one tree must agree"
+    );
+    assert!(
+        full.contains(&("secret".to_string(), "trace".to_string())),
+        "the newly capturable parameter must receive the caller's argument; got {full:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}

@@ -298,6 +298,12 @@
 (public_field_definition
   value: (arrow_function body: (statement_block) @flow.barrier.owned))
 
+; A named callable's body is an OWNED barrier even when the callable is declared inside a
+; callback: `items.map(() => { function inner() { return v; } })` returns `v` from `inner`, and
+; `inner` is a definition record, so the barrier must stop at it rather than at the arrow.
+(function_declaration body: (statement_block) @flow.barrier.owned)
+(method_definition body: (statement_block) @flow.barrier.owned)
+
 ; Generic call value-flow facts. These are carried as UnresolvedRef hints and only become
 ; edges when the existing Calls resolver binds the exact site.
 (call_expression

@@ -1265,48 +1265,39 @@ pub fn index_path_as(
     // (wicked-estate#207 review, C2). Pinned by
     // `incremental_leaf_edit_forces_only_direct_callers`; the one-hop invariant it protects is
     // pinned by `incremental_callee_only_edit_preserves_call_derived_value_flow`.
+    //
+    // NOT gated on the store already holding a `flows_to` edge, deliberately: the edit that makes
+    // a callee flow-capable for the FIRST time (a destructured parameter becoming a plain one)
+    // is exactly when a store holds none, and skipping it strands the caller's transient
+    // call-site facts — the same full-vs-incremental divergence this change exists to remove.
+    // Pinned by `an_edit_that_first_makes_a_callee_flow_capable_forces_its_callers`.
     let mut forced_value_flow_callers: HashSet<String> = HashSet::new();
     if !force_full && !changed_seed.is_empty() {
-        // One pass over the edge table: does this store hold ANY value-flow edge, and which
-        // edges are Calls? A repo with no value lineage (every non-TypeScript repo today) stops
-        // here without touching the node table.
-        let flows_to = edge_tags::other(edge_tags::FLOWS_TO);
-        let mut has_value_flow = false;
-        let mut call_edges: Vec<Edge> = Vec::new();
-        for edge in store.all_edges()? {
-            if edge.kind == EdgeKind::Calls {
-                call_edges.push(edge);
-            } else if edge.kind == flows_to {
-                has_value_flow = true;
+        let mut changed_symbols: HashSet<SymbolId> = HashSet::new();
+        let mut file_by_symbol: HashMap<SymbolId, String> = HashMap::new();
+        for node in store.all_nodes()? {
+            if changed_seed.contains(&node.location.file) {
+                changed_symbols.insert(node.symbol.clone());
             }
+            file_by_symbol.insert(node.symbol, node.location.file);
         }
-        if has_value_flow {
-            let mut changed_symbols: HashSet<SymbolId> = HashSet::new();
-            let mut file_by_symbol: HashMap<SymbolId, String> = HashMap::new();
-            for node in store.all_nodes()? {
-                if changed_seed.contains(&node.location.file) {
-                    changed_symbols.insert(node.symbol.clone());
-                }
-                file_by_symbol.insert(node.symbol, node.location.file);
+        for edge in store.all_edges()? {
+            // Only a DIRECT caller of a changed callee holds call-site facts about it.
+            if edge.kind != EdgeKind::Calls || !changed_symbols.contains(&edge.target) {
+                continue;
             }
-            for edge in &call_edges {
-                // Only a DIRECT caller of a changed callee holds call-site facts about it.
-                if !changed_symbols.contains(&edge.target) {
-                    continue;
-                }
-                for candidate in [
-                    edge.location.as_ref().map(|loc| loc.file.as_str()),
-                    file_by_symbol.get(&edge.source).map(String::as_str),
-                ]
-                .into_iter()
-                .flatten()
+            for candidate in [
+                edge.location.as_ref().map(|loc| loc.file.as_str()),
+                file_by_symbol.get(&edge.source).map(String::as_str),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if !changed_seed.contains(candidate)
+                    && current_rel_paths.contains(candidate)
+                    && work_by_rel.contains_key(candidate)
                 {
-                    if !changed_seed.contains(candidate)
-                        && current_rel_paths.contains(candidate)
-                        && work_by_rel.contains_key(candidate)
-                    {
-                        forced_value_flow_callers.insert(candidate.to_string());
-                    }
+                    forced_value_flow_callers.insert(candidate.to_string());
                 }
             }
         }

@@ -4,6 +4,11 @@
   "inputSchema": {
     "additionalProperties": false,
     "properties": {
+      "include_values": {
+        "default": false,
+        "description": "Include synthetic value-flow slots (a callable's locals, parameters and return values, minted for semantic value lineage). Excluded by default: they carry bare source identifiers and displace real symbols for common names. Default false.",
+        "type": "boolean"
+      },
       "limit": {
         "default": 20,
         "description": "Maximum number of results (default 20, max 100).",
