@@ -368,17 +368,33 @@ impl RetrievalTool for SearchEntity {
 
         let raw_limit = opt_u64(request, "limit").unwrap_or(20).min(100) as usize;
 
+        // Synthetic value-flow slots (a callable's locals, parameters, returns) carry ordinary
+        // kinds and BARE source identifiers, so for a common name they displace every real symbol:
+        // on a real repo `{"name":"id"}` returned 20 of 20 synthetic locals where it had returned
+        // `SHORT_ID`, `short7`, … (wicked-estate#207 review, C4). They are excluded unless the
+        // caller opts in — the same opt-in shape `Lineage`'s `relation` uses — and the store is
+        // over-fetched so the exclusion costs recall, not matches.
+        let include_values = request
+            .get("include_values")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let fetch_limit = if include_values {
+            raw_limit
+        } else {
+            raw_limit.saturating_mul(10).clamp(raw_limit, 500)
+        };
+
         // Two-pass: exact first, then substring (deduplicated).
         let exact_query = SymbolQuery {
             exact_name: Some(name_val.clone()),
-            limit: Some(raw_limit),
+            limit: Some(fetch_limit),
             ..Default::default()
         };
         let mut exact_hits = store.find_symbols(&exact_query)?;
 
         let text_query = SymbolQuery {
             text: Some(name_val.clone()),
-            limit: Some(raw_limit),
+            limit: Some(fetch_limit),
             ..Default::default()
         };
         let text_hits = store.find_symbols(&text_query)?;
@@ -391,9 +407,22 @@ impl RetrievalTool for SearchEntity {
                 exact_hits.push(n);
             }
         }
-        exact_hits.truncate(raw_limit);
 
         let mut diag = Vec::new();
+        if !include_values {
+            let before = exact_hits.len();
+            exact_hits.retain(|n| !n.is_value_flow_node());
+            let hidden = before - exact_hits.len();
+            if hidden > 0 {
+                // R7/R5: never silently drop matches — name the count and the way back in.
+                diag.push(format!(
+                    "SearchEntity: hid {hidden} synthetic value-flow slot(s) matching \'{name_val}\'; \
+                     pass include_values=true to search them (they are queried by SymbolId, e.g. \
+                     Lineage relation=flows_to)"
+                ));
+            }
+        }
+        exact_hits.truncate(raw_limit);
 
         if exact_hits.is_empty() {
             diag.push(format!(
@@ -2868,6 +2897,62 @@ mod tests {
 
         let matches = res.content["matches"].as_array().unwrap();
         assert_eq!(matches.len(), 3, "all three *_fn symbols match substring");
+    }
+
+    /// C4 (wicked-estate#207 review): a real repo has hundreds of synthetic locals named `id`;
+    /// unfiltered they took all 20 result slots and the real `SHORT_ID` / `short7` symbols were
+    /// gone. `limit` must bound REAL matches, so the store is over-fetched and the slots filtered.
+    #[test]
+    fn search_entity_hides_value_flow_slots_unless_opted_in() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        let mut nodes = vec![make_node(
+            "real::SHORT_ID",
+            "SHORT_ID",
+            NodeKind::Constant,
+            "src/id.rs",
+            1,
+        )];
+        // Enough slots to fill the default limit on their own.
+        for i in 0..40 {
+            nodes.push(
+                make_node(
+                    &format!("value::owner{i}().:local:id:"),
+                    "id",
+                    NodeKind::Variable,
+                    "src/takes.ts",
+                    i,
+                )
+                .with_value_role("Local"),
+            );
+        }
+        store.upsert_nodes(&nodes).unwrap();
+        store.commit_batch().unwrap();
+
+        let res = SearchEntity.invoke(&store, &json!({"name": "id"})).unwrap();
+        let matches = res.content["matches"].as_array().unwrap();
+        assert_eq!(
+            matches.len(),
+            1,
+            "only the real symbol may be returned by default; got {matches:?}"
+        );
+        assert_eq!(matches[0]["name"].as_str(), Some("SHORT_ID"));
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.contains("include_values=true")),
+            "hidden slots must be reported with the way back in; got {:?}",
+            res.diagnostics
+        );
+
+        let opted_in = SearchEntity
+            .invoke(&store, &json!({"name": "id", "include_values": true}))
+            .unwrap();
+        assert_eq!(
+            opted_in.content["matches"].as_array().unwrap().len(),
+            20,
+            "opting in restores the slots (default limit)"
+        );
     }
 
     #[test]

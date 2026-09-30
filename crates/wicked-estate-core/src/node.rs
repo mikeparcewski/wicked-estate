@@ -105,6 +105,21 @@ pub type Metadata = serde_json::Map<String, serde_json::Value>;
 /// Extractors set it on prototype/forward-declaration captures; absent means definition.
 pub const DECLARATION_METADATA_KEY: &str = "is_declaration";
 
+/// Metadata key marking a node as a **synthetic value-flow slot** (a callable's parameter, local,
+/// return value, field or property read) minted for semantic value lineage rather than parsed from
+/// a definition site. The value is the role name (`"Local"`, `"Parameter"`, `"Return"`, …).
+///
+/// These nodes reuse ordinary [`NodeKind`]s (a local is a [`NodeKind::Variable`]) and are named
+/// with the bare source identifier, so this marker is the ONLY thing distinguishing them from real
+/// definitions. Consumers that answer questions about *code structure* MUST exclude them:
+///
+/// - name-based resolvers must not bind a `Calls` (or any) reference to one — a local named `map`
+///   is not a call target, and admitting it mints false `Calls` edges that corrupt PageRank,
+///   blast radius and clustering (wicked-estate#207 review, C1);
+/// - symbol search must not return them unless the caller opts in — they displace real symbols for
+///   common identifier names (C4).
+pub const VALUE_ROLE_METADATA_KEY: &str = "value_role";
+
 /// A node in the code graph. The [`SymbolId`] is its stable primary key; `location` is mutable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Node {
@@ -171,6 +186,22 @@ impl Node {
             .get(DECLARATION_METADATA_KEY)
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
+    }
+
+    /// Mark this node as a synthetic value-flow slot with role `role` (builder) — see
+    /// [`VALUE_ROLE_METADATA_KEY`]. Metadata only, never part of the [`SymbolId`].
+    pub fn with_value_role(mut self, role: impl Into<String>) -> Self {
+        self.metadata.insert(
+            VALUE_ROLE_METADATA_KEY.to_string(),
+            serde_json::Value::String(role.into()),
+        );
+        self
+    }
+
+    /// Whether this node is a synthetic value-flow slot (`metadata["value_role"]` present) —
+    /// see [`VALUE_ROLE_METADATA_KEY`]. Real definitions return `false`.
+    pub fn is_value_flow_node(&self) -> bool {
+        self.metadata.contains_key(VALUE_ROLE_METADATA_KEY)
     }
 }
 

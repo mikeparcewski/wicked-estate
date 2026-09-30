@@ -1442,6 +1442,12 @@ struct PendingDef {
     /// qualifier, Ruby `def self.m`). Pass 2 appends it as the INNERMOST Type
     /// descriptor after [`enclosing_chain`].
     owner: Option<String>,
+    /// Byte ranges of THIS def's own declared parameters, in source order, from the
+    /// `@code_<kind>.params` capture in the same match. Pass 2 turns them into the positional
+    /// `value_params` metadata a call site's argument slots join against. Empty when the def
+    /// declares no parameter list (or the query captures none), which is why the join must treat
+    /// a missing slot as a lost hop rather than falling back to a neighbouring parameter.
+    param_slots: Vec<(usize, usize)>,
 }
 
 /// The chain of Type descriptors a definition nests under (ADR-002 amendment, 2026-08).
@@ -1866,23 +1872,37 @@ fn flow_endpoint_symbol(
     }
 }
 
+/// Whether a `return` at byte `pos` is the enclosing DEFINITION's return value.
+///
+/// `barriers` maps a callable body's byte range to whether that body is its own definition's body
+/// (`true`) or an anonymous callable's (`false`). The innermost body containing `pos` decides: a
+/// `return` inside a callback belongs to the callback, and since anonymous callables are not
+/// definition records there is nothing to attribute it to, so the fact is dropped rather than
+/// mis-attributed to the enclosing method (wicked-estate#207 review, C5a). No enclosing body
+/// means the `return` sits directly in a `function_declaration` / `method_definition` body, whose
+/// smallest enclosing definition record IS its owner.
+fn return_is_owner_scoped(pos: usize, barriers: &HashMap<(usize, usize), bool>) -> bool {
+    barriers
+        .iter()
+        .filter(|((start, end), _)| *start <= pos && pos < *end)
+        .min_by_key(|((start, end), _)| end - start)
+        .map(|(_, owned)| *owned)
+        .unwrap_or(true)
+}
+
 fn return_flow_symbol(owner: &SymbolId) -> SymbolId {
     Symbol::synthetic("value", format!("{}:return:value", owner.0)).id()
 }
 
 fn return_flow_node(owner: &DefRec, file: &SourceFile, span: Span) -> Node {
-    let mut node = Node::new(
+    Node::new(
         return_flow_symbol(&owner.symbol),
         NodeKind::Synthetic,
         format!("{}.return", owner.name),
         file.language.clone(),
         Location::new(&file.path, span),
-    );
-    node.metadata.insert(
-        "value_role".to_string(),
-        serde_json::Value::String("Return".to_string()),
-    );
-    node
+    )
+    .with_value_role("Return")
 }
 
 fn flow_endpoint_node(endpoint: &PendingFlowEndpoint, symbol: SymbolId, file: &SourceFile) -> Node {
@@ -1899,18 +1919,14 @@ fn flow_endpoint_node(endpoint: &PendingFlowEndpoint, symbol: SymbolId, file: &S
             (NodeKind::Synthetic, format!("RouteParam:{}", endpoint.name))
         }
     };
-    let mut node = Node::new(
+    Node::new(
         symbol,
         kind,
         name,
         file.language.clone(),
         Location::new(&file.path, endpoint.span),
-    );
-    node.metadata.insert(
-        "value_role".to_string(),
-        serde_json::Value::String(format!("{:?}", endpoint.kind)),
-    );
-    node
+    )
+    .with_value_role(format!("{:?}", endpoint.kind))
 }
 
 fn argument_slot(arguments: tree_sitter::Node, endpoint: &PendingFlowEndpoint) -> Option<usize> {
@@ -1952,6 +1968,9 @@ enum CaptureRole<'a> {
     /// owner is not an enclosing node (Go receivers, C++ `Foo::` qualifiers, Ruby `def self.m`).
     /// Spliced as the innermost Type descriptor of that def's id in pass 2.
     DefOwner { kind: &'a str },
+    /// `@code_<kind>.params` — the def's own parameter list node, whose named children give the
+    /// positional parameter slots a call site's argument slots join against.
+    DefParams { kind: &'a str },
     /// `@code_<kind>.name` — the identifier for a definition of `<kind>`.
     /// `symbol` is true for the `@code_<kind>.name.symbol` variant: the captured
     /// text is a symbol literal (Ruby `:name`) whose leading `:` must be stripped
@@ -2006,6 +2025,11 @@ enum CaptureRole<'a> {
     FlowParameter { kind: FlowEndpointKind },
     /// `@flow.return.<kind>` — a value returned by the enclosing callable.
     FlowReturn { kind: FlowEndpointKind },
+    /// `@flow.barrier` / `@flow.barrier.owned` — the body of a callable, marking whose return
+    /// value a `return` statement inside it is. A barrier that is NOT `.owned` belongs to an
+    /// anonymous callable (a callback), which is not a definition record: a `return` inside it
+    /// must not be attributed to the enclosing definition.
+    FlowBarrier { owned: bool },
     /// `@call.value` — call-expression anchor for per-site semantic call facts.
     CallValue,
     /// `@call.arguments` — enclosing arguments node used to compute original zero-based slots.
@@ -2063,6 +2087,8 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
             "return.local" => CaptureRole::FlowReturn {
                 kind: FlowEndpointKind::Local,
             },
+            "barrier" => CaptureRole::FlowBarrier { owned: false },
+            "barrier.owned" => CaptureRole::FlowBarrier { owned: true },
             _ => CaptureRole::Other,
         };
     }
@@ -2150,6 +2176,9 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
             if suffix == "owner" {
                 return CaptureRole::DefOwner { kind };
             }
+            if suffix == "params" {
+                return CaptureRole::DefParams { kind };
+            }
             if suffix == "name" {
                 return CaptureRole::DefName {
                     kind,
@@ -2159,7 +2188,7 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
             if suffix == "name.symbol" {
                 return CaptureRole::DefName { kind, symbol: true };
             }
-            // Everything else (.params, .body, .return_type, .value, .type, .base,
+            // Everything else (.body, .return_type, .value, .type, .base,
             // .annotation, …) is auxiliary — ignored.
         } else {
             // @code_<kind> with no dot — treat as def anchor (e.g. @code_variable, @code_module)
@@ -2287,6 +2316,9 @@ impl Extractor for TreeSitterExtractor {
         let mut flow_sites: Vec<PendingFlow> = Vec::new();
         let mut flow_parameters: Vec<PendingFlowEndpoint> = Vec::new();
         let mut flow_returns: Vec<PendingReturnFlow> = Vec::new();
+        // Callable bodies by byte range → `true` when the body is its own definition's body.
+        // A `return` inside the innermost NON-owned body is a callback's return value.
+        let mut flow_return_barriers: HashMap<(usize, usize), bool> = HashMap::new();
         let mut call_facts: HashMap<Span, PendingCallFact> = HashMap::new();
         let mut import_targets: Vec<(String, Span)> = Vec::new();
         let mut seen_imports: HashSet<String> = HashSet::new();
@@ -2336,6 +2368,7 @@ impl Extractor for TreeSitterExtractor {
             let mut flow_construct: Option<(String, Span)> = None;
             let mut flow_consumers: Vec<PendingFlowEndpoint> = Vec::new();
             let mut flow_producers: Vec<PendingFlowEndpoint> = Vec::new();
+            let mut def_params: Option<(&str, Vec<(usize, usize)>)> = None;
             let mut flow_parameter_sites: Vec<PendingFlowEndpoint> = Vec::new();
             let mut flow_return_sites: Vec<PendingFlowEndpoint> = Vec::new();
             let mut call_value_span: Option<Span> = None;
@@ -2356,6 +2389,16 @@ impl Extractor for TreeSitterExtractor {
                     }
                     CaptureRole::DefOwner { kind } => {
                         def_owner = Some((kind, text));
+                    }
+                    CaptureRole::DefParams { kind } => {
+                        let mut walk = c.node.walk();
+                        def_params = Some((
+                            kind,
+                            c.node
+                                .named_children(&mut walk)
+                                .map(|child| (child.start_byte(), child.end_byte()))
+                                .collect::<Vec<_>>(),
+                        ));
                     }
                     CaptureRole::DefName { kind, symbol } => {
                         let name = strip_def_name(&text);
@@ -2453,6 +2496,12 @@ impl Extractor for TreeSitterExtractor {
                             slot: None,
                         });
                     }
+                    CaptureRole::FlowBarrier { owned } => {
+                        let entry = flow_return_barriers
+                            .entry((c.node.start_byte(), c.node.end_byte()))
+                            .or_insert(false);
+                        *entry |= owned;
+                    }
                     CaptureRole::FlowReturn { kind } => {
                         flow_return_sites.push(PendingFlowEndpoint {
                             kind,
@@ -2512,6 +2561,11 @@ impl Extractor for TreeSitterExtractor {
                         }
                         _ => None,
                     };
+                    // Same kind-equality guard as the owner splice.
+                    let param_slots = match &def_params {
+                        Some((params_kind, slots)) if *params_kind == anchor_kind => slots.clone(),
+                        _ => Vec::new(),
+                    };
                     pending.push(PendingDef {
                         kind: anchor_kind.to_string(),
                         name: name_text.clone(),
@@ -2522,6 +2576,7 @@ impl Extractor for TreeSitterExtractor {
                         emit,
                         decl,
                         owner,
+                        param_slots,
                     });
                 }
             }
@@ -2737,12 +2792,26 @@ impl Extractor for TreeSitterExtractor {
                     // (metadata only — the id above is identical to a `.def` capture's).
                     node = node.as_declaration();
                 }
-                let params: Vec<_> = flow_parameters
+                // `value_params` is POSITIONAL: one entry per declared parameter, in source
+                // order, `null` where the query captures no value node for that parameter (a
+                // destructured or optional parameter). A call site joins `arg.slot ==
+                // param.slot`, so an uncaptured parameter costs that one hop instead of shifting
+                // every later argument onto the wrong parameter, and a def takes only its OWN
+                // parameters — the byte-range scan this replaces gave a callable its nested
+                // callables' parameters and a class all its methods' (wicked-estate#207 review,
+                // C5d + C5e).
+                let params: Vec<serde_json::Value> = p
+                    .param_slots
                     .iter()
-                    .filter(|param| p.start <= param.pos && param.pos < p.end)
-                    .map(|param| serde_json::Value::String(param.name.clone()))
+                    .map(|(start, end)| {
+                        flow_parameters
+                            .iter()
+                            .find(|param| *start <= param.pos && param.pos < *end)
+                            .map(|param| serde_json::Value::String(param.name.clone()))
+                            .unwrap_or(serde_json::Value::Null)
+                    })
                     .collect();
-                if !params.is_empty() {
+                if params.iter().any(|param| !param.is_null()) {
                     node.metadata
                         .insert("value_params".to_string(), serde_json::Value::Array(params));
                 }
@@ -2864,6 +2933,9 @@ impl Extractor for TreeSitterExtractor {
             nodes.push(flow_endpoint_node(parameter, symbol, file));
         }
         for ret in &flow_returns {
+            if !return_is_owner_scoped(ret.pos, &flow_return_barriers) {
+                continue;
+            }
             let Some(owner) = defs
                 .iter()
                 .filter(|d| d.start <= ret.pos && ret.pos < d.end)
@@ -2932,6 +3004,33 @@ impl Extractor for TreeSitterExtractor {
                     );
                     local_edges.push(edge);
                 }
+            }
+        }
+
+        // Value nodes join the graph the way ordinary locals do: one File→node `Contains` edge
+        // (D4 — Contains stays File→node). Without it the whole value-lineage graph is an island
+        // with no edge from any real code node into it, and the only bridge in was the spurious
+        // `Calls` edges the value_role guard now rejects (wicked-estate#207 review, C1 + C13).
+        // Carries the file location so `remove_file` can retire it like every other local edge.
+        {
+            let mut seen: HashSet<SymbolId> = HashSet::new();
+            let value_symbols: Vec<SymbolId> = nodes
+                .iter()
+                .filter(|node| node.is_value_flow_node())
+                .map(|node| node.symbol.clone())
+                .filter(|symbol| seen.insert(symbol.clone()))
+                .collect();
+            for symbol in value_symbols {
+                local_edges.push(
+                    Edge::new(
+                        file_symbol.clone(),
+                        symbol,
+                        EdgeKind::Contains,
+                        ResolutionTier::Parsed,
+                        "tree-sitter",
+                    )
+                    .with_location(Location::new(&file.path, Span::ZERO)),
+                );
             }
         }
 
@@ -7495,6 +7594,7 @@ public class PlainListener {
             emit: true,
             decl: false,
             owner: None,
+            param_slots: Vec::new(),
         };
         let pending = vec![
             mk("class", "M", 0, 100),

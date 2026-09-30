@@ -283,6 +283,21 @@
 (return_statement
   (identifier) @flow.return.local)
 
+; Return barriers. A `return x` is only the OWNER callable's return value when no other callable
+; body lies between them: in the canonical RxJS shape
+; `svc.get(id).subscribe((customer) => { return customer; })` the returned value belongs to the
+; callback, not to the enclosing method, and anonymous callables are not definition records — so
+; without this the method's return value is asserted to be the callback's, at confidence 1.00
+; (wicked-estate#207 review, C5a). `.owned` marks a body that IS its own definition's body (an
+; arrow bound to a const or a class field is captured as a def above), whose returns are kept.
+(arrow_function body: (statement_block) @flow.barrier)
+(function_expression body: (statement_block) @flow.barrier)
+
+(variable_declarator
+  value: (arrow_function body: (statement_block) @flow.barrier.owned))
+(public_field_definition
+  value: (arrow_function body: (statement_block) @flow.barrier.owned))
+
 ; Generic call value-flow facts. These are carried as UnresolvedRef hints and only become
 ; edges when the existing Calls resolver binds the exact site.
 (call_expression

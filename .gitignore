@@ -43,6 +43,4 @@ Thumbs.db
 site/*.db.mem*
 site/*.db.knowledge*
 .product/
-.context/
 node_modules/
-.loop-run/

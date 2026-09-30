@@ -360,12 +360,21 @@ fn value_node(
     location: Location,
     role: &str,
 ) -> Node {
-    let mut node = Node::new(symbol, kind, name.into(), language, location);
-    node.metadata.insert(
-        "value_role".to_string(),
-        serde_json::Value::String(role.to_string()),
-    );
-    node
+    Node::new(symbol, kind, name.into(), language, location).with_value_role(role)
+}
+
+/// One `File`→value-node `Contains` edge, so a call-derived value node is reachable from a real
+/// code node instead of sitting on an island (wicked-estate#207 review, C13) and `remove_file`
+/// can retire it. Mirrors the tree-sitter emitter; Contains stays File→node (D4).
+fn value_containment_edge(node: &Node) -> Edge {
+    Edge::new(
+        Symbol::file(&node.location.file).id(),
+        node.symbol.clone(),
+        EdgeKind::Contains,
+        ResolutionTier::Parsed,
+        "call-value-flow",
+    )
+    .with_location(Location::new(&node.location.file, Span::ZERO))
 }
 
 fn flow_edge(source: SymbolId, target: SymbolId, call_edge: &Edge, construct: &str) -> Edge {
@@ -579,15 +588,17 @@ fn value_flow_result(
     }))
 }
 
-fn callable_param_names(callee: &Node) -> Vec<String> {
+/// The callee's POSITIONAL parameter slots: one entry per declared parameter, `None` where the
+/// extractor captured no value node for it (a destructured or optional parameter). The index IS
+/// the argument slot — see the `value_params` note in `wicked-estate-extract` (C5d).
+fn callable_param_names(callee: &Node) -> Vec<Option<String>> {
     callee
         .metadata
         .get("value_params")
         .and_then(|v| v.as_array())
         .into_iter()
         .flatten()
-        .filter_map(|v| v.as_str())
-        .map(str::to_string)
+        .map(|v| v.as_str().map(str::to_string))
         .collect()
 }
 
@@ -646,7 +657,9 @@ fn call_value_flow(
             let Some(slot) = arg.slot else {
                 continue;
             };
-            let Some(param) = params.get(slot) else {
+            // Slot-exact: a parameter the extractor could not capture yields a LOST hop, never a
+            // hop onto a neighbouring parameter (wicked-estate#207 review, C5d).
+            let Some(Some(param)) = params.get(slot) else {
                 continue;
             };
             let arg_symbol = arg
@@ -655,14 +668,16 @@ fn call_value_flow(
                 .unwrap_or_else(|| value_symbol(&caller.symbol, "local", &arg.name));
             let param_symbol = value_symbol(&callee.symbol, "local", param);
             if index.get(&arg_symbol).is_none() {
-                nodes.push(value_node(
+                let node = value_node(
                     arg_symbol.clone(),
                     arg.node_kind(),
                     arg.name.clone(),
                     caller.language.clone(),
                     site.clone(),
                     arg.role(),
-                ));
+                );
+                edges.push(value_containment_edge(&node));
+                nodes.push(node);
             }
             edges.push(flow_edge(
                 param_symbol,
@@ -679,14 +694,16 @@ fn call_value_flow(
                 .clone()
                 .unwrap_or_else(|| value_symbol(&caller.symbol, "local", &target.name));
             if index.get(&target_symbol).is_none() {
-                nodes.push(value_node(
+                let node = value_node(
                     target_symbol.clone(),
                     target.node_kind(),
                     target.name.clone(),
                     caller.language.clone(),
                     site,
                     target.role(),
-                ));
+                );
+                edges.push(value_containment_edge(&node));
+                nodes.push(node);
             }
             edges.push(flow_edge(
                 target_symbol,
@@ -1239,45 +1256,60 @@ pub fn index_path_as(
     // endpoint but sourced from an unchanged caller's call-site facts. Re-extract the reverse
     // Calls/flows_to closure before remove_file() deletes those endpoint edges, otherwise a
     // callee-only edit drops the caller-derived semantic flow until the caller changes.
+    //
+    // The invariant is exactly ONE hop: a call-site fact in the caller joined to the callee's own
+    // parameter/return endpoint. A caller-of-a-caller holds no fact about this callee, so the
+    // transitive fixed point this used to run bought nothing and cost everything — on a 905-file
+    // TypeScript repo a one-line edit to a leaf test file forced 719 files into re-extraction
+    // (20.7 s / 1.2 GB, ~3× the full index) and `watch` paid it on every save
+    // (wicked-estate#207 review, C2). Pinned by
+    // `incremental_leaf_edit_forces_only_direct_callers`; the one-hop invariant it protects is
+    // pinned by `incremental_callee_only_edit_preserves_call_derived_value_flow`.
     let mut forced_value_flow_callers: HashSet<String> = HashSet::new();
     if !force_full && !changed_seed.is_empty() {
-        let all_nodes = store.all_nodes()?;
-        let file_by_symbol: HashMap<SymbolId, String> = all_nodes
-            .into_iter()
-            .map(|node| (node.symbol, node.location.file))
-            .collect();
-        let call_edges: Vec<Edge> = store
-            .all_edges()?
-            .into_iter()
-            .filter(|edge| edge.kind == EdgeKind::Calls)
-            .collect();
-        let mut affected = changed_seed.clone();
-        loop {
-            let before = affected.len();
+        // One pass over the edge table: does this store hold ANY value-flow edge, and which
+        // edges are Calls? A repo with no value lineage (every non-TypeScript repo today) stops
+        // here without touching the node table.
+        let flows_to = edge_tags::other(edge_tags::FLOWS_TO);
+        let mut has_value_flow = false;
+        let mut call_edges: Vec<Edge> = Vec::new();
+        for edge in store.all_edges()? {
+            if edge.kind == EdgeKind::Calls {
+                call_edges.push(edge);
+            } else if edge.kind == flows_to {
+                has_value_flow = true;
+            }
+        }
+        if has_value_flow {
+            let mut changed_symbols: HashSet<SymbolId> = HashSet::new();
+            let mut file_by_symbol: HashMap<SymbolId, String> = HashMap::new();
+            for node in store.all_nodes()? {
+                if changed_seed.contains(&node.location.file) {
+                    changed_symbols.insert(node.symbol.clone());
+                }
+                file_by_symbol.insert(node.symbol, node.location.file);
+            }
             for edge in &call_edges {
-                let source_file = file_by_symbol.get(&edge.source);
-                let target_file = file_by_symbol.get(&edge.target);
-                if !target_file.is_some_and(|file| affected.contains(file)) {
+                // Only a DIRECT caller of a changed callee holds call-site facts about it.
+                if !changed_symbols.contains(&edge.target) {
                     continue;
                 }
                 for candidate in [
                     edge.location.as_ref().map(|loc| loc.file.as_str()),
-                    source_file.map(String::as_str),
+                    file_by_symbol.get(&edge.source).map(String::as_str),
                 ]
                 .into_iter()
                 .flatten()
                 {
-                    if current_rel_paths.contains(candidate) && work_by_rel.contains_key(candidate)
+                    if !changed_seed.contains(candidate)
+                        && current_rel_paths.contains(candidate)
+                        && work_by_rel.contains_key(candidate)
                     {
-                        affected.insert(candidate.to_string());
+                        forced_value_flow_callers.insert(candidate.to_string());
                     }
                 }
             }
-            if affected.len() == before {
-                break;
-            }
         }
-        forced_value_flow_callers = affected.difference(&changed_seed).cloned().collect();
     }
 
     let mut changed: Vec<FileWork> = Vec::new();
@@ -1843,12 +1875,23 @@ pub fn symbols_for_requirement(
 }
 
 /// Find symbols by exact name.
+///
+/// Synthetic value-flow slots are excluded: a bare NAME never resolves to one. They are named with
+/// the bare source identifier, so a local named `map` would otherwise answer every `map` lookup —
+/// `blast-radius map` reported dependents of a local instead of "no resolved dependents"
+/// (wicked-estate#207 review, C1/C4). They are addressed by exact [`SymbolId`] only (the shape the
+/// `Lineage` `flows_to` relation takes), and `SearchEntity`'s `include_values` opt-in surfaces
+/// them deliberately.
 pub fn search(store: &dyn GraphRead, name: &str) -> Result<Vec<Node>> {
     let q = SymbolQuery {
         exact_name: Some(name.to_string()),
         ..Default::default()
     };
-    store.find_symbols(&q)
+    Ok(store
+        .find_symbols(&q)?
+        .into_iter()
+        .filter(|node| !node.is_value_flow_node())
+        .collect())
 }
 
 /// Blast radius: transitive dependents (callers) of every symbol named `name`, up to `depth`.

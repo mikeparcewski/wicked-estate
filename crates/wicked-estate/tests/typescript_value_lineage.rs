@@ -684,3 +684,403 @@ fn incremental_backfill_adds_call_value_flow_for_previously_parked_call() {
     }
     let _ = fs::remove_dir_all(root);
 }
+
+// ── Regression guards for the wicked-estate#207 review findings ──────────────────────────────
+//
+// Every test below fails on the pre-fix branch. They are the tests whose absence let a graph-
+// quality defect ship green: the PR's own suite asserts what the feature ADDS, these assert what
+// it must not DISTURB.
+
+/// The (source, target, kind) set of the whole stored graph — the exact comparison the review's
+/// real-repo index diff made, reduced to a fixture.
+fn edge_triples(store: &SqliteStore) -> BTreeSet<(String, String, String)> {
+    GraphRead::all_edges(store)
+        .unwrap()
+        .into_iter()
+        .map(|edge| {
+            (
+                edge.source.0,
+                edge.target.0,
+                serde_json::to_string(&edge.kind).unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn value_flow_symbols(store: &SqliteStore) -> BTreeSet<SymbolId> {
+    GraphRead::all_nodes(store)
+        .unwrap()
+        .into_iter()
+        .filter(|node| node.is_value_flow_node())
+        .map(|node| node.symbol)
+        .collect()
+}
+
+/// C1 — a synthetic value slot must never be the target of a `Calls` edge. On a real 905-file
+/// TypeScript repo the missing guard minted 1,077 false `calls` edges onto 8 locals, gave a local
+/// named `map` 915 dependents and made it the repo's top-ranked symbol.
+#[test]
+fn no_calls_edge_targets_a_value_node() {
+    let assert_no_value_call_targets = |store: &SqliteStore, label: &str| {
+        let value_symbols = value_flow_symbols(store);
+        assert!(
+            !value_symbols.is_empty(),
+            "{label} must mint value nodes for this guard to mean anything"
+        );
+        let offenders: Vec<_> = GraphRead::all_edges(store)
+            .unwrap()
+            .into_iter()
+            .filter(|edge| edge.kind == EdgeKind::Calls && value_symbols.contains(&edge.target))
+            .map(|edge| (edge.source.0, edge.target.0))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "{label}: Calls edges must never target a synthetic value slot; got {offenders:?}"
+        );
+    };
+
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typescript-value-lineage");
+    let mut store = SqliteStore::in_memory().expect("open sqlite");
+    wicked_estate::index_path(&mut store, &fixture).expect("index Angular TypeScript fixture");
+    assert_no_value_call_targets(&store, "committed Angular fixture");
+
+    // The committed fixture alone is NOT a guard: it holds no value node whose bare name is also
+    // called anywhere, which is precisely why AC-0005 held in the unit fixture and failed on a
+    // real 905-file repo. The name collision has to be in the corpus.
+    let (root, collision) = indexed_typescript_files("calls_target_guard", &COLLISION_FILES);
+    assert_no_value_call_targets(&collision, "name-collision corpus");
+    let _ = fs::remove_dir_all(root);
+}
+
+/// A local named `map` in one file, called as `map(...)` from two others — the real shape
+/// (`src/interactive/takes.ts` vs. every `map(...)` call in the repo), and the corpus C1 and C3
+/// both need: the committed fixture has no such collision.
+const COLLISION_FILES: [(&str, &str); 3] = [
+    (
+        "takes.ts",
+        r#"
+        export function asksByVersion(rows: string): string {
+            const map = rows;
+            return map;
+        }
+        "#,
+    ),
+    (
+        "consumer_one.ts",
+        r#"
+        export function render(items: string): string {
+            const out = map(items);
+            return out;
+        }
+        "#,
+    ),
+    (
+        "consumer_two.ts",
+        r#"
+        export function reload(items: string): string {
+            const again = map(items);
+            return again;
+        }
+        "#,
+    ),
+];
+
+/// C1 in the shape that actually bit: a bare local whose name collides with a called function in
+/// another file.
+#[test]
+fn a_local_named_like_a_callee_absorbs_no_calls() {
+    let (root, store) = indexed_typescript_files("local_name_collision", &COLLISION_FILES);
+
+    let local_map = one_symbol_named_with(&store, "map", "asksByVersion().:local:map:");
+    let dependents: Vec<_> = GraphRead::neighbors(
+        &store,
+        &local_map,
+        wicked_estate_core::Direction::Dependents,
+    )
+    .unwrap()
+    .into_iter()
+    .filter(|edge| edge.kind == EdgeKind::Calls)
+    .map(|edge| edge.source.0)
+    .collect();
+    assert!(
+        dependents.is_empty(),
+        "a local must not acquire Calls dependents; got {dependents:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// C13 — value nodes must not form an island: each one is contained by its File, the way an
+/// ordinary local is (Contains stays File→node, D4). Before this, 0 of 3,403 value nodes on a real
+/// repo had a containment parent and the ONLY edge joining a real code node to the value graph was
+/// the spurious `Calls` edges C1 removes.
+#[test]
+fn value_nodes_are_reachable_from_a_real_node() {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typescript-value-lineage");
+    let mut store = SqliteStore::in_memory().expect("open sqlite");
+    wicked_estate::index_path(&mut store, &fixture).expect("index Angular TypeScript fixture");
+
+    let value_symbols = value_flow_symbols(&store);
+    assert!(!value_symbols.is_empty(), "fixture must mint value nodes");
+    let mut orphans = Vec::new();
+    for symbol in &value_symbols {
+        let parents: Vec<_> =
+            GraphRead::neighbors(&store, symbol, wicked_estate_core::Direction::Dependents)
+                .unwrap()
+                .into_iter()
+                .filter(|edge| edge.kind == EdgeKind::Contains)
+                .collect();
+        if parents.is_empty() {
+            orphans.push(symbol.0.clone());
+        } else {
+            for edge in parents {
+                let parent = GraphRead::get_node(&store, &edge.source).unwrap();
+                assert_eq!(
+                    parent.map(|node| node.kind),
+                    Some(wicked_estate_core::NodeKind::File),
+                    "value containment must come from the File node (D4)"
+                );
+            }
+        }
+    }
+    assert!(
+        orphans.is_empty(),
+        "every value node needs a containment parent; orphans: {orphans:?}"
+    );
+}
+
+/// C2 — a leaf edit must force only the callee's DIRECT callers into re-extraction. The transitive
+/// reverse-`Calls` fixed point this replaces turned a one-line edit to a leaf test file into a
+/// 719-of-905-file, 20.7 s, 1.2 GB re-index on a real repo — three times its own full index — and
+/// `wicked-estate watch` paid it on every save.
+#[test]
+fn incremental_leaf_edit_forces_only_direct_callers() {
+    let leaf = r#"
+        export function leaf(seed: string): string {
+            return seed;
+        }
+    "#;
+    let mid = r#"
+        import { leaf } from './leaf';
+        export function mid(seed: string): string {
+            const midValue = leaf(seed);
+            return midValue;
+        }
+    "#;
+    let top = r#"
+        import { mid } from './mid';
+        export function top(seed: string): string {
+            const topValue = mid(seed);
+            return topValue;
+        }
+    "#;
+    let roof = r#"
+        import { top } from './top';
+        export function roof(seed: string): string {
+            const roofValue = top(seed);
+            return roofValue;
+        }
+    "#;
+    let (root, mut store) = indexed_typescript_files(
+        "incremental_leaf_scope",
+        &[
+            ("leaf.ts", leaf),
+            ("mid.ts", mid),
+            ("top.ts", top),
+            ("roof.ts", roof),
+        ],
+    );
+
+    // The chain must actually be resolved, or the forcing logic has nothing to walk.
+    let calls = GraphRead::all_edges(&store)
+        .unwrap()
+        .into_iter()
+        .filter(|edge| edge.kind == EdgeKind::Calls)
+        .count();
+    assert!(
+        calls >= 3,
+        "fixture chain must resolve its calls; got {calls}"
+    );
+
+    let cursor = GraphRead::changes_since(&store, 0)
+        .unwrap()
+        .iter()
+        .map(|change| change.seq)
+        .max()
+        .unwrap_or(0);
+
+    fs::write(root.join("leaf.ts"), format!("{leaf}\n// one-line edit\n")).unwrap();
+    wicked_estate::index_path(&mut store, &root).expect("incremental re-index after leaf edit");
+
+    let touched: BTreeSet<String> = GraphRead::changes_since(&store, cursor)
+        .unwrap()
+        .into_iter()
+        .map(|change| change.target)
+        .collect();
+    assert_eq!(
+        touched,
+        ["leaf.ts", "mid.ts"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>(),
+        "only the edited leaf and its DIRECT caller may be re-extracted"
+    );
+
+    // …and the one-hop invariant the forcing exists for still holds.
+    let pairs = semantic_flow_name_pairs(&store);
+    assert!(
+        pairs.contains(&("seed".to_string(), "seed".to_string())),
+        "call-derived flow into the edited callee's parameter must survive; got {pairs:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// C3 — one tree, one graph: a full index and a full index followed by a touch-and-re-index must
+/// produce the same `(source, target, kind)` set. They diverged by 520 `calls` edges on a real
+/// repo, so `blast-radius map` answered 915, 2 or 0 depending only on how you had indexed.
+#[test]
+fn full_and_incremental_index_of_one_tree_agree() {
+    let (root, mut incremental) = indexed_typescript_files("full_vs_incremental", &COLLISION_FILES);
+    let full_only = {
+        let mut store = SqliteStore::in_memory().expect("open sqlite");
+        wicked_estate::index_path(&mut store, &root).expect("independent full index");
+        edge_triples(&store)
+    };
+
+    // Touch the file that OWNS the value node; its callers live in other files and are not
+    // re-extracted, which is how 519 `calls` edges into `:local:map:` vanished on a real repo.
+    let touched = format!("{}\n// unrelated comment\n", COLLISION_FILES[0].1);
+    fs::write(root.join("takes.ts"), touched).unwrap();
+    wicked_estate::index_path(&mut incremental, &root).expect("incremental re-index");
+    // Restore the byte-identical content and re-index, so both graphs describe the same tree.
+    fs::write(root.join("takes.ts"), COLLISION_FILES[0].1).unwrap();
+    wicked_estate::index_path(&mut incremental, &root).expect("incremental re-index back");
+
+    let incremental_triples = edge_triples(&incremental);
+    let lost: Vec<_> = full_only.difference(&incremental_triples).collect();
+    let gained: Vec<_> = incremental_triples.difference(&full_only).collect();
+    assert!(
+        lost.is_empty() && gained.is_empty(),
+        "full and incremental graphs of one tree must be identical; lost {lost:?}, gained {gained:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// C5a — the canonical Angular/RxJS shape. A `return` inside a callback is the callback's value;
+/// attributing it to the enclosing method asserted, at confidence 1.00, that `loadCustomer`
+/// returns the subscribe payload when it returns an entirely different local.
+#[test]
+fn callback_return_is_not_the_enclosing_methods_return() {
+    let source = r#"
+        export class CustomerComponent {
+            cached: string = "";
+            loadCustomer(id: string, svc: any): string {
+                svc.get(id).subscribe((customer: string) => { return customer; });
+                const fallback = this.cached;
+                return fallback;
+            }
+        }
+    "#;
+    let (root, store) = indexed_typescript("callback_return", source);
+    let pairs = semantic_flow_name_pairs(&store);
+    assert!(
+        pairs.contains(&("fallback".to_string(), "loadCustomer.return".to_string())),
+        "the method's own return value must still be recorded; got {pairs:?}"
+    );
+    assert!(
+        !pairs.contains(&("customer".to_string(), "loadCustomer.return".to_string())),
+        "a callback's return must not be attributed to the enclosing method; got {pairs:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// C5a — the guard is scoped to ANONYMOUS callables: an arrow bound to a name is its own
+/// definition, so its `return` is still its own return value.
+#[test]
+fn named_arrow_function_keeps_its_return_flow() {
+    let source = r#"
+        export const pick = (chosen: string): string => {
+            return chosen;
+        };
+    "#;
+    let (root, store) = indexed_typescript("named_arrow_return", source);
+    let pairs = semantic_flow_name_pairs(&store);
+    assert!(
+        pairs.contains(&("chosen".to_string(), "pick.return".to_string())),
+        "a named arrow function's return must still flow; got {pairs:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// C5d — argument→parameter joins are by explicit slot. With a destructured first parameter the
+/// compressed index space stored `token <== ctx` (a location and confidence 0.65 on a flow that
+/// does not exist) and dropped the real `secret -> token` hop entirely.
+#[test]
+fn call_arguments_join_parameters_by_slot_not_by_capture_order() {
+    let source = r#"
+        export function send({ trace }: any, token: string): void {}
+        export function caller(ctx: any, secret: string): void {
+            send(ctx, secret);
+        }
+    "#;
+    let (root, store) = indexed_typescript("slot_exact_join", source);
+    let pairs = semantic_flow_name_pairs(&store);
+    assert!(
+        !pairs.contains(&("ctx".to_string(), "token".to_string())),
+        "argument 0 must not land on the parameter in slot 1; got {pairs:?}"
+    );
+    assert!(
+        pairs.contains(&("secret".to_string(), "token".to_string())),
+        "argument 1 must reach the parameter in slot 1; got {pairs:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// C5e — a callable's parameter slots are its OWN. The byte-range scan this replaces gave `outer`
+/// its nested `inner`'s parameter, so `outer(a, b)`'s second argument (binding an optional
+/// parameter nothing captures) landed on `inner`'s `y`.
+#[test]
+fn nested_and_child_parameters_are_not_absorbed_by_the_owner() {
+    let source = r#"
+        export function outer(x: string, flag?: string): void {
+            const y = x;
+            function inner(y: string): void {}
+            inner(x);
+        }
+        export function drive(a: string, b: string): void {
+            outer(a, b);
+        }
+    "#;
+    let (root, store) = indexed_typescript("nested_params", source);
+    let pairs = semantic_flow_name_pairs(&store);
+    assert!(
+        !pairs.contains(&("b".to_string(), "y".to_string())),
+        "an optional parameter must lose its hop, not land on a nested callable's parameter; got {pairs:?}"
+    );
+    assert!(
+        pairs.contains(&("a".to_string(), "x".to_string())),
+        "the capturable first argument must still reach slot 0; got {pairs:?}"
+    );
+
+    // …and a class never takes its methods' parameters.
+    let class_source = r#"
+        export class Svc {
+            constructor(http: string) {}
+            fetch(a: string, b: string): void {}
+        }
+    "#;
+    let (class_root, class_store) = indexed_typescript("class_params", class_source);
+    let class_params: Vec<_> = GraphRead::all_nodes(&class_store)
+        .unwrap()
+        .into_iter()
+        .filter(|node| node.kind == wicked_estate_core::NodeKind::Class)
+        .filter_map(|node| node.metadata.get("value_params").cloned())
+        .collect();
+    assert!(
+        class_params.is_empty(),
+        "a class must not carry its methods' parameters; got {class_params:?}"
+    );
+    let _ = fs::remove_dir_all(class_root);
+    let _ = fs::remove_dir_all(root);
+}
