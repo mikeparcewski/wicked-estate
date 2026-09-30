@@ -751,6 +751,10 @@ impl Resolver for RulesBridgeResolver {
 pub struct Resolution {
     /// Deduplicated edges, one per `(source, target, kind)`, highest confidence kept.
     pub edges: Vec<Edge>,
+    /// Resolver output before `(source, target, kind)` deduplication. Consumers that need
+    /// syntax-site evidence, such as call-derived value flow, must use this while exact
+    /// locations are still present.
+    pub site_edges: Vec<Edge>,
     /// References no resolver emitted an edge for (per site — one entry per reference).
     pub unresolved: Vec<UnresolvedRef>,
 }
@@ -819,6 +823,7 @@ pub fn resolve_all_with_coverage(
     let mut collided: HashSet<(usize, usize)> = HashSet::new();
 
     let mut best: HashMap<(String, String, String), Edge> = HashMap::new();
+    let mut site_edges = Vec::new();
 
     for (resolver_idx, resolver) in resolvers.iter().enumerate() {
         let edges = resolver.resolve(refs, index)?;
@@ -842,7 +847,8 @@ pub fn resolve_all_with_coverage(
                         *incumbent = edge.clone();
                     }
                 })
-                .or_insert(edge);
+                .or_insert_with(|| edge.clone());
+            site_edges.push(edge);
         }
     }
 
@@ -969,6 +975,7 @@ pub fn resolve_all_with_coverage(
 
     Ok(Resolution {
         edges: resolved_edges,
+        site_edges,
         unresolved,
     })
 }

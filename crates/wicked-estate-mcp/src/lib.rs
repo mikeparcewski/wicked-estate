@@ -316,6 +316,11 @@ fn lineage_schema() -> Value {
                 "description": "Maximum hop depth (default 8, max 24).",
                 "default": 8,
                 "maximum": 24
+            },
+            "relation": {
+                "type": "string",
+                "enum": ["flows_to"],
+                "description": "Optional relation selector. Use 'flows_to' to trace semantic value flow from producer to consumer; omit for default dependency lineage."
             }
         },
         "additionalProperties": false
@@ -1180,6 +1185,24 @@ mod tests {
         assert!(
             required.iter().any(|r| r == "name"),
             "SearchEntity schema must require 'name'"
+        );
+    }
+
+    #[test]
+    fn tools_list_lineage_schema_exposes_flows_to_relation() {
+        let store = fixture();
+        let req = json!({ "jsonrpc": "2.0", "id": 41, "method": "tools/list", "params": {} });
+        let resp = handle_request(&store, &req);
+
+        let lineage = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some("Lineage"))
+            .expect("Lineage tool must be listed");
+        assert_eq!(
+            lineage["inputSchema"]["properties"]["relation"]["enum"][0].as_str(),
+            Some("flows_to")
         );
     }
 

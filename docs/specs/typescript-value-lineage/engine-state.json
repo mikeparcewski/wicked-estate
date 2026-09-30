@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "run_id": "b231279a-f20d-465e-842a-25b2c52f5c9d",
+  "feature": "typescript-value-lineage",
+  "mode": "code",
+  "state": "CODE-HUMAN-GATE",
+  "last_event": "reviewers-clean",
+  "last_event_context": {
+    "pre_transition_sequence": 36,
+    "clean_digest": "74b12980b87d0d6bc6a2bc7f5b51d18571074f7a3c4ec52969e3394d4c582e3c",
+    "clean_source": "structural-clean"
+  },
+  "transition_sequence": 37,
+  "last_transition_at": "2026-09-30T05:04:05Z",
+  "gate_question": "Are these changes correct and ready to merge?"
+}

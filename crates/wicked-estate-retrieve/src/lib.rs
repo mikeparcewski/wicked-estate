@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use wicked_estate_core::{
     Annotation, Direction, EdgeKind, GraphRead, NodeKind, Result, RetrievalResult, RetrievalTool,
-    SymbolId, SymbolQuery, TraversalSpec, is_advisory,
+    SymbolId, SymbolQuery, TraversalSpec, edge_tags, is_advisory,
 };
 
 // W12 — one-shot context bundle tool (seed + ranked neighbours + budgeted stubs). Lives in its
@@ -1035,7 +1035,7 @@ fn blast_summary(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Transitive **dependencies** of a symbol (what it depends on — forward-reachability on
-/// `Calls` + `Imports` edges).
+/// `Calls` + `Imports` edges), or opt-in semantic value flow over `flows_to`.
 ///
 /// This is the directional complement of [`BlastRadius`]: where `BlastRadius` walks
 /// *Dependents* (who calls *me*?), `Lineage` walks *Dependencies* (what do *I* call?).
@@ -1043,10 +1043,12 @@ fn blast_summary(
 ///
 /// **Request shape**
 /// ```json
-/// { "symbol": "<id>", "depth": <n> }
+/// { "symbol": "<id>", "depth": <n>, "relation": "flows_to" }
 /// ```
 /// * `symbol` (required) — stable [`SymbolId`] of the start symbol.
 /// * `depth`  (optional, default 8, max 24) — maximum traversal hops.
+/// * `relation` (optional) — when set to `"flows_to"`, walks stored semantic value-flow edges
+///   from producer to consumer. Omit it for the existing dependency-lineage behavior.
 ///
 /// **Response `content` shape**
 /// ```json
@@ -1068,6 +1070,7 @@ impl RetrievalTool for Lineage {
 
     fn description(&self) -> &str {
         "Transitive dependencies of a symbol (forward-reachability on Calls+Imports edges). \
+         Optional relation='flows_to' traces semantic value flow from producer to consumer. \
          Answers 'what does this symbol depend on?' — the complement of BlastRadius. \
          Use to understand the full dependency chain before a refactor or to build a \
          change-impact picture from the dependency side."
@@ -1091,10 +1094,30 @@ impl RetrievalTool for Lineage {
 
         let max_depth = opt_u64(request, "depth").unwrap_or(8).min(24) as u32;
 
-        // Walk forward (Dependencies) along Calls + Imports edges — bounded.
+        let relation = request.get("relation").and_then(|v| v.as_str());
+        let semantic_flow = relation == Some(edge_tags::FLOWS_TO);
+        let invalid_relation = relation.filter(|r| *r != edge_tags::FLOWS_TO);
+
+        // Stored flows_to edges preserve the engine invariant: source=consumer, target=producer.
+        // A semantic-forward query therefore walks dependents from the producer to consumers.
+        let (direction, edge_kinds, empty_label) = if semantic_flow {
+            (
+                Direction::Dependents,
+                vec![edge_tags::other(edge_tags::FLOWS_TO)],
+                "flows_to consumers",
+            )
+        } else {
+            (
+                Direction::Dependencies,
+                vec![EdgeKind::Calls, EdgeKind::Imports],
+                "dependencies",
+            )
+        };
+
+        // Walk the selected relation — bounded.
         let spec = TraversalSpec {
-            direction: Direction::Dependencies,
-            edge_kinds: vec![EdgeKind::Calls, EdgeKind::Imports],
+            direction,
+            edge_kinds,
             max_depth,
             max_nodes: 5_000,
             min_confidence: 0.0,
@@ -1102,6 +1125,11 @@ impl RetrievalTool for Lineage {
 
         let start = SymbolId(id_str.clone());
         let mut diag = vec![staleness_note()];
+        if let Some(relation) = invalid_relation {
+            diag.push(format!(
+                "Lineage: unsupported relation '{relation}', using default dependency lineage"
+            ));
+        }
 
         let subgraph = store.traverse(&start, &spec)?;
 
@@ -1143,7 +1171,7 @@ impl RetrievalTool for Lineage {
 
         if dependencies.is_empty() {
             diag.push(format!(
-                "Lineage: no dependencies found for '{id_str}' \
+                "Lineage: no {empty_label} found for '{id_str}' \
                  (it may be a leaf or not yet indexed)"
             ));
         }
@@ -3325,6 +3353,51 @@ mod tests {
         );
         assert!(conf["min"].as_f64().is_some(), "min confidence populated");
         assert!(conf["avg"].as_f64().is_some(), "avg confidence populated");
+    }
+
+    #[test]
+    fn lineage_flows_to_walks_from_producer_to_consumer_without_changing_default() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node("producer", "route_id", NodeKind::Variable, "fixture.ts", 1),
+                make_node("consumer", "customer_id", NodeKind::Field, "fixture.ts", 2),
+            ])
+            .unwrap();
+        store
+            .upsert_edges(&[Edge::new(
+                SymbolId("consumer".to_string()),
+                SymbolId("producer".to_string()),
+                edge_tags::other(edge_tags::FLOWS_TO),
+                ResolutionTier::Parsed,
+                "test-fixture",
+            )])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        let semantic = Lineage
+            .invoke(
+                &store,
+                &json!({"symbol": "producer", "depth": 8, "relation": "flows_to"}),
+            )
+            .unwrap();
+        let semantic_names: Vec<_> = semantic.content["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| node["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(semantic_names, vec!["customer_id"]);
+        assert_eq!(
+            semantic.content["confidence"]["edge_count"].as_u64(),
+            Some(1)
+        );
+
+        let default = Lineage
+            .invoke(&store, &json!({"symbol": "producer", "depth": 8}))
+            .unwrap();
+        assert_eq!(default.content["total"].as_u64(), Some(0));
     }
 
     // ── Reciprocal Rank Fusion ───────────────────────────────────────────────

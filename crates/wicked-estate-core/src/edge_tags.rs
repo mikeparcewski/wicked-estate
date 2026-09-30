@@ -45,6 +45,10 @@ pub const LIFECYCLE_HOOK: &str = "lifecycle-hook";
 /// as a real graph edge by extractors.
 pub const SAME_PACKAGE: &str = "same-package";
 
+/// Conservative semantic value lineage. Stored direction follows the engine invariant:
+/// `source` = consumer/dependent value, `target` = producer/dependency value.
+pub const FLOWS_TO: &str = "flows_to";
+
 /// Build an [`EdgeKind::Other`] from a canonical tag constant.
 ///
 /// ```
@@ -88,6 +92,7 @@ mod tests {
             EVENT_LISTENS,
             LIFECYCLE_HOOK,
             SAME_PACKAGE,
+            FLOWS_TO,
         ];
         let set: std::collections::HashSet<_> = all.iter().collect();
         assert_eq!(set.len(), all.len(), "edge tag constants must be unique");

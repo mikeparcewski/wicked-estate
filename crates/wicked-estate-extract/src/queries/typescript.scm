@@ -208,13 +208,107 @@
     source: (string) @import.source)
 ) @import
 
+; ── Direct value-flow sites ─────────────────────────────────────────────────
+
+; const a = b / let a = b / var a = b
+(variable_declarator
+  name: (identifier) @flow.consumer.local
+  value: (identifier) @flow.producer.local
+) @flow.assignment
+
+; const c = a + b
+(variable_declarator
+  name: (identifier) @flow.consumer.local
+  value: (binary_expression
+    left: (identifier) @flow.producer.local
+    right: (identifier) @flow.producer.local)
+) @flow.expression
+
+; this.field = value
+(expression_statement
+  (assignment_expression
+    left: (member_expression
+      object: (this)
+      property: (property_identifier) @flow.consumer.field)
+    right: (identifier) @flow.producer.local)
+) @flow.assignment
+
+; const id = customer.id
+(variable_declarator
+  name: (identifier) @flow.consumer.local
+  value: (member_expression
+    object: (identifier)
+    property: (property_identifier)) @flow.producer.property
+) @flow.property_read
+
+; @Input() tenantId
+(public_field_definition
+  decorator: (decorator
+    (call_expression
+      function: (identifier) @_input_dec
+      (#eq? @_input_dec "Input")))
+  name: (property_identifier) @flow.consumer.field @flow.producer.angular_input
+) @flow.angular_input
+
+; const routeId = route.snapshot.paramMap.get('id')
+(variable_declarator
+  name: (identifier) @flow.consumer.local
+  value: (call_expression
+    function: (member_expression
+      object: (member_expression
+        object: (member_expression
+          object: (identifier) @_route_obj
+          property: (property_identifier) @_snapshot)
+        property: (property_identifier) @_param_map)
+      property: (property_identifier) @_get)
+    arguments: (arguments (string) @flow.producer.route_param)
+    (#eq? @_route_obj "route")
+    (#eq? @_snapshot "snapshot")
+    (#eq? @_param_map "paramMap")
+    (#eq? @_get "get"))
+) @flow.route_param
+
+; Callable parameters and simple returns become stable value nodes/edges. The call resolver
+; later joins exact call-site argument facts to these callable-owned values.
+(function_declaration
+  parameters: (formal_parameters
+    (required_parameter
+      pattern: (identifier) @flow.parameter.local)))
+
+(method_definition
+  parameters: (formal_parameters
+    (required_parameter
+      pattern: (identifier) @flow.parameter.local)))
+
+(return_statement
+  (identifier) @flow.return.local)
+
+; Generic call value-flow facts. These are carried as UnresolvedRef hints and only become
+; edges when the existing Calls resolver binds the exact site.
+(call_expression
+  arguments: (arguments
+    (identifier) @call.arg.local) @call.arguments
+) @call.value
+
+; this.field passed as an argument, e.g. this.loadCustomer(service, this.customerId)
+(call_expression
+  arguments: (arguments
+    (member_expression
+      object: (this)
+      property: (property_identifier) @call.arg.field)) @call.arguments
+) @call.value
+
+(variable_declarator
+  name: (identifier) @call.result.local
+  value: (call_expression) @call.value)
+
 ; ── Call sites ───────────────────────────────────────────────────────────────
 
 ; Function calls — simple: foo()
 (call_expression
   function: (identifier) @call.function
   arguments: (arguments) @call.args
-) @call
+) @call.value
 
 ; Method calls — member expression: a.b(), a.b.c(), a?.b()
 ; The optional_chain variant also uses member_expression with property_identifier
@@ -222,16 +316,16 @@
   function: (member_expression
     property: (property_identifier) @call.method
   )
-) @call.method
+) @call.value
 
 ; Constructor calls — new X()
 (new_expression
   constructor: (identifier) @call.function
-) @call
+) @call.value
 
 ; Constructor calls — new a.B()
 (new_expression
   constructor: (member_expression
     property: (property_identifier) @call.method
   )
-) @call.method
+) @call.value
