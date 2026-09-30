@@ -77,7 +77,7 @@ use rayon::prelude::*;
 use wicked_estate_core::{
     ChangeOp, Edge, EdgeKind, Extraction, Extractor, GraphRead, GraphStats, Language, Location,
     Node, NodeKind, NodeSemantics, RepoInfo, ResolutionTier, Resolver, Result, SourceFile, Span,
-    Symbol, SymbolId, SymbolIndex, SymbolQuery, TraversalSpec,
+    Symbol, SymbolId, SymbolIndex, SymbolQuery, TraversalSpec, edge_tags,
 };
 use wicked_estate_extract::{
     BlazeBrlExtractor, CicsSqlExtractor, DrlExtractor, ExtraEdgeExtractor, HlasmExtractor,
@@ -346,6 +346,375 @@ impl SymbolIndex for InMemoryIndex {
     fn language_family(&self, language: &str) -> Option<String> {
         self.families.get(language).cloned()
     }
+}
+
+fn value_symbol(owner: &SymbolId, role: &str, name: &str) -> SymbolId {
+    Symbol::synthetic("value", format!("{}:{role}:{name}", owner.0)).id()
+}
+
+fn value_node(
+    symbol: SymbolId,
+    kind: NodeKind,
+    name: impl Into<String>,
+    language: Language,
+    location: Location,
+    role: &str,
+) -> Node {
+    Node::new(symbol, kind, name.into(), language, location).with_value_role(role)
+}
+
+/// One `File`→value-node `Contains` edge, so a call-derived value node is reachable from a real
+/// code node instead of sitting on an island (wicked-estate#207 review, C13) and `remove_file`
+/// can retire it. Mirrors the tree-sitter emitter; Contains stays File→node (D4).
+fn value_containment_edge(node: &Node) -> Edge {
+    Edge::new(
+        Symbol::file(&node.location.file).id(),
+        node.symbol.clone(),
+        EdgeKind::Contains,
+        ResolutionTier::Parsed,
+        "call-value-flow",
+    )
+    .with_location(Location::new(&node.location.file, Span::ZERO))
+}
+
+fn flow_edge(source: SymbolId, target: SymbolId, call_edge: &Edge, construct: &str) -> Edge {
+    let mut edge = Edge::new(
+        source,
+        target,
+        edge_tags::other(edge_tags::FLOWS_TO),
+        ResolutionTier::Heuristic,
+        call_edge.resolved_by.clone(),
+    );
+    edge.confidence = call_edge.confidence;
+    edge.provenance = call_edge.provenance.clone();
+    edge.location = call_edge.location.clone();
+    edge.metadata.insert(
+        "construct".to_string(),
+        serde_json::Value::String(construct.to_string()),
+    );
+    edge
+}
+
+type CallSiteKey = (String, u32, u32, u32);
+
+fn call_site_key(location: &Location) -> CallSiteKey {
+    (
+        location.file.clone(),
+        location.span.start_line,
+        location.span.start_byte,
+        location.span.end_byte,
+    )
+}
+
+fn call_value_ref_hints(
+    refs: &[wicked_estate_core::UnresolvedRef],
+) -> HashMap<CallSiteKey, serde_json::Value> {
+    refs.iter()
+        .filter(|r| r.kind == EdgeKind::Calls)
+        .filter_map(|r| {
+            r.hints
+                .get("value_flow")
+                .cloned()
+                .map(|hint| (call_site_key(&r.location), hint))
+        })
+        .collect()
+}
+
+fn call_value_ref_hints_from_files(
+    store: &dyn GraphRead,
+    files: impl IntoIterator<Item = String>,
+    ext_map: &HashMap<String, TreeSitterExtractor>,
+) -> Result<HashMap<CallSiteKey, serde_json::Value>> {
+    let mut refs = Vec::new();
+    for file in files {
+        let Some(text) = store.file_content(&file)? else {
+            continue;
+        };
+        let ext = Path::new(&file)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if let Some(extraction) = base_extraction(&file, &ext, &text, ext_map) {
+            refs.extend(extraction.refs);
+        }
+    }
+    Ok(call_value_ref_hints(&refs))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValueFlowHintKind {
+    Local,
+    Field,
+    Parameter,
+}
+
+impl ValueFlowHintKind {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "local" => Some(Self::Local),
+            "field" => Some(Self::Field),
+            "parameter" => Some(Self::Parameter),
+            _ => None,
+        }
+    }
+
+    fn node_kind(self) -> NodeKind {
+        match self {
+            Self::Field => NodeKind::Field,
+            Self::Parameter => NodeKind::Parameter,
+            Self::Local => NodeKind::Variable,
+        }
+    }
+
+    fn role(self) -> &'static str {
+        match self {
+            Self::Field => "Field",
+            Self::Parameter => "Parameter",
+            Self::Local => "Local",
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ValueFlowHintError {
+    key: String,
+    kind: String,
+}
+
+fn value_flow_hint_decode_error(
+    site: &CallSiteKey,
+    error: ValueFlowHintError,
+) -> wicked_estate_core::Error {
+    wicked_estate_core::Error::Invalid(format!(
+        "unsupported call value-flow hint kind at {}:{}:{}-{} key={} kind={}",
+        site.0, site.1, site.2, site.3, error.key, error.kind
+    ))
+}
+
+#[derive(Debug)]
+struct ValueFlowEndpoint {
+    name: String,
+    kind: ValueFlowHintKind,
+    symbol: Option<SymbolId>,
+    slot: Option<usize>,
+}
+
+impl ValueFlowEndpoint {
+    fn node_kind(&self) -> NodeKind {
+        self.kind.node_kind()
+    }
+
+    fn role(&self) -> &str {
+        self.kind.role()
+    }
+}
+
+fn value_flow_endpoint_kind(
+    raw: &str,
+    key: &str,
+) -> std::result::Result<ValueFlowHintKind, ValueFlowHintError> {
+    ValueFlowHintKind::parse(raw).ok_or_else(|| ValueFlowHintError {
+        key: key.to_string(),
+        kind: raw.to_string(),
+    })
+}
+
+fn value_flow_endpoints(
+    hint: &serde_json::Value,
+    key: &str,
+) -> std::result::Result<Vec<ValueFlowEndpoint>, ValueFlowHintError> {
+    hint.get(key)
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let raw_kind = item.get("kind")?.as_str()?;
+            let name = item.get("name")?.as_str()?.to_string();
+            let symbol = item
+                .get("symbol")
+                .and_then(|v| v.as_str())
+                .map(|s| SymbolId(s.to_string()));
+            let slot = item
+                .get("slot")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            Some(
+                value_flow_endpoint_kind(raw_kind, key).map(|kind| ValueFlowEndpoint {
+                    name,
+                    kind,
+                    symbol,
+                    slot,
+                }),
+            )
+        })
+        .collect()
+}
+
+fn sorted_value_flow_endpoints(
+    hint: &serde_json::Value,
+    key: &str,
+) -> std::result::Result<Vec<ValueFlowEndpoint>, ValueFlowHintError> {
+    let mut endpoints = value_flow_endpoints(hint, key)?;
+    endpoints.sort_by_key(|endpoint| endpoint.slot.unwrap_or(usize::MAX));
+    Ok(endpoints)
+}
+
+fn value_flow_result(
+    hint: &serde_json::Value,
+) -> std::result::Result<Option<ValueFlowEndpoint>, ValueFlowHintError> {
+    let Some(result) = hint.get("result") else {
+        return Ok(None);
+    };
+    let Some(raw_kind) = result.get("kind").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    let Some(name) = result
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
+        return Ok(None);
+    };
+    let symbol = result
+        .get("symbol")
+        .and_then(|v| v.as_str())
+        .map(|s| SymbolId(s.to_string()));
+    Ok(Some(ValueFlowEndpoint {
+        name,
+        kind: value_flow_endpoint_kind(raw_kind, "result")?,
+        symbol,
+        slot: None,
+    }))
+}
+
+/// The callee's POSITIONAL parameter slots: one entry per declared parameter, `None` where the
+/// extractor captured no value node for it (a destructured or optional parameter). The index IS
+/// the argument slot — see the `value_params` note in `wicked-estate-extract` (C5d).
+fn callable_param_names(callee: &Node) -> Vec<Option<String>> {
+    callee
+        .metadata
+        .get("value_params")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .map(|v| v.as_str().map(str::to_string))
+        .collect()
+}
+
+fn call_value_flow(
+    site_edges: &[Edge],
+    index: &InMemoryIndex,
+    ref_hints: &HashMap<CallSiteKey, serde_json::Value>,
+) -> Result<(Vec<Node>, Vec<Edge>)> {
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut by_site: HashMap<CallSiteKey, HashMap<SymbolId, Edge>> = HashMap::new();
+
+    for call_edge in site_edges {
+        if call_edge.kind != EdgeKind::Calls {
+            continue;
+        }
+        let Some(loc) = &call_edge.location else {
+            continue;
+        };
+        let target_edges = by_site.entry(call_site_key(loc)).or_default();
+        target_edges
+            .entry(call_edge.target.clone())
+            .and_modify(|existing| {
+                if call_edge.confidence.get() > existing.confidence.get() {
+                    *existing = call_edge.clone();
+                }
+            })
+            .or_insert_with(|| call_edge.clone());
+    }
+
+    for (site_key, target_edges) in by_site {
+        let Some(hint) = ref_hints.get(&site_key) else {
+            continue;
+        };
+        if target_edges.len() != 1 {
+            continue;
+        }
+        let call_edge = target_edges.into_values().next().unwrap();
+        let Some(caller) = index.get(&call_edge.source) else {
+            continue;
+        };
+        let Some(callee) = index.get(&call_edge.target) else {
+            continue;
+        };
+
+        let args = sorted_value_flow_endpoints(hint, "args")
+            .map_err(|error| value_flow_hint_decode_error(&site_key, error))?;
+        let target = value_flow_result(hint)
+            .map_err(|error| value_flow_hint_decode_error(&site_key, error))?;
+        let params = callable_param_names(&callee);
+        let Some(site) = call_edge.location.clone() else {
+            continue;
+        };
+
+        for arg in &args {
+            let Some(slot) = arg.slot else {
+                continue;
+            };
+            // Slot-exact: a parameter the extractor could not capture yields a LOST hop, never a
+            // hop onto a neighbouring parameter (wicked-estate#207 review, C5d).
+            let Some(Some(param)) = params.get(slot) else {
+                continue;
+            };
+            let arg_symbol = arg
+                .symbol
+                .clone()
+                .unwrap_or_else(|| value_symbol(&caller.symbol, "local", &arg.name));
+            let param_symbol = value_symbol(&callee.symbol, "local", param);
+            if index.get(&arg_symbol).is_none() {
+                let node = value_node(
+                    arg_symbol.clone(),
+                    arg.node_kind(),
+                    arg.name.clone(),
+                    caller.language.clone(),
+                    site.clone(),
+                    arg.role(),
+                );
+                edges.push(value_containment_edge(&node));
+                nodes.push(node);
+            }
+            edges.push(flow_edge(
+                param_symbol,
+                arg_symbol,
+                &call_edge,
+                "call_argument",
+            ));
+        }
+
+        let return_symbol = value_symbol(&callee.symbol, "return", "value");
+        if let Some(target) = target {
+            let target_symbol = target
+                .symbol
+                .clone()
+                .unwrap_or_else(|| value_symbol(&caller.symbol, "local", &target.name));
+            if index.get(&target_symbol).is_none() {
+                let node = value_node(
+                    target_symbol.clone(),
+                    target.node_kind(),
+                    target.name.clone(),
+                    caller.language.clone(),
+                    site,
+                    target.role(),
+                );
+                edges.push(value_containment_edge(&node));
+                nodes.push(node);
+            }
+            edges.push(flow_edge(
+                target_symbol,
+                return_symbol,
+                &call_edge,
+                "call_result",
+            ));
+        }
+    }
+
+    Ok((nodes, edges))
 }
 
 /// Entry names both walks skip: vendor/build dirs, wicked's own generated measurement artifacts
@@ -868,18 +1237,84 @@ pub fn index_path_as(
     }
 
     // ── Split CHANGED/NEW from UNCHANGED ────────────────────────────────────────────────────
+    let work_by_rel: HashMap<String, FileWork> =
+        work.into_iter().map(|fw| (fw.rel.clone(), fw)).collect();
+    let mut stored_digest_by_rel: HashMap<String, Option<String>> = HashMap::new();
+    let mut changed_seed: HashSet<String> = HashSet::new();
+    for (rel, fw) in &work_by_rel {
+        let stored = store.file_digest(rel)?;
+        if force_full
+            || forced_importers.contains(rel)
+            || stored.as_deref() != Some(fw.digest.as_str())
+        {
+            changed_seed.insert(rel.clone());
+        }
+        stored_digest_by_rel.insert(rel.clone(), stored);
+    }
+
+    // Call-derived value-flow edges can be stored with a changed callee-owned parameter/return
+    // endpoint but sourced from an unchanged caller's call-site facts. Re-extract the reverse
+    // Calls/flows_to closure before remove_file() deletes those endpoint edges, otherwise a
+    // callee-only edit drops the caller-derived semantic flow until the caller changes.
+    //
+    // The invariant is exactly ONE hop: a call-site fact in the caller joined to the callee's own
+    // parameter/return endpoint. A caller-of-a-caller holds no fact about this callee, so the
+    // transitive fixed point this used to run bought nothing and cost everything — on a 905-file
+    // TypeScript repo a one-line edit to a leaf test file forced 719 files into re-extraction
+    // (20.7 s / 1.2 GB, ~3× the full index) and `watch` paid it on every save
+    // (wicked-estate#207 review, C2). Pinned by
+    // `incremental_leaf_edit_forces_only_direct_callers`; the one-hop invariant it protects is
+    // pinned by `incremental_callee_only_edit_preserves_call_derived_value_flow`.
+    //
+    // NOT gated on the store already holding a `flows_to` edge, deliberately: the edit that makes
+    // a callee flow-capable for the FIRST time (a destructured parameter becoming a plain one)
+    // is exactly when a store holds none, and skipping it strands the caller's transient
+    // call-site facts — the same full-vs-incremental divergence this change exists to remove.
+    // Pinned by `an_edit_that_first_makes_a_callee_flow_capable_forces_its_callers`.
+    let mut forced_value_flow_callers: HashSet<String> = HashSet::new();
+    if !force_full && !changed_seed.is_empty() {
+        let mut changed_symbols: HashSet<SymbolId> = HashSet::new();
+        let mut file_by_symbol: HashMap<SymbolId, String> = HashMap::new();
+        for node in store.all_nodes()? {
+            if changed_seed.contains(&node.location.file) {
+                changed_symbols.insert(node.symbol.clone());
+            }
+            file_by_symbol.insert(node.symbol, node.location.file);
+        }
+        for edge in store.all_edges()? {
+            // Only a DIRECT caller of a changed callee holds call-site facts about it.
+            if edge.kind != EdgeKind::Calls || !changed_symbols.contains(&edge.target) {
+                continue;
+            }
+            for candidate in [
+                edge.location.as_ref().map(|loc| loc.file.as_str()),
+                file_by_symbol.get(&edge.source).map(String::as_str),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if !changed_seed.contains(candidate)
+                    && current_rel_paths.contains(candidate)
+                    && work_by_rel.contains_key(candidate)
+                {
+                    forced_value_flow_callers.insert(candidate.to_string());
+                }
+            }
+        }
+    }
+
     let mut changed: Vec<FileWork> = Vec::new();
     let mut unchanged_count: usize = 0;
     // Paths with NO digest row — never indexed before (or removed and re-created since). The
     // count gates the back-fill pass's import lane below: only a NEW File path can be what a
     // parked relative-import ref was waiting for.
     let mut new_file_count: usize = 0;
-    for fw in work {
-        let stored = store.file_digest(&fw.rel)?;
+    for (rel, fw) in work_by_rel {
+        let stored = stored_digest_by_rel.remove(&rel).unwrap_or(None);
         // A direct importer of a DELETED file is forced into `changed` even with a matching
         // digest (Decision J): consulted HERE, while the FileWork is still alive — the
         // unchanged arm drops it.
-        let forced = forced_importers.contains(&fw.rel);
+        let forced = forced_importers.contains(&rel) || forced_value_flow_callers.contains(&rel);
         if !force_full && !forced && stored.as_deref() == Some(&fw.digest) {
             // UNCHANGED: skip extraction entirely; its nodes/edges already in the store.
             //
@@ -1142,6 +1577,9 @@ pub fn index_path_as(
         &RulesBridgeResolver,
     ];
     let resolution = resolve_all_with_coverage(resolvers, &all_refs, &index)?;
+    let call_ref_hints = call_value_ref_hints(&all_refs);
+    let (call_flow_nodes, call_flow_edges) =
+        call_value_flow(&resolution.site_edges, &index, &call_ref_hints)?;
     // Estate cross-domain join: RACF profiles → the datasets/MQ assets they protect, by RACF
     // generic profile matching (most-specific wins). Derived from the full node population (a
     // profile pattern can match assets declared in any file), reusing the index just built.
@@ -1151,7 +1589,9 @@ pub fn index_path_as(
     // docs/ENGINE-CONTRACT.md §2.1 (a ref is unresolved iff no resolver emitted an edge
     // attributed to it, per site).
     store.begin_batch()?;
+    store.upsert_nodes(&call_flow_nodes)?;
     store.upsert_edges(&resolution.edges)?;
+    store.upsert_edges(&call_flow_edges)?;
     store.upsert_edges(&estate)?;
     store.upsert_unresolved_refs(&resolution.unresolved)?;
     store.commit_batch()?;
@@ -1231,9 +1671,25 @@ pub fn index_path_as(
                 .collect();
             backfill_resolved = bound.len();
             backfill_still_parked = backfill.unresolved.len();
-            if !bound.is_empty() || !backfill.edges.is_empty() {
+            let backfill_call_files: HashSet<String> = backfill
+                .site_edges
+                .iter()
+                .filter(|edge| edge.kind == EdgeKind::Calls)
+                .filter_map(|edge| edge.location.as_ref().map(|loc| loc.file.clone()))
+                .collect();
+            let backfill_call_hints =
+                call_value_ref_hints_from_files(&*store, backfill_call_files, &ext_map)?;
+            let (backfill_flow_nodes, backfill_flow_edges) =
+                call_value_flow(&backfill.site_edges, &index, &backfill_call_hints)?;
+            if !bound.is_empty()
+                || !backfill.edges.is_empty()
+                || !backfill_flow_nodes.is_empty()
+                || !backfill_flow_edges.is_empty()
+            {
                 store.begin_batch()?;
+                store.upsert_nodes(&backfill_flow_nodes)?;
                 store.upsert_edges(&backfill.edges)?;
+                store.upsert_edges(&backfill_flow_edges)?;
                 store.delete_unresolved_refs(&bound)?;
                 store.commit_batch()?;
             }
@@ -1410,12 +1866,23 @@ pub fn symbols_for_requirement(
 }
 
 /// Find symbols by exact name.
+///
+/// Synthetic value-flow slots are excluded: a bare NAME never resolves to one. They are named with
+/// the bare source identifier, so a local named `map` would otherwise answer every `map` lookup —
+/// `blast-radius map` reported dependents of a local instead of "no resolved dependents"
+/// (wicked-estate#207 review, C1/C4). They are addressed by exact [`SymbolId`] only (the shape the
+/// `Lineage` `flows_to` relation takes), and `SearchEntity`'s `include_values` opt-in surfaces
+/// them deliberately.
 pub fn search(store: &dyn GraphRead, name: &str) -> Result<Vec<Node>> {
     let q = SymbolQuery {
         exact_name: Some(name.to_string()),
         ..Default::default()
     };
-    store.find_symbols(&q)
+    Ok(store
+        .find_symbols(&q)?
+        .into_iter()
+        .filter(|node| !node.is_value_flow_node())
+        .collect())
 }
 
 /// Blast radius: transitive dependents (callers) of every symbol named `name`, up to `depth`.
@@ -1987,6 +2454,232 @@ mod tests {
                 "{name} must stay family-None (D5/F7: must keep resolving)"
             );
         }
+    }
+
+    fn call_flow_index() -> (InMemoryIndex, SymbolId, SymbolId, SymbolId, Span, String) {
+        let caller = SymbolId("caller".to_string());
+        let callee = SymbolId("callee".to_string());
+        let other = SymbolId("other_callee".to_string());
+        let mut callee_node = Node::new(
+            callee.clone(),
+            NodeKind::Function,
+            "normalize",
+            Language::new("typescript"),
+            Location::new("callee.ts", Span::ZERO),
+        );
+        callee_node
+            .metadata
+            .insert("value_params".to_string(), serde_json::json!(["id"]));
+        let mut other_node = Node::new(
+            other.clone(),
+            NodeKind::Function,
+            "normalize",
+            Language::new("typescript"),
+            Location::new("other.ts", Span::ZERO),
+        );
+        other_node
+            .metadata
+            .insert("value_params".to_string(), serde_json::json!(["id"]));
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                Node::new(
+                    caller.clone(),
+                    NodeKind::Function,
+                    "load",
+                    Language::new("typescript"),
+                    Location::new("caller.ts", Span::ZERO),
+                ),
+                callee_node,
+                other_node,
+            ])
+            .unwrap();
+        store.commit_batch().unwrap();
+        let index = InMemoryIndex::build(&store, None).unwrap();
+        (
+            index,
+            caller,
+            callee,
+            other,
+            Span {
+                start_byte: 10,
+                end_byte: 30,
+                start_line: 1,
+                start_col: 4,
+                end_line: 1,
+                end_col: 24,
+            },
+            "caller.ts".to_string(),
+        )
+    }
+
+    fn call_flow_hints(
+        caller: &SymbolId,
+        file: &str,
+        span: Span,
+    ) -> HashMap<CallSiteKey, serde_json::Value> {
+        HashMap::from([(
+            call_site_key(&Location::new(file, span)),
+            serde_json::json!({
+                "args": [{
+                    "name": "raw",
+                    "kind": "local",
+                    "symbol": value_symbol(caller, "local", "raw").0,
+                    "slot": 0
+                }],
+                "result": {
+                    "name": "out",
+                    "kind": "local",
+                    "symbol": value_symbol(caller, "local", "out").0
+                }
+            }),
+        )])
+    }
+
+    #[test]
+    fn value_flow_hint_endpoint_kinds_round_trip_stable_vocabulary() {
+        let hint = serde_json::json!({
+            "args": [
+                {"name": "raw", "kind": "local", "slot": 0},
+                {"name": "fieldValue", "kind": "field", "slot": 1},
+                {"name": "id", "kind": "parameter", "slot": 2}
+            ],
+            "result": {"name": "out", "kind": "local"}
+        });
+
+        let args = value_flow_endpoints(&hint, "args").unwrap();
+        let kinds: Vec<_> = args.iter().map(|endpoint| endpoint.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ValueFlowHintKind::Local,
+                ValueFlowHintKind::Field,
+                ValueFlowHintKind::Parameter
+            ]
+        );
+        assert_eq!(
+            value_flow_result(&hint).unwrap().unwrap().kind,
+            ValueFlowHintKind::Local
+        );
+    }
+
+    #[test]
+    fn value_flow_hint_rejects_unsupported_endpoint_kind() {
+        let args_hint = serde_json::json!({
+            "args": [{"name": "raw", "kind": "Local", "slot": 0}]
+        });
+        assert_eq!(
+            value_flow_endpoints(&args_hint, "args").unwrap_err(),
+            ValueFlowHintError {
+                key: "args".to_string(),
+                kind: "Local".to_string()
+            }
+        );
+
+        let result_hint = serde_json::json!({
+            "result": {"name": "out", "kind": "RouteParam"}
+        });
+        assert_eq!(
+            value_flow_result(&result_hint).unwrap_err(),
+            ValueFlowHintError {
+                key: "result".to_string(),
+                kind: "RouteParam".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn call_value_flow_returns_error_for_unsupported_hint_kind() {
+        let (index, caller, callee, _, span, file) = call_flow_index();
+        let edge = Edge::new(
+            caller.clone(),
+            callee,
+            EdgeKind::Calls,
+            ResolutionTier::Parsed,
+            "test",
+        )
+        .with_location(Location::new(&file, span));
+        let hints = HashMap::from([(
+            call_site_key(&Location::new(&file, span)),
+            serde_json::json!({
+                "args": [{
+                    "name": "raw",
+                    "kind": "Local",
+                    "symbol": value_symbol(&caller, "local", "raw").0,
+                    "slot": 0
+                }]
+            }),
+        )]);
+
+        let error = call_value_flow(&[edge], &index, &hints).unwrap_err();
+        let wicked_estate_core::Error::Invalid(message) = error else {
+            panic!("expected invalid hint error, got {error:?}");
+        };
+        assert!(
+            message.contains("caller.ts:1:10-30")
+                && message.contains("key=args")
+                && message.contains("kind=Local"),
+            "invalid hint error should include site/key/kind context, got {message:?}"
+        );
+    }
+
+    #[test]
+    fn call_value_flow_allows_duplicate_same_target_at_one_site() {
+        let (index, caller, callee, _, span, file) = call_flow_index();
+        let edge = Edge::new(
+            caller.clone(),
+            callee.clone(),
+            EdgeKind::Calls,
+            ResolutionTier::Parsed,
+            "test",
+        )
+        .with_location(Location::new(&file, span));
+        let hints = call_flow_hints(&caller, &file, span);
+
+        let (_, flows) = call_value_flow(&[edge.clone(), edge], &index, &hints).unwrap();
+        let pairs: std::collections::BTreeSet<_> = flows
+            .into_iter()
+            .map(|edge| (edge.target, edge.source))
+            .collect();
+
+        assert!(pairs.contains(&(
+            value_symbol(&caller, "local", "raw"),
+            value_symbol(&callee, "local", "id")
+        )));
+        assert!(pairs.contains(&(
+            value_symbol(&callee, "return", "value"),
+            value_symbol(&caller, "local", "out")
+        )));
+    }
+
+    #[test]
+    fn call_value_flow_suppresses_one_site_with_two_unique_targets() {
+        let (index, caller, callee, other, span, file) = call_flow_index();
+        let first = Edge::new(
+            caller.clone(),
+            callee,
+            EdgeKind::Calls,
+            ResolutionTier::Parsed,
+            "test",
+        )
+        .with_location(Location::new(&file, span));
+        let second = Edge::new(
+            caller.clone(),
+            other,
+            EdgeKind::Calls,
+            ResolutionTier::Parsed,
+            "test",
+        )
+        .with_location(Location::new(&file, span));
+        let hints = call_flow_hints(&caller, &file, span);
+
+        let (_, flows) = call_value_flow(&[first, second], &index, &hints).unwrap();
+
+        assert!(
+            flows.is_empty(),
+            "ambiguous exact-site call must not emit argument or return value flow"
+        );
     }
 
     // ── Task C: estate_drift ─────────────────────────────────────────────────

@@ -39,6 +39,7 @@ pub use error::{Error, Result};
 pub use history::HistoricalEdge;
 pub use node::{
     DECLARATION_METADATA_KEY, Language, Location, Metadata, Node, NodeKind, SourceFile, Span,
+    VALUE_ROLE_METADATA_KEY,
 };
 pub use observability::{
     AggregationTemporality, AttributeValue, ExportError, ExportResult, ExporterConfig,

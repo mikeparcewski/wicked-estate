@@ -20,6 +20,11 @@ Therefore:
 - **Dependents of X** (who needs X) = edges where `target == X` → `Direction::Dependents`.
 - **Blast radius of X** ("what breaks if I change X?") = transitive **dependents** =
   reverse-reachability following edges where `target == X`, then their sources, recursively.
+- **Semantic value flow** stores `flows_to` as `EdgeKind::Other("flows_to")` with the same
+  invariant: `source` is the consumer and `target` is the producer. A user-facing producer →
+  consumer lineage query therefore walks `Direction::Dependents` over only `flows_to` edges. The
+  default `Lineage` query remains dependency lineage over `Calls` + `Imports` unless callers opt in
+  with `relation = "flows_to"`.
 
 This matches the hard-won `DEPENDENTS_BY = "target"` (a spike there caught a latent
 direction bug in a reference impl — the design notes). `MemStore` and every
@@ -138,7 +143,9 @@ the production resolver slice — guarded against drift by
 
 | resolver id | tier | confidence | activation | notes |
 |---|---|---|---|---|
-| tree-sitter extractors (local edges) | `Parsed` | 1.0 | yes (extract phase) | intra-file `Contains`/`Defines`, written before resolution |
+| tree-sitter extractors (local edges) | `Parsed` | 1.0 | yes (extract phase) | intra-file `Contains`/`Defines` and parsed `flows_to` local/field/property-read/Angular-input/route-param/return edges, written before resolution; parsed `flows_to` edges use stored direction consumer→producer, `resolved_by = tree-sitter`, `Provenance::Parsed`, and `metadata.construct` |
+| call-derived value flow (main pass) | inherited from resolved `Calls` edge | inherited from resolved `Calls` edge | yes (post-resolution, same index run) | derives `flows_to` call-argument and call-result edges only from exact-site `Calls` bindings with one unique accepted target; stored direction remains consumer→producer, while `Lineage` `relation = "flows_to"` walks dependents for semantic-forward producer→consumer output |
+| call-derived value flow (back-fill) | inherited from resolved `Calls` edge | inherited from resolved `Calls` edge | yes (parked-ref back-fill, same index run) | when a previously parked call binds after another file appears, re-extracts call-site hints from stored source text and emits the same exact-site call-argument/call-result `flows_to` edges before deleting the parked ref |
 | `name-resolver` | `ImportMap` | 0.60 | yes (slice) | unique-name binding; kind deny-list runs pre-uniqueness, cross-family guard post-uniqueness |
 | `scoped-name-resolver` | `ImportMap` | 0.60 / 0.62 / 0.65 | yes (slice) | callable-only for Calls; same-file / same-dir / cross-file ranking; family guard pre-ranking |
 | `import-map-resolver` | `ImportMap` | 0.63 | yes (slice) | `hints["imports"]`-scoped binding, `via=import-map` |

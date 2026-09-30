@@ -26,8 +26,8 @@
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use wicked_estate_core::{
-    Annotation, Direction, EdgeKind, GraphRead, NodeKind, Result, RetrievalResult, RetrievalTool,
-    SymbolId, SymbolQuery, TraversalSpec, is_advisory,
+    Annotation, Direction, EdgeKind, GraphRead, Node, NodeKind, Result, RetrievalResult,
+    RetrievalTool, SymbolId, SymbolQuery, TraversalSpec, edge_tags, is_advisory,
 };
 
 // W12 — one-shot context bundle tool (seed + ranked neighbours + budgeted stubs). Lives in its
@@ -308,6 +308,51 @@ fn annotation_payload(store: &dyn GraphRead, id: &SymbolId) -> Result<Option<(Va
     Ok(Some((Value::Array(items), summary)))
 }
 
+/// Name/FTS candidates **for a symbol seed**, with synthetic value-flow slots excluded.
+///
+/// Value slots (a callable's locals, parameters and return values) reuse ordinary node kinds and
+/// carry the BARE source identifier, so for a common name they displace every real symbol: on a
+/// real repo `name:"id"` returned 20 of 20 synthetic locals where it had returned `SHORT_ID`,
+/// `short7`, … (wicked-estate#207 review, C4). Every tool that turns a NAME into a symbol seeds
+/// through here — `SearchEntity`, `ContextPack`, `ContextBundle`, `budget_context` — so the rule
+/// lives in one place rather than in four copies. Value slots stay addressable by exact
+/// [`SymbolId`], and `SearchEntity` re-admits them with `include_values=true`.
+///
+/// The store is over-fetched and filtered here rather than filtered after `limit`, so the
+/// exclusion costs recall instead of matches; if the over-fetch saturates and still yields fewer
+/// than `want` real symbols, it escalates ONCE. A store-level predicate would remove the
+/// escalation entirely — tracked as a follow-up.
+///
+/// Returns the surviving nodes (NOT truncated to `want`, so callers can merge result sets) and
+/// the number of slots hidden.
+pub(crate) fn find_seed_symbols(
+    store: &dyn GraphRead,
+    base: &SymbolQuery,
+    want: usize,
+) -> Result<(Vec<Node>, usize)> {
+    const ESCALATED_LIMIT: usize = 5_000;
+    let limits = [want.saturating_mul(10).clamp(want, 500), ESCALATED_LIMIT];
+    let mut out = (Vec::new(), 0);
+    for (i, limit) in limits.into_iter().enumerate() {
+        let mut query = base.clone();
+        query.limit = Some(limit);
+        let raw = store.find_symbols(&query)?;
+        let saturated = raw.len() >= limit;
+        let total = raw.len();
+        let kept: Vec<Node> = raw
+            .into_iter()
+            .filter(|node| !node.is_value_flow_node())
+            .collect();
+        let hidden = total - kept.len();
+        let enough = kept.len() >= want;
+        out = (kept, hidden);
+        if enough || !saturated || i + 1 == limits.len() {
+            break;
+        }
+    }
+    Ok(out)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SearchEntity
 // ─────────────────────────────────────────────────────────────────────────────
@@ -368,20 +413,38 @@ impl RetrievalTool for SearchEntity {
 
         let raw_limit = opt_u64(request, "limit").unwrap_or(20).min(100) as usize;
 
+        // Synthetic value-flow slots (a callable's locals, parameters, returns) carry ordinary
+        // kinds and BARE source identifiers, so for a common name they displace every real symbol:
+        // on a real repo `{"name":"id"}` returned 20 of 20 synthetic locals where it had returned
+        // `SHORT_ID`, `short7`, … (wicked-estate#207 review, C4). They are excluded unless the
+        // caller opts in — the same opt-in shape `Lineage`'s `relation` uses — and the store is
+        // over-fetched so the exclusion costs recall, not matches.
+        let include_values = request
+            .get("include_values")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         // Two-pass: exact first, then substring (deduplicated).
         let exact_query = SymbolQuery {
             exact_name: Some(name_val.clone()),
             limit: Some(raw_limit),
             ..Default::default()
         };
-        let mut exact_hits = store.find_symbols(&exact_query)?;
-
         let text_query = SymbolQuery {
             text: Some(name_val.clone()),
             limit: Some(raw_limit),
             ..Default::default()
         };
-        let text_hits = store.find_symbols(&text_query)?;
+        let (mut exact_hits, text_hits, hidden) = if include_values {
+            (
+                store.find_symbols(&exact_query)?,
+                store.find_symbols(&text_query)?,
+                0,
+            )
+        } else {
+            let (exact, hidden_exact) = find_seed_symbols(store, &exact_query, raw_limit)?;
+            let (text, hidden_text) = find_seed_symbols(store, &text_query, raw_limit)?;
+            (exact, text, hidden_exact + hidden_text)
+        };
 
         // Merge: exact first, then text hits not already present.
         let exact_ids: std::collections::HashSet<_> =
@@ -391,9 +454,17 @@ impl RetrievalTool for SearchEntity {
                 exact_hits.push(n);
             }
         }
-        exact_hits.truncate(raw_limit);
 
         let mut diag = Vec::new();
+        if hidden > 0 {
+            // R7/R5: never silently drop matches — name the count and the way back in.
+            diag.push(format!(
+                "SearchEntity: hid {hidden} synthetic value-flow slot(s) matching \'{name_val}\'; \
+                 pass include_values=true to search them (they are queried by SymbolId, e.g. \
+                 Lineage relation=flows_to)"
+            ));
+        }
+        exact_hits.truncate(raw_limit);
 
         if exact_hits.is_empty() {
             diag.push(format!(
@@ -1035,7 +1106,7 @@ fn blast_summary(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Transitive **dependencies** of a symbol (what it depends on — forward-reachability on
-/// `Calls` + `Imports` edges).
+/// `Calls` + `Imports` edges), or opt-in semantic value flow over `flows_to`.
 ///
 /// This is the directional complement of [`BlastRadius`]: where `BlastRadius` walks
 /// *Dependents* (who calls *me*?), `Lineage` walks *Dependencies* (what do *I* call?).
@@ -1043,10 +1114,12 @@ fn blast_summary(
 ///
 /// **Request shape**
 /// ```json
-/// { "symbol": "<id>", "depth": <n> }
+/// { "symbol": "<id>", "depth": <n>, "relation": "flows_to" }
 /// ```
 /// * `symbol` (required) — stable [`SymbolId`] of the start symbol.
 /// * `depth`  (optional, default 8, max 24) — maximum traversal hops.
+/// * `relation` (optional) — when set to `"flows_to"`, walks stored semantic value-flow edges
+///   from producer to consumer. Omit it for the existing dependency-lineage behavior.
 ///
 /// **Response `content` shape**
 /// ```json
@@ -1068,6 +1141,7 @@ impl RetrievalTool for Lineage {
 
     fn description(&self) -> &str {
         "Transitive dependencies of a symbol (forward-reachability on Calls+Imports edges). \
+         Optional relation='flows_to' traces semantic value flow from producer to consumer. \
          Answers 'what does this symbol depend on?' — the complement of BlastRadius. \
          Use to understand the full dependency chain before a refactor or to build a \
          change-impact picture from the dependency side."
@@ -1091,10 +1165,30 @@ impl RetrievalTool for Lineage {
 
         let max_depth = opt_u64(request, "depth").unwrap_or(8).min(24) as u32;
 
-        // Walk forward (Dependencies) along Calls + Imports edges — bounded.
+        let relation = request.get("relation").and_then(|v| v.as_str());
+        let semantic_flow = relation == Some(edge_tags::FLOWS_TO);
+        let invalid_relation = relation.filter(|r| *r != edge_tags::FLOWS_TO);
+
+        // Stored flows_to edges preserve the engine invariant: source=consumer, target=producer.
+        // A semantic-forward query therefore walks dependents from the producer to consumers.
+        let (direction, edge_kinds, empty_label) = if semantic_flow {
+            (
+                Direction::Dependents,
+                vec![edge_tags::other(edge_tags::FLOWS_TO)],
+                "flows_to consumers",
+            )
+        } else {
+            (
+                Direction::Dependencies,
+                vec![EdgeKind::Calls, EdgeKind::Imports],
+                "dependencies",
+            )
+        };
+
+        // Walk the selected relation — bounded.
         let spec = TraversalSpec {
-            direction: Direction::Dependencies,
-            edge_kinds: vec![EdgeKind::Calls, EdgeKind::Imports],
+            direction,
+            edge_kinds,
             max_depth,
             max_nodes: 5_000,
             min_confidence: 0.0,
@@ -1102,6 +1196,11 @@ impl RetrievalTool for Lineage {
 
         let start = SymbolId(id_str.clone());
         let mut diag = vec![staleness_note()];
+        if let Some(relation) = invalid_relation {
+            diag.push(format!(
+                "Lineage: unsupported relation '{relation}', using default dependency lineage"
+            ));
+        }
 
         let subgraph = store.traverse(&start, &spec)?;
 
@@ -1143,7 +1242,7 @@ impl RetrievalTool for Lineage {
 
         if dependencies.is_empty() {
             diag.push(format!(
-                "Lineage: no dependencies found for '{id_str}' \
+                "Lineage: no {empty_label} found for '{id_str}' \
                  (it may be a leaf or not yet indexed)"
             ));
         }
@@ -1813,7 +1912,9 @@ impl RetrievalTool for ContextPack {
                         limit: Some(20),
                         ..Default::default()
                     };
-                    let hits = store.find_symbols(&q)?;
+                    // A NAME seeds on real symbols only — see `find_seed_symbols`.
+                    let mut hits = find_seed_symbols(store, &q, 20)?.0;
+                    hits.truncate(20);
                     for node in &hits {
                         seeds.push(node.symbol.clone());
                     }
@@ -2686,7 +2787,9 @@ pub fn budget_context(
         limit: Some(20),
         ..Default::default()
     };
-    let seeds = store.find_symbols(&seed_query)?;
+    // A NAME seeds on real symbols only — see `find_seed_symbols`.
+    let mut seeds = find_seed_symbols(store, &seed_query, 20)?.0;
+    seeds.truncate(20);
     if seeds.is_empty() {
         return Ok(Vec::new());
     }
@@ -2840,6 +2943,79 @@ mod tests {
 
         let matches = res.content["matches"].as_array().unwrap();
         assert_eq!(matches.len(), 3, "all three *_fn symbols match substring");
+    }
+
+    /// C4 (wicked-estate#207 review): a real repo has hundreds of synthetic locals named `id`;
+    /// unfiltered they took all 20 result slots and the real `SHORT_ID` / `short7` symbols were
+    /// gone. `limit` must bound REAL matches, so the store is over-fetched and the slots filtered.
+    #[test]
+    fn search_entity_hides_value_flow_slots_unless_opted_in() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        // The id sorts AFTER every slot below (MemStore orders by SymbolId), so the first,
+        // bounded over-fetch is 100% slots and only the escalation can surface the real symbol.
+        let mut nodes = vec![make_node(
+            "zz_real::SHORT_ID",
+            "SHORT_ID",
+            NodeKind::Constant,
+            "src/id.rs",
+            1,
+        )];
+        // Enough slots to SATURATE the bounded over-fetch (a codex-cli review finding: 10x the
+        // limit is not a guarantee), so only the escalation can surface the real symbol.
+        for i in 0..600 {
+            nodes.push(
+                make_node(
+                    &format!("value::owner{i}().:local:id:"),
+                    "id",
+                    NodeKind::Variable,
+                    "src/takes.ts",
+                    i,
+                )
+                .with_value_role("Local"),
+            );
+        }
+        store.upsert_nodes(&nodes).unwrap();
+        store.commit_batch().unwrap();
+
+        let res = SearchEntity.invoke(&store, &json!({"name": "id"})).unwrap();
+        let matches = res.content["matches"].as_array().unwrap();
+        assert_eq!(
+            matches.len(),
+            1,
+            "only the real symbol may be returned by default; got {matches:?}"
+        );
+        assert_eq!(matches[0]["name"].as_str(), Some("SHORT_ID"));
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.contains("include_values=true")),
+            "hidden slots must be reported with the way back in; got {:?}",
+            res.diagnostics
+        );
+
+        let opted_in = SearchEntity
+            .invoke(&store, &json!({"name": "id", "include_values": true}))
+            .unwrap();
+        assert_eq!(
+            opted_in.content["matches"].as_array().unwrap().len(),
+            20,
+            "opting in restores the slots (default limit)"
+        );
+
+        // The same rule holds for the other name→seed entry points (ContextPack / ContextBundle /
+        // budget_context all route through `find_seed_symbols`).
+        let q = SymbolQuery {
+            text: Some("id".to_string()),
+            limit: Some(20),
+            ..Default::default()
+        };
+        let (seeds, hidden) = find_seed_symbols(&store, &q, 20).unwrap();
+        assert!(
+            !seeds.is_empty() && seeds.iter().all(|n| !n.is_value_flow_node()),
+            "seeds must be real symbols only; got {seeds:?}"
+        );
+        assert!(hidden > 0, "the hidden count must be reported");
     }
 
     #[test]
@@ -3325,6 +3501,51 @@ mod tests {
         );
         assert!(conf["min"].as_f64().is_some(), "min confidence populated");
         assert!(conf["avg"].as_f64().is_some(), "avg confidence populated");
+    }
+
+    #[test]
+    fn lineage_flows_to_walks_from_producer_to_consumer_without_changing_default() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node("producer", "route_id", NodeKind::Variable, "fixture.ts", 1),
+                make_node("consumer", "customer_id", NodeKind::Field, "fixture.ts", 2),
+            ])
+            .unwrap();
+        store
+            .upsert_edges(&[Edge::new(
+                SymbolId("consumer".to_string()),
+                SymbolId("producer".to_string()),
+                edge_tags::other(edge_tags::FLOWS_TO),
+                ResolutionTier::Parsed,
+                "test-fixture",
+            )])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        let semantic = Lineage
+            .invoke(
+                &store,
+                &json!({"symbol": "producer", "depth": 8, "relation": "flows_to"}),
+            )
+            .unwrap();
+        let semantic_names: Vec<_> = semantic.content["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| node["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(semantic_names, vec!["customer_id"]);
+        assert_eq!(
+            semantic.content["confidence"]["edge_count"].as_u64(),
+            Some(1)
+        );
+
+        let default = Lineage
+            .invoke(&store, &json!({"symbol": "producer", "depth": 8}))
+            .unwrap();
+        assert_eq!(default.content["total"].as_u64(), Some(0));
     }
 
     // ── Reciprocal Rank Fusion ───────────────────────────────────────────────

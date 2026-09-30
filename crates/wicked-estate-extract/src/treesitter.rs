@@ -1442,6 +1442,12 @@ struct PendingDef {
     /// qualifier, Ruby `def self.m`). Pass 2 appends it as the INNERMOST Type
     /// descriptor after [`enclosing_chain`].
     owner: Option<String>,
+    /// Byte ranges of THIS def's own declared parameters, in source order, from the
+    /// `@code_<kind>.params` capture in the same match. Pass 2 turns them into the positional
+    /// `value_params` metadata a call site's argument slots join against. Empty when the def
+    /// declares no parameter list (or the query captures none), which is why the join must treat
+    /// a missing slot as a lost hop rather than falling back to a neighbouring parameter.
+    param_slots: Vec<(usize, usize)>,
 }
 
 /// The chain of Type descriptors a definition nests under (ADR-002 amendment, 2026-08).
@@ -1549,6 +1555,57 @@ struct DefRec {
     end: usize,
     /// The definition's name — [`def_symbol_at`] joins framework captures onto defs by it.
     name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlowEndpointKind {
+    Local,
+    Parameter,
+    Field,
+    Property,
+    AngularInput,
+    RouteParam,
+}
+
+fn value_flow_hint_kind(kind: FlowEndpointKind) -> Option<&'static str> {
+    match kind {
+        FlowEndpointKind::Local => Some("local"),
+        FlowEndpointKind::Parameter => Some("parameter"),
+        FlowEndpointKind::Field => Some("field"),
+        FlowEndpointKind::Property
+        | FlowEndpointKind::AngularInput
+        | FlowEndpointKind::RouteParam => None,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingFlowEndpoint {
+    kind: FlowEndpointKind,
+    name: String,
+    pos: usize,
+    span: Span,
+    slot: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingFlow {
+    construct: String,
+    span: Span,
+    consumers: Vec<PendingFlowEndpoint>,
+    producers: Vec<PendingFlowEndpoint>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PendingCallFact {
+    args: Vec<PendingFlowEndpoint>,
+    result: Option<PendingFlowEndpoint>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingReturnFlow {
+    pos: usize,
+    span: Span,
+    producer: PendingFlowEndpoint,
 }
 
 /// Strip surrounding quote/delimiter chars from a captured literal to get its canonical name.
@@ -1737,6 +1794,151 @@ fn enclosing(defs: &[DefRec], pos: usize) -> Option<SymbolId> {
         .map(|d| d.symbol.clone())
 }
 
+fn enclosing_type_symbol(
+    pending: &[PendingDef],
+    scheme: &str,
+    module: &str,
+    pos: usize,
+) -> Option<SymbolId> {
+    pending
+        .iter()
+        .filter(|p| p.emit && p.start <= pos && pos < p.end && def_suffix(&p.kind) == Suffix::Type)
+        .min_by_key(|p| p.end - p.start)
+        .map(|p| {
+            let mut chain = enclosing_chain(pending, p.start, p.end);
+            if let Some(owner) = &p.owner {
+                chain.push(Descriptor::new(owner.clone(), Suffix::Type));
+            }
+            def_symbol(scheme, module, &chain, &p.name, Suffix::Type)
+        })
+}
+
+fn flow_owner_key(
+    endpoint: &PendingFlowEndpoint,
+    defs: &[DefRec],
+    pending: &[PendingDef],
+    scheme: &str,
+    module: &str,
+    file_symbol: &SymbolId,
+) -> String {
+    match endpoint.kind {
+        FlowEndpointKind::Field | FlowEndpointKind::AngularInput => {
+            enclosing_type_symbol(pending, scheme, module, endpoint.pos)
+                .unwrap_or_else(|| file_symbol.clone())
+                .0
+        }
+        FlowEndpointKind::Local | FlowEndpointKind::Parameter | FlowEndpointKind::Property => {
+            enclosing(defs, endpoint.pos)
+                .unwrap_or_else(|| file_symbol.clone())
+                .0
+        }
+        FlowEndpointKind::RouteParam => {
+            enclosing(defs, endpoint.pos)
+                .unwrap_or_else(|| file_symbol.clone())
+                .0
+        }
+    }
+}
+
+fn flow_endpoint_symbol(
+    endpoint: &PendingFlowEndpoint,
+    defs: &[DefRec],
+    pending: &[PendingDef],
+    scheme: &str,
+    module: &str,
+    file_symbol: &SymbolId,
+) -> SymbolId {
+    match endpoint.kind {
+        FlowEndpointKind::RouteParam => {
+            let owner = flow_owner_key(endpoint, defs, pending, scheme, module, file_symbol);
+            Symbol::synthetic("route-param", format!("{owner}:param:{}", endpoint.name)).id()
+        }
+        FlowEndpointKind::AngularInput => {
+            let owner = flow_owner_key(endpoint, defs, pending, scheme, module, file_symbol);
+            Symbol::synthetic("angular-input", format!("{owner}:input:{}", endpoint.name)).id()
+        }
+        FlowEndpointKind::Field => {
+            let owner = flow_owner_key(endpoint, defs, pending, scheme, module, file_symbol);
+            Symbol::synthetic("value", format!("{owner}:field:{}", endpoint.name)).id()
+        }
+        FlowEndpointKind::Property => {
+            let owner = flow_owner_key(endpoint, defs, pending, scheme, module, file_symbol);
+            Symbol::synthetic("value", format!("{owner}:property:{}", endpoint.name)).id()
+        }
+        FlowEndpointKind::Local | FlowEndpointKind::Parameter => {
+            let owner = flow_owner_key(endpoint, defs, pending, scheme, module, file_symbol);
+            Symbol::synthetic("value", format!("{owner}:local:{}", endpoint.name)).id()
+        }
+    }
+}
+
+/// Whether a `return` at byte `pos` is the enclosing DEFINITION's return value.
+///
+/// `barriers` maps a callable body's byte range to whether that body is its own definition's body
+/// (`true`) or an anonymous callable's (`false`). The innermost body containing `pos` decides: a
+/// `return` inside a callback belongs to the callback, and since anonymous callables are not
+/// definition records there is nothing to attribute it to, so the fact is dropped rather than
+/// mis-attributed to the enclosing method (wicked-estate#207 review, C5a). No enclosing body
+/// means the `return` sits directly in a `function_declaration` / `method_definition` body, whose
+/// smallest enclosing definition record IS its owner.
+fn return_is_owner_scoped(pos: usize, barriers: &HashMap<(usize, usize), bool>) -> bool {
+    barriers
+        .iter()
+        .filter(|((start, end), _)| *start <= pos && pos < *end)
+        .min_by_key(|((start, end), _)| end - start)
+        .map(|(_, owned)| *owned)
+        .unwrap_or(true)
+}
+
+fn return_flow_symbol(owner: &SymbolId) -> SymbolId {
+    Symbol::synthetic("value", format!("{}:return:value", owner.0)).id()
+}
+
+fn return_flow_node(owner: &DefRec, file: &SourceFile, span: Span) -> Node {
+    Node::new(
+        return_flow_symbol(&owner.symbol),
+        NodeKind::Synthetic,
+        format!("{}.return", owner.name),
+        file.language.clone(),
+        Location::new(&file.path, span),
+    )
+    .with_value_role("Return")
+}
+
+fn flow_endpoint_node(endpoint: &PendingFlowEndpoint, symbol: SymbolId, file: &SourceFile) -> Node {
+    let (kind, name) = match endpoint.kind {
+        FlowEndpointKind::Local => (NodeKind::Variable, endpoint.name.clone()),
+        FlowEndpointKind::Parameter => (NodeKind::Parameter, endpoint.name.clone()),
+        FlowEndpointKind::Field => (NodeKind::Field, endpoint.name.clone()),
+        FlowEndpointKind::Property => (NodeKind::Field, endpoint.name.clone()),
+        FlowEndpointKind::AngularInput => (
+            NodeKind::Synthetic,
+            format!("AngularInput:{}", endpoint.name),
+        ),
+        FlowEndpointKind::RouteParam => {
+            (NodeKind::Synthetic, format!("RouteParam:{}", endpoint.name))
+        }
+    };
+    Node::new(
+        symbol,
+        kind,
+        name,
+        file.language.clone(),
+        Location::new(&file.path, endpoint.span),
+    )
+    .with_value_role(format!("{:?}", endpoint.kind))
+}
+
+fn argument_slot(arguments: tree_sitter::Node, endpoint: &PendingFlowEndpoint) -> Option<usize> {
+    let mut cursor = arguments.walk();
+    arguments
+        .named_children(&mut cursor)
+        .enumerate()
+        .find_map(|(slot, child)| {
+            (child.start_byte() <= endpoint.pos && endpoint.pos < child.end_byte()).then_some(slot)
+        })
+}
+
 // ── Capture-name classification ───────────────────────────────────────────────
 
 /// What role a capture name plays in the prior art convention.
@@ -1766,6 +1968,9 @@ enum CaptureRole<'a> {
     /// owner is not an enclosing node (Go receivers, C++ `Foo::` qualifiers, Ruby `def self.m`).
     /// Spliced as the innermost Type descriptor of that def's id in pass 2.
     DefOwner { kind: &'a str },
+    /// `@code_<kind>.params` — the def's own parameter list node, whose named children give the
+    /// positional parameter slots a call site's argument slots join against.
+    DefParams { kind: &'a str },
     /// `@code_<kind>.name` — the identifier for a definition of `<kind>`.
     /// `symbol` is true for the `@code_<kind>.name.symbol` variant: the captured
     /// text is a symbol literal (Ruby `:name`) whose leading `:` must be stripped
@@ -1810,6 +2015,29 @@ enum CaptureRole<'a> {
     /// `@event.emit.topic` — a topic/queue *string* published at a call site. Source = enclosing
     /// def, target = a synthetic topic node.
     EventEmitTopic,
+    /// `@flow.<construct>` — anchor/evidence for a semantic value-flow match.
+    FlowConstruct { construct: &'a str },
+    /// `@flow.consumer.<kind>` — the value receiving data at this syntax site.
+    FlowConsumer { kind: FlowEndpointKind },
+    /// `@flow.producer.<kind>` — a value contributing data at this syntax site.
+    FlowProducer { kind: FlowEndpointKind },
+    /// `@flow.parameter.local` — a callable parameter that can receive call-site arguments.
+    FlowParameter { kind: FlowEndpointKind },
+    /// `@flow.return.<kind>` — a value returned by the enclosing callable.
+    FlowReturn { kind: FlowEndpointKind },
+    /// `@flow.barrier` / `@flow.barrier.owned` — the body of a callable, marking whose return
+    /// value a `return` statement inside it is. A barrier that is NOT `.owned` belongs to an
+    /// anonymous callable (a callback), which is not a definition record: a `return` inside it
+    /// must not be attributed to the enclosing definition.
+    FlowBarrier { owned: bool },
+    /// `@call.value` — call-expression anchor for per-site semantic call facts.
+    CallValue,
+    /// `@call.arguments` — enclosing arguments node used to compute original zero-based slots.
+    CallArguments,
+    /// `@call.arg.<kind>` — a supported argument value at a call site.
+    CallArg { kind: FlowEndpointKind },
+    /// `@call.result.<kind>` — a supported assignment target for a call result.
+    CallResult { kind: FlowEndpointKind },
     /// Anything else (params, body, return_type, comments, decorators, …) — ignored.
     Other,
 }
@@ -1828,6 +2056,41 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
         "event.emit.type" => return CaptureRole::EventEmitType,
         "event.emit.topic" => return CaptureRole::EventEmitTopic,
         _ => {}
+    }
+
+    if let Some(construct) = cap_name.strip_prefix("flow.") {
+        return match construct {
+            "assignment" | "expression" | "property_read" | "angular_input" | "route_param" => {
+                CaptureRole::FlowConstruct { construct }
+            }
+            "consumer.local" => CaptureRole::FlowConsumer {
+                kind: FlowEndpointKind::Local,
+            },
+            "consumer.field" => CaptureRole::FlowConsumer {
+                kind: FlowEndpointKind::Field,
+            },
+            "producer.local" => CaptureRole::FlowProducer {
+                kind: FlowEndpointKind::Local,
+            },
+            "producer.property" => CaptureRole::FlowProducer {
+                kind: FlowEndpointKind::Property,
+            },
+            "producer.angular_input" => CaptureRole::FlowProducer {
+                kind: FlowEndpointKind::AngularInput,
+            },
+            "producer.route_param" => CaptureRole::FlowProducer {
+                kind: FlowEndpointKind::RouteParam,
+            },
+            "parameter.local" => CaptureRole::FlowParameter {
+                kind: FlowEndpointKind::Parameter,
+            },
+            "return.local" => CaptureRole::FlowReturn {
+                kind: FlowEndpointKind::Local,
+            },
+            "barrier" => CaptureRole::FlowBarrier { owned: false },
+            "barrier.owned" => CaptureRole::FlowBarrier { owned: true },
+            _ => CaptureRole::Other,
+        };
     }
 
     // Heritage
@@ -1850,6 +2113,27 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
     }
     if cap_name == "call.method" {
         return CaptureRole::CallMethod;
+    }
+    if cap_name == "call.value" {
+        return CaptureRole::CallValue;
+    }
+    if cap_name == "call.arguments" {
+        return CaptureRole::CallArguments;
+    }
+    if cap_name == "call.arg.local" {
+        return CaptureRole::CallArg {
+            kind: FlowEndpointKind::Local,
+        };
+    }
+    if cap_name == "call.arg.field" {
+        return CaptureRole::CallArg {
+            kind: FlowEndpointKind::Field,
+        };
+    }
+    if cap_name == "call.result.local" {
+        return CaptureRole::CallResult {
+            kind: FlowEndpointKind::Local,
+        };
     }
 
     // Imports
@@ -1892,6 +2176,9 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
             if suffix == "owner" {
                 return CaptureRole::DefOwner { kind };
             }
+            if suffix == "params" {
+                return CaptureRole::DefParams { kind };
+            }
             if suffix == "name" {
                 return CaptureRole::DefName {
                     kind,
@@ -1901,7 +2188,7 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
             if suffix == "name.symbol" {
                 return CaptureRole::DefName { kind, symbol: true };
             }
-            // Everything else (.params, .body, .return_type, .value, .type, .base,
+            // Everything else (.body, .return_type, .value, .type, .base,
             // .annotation, …) is auxiliary — ignored.
         } else {
             // @code_<kind> with no dot — treat as def anchor (e.g. @code_variable, @code_module)
@@ -2026,6 +2313,13 @@ impl Extractor for TreeSitterExtractor {
         // Event emits to a topic string: (topic, call_site_pos, span). source = enclosing def
         // (resolved after the match loop, like a Calls ref), target = synthetic topic node.
         let mut event_emit_topic_sites: Vec<(String, usize, Span)> = Vec::new();
+        let mut flow_sites: Vec<PendingFlow> = Vec::new();
+        let mut flow_parameters: Vec<PendingFlowEndpoint> = Vec::new();
+        let mut flow_returns: Vec<PendingReturnFlow> = Vec::new();
+        // Callable bodies by byte range → `true` when the body is its own definition's body.
+        // A `return` inside the innermost NON-owned body is a callback's return value.
+        let mut flow_return_barriers: HashMap<(usize, usize), bool> = HashMap::new();
+        let mut call_facts: HashMap<Span, PendingCallFact> = HashMap::new();
         let mut import_targets: Vec<(String, Span)> = Vec::new();
         let mut seen_imports: HashSet<String> = HashSet::new();
         // File-level import map: local name → module source (for hint injection).
@@ -2071,6 +2365,16 @@ impl Extractor for TreeSitterExtractor {
             let mut event_topic: Option<(String, Span)> = None; // subscribed topic string + site
             let mut event_emit_type: Option<(String, usize, Span)> = None; // published type + pos
             let mut event_emit_topic: Option<(String, usize, Span)> = None; // published topic + pos
+            let mut flow_construct: Option<(String, Span)> = None;
+            let mut flow_consumers: Vec<PendingFlowEndpoint> = Vec::new();
+            let mut flow_producers: Vec<PendingFlowEndpoint> = Vec::new();
+            let mut def_params: Option<(&str, Vec<(usize, usize)>)> = None;
+            let mut flow_parameter_sites: Vec<PendingFlowEndpoint> = Vec::new();
+            let mut flow_return_sites: Vec<PendingFlowEndpoint> = Vec::new();
+            let mut call_value_span: Option<Span> = None;
+            let mut call_arguments_node: Option<tree_sitter::Node> = None;
+            let mut call_arg_sites: Vec<PendingFlowEndpoint> = Vec::new();
+            let mut call_result_site: Option<PendingFlowEndpoint> = None;
 
             for c in m.captures {
                 let cap = names[c.index as usize];
@@ -2085,6 +2389,16 @@ impl Extractor for TreeSitterExtractor {
                     }
                     CaptureRole::DefOwner { kind } => {
                         def_owner = Some((kind, text));
+                    }
+                    CaptureRole::DefParams { kind } => {
+                        let mut walk = c.node.walk();
+                        def_params = Some((
+                            kind,
+                            c.node
+                                .named_children(&mut walk)
+                                .map(|child| (child.start_byte(), child.end_byte()))
+                                .collect::<Vec<_>>(),
+                        ));
                     }
                     CaptureRole::DefName { kind, symbol } => {
                         let name = strip_def_name(&text);
@@ -2146,6 +2460,81 @@ impl Extractor for TreeSitterExtractor {
                     CaptureRole::EventEmitTopic => {
                         event_emit_topic = Some((strip_literal_quotes(&text), pos, span));
                     }
+                    CaptureRole::FlowConstruct { construct } => {
+                        flow_construct = Some((construct.to_string(), span));
+                    }
+                    CaptureRole::FlowConsumer { kind } => {
+                        flow_consumers.push(PendingFlowEndpoint {
+                            kind,
+                            name: strip_def_name(&text),
+                            pos,
+                            span,
+                            slot: None,
+                        });
+                    }
+                    CaptureRole::FlowProducer { kind } => {
+                        let name = match kind {
+                            FlowEndpointKind::AngularInput | FlowEndpointKind::RouteParam => {
+                                strip_literal_quotes(&text)
+                            }
+                            _ => strip_def_name(&text),
+                        };
+                        flow_producers.push(PendingFlowEndpoint {
+                            kind,
+                            name,
+                            pos,
+                            span,
+                            slot: None,
+                        });
+                    }
+                    CaptureRole::FlowParameter { kind } => {
+                        flow_parameter_sites.push(PendingFlowEndpoint {
+                            kind,
+                            name: strip_def_name(&text),
+                            pos,
+                            span,
+                            slot: None,
+                        });
+                    }
+                    CaptureRole::FlowBarrier { owned } => {
+                        let entry = flow_return_barriers
+                            .entry((c.node.start_byte(), c.node.end_byte()))
+                            .or_insert(false);
+                        *entry |= owned;
+                    }
+                    CaptureRole::FlowReturn { kind } => {
+                        flow_return_sites.push(PendingFlowEndpoint {
+                            kind,
+                            name: strip_def_name(&text),
+                            pos,
+                            span,
+                            slot: None,
+                        });
+                    }
+                    CaptureRole::CallValue => {
+                        call_value_span = Some(span);
+                    }
+                    CaptureRole::CallArguments => {
+                        call_arguments_node = Some(c.node);
+                    }
+                    CaptureRole::CallArg { kind } => {
+                        call_arg_sites.push(PendingFlowEndpoint {
+                            kind,
+                            name: strip_def_name(&text),
+                            pos,
+                            span,
+                            slot: None,
+                        });
+                    }
+                    CaptureRole::CallResult { kind } => {
+                        call_result_site = Some(PendingFlowEndpoint {
+                            kind,
+                            name: strip_def_name(&text),
+                            pos,
+                            span,
+                            slot: None,
+                        });
+                    }
                     CaptureRole::Other => {}
                 }
             }
@@ -2172,6 +2561,11 @@ impl Extractor for TreeSitterExtractor {
                         }
                         _ => None,
                     };
+                    // Same kind-equality guard as the owner splice.
+                    let param_slots = match &def_params {
+                        Some((params_kind, slots)) if *params_kind == anchor_kind => slots.clone(),
+                        _ => Vec::new(),
+                    };
                     pending.push(PendingDef {
                         kind: anchor_kind.to_string(),
                         name: name_text.clone(),
@@ -2182,6 +2576,7 @@ impl Extractor for TreeSitterExtractor {
                         emit,
                         decl,
                         owner,
+                        param_slots,
                     });
                 }
             }
@@ -2192,9 +2587,11 @@ impl Extractor for TreeSitterExtractor {
             // Strip surrounding quotes so string-literal call targets (COBOL `CALL 'SUB'`) resolve
             // to the program named SUB; identifier calls are unaffected (no quotes to strip).
             if let Some((name, pos, span)) = call_fn {
-                raw_refs.push((strip_literal_quotes(&name), EdgeKind::Calls, pos, span));
+                let site_span = call_value_span.unwrap_or(span);
+                raw_refs.push((strip_literal_quotes(&name), EdgeKind::Calls, pos, site_span));
             } else if let Some((name, pos, span)) = call_method {
-                raw_refs.push((strip_literal_quotes(&name), EdgeKind::Calls, pos, span));
+                let site_span = call_value_span.unwrap_or(span);
+                raw_refs.push((strip_literal_quotes(&name), EdgeKind::Calls, pos, site_span));
             }
 
             // ── Process imports ─────────────────────────────────────────────
@@ -2299,6 +2696,45 @@ impl Extractor for TreeSitterExtractor {
             if let Some((topic, pos, span)) = event_emit_topic {
                 event_emit_topic_sites.push((topic, pos, span));
             }
+
+            if let Some((construct, span)) = flow_construct {
+                if !flow_consumers.is_empty() && !flow_producers.is_empty() {
+                    flow_sites.push(PendingFlow {
+                        construct,
+                        span,
+                        consumers: flow_consumers,
+                        producers: flow_producers,
+                    });
+                }
+            }
+
+            flow_parameters.extend(flow_parameter_sites);
+            for producer in flow_return_sites {
+                flow_returns.push(PendingReturnFlow {
+                    pos: producer.pos,
+                    span: producer.span,
+                    producer,
+                });
+            }
+            if let Some(span) = call_value_span {
+                let fact = call_facts.entry(span).or_default();
+                if let Some(arguments) = call_arguments_node {
+                    for arg in &mut call_arg_sites {
+                        arg.slot = argument_slot(arguments, arg);
+                    }
+                }
+                call_arg_sites.sort_by_key(|arg| (arg.slot.unwrap_or(usize::MAX), arg.pos));
+                fact.args.extend(call_arg_sites);
+                if call_result_site.is_some() {
+                    fact.result = call_result_site;
+                }
+            }
+        }
+
+        // Query patterns for different supported endpoint kinds can match the same call
+        // independently. Restore source argument order before pairing them with parameters.
+        for fact in call_facts.values_mut() {
+            fact.args.sort_by_key(|arg| arg.pos);
         }
 
         // ── Pass 2: mint definition ids (ADR-002 amendment — type-nested identity) ──
@@ -2355,6 +2791,29 @@ impl Extractor for TreeSitterExtractor {
                     // `.decl` capture: mark the record as a DECLARATION contribution
                     // (metadata only — the id above is identical to a `.def` capture's).
                     node = node.as_declaration();
+                }
+                // `value_params` is POSITIONAL: one entry per declared parameter, in source
+                // order, `null` where the query captures no value node for that parameter (a
+                // destructured or optional parameter). A call site joins `arg.slot ==
+                // param.slot`, so an uncaptured parameter costs that one hop instead of shifting
+                // every later argument onto the wrong parameter, and a def takes only its OWN
+                // parameters — the byte-range scan this replaces gave a callable its nested
+                // callables' parameters and a class all its methods' (wicked-estate#207 review,
+                // C5d + C5e).
+                let params: Vec<serde_json::Value> = p
+                    .param_slots
+                    .iter()
+                    .map(|(start, end)| {
+                        flow_parameters
+                            .iter()
+                            .find(|param| *start <= param.pos && param.pos < *end)
+                            .map(|param| serde_json::Value::String(param.name.clone()))
+                            .unwrap_or(serde_json::Value::Null)
+                    })
+                    .collect();
+                if params.iter().any(|param| !param.is_null()) {
+                    node.metadata
+                        .insert("value_params".to_string(), serde_json::Value::Array(params));
                 }
                 def_nodes.push(node);
                 defs.push(DefRec {
@@ -2467,6 +2926,114 @@ impl Extractor for TreeSitterExtractor {
             );
         }
 
+        // ── Semantic value-flow nodes + direct edges ───────────────────────
+        for parameter in &flow_parameters {
+            let symbol =
+                flow_endpoint_symbol(parameter, &defs, &pending, &scheme, &module, &file_symbol);
+            nodes.push(flow_endpoint_node(parameter, symbol, file));
+        }
+        for ret in &flow_returns {
+            if !return_is_owner_scoped(ret.pos, &flow_return_barriers) {
+                continue;
+            }
+            let Some(owner) = defs
+                .iter()
+                .filter(|d| d.start <= ret.pos && ret.pos < d.end)
+                .min_by_key(|d| d.end - d.start)
+            else {
+                continue;
+            };
+            let return_symbol = return_flow_symbol(&owner.symbol);
+            nodes.push(return_flow_node(owner, file, ret.span));
+            let producer_symbol = flow_endpoint_symbol(
+                &ret.producer,
+                &defs,
+                &pending,
+                &scheme,
+                &module,
+                &file_symbol,
+            );
+            nodes.push(flow_endpoint_node(
+                &ret.producer,
+                producer_symbol.clone(),
+                file,
+            ));
+            let mut edge = Edge::new(
+                return_symbol,
+                producer_symbol,
+                edge_tags::other(edge_tags::FLOWS_TO),
+                ResolutionTier::Parsed,
+                "tree-sitter",
+            )
+            .with_location(Location::new(&file.path, ret.span));
+            edge.metadata.insert(
+                "construct".to_string(),
+                serde_json::Value::String("return".to_string()),
+            );
+            local_edges.push(edge);
+        }
+        for flow in flow_sites {
+            for consumer in &flow.consumers {
+                let consumer_symbol =
+                    flow_endpoint_symbol(consumer, &defs, &pending, &scheme, &module, &file_symbol);
+                nodes.push(flow_endpoint_node(consumer, consumer_symbol.clone(), file));
+                for producer in &flow.producers {
+                    if producer.name == consumer.name && producer.kind == consumer.kind {
+                        continue;
+                    }
+                    let producer_symbol = flow_endpoint_symbol(
+                        producer,
+                        &defs,
+                        &pending,
+                        &scheme,
+                        &module,
+                        &file_symbol,
+                    );
+                    nodes.push(flow_endpoint_node(producer, producer_symbol.clone(), file));
+                    let mut edge = Edge::new(
+                        consumer_symbol.clone(),
+                        producer_symbol,
+                        edge_tags::other(edge_tags::FLOWS_TO),
+                        ResolutionTier::Parsed,
+                        "tree-sitter",
+                    )
+                    .with_location(Location::new(&file.path, flow.span));
+                    edge.metadata.insert(
+                        "construct".to_string(),
+                        serde_json::Value::String(flow.construct.clone()),
+                    );
+                    local_edges.push(edge);
+                }
+            }
+        }
+
+        // Value nodes join the graph the way ordinary locals do: one File→node `Contains` edge
+        // (D4 — Contains stays File→node). Without it the whole value-lineage graph is an island
+        // with no edge from any real code node into it, and the only bridge in was the spurious
+        // `Calls` edges the value_role guard now rejects (wicked-estate#207 review, C1 + C13).
+        // Carries the file location so `remove_file` can retire it like every other local edge.
+        {
+            let mut seen: HashSet<SymbolId> = HashSet::new();
+            let value_symbols: Vec<SymbolId> = nodes
+                .iter()
+                .filter(|node| node.is_value_flow_node())
+                .map(|node| node.symbol.clone())
+                .filter(|symbol| seen.insert(symbol.clone()))
+                .collect();
+            for symbol in value_symbols {
+                local_edges.push(
+                    Edge::new(
+                        file_symbol.clone(),
+                        symbol,
+                        EdgeKind::Contains,
+                        ResolutionTier::Parsed,
+                        "tree-sitter",
+                    )
+                    .with_location(Location::new(&file.path, Span::ZERO)),
+                );
+            }
+        }
+
         // ── Build hints blob for Calls refs ──────────────────────────────
         // Serialize the file import map once, to attach to every Calls UnresolvedRef.
         // Only build if we have something meaningful.
@@ -2510,6 +3077,83 @@ impl Extractor for TreeSitterExtractor {
                 }
                 if let Some(ref srcs) = import_sources_hint {
                     r.hints.insert("import_sources".to_string(), srcs.clone());
+                }
+                if let Some(fact) = call_facts.get(&span) {
+                    let mut flow = serde_json::Map::new();
+                    if !fact.args.is_empty() {
+                        let args: Vec<_> = fact
+                            .args
+                            .iter()
+                            .filter_map(|arg| {
+                                let kind = value_flow_hint_kind(arg.kind)?;
+                                let mut item = serde_json::Map::new();
+                                item.insert(
+                                    "name".to_string(),
+                                    serde_json::Value::String(arg.name.clone()),
+                                );
+                                item.insert(
+                                    "kind".to_string(),
+                                    serde_json::Value::String(kind.to_string()),
+                                );
+                                if let Some(slot) = arg.slot {
+                                    item.insert(
+                                        "slot".to_string(),
+                                        serde_json::Value::Number((slot as u64).into()),
+                                    );
+                                }
+                                item.insert(
+                                    "symbol".to_string(),
+                                    serde_json::Value::String(
+                                        flow_endpoint_symbol(
+                                            arg,
+                                            &defs,
+                                            &pending,
+                                            &scheme,
+                                            &module,
+                                            &file_symbol,
+                                        )
+                                        .0,
+                                    ),
+                                );
+                                Some(serde_json::Value::Object(item))
+                            })
+                            .collect();
+                        if !args.is_empty() {
+                            flow.insert("args".to_string(), serde_json::Value::Array(args));
+                        }
+                    }
+                    if let Some(result) = &fact.result {
+                        if let Some(kind) = value_flow_hint_kind(result.kind) {
+                            let mut item = serde_json::Map::new();
+                            item.insert(
+                                "name".to_string(),
+                                serde_json::Value::String(result.name.clone()),
+                            );
+                            item.insert(
+                                "kind".to_string(),
+                                serde_json::Value::String(kind.to_string()),
+                            );
+                            item.insert(
+                                "symbol".to_string(),
+                                serde_json::Value::String(
+                                    flow_endpoint_symbol(
+                                        result,
+                                        &defs,
+                                        &pending,
+                                        &scheme,
+                                        &module,
+                                        &file_symbol,
+                                    )
+                                    .0,
+                                ),
+                            );
+                            flow.insert("result".to_string(), serde_json::Value::Object(item));
+                        }
+                    }
+                    if !flow.is_empty() {
+                        r.hints
+                            .insert("value_flow".to_string(), serde_json::Value::Object(flow));
+                    }
                 }
             }
             refs.push(r);
@@ -3152,6 +3796,19 @@ mod tests {
         assert_eq!(strip_literal_quotes("\"SUBPROG\""), "SUBPROG");
         assert_eq!(strip_literal_quotes("<stdio.h>"), "stdio.h");
         assert_eq!(strip_literal_quotes("plainName"), "plainName");
+    }
+
+    #[test]
+    fn value_flow_hint_kind_uses_stable_call_endpoint_vocabulary() {
+        assert_eq!(value_flow_hint_kind(FlowEndpointKind::Local), Some("local"));
+        assert_eq!(
+            value_flow_hint_kind(FlowEndpointKind::Parameter),
+            Some("parameter")
+        );
+        assert_eq!(value_flow_hint_kind(FlowEndpointKind::Field), Some("field"));
+        assert_eq!(value_flow_hint_kind(FlowEndpointKind::Property), None);
+        assert_eq!(value_flow_hint_kind(FlowEndpointKind::AngularInput), None);
+        assert_eq!(value_flow_hint_kind(FlowEndpointKind::RouteParam), None);
     }
 
     #[test]
@@ -6937,6 +7594,7 @@ public class PlainListener {
             emit: true,
             decl: false,
             owner: None,
+            param_slots: Vec::new(),
         };
         let pending = vec![
             mk("class", "M", 0, 100),

@@ -119,6 +119,11 @@ fn search_entity_schema() -> Value {
                 "description": "Maximum number of results (default 20, max 100).",
                 "default": 20,
                 "maximum": 100
+            },
+            "include_values": {
+                "type": "boolean",
+                "description": "Include synthetic value-flow slots (a callable's locals, parameters and return values, minted for semantic value lineage). Excluded by default: they carry bare source identifiers and displace real symbols for common names. Default false.",
+                "default": false
             }
         },
         "additionalProperties": false
@@ -316,6 +321,11 @@ fn lineage_schema() -> Value {
                 "description": "Maximum hop depth (default 8, max 24).",
                 "default": 8,
                 "maximum": 24
+            },
+            "relation": {
+                "type": "string",
+                "enum": ["flows_to"],
+                "description": "Optional relation selector. Use 'flows_to' to trace semantic value flow from producer to consumer; omit for default dependency lineage."
             }
         },
         "additionalProperties": false
@@ -1180,6 +1190,53 @@ mod tests {
         assert!(
             required.iter().any(|r| r == "name"),
             "SearchEntity schema must require 'name'"
+        );
+    }
+
+    /// C4 (wicked-estate#207 review): the opt-in must be advertised, additively — a client that
+    /// never sends it keeps the (now value-free) default.
+    #[test]
+    fn tools_list_search_entity_schema_exposes_include_values_opt_in() {
+        let store = fixture();
+        let req = json!({ "jsonrpc": "2.0", "id": 42, "method": "tools/list", "params": {} });
+        let resp = handle_request(&store, &req);
+
+        let search = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some("SearchEntity"))
+            .expect("SearchEntity tool must be listed");
+        assert_eq!(
+            search["inputSchema"]["properties"]["include_values"]["type"].as_str(),
+            Some("boolean")
+        );
+        assert_eq!(
+            search["inputSchema"]["properties"]["include_values"]["default"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            search["inputSchema"]["additionalProperties"].as_bool(),
+            Some(false),
+            "the schema change must stay additive"
+        );
+    }
+
+    #[test]
+    fn tools_list_lineage_schema_exposes_flows_to_relation() {
+        let store = fixture();
+        let req = json!({ "jsonrpc": "2.0", "id": 41, "method": "tools/list", "params": {} });
+        let resp = handle_request(&store, &req);
+
+        let lineage = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some("Lineage"))
+            .expect("Lineage tool must be listed");
+        assert_eq!(
+            lineage["inputSchema"]["properties"]["relation"]["enum"][0].as_str(),
+            Some("flows_to")
         );
     }
 

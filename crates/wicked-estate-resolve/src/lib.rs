@@ -54,7 +54,7 @@ impl Resolver for NameResolver {
             // Kind admissibility (D1) runs PRE-uniqueness — deliberately recall-widening:
             // dropping a deny-listed homonym (e.g. an html type_alias) can make a legitimate
             // same-family callable unique. Every edge this mints is measured (Q4b).
-            candidates.retain(|n| admissible_target(&r.kind, &n.kind));
+            candidates.retain(|n| admissible_target(&r.kind, n));
             // Unique resolution only — ambiguity is deferred to a precise tier (W2.2+).
             if let [only] = candidates.as_slice() {
                 if only.symbol != r.from {
@@ -118,7 +118,18 @@ fn is_callable(kind: &NodeKind) -> bool {
 ///   program calls target `Module` nodes — pinned by `tests/cross_language_estate.rs`),
 ///   `Constant`/`Variable` (function-valued bindings: `const f = () => …`, `vi.fn()`),
 ///   `Macro`, `Synthetic`, and `Other(_)`.
-fn admissible_target(ref_kind: &EdgeKind, cand_kind: &NodeKind) -> bool {
+/// - **Synthetic value-flow slots** ([`wicked_estate_core::VALUE_ROLE_METADATA_KEY`]) are never
+///   edge targets, for ANY ref kind: they are value *slots* inside a callable (a local, a
+///   parameter, a return value), named with the bare source identifier and minted with ordinary
+///   kinds (a local is a `Variable`, which Calls deliberately keeps for `const f = () => …`).
+///   Admitting them let a local named `map` absorb 519 `Calls` edges and become the top-ranked
+///   symbol of a real repo (wicked-estate#207 review, C1). They are reached by exact
+///   [`wicked_estate_core::SymbolId`] only, never by name.
+fn admissible_target(ref_kind: &EdgeKind, cand: &wicked_estate_core::Node) -> bool {
+    if cand.is_value_flow_node() {
+        return false;
+    }
+    let cand_kind = &cand.kind;
     if matches!(cand_kind, NodeKind::Import) {
         return false;
     }
@@ -229,7 +240,7 @@ impl Resolver for ScopedNameResolver {
             let mut candidates = index.by_name(&r.raw_name);
 
             // Kind admissibility (D1): Import nodes are never targets, for any ref kind.
-            candidates.retain(|n| admissible_target(&r.kind, &n.kind));
+            candidates.retain(|n| admissible_target(&r.kind, n));
 
             // For method-like edge kinds, narrow the pool to callable nodes.
             if matches!(r.kind, EdgeKind::Calls) {
@@ -450,7 +461,7 @@ impl wicked_estate_core::Resolver for ImportMapResolver {
             // run pre-ranking, alongside the callable filter — same placement as
             // ScopedNameResolver).
             let mut candidates = index.by_name(&r.raw_name);
-            candidates.retain(|n| admissible_target(&r.kind, &n.kind));
+            candidates.retain(|n| admissible_target(&r.kind, n));
             candidates.retain(|n| is_callable(&n.kind));
             candidates.retain(|n| n.symbol != r.from); // no self-edges
 
@@ -747,10 +758,19 @@ impl Resolver for RulesBridgeResolver {
 /// The full output of a resolve pass: the deduplicated edges plus the references no resolver
 /// bound — computed once, from the same attribution, so persistence and telemetry can never
 /// disagree about what "unresolved" means (`docs/ENGINE-CONTRACT.md` §2.1).
+/// Adding a field here would otherwise be a semver break for every downstream that builds a
+/// `Resolution` with a struct literal or destructures it (`site_edges` did exactly that —
+/// `error[E0063]`/`error[E0027]` against 0.16.7 callers). `Default` is derived, so downstreams
+/// construct with `..Default::default()` and future fields stay additive.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct Resolution {
     /// Deduplicated edges, one per `(source, target, kind)`, highest confidence kept.
     pub edges: Vec<Edge>,
+    /// Resolver output before `(source, target, kind)` deduplication. Consumers that need
+    /// syntax-site evidence, such as call-derived value flow, must use this while exact
+    /// locations are still present.
+    pub site_edges: Vec<Edge>,
     /// References no resolver emitted an edge for (per site — one entry per reference).
     pub unresolved: Vec<UnresolvedRef>,
 }
@@ -819,6 +839,7 @@ pub fn resolve_all_with_coverage(
     let mut collided: HashSet<(usize, usize)> = HashSet::new();
 
     let mut best: HashMap<(String, String, String), Edge> = HashMap::new();
+    let mut site_edges = Vec::new();
 
     for (resolver_idx, resolver) in resolvers.iter().enumerate() {
         let edges = resolver.resolve(refs, index)?;
@@ -842,7 +863,8 @@ pub fn resolve_all_with_coverage(
                         *incumbent = edge.clone();
                     }
                 })
-                .or_insert(edge);
+                .or_insert_with(|| edge.clone());
+            site_edges.push(edge);
         }
     }
 
@@ -969,6 +991,7 @@ pub fn resolve_all_with_coverage(
 
     Ok(Resolution {
         edges: resolved_edges,
+        site_edges,
         unresolved,
     })
 }
@@ -1320,6 +1343,59 @@ mod tests {
         assert_eq!(edges[0].target, sym("beta"));
         assert_eq!(edges[0].kind, EdgeKind::Calls);
         assert!((edges[0].confidence.get() - 0.6).abs() < 1e-6);
+    }
+
+    /// C1 (wicked-estate#207 review): a synthetic value-flow slot is never a name-resolution
+    /// target. The node is a `Variable` (a kind `Calls` deliberately keeps for `const f = () =>
+    /// …`) named with the bare source identifier, so without the `value_role` guard a local named
+    /// `map` becomes the unique candidate for every `map(...)` call in the repo.
+    #[test]
+    fn value_flow_slots_are_never_resolution_targets() {
+        let local = node_kind_lang(
+            "local_map",
+            "map",
+            "src/takes.ts",
+            "typescript",
+            NodeKind::Variable,
+        )
+        .with_value_role("Local");
+        let index = VecIndex(vec![node("caller"), local.clone()]);
+
+        // Unique candidate, admissible kind, same family — only the marker can stop it.
+        let edges = NameResolver
+            .resolve(&[call_ref("caller", "map")], &index)
+            .unwrap();
+        assert!(
+            edges.is_empty(),
+            "a Calls ref must not bind to a synthetic value slot, got {edges:?}"
+        );
+
+        // Not Calls-specific: a value slot is a slot, not a definition, for every ref kind.
+        for kind in [EdgeKind::Extends, EdgeKind::Imports, EdgeKind::References] {
+            let r = UnresolvedRef::new(
+                sym("caller"),
+                "map",
+                kind.clone(),
+                Location::new("f.rs", Span::ZERO),
+            );
+            assert!(
+                NameResolver.resolve(&[r], &index).unwrap().is_empty(),
+                "{kind:?} ref must not bind to a synthetic value slot"
+            );
+        }
+
+        // The same node WITHOUT the marker still resolves — the guard is the marker, not the kind.
+        let mut real = local;
+        real.metadata.clear();
+        let index = VecIndex(vec![node("caller"), real]);
+        assert_eq!(
+            NameResolver
+                .resolve(&[call_ref("caller", "map")], &index)
+                .unwrap()
+                .len(),
+            1,
+            "a real function-valued Variable binding must still resolve"
+        );
     }
 
     #[test]

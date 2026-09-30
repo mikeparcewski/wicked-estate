@@ -335,7 +335,23 @@ wicked-estate-mcp --db /path/to/graph.db
 | `rules.recall` | Faceted, severity-ordered recall of conformance `Rule` nodes (`PAT-*`/`POL-*`) — facets: language/layer/framework (wildcard), severity/rule_type (exact), scope subtree prefix. |
 | `RankHotspots` | Return the top N symbols by PageRank × change-frequency churn score. |
 | `Communities` | List detected symbol communities (Louvain clusters) in the graph. |
-| `Lineage` | Trace data-lineage edges (origin → transformation → sink) for a symbol. |
+| `Lineage` | Trace dependency lineage by default (`Calls` + `Imports`). Optional: `relation: "flows_to"` traces semantic value flow from producer to consumer, for example Angular route/input value chains. |
+
+Semantic value lineage is opt-in so existing dependency lineage calls do not change. First resolve
+the displayed source node, such as `RouteParam:id`, to its stable `symbol` with `SearchEntity` or
+`RetrieveEntity`; then follow that symbol forward through assignments and resolved calls:
+
+```json
+{
+  "symbol": "<stable SymbolId for the RouteParam:id node>",
+  "depth": 8,
+  "relation": "flows_to"
+}
+```
+
+The stored `flows_to` edge still follows the engine edge-direction invariant (`source` is the
+consumer, `target` is the producer); `Lineage` reverses the walk for this relation so the response
+reads as producer → consumer.
 
 #### Memory tools (absorbed from wicked-memory)
 

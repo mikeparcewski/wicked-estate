@@ -113,7 +113,8 @@ impl ContextBundle {
                     limit: Some(20),
                     ..Default::default()
                 };
-                let hits = store.find_symbols(&query)?;
+                // A NAME seeds on real symbols only — see `crate::find_seed_symbols`.
+                let hits = crate::find_seed_symbols(store, &query, 20)?.0;
                 match hits.into_iter().next() {
                     Some(node) => return Ok(Some(node)),
                     None => {
