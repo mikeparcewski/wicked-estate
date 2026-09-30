@@ -2,9 +2,26 @@
 
 ## [Unreleased]
 
-## [0.16.8] — 2026-09-29
+## [0.17.0] — 2026-09-30
+
+Minor bump, not a patch: `resolve::Resolution` is now `#[non_exhaustive]`, so a downstream that
+constructed it with a struct literal or matched it with an exhaustive pattern must switch to
+`Resolution::default()` plus field access (fields stay public). That pattern compiles against
+0.16.7 and against this release, and future fields are additive.
 
 ### Added
+- **TypeScript value lineage — `Lineage{relation:"flows_to"}` (#207).** An opt-in semantic
+  relation that traces a value from producer to consumer: callable parameters, return values,
+  fields, property reads, Angular `@Input()`s and route parameters become stable, span-free
+  synthetic nodes joined by `flows_to` edges, and call sites bind a caller's argument to the
+  callee's parameter by explicit slot when — and only when — the existing `Calls` resolver binds
+  that exact site (an ambiguous call emits no flow). Omit `relation` and lineage behaves exactly
+  as before. The new nodes are **not** name-addressable: they carry a `value_role` marker,
+  never resolve as `Calls` targets, and are excluded from symbol search unless the caller passes
+  `SearchEntity{include_values:true}` — measured on a 905-file TypeScript repo, the `Calls`
+  relation, PageRank ordering and blast radius are identical to the previous release. Each value
+  node gets one File→node `Contains` edge so the relation is reachable from real code.
+  Coverage is `.ts` only today (#213); the known gaps are tracked in #208-#217.
 - **`memory.erase` by `id` erases exactly one memory (studio#206).** `memory.erase` now takes
   exactly one of `id` or `scope_prefix`. With `id` it hard-deletes only that memory (graph,
   FTS, vector, sidecar and its xedges) and returns `deleted_count` 1, or 0 when no memory has
