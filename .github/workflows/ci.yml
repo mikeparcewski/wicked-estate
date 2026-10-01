@@ -99,6 +99,35 @@ jobs:
           TEST_POSTGRES_URL: postgres://wicked:wicked@localhost:5432/estate_test
         run: cargo test -p wicked-estate-store --features postgres
 
+  # ── SurrealStore is behind `--features surrealdb`, so — exactly like Postgres above —
+  #    NOTHING in the default `gate` compiles it. It rotted the same way, only worse,
+  #    because no lane ever existed for it: the surrealdb 3.1.5 → 3.2.0 bump (#157)
+  #    merged green while breaking every `surrealdb::Value` site, and by then the
+  #    backend was already 15 `GraphRead`/`GraphWrite` methods behind the trait and
+  #    predated the M4 contribution model. Its upserts used SurrealQL that never parsed,
+  #    with the error swallowed — the store was silently writing nothing.
+  #
+  #    The engine is embedded (kv-mem), so unlike Postgres this needs no server: one
+  #    lane runs clippy AND the full conformance kit (graph_store_suite incl. the #190
+  #    depth-horizon case, traverse_multi, multi-file contributions). Any trait change
+  #    that skips SurrealStore, and any dependabot bump that breaks it, now fails here
+  #    instead of passing silently. ──────────────────────────────────────────────────
+  surrealdb-backend:
+    name: surrealdb backend (clippy · conformance)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: surrealdb-backend
+      - name: clippy the surrealdb store (-D warnings)
+        run: cargo clippy -p wicked-estate-store --features surrealdb --all-targets -- -D warnings
+      - name: conformance (graph_store_suite · traverse_multi · multi-file contributions)
+        run: cargo test -p wicked-estate-store --features surrealdb --test surreal_conformance
+
   # ── Feature-gated semantic embedders. These tests download an embedding model on
   #    first run, so they CANNOT live in the default `gate` job (which must stay
   #    offline + dependency-free). This lane proves the semantic tiers keep working:
