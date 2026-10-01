@@ -148,8 +148,12 @@ pub fn traverse_multi_matches_union_of_traverse<S: GraphStore>(store: &mut S) {
             got_edges, want_edges,
             "traverse_multi edge set must equal union-of-traverse ({dir:?})"
         );
-        // The honesty triple must agree too, cause-by-cause — a specialized multi-seed query that
-        // folds only the node cap is the #190 defect in its multi-seed clothing.
+        // The honesty triple must agree too — on THIS fixture, whose generous caps cut nothing, so
+        // an override that invents a cut (or drops the causes) fails here. Equality is NOT an
+        // invariant once a horizon bites: the union-of-traverse fold can over-report a cut a
+        // native multi-seed walk correctly rules out (an edge from a seed's horizon node to
+        // ANOTHER seed is unseen per-seed but inside the union). Over-reporting is the safe
+        // direction; a horizon fixture here would pin a difference, not a defect.
         assert_eq!(
             (
                 got.truncated,
@@ -218,6 +222,8 @@ pub fn traverse_multi_matches_union_of_traverse<S: GraphStore>(store: &mut S) {
 /// 3. **Node cut only** — `max_depth = 16`, `max_nodes = 2`: `node_cap_reached`, NOT
 ///    `depth_horizon_reached`. The recursion ran to the chain's end, so no node was left
 ///    unexpanded — the two causes must not be aliases for each other.
+/// 4. **Cap-dropped neighbour** — a node the node cap declined is not "beyond the horizon"; a
+///    BFS that forgets it was seen would mislabel a node-cap cut as a depth cut.
 ///
 /// Run on any store; the `dh_*` symbols are disjoint from the other fixtures, so
 /// [`graph_store_suite`] calls it inline.
@@ -311,6 +317,48 @@ pub fn traverse_reports_depth_horizon<S: GraphStore>(store: &mut S) {
          cause here; the two flags must not alias"
     );
     assert!(sub.truncated, "a node-capped result is incomplete");
+
+    // --- case 4: a node the CAP dropped is not "beyond the horizon" ---
+    // `nc_b → nc_a`, `nc_c → nc_a`, `nc_c → nc_b`; Dependents of `nc_a` at max_depth=1. Both
+    // dependents sit at depth 1, so nothing lies beyond the horizon. With max_nodes=2 a BFS store
+    // may drop `nc_c` for the cap; probing the horizon node `nc_b` must then not count the
+    // cap-dropped `nc_c` as an unreached neighbour — that would label a node-cap cut as a depth
+    // cut and tell the caller to "raise depth", which cannot help. (Stores differ on WHETHER this
+    // fixture trips the cap — MemStore counts the start against `max_nodes`, PostgresStore
+    // fetches `max_nodes + 1` — so only the cause is pinned, never `node_cap_reached`.)
+    store.begin_batch().expect("begin_batch");
+    store
+        .upsert_nodes(&[func_node("nc_a"), func_node("nc_b"), func_node("nc_c")])
+        .expect("upsert nc nodes");
+    store
+        .upsert_edges(&[
+            calls("nc_b", "nc_a"),
+            calls("nc_c", "nc_a"),
+            calls("nc_c", "nc_b"),
+        ])
+        .expect("upsert nc edges");
+    store.commit_batch().expect("commit_batch");
+    let sub = store
+        .traverse(
+            &sym("nc_a"),
+            &TraversalSpec {
+                direction: Direction::Dependents,
+                edge_kinds: vec![],
+                max_depth: 1,
+                max_nodes: 2,
+                min_confidence: 0.0,
+            },
+        )
+        .expect("traverse nc");
+    assert!(
+        sub.truncation_invariant_holds(),
+        "invariant (cap-dropped case)"
+    );
+    assert!(
+        !sub.depth_horizon_reached,
+        "every dependent of nc_a is at depth 1 — a node dropped by the NODE CAP is not beyond the \
+         depth horizon, and must not be reported as a depth cut"
+    );
 }
 
 /// Run the full contract against a fresh, empty store. Panics on the first violation.

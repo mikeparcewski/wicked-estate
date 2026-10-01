@@ -19,7 +19,44 @@ fn fresh() -> SurrealStore {
 /// which `graph_store_suite` runs inline).
 #[test]
 fn surrealstore_satisfies_graph_store_contract() {
-    conformance::graph_store_suite(&mut fresh());
+    let mut store = fresh();
+    // history must be ON for the edge_history archival assertion in the suite (SqliteStore parity).
+    store.set_history_enabled(true);
+    conformance::graph_store_suite(&mut store);
+}
+
+/// History archival is opt-in: a default store archives nothing on `remove_file` (MemStore parity).
+#[test]
+fn surrealstore_history_is_off_by_default() {
+    use wicked_estate_core::{
+        Edge, EdgeKind, GraphRead, GraphWrite, Language, Location, Node, NodeKind, ResolutionTier,
+        Span, SymbolId,
+    };
+    let mut store = fresh();
+    let node = |n: &str| {
+        Node::new(
+            SymbolId(n.into()),
+            NodeKind::Function,
+            n,
+            Language::new("rust"),
+            Location::new("a.rs", Span::ZERO),
+        )
+    };
+    store.upsert_nodes(&[node("h1"), node("h2")]).unwrap();
+    store
+        .upsert_edges(&[Edge::new(
+            SymbolId("h1".into()),
+            SymbolId("h2".into()),
+            EdgeKind::Calls,
+            ResolutionTier::Scip,
+            "test",
+        )])
+        .unwrap();
+    store.remove_file("a.rs").unwrap();
+    assert!(
+        store.edge_history("a.rs").unwrap().is_empty(),
+        "history is opt-in; a default store must not archive"
+    );
 }
 
 /// `traverse_multi` (the trait default here) must equal the union of per-seed `traverse`,

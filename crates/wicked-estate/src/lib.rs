@@ -2307,7 +2307,8 @@ pub fn cross_graph_blast_radius(db_paths: &[String], name: &str, depth: u32) -> 
                     if br.depth_horizon_reached {
                         errors.push(format!(
                             "{db_path}: DEPTH-HORIZON — dependents of '{name}' extend beyond \
-                             depth {depth}; this repo's rows are a floor, re-run with a larger depth"
+                             depth {depth}; this repo's rows are a floor (single-repo `blast-radius --depth N` \
+                             follows further)"
                         ));
                     }
                     if br.node_cap_reached {

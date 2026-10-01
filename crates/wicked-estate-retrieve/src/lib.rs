@@ -712,26 +712,39 @@ fn parse_edge_kinds(v: &Value) -> Vec<EdgeKind> {
 /// while the flag gating them only ever tracked the node cap — so the one cause the message could
 /// have reported was the one it never fired on. Now the cause is read from the subgraph and the
 /// message states only the cap that actually bit. Returns `None` when nothing was cut.
+///
+/// `depth_ceiling` is the tool's clamp on `depth`: at the ceiling, "raise `depth`" is advice the
+/// caller cannot act on, so the message says the ceiling was hit instead.
 fn truncation_cause(
     sub: &wicked_estate_core::Subgraph,
     max_depth: u32,
+    depth_ceiling: u32,
     max_nodes: usize,
 ) -> Option<String> {
+    let remedy = if max_depth < depth_ceiling {
+        "raise `depth`".to_string()
+    } else {
+        format!("`depth` is already at this tool's ceiling ({depth_ceiling}) and cannot go further")
+    };
     match (sub.depth_horizon_reached, sub.node_cap_reached) {
         (false, false) => None,
         (true, false) => Some(format!(
             "cut at depth={max_depth} (the depth horizon; more results exist further out — \
-             raise `depth`)"
+             {remedy})"
         )),
         (false, true) => Some(format!(
             "cut by the node cap (max_nodes={max_nodes}); more results exist"
         )),
         (true, true) => Some(format!(
             "cut at depth={max_depth} AND by the node cap (max_nodes={max_nodes}); more results \
-             exist — raise `depth`"
+             exist — {remedy}"
         )),
     }
 }
+
+/// `depth` ceilings of the graph tools. Named so `truncation_cause` and the clamps cannot drift.
+const TRAVERSE_DEPTH_CEILING: u32 = 16;
+const BLAST_DEPTH_CEILING: u32 = 24;
 
 impl RetrievalTool for TraverseGraph {
     fn name(&self) -> &str {
@@ -757,7 +770,9 @@ impl RetrievalTool for TraverseGraph {
             }
         };
 
-        let max_depth = opt_u64(request, "depth").unwrap_or(4).min(16) as u32;
+        let max_depth = opt_u64(request, "depth")
+            .unwrap_or(4)
+            .min(TRAVERSE_DEPTH_CEILING as u64) as u32;
         let max_nodes = opt_u64(request, "max_nodes").unwrap_or(200).min(1_000) as usize;
         let direction = parse_direction(request);
         let edge_kinds = parse_edge_kinds(request);
@@ -780,7 +795,9 @@ impl RetrievalTool for TraverseGraph {
                 "TraverseGraph: no nodes reachable from '{id_str}' under given spec"
             ));
         }
-        if let Some(cause) = truncation_cause(&subgraph, max_depth, max_nodes) {
+        if let Some(cause) =
+            truncation_cause(&subgraph, max_depth, TRAVERSE_DEPTH_CEILING, max_nodes)
+        {
             diag.push(format!("TraverseGraph: result truncated — {cause}"));
         }
 
@@ -906,7 +923,9 @@ impl RetrievalTool for BlastRadius {
             }
         };
 
-        let max_depth = opt_u64(request, "depth").unwrap_or(8).min(24) as u32;
+        let max_depth = opt_u64(request, "depth")
+            .unwrap_or(8)
+            .min(BLAST_DEPTH_CEILING as u64) as u32;
 
         let spec = TraversalSpec::blast_radius(max_depth);
         let start = SymbolId(id_str.clone());
@@ -995,7 +1014,9 @@ impl RetrievalTool for BlastRadius {
                 "BlastRadius: no dependents found for '{id_str}' (it may be a leaf or not yet indexed)"
             ));
         }
-        if let Some(cause) = truncation_cause(&subgraph, max_depth, spec.max_nodes) {
+        if let Some(cause) =
+            truncation_cause(&subgraph, max_depth, BLAST_DEPTH_CEILING, spec.max_nodes)
+        {
             diag.push(format!("BlastRadius: result truncated — {cause}"));
         }
 
@@ -1197,7 +1218,9 @@ impl RetrievalTool for Lineage {
             }
         };
 
-        let max_depth = opt_u64(request, "depth").unwrap_or(8).min(24) as u32;
+        let max_depth = opt_u64(request, "depth")
+            .unwrap_or(8)
+            .min(BLAST_DEPTH_CEILING as u64) as u32;
 
         let relation = request.get("relation").and_then(|v| v.as_str());
         let semantic_flow = relation == Some(edge_tags::FLOWS_TO);
@@ -1281,7 +1304,9 @@ impl RetrievalTool for Lineage {
             ));
         }
         let node_truncated = subgraph.truncated;
-        if let Some(cause) = truncation_cause(&subgraph, max_depth, spec.max_nodes) {
+        if let Some(cause) =
+            truncation_cause(&subgraph, max_depth, BLAST_DEPTH_CEILING, spec.max_nodes)
+        {
             diag.push(format!("Lineage: result truncated — {cause}"));
         }
 

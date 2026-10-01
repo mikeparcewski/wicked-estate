@@ -732,6 +732,9 @@ impl GraphRead for MemStore {
         let mut queue: VecDeque<(SymbolId, u32)> = VecDeque::new();
         let mut node_cap_reached = false;
         let mut depth_horizon_reached = false;
+        // Nodes the node cap declined. They were REACHED within the horizon, just not admitted,
+        // so the horizon probe must count them as seen — else a cap cut reads as a depth cut.
+        let mut capped: HashSet<SymbolId> = HashSet::new();
 
         seen.insert(start.clone());
         queue.push_back((start.clone(), 0));
@@ -744,8 +747,8 @@ impl GraphRead for MemStore {
                 // DEPTH HORIZON (wicked-estate#190): `cur` is not expanded. If it has even one
                 // qualifying neighbour we never reached, the horizon hid real results and the
                 // subgraph must say so. BFS is level-ordered, so by the time the first
-                // depth==max_depth node pops, `seen` already holds every node at depth
-                // <= max_depth — the check is exact, not a heuristic. Short-circuited on the flag
+                // depth==max_depth node pops, `seen` ∪ `capped` already holds every node at
+                // depth <= max_depth — the check is exact, not a heuristic. Short-circuited on the flag
                 // so the probe costs at most one extra neighbour sweep per horizon node and
                 // nothing at all once the answer is known. The traversal is NOT widened: no edge
                 // or node from beyond the horizon enters the result (bounded-traversal invariant).
@@ -758,7 +761,7 @@ impl GraphRead for MemStore {
                             continue;
                         }
                         let next = Self::advance_to(spec.direction, &e, &cur);
-                        if !seen.contains(&next) {
+                        if !seen.contains(&next) && !capped.contains(&next) {
                             depth_horizon_reached = true;
                             break;
                         }
@@ -781,6 +784,7 @@ impl GraphRead for MemStore {
                 }
                 if sub_nodes.len() >= spec.max_nodes {
                     node_cap_reached = true;
+                    capped.insert(next);
                     continue;
                 }
                 seen.insert(next.clone());

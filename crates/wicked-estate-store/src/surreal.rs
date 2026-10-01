@@ -107,6 +107,9 @@ struct AnnotRow {
 pub struct SurrealStore {
     db: Surreal<Db>,
     rt: tokio::runtime::Runtime,
+    /// Edge-history archival on `remove_file`. Opt-in, default `false` — MemStore / SqliteStore
+    /// parity (it costs a write per superseded edge).
+    history_enabled: bool,
 }
 
 impl SurrealStore {
@@ -220,7 +223,16 @@ impl SurrealStore {
             .map_err(se)?;
             Ok::<_, Error>(db)
         })?;
-        Ok(Self { db, rt })
+        Ok(Self {
+            db,
+            rt,
+            history_enabled: false,
+        })
+    }
+
+    /// Enable or disable edge-history archival on `remove_file` (default: off).
+    pub fn set_history_enabled(&mut self, on: bool) {
+        self.history_enabled = on;
     }
 }
 
@@ -428,6 +440,7 @@ impl GraphWrite for SurrealStore {
     fn remove_file(&mut self, file: &str) -> Result<()> {
         let db = self.db.clone();
         let file = file.to_string();
+        let history_enabled = self.history_enabled;
         self.rt.block_on(async move {
             // Step 1: the git blob SHA of the version being superseded (tags archived edges).
             let current_git_sha = file_text_async(&db, &file)
@@ -490,8 +503,9 @@ impl GraphWrite for SurrealStore {
                 .map_err(se)?;
             let owned_edges: Vec<Edge> = data_col(&mut res, 0)?;
 
-            // Step 3: archive the superseded edges (read-only history, never traversed).
-            for edge in owned_edges {
+            // Step 3: if history is enabled, archive the superseded edges (read-only history,
+            // never traversed).
+            for edge in owned_edges.into_iter().filter(|_| history_enabled) {
                 let archived_seq = next_seq(&db, "edge_hist", "archived_seq").await?;
                 let hist = HistoricalEdge {
                     git_sha: current_git_sha.clone(),
@@ -896,6 +910,9 @@ impl GraphRead for SurrealStore {
         let mut sub_edges: Vec<Edge> = Vec::new();
         let mut node_cap_reached = false;
         let mut depth_horizon_reached = false;
+        // Nodes the node cap declined. They were REACHED within the horizon, just not admitted,
+        // so the horizon probe must count them as seen — else a cap cut reads as a depth cut.
+        let mut capped: HashSet<SymbolId> = HashSet::new();
 
         if let Some(n) = self.get_node(start)? {
             sub_nodes.push(n);
@@ -905,8 +922,8 @@ impl GraphRead for SurrealStore {
             if depth >= spec.max_depth {
                 // DEPTH HORIZON (wicked-estate#190) — same rule as MemStore's BFS: a node left
                 // unexpanded that still has an unreached qualifying neighbour means the horizon
-                // cut real results. BFS level order makes `seen` complete for depths
-                // <= max_depth, so the test is exact. Short-circuited on the flag, so the extra
+                // cut real results. BFS level order makes `seen` ∪ `capped` complete for
+                // depths <= max_depth, so the test is exact. Short-circuited on the flag, so the extra
                 // `neighbors` query runs at most once per horizon node and never after the answer
                 // is known. No node or edge from beyond the horizon is admitted to the result.
                 if !depth_horizon_reached {
@@ -918,7 +935,7 @@ impl GraphRead for SurrealStore {
                             continue;
                         }
                         let next = advance_to(spec.direction, &e, &cur);
-                        if !seen.contains(&next) {
+                        if !seen.contains(&next) && !capped.contains(&next) {
                             depth_horizon_reached = true;
                             break;
                         }
@@ -940,6 +957,7 @@ impl GraphRead for SurrealStore {
                 }
                 if sub_nodes.len() >= spec.max_nodes {
                     node_cap_reached = true;
+                    capped.insert(next);
                     continue;
                 }
                 seen.insert(next.clone());
