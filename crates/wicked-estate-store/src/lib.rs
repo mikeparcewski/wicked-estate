@@ -144,6 +144,23 @@ impl MemStore {
         spec_kinds.is_empty() || spec_kinds.contains(kind)
     }
 
+    /// The endpoint a traversal advances to across `e`, relative to `dir` and the node it is
+    /// standing on. Shared by the expansion step and the depth-horizon probe so the two can never
+    /// disagree about what "the next node" is (wicked-estate#190).
+    fn advance_to(dir: Direction, e: &Edge, cur: &SymbolId) -> SymbolId {
+        match dir {
+            Direction::Dependents => e.source.clone(),
+            Direction::Dependencies => e.target.clone(),
+            Direction::Both => {
+                if &e.source == cur {
+                    e.target.clone()
+                } else {
+                    e.source.clone()
+                }
+            }
+        }
+    }
+
     /// All file paths that have a stored digest. Used by the incremental CLI to detect deletions.
     pub fn indexed_files(&self) -> Vec<String> {
         self.file_digests.keys().cloned().collect()
@@ -713,7 +730,8 @@ impl GraphRead for MemStore {
         let mut sub_edges: Vec<Edge> = Vec::new();
         let mut seen: HashSet<SymbolId> = HashSet::new();
         let mut queue: VecDeque<(SymbolId, u32)> = VecDeque::new();
-        let mut truncated = false;
+        let mut node_cap_reached = false;
+        let mut depth_horizon_reached = false;
 
         seen.insert(start.clone());
         queue.push_back((start.clone(), 0));
@@ -723,6 +741,29 @@ impl GraphRead for MemStore {
 
         while let Some((cur, depth)) = queue.pop_front() {
             if depth >= spec.max_depth {
+                // DEPTH HORIZON (wicked-estate#190): `cur` is not expanded. If it has even one
+                // qualifying neighbour we never reached, the horizon hid real results and the
+                // subgraph must say so. BFS is level-ordered, so by the time the first
+                // depth==max_depth node pops, `seen` already holds every node at depth
+                // <= max_depth — the check is exact, not a heuristic. Short-circuited on the flag
+                // so the probe costs at most one extra neighbour sweep per horizon node and
+                // nothing at all once the answer is known. The traversal is NOT widened: no edge
+                // or node from beyond the horizon enters the result (bounded-traversal invariant).
+                if !depth_horizon_reached {
+                    for e in self.neighbors(&cur, spec.direction)? {
+                        if e.confidence.get() < spec.min_confidence {
+                            continue;
+                        }
+                        if !Self::kind_allowed(&spec.edge_kinds, &e.kind) {
+                            continue;
+                        }
+                        let next = Self::advance_to(spec.direction, &e, &cur);
+                        if !seen.contains(&next) {
+                            depth_horizon_reached = true;
+                            break;
+                        }
+                    }
+                }
                 continue;
             }
             for e in self.neighbors(&cur, spec.direction)? {
@@ -733,23 +774,13 @@ impl GraphRead for MemStore {
                     continue;
                 }
                 // The endpoint we advance to, relative to the traversal direction.
-                let next = match spec.direction {
-                    Direction::Dependents => e.source.clone(),
-                    Direction::Dependencies => e.target.clone(),
-                    Direction::Both => {
-                        if e.source == cur {
-                            e.target.clone()
-                        } else {
-                            e.source.clone()
-                        }
-                    }
-                };
+                let next = Self::advance_to(spec.direction, &e, &cur);
                 sub_edges.push(e.clone());
                 if seen.contains(&next) {
                     continue;
                 }
                 if sub_nodes.len() >= spec.max_nodes {
-                    truncated = true;
+                    node_cap_reached = true;
                     continue;
                 }
                 seen.insert(next.clone());
@@ -765,8 +796,9 @@ impl GraphRead for MemStore {
             nodes: sub_nodes,
             edges: sub_edges,
             depths,
-            truncated,
-        })
+            ..Default::default()
+        }
+        .with_caps(node_cap_reached, depth_horizon_reached))
     }
 
     fn all_nodes(&self) -> Result<Vec<Node>> {

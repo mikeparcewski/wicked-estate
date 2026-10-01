@@ -312,11 +312,11 @@ fn benchmark_repo(repo_path: &Path) -> Result<RepoMetrics> {
             let search_us = elapsed_us(t1.elapsed());
 
             let t2 = Instant::now();
-            let br_nodes = wicked_estate::blast_radius_by_name(&store, &query_symbol, 3)
+            let br = wicked_estate::blast_radius_by_name(&store, &query_symbol, 3)
                 .context("blast_radius")?;
             let br_us = elapsed_us(t2.elapsed());
 
-            (search_us, br_us, br_nodes.len())
+            (search_us, br_us, br.dependents.len())
         };
 
     // -----------------------------------------------------------------------

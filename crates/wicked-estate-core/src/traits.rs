@@ -118,9 +118,12 @@ pub trait GraphRead: Send {
         let mut edge_seen: std::collections::HashSet<(String, String, String)> =
             std::collections::HashSet::new();
         let mut depths: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
-        let mut truncated = false;
+        let mut acc = Subgraph::default();
         for s in starts {
             let sub = self.traverse(s, spec)?;
+            // Fold BOTH incompleteness causes, not just the legacy `truncated` bit — a depth
+            // horizon hit on ONE seed makes the union incomplete (wicked-estate#190).
+            acc.absorb_truncation(&sub);
             for n in sub.nodes {
                 if node_seen.insert(n.symbol.clone()) {
                     nodes.push(n);
@@ -137,7 +140,6 @@ pub trait GraphRead: Send {
                     .and_modify(|d| *d = (*d).min(v))
                     .or_insert(v);
             }
-            truncated |= sub.truncated;
         }
         // Seeds excluded from `depths` (generalizes traverse's single-seed exclusion).
         for s in starts {
@@ -147,7 +149,7 @@ pub trait GraphRead: Send {
             nodes,
             edges,
             depths,
-            truncated,
+            ..acc
         })
     }
     /// All nodes — for global analytics (PageRank) and export. Local-first scale.

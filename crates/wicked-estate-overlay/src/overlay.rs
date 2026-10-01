@@ -381,7 +381,11 @@ impl<H: GraphRead + Sync + ?Sized> GraphRead for OverlayReader<'_, H> {
             };
             for edge in rows {
                 if cross_added >= self.budget.max_cross_nodes {
-                    sub.truncated = true;
+                    // A cross-node BUDGET cut is a node-cap cut; set it through the marker so the
+                    // `truncated == node_cap_reached || depth_horizon_reached` invariant holds
+                    // (wicked-estate#190 — a bare `truncated = true` leaves the causes blank and
+                    // breaks the invariant the conformance kit now asserts).
+                    sub.mark_node_cap();
                     break;
                 }
                 let key = edge.dedup_key();

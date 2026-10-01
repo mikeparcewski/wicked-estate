@@ -1885,19 +1885,49 @@ pub fn search(store: &dyn GraphRead, name: &str) -> Result<Vec<Node>> {
         .collect())
 }
 
+/// The answer [`blast_radius_by_name`] gives: the dependents AND why the answer may be a floor.
+///
+/// Returning the bare `Vec<Node>` is what made wicked-estate#190 invisible on the CLI — the
+/// `Subgraph`'s honesty flags were computed by the store, then dropped on the floor here, so
+/// `blast-radius` printed a depth-cut answer as if it were the whole truth. Any caller that only
+/// wants the rows can still use `.dependents`; a caller that reports completeness MUST read
+/// [`BlastRadius::truncated`].
+#[derive(Debug, Clone, Default)]
+pub struct BlastRadius {
+    /// Transitive dependents, deduped across every symbol that matched the name.
+    pub dependents: Vec<Node>,
+    /// A traversal's `max_nodes` budget dropped at least one reachable dependent.
+    pub node_cap_reached: bool,
+    /// The `depth` horizon cut the walk short — real dependents exist BEYOND these rows.
+    pub depth_horizon_reached: bool,
+}
+
+impl BlastRadius {
+    /// True if the dependent list is a FLOOR rather than the complete set, for any reason.
+    pub fn truncated(&self) -> bool {
+        self.node_cap_reached || self.depth_horizon_reached
+    }
+}
+
 /// Blast radius: transitive dependents (callers) of every symbol named `name`, up to `depth`.
 ///
 /// The traversal walks ALL edge kinds (the locked decision); the RESULT is classified through
 /// `Subgraph::code_dependents` so import-transit File nodes never surface as dependents of a
 /// symbol, while a File start keeps its importers (lane relative-imports Decision G).
-pub fn blast_radius_by_name(store: &dyn GraphRead, name: &str, depth: u32) -> Result<Vec<Node>> {
-    let mut out = Vec::new();
+///
+/// Returns a [`BlastRadius`], not a bare `Vec<Node>`: the store's incompleteness flags are
+/// ORed across every matching symbol's traversal and handed to the caller (wicked-estate#190).
+pub fn blast_radius_by_name(store: &dyn GraphRead, name: &str, depth: u32) -> Result<BlastRadius> {
+    let mut out = BlastRadius::default();
     let mut seen = std::collections::HashSet::new();
     for sym in search(store, name)? {
         let sub = store.traverse(&sym.symbol, &TraversalSpec::blast_radius(depth))?;
+        // A cut on ANY matching symbol's walk makes the union a floor.
+        out.node_cap_reached |= sub.node_cap_reached;
+        out.depth_horizon_reached |= sub.depth_horizon_reached;
         for n in sub.code_dependents(&sym.symbol, Some(&sym.kind)) {
             if seen.insert(n.symbol.clone()) {
-                out.push(n.clone());
+                out.dependents.push(n.clone());
             }
         }
     }
@@ -2270,8 +2300,23 @@ pub fn cross_graph_blast_radius(db_paths: &[String], name: &str, depth: u32) -> 
                 Err(e) => {
                     errors.push(format!("{db_path}: blast-radius error — {e}"));
                 }
-                Ok(nodes) => {
-                    for node in nodes {
+                Ok(br) => {
+                    // A per-repo cut must not vanish into the union: surface it in `errors`,
+                    // which is the channel this federated path already prints as a warning
+                    // (wicked-estate#190). Silently unioning floors reads as a complete answer.
+                    if br.depth_horizon_reached {
+                        errors.push(format!(
+                            "{db_path}: DEPTH-HORIZON — dependents of '{name}' extend beyond \
+                             depth {depth}; this repo's rows are a floor, re-run with a larger depth"
+                        ));
+                    }
+                    if br.node_cap_reached {
+                        errors.push(format!(
+                            "{db_path}: NODE-CAP — the traversal node budget dropped reachable \
+                             dependents of '{name}'; this repo's rows are a floor"
+                        ));
+                    }
+                    for node in br.dependents {
                         results.push((db_path.clone(), node));
                     }
                 }

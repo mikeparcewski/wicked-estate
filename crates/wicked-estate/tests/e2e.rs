@@ -45,8 +45,14 @@ fn end_to_end_index_resolve_blast_radius() {
     );
 
     // Blast radius of `util` = its transitive dependents: service (1 hop) + handler (2 hops).
-    let deps = wicked_estate::blast_radius_by_name(&store, "util", 8).expect("blast radius");
-    let names: Vec<&str> = deps.iter().map(|n| n.name.as_str()).collect();
+    let br = wicked_estate::blast_radius_by_name(&store, "util", 8).expect("blast radius");
+    // The 3-node chain fits inside depth 8 — the honesty flags must say so, not merely default
+    // to false (wicked-estate#190).
+    assert!(
+        !br.truncated() && !br.depth_horizon_reached && !br.node_cap_reached,
+        "util's blast radius fits inside depth 8; nothing was cut"
+    );
+    let names: Vec<&str> = br.dependents.iter().map(|n| n.name.as_str()).collect();
     assert!(
         names.contains(&"service"),
         "service should be a dependent of util, got {names:?}"

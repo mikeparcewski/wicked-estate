@@ -1691,7 +1691,7 @@ impl SqliteStore {
         start: &SymbolId,
         dir: Direction,
         spec: &TraversalSpec,
-    ) -> Result<BTreeMap<String, u32>> {
+    ) -> Result<(BTreeMap<String, u32>, bool)> {
         // Look up the start symbol's sid.  If not interned yet, nothing can be reachable.
         let start_sid: Option<i64> = self
             .conn
@@ -1704,7 +1704,7 @@ impl SqliteStore {
             .map_err(st)?;
         let start_sid = match start_sid {
             Some(s) => s,
-            None => return Ok(BTreeMap::new()),
+            None => return Ok((BTreeMap::new(), false)),
         };
 
         // (column matched against the frontier, column we advance to)
@@ -1730,6 +1730,15 @@ impl SqliteStore {
         // The CTE walks INTEGER sid columns in edges (fast).  The final SELECT resolves
         // sid → sym by joining the symbols table.
         // column names are fixed literals (never user input) → safe to interpolate.
+        //
+        // The second leg of the compound SELECT is the DEPTH-HORIZON existence probe
+        // (wicked-estate#190). `frontier` is the set of nodes whose MIN depth is exactly
+        // `max_depth` — precisely the nodes the bounded recursion declined to expand. If any
+        // qualifying edge leaves one of them toward a node the walk never visited, the horizon cut
+        // the result. `LIMIT 1` makes it an existence test, and `frontier` carries the same
+        // `max_nodes` LIMIT so the probe stays bounded by the node budget. The recursion is NOT
+        // widened to max_depth+1 and no extra row is returned (bounded-traversal invariant);
+        // `walk` is MATERIALIZED so the recursion runs ONCE for both legs.
         let sql = format!(
             "WITH RECURSIVE walk(id, depth) AS (
                  SELECT ?1, 0
@@ -1737,14 +1746,23 @@ impl SqliteStore {
                  SELECT e.{advance_col}, walk.depth + 1
                    FROM edges e JOIN walk ON e.{match_col} = walk.id
                   WHERE walk.depth < ?2 AND e.confidence >= ?3 {kind_filter}
-             )
-             SELECT s.sym, MIN(walk.depth)
-               FROM walk
-               JOIN symbols s ON s.sid = walk.id
-              WHERE walk.id <> ?1
-              GROUP BY walk.id
-              ORDER BY 2
-              LIMIT ?4"
+             ),
+             mins(id, d) AS MATERIALIZED (
+                 SELECT walk.id, MIN(walk.depth) FROM walk GROUP BY walk.id
+             ),
+             frontier(id) AS (SELECT mins.id FROM mins WHERE mins.d = ?2 LIMIT ?4)
+             SELECT sym, d, 0 AS horizon FROM (
+                 SELECT s.sym AS sym, mins.d AS d
+                   FROM mins JOIN symbols s ON s.sid = mins.id
+                  WHERE mins.id <> ?1
+                  ORDER BY mins.d
+                  LIMIT ?4)
+             UNION ALL
+             SELECT '', 0, 1 FROM (
+                 SELECT 1 FROM edges e JOIN frontier f ON e.{match_col} = f.id
+                  WHERE e.confidence >= ?3 {kind_filter}
+                    AND e.{advance_col} NOT IN (SELECT mins.id FROM mins)
+                  LIMIT 1)"
         );
         let mut stmt = self.conn.prepare(&sql).map_err(st)?;
         let rows = stmt
@@ -1755,15 +1773,26 @@ impl SqliteStore {
                     spec.min_confidence as f64,
                     spec.max_nodes as i64
                 ],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u32)),
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)? as u32,
+                        r.get::<_, i64>(2)? != 0,
+                    ))
+                },
             )
             .map_err(st)?;
         let mut out = BTreeMap::new();
+        let mut depth_horizon_reached = false;
         for row in rows {
-            let (sym, depth) = row.map_err(st)?;
-            out.insert(sym, depth);
+            let (sym, depth, horizon) = row.map_err(st)?;
+            if horizon {
+                depth_horizon_reached = true;
+            } else {
+                out.insert(sym, depth);
+            }
         }
-        Ok(out)
+        Ok((out, depth_horizon_reached))
     }
 
     /// Multi-seed bounded reachability — the set-seeded generalization of [`cte_reach`](Self::cte_reach).
@@ -1777,9 +1806,9 @@ impl SqliteStore {
         start_sids: &[i64],
         dir: Direction,
         spec: &TraversalSpec,
-    ) -> Result<BTreeMap<String, u32>> {
+    ) -> Result<(BTreeMap<String, u32>, bool)> {
         if start_sids.is_empty() {
-            return Ok(BTreeMap::new());
+            return Ok((BTreeMap::new(), false));
         }
         let (match_col, advance_col) = match dir {
             Direction::Dependents => ("target", "source"),
@@ -1808,6 +1837,10 @@ impl SqliteStore {
             .map(|s| s.to_string())
             .collect::<Vec<_>>()
             .join(",");
+        // Second leg = the depth-horizon existence probe, identical in rule to `cte_reach`'s
+        // (wicked-estate#190): any qualifying edge out of a MIN-depth==max_depth node toward a
+        // node the walk never visited. Seeds stay in `mins` for the probe's visited-set test (an
+        // edge back to a seed is not a horizon cut) and are excluded only from the returned rows.
         let sql = format!(
             "WITH RECURSIVE walk(id, depth) AS (
                  SELECT sid, 0 FROM symbols WHERE sid IN ({seed_list})
@@ -1815,14 +1848,23 @@ impl SqliteStore {
                  SELECT e.{advance_col}, walk.depth + 1
                    FROM edges e JOIN walk ON e.{match_col} = walk.id
                   WHERE walk.depth < ?1 AND e.confidence >= ?2 {kind_filter}
-             )
-             SELECT s.sym, MIN(walk.depth)
-               FROM walk
-               JOIN symbols s ON s.sid = walk.id
-              WHERE walk.id NOT IN ({seed_list})
-              GROUP BY walk.id
-              ORDER BY 2
-              LIMIT ?3"
+             ),
+             mins(id, d) AS MATERIALIZED (
+                 SELECT walk.id, MIN(walk.depth) FROM walk GROUP BY walk.id
+             ),
+             frontier(id) AS (SELECT mins.id FROM mins WHERE mins.d = ?1 LIMIT ?3)
+             SELECT sym, d, 0 AS horizon FROM (
+                 SELECT s.sym AS sym, mins.d AS d
+                   FROM mins JOIN symbols s ON s.sid = mins.id
+                  WHERE mins.id NOT IN ({seed_list})
+                  ORDER BY mins.d
+                  LIMIT ?3)
+             UNION ALL
+             SELECT '', 0, 1 FROM (
+                 SELECT 1 FROM edges e JOIN frontier f ON e.{match_col} = f.id
+                  WHERE e.confidence >= ?2 {kind_filter}
+                    AND e.{advance_col} NOT IN (SELECT mins.id FROM mins)
+                  LIMIT 1)"
         );
         let mut stmt = self.conn.prepare(&sql).map_err(st)?;
         let rows = stmt
@@ -1832,15 +1874,26 @@ impl SqliteStore {
                     spec.min_confidence as f64,
                     spec.max_nodes as i64
                 ],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u32)),
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)? as u32,
+                        r.get::<_, i64>(2)? != 0,
+                    ))
+                },
             )
             .map_err(st)?;
         let mut out = BTreeMap::new();
+        let mut depth_horizon_reached = false;
         for row in rows {
-            let (sym, depth) = row.map_err(st)?;
-            out.insert(sym, depth);
+            let (sym, depth, horizon) = row.map_err(st)?;
+            if horizon {
+                depth_horizon_reached = true;
+            } else {
+                out.insert(sym, depth);
+            }
         }
-        Ok(out)
+        Ok((out, depth_horizon_reached))
     }
 }
 
@@ -2730,17 +2783,20 @@ impl GraphRead for SqliteStore {
     }
 
     fn traverse(&self, start: &SymbolId, spec: &TraversalSpec) -> Result<Subgraph> {
-        let depths = match spec.direction {
+        // `Both` ORs the two directions' horizon flags: a cut in EITHER direction makes the
+        // merged subgraph incomplete.
+        let (depths, depth_horizon) = match spec.direction {
             Direction::Both => {
-                let mut a = self.cte_reach(start, Direction::Dependents, spec)?;
-                for (k, v) in self.cte_reach(start, Direction::Dependencies, spec)? {
+                let (mut a, h1) = self.cte_reach(start, Direction::Dependents, spec)?;
+                let (b, h2) = self.cte_reach(start, Direction::Dependencies, spec)?;
+                for (k, v) in b {
                     a.entry(k).and_modify(|e| *e = (*e).min(v)).or_insert(v);
                 }
-                a
+                (a, h1 || h2)
             }
             d => self.cte_reach(start, d, spec)?,
         };
-        let truncated = depths.len() >= spec.max_nodes;
+        let node_cap = depths.len() >= spec.max_nodes;
 
         let mut nodes = Vec::new();
         if let Some(n) = self.get_node(start)? {
@@ -2769,8 +2825,9 @@ impl GraphRead for SqliteStore {
             nodes,
             edges,
             depths,
-            truncated,
-        })
+            ..Default::default()
+        }
+        .with_caps(node_cap, depth_horizon))
     }
 
     fn traverse_multi(&self, starts: &[SymbolId], spec: &TraversalSpec) -> Result<Subgraph> {
@@ -2793,17 +2850,18 @@ impl GraphRead for SqliteStore {
 
         // Reachable depths from the seed SET — ONE recursive CTE per direction (≤2), independent of
         // the seed count; all seeds excluded. Mirrors `traverse`'s `Both` merge (min depth).
-        let depths = match spec.direction {
+        let (depths, depth_horizon) = match spec.direction {
             Direction::Both => {
-                let mut a = self.cte_reach_multi(&seed_sids, Direction::Dependents, spec)?;
-                for (k, v) in self.cte_reach_multi(&seed_sids, Direction::Dependencies, spec)? {
+                let (mut a, h1) = self.cte_reach_multi(&seed_sids, Direction::Dependents, spec)?;
+                let (b, h2) = self.cte_reach_multi(&seed_sids, Direction::Dependencies, spec)?;
+                for (k, v) in b {
                     a.entry(k).and_modify(|e| *e = (*e).min(v)).or_insert(v);
                 }
-                a
+                (a, h1 || h2)
             }
             d => self.cte_reach_multi(&seed_sids, d, spec)?,
         };
-        let truncated = depths.len() >= spec.max_nodes;
+        let node_cap = depths.len() >= spec.max_nodes;
 
         // Nodes: each live seed + each reached node (dedup by symbol).
         let mut nodes = Vec::new();
@@ -2840,8 +2898,9 @@ impl GraphRead for SqliteStore {
             nodes,
             edges,
             depths,
-            truncated,
-        })
+            ..Default::default()
+        }
+        .with_caps(node_cap, depth_horizon))
     }
 
     fn all_nodes(&self) -> Result<Vec<Node>> {

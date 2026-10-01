@@ -63,11 +63,71 @@ pub struct Subgraph {
     pub edges: Vec<Edge>,
     /// Distance from the start node, keyed by `SymbolId` string.
     pub depths: BTreeMap<String, u32>,
-    /// True if a cap (`max_depth` / `max_nodes`) truncated the result.
+    /// True if the result is INCOMPLETE for any reason — i.e. exactly
+    /// `node_cap_reached || depth_horizon_reached`. This is the one field a naive caller may read
+    /// and still be correct; the two cause flags below say WHICH cap bit, never WHETHER.
+    ///
+    /// Maintained by [`Subgraph::mark_node_cap`] / [`Subgraph::mark_depth_horizon`] /
+    /// [`Subgraph::absorb_truncation`] — set those, never this, so the invariant holds by
+    /// construction. [`Subgraph::truncation_invariant_holds`] pins it in the conformance kit.
     pub truncated: bool,
+    /// The `max_nodes` cap dropped at least one reachable node.
+    #[serde(default)]
+    pub node_cap_reached: bool,
+    /// The `max_depth` horizon declined to expand at least one node that had an unreached
+    /// neighbour — i.e. real dependencies/dependents exist BEYOND the returned set.
+    ///
+    /// Historically every `traverse` impl derived `truncated` from the node cap alone, so a deep,
+    /// narrow graph (a 20-hop COBOL `PERFORM` chain: few nodes, many hops) was cut silently and
+    /// reported complete — wicked-estate#190. Deriving `truncated` from BOTH is the fix.
+    #[serde(default)]
+    pub depth_horizon_reached: bool,
 }
 
 impl Subgraph {
+    /// Record that the `max_nodes` cap bit, keeping the `truncated` invariant.
+    pub fn mark_node_cap(&mut self) {
+        self.node_cap_reached = true;
+        self.truncated = true;
+    }
+
+    /// Record that the `max_depth` horizon cut the result, keeping the `truncated` invariant.
+    pub fn mark_depth_horizon(&mut self) {
+        self.depth_horizon_reached = true;
+        self.truncated = true;
+    }
+
+    /// Set both causes at once from an impl that computed them, deriving `truncated` as their OR.
+    /// The single place a `traverse` implementation should establish incompleteness.
+    pub fn with_caps(mut self, node_cap_reached: bool, depth_horizon_reached: bool) -> Self {
+        if node_cap_reached {
+            self.mark_node_cap();
+        }
+        if depth_horizon_reached {
+            self.mark_depth_horizon();
+        }
+        self
+    }
+
+    /// Fold another subgraph's incompleteness into this one — the union-of-traversals case
+    /// (`traverse_multi`, the overlay's cross-graph merge). ORs all three fields, so a cause lost
+    /// here cannot make the union look complete.
+    pub fn absorb_truncation(&mut self, other: &Subgraph) {
+        if other.node_cap_reached {
+            self.mark_node_cap();
+        }
+        if other.depth_horizon_reached {
+            self.mark_depth_horizon();
+        }
+        // A backend that set only the legacy `truncated` bit (or a row deserialized from an
+        // older schema, where the cause fields default to false) must still propagate.
+        self.truncated |= other.truncated;
+    }
+
+    /// `truncated == node_cap_reached || depth_horizon_reached`. Asserted by the conformance kit.
+    pub fn truncation_invariant_holds(&self) -> bool {
+        self.truncated == (self.node_cap_reached || self.depth_horizon_reached)
+    }
     /// The dependent list of a blast-radius traversal, with import-transit File nodes cut
     /// (contains-aware rule; lane relative-imports Decision G, PER-1).
     ///
@@ -215,7 +275,7 @@ mod code_dependents_tests {
                 edge(&file_t, &file_b, EdgeKind::Imports), // t.ts imports FileB — transit only
             ],
             depths: Default::default(),
-            truncated: false,
+            ..Default::default()
         };
 
         let deps = sub.code_dependents(&sym_f, Some(&NodeKind::Function));
@@ -253,7 +313,7 @@ mod code_dependents_tests {
                 edge(&file_t, &file_a, EdgeKind::Imports), // transitive importer
             ],
             depths: Default::default(),
-            truncated: false,
+            ..Default::default()
         };
         let deps = sub.code_dependents(&file_b, Some(&NodeKind::File));
         let ids: Vec<&str> = deps.iter().map(|n| n.symbol.as_str()).collect();
@@ -284,7 +344,7 @@ mod code_dependents_tests {
                 edge(&file_t, &file_a, EdgeKind::Imports),
             ],
             depths: Default::default(),
-            truncated: false,
+            ..Default::default()
         };
         let deps = sub.code_dependents(&imp, Some(&NodeKind::Import));
         let ids: Vec<&str> = deps.iter().map(|n| n.symbol.as_str()).collect();
@@ -305,7 +365,7 @@ mod code_dependents_tests {
             ],
             edges: vec![edge(&file_t, &Symbol::file("b.ts").id(), EdgeKind::Imports)],
             depths: Default::default(),
-            truncated: false,
+            ..Default::default()
         };
         let deps = sub.code_dependents(&sym_f, None);
         assert!(
@@ -338,7 +398,7 @@ mod code_dependents_tests {
                 edge(&file_transit, &Symbol::file("b.ts").id(), EdgeKind::Imports),
             ],
             depths: Default::default(),
-            truncated: false,
+            ..Default::default()
         };
         let deps = sub.code_dependents(&sym_f, Some(&NodeKind::Function));
         let ids: Vec<&str> = deps.iter().map(|n| n.symbol.as_str()).collect();

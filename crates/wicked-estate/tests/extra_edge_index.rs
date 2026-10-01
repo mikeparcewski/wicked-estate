@@ -142,9 +142,9 @@ fn blast_radius_on_playbook_surfaces_the_archetype() {
 
     // The user-facing promise: "what breaks if I change the playbook?" reaches the archetype
     // (and, transitively, the catalog) — the relationship no grep can see.
-    let deps = wicked_estate::blast_radius_by_name(&store, "skills/archetype/refs/triage.md", 4)
+    let br = wicked_estate::blast_radius_by_name(&store, "skills/archetype/refs/triage.md", 4)
         .expect("blast radius");
-    let names: Vec<&str> = deps.iter().map(|n| n.name.as_str()).collect();
+    let names: Vec<&str> = br.dependents.iter().map(|n| n.name.as_str()).collect();
     assert!(
         names.contains(&"triage"),
         "archetype must be a dependent of its playbook, got {names:?}"

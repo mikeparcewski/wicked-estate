@@ -9,7 +9,7 @@
 //!   wicked-estate import-telemetry <file.json> [--db ...]
 //!   wicked-estate drift                  [--db ...]
 //!   wicked-estate query <name>           [--db ...]
-//!   wicked-estate blast-radius <name>    [--db ...]
+//!   wicked-estate blast-radius <name>    [--depth N] [--json] [--db ...]
 //!   wicked-estate stats                  [--db ...]
 //!   wicked-estate rank                   [--db ...]
 //!   wicked-estate source [<name>]        [--cluster <id>] [--file <path>] [--symbols id1,id2,...]
@@ -1340,11 +1340,51 @@ fn main() -> Result<()> {
             );
         }
         "blast-radius" => {
-            let name = positional
-                .first()
-                .context("usage: wicked-estate blast-radius <name>")?;
-            let store = open_store_ext(&db).map_err(to_any)?;
             let json_out = positional.iter().any(|a| a == "--json");
+            // `--depth N` (wicked-estate#190). DEFAULT 12 — the previously hardcoded horizon, so
+            // existing invocations behave identically; the difference is that a cut at 12 is now
+            // REPORTED instead of silent, and a deep estate chain can be followed by raising it.
+            let mut depth: u32 = 12;
+            {
+                let mut it = positional.iter();
+                while let Some(a) = it.next() {
+                    match a.as_str() {
+                        "--depth" => match it.next() {
+                            Some(v) => {
+                                depth = v.parse().with_context(|| {
+                                    format!("blast-radius --depth expects a number, got '{v}'")
+                                })?
+                            }
+                            None => anyhow::bail!("blast-radius --depth requires a value"),
+                        },
+                        _ if a.starts_with("--depth=") => {
+                            let v = a.trim_start_matches("--depth=");
+                            depth = v.parse().with_context(|| {
+                                format!("blast-radius --depth expects a number, got '{v}'")
+                            })?;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // The positional <name> is the first arg that is neither a flag nor a flag's value.
+            let name = {
+                let mut it = positional.iter();
+                let mut found: Option<&String> = None;
+                while let Some(a) = it.next() {
+                    if a == "--depth" {
+                        it.next(); // consume the value so it is never read as <name>
+                        continue;
+                    }
+                    if a.starts_with("--") {
+                        continue;
+                    }
+                    found = Some(a);
+                    break;
+                }
+                found.context("usage: wicked-estate blast-radius <name> [--depth N] [--json]")?
+            };
+            let store = open_store_ext(&db).map_err(to_any)?;
             // Machine output must be exactly one JSON document — notices would corrupt it.
             if !json_out {
                 maybe_print_staleness(store.as_ref(), &db);
@@ -1354,7 +1394,8 @@ fn main() -> Result<()> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos() as u64;
-            let deps = wicked_estate::blast_radius_by_name(&*store, name, 12).map_err(to_any)?;
+            let br = wicked_estate::blast_radius_by_name(&*store, name, depth).map_err(to_any)?;
+            let deps = &br.dependents;
             let unresolved = store.unresolved_refs_for_name(name).map_err(to_any)?.len();
             let t_cmd_end = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1364,12 +1405,12 @@ fn main() -> Result<()> {
             // reads this via execCapped, where an oversized payload is TRUNCATED mid-document
             // and JSON.parse throws. 25K chars (the R4 budget) with an ADDITIVE
             // `truncated_dependents` count — crew reads only `dependents`/`unresolved`.
-            let (kept, dropped) = cap_blast_radius_rows(&deps);
+            let (kept, dropped) = cap_blast_radius_rows(deps);
             if json_out {
                 // Machine consumers (wicked-crew studio) get the same honesty contract as the
                 // text path: dependents PLUS the unresolved count — absence of dependents must
                 // never silently read as "safe to change".
-                let out = blast_radius_json(name, &deps[..kept], dropped, unresolved);
+                let out = blast_radius_json(name, &deps[..kept], dropped, unresolved, &br, depth);
                 println!(
                     "{}",
                     serde_json::to_string(&out).map_err(|e| anyhow::anyhow!(e))?
@@ -1387,11 +1428,28 @@ fn main() -> Result<()> {
             }
             // Honest coverage — never let the absence of dependents read as "safe to change".
             // `unresolved` counts per-site unresolved references, defined once in
-            // docs/ENGINE-CONTRACT.md §2.1.
+            // docs/ENGINE-CONTRACT.md §2.1. The depth/node cut is reported on the SAME line a
+            // human reads for completeness (wicked-estate#190) — a cap the honesty line does not
+            // cover is worse than having no honesty line (agent rule R3).
             if !json_out {
+                let cut = match (br.depth_horizon_reached, br.node_cap_reached) {
+                    (true, true) => format!(
+                        "; CUT AT depth={depth} AND by the traversal node budget — more \
+                         dependents exist, re-run with a larger --depth"
+                    ),
+                    (true, false) => format!(
+                        "; CUT AT depth={depth} — more dependents exist beyond {depth} hops, \
+                         re-run with a larger --depth"
+                    ),
+                    (false, true) => {
+                        "; CUT by the traversal node budget — more dependents exist".to_string()
+                    }
+                    (false, false) => String::new(),
+                };
                 println!(
-                    "coverage: {} resolved dependent(s); {unresolved} unresolved call(s) reference \
-                     '{name}' — best-effort static resolution, MAY be incomplete (precise tier pending)",
+                    "coverage: {} resolved dependent(s) within depth {depth}; {unresolved} \
+                     unresolved call(s) reference '{name}' — best-effort static resolution, MAY \
+                     be incomplete (precise tier pending){cut}",
                     deps.len()
                 );
             }
@@ -3533,7 +3591,7 @@ fn main() -> Result<()> {
                 "  wicked-estate drift                 [--db ...]  # IaC vs live resource diff (W10)"
             );
             println!("  wicked-estate query <name>          [--db ...]");
-            println!("  wicked-estate blast-radius <name>   [--db ...]");
+            println!("  wicked-estate blast-radius <name>   [--depth N] [--json] [--db ...]");
             println!(
                 "  wicked-estate rank                  [--db ...]  # most important symbols (PageRank)"
             );
@@ -3691,17 +3749,32 @@ fn cap_blast_radius_rows(deps: &[wicked_estate_core::Node]) -> (usize, usize) {
 
 /// The blast-radius `--json` document. `truncated_dependents` is ADDITIVE — existing consumers
 /// (crew `projects/graph.ts`) read only `dependents` and `unresolved`.
+///
+/// The three honesty fields are DISJOINT causes and must stay that way:
+///
+/// - `unresolved` — calls to the name the resolver could not bind (coverage of the INPUT).
+/// - `truncated_dependents` — rows dropped to stay inside the 25K-char output budget. This
+///   counts ROWS WE HAVE BUT DID NOT PRINT, and nothing else. A depth cut is NOT folded in here;
+///   doing so would destroy the only meaning this field has ever had.
+/// - `depth_horizon_reached` / `node_cap_reached` — rows the TRAVERSAL never produced, because
+///   `--depth` or the node budget stopped the walk (wicked-estate#190). `searched_depth` says
+///   which horizon applied, so a consumer can re-run with a larger one.
 fn blast_radius_json(
     name: &str,
     kept: &[wicked_estate_core::Node],
     dropped: usize,
     unresolved: usize,
+    br: &wicked_estate::BlastRadius,
+    depth: u32,
 ) -> serde_json::Value {
     serde_json::json!({
         "target": name,
         "dependents": kept.iter().map(blast_radius_row).collect::<Vec<_>>(),
         "unresolved": unresolved,
         "truncated_dependents": dropped,
+        "searched_depth": depth,
+        "depth_horizon_reached": br.depth_horizon_reached,
+        "node_cap_reached": br.node_cap_reached,
     })
 }
 
@@ -3733,7 +3806,11 @@ mod blast_radius_json_tests {
         let (kept, dropped) = cap_blast_radius_rows(&deps);
         assert!(dropped > 0, "2000 wide rows must exceed the budget");
         assert_eq!(kept + dropped, deps.len());
-        let out = blast_radius_json("core_fn", &deps[..kept], dropped, 3);
+        let br = wicked_estate::BlastRadius {
+            dependents: deps.clone(),
+            ..Default::default()
+        };
+        let out = blast_radius_json("core_fn", &deps[..kept], dropped, 3, &br, 12);
         let s = serde_json::to_string(&out).unwrap();
         assert!(
             s.len() <= BLAST_RADIUS_CHAR_BUDGET,
@@ -3754,9 +3831,45 @@ mod blast_radius_json_tests {
         let deps: Vec<Node> = (0..3).map(wide_node).collect();
         let (kept, dropped) = cap_blast_radius_rows(&deps);
         assert_eq!((kept, dropped), (3, 0));
-        let out = blast_radius_json("f", &deps, 0, 0);
+        let out = blast_radius_json("f", &deps, 0, 0, &wicked_estate::BlastRadius::default(), 12);
         assert_eq!(out["dependents"].as_array().unwrap().len(), 3);
         assert_eq!(out["truncated_dependents"], serde_json::json!(0));
+    }
+
+    /// wicked-estate#190: a DEPTH cut and an output-BUDGET cut are different facts and must not
+    /// be conflated. `truncated_dependents` keeps meaning "rows we had but did not print";
+    /// `depth_horizon_reached` means "rows the traversal never produced".
+    #[test]
+    fn depth_cut_is_reported_separately_from_the_char_budget_cut() {
+        let deps: Vec<Node> = (0..3).map(wide_node).collect();
+        let cut = wicked_estate::BlastRadius {
+            dependents: deps.clone(),
+            depth_horizon_reached: true,
+            node_cap_reached: false,
+        };
+        let out = blast_radius_json("f", &deps, 0, 0, &cut, 5);
+        assert_eq!(out["depth_horizon_reached"], serde_json::json!(true));
+        assert_eq!(out["node_cap_reached"], serde_json::json!(false));
+        assert_eq!(out["searched_depth"], serde_json::json!(5));
+        // The budget field is UNTOUCHED by a depth cut — nothing was dropped for size.
+        assert_eq!(
+            out["truncated_dependents"],
+            serde_json::json!(0),
+            "a depth cut must NOT be folded into the char-budget count"
+        );
+        assert_eq!(out["dependents"].as_array().unwrap().len(), 3);
+
+        // …and the mirror: a budget cut with a complete traversal reports the budget only.
+        let wide: Vec<Node> = (0..2000).map(wide_node).collect();
+        let (kept, dropped) = cap_blast_radius_rows(&wide);
+        assert!(dropped > 0);
+        let complete = wicked_estate::BlastRadius {
+            dependents: wide.clone(),
+            ..Default::default()
+        };
+        let out = blast_radius_json("f", &wide[..kept], dropped, 0, &complete, 12);
+        assert_eq!(out["truncated_dependents"], serde_json::json!(dropped));
+        assert_eq!(out["depth_horizon_reached"], serde_json::json!(false));
     }
 }
 

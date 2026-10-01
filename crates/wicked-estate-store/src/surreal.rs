@@ -24,6 +24,23 @@ fn se<E: std::fmt::Display>(e: E) -> Error {
     Error::Storage(e.to_string())
 }
 
+/// The endpoint a traversal advances to across `e`, relative to `dir` and the node it is standing
+/// on. Shared by the expansion step and the depth-horizon probe so the two can never disagree
+/// about what "the next node" is (wicked-estate#190).
+fn advance_to(dir: Direction, e: &Edge, cur: &SymbolId) -> SymbolId {
+    match dir {
+        Direction::Dependents => e.source.clone(),
+        Direction::Dependencies => e.target.clone(),
+        Direction::Both => {
+            if &e.source == cur {
+                e.target.clone()
+            } else {
+                e.source.clone()
+            }
+        }
+    }
+}
+
 /// Embedded SurrealDB graph store (W1.5 bake-off challenger).
 ///
 /// Wraps the async SurrealDB client with a synchronous facade using a single-threaded
@@ -558,7 +575,8 @@ impl GraphRead for SurrealStore {
 
         let mut sub_nodes: Vec<Node> = Vec::new();
         let mut sub_edges: Vec<Edge> = Vec::new();
-        let mut truncated = false;
+        let mut node_cap_reached = false;
+        let mut depth_horizon_reached = false;
 
         if let Some(n) = self.get_node(start)? {
             sub_nodes.push(n);
@@ -566,6 +584,27 @@ impl GraphRead for SurrealStore {
 
         while let Some((cur, depth)) = queue.pop_front() {
             if depth >= spec.max_depth {
+                // DEPTH HORIZON (wicked-estate#190) — same rule as MemStore's BFS: a node left
+                // unexpanded that still has an unreached qualifying neighbour means the horizon
+                // cut real results. BFS level order makes `seen` complete for depths
+                // <= max_depth, so the test is exact. Short-circuited on the flag, so the extra
+                // `neighbors` query runs at most once per horizon node and never after the answer
+                // is known. No node or edge from beyond the horizon is admitted to the result.
+                if !depth_horizon_reached {
+                    for e in self.neighbors(&cur, spec.direction)? {
+                        if e.confidence.get() < spec.min_confidence {
+                            continue;
+                        }
+                        if !spec.edge_kinds.is_empty() && !spec.edge_kinds.contains(&e.kind) {
+                            continue;
+                        }
+                        let next = advance_to(spec.direction, &e, &cur);
+                        if !seen.contains(&next) {
+                            depth_horizon_reached = true;
+                            break;
+                        }
+                    }
+                }
                 continue;
             }
             for e in self.neighbors(&cur, spec.direction)? {
@@ -575,23 +614,13 @@ impl GraphRead for SurrealStore {
                 if !spec.edge_kinds.is_empty() && !spec.edge_kinds.contains(&e.kind) {
                     continue;
                 }
-                let next = match spec.direction {
-                    Direction::Dependents => e.source.clone(),
-                    Direction::Dependencies => e.target.clone(),
-                    Direction::Both => {
-                        if e.source == cur {
-                            e.target.clone()
-                        } else {
-                            e.source.clone()
-                        }
-                    }
-                };
+                let next = advance_to(spec.direction, &e, &cur);
                 sub_edges.push(e);
                 if seen.contains(&next) {
                     continue;
                 }
                 if sub_nodes.len() >= spec.max_nodes {
-                    truncated = true;
+                    node_cap_reached = true;
                     continue;
                 }
                 seen.insert(next.clone());
@@ -607,8 +636,9 @@ impl GraphRead for SurrealStore {
             nodes: sub_nodes,
             edges: sub_edges,
             depths,
-            truncated,
-        })
+            ..Default::default()
+        }
+        .with_caps(node_cap_reached, depth_horizon_reached))
     }
 
     fn all_nodes(&self) -> Result<Vec<Node>> {

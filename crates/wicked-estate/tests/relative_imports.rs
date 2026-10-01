@@ -31,9 +31,15 @@ fn blast_radius_size_unchanged_for_function_in_imported_file() {
 
         let mut store = SqliteStore::in_memory().unwrap();
         wicked_estate::index_path(&mut store, &dir).unwrap();
-        let deps = wicked_estate::blast_radius_by_name(&store, "f", 12).unwrap();
+        let br = wicked_estate::blast_radius_by_name(&store, "f", 12).unwrap();
         let _ = fs::remove_dir_all(&dir);
-        deps.into_iter().map(|n| n.symbol.0).collect()
+        // Depth 12 over this two-file fixture must not be a floor — if it were, the
+        // with/without-import comparison below would be comparing two truncations.
+        assert!(
+            !br.truncated(),
+            "fixture must fit inside depth 12 (wicked-estate#190)"
+        );
+        br.dependents.into_iter().map(|n| n.symbol.0).collect()
     };
 
     let with_import = deps_with(true, "br_with");

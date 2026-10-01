@@ -608,7 +608,7 @@ impl PostgresStore {
         start: &SymbolId,
         dir: Direction,
         spec: &TraversalSpec,
-    ) -> Result<BTreeMap<String, u32>> {
+    ) -> Result<(BTreeMap<String, u32>, bool)> {
         let (match_col, advance_col) = match dir {
             Direction::Dependents => ("target", "source"),
             Direction::Dependencies => ("source", "target"),
@@ -631,6 +631,16 @@ impl PostgresStore {
         };
 
         // Postgres WITH RECURSIVE on TEXT columns directly (no integer interning needed).
+        //
+        // Second leg of the compound SELECT = the DEPTH-HORIZON existence probe
+        // (wicked-estate#190). `frontier` is the set of nodes whose MIN depth is exactly
+        // `max_depth` — the nodes the bounded recursion declined to expand. If any qualifying edge
+        // leaves one of them toward a node the walk never visited, the horizon cut the result.
+        // `LIMIT 1` keeps it an existence test and `frontier` carries the same node budget, so the
+        // probe is bounded by `max_nodes`. The recursion is NOT widened to max_depth+1 and no
+        // beyond-horizon row is returned (bounded-traversal invariant); `walk` is MATERIALIZED so
+        // the recursion runs ONCE for both legs. The probe row is tagged `horizon = 1` and carries
+        // a sentinel id the row loop discards.
         let sql = format!(
             "WITH RECURSIVE walk(id, depth) AS (
                  SELECT $1::TEXT, 0
@@ -638,13 +648,19 @@ impl PostgresStore {
                  SELECT e.{advance_col}, walk.depth + 1
                    FROM edges e JOIN walk ON e.{match_col} = walk.id
                   WHERE walk.depth < $2 AND e.confidence >= $3 {kind_filter}
-             )
-             SELECT id, MIN(depth) AS min_depth
-               FROM walk
-              WHERE id <> $1
-              GROUP BY id
-              ORDER BY 2
-              LIMIT $4"
+             ),
+             mins AS MATERIALIZED (
+                 SELECT id, MIN(depth) AS d FROM walk GROUP BY id
+             ),
+             frontier AS (SELECT id FROM mins WHERE d = $2 LIMIT $4)
+             SELECT id, d AS min_depth, 0 AS horizon FROM (
+                 SELECT id, d FROM mins WHERE id <> $1 ORDER BY d LIMIT $4) ranked
+             UNION ALL
+             SELECT ''::TEXT, 0, 1 FROM (
+                 SELECT 1 FROM edges e JOIN frontier f ON e.{match_col} = f.id
+                  WHERE e.confidence >= $3 {kind_filter}
+                    AND e.{advance_col} NOT IN (SELECT id FROM mins)
+                  LIMIT 1) probe"
         );
 
         // Fetch max_nodes + 1 rows so we can distinguish "exactly max_nodes reachable" from
@@ -662,12 +678,18 @@ impl PostgresStore {
         .map_err(st)?;
 
         let mut out = BTreeMap::new();
+        let mut depth_horizon_reached = false;
         for row in rows {
+            let horizon: i32 = row.try_get("horizon").map_err(st)?;
+            if horizon != 0 {
+                depth_horizon_reached = true;
+                continue;
+            }
             let id: String = row.try_get("id").map_err(st)?;
             let depth: i32 = row.try_get("min_depth").map_err(st)?;
             out.insert(id, depth as u32);
         }
-        Ok(out)
+        Ok((out, depth_horizon_reached))
     }
 
     /// Hard-delete nodes by symbol id, plus every edge incident on them. Atomic (transaction): all
@@ -1601,32 +1623,36 @@ impl GraphRead for PostgresStore {
         // such results (each capped at max_nodes+1); the combined unique set can exceed
         // max_nodes, so we sort by depth, keep min-depth per node via the merge, then
         // truncate to max_nodes and flag truncated if anything was dropped.
-        let (depths, truncated): (BTreeMap<String, u32>, bool) = match spec.direction {
-            Direction::Both => {
-                let mut merged = self.cte_reach(start, Direction::Dependents, spec)?;
-                for (k, v) in self.cte_reach(start, Direction::Dependencies, spec)? {
-                    // Keep the minimum depth when a node is reachable from both directions.
-                    merged
-                        .entry(k)
-                        .and_modify(|e| *e = (*e).min(v))
-                        .or_insert(v);
+        // `Both` ORs the two directions' horizon flags: a cut in EITHER direction makes the
+        // merged subgraph incomplete.
+        let (depths, node_cap, depth_horizon): (BTreeMap<String, u32>, bool, bool) =
+            match spec.direction {
+                Direction::Both => {
+                    let (mut merged, h1) = self.cte_reach(start, Direction::Dependents, spec)?;
+                    let (other, h2) = self.cte_reach(start, Direction::Dependencies, spec)?;
+                    for (k, v) in other {
+                        // Keep the minimum depth when a node is reachable from both directions.
+                        merged
+                            .entry(k)
+                            .and_modify(|e| *e = (*e).min(v))
+                            .or_insert(v);
+                    }
+                    let was_truncated = merged.len() > spec.max_nodes;
+                    // Sort by depth and keep only the closest max_nodes nodes.
+                    let mut pairs: Vec<(String, u32)> = merged.into_iter().collect();
+                    pairs.sort_unstable_by_key(|&(_, d)| d);
+                    pairs.truncate(spec.max_nodes);
+                    (pairs.into_iter().collect(), was_truncated, h1 || h2)
                 }
-                let was_truncated = merged.len() > spec.max_nodes;
-                // Sort by depth and keep only the closest max_nodes nodes.
-                let mut pairs: Vec<(String, u32)> = merged.into_iter().collect();
-                pairs.sort_unstable_by_key(|&(_, d)| d);
-                pairs.truncate(spec.max_nodes);
-                (pairs.into_iter().collect(), was_truncated)
-            }
-            d => {
-                let raw = self.cte_reach(start, d, spec)?;
-                // cte_reach fetches max_nodes+1; more than max_nodes means something was cut.
-                let was_truncated = raw.len() > spec.max_nodes;
-                let mut pairs: Vec<(String, u32)> = raw.into_iter().collect();
-                pairs.truncate(spec.max_nodes);
-                (pairs.into_iter().collect(), was_truncated)
-            }
-        };
+                d => {
+                    let (raw, horizon) = self.cte_reach(start, d, spec)?;
+                    // cte_reach fetches max_nodes+1; more than max_nodes means something was cut.
+                    let was_truncated = raw.len() > spec.max_nodes;
+                    let mut pairs: Vec<(String, u32)> = raw.into_iter().collect();
+                    pairs.truncate(spec.max_nodes);
+                    (pairs.into_iter().collect(), was_truncated, horizon)
+                }
+            };
 
         let mut nodes = Vec::new();
         if let Some(n) = self.get_node(start)? {
@@ -1655,8 +1681,9 @@ impl GraphRead for PostgresStore {
             nodes,
             edges,
             depths,
-            truncated,
-        })
+            ..Default::default()
+        }
+        .with_caps(node_cap, depth_horizon))
     }
 
     fn all_nodes(&self) -> Result<Vec<Node>> {

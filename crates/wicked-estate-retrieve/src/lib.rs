@@ -706,6 +706,33 @@ fn parse_edge_kinds(v: &Value) -> Vec<EdgeKind> {
         .collect()
 }
 
+/// The honesty clause naming WHICH cap cut a traversal, for a tool diagnostic.
+///
+/// The pre-#190 messages named both caps unconditionally ("truncated at depth=8 / max_nodes=5000")
+/// while the flag gating them only ever tracked the node cap — so the one cause the message could
+/// have reported was the one it never fired on. Now the cause is read from the subgraph and the
+/// message states only the cap that actually bit. Returns `None` when nothing was cut.
+fn truncation_cause(
+    sub: &wicked_estate_core::Subgraph,
+    max_depth: u32,
+    max_nodes: usize,
+) -> Option<String> {
+    match (sub.depth_horizon_reached, sub.node_cap_reached) {
+        (false, false) => None,
+        (true, false) => Some(format!(
+            "cut at depth={max_depth} (the depth horizon; more results exist further out — \
+             raise `depth`)"
+        )),
+        (false, true) => Some(format!(
+            "cut by the node cap (max_nodes={max_nodes}); more results exist"
+        )),
+        (true, true) => Some(format!(
+            "cut at depth={max_depth} AND by the node cap (max_nodes={max_nodes}); more results \
+             exist — raise `depth`"
+        )),
+    }
+}
+
 impl RetrievalTool for TraverseGraph {
     fn name(&self) -> &str {
         "TraverseGraph"
@@ -753,10 +780,8 @@ impl RetrievalTool for TraverseGraph {
                 "TraverseGraph: no nodes reachable from '{id_str}' under given spec"
             ));
         }
-        if subgraph.truncated {
-            diag.push(format!(
-                "TraverseGraph: result truncated (max_depth={max_depth}, max_nodes={max_nodes})"
-            ));
+        if let Some(cause) = truncation_cause(&subgraph, max_depth, max_nodes) {
+            diag.push(format!("TraverseGraph: result truncated — {cause}"));
         }
 
         // R7 — flag any low-confidence edges.
@@ -806,6 +831,11 @@ impl RetrievalTool for TraverseGraph {
                 "edges": edges_json,
                 "depths": subgraph.depths,
                 "truncated": subgraph.truncated,
+                // WHICH cap bit, in the payload and not only the diagnostic — an agent that
+                // branches on completeness reads `content`, not prose (wicked-estate#190).
+                "depth_horizon_reached": subgraph.depth_horizon_reached,
+                "node_cap_reached": subgraph.node_cap_reached,
+                "searched_depth": max_depth,
             }),
             diagnostics: diag,
         })
@@ -965,10 +995,8 @@ impl RetrievalTool for BlastRadius {
                 "BlastRadius: no dependents found for '{id_str}' (it may be a leaf or not yet indexed)"
             ));
         }
-        if subgraph.truncated {
-            diag.push(format!(
-                "BlastRadius: result truncated at depth={max_depth} / max_nodes=5000"
-            ));
+        if let Some(cause) = truncation_cause(&subgraph, max_depth, spec.max_nodes) {
+            diag.push(format!("BlastRadius: result truncated — {cause}"));
         }
 
         // R4 (DoD-A8) — a File-node start returns every transitive importer at depth 8, so the
@@ -1008,6 +1036,12 @@ impl RetrievalTool for BlastRadius {
                 "dependents": dependents,
                 "total": total,
                 "truncated": subgraph.truncated || dropped > 0,
+                // `truncated` folds the R4 char-budget drop too, so it cannot say WHY. These
+                // name the traversal-side causes (wicked-estate#190); `searched_depth` tells a
+                // caller what to raise.
+                "depth_horizon_reached": subgraph.depth_horizon_reached,
+                "node_cap_reached": subgraph.node_cap_reached,
+                "searched_depth": max_depth,
                 "unresolved_callers": unresolved_callers,
                 "confidence": conf_json,
                 "summary": summary,
@@ -1247,10 +1281,8 @@ impl RetrievalTool for Lineage {
             ));
         }
         let node_truncated = subgraph.truncated;
-        if node_truncated {
-            diag.push(format!(
-                "Lineage: result truncated at depth={max_depth} / max_nodes=5000"
-            ));
+        if let Some(cause) = truncation_cause(&subgraph, max_depth, spec.max_nodes) {
+            diag.push(format!("Lineage: result truncated — {cause}"));
         }
 
         // R7 — flag any low-confidence edges.
@@ -1287,6 +1319,9 @@ impl RetrievalTool for Lineage {
                 "dependencies": dependencies,
                 "total": total,
                 "truncated": truncated,
+                "depth_horizon_reached": subgraph.depth_horizon_reached,
+                "node_cap_reached": subgraph.node_cap_reached,
+                "searched_depth": max_depth,
                 "confidence": conf_json,
             }),
             diagnostics: diag,

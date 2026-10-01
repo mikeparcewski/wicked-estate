@@ -53,9 +53,11 @@ fn union_of_traverse<S: crate::traits::GraphRead>(
     let mut edges = Vec::new();
     let mut edge_seen = std::collections::HashSet::new();
     let mut depths = std::collections::BTreeMap::new();
-    let mut truncated = false;
+    let mut acc = crate::query::Subgraph::default();
     for s in starts {
         let sub = store.traverse(s, spec).expect("traverse");
+        // Fold BOTH causes (#190) — the kit's own fold used to inherit the node-cap blind spot.
+        acc.absorb_truncation(&sub);
         for n in sub.nodes {
             if node_seen.insert(n.symbol.0.clone()) {
                 nodes.push(n);
@@ -72,7 +74,6 @@ fn union_of_traverse<S: crate::traits::GraphRead>(
                 .and_modify(|d: &mut u32| *d = (*d).min(v))
                 .or_insert(v);
         }
-        truncated |= sub.truncated;
     }
     for s in starts {
         depths.remove(&s.0);
@@ -81,7 +82,7 @@ fn union_of_traverse<S: crate::traits::GraphRead>(
         nodes,
         edges,
         depths,
-        truncated,
+        ..acc
     }
 }
 
@@ -147,6 +148,25 @@ pub fn traverse_multi_matches_union_of_traverse<S: GraphStore>(store: &mut S) {
             got_edges, want_edges,
             "traverse_multi edge set must equal union-of-traverse ({dir:?})"
         );
+        // The honesty triple must agree too, cause-by-cause — a specialized multi-seed query that
+        // folds only the node cap is the #190 defect in its multi-seed clothing.
+        assert_eq!(
+            (
+                got.truncated,
+                got.node_cap_reached,
+                got.depth_horizon_reached
+            ),
+            (
+                want.truncated,
+                want.node_cap_reached,
+                want.depth_horizon_reached
+            ),
+            "traverse_multi truncation causes must equal union-of-traverse ({dir:?})"
+        );
+        assert!(
+            got.truncation_invariant_holds() && want.truncation_invariant_holds(),
+            "truncated == node_cap_reached || depth_horizon_reached ({dir:?})"
+        );
     }
 
     // Hardcoded discriminator (Dependencies) — catches a bug SHARED by the fold and the override:
@@ -177,6 +197,120 @@ pub fn traverse_multi_matches_union_of_traverse<S: GraphStore>(store: &mut S) {
         !got.depths.contains_key(sym("tm_s1").as_str()),
         "seed tm_s1 must be excluded from depths"
     );
+}
+
+/// Conformance: a bounded `traverse` cut by the **depth horizon** must say so.
+///
+/// This is wicked-estate#190. Every store derived `Subgraph::truncated` from the `max_nodes` cap
+/// alone, so a deep, narrow graph — the legacy-estate shape: a long COBOL `PERFORM` / JCL step
+/// chain has FEW nodes and MANY hops, so the node cap never trips — came back cut and labelled
+/// complete, on both the CLI and the MCP transports. The honesty fields callers trust are worse
+/// than useless when a cap they do not cover exists (agent rule R3).
+///
+/// Fixture: a 7-node `Calls` chain `dh_00 → dh_01 → … → dh_06` (so `dh_00` DEPENDS ON all six),
+/// walked `Dependencies` from `dh_00`. Each case pins the two causes INDEPENDENTLY plus the
+/// `truncated == node_cap_reached || depth_horizon_reached` invariant:
+///
+/// 1. **Depth cut only** — `max_depth = 2`, `max_nodes = 1000` (far more than the chain):
+///    `depth_horizon_reached`, NOT `node_cap_reached`. This is the case that failed everywhere.
+/// 2. **Complete** — `max_depth = 16`, `max_nodes = 1000`: all three false. Guards the opposite
+///    failure (a probe that always fires is as dishonest as one that never does).
+/// 3. **Node cut only** — `max_depth = 16`, `max_nodes = 2`: `node_cap_reached`, NOT
+///    `depth_horizon_reached`. The recursion ran to the chain's end, so no node was left
+///    unexpanded — the two causes must not be aliases for each other.
+///
+/// Run on any store; the `dh_*` symbols are disjoint from the other fixtures, so
+/// [`graph_store_suite`] calls it inline.
+pub fn traverse_reports_depth_horizon<S: GraphStore>(store: &mut S) {
+    const N: usize = 7;
+    let names: Vec<String> = (0..N).map(|i| format!("dh_{i:02}")).collect();
+    let nodes: Vec<Node> = names.iter().map(|n| func_node(n)).collect();
+    let edges: Vec<Edge> = (0..N - 1)
+        .map(|i| calls(&names[i], &names[i + 1]))
+        .collect();
+    store.begin_batch().expect("begin_batch");
+    store.upsert_nodes(&nodes).expect("upsert_nodes");
+    store.upsert_edges(&edges).expect("upsert_edges");
+    store.commit_batch().expect("commit_batch");
+
+    let start = sym(&names[0]);
+    let spec = |max_depth: u32, max_nodes: usize| TraversalSpec {
+        direction: Direction::Dependencies,
+        edge_kinds: vec![],
+        max_depth,
+        max_nodes,
+        min_confidence: 0.0,
+    };
+
+    // --- case 1: the depth horizon cut the result, the node cap did not ---
+    let sub = store
+        .traverse(&start, &spec(2, 1000))
+        .expect("traverse d=2");
+    assert!(
+        sub.truncation_invariant_holds(),
+        "truncated must equal node_cap_reached || depth_horizon_reached (depth-cut case): {sub:?}"
+    );
+    assert_eq!(
+        sub.depths.len(),
+        2,
+        "depth 2 over a 7-chain reaches exactly dh_01, dh_02 — got {:?}",
+        sub.depths
+    );
+    assert!(
+        sub.depth_horizon_reached,
+        "max_depth=2 left dh_02 unexpanded with dh_03 unreached — the depth horizon CUT the \
+         result and must be reported (wicked-estate#190)"
+    );
+    assert!(
+        !sub.node_cap_reached,
+        "max_nodes=1000 over a 7-node chain cannot have capped anything"
+    );
+    assert!(
+        sub.truncated,
+        "a depth-cut result is INCOMPLETE; `truncated` is the field a naive caller reads"
+    );
+
+    // --- case 2: the whole chain fits — nothing was cut ---
+    let sub = store
+        .traverse(&start, &spec(16, 1000))
+        .expect("traverse d=16");
+    assert!(
+        sub.truncation_invariant_holds(),
+        "invariant (complete case)"
+    );
+    assert_eq!(
+        sub.depths.len(),
+        N - 1,
+        "depth 16 reaches the whole chain — got {:?}",
+        sub.depths
+    );
+    assert!(
+        !sub.depth_horizon_reached,
+        "the walk ran past the chain's end; no node was left unexpanded"
+    );
+    assert!(!sub.node_cap_reached, "max_nodes=1000 did not bite");
+    assert!(
+        !sub.truncated,
+        "a complete result must NOT claim truncation (a probe that always fires is as \
+         dishonest as one that never fires)"
+    );
+
+    // --- case 3: the node cap cut the result, the depth horizon did not ---
+    let sub = store.traverse(&start, &spec(16, 2)).expect("traverse n=2");
+    assert!(
+        sub.truncation_invariant_holds(),
+        "invariant (node-cap case)"
+    );
+    assert!(
+        sub.node_cap_reached,
+        "max_nodes=2 over a 6-dependency chain must report the node cap"
+    );
+    assert!(
+        !sub.depth_horizon_reached,
+        "the recursion ran to the chain's end at max_depth=16 — the depth horizon is NOT the \
+         cause here; the two flags must not alias"
+    );
+    assert!(sub.truncated, "a node-capped result is incomplete");
 }
 
 /// Run the full contract against a fresh, empty store. Panics on the first violation.
@@ -1731,6 +1865,13 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
     store
         .prune_dangling_edges()
         .expect("prune after si4 cleanup");
+
+    // --- DEPTH-HORIZON HONESTY (wicked-estate#190) ---
+    // Inline (not a separate entry point) so EVERY existing `graph_store_suite` caller — MemStore,
+    // SqliteStore, SurrealStore, PostgresStore, the team-runtime store — is gated on it without
+    // each backend's test file having to opt in. The `dh_*` fixture is symbol-disjoint from
+    // everything above.
+    traverse_reports_depth_horizon(store);
 }
 
 /// Multi-file symbol contributions (M4 / Option A — wicked-estate#152). Run on a FRESH store,
