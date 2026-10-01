@@ -36,6 +36,9 @@ constructed it with a struct literal or matched it with an exhaustive pattern mu
   hidden-inclusive extra-rule walk also skips `.wicked/worktrees/`. A worktree holds a full repo
   copy plus the run's unreviewed output, so indexing it duplicated every symbol and served a
   cancelled run's changes back as the codebase. The two walks now share one skip list.
+- **Clean under clippy 1.99 (`double_must_use`).** The `async-trait` floor is now `0.1.92`, whose
+  generated methods no longer repeat the `#[must_use]` the returned boxed future already carries.
+  Clippy 1.99 rejected the old output at `AsyncGraphStore` under `-D warnings`. No behaviour change.
 
 ## [0.16.7] — 2026-09-07
 

@@ -23,7 +23,7 @@ zstd = "0.13"
 wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.17.0" }
 surrealdb = { version = "3", optional = true, default-features = false, features = ["kv-mem"] }
 tokio = { version = "1", optional = true, features = ["rt-multi-thread", "macros"] }
-async-trait = { version = "0.1", optional = true }
+async-trait = { version = "0.1.92", optional = true }
 deadpool = { version = "0.12", features = ["managed"], optional = true }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"], optional = true }
 
