@@ -261,7 +261,8 @@ Full `GraphRead` + `GraphWrite` + `GraphStoreMutExt` implementation backed by Po
 - `FetchContent` ✅ — source slice retrieval.
 - `RulesInventory` ✅ — lists rule engines + rule sets and the code that calls them (§2 rules layer).
 - `rules.recall` ✅ — faceted, severity-ordered recall of conformance `Rule` nodes (`PAT-*`/`POL-*`);
-  facets: language/layer/framework (wildcard), severity/rule_type (exact), scope subtree prefix.
+  facets: language/layer/framework (wildcard), severity/rule_type (exact), scope subtree prefix,
+  projects (a project rule only when its project is named; omitted = global rules only).
 - `RankHotspots` ✅ — top symbols by PageRank × change-frequency churn.
 - `Communities` ✅ — detected symbol communities (graph clusters).
 - `SemanticSearch` ✅ — embedding ANN (optional; needs a VectorStore).

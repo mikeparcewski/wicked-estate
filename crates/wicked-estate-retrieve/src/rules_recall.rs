@@ -16,8 +16,15 @@
 //! * `severity` / `rule_type` are **exact** matches.
 //! * `scope` restricts to a scope subtree by canonical path prefix (the estate-wide
 //!   `SymbolQuery::scope_prefix` predicate, e.g. `"wiki:architecture"`).
-//! * Results are ordered severity-first (critical → error → warn → info) then rule id —
-//!   deterministic, enforcement-ready.
+//! * `projects` is **asymmetric** (DES-decision-capture §4.2.2, DC-S2): a rule with no
+//!   `targets.project` applies everywhere; a rule with `targets.project = P` is recalled only
+//!   when `projects` contains P; an omitted or empty `projects` recalls no project-scoped rule.
+//!   Core's `recall_rules` implements the same rule; estate does not depend on core, so it is
+//!   ported here and pinned by one golden fixture copied byte-identical into both repos
+//!   (`tests/fixtures/rules-project-parity.json`).
+//! * Results are ordered severity-first (critical → error → warn → info), then weight
+//!   (heavier first; absent = 1.0), then rule id — deterministic, enforcement-ready, and the
+//!   same order as core's `recall_rules`.
 //! * `retired` rules are withdrawn from recall (same funnel as the Rust-side `recall_rules`).
 //!
 //! Agent-behavior rules honored: R1 (empty result = successful response + diagnostic, NEVER
@@ -50,6 +57,8 @@ const MAX_LIMIT: usize = 500;
 
 const VALID_SEVERITIES: [&str; 4] = ["info", "warn", "error", "critical"];
 const VALID_RULE_TYPES: [&str; 2] = ["pattern", "policy"];
+/// The weight a rule without one reads as (core's `DEFAULT_RULE_WEIGHT`).
+const DEFAULT_WEIGHT: f32 = 1.0;
 
 /// Descending severity rank for recall ordering (mirrors `ConfSeverity::rank`). Unknown strings
 /// (a producer newer than this reader) rank lowest rather than failing the whole recall.
@@ -79,6 +88,22 @@ struct RuleView {
     targets: TargetsView,
     #[serde(default)]
     retired: bool,
+    /// Ordering weight within a severity band. Read leniently: anything that is not a finite
+    /// number reads as the default rather than making the rule undecodable. Compared as `f32`,
+    /// the type core stores it in, so two weights core cannot tell apart order by id here too.
+    #[serde(default)]
+    weight: Option<Value>,
+}
+
+impl RuleView {
+    fn weight(&self) -> f32 {
+        self.weight
+            .as_ref()
+            .and_then(Value::as_f64)
+            .map(|w| w as f32)
+            .filter(|w| w.is_finite())
+            .unwrap_or(DEFAULT_WEIGHT)
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -89,6 +114,33 @@ struct TargetsView {
     layer: Option<String>,
     #[serde(default)]
     framework: Option<String>,
+    #[serde(default)]
+    project: Option<String>,
+}
+
+/// The asymmetric project facet (DC-S2, core's `project_admits` in strict mode): a rule without
+/// a project applies everywhere; a project-scoped rule only to a query that names its project.
+fn project_admits(rule_project: &Option<String>, projects: &[String]) -> bool {
+    match rule_project {
+        None => true,
+        Some(p) => projects.iter().any(|q| q == p),
+    }
+}
+
+/// Parse the `projects` argument: absent or `null` is the empty set; otherwise it must be an
+/// array of strings (any string, as in core's `RuleQuery.projects`). Anything else is `Err` so
+/// the caller can answer with an honest diagnostic instead of silently dropping the caller's
+/// scope.
+fn parse_projects(request: &Value) -> std::result::Result<Vec<String>, String> {
+    match request.get("projects") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|v| v.as_str().map(str::to_string).ok_or_else(|| format!("{v}")))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|bad| format!("element {bad} is not a string")),
+        Some(other) => Err(format!("{other} is not an array of project ids")),
+    }
 }
 
 /// Wildcard facet match (ported from `recall_rules`): a query that omits the facet matches all
@@ -124,7 +176,9 @@ impl RetrievalTool for RulesRecall {
         "Recall the conformance rules (native Rule nodes, PAT-*/POL-* ids) that apply to a query \
          slice. language/layer/framework are wildcard facets (a rule without the facet applies to \
          all values), severity/rule_type are exact, scope restricts to a scope subtree by prefix. \
-         Results are severity-ordered (critical\u{2192}info) then id. Read-only: rules are \
+         projects is asymmetric: a rule scoped to a project is returned only when projects \
+         names it; omit projects and you get global rules only. Results are severity-ordered \
+         (critical\u{2192}info), then weight (heavier first), then id. Read-only: rules are \
          authored via git-tracked docs + `wicked-core rules ingest`, never over MCP."
     }
 
@@ -153,6 +207,18 @@ impl RetrievalTool for RulesRecall {
                 });
             }
         }
+        let projects = match parse_projects(request) {
+            Ok(p) => p,
+            Err(why) => {
+                return Ok(RetrievalResult {
+                    content: json!({ "rules": [], "total": 0, "returned": 0 }),
+                    diagnostics: vec![format!(
+                        "rules.recall: invalid projects: {why} — expected an array of project ids, \
+                         e.g. [\"proj_alpha\"]"
+                    )],
+                });
+            }
+        };
         let language = opt_str(request, "language");
         let layer = opt_str(request, "layer");
         let framework = opt_str(request, "framework");
@@ -175,6 +241,7 @@ impl RetrievalTool for RulesRecall {
         let mut foreign = 0usize; // Rule nodes that are NOT conformance rules (e.g. W15 rules-engine artifacts)
         let mut undecodable = 0usize; // conformance-symbol nodes whose metadata failed to decode
         let mut retired = 0usize;
+        let mut out_of_project = 0usize; // project-scoped rules whose project the query did not name
         let mut matched: Vec<(RuleView, Value)> = Vec::new();
 
         for node in nodes {
@@ -214,14 +281,20 @@ impl RetrievalTool for RulesRecall {
                     .as_deref()
                     .is_none_or(|t| view.rule_type.as_deref() == Some(t))
             {
-                matched.push((view, meta));
+                if project_admits(&view.targets.project, &projects) {
+                    matched.push((view, meta));
+                } else {
+                    out_of_project += 1;
+                }
             }
         }
 
-        // Deterministic enforcement-ready ordering: severity rank desc, then id asc.
+        // Deterministic enforcement-ready ordering (core's `scan_rules` order): severity rank
+        // desc, then weight desc, then id asc.
         matched.sort_by(|(a, _), (b, _)| {
             severity_rank(b.severity.as_deref())
                 .cmp(&severity_rank(a.severity.as_deref()))
+                .then_with(|| b.weight().total_cmp(&a.weight()))
                 .then_with(|| a.id.cmp(&b.id))
         });
 
@@ -244,8 +317,9 @@ impl RetrievalTool for RulesRecall {
             diagnostics.push(format!(
                 "rules.recall: no active conformance rules matched (facets: language={language:?}, \
                  layer={layer:?}, framework={framework:?}, severity={severity:?}, \
-                 rule_type={rule_type:?}, scope={scope:?}). The graph holds {retired} retired \
-                 conformance rule(s) and {foreign} non-conformance Rule node(s) (rules-engine \
+                 rule_type={rule_type:?}, scope={scope:?}, projects={projects:?}). The graph holds {retired} retired \
+                 conformance rule(s), {out_of_project} rule(s) scoped to a project not in \
+                 `projects`, and {foreign} non-conformance Rule node(s) (rules-engine \
                  artifacts — see RulesInventory). Rules are populated from git-tracked docs via \
                  `wicked-core rules ingest`, never over MCP."
             ));
@@ -453,6 +527,163 @@ mod tests {
             "truncation must be loud (R4); got {:?}",
             res.diagnostics
         );
+    }
+
+    fn recalled_ids(res: &RetrievalResult) -> Vec<String> {
+        res.content["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// Build a conformance node whose metadata IS the given serialized rule (as governance
+    /// persists it).
+    fn node_from_rule_json(rule: &Value) -> Node {
+        let id = rule["id"].as_str().unwrap();
+        let mut node = conformance_node(id, "pattern", "warn", None, false);
+        node.metadata = rule.as_object().unwrap().clone();
+        node
+    }
+
+    /// DES-decision-capture §4.6 / DC-S2: the ONE golden fixture for project-scoped matching,
+    /// copied byte-identical from wicked-core
+    /// (`crates/wicked-governance/tests/fixtures/rules-project-parity.json`), where core's
+    /// `recall_rules` runs the same cases. Estate does not depend on core, so the semantics are
+    /// ported; this test pins the port to core's answers.
+    #[test]
+    fn recall_matches_core_project_parity_fixture() {
+        let fx: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/rules-project-parity.json"))
+                .unwrap();
+        assert_eq!(fx["version"].as_u64(), Some(1), "fixture version");
+        let nodes: Vec<Node> = fx["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(node_from_rule_json)
+            .collect();
+        let store = store_with(nodes);
+        let cases = fx["cases"].as_array().unwrap();
+        assert!(!cases.is_empty());
+        for case in cases {
+            let want: Vec<String> = case["expect"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
+            let res = RulesRecall.invoke(&store, &case["query"]).unwrap();
+            assert_eq!(recalled_ids(&res), want, "{}", case["name"]);
+        }
+    }
+
+    /// A project-less recall (an agent that names no project) never returns a project rule —
+    /// the leak DC-S2 exists to close.
+    #[test]
+    fn recall_without_projects_returns_no_project_rule() {
+        let mut scoped = conformance_node("proposal:p1", "policy", "critical", None, false);
+        scoped
+            .metadata
+            .insert("targets".into(), json!({ "project": "proj_alpha" }));
+        let store = store_with(vec![
+            scoped,
+            conformance_node("PAT-001", "pattern", "warn", None, false),
+        ]);
+        let res = RulesRecall.invoke(&store, &json!({})).unwrap();
+        assert_eq!(recalled_ids(&res), vec!["PAT-001"]);
+        // Empty because the only rule is another project's: the diagnostic says so.
+        let lone = store_with(vec![{
+            let mut n = conformance_node("proposal:p2", "policy", "warn", None, false);
+            n.metadata
+                .insert("targets".into(), json!({ "project": "proj_beta" }));
+            n
+        }]);
+        let res = RulesRecall.invoke(&lone, &json!({})).unwrap();
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.contains("1 rule(s) scoped to a project not in `projects`")),
+            "{:?}",
+            res.diagnostics
+        );
+        let res = RulesRecall
+            .invoke(&store, &json!({ "projects": ["proj_alpha"] }))
+            .unwrap();
+        assert_eq!(recalled_ids(&res), vec!["proposal:p1", "PAT-001"]);
+    }
+
+    /// A malformed `projects` value is an honest empty result + diagnostic (R1), never isError —
+    /// and never a silent fall back to "no projects", which would hide that the caller's scope
+    /// was dropped.
+    #[test]
+    fn recall_invalid_projects_is_diagnostic_never_error() {
+        let store = store_with(vec![conformance_node(
+            "PAT-001", "pattern", "warn", None, false,
+        )]);
+        for bad in [
+            json!("proj_alpha"),
+            json!([1]),
+            json!({ "p": 1 }),
+            json!([null]),
+        ] {
+            let res = RulesRecall
+                .invoke(&store, &json!({ "projects": bad }))
+                .unwrap();
+            assert_eq!(res.content["total"].as_u64().unwrap(), 0, "{bad}");
+            assert!(
+                res.diagnostics
+                    .iter()
+                    .any(|d| d.contains("invalid projects")),
+                "{bad}: {:?}",
+                res.diagnostics
+            );
+        }
+    }
+
+    /// Within a severity band the heavier rule orders first (core's severity -> weight desc ->
+    /// id); a rule without a weight reads as 1.0.
+    #[test]
+    fn recall_orders_by_weight_within_severity() {
+        let mut heavy = conformance_node("PAT-009", "pattern", "warn", None, false);
+        heavy.metadata.insert("weight".into(), json!(5.0));
+        let store = store_with(vec![
+            conformance_node("PAT-001", "pattern", "warn", None, false),
+            heavy,
+            conformance_node("POL-001", "policy", "critical", None, false),
+        ]);
+        let res = RulesRecall.invoke(&store, &json!({})).unwrap();
+        assert_eq!(recalled_ids(&res), vec!["POL-001", "PAT-009", "PAT-001"]);
+
+        // Core stores weight as f32: two weights that collapse to one f32 tie and order by id.
+        let mut a = conformance_node("PAT-001", "pattern", "warn", None, false);
+        a.metadata.insert("weight".into(), json!(1.000_000_01));
+        let mut b = conformance_node("PAT-999", "pattern", "warn", None, false);
+        b.metadata.insert("weight".into(), json!(1.000_000_02));
+        let res = RulesRecall
+            .invoke(&store_with(vec![a, b]), &json!({}))
+            .unwrap();
+        assert_eq!(recalled_ids(&res), vec!["PAT-001", "PAT-999"]);
+    }
+
+    /// Any string is a project id, as in core: `[""]` is a valid query (it names the project
+    /// `""`), not an invalid argument.
+    #[test]
+    fn recall_empty_string_project_matches_like_core() {
+        let mut odd = conformance_node("proposal:p0", "policy", "warn", None, false);
+        odd.metadata
+            .insert("targets".into(), json!({ "project": "" }));
+        let store = store_with(vec![
+            odd,
+            conformance_node("PAT-001", "pattern", "warn", None, false),
+        ]);
+        let res = RulesRecall
+            .invoke(&store, &json!({ "projects": [""] }))
+            .unwrap();
+        assert_eq!(recalled_ids(&res), vec!["PAT-001", "proposal:p0"]);
+        let res = RulesRecall.invoke(&store, &json!({})).unwrap();
+        assert_eq!(recalled_ids(&res), vec!["PAT-001"]);
     }
 
     #[test]

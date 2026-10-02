@@ -329,6 +329,11 @@ fn rules_recall_schema() -> Value {
                 "type": "string",
                 "description": "Restrict to a scope subtree by canonical path prefix (e.g. \"wiki:architecture\")."
             },
+            "projects": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "The projects you are working in. A rule scoped to a project is returned only when that project is listed; omit it (or pass []) to get global rules only. Rules with no project always apply."
+            },
             "limit": {
                 "type": "integer",
                 "description": "Result cap (default 100, max 500). Truncation is reported in diagnostics.",

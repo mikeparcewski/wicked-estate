@@ -15,6 +15,12 @@
       "limit": {
         "type": "integer"
       },
+      "projects": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
       "rule_type": {
         "enum": [
           "pattern",

@@ -217,7 +217,9 @@ docs, projected into the graph as conformance rules and knowledge chunks, and re
 citations —
 
 - **`rules.recall`** — which rules apply to what you're doing (faceted by
-  language/layer/framework, severity-ordered, every hit citing `<doc>@<blob sha>#<RULE-ID>`);
+  language/layer/framework, severity-ordered, every hit citing `<doc>@<blob sha>#<RULE-ID>`).
+  Pass `projects` to get the rules scoped to the projects you're working in; without it you
+  get global rules only;
 - **`knowledge.recall`** with `{"scope_prefix": "wiki:"}` — the rationale and ADR text behind them.
 
 Authoring, seeding, retiring, and monitoring live in wicked-core's operator guide:

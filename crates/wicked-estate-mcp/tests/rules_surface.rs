@@ -13,7 +13,9 @@ use wicked_estate_core::{
     GraphWrite, Language, Location, Node, NodeKind, RetrievalTool, Span, Symbol,
 };
 use wicked_estate_knowledge::{KnowledgeApi, KnowledgeEngine};
-use wicked_estate_mcp::{DomainHandles, McpContext, handle_request_unified};
+use wicked_estate_mcp::{
+    DomainHandles, McpContext, handle_request_unified, handle_request_unified_ro,
+};
 use wicked_estate_memory::MemoryEngine;
 use wicked_estate_memory_core::MemoryApi;
 use wicked_estate_store::MemStore;
@@ -270,4 +272,85 @@ fn rules_write_call_is_unknown_tool() {
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
     let parsed: Value = serde_json::from_str(text).unwrap();
     assert_eq!(parsed["total"].as_u64().unwrap(), 3);
+}
+
+// ── DC-S2: the `projects` argument (DES-decision-capture §4.6) ───────────────────
+
+fn project_rule_node(id: &str, severity: &str, project: &str) -> Node {
+    let mut node = conformance_rule_node(id, "policy", severity, None);
+    node.metadata
+        .insert("targets".into(), json!({ "project": project }));
+    node
+}
+
+fn call_ro(store: &MemStore, method: &str, params: Value) -> Value {
+    let req = json!({ "jsonrpc": "2.0", "id": 30, "method": method, "params": params });
+    handle_request_unified_ro(
+        store,
+        &req,
+        &McpContext::default(),
+        None,
+        None::<&dyn RetrievalTool>,
+        true,
+    )
+}
+
+fn recalled(resp: &Value) -> Vec<String> {
+    assert!(
+        !resp["result"]["isError"].as_bool().unwrap_or(true),
+        "isError must be false: {resp}"
+    );
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let parsed: Value = serde_json::from_str(text).unwrap();
+    parsed["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// `--readonly` serves the `projects` argument: a project-less recall returns no project rule,
+/// a recall naming the project returns it, and tools/list advertises the argument.
+#[test]
+fn rules_recall_projects_argument_under_readonly() {
+    let mut s = MemStore::new();
+    s.begin_batch().unwrap();
+    s.upsert_nodes(&[
+        conformance_rule_node("POL-001", "policy", "warn", None),
+        project_rule_node("proposal:p-alpha", "critical", "proj_alpha"),
+        project_rule_node("proposal:p-beta", "critical", "proj_beta"),
+    ])
+    .unwrap();
+    s.commit_batch().unwrap();
+
+    let none = call_ro(
+        &s,
+        "tools/call",
+        json!({ "name": "rules.recall", "arguments": {} }),
+    );
+    assert_eq!(
+        recalled(&none),
+        vec!["POL-001"],
+        "no project named: globals only"
+    );
+
+    let alpha = call_ro(
+        &s,
+        "tools/call",
+        json!({ "name": "rules.recall", "arguments": { "projects": ["proj_alpha"] } }),
+    );
+    assert_eq!(recalled(&alpha), vec!["proposal:p-alpha", "POL-001"]);
+
+    let list = call_ro(&s, "tools/list", json!({}));
+    let tool = list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "rules.recall")
+        .expect("rules.recall advertised under --readonly");
+    assert_eq!(
+        tool["inputSchema"]["properties"]["projects"]["type"], "array",
+        "projects is advertised: {tool}"
+    );
 }

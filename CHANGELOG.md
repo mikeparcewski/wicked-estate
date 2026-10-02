@@ -60,6 +60,18 @@ Breaking for Rust callers, so the next release is 0.18.0, not 0.17.x. See **Chan
   `PathResult` and `Unresolved` (both `#[non_exhaustive]`), `Subgraph::shortest_path`, and an
   `Ord` derive on `EdgeKind`; parallel edges tie-break in variant declaration order. The MCP
   server now lists 30 tools (12 estate).
+- **`rules.recall` takes a `projects` argument (DES-decision-capture DC-S2).** A rule whose
+  `targets.project` is P is returned only when `projects` contains P. If `projects` is omitted
+  or empty, no project rule is returned, only global ones. A rule with no project applies
+  everywhere, as before. Before this change, recall ignored `targets.project`, so an agent that
+  named no project got every project's rules. wicked-core's `recall_rules` uses the same rule.
+  One golden fixture, `crates/wicked-estate-retrieve/tests/fixtures/rules-project-parity.json`,
+  is copied byte-identical from wicked-core and tested in both repos. A `projects` value that
+  is not an array of strings gives an empty result with a diagnostic, never
+  `isError`. The empty-result diagnostic also counts the project rules it withheld. Results
+  within a severity are now ordered by `weight` (heavier first; a rule without one counts as
+  1.0, compared as f32 like core) and then id. The tool is still read-only, `--readonly` serves the
+  argument, and no write tool is added.
 
 ### Fixed
 - **The BlastRadius depth flag describes the rows it returns (#222 review).** The horizon is
