@@ -320,7 +320,20 @@ fn write_sets(
 
 /// The total order the support list — and therefore the representative-fact choice — is sorted by.
 /// Every component is stable across runs; none of them is an insertion index.
-type SupportOrder = (String, String, String, String, String, u32, u32, String);
+/// One fact's identity and sort key: construct, semantics, evidence, rule, file, start byte, end
+/// byte, resolved_by, and the confidence's f32 bits (monotonic for the non-negative range), so
+/// two facts that differ only in confidence are two rows, not one row chosen by input order.
+type SupportOrder = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    u32,
+    u32,
+    String,
+    u32,
+);
 
 fn support_order(edge: &Edge) -> SupportOrder {
     let get = |key: &str| {
@@ -349,6 +362,7 @@ fn support_order(edge: &Edge) -> SupportOrder {
         start,
         end,
         edge.resolved_by.clone(),
+        edge.confidence.get().to_bits(),
     )
 }
 
@@ -359,6 +373,13 @@ fn support_order(edge: &Edge) -> SupportOrder {
 /// an already-folded edge must not collapse its two-class `flow_semantics` array into whichever
 /// value happens to sort first. A caller that merges per file and then again per run (TS-S2A's
 /// likely shape) gets the same answer as one merge over everything.
+///
+/// **The cap is the boundary of that promise.** Up to [`MAX_FLOW_SUPPORT`] facts per edge, a
+/// staged fold equals one fold exactly. Beyond it, the dropped facts' identities are gone: the
+/// representative still composes (its row always survives the cap), but which non-representative
+/// rows are kept can depend on batching, and [`FLOW_SUPPORT_TRUNCATED_KEY`] sums each fold's
+/// drops, so merging overlapping pre-folded inputs can over-count. Read it as "at least this
+/// many facts are not listed" only for a single fold.
 fn support_rows(edge: &Edge) -> Vec<(SupportOrder, serde_json::Value)> {
     if let Some(existing) = edge
         .metadata
@@ -418,6 +439,10 @@ fn support_entry_order(entry: &serde_json::Value) -> SupportOrder {
         num("start_byte"),
         num("end_byte"),
         text("resolved_by"),
+        entry
+            .get("confidence")
+            .and_then(|v| v.as_f64())
+            .map_or(0, |c| (c as f32).to_bits()),
     )
 }
 
@@ -566,6 +591,7 @@ pub fn merge_flow_edges(edges: Vec<Edge>) -> Vec<Edge> {
         // Representative: the max-confidence fact under the stable total order. Its provenance,
         // resolved_by and location ride the merged edge; every other fact's are preserved in the
         // support list, so nothing is discarded.
+        let representative_key = representative_order(&group[0]);
         let mut edge = group.into_iter().next().expect("group is non-empty");
         write_sets(
             &mut edge.metadata,
@@ -575,7 +601,23 @@ pub fn merge_flow_edges(edges: Vec<Edge>) -> Vec<Edge> {
             &rules,
         );
         let total_support = supports.len();
-        let kept: Vec<serde_json::Value> = supports.into_values().take(MAX_FLOW_SUPPORT).collect();
+        // Keep the first MAX_FLOW_SUPPORT rows in fact order, but never drop the representative's
+        // own row: a later fold finds the representative through it, so losing it to the cap
+        // would make the representative (location, provenance) depend on batching. It sorts
+        // after every row it displaces, so the kept list stays in fact order.
+        let mut kept: Vec<serde_json::Value> = Vec::with_capacity(MAX_FLOW_SUPPORT);
+        let mut representative_row = None;
+        for (i, (key, row)) in supports.into_iter().enumerate() {
+            if i < MAX_FLOW_SUPPORT {
+                kept.push(row);
+            } else if key == representative_key {
+                representative_row = Some(row);
+            }
+        }
+        if let Some(row) = representative_row {
+            kept.pop();
+            kept.push(row);
+        }
         let dropped = (total_support - kept.len()) + already_dropped;
         edge.metadata
             .insert(FLOW_SUPPORT_KEY.to_string(), serde_json::Value::Array(kept));
@@ -955,6 +997,87 @@ mod tests {
                 .collect(),
         );
         assert_eq!(one_pass, two_pass, "two folds must equal one");
+    }
+
+    /// Copilot review of #231: two facts identical except for confidence shared one support
+    /// key, so whichever was inserted last overwrote the other — an insertion-order-dependent
+    /// `flow_support`.
+    #[test]
+    fn support_rows_that_differ_only_in_confidence_are_both_kept() {
+        let strong = flow_edge(
+            "assignment",
+            FlowSemantics::ValuePreserving,
+            10,
+            ResolutionTier::Parsed,
+        );
+        let weak = flow_edge(
+            "assignment",
+            FlowSemantics::ValuePreserving,
+            10,
+            ResolutionTier::Heuristic,
+        );
+        let forward = merge_flow_edges(vec![strong.clone(), weak.clone()]);
+        let backward = merge_flow_edges(vec![weak, strong]);
+        assert_eq!(
+            forward, backward,
+            "the support list must not depend on input order"
+        );
+        assert_eq!(
+            forward[0].metadata[FLOW_SUPPORT_KEY]
+                .as_array()
+                .unwrap()
+                .len(),
+            2,
+            "{:?}",
+            forward[0].metadata
+        );
+    }
+
+    /// Copilot review of #231: when the support cap dropped every strongest row, a second fold
+    /// fell back to the aggregate metadata and could pick a different representative. The
+    /// representative's own row now always survives the cap.
+    #[test]
+    fn representative_row_survives_the_support_cap_across_folds() {
+        let weak = |byte: u32| {
+            flow_edge(
+                "assignment",
+                FlowSemantics::ValuePreserving,
+                byte,
+                ResolutionTier::Heuristic,
+            )
+        };
+        let strong = flow_edge(
+            "property_read",
+            FlowSemantics::ValuePreserving,
+            500,
+            ResolutionTier::Parsed,
+        );
+        let stronger_later = flow_edge(
+            "expression",
+            FlowSemantics::MayInfluence,
+            600,
+            ResolutionTier::Parsed,
+        );
+        let x: Vec<Edge> = (0..MAX_FLOW_SUPPORT as u32)
+            .map(|i| weak(10 + i))
+            .chain([strong])
+            .collect();
+        let first = merge_flow_edges(x.clone());
+        assert!(
+            first[0].metadata[FLOW_SUPPORT_KEY]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["construct"] == "property_read"),
+            "the representative's row must be kept: {:?}",
+            first[0].metadata
+        );
+        let one_pass = merge_flow_edges(x.into_iter().chain([stronger_later.clone()]).collect());
+        let two_pass = merge_flow_edges(first.into_iter().chain([stronger_later]).collect());
+        assert_eq!(
+            one_pass[0].location, two_pass[0].location,
+            "the representative must not depend on batching"
+        );
     }
 
     #[test]

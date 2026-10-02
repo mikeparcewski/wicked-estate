@@ -46,7 +46,10 @@ edge behaviour changes on purpose. See **Changed (breaking)**.
   - **`Lineage{relation:"flows_to"}` returns a `flows` array** carrying each hop's classification,
     confidence, provenance, rule id and site (R7). Default lineage is untouched and gains no field.
     `dependencies` and `flows` share the one 25K-char R4 budget, and a row dropped from either
-    array sets `truncated`.
+    array sets `truncated`. `flows` lists only hops whose two ends are both in the answer, and in
+    this mode the `confidence` summary describes those hops; it used to count every edge the
+    traversal touched, including the value slots' `File` `Contains` edges and, on SQLite, the
+    hops leaving the depth frontier.
   - **Existing graphs keep the old classification until re-extracted.** A release-version bump
     re-extracts automatically; a same-version development binary needs
     `wicked-estate index <path> --force` once.
@@ -58,7 +61,8 @@ edge behaviour changes on purpose. See **Changed (breaking)**.
   symbols/`RankHotspots`/`important_symbols` 16 rows → 4, `entrypoints` 15 → 3, `leaves` 16 → 4,
   `dead-code` 14 → 2, `budget_context` 4 → 1 — in every case the removed rows were exactly the
   synthetic slots. Also filtered: the `ContextPack` body, `budget_context`'s supplementary FTS
-  pass, `SemanticSearch`, `graph-view --focus` by name, and community detection. The eligible
+  pass, `SemanticSearch` (before `k` is applied, so slots cannot fill the window),
+  `graph-view --focus` by name (before its 5-seed cap), and community detection. The eligible
   symbols' PageRank scores and order are byte-identical, because value slots stay in the PageRank
   *input* graph and are filtered from its output. `export`, `stats`, exact-`SymbolId` lookup,
   `SearchEntity{include_values:true}` and `Lineage{relation:"flows_to"}` deliberately still show

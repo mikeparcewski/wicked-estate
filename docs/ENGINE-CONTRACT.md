@@ -261,11 +261,14 @@ may-influence contribution vanished with nothing recording that it had been asse
 **before** the batch reaches a store: set union for every classification key, `max` confidence
 (matching the stores' own `>=`, so the merge is upsert-stable), the minimum over every
 contributing fact recorded in `flow_confidence_min` when it is below the edge's confidence (read
-from the support rows and any prior key, so a second fold equals one fold over everything), and the representative fact chosen by a total order that
-contains no insertion index. Every contributing fact keeps a row in `flow_support`
+from the support rows and any prior key, so a second fold equals one fold over everything), and
+the representative fact chosen by a total order that contains no insertion index. Every contributing fact keeps a row in `flow_support`
 (`{construct, semantics, evidence, rule, confidence, resolved_by, file, line, start_byte,
-end_byte}`), capped at 8 with `flow_support_truncated` (R4). The result is a pure function of the
-input *set*.
+end_byte}`), capped at 8 with `flow_support_truncated` (R4); a fact's identity includes its
+confidence, and the representative's own row always survives the cap. The result is a pure
+function of the input *set*, and folding in stages equals one fold, exactly up to the cap. Past
+it, the dropped facts' identities are not kept: which other rows survive can depend on batching,
+and `flow_support_truncated` sums each fold's drops, so it is exact only for a single fold.
 
 The legacy scalar `metadata.construct` stays readable: it is the lexicographic minimum of
 `constructs`. It is a lossy summary **by construction** — `constructs` is the whole truth.
@@ -289,7 +292,7 @@ explicit — a node hidden from human-facing search is **not** automatically hid
 |---|---|---|
 | Raw storage / `export` / `nodes` CLI / `GraphStats` | **yes** | deliberate: a faithful view of storage must stay faithful. A filtered `export` would make the file an unreliable basis for diffing a graph |
 | Exact `SymbolId` lookup (`RetrieveEntity`, `FetchContent`, `get_node`, `graph-view --focus <id>`) | **yes** | deliberate: you addressed this node |
-| `Lineage relation=flows_to` | **yes** | the explicit semantic query; this is the whole point. `dependencies` and `flows` share one R4 budget, and a row dropped from either sets `truncated` |
+| `Lineage relation=flows_to` | **yes** | the explicit semantic query; this is the whole point. `flows` and the `confidence` summary list only flow hops whose two ends are both in the answer; `dependencies` and `flows` share one R4 budget, and a row dropped from either sets `truncated` |
 | `SearchEntity include_values=true` | **yes** | explicit opt-in. The default path is the one with a diagnostic naming the hidden count and this way back in; this path hides nothing, so it has none |
 | Default name/FTS search (`SearchEntity`, `wicked_estate::search`, CLI `query`) | no | `find_seed_symbols` / `is_structural_symbol` |
 | `ContextPack` / `ContextBundle` seeds | no | `find_seed_symbols` |
@@ -299,7 +302,7 @@ explicit — a node hidden from human-facing search is **not** automatically hid
 | Ranked symbols / `RankHotspots` / `important_symbols` / `pagerank.top` cache (write **and** read) | no | the `excluded` set in `pagerank_inner` + read-time hygiene for caches written by an older binary |
 | **PageRank input graph** | **yes** | deliberate: value slots carry no `Calls`/`Imports` edge, so they are isolated vertices. Removing them from the input would renumber the uniform teleport denominator and change *every* real symbol's score. Keeping them in the input and filtering the output leaves eligible symbols' scores and order byte-identical |
 | Communities / cluster summaries | no | excluded from `detect_communities`' node set — necessary because `package_bias > 0` rings every node in a directory together, which would wire locals into real communities |
-| `SemanticSearch` | no | filtered at read. **Residual:** embeddings are still computed for value slots, so they occupy ANN index space; filtering at write would need an embeddings backfill |
+| `SemanticSearch` | no | filtered at read, before `k` is applied (bounded over-fetch, with a diagnostic if the candidate cap still leaves fewer than `k`). **Residual:** embeddings are still computed for value slots, so they occupy ANN index space; filtering at write would need an embeddings backfill |
 | `graph-view` roots | no | roots come from `important_symbols`; the `--focus` *by name* path is filtered (before its 5-seed cap, so same-name slots cannot crowd out the real symbol), `--focus` *by id* is not (see exact-lookup row) |
 | `Path` (MCP) / `path` (CLI) | by name: no; by `SymbolId`: **yes** | a bare name resolves with `!is_value_flow_node()` (`path.rs`); pass the exact `SymbolId` to route from or to a slot |
 | CLI `resolve <name>` | **yes** (pre-existing, not yet decided) | raw `find_symbols` by exact name, so e.g. `resolve runs` can return mostly slots. Crew's cross-repo symbol search calls it; filtering it is an open follow-up |
