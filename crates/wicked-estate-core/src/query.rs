@@ -113,15 +113,18 @@ impl Subgraph {
     /// (`traverse_multi`, the overlay's cross-graph merge). ORs all three fields, so a cause lost
     /// here cannot make the union look complete.
     pub fn absorb_truncation(&mut self, other: &Subgraph) {
-        if other.node_cap_reached {
+        // A backend that set only the legacy `truncated` bit (or a row deserialized from an
+        // older schema, where the cause fields default to false) must still propagate. Before
+        // wicked-estate#190 that bit meant the node cap, so it is folded in as one; copying the
+        // bare bit would leave both causes false and break the invariant below.
+        let legacy_only =
+            other.truncated && !other.node_cap_reached && !other.depth_horizon_reached;
+        if other.node_cap_reached || legacy_only {
             self.mark_node_cap();
         }
         if other.depth_horizon_reached {
             self.mark_depth_horizon();
         }
-        // A backend that set only the legacy `truncated` bit (or a row deserialized from an
-        // older schema, where the cause fields default to false) must still propagate.
-        self.truncated |= other.truncated;
     }
 
     /// `truncated == node_cap_reached || depth_horizon_reached`. Asserted by the conformance kit.
@@ -322,6 +325,39 @@ impl RetrievalResult {
             content,
             diagnostics: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod absorb_truncation_tests {
+    use super::*;
+
+    /// A legacy subgraph (only `truncated` set, both causes false, as an older backend or an
+    /// older serialized row produces) must keep the folded result's invariant: the legacy bit
+    /// meant the node cap, so the union reports a node-cap cut.
+    #[test]
+    fn a_legacy_truncated_only_subgraph_folds_in_as_a_node_cap_cut() {
+        let legacy = Subgraph {
+            truncated: true,
+            ..Default::default()
+        };
+        let mut acc = Subgraph::default();
+        acc.absorb_truncation(&legacy);
+        assert!(acc.truncated && acc.node_cap_reached && !acc.depth_horizon_reached);
+        assert!(acc.truncation_invariant_holds(), "{acc:?}");
+    }
+
+    #[test]
+    fn each_cause_folds_in_as_itself() {
+        let mut acc = Subgraph::default();
+        acc.absorb_truncation(&Subgraph::default().with_caps(false, true));
+        assert!(acc.depth_horizon_reached && !acc.node_cap_reached && acc.truncated);
+        acc.absorb_truncation(&Subgraph::default().with_caps(true, false));
+        assert!(acc.depth_horizon_reached && acc.node_cap_reached);
+        assert!(acc.truncation_invariant_holds());
+        let mut clean = Subgraph::default();
+        clean.absorb_truncation(&Subgraph::default());
+        assert!(!clean.truncated && clean.truncation_invariant_holds());
     }
 }
 
