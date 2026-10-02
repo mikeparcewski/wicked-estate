@@ -1063,6 +1063,15 @@ mod tests {
             .chain([strong])
             .collect();
         let first = merge_flow_edges(x.clone());
+        assert_eq!(
+            merge_flow_edges(first.clone()),
+            first,
+            "re-folding a capped edge must be idempotent, truncation count included"
+        );
+        assert_eq!(
+            first[0].metadata[FLOW_SUPPORT_TRUNCATED_KEY],
+            serde_json::json!(1)
+        );
         assert!(
             first[0].metadata[FLOW_SUPPORT_KEY]
                 .as_array()
