@@ -2,7 +2,9 @@
 
 ## [Unreleased]
 
-Breaking for Rust callers, so the next release is 0.18.0, not 0.17.x. See **Changed (breaking)**.
+## [0.18.0] — 2026-10-02
+
+Minor bump, not a patch: this release is breaking for Rust callers. See **Changed (breaking)**.
 
 ### Changed (breaking)
 - **`Subgraph` gains two public fields, `node_cap_reached` and `depth_horizon_reached` (#190).**
