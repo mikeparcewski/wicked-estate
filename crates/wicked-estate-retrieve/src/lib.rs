@@ -3379,6 +3379,48 @@ mod tests {
         assert_eq!(shallow.content["truncated"], json!(false));
     }
 
+    /// No false "complete": an import-transit File past the horizon is followed, not ignored.
+    /// `m00.ts` contains `targetFn`, `m01.ts` imports `m00.ts`, and a function `g` points at
+    /// `m01.ts` with a non-`Imports` edge. At depth 1 the walk stops at `m00.ts`; a deeper walk
+    /// reaches `m01.ts` (dropped) and then `g` (kept). The cut must stay reported.
+    #[test]
+    fn blast_radius_depth_flag_follows_import_transit_to_a_kept_dependent() {
+        let mut store = import_chain_store(2);
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[make_node("g", "g", NodeKind::Function, "z.ts", 1)])
+            .unwrap();
+        store
+            .upsert_edges(&[make_call_edge("g", "m01.ts")])
+            .unwrap();
+        store.commit_batch().unwrap();
+        let shallow = BlastRadius
+            .invoke(&store, &json!({"symbol": "targetFn", "depth": 1}))
+            .unwrap();
+        let deep = BlastRadius
+            .invoke(&store, &json!({"symbol": "targetFn", "depth": 8}))
+            .unwrap();
+        let names = |r: &RetrievalResult| -> Vec<String> {
+            r.content["dependents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| d["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert!(
+            names(&deep).contains(&"g".to_string()),
+            "fixture premise: the deeper walk keeps g: {:?}",
+            names(&deep)
+        );
+        assert!(!names(&shallow).contains(&"g".to_string()));
+        assert_eq!(
+            shallow.content["depth_horizon_reached"],
+            json!(true),
+            "g lies past the horizon behind an import-transit File: {shallow:?}"
+        );
+    }
+
     /// The control: a real call chain past the horizon is still reported as cut.
     #[test]
     fn blast_radius_depth_flag_still_reports_a_real_call_chain_cut() {

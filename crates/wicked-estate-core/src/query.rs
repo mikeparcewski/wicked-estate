@@ -191,27 +191,28 @@ impl Subgraph {
     /// blast-radius walk, so the flag describes the rows the caller actually returns.
     ///
     /// The store's horizon probe runs on the raw all-edge-kinds walk. From a code-symbol start,
-    /// the only way that walk continues past the horizon is very often a File→File `Imports`
-    /// edge into a frontier File, and `code_dependents` drops import-transit Files anyway. A
-    /// deeper walk then returns the identical set, so the flag was a false "more dependents
-    /// exist". On a 905-file TypeScript repo that was 426 of 434 flags (98.2%).
+    /// the walk very often leaves the horizon only through File→File `Imports` edges, and
+    /// `code_dependents` drops import-transit Files. A deeper walk then returns the identical
+    /// set, so the flag was a false "more dependents exist". On a 905-file TypeScript repo that
+    /// was 426 of 434 flags (98.2%).
     ///
-    /// This re-checks every frontier node (depth == `spec.max_depth`) against its incident edges
-    /// in `spec.direction`. The cut stays reported if any edge that `spec` admits leads to an
-    /// unvisited node, unless that edge is an `Imports` edge whose source is a `File`. Those
-    /// edges can only add Files that the projection removes. An `Imports` edge from anything
-    /// else, or from a node the store cannot resolve, still counts as a real cut.
+    /// The check replays the part of a deeper walk that matters. Starting from every frontier
+    /// node (depth == `spec.max_depth`), it looks at each incident edge in the walk direction
+    /// that `spec` admits and that leads to an unvisited node:
+    /// - an `Imports` edge whose source is a `File` adds only an import-transit File, so that
+    ///   File is queued and its own dependents are checked the same way;
+    /// - any other edge (or an importer the store cannot resolve) adds a row the projection
+    ///   keeps, so the cut is real and the flag stays.
+    ///
+    /// The flag is cleared only when the whole import-transit closure past the horizon is
+    /// explored and contains nothing the projection keeps. If that closure grows past
+    /// `spec.max_nodes` Files, the flag stays: a false alarm is preferred to a false "complete".
     ///
     /// The flag is left untouched when:
     /// - the start is a File or an Import, because their importers ARE the blast radius;
     /// - the walk is not a `Dependents` walk;
     /// - the node cap also cut the walk, because then the frontier itself is incomplete and
     ///   `truncated` stays true anyway.
-    ///
-    /// Residual, by design: a File reached past the horizon only through imports could itself
-    /// have a non-`Imports` dependent one hop further out. No such edge appears on the indexed
-    /// corpora (nothing but `Imports` targets a File there), so the check does not chase
-    /// import-transit chains.
     pub fn refine_code_dependents_horizon(
         &mut self,
         store: &dyn crate::traits::GraphRead,
@@ -227,26 +228,32 @@ impl Subgraph {
         }
         let visited: std::collections::HashSet<&str> =
             self.nodes.iter().map(|n| n.symbol.as_str()).collect();
-        for (id, depth) in &self.depths {
-            if *depth != spec.max_depth {
-                continue;
-            }
-            for e in store.neighbors(&SymbolId(id.clone()), Direction::Dependents)? {
-                let other = e.source.as_str();
-                if visited.contains(other)
+        // Import-transit Files past the horizon, and the queue of those still to expand.
+        let mut transit: std::collections::HashSet<SymbolId> = std::collections::HashSet::new();
+        let mut queue: std::collections::VecDeque<SymbolId> = self
+            .depths
+            .iter()
+            .filter(|(_, d)| **d == spec.max_depth)
+            .map(|(id, _)| SymbolId(id.clone()))
+            .collect();
+        while let Some(id) = queue.pop_front() {
+            for e in store.neighbors(&id, Direction::Dependents)? {
+                if visited.contains(e.source.as_str())
+                    || transit.contains(&e.source)
                     || e.confidence.get() < spec.min_confidence
                     || (!spec.edge_kinds.is_empty() && !spec.edge_kinds.contains(&e.kind))
                 {
                     continue;
                 }
-                if e.kind == EdgeKind::Imports {
-                    let importer = store.get_node(&e.source)?;
-                    if matches!(importer, Some(ref n) if n.kind == NodeKind::File) {
-                        continue;
-                    }
+                let import_transit = e.kind == EdgeKind::Imports
+                    && matches!(store.get_node(&e.source)?, Some(n) if n.kind == NodeKind::File);
+                if !import_transit || transit.len() >= spec.max_nodes {
+                    // A row the projection keeps lies past the horizon, or the transit closure
+                    // is too large to prove it does not: the cut stays reported.
+                    return Ok(());
                 }
-                // A dependent the projection would keep lies past the horizon: the cut is real.
-                return Ok(());
+                transit.insert(e.source.clone());
+                queue.push_back(e.source);
             }
         }
         self.depth_horizon_reached = false;
