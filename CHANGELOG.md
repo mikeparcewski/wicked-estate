@@ -2,6 +2,55 @@
 
 ## [Unreleased]
 
+Breaking for Rust callers, so the next release is 0.18.0, not 0.17.x. See **Changed (breaking)**.
+
+### Changed (breaking)
+- **`Subgraph` gains two public fields, `node_cap_reached` and `depth_horizon_reached` (#190).**
+  The struct is not `#[non_exhaustive]`, so a downstream struct literal or exhaustive pattern
+  that compiled against 0.17.0 now fails (E0063 / E0027). Build it with `..Default::default()`,
+  set the causes with `.with_caps(node_cap_reached, depth_horizon_reached)`, and match with `..`.
+  `truncated` is now exactly `node_cap_reached || depth_horizon_reached`: it is also true when
+  the depth horizon cut the walk, where it used to mean the node cap only.
+- **`wicked_estate::blast_radius_by_name` returns `BlastRadius`, not `Vec<Node>` (#190).** The
+  rows are in `.dependents`; `.truncated()`, `.node_cap_reached` and `.depth_horizon_reached`
+  say whether they are a floor. `BlastRadius` is `#[non_exhaustive]`: outside the crate, build it
+  from `BlastRadius::default()` and assign the fields.
+- **SurrealStore (`--features surrealdb`) behaviour changes (#222).** `capabilities()` now reports
+  `server_side_traversal: false` (the traversal is a client-side BFS), edge-history archival is
+  opt-in through `set_history_enabled` (default off, as on MemStore and SqliteStore), and
+  `find_symbols` honours `scope_prefix`.
+
+### Added
+- **A depth cut is reported instead of read as completeness (#190).** Every `traverse` backend
+  (MemStore, SqliteStore, PostgresStore, SurrealStore, the overlay) now detects when the
+  `max_depth` horizon declined to expand a node that has an unreached neighbour. New wire keys
+  on `TraverseGraph`, `BlastRadius` and `Lineage`: `depth_horizon_reached`, `node_cap_reached`
+  and `searched_depth`; `truncated` stays and folds both causes. The diagnostics name the cap
+  that cut the result, and say so when `depth` is already at the tool's ceiling.
+- **`wicked-estate blast-radius --depth N` (#190).** Default 12 (the previous fixed horizon, so
+  existing invocations return the same rows); maximum 24, the MCP `BlastRadius` ceiling, and a
+  larger value is refused with an error that names it. A cut is printed on the coverage line as
+  `CUT AT depth=N`, and `--json` carries `depth_horizon_reached`, `node_cap_reached` and
+  `searched_depth`. `cross-graph` reports a per-repo cut the same way.
+- **SurrealStore compiles and passes the `GraphStore` conformance kit again, in a new
+  `surrealdb backend` CI lane (#222).** It had not built since the surrealdb 3.2 bump, and its
+  upserts had been silently writing nothing.
+
+### Fixed
+- **The BlastRadius depth flag describes the rows it returns (#222 review).** The horizon is
+  probed on the all-edge-kinds walk, but BlastRadius returns the `code_dependents` projection,
+  which drops import-transit Files. For a code-symbol start, a frontier edge that is a File→File
+  `Imports` edge no longer counts as a cut, because a deeper walk would only add Files the
+  projection removes. Measured with the MCP tool on a 905-file TypeScript repo at depth 8: 460
+  flags became 20; of the flags whose depth-24 answer is comparable, false alarms went from 426
+  of 434 (98.2%) to 0 of 8; all 8 real cuts are still flagged; returned rows are identical for
+  all 5,627 symbols, and no unflagged symbol gains rows at depth 24. New
+  `Subgraph::refine_code_dependents_horizon`.
+- **The MCP response cache no longer serves another server version's answers.** Persisted (L2)
+  responses were keyed by tool and arguments and invalidated only by the next index, so an
+  upgraded binary replayed the old binary's output, for example the pre-#190
+  `truncated:false`. The key now carries the server version (`response_cache_key`).
+
 ## [0.17.0] — 2026-09-30
 
 Minor bump, not a patch: `resolve::Resolution` is now `#[non_exhaustive]`, so a downstream that
