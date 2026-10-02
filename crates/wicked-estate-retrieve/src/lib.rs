@@ -3421,6 +3421,139 @@ mod tests {
         );
     }
 
+    /// A File past the horizon that IMPORTS one frontier node and CALLS another is a kept row
+    /// (it is the source of a non-`Imports` edge). Seeing its import edge first must not hide
+    /// the call edge. Frontier at depth 1: `a_file.ts` (contains the start) and `b_fn` (calls
+    /// the start). `f.ts` imports `a_file.ts` and has a file-scope call to `b_fn`.
+    #[test]
+    fn blast_radius_depth_flag_keeps_a_file_that_imports_one_frontier_node_and_calls_another() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node("start", "start", NodeKind::Function, "a_file.ts", 1),
+                make_node("a_file.ts", "a_file.ts", NodeKind::File, "a_file.ts", 0),
+                make_node("b_fn", "b_fn", NodeKind::Function, "b.ts", 1),
+                make_node("f.ts", "f.ts", NodeKind::File, "f.ts", 0),
+            ])
+            .unwrap();
+        let edge = |s: &str, t: &str, k: EdgeKind| {
+            Edge::new(
+                SymbolId(s.into()),
+                SymbolId(t.into()),
+                k,
+                ResolutionTier::Parsed,
+                "test-fixture",
+            )
+        };
+        store
+            .upsert_edges(&[
+                edge("a_file.ts", "start", EdgeKind::Contains),
+                edge("b_fn", "start", EdgeKind::Calls),
+                edge("f.ts", "a_file.ts", EdgeKind::Imports),
+                edge("f.ts", "b_fn", EdgeKind::Calls),
+            ])
+            .unwrap();
+        store.commit_batch().unwrap();
+        let deep = BlastRadius
+            .invoke(&store, &json!({"symbol": "start", "depth": 8}))
+            .unwrap();
+        assert!(
+            deep.content["dependents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["symbol"] == json!("f.ts")),
+            "fixture premise: the deeper walk keeps f.ts: {deep:?}"
+        );
+        let shallow = BlastRadius
+            .invoke(&store, &json!({"symbol": "start", "depth": 1}))
+            .unwrap();
+        assert_eq!(
+            shallow.content["depth_horizon_reached"],
+            json!(true),
+            "f.ts lies past the horizon and is kept: {shallow:?}"
+        );
+    }
+
+    /// A File the shallow walk reached only through an import (so the projection drops it) and
+    /// that also calls a FRONTIER node becomes a row once a deeper walk expands that node. At
+    /// depth 2: `c` calls the start (depth 1); `a.ts` imports `c` and `x` calls `c` (both depth
+    /// 2, the frontier); `a.ts` calls `x`; `b.ts` imports `x` and leads nowhere. The edge
+    /// `a.ts -> x` is behind the horizon, so the cut must stay reported.
+    #[test]
+    fn blast_radius_depth_flag_keeps_a_dropped_file_that_calls_a_frontier_node() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node("start", "start", NodeKind::Function, "s.ts", 1),
+                make_node("c", "c", NodeKind::Function, "c.ts", 1),
+                make_node("x", "x", NodeKind::Function, "x.ts", 1),
+                make_node("a.ts", "a.ts", NodeKind::File, "a.ts", 0),
+                make_node("b.ts", "b.ts", NodeKind::File, "b.ts", 0),
+            ])
+            .unwrap();
+        let edge = |s: &str, t: &str, k: EdgeKind| {
+            Edge::new(
+                SymbolId(s.into()),
+                SymbolId(t.into()),
+                k,
+                ResolutionTier::Parsed,
+                "test-fixture",
+            )
+        };
+        store
+            .upsert_edges(&[
+                edge("c", "start", EdgeKind::Calls),
+                edge("a.ts", "c", EdgeKind::Imports),
+                edge("x", "c", EdgeKind::Calls),
+                edge("a.ts", "x", EdgeKind::Calls),
+                edge("b.ts", "x", EdgeKind::Imports),
+            ])
+            .unwrap();
+        store.commit_batch().unwrap();
+        let has_a = |r: &RetrievalResult| {
+            r.content["dependents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["symbol"] == json!("a.ts"))
+        };
+        let deep = BlastRadius
+            .invoke(&store, &json!({"symbol": "start", "depth": 8}))
+            .unwrap();
+        let shallow = BlastRadius
+            .invoke(&store, &json!({"symbol": "start", "depth": 2}))
+            .unwrap();
+        assert!(
+            has_a(&deep),
+            "fixture premise: the deeper walk keeps a.ts: {deep:?}"
+        );
+        if has_a(&shallow) {
+            // A backend that collects edges between two frontier-depth nodes already returns
+            // a.ts; then nothing is missing and either flag value is honest.
+            return;
+        }
+        assert_eq!(
+            shallow.content["depth_horizon_reached"],
+            json!(true),
+            "a.ts becomes a row past the horizon: {shallow:?}"
+        );
+    }
+
+    /// Depth 0 stops at the start itself, which `depths` does not record, so there is no
+    /// frontier to re-check: the store's cut must be reported as it is.
+    #[test]
+    fn blast_radius_depth_zero_keeps_the_cut() {
+        let store = fixture_store();
+        let res = BlastRadius
+            .invoke(&store, &json!({"symbol": "leaf", "depth": 0}))
+            .unwrap();
+        assert_eq!(res.content["total"], json!(0));
+        assert_eq!(res.content["depth_horizon_reached"], json!(true), "{res:?}");
+    }
+
     /// The control: a real call chain past the horizon is still reported as cut.
     #[test]
     fn blast_radius_depth_flag_still_reports_a_real_call_chain_cut() {

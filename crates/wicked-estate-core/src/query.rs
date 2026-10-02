@@ -196,20 +196,23 @@ impl Subgraph {
     /// set, so the flag was a false "more dependents exist". On a 905-file TypeScript repo that
     /// was 426 of 434 flags (98.2%).
     ///
-    /// The check replays the part of a deeper walk that matters. Starting from every frontier
-    /// node (depth == `spec.max_depth`), it looks at each incident edge in the walk direction
-    /// that `spec` admits and that leads to an unvisited node:
-    /// - an `Imports` edge whose source is a `File` adds only an import-transit File, so that
-    ///   File is queued and its own dependents are checked the same way;
-    /// - any other edge (or an importer the store cannot resolve) adds a row the projection
-    ///   keeps, so the cut is real and the flag stays.
+    /// The check replays the part of a deeper walk that can change the projection. Starting from
+    /// every frontier node (depth == `spec.max_depth`), whose incoming edges the walk did not
+    /// expand, it looks at each incident edge in the walk direction that `spec` admits:
+    /// - a non-`Imports` edge adds a row the projection keeps when its source is unvisited (a
+    ///   non-File is always kept; a File is kept once it sources a non-`Imports` edge), or when
+    ///   its source is a visited File the projection currently drops. Either way the cut is real.
+    /// - an `Imports` edge from an unvisited `File` adds only an import-transit File, so that
+    ///   File is queued and its own incoming edges are checked the same way. An `Imports` edge
+    ///   from anything else unvisited (or from a node the store cannot resolve) is a real cut.
     ///
     /// The flag is cleared only when the whole import-transit closure past the horizon is
-    /// explored and contains nothing the projection keeps. If that closure grows past
-    /// `spec.max_nodes` Files, the flag stays: a false alarm is preferred to a false "complete".
+    /// explored and adds nothing to the projection. If that closure grows past `spec.max_nodes`
+    /// Files, the flag stays: a false alarm is preferred to a false "complete".
     ///
     /// The flag is left untouched when:
     /// - the start is a File or an Import, because their importers ARE the blast radius;
+    /// - `max_depth` is 0, because then the frontier is the start, which `depths` does not hold;
     /// - the walk is not a `Dependents` walk;
     /// - the node cap also cut the walk, because then the frontier itself is incomplete and
     ///   `truncated` stays true anyway.
@@ -221,14 +224,29 @@ impl Subgraph {
     ) -> crate::error::Result<()> {
         if !self.depth_horizon_reached
             || self.node_cap_reached
+            || spec.max_depth == 0
             || spec.direction != Direction::Dependents
             || matches!(start_kind, Some(NodeKind::File | NodeKind::Import))
         {
             return Ok(());
         }
-        let visited: std::collections::HashSet<&str> =
-            self.nodes.iter().map(|n| n.symbol.as_str()).collect();
-        // Import-transit Files past the horizon, and the queue of those still to expand.
+        // Visited node -> whether the projection drops it today (a File that sources no walked
+        // non-`Imports` edge). The same rule as `code_dependents`.
+        let kept_files: std::collections::HashSet<&str> = self
+            .edges
+            .iter()
+            .filter(|e| e.kind != EdgeKind::Imports)
+            .map(|e| e.source.as_str())
+            .collect();
+        let dropped: std::collections::HashMap<&str, bool> = self
+            .nodes
+            .iter()
+            .map(|n| {
+                let id = n.symbol.as_str();
+                (id, n.kind == NodeKind::File && !kept_files.contains(id))
+            })
+            .collect();
+        // Import-transit Files past the horizon, and the queue of nodes still to expand.
         let mut transit: std::collections::HashSet<SymbolId> = std::collections::HashSet::new();
         let mut queue: std::collections::VecDeque<SymbolId> = self
             .depths
@@ -238,18 +256,31 @@ impl Subgraph {
             .collect();
         while let Some(id) = queue.pop_front() {
             for e in store.neighbors(&id, Direction::Dependents)? {
-                if visited.contains(e.source.as_str())
-                    || transit.contains(&e.source)
-                    || e.confidence.get() < spec.min_confidence
+                if e.confidence.get() < spec.min_confidence
                     || (!spec.edge_kinds.is_empty() && !spec.edge_kinds.contains(&e.kind))
                 {
                     continue;
                 }
-                let import_transit = e.kind == EdgeKind::Imports
-                    && matches!(store.get_node(&e.source)?, Some(n) if n.kind == NodeKind::File);
-                if !import_transit || transit.len() >= spec.max_nodes {
-                    // A row the projection keeps lies past the horizon, or the transit closure
-                    // is too large to prove it does not: the cut stays reported.
+                let src = e.source.as_str();
+                if e.kind != EdgeKind::Imports {
+                    match dropped.get(src) {
+                        // Already a returned row: nothing new.
+                        Some(false) => continue,
+                        // Unvisited (transit Files included), or a visited File the projection
+                        // drops: a deeper walk adds a row.
+                        _ => return Ok(()),
+                    }
+                }
+                if dropped.contains_key(src) || transit.contains(&e.source) {
+                    // An import edge never makes a File a row, and the source is already known.
+                    continue;
+                }
+                let from_file =
+                    matches!(store.get_node(&e.source)?, Some(n) if n.kind == NodeKind::File);
+                if !from_file || kept_files.contains(src) || transit.len() >= spec.max_nodes {
+                    // An importer the projection keeps (a non-File, or a File that already
+                    // sources a collected non-`Imports` edge), or a transit closure too large to
+                    // prove there is none: the cut stays reported.
                     return Ok(());
                 }
                 transit.insert(e.source.clone());
