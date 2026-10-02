@@ -143,7 +143,7 @@ the production resolver slice — guarded against drift by
 
 | resolver id | tier | confidence | activation | notes |
 |---|---|---|---|---|
-| tree-sitter extractors (local edges) | `Parsed` | 1.0 | yes (extract phase) | intra-file `Contains`/`Defines`, plus `flows_to` edges whose capture declares `syntax` evidence (local / field / property-read / return), written before resolution; stored direction consumer→producer, `resolved_by = tree-sitter`, `Provenance::Parsed`, classified per §3.2 |
+| tree-sitter extractors (local edges) | `Parsed` | 1.0 | yes (extract phase) | intra-file `Contains`/`Defines`, plus `flows_to` edges whose capture declares `syntax` evidence (`assignment` and `property_read` → `value_preserving`, `expression` → `may_influence`), and the engine-emitted `return` flow (`value_preserving`; not a query-file capture), written before resolution; stored direction consumer→producer, `resolved_by = tree-sitter`, `Provenance::Parsed`, classified per §3.2 |
 | tree-sitter **convention** flow (`tree-sitter-convention`) | `Heuristic` | 0.5 | yes (extract phase) | `flows_to` edges whose capture declares `convention` evidence — today Angular `@Input()` and `route.snapshot.paramMap.get(…)`. The AST proves the *shape*; it does **not** prove `@angular/core` identity or that the receiver is an `ActivatedRoute`, so these are heuristics, not parsed facts. Carries a stable `flow_rules` id (§3.2). Downgraded from `Parsed`/1.0 in TS-S1 |
 | call-derived value flow (main pass) | inherited from resolved `Calls` edge | inherited from resolved `Calls` edge | yes (post-resolution, same index run) | derives `flows_to` call-argument and call-result edges only from exact-site `Calls` bindings with one unique accepted target; stored direction remains consumer→producer, while `Lineage` `relation = "flows_to"` walks dependents for semantic-forward producer→consumer output |
 | call-derived value flow (back-fill) | inherited from resolved `Calls` edge | inherited from resolved `Calls` edge | yes (parked-ref back-fill, same index run) | when a previously parked call binds after another file appears, re-extracts call-site hints from stored source text and emits the same exact-site call-argument/call-result `flows_to` edges before deleting the parked ref |
@@ -192,7 +192,7 @@ A flow edge answers two independent questions. Conflating them is how a tool sta
 | | | `scip` | **RESERVED, not emitted** — a verified SCIP projection (TS-S2) |
 | | | `compiler` | **RESERVED, not emitted** — a framework compiler fact (TS-S3/TS-S4) |
 
-Both keys hold a **sorted array**, never a scalar — see "endpoint dedup" below. Evidence
+Both keys hold an array sorted in the enum's **declared** order (the order of the table above, so `["value_preserving","may_influence"]`, not lexicographic), never a scalar — see "endpoint dedup" below. `constructs` and `flow_rules` are sorted lexicographically. Evidence
 *strength* stays where this contract already put it: `confidence`, `provenance`, `resolved_by`.
 The two reserved words exist so that a convention match can never later be relabelled as a
 compiler proof; `FlowEvidence::is_emitted()` is the tripwire.
@@ -232,7 +232,8 @@ The classification is declared in the query file, not in Rust:
 `treesitter.rs` parses those three segments structurally and knows nothing about what
 `angular_input` means. The rule id is derived — `<language>/<evidence>/<construct>` — so a new
 construct or a new language mints its own id with zero core change. A capture naming a reserved
-(`scip`/`compiler`) or `call_derived` evidence class is **rejected**, not emitted.
+(`scip`/`compiler`) or `call_derived` evidence class is **ignored**: it is never emitted, but it
+does not fail the query load either (nor does a misspelt anchor), so a typo drops silently.
 
 #### Endpoint dedup: why the vocabulary is set-valued
 
@@ -248,13 +249,19 @@ function f(a: string, b: string) {
 }
 ```
 
+The two `c`s are **distinct variables** that share one value slot, because slot identity is
+owner-scoped, not block-scoped (`f:local:c`). The merge keeps both facts, but a read of `c` after
+the block (say a `return c`) sees the outer `c`, whose fact is `may_influence`: the merged
+`value_preserving` belongs only to the inner `c`. Scope-sensitive slot identity is TS-S2 work.
+
 Measured on `c4fa938`, exactly one survived (`construct="assignment"`, byte 116) and the
 may-influence contribution vanished with nothing recording that it had been asserted.
 
 `wicked_estate_core::flow::merge_flow_edges` folds such a group through a deterministic lattice
 **before** the batch reaches a store: set union for every classification key, `max` confidence
-(matching the stores' own `>=`, so the merge is upsert-stable), `min` recorded in
-`flow_confidence_min` when it differs, and the representative fact chosen by a total order that
+(matching the stores' own `>=`, so the merge is upsert-stable), the minimum over every
+contributing fact recorded in `flow_confidence_min` when it is below the edge's confidence (read
+from the support rows and any prior key, so a second fold equals one fold over everything), and the representative fact chosen by a total order that
 contains no insertion index. Every contributing fact keeps a row in `flow_support`
 (`{construct, semantics, evidence, rule, confidence, resolved_by, file, line, start_byte,
 end_byte}`), capped at 8 with `flow_support_truncated` (R4). The result is a pure function of the
@@ -282,8 +289,8 @@ explicit — a node hidden from human-facing search is **not** automatically hid
 |---|---|---|
 | Raw storage / `export` / `nodes` CLI / `GraphStats` | **yes** | deliberate: a faithful view of storage must stay faithful. A filtered `export` would make the file an unreliable basis for diffing a graph |
 | Exact `SymbolId` lookup (`RetrieveEntity`, `FetchContent`, `get_node`, `graph-view --focus <id>`) | **yes** | deliberate: you addressed this node |
-| `Lineage relation=flows_to` | **yes** | the explicit semantic query; this is the whole point |
-| `SearchEntity include_values=true` | **yes** | explicit opt-in, with a diagnostic naming the hidden count |
+| `Lineage relation=flows_to` | **yes** | the explicit semantic query; this is the whole point. `dependencies` and `flows` share one R4 budget, and a row dropped from either sets `truncated` |
+| `SearchEntity include_values=true` | **yes** | explicit opt-in. The default path is the one with a diagnostic naming the hidden count and this way back in; this path hides nothing, so it has none |
 | Default name/FTS search (`SearchEntity`, `wicked_estate::search`, CLI `query`) | no | `find_seed_symbols` / `is_structural_symbol` |
 | `ContextPack` / `ContextBundle` seeds | no | `find_seed_symbols` |
 | `ContextPack` body (`render_context` tail-fill) | no | `is_structural_symbol` — TS-S1 (seeds were fixed in #207, the body was not) |
@@ -293,7 +300,9 @@ explicit — a node hidden from human-facing search is **not** automatically hid
 | **PageRank input graph** | **yes** | deliberate: value slots carry no `Calls`/`Imports` edge, so they are isolated vertices. Removing them from the input would renumber the uniform teleport denominator and change *every* real symbol's score. Keeping them in the input and filtering the output leaves eligible symbols' scores and order byte-identical |
 | Communities / cluster summaries | no | excluded from `detect_communities`' node set — necessary because `package_bias > 0` rings every node in a directory together, which would wire locals into real communities |
 | `SemanticSearch` | no | filtered at read. **Residual:** embeddings are still computed for value slots, so they occupy ANN index space; filtering at write would need an embeddings backfill |
-| `graph-view` roots | no | roots come from `important_symbols`; the `--focus` *by name* path is filtered, `--focus` *by id* is not (see exact-lookup row) |
+| `graph-view` roots | no | roots come from `important_symbols`; the `--focus` *by name* path is filtered (before its 5-seed cap, so same-name slots cannot crowd out the real symbol), `--focus` *by id* is not (see exact-lookup row) |
+| `Path` (MCP) / `path` (CLI) | by name: no; by `SymbolId`: **yes** | a bare name resolves with `!is_value_flow_node()` (`path.rs`); pass the exact `SymbolId` to route from or to a slot |
+| CLI `resolve <name>` | **yes** (pre-existing, not yet decided) | raw `find_symbols` by exact name, so e.g. `resolve runs` can return mostly slots. Crew's cross-repo symbol search calls it; filtering it is an open follow-up |
 | `entrypoints` / `leaves` / `dead-code` | no | TS-S1. These match **100%** of value slots by construction (no `Calls`/`Imports` edge in either direction), so `dead-code` had become mostly synthetic noise |
 | `BlastRadius` / `TraverseGraph` | **yes** | **unresolved, deliberately out of scope.** Blast radius follows every edge kind by locked contract (the design notes: a blast radius that only follows calls silently under-reports). Value slots hang off `File` by `Contains`, so a File-rooted blast radius surfaces them. Narrowing this needs an explicit contract decision, not a visibility patch. Seeds are already filtered, so `blast-radius <name>` does not start from one |
 

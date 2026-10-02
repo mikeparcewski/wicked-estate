@@ -123,7 +123,11 @@ fn graph_view_focus_by_name_skips_value_slots_ahead_of_the_real_symbol() {
         "fixture must hold >= 5 value slots named `key`; got {slot_ids:?}"
     );
 
-    let out = run(&dir, &db, &["graph-view", "--focus", "key", "--limit", "10"]);
+    let out = run(
+        &dir,
+        &db,
+        &["graph-view", "--focus", "key", "--limit", "10"],
+    );
     let v: serde_json::Value = serde_json::from_str(&out).expect("graph-view emits JSON");
     let nodes = v["nodes"].as_array().expect("nodes array");
     assert!(
@@ -140,6 +144,9 @@ fn graph_view_focus_by_name_skips_value_slots_ahead_of_the_real_symbol() {
                 .is_some_and(|id| slot_ids.iter().any(|s| s == id))
         })
         .collect();
-    assert!(polluted.is_empty(), "no value slot may be a focus seed: {polluted:?}");
+    assert!(
+        polluted.is_empty(),
+        "no value slot may be a focus seed: {polluted:?}"
+    );
     let _ = fs::remove_dir_all(&dir);
 }

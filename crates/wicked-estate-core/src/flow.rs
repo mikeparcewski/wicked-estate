@@ -871,7 +871,11 @@ mod tests {
                 ResolutionTier::Parsed,
             )
         };
-        let min_of = |e: &Edge| e.metadata.get(FLOW_CONFIDENCE_MIN_KEY).and_then(|v| v.as_f64());
+        let min_of = |e: &Edge| {
+            e.metadata
+                .get(FLOW_CONFIDENCE_MIN_KEY)
+                .and_then(|v| v.as_f64())
+        };
 
         for third in [mid as fn() -> Edge, strong2] {
             let one_pass = merge_flow_edges(vec![strong(), weak(), third()]);

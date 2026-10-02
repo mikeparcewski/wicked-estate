@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+Implies a minor bump (**0.19.0**), not a patch. The Rust API change is additive, but published
+edge behaviour changes on purpose. See **Changed (breaking)**.
+
+### Changed (breaking)
+- **Angular convention `flows_to` edges are now `Heuristic`/0.5, not `Parsed`/1.0 (#231).**
+  `@Input()` and `route.snapshot.paramMap.get(…)` edges carry
+  `resolved_by = "tree-sitter-convention"`. A caller that filters on
+  `TraversalSpec.min_confidence > 0.5` or on `Provenance::Parsed` no longer sees them; lower
+  the threshold to 0.5, or read `flow_evidence` (`convention`) to keep them. Other direct syntax
+  flow stays `Parsed`/1.0.
+- **`entrypoints`, `leaves`, `dead-code`, community detection and the other §3.3 surfaces no
+  longer return synthetic value slots (#231).** A caller that counted or diffed those lists sees
+  them shrink by exactly the slots. `clusters --package-bias <b>` with `b > 0` can partition
+  real symbols differently, because slots no longer ring a directory's nodes together; default
+  `clusters` (no bias) is unchanged.
+- **The new flow types are `#[non_exhaustive]` (#231).** `FlowSemantics`, `FlowEvidence` and
+  `FlowFact` in `wicked_estate_core::flow` are new in this release; outside the crate, `match`
+  them with a wildcard arm and build a fact with `FlowFact::new`.
+
 ### Changed
 - **`flows_to` says what it claims, and stops overstating it (TS-S1).** The relation tag, the
   default `Lineage` behaviour and the stored direction are unchanged. What changed is its
@@ -26,6 +45,8 @@
     stays readable as the set's lexicographic minimum.
   - **`Lineage{relation:"flows_to"}` returns a `flows` array** carrying each hop's classification,
     confidence, provenance, rule id and site (R7). Default lineage is untouched and gains no field.
+    `dependencies` and `flows` share the one 25K-char R4 budget, and a row dropped from either
+    array sets `truncated`.
   - **Existing graphs keep the old classification until re-extracted.** A release-version bump
     re-extracts automatically; a same-version development binary needs
     `wicked-estate index <path> --force` once.
