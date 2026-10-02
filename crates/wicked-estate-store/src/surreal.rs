@@ -632,6 +632,9 @@ impl GraphWrite for SurrealStore {
                 .map_err(se)?;
             let before = count_of(&mut res, 0)?;
             let after = count_of(&mut res, 3)?;
+            // Taking the two counts does not surface an error from the DELETE (or the LET):
+            // check the whole response so a failed prune cannot report success.
+            res.check().map_err(se)?;
             Ok::<_, Error>(before.saturating_sub(after) as usize)
         })
     }

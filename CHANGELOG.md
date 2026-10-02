@@ -39,9 +39,9 @@ Breaking for Rust callers, so the next release is 0.18.0, not 0.17.x. See **Chan
 ### Fixed
 - **The BlastRadius depth flag describes the rows it returns (#222 review).** The horizon is
   probed on the all-edge-kinds walk, but BlastRadius returns the `code_dependents` projection,
-  which drops import-transit Files. For a code-symbol start, the check now follows File→File
-  `Imports` edges past the horizon and keeps the cut only if that import-transit closure reaches
-  something the projection would return (a closure larger than the node budget also keeps it).
+  which drops import-transit Files. For a code-symbol start, the check now extends the walk from
+  the frontier with one more bounded traversal (up to 32 further hops, the same node budget) and
+  keeps the cut if that extension adds a row the projection would return, or was itself cut.
   Measured with the MCP tool on a 905-file TypeScript repo at depth 8: 460
   flags became 20; of the flags whose depth-24 answer is comparable, false alarms went from 426
   of 434 (98.2%) to 0 of 8; all 8 real cuts are still flagged; returned rows are identical for
