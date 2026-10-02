@@ -1514,11 +1514,46 @@ impl RetrievalTool for Lineage {
             ));
         }
 
+        // TS-S1 / R7: in `flows_to` mode the hop LIST alone is not an answer — "a flows to b" is
+        // a different claim depending on whether the value is preserved or merely contributes,
+        // and on whether the fact came from syntax, a 0.5-confidence resolved call, or a
+        // framework naming convention. The node rows carry none of that, so the flow edges ride
+        // alongside them with their classification, evidence and site.
+        //
+        // The traversal's edge_kinds bound the WALK; the returned subgraph still carries the
+        // visited nodes' other incident edges (a value slot's `File`→value `Contains`). Those
+        // carry no classification, and emitting them as flow evidence would be exactly the
+        // unlabelled claim this wave exists to remove.
+        let flow_rows: Option<Vec<Value>> = semantic_flow.then(|| {
+            subgraph
+                .edges
+                .iter()
+                .filter(|edge| wicked_estate_core::is_flow_edge(edge))
+                .map(flow_hop_row)
+                .collect()
+        });
+
         // R4 (DoD-A8) — `max_nodes=5000` bounds the traversal, but 5000 wide rows can still exceed
-        // the 25K-char budget. Cap the serialized `dependencies` array under the budget and emit a
-        // loud truncation diagnostic when it bites, on top of the depth/node-cap note above.
-        let envelope_overhead = 160; // dependencies + total + truncated + confidence scaffolding.
-        let (dependencies, dropped) = cap_rows_to_budget(dependencies, envelope_overhead);
+        // the 25K-char budget. ONE budget covers the whole content: in `flows_to` mode the
+        // `dependencies` and `flows` arrays share it (each is guaranteed half when both
+        // overflow, and either may use what the other leaves), and a row dropped from EITHER
+        // array sets `truncated` — a cut evidence list must never read as complete.
+        let available = R4_CHAR_BUDGET.saturating_sub(LINEAGE_ENVELOPE_OVERHEAD);
+        let serialized_len =
+            |rows: &[Value]| serde_json::to_string(rows).map_or(usize::MAX, |s| s.len());
+        let deps_budget = match &flow_rows {
+            None => available,
+            Some(flows) => {
+                let flows_len = serialized_len(flows);
+                if serialized_len(&dependencies).saturating_add(flows_len) <= available {
+                    available
+                } else {
+                    (available / 2).max(available.saturating_sub(flows_len))
+                }
+            }
+        };
+        let (dependencies, dropped) =
+            cap_rows_to_budget(dependencies, R4_CHAR_BUDGET.saturating_sub(deps_budget));
         if dropped > 0 {
             diag.push(format!(
                 "Lineage: result truncated to {} dependency/dependencies to stay under the \
@@ -1528,39 +1563,35 @@ impl RetrievalTool for Lineage {
                 dropped
             ));
         }
-        let truncated = node_truncated || dropped > 0;
+        let flow_rows = flow_rows.map(|rows| {
+            let used = LINEAGE_ENVELOPE_OVERHEAD.saturating_add(serialized_len(&dependencies));
+            let total_flows = rows.len();
+            let (rows, flow_dropped) = cap_rows_to_budget(rows, used);
+            if flow_dropped > 0 {
+                diag.push(format!(
+                    "Lineage: result truncated to {} of {total_flows} flow-evidence row(s) to \
+                     stay under the {R4_CHAR_BUDGET}-char R4 budget ({flow_dropped} dropped); \
+                     the `dependencies` list shares the budget, so a lower `depth` or a \
+                     narrower start returns the full evidence",
+                    rows.len()
+                ));
+            }
+            (rows, flow_dropped)
+        });
+        let flow_dropped = flow_rows.as_ref().map_or(0, |(_, d)| *d);
+        let truncated = node_truncated || dropped > 0 || flow_dropped > 0;
         let total = dependencies.len();
 
-        // TS-S1 / R7: in `flows_to` mode the hop LIST alone is not an answer — "a flows to b" is
-        // a different claim depending on whether the value is preserved or merely contributes,
-        // and on whether the fact came from syntax, a 0.5-confidence resolved call, or a
-        // framework naming convention. The node rows carry none of that, so the flow edges ride
-        // alongside them with their classification, evidence and site. Bounded like every other
-        // row set (R4).
         let mut content = json!({
             "dependencies": dependencies,
             "total": total,
             "truncated": truncated,
+            "depth_horizon_reached": subgraph.depth_horizon_reached,
+            "node_cap_reached": subgraph.node_cap_reached,
+            "searched_depth": max_depth,
             "confidence": conf_json,
         });
-        if semantic_flow {
-            // The traversal's edge_kinds bound the WALK; the returned subgraph still carries the
-            // visited nodes' other incident edges (a value slot's `File`→value `Contains`). Those
-            // carry no classification, and emitting them as flow evidence would be exactly the
-            // unlabelled claim this wave exists to remove.
-            let rows: Vec<Value> = subgraph
-                .edges
-                .iter()
-                .filter(|edge| wicked_estate_core::is_flow_edge(edge))
-                .map(flow_hop_row)
-                .collect();
-            let (rows, flow_dropped) = cap_rows_to_budget(rows, R4_CHAR_BUDGET / 2);
-            if flow_dropped > 0 {
-                diag.push(format!(
-                    "Lineage: {flow_dropped} flow-evidence row(s) dropped to stay under the \
-                     {R4_CHAR_BUDGET}-char R4 budget; lower `depth`"
-                ));
-            }
+        if let Some((rows, _)) = flow_rows {
             content["flows"] = Value::Array(rows);
         }
 
@@ -1615,6 +1646,11 @@ fn flow_hop_row(edge: &wicked_estate_core::Edge) -> Value {
 /// wide graph, so they cap the row count to keep the payload under this budget and emit a loud
 /// truncation diagnostic when the cap bites — an agent must never silently reason over a cut body.
 const R4_CHAR_BUDGET: usize = 25_000;
+
+/// Headroom for Lineage's non-array keys: `total`, `truncated`, the three #222 horizon keys,
+/// `confidence` (two f32s rendered at full precision plus `edge_count`) and the `flows` key, with
+/// margin. Everything else in the payload is one of the two capped row arrays.
+const LINEAGE_ENVELOPE_OVERHEAD: usize = 320;
 
 /// Trim `items` (already in priority order: best first) until the serialized JSON array fits under
 /// [`R4_CHAR_BUDGET`], leaving headroom for the surrounding envelope keys. Returns the kept rows and
@@ -4839,6 +4875,122 @@ mod tests {
             .invoke(&store, &json!({"symbol": "producer", "depth": 8}))
             .unwrap();
         assert_eq!(default.content["total"].as_u64(), Some(0));
+    }
+
+    /// #222 (0.18.0) published `depth_horizon_reached`, `node_cap_reached` and `searched_depth`
+    /// on Lineage. The flows_to rework rebuilt Lineage's content object; pin the three keys in
+    /// BOTH modes so a rebuild cannot silently drop them again (no test caught it before).
+    #[test]
+    fn lineage_carries_horizon_keys_in_default_and_flows_to_modes() {
+        let store = flow_fan_out_store(1);
+        for args in [
+            json!({"symbol": "producer", "depth": 8}),
+            json!({"symbol": "producer", "depth": 8, "relation": "flows_to"}),
+        ] {
+            let res = Lineage.invoke(&store, &args).unwrap();
+            assert_eq!(
+                res.content["searched_depth"],
+                json!(8),
+                "searched_depth missing or wrong for {args}: {}",
+                res.content
+            );
+            assert_eq!(
+                res.content["depth_horizon_reached"],
+                json!(false),
+                "depth_horizon_reached missing for {args}: {}",
+                res.content
+            );
+            assert_eq!(
+                res.content["node_cap_reached"],
+                json!(false),
+                "node_cap_reached missing for {args}: {}",
+                res.content
+            );
+        }
+    }
+
+    /// `producer` flows into `n` wide-named consumers (stored `consumer → producer`, the engine
+    /// invariant), each a Variable so both arrays carry one row per consumer.
+    fn flow_fan_out_store(n: usize) -> MemStore {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        let mut nodes: Vec<Node> = (0..n).map(wide_node).collect();
+        nodes.push(make_node(
+            "producer",
+            "route_id",
+            NodeKind::Variable,
+            "fixture.ts",
+            1,
+        ));
+        store.upsert_nodes(&nodes).unwrap();
+        let edges: Vec<Edge> = (0..n)
+            .map(|i| {
+                Edge::new(
+                    SymbolId(wide_id(i)),
+                    SymbolId("producer".to_string()),
+                    edge_tags::other(edge_tags::FLOWS_TO),
+                    ResolutionTier::Parsed,
+                    "test-fixture",
+                )
+            })
+            .collect();
+        store.upsert_edges(&edges).unwrap();
+        store.commit_batch().unwrap();
+        store
+    }
+
+    /// R4 holds for the WHOLE `flows_to` payload, and a dropped `flows` row is reported in
+    /// `truncated`. Before the fix, `flows` had its own ~12.5K budget on top of `dependencies`
+    /// (37K+ chars on a 300-way fan-out), and on a 60-way fan-out all 60 dependencies fit while
+    /// 42 flow rows were dropped under `truncated:false`.
+    #[test]
+    fn lineage_flows_to_shares_one_r4_budget_and_reports_dropped_flows() {
+        for n in [60usize, 300] {
+            let store = flow_fan_out_store(n);
+            let res = Lineage
+                .invoke(
+                    &store,
+                    &json!({"symbol": "producer", "depth": 1, "relation": "flows_to"}),
+                )
+                .unwrap();
+            let payload = serde_json::to_string(&res.content).unwrap();
+            assert!(
+                payload.len() <= R4_CHAR_BUDGET,
+                "n={n}: Lineage flows_to payload must be <= {R4_CHAR_BUDGET} chars, got {}",
+                payload.len()
+            );
+            let deps = res.content["dependencies"].as_array().unwrap().len();
+            let flows = res.content["flows"].as_array().unwrap().len();
+            assert!(
+                deps < n || flows < n,
+                "n={n}: fixture must actually overflow the budget (deps={deps}, flows={flows})"
+            );
+            assert_eq!(
+                res.content["truncated"],
+                json!(true),
+                "n={n}: deps={deps}/{n} flows={flows}/{n} dropped rows must set truncated"
+            );
+            assert!(
+                flows > 0 && deps > 0,
+                "n={n}: neither array may be starved (deps={deps}, flows={flows})"
+            );
+        }
+    }
+
+    /// Falsifier for the shared budget: a small flows_to answer keeps every row of both arrays
+    /// and reports `truncated:false`.
+    #[test]
+    fn lineage_flows_to_small_fan_out_keeps_everything() {
+        let store = flow_fan_out_store(5);
+        let res = Lineage
+            .invoke(
+                &store,
+                &json!({"symbol": "producer", "depth": 1, "relation": "flows_to"}),
+            )
+            .unwrap();
+        assert_eq!(res.content["dependencies"].as_array().unwrap().len(), 5);
+        assert_eq!(res.content["flows"].as_array().unwrap().len(), 5);
+        assert_eq!(res.content["truncated"], json!(false));
     }
 
     // ── Reciprocal Rank Fusion ───────────────────────────────────────────────
