@@ -127,13 +127,14 @@ fn project_admits(rule_project: &Option<String>, projects: &[String]) -> bool {
     }
 }
 
-/// Parse the `projects` argument: absent or `null` is the empty set; otherwise it must be an
-/// array of strings (any string, as in core's `RuleQuery.projects`). Anything else is `Err` so
+/// Parse the `projects` argument: an absent key is the empty set; otherwise it must be an
+/// array of strings (any string, as in core's `RuleQuery.projects`). Anything else, including an
+/// explicit `null` (which core's `Vec<String>` does not deserialize), is `Err` so
 /// the caller can answer with an honest diagnostic instead of silently dropping the caller's
 /// scope.
 fn parse_projects(request: &Value) -> std::result::Result<Vec<String>, String> {
     match request.get("projects") {
-        None | Some(Value::Null) => Ok(Vec::new()),
+        None => Ok(Vec::new()),
         Some(Value::Array(items)) => items
             .iter()
             .map(|v| v.as_str().map(str::to_string).ok_or_else(|| format!("{v}")))
@@ -627,6 +628,7 @@ mod tests {
             json!([1]),
             json!({ "p": 1 }),
             json!([null]),
+            Value::Null,
         ] {
             let res = RulesRecall
                 .invoke(&store, &json!({ "projects": bad }))

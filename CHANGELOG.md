@@ -67,7 +67,7 @@ Breaking for Rust callers, so the next release is 0.18.0, not 0.17.x. See **Chan
   named no project got every project's rules. wicked-core's `recall_rules` uses the same rule.
   One golden fixture, `crates/wicked-estate-retrieve/tests/fixtures/rules-project-parity.json`,
   is copied byte-identical from wicked-core and tested in both repos. A `projects` value that
-  is not an array of strings gives an empty result with a diagnostic, never
+  is not an array of strings (including an explicit `null`) gives an empty result with a diagnostic, never
   `isError`. The empty-result diagnostic also counts the project rules it withheld. Results
   within a severity are now ordered by `weight` (heavier first; a rule without one counts as
   1.0, compared as f32 like core) and then id. The tool is still read-only, `--readonly` serves the
