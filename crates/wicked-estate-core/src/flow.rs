@@ -105,6 +105,7 @@ pub const MAX_FLOW_SUPPORT: usize = 8;
 /// What a flow edge claims about the value, independent of how sure we are that it happens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum FlowSemantics {
     /// The producer's value becomes the consumer's value, whole: `const c = a`, an argument
     /// binding a parameter, a `return`, a property read.
@@ -136,6 +137,7 @@ impl FlowSemantics {
 /// fact and the other is a framework naming convention the parser cannot prove.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum FlowEvidence {
     /// The AST proves it at this site: an assignment, a binary operand, a `return`.
     Syntax,
@@ -196,7 +198,53 @@ pub fn flow_rule_id(producer: &str, evidence: FlowEvidence, construct: &str) -> 
 }
 
 /// One flow fact, before it is folded into an edge.
+///
+/// Forward-compatible (#231 review S2): the vocabulary grows with later waves, so outside this
+/// crate a `match` needs a wildcard arm and a [`FlowFact`] is built with [`FlowFact::new`].
+///
+/// ```compile_fail
+/// use wicked_estate_core::flow::FlowSemantics;
+/// fn exhaustive(s: FlowSemantics) -> u8 {
+///     match s {
+///         FlowSemantics::ValuePreserving => 0,
+///         FlowSemantics::MayInfluence => 1,
+///     }
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use wicked_estate_core::flow::FlowEvidence;
+/// fn exhaustive(e: FlowEvidence) -> u8 {
+///     match e {
+///         FlowEvidence::Syntax => 0,
+///         FlowEvidence::CallDerived => 1,
+///         FlowEvidence::Convention => 2,
+///         FlowEvidence::Scip => 3,
+///         FlowEvidence::Compiler => 4,
+///     }
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use wicked_estate_core::flow::{FlowEvidence, FlowFact, FlowSemantics};
+/// let _ = FlowFact {
+///     semantics: FlowSemantics::ValuePreserving,
+///     evidence: FlowEvidence::Syntax,
+///     construct: "assignment".into(),
+///     rule: "typescript/syntax/assignment".into(),
+/// };
+/// ```
+///
+/// The supported spellings compile:
+///
+/// ```
+/// use wicked_estate_core::flow::{FlowEvidence, FlowFact, FlowSemantics};
+/// let fact = FlowFact::new(FlowSemantics::ValuePreserving, FlowEvidence::Syntax, "assignment", "typescript");
+/// let n = match fact.semantics { FlowSemantics::MayInfluence => 1, _ => 0 };
+/// assert_eq!((n, fact.rule.as_str()), (0, "typescript/syntax/assignment"));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FlowFact {
     pub semantics: FlowSemantics,
     pub evidence: FlowEvidence,
@@ -438,7 +486,6 @@ pub fn merge_flow_edges(edges: Vec<Edge>) -> Vec<Edge> {
         let mut rules = BTreeSet::new();
         let mut supports: BTreeMap<SupportOrder, serde_json::Value> = BTreeMap::new();
         let mut min_confidence = f32::INFINITY;
-        let mut max_confidence = f32::NEG_INFINITY;
         let mut already_dropped = 0usize;
         for edge in &group {
             let read = |key: &str| -> Vec<String> {
@@ -464,9 +511,26 @@ pub fn merge_flow_edges(edges: Vec<Edge>) -> Vec<Edge> {
             );
             constructs.extend(read(FLOW_CONSTRUCTS_KEY));
             rules.extend(read(FLOW_RULES_KEY));
-            supports.extend(support_rows(edge));
+            // The minimum is over every contributing FACT, not over the folded edges: an
+            // already-merged edge's own confidence is its strongest fact, so its weaker ones
+            // live in its support rows and its prior `flow_confidence_min` (which also covers
+            // rows a `MAX_FLOW_SUPPORT` cut dropped). Reading all three keeps a second fold
+            // equal to one fold over everything.
+            let rows = support_rows(edge);
+            for (_, row) in &rows {
+                if let Some(c) = row.get("confidence").and_then(|v| v.as_f64()) {
+                    min_confidence = min_confidence.min(c as f32);
+                }
+            }
+            if let Some(prior) = edge
+                .metadata
+                .get(FLOW_CONFIDENCE_MIN_KEY)
+                .and_then(|v| v.as_f64())
+            {
+                min_confidence = min_confidence.min(prior as f32);
+            }
+            supports.extend(rows);
             min_confidence = min_confidence.min(edge.confidence.get());
-            max_confidence = max_confidence.max(edge.confidence.get());
             // A previously-truncated edge must not silently claim its dropped rows back.
             already_dropped += edge
                 .metadata
@@ -497,11 +561,14 @@ pub fn merge_flow_edges(edges: Vec<Edge>) -> Vec<Edge> {
                 serde_json::json!(dropped),
             );
         }
-        if total_support > 1 && min_confidence < max_confidence {
+        // The representative is the max-confidence fact, so the edge's confidence IS the max.
+        if min_confidence < edge.confidence.get() {
             edge.metadata.insert(
                 FLOW_CONFIDENCE_MIN_KEY.to_string(),
                 serde_json::json!(min_confidence),
             );
+        } else {
+            edge.metadata.remove(FLOW_CONFIDENCE_MIN_KEY);
         }
         merged.push(edge);
     }
@@ -763,6 +830,63 @@ mod tests {
             flow_semantics_of(&twice[0]),
             BTreeSet::from([FlowSemantics::MayInfluence, FlowSemantics::ValuePreserving])
         );
+    }
+
+    /// `flow_confidence_min` composes too (#231 review S1): it is the minimum over every
+    /// contributing FACT, so a second fold must reproduce the one-pass value. Before the fix it
+    /// was the minimum over the folded EDGES' confidences, so `merge(merge(strong, weak), mid)`
+    /// reported 0.6 instead of 0.5, and `merge(merge(strong, weak), strong2)` erased the key.
+    #[test]
+    fn flow_confidence_min_composes_across_two_folds() {
+        let strong = || {
+            flow_edge(
+                "assignment",
+                FlowSemantics::ValuePreserving,
+                10,
+                ResolutionTier::Parsed,
+            )
+        };
+        let weak = || {
+            flow_edge(
+                "expression",
+                FlowSemantics::MayInfluence,
+                20,
+                ResolutionTier::Heuristic,
+            )
+        };
+        let mid = || {
+            flow_edge(
+                "call_argument",
+                FlowSemantics::ValuePreserving,
+                30,
+                ResolutionTier::ImportMap,
+            )
+        };
+        // Sorts ahead of `strong` (byte 5 < 10), so it becomes the second fold's representative.
+        let strong2 = || {
+            flow_edge(
+                "property",
+                FlowSemantics::ValuePreserving,
+                5,
+                ResolutionTier::Parsed,
+            )
+        };
+        let min_of = |e: &Edge| e.metadata.get(FLOW_CONFIDENCE_MIN_KEY).and_then(|v| v.as_f64());
+
+        for third in [mid as fn() -> Edge, strong2] {
+            let one_pass = merge_flow_edges(vec![strong(), weak(), third()]);
+            let first = merge_flow_edges(vec![strong(), weak()]);
+            let two_pass = merge_flow_edges(first.into_iter().chain([third()]).collect());
+            assert_eq!(one_pass.len(), 1);
+            assert_eq!(two_pass.len(), 1);
+            let (a, b) = (min_of(&one_pass[0]), min_of(&two_pass[0]));
+            assert!(
+                a.is_some_and(|m| (m - 0.5).abs() < 1e-6),
+                "one pass must report the 0.5 fact: {:?}",
+                one_pass[0].metadata
+            );
+            assert_eq!(a, b, "two folds must equal one: {:?}", two_pass[0].metadata);
+        }
     }
 
     #[test]
