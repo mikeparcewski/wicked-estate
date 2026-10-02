@@ -4977,6 +4977,32 @@ mod tests {
         }
     }
 
+    /// The fixed `LINEAGE_ENVELOPE_OVERHEAD` must cover the real non-array keys at their widest:
+    /// full-precision f32 confidences, a node-capped `total`, the depth ceiling and a 9-digit
+    /// edge count. If a key is added to Lineage's content, this is the test that must grow.
+    #[test]
+    fn lineage_envelope_overhead_covers_the_widest_envelope() {
+        let widest = json!({
+            "dependencies": [],
+            "total": 5_000,
+            "truncated": false,
+            "depth_horizon_reached": false,
+            "node_cap_reached": false,
+            "searched_depth": BLAST_DEPTH_CEILING,
+            "confidence": {
+                "min": 0.123_456_79_f32,
+                "avg": 0.987_654_3_f32,
+                "edge_count": 999_999_999u64,
+            },
+            "flows": [],
+        });
+        let len = serde_json::to_string(&widest).unwrap().len();
+        assert!(
+            len < LINEAGE_ENVELOPE_OVERHEAD,
+            "widest Lineage envelope is {len} chars; LINEAGE_ENVELOPE_OVERHEAD is {LINEAGE_ENVELOPE_OVERHEAD}"
+        );
+    }
+
     /// Falsifier for the shared budget: a small flows_to answer keeps every row of both arrays
     /// and reports `truncated:false`.
     #[test]
