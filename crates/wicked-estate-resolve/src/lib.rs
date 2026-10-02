@@ -126,7 +126,7 @@ fn is_callable(kind: &NodeKind) -> bool {
 ///   symbol of a real repo (wicked-estate#207 review, C1). They are reached by exact
 ///   [`wicked_estate_core::SymbolId`] only, never by name.
 fn admissible_target(ref_kind: &EdgeKind, cand: &wicked_estate_core::Node) -> bool {
-    if cand.is_value_flow_node() {
+    if !wicked_estate_core::is_structural_symbol(cand) {
         return false;
     }
     let cand_kind = &cand.kind;

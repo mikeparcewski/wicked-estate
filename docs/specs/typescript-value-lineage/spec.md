@@ -66,6 +66,14 @@ Callers tracing an Angular route parameter or conventional `@Input()` can recove
 - [x] **AC-0006.** New local, parameter, return, property-read, and external-source identities are unchanged by unrelated line shifts and remain partitioned by logical owner; same-named locals in different callables and same-named `@Input()` fields in different components do not merge.
 - [x] **AC-0007.** The workspace build, test, clippy, formatting, and GraphStore conformance gates pass without new warnings or ignored tests.
 
+## Amendments
+
+- **2026-10-01 — partially superseded by [`docs/specs/typescript-flow-semantics/spec.md`](../typescript-flow-semantics/spec.md) (TS-S1).** Every acceptance criterion above was met at the revision that shipped it (`3257648`) and stays checked as historical evidence. Two of its observable claims have since changed on purpose, and the assertions that pinned them are versioned, not deleted:
+  - **AC-0001/AC-0003 evidence.** The Angular `@Input()` and `route.snapshot.paramMap.get(…)` constructs were emitted at `Parsed`/1.0. They are convention matches, not compiler-proven facts, and are now emitted at `Heuristic`/0.5 with `resolved_by = tree-sitter-convention`. Non-Angular direct syntax flow is unchanged at `Parsed`/1.0.
+  - **`metadata.construct`.** Still present and readable, but it is now the lexicographic minimum of the complete `constructs` set. A scalar was proven lossy: two facts sharing `(source, target, kind)` collapsed last-writer-wins and one classification disappeared.
+
+  The counts quoted in the PR #207 description (8,600 `Calls`, the PageRank top-25 result, the 1,474-test total) are observations from that revision, not acceptance thresholds.
+
 ## Follow-ons
 
 none — Slice 2 and every explicitly excluded adjacent semantic domain remain outside this delivery and are not queued by this spec.

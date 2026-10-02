@@ -24,7 +24,7 @@ Therefore:
   invariant: `source` is the consumer and `target` is the producer. A user-facing producer →
   consumer lineage query therefore walks `Direction::Dependents` over only `flows_to` edges. The
   default `Lineage` query remains dependency lineage over `Calls` + `Imports` unless callers opt in
-  with `relation = "flows_to"`.
+  with `relation = "flows_to"`. What such an edge **claims**, and how we know it, is §3.2.
 
 This matches the hard-won `DEPENDENTS_BY = "target"` (a spike there caught a latent
 direction bug in a reference impl — the design notes). `MemStore` and every
@@ -143,7 +143,8 @@ the production resolver slice — guarded against drift by
 
 | resolver id | tier | confidence | activation | notes |
 |---|---|---|---|---|
-| tree-sitter extractors (local edges) | `Parsed` | 1.0 | yes (extract phase) | intra-file `Contains`/`Defines` and parsed `flows_to` local/field/property-read/Angular-input/route-param/return edges, written before resolution; parsed `flows_to` edges use stored direction consumer→producer, `resolved_by = tree-sitter`, `Provenance::Parsed`, and `metadata.construct` |
+| tree-sitter extractors (local edges) | `Parsed` | 1.0 | yes (extract phase) | intra-file `Contains`/`Defines`, plus `flows_to` edges whose capture declares `syntax` evidence (local / field / property-read / return), written before resolution; stored direction consumer→producer, `resolved_by = tree-sitter`, `Provenance::Parsed`, classified per §3.2 |
+| tree-sitter **convention** flow (`tree-sitter-convention`) | `Heuristic` | 0.5 | yes (extract phase) | `flows_to` edges whose capture declares `convention` evidence — today Angular `@Input()` and `route.snapshot.paramMap.get(…)`. The AST proves the *shape*; it does **not** prove `@angular/core` identity or that the receiver is an `ActivatedRoute`, so these are heuristics, not parsed facts. Carries a stable `flow_rules` id (§3.2). Downgraded from `Parsed`/1.0 in TS-S1 |
 | call-derived value flow (main pass) | inherited from resolved `Calls` edge | inherited from resolved `Calls` edge | yes (post-resolution, same index run) | derives `flows_to` call-argument and call-result edges only from exact-site `Calls` bindings with one unique accepted target; stored direction remains consumer→producer, while `Lineage` `relation = "flows_to"` walks dependents for semantic-forward producer→consumer output |
 | call-derived value flow (back-fill) | inherited from resolved `Calls` edge | inherited from resolved `Calls` edge | yes (parked-ref back-fill, same index run) | when a previously parked call binds after another file appears, re-extracts call-site hints from stored source text and emits the same exact-site call-argument/call-result `flows_to` edges before deleting the parked ref |
 | `name-resolver` | `ImportMap` | 0.60 | yes (slice) | unique-name binding; kind deny-list runs pre-uniqueness, cross-family guard post-uniqueness |
@@ -170,6 +171,131 @@ edit-plane MCP tools + CLI twins that call `LspTier` on demand, outside every re
 slice; the understand plane (BlastRadius/Lineage/SearchEntity/hotspots) never consults LSP.
 When that consumer lands, only the Lsp row's notes cell changes, and its activation cell
 stays out of the slice-guarded set.
+
+### 3.2 Semantic value flow — what a `flows_to` edge claims (TS-S1)
+
+Implemented by `wicked_estate_core::flow`. The relation tag `flows_to` is unchanged and public;
+TS-S1 made its **meaning** machine-readable instead of leaving it in one scalar string.
+
+#### The two orthogonal dimensions
+
+A flow edge answers two independent questions. Conflating them is how a tool starts presenting a
+0.5-confidence guess as a fact (agent rule R7).
+
+| Dimension | Metadata key | Values | Meaning |
+|---|---|---|---|
+| **Flow semantics** — what the edge CLAIMS | `flow_semantics` | `value_preserving` | the producer's value becomes the consumer's value, *whole* |
+| | | `may_influence` | the producer *contributes* to it. `const c = a + b` gives `c may_influence a` — it is **not** a claim that `c`'s complete value is `a` |
+| **Evidence origin** — HOW we know | `flow_evidence` | `syntax` | the AST proves this fact at this site |
+| | | `call_derived` | derived from a *resolved* `Calls` edge |
+| | | `convention` | a framework naming/shape match the parser cannot prove |
+| | | `scip` | **RESERVED, not emitted** — a verified SCIP projection (TS-S2) |
+| | | `compiler` | **RESERVED, not emitted** — a framework compiler fact (TS-S3/TS-S4) |
+
+Both keys hold a **sorted array**, never a scalar — see "endpoint dedup" below. Evidence
+*strength* stays where this contract already put it: `confidence`, `provenance`, `resolved_by`.
+The two reserved words exist so that a convention match can never later be relabelled as a
+compiler proof; `FlowEvidence::is_emitted()` is the tripwire.
+
+**What the evidence does not prove.** No flow edge carries CFG, SSA, path-sensitivity, alias or
+heap reasoning. `a flows_to b` means "on some path, by the stated evidence, a value may reach b".
+It does not mean it always does, nor that no other value does.
+
+**Direction, again.** Stored `source = consumer`, `target = producer`. Semantic-forward lineage
+("where does this value go?") walks `Direction::Dependents`. Do not reverse this for display
+convenience; `Lineage` renames the ends in its response instead.
+
+#### Call-derived flow inherits its cause
+
+A call-argument or call-result edge takes the causal `Calls` edge's `confidence`, `provenance` and
+`resolved_by` **wholesale**. The callee being *uniquely* selected is not evidence about how well
+the call resolved: a 0.5 `name-resolver` binding yields 0.5 flow. Uniqueness never upgrades a
+heuristic call to `Parsed`. Ambiguous or unresolved calls emit no flow at all.
+
+#### Framework conventions are not compiler facts
+
+Angular `@Input()` and `route.snapshot.paramMap.get('id')` are matched by *shape*. An identifier
+named `Input` is not necessarily `@angular/core`'s `Input`; a receiver named `route` is not
+necessarily an `ActivatedRoute`. Those edges are emitted at the `Heuristic` tier with
+`resolved_by = tree-sitter-convention` and a stable rule id in `flow_rules`
+(`typescript/convention/angular_input`, `typescript/convention/route_param`). Template wiring and
+`@angular/core` identity are **not** claimed and are not resolved.
+
+#### Rules stay data
+
+The classification is declared in the query file, not in Rust:
+
+```
+@flow.<semantics>.<evidence>.<construct>     e.g. @flow.influence.syntax.expression
+```
+
+`treesitter.rs` parses those three segments structurally and knows nothing about what
+`angular_input` means. The rule id is derived — `<language>/<evidence>/<construct>` — so a new
+construct or a new language mints its own id with zero core change. A capture naming a reserved
+(`scip`/`compiler`) or `call_derived` evidence class is **rejected**, not emitted.
+
+#### Endpoint dedup: why the vocabulary is set-valued
+
+An edge is keyed `(source, target, kind)` (`Edge::dedup_key`); metadata, location and provenance
+are not in the key, and every store's `upsert_edges` replaces the whole row at
+`confidence >= stored` — i.e. **last-writer-wins on a tie**. Two flow facts sharing endpoints
+therefore collapse. This is reachable in ordinary TypeScript via block-scoped shadowing:
+
+```ts
+function f(a: string, b: string) {
+    const c = a + b;          // c -> a  may_influence,    byte 62
+    if (b) { const c = a; }   // c -> a  value_preserving, byte 116
+}
+```
+
+Measured on `c4fa938`, exactly one survived (`construct="assignment"`, byte 116) and the
+may-influence contribution vanished with nothing recording that it had been asserted.
+
+`wicked_estate_core::flow::merge_flow_edges` folds such a group through a deterministic lattice
+**before** the batch reaches a store: set union for every classification key, `max` confidence
+(matching the stores' own `>=`, so the merge is upsert-stable), `min` recorded in
+`flow_confidence_min` when it differs, and the representative fact chosen by a total order that
+contains no insertion index. Every contributing fact keeps a row in `flow_support`
+(`{construct, semantics, evidence, rule, confidence, resolved_by, file, line, start_byte,
+end_byte}`), capped at 8 with `flow_support_truncated` (R4). The result is a pure function of the
+input *set*.
+
+The legacy scalar `metadata.construct` stays readable: it is the lexicographic minimum of
+`constructs`. It is a lossy summary **by construction** — `constructs` is the whole truth.
+
+**Scope.** This is a one-batch fold, not an occurrence table: it has no retirement semantics and
+cannot merge across two batches that reach the store separately. The only reachable cross-batch
+pairing is tree-sitter parsed facts vs. post-resolution call-derived facts, and those are
+endpoint-disjoint — parsed flow joins two values owned by one callable (or a class field), while
+call-derived flow joins the *callee's* parameter/return slot to the *caller's* local, so a
+collision needs `caller == callee` **and** an assignment in the reverse direction, which is a
+different dedup key. The authoritative, replaceable multi-support model is TS-S2A's seam.
+
+### 3.3 Visibility matrix for synthetic value slots
+
+Value slots (`metadata.value_role`) reuse ordinary `NodeKind`s and carry the bare source
+identifier, so nothing else distinguishes a local named `map` from the function `map`. The single
+predicate is `wicked_estate_core::flow::is_structural_symbol`. Each consumer's decision is
+explicit — a node hidden from human-facing search is **not** automatically hidden everywhere.
+
+| Surface | Value slots visible? | Mechanism |
+|---|---|---|
+| Raw storage / `export` / `nodes` CLI / `GraphStats` | **yes** | deliberate: a faithful view of storage must stay faithful. A filtered `export` would make the file an unreliable basis for diffing a graph |
+| Exact `SymbolId` lookup (`RetrieveEntity`, `FetchContent`, `get_node`, `graph-view --focus <id>`) | **yes** | deliberate: you addressed this node |
+| `Lineage relation=flows_to` | **yes** | the explicit semantic query; this is the whole point |
+| `SearchEntity include_values=true` | **yes** | explicit opt-in, with a diagnostic naming the hidden count |
+| Default name/FTS search (`SearchEntity`, `wicked_estate::search`, CLI `query`) | no | `find_seed_symbols` / `is_structural_symbol` |
+| `ContextPack` / `ContextBundle` seeds | no | `find_seed_symbols` |
+| `ContextPack` body (`render_context` tail-fill) | no | `is_structural_symbol` — TS-S1 (seeds were fixed in #207, the body was not) |
+| `budget_context` neighbours + its supplementary FTS pass | no | `is_structural_symbol` — TS-S1 |
+| Resolver candidates (any ref kind, incl. `Calls`) | no | `admissible_target` |
+| Ranked symbols / `RankHotspots` / `important_symbols` / `pagerank.top` cache (write **and** read) | no | the `excluded` set in `pagerank_inner` + read-time hygiene for caches written by an older binary |
+| **PageRank input graph** | **yes** | deliberate: value slots carry no `Calls`/`Imports` edge, so they are isolated vertices. Removing them from the input would renumber the uniform teleport denominator and change *every* real symbol's score. Keeping them in the input and filtering the output leaves eligible symbols' scores and order byte-identical |
+| Communities / cluster summaries | no | excluded from `detect_communities`' node set — necessary because `package_bias > 0` rings every node in a directory together, which would wire locals into real communities |
+| `SemanticSearch` | no | filtered at read. **Residual:** embeddings are still computed for value slots, so they occupy ANN index space; filtering at write would need an embeddings backfill |
+| `graph-view` roots | no | roots come from `important_symbols`; the `--focus` *by name* path is filtered, `--focus` *by id* is not (see exact-lookup row) |
+| `entrypoints` / `leaves` / `dead-code` | no | TS-S1. These match **100%** of value slots by construction (no `Calls`/`Imports` edge in either direction), so `dead-code` had become mostly synthetic noise |
+| `BlastRadius` / `TraverseGraph` | **yes** | **unresolved, deliberately out of scope.** Blast radius follows every edge kind by locked contract (the design notes: a blast radius that only follows calls silently under-reports). Value slots hang off `File` by `Contains`, so a File-rooted blast radius surfaces them. Narrowing this needs an explicit contract decision, not a visibility patch. Seeds are already filtered, so `blast-radius <name>` does not start from one |
 
 ## 4. GraphStore contract
 

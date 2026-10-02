@@ -75,9 +75,10 @@ use std::path::{Path, PathBuf};
 use ignore::WalkBuilder;
 use rayon::prelude::*;
 use wicked_estate_core::{
-    ChangeOp, Edge, EdgeKind, Extraction, Extractor, GraphRead, GraphStats, Language, Location,
-    Node, NodeKind, NodeSemantics, RepoInfo, ResolutionTier, Resolver, Result, SourceFile, Span,
-    Symbol, SymbolId, SymbolIndex, SymbolQuery, TraversalSpec, edge_tags,
+    ChangeOp, Edge, EdgeKind, Extraction, Extractor, FlowEvidence, FlowFact, FlowSemantics,
+    GraphRead, GraphStats, Language, Location, Node, NodeKind, NodeSemantics, RepoInfo,
+    ResolutionTier, Resolver, Result, SourceFile, Span, Symbol, SymbolId, SymbolIndex, SymbolQuery,
+    TraversalSpec, edge_tags, is_structural_symbol, merge_flow_edges,
 };
 use wicked_estate_extract::{
     BlazeBrlExtractor, CicsSqlExtractor, DrlExtractor, ExtraEdgeExtractor, HlasmExtractor,
@@ -377,6 +378,11 @@ fn value_containment_edge(node: &Node) -> Edge {
     .with_location(Location::new(&node.location.file, Span::ZERO))
 }
 
+/// A call-derived flow edge. It inherits the CAUSAL call edge's confidence, provenance and
+/// `resolved_by` wholesale: the callee being uniquely selected says nothing about how well that
+/// call was resolved, so a 0.5 `name-resolver` binding yields 0.5 flow, never Parsed
+/// (`docs/ENGINE-CONTRACT.md` §3.2). The classification is orthogonal — argument→parameter and
+/// return→callsite both carry the producer's value whole, hence `ValuePreserving`.
 fn flow_edge(source: SymbolId, target: SymbolId, call_edge: &Edge, construct: &str) -> Edge {
     let mut edge = Edge::new(
         source,
@@ -388,12 +394,20 @@ fn flow_edge(source: SymbolId, target: SymbolId, call_edge: &Edge, construct: &s
     edge.confidence = call_edge.confidence;
     edge.provenance = call_edge.provenance.clone();
     edge.location = call_edge.location.clone();
-    edge.metadata.insert(
-        "construct".to_string(),
-        serde_json::Value::String(construct.to_string()),
-    );
+    FlowFact::new(
+        FlowSemantics::ValuePreserving,
+        FlowEvidence::CallDerived,
+        construct,
+        CALL_FLOW_PRODUCER,
+    )
+    .apply(&mut edge);
     edge
 }
+
+/// Rule-id producer segment for engine-derived (not query-file-derived) flow facts. These are
+/// language-independent — the call-resolution pipeline, not a `.scm` — so they are not namespaced
+/// by language.
+const CALL_FLOW_PRODUCER: &str = "engine";
 
 type CallSiteKey = (String, u32, u32, u32);
 
@@ -714,7 +728,10 @@ fn call_value_flow(
         }
     }
 
-    Ok((nodes, edges))
+    // Same lattice the extractor uses (TS-S1): two call sites in one caller that bind the same
+    // argument to the same parameter share `(source, target, kind)` and would otherwise collapse
+    // last-writer-wins in the store, silently picking one site's location as THE location.
+    Ok((nodes, merge_flow_edges(edges)))
 }
 
 /// Entry names both walks skip: vendor/build dirs, wicked's own generated measurement artifacts
@@ -1881,7 +1898,7 @@ pub fn search(store: &dyn GraphRead, name: &str) -> Result<Vec<Node>> {
     Ok(store
         .find_symbols(&q)?
         .into_iter()
-        .filter(|node| !node.is_value_flow_node())
+        .filter(is_structural_symbol)
         .collect())
 }
 
@@ -2036,7 +2053,12 @@ pub fn important_symbols(store: &dyn GraphStoreMutExt, top_n: usize) -> Result<V
                     // them now, but old caches persist until a re-index). Clean them at READ
                     // time so no consumer of important_symbols ever serves one — the
                     // precondition for graph-view dropping its post-hoc exclusion.
-                    if matches!(node.kind, NodeKind::File | NodeKind::Import) {
+                    // TS-S1 joins the same read-time hygiene: a `pagerank.top` cache written by a
+                    // 0.17.0 binary can hold synthetic value-flow slots, and that cache outlives
+                    // the fix until the DB is re-indexed.
+                    if matches!(node.kind, NodeKind::File | NodeKind::Import)
+                        || !is_structural_symbol(&node)
+                    {
                         continue;
                     }
                     out.push((node, score));

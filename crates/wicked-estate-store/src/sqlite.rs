@@ -12,6 +12,7 @@ use wicked_estate_core::{
     Annotation, Change, ChangeOp, Direction, Edge, EdgeKind, Error, GraphRead, GraphStats,
     GraphWrite, HistoricalEdge, Node, NodeKind, NodeSemantics, RepoInfo, Result, StoreCapabilities,
     Subgraph, SymbolId, SymbolIndex, SymbolQuery, TraversalSpec, UnresolvedRef,
+    is_structural_symbol,
 };
 
 const SCHEMA: &str = include_str!("schema.sql");
@@ -3477,7 +3478,16 @@ impl SqliteStore {
             })
             .map_err(st)?;
         for row in rows {
-            out.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
+            let node = serde_json::from_str::<Node>(&row.map_err(st)?)?;
+            // TS-S1: a synthetic value-flow slot has NO `Calls`/`Imports` edge in either
+            // direction by construction, so it matches every one of these three shape queries —
+            // 100% of them. `dead-code` on a TypeScript repo became mostly synthetic locals.
+            // These answer questions about code structure; the predicate is the one in
+            // `wicked_estate_core::flow`, filtered after deserialization so there is no
+            // backend-specific JSON predicate to keep in sync.
+            if is_structural_symbol(&node) {
+                out.push(node);
+            }
         }
         Ok(out)
     }
@@ -3504,7 +3514,16 @@ impl SqliteStore {
             })
             .map_err(st)?;
         for row in rows {
-            out.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
+            let node = serde_json::from_str::<Node>(&row.map_err(st)?)?;
+            // TS-S1: a synthetic value-flow slot has NO `Calls`/`Imports` edge in either
+            // direction by construction, so it matches every one of these three shape queries —
+            // 100% of them. `dead-code` on a TypeScript repo became mostly synthetic locals.
+            // These answer questions about code structure; the predicate is the one in
+            // `wicked_estate_core::flow`, filtered after deserialization so there is no
+            // backend-specific JSON predicate to keep in sync.
+            if is_structural_symbol(&node) {
+                out.push(node);
+            }
         }
         Ok(out)
     }
@@ -3534,7 +3553,16 @@ impl SqliteStore {
             })
             .map_err(st)?;
         for row in rows {
-            out.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
+            let node = serde_json::from_str::<Node>(&row.map_err(st)?)?;
+            // TS-S1: a synthetic value-flow slot has NO `Calls`/`Imports` edge in either
+            // direction by construction, so it matches every one of these three shape queries —
+            // 100% of them. `dead-code` on a TypeScript repo became mostly synthetic locals.
+            // These answer questions about code structure; the predicate is the one in
+            // `wicked_estate_core::flow`, filtered after deserialization so there is no
+            // backend-specific JSON predicate to keep in sync.
+            if is_structural_symbol(&node) {
+                out.push(node);
+            }
         }
         Ok(out)
     }

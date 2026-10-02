@@ -20,7 +20,7 @@
 //! it was produced (the benchmark gate and the comparison tests use them directly).
 
 use std::collections::HashMap;
-use wicked_estate_core::{EdgeKind, GraphRead, Node, Result, SymbolId};
+use wicked_estate_core::{EdgeKind, GraphRead, Node, Result, SymbolId, is_structural_symbol};
 
 // ─── parameters ────────────────────────────────────────────────────────────────
 
@@ -349,6 +349,12 @@ pub fn detect_communities(
     params: &CommunityParams,
 ) -> Result<Vec<Vec<SymbolId>>> {
     let mut nodes = store.all_nodes()?;
+    // Synthetic value-flow slots are not community members (TS-S1). They carry no
+    // `Calls`/`Imports` edge, so Louvain sees them as singletons — harmless until
+    // `package_bias > 0`, whose per-directory ring would wire every local in a file into its real
+    // community and dominate the partition, or until `include_singletons` lets them flood the
+    // output. Excluding them from the node set is the only place that holds for both.
+    nodes.retain(is_structural_symbol);
     if nodes.is_empty() {
         return Ok(Vec::new());
     }

@@ -17,6 +17,7 @@ pub mod conformance;
 pub mod edge;
 pub mod edge_tags;
 pub mod error;
+pub mod flow;
 pub mod history;
 pub mod node;
 pub mod observability;
@@ -37,6 +38,10 @@ pub use annotation::{
 pub use change::{Change, ChangeOp};
 pub use edge::{Confidence, Direction, Edge, EdgeKind, Provenance, ResolutionTier};
 pub use error::{Error, Result};
+pub use flow::{
+    FlowEvidence, FlowFact, FlowSemantics, flow_evidence_of, flow_rule_id, flow_semantics_of,
+    is_flow_edge, is_structural_symbol, merge_flow_edges,
+};
 pub use history::HistoricalEdge;
 pub use node::{
     DECLARATION_METADATA_KEY, Language, Location, Metadata, Node, NodeKind, SourceFile, Span,

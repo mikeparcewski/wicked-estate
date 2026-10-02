@@ -1816,7 +1816,15 @@ fn main() -> Result<()> {
                         limit: Some(5),
                         ..Default::default()
                     };
-                    seeds.extend(store.find_symbols(&q).map_err(to_any)?);
+                    // TS-S1: exact-SymbolId focus above is deliberate; focusing by NAME is not a
+                    // way back into synthetic value slots — a bare name never resolves to one.
+                    seeds.extend(
+                        store
+                            .find_symbols(&q)
+                            .map_err(to_any)?
+                            .into_iter()
+                            .filter(wicked_estate_core::is_structural_symbol),
+                    );
                 }
                 if seeds.is_empty() {
                     anyhow::bail!("graph-view --focus: no symbol matches '{f}'");

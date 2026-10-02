@@ -28,6 +28,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use wicked_estate_core::{
     Annotation, Direction, EdgeKind, GraphRead, Node, NodeKind, Result, RetrievalResult,
     RetrievalTool, SymbolId, SymbolQuery, TraversalSpec, edge_tags, is_advisory,
+    is_structural_symbol,
 };
 
 // W12 — one-shot context bundle tool (seed + ranked neighbours + budgeted stubs). Lives in its
@@ -339,10 +340,7 @@ pub(crate) fn find_seed_symbols(
         let raw = store.find_symbols(&query)?;
         let saturated = raw.len() >= limit;
         let total = raw.len();
-        let kept: Vec<Node> = raw
-            .into_iter()
-            .filter(|node| !node.is_value_flow_node())
-            .collect();
+        let kept: Vec<Node> = raw.into_iter().filter(is_structural_symbol).collect();
         let hidden = total - kept.len();
         let enough = kept.len() >= want;
         out = (kept, hidden);
@@ -1533,19 +1531,79 @@ impl RetrievalTool for Lineage {
         let truncated = node_truncated || dropped > 0;
         let total = dependencies.len();
 
+        // TS-S1 / R7: in `flows_to` mode the hop LIST alone is not an answer — "a flows to b" is
+        // a different claim depending on whether the value is preserved or merely contributes,
+        // and on whether the fact came from syntax, a 0.5-confidence resolved call, or a
+        // framework naming convention. The node rows carry none of that, so the flow edges ride
+        // alongside them with their classification, evidence and site. Bounded like every other
+        // row set (R4).
+        let mut content = json!({
+            "dependencies": dependencies,
+            "total": total,
+            "truncated": truncated,
+            "confidence": conf_json,
+        });
+        if semantic_flow {
+            // The traversal's edge_kinds bound the WALK; the returned subgraph still carries the
+            // visited nodes' other incident edges (a value slot's `File`→value `Contains`). Those
+            // carry no classification, and emitting them as flow evidence would be exactly the
+            // unlabelled claim this wave exists to remove.
+            let rows: Vec<Value> = subgraph
+                .edges
+                .iter()
+                .filter(|edge| wicked_estate_core::is_flow_edge(edge))
+                .map(flow_hop_row)
+                .collect();
+            let (rows, flow_dropped) = cap_rows_to_budget(rows, R4_CHAR_BUDGET / 2);
+            if flow_dropped > 0 {
+                diag.push(format!(
+                    "Lineage: {flow_dropped} flow-evidence row(s) dropped to stay under the \
+                     {R4_CHAR_BUDGET}-char R4 budget; lower `depth`"
+                ));
+            }
+            content["flows"] = Value::Array(rows);
+        }
+
         Ok(RetrievalResult {
-            content: json!({
-                "dependencies": dependencies,
-                "total": total,
-                "truncated": truncated,
-                "depth_horizon_reached": subgraph.depth_horizon_reached,
-                "node_cap_reached": subgraph.node_cap_reached,
-                "searched_depth": max_depth,
-                "confidence": conf_json,
-            }),
+            content,
             diagnostics: diag,
         })
     }
+}
+
+/// One `flows_to` hop, rendered with everything a caller needs to judge it: the two orthogonal
+/// classifications (what the edge CLAIMS vs. HOW we know), the evidence strength the engine
+/// contract already required on every edge, and the exact site.
+///
+/// `producer`/`consumer` are the semantic-forward names, not the stored ones: the stored edge is
+/// `source = consumer`, `target = producer` (engine invariant), and `Lineage` presents lineage in
+/// the direction the value actually travels.
+fn flow_hop_row(edge: &wicked_estate_core::Edge) -> Value {
+    let mut row = json!({
+        "producer": edge.target.as_str(),
+        "consumer": edge.source.as_str(),
+        "confidence": edge.confidence.get(),
+        "provenance": serde_json::to_value(&edge.provenance).unwrap_or(Value::Null),
+        "resolved_by": edge.resolved_by,
+    });
+    for key in [
+        wicked_estate_core::flow::FLOW_SEMANTICS_KEY,
+        wicked_estate_core::flow::FLOW_EVIDENCE_KEY,
+        wicked_estate_core::flow::FLOW_CONSTRUCTS_KEY,
+        wicked_estate_core::flow::FLOW_RULES_KEY,
+        wicked_estate_core::flow::FLOW_SUPPORT_KEY,
+        wicked_estate_core::flow::FLOW_SUPPORT_TRUNCATED_KEY,
+        wicked_estate_core::flow::FLOW_CONFIDENCE_MIN_KEY,
+    ] {
+        if let Some(value) = edge.metadata.get(key) {
+            row[key] = value.clone();
+        }
+    }
+    if let Some(location) = &edge.location {
+        row["file"] = Value::String(location.file.clone());
+        row["line"] = json!(location.span.start_line);
+    }
+    row
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2046,8 +2104,13 @@ pub fn render_context(
     let ranked_set: HashSet<SymbolId> = ordered.iter().cloned().collect();
     for id in &candidate_ids {
         if !ranked_set.contains(id) {
+            // TS-S1: the same applies to synthetic value-flow slots. `render_context` expands
+            // with an all-edge-kind `Both` traversal, so a seed's `File`→value `Contains` edges
+            // drag every local in the file into the tail; the ContextPack SEEDS were isolated in
+            // wicked-estate#207 but its BODY was not.
             if let Some(n) = store.get_node(id)? {
-                if matches!(n.kind, NodeKind::File | NodeKind::Import) {
+                if matches!(n.kind, NodeKind::File | NodeKind::Import) || !is_structural_symbol(&n)
+                {
                     continue;
                 }
             }
@@ -2842,6 +2905,12 @@ impl RetrievalTool for SemanticSearch {
             let Some(node) = store.get_node(id)? else {
                 continue;
             };
+            // TS-S1: embeddings are computed over every node, so synthetic value slots are in the
+            // ANN index. Filtering at READ needs no embeddings-table backfill; the storage-level
+            // residual is named in the visibility matrix (ENGINE-CONTRACT §3.3).
+            if !is_structural_symbol(&node) {
+                continue;
+            }
             matches.push(json!({
                 "symbol": node.symbol.as_str(),
                 "name": node.name,
@@ -3072,8 +3141,11 @@ pub fn budget_context(
         limit: Some(10),
         ..Default::default()
     };
-    let fts_hits = store.find_symbols(&fts_query)?;
-    for node in fts_hits {
+    // TS-S1: `budget_context`'s seeds route through `find_seed_symbols`, but this supplementary
+    // FTS pass went to the store raw — for a common identifier it re-admitted exactly the
+    // synthetic value slots the seed filter had just excluded.
+    let (fts_hits, _) = find_seed_symbols(store, &fts_query, 10)?;
+    for node in fts_hits.into_iter().take(10) {
         if !seed_ids.contains(&node.symbol) {
             scores.entry(node.symbol.clone()).or_insert(1.0);
         }
@@ -3093,6 +3165,11 @@ pub fn budget_context(
         let Some(node) = store.get_node(id)? else {
             continue;
         };
+        // TS-S1: the neighbour pass above walks ALL edge kinds, so a seed's `File`→value
+        // `Contains` and `flows_to` edges reach synthetic slots. Context is a structural answer.
+        if !is_structural_symbol(&node) {
+            continue;
+        }
         let node_size = node.name.len() + node.location.file.len() + 100;
         if chars_used + node_size > max_chars {
             break;

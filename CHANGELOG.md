@@ -2,6 +2,50 @@
 
 ## [Unreleased]
 
+### Changed
+- **`flows_to` says what it claims, and stops overstating it (TS-S1).** The relation tag, the
+  default `Lineage` behaviour and the stored direction are unchanged. What changed is its
+  metadata and two of its confidences.
+  - **Classification is now two orthogonal, set-valued keys.** `flow_semantics` says what the
+    edge claims — `value_preserving` (the producer's value becomes the consumer's, whole) vs.
+    `may_influence` (it only contributes: `const c = a + b`). `flow_evidence` says how we know —
+    `syntax`, `call_derived`, or `convention`. `scip` and `compiler` are reserved and emitted by
+    nothing. Also added: `constructs`, `flow_rules` (stable ids like
+    `typescript/convention/angular_input`), and `flow_support` — one bounded row per contributing
+    fact with its own site, construct and confidence.
+  - **Angular convention edges drop from `Parsed`/1.0 to `Heuristic`/0.5**, with
+    `resolved_by = "tree-sitter-convention"`. `@Input()` and `route.snapshot.paramMap.get(…)` are
+    shape matches: the AST proves the syntax, not that `Input` is `@angular/core`'s or that the
+    receiver is an `ActivatedRoute`. No template wiring is claimed. Non-Angular direct syntax flow
+    stays `Parsed`/1.0.
+  - **Colliding facts no longer overwrite each other.** An edge is keyed `(source, target, kind)`
+    and every store's upsert replaces the row at `confidence >= stored`. Block-scoped shadowing
+    puts a may-influence and a value-preserving fact on one pair; measured on 0.17.0, one of the
+    two silently vanished. They now merge through a deterministic, insertion-order-independent
+    lattice, so a scalar `construct` is no longer the whole story — `constructs` is. The scalar
+    stays readable as the set's lexicographic minimum.
+  - **`Lineage{relation:"flows_to"}` returns a `flows` array** carrying each hop's classification,
+    confidence, provenance, rule id and site (R7). Default lineage is untouched and gains no field.
+  - **Existing graphs keep the old classification until re-extracted.** A release-version bump
+    re-extracts automatically; a same-version development binary needs
+    `wicked-estate index <path> --force` once.
+
+### Fixed
+- **Synthetic value slots are contained to the surfaces that asked for them (TS-S1).** #207
+  isolated symbol search, resolver candidates and `ContextPack` seeds; several other surfaces were
+  still polluted. Measured on one 18-node TypeScript fixture holding 12 value slots: ranked
+  symbols/`RankHotspots`/`important_symbols` 16 rows → 4, `entrypoints` 15 → 3, `leaves` 16 → 4,
+  `dead-code` 14 → 2, `budget_context` 4 → 1 — in every case the removed rows were exactly the
+  synthetic slots. Also filtered: the `ContextPack` body, `budget_context`'s supplementary FTS
+  pass, `SemanticSearch`, `graph-view --focus` by name, and community detection. The eligible
+  symbols' PageRank scores and order are byte-identical, because value slots stay in the PageRank
+  *input* graph and are filtered from its output. `export`, `stats`, exact-`SymbolId` lookup,
+  `SearchEntity{include_values:true}` and `Lineage{relation:"flows_to"}` deliberately still show
+  them; `BlastRadius`/`TraverseGraph` still reach them through `File`→value `Contains`, which
+  needs an explicit contract decision rather than a visibility patch. Every consumer's decision is
+  published as a matrix in `docs/ENGINE-CONTRACT.md` §3.3, behind one predicate
+  (`wicked_estate_core::flow::is_structural_symbol`).
+
 ## [0.18.0] — 2026-10-02
 
 Minor bump, not a patch: this release is breaking for Rust callers. See **Changed (breaking)**.

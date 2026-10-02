@@ -27,8 +27,9 @@ use std::collections::{HashMap, HashSet};
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
 use wicked_estate_core::{
-    Descriptor, Edge, EdgeKind, Error, Extraction, Extractor, Language, Location, Node, NodeKind,
-    ResolutionTier, Result, SourceFile, Span, Suffix, Symbol, SymbolId, UnresolvedRef, edge_tags,
+    Descriptor, Edge, EdgeKind, Error, Extraction, Extractor, FlowEvidence, FlowFact,
+    FlowSemantics, Language, Location, Node, NodeKind, ResolutionTier, Result, SourceFile, Span,
+    Suffix, Symbol, SymbolId, UnresolvedRef, edge_tags, merge_flow_edges,
 };
 
 // ── Embedded query files ──────────────────────────────────────────────────────
@@ -1587,9 +1588,94 @@ struct PendingFlowEndpoint {
     slot: Option<usize>,
 }
 
+/// The classification a `@flow.<semantics>.<evidence>.<construct>` capture carries.
+///
+/// Parsing is purely structural — nothing here knows what "angular_input" means — so the
+/// vocabulary lives in the query files and a new construct costs zero core change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FlowClass<'a> {
+    semantics: FlowSemantics,
+    evidence: FlowEvidence,
+    construct: &'a str,
+}
+
+impl<'a> FlowClass<'a> {
+    fn parse(suffix: &'a str) -> Option<Self> {
+        let mut parts = suffix.splitn(3, '.');
+        let semantics = FlowSemantics::parse(parts.next()?)?;
+        let evidence = FlowEvidence::parse(parts.next()?)?;
+        let construct = parts.next()?;
+        // A query file may not mint evidence a wave has not shipped: reserving `compiler`/`scip`
+        // is pointless if a `.scm` can claim them (wicked-estate TS-S1).
+        if construct.is_empty() || !evidence.is_emitted() || evidence == FlowEvidence::CallDerived {
+            return None;
+        }
+        Some(Self {
+            semantics,
+            evidence,
+            construct,
+        })
+    }
+
+    fn to_owned_class(self) -> OwnedFlowClass {
+        OwnedFlowClass {
+            semantics: self.semantics,
+            evidence: self.evidence,
+            construct: self.construct.to_string(),
+        }
+    }
+}
+
+/// The same classification, detached from the query's capture-name lifetime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OwnedFlowClass {
+    semantics: FlowSemantics,
+    evidence: FlowEvidence,
+    construct: String,
+}
+
+impl OwnedFlowClass {
+    /// A `return x` fact: the enclosing callable's return slot takes `x`'s value, whole. Emitted
+    /// by the engine rather than by a construct anchor, so its class is named here.
+    fn returns() -> Self {
+        Self {
+            semantics: FlowSemantics::ValuePreserving,
+            evidence: FlowEvidence::Syntax,
+            construct: "return".to_string(),
+        }
+    }
+
+    /// The resolution tier an edge of this evidence class is emitted at. A convention match is a
+    /// heuristic however clean its syntax: the AST proves the shape, not the framework identity.
+    fn tier(&self) -> ResolutionTier {
+        match self.evidence {
+            FlowEvidence::Convention => ResolutionTier::Heuristic,
+            _ => ResolutionTier::Parsed,
+        }
+    }
+
+    /// `resolved_by` for a framework-convention flow edge is distinct from `"tree-sitter"` so a
+    /// consumer can tell a proven syntax fact from a name match without parsing metadata.
+    fn resolved_by(&self) -> &'static str {
+        match self.evidence {
+            FlowEvidence::Convention => "tree-sitter-convention",
+            _ => "tree-sitter",
+        }
+    }
+
+    fn fact(&self, language: &Language) -> FlowFact {
+        FlowFact::new(
+            self.semantics,
+            self.evidence,
+            self.construct.clone(),
+            language.as_str(),
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PendingFlow {
-    construct: String,
+    class: OwnedFlowClass,
     span: Span,
     consumers: Vec<PendingFlowEndpoint>,
     producers: Vec<PendingFlowEndpoint>,
@@ -2015,8 +2101,10 @@ enum CaptureRole<'a> {
     /// `@event.emit.topic` — a topic/queue *string* published at a call site. Source = enclosing
     /// def, target = a synthetic topic node.
     EventEmitTopic,
-    /// `@flow.<construct>` — anchor/evidence for a semantic value-flow match.
-    FlowConstruct { construct: &'a str },
+    /// `@flow.<semantics>.<evidence>.<construct>` — anchor for a semantic value-flow match,
+    /// carrying its own classification. The three segments are parsed generically, so a query
+    /// file introduces a construct without any Rust change (CLAUDE.md "Rules as DATA").
+    FlowConstruct { class: FlowClass<'a> },
     /// `@flow.consumer.<kind>` — the value receiving data at this syntax site.
     FlowConsumer { kind: FlowEndpointKind },
     /// `@flow.producer.<kind>` — a value contributing data at this syntax site.
@@ -2060,9 +2148,6 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
 
     if let Some(construct) = cap_name.strip_prefix("flow.") {
         return match construct {
-            "assignment" | "expression" | "property_read" | "angular_input" | "route_param" => {
-                CaptureRole::FlowConstruct { construct }
-            }
             "consumer.local" => CaptureRole::FlowConsumer {
                 kind: FlowEndpointKind::Local,
             },
@@ -2089,7 +2174,12 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
             },
             "barrier" => CaptureRole::FlowBarrier { owned: false },
             "barrier.owned" => CaptureRole::FlowBarrier { owned: true },
-            _ => CaptureRole::Other,
+            // Anything else under `flow.` is a classified construct anchor. Unparseable =
+            // ignored, never silently emitted as an unclassified fact.
+            other => match FlowClass::parse(other) {
+                Some(class) => CaptureRole::FlowConstruct { class },
+                None => CaptureRole::Other,
+            },
         };
     }
 
@@ -2365,7 +2455,7 @@ impl Extractor for TreeSitterExtractor {
             let mut event_topic: Option<(String, Span)> = None; // subscribed topic string + site
             let mut event_emit_type: Option<(String, usize, Span)> = None; // published type + pos
             let mut event_emit_topic: Option<(String, usize, Span)> = None; // published topic + pos
-            let mut flow_construct: Option<(String, Span)> = None;
+            let mut flow_construct: Option<(OwnedFlowClass, Span)> = None;
             let mut flow_consumers: Vec<PendingFlowEndpoint> = Vec::new();
             let mut flow_producers: Vec<PendingFlowEndpoint> = Vec::new();
             let mut def_params: Option<(&str, Vec<(usize, usize)>)> = None;
@@ -2460,8 +2550,8 @@ impl Extractor for TreeSitterExtractor {
                     CaptureRole::EventEmitTopic => {
                         event_emit_topic = Some((strip_literal_quotes(&text), pos, span));
                     }
-                    CaptureRole::FlowConstruct { construct } => {
-                        flow_construct = Some((construct.to_string(), span));
+                    CaptureRole::FlowConstruct { class } => {
+                        flow_construct = Some((class.to_owned_class(), span));
                     }
                     CaptureRole::FlowConsumer { kind } => {
                         flow_consumers.push(PendingFlowEndpoint {
@@ -2697,10 +2787,10 @@ impl Extractor for TreeSitterExtractor {
                 event_emit_topic_sites.push((topic, pos, span));
             }
 
-            if let Some((construct, span)) = flow_construct {
+            if let Some((class, span)) = flow_construct {
                 if !flow_consumers.is_empty() && !flow_producers.is_empty() {
                     flow_sites.push(PendingFlow {
-                        construct,
+                        class,
                         span,
                         consumers: flow_consumers,
                         producers: flow_producers,
@@ -2958,18 +3048,16 @@ impl Extractor for TreeSitterExtractor {
                 producer_symbol.clone(),
                 file,
             ));
+            let class = OwnedFlowClass::returns();
             let mut edge = Edge::new(
                 return_symbol,
                 producer_symbol,
                 edge_tags::other(edge_tags::FLOWS_TO),
-                ResolutionTier::Parsed,
-                "tree-sitter",
+                class.tier(),
+                class.resolved_by(),
             )
             .with_location(Location::new(&file.path, ret.span));
-            edge.metadata.insert(
-                "construct".to_string(),
-                serde_json::Value::String("return".to_string()),
-            );
+            class.fact(&file.language).apply(&mut edge);
             local_edges.push(edge);
         }
         for flow in flow_sites {
@@ -2994,14 +3082,11 @@ impl Extractor for TreeSitterExtractor {
                         consumer_symbol.clone(),
                         producer_symbol,
                         edge_tags::other(edge_tags::FLOWS_TO),
-                        ResolutionTier::Parsed,
-                        "tree-sitter",
+                        flow.class.tier(),
+                        flow.class.resolved_by(),
                     )
                     .with_location(Location::new(&file.path, flow.span));
-                    edge.metadata.insert(
-                        "construct".to_string(),
-                        serde_json::Value::String(flow.construct.clone()),
-                    );
+                    flow.class.fact(&file.language).apply(&mut edge);
                     local_edges.push(edge);
                 }
             }
@@ -3295,6 +3380,14 @@ impl Extractor for TreeSitterExtractor {
                 .with_location(Location::new(&file.path, span)),
             );
         }
+
+        // Fold flow facts that share `(source, target, kind)` through the deterministic lattice
+        // BEFORE they reach a store. Every backend's `upsert_edges` replaces the whole row at
+        // `confidence >= stored`, so two facts about one endpoint pair — block-scoped shadowing
+        // puts a may-influence and a value-preserving fact on the same locals — would otherwise
+        // collapse last-writer-wins, losing a classification and its site with no record that it
+        // was ever asserted (TS-S1; see `wicked_estate_core::flow`).
+        let local_edges = merge_flow_edges(local_edges);
 
         Ok(Extraction {
             nodes,
@@ -7607,6 +7700,79 @@ public class PlainListener {
             vec![Descriptor::new("M", Suffix::Type)],
             "the equal-range Term artifact must be dropped, not truncate the chain"
         );
+    }
+
+    // ── TS-S1: `@flow.<semantics>.<evidence>.<construct>` is parsed, not enumerated ──────
+
+    /// A query file declares a flow fact's classification; Rust parses the three segments and
+    /// knows nothing about what any construct MEANS. Adding a construct must cost zero core
+    /// change (CLAUDE.md "Rules as DATA").
+    #[test]
+    fn flow_construct_classification_comes_from_the_capture_name() {
+        for (capture, semantics, evidence, construct) in [
+            (
+                "flow.value.syntax.assignment",
+                FlowSemantics::ValuePreserving,
+                FlowEvidence::Syntax,
+                "assignment",
+            ),
+            (
+                "flow.influence.syntax.expression",
+                FlowSemantics::MayInfluence,
+                FlowEvidence::Syntax,
+                "expression",
+            ),
+            (
+                "flow.value.convention.angular_input",
+                FlowSemantics::ValuePreserving,
+                FlowEvidence::Convention,
+                "angular_input",
+            ),
+            // A construct no Rust code has ever heard of classifies fine.
+            (
+                "flow.influence.syntax.template_literal",
+                FlowSemantics::MayInfluence,
+                FlowEvidence::Syntax,
+                "template_literal",
+            ),
+        ] {
+            match classify_capture(capture) {
+                CaptureRole::FlowConstruct { class } => {
+                    assert_eq!(class.semantics, semantics, "{capture}");
+                    assert_eq!(class.evidence, evidence, "{capture}");
+                    assert_eq!(class.construct, construct, "{capture}");
+                }
+                other => panic!("{capture} must classify as a flow construct, got {other:?}"),
+            }
+        }
+    }
+
+    /// The tripwire that keeps the reserved vocabulary honest: a `.scm` must not be able to claim
+    /// evidence a wave has not shipped. Reserving `compiler`/`scip` in the type is pointless if a
+    /// query file can mint them, and `call_derived` is the engine's to assert, not a parser's.
+    #[test]
+    fn a_query_file_cannot_claim_unshipped_or_engine_owned_evidence() {
+        for forbidden in [
+            "flow.value.compiler.angular_input", // TS-S3
+            "flow.value.scip.call_argument",     // TS-S2
+            "flow.value.call_derived.call_argument",
+        ] {
+            assert!(
+                matches!(classify_capture(forbidden), CaptureRole::Other),
+                "{forbidden} must be rejected, not emitted as an unearned claim"
+            );
+        }
+        // Malformed shapes are ignored rather than emitted unclassified.
+        for malformed in [
+            "flow.assignment",
+            "flow.value.syntax.",
+            "flow.bogus.syntax.x",
+        ] {
+            assert!(
+                matches!(classify_capture(malformed), CaptureRole::Other),
+                "{malformed} must not become an unclassified flow fact"
+            );
+        }
     }
 
     // ── Scheme-3 identity roles: `.anchor` + `.owner` (scm-anchors D1) ──────────

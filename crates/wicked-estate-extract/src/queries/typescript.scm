@@ -209,12 +209,29 @@
 ) @import
 
 ; ── Direct value-flow sites ─────────────────────────────────────────────────
+;
+; The whole-pattern anchor capture names the fact's CLASSIFICATION, so the classification is data
+; in this file rather than a `match language` arm in Rust:
+;
+;     @flow.<semantics>.<evidence>.<construct>
+;
+;   <semantics>  value     — the producer's value becomes the consumer's value, whole
+;                influence — the producer contributes to it (NOT a claim the value is preserved)
+;   <evidence>   syntax     — the AST proves this fact at this site
+;                convention — a framework naming/shape match the parser CANNOT prove. An
+;                             identifier named `Input` is not necessarily `@angular/core`'s
+;                             `Input`; a receiver named `route` is not necessarily an
+;                             `ActivatedRoute`. These edges are emitted at the Heuristic tier.
+;   <construct>  free-form; becomes part of the stable rule id
+;                `typescript/<evidence>/<construct>` carried on every emitted edge.
+;
+; See `wicked_estate_core::flow` and docs/ENGINE-CONTRACT.md §3.2.
 
 ; const a = b / let a = b / var a = b
 (variable_declarator
   name: (identifier) @flow.consumer.local
   value: (identifier) @flow.producer.local
-) @flow.assignment
+) @flow.value.syntax.assignment
 
 ; const c = a + b
 (variable_declarator
@@ -222,7 +239,7 @@
   value: (binary_expression
     left: (identifier) @flow.producer.local
     right: (identifier) @flow.producer.local)
-) @flow.expression
+) @flow.influence.syntax.expression
 
 ; this.field = value
 (expression_statement
@@ -231,7 +248,7 @@
       object: (this)
       property: (property_identifier) @flow.consumer.field)
     right: (identifier) @flow.producer.local)
-) @flow.assignment
+) @flow.value.syntax.assignment
 
 ; const id = customer.id
 (variable_declarator
@@ -239,7 +256,7 @@
   value: (member_expression
     object: (identifier)
     property: (property_identifier)) @flow.producer.property
-) @flow.property_read
+) @flow.value.syntax.property_read
 
 ; @Input() tenantId
 (public_field_definition
@@ -248,7 +265,7 @@
       function: (identifier) @_input_dec
       (#eq? @_input_dec "Input")))
   name: (property_identifier) @flow.consumer.field @flow.producer.angular_input
-) @flow.angular_input
+) @flow.value.convention.angular_input
 
 ; const routeId = route.snapshot.paramMap.get('id')
 (variable_declarator
@@ -266,7 +283,7 @@
     (#eq? @_snapshot "snapshot")
     (#eq? @_param_map "paramMap")
     (#eq? @_get "get"))
-) @flow.route_param
+) @flow.value.convention.route_param
 
 ; Callable parameters and simple returns become stable value nodes/edges. The call resolver
 ; later joins exact call-site argument facts to these callable-owned values.

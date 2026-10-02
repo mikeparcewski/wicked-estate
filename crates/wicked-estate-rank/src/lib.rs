@@ -33,7 +33,9 @@ use petgraph::Direction;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use std::collections::{HashMap, HashSet};
-use wicked_estate_core::{EdgeKind, GraphRead, NodeKind, Ranker, Result, SymbolId};
+use wicked_estate_core::{
+    EdgeKind, GraphRead, NodeKind, Ranker, Result, SymbolId, is_structural_symbol,
+};
 
 pub mod cluster_summary;
 pub mod community;
@@ -205,11 +207,18 @@ fn pagerank_inner(
         return Ok((HashMap::new(), HashSet::new()));
     }
 
-    // File/Import ids, collected in the SAME pass — the ids `ranked_symbols` filters from its
-    // results (Decision H). They stay in the graph itself so rank mass still flows through them.
+    // Ids `ranked_symbols` filters from its RESULTS (Decision H), collected in the SAME pass.
+    // They stay in the graph itself so rank mass still flows through them — and, for synthetic
+    // value-flow slots, so that every real symbol's score and relative order are byte-identical
+    // to a graph without them. Value slots carry no `Calls`/`Imports` edge, so they are isolated
+    // vertices here; removing them from the INPUT would renumber the uniform teleport denominator
+    // and change every score, which is a measured contract change rather than the visibility
+    // correction this is (TS-S1; `wicked_estate_core::flow::is_structural_symbol`).
     let excluded: HashSet<SymbolId> = all_nodes
         .iter()
-        .filter(|node| matches!(node.kind, NodeKind::File | NodeKind::Import))
+        .filter(|node| {
+            matches!(node.kind, NodeKind::File | NodeKind::Import) || !is_structural_symbol(node)
+        })
         .map(|node| node.symbol.clone())
         .collect();
 
@@ -321,7 +330,9 @@ pub fn ranked_symbols(
 
     // File/Import nodes never rank as hotspots (lane relative-imports Decision H, PER-2):
     // with File→File import edges in the graph, import fan-in would otherwise put File and
-    // Import nodes in every top-N. Filtered BEFORE the truncate so top_n stays full.
+    // Import nodes in every top-N. Synthetic value-flow slots join them for the same reason
+    // (TS-S1): a local named `id` is not a hotspot. Filtered BEFORE the truncate so top_n
+    // stays full.
     let mut pairs: Vec<(SymbolId, f32)> = scores
         .into_iter()
         .filter(|(id, _)| !excluded.contains(id))

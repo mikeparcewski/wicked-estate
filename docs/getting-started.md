@@ -397,6 +397,42 @@ The stored `flows_to` edge still follows the engine edge-direction invariant (`s
 consumer, `target` is the producer); `Lineage` reverses the walk for this relation so the response
 reads as producer → consumer.
 
+In `flows_to` mode the response carries a `flows` array alongside `dependencies` — one row per
+traversed hop, because the hop list alone does not tell you what the hop *claims*:
+
+```json
+{
+  "producer": "<SymbolId>", "consumer": "<SymbolId>",
+  "flow_semantics": ["value_preserving"],
+  "flow_evidence": ["call_derived"],
+  "constructs": ["call_argument"],
+  "flow_rules": ["engine/call_derived/call_argument"],
+  "confidence": 0.65, "provenance": "import_map", "resolved_by": "scoped-name-resolver",
+  "file": "src/customer.component.ts", "line": 14,
+  "flow_support": [ { "construct": "call_argument", "semantics": "value_preserving", "…": "…" } ]
+}
+```
+
+Read it as two independent facts:
+
+- **`flow_semantics`** — what the hop claims. `value_preserving` means the producer's value becomes
+  the consumer's value whole; `may_influence` means it only *contributes* (`const c = a + b` gives
+  `c may_influence a`). An edge supported by both kinds of fact lists both.
+- **`flow_evidence`** — how we know. `syntax` is proven by the AST. `call_derived` inherits the
+  resolved call's confidence, so a 0.5 call yields a 0.5 flow. `convention` is a framework *name
+  match* — Angular `@Input()` and `route.snapshot.paramMap.get(…)` are matched by shape, and
+  wicked-estate does **not** claim it resolved `@angular/core` or any template wiring. Those edges
+  are emitted at confidence 0.5.
+
+`flow_support` lists every distinct fact behind the hop (two sites can share one edge), so an
+explanation never has to guess which site it came from. None of this is CFG, SSA, alias or taint
+analysis: a hop says a value *may* reach the consumer by the stated evidence, not that it always
+does.
+
+Existing stores keep whatever classification the binary that wrote them used. Re-index to adopt
+the current contract: a release-version bump re-extracts automatically, and a same-version
+development binary needs `wicked-estate index <path> --force` once.
+
 #### Memory tools (absorbed from wicked-memory)
 
 | Tool | Description |
