@@ -182,6 +182,15 @@ fn maybe_warn_version_mismatch(store: &dyn wicked_estate_store::GraphStoreMutExt
     }
 }
 
+/// The tail of a blast-radius CUT line: tell the user to raise `--depth`, or that they cannot.
+fn raise_hint(depth: u32, max_depth: u32) -> String {
+    if depth < max_depth {
+        ", re-run with a larger --depth".to_string()
+    } else {
+        format!(" (--depth is already at its maximum of {max_depth})")
+    }
+}
+
 fn loc(n: &wicked_estate_core::Node) -> String {
     format!("{}:{}", n.location.file, n.location.span.start_line + 1)
 }
@@ -1367,6 +1376,15 @@ fn main() -> Result<()> {
                     }
                 }
             }
+            // Same ceiling as the MCP BlastRadius tool. An unbounded value hangs on a cyclic graph
+            // (the recursive walk grows with depth), so reject it instead of clamping silently.
+            let max_depth = wicked_estate_retrieve::BLAST_DEPTH_CEILING;
+            if depth > max_depth {
+                anyhow::bail!(
+                    "blast-radius --depth {depth} is above the maximum of {max_depth} \
+                     (the same ceiling the MCP BlastRadius tool applies)"
+                );
+            }
             // The positional <name> is the first arg that is neither a flag nor a flag's value.
             let name = {
                 let mut it = positional.iter();
@@ -1435,11 +1453,12 @@ fn main() -> Result<()> {
                 let cut = match (br.depth_horizon_reached, br.node_cap_reached) {
                     (true, true) => format!(
                         "; CUT AT depth={depth} AND by the traversal node budget — more \
-                         dependents exist, re-run with a larger --depth"
+                         dependents exist{}",
+                        raise_hint(depth, max_depth)
                     ),
                     (true, false) => format!(
-                        "; CUT AT depth={depth} — more dependents exist beyond {depth} hops, \
-                         re-run with a larger --depth"
+                        "; CUT AT depth={depth} — more dependents exist beyond {depth} hops{}",
+                        raise_hint(depth, max_depth)
                     ),
                     (false, true) => {
                         "; CUT by the traversal node budget — more dependents exist".to_string()
@@ -3806,10 +3825,9 @@ mod blast_radius_json_tests {
         let (kept, dropped) = cap_blast_radius_rows(&deps);
         assert!(dropped > 0, "2000 wide rows must exceed the budget");
         assert_eq!(kept + dropped, deps.len());
-        let br = wicked_estate::BlastRadius {
-            dependents: deps.clone(),
-            ..Default::default()
-        };
+        // `BlastRadius` is #[non_exhaustive] and this is the bin crate: build it field by field.
+        let mut br = wicked_estate::BlastRadius::default();
+        br.dependents = deps.clone();
         let out = blast_radius_json("core_fn", &deps[..kept], dropped, 3, &br, 12);
         let s = serde_json::to_string(&out).unwrap();
         assert!(
@@ -3842,11 +3860,10 @@ mod blast_radius_json_tests {
     #[test]
     fn depth_cut_is_reported_separately_from_the_char_budget_cut() {
         let deps: Vec<Node> = (0..3).map(wide_node).collect();
-        let cut = wicked_estate::BlastRadius {
-            dependents: deps.clone(),
-            depth_horizon_reached: true,
-            node_cap_reached: false,
-        };
+        let mut cut = wicked_estate::BlastRadius::default();
+        cut.dependents = deps.clone();
+        cut.depth_horizon_reached = true;
+        cut.node_cap_reached = false;
         let out = blast_radius_json("f", &deps, 0, 0, &cut, 5);
         assert_eq!(out["depth_horizon_reached"], serde_json::json!(true));
         assert_eq!(out["node_cap_reached"], serde_json::json!(false));
@@ -3863,10 +3880,8 @@ mod blast_radius_json_tests {
         let wide: Vec<Node> = (0..2000).map(wide_node).collect();
         let (kept, dropped) = cap_blast_radius_rows(&wide);
         assert!(dropped > 0);
-        let complete = wicked_estate::BlastRadius {
-            dependents: wide.clone(),
-            ..Default::default()
-        };
+        let mut complete = wicked_estate::BlastRadius::default();
+        complete.dependents = wide.clone();
         let out = blast_radius_json("f", &wide[..kept], dropped, 0, &complete, 12);
         assert_eq!(out["truncated_dependents"], serde_json::json!(dropped));
         assert_eq!(out["depth_horizon_reached"], serde_json::json!(false));

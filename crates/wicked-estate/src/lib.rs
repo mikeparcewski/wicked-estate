@@ -1892,7 +1892,11 @@ pub fn search(store: &dyn GraphRead, name: &str) -> Result<Vec<Node>> {
 /// `blast-radius` printed a depth-cut answer as if it were the whole truth. Any caller that only
 /// wants the rows can still use `.dependents`; a caller that reports completeness MUST read
 /// [`BlastRadius::truncated`].
+///
+/// `#[non_exhaustive]`: the next incompleteness cause can be added without a breaking release.
+/// Outside this crate, build one with `BlastRadius::default()` and assign the fields.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct BlastRadius {
     /// Transitive dependents, deduped across every symbol that matched the name.
     pub dependents: Vec<Node>,
@@ -1921,7 +1925,11 @@ pub fn blast_radius_by_name(store: &dyn GraphRead, name: &str, depth: u32) -> Re
     let mut out = BlastRadius::default();
     let mut seen = std::collections::HashSet::new();
     for sym in search(store, name)? {
-        let sub = store.traverse(&sym.symbol, &TraversalSpec::blast_radius(depth))?;
+        let spec = TraversalSpec::blast_radius(depth);
+        let mut sub = store.traverse(&sym.symbol, &spec)?;
+        // Judge the horizon on the projected rows, not the raw walk: past the horizon an
+        // import-transit File is dropped by code_dependents, so it is not a missing dependent.
+        sub.refine_code_dependents_horizon(store, Some(&sym.kind), &spec)?;
         // A cut on ANY matching symbol's walk makes the union a floor.
         out.node_cap_reached |= sub.node_cap_reached;
         out.depth_horizon_reached |= sub.depth_horizon_reached;

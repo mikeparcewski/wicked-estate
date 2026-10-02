@@ -407,8 +407,10 @@ async fn main() -> Result<()> {
         let cache_key = if req.get("method").and_then(|m| m.as_str()) == Some("tools/call") {
             let tool = req["params"]["name"].as_str().unwrap_or("");
             if wicked_estate_mcp::response_cacheable(tool) {
-                let args = req["params"]["arguments"].to_string();
-                Some(format!("{tool}/{args}"))
+                Some(wicked_estate_mcp::response_cache_key(
+                    tool,
+                    &req["params"]["arguments"],
+                ))
             } else {
                 None
             }

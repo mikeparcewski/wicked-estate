@@ -309,22 +309,70 @@ fn graph_tools_still_cached_domain_tools_never() {
     mcp.tool("knowledge.recall", recall_args.clone());
     mcp.finish();
 
-    // Inspect the graph store's L2 cache directly. Keys are "{tool}/{args_json}" with args
-    // serialized exactly as the server does (Value::to_string on params.arguments).
+    // Inspect the graph store's L2 cache directly, under the key the server builds.
     let store =
         wicked_estate_store::SqliteStore::open(tmp.path().join("estate.db").to_str().unwrap())
             .expect("open estate store");
-    let graph_key = format!("SearchEntity/{graph_args}");
+    let graph_key = wicked_estate_mcp::response_cache_key("SearchEntity", &graph_args);
     assert!(
         store.cache_get(&graph_key).expect("cache_get").is_some(),
         "graph tool response must still be cached under {graph_key:?} (#102 must not \
          disable graph-tool caching)"
     );
     for tool in ["memory.recall", "knowledge.recall"] {
-        let key = format!("{tool}/{recall_args}");
+        let key = wicked_estate_mcp::response_cache_key(tool, &recall_args);
         assert!(
             store.cache_get(&key).expect("cache_get").is_none(),
             "#102: domain tool response must NEVER be cached, found L2 row for {key:?}"
         );
     }
+}
+
+/// An upgraded server must not replay a response another binary version wrote into the L2
+/// cache. L2 rows survive restarts and are invalidated only by the graph version (the next
+/// index), so before the key carried the server version, a new binary kept serving the old
+/// binary's answers: the wicked-estate#190 depth-cut fix stayed invisible behind a cached
+/// `truncated:false`.
+#[test]
+fn l2_rows_written_by_another_server_version_are_not_served() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("estate.db");
+    let args = json!({ "symbol": "nonexistent_symbol_xyz" });
+    let stale = |marker: &str| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": { "content": [{ "type": "text", "text": marker }] }
+        })
+        .to_string()
+    };
+    {
+        let mut store =
+            wicked_estate_store::SqliteStore::open(db.to_str().unwrap()).expect("open store");
+        // The key shape every release up to 0.17.0 wrote, and the same key under another version.
+        store
+            .cache_put(&format!("BlastRadius/{args}"), &stale("STALE-UNVERSIONED"))
+            .unwrap();
+        store
+            .cache_put(
+                &format!("0.0.0-old/BlastRadius/{args}"),
+                &stale("STALE-OLD-VERSION"),
+            )
+            .unwrap();
+    }
+    let mut mcp = spawn_all_domains(&tmp);
+    let resp = mcp.request(
+        "tools/call",
+        json!({ "name": "BlastRadius", "arguments": args }),
+    );
+    mcp.finish();
+    let text = resp.to_string();
+    assert!(
+        !text.contains("STALE-"),
+        "the server replayed a response another version cached: {text}"
+    );
+    assert!(
+        resp["result"]["content"][0]["text"].is_string(),
+        "BlastRadius must answer from the engine: {resp}"
+    );
 }

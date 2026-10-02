@@ -848,6 +848,18 @@ pub fn response_cacheable(tool: &str) -> bool {
     )
 }
 
+/// The response-cache key for a cacheable `tools/call`: the server's version, the tool and its
+/// arguments.
+///
+/// The L2 rows persist in the graph DB and are invalidated only when `graph_version` changes,
+/// that is, on the next index. Without the server version in the key, an upgraded binary served
+/// the previous binary's answers for every repeated call until then. That made the wicked-estate#190
+/// fix invisible: the new server kept replaying the old `truncated:false`. Keying on the version
+/// means a binary never reads a response another version wrote.
+pub fn response_cache_key(tool: &str, args: &serde_json::Value) -> String {
+    format!("{}/{tool}/{args}", env!("CARGO_PKG_VERSION"))
+}
+
 /// The write/destructive domain tools that read-only mode (`--readonly`, DES-GROUNDING-001 §3.0)
 /// omits from `tools/list` and refuses in `tools/call`.
 ///

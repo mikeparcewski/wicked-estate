@@ -256,3 +256,94 @@ fn tsx_and_js_importers_bind_through_the_real_registry() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// wicked-estate#190 follow-up: the depth flag must describe the rows blast-radius returns.
+///
+/// Twenty `.ts` files form an import-only chain (`m01` imports `targetFn` from `m00`, `m02`
+/// imports from `m01`, …) with no calls. The all-kinds walk from `targetFn` crosses the depth-12
+/// horizon only through File→File `Imports` edges, and the code_dependents projection drops those
+/// import-transit Files. `--depth 40` returns the same single row, so reporting "CUT AT depth=12 —
+/// more dependents exist" was false. That shape was 426 of 434 flags on a real TypeScript repo.
+#[test]
+fn import_only_chain_past_the_horizon_is_not_a_depth_cut() {
+    let dir = fresh_dir("import_chain");
+    fs::write(
+        dir.join("src/m00.ts"),
+        "export function targetFn(): number { return 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/m01.ts"),
+        "import { targetFn } from './m00';\nexport const v01 = 1;\n",
+    )
+    .unwrap();
+    for i in 2..20 {
+        fs::write(
+            dir.join(format!("src/m{i:02}.ts")),
+            format!(
+                "import {{ v{p:02} }} from './m{p:02}';\nexport const v{i:02} = 1;\n",
+                p = i - 1
+            ),
+        )
+        .unwrap();
+    }
+    let mut store = SqliteStore::in_memory().unwrap();
+    wicked_estate::index_path(&mut store, &dir).unwrap();
+    let at12 = wicked_estate::blast_radius_by_name(&store, "targetFn", 12).unwrap();
+    let at24 = wicked_estate::blast_radius_by_name(&store, "targetFn", 24).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+
+    let ids = |br: &wicked_estate::BlastRadius| -> std::collections::BTreeSet<String> {
+        br.dependents.iter().map(|n| n.symbol.0.clone()).collect()
+    };
+    assert_eq!(
+        ids(&at12),
+        ids(&at24),
+        "fixture premise: a deeper walk returns the identical dependent set"
+    );
+    assert!(
+        !at12.depth_horizon_reached && !at12.truncated(),
+        "only import-transit Files lie past depth 12, and blast-radius drops them; the result \
+         is complete, not a floor: {:?}",
+        ids(&at12)
+    );
+}
+
+/// The control for the test above: a real CALL chain across the same kind of files is still
+/// reported as cut at the horizon, and stops being cut once the walk is deep enough.
+#[test]
+fn call_chain_past_the_horizon_is_still_a_depth_cut() {
+    let dir = fresh_dir("call_chain");
+    fs::write(
+        dir.join("src/c00.ts"),
+        "export function f00(): number { return 1; }\n",
+    )
+    .unwrap();
+    for i in 1..20 {
+        fs::write(
+            dir.join(format!("src/c{i:02}.ts")),
+            format!(
+                "import {{ f{p:02} }} from './c{p:02}';\nexport function f{i:02}(): number {{ return f{p:02}(); }}\n",
+                p = i - 1
+            ),
+        )
+        .unwrap();
+    }
+    let mut store = SqliteStore::in_memory().unwrap();
+    wicked_estate::index_path(&mut store, &dir).unwrap();
+    let shallow = wicked_estate::blast_radius_by_name(&store, "f00", 5).unwrap();
+    let deep = wicked_estate::blast_radius_by_name(&store, "f00", 24).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        shallow.depth_horizon_reached,
+        "callers exist past depth 5; the cut must be reported"
+    );
+    assert!(
+        deep.dependents.len() > shallow.dependents.len(),
+        "fixture premise: the deeper walk finds more callers"
+    );
+    assert!(
+        !deep.depth_horizon_reached,
+        "the whole chain fits in 24 hops"
+    );
+}

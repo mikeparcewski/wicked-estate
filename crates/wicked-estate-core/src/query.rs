@@ -186,6 +186,73 @@ impl Subgraph {
             })
             .collect()
     }
+
+    /// Re-derive `depth_horizon_reached` for the [`Subgraph::code_dependents`] projection of a
+    /// blast-radius walk, so the flag describes the rows the caller actually returns.
+    ///
+    /// The store's horizon probe runs on the raw all-edge-kinds walk. From a code-symbol start,
+    /// the only way that walk continues past the horizon is very often a File→File `Imports`
+    /// edge into a frontier File, and `code_dependents` drops import-transit Files anyway. A
+    /// deeper walk then returns the identical set, so the flag was a false "more dependents
+    /// exist". On a 905-file TypeScript repo that was 426 of 434 flags (98.2%).
+    ///
+    /// This re-checks every frontier node (depth == `spec.max_depth`) against its incident edges
+    /// in `spec.direction`. The cut stays reported if any edge that `spec` admits leads to an
+    /// unvisited node, unless that edge is an `Imports` edge whose source is a `File`. Those
+    /// edges can only add Files that the projection removes. An `Imports` edge from anything
+    /// else, or from a node the store cannot resolve, still counts as a real cut.
+    ///
+    /// The flag is left untouched when:
+    /// - the start is a File or an Import, because their importers ARE the blast radius;
+    /// - the walk is not a `Dependents` walk;
+    /// - the node cap also cut the walk, because then the frontier itself is incomplete and
+    ///   `truncated` stays true anyway.
+    ///
+    /// Residual, by design: a File reached past the horizon only through imports could itself
+    /// have a non-`Imports` dependent one hop further out. No such edge appears on the indexed
+    /// corpora (nothing but `Imports` targets a File there), so the check does not chase
+    /// import-transit chains.
+    pub fn refine_code_dependents_horizon(
+        &mut self,
+        store: &dyn crate::traits::GraphRead,
+        start_kind: Option<&NodeKind>,
+        spec: &TraversalSpec,
+    ) -> crate::error::Result<()> {
+        if !self.depth_horizon_reached
+            || self.node_cap_reached
+            || spec.direction != Direction::Dependents
+            || matches!(start_kind, Some(NodeKind::File | NodeKind::Import))
+        {
+            return Ok(());
+        }
+        let visited: std::collections::HashSet<&str> =
+            self.nodes.iter().map(|n| n.symbol.as_str()).collect();
+        for (id, depth) in &self.depths {
+            if *depth != spec.max_depth {
+                continue;
+            }
+            for e in store.neighbors(&SymbolId(id.clone()), Direction::Dependents)? {
+                let other = e.source.as_str();
+                if visited.contains(other)
+                    || e.confidence.get() < spec.min_confidence
+                    || (!spec.edge_kinds.is_empty() && !spec.edge_kinds.contains(&e.kind))
+                {
+                    continue;
+                }
+                if e.kind == EdgeKind::Imports {
+                    let importer = store.get_node(&e.source)?;
+                    if matches!(importer, Some(ref n) if n.kind == NodeKind::File) {
+                        continue;
+                    }
+                }
+                // A dependent the projection would keep lies past the horizon: the cut is real.
+                return Ok(());
+            }
+        }
+        self.depth_horizon_reached = false;
+        self.truncated = self.node_cap_reached;
+        Ok(())
+    }
 }
 
 /// Aggregate counts for health / staleness / coverage reporting.

@@ -744,7 +744,10 @@ fn truncation_cause(
 
 /// `depth` ceilings of the graph tools. Named so `truncation_cause` and the clamps cannot drift.
 const TRAVERSE_DEPTH_CEILING: u32 = 16;
-const BLAST_DEPTH_CEILING: u32 = 24;
+/// The deepest BlastRadius / Lineage walk the MCP tools accept. Public so the CLI's
+/// `blast-radius --depth` enforces the same ceiling (a cyclic graph's recursive walk grows with
+/// depth: `--depth 100000` ran past 20 s and 397 MB on estate's own graph).
+pub const BLAST_DEPTH_CEILING: u32 = 24;
 
 impl RetrievalTool for TraverseGraph {
     fn name(&self) -> &str {
@@ -931,11 +934,19 @@ impl RetrievalTool for BlastRadius {
         let start = SymbolId(id_str.clone());
         let mut diag = vec![staleness_note()];
 
-        let subgraph = store.traverse(&start, &spec)?;
+        let mut subgraph = store.traverse(&start, &spec)?;
 
         // Resolve the symbol's simple name (for unresolved-ref lookup).  If the symbol is in
         // the graph, use its recorded name; otherwise fall back to the last segment of the id.
         let start_node = store.get_node(&start)?;
+        // The store probed the horizon on the raw walk; re-derive it for the code_dependents
+        // projection returned below, so import-transit Files past the horizon (which that
+        // projection drops) do not raise a false "more dependents exist" flag.
+        subgraph.refine_code_dependents_horizon(
+            store,
+            start_node.as_ref().map(|n| &n.kind),
+            &spec,
+        )?;
         let symbol_name: String =
             start_node
                 .as_ref()
@@ -3296,6 +3307,106 @@ mod tests {
             res.diagnostics.iter().any(|d| d.contains("coverage:")),
             "coverage diagnostic always emitted"
         );
+    }
+
+    /// The 20-file import-only chain (`m01` imports `m00`, `m02` imports `m01`, …; `m00`
+    /// contains `targetFn`). The all-kinds walk from `targetFn` leaves the depth horizon through
+    /// File→File `Imports` edges, but every node it would add is an import-transit File that the
+    /// blast-radius projection drops. The depth flag must describe the returned rows: a deeper
+    /// walk returns the same set, so nothing was cut. (On a 905-file TypeScript repo, 426 of 434
+    /// flags were this false alarm.)
+    fn import_chain_store(files: usize) -> MemStore {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        let mut nodes = vec![make_node(
+            "targetFn",
+            "targetFn",
+            NodeKind::Function,
+            "m00.ts",
+            1,
+        )];
+        let mut edges = Vec::new();
+        for i in 0..files {
+            let file = format!("m{i:02}.ts");
+            nodes.push(make_node(&file, &file, NodeKind::File, &file, 0));
+            if i == 0 {
+                edges.push(Edge::new(
+                    SymbolId(file.clone()),
+                    SymbolId("targetFn".into()),
+                    EdgeKind::Contains,
+                    ResolutionTier::Parsed,
+                    "test-fixture",
+                ));
+            } else {
+                edges.push(Edge::new(
+                    SymbolId(file.clone()),
+                    SymbolId(format!("m{:02}.ts", i - 1)),
+                    EdgeKind::Imports,
+                    ResolutionTier::Parsed,
+                    "test-fixture",
+                ));
+            }
+        }
+        store.upsert_nodes(&nodes).unwrap();
+        store.upsert_edges(&edges).unwrap();
+        store.commit_batch().unwrap();
+        store
+    }
+
+    #[test]
+    fn blast_radius_depth_flag_ignores_import_transit_files() {
+        let store = import_chain_store(20);
+        let shallow = BlastRadius
+            .invoke(&store, &json!({"symbol": "targetFn", "depth": 5}))
+            .unwrap();
+        let deep = BlastRadius
+            .invoke(&store, &json!({"symbol": "targetFn", "depth": 24}))
+            .unwrap();
+        assert_eq!(
+            shallow.content["dependents"], deep.content["dependents"],
+            "fixture premise: the deeper walk returns the identical set"
+        );
+        assert_eq!(
+            shallow.content["total"],
+            json!(1),
+            "only m00.ts: {shallow:?}"
+        );
+        assert_eq!(
+            shallow.content["depth_horizon_reached"],
+            json!(false),
+            "an import-transit-only horizon is not a cut: {shallow:?}"
+        );
+        assert_eq!(shallow.content["truncated"], json!(false));
+    }
+
+    /// The control: a real call chain past the horizon is still reported as cut.
+    #[test]
+    fn blast_radius_depth_flag_still_reports_a_real_call_chain_cut() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        let nodes: Vec<Node> = (0..10)
+            .map(|i| {
+                make_node(
+                    &format!("f{i}"),
+                    &format!("f{i}"),
+                    NodeKind::Function,
+                    "a.rs",
+                    i,
+                )
+            })
+            .collect();
+        let edges: Vec<Edge> = (1..10)
+            .map(|i| make_call_edge(&format!("f{i}"), &format!("f{}", i - 1)))
+            .collect();
+        store.upsert_nodes(&nodes).unwrap();
+        store.upsert_edges(&edges).unwrap();
+        store.commit_batch().unwrap();
+        let res = BlastRadius
+            .invoke(&store, &json!({"symbol": "f0", "depth": 3}))
+            .unwrap();
+        assert_eq!(res.content["total"], json!(3));
+        assert_eq!(res.content["depth_horizon_reached"], json!(true), "{res:?}");
+        assert_eq!(res.content["truncated"], json!(true));
     }
 
     #[test]

@@ -99,11 +99,13 @@ $ wicked-estate query bark --db /tmp/demo.db
 ## 4. Blast-radius — what depends on a symbol
 
 ```bash
-wicked-estate blast-radius <name> [--db ...]
+wicked-estate blast-radius <name> [--depth N] [--json] [--db ...]
 ```
 
 Returns the set of symbols that transitively depend on `<name>` via resolved `calls`, `imports`,
-and `extends` edges. Always prints a coverage line — do not interpret an empty result as "safe
+and `extends` edges, up to `--depth` hops (default 12, maximum 24, the same ceiling as the MCP
+`BlastRadius` tool). If the walk stopped at the depth horizon while more dependents exist, the
+coverage line ends with `CUT AT depth=N`; re-run with a larger `--depth` to follow them. Always prints a coverage line — do not interpret an empty result as "safe
 to change" without reading it.
 
 ```
@@ -112,8 +114,8 @@ $ wicked-estate blast-radius bark --db /tmp/demo.db
   File main.py (main.py:1)
   Function speak (example.py:6)
   Function main (main.py:3)
-coverage: 3 resolved dependent(s); 0 unresolved call(s) reference 'bark' — best-effort static
-resolution, MAY be incomplete (precise tier pending)
+coverage: 3 resolved dependent(s) within depth 12; 0 unresolved call(s) reference 'bark' —
+best-effort static resolution, MAY be incomplete (precise tier pending)
 ```
 
 ### Coverage semantics — read this
