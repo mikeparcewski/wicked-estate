@@ -375,6 +375,30 @@ fn support_rows(edge: &Edge) -> Vec<(SupportOrder, serde_json::Value)> {
     vec![(support_order(edge), support_entry(edge))]
 }
 
+/// The order an edge sorts by when choosing a group's representative: that of the fact it
+/// represents. A fresh edge IS one fact ([`support_order`]). An already-merged edge carries
+/// aggregate set metadata, so ordering it by that would let `merge(merge(X) ++ Y)` pick a
+/// different representative than `merge(X ++ Y)`; its representative is the least-ordered of
+/// its strongest support rows, exactly what the first fold chose. If a `MAX_FLOW_SUPPORT` cut
+/// dropped every strongest row, fall back to the edge's own metadata.
+fn representative_order(edge: &Edge) -> SupportOrder {
+    let strongest = edge.confidence.get();
+    edge.metadata
+        .get(FLOW_SUPPORT_KEY)
+        .and_then(|v| v.as_array())
+        .and_then(|rows| {
+            rows.iter()
+                .filter(|row| {
+                    row.get("confidence")
+                        .and_then(|c| c.as_f64())
+                        .is_some_and(|c| c as f32 == strongest)
+                })
+                .map(support_entry_order)
+                .min()
+        })
+        .unwrap_or_else(|| support_order(edge))
+}
+
 /// The same total order as [`support_order`], read back off a stored support row.
 fn support_entry_order(entry: &serde_json::Value) -> SupportOrder {
     let text = |key: &str| {
@@ -477,7 +501,7 @@ pub fn merge_flow_edges(edges: Vec<Edge>) -> Vec<Edge> {
             b.confidence
                 .get()
                 .total_cmp(&a.confidence.get())
-                .then_with(|| support_order(a).cmp(&support_order(b)))
+                .then_with(|| representative_order(a).cmp(&representative_order(b)))
         });
 
         let mut semantics = BTreeSet::new();
@@ -891,6 +915,46 @@ mod tests {
             );
             assert_eq!(a, b, "two folds must equal one: {:?}", two_pass[0].metadata);
         }
+    }
+
+    /// The representative composes too (codex review of #231): an already-merged edge must sort
+    /// as its representative FACT, not as its aggregate set metadata. Otherwise
+    /// `merge(merge(X) ++ Y)` can pick a different representative — and so a different
+    /// location — than `merge(X ++ Y)`.
+    #[test]
+    fn representative_composes_across_two_folds() {
+        let a = || {
+            flow_edge(
+                "assignment",
+                FlowSemantics::ValuePreserving,
+                10,
+                ResolutionTier::Parsed,
+            )
+        };
+        let b = || {
+            flow_edge(
+                "assignment",
+                FlowSemantics::MayInfluence,
+                20,
+                ResolutionTier::Parsed,
+            )
+        };
+        let c = || {
+            flow_edge(
+                "assignment",
+                FlowSemantics::ValuePreserving,
+                30,
+                ResolutionTier::Parsed,
+            )
+        };
+        let one_pass = merge_flow_edges(vec![a(), b(), c()]);
+        let two_pass = merge_flow_edges(
+            merge_flow_edges(vec![a(), b()])
+                .into_iter()
+                .chain([c()])
+                .collect(),
+        );
+        assert_eq!(one_pass, two_pass, "two folds must equal one");
     }
 
     #[test]
