@@ -1813,17 +1813,20 @@ fn main() -> Result<()> {
                 } else {
                     let q = wicked_estate_core::SymbolQuery {
                         exact_name: Some(f.clone()),
-                        limit: Some(5),
                         ..Default::default()
                     };
                     // TS-S1: exact-SymbolId focus above is deliberate; focusing by NAME is not a
                     // way back into synthetic value slots — a bare name never resolves to one.
+                    // Filter BEFORE capping at 5: with the cap in the query, five same-name
+                    // slots fill the window and the real symbol is never seen. An exact-name
+                    // lookup is bounded by that name's cardinality, so the full fetch is cheap.
                     seeds.extend(
                         store
                             .find_symbols(&q)
                             .map_err(to_any)?
                             .into_iter()
-                            .filter(wicked_estate_core::is_structural_symbol),
+                            .filter(wicked_estate_core::is_structural_symbol)
+                            .take(5),
                     );
                 }
                 if seeds.is_empty() {

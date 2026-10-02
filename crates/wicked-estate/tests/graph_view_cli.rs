@@ -85,3 +85,61 @@ fn graph_view_expansion_never_yields_file_or_import_nodes() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// TS-S1 (#231 review M2): `--focus <name>` must find the real symbol even when five or more
+/// synthetic value slots share its name and sort ahead of it. The value-slot filter used to run
+/// AFTER a `limit 5` fetch, so five slots filled the window, were all filtered out, and the real
+/// `Function key` produced "no symbol matches" (crew maps that to an HTTP 500).
+#[test]
+fn graph_view_focus_by_name_skips_value_slots_ahead_of_the_real_symbol() {
+    let dir = fresh_dir("focus_slots");
+    // `src/a.ts` sorts before `src/z.ts`, and every `key` parameter / local below is a value
+    // slot named `key` — more than the old 5-row window.
+    let mut a = String::new();
+    for i in 0..7 {
+        a.push_str(&format!(
+            "export function use{i}(key: string) {{ const k{i} = key; return k{i}; }}\n"
+        ));
+    }
+    fs::write(dir.join("src/a.ts"), a).unwrap();
+    fs::write(
+        dir.join("src/z.ts"),
+        "export function key() { return 'k'; }\nexport function caller() { return key(); }\n",
+    )
+    .unwrap();
+
+    let db = dir.join("g.db");
+    run(&dir, &db, &["index", dir.to_str().unwrap()]);
+    // Synthetic slots carry `metadata.value_role`; collect the ids of the ones named `key`.
+    let export = run(&dir, &db, &["export", "--nodes-only"]);
+    let slot_ids: Vec<String> = export
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|n| n["name"] == "key" && !n["metadata"]["value_role"].is_null())
+        .filter_map(|n| n["symbol"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        slot_ids.len() >= 5,
+        "fixture must hold >= 5 value slots named `key`; got {slot_ids:?}"
+    );
+
+    let out = run(&dir, &db, &["graph-view", "--focus", "key", "--limit", "10"]);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("graph-view emits JSON");
+    let nodes = v["nodes"].as_array().expect("nodes array");
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n["name"] == "key" && n["kind"] == "function"),
+        "focus must seed the real `Function key`: {out}"
+    );
+    let polluted: Vec<&serde_json::Value> = nodes
+        .iter()
+        .filter(|n| {
+            n["id"]
+                .as_str()
+                .is_some_and(|id| slot_ids.iter().any(|s| s == id))
+        })
+        .collect();
+    assert!(polluted.is_empty(), "no value slot may be a focus seed: {polluted:?}");
+    let _ = fs::remove_dir_all(&dir);
+}
