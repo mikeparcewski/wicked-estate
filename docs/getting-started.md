@@ -206,13 +206,14 @@ claim about runtime behaviour.
 
 Text mode prints each node row and, for `flows_to`, each hop with its `flow_semantics`,
 `flow_evidence`, confidence, resolver, rule ids and site, then names any depth, node-cap or
-budget cut. The tool's diagnostics go to stderr as `note: …`; that always includes the tool's
-own `STALENESS: commits_behind not available at this layer …` placeholder, which says only that
-the retrieval layer cannot see git. The real staleness check is the CLI's own: on a graph behind
-its repo, text mode prints `STALENESS: N commit(s) since last index …` on **stdout** (the same
-notice `query`, `path` and `blast-radius` print), and a binary-version mismatch prints
-`VERSION MISMATCH: …` on stderr without the `note:` prefix. Use `--json` for one machine-readable
-channel.
+budget cut. The tool's diagnostics go to stderr as `note: …`, with one exception: the tool's own
+`STALENESS: commits_behind not available at this layer …` placeholder is the retrieval layer's
+cue to its host (it says only that the tool cannot see git), and the CLI, having run the real
+check itself, does not echo it. On a graph behind its repo, text mode prints
+`STALENESS: N commit(s) since last index …` on **stdout** (the same notice `query`, `path` and
+`blast-radius` print), and a binary-version mismatch prints `VERSION MISMATCH: …` on stderr
+without the `note:` prefix. `--json` keeps the placeholder in `diagnostics`, because that document
+must equal the MCP response. Use `--json` for one machine-readable channel.
 
 `--json` prints exactly one document — the tool's `RetrievalResult` as
 `{"content": {…}, "diagnostics": […]}` — and nothing else on stdout or stderr. When the graph is

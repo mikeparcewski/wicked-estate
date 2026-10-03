@@ -15,6 +15,9 @@
   server's `STALENESS: commits_behind=N` line when behind), equal to the parsed MCP response for
   the same db state and arguments. The MCP server's startup staleness computation moved into
   `wicked_estate::graph_commits_behind` / `staleness_diagnostic` so both frontends share it.
+  Text mode prints the tool's diagnostics on stderr as `note: …`, except the retrieval layer's
+  `STALENESS: commits_behind not available at this layer …` cue, which the CLI's own stdout
+  staleness notice supersedes (`--json` keeps it, for parity).
   Additive: no existing command's output changes, and CLI `resolve` visibility is untouched.
 
 ## [0.19.0] — 2026-10-03

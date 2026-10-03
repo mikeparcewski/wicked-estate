@@ -494,11 +494,27 @@ fn text_mode_is_prose_and_json_mode_is_only_json() {
     assert!(stdout.contains("semantics=value_preserving"), "{stdout}");
     assert!(stdout.contains("evidence=convention"), "{stdout}");
     assert!(stdout.contains("(tree-sitter-convention)"), "{stdout}");
+    assert!(!stdout.contains("note:"), "{stdout}");
+    // The tool's `STALENESS: commits_behind not available at this layer …` diagnostic is the
+    // retrieval layer's cue to its host, not a user notice: this frontend runs the real check
+    // itself and prints it on stdout (see the stale-graph test), so the cue is not echoed.
     assert!(
-        stderr.contains("note: STALENESS"),
+        !stderr.contains("STALENESS"),
+        "the retrieve placeholder must not reach the user: {stderr}"
+    );
+
+    // The tool's other diagnostics still go to stderr as `note: …`.
+    let out = run(
+        &s,
+        &["lineage", "--symbol", "absent-id", "--db", "graph.db"],
+    );
+    assert!(out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("note: Lineage: no dependencies found for 'absent-id'"),
         "diagnostics go to stderr: {stderr}"
     );
-    assert!(!stdout.contains("note:"), "{stdout}");
+    assert!(!stderr.contains("STALENESS"), "{stderr}");
 
     // `cli_json` asserts the converse: one JSON line, nothing on stderr.
     cli_json(&s, &["--symbol", &route, "--relation", "flows_to"]);
@@ -673,9 +689,9 @@ fn git(dir: &Path, date: &str, args: &[&str]) {
     );
 }
 
-#[test]
-fn json_on_a_stale_graph_carries_the_same_staleness_line_as_mcp() {
-    let s = scratch("stale");
+/// The Angular fixture as a git repo whose graph is exactly two commits behind HEAD.
+fn stale_fixture(tag: &str) -> Scratch {
+    let s = scratch(tag);
     let src =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typescript-value-lineage");
     for entry in fs::read_dir(&src).unwrap() {
@@ -695,7 +711,12 @@ fn json_on_a_stale_graph_carries_the_same_staleness_line_as_mcp() {
             &["commit", "-q", "--allow-empty", "-m", msg],
         );
     }
+    s
+}
 
+#[test]
+fn json_on_a_stale_graph_carries_the_same_staleness_line_as_mcp() {
+    let s = stale_fixture("stale");
     let store = open(&s);
     let route = node_where(&store, |n| n.name == "RouteParam:id", "RouteParam:id");
     let cli = cli_json(&s, &["--symbol", &route, "--relation", "flows_to"]);
@@ -726,6 +747,43 @@ fn json_on_a_stale_graph_carries_the_same_staleness_line_as_mcp() {
         .unwrap()
         .push(json!(wicked_estate::staleness_diagnostic(2)));
     assert_eq!(cli, tool);
+}
+
+#[test]
+fn text_mode_on_a_stale_graph_prints_the_real_notice_and_not_the_placeholder() {
+    let s = stale_fixture("stale_text");
+    let store = open(&s);
+    let route = node_where(&store, |n| n.name == "RouteParam:id", "RouteParam:id");
+    let out = run(
+        &s,
+        &[
+            "lineage",
+            "--symbol",
+            &route,
+            "--relation",
+            "flows_to",
+            "--db",
+            "graph.db",
+        ],
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    // One real notice, on stdout, the same one `query`, `path` and `blast-radius` print …
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|l| l.starts_with("STALENESS: 2 commit(s) since last index"))
+            .count(),
+        1,
+        "{stdout}"
+    );
+    // … and not the tool's `commits_behind not available at this layer` cue beside it, which
+    // would tell the reader the opposite of the line above.
+    assert!(
+        !stderr.contains("STALENESS"),
+        "the retrieve placeholder must not reach the user: {stderr}"
+    );
 }
 
 #[test]

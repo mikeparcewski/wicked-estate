@@ -50,8 +50,10 @@ fn opt_u64(v: &Value, key: &str) -> Option<u64> {
     v.get(key)?.as_u64()
 }
 
-/// Emit a staleness note reminding the MCP layer to embed `commits_behind`.
-pub(crate) fn staleness_note() -> String {
+/// The staleness note every tool emits to remind the hosting layer (the MCP server, the CLI) to
+/// embed `commits_behind`: the retrieval layer cannot see git. Public so a host that runs the real
+/// check can recognise the cue by value instead of by a copied literal.
+pub fn staleness_note() -> String {
     "STALENESS: commits_behind not available at this layer — embed git rev-list delta in the MCP response".to_string()
 }
 

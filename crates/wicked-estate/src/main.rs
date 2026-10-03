@@ -1652,7 +1652,12 @@ fn main() -> Result<()> {
             } else {
                 let mut out = std::io::stdout().lock();
                 write_lineage_text(&mut out, &args, &result).map_err(|e| anyhow::anyhow!(e))?;
-                for d in &result.diagnostics {
+                // The tool's `STALENESS: commits_behind not available at this layer …` line is
+                // its cue to the hosting layer to run the git check. This frontend did
+                // (`maybe_print_staleness`, on stdout), so echoing the cue would contradict that
+                // notice. `--json` keeps it: that document must equal the MCP response.
+                let placeholder = wicked_estate_retrieve::staleness_note();
+                for d in result.diagnostics.iter().filter(|d| **d != placeholder) {
                     eprintln!("note: {d}");
                 }
             }
