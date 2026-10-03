@@ -142,3 +142,29 @@ fn internal_version_pins_match_workspace_version() {
         bad.join("\n")
     );
 }
+
+/// `wicked-estate`'s dev-dependency on `wicked-estate-mcp` (the `lineage_cli` parity test) must
+/// stay PATH-ONLY. `wicked-estate-mcp` depends on this crate and is published AFTER it
+/// (`scripts/publish.sh`), so a `version` on that line can never resolve when this crate is
+/// packaged: `cargo publish` fails with "failed to select a version for the requirement
+/// `wicked-estate-mcp`" — mid-sequence, after the leaf crates are irreversibly published.
+/// `internal_version_pins_match_workspace_version` cannot see this: a version that MATCHES the
+/// workspace passes it. In a published `.crate` cargo has already stripped the line: no-op.
+#[test]
+fn the_mcp_dev_dependency_stays_path_only() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let text = fs::read_to_string(&manifest)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", manifest.display()));
+    for (i, line) in text.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("wicked-estate-mcp") {
+            assert!(
+                version_req(trimmed).is_none(),
+                "{}:{}: the wicked-estate-mcp dev-dependency must be path-only (no `version`): \
+                 a versioned pin on a crate published after this one fails `cargo publish`",
+                manifest.display(),
+                i + 1
+            );
+        }
+    }
+}

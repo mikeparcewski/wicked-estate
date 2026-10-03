@@ -207,22 +207,7 @@ async fn main() -> Result<()> {
         } else {
             None
         };
-        store.and_then(|s| {
-            // A co-located graph has one root PER REPO, and `indexed_root` is only the last one
-            // indexed — reading it alone reports one arbitrary repo's staleness as the whole
-            // graph's, and answers "fresh" while every other repo is behind. Take the worst.
-            let repos = wicked_estate::repo_scope::registry(s.as_ref());
-            if !repos.is_empty() {
-                return repos
-                    .iter()
-                    .filter_map(|r| {
-                        wicked_estate::commits_behind(std::path::Path::new(&r.root), &db_path)
-                    })
-                    .max();
-            }
-            let root = s.meta_get_key("indexed_root")?;
-            wicked_estate::commits_behind(std::path::Path::new(&root), &db_path)
-        })
+        store.and_then(|s| wicked_estate::graph_commits_behind(s.as_ref(), &db_path))
     };
 
     // Dim-guard (DoD-A6a): read the store's recorded embedder identity + dim, and compute the

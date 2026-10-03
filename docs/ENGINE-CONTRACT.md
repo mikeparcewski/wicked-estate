@@ -292,7 +292,8 @@ explicit — a node hidden from human-facing search is **not** automatically hid
 |---|---|---|
 | Raw storage / `export` / `nodes` CLI / `GraphStats` | **yes** | deliberate: a faithful view of storage must stay faithful. A filtered `export` would make the file an unreliable basis for diffing a graph |
 | Exact `SymbolId` lookup (`RetrieveEntity`, `FetchContent`, `get_node`, `graph-view --focus <id>`) | **yes** | deliberate: you addressed this node |
-| `Lineage relation=flows_to` | **yes** | the explicit semantic query; this is the whole point. `flows` and the `confidence` summary list only flow hops whose two ends are both in the answer; `dependencies` and `flows` share one R4 budget, and a row dropped from either sets `truncated` |
+| `Lineage relation=flows_to` (MCP) / `lineage --relation flows_to` (CLI) | **yes** | the explicit semantic query; this is the whole point. `flows` and the `confidence` summary list only flow hops whose two ends are both in the answer; `dependencies` and `flows` share one R4 budget, and a row dropped from either sets `truncated`. The CLI invokes the same tool and its `--json` is the same `RetrievalResult` plus the MCP server's own staleness line (`crates/wicked-estate/tests/lineage_cli.rs`) |
+| `Lineage` start (MCP `symbol`) / `lineage --symbol` (CLI) | **yes** (exact `SymbolId` only) | no name resolution on either frontend, so a slot is reached only by its id — same reasoning as the exact-lookup row |
 | `SearchEntity include_values=true` | **yes** | explicit opt-in. The default path is the one with a diagnostic naming the hidden count and this way back in; this path hides nothing, so it has none |
 | Default name/FTS search (`SearchEntity`, `wicked_estate::search`, CLI `query`) | no | `find_seed_symbols` / `is_structural_symbol` |
 | `ContextPack` / `ContextBundle` seeds | no | `find_seed_symbols` |

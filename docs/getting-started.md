@@ -20,7 +20,7 @@ Produces two binaries:
 
 | Binary | Purpose |
 |--------|---------|
-| `target/release/wicked-estate` | CLI — index, query, blast-radius, rank, source, stats, scip, semantic, watch, subscribe, compact, tfstate, drift, cross-graph, clusters, context, annotate, nodes, resolve, export, plugins list, … |
+| `target/release/wicked-estate` | CLI — index, query, blast-radius, lineage, rank, source, stats, scip, semantic, watch, subscribe, compact, tfstate, drift, cross-graph, clusters, context, annotate, nodes, resolve, export, plugins list, … |
 | `target/release/wicked-estate-mcp` | MCP stdio server — 30 tools (12 estate + 7 memory + 7 knowledge + 4 proposal) for LLM agents |
 
 Zero runtime deps. Single static binary on each target.
@@ -171,6 +171,59 @@ edge.
 `file`, `line`, `line_1based`), so a script never needs a second command per hop.
 
 The same query is available to agents as the MCP `Path` tool (§10).
+
+### Lineage — what a symbol depends on, or where its value goes
+
+```bash
+wicked-estate lineage --symbol <SYMBOL_ID> [--depth N] [--relation flows_to] [--json] [--db ...]
+```
+
+The CLI twin of the MCP `Lineage` tool (§10): it parses the flags, invokes the same tool, and
+renders its result. Without `--relation` it is dependency lineage over `Calls` + `Imports`. With
+`--relation flows_to` it is **static semantic value lineage**, producer → consumer, over the
+evidence-bearing `flows_to` graph — not taint analysis, not compiler-exact data flow, and not a
+claim about runtime behaviour.
+
+- `--symbol` takes an **exact `SymbolId`**, the same as the MCP tool. There is no name resolution
+  and no "first match": get the id from `nodes --json`, `SearchEntity`, or `RetrieveEntity`. Exact
+  ids may name synthetic value slots (a `RouteParam:id` source, a local, a parameter), which the
+  name-oriented commands such as `query` deliberately hide.
+- `--depth` accepts `0..=24` and defaults to 8 — the MCP tool's default and ceiling. A larger value
+  is an error, not a silent clamp.
+- `--relation` accepts only `flows_to`. Any other value, a missing flag value, an unknown flag, or a
+  bare name instead of `--symbol` fails non-zero with the usage text.
+- The flag set is closed: a flag another command owns (`--file`, `--type`, `--top`, …), a
+  repeated flag, or a value flag whose value is missing or is itself a flag (`--db --json`) fails
+  before any store is opened. Two flags are still handled by the CLI-wide parser first: a
+  standalone `-h` / `--help`, or one given as the value of `--depth` or `--relation`, prints the
+  general help with exit 0 (after `--symbol` or `--db` it is that flag's value: `--help` is
+  refused as a flag, `-h` is taken literally), and a malformed `--repo` fails non-zero with that
+  parser's own message rather than the `lineage` usage.
+- An exact id that is not in the graph is **not** an error: it returns the tool's empty result
+  with a diagnostic, exit 0. A `--db` file that does not exist (a bare path or `sqlite://<path>`),
+  or is empty, **is** an error — `lineage` never creates a graph, so a typo cannot read as
+  "absent id".
+
+Text mode prints each node row and, for `flows_to`, each hop with its `flow_semantics`,
+`flow_evidence`, confidence, resolver, rule ids and site, then names any depth, node-cap or
+budget cut. The tool's diagnostics go to stderr as `note: …`, with one exception: the tool's own
+`STALENESS: commits_behind not available at this layer …` placeholder is the retrieval layer's
+cue to its host (it says only that the tool cannot see git), and the CLI, having run the real
+check itself, does not echo it. On a graph behind its repo, text mode prints
+`STALENESS: N commit(s) since last index …` on **stdout** (the same notice `query`, `path` and
+`blast-radius` print), and a binary-version mismatch prints `VERSION MISMATCH: …` on stderr
+without the `note:` prefix. `--json` keeps the placeholder in `diagnostics`, because that document
+must equal the MCP response. Use `--json` for one machine-readable channel.
+
+`--json` prints exactly one document — the tool's `RetrievalResult` as
+`{"content": {…}, "diagnostics": […]}` — and nothing else on stdout or stderr. When the graph is
+behind its git repo, `diagnostics` ends with the same `STALENESS: commits_behind=N …` line the MCP
+server appends (R5), computed by the same function. With that, `content` is identical to the MCP
+`Lineage` response's first text block and `diagnostics` to its second (split on newlines), for the
+same database and arguments; `crates/wicked-estate/tests/lineage_cli.rs` pins it. Row `line`
+values in `--json` are the tool's **0-based** lines (unlike `path --json`, there is no
+`line_1based`, because the document is the MCP one verbatim); text mode prints 1-based `file:line`.
+The one 25K-char R4 budget is the tool's and covers `content`; the CLI adds no budget of its own.
 
 ---
 
@@ -395,7 +448,8 @@ the displayed source node, such as `RouteParam:id`, to its stable `symbol` with 
 
 The stored `flows_to` edge still follows the engine edge-direction invariant (`source` is the
 consumer, `target` is the producer); `Lineage` reverses the walk for this relation so the response
-reads as producer → consumer.
+reads as producer → consumer. The same query runs from a shell as
+`wicked-estate lineage --symbol <SymbolId> --relation flows_to [--json]` (§4).
 
 In `flows_to` mode the response carries a `flows` array alongside `dependencies` — one row per
 traversed hop, because the hop list alone does not tell you what the hop *claims*:

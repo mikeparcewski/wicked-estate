@@ -2237,6 +2237,30 @@ pub fn commits_behind(root: &Path, db_path: &str) -> Option<u64> {
     s.trim().parse::<u64>().ok()
 }
 
+/// The whole graph's staleness: the worst [`commits_behind`] over every registered repo root.
+///
+/// A co-located graph has one root PER REPO, and `indexed_root` is only the last one indexed —
+/// reading it alone reports one arbitrary repo's staleness as the whole graph's, and answers
+/// "fresh" while every other repo is behind. A single-repo graph falls back to `indexed_root`.
+/// The MCP server and the CLI's machine output both report this one number (R5).
+pub fn graph_commits_behind(store: &dyn GraphStoreMutExt, db_path: &str) -> Option<u64> {
+    let repos = repo_scope::registry(store);
+    if !repos.is_empty() {
+        return repos
+            .iter()
+            .filter_map(|r| commits_behind(Path::new(&r.root), db_path))
+            .max();
+    }
+    let root = store.meta_get_key("indexed_root")?;
+    commits_behind(Path::new(&root), db_path)
+}
+
+/// The R5 diagnostic a frontend appends to a retrieval result when the graph is `n > 0` commits
+/// behind its repo. One wording, so MCP and `wicked-estate lineage --json` cannot drift.
+pub fn staleness_diagnostic(n: u64) -> String {
+    format!("STALENESS: commits_behind={n} — re-run `wicked-estate index` to refresh")
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // W12 — Cross-graph / federated query API
 // ─────────────────────────────────────────────────────────────────────────────
