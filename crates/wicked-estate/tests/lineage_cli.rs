@@ -141,9 +141,15 @@ fn cli_json(dir: &Path, args: &[&str]) -> Value {
     doc
 }
 
+/// The in-memory tool result, normalized through the same serializer the CLI and MCP print with.
+/// Without the round trip the comparison depends on `serde_json`'s best-effort float parsing: a
+/// `confidence.avg` such as `0.9093789458274841` reparses one ulp off (`…484`) unless the
+/// `float_roundtrip` feature is on, so `assert_eq!(cli, direct)` could fail on a richer fixture
+/// with byte-identical output (15 of 850 cases on a real repo).
 fn direct(store: &SqliteStore, args: &Value) -> Value {
     let r = Lineage.invoke(store, args).unwrap();
-    json!({ "content": r.content, "diagnostics": r.diagnostics })
+    let doc = json!({ "content": r.content, "diagnostics": r.diagnostics });
+    serde_json::from_str(&serde_json::to_string(&doc).unwrap()).unwrap()
 }
 
 /// The MCP `tools/call` response for `Lineage`, normalized back into `{content, diagnostics}`:
