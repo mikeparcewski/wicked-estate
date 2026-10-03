@@ -162,6 +162,7 @@ Current session (v0.1.0): **W9.3 ✅** Bicep fully wired (grammar + `.scm` + LAN
 - [x] **W8.2** **Perf/size budgets** — footprint 357→154 MB (−57%); speed prior art 114s→~4s; footprint+speed regression gates in wicked-estate-bench; traversals via recursive CTE. **AC:** ✅ budgets met on benchmark repos.
 - [x] **W8.3** **Language coverage matrix** — `docs/language-coverage-matrix.md` auto-generated from `languages.toml` + `LANG_TABLE` by `scripts/gen-coverage-matrix.py`. **AC:** ✅ matrix shows extraction quality + per-language capability.
 - [x] **W8.4** **Docs** — `docs/getting-started.md` covers all 17 subcommands + flags; `docs/extractor-sdk.md` (this task); ADR-007 (W3.2 decision). **AC:** ✅ a new user can index + query from `getting-started.md` alone.
+- [ ] **W8.5** **RetrievalTool→CLI bridge: work deferred until TS-S2 lands** — the bridge (`crates/wicked-estate/src/tool_bridge.rs`) shipped with `traverse` as its only command. It skips `Lineage` because TS-S2 is rewriting that tool's envelope. When TS-S2 merges: (a) `Lineage` emits `clamp_note` for `depth`, like every other clamping RetrievalTool; (b) `lineage` becomes a second `COMMANDS` row (#195); (c) `traverse` gets a CLI test for a value-flow node passed by exact `SymbolId`, which needs TS-S2B's identity fixtures. **Deadline:** the first PR after TS-S2 merges. **AC:** an over-ceiling `Lineage` depth emits `CLAMPED:`; `wicked-estate lineage` passes the bridge's CLI tests; the value-flow-by-id case is green.
 
 ---
 

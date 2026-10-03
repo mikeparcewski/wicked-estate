@@ -34,10 +34,14 @@
 //!   wicked-estate dead-code              [--json] [--db ...]
 //!   wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json] [--semantics] [--db ...]
 //!   wicked-estate graph-view [--limit N] [--include-tests] [--include-trivial] [--ignore <pat>] [--db ...]
+//!
+//! RetrievalTool-backed commands (see `tool_bridge::COMMANDS`; strict flags, `--help` per command):
+//!   wicked-estate traverse <symbol>      [--depth N] [--direction D] [--edge-kinds a,b] [--max-nodes N] [--json] [--db ...]
 
 mod emit;
 mod scip_auto;
 mod source_bundle;
+mod tool_bridge;
 mod watch_coalesce;
 
 use anyhow::{Context, Result};
@@ -68,8 +72,16 @@ fn ensure_db_dir(db: &str) -> Result<()> {
 }
 
 /// W7.4: emit staleness notice if git reports commits since the db was written.
-/// Reads the indexed root from store meta; resolves the db path for mtime.
 fn maybe_print_staleness(store: &dyn wicked_estate_store::GraphStoreMutExt, db: &str) {
+    for line in staleness_lines(store, db) {
+        println!("{line}");
+    }
+}
+
+/// The staleness notices for this db, one line each — empty when fresh or never indexed.
+/// Reads the indexed root from store meta; resolves the db path for mtime.
+fn staleness_lines(store: &dyn wicked_estate_store::GraphStoreMutExt, db: &str) -> Vec<String> {
+    let mut lines = Vec::new();
     // A multi-repo graph has one root per repo — check each, and name the label in the fix so the
     // operator re-indexes THAT repo and not whichever one happened to be indexed last.
     let repos = wicked_estate::repo_scope::registry(store);
@@ -77,28 +89,29 @@ fn maybe_print_staleness(store: &dyn wicked_estate_store::GraphStoreMutExt, db: 
         for rec in repos {
             if let Some(n) = wicked_estate::commits_behind(Path::new(&rec.root), db) {
                 if n > 0 {
-                    println!(
+                    lines.push(format!(
                         "STALENESS: {n} commit(s) in '{label}' since last index — run \
                          `wicked-estate index {root} --repo {label}` to refresh",
                         label = rec.label,
                         root = rec.root,
-                    );
+                    ));
                 }
             }
         }
-        return;
+        return lines;
     }
     let root_str = match store.meta_get_key("indexed_root") {
         Some(r) => r,
-        None => return, // never indexed yet
+        None => return lines, // never indexed yet
     };
     if let Some(n) = wicked_estate::commits_behind(Path::new(&root_str), db) {
         if n > 0 {
-            println!(
+            lines.push(format!(
                 "STALENESS: {n} commit(s) since last index — run `wicked-estate index {root_str}` to refresh"
-            );
+            ));
         }
     }
+    lines
 }
 
 /// Warn when the database was indexed under a different binary version or an older symbol-id
@@ -709,6 +722,30 @@ fn main() -> Result<()> {
     // `--db` flag below still overrides whatever resolves here.
     let mut db =
         wicked_estate_store::resolve_store_spec(None, ".wicked-estate/graph.db").map_err(to_any)?;
+    let otel_sink = wicked_estate_observe::init_sink_from_env();
+    let otel_resource = wicked_estate_core::observability::Resource::service(
+        "wicked_estate",
+        env!("CARGO_PKG_VERSION"),
+    );
+    let otel_scope = wicked_estate_core::observability::InstrumentationScope::versioned(
+        "wicked_estate",
+        env!("CARGO_PKG_VERSION"),
+    );
+    // RetrievalTool-backed commands parse their own argv, strictly, so they bypass the shared
+    // parser below — which would swallow flags other commands own (see `tool_bridge`).
+    if let Some(bridged) = tool_bridge::lookup(cmd) {
+        return tool_bridge::run(bridged, rest, db, &|name, attrs, start, end| {
+            emit_cli_span(
+                &otel_sink,
+                &otel_resource,
+                &otel_scope,
+                name,
+                attrs,
+                start,
+                end,
+            )
+        });
+    }
     let mut db_paths: Vec<String> = Vec::new();
     let mut scip_file: Option<String> = None;
     let mut since: u64 = 0;
@@ -1013,16 +1050,6 @@ fn main() -> Result<()> {
     }
     // Re-dispatch to the usage arm. `help` matches no command, so it falls through to `_`.
     let cmd = if help_requested { "help" } else { cmd };
-
-    let otel_sink = wicked_estate_observe::init_sink_from_env();
-    let otel_resource = wicked_estate_core::observability::Resource::service(
-        "wicked_estate",
-        env!("CARGO_PKG_VERSION"),
-    );
-    let otel_scope = wicked_estate_core::observability::InstrumentationScope::versioned(
-        "wicked_estate",
-        env!("CARGO_PKG_VERSION"),
-    );
 
     match cmd {
         "index" => {
@@ -3728,6 +3755,15 @@ fn main() -> Result<()> {
             println!(
                 "    <from>/<to>: exact symbol name or SymbolId. --max-depth 1..=16 (default 12)."
             );
+            // Generated from the bridge table, so a bridged command cannot ship undocumented.
+            for c in tool_bridge::COMMANDS {
+                println!("  wicked-estate {}", c.usage_line());
+                println!(
+                    "    MCP {} over the CLI; `wicked-estate {} --help` for flags.",
+                    c.tool.name(),
+                    c.name
+                );
+            }
             println!(
                 "  wicked-estate rank                  [--db ...]  # most important symbols (PageRank)"
             );
