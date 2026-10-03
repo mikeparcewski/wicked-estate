@@ -50,9 +50,14 @@ fn opt_u64(v: &Value, key: &str) -> Option<u64> {
     v.get(key)?.as_u64()
 }
 
+/// The R5 staleness line every tool emits: a placeholder this layer cannot fill (it has no git
+/// root or db path), addressed to the transport. Public so a transport that computes the real
+/// commits-behind (the CLI bridge) can replace it rather than print both.
+pub const STALENESS_PLACEHOLDER: &str = "STALENESS: commits_behind not available at this layer — embed git rev-list delta in the MCP response";
+
 /// Emit a staleness note reminding the MCP layer to embed `commits_behind`.
 pub(crate) fn staleness_note() -> String {
-    "STALENESS: commits_behind not available at this layer — embed git rev-list delta in the MCP response".to_string()
+    STALENESS_PLACEHOLDER.to_string()
 }
 
 // Source inlining is **unbounded by default**: when a caller opts into `include_source`, it gets

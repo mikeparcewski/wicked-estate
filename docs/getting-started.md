@@ -177,23 +177,27 @@ The same query is available to agents as the MCP `Path` tool (§10).
 ## 5. Rank — most important symbols (PageRank)
 
 ```bash
-wicked-estate rank [--db ...]
+wicked-estate rank [--limit N] [--seeds s1,s2] [--json] [--db ...]     # alias: hotspots
 ```
 
-Returns the top 25 symbols by PageRank over the call/import graph. Use this to understand which
-symbols are most load-bearing in a repo.
+Returns the top symbols (default 20, at most 200) by PageRank over the call/import graph,
+computed live, so the ranking reflects `scip` ingests and injected cross-repo edges. Use it to
+find which symbols are most load-bearing in a repo. `--seeds` personalizes the ranking toward
+the given symbols (names or SymbolIds): rank a blast radius, not the whole repo. `--json` emits
+the MCP `RankHotspots` document on stdout, with diagnostics on stderr. Unknown flags and
+unknown seeds are errors.
 
 ```
 $ wicked-estate rank --db /tmp/demo.db
-top 8 symbols by PageRank:
-  0.2163  Function bark (example.py:9)
-  0.1411  Class Dog (example.py:5)
-  0.1411  Function speak (example.py:6)
-  0.1235  Import example (main.py:1)
-  0.1235  Function main (main.py:3)
-  0.0848  File example.py (example.py:1)
-  0.0848  File main.py (main.py:1)
-  0.0848  Class Animal (example.py:1)
+top 6 symbols by PageRank:
+  0.1856  function bark (example.py:9)
+  0.1196  class Dog (example.py:5)
+  0.1196  function speak (example.py:6)
+  0.0840  class Animal (example.py:1)
+  0.0840  function sound (example.py:2)
+  0.0840  function main (main.py:3)
+
+STALENESS: 0 commits since last index
 ```
 
 ---

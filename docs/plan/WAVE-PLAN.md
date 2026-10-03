@@ -192,7 +192,7 @@ Current session (v0.1.0): **W9.3 ✅** Bicep fully wired (grammar + `.scm` + LAN
 
 - [x] **W11.1** **Content store** — source text content-addressed by blob-SHA; `symbol_source` / `FetchContent` MCP tool; FTS5 over content. **AC:** ✅ `FetchContent` returns symbol source; full-text search works.
 - [x] **W11.2** **Versioned query cache** — `versioned cache-port` pattern: `(query_hash, graph_version)` cache + producer-version rejection + invalidation. **AC:** ✅ cached blast-radius reused until reindex, then busted.
-- [x] **W11.3** **Materialized analytics** — PageRank precomputed at index time (`wicked-estate-rank` power-iter); hotspots served from cache; `wicked-estate rank` returns from stored scores. **AC:** ✅ `rank`/hotspots served from cache.
+- [x] **W11.3** **Materialized analytics** — PageRank precomputed at index time (`wicked-estate-rank` power-iter); hotspots served from cache; `wicked-estate rank` returns from stored scores. **AC:** ✅ `rank`/hotspots served from cache. **Amended (#193):** the CLI `rank`/`hotspots` moved onto the RetrievalTool bridge and now computes live, like MCP `RankHotspots`. The cache was written only by `index` and went stale after `scip` ingest and overlay edges. Measured on a 10K-node debug build: 0.06 s cached vs ~1 s live, same top 25. `graph-view` and the bench still read the cache.
 
 ## Wave 12 — CROSS-GRAPH / MULTI-REPO BRAIN  🟡 SEMI · Deps: W11 · designed in `ADR-005`
 

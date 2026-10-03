@@ -1,10 +1,11 @@
-//! `wicked-estate traverse` — the first RetrievalTool→CLI bridge command — through the real
+//! The RetrievalTool→CLI bridge commands (`traverse`, `rank`/`hotspots`) through the real
 //! binary.
 //!
-//! These test the BRIDGE: strict flags, operand resolution, the stdout/stderr split, exactly
-//! one document under `--json`, clamp reporting. They deliberately do not pin
-//! `TraverseGraph`'s payload shape — that envelope is owned by the tool and is being reworked
-//! by the TypeScript-semantics wave; a snapshot here would break under it for no bridge reason.
+//! These test the BRIDGE: strict flags, operand and `--seeds` resolution, aliases, the
+//! stdout/stderr split, exactly one document under `--json`, clamp reporting. They
+//! deliberately do not pin `TraverseGraph`'s payload shape — that envelope is owned by the tool
+//! and is being reworked by the TypeScript-semantics wave; a snapshot here would break under it
+//! for no bridge reason. `rank` reads only `RankHotspots`' row array, outside that rework.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,18 @@ impl Drop for Scratch {
 
 /// A git repo with a Rust call chain `f0 → f1 → … → f{depth}`, indexed into `<dir>/graph.db`.
 fn indexed_chain(tag: &str, depth: usize) -> Scratch {
+    let scratch = chain_repo(tag, depth);
+    index(&scratch);
+    scratch
+}
+
+fn index(dir: &Path) {
+    let out = run(dir, &["index", ".", "--db", "graph.db"]);
+    assert!(out.status.success(), "index failed: {}", stderr(&out));
+}
+
+/// [`indexed_chain`] without the index: the committed git repo alone.
+fn chain_repo(tag: &str, depth: usize) -> Scratch {
     let d = std::env::temp_dir().join(format!("ci_travcli_{tag}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
     let scratch = Scratch(d);
@@ -48,8 +61,6 @@ fn indexed_chain(tag: &str, depth: usize) -> Scratch {
     git(&scratch, &["init", "-q", "."]);
     git(&scratch, &["add", "-A"]);
     git(&scratch, &["commit", "-qm", "fx"]);
-    let out = run(&scratch, &["index", ".", "--db", "graph.db"]);
-    assert!(out.status.success(), "index failed: {}", stderr(&out));
     scratch
 }
 
@@ -247,4 +258,151 @@ fn help_comes_from_the_tool_and_the_banner_lists_the_command() {
         banner.contains("wicked-estate traverse <symbol>"),
         "{banner}"
     );
+}
+
+fn rank(dir: &Path, args: &[&str]) -> Output {
+    let mut full = vec!["rank"];
+    full.extend_from_slice(args);
+    full.extend_from_slice(&["--db", "graph.db"]);
+    run(dir, &full)
+}
+
+fn hotspot_rows(o: &Output) -> Vec<serde_json::Value> {
+    documents(o).remove(0)["hotspots"]
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| panic!("no hotspots array: {}", stdout(o)))
+}
+
+/// wicked-estate#193: `--json` and `--limit` were accepted and silently dropped; the count was
+/// fixed at 25 and the output was human text either way.
+#[test]
+fn rank_honours_json_and_limit() {
+    let fx = indexed_chain("rank_limit", 6);
+    let out = rank(&fx, &["--json", "--limit", "3"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(documents(&out).len(), 1);
+    assert_eq!(hotspot_rows(&out).len(), 3);
+    assert!(stderr(&out).contains("STALENESS"), "{}", stderr(&out));
+
+    let out = rank(&fx, &["--limit", "999", "--json"]);
+    assert!(
+        stderr(&out).contains("CLAMPED: limit=999"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn hotspots_is_the_same_command_as_rank() {
+    let fx = indexed_chain("rank_alias", 4);
+    let a = rank(&fx, &["--json"]);
+    let mut full = vec!["hotspots", "--json", "--db", "graph.db"];
+    let b = run(&fx, &full);
+    assert!(a.status.success() && b.status.success());
+    assert_eq!(a.stdout, b.stdout);
+    full.push("--bogus");
+    assert!(!run(&fx, &full).status.success(), "the alias is strict too");
+}
+
+/// `--seeds` personalizes the ranking — and a seed that resolves to nothing is an error, not
+/// a silent fall-back to the global ranking.
+#[test]
+fn rank_seeds_resolve_and_personalize() {
+    let fx = indexed_chain("rank_seeds", 6);
+    let global = hotspot_rows(&rank(&fx, &["--json"]));
+    let seeded = rank(&fx, &["--json", "--seeds", "f0"]);
+    assert!(seeded.status.success(), "{}", stderr(&seeded));
+    assert_ne!(
+        global,
+        hotspot_rows(&seeded),
+        "seeds must change the ranking"
+    );
+
+    let out = rank(&fx, &["--seeds", "f0,no_such_fn"]);
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    assert!(
+        stderr(&out).contains("no symbol named \"no_such_fn\""),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn rank_takes_no_operand_and_keeps_its_text_listing() {
+    let fx = indexed_chain("rank_text", 3);
+    let out = rank(&fx, &["f0"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("takes no positional argument"),
+        "{}",
+        stderr(&out)
+    );
+
+    let out = rank(&fx, &["--limit", "2"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    // Every row renders kind, name and file:line — a renamed tool key would print `? ? (?:null)`.
+    let rows: Vec<&str> = text.lines().skip(1).take(2).collect();
+    for row in &rows {
+        assert!(
+            row.contains(" function f") && row.contains("(src/a.rs:"),
+            "row lost a field: {row:?}\n{text}"
+        );
+    }
+    assert!(text.starts_with("top 2 symbols by PageRank:\n"), "{text}");
+}
+
+/// R5 through the bridge: exactly one freshness statement, never the tool's transport-addressed
+/// placeholder — "0 commits" on a current git index, "unknown" without git history.
+#[test]
+fn staleness_is_stated_once_and_the_placeholder_never_leaks() {
+    const PLACEHOLDER: &str = "commits_behind not available at this layer";
+    // `commits_behind` counts commits at or after the db mtime's whole second, so a commit in
+    // the same second as the index counts as one behind. Index in a LATER second so "current"
+    // is exact regardless of timing.
+    let fx = chain_repo("fresh", 2);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    index(&fx);
+    let out = rank(&fx, &["--json"]);
+    let err = stderr(&out);
+    assert!(
+        err.contains("STALENESS: 0 commits since last index"),
+        "{err}"
+    );
+    assert!(!err.contains(PLACEHOLDER), "{err}");
+    assert_eq!(err.matches("STALENESS").count(), 1, "{err}");
+
+    // No git history: freshness is unknown, and says so.
+    fs::remove_dir_all(fx.join(".git")).unwrap();
+    let out = traverse(&fx, &["f0"]);
+    let text = stdout(&out);
+    assert!(text.contains("STALENESS: unknown"), "{text}");
+    assert!(!text.contains(PLACEHOLDER), "{text}");
+}
+
+/// A multi-repo graph where one repo has no git history: the bridge must NOT claim the graph is
+/// current (R3 — partial coverage presented as complete). It names the unchecked repo instead.
+#[test]
+fn mixed_git_and_non_git_repos_are_not_reported_current() {
+    let fx = chain_repo("mixed", 2);
+    // Outside any git work tree — inside `fx` git would answer for it.
+    let plain = Scratch(
+        std::env::temp_dir().join(format!("ci_travcli_mixed_plain_{}", std::process::id())),
+    );
+    let _ = fs::remove_dir_all(&*plain);
+    fs::create_dir_all(&*plain).unwrap();
+    fs::write(plain.join("b.rs"), "fn g() {}\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let plain_path = plain.to_string_lossy().into_owned();
+    for (path, label) in [("src", "chain"), (plain_path.as_str(), "plain")] {
+        let out = run(&fx, &["index", path, "--repo", label, "--db", "graph.db"]);
+        assert!(out.status.success(), "index {label}: {}", stderr(&out));
+    }
+    let out = rank(&fx, &["--json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(!err.contains("0 commits since last index"), "{err}");
+    assert!(err.contains("STALENESS: unknown for repo 'plain'"), "{err}");
 }

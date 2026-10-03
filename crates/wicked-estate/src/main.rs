@@ -11,7 +11,6 @@
 //!   wicked-estate query <name>           [--db ...]
 //!   wicked-estate blast-radius <name>    [--depth N] [--json] [--db ...]
 //!   wicked-estate stats                  [--db ...]
-//!   wicked-estate rank                   [--db ...]
 //!   wicked-estate source [<name>]        [--cluster <id>] [--file <path>] [--symbols id1,id2,...]
 //!                                     [--json] [--max-total-chars <N>] [--max-node-chars <N>]
 //!                                     [--signatures-only] [--db ...]
@@ -37,6 +36,7 @@
 //!
 //! RetrievalTool-backed commands (see `tool_bridge::COMMANDS`; strict flags, `--help` per command):
 //!   wicked-estate traverse <symbol>      [--depth N] [--direction D] [--edge-kinds a,b] [--max-nodes N] [--json] [--db ...]
+//!   wicked-estate rank                   [--limit N] [--seeds s1,s2] [--json] [--db ...]   (alias: hotspots)
 
 mod emit;
 mod scip_auto;
@@ -73,45 +73,90 @@ fn ensure_db_dir(db: &str) -> Result<()> {
 
 /// W7.4: emit staleness notice if git reports commits since the db was written.
 fn maybe_print_staleness(store: &dyn wicked_estate_store::GraphStoreMutExt, db: &str) {
-    for line in staleness_lines(store, db) {
+    for line in staleness_report(store, db).stale {
         println!("{line}");
     }
 }
 
-/// The staleness notices for this db, one line each — empty when fresh or never indexed.
-/// Reads the indexed root from store meta; resolves the db path for mtime.
-fn staleness_lines(store: &dyn wicked_estate_store::GraphStoreMutExt, db: &str) -> Vec<String> {
-    let mut lines = Vec::new();
+/// What can be said about a db's freshness, per indexed root.
+#[derive(Debug, Default)]
+struct StalenessReport {
+    /// One line per root with commits since its last index.
+    stale: Vec<String>,
+    /// Roots whose freshness could NOT be determined (no git history at the root, a db spec
+    /// with no file mtime, …), named by repo label or root path. The cause is not guessed.
+    unknown: Vec<String>,
+    /// Roots whose commits-behind count was read, stale or not.
+    checked: usize,
+}
+
+impl StalenessReport {
+    /// Exactly the freshness statements a caller should see (agent rule R5): a positive
+    /// "current" claim only when EVERY indexed root was checked and none is behind — partial
+    /// coverage presented as complete is the R3 failure.
+    fn statements(&self, db: &str) -> Vec<String> {
+        let mut out = self.stale.clone();
+        for what in &self.unknown {
+            out.push(format!(
+                "STALENESS: unknown for {what} — freshness could not be determined"
+            ));
+        }
+        if self.checked == 0 && self.unknown.is_empty() {
+            out.push(format!(
+                "STALENESS: unknown — {db} records no indexed root to check"
+            ));
+        } else if out.is_empty() {
+            out.push("STALENESS: 0 commits since last index".to_string());
+        }
+        out
+    }
+}
+
+/// Freshness of every indexed root in this db. Reads the indexed root(s) from store meta and
+/// the db path's mtime.
+fn staleness_report(
+    store: &dyn wicked_estate_store::GraphStoreMutExt,
+    db: &str,
+) -> StalenessReport {
+    let mut report = StalenessReport::default();
     // A multi-repo graph has one root per repo — check each, and name the label in the fix so the
     // operator re-indexes THAT repo and not whichever one happened to be indexed last.
     let repos = wicked_estate::repo_scope::registry(store);
     if !repos.is_empty() {
         for rec in repos {
-            if let Some(n) = wicked_estate::commits_behind(Path::new(&rec.root), db) {
-                if n > 0 {
-                    lines.push(format!(
-                        "STALENESS: {n} commit(s) in '{label}' since last index — run \
-                         `wicked-estate index {root} --repo {label}` to refresh",
-                        label = rec.label,
-                        root = rec.root,
-                    ));
+            match wicked_estate::commits_behind(Path::new(&rec.root), db) {
+                Some(n) => {
+                    report.checked += 1;
+                    if n > 0 {
+                        report.stale.push(format!(
+                            "STALENESS: {n} commit(s) in '{label}' since last index — run \
+                             `wicked-estate index {root} --repo {label}` to refresh",
+                            label = rec.label,
+                            root = rec.root,
+                        ));
+                    }
                 }
+                None => report.unknown.push(format!("repo '{}'", rec.label)),
             }
         }
-        return lines;
+        return report;
     }
-    let root_str = match store.meta_get_key("indexed_root") {
-        Some(r) => r,
-        None => return lines, // never indexed yet
+    // Never indexed: no root to check (`statements` says so).
+    let Some(root_str) = store.meta_get_key("indexed_root") else {
+        return report;
     };
-    if let Some(n) = wicked_estate::commits_behind(Path::new(&root_str), db) {
-        if n > 0 {
-            lines.push(format!(
-                "STALENESS: {n} commit(s) since last index — run `wicked-estate index {root_str}` to refresh"
-            ));
+    match wicked_estate::commits_behind(Path::new(&root_str), db) {
+        Some(n) => {
+            report.checked += 1;
+            if n > 0 {
+                report.stale.push(format!(
+                    "STALENESS: {n} commit(s) since last index — run `wicked-estate index {root_str}` to refresh"
+                ));
+            }
         }
+        None => report.unknown.push(root_str),
     }
-    lines
+    report
 }
 
 /// Warn when the database was indexed under a different binary version or an older symbol-id
@@ -1672,34 +1717,6 @@ fn main() -> Result<()> {
                 }
                 println!();
             }
-        }
-        "rank" | "hotspots" => {
-            let store = open_store_ext(&db).map_err(to_any)?;
-            let t_cmd_start = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64;
-            let top = wicked_estate::important_symbols(store.as_ref(), 25).map_err(to_any)?;
-            let t_cmd_end = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64;
-            println!("top {} symbols by PageRank:", top.len());
-            for (n, score) in &top {
-                println!("  {score:.4}  {:?} {} ({})", n.kind, n.name, loc(n));
-            }
-            emit_cli_span(
-                &otel_sink,
-                &otel_resource,
-                &otel_scope,
-                "wicked_estate.rank",
-                vec![wicked_estate_core::observability::KeyValue::int(
-                    "symbol.count",
-                    top.len() as i64,
-                )],
-                t_cmd_start,
-                t_cmd_end,
-            );
         }
         // Graph view for UI consumption — top-N code symbols by PageRank + inter-symbol edges.
         //
@@ -3758,15 +3775,17 @@ fn main() -> Result<()> {
             // Generated from the bridge table, so a bridged command cannot ship undocumented.
             for c in tool_bridge::COMMANDS {
                 println!("  wicked-estate {}", c.usage_line());
+                let also = if c.aliases.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (alias: {})", c.aliases.join(", "))
+                };
                 println!(
-                    "    MCP {} over the CLI; `wicked-estate {} --help` for flags.",
+                    "    MCP {} over the CLI{also}; `wicked-estate {} --help` for flags.",
                     c.tool.name(),
                     c.name
                 );
             }
-            println!(
-                "  wicked-estate rank                  [--db ...]  # most important symbols (PageRank)"
-            );
             println!(
                 "  wicked-estate stats                 [--db ...]  # includes git provenance if indexed"
             );

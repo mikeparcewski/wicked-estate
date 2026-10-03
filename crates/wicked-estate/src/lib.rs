@@ -1718,8 +1718,9 @@ pub fn index_path_as(
         }
     }
 
-    // W11.3: populate the pagerank.top cache so subsequent `rank`/`important_symbols` calls
-    // can serve from cache instead of recomputing. Best-effort: failure is non-fatal.
+    // W11.3: populate the pagerank.top cache so `important_symbols` (graph-view, the bench) can
+    // serve from cache instead of recomputing. CLI `rank` computes live since #193 — this cache
+    // is not refreshed by `scip` or overlay edges. Best-effort: failure is non-fatal.
     const PAGERANK_CACHE_N: usize = 100;
     let pr_result = {
         let reader: &dyn GraphRead = &*store;
