@@ -194,12 +194,15 @@ claim about runtime behaviour.
   bare name instead of `--symbol` fails non-zero with the usage text.
 - The flag set is closed: a flag another command owns (`--file`, `--type`, `--top`, …), a
   repeated flag, or a value flag whose value is missing or is itself a flag (`--db --json`) fails
-  before any store is opened. Two flags are still handled by the CLI-wide parser first: `-h` /
-  `--help` anywhere (even as a flag's value) prints the general help with exit 0, and a malformed
-  `--repo` fails non-zero with that parser's own message rather than the `lineage` usage.
+  before any store is opened. Two flags are still handled by the CLI-wide parser first: a
+  standalone `-h` / `--help`, or one given as the value of `--depth` or `--relation`, prints the
+  general help with exit 0 (after `--symbol` or `--db` it is that flag's value: `--help` is
+  refused as a flag, `-h` is taken literally), and a malformed `--repo` fails non-zero with that
+  parser's own message rather than the `lineage` usage.
 - An exact id that is not in the graph is **not** an error: it returns the tool's empty result
-  with a diagnostic, exit 0. A `--db` path that does not exist **is** an error — `lineage` never
-  creates a graph, so a typo cannot read as "absent id".
+  with a diagnostic, exit 0. A `--db` file that does not exist (a bare path or `sqlite://<path>`),
+  or is empty, **is** an error — `lineage` never creates a graph, so a typo cannot read as
+  "absent id".
 
 Text mode prints each node row and, for `flows_to`, each hop with its `flow_semantics`,
 `flow_evidence`, confidence, resolver, rule ids and site, then names any depth, node-cap or

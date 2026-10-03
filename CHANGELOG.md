@@ -13,7 +13,7 @@
   tool's empty result, exit 0; a nonexistent `--db` path fails instead of creating an empty graph.
   `--json` prints the tool's `RetrievalResult` once as `{"content", "diagnostics"}` (plus the MCP
   server's `STALENESS: commits_behind=N` line when behind), equal to the parsed MCP response for
-  the same db and arguments. The MCP server's startup staleness computation moved into
+  the same db state and arguments. The MCP server's startup staleness computation moved into
   `wicked_estate::graph_commits_behind` / `staleness_diagnostic` so both frontends share it.
   Additive: no existing command's output changes, and CLI `resolve` visibility is untouched.
 
