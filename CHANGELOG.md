@@ -2,8 +2,10 @@
 
 ## [Unreleased]
 
-Implies a minor bump (**0.19.0**), not a patch. The Rust API change is additive, but published
-edge behaviour changes on purpose. See **Changed (breaking)**.
+## [0.19.0] — 2026-10-03
+
+Minor bump, not a patch. The Rust API change is additive, but published edge behaviour changes on
+purpose. See **Changed (breaking)**.
 
 ### Changed (breaking)
 - **Angular convention `flows_to` edges are now `Heuristic`/0.5, not `Parsed`/1.0 (#231).**
