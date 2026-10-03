@@ -82,3 +82,49 @@ fn depth_above_the_ceiling_is_refused_and_the_ceiling_itself_is_accepted() {
     }
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// wicked-estate#194: `blast-radius --json` carries `confidence: {min, avg, edge_count}` over the
+/// DEPENDENCY edges inside the answer. Here that is exactly two: `g → f` (calls) and
+/// `b.ts → a.ts` (imports) — both endpoints of each are returned rows. The two parse-certain
+/// 1.0 `contains` edges (`a.ts → f`, `b.ts → g`) are structure, not dependency: counting them
+/// would make it 4 and lift the average toward "verified".
+#[test]
+fn json_confidence_envelope_counts_dependency_edges_only() {
+    let dir = scratch("conf");
+    fs::write(
+        dir.join("src/a.ts"),
+        "export function f(): number { return 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/b.ts"),
+        "import { f } from './a';\nexport function g(): number { return f(); }\n",
+    )
+    .unwrap();
+    let db = dir.join("g.db");
+    let db = db.to_str().unwrap();
+    let src = dir.join("src");
+    let out = run(&dir, &["index", src.to_str().unwrap(), "--db", db]);
+    assert!(out.status.success(), "index failed: {out:?}");
+
+    let out = run(&dir, &["blast-radius", "f", "--json", "--db", db]);
+    assert!(out.status.success(), "{out:?}");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let conf = &doc["confidence"];
+    assert_eq!(conf["edge_count"], serde_json::json!(2), "{doc}");
+
+    let out = run(&dir, &["path", "g", "f", "--json", "--db", db]);
+    let path: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let hop_conf = &path["hops"][0]["confidence"];
+    // The weakest edge in the answer is the name-resolved call, as `path` reports it.
+    assert_eq!(&conf["min"], hop_conf, "{doc}");
+    // The #190 honesty keys survive the new key.
+    for key in [
+        "searched_depth",
+        "depth_horizon_reached",
+        "node_cap_reached",
+    ] {
+        assert!(doc.get(key).is_some(), "{key} lost: {doc}");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}

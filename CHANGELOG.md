@@ -57,6 +57,24 @@ purpose. See **Changed (breaking)**.
   them with a wildcard arm and build a fact with `FlowFact::new`.
 
 ### Changed
+- **CLI read paths now carry edge evidence (#194).** Both changes are additive; no existing key
+  changed.
+  - **`graph-view` edges.** Rows were `{src, tgt}`. They now also carry `kind`, `confidence`,
+    `provenance` and `resolved_by`, with the same spelling and values as `path --json`. Rows
+    are keyed by `(src, tgt, kind)`, so `calls` and `imports` edges between one pair are no
+    longer merged into a single row with an arbitrary kind. On this repo's own index (17,184
+    edges) no such pair exists, and row counts at `--limit` 80, 500 and 2000 were unchanged.
+    Other languages were not measured.
+  - **`blast-radius`.** `--json` gains `confidence: {min, avg, edge_count}`, the MCP
+    `BlastRadius` shape. It is computed over the edges that admitted the returned rows: the
+    source is a row and the target is a node the walk reached. Structural `contains`/`defines`
+    edges are excluded, so a File row admitted only by containment adds no evidence. MCP
+    `BlastRadius` averages over every edge it walked, `contains` included, so on the same graph
+    its numbers can be higher. Text output gains an `evidence:` line.
+  - **The 25K-char `--json` bound is measured, not assumed.** The envelope is serialized
+    first, and the rows get the space that is left. The old fixed 200-char allowance broke on
+    a long target name. The bound holds while the envelope itself fits; a `<name>` near 25K
+    chars still overflows.
 - **`flows_to` says what it claims, and stops overstating it (TS-S1).** The relation tag, the
   default `Lineage` behaviour and the stored direction are unchanged. What changed is its
   metadata and two of its confidences.
