@@ -128,3 +128,52 @@ fn json_confidence_envelope_counts_dependency_edges_only() {
     }
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// wicked-estate#194: `cross-graph` prints one `evidence [<db>]:` line PER REPO — never a pooled
+/// figure, since each repo is resolved by its own tiers.
+#[test]
+fn cross_graph_prints_evidence_per_repo() {
+    let dir = scratch("xgraph");
+    let mut dbs = Vec::new();
+    for repo in ["one", "two"] {
+        let src = dir.join(repo);
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("a.ts"),
+            "export function f(): number { return 1; }\n",
+        )
+        .unwrap();
+        fs::write(
+            src.join("b.ts"),
+            "import { f } from './a';\nexport function g(): number { return f(); }\n",
+        )
+        .unwrap();
+        let db = dir
+            .join(format!("{repo}.db"))
+            .to_string_lossy()
+            .into_owned();
+        let out = run(&dir, &["index", src.to_str().unwrap(), "--db", &db]);
+        assert!(out.status.success(), "index {repo} failed: {out:?}");
+        dbs.push(db);
+    }
+
+    let out = run(
+        &dir,
+        &["cross-graph", "f", "--db", &dbs[0], "--db", &dbs[1]],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.starts_with("evidence ["))
+        .collect();
+    assert_eq!(lines.len(), 2, "one evidence line per repo:\n{stdout}");
+    for (line, db) in lines.iter().zip(&dbs) {
+        assert!(line.contains(db.as_str()), "{line} should name {db}");
+        assert!(
+            line.contains("dependency edge(s); confidence min"),
+            "{line}"
+        );
+    }
+    let _ = fs::remove_dir_all(&dir);
+}

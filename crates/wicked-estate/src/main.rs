@@ -1545,14 +1545,7 @@ fn main() -> Result<()> {
                 );
                 // How much to believe the rows above (wicked-estate#194), on the line after the
                 // completeness line a human already reads.
-                let c = br.confidence;
-                match (c.min, c.avg) {
-                    (Some(min), Some(avg)) => println!(
-                        "evidence: {} dependency edge(s); confidence min {min:.2}, avg {avg:.2}",
-                        c.edge_count
-                    ),
-                    _ => println!("evidence: no dependency edges inside the answer"),
-                }
+                println!("evidence: {}", evidence_text(&br.confidence));
             }
             emit_cli_span(
                 &otel_sink,
@@ -2236,8 +2229,9 @@ fn main() -> Result<()> {
 
             // ── Cross-repo blast-radius ───────────────────────────────────────
             println!("\n=== cross-graph blast-radius: '{}' dependents ===", name);
-            let (br_results, br_errors) =
+            let fed =
                 wicked_estate::cross_graph_blast_radius(&db_paths, name, 12).map_err(to_any)?;
+            let (br_results, br_errors) = (&fed.dependents, &fed.errors);
 
             if br_results.is_empty() {
                 println!("no resolved dependents for '{name}' across the specified databases");
@@ -2247,7 +2241,7 @@ fn main() -> Result<()> {
                     br_results.len()
                 );
                 let mut current_repo = "";
-                for (repo, node) in &br_results {
+                for (repo, node) in br_results {
                     if repo.as_str() != current_repo {
                         println!("\n  [repo: {repo}]");
                         current_repo = repo.as_str();
@@ -2255,8 +2249,15 @@ fn main() -> Result<()> {
                     println!("    {:?} {} ({})", node.kind, node.name, loc(node));
                 }
             }
+            // Per repo, never pooled (wicked-estate#194): each repo has its own resolution tiers.
+            if !fed.confidence.is_empty() {
+                println!();
+                for (repo, c) in &fed.confidence {
+                    println!("evidence [{repo}]: {}", evidence_text(c));
+                }
+            }
 
-            for err in &br_errors {
+            for err in br_errors {
                 eprintln!("warning: {err}");
             }
 
@@ -3976,6 +3977,18 @@ mod graph_view_edge_rows_tests {
     fn a_repeated_triple_is_one_row() {
         let e = edge(EdgeKind::Calls, ResolutionTier::Tags);
         assert_eq!(graph_view_edge_rows(&[e.clone(), e]).len(), 1);
+    }
+}
+
+/// The human `evidence:` text for a confidence envelope (wicked-estate#194), shared by
+/// `blast-radius` and `cross-graph` so the two cannot word it differently.
+fn evidence_text(c: &wicked_estate::EdgeConfidence) -> String {
+    match (c.min, c.avg) {
+        (Some(min), Some(avg)) => format!(
+            "{} dependency edge(s); confidence min {min:.2}, avg {avg:.2}",
+            c.edge_count
+        ),
+        _ => "no dependency edges inside the answer".to_string(),
     }
 }
 
