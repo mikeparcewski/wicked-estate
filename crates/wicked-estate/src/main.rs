@@ -4371,7 +4371,10 @@ fn parse_lineage_args(raw: &[String]) -> Result<LineageArgs> {
             }
         };
         match flag {
-            "--json" if inline.is_none() => json = true,
+            "--json" if inline.is_none() => {
+                once(json, "--json")?;
+                json = true;
+            }
             "--symbol" => {
                 once(symbol.is_some(), "--symbol")?;
                 symbol = Some(value("--symbol")?);
@@ -4914,6 +4917,10 @@ mod lineage_cli_tests {
             (
                 &["--symbol", "s", "--json=1"][..],
                 "unknown flag \"--json=1\"",
+            ),
+            (
+                &["--symbol", "s", "--json", "--json"][..],
+                "--json given more than once",
             ),
             (
                 &["--symbol", "s", "--file", "a.ts"][..],
