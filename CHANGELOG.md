@@ -34,7 +34,10 @@ purpose. See **Changed (breaking)**.
   mistyped flag, or a value outside a closed set (`--direction sideways`, `--edge-kinds cals`),
   exits non-zero instead of being ignored (#197/#206 class). `--json` writes the MCP `content`
   document unchanged as exactly one JSON document on stdout. Diagnostics go to stderr, including
-  the real commits-behind `STALENESS:` line (#198 for this surface).
+  the real commits-behind `STALENESS:` line (#198 for this surface). It replaces the tool's
+  transport-addressed placeholder and is always present. It says `0 commits` only when every
+  indexed root was checked. Otherwise it names each unchecked repo or root as `unknown`, and
+  never guesses a cause.
 - **Retrieval tools report a clamp.** `TraverseGraph`, `SearchEntity`, `Path`, `BlastRadius`,
   `RankHotspots`, `Communities`, `ContextPack` and `SemanticSearch` still clamp an
   over-ceiling `depth`/`max_nodes`/`limit`/`token_budget`/`k`. Each now also emits a `CLAMPED:`
@@ -43,6 +46,19 @@ purpose. See **Changed (breaking)**.
 - `wicked_estate_core::resolve_operand`: the name-or-id resolver `path` already used, now public.
 
 ### Changed (breaking)
+- **`rank` / `hotspots` now run on the RetrievalTool bridge (#193).** They expose MCP
+  `RankHotspots`: `--limit N` and `--seeds s1,s2` (names or SymbolIds, resolved like
+  `traverse`'s operand) are honoured, and `--json` emits the tool's document. Before, all three
+  were silently ignored. Changes a script may notice:
+  - The default count is the tool's 20, not 25.
+  - Kinds print in serde spelling (`function`, not `Function`).
+  - A freshness line follows the listing.
+  - The `wicked_estate.rank` span keeps its name, but its `symbol.count` attribute is
+    replaced by `tool.name` and `diagnostics.count`, as on every bridged command.
+  - Unknown flags, a positional argument, and unknown or ambiguous seeds now exit non-zero.
+  - The ranking is computed live, so it now reflects `scip` ingests and injected cross-repo
+    edges that the index-time `pagerank.top` cache missed. That costs latency: about 1 s
+    instead of 0.06 s on a 10K-node debug build, with the same top 25 (W11.3 amended).
 - **Angular convention `flows_to` edges are now `Heuristic`/0.5, not `Parsed`/1.0 (#231).**
   `@Input()` and `route.snapshot.paramMap.get(…)` edges carry
   `resolved_by = "tree-sitter-convention"`. A caller that filters on

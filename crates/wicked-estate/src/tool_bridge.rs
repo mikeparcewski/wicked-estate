@@ -37,6 +37,12 @@ pub enum FlagType {
     U64,
     /// Comma-separated → JSON array of strings; empty items are dropped.
     List,
+    /// Comma-separated symbol names or `SymbolId`s → JSON array of `SymbolId`s. Each item is
+    /// resolved like the operand (see [`OperandSpec`]); an unmatched or ambiguous item is an
+    /// error, because a tool that ignores an unknown id answers a different question.
+    /// Items are split on `,` and trimmed, so an item cannot contain a comma or edge whitespace
+    /// (native `SymbolId` disambiguators are arity/hash, so none do).
+    SymbolList,
     /// One of a closed set of strings. A tool that falls back to a default on an unrecognized
     /// value would otherwise answer a different question than the one asked.
     OneOf(&'static [&'static str]),
@@ -47,6 +53,7 @@ impl FlagType {
         match self {
             FlagType::U64 => "N".into(),
             FlagType::List => "a,b".into(),
+            FlagType::SymbolList => "s1,s2".into(),
             FlagType::OneOf(vals) => vals.join("|"),
         }
     }
@@ -79,12 +86,20 @@ pub struct OperandSpec {
     pub key: &'static str,
 }
 
+/// Renders a tool's `content` for humans, one line per entry. Optional per row: the generic
+/// indented rendering is the default.
+pub type Renderer = fn(&Value) -> Vec<String>;
+
 /// A RetrievalTool exposed as a subcommand.
 pub struct BridgedCommand {
     pub name: &'static str,
+    /// Other names for the same row, e.g. `hotspots` for `rank`.
+    pub aliases: &'static [&'static str],
     pub tool: &'static dyn RetrievalTool,
-    pub operand: OperandSpec,
+    /// `None` for a command that takes no positional argument; any operand is then an error.
+    pub operand: Option<OperandSpec>,
     pub flags: &'static [FlagSpec],
+    pub render: Option<Renderer>,
 }
 
 fn edge_kind(s: &str) -> std::result::Result<(), String> {
@@ -93,54 +108,107 @@ fn edge_kind(s: &str) -> std::result::Result<(), String> {
         .map_err(|_| format!("unknown edge kind {s:?} (snake_case, e.g. calls,imports,references)"))
 }
 
+/// `rank`'s human output: the `top N symbols by PageRank:` listing the bespoke arm printed.
+fn render_hotspots(content: &Value) -> Vec<String> {
+    let rows = content["hotspots"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut lines = vec![format!("top {} symbols by PageRank:", rows.len())];
+    for r in rows {
+        let text = |k: &str| r[k].as_str().unwrap_or("?").to_string();
+        lines.push(format!(
+            "  {:.4}  {} {} ({}:{})",
+            r["score"].as_f64().unwrap_or(0.0),
+            text("kind"),
+            text("name"),
+            text("file"),
+            r["line_1based"]
+        ));
+    }
+    lines
+}
+
 /// Every bridged command. Adding one is a row here — no new dispatch arm.
-pub const COMMANDS: &[BridgedCommand] = &[BridgedCommand {
-    name: "traverse",
-    tool: &wicked_estate_retrieve::TraverseGraph,
-    operand: OperandSpec {
-        name: "<symbol>",
-        key: "symbol",
+pub const COMMANDS: &[BridgedCommand] = &[
+    BridgedCommand {
+        name: "traverse",
+        aliases: &[],
+        tool: &wicked_estate_retrieve::TraverseGraph,
+        operand: Some(OperandSpec {
+            name: "<symbol>",
+            key: "symbol",
+        }),
+        render: None,
+        flags: &[
+            FlagSpec {
+                flag: "depth",
+                key: "depth",
+                ty: FlagType::U64,
+                validate: None,
+                help: "max hops; the tool clamps to its ceiling and reports the clamp",
+            },
+            FlagSpec {
+                flag: "direction",
+                key: "direction",
+                ty: FlagType::OneOf(&["dependencies", "dependents", "both"]),
+                validate: None,
+                help: "dependencies = what <symbol> uses; dependents = what uses <symbol>",
+            },
+            FlagSpec {
+                flag: "edge-kinds",
+                key: "edge_kinds",
+                ty: FlagType::List,
+                validate: Some(edge_kind),
+                help: "only follow these edge kinds (default: all)",
+            },
+            FlagSpec {
+                flag: "max-nodes",
+                key: "max_nodes",
+                ty: FlagType::U64,
+                validate: None,
+                help: "node cap; the tool clamps to its ceiling and reports the clamp",
+            },
+        ],
     },
-    flags: &[
-        FlagSpec {
-            flag: "depth",
-            key: "depth",
-            ty: FlagType::U64,
-            validate: None,
-            help: "max hops; the tool clamps to its ceiling and reports the clamp",
-        },
-        FlagSpec {
-            flag: "direction",
-            key: "direction",
-            ty: FlagType::OneOf(&["dependencies", "dependents", "both"]),
-            validate: None,
-            help: "dependencies = what <symbol> uses; dependents = what uses <symbol>",
-        },
-        FlagSpec {
-            flag: "edge-kinds",
-            key: "edge_kinds",
-            ty: FlagType::List,
-            validate: Some(edge_kind),
-            help: "only follow these edge kinds (default: all)",
-        },
-        FlagSpec {
-            flag: "max-nodes",
-            key: "max_nodes",
-            ty: FlagType::U64,
-            validate: None,
-            help: "node cap; the tool clamps to its ceiling and reports the clamp",
-        },
-    ],
-}];
+    BridgedCommand {
+        name: "rank",
+        aliases: &["hotspots"],
+        tool: &wicked_estate_retrieve::RankHotspots,
+        operand: None,
+        render: Some(render_hotspots),
+        flags: &[
+            FlagSpec {
+                flag: "limit",
+                key: "limit",
+                ty: FlagType::U64,
+                validate: None,
+                help: "how many symbols; the tool clamps to its ceiling and reports the clamp",
+            },
+            FlagSpec {
+                flag: "seeds",
+                key: "seeds",
+                ty: FlagType::SymbolList,
+                validate: None,
+                help: "personalize toward these symbols (names or SymbolIds; no commas)",
+            },
+        ],
+    },
+];
 
 pub fn lookup(name: &str) -> Option<&'static BridgedCommand> {
-    COMMANDS.iter().find(|c| c.name == name)
+    COMMANDS
+        .iter()
+        .find(|c| c.name == name || c.aliases.contains(&name))
 }
 
 impl BridgedCommand {
     /// `traverse <symbol> [--depth N] … [--json] [--db ...]`
     pub fn usage_line(&self) -> String {
-        let mut s = format!("{} {}", self.name, self.operand.name);
+        let mut s = self.name.to_string();
+        if let Some(op) = &self.operand {
+            s.push_str(&format!(" {}", op.name));
+        }
         for f in self.flags {
             s.push_str(&format!(" [--{} {}]", f.flag, f.ty.placeholder()));
         }
@@ -154,10 +222,12 @@ impl BridgedCommand {
             self.usage_line(),
             self.tool.description()
         );
-        s.push_str(&format!(
-            "  {:<28}exact symbol name or SymbolId\n",
-            self.operand.name
-        ));
+        if !self.aliases.is_empty() {
+            s.push_str(&format!("  also: {}\n\n", self.aliases.join(", ")));
+        }
+        if let Some(op) = &self.operand {
+            s.push_str(&format!("  {:<28}exact symbol name or SymbolId\n", op.name));
+        }
         for f in self.flags {
             let head = format!("--{} {}", f.flag, f.ty.placeholder());
             if head.len() < 28 {
@@ -280,7 +350,7 @@ pub fn parse(cmd: &BridgedCommand, args: &[String]) -> std::result::Result<Invoc
                         }
                         Value::String(v)
                     }
-                    FlagType::List => {
+                    FlagType::List | FlagType::SymbolList => {
                         let v = value("a comma-separated list")?;
                         let mut items = Vec::new();
                         for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -301,15 +371,19 @@ pub fn parse(cmd: &BridgedCommand, args: &[String]) -> std::result::Result<Invoc
     }
 
     if !help {
-        match operands.as_slice() {
-            [one] => {
-                req.insert(cmd.operand.key.to_string(), Value::String(one.to_string()));
+        match (&cmd.operand, operands.as_slice()) {
+            (None, []) => {}
+            (None, any) => {
+                return Err(format!("takes no positional argument, got {any:?}"));
             }
-            [] => return Err(format!("missing {}", cmd.operand.name)),
-            many => {
+            (Some(op), [one]) => {
+                req.insert(op.key.to_string(), Value::String(one.to_string()));
+            }
+            (Some(op), []) => return Err(format!("missing {}", op.name)),
+            (Some(op), many) => {
                 return Err(format!(
                     "expected exactly one {}, got {}: {many:?}",
-                    cmd.operand.name,
+                    op.name,
                     many.len()
                 ));
             }
@@ -360,43 +434,71 @@ pub fn run(
     let store = wicked_estate_store::open_store_ext(&db).map_err(super::to_any)?;
 
     let mut request = inv.request;
-    let key = cmd.operand.key;
-    let given = request[key].as_str().unwrap_or_default().to_string();
-    let ids = wicked_estate_core::resolve_operand(&*store, &given).map_err(super::to_any)?;
-    match ids.as_slice() {
-        [id] => request[key] = Value::String(id.0.clone()),
-        [] => anyhow::bail!(
-            "{}: no symbol named {given:?} and no node with that id in {db}",
-            cmd.name
-        ),
-        many => anyhow::bail!(
-            "{}: {given:?} names {} symbols — pass one SymbolId:\n  {}",
-            cmd.name,
-            many.len(),
-            many.iter()
-                .map(|s| s.0.as_str())
-                .collect::<Vec<_>>()
-                .join("\n  ")
-        ),
+    let resolve = |given: &str| -> Result<Value> {
+        let ids = wicked_estate_core::resolve_operand(&*store, given).map_err(super::to_any)?;
+        match ids.as_slice() {
+            [id] => Ok(Value::String(id.0.clone())),
+            [] => anyhow::bail!(
+                "{}: no symbol named {given:?} and no node with that id in {db}",
+                cmd.name
+            ),
+            many => anyhow::bail!(
+                "{}: {given:?} names {} symbols — pass one SymbolId:\n  {}",
+                cmd.name,
+                many.len(),
+                many.iter()
+                    .map(|s| s.0.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
+            ),
+        }
+    };
+    if let Some(op) = &cmd.operand {
+        let given = request[op.key].as_str().unwrap_or_default().to_string();
+        request[op.key] = resolve(&given)?;
+    }
+    for f in cmd
+        .flags
+        .iter()
+        .filter(|f| matches!(f.ty, FlagType::SymbolList))
+    {
+        if let Some(Value::Array(items)) = request.get(f.key).cloned() {
+            let mut ids = Vec::with_capacity(items.len());
+            for item in &items {
+                ids.push(resolve(item.as_str().unwrap_or_default())?);
+            }
+            request[f.key] = Value::Array(ids);
+        }
     }
 
     let t_start = now_ns();
     let result = cmd.tool.invoke(&*store, &request).map_err(super::to_any)?;
+    let t_end = now_ns();
+    // Real freshness, computed here as the MCP server does. The tool's own staleness line is a
+    // placeholder addressed to the transport — this is that transport, so it is REPLACED, and
+    // R5 still holds: freshness is always stated, as "N commits", "0 commits" or "unknown".
+    let mut diagnostics = result.diagnostics;
+    diagnostics.retain(|d| d != wicked_estate_retrieve::STALENESS_PLACEHOLDER);
+    diagnostics.extend(super::staleness_report(store.as_ref(), &db).statements(&db));
+    super::maybe_warn_version_mismatch(store.as_ref(), &db);
+
+    // The span counts the diagnostics the caller actually receives, not the tool's raw list.
+    let mut attrs = vec![
+        KeyValue::str("tool.name", cmd.tool.name()),
+        KeyValue::int("diagnostics.count", diagnostics.len() as i64),
+    ];
+    if let Some(op) = &cmd.operand {
+        attrs.push(KeyValue::str(
+            "symbol.id",
+            request[op.key].as_str().unwrap_or_default(),
+        ));
+    }
     span(
         &format!("wicked_estate.{}", cmd.name),
-        vec![
-            KeyValue::str("tool.name", cmd.tool.name()),
-            KeyValue::str("symbol.id", request[key].as_str().unwrap_or_default()),
-            KeyValue::int("diagnostics.count", result.diagnostics.len() as i64),
-        ],
+        attrs,
         t_start,
-        now_ns(),
+        t_end,
     );
-    // Real freshness, computed here as the MCP server does — the tool's own staleness line is
-    // a placeholder for the transport to fill in.
-    let mut diagnostics = result.diagnostics;
-    diagnostics.extend(super::staleness_lines(store.as_ref(), &db));
-    super::maybe_warn_version_mismatch(store.as_ref(), &db);
 
     let mut out = std::io::stdout().lock();
     if inv.json {
@@ -406,8 +508,14 @@ pub fn run(
             writeln!(err, "{d}")?;
         }
     } else {
-        let mut lines = Vec::new();
-        render(&result.content, 0, &mut lines);
+        let lines = match cmd.render {
+            Some(row_render) => row_render(&result.content),
+            None => {
+                let mut lines = Vec::new();
+                render(&result.content, 0, &mut lines);
+                lines
+            }
+        };
         for l in &lines {
             writeln!(out, "{l}")?;
         }
@@ -554,6 +662,30 @@ mod tests {
         assert!(err(&["a", "b"]).contains("exactly one"));
         // `--` ends flags, so an operand may begin with a dash.
         assert_eq!(req(&["--", "-odd"])["symbol"], json!("-odd"));
+    }
+
+    #[test]
+    fn a_command_without_an_operand_rejects_one_and_aliases_resolve() {
+        let rank = lookup("rank").unwrap();
+        assert!(std::ptr::eq(lookup("hotspots").unwrap(), rank));
+        let p = |a: &[&str]| parse(rank, &args(a));
+        assert_eq!(p(&[]).unwrap().request, json!({}));
+        assert!(
+            p(&["f"])
+                .unwrap_err()
+                .contains("takes no positional argument")
+        );
+        // Symbol lists parse like lists; resolution against the store happens in `run`.
+        assert_eq!(
+            p(&["--seeds", "a, b"]).unwrap().request["seeds"],
+            json!(["a", "b"])
+        );
+        assert!(
+            p(&["--seeds", ","])
+                .unwrap_err()
+                .contains("at least one item")
+        );
+        assert!(!rank.usage_line().contains('<'), "{}", rank.usage_line());
     }
 
     #[test]
