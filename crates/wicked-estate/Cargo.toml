@@ -10,6 +10,9 @@ homepage = "https://github.com/mikeparcewski/wicked-estate"
 readme = "README.md"
 keywords = ["code-graph", "llm", "tree-sitter", "code-intelligence", "mcp"]
 categories = ["development-tools", "parsing", "command-line-utilities"]
+# tests/lineage_cli.rs needs the path-only wicked-estate-mcp dev-dependency below, which
+# `cargo publish` strips: shipped, it would be a test target the published crate cannot compile.
+exclude = ["tests/lineage_cli.rs"]
 
 [[bin]]
 name = "wicked-estate"
