@@ -713,6 +713,12 @@ fn json_on_a_stale_graph_carries_the_same_staleness_line_as_mcp() {
         &json!(wicked_estate::staleness_diagnostic(2)),
         "{cli}"
     );
+    // Pinned as a literal: both frontends share one function, so comparing them with each other
+    // cannot see the wording itself change.
+    assert_eq!(
+        wicked_estate::staleness_diagnostic(2),
+        "STALENESS: commits_behind=2 — re-run `wicked-estate index` to refresh"
+    );
     // Everything before the server line is the tool's own result, untouched.
     let mut tool = direct(&store, &args);
     tool["diagnostics"]
