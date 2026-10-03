@@ -565,9 +565,7 @@ fn handle_tools_call_ctx(
             }
             if let Some(n) = ctx.commits_behind {
                 if n > 0 {
-                    all_diags.push(format!(
-                        "STALENESS: commits_behind={n} — re-run `wicked-estate index` to refresh"
-                    ));
+                    all_diags.push(wicked_estate::staleness_diagnostic(n));
                 }
             }
 

@@ -10,6 +10,9 @@ homepage = "https://github.com/mikeparcewski/wicked-estate"
 readme = "README.md"
 keywords = ["code-graph", "llm", "tree-sitter", "code-intelligence", "mcp"]
 categories = ["development-tools", "parsing", "command-line-utilities"]
+# tests/lineage_cli.rs needs the path-only wicked-estate-mcp dev-dependency below, which
+# `cargo publish` strips: shipped, it would be a test target the published crate cannot compile.
+exclude = ["tests/lineage_cli.rs"]
 
 [[bin]]
 name = "wicked-estate"
@@ -51,3 +54,11 @@ excel-rules = ["wicked-estate-extract/excel-rules"] # Excel/XLSX decision tables
 
 [dev-dependencies]
 tempfile = "3"
+# tests/lineage_cli.rs pins `wicked-estate lineage --json` to the MCP `Lineage` response, so the
+# test needs both the binary (only this crate gets CARGO_BIN_EXE_wicked-estate) and the MCP handler.
+# Path-only on purpose: wicked-estate-mcp depends on this crate, so a versioned pin could never be
+# satisfied when this crate is packaged; `cargo publish` strips a versionless dev-dependency.
+# Cost, accepted: `cargo test -p wicked-estate` also builds wicked-estate-mcp, and feature
+# unification turns on this crate's `serve` (+ store `pool`) for the test build. Both only ADD
+# items (`open_async_store`, the `pool` module); no synchronous CLI path changes under them.
+wicked-estate-mcp = { path = "../wicked-estate-mcp" }

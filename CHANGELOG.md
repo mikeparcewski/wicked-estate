@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Added
+- **`wicked-estate lineage --symbol <SYMBOL_ID> [--depth N] [--relation flows_to] [--json]` (TS-S1B).**
+  The MCP `Lineage` tool from the CLI — a frontend, not new evidence: no new extraction, edge,
+  confidence rule or storage behaviour. Default is dependency lineage; `--relation flows_to` is
+  static semantic value lineage, producer → consumer, with per-hop evidence (not taint analysis).
+  `--symbol` is an exact `SymbolId` (value slots allowed; no name resolution). `--depth` is
+  `0..=24`, default 8, as in MCP; above 24, an unknown or foreign flag, a repeated flag, or a
+  missing value fails non-zero with usage, before any store is opened. An absent id returns the
+  tool's empty result, exit 0; a nonexistent `--db` path fails instead of creating an empty graph.
+  `--json` prints the tool's `RetrievalResult` once as `{"content", "diagnostics"}` (plus the MCP
+  server's `STALENESS: commits_behind=N` line when behind), equal to the parsed MCP response for
+  the same db state and arguments. The MCP server's startup staleness computation moved into
+  `wicked_estate::graph_commits_behind` / `staleness_diagnostic` so both frontends share it.
+  Text mode prints the tool's diagnostics on stderr as `note: …`, except the retrieval layer's
+  `STALENESS: commits_behind not available at this layer …` cue, which the CLI's own stdout
+  staleness notice supersedes (`--json` keeps it, for parity).
+  Additive: no existing command's output changes, and CLI `resolve` visibility is untouched.
+
 ## [0.19.0] — 2026-10-03
 
 Minor bump, not a patch. The Rust API change is additive, but published edge behaviour changes on

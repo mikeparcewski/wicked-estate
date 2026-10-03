@@ -10,6 +10,9 @@
 //!   wicked-estate drift                  [--db ...]
 //!   wicked-estate query <name>           [--db ...]
 //!   wicked-estate blast-radius <name>    [--depth N] [--json] [--db ...]
+//!   wicked-estate lineage --symbol <SYMBOL_ID> [--depth N] [--relation flows_to] [--json] [--db ...]
+//!                                     the MCP `Lineage` tool: dependency lineage by default;
+//!                                     `flows_to` = static semantic value lineage (not taint)
 //!   wicked-estate stats                  [--db ...]
 //!   wicked-estate rank                   [--db ...]
 //!   wicked-estate source [<name>]        [--cluster <id>] [--file <path>] [--symbols id1,id2,...]
@@ -1581,6 +1584,96 @@ fn main() -> Result<()> {
                     wicked_estate_core::observability::KeyValue::int(
                         "path.hops",
                         result.hops.len() as i64,
+                    ),
+                ],
+                t_cmd_start,
+                t_cmd_end,
+            );
+        }
+        // ── lineage ─────────────────────────────────────────────────────────
+        //   wicked-estate lineage --symbol <SYMBOL_ID> [--depth N] [--relation flows_to] [--json]
+        //
+        // A frontend over the MCP `Lineage` tool, not a second implementation: this arm parses
+        // and validates the transport arguments, invokes `wicked_estate_retrieve::Lineage`, and
+        // renders its `RetrievalResult`. Traversal, filtering, confidence and the R4 budget all
+        // live in the tool, so `--json` is byte-for-byte the result MCP serializes.
+        "lineage" => {
+            let args = parse_lineage_args(rest)?;
+            // Fail CLOSED on a graph that is not there: opening a missing SQLite path creates an
+            // empty one, and an empty graph answers every exact id with the honest-empty result —
+            // indistinguishable from "this id is absent" (the `index` arm's wicked-core#170 class).
+            // The store factory decides what a spec names: `sqlite://<path>` is a file too, and a
+            // zero-length file is not a graph (SQLite would grow it into an empty one).
+            if let wicked_estate_store::StoreBackend::Sqlite { path } =
+                wicked_estate_store::StoreBackend::parse(&db)
+            {
+                let no_graph = std::fs::metadata(&path).map_or(true, |m| m.len() == 0);
+                if path != ":memory:" && no_graph {
+                    anyhow::bail!(
+                        "no graph at {db} (lineage never creates one) — run \
+                         `wicked-estate index <path> --db {db}` first, or pass the right --db"
+                    );
+                }
+            }
+            let store = open_store_ext(&db).map_err(to_any)?;
+            // Machine output must be exactly one JSON document — notices would corrupt it.
+            if !args.json {
+                maybe_print_staleness(store.as_ref(), &db);
+                maybe_warn_version_mismatch(store.as_ref(), &db);
+            }
+            let t_cmd_start = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            use wicked_estate_core::RetrievalTool;
+            let result = wicked_estate_retrieve::Lineage
+                .invoke(&*store, &lineage_request(&args))
+                .map_err(to_any)?;
+            let t_cmd_end = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+
+            if args.json {
+                // The same server-level R5 line MCP appends to every tools/call (computed by the
+                // same function, worded by the same function); text mode prints its own notice.
+                let mut result = result.clone();
+                if let Some(n) = wicked_estate::graph_commits_behind(store.as_ref(), &db) {
+                    if n > 0 {
+                        result
+                            .diagnostics
+                            .push(wicked_estate::staleness_diagnostic(n));
+                    }
+                }
+                println!(
+                    "{}",
+                    serde_json::to_string(&result).map_err(|e| anyhow::anyhow!(e))?
+                );
+            } else {
+                let mut out = std::io::stdout().lock();
+                write_lineage_text(&mut out, &args, &result).map_err(|e| anyhow::anyhow!(e))?;
+                // The tool's `STALENESS: commits_behind not available at this layer …` line is
+                // its cue to the hosting layer to run the git check. This frontend did
+                // (`maybe_print_staleness`, on stdout), so echoing the cue would contradict that
+                // notice. `--json` keeps it: that document must equal the MCP response.
+                let placeholder = wicked_estate_retrieve::staleness_note();
+                for d in result.diagnostics.iter().filter(|d| **d != placeholder) {
+                    eprintln!("note: {d}");
+                }
+            }
+            emit_cli_span(
+                &otel_sink,
+                &otel_resource,
+                &otel_scope,
+                "wicked_estate.lineage",
+                vec![
+                    wicked_estate_core::observability::KeyValue::str(
+                        "symbol.id",
+                        args.symbol.as_str(),
+                    ),
+                    wicked_estate_core::observability::KeyValue::int(
+                        "result.count",
+                        result.content["total"].as_i64().unwrap_or(0),
                     ),
                 ],
                 t_cmd_start,
@@ -3729,6 +3822,24 @@ fn main() -> Result<()> {
                 "    <from>/<to>: exact symbol name or SymbolId. --max-depth 1..=16 (default 12)."
             );
             println!(
+                "  wicked-estate lineage --symbol <SYMBOL_ID> [--depth N] [--relation flows_to] [--json] [--db ...]"
+            );
+            println!(
+                "    The MCP Lineage tool from the CLI. --symbol is an exact SymbolId (value slots allowed;"
+            );
+            println!(
+                "    no name resolution). Default: dependency lineage over Calls + Imports. --relation"
+            );
+            println!(
+                "    flows_to: static semantic value lineage, producer -> consumer, with per-hop evidence"
+            );
+            println!(
+                "    and confidence — not taint analysis or runtime data flow. --depth 0..=24 (default 8)."
+            );
+            println!(
+                "    --json prints the tool result once: {{\"content\": {{...}}, \"diagnostics\": [...]}}."
+            );
+            println!(
                 "  wicked-estate rank                  [--db ...]  # most important symbols (PageRank)"
             );
             println!(
@@ -4176,6 +4287,270 @@ fn write_path_text(
     }
     Ok(())
 }
+
+const LINEAGE_USAGE: &str = "usage: wicked-estate lineage --symbol <SYMBOL_ID> [--depth N] [--relation flows_to] [--json] [--db ...]\n  \
+     --symbol    an exact SymbolId (no name resolution; value-slot ids are accepted)\n  \
+     --depth     0..=24 hops (default 8, the MCP Lineage default and ceiling)\n  \
+     --relation  omit for dependency lineage (Calls + Imports); `flows_to` for static semantic \
+     value lineage, producer -> consumer — evidence-bearing graph edges, not taint analysis";
+
+/// The `lineage` arguments after transport validation. `depth`/`relation` stay `None` when not
+/// given so the `Lineage` tool applies its own defaults rather than a CLI copy of them.
+#[derive(Debug, PartialEq)]
+struct LineageArgs {
+    symbol: String,
+    depth: Option<u32>,
+    relation: Option<String>,
+    json: bool,
+}
+
+/// Parse `lineage`'s arguments from the RAW argument list (everything after the command).
+///
+/// Not from the shared loop's leftovers: that loop consumes every flag any command knows
+/// (`--file`, `--type`, `--top`, …) and a dangling `--db`/`--symbol` without complaint, so a
+/// mistyped or foreign flag would be silently dropped and the unscoped query answered. Here every
+/// token is classified; anything `lineage` does not accept, a value flag with no value or with a
+/// flag as its value, and any repeated flag fail with the usage text before a store is opened.
+/// `--db` is validated here and its value is the one the shared loop already selected.
+fn parse_lineage_args(raw: &[String]) -> Result<LineageArgs> {
+    let mut symbol: Option<String> = None;
+    let mut depth: Option<u32> = None;
+    let mut relation: Option<String> = None;
+    let mut db_seen = false;
+    let mut json = false;
+
+    let parse_depth = |v: &str| -> Result<u32> {
+        // `u32::from_str` accepts a leading `+`; MCP takes a JSON number, so digits only.
+        let d: u32 = v
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| v.parse().ok())
+            .flatten()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{LINEAGE_USAGE}\n--depth must be a non-negative integer, got {v:?}"
+                )
+            })?;
+        let max = wicked_estate_retrieve::BLAST_DEPTH_CEILING;
+        if d > max {
+            anyhow::bail!(
+                "{LINEAGE_USAGE}\n--depth {d} is above the maximum of {max} (the same ceiling \
+                 the MCP Lineage tool applies)"
+            );
+        }
+        Ok(d)
+    };
+    let parse_relation = |v: &str| -> Result<String> {
+        if v != wicked_estate_core::edge_tags::FLOWS_TO {
+            anyhow::bail!(
+                "{LINEAGE_USAGE}\nunsupported --relation {v:?}; the only relation is `flows_to` \
+                 (omit --relation for dependency lineage)"
+            );
+        }
+        Ok(v.to_string())
+    };
+    let once = |already: bool, flag: &str| -> Result<()> {
+        if already {
+            anyhow::bail!("{LINEAGE_USAGE}\n{flag} given more than once");
+        }
+        Ok(())
+    };
+
+    let mut it = raw.iter();
+    while let Some(a) = it.next() {
+        let (flag, inline) = match a.split_once('=') {
+            Some((f, v)) if f.starts_with("--") => (f, Some(v.to_string())),
+            _ => (a.as_str(), None),
+        };
+        // A value flag's value: `--flag=v` or the next token, never a missing one or a flag.
+        let mut value = |flag: &str| -> Result<String> {
+            if let Some(v) = &inline {
+                return Ok(v.clone());
+            }
+            match it.next() {
+                None => anyhow::bail!("{LINEAGE_USAGE}\n{flag} requires a value"),
+                Some(v) if v.starts_with("--") => {
+                    anyhow::bail!("{LINEAGE_USAGE}\n{flag} needs a value, got the flag {v:?}")
+                }
+                Some(v) => Ok(v.clone()),
+            }
+        };
+        match flag {
+            "--json" if inline.is_none() => {
+                once(json, "--json")?;
+                json = true;
+            }
+            "--symbol" => {
+                once(symbol.is_some(), "--symbol")?;
+                symbol = Some(value("--symbol")?);
+            }
+            "--depth" => {
+                once(depth.is_some(), "--depth")?;
+                depth = Some(parse_depth(&value("--depth")?)?);
+            }
+            "--relation" => {
+                once(relation.is_some(), "--relation")?;
+                relation = Some(parse_relation(&value("--relation")?)?);
+            }
+            // `--db=` is not a form the shared loop selects a store from, so it is refused
+            // rather than accepted here and silently ignored there.
+            "--db" if inline.is_none() => {
+                once(db_seen, "--db")?;
+                value("--db")?;
+                db_seen = true;
+            }
+            other if other.starts_with('-') => {
+                anyhow::bail!("{LINEAGE_USAGE}\nunknown flag {a:?}");
+            }
+            other => anyhow::bail!(
+                "{LINEAGE_USAGE}\nunexpected operand {other:?}: lineage takes an exact SymbolId \
+                 via --symbol and does not resolve names"
+            ),
+        }
+    }
+    let symbol = match symbol {
+        Some(s) if !s.is_empty() => s,
+        Some(_) => anyhow::bail!("{LINEAGE_USAGE}\n--symbol must not be empty"),
+        None => anyhow::bail!("{LINEAGE_USAGE}\n--symbol <SYMBOL_ID> is required"),
+    };
+    Ok(LineageArgs {
+        symbol,
+        depth,
+        relation,
+        json,
+    })
+}
+
+/// The `Lineage` request for `args`, carrying only the keys the caller actually set.
+fn lineage_request(args: &LineageArgs) -> serde_json::Value {
+    let mut req = serde_json::json!({ "symbol": args.symbol });
+    if let Some(d) = args.depth {
+        req["depth"] = serde_json::json!(d);
+    }
+    if let Some(r) = &args.relation {
+        req["relation"] = serde_json::json!(r);
+    }
+    req
+}
+
+/// Text mode for `lineage`: a reading of the tool's result, never a stronger claim than it.
+/// Each flow hop keeps its semantics, evidence, confidence and resolver so a heuristic or
+/// may-influence hop cannot read as a proven value copy (R7); every cut is named (R3).
+fn write_lineage_text(
+    out: &mut impl std::io::Write,
+    args: &LineageArgs,
+    result: &wicked_estate_core::RetrievalResult,
+) -> std::io::Result<()> {
+    use serde_json::Value;
+    let c = &result.content;
+    let flows_mode = c.get("flows").is_some();
+    let depth = c["searched_depth"].as_u64().unwrap_or(0);
+    let list = |v: &Value| -> String {
+        v.as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|x| x.as_str().map_or_else(|| x.to_string(), str::to_string))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_else(|| "-".to_string())
+    };
+
+    if flows_mode {
+        writeln!(
+            out,
+            "flows_to lineage from '{}' — static semantic value lineage, producer -> consumer \
+             (graph evidence; not taint analysis, compiler-exact data flow, or runtime behaviour)",
+            args.symbol
+        )?;
+    } else {
+        writeln!(
+            out,
+            "dependency lineage of '{}' — what it depends on via Calls + Imports",
+            args.symbol
+        )?;
+    }
+
+    let rows = c["dependencies"].as_array().map_or(&[][..], Vec::as_slice);
+    let noun = if flows_mode {
+        "consumer(s)"
+    } else {
+        "dependency/dependencies"
+    };
+    if rows.is_empty() {
+        writeln!(out, "no {noun} returned within depth {depth}")?;
+    } else {
+        writeln!(out, "{} {noun} within depth {depth}:", rows.len())?;
+        for r in rows {
+            writeln!(
+                out,
+                "  [depth {}] {} {} ({}:{})  {}",
+                r["depth"].as_u64().unwrap_or(0),
+                r["kind"]
+                    .as_str()
+                    .map_or_else(|| r["kind"].to_string(), str::to_string),
+                r["name"].as_str().unwrap_or("?"),
+                r["file"].as_str().unwrap_or("?"),
+                r["line"].as_u64().map_or(0, |l| l + 1),
+                r["symbol"].as_str().unwrap_or("?"),
+            )?;
+        }
+    }
+
+    if let Some(hops) = c["flows"].as_array() {
+        writeln!(out, "{} flow hop(s):", hops.len())?;
+        for h in hops {
+            write!(
+                out,
+                "  {} -> {}  semantics={} evidence={} confidence {:.2} ({}) rules={}",
+                h["producer"].as_str().unwrap_or("?"),
+                h["consumer"].as_str().unwrap_or("?"),
+                list(&h[wicked_estate_core::flow::FLOW_SEMANTICS_KEY]),
+                list(&h[wicked_estate_core::flow::FLOW_EVIDENCE_KEY]),
+                h["confidence"].as_f64().unwrap_or(0.0),
+                h["resolved_by"].as_str().unwrap_or("?"),
+                list(&h[wicked_estate_core::flow::FLOW_RULES_KEY]),
+            )?;
+            if let Some(min) = h[wicked_estate_core::flow::FLOW_CONFIDENCE_MIN_KEY].as_f64() {
+                write!(out, " weakest-support {min:.2}")?;
+            }
+            if let (Some(file), Some(line)) = (h["file"].as_str(), h["line"].as_u64()) {
+                write!(out, " at {file}:{}", line + 1)?;
+            }
+            writeln!(out)?;
+        }
+    }
+
+    match (
+        c["confidence"]["min"].as_f64(),
+        c["confidence"]["avg"].as_f64(),
+    ) {
+        (Some(min), Some(avg)) => writeln!(
+            out,
+            "confidence: min {min:.2} avg {avg:.2} over {} edge(s)",
+            c["confidence"]["edge_count"].as_u64().unwrap_or(0)
+        )?,
+        _ => writeln!(out, "confidence: no edges described")?,
+    }
+    // R3: a cut answer must never read as complete.
+    if c["depth_horizon_reached"].as_bool() == Some(true) {
+        writeln!(
+            out,
+            "bound: cut at depth {depth}; more results may exist beyond it (max {})",
+            wicked_estate_retrieve::BLAST_DEPTH_CEILING
+        )?;
+    }
+    if c["node_cap_reached"].as_bool() == Some(true) {
+        writeln!(out, "bound: the traversal node cap was reached")?;
+    }
+    if c["truncated"].as_bool() == Some(true) {
+        writeln!(
+            out,
+            "truncated: yes — the answer is incomplete; see the notes on stderr"
+        )?;
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod path_render_tests {
     use super::*;
@@ -4411,5 +4786,272 @@ mod path_render_tests {
     #[test]
     fn text_label_falls_back_to_the_bare_id() {
         assert_eq!(path_endpoint_label(&SymbolId("ghost".into()), &[]), "ghost");
+    }
+}
+
+#[cfg(test)]
+mod lineage_cli_tests {
+    use super::*;
+    use serde_json::json;
+    use wicked_estate_core::RetrievalResult;
+
+    fn argv(tokens: &[&str]) -> Vec<String> {
+        tokens.iter().map(|t| t.to_string()).collect()
+    }
+
+    fn err(tokens: &[&str]) -> String {
+        format!("{:#}", parse_lineage_args(&argv(tokens)).unwrap_err())
+    }
+
+    #[test]
+    fn unset_depth_and_relation_are_left_to_the_tool() {
+        let a = parse_lineage_args(&argv(&["--symbol", "s#"])).unwrap();
+        assert_eq!(
+            a,
+            LineageArgs {
+                symbol: "s#".into(),
+                depth: None,
+                relation: None,
+                json: false
+            }
+        );
+        // The CLI must not restate the tool's defaults: the request carries only `symbol`.
+        assert_eq!(lineage_request(&a), json!({"symbol": "s#"}));
+    }
+
+    #[test]
+    fn every_flag_form_reaches_the_request() {
+        let a = parse_lineage_args(&argv(&[
+            "--symbol=s#",
+            "--depth=24",
+            "--relation=flows_to",
+            "--json",
+            "--db",
+            "g.db",
+        ]))
+        .unwrap();
+        assert!(a.json);
+        assert_eq!(
+            lineage_request(&a),
+            json!({"symbol": "s#", "depth": 24, "relation": "flows_to"})
+        );
+        let b = parse_lineage_args(&argv(&[
+            "--symbol",
+            "s#",
+            "--depth",
+            "0",
+            "--relation",
+            "flows_to",
+        ]))
+        .unwrap();
+        assert_eq!(
+            lineage_request(&b),
+            json!({"symbol": "s#", "depth": 0, "relation": "flows_to"})
+        );
+        // A SymbolId may itself contain `=`; only the first one splits `--symbol=…`.
+        let c = parse_lineage_args(&argv(&["--symbol=a=b#"])).unwrap();
+        assert_eq!(c.symbol, "a=b#");
+    }
+
+    #[test]
+    fn the_depth_ceiling_is_the_shared_mcp_constant() {
+        let max = wicked_estate_retrieve::BLAST_DEPTH_CEILING;
+        assert!(parse_lineage_args(&argv(&["--symbol", "s", "--depth", &max.to_string()])).is_ok());
+        assert!(
+            err(&["--symbol", "s", "--depth", &(max + 1).to_string()])
+                .contains("above the maximum")
+        );
+        for bad in ["x", "+5", "-1", " 5", ""] {
+            assert!(
+                err(&["--symbol", "s", &format!("--depth={bad}")])
+                    .contains("--depth must be a non-negative integer"),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_input_names_the_problem_after_the_usage() {
+        for (tokens, want) in [
+            (&[][..], "--symbol <SYMBOL_ID> is required"),
+            (&["--symbol"][..], "--symbol requires a value"),
+            (
+                &["--symbol", "--json"][..],
+                "--symbol needs a value, got the flag",
+            ),
+            (&["--symbol", ""][..], "--symbol must not be empty"),
+            (
+                &["--symbol", "s", "--symbol=t"][..],
+                "--symbol given more than once",
+            ),
+            (
+                &["--symbol", "s", "--symbol", "t"][..],
+                "--symbol given more than once",
+            ),
+            (
+                &["--symbol", "s", "--relation"][..],
+                "--relation requires a value",
+            ),
+            (
+                &[
+                    "--symbol",
+                    "s",
+                    "--relation",
+                    "flows_to",
+                    "--relation=flows_to",
+                ][..],
+                "--relation given more than once",
+            ),
+            (
+                &["--symbol", "s", "--relation", "calls"][..],
+                "unsupported --relation",
+            ),
+            (&["--symbol", "s", "--db"][..], "--db requires a value"),
+            (
+                &["--db", "--json", "--symbol", "s"][..],
+                "--db needs a value, got the flag",
+            ),
+            (
+                &["--symbol", "s", "--db", "a", "--db", "b"][..],
+                "--db given more than once",
+            ),
+            (
+                &["--symbol", "s", "--db=g.db"][..],
+                "unknown flag \"--db=g.db\"",
+            ),
+            (
+                &["--symbol", "s", "--json=1"][..],
+                "unknown flag \"--json=1\"",
+            ),
+            (
+                &["--symbol", "s", "--json", "--json"][..],
+                "--json given more than once",
+            ),
+            (
+                &["--symbol", "s", "--file", "a.ts"][..],
+                "unknown flag \"--file\"",
+            ),
+            (
+                &["--symbol", "s", "--top", "5"][..],
+                "unknown flag \"--top\"",
+            ),
+            (&["--symbol", "s", "-x"][..], "unknown flag \"-x\""),
+            (&["name"][..], "does not resolve names"),
+        ] {
+            let e = err(tokens);
+            assert!(e.starts_with("usage: wicked-estate lineage"), "{e}");
+            assert!(e.contains(want), "{tokens:?}: want {want:?} in {e}");
+        }
+    }
+
+    fn render(args: &LineageArgs, content: serde_json::Value) -> String {
+        let r = RetrievalResult {
+            content,
+            diagnostics: vec!["a diagnostic".into()],
+        };
+        let mut out = Vec::new();
+        write_lineage_text(&mut out, args, &r).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    fn flows_args() -> LineageArgs {
+        LineageArgs {
+            symbol: "p#".into(),
+            depth: Some(1),
+            relation: Some("flows_to".into()),
+            json: false,
+        }
+    }
+
+    #[test]
+    fn text_keeps_each_hops_claim_and_evidence() {
+        let text = render(
+            &flows_args(),
+            json!({
+                "dependencies": [{"symbol": "c#", "name": "c", "kind": "variable",
+                                  "file": "a.ts", "line": 41, "depth": 1}],
+                "flows": [{"producer": "p#", "consumer": "c#", "confidence": 0.5,
+                           "resolved_by": "tree-sitter-convention",
+                           "flow_semantics": ["value_preserving", "may_influence"],
+                           "flow_evidence": ["convention"],
+                           "flow_rules": ["typescript/convention/route_param"],
+                           "flow_confidence_min": 0.25, "file": "a.ts", "line": 41}],
+                "total": 1, "truncated": false,
+                "depth_horizon_reached": false, "node_cap_reached": false,
+                "searched_depth": 1,
+                "confidence": {"min": 0.5, "avg": 0.5, "edge_count": 1},
+            }),
+        );
+        assert!(text.contains("not taint analysis"), "{text}");
+        assert!(
+            text.contains("[depth 1] variable c (a.ts:42)  c#"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "p# -> c#  semantics=value_preserving,may_influence evidence=convention \
+                 confidence 0.50 (tree-sitter-convention) rules=typescript/convention/route_param \
+                 weakest-support 0.25 at a.ts:42"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("confidence: min 0.50 avg 0.50 over 1 edge(s)"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("bound:") && !text.contains("truncated:"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("a diagnostic"),
+            "diagnostics belong on stderr: {text}"
+        );
+    }
+
+    #[test]
+    fn text_names_every_cut() {
+        let text = render(
+            &flows_args(),
+            json!({
+                "dependencies": [], "flows": [], "total": 0, "truncated": true,
+                "depth_horizon_reached": true, "node_cap_reached": true, "searched_depth": 1,
+                "confidence": {"min": null, "avg": null, "edge_count": 0},
+            }),
+        );
+        assert!(
+            text.contains("no consumer(s) returned within depth 1"),
+            "{text}"
+        );
+        assert!(text.contains("0 flow hop(s):"), "{text}");
+        assert!(text.contains("confidence: no edges described"), "{text}");
+        assert!(text.contains("bound: cut at depth 1"), "{text}");
+        assert!(
+            text.contains("bound: the traversal node cap was reached"),
+            "{text}"
+        );
+        assert!(text.contains("truncated: yes"), "{text}");
+    }
+
+    #[test]
+    fn dependency_text_has_no_flow_section() {
+        let args = LineageArgs {
+            relation: None,
+            ..flows_args()
+        };
+        let text = render(
+            &args,
+            json!({
+                "dependencies": [], "total": 0, "truncated": false,
+                "depth_horizon_reached": false, "node_cap_reached": false, "searched_depth": 8,
+                "confidence": {"min": null, "avg": null, "edge_count": 0},
+            }),
+        );
+        assert!(text.starts_with("dependency lineage of 'p#'"), "{text}");
+        assert!(
+            text.contains("no dependency/dependencies returned within depth 8"),
+            "{text}"
+        );
+        assert!(!text.contains("flow hop"), "{text}");
     }
 }

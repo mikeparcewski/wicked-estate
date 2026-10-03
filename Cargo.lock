@@ -10052,6 +10052,7 @@ dependencies = [
  "tokio",
  "wicked-estate-core",
  "wicked-estate-extract",
+ "wicked-estate-mcp",
  "wicked-estate-observe",
  "wicked-estate-rank",
  "wicked-estate-resolve",
