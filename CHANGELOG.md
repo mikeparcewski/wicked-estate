@@ -25,6 +25,23 @@
 Minor bump, not a patch. The Rust API change is additive, but published edge behaviour changes on
 purpose. See **Changed (breaking)**.
 
+### Added
+- **`wicked-estate traverse <symbol>` — and the RetrievalTool→CLI bridge behind it.** The CLI
+  now exposes MCP `TraverseGraph` (`--depth`, `--direction`, `--edge-kinds`, `--max-nodes`,
+  `--json`). `<symbol>` is an exact name or a SymbolId, resolved by the same rule as `path`. It
+  is the first row of `tool_bridge::COMMANDS`; a further RetrievalTool becomes a CLI command by
+  adding a row, not a dispatch arm. Bridged commands are **strict**: an unknown, repeated or
+  mistyped flag, or a value outside a closed set (`--direction sideways`, `--edge-kinds cals`),
+  exits non-zero instead of being ignored (#197/#206 class). `--json` writes the MCP `content`
+  document unchanged as exactly one JSON document on stdout. Diagnostics go to stderr, including
+  the real commits-behind `STALENESS:` line (#198 for this surface).
+- **Retrieval tools report a clamp.** `TraverseGraph`, `SearchEntity`, `Path`, `BlastRadius`,
+  `RankHotspots`, `Communities`, `ContextPack` and `SemanticSearch` still clamp an
+  over-ceiling `depth`/`max_nodes`/`limit`/`token_budget`/`k`. Each now also emits a `CLAMPED:`
+  diagnostic, for MCP callers too. No response envelope changed. `Lineage` is not covered yet,
+  because TS-S2 is rewriting it (WAVE-PLAN W8.5).
+- `wicked_estate_core::resolve_operand`: the name-or-id resolver `path` already used, now public.
+
 ### Changed (breaking)
 - **Angular convention `flows_to` edges are now `Heuristic`/0.5, not `Parsed`/1.0 (#231).**
   `@Input()` and `route.snapshot.paramMap.get(…)` edges carry

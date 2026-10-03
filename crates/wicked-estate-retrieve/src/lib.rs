@@ -411,7 +411,9 @@ impl RetrievalTool for SearchEntity {
             }
         };
 
-        let raw_limit = opt_u64(request, "limit").unwrap_or(20).min(100) as usize;
+        let raw_limit = opt_u64(request, "limit")
+            .unwrap_or(20)
+            .min(SEARCH_LIMIT_CEILING) as usize;
 
         // Synthetic value-flow slots (a callable's locals, parameters, returns) carry ordinary
         // kinds and BARE source identifiers, so for a common name they displace every real symbol:
@@ -456,6 +458,7 @@ impl RetrievalTool for SearchEntity {
         }
 
         let mut diag = Vec::new();
+        diag.extend(clamp_note(request, "limit", SEARCH_LIMIT_CEILING));
         if hidden > 0 {
             // R7/R5: never silently drop matches — name the count and the way back in.
             diag.push(format!(
@@ -744,6 +747,28 @@ fn truncation_cause(
 
 /// `depth` ceilings of the graph tools. Named so `truncation_cause` and the clamps cannot drift.
 const TRAVERSE_DEPTH_CEILING: u32 = 16;
+/// `max_nodes` ceiling of [`TraverseGraph`]. Named so the clamp and its diagnostic cannot drift.
+const TRAVERSE_MAX_NODES_CEILING: usize = 1_000;
+/// Each tool's caller-value ceilings, read by both its clamp and its `clamp_note` call so the
+/// `CLAMPED:` line can never name a different ceiling than the one applied.
+const SEARCH_LIMIT_CEILING: u64 = 100;
+const PATH_DEPTH_CEILING: u64 = 16;
+const PATH_MAX_NODES_CEILING: u64 = 5_000;
+const RANK_LIMIT_CEILING: u64 = 200;
+const COMMUNITIES_LIMIT_CEILING: u64 = 200;
+const SEMANTIC_K_CEILING: u64 = 100;
+
+/// A `CLAMPED:` diagnostic when the request's `key` exceeds `ceiling` and was clamped to it;
+/// `None` when the value is absent or within bounds. Every tool that lowers a caller-supplied
+/// value to a ceiling pushes this, so a cap is never silent (wicked-estate#190), whichever
+/// transport serves it. Floor clamps (`0` → `1`) are not reported. `Lineage` is the exception
+/// until WAVE-PLAN W8.5.
+fn clamp_note(request: &Value, key: &str, ceiling: u64) -> Option<String> {
+    let asked = opt_u64(request, key)?;
+    (asked > ceiling).then(|| {
+        format!("CLAMPED: {key}={asked} is above this tool's ceiling; used {key}={ceiling}")
+    })
+}
 /// The deepest BlastRadius / Lineage walk the MCP tools accept. Public so the CLI's
 /// `blast-radius --depth` enforces the same ceiling (a cyclic graph's recursive walk grows with
 /// depth: `--depth 100000` ran past 20 s and 397 MB on estate's own graph).
@@ -776,7 +801,9 @@ impl RetrievalTool for TraverseGraph {
         let max_depth = opt_u64(request, "depth")
             .unwrap_or(4)
             .min(TRAVERSE_DEPTH_CEILING as u64) as u32;
-        let max_nodes = opt_u64(request, "max_nodes").unwrap_or(200).min(1_000) as usize;
+        let max_nodes = opt_u64(request, "max_nodes")
+            .unwrap_or(200)
+            .min(TRAVERSE_MAX_NODES_CEILING as u64) as usize;
         let direction = parse_direction(request);
         let edge_kinds = parse_edge_kinds(request);
 
@@ -790,6 +817,15 @@ impl RetrievalTool for TraverseGraph {
 
         let start = SymbolId(id_str.clone());
         let mut diag = vec![staleness_note()];
+        // A clamp the caller cannot see is worse than the clamp (the #190 lesson): asking for
+        // depth 99 and silently getting 16 reads as "searched everything". `searched_depth` in
+        // the payload carries the effective value; this names the clamp in words.
+        diag.extend(clamp_note(request, "depth", TRAVERSE_DEPTH_CEILING as u64));
+        diag.extend(clamp_note(
+            request,
+            "max_nodes",
+            TRAVERSE_MAX_NODES_CEILING as u64,
+        ));
 
         let subgraph = store.traverse(&start, &spec)?;
 
@@ -972,13 +1008,17 @@ impl RetrievalTool for Path {
         // whole reachable set was searched for a search that visited nothing, which is the
         // R3 proven-absence failure. `as_u64` also yields None for a negative or fractional
         // value, which falls back to the default rather than silently searching at 0.
-        let max_depth = opt_u64(request, "depth").unwrap_or(8).clamp(1, 16) as u32;
+        let max_depth = opt_u64(request, "depth")
+            .unwrap_or(8)
+            .clamp(1, PATH_DEPTH_CEILING) as u32;
         let max_nodes = opt_u64(request, "max_nodes")
             .unwrap_or(1_000)
-            .clamp(1, 5_000) as usize;
+            .clamp(1, PATH_MAX_NODES_CEILING) as usize;
 
         let result = wicked_estate_core::path_between(store, from, to, max_depth, max_nodes)?;
         let mut diag = vec![staleness_note()];
+        diag.extend(clamp_note(request, "depth", PATH_DEPTH_CEILING));
+        diag.extend(clamp_note(request, "max_nodes", PATH_MAX_NODES_CEILING));
 
         if let Some(side) = result.unresolved {
             diag.push(format!(
@@ -1116,6 +1156,7 @@ impl RetrievalTool for BlastRadius {
         let spec = TraversalSpec::blast_radius(max_depth);
         let start = SymbolId(id_str.clone());
         let mut diag = vec![staleness_note()];
+        diag.extend(clamp_note(request, "depth", BLAST_DEPTH_CEILING as u64));
 
         let mut subgraph = store.traverse(&start, &spec)?;
 
@@ -1736,7 +1777,9 @@ impl RetrievalTool for RankHotspots {
     }
 
     fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
-        let limit = opt_u64(request, "limit").unwrap_or(20).clamp(1, 200) as usize;
+        let limit = opt_u64(request, "limit")
+            .unwrap_or(20)
+            .clamp(1, RANK_LIMIT_CEILING) as usize;
 
         // Optional personalization seeds.
         let seeds: Vec<SymbolId> = request
@@ -1752,6 +1795,7 @@ impl RetrievalTool for RankHotspots {
             .unwrap_or_default();
 
         let mut diag = vec![staleness_note()];
+        diag.extend(clamp_note(request, "limit", RANK_LIMIT_CEILING));
 
         // Global / personalized PageRank, top-`limit` symbols (already sorted high-score first).
         let ranked = wicked_estate_rank::ranked_symbols(store, &seeds, limit)?;
@@ -1877,7 +1921,9 @@ impl RetrievalTool for Communities {
     }
 
     fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
-        let limit = opt_u64(request, "limit").unwrap_or(20).clamp(1, 200) as usize;
+        let limit = opt_u64(request, "limit")
+            .unwrap_or(20)
+            .clamp(1, COMMUNITIES_LIMIT_CEILING) as usize;
         let min_size = opt_u64(request, "min_size").unwrap_or(2).max(1) as usize;
         let resolution = request
             .get("resolution")
@@ -1886,6 +1932,7 @@ impl RetrievalTool for Communities {
             .unwrap_or(1.0);
 
         let mut diag = vec![staleness_note()];
+        diag.extend(clamp_note(request, "limit", COMMUNITIES_LIMIT_CEILING));
 
         let params = wicked_estate_rank::CommunityParams {
             min_size,
@@ -2257,6 +2304,7 @@ impl RetrievalTool for ContextPack {
         // ── parse seeds ──────────────────────────────────────────────────────
         let mut seeds: Vec<SymbolId> = Vec::new();
         let mut diag: Vec<String> = Vec::new();
+        diag.extend(clamp_note(request, "token_budget", MAX_TOKEN_BUDGET as u64));
 
         // Accept either explicit `seeds` array or a `name` to resolve.
         if let Some(arr) = request.get("seeds").and_then(|v| v.as_array()) {
@@ -2938,7 +2986,7 @@ impl RetrievalTool for SemanticSearch {
             }
         };
 
-        let k = opt_u64(request, "k").unwrap_or(10).min(100) as usize;
+        let k = opt_u64(request, "k").unwrap_or(10).min(SEMANTIC_K_CEILING) as usize;
         let qvec = self.embedder.embed(&query_str);
 
         // TS-S1: embeddings are computed over every node, so synthetic value slots are in the
@@ -2988,6 +3036,7 @@ impl RetrievalTool for SemanticSearch {
         }
 
         let mut diag = vec![staleness_note()];
+        diag.extend(clamp_note(request, "k", SEMANTIC_K_CEILING));
         if candidate_cap_hit {
             diag.push(format!(
                 "SemanticSearch: returned {} of k={k}; the nearest {ESCALATED_CANDIDATES} \
@@ -4256,6 +4305,90 @@ mod tests {
         let nodes = res.content["nodes"].as_array().unwrap();
         assert!(nodes.is_empty());
         assert!(!res.diagnostics.is_empty());
+    }
+
+    /// A request above a ceiling is clamped by the tool AND says so — the effective value in
+    /// `searched_depth`, the clamp itself in a diagnostic. A silent clamp reads as "searched
+    /// everything you asked for" (wicked-estate#190).
+    #[test]
+    fn traverse_graph_reports_clamp_above_ceiling() {
+        let store = fixture_store();
+        let res = TraverseGraph
+            .invoke(
+                &store,
+                &json!({"symbol": "caller", "depth": 99, "max_nodes": 5000}),
+            )
+            .unwrap();
+        assert_eq!(res.content["searched_depth"], json!(TRAVERSE_DEPTH_CEILING));
+        let clamps: Vec<&String> = res
+            .diagnostics
+            .iter()
+            .filter(|d| d.starts_with("CLAMPED:"))
+            .collect();
+        assert_eq!(clamps.len(), 2, "depth and max_nodes clamps: {clamps:?}");
+        assert!(clamps[0].contains("depth=99") && clamps[0].contains("depth=16"));
+        assert!(clamps[1].contains("max_nodes=5000") && clamps[1].contains("max_nodes=1000"));
+
+        // At or under the ceiling nothing is clamped, so nothing is reported.
+        let res = TraverseGraph
+            .invoke(
+                &store,
+                &json!({"symbol": "caller", "depth": 16, "max_nodes": 1000}),
+            )
+            .unwrap();
+        assert!(
+            !res.diagnostics.iter().any(|d| d.starts_with("CLAMPED:")),
+            "{:?}",
+            res.diagnostics
+        );
+    }
+
+    /// The clamp report is a property of every clamping tool, not of TraverseGraph alone
+    /// (CLAUDE.md §11). SemanticSearch needs an embedder + vector store, so it is covered by
+    /// the same one-line `clamp_note` call rather than this table.
+    #[test]
+    fn sibling_tools_report_clamps_above_their_ceilings() {
+        let store = fixture_store();
+        let cases: [(&dyn RetrievalTool, Value, &str); 7] = [
+            (
+                &SearchEntity,
+                json!({"name": "caller", "limit": 101}),
+                "limit=101",
+            ),
+            (
+                &Path,
+                json!({"from": "caller", "to": "leaf", "depth": 17}),
+                "depth=17",
+            ),
+            (
+                &Path,
+                json!({"from": "caller", "to": "leaf", "max_nodes": 5001}),
+                "max_nodes=5001",
+            ),
+            (
+                &BlastRadius,
+                json!({"symbol": "leaf", "depth": 25}),
+                "depth=25",
+            ),
+            (&RankHotspots, json!({"limit": 201}), "limit=201"),
+            (&Communities, json!({"limit": 201}), "limit=201"),
+            (
+                &ContextPack,
+                json!({"seeds": ["caller"], "token_budget": MAX_TOKEN_BUDGET + 1}),
+                "token_budget=",
+            ),
+        ];
+        for (tool, req, asked) in cases {
+            let res = tool.invoke(&store, &req).unwrap();
+            assert!(
+                res.diagnostics
+                    .iter()
+                    .any(|d| d.starts_with("CLAMPED:") && d.contains(asked)),
+                "{} did not report clamping {asked}: {:?}",
+                tool.name(),
+                res.diagnostics
+            );
+        }
     }
 
     // ── BlastRadius ───────────────────────────────────────────────────────────
