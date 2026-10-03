@@ -2413,9 +2413,17 @@ pub fn cross_graph_search(db_paths: &[String], name: &str) -> FedResult {
 ///
 /// See [`cross_graph_search`] for the cross-repo matching semantics and the honest limitation
 /// regarding cross-repo edges.
-pub fn cross_graph_blast_radius(db_paths: &[String], name: &str, depth: u32) -> FedResult {
-    let mut results: Vec<(String, wicked_estate_core::Node)> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
+pub fn cross_graph_blast_radius(
+    db_paths: &[String],
+    name: &str,
+    depth: u32,
+) -> Result<FedBlastRadius> {
+    let mut out = FedBlastRadius::default();
+    let FedBlastRadius {
+        dependents: results,
+        errors,
+        confidence,
+    } = &mut out;
 
     for db_path in db_paths {
         match open_read_store(db_path) {
@@ -2443,6 +2451,7 @@ pub fn cross_graph_blast_radius(db_paths: &[String], name: &str, depth: u32) -> 
                              dependents of '{name}'; this repo's rows are a floor"
                         ));
                     }
+                    confidence.push((db_path.clone(), br.confidence));
                     for node in br.dependents {
                         results.push((db_path.clone(), node));
                     }
@@ -2451,7 +2460,24 @@ pub fn cross_graph_blast_radius(db_paths: &[String], name: &str, depth: u32) -> 
         }
     }
 
-    Ok((results, errors))
+    Ok(out)
+}
+
+/// The answer [`cross_graph_blast_radius`] gives.
+///
+/// `confidence` is kept PER REPO (wicked-estate#194), never merged: each repo was resolved by
+/// its own tiers, and one pooled average would let a well-resolved repo hide a repo whose
+/// dependents are all name guesses.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct FedBlastRadius {
+    /// `(repo_db_path, dependent)`, repo by repo in `db_paths` order.
+    pub dependents: Vec<(String, Node)>,
+    /// Per-db failures and per-repo DEPTH-HORIZON / NODE-CAP notices.
+    pub errors: Vec<String>,
+    /// `(repo_db_path, envelope)` for every repo whose walk ran — see
+    /// [`BlastRadius::confidence`].
+    pub confidence: Vec<(String, EdgeConfidence)>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3374,9 +3400,9 @@ mod tests {
             Some("caller_b_fn"),
         );
 
-        let (results, errors) =
-            cross_graph_blast_radius(&[db_a.clone(), db_b.clone()], "target_fn", 8)
-                .expect("federation blast-radius must succeed");
+        let fed = cross_graph_blast_radius(&[db_a.clone(), db_b.clone()], "target_fn", 8)
+            .expect("federation blast-radius must succeed");
+        let (results, errors) = (&fed.dependents, &fed.errors);
 
         assert!(errors.is_empty(), "no DB errors expected: {errors:?}");
         // Each repo contributes its own caller to the union.
@@ -3391,6 +3417,12 @@ mod tests {
             caller_names.contains(&"caller_b_fn"),
             "caller from repo_b must appear"
         );
+        // wicked-estate#194: one envelope per repo, each over that repo's own admission edge.
+        let repos: Vec<&str> = fed.confidence.iter().map(|(r, _)| r.as_str()).collect();
+        assert_eq!(repos, [db_a.as_str(), db_b.as_str()]);
+        for (repo, c) in &fed.confidence {
+            assert_eq!(c.edge_count, 1, "{repo}: {c:?}");
+        }
     }
 
     #[test]

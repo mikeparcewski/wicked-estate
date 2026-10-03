@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+Implies a minor bump (**0.20.0**): the CLI `rank`/`hotspots` output and the
+`cross_graph_blast_radius` return type change. See **Changed (breaking)**.
+
 ### Added
 - **`wicked-estate lineage --symbol <SYMBOL_ID> [--depth N] [--relation flows_to] [--json]` (TS-S1B).**
   The MCP `Lineage` tool from the CLI — a frontend, not new evidence: no new extraction, edge,
@@ -19,13 +22,6 @@
   `STALENESS: commits_behind not available at this layer …` cue, which the CLI's own stdout
   staleness notice supersedes (`--json` keeps it, for parity).
   Additive: no existing command's output changes, and CLI `resolve` visibility is untouched.
-
-## [0.19.0] — 2026-10-03
-
-Minor bump, not a patch. The Rust API change is additive, but published edge behaviour changes on
-purpose. See **Changed (breaking)**.
-
-### Added
 - **`wicked-estate traverse <symbol>` — and the RetrievalTool→CLI bridge behind it.** The CLI
   now exposes MCP `TraverseGraph` (`--depth`, `--direction`, `--edge-kinds`, `--max-nodes`,
   `--json`). `<symbol>` is an exact name or a SymbolId, resolved by the same rule as `path`. It
@@ -59,20 +55,10 @@ purpose. See **Changed (breaking)**.
   - The ranking is computed live, so it now reflects `scip` ingests and injected cross-repo
     edges that the index-time `pagerank.top` cache missed. That costs latency: about 1 s
     instead of 0.06 s on a 10K-node debug build, with the same top 25 (W11.3 amended).
-- **Angular convention `flows_to` edges are now `Heuristic`/0.5, not `Parsed`/1.0 (#231).**
-  `@Input()` and `route.snapshot.paramMap.get(…)` edges carry
-  `resolved_by = "tree-sitter-convention"`. A caller that filters on
-  `TraversalSpec.min_confidence > 0.5` or on `Provenance::Parsed` no longer sees them; lower
-  the threshold to 0.5, or read `flow_evidence` (`convention`) to keep them. Other direct syntax
-  flow stays `Parsed`/1.0.
-- **`entrypoints`, `leaves`, `dead-code`, community detection and the other §3.3 surfaces no
-  longer return synthetic value slots (#231).** A caller that counted or diffed those lists sees
-  them shrink by exactly the slots. `clusters --package-bias <b>` with `b > 0` can partition
-  real symbols differently, because slots no longer ring a directory's nodes together; default
-  `clusters` (no bias) is unchanged.
-- **The new flow types are `#[non_exhaustive]` (#231).** `FlowSemantics`, `FlowEvidence` and
-  `FlowFact` in `wicked_estate_core::flow` are new in this release; outside the crate, `match`
-  them with a wildcard arm and build a fact with `FlowFact::new`.
+- **`wicked_estate::cross_graph_blast_radius` returns `FedBlastRadius`, not a tuple (#194).**
+  The struct has `dependents` and `errors` (the old tuple's two members) plus a per-repo
+  `confidence`. Replace `let (rows, errors) = …` with `fed.dependents` / `fed.errors`. The
+  struct is `#[non_exhaustive]`. `cross_graph_search` is unchanged.
 
 ### Changed
 - **CLI read paths now carry edge evidence (#194).** Both changes are additive; no existing key
@@ -93,6 +79,31 @@ purpose. See **Changed (breaking)**.
     first, and the rows get the space that is left. The old fixed 200-char allowance broke on
     a long target name. The bound holds while the envelope itself fits; a `<name>` near 25K
     chars still overflows.
+  - **`cross-graph`** prints one `evidence [<db>]:` line per repo. Each repo has its own
+    resolution tiers, so the figures are never pooled across repos.
+
+## [0.19.0] — 2026-10-03
+
+Minor bump, not a patch. The Rust API change is additive, but published edge behaviour changes on
+purpose. See **Changed (breaking)**.
+
+### Changed (breaking)
+- **Angular convention `flows_to` edges are now `Heuristic`/0.5, not `Parsed`/1.0 (#231).**
+  `@Input()` and `route.snapshot.paramMap.get(…)` edges carry
+  `resolved_by = "tree-sitter-convention"`. A caller that filters on
+  `TraversalSpec.min_confidence > 0.5` or on `Provenance::Parsed` no longer sees them; lower
+  the threshold to 0.5, or read `flow_evidence` (`convention`) to keep them. Other direct syntax
+  flow stays `Parsed`/1.0.
+- **`entrypoints`, `leaves`, `dead-code`, community detection and the other §3.3 surfaces no
+  longer return synthetic value slots (#231).** A caller that counted or diffed those lists sees
+  them shrink by exactly the slots. `clusters --package-bias <b>` with `b > 0` can partition
+  real symbols differently, because slots no longer ring a directory's nodes together; default
+  `clusters` (no bias) is unchanged.
+- **The new flow types are `#[non_exhaustive]` (#231).** `FlowSemantics`, `FlowEvidence` and
+  `FlowFact` in `wicked_estate_core::flow` are new in this release; outside the crate, `match`
+  them with a wildcard arm and build a fact with `FlowFact::new`.
+
+### Changed
 - **`flows_to` says what it claims, and stops overstating it (TS-S1).** The relation tag, the
   default `Lineage` behaviour and the stored direction are unchanged. What changed is its
   metadata and two of its confidences.
