@@ -150,3 +150,46 @@ fn graph_view_focus_by_name_skips_value_slots_ahead_of_the_real_symbol() {
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// wicked-estate#194: every edge row carries the resolution evidence, spelled and valued exactly
+/// as `path --json` ships it for the same edge — one shape across the CLI's edge outputs.
+#[test]
+fn graph_view_edges_carry_the_same_evidence_as_path() {
+    let dir = fresh_dir("evidence");
+    fs::write(
+        dir.join("src/a.ts"),
+        "export function f(): number { return 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/b.ts"),
+        "import { f } from './a';\nexport function g(): number { return f(); }\n",
+    )
+    .unwrap();
+    let db = dir.join("g.db");
+    run(&dir, &db, &["index", dir.join("src").to_str().unwrap()]);
+
+    let view: serde_json::Value =
+        serde_json::from_str(&run(&dir, &db, &["graph-view", "--focus", "f"])).unwrap();
+    let edges = view["edges"].as_array().unwrap();
+    assert!(!edges.is_empty(), "g → f must be in the view: {view}");
+    const EVIDENCE: [&str; 4] = ["kind", "confidence", "provenance", "resolved_by"];
+    for e in edges {
+        for key in EVIDENCE {
+            assert!(e.get(key).is_some(), "edge row lacks {key}: {e}");
+        }
+        assert!(e["confidence"].is_number(), "{e}");
+    }
+
+    let path: serde_json::Value =
+        serde_json::from_str(&run(&dir, &db, &["path", "g", "f", "--json"])).unwrap();
+    let hop = &path["hops"][0];
+    let row = edges
+        .iter()
+        .find(|e| e["src"] == hop["source"]["symbol"] && e["tgt"] == hop["target"]["symbol"])
+        .unwrap_or_else(|| panic!("no graph-view row for the path hop {hop}: {view}"));
+    for key in EVIDENCE {
+        assert_eq!(row[key], hop[key], "{key} differs from path --json");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}

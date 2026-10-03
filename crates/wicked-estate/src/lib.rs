@@ -1922,6 +1922,48 @@ pub struct BlastRadius {
     pub node_cap_reached: bool,
     /// The `depth` horizon cut the walk short — real dependents exist BEYOND these rows.
     pub depth_horizon_reached: bool,
+    /// How much to believe the dependency edges that admitted [`Self::dependents`]
+    /// (wicked-estate#194): edges whose source is a returned row and whose target the walk
+    /// reached. Structural `Contains`/`Defines` are excluded, so a File row admitted only by
+    /// containment adds no evidence. See `blast_radius_by_name`.
+    pub confidence: EdgeConfidence,
+}
+
+/// Confidence summary over a set of edges: `{min, avg, edge_count}`, the MCP `BlastRadius`
+/// envelope's shape. `min`/`avg` are `None` when there are no edges, never a fabricated 1.0.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct EdgeConfidence {
+    pub min: Option<f32>,
+    pub avg: Option<f32>,
+    pub edge_count: usize,
+}
+
+impl EdgeConfidence {
+    fn from_confidences(confs: impl IntoIterator<Item = f32>) -> Self {
+        let (mut min, mut sum, mut n) = (f32::INFINITY, 0.0f64, 0usize);
+        for c in confs {
+            min = min.min(c);
+            sum += f64::from(c);
+            n += 1;
+        }
+        if n == 0 {
+            return Self::default();
+        }
+        Self {
+            min: Some(min),
+            avg: Some((sum / n as f64) as f32),
+            edge_count: n,
+        }
+    }
+}
+
+/// Is `kind` evidence that one symbol DEPENDS on another, as opposed to structural membership?
+/// `Contains`/`Defines` are parse-certain (confidence 1.0) and say only where a symbol lives;
+/// counting them would let a file's containment edges make a name-guess impact set look
+/// compiler-verified — the S1 repair finding "summaries counted non-flow `Contains` edges".
+fn is_dependency_evidence(kind: &wicked_estate_core::EdgeKind) -> bool {
+    use wicked_estate_core::EdgeKind;
+    !matches!(kind, EdgeKind::Contains | EdgeKind::Defines)
 }
 
 impl BlastRadius {
@@ -1942,6 +1984,9 @@ impl BlastRadius {
 pub fn blast_radius_by_name(store: &dyn GraphRead, name: &str, depth: u32) -> Result<BlastRadius> {
     let mut out = BlastRadius::default();
     let mut seen = std::collections::HashSet::new();
+    // Eligible edges, deduped across walks: two same-named symbols can share a caller.
+    let mut evidence: HashMap<(SymbolId, SymbolId, wicked_estate_core::EdgeKind), f32> =
+        HashMap::new();
     for sym in search(store, name)? {
         let spec = TraversalSpec::blast_radius(depth);
         let mut sub = store.traverse(&sym.symbol, &spec)?;
@@ -1951,12 +1996,38 @@ pub fn blast_radius_by_name(store: &dyn GraphRead, name: &str, depth: u32) -> Re
         // A cut on ANY matching symbol's walk makes the union a floor.
         out.node_cap_reached |= sub.node_cap_reached;
         out.depth_horizon_reached |= sub.depth_horizon_reached;
-        for n in sub.code_dependents(&sym.symbol, Some(&sym.kind)) {
+        let answer: Vec<&Node> = sub.code_dependents(&sym.symbol, Some(&sym.kind));
+        // Admission evidence: in a Dependents walk an edge `row → x` is WHY `row` is in the
+        // answer, so count dependency edges whose source is a returned row and whose target is
+        // the start or any node this walk reached — including an import-transit File that
+        // `code_dependents` dropped as a row (the edge into it still admitted its dependent).
+        // Not counted: an edge sourced at a node that is not a row (a dropped transit File, a
+        // frontier node past the horizon), and structural `Contains`/`Defines`, so a File row
+        // admitted only by containment contributes no evidence.
+        let rows: HashSet<&SymbolId> = answer.iter().map(|n| &n.symbol).collect();
+        let reached: HashSet<&SymbolId> = sub
+            .nodes
+            .iter()
+            .map(|n| &n.symbol)
+            .chain(std::iter::once(&sym.symbol))
+            .collect();
+        for e in &sub.edges {
+            if is_dependency_evidence(&e.kind)
+                && rows.contains(&e.source)
+                && reached.contains(&e.target)
+            {
+                evidence
+                    .entry((e.source.clone(), e.target.clone(), e.kind.clone()))
+                    .or_insert(e.confidence.get());
+            }
+        }
+        for n in answer {
             if seen.insert(n.symbol.clone()) {
                 out.dependents.push(n.clone());
             }
         }
     }
+    out.confidence = EdgeConfidence::from_confidences(evidence.into_values());
     Ok(out)
 }
 
@@ -3988,5 +4059,66 @@ pattern = "(?P<k>\\{)"
             slice_ids, doc_ids,
             "the index_path resolver slice and ENGINE-CONTRACT §3.1's `yes (slice)` rows drifted apart"
         );
+    }
+}
+
+#[cfg(test)]
+mod blast_radius_confidence_tests {
+    use super::*;
+    use wicked_estate_core::{EdgeKind, GraphWrite, ResolutionTier};
+    use wicked_estate_store::MemStore;
+
+    fn node(id: &str, kind: NodeKind) -> Node {
+        Node::new(
+            SymbolId(id.into()),
+            kind,
+            id,
+            Language::new("typescript"),
+            Location::new("x.ts", Span::ZERO),
+        )
+    }
+
+    fn edge(src: &str, tgt: &str, kind: EdgeKind, tier: ResolutionTier) -> Edge {
+        Edge::new(
+            SymbolId(src.into()),
+            SymbolId(tgt.into()),
+            kind,
+            tier,
+            "test",
+        )
+    }
+
+    /// `s` reaches `f` only THROUGH an import-transit File `t` (it sources only `Imports`, so
+    /// `code_dependents` drops it as a row). `s` is a row, and `s → t` is the edge that
+    /// admitted it — the envelope must count it. `t → f` is sourced at a non-row and must not
+    /// count; neither may the parse-certain `Contains` edge.
+    #[test]
+    fn envelope_counts_the_edge_into_a_dropped_transit_file() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                node("f", NodeKind::Function),
+                node("t", NodeKind::File),
+                node("s", NodeKind::Function),
+                node("home", NodeKind::File),
+            ])
+            .unwrap();
+        store
+            .upsert_edges(&[
+                edge("t", "f", EdgeKind::Imports, ResolutionTier::ImportMap),
+                edge("s", "t", EdgeKind::References, ResolutionTier::Tags),
+                edge("home", "s", EdgeKind::Contains, ResolutionTier::Parsed),
+            ])
+            .unwrap();
+        store.commit_batch().unwrap();
+
+        let br = blast_radius_by_name(&store, "f", 12).unwrap();
+        let rows: Vec<&str> = br.dependents.iter().map(|n| n.symbol.as_str()).collect();
+        assert!(rows.contains(&"s") && !rows.contains(&"t"), "{rows:?}");
+        let tags = ResolutionTier::Tags.default_confidence().get();
+        assert_eq!(br.confidence.edge_count, 1, "{:?}", br.confidence);
+        assert_eq!(br.confidence.min, Some(tags));
+        assert_eq!(br.confidence.avg, Some(tags));
     }
 }
