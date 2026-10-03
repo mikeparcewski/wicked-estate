@@ -308,6 +308,8 @@ explicit — a node hidden from human-facing search is **not** automatically hid
 | CLI `resolve <name>` | **yes** (pre-existing, not yet decided) | raw `find_symbols` by exact name, so e.g. `resolve runs` can return mostly slots. Crew's cross-repo symbol search calls it; filtering it is an open follow-up |
 | `entrypoints` / `leaves` / `dead-code` | no | TS-S1. These match **100%** of value slots by construction (no `Calls`/`Imports` edge in either direction), so `dead-code` had become mostly synthetic noise |
 | `BlastRadius` / `TraverseGraph` | **yes** | **unresolved, deliberately out of scope.** Blast radius follows every edge kind by locked contract (the design notes: a blast radius that only follows calls silently under-reports). Value slots hang off `File` by `Contains`, so a File-rooted blast radius surfaces them. Narrowing this needs an explicit contract decision, not a visibility patch. Seeds are already filtered, so `blast-radius <name>` does not start from one |
+| CLI `blast-radius --json` `confidence` envelope (#194) | follows the rows | `{min, avg, edge_count}` over the edges that admitted the returned rows: the source is a row and the target is a node the walk reached; `Contains`/`Defines` are excluded. When slots are rows (File-rooted), their `flows_to` admission edges count, as the locked "every edge kind" contract implies. MCP `BlastRadius`'s envelope still averages every walked edge, including `Contains`, so the two can differ on the same graph |
+| `graph-view` edges (#194) | no | edges are `Calls`/`Imports` between selected nodes only, keyed `(src, tgt, kind)`. Slots carry neither kind, and selection is the `graph-view` roots row above |
 
 ## 4. GraphStore contract
 

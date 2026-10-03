@@ -11,7 +11,6 @@
 //!   wicked-estate query <name>           [--db ...]
 //!   wicked-estate blast-radius <name>    [--depth N] [--json] [--db ...]
 //!   wicked-estate stats                  [--db ...]
-//!   wicked-estate rank                   [--db ...]
 //!   wicked-estate source [<name>]        [--cluster <id>] [--file <path>] [--symbols id1,id2,...]
 //!                                     [--json] [--max-total-chars <N>] [--max-node-chars <N>]
 //!                                     [--signatures-only] [--db ...]
@@ -34,10 +33,15 @@
 //!   wicked-estate dead-code              [--json] [--db ...]
 //!   wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json] [--semantics] [--db ...]
 //!   wicked-estate graph-view [--limit N] [--include-tests] [--include-trivial] [--ignore <pat>] [--db ...]
+//!
+//! RetrievalTool-backed commands (see `tool_bridge::COMMANDS`; strict flags, `--help` per command):
+//!   wicked-estate traverse <symbol>      [--depth N] [--direction D] [--edge-kinds a,b] [--max-nodes N] [--json] [--db ...]
+//!   wicked-estate rank                   [--limit N] [--seeds s1,s2] [--json] [--db ...]   (alias: hotspots)
 
 mod emit;
 mod scip_auto;
 mod source_bundle;
+mod tool_bridge;
 mod watch_coalesce;
 
 use anyhow::{Context, Result};
@@ -68,37 +72,91 @@ fn ensure_db_dir(db: &str) -> Result<()> {
 }
 
 /// W7.4: emit staleness notice if git reports commits since the db was written.
-/// Reads the indexed root from store meta; resolves the db path for mtime.
 fn maybe_print_staleness(store: &dyn wicked_estate_store::GraphStoreMutExt, db: &str) {
+    for line in staleness_report(store, db).stale {
+        println!("{line}");
+    }
+}
+
+/// What can be said about a db's freshness, per indexed root.
+#[derive(Debug, Default)]
+struct StalenessReport {
+    /// One line per root with commits since its last index.
+    stale: Vec<String>,
+    /// Roots whose freshness could NOT be determined (no git history at the root, a db spec
+    /// with no file mtime, …), named by repo label or root path. The cause is not guessed.
+    unknown: Vec<String>,
+    /// Roots whose commits-behind count was read, stale or not.
+    checked: usize,
+}
+
+impl StalenessReport {
+    /// Exactly the freshness statements a caller should see (agent rule R5): a positive
+    /// "current" claim only when EVERY indexed root was checked and none is behind — partial
+    /// coverage presented as complete is the R3 failure.
+    fn statements(&self, db: &str) -> Vec<String> {
+        let mut out = self.stale.clone();
+        for what in &self.unknown {
+            out.push(format!(
+                "STALENESS: unknown for {what} — freshness could not be determined"
+            ));
+        }
+        if self.checked == 0 && self.unknown.is_empty() {
+            out.push(format!(
+                "STALENESS: unknown — {db} records no indexed root to check"
+            ));
+        } else if out.is_empty() {
+            out.push("STALENESS: 0 commits since last index".to_string());
+        }
+        out
+    }
+}
+
+/// Freshness of every indexed root in this db. Reads the indexed root(s) from store meta and
+/// the db path's mtime.
+fn staleness_report(
+    store: &dyn wicked_estate_store::GraphStoreMutExt,
+    db: &str,
+) -> StalenessReport {
+    let mut report = StalenessReport::default();
     // A multi-repo graph has one root per repo — check each, and name the label in the fix so the
     // operator re-indexes THAT repo and not whichever one happened to be indexed last.
     let repos = wicked_estate::repo_scope::registry(store);
     if !repos.is_empty() {
         for rec in repos {
-            if let Some(n) = wicked_estate::commits_behind(Path::new(&rec.root), db) {
-                if n > 0 {
-                    println!(
-                        "STALENESS: {n} commit(s) in '{label}' since last index — run \
-                         `wicked-estate index {root} --repo {label}` to refresh",
-                        label = rec.label,
-                        root = rec.root,
-                    );
+            match wicked_estate::commits_behind(Path::new(&rec.root), db) {
+                Some(n) => {
+                    report.checked += 1;
+                    if n > 0 {
+                        report.stale.push(format!(
+                            "STALENESS: {n} commit(s) in '{label}' since last index — run \
+                             `wicked-estate index {root} --repo {label}` to refresh",
+                            label = rec.label,
+                            root = rec.root,
+                        ));
+                    }
                 }
+                None => report.unknown.push(format!("repo '{}'", rec.label)),
             }
         }
-        return;
+        return report;
     }
-    let root_str = match store.meta_get_key("indexed_root") {
-        Some(r) => r,
-        None => return, // never indexed yet
+    // Never indexed: no root to check (`statements` says so).
+    let Some(root_str) = store.meta_get_key("indexed_root") else {
+        return report;
     };
-    if let Some(n) = wicked_estate::commits_behind(Path::new(&root_str), db) {
-        if n > 0 {
-            println!(
-                "STALENESS: {n} commit(s) since last index — run `wicked-estate index {root_str}` to refresh"
-            );
+    match wicked_estate::commits_behind(Path::new(&root_str), db) {
+        Some(n) => {
+            report.checked += 1;
+            if n > 0 {
+                report.stale.push(format!(
+                    "STALENESS: {n} commit(s) since last index — run `wicked-estate index {root_str}` to refresh"
+                ));
+            }
         }
+        None => report.unknown.push(root_str),
     }
+    report
 }
 
 /// Warn when the database was indexed under a different binary version or an older symbol-id
@@ -709,6 +767,30 @@ fn main() -> Result<()> {
     // `--db` flag below still overrides whatever resolves here.
     let mut db =
         wicked_estate_store::resolve_store_spec(None, ".wicked-estate/graph.db").map_err(to_any)?;
+    let otel_sink = wicked_estate_observe::init_sink_from_env();
+    let otel_resource = wicked_estate_core::observability::Resource::service(
+        "wicked_estate",
+        env!("CARGO_PKG_VERSION"),
+    );
+    let otel_scope = wicked_estate_core::observability::InstrumentationScope::versioned(
+        "wicked_estate",
+        env!("CARGO_PKG_VERSION"),
+    );
+    // RetrievalTool-backed commands parse their own argv, strictly, so they bypass the shared
+    // parser below — which would swallow flags other commands own (see `tool_bridge`).
+    if let Some(bridged) = tool_bridge::lookup(cmd) {
+        return tool_bridge::run(bridged, rest, db, &|name, attrs, start, end| {
+            emit_cli_span(
+                &otel_sink,
+                &otel_resource,
+                &otel_scope,
+                name,
+                attrs,
+                start,
+                end,
+            )
+        });
+    }
     let mut db_paths: Vec<String> = Vec::new();
     let mut scip_file: Option<String> = None;
     let mut since: u64 = 0;
@@ -1013,16 +1095,6 @@ fn main() -> Result<()> {
     }
     // Re-dispatch to the usage arm. `help` matches no command, so it falls through to `_`.
     let cmd = if help_requested { "help" } else { cmd };
-
-    let otel_sink = wicked_estate_observe::init_sink_from_env();
-    let otel_resource = wicked_estate_core::observability::Resource::service(
-        "wicked_estate",
-        env!("CARGO_PKG_VERSION"),
-    );
-    let otel_scope = wicked_estate_core::observability::InstrumentationScope::versioned(
-        "wicked_estate",
-        env!("CARGO_PKG_VERSION"),
-    );
 
     match cmd {
         "index" => {
@@ -1423,7 +1495,7 @@ fn main() -> Result<()> {
             // reads this via execCapped, where an oversized payload is TRUNCATED mid-document
             // and JSON.parse throws. 25K chars (the R4 budget) with an ADDITIVE
             // `truncated_dependents` count — crew reads only `dependents`/`unresolved`.
-            let (kept, dropped) = cap_blast_radius_rows(deps);
+            let (kept, dropped) = cap_blast_radius_rows(name, unresolved, &br, depth);
             if json_out {
                 // Machine consumers (wicked-crew studio) get the same honesty contract as the
                 // text path: dependents PLUS the unresolved count — absence of dependents must
@@ -1471,6 +1543,9 @@ fn main() -> Result<()> {
                      be incomplete (precise tier pending){cut}",
                     deps.len()
                 );
+                // How much to believe the rows above (wicked-estate#194), on the line after the
+                // completeness line a human already reads.
+                println!("evidence: {}", evidence_text(&br.confidence));
             }
             emit_cli_span(
                 &otel_sink,
@@ -1645,34 +1720,6 @@ fn main() -> Result<()> {
                 }
                 println!();
             }
-        }
-        "rank" | "hotspots" => {
-            let store = open_store_ext(&db).map_err(to_any)?;
-            let t_cmd_start = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64;
-            let top = wicked_estate::important_symbols(store.as_ref(), 25).map_err(to_any)?;
-            let t_cmd_end = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64;
-            println!("top {} symbols by PageRank:", top.len());
-            for (n, score) in &top {
-                println!("  {score:.4}  {:?} {} ({})", n.kind, n.name, loc(n));
-            }
-            emit_cli_span(
-                &otel_sink,
-                &otel_resource,
-                &otel_scope,
-                "wicked_estate.rank",
-                vec![wicked_estate_core::observability::KeyValue::int(
-                    "symbol.count",
-                    top.len() as i64,
-                )],
-                t_cmd_start,
-                t_cmd_end,
-            );
         }
         // Graph view for UI consumption — top-N code symbols by PageRank + inter-symbol edges.
         //
@@ -1902,11 +1949,11 @@ fn main() -> Result<()> {
 
             // Single-pass: collect outgoing edges, out-degree, and in-degree simultaneously.
             // out_deg_map[X] = number of Calls/Imports edges leaving X (full graph, from Dependencies).
-            // in_deg_map[Y]  = number of top-N nodes with a Calls/Imports edge pointing to Y
+            // in_deg_map[Y]  = number of Calls/Imports edges from top-N nodes pointing to Y
             //                  (within-set in-degree, appropriate for layout sizing in the UI).
+            //                  It counts edges, so it equals Y's in-set rows in `edges` below.
             // This halves store calls vs. a separate per-node Dependents query per node.
-            let mut edges_json: Vec<serde_json::Value> = Vec::new();
-            let mut seen: HashSet<String> = HashSet::new();
+            let mut in_set_edges: Vec<wicked_estate_core::Edge> = Vec::new();
             let mut out_deg_map: std::collections::HashMap<String, usize> =
                 std::collections::HashMap::new();
             let mut in_deg_map: std::collections::HashMap<String, usize> =
@@ -1927,16 +1974,11 @@ fn main() -> Result<()> {
                         && node_ids.contains(e.target.as_str())
                     {
                         *in_deg_map.entry(e.target.as_str().to_string()).or_insert(0) += 1;
-                        let key = format!("{}→{}", e.source.as_str(), e.target.as_str());
-                        if seen.insert(key) {
-                            edges_json.push(serde_json::json!({
-                                "src": e.source.as_str(),
-                                "tgt": e.target.as_str(),
-                            }));
-                        }
+                        in_set_edges.push(e.clone());
                     }
                 }
             }
+            let edges_json = graph_view_edge_rows(&in_set_edges);
 
             let nodes_json: Vec<serde_json::Value> = selected
                 .iter()
@@ -2187,8 +2229,9 @@ fn main() -> Result<()> {
 
             // ── Cross-repo blast-radius ───────────────────────────────────────
             println!("\n=== cross-graph blast-radius: '{}' dependents ===", name);
-            let (br_results, br_errors) =
+            let fed =
                 wicked_estate::cross_graph_blast_radius(&db_paths, name, 12).map_err(to_any)?;
+            let (br_results, br_errors) = (&fed.dependents, &fed.errors);
 
             if br_results.is_empty() {
                 println!("no resolved dependents for '{name}' across the specified databases");
@@ -2198,7 +2241,7 @@ fn main() -> Result<()> {
                     br_results.len()
                 );
                 let mut current_repo = "";
-                for (repo, node) in &br_results {
+                for (repo, node) in br_results {
                     if repo.as_str() != current_repo {
                         println!("\n  [repo: {repo}]");
                         current_repo = repo.as_str();
@@ -2206,8 +2249,15 @@ fn main() -> Result<()> {
                     println!("    {:?} {} ({})", node.kind, node.name, loc(node));
                 }
             }
+            // Per repo, never pooled (wicked-estate#194): each repo has its own resolution tiers.
+            if !fed.confidence.is_empty() {
+                println!();
+                for (repo, c) in &fed.confidence {
+                    println!("evidence [{repo}]: {}", evidence_text(c));
+                }
+            }
 
-            for err in &br_errors {
+            for err in br_errors {
                 eprintln!("warning: {err}");
             }
 
@@ -3728,9 +3778,20 @@ fn main() -> Result<()> {
             println!(
                 "    <from>/<to>: exact symbol name or SymbolId. --max-depth 1..=16 (default 12)."
             );
-            println!(
-                "  wicked-estate rank                  [--db ...]  # most important symbols (PageRank)"
-            );
+            // Generated from the bridge table, so a bridged command cannot ship undocumented.
+            for c in tool_bridge::COMMANDS {
+                println!("  wicked-estate {}", c.usage_line());
+                let also = if c.aliases.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (alias: {})", c.aliases.join(", "))
+                };
+                println!(
+                    "    MCP {} over the CLI{also}; `wicked-estate {} --help` for flags.",
+                    c.tool.name(),
+                    c.name
+                );
+            }
             println!(
                 "  wicked-estate stats                 [--db ...]  # includes git provenance if indexed"
             );
@@ -3845,6 +3906,92 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// `graph-view`'s edge rows: `{src, tgt}` plus the resolution evidence `kind`, `confidence`,
+/// `provenance`, `resolved_by`, spelled as `path --json` ships it (wicked-estate#194).
+///
+/// One row per `(src, tgt, kind)`. A `calls` and an `imports` edge between one pair are two
+/// facts; the old `src→tgt` key kept whichever came first and, once rows carry `kind`, would
+/// have presented that arbitrary winner as the relation. The store's own primary key is
+/// `(source, target, kind)`, so a repeat of the same triple is the same edge and is skipped.
+fn graph_view_edge_rows(edges: &[wicked_estate_core::Edge]) -> Vec<serde_json::Value> {
+    let mut seen = std::collections::HashSet::new();
+    edges
+        .iter()
+        .filter(|e| seen.insert((e.source.as_str(), e.target.as_str(), &e.kind)))
+        .map(|e| {
+            serde_json::json!({
+                "src": e.source.as_str(),
+                "tgt": e.target.as_str(),
+                "kind": &e.kind,
+                "confidence": e.confidence.get(),
+                "provenance": &e.provenance,
+                "resolved_by": e.resolved_by,
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod graph_view_edge_rows_tests {
+    use super::graph_view_edge_rows;
+    use wicked_estate_core::{Edge, EdgeKind, ResolutionTier, SymbolId};
+
+    fn edge(kind: EdgeKind, tier: ResolutionTier) -> Edge {
+        Edge::new(
+            SymbolId("a".into()),
+            SymbolId("b".into()),
+            kind,
+            tier,
+            "test",
+        )
+    }
+
+    /// Two kinds between one pair are two rows, each with its own evidence — the trap a
+    /// pair-only key fell into (#194 brief §2).
+    #[test]
+    fn parallel_kinds_between_one_pair_stay_separate_rows() {
+        let rows = graph_view_edge_rows(&[
+            edge(EdgeKind::Calls, ResolutionTier::Tags),
+            edge(EdgeKind::Imports, ResolutionTier::Scip),
+        ]);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0]["kind"], serde_json::json!("calls"));
+        assert_eq!(rows[1]["kind"], serde_json::json!("imports"));
+        assert_ne!(rows[0]["confidence"], rows[1]["confidence"]);
+        for r in &rows {
+            for key in [
+                "src",
+                "tgt",
+                "kind",
+                "confidence",
+                "provenance",
+                "resolved_by",
+            ] {
+                assert!(r.get(key).is_some(), "{key} missing: {r}");
+            }
+        }
+    }
+
+    /// The same `(src, tgt, kind)` twice is one edge, one row.
+    #[test]
+    fn a_repeated_triple_is_one_row() {
+        let e = edge(EdgeKind::Calls, ResolutionTier::Tags);
+        assert_eq!(graph_view_edge_rows(&[e.clone(), e]).len(), 1);
+    }
+}
+
+/// The human `evidence:` text for a confidence envelope (wicked-estate#194), shared by
+/// `blast-radius` and `cross-graph` so the two cannot word it differently.
+fn evidence_text(c: &wicked_estate::EdgeConfidence) -> String {
+    match (c.min, c.avg) {
+        (Some(min), Some(avg)) => format!(
+            "{} dependency edge(s); confidence min {min:.2}, avg {avg:.2}",
+            c.edge_count
+        ),
+        _ => "no dependency edges inside the answer".to_string(),
+    }
+}
+
 /// Serialized-size bound for the CLI blast-radius output (mirrors the retrieval tools'
 /// R4 budget). crew parses the `--json` document from `execCapped` stdout, where an oversized
 /// payload is cut mid-document and `JSON.parse` throws — bounding it here fixes that.
@@ -3861,12 +4008,29 @@ fn blast_radius_row(n: &wicked_estate_core::Node) -> serde_json::Value {
     })
 }
 
-/// Largest dependents prefix whose serialized rows fit the char budget. Returns
+/// Largest dependents prefix whose serialized document fits the char budget. Returns
 /// `(kept, dropped)`. Binary search on prefix length — O(log n · serialize).
-fn cap_blast_radius_rows(deps: &[wicked_estate_core::Node]) -> (usize, usize) {
+///
+/// The envelope is MEASURED, not assumed: it is serialized with no rows and the rows get what
+/// is left. A fixed allowance (the old `- 200`) cannot be right — `target` echoes a caller's
+/// name of any length, and the confidence envelope renders two f32s at full precision. The
+/// bound holds only while the envelope itself fits: a `<name>` near 25K chars leaves no room
+/// and the document exceeds the budget with zero rows (as it did before).
+fn cap_blast_radius_rows(
+    name: &str,
+    unresolved: usize,
+    br: &wicked_estate::BlastRadius,
+    depth: u32,
+) -> (usize, usize) {
+    let deps = &br.dependents;
+    // `dropped` at its widest (every row) so its digits are never under-counted.
+    let envelope = blast_radius_json(name, &[], deps.len(), unresolved, br, depth);
+    let envelope_len = serde_json::to_string(&envelope).map_or(usize::MAX, |s| s.len());
+    // The empty `[]` already counted in the envelope is replaced by the rows' own `[...]`.
+    let row_budget = (BLAST_RADIUS_CHAR_BUDGET + 2).saturating_sub(envelope_len);
     let fits = |k: usize| -> bool {
         let rows: Vec<serde_json::Value> = deps[..k].iter().map(blast_radius_row).collect();
-        serde_json::to_string(&rows).is_ok_and(|s| s.len() <= BLAST_RADIUS_CHAR_BUDGET - 200)
+        serde_json::to_string(&rows).is_ok_and(|s| s.len() <= row_budget)
     };
     if fits(deps.len()) {
         return (deps.len(), 0);
@@ -3895,6 +4059,11 @@ fn cap_blast_radius_rows(deps: &[wicked_estate_core::Node]) -> (usize, usize) {
 /// - `depth_horizon_reached` / `node_cap_reached` — rows the TRAVERSAL never produced, because
 ///   `--depth` or the node budget stopped the walk (wicked-estate#190). `searched_depth` says
 ///   which horizon applied, so a consumer can re-run with a larger one.
+///
+/// `confidence` (wicked-estate#194) is `{min, avg, edge_count}` over the dependency edges that
+/// admitted the rows (source a returned row; structural `contains`/`defines` excluded) — see
+/// `wicked_estate::BlastRadius::confidence`. It is computed over the whole answer, before the
+/// char-budget cut, so it describes the impact set, not the printed prefix.
 fn blast_radius_json(
     name: &str,
     kept: &[wicked_estate_core::Node],
@@ -3911,6 +4080,11 @@ fn blast_radius_json(
         "searched_depth": depth,
         "depth_horizon_reached": br.depth_horizon_reached,
         "node_cap_reached": br.node_cap_reached,
+        "confidence": {
+            "min": br.confidence.min,
+            "avg": br.confidence.avg,
+            "edge_count": br.confidence.edge_count,
+        },
     })
 }
 
@@ -3939,12 +4113,12 @@ mod blast_radius_json_tests {
     #[test]
     fn json_output_is_bounded_and_truncation_is_additive() {
         let deps: Vec<Node> = (0..2000).map(wide_node).collect();
-        let (kept, dropped) = cap_blast_radius_rows(&deps);
-        assert!(dropped > 0, "2000 wide rows must exceed the budget");
-        assert_eq!(kept + dropped, deps.len());
         // `BlastRadius` is #[non_exhaustive] and this is the bin crate: build it field by field.
         let mut br = wicked_estate::BlastRadius::default();
         br.dependents = deps.clone();
+        let (kept, dropped) = cap_blast_radius_rows("core_fn", 3, &br, 12);
+        assert!(dropped > 0, "2000 wide rows must exceed the budget");
+        assert_eq!(kept + dropped, deps.len());
         let out = blast_radius_json("core_fn", &deps[..kept], dropped, 3, &br, 12);
         let s = serde_json::to_string(&out).unwrap();
         assert!(
@@ -3964,7 +4138,9 @@ mod blast_radius_json_tests {
     #[test]
     fn small_result_is_not_capped() {
         let deps: Vec<Node> = (0..3).map(wide_node).collect();
-        let (kept, dropped) = cap_blast_radius_rows(&deps);
+        let mut br = wicked_estate::BlastRadius::default();
+        br.dependents = deps.clone();
+        let (kept, dropped) = cap_blast_radius_rows("f", 0, &br, 12);
         assert_eq!((kept, dropped), (3, 0));
         let out = blast_radius_json("f", &deps, 0, 0, &wicked_estate::BlastRadius::default(), 12);
         assert_eq!(out["dependents"].as_array().unwrap().len(), 3);
@@ -3995,13 +4171,67 @@ mod blast_radius_json_tests {
 
         // …and the mirror: a budget cut with a complete traversal reports the budget only.
         let wide: Vec<Node> = (0..2000).map(wide_node).collect();
-        let (kept, dropped) = cap_blast_radius_rows(&wide);
-        assert!(dropped > 0);
         let mut complete = wicked_estate::BlastRadius::default();
         complete.dependents = wide.clone();
+        let (kept, dropped) = cap_blast_radius_rows("f", 0, &complete, 12);
+        assert!(dropped > 0);
         let out = blast_radius_json("f", &wide[..kept], dropped, 0, &complete, 12);
         assert_eq!(out["truncated_dependents"], serde_json::json!(dropped));
         assert_eq!(out["depth_horizon_reached"], serde_json::json!(false));
+    }
+
+    /// wicked-estate#194: the confidence envelope rides the document in MCP `BlastRadius`'s
+    /// shape, and no edges means `null`, never a fabricated certainty.
+    #[test]
+    fn confidence_envelope_is_present_and_null_without_edges() {
+        let none = blast_radius_json("f", &[], 0, 0, &wicked_estate::BlastRadius::default(), 12);
+        assert_eq!(
+            none["confidence"],
+            serde_json::json!({"min": null, "avg": null, "edge_count": 0})
+        );
+        let mut br = wicked_estate::BlastRadius::default();
+        br.confidence.min = Some(0.5);
+        br.confidence.avg = Some(0.75);
+        br.confidence.edge_count = 4;
+        let out = blast_radius_json("f", &[], 0, 0, &br, 12);
+        assert_eq!(
+            out["confidence"],
+            serde_json::json!({"min": 0.5, "avg": 0.75, "edge_count": 4})
+        );
+        // The #190 honesty keys survive alongside it.
+        for key in [
+            "searched_depth",
+            "depth_horizon_reached",
+            "node_cap_reached",
+        ] {
+            assert!(out.get(key).is_some(), "{key} lost");
+        }
+    }
+
+    /// The widest real envelope still fits: a long caller-supplied name, full-precision f32s
+    /// and a huge edge count are measured, not covered by a guessed allowance.
+    #[test]
+    fn widest_envelope_still_fits_the_budget() {
+        let name = "n".repeat(2_000);
+        let mut br = wicked_estate::BlastRadius::default();
+        br.dependents = (0..2000).map(wide_node).collect();
+        br.confidence.min = Some(0.100_000_01);
+        br.confidence.avg = Some(0.123_456_79);
+        br.confidence.edge_count = usize::MAX;
+        br.depth_horizon_reached = true;
+        br.node_cap_reached = true;
+        let (kept, dropped) = cap_blast_radius_rows(&name, usize::MAX, &br, u32::MAX);
+        assert!(kept > 0 && dropped > 0);
+        let out = blast_radius_json(
+            &name,
+            &br.dependents[..kept],
+            dropped,
+            usize::MAX,
+            &br,
+            u32::MAX,
+        );
+        let len = serde_json::to_string(&out).unwrap().len();
+        assert!(len <= BLAST_RADIUS_CHAR_BUDGET, "payload {len}");
     }
 }
 

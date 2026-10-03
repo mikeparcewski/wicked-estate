@@ -162,6 +162,7 @@ Current session (v0.1.0): **W9.3 ✅** Bicep fully wired (grammar + `.scm` + LAN
 - [x] **W8.2** **Perf/size budgets** — footprint 357→154 MB (−57%); speed prior art 114s→~4s; footprint+speed regression gates in wicked-estate-bench; traversals via recursive CTE. **AC:** ✅ budgets met on benchmark repos.
 - [x] **W8.3** **Language coverage matrix** — `docs/language-coverage-matrix.md` auto-generated from `languages.toml` + `LANG_TABLE` by `scripts/gen-coverage-matrix.py`. **AC:** ✅ matrix shows extraction quality + per-language capability.
 - [x] **W8.4** **Docs** — `docs/getting-started.md` covers all 17 subcommands + flags; `docs/extractor-sdk.md` (this task); ADR-007 (W3.2 decision). **AC:** ✅ a new user can index + query from `getting-started.md` alone.
+- [ ] **W8.5** **RetrievalTool→CLI bridge: work deferred until TS-S2 lands** — the bridge (`crates/wicked-estate/src/tool_bridge.rs`) shipped with `traverse` as its only command. It skips `Lineage` because TS-S2 is rewriting that tool's envelope. When TS-S2 merges: (a) `Lineage` emits `clamp_note` for `depth`, like every other clamping RetrievalTool; (b) `lineage` becomes a second `COMMANDS` row (#195); (c) `traverse` gets a CLI test for a value-flow node passed by exact `SymbolId`, which needs TS-S2B's identity fixtures. **Deadline:** the first PR after TS-S2 merges. **AC:** an over-ceiling `Lineage` depth emits `CLAMPED:`; `wicked-estate lineage` passes the bridge's CLI tests; the value-flow-by-id case is green.
 
 ---
 
@@ -191,7 +192,7 @@ Current session (v0.1.0): **W9.3 ✅** Bicep fully wired (grammar + `.scm` + LAN
 
 - [x] **W11.1** **Content store** — source text content-addressed by blob-SHA; `symbol_source` / `FetchContent` MCP tool; FTS5 over content. **AC:** ✅ `FetchContent` returns symbol source; full-text search works.
 - [x] **W11.2** **Versioned query cache** — `versioned cache-port` pattern: `(query_hash, graph_version)` cache + producer-version rejection + invalidation. **AC:** ✅ cached blast-radius reused until reindex, then busted.
-- [x] **W11.3** **Materialized analytics** — PageRank precomputed at index time (`wicked-estate-rank` power-iter); hotspots served from cache; `wicked-estate rank` returns from stored scores. **AC:** ✅ `rank`/hotspots served from cache.
+- [x] **W11.3** **Materialized analytics** — PageRank precomputed at index time (`wicked-estate-rank` power-iter); hotspots served from cache; `wicked-estate rank` returns from stored scores. **AC:** ✅ `rank`/hotspots served from cache. **Amended (#193):** the CLI `rank`/`hotspots` moved onto the RetrievalTool bridge and now computes live, like MCP `RankHotspots`. The cache was written only by `index` and went stale after `scip` ingest and overlay edges. Measured on a 10K-node debug build: 0.06 s cached vs ~1 s live, same top 25. `graph-view` and the bench still read the cache.
 
 ## Wave 12 — CROSS-GRAPH / MULTI-REPO BRAIN  🟡 SEMI · Deps: W11 · designed in `ADR-005`
 
