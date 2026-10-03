@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+- **`wicked-estate lineage --symbol <SYMBOL_ID> [--depth N] [--relation flows_to] [--json]` (TS-S1B).**
+  The MCP `Lineage` tool from the CLI — a frontend, not new evidence: no new extraction, edge,
+  confidence rule or storage behaviour. Default is dependency lineage; `--relation flows_to` is
+  static semantic value lineage, producer → consumer, with per-hop evidence (not taint analysis).
+  `--symbol` is an exact `SymbolId` (value slots allowed; no name resolution). `--depth` is
+  `0..=24`, default 8, as in MCP; above 24, an unknown or foreign flag, a repeated flag, or a
+  missing value fails non-zero with usage, before any store is opened. An absent id returns the
+  tool's empty result, exit 0; a nonexistent `--db` path fails instead of creating an empty graph.
+  `--json` prints the tool's `RetrievalResult` once as `{"content", "diagnostics"}` (plus the MCP
+  server's `STALENESS: commits_behind=N` line when behind), equal to the parsed MCP response for
+  the same db and arguments. The MCP server's startup staleness computation moved into
+  `wicked_estate::graph_commits_behind` / `staleness_diagnostic` so both frontends share it.
+  Additive: no existing command's output changes, and CLI `resolve` visibility is untouched.
+
 ## [0.19.0] — 2026-10-03
 
 Minor bump, not a patch. The Rust API change is additive, but published edge behaviour changes on
@@ -22,21 +37,6 @@ purpose. See **Changed (breaking)**.
 - **The new flow types are `#[non_exhaustive]` (#231).** `FlowSemantics`, `FlowEvidence` and
   `FlowFact` in `wicked_estate_core::flow` are new in this release; outside the crate, `match`
   them with a wildcard arm and build a fact with `FlowFact::new`.
-
-### Added
-- **`wicked-estate lineage --symbol <SYMBOL_ID> [--depth N] [--relation flows_to] [--json]` (TS-S1B).**
-  The MCP `Lineage` tool from the CLI — a frontend, not new evidence: no new extraction, edge,
-  confidence rule or storage behaviour. Default is dependency lineage; `--relation flows_to` is
-  static semantic value lineage, producer → consumer, with per-hop evidence (not taint analysis).
-  `--symbol` is an exact `SymbolId` (value slots allowed; no name resolution). `--depth` is
-  `0..=24`, default 8, as in MCP; above 24, an unknown or foreign flag, a repeated flag, or a
-  missing value fails non-zero with usage, before any store is opened. An absent id returns the
-  tool's empty result, exit 0; a nonexistent `--db` path fails instead of creating an empty graph.
-  `--json` prints the tool's `RetrievalResult` once as `{"content", "diagnostics"}` (plus the MCP
-  server's `STALENESS: commits_behind=N` line when behind), equal to the parsed MCP response for
-  the same db and arguments. The MCP server's startup staleness computation moved into
-  `wicked_estate::graph_commits_behind` / `staleness_diagnostic` so both frontends share it.
-  Additive: no existing command's output changes, and CLI `resolve` visibility is untouched.
 
 ### Changed
 - **`flows_to` says what it claims, and stops overstating it (TS-S1).** The relation tag, the
