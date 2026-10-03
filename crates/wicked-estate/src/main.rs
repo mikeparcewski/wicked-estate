@@ -1602,11 +1602,18 @@ fn main() -> Result<()> {
             // Fail CLOSED on a graph that is not there: opening a missing SQLite path creates an
             // empty one, and an empty graph answers every exact id with the honest-empty result —
             // indistinguishable from "this id is absent" (the `index` arm's wicked-core#170 class).
-            if db != ":memory:" && !db.contains("://") && !Path::new(&db).exists() {
-                anyhow::bail!(
-                    "no graph at {db} (lineage never creates one) — run \
-                     `wicked-estate index <path> --db {db}` first, or pass the right --db"
-                );
+            // The store factory decides what a spec names: `sqlite://<path>` is a file too, and a
+            // zero-length file is not a graph (SQLite would grow it into an empty one).
+            if let wicked_estate_store::StoreBackend::Sqlite { path } =
+                wicked_estate_store::StoreBackend::parse(&db)
+            {
+                let no_graph = std::fs::metadata(&path).map_or(true, |m| m.len() == 0);
+                if path != ":memory:" && no_graph {
+                    anyhow::bail!(
+                        "no graph at {db} (lineage never creates one) — run \
+                         `wicked-estate index <path> --db {db}` first, or pass the right --db"
+                    );
+                }
             }
             let store = open_store_ext(&db).map_err(to_any)?;
             // Machine output must be exactly one JSON document — notices would corrupt it.

@@ -622,18 +622,27 @@ fn malformed_arguments_fail_before_any_query() {
 #[test]
 fn a_missing_graph_fails_closed_instead_of_answering_empty() {
     let s = scratch("missing_db");
+    // A bare path and the `sqlite://` spelling of the same path are both file specs.
+    for spec in ["typo.db", "sqlite://typo.db"] {
+        let out = run(&s, &["lineage", "--symbol", "x", "--json", "--db", spec]);
+        assert!(!out.status.success(), "{spec} must fail");
+        assert!(out.stdout.is_empty(), "{spec} printed to stdout");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(&format!("no graph at {spec}")), "{stderr}");
+        assert!(
+            !s.join("typo.db").exists(),
+            "lineage must never create a graph ({spec})"
+        );
+    }
+    // A zero-length file is not a graph either, and must not be grown into an empty one.
+    fs::write(s.join("empty.db"), b"").unwrap();
     let out = run(
         &s,
-        &["lineage", "--symbol", "x", "--json", "--db", "typo.db"],
+        &["lineage", "--symbol", "x", "--json", "--db", "empty.db"],
     );
-    assert!(!out.status.success());
+    assert!(!out.status.success(), "a zero-length file must fail");
     assert!(out.stdout.is_empty());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("no graph at typo.db"), "{stderr}");
-    assert!(
-        !s.join("typo.db").exists(),
-        "lineage must never create a graph"
-    );
+    assert_eq!(fs::metadata(s.join("empty.db")).unwrap().len(), 0);
 }
 
 // ── R5: the server-level staleness line is part of the parity ───────────────
