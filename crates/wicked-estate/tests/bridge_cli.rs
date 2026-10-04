@@ -64,10 +64,19 @@ fn chain_repo(tag: &str, depth: usize) -> Scratch {
     scratch
 }
 
+/// Git, hermetically: a developer's `commit.gpgsign` or hooks must not reach the fixture, and
+/// repo discovery stops at the scratch dir's parent.
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")
         .current_dir(dir)
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
         .args(args)
+        .env("GIT_CEILING_DIRECTORIES", dir.parent().unwrap())
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
         .env("GIT_COMMITTER_NAME", "t")
@@ -77,10 +86,23 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(out.status.success(), "git {args:?}: {}", stderr(&out));
 }
 
+/// The binary, run inside `dir`, hermetically (as `lineage_cli.rs` does): the `index` event
+/// emitter points at a missing program and a spool inside `dir` (no `wicked-bus`, no write to
+/// `$HOME`); the store-selection and telemetry variables the binary reads are cleared, so a
+/// developer's `WICKED_RUNTIME=team` cannot fail every command; and git discovery stops at
+/// `dir`'s parent, so a scratch dir under a checkout cannot change the freshness verdict.
 fn run(dir: &Path, args: &[&str]) -> Output {
     Command::new(bin())
         .current_dir(dir)
         .args(args)
+        .env("WICKED_ESTATE_EMIT_PROGRAM", "wicked-bus-absent-bridge-cli")
+        .env("WICKED_ESTATE_EMIT_DEADLETTER", dir.join("emit.ndjson"))
+        .env("GIT_CEILING_DIRECTORIES", dir.parent().unwrap())
+        .env_remove("WICKED_OTEL_ENDPOINT")
+        .env_remove("WICKED_OTEL_HEADERS")
+        .env_remove("WICKED_ESTATE_DB")
+        .env_remove("WICKED_STORE_URL")
+        .env_remove("WICKED_RUNTIME")
         .output()
         .expect("spawn wicked-estate")
 }
