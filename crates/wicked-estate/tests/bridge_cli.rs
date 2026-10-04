@@ -428,3 +428,62 @@ fn mixed_git_and_non_git_repos_are_not_reported_current() {
     assert!(!err.contains("0 commits since last index"), "{err}");
     assert!(err.contains("STALENESS: unknown for repo 'plain'"), "{err}");
 }
+
+/// An empty scratch directory: no repo, no graph.
+fn scratch(tag: &str) -> Scratch {
+    let d = std::env::temp_dir().join(format!("ci_travcli_{tag}_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&d);
+    fs::create_dir_all(&d).unwrap();
+    Scratch(d)
+}
+
+/// A `--db` that is not there must fail CLOSED, as `lineage` does (#241): opening a missing
+/// SQLite path creates an empty graph, and an empty graph answers `rank` with an empty ranking,
+/// exit 0 — a typo reads as "this repo has no hotspots". A bare path and `sqlite://<path>` are
+/// both file specs, and a zero-length file is not a graph either.
+#[test]
+fn a_missing_graph_fails_closed_for_bridged_commands() {
+    let s = scratch("missing_db");
+    for spec in ["typo.db", "sqlite://typo.db"] {
+        for args in [
+            vec!["rank", "--json", "--db", spec],
+            vec!["hotspots", "--limit", "2", "--db", spec],
+            vec!["traverse", "f0", "--json", "--db", spec],
+        ] {
+            let out = run(&s, &args);
+            assert!(!out.status.success(), "{args:?} must fail");
+            assert!(
+                out.stdout.is_empty(),
+                "{args:?} printed to stdout: {}",
+                stdout(&out)
+            );
+            let err = stderr(&out);
+            assert!(
+                err.contains(&format!("no graph at {spec}")),
+                "{args:?}: {err}"
+            );
+            assert!(
+                !s.join("typo.db").exists(),
+                "{args:?} must never create a graph"
+            );
+        }
+    }
+    fs::write(s.join("empty.db"), b"").unwrap();
+    for args in [
+        ["rank", "--json", "--db", "empty.db"],
+        ["traverse", "f0", "--db", "empty.db"],
+    ] {
+        let out = run(&s, &args);
+        assert!(
+            !out.status.success(),
+            "{args:?}: a zero-length file must fail"
+        );
+        assert!(out.stdout.is_empty(), "{args:?}: {}", stdout(&out));
+        assert!(stderr(&out).contains("no graph at empty.db"), "{args:?}");
+        assert_eq!(
+            fs::metadata(s.join("empty.db")).unwrap().len(),
+            0,
+            "{args:?} grew the zero-length file into an empty graph"
+        );
+    }
+}

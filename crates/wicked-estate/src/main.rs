@@ -115,6 +115,28 @@ impl StalenessReport {
     }
 }
 
+/// Fail CLOSED on a graph that is not there, for every read-only frontend over a RetrievalTool
+/// (`lineage`, and each `tool_bridge` command): opening a missing SQLite path creates an empty
+/// one, and an empty graph answers every question with an honest-empty result — `rank` with an
+/// empty ranking and exit 0, an exact id as "absent" — indistinguishable from the real answer
+/// (the `index` arm's wicked-core#170 class). The store factory decides what a spec names:
+/// `sqlite://<path>` is a file too, and a zero-length file is not a graph (SQLite would grow it
+/// into an empty one). `:memory:` and non-file backends are left to the factory.
+fn require_existing_graph(db: &str, cmd: &str) -> anyhow::Result<()> {
+    if let wicked_estate_store::StoreBackend::Sqlite { path } =
+        wicked_estate_store::StoreBackend::parse(db)
+    {
+        let no_graph = std::fs::metadata(&path).map_or(true, |m| m.len() == 0);
+        if path != ":memory:" && no_graph {
+            anyhow::bail!(
+                "no graph at {db} ({cmd} never creates one) — run \
+                 `wicked-estate index <path> --db {db}` first, or pass the right --db"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Freshness of every indexed root in this db. Reads the indexed root(s) from store meta and
 /// the db path's mtime.
 fn staleness_report(
@@ -1674,22 +1696,7 @@ fn main() -> Result<()> {
         // live in the tool, so `--json` is byte-for-byte the result MCP serializes.
         "lineage" => {
             let args = parse_lineage_args(rest)?;
-            // Fail CLOSED on a graph that is not there: opening a missing SQLite path creates an
-            // empty one, and an empty graph answers every exact id with the honest-empty result —
-            // indistinguishable from "this id is absent" (the `index` arm's wicked-core#170 class).
-            // The store factory decides what a spec names: `sqlite://<path>` is a file too, and a
-            // zero-length file is not a graph (SQLite would grow it into an empty one).
-            if let wicked_estate_store::StoreBackend::Sqlite { path } =
-                wicked_estate_store::StoreBackend::parse(&db)
-            {
-                let no_graph = std::fs::metadata(&path).map_or(true, |m| m.len() == 0);
-                if path != ":memory:" && no_graph {
-                    anyhow::bail!(
-                        "no graph at {db} (lineage never creates one) — run \
-                         `wicked-estate index <path> --db {db}` first, or pass the right --db"
-                    );
-                }
-            }
+            require_existing_graph(&db, "lineage")?;
             let store = open_store_ext(&db).map_err(to_any)?;
             // Machine output must be exactly one JSON document — notices would corrupt it.
             if !args.json {

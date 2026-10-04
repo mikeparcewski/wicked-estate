@@ -431,6 +431,8 @@ pub fn run(
         return Ok(());
     }
     let db = inv.db.unwrap_or(default_db);
+    // A read-only command never creates the graph it reads (see `require_existing_graph`).
+    super::require_existing_graph(&db, cmd.name)?;
     let store = wicked_estate_store::open_store_ext(&db).map_err(super::to_any)?;
 
     let mut request = inv.request;
