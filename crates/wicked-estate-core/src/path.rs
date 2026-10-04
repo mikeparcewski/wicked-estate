@@ -99,7 +99,11 @@ pub struct PathResult {
 /// winner is a property of the data: `MemStore` sorts `find_symbols` by symbol string while
 /// `SqliteStore` orders by an autoincrement row id, and taking either store's order would
 /// pick a different winner on the same graph.
-fn resolve(store: &dyn GraphRead, value: &str) -> Result<Vec<SymbolId>> {
+///
+/// Public so the CLI's RetrievalTool bridge resolves a `traverse` operand under exactly this
+/// rule — one name-vs-id visibility policy for `path` and every bridged command, not a copy
+/// per surface (CLAUDE.md §11).
+pub fn resolve_operand(store: &dyn GraphRead, value: &str) -> Result<Vec<SymbolId>> {
     let query = SymbolQuery {
         exact_name: Some(value.to_string()),
         ..Default::default()
@@ -143,14 +147,14 @@ pub fn path_between(
     max_depth: u32,
     max_nodes: usize,
 ) -> Result<PathResult> {
-    let from_ids = resolve(store, from)?;
+    let from_ids = resolve_operand(store, from)?;
     if from_ids.is_empty() {
         return Ok(PathResult {
             unresolved: Some(Unresolved::From),
             ..Default::default()
         });
     }
-    let to_ids = resolve(store, to)?;
+    let to_ids = resolve_operand(store, to)?;
     if to_ids.is_empty() {
         return Ok(PathResult {
             unresolved: Some(Unresolved::To),

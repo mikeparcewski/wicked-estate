@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+Implies a minor bump (**0.20.0**): the CLI `rank`/`hotspots` output and the
+`cross_graph_blast_radius` return type change. See **Changed (breaking)**.
+
 ### Added
 - **`wicked-estate lineage --symbol <SYMBOL_ID> [--depth N] [--relation flows_to] [--json]` (TS-S1B).**
   The MCP `Lineage` tool from the CLI — a frontend, not new evidence: no new extraction, edge,
@@ -19,6 +22,71 @@
   `STALENESS: commits_behind not available at this layer …` cue, which the CLI's own stdout
   staleness notice supersedes (`--json` keeps it, for parity).
   Additive: no existing command's output changes, and CLI `resolve` visibility is untouched.
+- **`wicked-estate traverse <symbol>` — and the RetrievalTool→CLI bridge behind it.** The CLI
+  now exposes MCP `TraverseGraph` (`--depth`, `--direction`, `--edge-kinds`, `--max-nodes`,
+  `--json`). `<symbol>` is an exact name or a SymbolId, resolved by the same rule as `path`. It
+  is the first row of `tool_bridge::COMMANDS`; a further RetrievalTool becomes a CLI command by
+  adding a row, not a dispatch arm. Bridged commands are **strict**: an unknown, repeated or
+  mistyped flag, or a value outside a closed set (`--direction sideways`, `--edge-kinds cals`),
+  exits non-zero instead of being ignored (#197/#206 class). `--json` writes the MCP `content`
+  document unchanged as exactly one JSON document on stdout. Diagnostics go to stderr, including
+  the real commits-behind `STALENESS:` line (#198 for this surface). It replaces the tool's
+  transport-addressed placeholder and is always present. It says `0 commits` only when every
+  indexed root was checked. Otherwise it names each unchecked repo or root as `unknown`, and
+  never guesses a cause. A `--db` that does not exist (a bare path or `sqlite://<path>`) or is a
+  zero-length file is an error (`no graph at <spec>`), as for `lineage`: bridged commands never
+  create a graph, so a typo cannot read as an empty ranking. Interim difference: `lineage --json`
+  (hand-rolled, above) states freshness inside the JSON `diagnostics` in the MCP server's
+  `STALENESS: commits_behind=N` wording and keeps the retrieval layer's placeholder, while a
+  bridged command's `--json` states it once on stderr and drops the placeholder — one binary,
+  two freshness channels under `--json`, until WAVE-PLAN W8.5 moves `lineage` onto the bridge.
+- **Retrieval tools report a clamp.** `TraverseGraph`, `SearchEntity`, `Path`, `BlastRadius`,
+  `RankHotspots`, `Communities`, `ContextPack` and `SemanticSearch` still clamp an
+  over-ceiling `depth`/`max_nodes`/`limit`/`token_budget`/`k`. Each now also emits a `CLAMPED:`
+  diagnostic, for MCP callers too. No response envelope changed. `Lineage` is not covered yet,
+  because TS-S2 is rewriting it (WAVE-PLAN W8.5).
+- `wicked_estate_core::resolve_operand`: the name-or-id resolver `path` already used, now public.
+
+### Changed (breaking)
+- **`rank` / `hotspots` now run on the RetrievalTool bridge (#193).** They expose MCP
+  `RankHotspots`: `--limit N` and `--seeds s1,s2` (names or SymbolIds, resolved like
+  `traverse`'s operand) are honoured, and `--json` emits the tool's document. Before, all three
+  were silently ignored. Changes a script may notice:
+  - The default count is the tool's 20, not 25.
+  - Kinds print in serde spelling (`function`, not `Function`).
+  - A freshness line follows the listing.
+  - The `wicked_estate.rank` span keeps its name, but its `symbol.count` attribute is
+    replaced by `tool.name` and `diagnostics.count`, as on every bridged command.
+  - Unknown flags, a positional argument, and unknown or ambiguous seeds now exit non-zero.
+  - The ranking is computed live, so it now reflects `scip` ingests and injected cross-repo
+    edges that the index-time `pagerank.top` cache missed. That costs latency: about 1 s
+    instead of 0.06 s on a 10K-node debug build, with the same top 25 (W11.3 amended).
+- **`wicked_estate::cross_graph_blast_radius` returns `FedBlastRadius`, not a tuple (#194).**
+  The struct has `dependents` and `errors` (the old tuple's two members) plus a per-repo
+  `confidence`. Replace `let (rows, errors) = …` with `fed.dependents` / `fed.errors`. The
+  struct is `#[non_exhaustive]`. `cross_graph_search` is unchanged.
+
+### Changed
+- **CLI read paths now carry edge evidence (#194).** Both changes are additive; no existing key
+  changed.
+  - **`graph-view` edges.** Rows were `{src, tgt}`. They now also carry `kind`, `confidence`,
+    `provenance` and `resolved_by`, with the same spelling and values as `path --json`. Rows
+    are keyed by `(src, tgt, kind)`, so `calls` and `imports` edges between one pair are no
+    longer merged into a single row with an arbitrary kind. On this repo's own index (17,184
+    edges) no such pair exists, and row counts at `--limit` 80, 500 and 2000 were unchanged.
+    Other languages were not measured.
+  - **`blast-radius`.** `--json` gains `confidence: {min, avg, edge_count}`, the MCP
+    `BlastRadius` shape. It is computed over the edges that admitted the returned rows: the
+    source is a row and the target is a node the walk reached. Structural `contains`/`defines`
+    edges are excluded, so a File row admitted only by containment adds no evidence. MCP
+    `BlastRadius` averages over every edge it walked, `contains` included, so on the same graph
+    its numbers can be higher. Text output gains an `evidence:` line.
+  - **The 25K-char `--json` bound is measured, not assumed.** The envelope is serialized
+    first, and the rows get the space that is left. The old fixed 200-char allowance broke on
+    a long target name. The bound holds while the envelope itself fits; a `<name>` near 25K
+    chars still overflows.
+  - **`cross-graph`** prints one `evidence [<db>]:` line per repo. Each repo has its own
+    resolution tiers, so the figures are never pooled across repos.
 
 ## [0.19.0] — 2026-10-03
 

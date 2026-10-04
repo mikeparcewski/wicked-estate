@@ -20,7 +20,7 @@ Produces two binaries:
 
 | Binary | Purpose |
 |--------|---------|
-| `target/release/wicked-estate` | CLI — index, query, blast-radius, lineage, rank, source, stats, scip, semantic, watch, subscribe, compact, tfstate, drift, cross-graph, clusters, context, annotate, nodes, resolve, export, plugins list, … |
+| `target/release/wicked-estate` | CLI — index, query, blast-radius, path, lineage, traverse, rank, source, stats, scip, semantic, watch, subscribe, compact, tfstate, drift, cross-graph, clusters, context, annotate, nodes, resolve, export, plugins list, … |
 | `target/release/wicked-estate-mcp` | MCP stdio server — 30 tools (12 estate + 7 memory + 7 knowledge + 4 proposal) for LLM agents |
 
 Zero runtime deps. Single static binary on each target.
@@ -225,28 +225,70 @@ values in `--json` are the tool's **0-based** lines (unlike `path --json`, there
 `line_1based`, because the document is the MCP one verbatim); text mode prints 1-based `file:line`.
 The one 25K-char R4 budget is the tool's and covers `content`; the CLI adds no budget of its own.
 
+### Traverse — walk the graph from a symbol, as the MCP `TraverseGraph` tool does
+
+```bash
+wicked-estate traverse <symbol> [--depth N] [--direction dependencies|dependents|both] [--edge-kinds a,b] [--max-nodes N] [--json] [--db ...]
+```
+
+The MCP `TraverseGraph` tool from the CLI (see §10's tool table for its defaults and ceilings).
+`traverse` runs on the RetrievalTool→CLI bridge (`crates/wicked-estate/src/tool_bridge.rs`),
+the same mechanism as `rank`: the walk, its ceilings and its document are the tool's; the CLI
+adds only argv parsing, operand resolution and freshness.
+
+- `<symbol>` is an exact name or a `SymbolId`, resolved by the same rule as `path`. A name
+  that matches several symbols fails and lists the candidate ids; a name that matches nothing
+  fails non-zero with `no symbol named …` (the MCP tool, handed an unknown id, returns an empty
+  document instead).
+- `--direction` defaults to `dependencies` (what `<symbol>` uses); `--edge-kinds` takes
+  snake_case kinds (`calls,imports,references`, …) and rejects an unknown one. A `--depth` or
+  `--max-nodes` above the tool's ceiling is clamped by the tool **and reported** as a
+  `CLAMPED: …` diagnostic — the same line MCP callers now get.
+- Flags are strict: an unknown, repeated, foreign or mistyped flag exits non-zero before any
+  store is opened. A `--db` that does not exist (a bare path or `sqlite://<path>`), or is a
+  zero-length file, is an error — bridged commands never create a graph, so a typo cannot read
+  as an empty result.
+- `--json` writes the tool's `content` document unchanged, as exactly one JSON document on
+  stdout, with the diagnostics on stderr one per line. The last of them is the real freshness
+  statement, computed by the CLI (`STALENESS: N commit(s) since last index …`, `STALENESS: 0
+  commits since last index`, or `STALENESS: unknown for <root> …`); the tool's own
+  `commits_behind not available at this layer` placeholder is replaced, not printed alongside.
+  Unlike `blast-radius --json`, there is no CLI-side 25K-char bound: the document is as large as
+  the tool's envelope (a wide symbol on a 15K-node index gave ~239K chars).
+- Text mode prints the document rendered as indented `key: value` lines, then the diagnostics,
+  all on stdout.
+
+Note the interim difference from `lineage --json` (§4, above), which states freshness inside the
+JSON `diagnostics` in the MCP server's `STALENESS: commits_behind=N` wording and keeps the
+placeholder: one binary, two freshness channels under `--json`, until W8.5 moves `lineage` onto
+the bridge.
+
 ---
 
 ## 5. Rank — most important symbols (PageRank)
 
 ```bash
-wicked-estate rank [--db ...]
+wicked-estate rank [--limit N] [--seeds s1,s2] [--json] [--db ...]     # alias: hotspots
 ```
 
-Returns the top 25 symbols by PageRank over the call/import graph. Use this to understand which
-symbols are most load-bearing in a repo.
+Returns the top symbols (default 20, at most 200) by PageRank over the call/import graph,
+computed live, so the ranking reflects `scip` ingests and injected cross-repo edges. Use it to
+find which symbols are most load-bearing in a repo. `--seeds` personalizes the ranking toward
+the given symbols (names or SymbolIds): rank a blast radius, not the whole repo. `--json` emits
+the MCP `RankHotspots` document on stdout, with diagnostics on stderr. Unknown flags and
+unknown seeds are errors.
 
 ```
 $ wicked-estate rank --db /tmp/demo.db
-top 8 symbols by PageRank:
-  0.2163  Function bark (example.py:9)
-  0.1411  Class Dog (example.py:5)
-  0.1411  Function speak (example.py:6)
-  0.1235  Import example (main.py:1)
-  0.1235  Function main (main.py:3)
-  0.0848  File example.py (example.py:1)
-  0.0848  File main.py (main.py:1)
-  0.0848  Class Animal (example.py:1)
+top 6 symbols by PageRank:
+  0.1856  function bark (example.py:9)
+  0.1196  class Dog (example.py:5)
+  0.1196  function speak (example.py:6)
+  0.0840  class Animal (example.py:1)
+  0.0840  function sound (example.py:2)
+  0.0840  function main (main.py:3)
+
+STALENESS: 0 commits since last index
 ```
 
 ---
