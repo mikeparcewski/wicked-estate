@@ -33,7 +33,13 @@ Implies a minor bump (**0.20.0**): the CLI `rank`/`hotspots` output and the
   the real commits-behind `STALENESS:` line (#198 for this surface). It replaces the tool's
   transport-addressed placeholder and is always present. It says `0 commits` only when every
   indexed root was checked. Otherwise it names each unchecked repo or root as `unknown`, and
-  never guesses a cause.
+  never guesses a cause. A `--db` that does not exist (a bare path or `sqlite://<path>`) or is a
+  zero-length file is an error (`no graph at <spec>`), as for `lineage`: bridged commands never
+  create a graph, so a typo cannot read as an empty ranking. Interim difference: `lineage --json`
+  (hand-rolled, above) states freshness inside the JSON `diagnostics` in the MCP server's
+  `STALENESS: commits_behind=N` wording and keeps the retrieval layer's placeholder, while a
+  bridged command's `--json` states it once on stderr and drops the placeholder — one binary,
+  two freshness channels under `--json`, until WAVE-PLAN W8.5 moves `lineage` onto the bridge.
 - **Retrieval tools report a clamp.** `TraverseGraph`, `SearchEntity`, `Path`, `BlastRadius`,
   `RankHotspots`, `Communities`, `ContextPack` and `SemanticSearch` still clamp an
   over-ceiling `depth`/`max_nodes`/`limit`/`token_budget`/`k`. Each now also emits a `CLAMPED:`
