@@ -2,7 +2,9 @@
 
 ## [Unreleased]
 
-Implies a minor bump (**0.20.0**): the CLI `rank`/`hotspots` output and the
+## [0.20.0] — 2026-10-04
+
+Minor bump, not a patch: the CLI `rank`/`hotspots` output and the
 `cross_graph_blast_radius` return type change. See **Changed (breaking)**.
 
 ### Added
