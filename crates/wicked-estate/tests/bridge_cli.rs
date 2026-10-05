@@ -1,5 +1,5 @@
-//! The RetrievalTool→CLI bridge commands (`traverse`, `rank`/`hotspots`) through the real
-//! binary.
+//! The RetrievalTool→CLI bridge commands (`traverse`, `rank`/`hotspots`, `rules-inventory`,
+//! `rules-recall`) through the real binary.
 //!
 //! These test the BRIDGE: strict flags, operand and `--seeds` resolution, aliases, the
 //! stdout/stderr split, exactly one document under `--json`, clamp reporting. They
@@ -449,6 +449,8 @@ fn a_missing_graph_fails_closed_for_bridged_commands() {
             vec!["rank", "--json", "--db", spec],
             vec!["hotspots", "--limit", "2", "--db", spec],
             vec!["traverse", "f0", "--json", "--db", spec],
+            vec!["rules-inventory", "--json", "--db", spec],
+            vec!["rules-recall", "--severity", "error", "--db", spec],
         ] {
             let out = run(&s, &args);
             assert!(!out.status.success(), "{args:?} must fail");
@@ -486,4 +488,213 @@ fn a_missing_graph_fails_closed_for_bridged_commands() {
             "{args:?} grew the zero-length file into an empty graph"
         );
     }
+}
+
+// ── rules-inventory / rules-recall (#196) ────────────────────────────────────────────────────
+
+/// A committed repo with one Python file and one Drools package (a `RuleSet` + two `Rule` nodes
+/// through the real `index` path), plus three conformance rules seeded straight into the graph:
+/// those are minted only by `wicked-core rules ingest`, which this repo does not ship.
+fn indexed_rules(tag: &str) -> Scratch {
+    let s = scratch(tag);
+    fs::write(s.join("alpha.py"), "def f(p): return p\n").unwrap();
+    fs::write(
+        s.join("lending.drl"),
+        "package com.example.lending;\nrule \"CheckScore\"\n  when\n    $c : Customer( score >= 700 )\n  then\n    $c.approve();\nend\n",
+    )
+    .unwrap();
+    git(&s, &["init", "-q", "."]);
+    git(&s, &["add", "-A"]);
+    git(&s, &["commit", "-qm", "fx"]);
+    index(&s);
+
+    use wicked_estate_core::{Language, Location, Node, NodeKind, Span, Symbol};
+    let conformance = |id: &str, severity: &str, language: Option<&str>| {
+        let path = format!("conformance_rule/{id}");
+        let mut node = Node::new(
+            Symbol::synthetic("wicked-apps", path.clone()).id(),
+            NodeKind::Rule,
+            id,
+            Language::new("wicked-apps"),
+            Location::new(path, Span::ZERO),
+        );
+        let targets = match language {
+            Some(l) => serde_json::json!({ "language": l }),
+            None => serde_json::json!({}),
+        };
+        let serde_json::Value::Object(meta) = serde_json::json!({
+            "id": id, "rule_type": "pattern", "severity": severity, "targets": targets,
+        }) else {
+            unreachable!()
+        };
+        node.metadata = meta;
+        node
+    };
+    let mut store = wicked_estate_store::open_store(s.join("graph.db").to_str().unwrap()).unwrap();
+    store.begin_batch().unwrap();
+    store
+        .upsert_nodes(&[
+            conformance("PAT-1", "error", Some("python")),
+            conformance("PAT-3", "error", Some("java")),
+            conformance("POL-2", "warn", None),
+        ])
+        .unwrap();
+    store.commit_batch().unwrap();
+    s
+}
+
+/// The tool's own `content` for `request` against the fixture's graph — what MCP returns.
+fn direct(
+    dir: &Path,
+    tool: &dyn wicked_estate_core::RetrievalTool,
+    request: serde_json::Value,
+) -> serde_json::Value {
+    let store = wicked_estate_store::open_store(dir.join("graph.db").to_str().unwrap()).unwrap();
+    tool.invoke(&*store, &request).unwrap().content
+}
+
+fn rule_ids(doc: &serde_json::Value) -> Vec<&str> {
+    doc["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect()
+}
+
+#[test]
+fn rules_inventory_json_is_the_tool_document_unchanged() {
+    let fx = indexed_rules("rules_inv");
+    let out = run(&fx, &["rules-inventory", "--json", "--db", "graph.db"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let docs = documents(&out);
+    assert_eq!(docs.len(), 1, "stdout: {}", stdout(&out));
+    assert_eq!(
+        docs[0],
+        direct(
+            &fx,
+            &wicked_estate_retrieve::RulesInventory,
+            serde_json::json!({})
+        )
+    );
+    // Populated, not vacuously equal: the Drools package and its rule, plus the seeded rules.
+    assert_eq!(docs[0]["engines"][0]["name"], "com.example.lending");
+    assert_eq!(docs[0]["rule_nodes"]["total"], 4);
+    assert!(stderr(&out).contains("STALENESS:"), "{}", stderr(&out));
+}
+
+#[test]
+fn rules_recall_json_is_the_tool_document_and_str_facets_reach_the_tool() {
+    let fx = indexed_rules("rules_recall");
+    let recall = |args: &[&str]| {
+        let mut full = vec!["rules-recall"];
+        full.extend_from_slice(args);
+        full.extend_from_slice(&["--json", "--db", "graph.db"]);
+        let out = run(&fx, &full);
+        assert!(out.status.success(), "{args:?}: {}", stderr(&out));
+        let mut docs = documents(&out);
+        assert_eq!(docs.len(), 1, "{args:?} stdout: {}", stdout(&out));
+        docs.remove(0)
+    };
+
+    let doc = recall(&["--severity", "error", "--language", "python"]);
+    assert_eq!(
+        doc,
+        direct(
+            &fx,
+            &wicked_estate_retrieve::RulesRecall,
+            serde_json::json!({ "severity": "error", "language": "python" })
+        )
+    );
+    // Exact severity drops POL-2 (warn); the language facet drops PAT-3 (java). Were either
+    // flag lost or mistyped on the way, the tool would read it as absent and return more.
+    assert_eq!(rule_ids(&doc), ["PAT-1"]);
+
+    // `language` is a wildcard facet: POL-2 names no language, so it applies to python too.
+    // Severity-first order: error before warn.
+    assert_eq!(
+        rule_ids(&recall(&["--language=python"])),
+        ["PAT-1", "POL-2"]
+    );
+    // U64 reaches the tool as a number: a string would fall back to the default cap of 100.
+    assert_eq!(rule_ids(&recall(&["--limit", "1"])), ["PAT-1"]);
+}
+
+#[test]
+fn rules_commands_on_a_graph_without_rules_are_empty_not_errors() {
+    // R1: an empty graph is an empty result and exit 0, never an error.
+    let fx = indexed_chain("rules_empty", 1);
+    let out = run(&fx, &["rules-inventory", "--json", "--db", "graph.db"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let doc = documents(&out).remove(0);
+    assert_eq!(doc["total"], 0);
+    assert_eq!(doc["rule_nodes"]["total"], 0);
+
+    let out = run(&fx, &["rules-recall", "--json", "--db", "graph.db"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        documents(&out),
+        [serde_json::json!({"returned": 0, "rules": [], "total": 0})]
+    );
+    assert!(stderr(&out).contains("no active conformance rules matched"));
+}
+
+#[test]
+fn rules_commands_reject_unknown_foreign_and_malformed_flags() {
+    let fx = indexed_chain("rules_flags", 1);
+    for bad in [
+        &["rules-inventory", "--bogus", "x"][..],
+        &["rules-inventory", "--limit", "5"][..],
+        &["rules-inventory", "positional"][..],
+        &["rules-recall", "--top", "5"][..],
+        &["rules-recall", "--language", ""][..],
+        &["rules-recall", "--language="][..],
+        &["rules-recall", "--severity"][..],
+        &["rules-recall", "--layer", "a", "--layer", "b"][..],
+        &["rules-recall", "--limit", "many"][..],
+        &["rules-recall", "--projects", ","][..],
+    ] {
+        let mut full = bad.to_vec();
+        full.extend_from_slice(&["--db", "graph.db"]);
+        let out = run(&fx, &full);
+        assert!(!out.status.success(), "{bad:?} exited 0");
+        assert!(
+            out.stdout.is_empty(),
+            "{bad:?} wrote stdout: {}",
+            stdout(&out)
+        );
+        assert!(
+            stderr(&out).contains(&format!("usage: wicked-estate {}", bad[0])),
+            "{bad:?}: {}",
+            stderr(&out)
+        );
+    }
+}
+
+#[test]
+fn rules_commands_have_help_and_appear_in_the_banner() {
+    let fx = scratch("rules_help");
+    let help = stdout(&run(&fx, &["rules-recall", "--help"]));
+    assert!(help.contains("wildcard facets"), "{help}");
+    for flag in [
+        "--severity",
+        "--rule-type",
+        "--language",
+        "--layer",
+        "--framework",
+        "--scope",
+        "--projects",
+        "--limit",
+    ] {
+        assert!(help.contains(flag), "{flag} missing: {help}");
+    }
+    let banner = stdout(&run(&fx, &["help"]));
+    assert!(
+        banner.contains("wicked-estate rules-inventory [--json]"),
+        "{banner}"
+    );
+    assert!(
+        banner.contains("wicked-estate rules-recall [--severity S]"),
+        "{banner}"
+    );
 }

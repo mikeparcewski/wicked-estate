@@ -4354,7 +4354,7 @@ mod tests {
     #[test]
     fn sibling_tools_report_clamps_above_their_ceilings() {
         let store = fixture_store();
-        let cases: [(&dyn RetrievalTool, Value, &str); 7] = [
+        let cases: [(&dyn RetrievalTool, Value, &str); 8] = [
             (
                 &SearchEntity,
                 json!({"name": "caller", "limit": 101}),
@@ -4377,6 +4377,7 @@ mod tests {
             ),
             (&RankHotspots, json!({"limit": 201}), "limit=201"),
             (&Communities, json!({"limit": 201}), "limit=201"),
+            (&RulesRecall, json!({"limit": 501}), "limit=501"),
             (
                 &ContextPack,
                 json!({"seeds": ["caller"], "token_budget": MAX_TOKEN_BUDGET + 1}),

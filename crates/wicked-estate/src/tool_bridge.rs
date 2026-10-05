@@ -30,11 +30,14 @@ use wicked_estate_core::RetrievalTool;
 use wicked_estate_core::observability::KeyValue;
 
 /// How a flag's value is coerced into the request JSON. A type exists only once a bridged
-/// command uses it (CLAUDE.md §5) — add `Str`/`Bool` with their first consumer.
+/// command uses it (CLAUDE.md §5) — add `Bool` with its first consumer.
 #[derive(Debug, Clone, Copy)]
 pub enum FlagType {
     /// Non-negative integer → JSON number.
     U64,
+    /// Free-form string → JSON string, passed through verbatim. An empty value is rejected:
+    /// tools read `""` as an absent facet, so `--language ""` would silently widen the query.
+    Str,
     /// Comma-separated → JSON array of strings; empty items are dropped.
     List,
     /// Comma-separated symbol names or `SymbolId`s → JSON array of `SymbolId`s. Each item is
@@ -52,6 +55,7 @@ impl FlagType {
     fn placeholder(self) -> String {
         match self {
             FlagType::U64 => "N".into(),
+            FlagType::Str => "S".into(),
             FlagType::List => "a,b".into(),
             FlagType::SymbolList => "s1,s2".into(),
             FlagType::OneOf(vals) => vals.join("|"),
@@ -191,6 +195,79 @@ pub const COMMANDS: &[BridgedCommand] = &[
                 ty: FlagType::SymbolList,
                 validate: None,
                 help: "personalize toward these symbols (names or SymbolIds; no commas)",
+            },
+        ],
+    },
+    BridgedCommand {
+        name: "rules-inventory",
+        aliases: &[],
+        tool: &wicked_estate_retrieve::RulesInventory,
+        operand: None,
+        render: None,
+        flags: &[],
+    },
+    BridgedCommand {
+        name: "rules-recall",
+        aliases: &[],
+        tool: &wicked_estate_retrieve::RulesRecall,
+        operand: None,
+        render: None,
+        flags: &[
+            FlagSpec {
+                flag: "severity",
+                key: "severity",
+                ty: FlagType::Str,
+                validate: None,
+                help: "exact: info|warn|error|critical",
+            },
+            FlagSpec {
+                flag: "rule-type",
+                key: "rule_type",
+                ty: FlagType::Str,
+                validate: None,
+                help: "exact: pattern|policy",
+            },
+            FlagSpec {
+                flag: "language",
+                key: "language",
+                ty: FlagType::Str,
+                validate: None,
+                help: "wildcard: also returns rules that name no language",
+            },
+            FlagSpec {
+                flag: "layer",
+                key: "layer",
+                ty: FlagType::Str,
+                validate: None,
+                help: "wildcard: also returns rules that name no layer",
+            },
+            FlagSpec {
+                flag: "framework",
+                key: "framework",
+                ty: FlagType::Str,
+                validate: None,
+                help: "wildcard: also returns rules that name no framework",
+            },
+            FlagSpec {
+                flag: "scope",
+                key: "scope",
+                ty: FlagType::Str,
+                validate: None,
+                help: "only rules under this scope subtree (path prefix, e.g. wiki:architecture)",
+            },
+            FlagSpec {
+                flag: "projects",
+                key: "projects",
+                ty: FlagType::List,
+                validate: None,
+                help: "also return rules scoped to these projects (omitted: global rules only)",
+            },
+            FlagSpec {
+                flag: "limit",
+                key: "limit",
+                ty: FlagType::U64,
+                validate: None,
+                help: "how many rules; the tool clamps to its ceiling and reports the clamp",
             },
         ],
     },
@@ -339,6 +416,11 @@ pub fn parse(cmd: &BridgedCommand, args: &[String]) -> std::result::Result<Invoc
                             format!("--{name} expects a non-negative integer, got {v:?}")
                         })?;
                         Value::from(n)
+                    }
+                    FlagType::Str => {
+                        let v = value("a value")?;
+                        check(f, &v)?;
+                        Value::String(v)
                     }
                     FlagType::OneOf(allowed) => {
                         let v = value(&format!("one of {}", allowed.join("|")))?;
@@ -688,6 +770,39 @@ mod tests {
                 .contains("at least one item")
         );
         assert!(!rank.usage_line().contains('<'), "{}", rank.usage_line());
+    }
+
+    #[test]
+    fn str_passes_the_value_through_and_rejects_an_empty_or_missing_one() {
+        let recall = lookup("rules-recall").unwrap();
+        let p = |a: &[&str]| parse(recall, &args(a));
+        assert_eq!(
+            p(&["--severity", "error", "--language=python"])
+                .unwrap()
+                .request,
+            json!({"severity": "error", "language": "python"})
+        );
+        // A numeric-looking value stays a string: the tool reads facets with `as_str`.
+        assert_eq!(p(&["--layer", "7"]).unwrap().request["layer"], json!("7"));
+        // `""` is the tool's "no facet" — it would silently widen the recall.
+        assert!(p(&["--language", ""]).unwrap_err().contains("empty value"));
+        assert!(p(&["--language="]).unwrap_err().contains("empty value"));
+        assert!(p(&["--scope"]).unwrap_err().contains("--scope requires"));
+        assert!(
+            p(&["--scope", "--json"])
+                .unwrap_err()
+                .contains("--scope requires")
+        );
+        assert!(
+            p(&["--layer", "a", "--layer", "b"])
+                .unwrap_err()
+                .contains("more than once")
+        );
+        assert!(
+            p(&["x"])
+                .unwrap_err()
+                .contains("takes no positional argument")
+        );
     }
 
     #[test]

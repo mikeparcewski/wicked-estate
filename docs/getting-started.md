@@ -291,6 +291,31 @@ top 6 symbols by PageRank:
 STALENESS: 0 commits since last index
 ```
 
+### Rules — the MCP `RulesInventory` and `rules.recall` tools
+
+```bash
+wicked-estate rules-inventory [--json] [--db ...]
+wicked-estate rules-recall [--severity S] [--rule-type S] [--language S] [--layer S] [--framework S] [--scope S] [--projects a,b] [--limit N] [--json] [--db ...]
+```
+
+Both run on the same bridge as `traverse` and `rank`, with the same strict flags, `--json`
+contract and freshness line. `rules-inventory` lists the rules-engine `RuleSet` nodes (a
+Drools package, for example), the code that invokes each one, and how many `Rule` nodes sit inside or outside
+a `RuleSet`. It takes no flags beyond `--json`/`--db`. `rules-recall` returns the active
+conformance rules (from `wicked-core rules ingest`), ordered by severity, then weight, then id:
+
+- `--severity` (`info|warn|error|critical`) and `--rule-type` (`pattern|policy`) are exact
+  matches. The tool answers an unknown value with an empty result and a diagnostic, exit 0.
+- `--language`, `--layer` and `--framework` are wildcard facets. A rule that names no language
+  applies to every language, so `--language python` also returns it.
+- `--scope` restricts to one scope subtree by path prefix (e.g. `wiki:architecture`).
+- `--projects` adds rules scoped to those projects. Without it you get only global rules.
+- `--limit` defaults to 100. Above the tool's ceiling of 500 it is clamped, with a `CLAMPED:`
+  diagnostic.
+
+An empty value (`--language ""`) is a usage error, because the tool reads `""` as "no filter".
+A graph without rules returns an empty document and exit 0.
+
 ---
 
 ## 6. Source — print the source slice for a symbol
