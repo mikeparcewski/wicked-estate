@@ -7,7 +7,7 @@
 
 use crate::annotation::Annotation;
 use crate::change::{Change, ChangeOp};
-use crate::edge::{Direction, Edge, ResolutionTier};
+use crate::edge::{Direction, Edge, EdgeKind, ResolutionTier};
 use crate::error::Result;
 use crate::history::HistoricalEdge;
 use crate::node::{Language, Node, SourceFile};
@@ -15,6 +15,9 @@ use crate::query::{GraphStats, RetrievalResult, Subgraph, SymbolQuery, Traversal
 use crate::refs::{Extraction, UnresolvedRef};
 use crate::repo::RepoInfo;
 use crate::semantics::{NodeSemantics, ValidationClaim};
+use crate::support::{
+    EdgeSupport, SupportFact, SupportOwner, SupportOwnerState, SupportReplacement,
+};
 use crate::symbol::SymbolId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -241,6 +244,24 @@ pub trait GraphRead: Send {
     /// FIRST delete-then-re-add yields `Some(g)` with `g >= 1`. The bump fires in the store's shared
     /// node-upsert seam (covering both the FTS and skip-FTS reindex paths), NEVER in symbol interning.
     fn symbol_epoch(&self, id: &SymbolId) -> Result<Option<u64>>;
+    /// The authoritative support rows behind the public edge `(source, target, kind)`, every owner,
+    /// ordered by `(owner.producer, owner.snapshot, fact_id)` (byte order). Empty when the key has no support
+    /// (including a plain base-plane edge). This — not the bounded `flow_support` sample on the
+    /// projected edge — is support identity. Contract: [`crate::support`] and
+    /// `docs/ENGINE-CONTRACT.md` §3.4. (TS-S2A)
+    fn edge_supports(
+        &self,
+        source: &SymbolId,
+        target: &SymbolId,
+        kind: &EdgeKind,
+    ) -> Result<Vec<EdgeSupport>>;
+    /// The last generation applied for `owner`, or `None` if it never replaced anything. Kept after
+    /// an empty replacement, so a stale replay stays rejected. (TS-S2A)
+    fn support_generation(&self, owner: &SupportOwner) -> Result<Option<u64>>;
+    /// Every owner that ever replaced support, with its last generation, ordered by
+    /// `(producer, snapshot)` (byte order). Includes owners whose set is now empty. This is how an
+    /// operator finds what to retract (CLI `wicked-estate supports owners`). (TS-S2A)
+    fn support_owners(&self) -> Result<Vec<SupportOwnerState>>;
     fn stats(&self) -> Result<GraphStats>;
 }
 
@@ -252,6 +273,10 @@ pub trait GraphWrite {
     fn commit_batch(&mut self) -> Result<()>;
     fn upsert_nodes(&mut self, nodes: &[Node]) -> Result<()>;
     /// Upsert edges; on a `dedup_key` collision the higher-confidence edge wins.
+    ///
+    /// On a key that has support (TS-S2A), the incoming edge is applied by the same rule to the
+    /// key's kept-aside *base contribution*, and the public edge is re-projected from base +
+    /// support — a base write never erases a producer's support. See [`crate::support`].
     fn upsert_edges(&mut self, edges: &[Edge]) -> Result<()>;
     /// Persist references the resolver could NOT bind (one row per unresolved reference —
     /// `docs/ENGINE-CONTRACT.md` §2.1). Keeping them is what lets blast-radius report its
@@ -284,6 +309,10 @@ pub trait GraphWrite {
     /// (In a fully-indexed store every importer's extraction contributes the shared Import node,
     /// so the contribution mechanism usually re-homes it first; this edge-based keep covers
     /// nodes written outside file extraction.) Pinned by the conformance kit's shared-Import cases.
+    ///
+    /// Support facts (TS-S2A) are producer-owned and are never deleted here: a supported edge this
+    /// call removes is re-projected from its surviving support, and a supported key's base
+    /// contribution is retired by exactly the predicate applied to edges. See [`crate::support`].
     fn remove_file(&mut self, file: &str) -> Result<()>;
     /// Record a content digest for `file` (incremental change detection — fast xxh3). (Wave 2.6)
     fn set_file_digest(&mut self, file: &str, digest: &str) -> Result<()>;
@@ -293,6 +322,9 @@ pub trait GraphWrite {
     fn set_file_content(&mut self, file: &str, text: &str) -> Result<()>;
     /// Delete edges whose `source` or `target` is no longer a node (orphans left by incremental
     /// removal of a file's symbols). Returns the count pruned. Keeps blast-radius from over-reporting.
+    ///
+    /// A supported edge (TS-S2A) is not pruned: its base contribution is dropped and it is
+    /// re-projected from its support, which only its owner may retract. The count excludes it.
     fn prune_dangling_edges(&mut self) -> Result<usize>;
     /// Append a delta to the change log (file granularity — one entry per changed/removed file, not
     /// per node/edge, so the log never explodes during bulk indexing). Powers reactive subscription
@@ -328,6 +360,23 @@ pub trait GraphWrite {
         ty: Option<&str>,
         key: &str,
     ) -> Result<usize>;
+    /// Make `facts` the **complete** support set of `owner` at `generation`, atomically, and
+    /// re-project every public edge whose support changed (TS-S2A — [`crate::support`],
+    /// `docs/ENGINE-CONTRACT.md` §3.4).
+    ///
+    /// Facts the owner held and does not re-assert are retracted; an empty `facts` retracts them
+    /// all. Other owners' facts and the base plane are never touched. Generation rules: a higher
+    /// generation applies; the same generation with the same fact set is an idempotent replay
+    /// (nothing written, `replayed: true`); the same generation with a different set, or a lower
+    /// one, is `Error::Invalid` and writes nothing. All-or-nothing on every backend, inside or
+    /// outside an open batch. Implementations validate with [`crate::support::normalize_facts`]
+    /// and decide with [`crate::support::plan_replacement`], so the rules cannot drift per store.
+    fn replace_edge_supports(
+        &mut self,
+        owner: &SupportOwner,
+        generation: u64,
+        facts: &[SupportFact],
+    ) -> Result<SupportReplacement>;
 }
 
 /// Convenience supertrait for the common case where one object both reads and writes (the

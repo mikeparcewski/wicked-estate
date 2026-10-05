@@ -70,7 +70,8 @@ fn drop_all_tables(url: &str) {
         sqlx::query(
             "DROP TABLE IF EXISTS \
              annotations, edge_history, changes, meta, cache, content, \
-             unresolved_refs, edges, nodes, node_files, files, symbol_gen CASCADE",
+             unresolved_refs, edges, nodes, node_files, files, symbol_gen, \
+             support_owners, edge_supports, edge_base CASCADE",
         )
         .execute(&pool)
         .await
@@ -121,6 +122,29 @@ fn postgres_store_satisfies_multi_file_contribution_contract() {
 
     let mut store = wicked_estate_store::PostgresStore::open(&url).expect("open postgres store");
     wicked_estate_core::conformance::multi_file_contribution_suite(&mut store);
+}
+
+/// TS-S2A authoritative, replaceable edge support on a live Postgres — the SAME shared suite the
+/// Mem/Sqlite/Surreal tests run, so the PG support tables, the per-replacement transaction (a
+/// SAVEPOINT inside an open batch) and the remove_file/prune heal cannot drift silently.
+#[test]
+fn postgres_store_satisfies_support_replacement_contract() {
+    let url = match std::env::var("TEST_POSTGRES_URL") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("postgres_conformance: TEST_POSTGRES_URL not set — skipping");
+            return;
+        }
+    };
+    let _guard = PG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lease = PgTestLease::acquire(&url);
+
+    drop_all_tables(&url);
+
+    let mut store = wicked_estate_store::PostgresStore::open(&url).expect("open postgres store");
+    wicked_estate_core::conformance::support_replacement_suite(&mut store);
 }
 
 /// The back-fill support surface (#141) on a live Postgres — the SAME shared body the
@@ -266,4 +290,211 @@ fn postgres_batch_commits_atomically_no_torn_reads() {
         FULL - 1,
         "all batch edges visible after commit"
     );
+}
+
+/// TS-S2A on concurrent Postgres writers (`shared_writers: true`): replacements are serialized by
+/// the support advisory lock, so racing generations can never move an owner backwards or leave it
+/// holding a mix of two generations' facts. Generation 3 always wins; generation 2 either applied
+/// first (and was replaced) or was refused as stale. Repeated to give the race room to happen.
+#[test]
+fn postgres_concurrent_support_replacements_serialize() {
+    use wicked_estate_core::SupportOwner;
+    let url = match std::env::var("TEST_POSTGRES_URL") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("postgres_conformance: TEST_POSTGRES_URL not set — skipping");
+            return;
+        }
+    };
+    let _guard = PG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lease = PgTestLease::acquire(&url);
+    drop_all_tables(&url);
+
+    let fact = |target: &str| {
+        Edge::new(
+            SymbolId("race:src".into()),
+            SymbolId(format!("race:{target}")),
+            EdgeKind::Calls,
+            ResolutionTier::Scip,
+            "scip-typescript",
+        )
+    };
+    let gen2: Vec<Edge> = (0..20).map(|i| fact(&format!("two{i}"))).collect();
+    let gen3: Vec<Edge> = (0..20).map(|i| fact(&format!("three{i}"))).collect();
+    for round in 0..10 {
+        let owner = SupportOwner::new("race", format!("round{round}")).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        // Both stores are opened up front: concurrent `CREATE TABLE IF NOT EXISTS` is itself a
+        // Postgres race, and a panic before the barrier would strand the other thread.
+        let spawn = |generation: u64, facts: Vec<Edge>| {
+            let (owner, barrier) = (owner.clone(), barrier.clone());
+            let mut store = wicked_estate_store::PostgresStore::open(&url).expect("open");
+            let facts: Vec<wicked_estate_core::SupportFact> = facts
+                .into_iter()
+                .map(|e| wicked_estate_core::SupportFact::from_edge(e).expect("valid fact"))
+                .collect();
+            std::thread::spawn(move || {
+                barrier.wait();
+                store.replace_edge_supports(&owner, generation, &facts)
+            })
+        };
+        let a = spawn(2, gen2.clone());
+        let b = spawn(3, gen3.clone());
+        let ra = a.join().expect("thread a");
+        b.join()
+            .expect("thread b")
+            .expect("generation 3 always applies");
+        if let Err(e) = ra {
+            assert!(e.to_string().contains("stale generation"), "{e}");
+        }
+        let store = wicked_estate_store::PostgresStore::open(&url).expect("open");
+        assert_eq!(
+            store.support_generation(&owner).unwrap(),
+            Some(3),
+            "round {round}"
+        );
+        for f in &gen2 {
+            assert!(
+                store
+                    .edge_supports(&f.source, &f.target, &f.kind)
+                    .unwrap()
+                    .iter()
+                    .all(|r| r.owner != owner),
+                "round {round}: a generation-2 fact survived generation 3"
+            );
+        }
+        for f in &gen3 {
+            assert_eq!(
+                store
+                    .edge_supports(&f.source, &f.target, &f.kind)
+                    .unwrap()
+                    .iter()
+                    .filter(|r| r.owner == owner)
+                    .count(),
+                1,
+                "round {round}: every generation-3 fact is held once"
+            );
+        }
+    }
+}
+
+/// TS-S2A atomicity on a live Postgres, with the failure INSIDE the write: a trigger raises on a
+/// poison row after the replacement already deleted a retracted fact and inserted a new one.
+/// The store must be unchanged afterwards — outside a batch (the replacement's own transaction)
+/// and inside one (a SAVEPOINT), where the caller's earlier batch writes must survive the commit.
+#[test]
+fn postgres_replacement_rolls_back_a_failure_inside_the_transaction() {
+    use wicked_estate_core::{SupportFact, SupportOwner};
+    let url = match std::env::var("TEST_POSTGRES_URL") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("postgres_conformance: TEST_POSTGRES_URL not set — skipping");
+            return;
+        }
+    };
+    let _guard = PG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lease = PgTestLease::acquire(&url);
+    drop_all_tables(&url);
+
+    let mut store = wicked_estate_store::PostgresStore::open(&url).expect("open postgres store");
+    let raw = |sql: &str| {
+        use sqlx::postgres::PgPoolOptions;
+        let rt = tokio::runtime::Runtime::new().expect("tokio");
+        let pool = rt
+            .block_on(PgPoolOptions::new().max_connections(1).connect(&url))
+            .expect("connect");
+        rt.block_on(sqlx::raw_sql(sql).execute(&pool))
+            .expect("raw sql");
+    };
+    let fact = |t: &str, by: &str| {
+        SupportFact::new(
+            format!("occ:{t}"),
+            Edge::new(
+                SymbolId("pg:src".into()),
+                SymbolId(format!("pg:{t}")),
+                EdgeKind::Calls,
+                ResolutionTier::Scip,
+                by,
+            ),
+        )
+        .expect("fact")
+    };
+    let snapshot = |store: &wicked_estate_store::PostgresStore, owner: &SupportOwner| {
+        let mut edges = store.all_edges().unwrap();
+        edges.sort_by_key(|e| e.dedup_key());
+        let mut rows = Vec::new();
+        for t in ["a", "b", "c", "d"] {
+            let f = fact(t, "x");
+            rows.extend(
+                store
+                    .edge_supports(&f.edge.source, &f.edge.target, &f.edge.kind)
+                    .unwrap(),
+            );
+        }
+        (edges, rows, store.support_generation(owner).unwrap())
+    };
+    for in_batch in [false, true] {
+        let owner = SupportOwner::new("scip-typescript", format!("web-{in_batch}")).unwrap();
+        raw("DROP TRIGGER IF EXISTS ts_s2a_poison ON edge_supports;");
+        store
+            .replace_edge_supports(&owner, 1, &[fact("a", "scip"), fact("b", "scip")])
+            .unwrap();
+        raw(
+            "CREATE OR REPLACE FUNCTION ts_s2a_poison() RETURNS trigger AS $$ \
+             BEGIN IF NEW.data LIKE '%poison%' THEN RAISE EXCEPTION 'injected storage failure'; \
+             END IF; RETURN NEW; END $$ LANGUAGE plpgsql; \
+             CREATE TRIGGER ts_s2a_poison BEFORE INSERT ON edge_supports \
+             FOR EACH ROW EXECUTE FUNCTION ts_s2a_poison();",
+        );
+        let before = snapshot(&store, &owner);
+        if in_batch {
+            store.begin_batch().unwrap();
+            store
+                .upsert_nodes(&[Node::new(
+                    SymbolId(format!("pg:batch_node_{in_batch}")),
+                    NodeKind::Function,
+                    "batch_node",
+                    Language::new("rust"),
+                    Location::new("b.rs", Span::ZERO),
+                )])
+                .unwrap();
+        }
+        // `{a,b}` → `{b,c,d}`: a's delete and c's insert run before the poison row (d).
+        let err = store
+            .replace_edge_supports(
+                &owner,
+                2,
+                &[fact("b", "scip"), fact("c", "scip"), fact("d", "poison")],
+            )
+            .expect_err("the trigger aborts the replacement");
+        assert!(
+            err.to_string().contains("injected storage failure"),
+            "{err}"
+        );
+        if in_batch {
+            store.commit_batch().unwrap();
+            assert!(
+                store
+                    .get_node(&SymbolId(format!("pg:batch_node_{in_batch}")))
+                    .unwrap()
+                    .is_some(),
+                "a failed replacement must not roll back the caller's batch"
+            );
+        }
+        assert_eq!(
+            snapshot(&store, &owner),
+            before,
+            "no half-old/half-new generation (in_batch={in_batch})"
+        );
+        raw("DROP TRIGGER IF EXISTS ts_s2a_poison ON edge_supports;");
+        let ok = store
+            .replace_edge_supports(&owner, 2, &[fact("b", "scip"), fact("c", "scip")])
+            .expect("generation 2 is still free after the rollback");
+        assert_eq!((ok.asserted, ok.retained, ok.retracted), (1, 1, 1));
+        store.replace_edge_supports(&owner, 3, &[]).unwrap();
+    }
 }

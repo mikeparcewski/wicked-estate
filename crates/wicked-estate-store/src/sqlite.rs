@@ -7,7 +7,12 @@
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use wicked_estate_core::support::{
+    EdgeKey, EdgeSupport, StoredFacts, SupportFact, SupportOwner, SupportOwnerState,
+    SupportReplacement, base_upsert_wins, fact_key, normalize_facts, plan_replacement,
+    project_edge,
+};
 use wicked_estate_core::{
     Annotation, Change, ChangeOp, Direction, Edge, EdgeKind, Error, GraphRead, GraphStats,
     GraphWrite, HistoricalEdge, Node, NodeKind, NodeSemantics, RepoInfo, Result, StoreCapabilities,
@@ -1280,6 +1285,19 @@ impl SqliteStore {
                     params![s],
                 )
                 .map_err(st)?;
+            // TS-S2A: erasure is total — support facts and base contributions naming the symbol
+            // go too (support is otherwise never deleted outside `replace_edge_supports`).
+            for table in ["edge_supports", "edge_base"] {
+                self.conn
+                    .execute(
+                        &format!(
+                            "DELETE FROM {table} WHERE source IN (SELECT sid FROM symbols WHERE sym=?1) \
+                                OR target IN (SELECT sid FROM symbols WHERE sym=?1)"
+                        ),
+                        params![s],
+                    )
+                    .map_err(st)?;
+            }
         }
         Ok(removed)
     }
@@ -1898,6 +1916,394 @@ impl SqliteStore {
     }
 }
 
+/// A public edge key in SQLite's on-disk form: interned `(source sid, target sid, kind JSON)`.
+type SidKey = (i64, i64, String);
+
+/// TS-S2A support-plane helpers (contract: `wicked_estate_core::support`). Every helper runs on
+/// `self.conn` and therefore inside whatever transaction/savepoint the caller holds.
+impl SqliteStore {
+    /// The sid of an already-interned symbol, without interning it (reads must not write).
+    fn lookup_sid(&self, sym: &str) -> Result<Option<i64>> {
+        self.conn
+            .query_row("SELECT sid FROM symbols WHERE sym=?1", params![sym], |r| {
+                r.get(0)
+            })
+            .optional()
+            .map_err(st)
+    }
+
+    /// Whether the support tables exist. Always true after [`Self::open`]/[`Self::in_memory`]
+    /// (SCHEMA creates them); false only for a pre-TS-S2A file opened via
+    /// [`Self::open_readonly`], which must read as "no support", not fail.
+    fn support_tables_present(&self) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+                 WHERE type='table' AND name='edge_supports')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(st)
+    }
+
+    /// True when any support row exists — the gate that keeps every pre-TS-S2A write path on its
+    /// original fast path while the support plane is unused.
+    fn any_support(&self) -> Result<bool> {
+        self.conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM edge_supports)", [], |r| {
+                r.get(0)
+            })
+            .map_err(st)
+    }
+
+    fn key_supported(&self, key: &SidKey) -> Result<bool> {
+        self.conn
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM edge_supports \
+                 WHERE source=?1 AND target=?2 AND kind=?3)",
+            )
+            .map_err(st)?
+            .query_row(params![key.0, key.1, key.2], |r| r.get(0))
+            .map_err(st)
+    }
+
+    /// The kept-aside base contribution: the parsed edge and its stored JSON text, so a restore
+    /// writes back the exact bytes (a row from an older serializer is not re-serialized).
+    fn edge_base_of(&self, key: &SidKey) -> Result<Option<(Edge, String)>> {
+        let data: Option<String> = self
+            .conn
+            .prepare_cached("SELECT data FROM edge_base WHERE source=?1 AND target=?2 AND kind=?3")
+            .map_err(st)?
+            .query_row(params![key.0, key.1, key.2], |r| r.get(0))
+            .optional()
+            .map_err(st)?;
+        data.map(|d| Ok((serde_json::from_str(&d)?, d))).transpose()
+    }
+
+    fn set_edge_base(&self, key: &SidKey, edge: &Edge) -> Result<()> {
+        let file = edge
+            .location
+            .as_ref()
+            .map(|l| l.file.as_str())
+            .unwrap_or("");
+        self.conn
+            .prepare_cached(
+                "INSERT INTO edge_base(source,target,kind,file,data) VALUES(?1,?2,?3,?4,?5) \
+                 ON CONFLICT(source,target,kind) DO UPDATE SET file=excluded.file, data=excluded.data",
+            )
+            .map_err(st)?
+            .execute(params![key.0, key.1, key.2, file, serde_json::to_string(edge)?])
+            .map_err(st)?;
+        Ok(())
+    }
+
+    /// Write (or delete) the public `edges` row for `key` unconditionally — a projection is
+    /// authoritative, so the base plane's `>=` rule does not apply to it. `file` is the row's
+    /// owning file (see [`Self::reproject`]), `data` its exact JSON.
+    fn set_public_edge(&self, key: &SidKey, row: Option<(&Edge, &str, &str)>) -> Result<()> {
+        match row {
+            Some((e, data, file)) => {
+                self.conn
+                    .prepare_cached(
+                        "INSERT INTO edges(source,target,kind,confidence,file,data,evidence_count) \
+                         VALUES(?1,?2,?3,?4,?5,?6,?7) \
+                         ON CONFLICT(source,target,kind) DO UPDATE SET \
+                           confidence=excluded.confidence, file=excluded.file, data=excluded.data, \
+                           evidence_count=excluded.evidence_count",
+                    )
+                    .map_err(st)?
+                    .execute(params![
+                        key.0,
+                        key.1,
+                        key.2,
+                        e.confidence.get() as f64,
+                        file,
+                        data,
+                        e.evidence_count as i64
+                    ])
+                    .map_err(st)?;
+            }
+            None => {
+                self.conn
+                    .prepare_cached("DELETE FROM edges WHERE source=?1 AND target=?2 AND kind=?3")
+                    .map_err(st)?
+                    .execute(params![key.0, key.1, key.2])
+                    .map_err(st)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Recompute `key`'s public edge from its base contribution and every owner's facts. With no
+    /// support left, the base contribution becomes the plain public edge again (its exact bytes).
+    ///
+    /// A projected row's `edges.file` is its base contribution's file, or `''` without one — NOT
+    /// the representative's location. Support is producer-owned: it must not make `remove_file`
+    /// of a fact's site delete the row, nor count as a surviving importer in the shared-Import
+    /// keep (which would pin an Import node to a file nothing will ever remove again).
+    fn reproject(&self, key: &SidKey) -> Result<()> {
+        let facts: Vec<Edge> = {
+            let mut stmt = self
+                .conn
+                .prepare_cached(
+                    "SELECT data FROM edge_supports WHERE source=?1 AND target=?2 AND kind=?3 \
+                     ORDER BY producer, snapshot, fact_id",
+                )
+                .map_err(st)?;
+            let rows = stmt
+                .query_map(params![key.0, key.1, key.2], |r| r.get::<_, String>(0))
+                .map_err(st)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(serde_json::from_str(&row.map_err(st)?)?);
+            }
+            out
+        };
+        let base = self.edge_base_of(key)?;
+        let base_file = |b: &Edge| {
+            b.location
+                .as_ref()
+                .map(|l| l.file.clone())
+                .unwrap_or_default()
+        };
+        if facts.is_empty() {
+            self.conn
+                .prepare_cached("DELETE FROM edge_base WHERE source=?1 AND target=?2 AND kind=?3")
+                .map_err(st)?
+                .execute(params![key.0, key.1, key.2])
+                .map_err(st)?;
+            return match &base {
+                Some((b, raw)) => self.set_public_edge(key, Some((b, raw, &base_file(b)))),
+                None => self.set_public_edge(key, None),
+            };
+        }
+        let refs: Vec<&Edge> = facts.iter().collect();
+        let file = base.as_ref().map(|(b, _)| base_file(b)).unwrap_or_default();
+        match project_edge(base.as_ref().map(|(b, _)| b), &refs) {
+            Some(p) => self.set_public_edge(key, Some((&p, &serde_json::to_string(&p)?, &file))),
+            None => self.set_public_edge(key, None),
+        }
+    }
+
+    /// Keys of public `edges` rows matching `predicate` (unaliased columns; `?1` bound to `arg`)
+    /// that have support. Captured BEFORE an edge-deleting step, so the heal re-projects exactly
+    /// the supported rows that step removes — not a whole-table scan.
+    fn supported_edge_keys(&self, predicate: &str, arg: Option<&str>) -> Result<BTreeSet<SidKey>> {
+        let sql = format!(
+            "SELECT source, target, kind FROM edges WHERE ({predicate}) AND EXISTS ( \
+               SELECT 1 FROM edge_supports s WHERE s.source = edges.source \
+                 AND s.target = edges.target AND s.kind = edges.kind)"
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(st)?;
+        let map = |r: &rusqlite::Row<'_>| -> rusqlite::Result<SidKey> {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        };
+        let rows = match arg {
+            Some(a) => stmt.query_map(params![a], map),
+            None => stmt.query_map([], map),
+        }
+        .map_err(st)?;
+        rows.collect::<rusqlite::Result<_>>().map_err(st)
+    }
+
+    /// Delete the `edge_base` rows matching `predicate` (the same unaliased predicate the caller
+    /// applies to `edges`, `?1` bound to `arg`) and return their keys.
+    fn retire_edge_base(&self, predicate: &str, arg: Option<&str>) -> Result<BTreeSet<SidKey>> {
+        let select = format!("SELECT source, target, kind FROM edge_base WHERE {predicate}");
+        let mut keys = BTreeSet::new();
+        {
+            let mut stmt = self.conn.prepare(&select).map_err(st)?;
+            let map = |r: &rusqlite::Row<'_>| -> rusqlite::Result<SidKey> {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            };
+            let rows = match arg {
+                Some(a) => stmt.query_map(params![a], map),
+                None => stmt.query_map([], map),
+            }
+            .map_err(st)?;
+            for row in rows {
+                keys.insert(row.map_err(st)?);
+            }
+        }
+        if !keys.is_empty() {
+            let delete = format!("DELETE FROM edge_base WHERE {predicate}");
+            match arg {
+                Some(a) => self.conn.execute(&delete, params![a]),
+                None => self.conn.execute(&delete, []),
+            }
+            .map_err(st)?;
+        }
+        Ok(keys)
+    }
+
+    /// The support-plane half of an edge-deleting step (`remove_file`, `prune_dangling_edges`),
+    /// run BEFORE its edge DELETE with the same predicate: retire matching base contributions and
+    /// capture the supported rows about to be deleted. `None` when no support exists anywhere —
+    /// the step then runs exactly its pre-TS-S2A queries.
+    fn support_pre_delete(
+        &self,
+        predicate: &str,
+        arg: Option<&str>,
+    ) -> Result<Option<(BTreeSet<SidKey>, BTreeSet<SidKey>)>> {
+        if !self.any_support()? {
+            return Ok(None);
+        }
+        let deleted = self.supported_edge_keys(predicate, arg)?;
+        let retired = self.retire_edge_base(predicate, arg)?;
+        Ok(Some((deleted, retired)))
+    }
+
+    /// The other half, AFTER the DELETE: re-project the captured keys. Returns how many deleted
+    /// supported rows came back (all of them — support is producer-owned).
+    fn support_post_delete(
+        &self,
+        captured: Option<(BTreeSet<SidKey>, BTreeSet<SidKey>)>,
+    ) -> Result<usize> {
+        let Some((deleted, retired)) = captured else {
+            return Ok(0);
+        };
+        let restored = deleted.len();
+        for key in deleted.union(&retired) {
+            self.reproject(key)?;
+        }
+        Ok(restored)
+    }
+
+    fn sid_key(&self, key: &EdgeKey) -> Result<SidKey> {
+        Ok((self.intern(&key.0)?, self.intern(&key.1)?, key.2.clone()))
+    }
+
+    /// The body of [`GraphWrite::replace_edge_supports`], run inside its savepoint.
+    fn replace_edge_supports_inner(
+        &self,
+        owner: &SupportOwner,
+        generation: u64,
+        incoming: Vec<wicked_estate_core::support::SupportFact>,
+    ) -> Result<SupportReplacement> {
+        let stored_generation: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT generation FROM support_owners WHERE producer=?1 AND snapshot=?2",
+                params![owner.producer, owner.snapshot],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(st)?;
+        let stored: StoredFacts = {
+            let mut stmt = self
+                .conn
+                .prepare_cached(
+                    "SELECT a.sym, b.sym, s.kind, s.fact_id, s.data FROM edge_supports s \
+                     JOIN symbols a ON a.sid = s.source JOIN symbols b ON b.sid = s.target \
+                     WHERE s.producer=?1 AND s.snapshot=?2",
+                )
+                .map_err(st)?;
+            let rows = stmt
+                .query_map(params![owner.producer, owner.snapshot], |r| {
+                    Ok((
+                        (
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                        ),
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                })
+                .map_err(st)?;
+            let mut out = StoredFacts::new();
+            for row in rows {
+                let (key, fact_id, data) = row.map_err(st)?;
+                let fact: Edge = serde_json::from_str(&data)?;
+                out.insert((key, fact_id), fact_key(&fact));
+            }
+            out
+        };
+        let plan = plan_replacement(
+            owner,
+            generation,
+            stored_generation.map(|g| g as u64),
+            &stored,
+            incoming,
+        )?;
+        if plan.report.replayed {
+            return Ok(plan.report);
+        }
+        let mut touched: Vec<SidKey> = Vec::with_capacity(plan.touched.len());
+        for key in &plan.touched {
+            let sk = self.sid_key(key)?;
+            // First support on this key: the base plane's edge becomes its base contribution.
+            if !self.key_supported(&sk)? {
+                self.conn
+                    .prepare_cached(
+                        "DELETE FROM edge_base WHERE source=?1 AND target=?2 AND kind=?3",
+                    )
+                    .map_err(st)?
+                    .execute(params![sk.0, sk.1, sk.2])
+                    .map_err(st)?;
+                self.conn
+                    .prepare_cached(
+                        "INSERT INTO edge_base(source,target,kind,file,data) \
+                         SELECT source,target,kind,file,data FROM edges \
+                         WHERE source=?1 AND target=?2 AND kind=?3",
+                    )
+                    .map_err(st)?
+                    .execute(params![sk.0, sk.1, sk.2])
+                    .map_err(st)?;
+            }
+            touched.push(sk);
+        }
+        for (key, fact_id) in &plan.delete {
+            let sk = self.sid_key(key)?;
+            self.conn
+                .prepare_cached(
+                    "DELETE FROM edge_supports WHERE producer=?1 AND snapshot=?2 \
+                     AND source=?3 AND target=?4 AND kind=?5 AND fact_id=?6",
+                )
+                .map_err(st)?
+                .execute(params![
+                    owner.producer,
+                    owner.snapshot,
+                    sk.0,
+                    sk.1,
+                    sk.2,
+                    fact_id
+                ])
+                .map_err(st)?;
+        }
+        for fact in &plan.insert {
+            let sk = self.sid_key(&fact.key)?;
+            self.conn
+                .prepare_cached(
+                    "INSERT INTO edge_supports(producer,snapshot,source,target,kind,fact_id,data) \
+                     VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                )
+                .map_err(st)?
+                .execute(params![
+                    owner.producer,
+                    owner.snapshot,
+                    sk.0,
+                    sk.1,
+                    sk.2,
+                    fact.fact_id,
+                    serde_json::to_string(&fact.edge)?
+                ])
+                .map_err(st)?;
+        }
+        self.conn
+            .execute(
+                "INSERT INTO support_owners(producer,snapshot,generation) VALUES(?1,?2,?3) \
+                 ON CONFLICT(producer,snapshot) DO UPDATE SET generation=excluded.generation",
+                params![owner.producer, owner.snapshot, generation as i64],
+            )
+            .map_err(st)?;
+        for key in &touched {
+            self.reproject(key)?;
+        }
+        Ok(plan.report)
+    }
+}
+
 impl GraphWrite for SqliteStore {
     fn begin_batch(&mut self) -> Result<()> {
         if !self.in_batch {
@@ -1988,8 +2394,25 @@ impl GraphWrite for SqliteStore {
                     OR excluded.evidence_count > edges.evidence_count",
             )
             .map_err(st)?;
+        // TS-S2A: while no support exists anywhere this is the original single-statement path.
+        let supported = self.any_support()?;
         for (e, (src_sid, tgt_sid)) in edges.iter().zip(sids.iter()) {
             let kind = serde_json::to_string(&e.kind)?;
+            if supported {
+                let key: SidKey = (*src_sid, *tgt_sid, kind.clone());
+                if self.key_supported(&key)? {
+                    // The base rule applies to the kept-aside base contribution; the public row
+                    // is re-projected — a base write never erases support.
+                    let wins = self
+                        .edge_base_of(&key)?
+                        .is_none_or(|(existing, _)| base_upsert_wins(&existing, e));
+                    if wins {
+                        self.set_edge_base(&key, e)?;
+                        self.reproject(&key)?;
+                    }
+                    continue;
+                }
+            }
             let data = serde_json::to_string(e)?;
             // Use the location file when present; empty string when None (e.g. synthetic edges).
             // After Fix A (wicked-estate-extract), Contains edges always carry a location, so this is always
@@ -2343,6 +2766,12 @@ impl GraphWrite for SqliteStore {
         // Delete edges using the same matching logic as Step 2 (location file OR source node
         // in this file) so that edges without an explicit location are also removed.
         // IMPORTANT: delete edges BEFORE nodes so the subquery on nodes is still valid.
+        // TS-S2A: retire supported keys' base contributions by exactly the edge predicate, and
+        // capture the supported rows this DELETE removes (healed below).
+        let support = self.support_pre_delete(
+            "file=?1 OR source IN (SELECT symbol FROM nodes WHERE file=?1)",
+            Some(file),
+        )?;
         self.conn
             .execute(
                 "DELETE FROM edges \
@@ -2372,6 +2801,8 @@ impl GraphWrite for SqliteStore {
         self.conn
             .execute("DELETE FROM files WHERE path=?1", params![file])
             .map_err(st)?;
+        // Support is producer-owned: re-project every supported edge the deletes removed.
+        self.support_post_delete(support)?;
         Ok(())
     }
 
@@ -2411,6 +2842,12 @@ impl GraphWrite for SqliteStore {
     }
 
     fn prune_dangling_edges(&mut self) -> Result<usize> {
+        // TS-S2A: a dangling supported key loses its base contribution (same predicate) but not
+        // its support; it is re-projected below and not counted as pruned.
+        let support = self.support_pre_delete(
+            "source NOT IN (SELECT symbol FROM nodes) OR target NOT IN (SELECT symbol FROM nodes)",
+            None,
+        )?;
         // Delete edges whose source or target is not present in the nodes table.
         // A single SQL DELETE with OR is correct and faster than two passes.
         let n = self
@@ -2422,7 +2859,8 @@ impl GraphWrite for SqliteStore {
                 [],
             )
             .map_err(st)?;
-        Ok(n)
+        let restored = self.support_post_delete(support)?;
+        Ok(n.saturating_sub(restored))
     }
 
     fn set_repo_info(&mut self, info: &RepoInfo) -> Result<()> {
@@ -2601,6 +3039,45 @@ impl GraphWrite for SqliteStore {
             )
             .map_err(st)?;
         Ok(n)
+    }
+
+    fn replace_edge_supports(
+        &mut self,
+        owner: &SupportOwner,
+        generation: u64,
+        facts: &[SupportFact],
+    ) -> Result<SupportReplacement> {
+        let incoming = normalize_facts(facts)?;
+        // A SAVEPOINT nests inside an open batch (BEGIN) and stands alone outside one, so the
+        // replacement is all-or-nothing in both modes without committing the caller's batch.
+        self.conn
+            .execute_batch("SAVEPOINT ts_s2a_replace")
+            .map_err(st)?;
+        match self.replace_edge_supports_inner(owner, generation, incoming) {
+            Ok(report) => {
+                self.conn
+                    .execute_batch("RELEASE ts_s2a_replace")
+                    .map_err(st)?;
+                Ok(report)
+            }
+            Err(e) => {
+                // SQLite can abort the whole transaction on its own (SQLITE_FULL, IOERR, NOMEM):
+                // the savepoint is then gone, so its rollback fails. Report the ORIGINAL error
+                // either way, and stop claiming an open batch over a transaction that is dead.
+                if let Err(rollback) = self
+                    .conn
+                    .execute_batch("ROLLBACK TO ts_s2a_replace; RELEASE ts_s2a_replace")
+                {
+                    if self.conn.is_autocommit() {
+                        self.in_batch = false;
+                    }
+                    return Err(Error::Storage(format!(
+                        "{e}; the engine also aborted the enclosing transaction ({rollback})"
+                    )));
+                }
+                Err(e)
+            }
+        }
     }
 }
 
@@ -3357,6 +3834,98 @@ impl GraphRead for SqliteStore {
             .optional()
             .map_err(st)?;
         Ok(epoch.map(|g| g as u64))
+    }
+
+    fn edge_supports(
+        &self,
+        source: &SymbolId,
+        target: &SymbolId,
+        kind: &EdgeKind,
+    ) -> Result<Vec<EdgeSupport>> {
+        if !self.support_tables_present()? {
+            return Ok(Vec::new());
+        }
+        let (Some(src), Some(tgt)) = (self.lookup_sid(&source.0)?, self.lookup_sid(&target.0)?)
+        else {
+            return Ok(Vec::new());
+        };
+        let kind = serde_json::to_string(kind)?;
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT s.producer, s.snapshot, o.generation, s.fact_id, s.data \
+                 FROM edge_supports s JOIN support_owners o \
+                   ON o.producer = s.producer AND o.snapshot = s.snapshot \
+                 WHERE s.source=?1 AND s.target=?2 AND s.kind=?3 \
+                 ORDER BY s.producer, s.snapshot, s.fact_id",
+            )
+            .map_err(st)?;
+        let rows = stmt
+            .query_map(params![src, tgt, kind], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(st)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (producer, snapshot, generation, fact_id, data) = row.map_err(st)?;
+            out.push(EdgeSupport::new(
+                SupportOwner::new(producer, snapshot)?,
+                generation as u64,
+                fact_id,
+                serde_json::from_str(&data)?,
+            ));
+        }
+        Ok(out)
+    }
+
+    fn support_generation(&self, owner: &SupportOwner) -> Result<Option<u64>> {
+        if !self.support_tables_present()? {
+            return Ok(None);
+        }
+        let generation: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT generation FROM support_owners WHERE producer=?1 AND snapshot=?2",
+                params![owner.producer, owner.snapshot],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(st)?;
+        Ok(generation.map(|g| g as u64))
+    }
+
+    fn support_owners(&self) -> Result<Vec<SupportOwnerState>> {
+        if !self.support_tables_present()? {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT producer, snapshot, generation FROM support_owners ORDER BY producer, snapshot")
+            .map_err(st)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(st)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (producer, snapshot, generation) = row.map_err(st)?;
+            out.push(SupportOwnerState::new(
+                SupportOwner::new(producer, snapshot)?,
+                generation as u64,
+            ));
+        }
+        Ok(out)
     }
 
     fn stats(&self) -> Result<GraphStats> {
@@ -5755,6 +6324,293 @@ mod tests {
             )
             .unwrap();
         assert_eq!(code_ec, 0, "an edge with no evidence_count backfills to 0");
+    }
+
+    // ── TS-S2A support plane: SQLite-specific failure, erasure and migration pins ─────────────
+
+    fn ts_flow(byte: u32, tier: wicked_estate_core::ResolutionTier, by: &str) -> Edge {
+        use wicked_estate_core::flow::{FlowEvidence, FlowFact, FlowSemantics};
+        use wicked_estate_core::{Location, Span};
+        let mut e = Edge::new(
+            sym("ts:c"),
+            sym("ts:a"),
+            wicked_estate_core::edge_tags::other(wicked_estate_core::edge_tags::FLOWS_TO),
+            tier,
+            by,
+        )
+        .with_location(Location::new(
+            "web.ts",
+            Span {
+                start_byte: byte,
+                end_byte: byte + 1,
+                ..Span::ZERO
+            },
+        ));
+        FlowFact::new(
+            FlowSemantics::ValuePreserving,
+            FlowEvidence::Syntax,
+            "assignment",
+            "typescript",
+        )
+        .apply(&mut e);
+        e
+    }
+
+    /// Every public edge row (sids, kind, data), the key's support rows, the owner's generation.
+    type TsState = (
+        Vec<(i64, i64, String, String)>,
+        Vec<EdgeSupport>,
+        Option<u64>,
+    );
+
+    fn ts_replace(
+        store: &mut SqliteStore,
+        owner: &SupportOwner,
+        generation: u64,
+        edges: &[Edge],
+    ) -> Result<SupportReplacement> {
+        let facts = edges
+            .iter()
+            .map(|e| SupportFact::from_edge(e.clone()))
+            .collect::<Result<Vec<_>>>()?;
+        store.replace_edge_supports(owner, generation, &facts)
+    }
+
+    fn ts_state(store: &SqliteStore) -> TsState {
+        let mut stmt = store
+            .conn
+            .prepare("SELECT source, target, kind, data FROM edges ORDER BY source, target, kind")
+            .unwrap();
+        let edges = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let flows = wicked_estate_core::edge_tags::other(wicked_estate_core::edge_tags::FLOWS_TO);
+        let owner = SupportOwner::new("scip-typescript", "web").unwrap();
+        (
+            edges,
+            store
+                .edge_supports(&sym("ts:c"), &sym("ts:a"), &flows)
+                .unwrap(),
+            store.support_generation(&owner).unwrap(),
+        )
+    }
+
+    /// The conformance suite's failure cases are all rejected BEFORE any write, so they cannot
+    /// prove the savepoint. This injects a storage failure MID-replacement (after the deletes and
+    /// some inserts already ran) and requires the store to be byte-identical afterwards — outside
+    /// a batch, and inside one whose own earlier writes must survive.
+    #[test]
+    fn support_replacement_rolls_back_a_mid_write_storage_failure() {
+        use wicked_estate_core::ResolutionTier;
+        let owner = SupportOwner::new("scip-typescript", "web").unwrap();
+        for in_batch in [false, true] {
+            let mut store = open();
+            ts_replace(
+                &mut store,
+                &owner,
+                1,
+                &[
+                    ts_flow(1, ResolutionTier::Scip, "scip"),
+                    ts_flow(2, ResolutionTier::Scip, "scip"),
+                ],
+            )
+            .unwrap();
+            store
+                .conn
+                .execute_batch(
+                    "CREATE TEMP TRIGGER poison BEFORE INSERT ON edge_supports \
+                     WHEN NEW.data LIKE '%\"poison\"%' \
+                     BEGIN SELECT RAISE(ABORT, 'injected storage failure'); END;",
+                )
+                .unwrap();
+            if in_batch {
+                store.begin_batch().unwrap();
+                store
+                    .upsert_nodes(&[Node::new(
+                        sym("ts:batch_node"),
+                        NodeKind::Function,
+                        "batch_node",
+                        wicked_estate_core::Language::new("rust"),
+                        wicked_estate_core::Location::new("b.rs", wicked_estate_core::Span::ZERO),
+                    )])
+                    .unwrap();
+            }
+            let before = ts_state(&store);
+            // `{1,2}` → `{2,3,poison}`: the delete of 1 and the insert of 3 run before the poison
+            // row aborts (BTreeMap order: fact 3 sorts before the poison fact's resolved_by).
+            let err = ts_replace(
+                &mut store,
+                &owner,
+                2,
+                &[
+                    ts_flow(2, ResolutionTier::Scip, "scip"),
+                    ts_flow(3, ResolutionTier::Scip, "scip"),
+                    ts_flow(4, ResolutionTier::Scip, "poison"),
+                ],
+            )
+            .expect_err("the trigger aborts the replacement");
+            assert!(
+                err.to_string().contains("injected storage failure"),
+                "{err}"
+            );
+            assert_eq!(
+                ts_state(&store),
+                before,
+                "no half-old/half-new generation (in_batch={in_batch})"
+            );
+            if in_batch {
+                store.commit_batch().unwrap();
+                assert!(
+                    store.get_node(&sym("ts:batch_node")).unwrap().is_some(),
+                    "a failed replacement must not roll back the caller's batch"
+                );
+            }
+            store.conn.execute_batch("DROP TRIGGER poison").unwrap();
+            let ok = ts_replace(
+                &mut store,
+                &owner,
+                2,
+                &[
+                    ts_flow(2, ResolutionTier::Scip, "scip"),
+                    ts_flow(3, ResolutionTier::Scip, "scip"),
+                ],
+            )
+            .expect("the same generation is still free after the rollback");
+            assert_eq!((ok.asserted, ok.retained, ok.retracted), (1, 1, 1));
+        }
+    }
+
+    /// Erasure (`remove_nodes`) is total: support and base rows naming the symbol go with it.
+    #[test]
+    fn remove_nodes_erases_support_rows() {
+        use wicked_estate_core::ResolutionTier;
+        let mut store = open();
+        let owner = SupportOwner::new("scip-typescript", "web").unwrap();
+        ts_replace(
+            &mut store,
+            &owner,
+            1,
+            &[ts_flow(1, ResolutionTier::Scip, "scip")],
+        )
+        .unwrap();
+        store.remove_nodes(&[sym("ts:a")]).unwrap();
+        let (edges, rows, generation) = ts_state(&store);
+        assert!(edges.is_empty() && rows.is_empty(), "{edges:?} {rows:?}");
+        assert_eq!(generation, Some(1), "the owner's generation is kept");
+        let left: i64 = store
+            .conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM edge_supports) + (SELECT COUNT(*) FROM edge_base)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    /// Migration: a database written before TS-S2A (no support tables) opens read-only as "no
+    /// support", gains the tables on a read-write open with every stored edge byte-identical, and
+    /// its pre-existing flow envelope — every field, not just the new ones — survives a support
+    /// round trip exactly.
+    #[test]
+    fn pre_support_database_migrates_with_the_public_envelope_intact() {
+        use wicked_estate_core::flow::merge_flow_edges;
+        use wicked_estate_core::{ResolutionTier, flow};
+        let dir = unique_test_dir("ts-s2a-migrate");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("legacy.db");
+        let flows = wicked_estate_core::edge_tags::other(wicked_estate_core::edge_tags::FLOWS_TO);
+
+        // A merged two-fact edge carries the WHOLE TS-S1 envelope, flow_confidence_min included.
+        let legacy = merge_flow_edges(vec![
+            ts_flow(10, ResolutionTier::Parsed, "tree-sitter"),
+            ts_flow(20, ResolutionTier::Heuristic, "tree-sitter-convention"),
+        ])
+        .remove(0);
+        for key in [
+            flow::FLOW_SEMANTICS_KEY,
+            flow::FLOW_EVIDENCE_KEY,
+            flow::FLOW_CONSTRUCTS_KEY,
+            flow::FLOW_RULES_KEY,
+            flow::FLOW_SUPPORT_KEY,
+            flow::FLOW_CONFIDENCE_MIN_KEY,
+            flow::CONSTRUCT_KEY,
+        ] {
+            assert!(legacy.metadata.contains_key(key), "fixture lacks {key}");
+        }
+        {
+            let mut rw = SqliteStore::open(&db).unwrap();
+            rw.upsert_edges(std::slice::from_ref(&legacy)).unwrap();
+            // Strip the TS-S2A tables: this is now byte-for-byte a pre-TS-S2A database.
+            rw.conn
+                .execute_batch(
+                    "DROP TABLE support_owners; DROP TABLE edge_supports; DROP TABLE edge_base;",
+                )
+                .unwrap();
+        }
+        let raw = |store: &SqliteStore| -> String {
+            store
+                .conn
+                .query_row("SELECT data FROM edges", [], |r| r.get(0))
+                .unwrap()
+        };
+        let original = {
+            let ro = SqliteStore::open_readonly(&db).unwrap();
+            assert!(
+                ro.edge_supports(&sym("ts:c"), &sym("ts:a"), &flows)
+                    .unwrap()
+                    .is_empty()
+            );
+            let owner = SupportOwner::new("scip-typescript", "web").unwrap();
+            assert_eq!(ro.support_generation(&owner).unwrap(), None);
+            raw(&ro)
+        };
+        assert_eq!(serde_json::from_str::<Edge>(&original).unwrap(), legacy);
+
+        let mut rw = SqliteStore::open(&db).unwrap();
+        assert_eq!(
+            raw(&rw),
+            original,
+            "opening migrates without rewriting a stored edge"
+        );
+        let public = |s: &SqliteStore| {
+            s.neighbors(&sym("ts:c"), Direction::Dependencies)
+                .unwrap()
+                .into_iter()
+                .find(|e| e.kind == flows)
+                .unwrap()
+        };
+        assert_eq!(
+            public(&rw),
+            legacy,
+            "every pre-existing field reads back unchanged"
+        );
+
+        let owner = SupportOwner::new("scip-typescript", "web").unwrap();
+        let scip = ts_flow(30, ResolutionTier::Scip, "scip-typescript");
+        ts_replace(&mut rw, &owner, 1, std::slice::from_ref(&scip)).unwrap();
+        let supported = public(&rw);
+        assert_eq!(
+            supported,
+            merge_flow_edges(vec![legacy.clone(), scip]).remove(0)
+        );
+        for key in legacy.metadata.keys() {
+            assert!(
+                supported.metadata.contains_key(key),
+                "projection dropped {key}"
+            );
+        }
+        ts_replace(&mut rw, &owner, 2, &[]).unwrap();
+        assert_eq!(
+            raw(&rw),
+            original,
+            "retracting the last support restores the stored bytes"
+        );
+        drop(rw);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

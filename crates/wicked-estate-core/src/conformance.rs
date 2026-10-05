@@ -1920,6 +1920,47 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
     // each backend's test file having to opt in. The `dh_*` fixture is symbol-disjoint from
     // everything above.
     traverse_reports_depth_horizon(store);
+
+    // --- remove_file deletes BOTH predicate halves ---
+    // The §4 contract: `remove_file(f)` removes an edge located in `f` AND a location-less edge
+    // whose source node lives in `f`. Only the first half was exercised above, and SurrealStore's
+    // predicate DELETE silently matched only that half (found during TS-S2A). `rf_*` is
+    // symbol-disjoint from everything above.
+    let rf_node = |name: &str, file: &str| {
+        Node::new(
+            sym(name),
+            NodeKind::Function,
+            name,
+            Language::new("rust"),
+            Location::new(file, Span::ZERO),
+        )
+    };
+    store
+        .upsert_nodes(&[
+            rf_node("rf_src", "rf/removed.rs"),
+            rf_node("rf_a", "rf/kept.rs"),
+            rf_node("rf_b", "rf/kept.rs"),
+        ])
+        .expect("rf nodes");
+    let sourced = calls("rf_src", "rf_a"); // no location: owned through its source node
+    let located = calls("rf_a", "rf_b").with_location(Location::new("rf/removed.rs", Span::ZERO));
+    let kept = calls("rf_b", "rf_a").with_location(Location::new("rf/kept.rs", Span::ZERO));
+    store
+        .upsert_edges(&[sourced, located, kept.clone()])
+        .expect("rf edges");
+    store.remove_file("rf/removed.rs").expect("remove rf file");
+    let left: Vec<(String, String)> = store
+        .all_edges()
+        .expect("all edges")
+        .into_iter()
+        .filter(|e| e.source.0.contains("rf_") || e.target.0.contains("rf_"))
+        .map(|e| (e.source.0, e.target.0))
+        .collect();
+    assert_eq!(
+        left,
+        vec![(kept.source.0, kept.target.0)],
+        "remove_file must delete the source-owned edge AND the located edge, and nothing else"
+    );
 }
 
 /// Multi-file symbol contributions (M4 / Option A — wicked-estate#152). Run on a FRESH store,
@@ -2186,4 +2227,1107 @@ pub fn multi_file_contribution_suite<S: GraphStore>(store: &mut S) {
              independent of write order"
         );
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TS-S2A — authoritative, replaceable edge support
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// File the support suite's endpoint nodes live in — distinct from every fact/base file below, so
+/// a `remove_file` of a fact's file never removes an endpoint node by accident.
+const SUP_NODE_FILE: &str = "sup/nodes.ts";
+
+fn sup_owner(producer: &str, snapshot: &str) -> crate::support::SupportOwner {
+    crate::support::SupportOwner::new(producer, snapshot).expect("valid owner")
+}
+
+/// Replace an owner's support with plain edges as facts (content-derived ids), the shape most
+/// cases below need. The opaque-id cases build [`crate::support::SupportFact`]s directly.
+fn sup_replace<S: GraphStore>(
+    store: &mut S,
+    owner: &crate::support::SupportOwner,
+    generation: u64,
+    edges: &[Edge],
+) -> crate::error::Result<crate::support::SupportReplacement> {
+    let facts = edges
+        .iter()
+        .map(|e| crate::support::SupportFact::from_edge(e.clone()))
+        .collect::<crate::error::Result<Vec<_>>>()?;
+    store.replace_edge_supports(owner, generation, &facts)
+}
+
+/// One single-fact `flows_to` edge `source → target` at `file:byte`, with a construct name (which
+/// leads the support-row order) and a resolution tier (which sets its confidence).
+fn sup_flow(
+    source: &str,
+    target: &str,
+    construct: &str,
+    file: &str,
+    byte: u32,
+    tier: ResolutionTier,
+    resolved_by: &str,
+) -> Edge {
+    use crate::flow::{FlowEvidence, FlowFact, FlowSemantics};
+    let mut e = Edge::new(
+        sym(source),
+        sym(target),
+        crate::edge_tags::other(crate::edge_tags::FLOWS_TO),
+        tier,
+        resolved_by,
+    )
+    .with_location(Location::new(
+        file,
+        Span {
+            start_byte: byte,
+            end_byte: byte + 1,
+            start_line: byte,
+            end_line: byte,
+            ..Span::ZERO
+        },
+    ));
+    FlowFact::new(
+        FlowSemantics::ValuePreserving,
+        FlowEvidence::Syntax,
+        construct,
+        "typescript",
+    )
+    .apply(&mut e);
+    e
+}
+
+/// The public edge for `(source, target, kind)`, read through the ordinary graph read path.
+fn sup_public<S: GraphStore>(
+    store: &S,
+    source: &str,
+    target: &str,
+    kind: &EdgeKind,
+) -> Option<Edge> {
+    store
+        .neighbors(&sym(source), Direction::Dependencies)
+        .expect("neighbors")
+        .into_iter()
+        .find(|e| e.target == sym(target) && &e.kind == kind)
+}
+
+fn sup_rows<S: GraphStore>(
+    store: &S,
+    source: &str,
+    target: &str,
+    kind: &EdgeKind,
+) -> Vec<crate::support::EdgeSupport> {
+    store
+        .edge_supports(&sym(source), &sym(target), kind)
+        .expect("edge_supports")
+}
+
+/// An edge with its endpoints renamed, so projections on two different keys can be compared.
+fn sup_rebind(mut e: Edge) -> Edge {
+    e.source = crate::symbol::SymbolId("S".into());
+    e.target = crate::symbol::SymbolId("T".into());
+    e
+}
+
+fn sup_sites(e: &Edge) -> Vec<u64> {
+    e.metadata[crate::flow::FLOW_SUPPORT_KEY]
+        .as_array()
+        .expect("flow_support array")
+        .iter()
+        .map(|r| r["start_byte"].as_u64().expect("start_byte"))
+        .collect()
+}
+
+fn sup_truncated(e: &Edge) -> u64 {
+    e.metadata
+        .get(crate::flow::FLOW_SUPPORT_TRUNCATED_KEY)
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+}
+
+/// TS-S2A: the authoritative, replaceable support plane (`crate::support`,
+/// `docs/ENGINE-CONTRACT.md` §3.4). Run on a FRESH store. Every shipped backend runs it; a new
+/// backend must pass it alongside [`graph_store_suite`].
+///
+/// Pinned, each against the public read path (`neighbors`) AND the authoritative one
+/// (`edge_supports`): identical replay is idempotent; `{a,b}→{b,c}` retracts only `a` and keeps
+/// `b` once; an empty replacement retracts everything the owner held; two producers on one edge
+/// are independent; a failed replacement (invalid fact, generation conflict, stale generation —
+/// inside and outside a batch) leaves no half-old/half-new state; input order never matters;
+/// staged and one-shot replacement agree (exactly for history, up to the cap for pre-merged
+/// input, and the over-count past it is pinned as the boundary); repeated folds are stable;
+/// eviction from the bounded sample cannot change identity or a later representative; and the
+/// base plane coexists — `upsert_edges`, `remove_file` and `prune_dangling_edges` neither erase
+/// support nor are erased by it, and retracting the last support restores the base edge exactly.
+pub fn support_replacement_suite<S: GraphStore>(store: &mut S) {
+    use crate::flow::{
+        FLOW_CONFIDENCE_MIN_KEY, FLOW_SUPPORT_KEY, MAX_FLOW_SUPPORT, merge_flow_edges,
+    };
+    let flows = crate::edge_tags::other(crate::edge_tags::FLOWS_TO);
+    let p = sup_owner("scip-typescript", "apps/web");
+    let q = sup_owner("angular-compiler", "apps/web");
+
+    let names = [
+        "s_c", "s_a", "s_c2", "s_a2", "s_c3", "s_a3", "s_c4", "s_a4", "s_c5", "s_a5", "s_c6",
+        "s_a6", "s_c7", "s_a7", "s_c8", "s_a8", "s_x", "s_y",
+    ];
+    let nodes: Vec<Node> = names
+        .iter()
+        .map(|n| {
+            Node::new(
+                sym(n),
+                NodeKind::Variable,
+                *n,
+                Language::new("typescript"),
+                Location::new(SUP_NODE_FILE, Span::ZERO),
+            )
+        })
+        .collect();
+    store.upsert_nodes(&nodes).expect("support endpoint nodes");
+
+    let fact = |byte: u32| {
+        sup_flow(
+            "s_c",
+            "s_a",
+            "assignment",
+            "sup/web.ts",
+            byte,
+            ResolutionTier::Scip,
+            "scip-typescript",
+        )
+    };
+    let (a, b, c) = (fact(10), fact(20), fact(30));
+
+    // ── 1. Identical replay is idempotent ──────────────────────────────────────
+    assert_eq!(
+        store.support_generation(&p).expect("gen"),
+        None,
+        "fresh owner has no generation"
+    );
+    let r1 = sup_replace(store, &p, 1, &[a.clone(), b.clone()]).expect("gen 1");
+    assert_eq!(
+        (
+            r1.replayed,
+            r1.asserted,
+            r1.retained,
+            r1.retracted,
+            r1.edges_touched
+        ),
+        (false, 2, 0, 0, 1),
+        "{r1:?}"
+    );
+    let public_1 = sup_public(store, "s_c", "s_a", &flows).expect("projected edge exists");
+    let rows_1 = sup_rows(store, "s_c", "s_a", &flows);
+    assert_eq!(rows_1.len(), 2);
+    assert_eq!(sup_sites(&public_1), vec![10, 20]);
+    let replay = sup_replace(store, &p, 1, &[b.clone(), a.clone(), a.clone()])
+        .expect("identical replay (any order, duplicates) is accepted");
+    assert!(
+        replay.replayed,
+        "same generation + same set is a replay: {replay:?}"
+    );
+    assert_eq!(
+        (replay.asserted, replay.retained, replay.retracted),
+        (0, 2, 0)
+    );
+    assert_eq!(
+        sup_public(store, "s_c", "s_a", &flows),
+        Some(public_1.clone())
+    );
+    assert_eq!(sup_rows(store, "s_c", "s_a", &flows), rows_1);
+    assert_eq!(store.support_generation(&p).expect("gen"), Some(1));
+
+    // ── 2. {a,b} → {b,c}: only a retracted, b kept exactly once ────────────────
+    let r2 = sup_replace(store, &p, 2, &[c.clone(), b.clone()]).expect("gen 2");
+    assert_eq!(
+        (r2.asserted, r2.retained, r2.retracted),
+        (1, 1, 1),
+        "{r2:?}"
+    );
+    let rows_2 = sup_rows(store, "s_c", "s_a", &flows);
+    let facts_2: Vec<Edge> = rows_2.iter().map(|r| r.fact.clone()).collect();
+    assert_eq!(
+        facts_2.len(),
+        2,
+        "b must be stored exactly once: {rows_2:?}"
+    );
+    assert!(facts_2.contains(&b) && facts_2.contains(&c) && !facts_2.contains(&a));
+    assert!(rows_2.iter().all(|r| r.owner == p && r.generation == 2));
+    let public_2 = sup_public(store, "s_c", "s_a", &flows).expect("edge");
+    assert_eq!(
+        sup_sites(&public_2),
+        vec![20, 30],
+        "the retracted site leaves the sample"
+    );
+
+    // ── 5a. Failed replacements roll back (checked before the empty retraction) ─
+    let before = (
+        sup_public(store, "s_c", "s_a", &flows),
+        sup_rows(store, "s_c", "s_a", &flows),
+        store.support_generation(&p).expect("gen"),
+    );
+    let mut invalid = fact(40);
+    invalid.resolved_by = String::new();
+    // A valid new fact on ANOTHER key precedes the invalid one: a store that wrote fact by fact
+    // would leave that key half-applied.
+    let other_key = sup_flow(
+        "s_x",
+        "s_y",
+        "assignment",
+        "sup/web.ts",
+        1,
+        ResolutionTier::Scip,
+        "scip-typescript",
+    );
+    for in_batch in [false, true] {
+        if in_batch {
+            store.begin_batch().expect("begin");
+        }
+        // The invalid fact reaches the STORE: it was valid when built and edited afterwards
+        // (the fields are public), so the store's own re-validation must reject it.
+        let mut edited =
+            crate::support::SupportFact::from_edge(fact(40)).expect("valid when built");
+        edited.edge = invalid.clone();
+        let batch = [
+            crate::support::SupportFact::from_edge(other_key.clone()).expect("valid"),
+            crate::support::SupportFact::from_edge(fact(35)).expect("valid"),
+            edited,
+        ];
+        let err = store
+            .replace_edge_supports(&p, 3, &batch)
+            .expect_err("a fact without resolved_by is rejected");
+        assert!(err.to_string().contains("resolved_by"), "{err}");
+        let err = sup_replace(store, &p, 2, std::slice::from_ref(&a))
+            .expect_err("same generation, different set");
+        assert!(err.to_string().contains("generation conflict"), "{err}");
+        let err = sup_replace(store, &p, 1, &[a.clone(), b.clone()]).expect_err("older generation");
+        assert!(err.to_string().contains("stale generation"), "{err}");
+        if in_batch {
+            store
+                .commit_batch()
+                .expect("commit after failed replacements");
+        }
+        let after = (
+            sup_public(store, "s_c", "s_a", &flows),
+            sup_rows(store, "s_c", "s_a", &flows),
+            store.support_generation(&p).expect("gen"),
+        );
+        assert_eq!(
+            after, before,
+            "a failed replacement must change nothing (in_batch={in_batch})"
+        );
+        assert!(
+            sup_public(store, "s_x", "s_y", &flows).is_none()
+                && sup_rows(store, "s_x", "s_y", &flows).is_empty(),
+            "no fact of a failed replacement may land (in_batch={in_batch})"
+        );
+    }
+
+    // ── 3. Empty replacement retracts the owner's stale support ────────────────
+    let r3 = sup_replace(store, &p, 3, &[]).expect("gen 3 empty");
+    assert_eq!(
+        (r3.asserted, r3.retained, r3.retracted, r3.edges_touched),
+        (0, 0, 2, 1),
+        "{r3:?}"
+    );
+    assert!(sup_rows(store, "s_c", "s_a", &flows).is_empty());
+    assert_eq!(
+        sup_public(store, "s_c", "s_a", &flows),
+        None,
+        "with no base and no support the public edge is gone"
+    );
+    assert_eq!(
+        store.support_generation(&p).expect("gen"),
+        Some(3),
+        "the generation survives emptiness"
+    );
+    sup_replace(store, &p, 2, &[c.clone(), b.clone()])
+        .expect_err("a stale replay cannot resurrect retracted support");
+    assert!(sup_rows(store, "s_c", "s_a", &flows).is_empty());
+    // A higher generation with the same (empty) set is not a replay but writes no fact.
+    let r3b = sup_replace(store, &p, 4, &[]).expect("gen 4 empty");
+    assert_eq!((r3b.replayed, r3b.edges_touched), (false, 0));
+    assert_eq!(store.support_generation(&p).expect("gen"), Some(4));
+
+    // ── 4. Two producers on one edge stay independent ─────────────────────────
+    let qa = sup_flow(
+        "s_c",
+        "s_a",
+        "angular_input",
+        "sup/web.html",
+        5,
+        ResolutionTier::Heuristic,
+        "angular-compiler",
+    );
+    sup_replace(store, &p, 5, &[a.clone(), b.clone()]).expect("p gen 5");
+    sup_replace(store, &q, 1, std::slice::from_ref(&qa)).expect("q gen 1");
+    let rows = sup_rows(store, "s_c", "s_a", &flows);
+    assert_eq!(rows.len(), 3);
+    let order: Vec<(String, String, String)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.owner.producer.clone(),
+                r.owner.snapshot.clone(),
+                r.fact_id.clone(),
+            )
+        })
+        .collect();
+    let mut sorted = order.clone();
+    sorted.sort();
+    assert_eq!(
+        order, sorted,
+        "edge_supports is ordered by (producer, snapshot, fact_key)"
+    );
+    let both = sup_public(store, "s_c", "s_a", &flows).expect("edge");
+    assert_eq!(sup_sites(&both).len(), 3);
+    assert!((both.metadata[FLOW_CONFIDENCE_MIN_KEY].as_f64().unwrap() - 0.5).abs() < 1e-6);
+    sup_replace(store, &p, 6, &[]).expect("p retracts");
+    let only_q = sup_public(store, "s_c", "s_a", &flows).expect("q still supports the edge");
+    assert_eq!(
+        sup_rows(store, "s_c", "s_a", &flows)
+            .iter()
+            .map(|r| r.owner.clone())
+            .collect::<Vec<_>>(),
+        vec![q.clone()]
+    );
+    assert_eq!(
+        only_q,
+        merge_flow_edges(vec![qa.clone()]).remove(0),
+        "Q alone projects to Q's fact"
+    );
+    assert_eq!(
+        store.support_generation(&q).expect("gen"),
+        Some(1),
+        "P's write never touches Q's generation"
+    );
+
+    // ── 6. Input and owner order do not matter ────────────────────────────────
+    sup_replace(store, &p, 7, &[c.clone(), a.clone(), b.clone()]).expect("p gen 7");
+    let pq = sup_public(store, "s_c", "s_a", &flows).expect("edge");
+    let pq_rows = sup_rows(store, "s_c", "s_a", &flows);
+    sup_replace(store, &p, 8, &[]).expect("p out");
+    sup_replace(store, &q, 2, &[]).expect("q out");
+    sup_replace(store, &q, 3, std::slice::from_ref(&qa)).expect("q first this time");
+    sup_replace(store, &p, 9, &[b.clone(), c.clone(), a.clone()]).expect("p, permuted");
+    assert_eq!(sup_public(store, "s_c", "s_a", &flows), Some(pq));
+    let strip =
+        |rows: Vec<crate::support::EdgeSupport>| -> Vec<(crate::support::SupportOwner, String)> {
+            rows.into_iter().map(|r| (r.owner, r.fact_id)).collect()
+        };
+    assert_eq!(strip(sup_rows(store, "s_c", "s_a", &flows)), strip(pq_rows));
+    sup_replace(store, &p, 10, &[]).expect("p clean");
+    sup_replace(store, &q, 4, &[]).expect("q clean");
+
+    // ── 7. Staged vs one-shot ─────────────────────────────────────────────────
+    // (a) History independence: a staged sequence ends where a one-shot replacement starts.
+    let f2 = |byte: u32| {
+        sup_flow(
+            "s_c2",
+            "s_a2",
+            "assignment",
+            "sup/web.ts",
+            byte,
+            ResolutionTier::Scip,
+            "scip-typescript",
+        )
+    };
+    let f3 = |byte: u32| {
+        sup_flow(
+            "s_c3",
+            "s_a3",
+            "assignment",
+            "sup/web.ts",
+            byte,
+            ResolutionTier::Scip,
+            "scip-typescript",
+        )
+    };
+    let staged = sup_owner("scip-typescript", "staged");
+    let oneshot = sup_owner("scip-typescript", "oneshot");
+    sup_replace(store, &staged, 1, &[f2(1), f2(2), f2(3)]).expect("staged 1");
+    sup_replace(store, &staged, 2, &[f2(2), f2(4)]).expect("staged 2");
+    sup_replace(store, &oneshot, 1, &[f3(4), f3(2)]).expect("one-shot");
+    assert_eq!(
+        sup_public(store, "s_c2", "s_a2", &flows).map(sup_rebind),
+        sup_public(store, "s_c3", "s_a3", &flows).map(sup_rebind),
+        "a replacement's result must not depend on the owner's history"
+    );
+    // (b) A pre-merged fact projects like its raw facts, up to the cap. Support identity is per
+    // SUBMITTED fact, so the authoritative rows deliberately differ (1 vs 3).
+    let f4 = |byte: u32| {
+        sup_flow(
+            "s_c4",
+            "s_a4",
+            "assignment",
+            "sup/web.ts",
+            byte,
+            ResolutionTier::Scip,
+            "scip-typescript",
+        )
+    };
+    let f5 = |byte: u32| {
+        sup_flow(
+            "s_c5",
+            "s_a5",
+            "assignment",
+            "sup/web.ts",
+            byte,
+            ResolutionTier::Scip,
+            "scip-typescript",
+        )
+    };
+    let premerged = merge_flow_edges(vec![f4(1), f4(2), f4(3)]);
+    sup_replace(store, &sup_owner("pre", "merged"), 1, &premerged).expect("pre-merged");
+    sup_replace(store, &sup_owner("raw", "facts"), 1, &[f5(1), f5(2), f5(3)]).expect("raw");
+    assert_eq!(
+        sup_public(store, "s_c4", "s_a4", &flows).map(sup_rebind),
+        sup_public(store, "s_c5", "s_a5", &flows).map(sup_rebind),
+        "under the cap, folding in stages equals one fold"
+    );
+    assert_eq!(sup_rows(store, "s_c4", "s_a4", &flows).len(), 1);
+    assert_eq!(sup_rows(store, "s_c5", "s_a5", &flows).len(), 3);
+    // (c) The boundary: past the cap, a pre-merged fact plus a raw fact it had DROPPED counts
+    // that fact twice — `flow_support_truncated` is "at least", exact only for a single fold.
+    let n = MAX_FLOW_SUPPORT as u32 + 2; // 10 facts, cap 8 → the sample drops 2
+    let raw: Vec<Edge> = (0..n).map(|i| f4(100 + i)).collect();
+    let capped = merge_flow_edges(raw.clone());
+    assert_eq!(sup_truncated(&capped[0]), 2);
+    let dropped_site = raw
+        .last()
+        .cloned()
+        .expect("the last-ordered fact is dropped");
+    assert!(!sup_sites(&capped[0]).contains(&(100 + n as u64 - 1)));
+    sup_replace(
+        store,
+        &sup_owner("pre", "merged"),
+        2,
+        &[capped[0].clone(), dropped_site],
+    )
+    .expect("overlapping pre-merged input");
+    let over = sup_public(store, "s_c4", "s_a4", &flows).expect("edge");
+    let shown = sup_sites(&over).len() as u64;
+    assert_eq!(
+        shown + sup_truncated(&over),
+        n as u64 + 1,
+        "documented boundary: overlapping pre-folded input over-counts by the overlap"
+    );
+    let raw: Vec<Edge> = (0..n).map(|i| f5(100 + i)).collect();
+    sup_replace(store, &sup_owner("raw", "facts"), 2, &raw).expect("raw 10");
+    let exact_raw = sup_public(store, "s_c5", "s_a5", &flows).expect("edge");
+    assert_eq!(
+        sup_sites(&exact_raw).len() as u64 + sup_truncated(&exact_raw),
+        n as u64,
+        "a single fold over raw facts counts exactly"
+    );
+    assert_eq!(sup_rows(store, "s_c5", "s_a5", &flows).len(), n as usize);
+
+    // ── 8. Repeated folds are stable (counts, extrema, representative, cap, truncation) ─
+    let again = sup_owner("raw", "facts");
+    sup_replace(store, &again, 3, &raw).expect("same set, new generation");
+    assert_eq!(
+        sup_public(store, "s_c5", "s_a5", &flows),
+        Some(exact_raw.clone())
+    );
+    let visitor = sup_flow(
+        "s_c5",
+        "s_a5",
+        "a_visitor",
+        "sup/other.ts",
+        7,
+        ResolutionTier::Tags,
+        "visitor",
+    );
+    for round in 0..3 {
+        sup_replace(
+            store,
+            &sup_owner("visitor", "v"),
+            2 * round + 1,
+            std::slice::from_ref(&visitor),
+        )
+        .expect("visitor joins");
+        let with_visitor = sup_public(store, "s_c5", "s_a5", &flows).expect("edge");
+        assert_eq!(
+            sup_truncated(&with_visitor),
+            3,
+            "11 facts, cap 8 (round {round})"
+        );
+        sup_replace(store, &sup_owner("visitor", "v"), 2 * round + 2, &[]).expect("visitor leaves");
+        assert_eq!(
+            sup_public(store, "s_c5", "s_a5", &flows),
+            Some(exact_raw.clone()),
+            "a joined-then-retracted owner leaves no residue (round {round})"
+        );
+    }
+
+    // ── 9. Eviction from the sample cannot change identity or a later representative ─
+    let f6 = |construct: &str, byte: u32, tier: ResolutionTier| {
+        sup_flow(
+            "s_c6",
+            "s_a6",
+            construct,
+            "sup/web.ts",
+            byte,
+            tier,
+            "scip-typescript",
+        )
+    };
+    let mut set: Vec<Edge> = (0..MAX_FLOW_SUPPORT as u32)
+        .map(|i| f6("a_weak", 10 + i, ResolutionTier::Tags))
+        .collect();
+    let mid = f6("m_mid", 50, ResolutionTier::ImportMap);
+    let strong = f6("z_strong", 60, ResolutionTier::Scip);
+    set.push(mid.clone());
+    set.push(strong.clone());
+    let ev = sup_owner("scip-typescript", "evict");
+    sup_replace(store, &ev, 1, &set).expect("10 facts");
+    let sampled = sup_public(store, "s_c6", "s_a6", &flows).expect("edge");
+    assert!(
+        !sup_sites(&sampled).contains(&50),
+        "m_mid is evicted from the sample: {:?}",
+        sup_sites(&sampled)
+    );
+    assert_eq!(
+        sampled.location.as_ref().map(|l| l.span.start_byte),
+        Some(60)
+    );
+    assert_eq!(
+        sup_rows(store, "s_c6", "s_a6", &flows).len(),
+        10,
+        "eviction never touches identity"
+    );
+    set.retain(|e| e != &strong);
+    sup_replace(store, &ev, 2, &set).expect("the representative is retracted");
+    let next = sup_public(store, "s_c6", "s_a6", &flows).expect("edge");
+    assert_eq!(
+        next.location.as_ref().map(|l| l.span.start_byte),
+        Some(50),
+        "the next representative is the evicted-from-sample m_mid, found from authoritative rows"
+    );
+    assert!((next.confidence.get() - mid.confidence.get()).abs() < f32::EPSILON);
+    assert_eq!(
+        next,
+        merge_flow_edges(set.clone()).remove(0),
+        "projection == one fold of the authoritative set"
+    );
+
+    // ── 10. The base plane coexists ───────────────────────────────────────────
+    // Base flow edge from the indexer (syntax, file sup/base.ts) + producer support (sup/web.ts).
+    let base = merge_flow_edges(vec![sup_flow(
+        "s_c7",
+        "s_a7",
+        "expression",
+        "sup/base.ts",
+        3,
+        ResolutionTier::Parsed,
+        "tree-sitter",
+    )])
+    .remove(0);
+    store
+        .upsert_edges(std::slice::from_ref(&base))
+        .expect("base write");
+    let plain = sup_public(store, "s_c7", "s_a7", &flows).expect("base edge");
+    assert_eq!(plain, base);
+    let sp = sup_owner("scip-typescript", "base-coexist");
+    let s1 = sup_flow(
+        "s_c7",
+        "s_a7",
+        "assignment",
+        "sup/web.ts",
+        9,
+        ResolutionTier::Scip,
+        "scip-typescript",
+    );
+    sup_replace(store, &sp, 1, std::slice::from_ref(&s1)).expect("support over a base edge");
+    assert_eq!(
+        sup_public(store, "s_c7", "s_a7", &flows),
+        Some(merge_flow_edges(vec![base.clone(), s1.clone()]).remove(0))
+    );
+    assert_eq!(
+        sup_rows(store, "s_c7", "s_a7", &flows).len(),
+        1,
+        "the base plane is not support"
+    );
+    // A base re-write lands in the base contribution, not over the projection.
+    let base2 = merge_flow_edges(vec![sup_flow(
+        "s_c7",
+        "s_a7",
+        "expression",
+        "sup/base.ts",
+        4,
+        ResolutionTier::Parsed,
+        "tree-sitter",
+    )])
+    .remove(0);
+    store
+        .upsert_edges(std::slice::from_ref(&base2))
+        .expect("base update");
+    assert_eq!(
+        sup_public(store, "s_c7", "s_a7", &flows),
+        Some(merge_flow_edges(vec![base2.clone(), s1.clone()]).remove(0))
+    );
+    assert_eq!(
+        sup_rows(store, "s_c7", "s_a7", &flows).len(),
+        1,
+        "a base write never erases support"
+    );
+    // remove_file of the SUPPORT's file: support is producer-owned, so the edge stays.
+    store
+        .remove_file("sup/web.ts")
+        .expect("remove support file");
+    assert_eq!(
+        sup_public(store, "s_c7", "s_a7", &flows),
+        Some(merge_flow_edges(vec![base2.clone(), s1.clone()]).remove(0))
+    );
+    // remove_file of the BASE's file retires the base contribution only.
+    store.remove_file("sup/base.ts").expect("remove base file");
+    assert_eq!(
+        sup_public(store, "s_c7", "s_a7", &flows),
+        Some(merge_flow_edges(vec![s1.clone()]).remove(0))
+    );
+    assert_eq!(sup_rows(store, "s_c7", "s_a7", &flows).len(), 1);
+    // Retracting the last support with the base gone leaves nothing.
+    sup_replace(store, &sp, 2, &[]).expect("retract");
+    assert_eq!(sup_public(store, "s_c7", "s_a7", &flows), None);
+    // Retracting the last support with the base present restores it byte-for-byte; same for a
+    // non-flow kind, whose projection is the max-confidence representative.
+    let calls_base = Edge::new(
+        sym("s_c8"),
+        sym("s_a8"),
+        EdgeKind::Calls,
+        ResolutionTier::Heuristic,
+        "name-resolver",
+    )
+    .with_location(Location::new("sup/base8.ts", Span::ZERO));
+    let calls_scip = Edge::new(
+        sym("s_c8"),
+        sym("s_a8"),
+        EdgeKind::Calls,
+        ResolutionTier::Scip,
+        "scip-typescript",
+    )
+    .with_location(Location::new("sup/web8.ts", Span::ZERO));
+    store
+        .upsert_edges(std::slice::from_ref(&calls_base))
+        .expect("calls base");
+    sup_replace(store, &sp, 3, std::slice::from_ref(&calls_scip)).expect("calls support");
+    assert_eq!(
+        sup_public(store, "s_c8", "s_a8", &EdgeKind::Calls),
+        Some(calls_scip.clone())
+    );
+    // A weaker base write is ignored by the base rule, exactly as without support.
+    let weaker = Edge::new(
+        sym("s_c8"),
+        sym("s_a8"),
+        EdgeKind::Calls,
+        ResolutionTier::Tags,
+        "tags",
+    )
+    .with_location(Location::new("sup/base8.ts", Span::ZERO));
+    store.upsert_edges(&[weaker]).expect("weaker base write");
+    sup_replace(store, &sp, 4, &[]).expect("retract calls support");
+    assert_eq!(
+        sup_public(store, "s_c8", "s_a8", &EdgeKind::Calls),
+        Some(calls_base.clone()),
+        "base restored exactly"
+    );
+    assert!(sup_rows(store, "s_c8", "s_a8", &EdgeKind::Calls).is_empty());
+
+    // prune_dangling_edges never prunes support: a dangling supported edge stays (its owner
+    // retracts it) and is not counted; a dangling base-only edge is pruned as ever.
+    let ghost_support = sup_flow(
+        "s_x",
+        "ghost_target",
+        "assignment",
+        "sup/web.ts",
+        1,
+        ResolutionTier::Scip,
+        "scip-typescript",
+    );
+    let ghost_base = Edge::new(
+        sym("s_y"),
+        sym("ghost_base"),
+        EdgeKind::Calls,
+        ResolutionTier::Parsed,
+        "tree-sitter",
+    );
+    store
+        .upsert_edges(&[ghost_base])
+        .expect("dangling base edge");
+    sup_replace(store, &sp, 5, std::slice::from_ref(&ghost_support)).expect("dangling support");
+    let pruned = store.prune_dangling_edges().expect("prune");
+    assert_eq!(pruned, 1, "only the base-only dangling edge is pruned");
+    assert_eq!(
+        sup_public(store, "s_x", "ghost_target", &flows),
+        Some(merge_flow_edges(vec![ghost_support]).remove(0))
+    );
+    assert!(sup_public(store, "s_y", "ghost_base", &EdgeKind::Calls).is_none());
+    sup_replace(store, &sp, 6, &[]).expect("owner retracts the dangling fact");
+    assert!(sup_public(store, "s_x", "ghost_target", &flows).is_none());
+    assert_eq!(store.prune_dangling_edges().expect("prune"), 0);
+
+    // ── 11. Representative ties are decided by the fact SET, never by row order ─────────
+    // Two facts identical in TS-S1's support order (same site, construct, class, resolver,
+    // confidence) but different facts (evidence_count, provenance, extra metadata). Every backend
+    // must project exactly `project_edge` of the set, whichever owner wrote first.
+    let tie = |source: &str, target: &str, evidence: u32, tag: &str| {
+        let mut e = sup_flow(
+            source,
+            target,
+            "assignment",
+            "sup/web.ts",
+            70,
+            ResolutionTier::Scip,
+            "scip-typescript",
+        );
+        e.evidence_count = evidence;
+        e.metadata.insert("tag".into(), serde_json::json!(tag));
+        e
+    };
+    let (a1, a2) = (sup_owner("tie", "one-a"), sup_owner("tie", "two-a"));
+    let (b1, b2) = (sup_owner("tie", "one-b"), sup_owner("tie", "two-b"));
+    sup_replace(store, &a1, 1, &[tie("s_c", "s_a2", 3, "one")]).expect("one first");
+    sup_replace(store, &a2, 1, &[tie("s_c", "s_a2", 1, "two")]).expect("two second");
+    sup_replace(store, &b2, 1, &[tie("s_c2", "s_a", 1, "two")]).expect("two first");
+    sup_replace(store, &b1, 1, &[tie("s_c2", "s_a", 3, "one")]).expect("one second");
+    let first = sup_public(store, "s_c", "s_a2", &flows).expect("edge");
+    let second = sup_public(store, "s_c2", "s_a", &flows).expect("edge");
+    let expect = crate::support::project_edge(
+        None,
+        &[&tie("s_c", "s_a2", 1, "two"), &tie("s_c", "s_a2", 3, "one")],
+    );
+    assert_eq!(
+        Some(first.clone()),
+        expect,
+        "projection == project_edge(set)"
+    );
+    assert_eq!(
+        sup_rebind(first),
+        sup_rebind(second),
+        "write order must not pick the representative"
+    );
+    for o in [&a1, &a2, &b1, &b2] {
+        sup_replace(store, o, 2, &[]).expect("tie clean");
+    }
+
+    // ── 12. remove_file's source-in-file predicate retires a base contribution ──────────
+    // The base edge carries no location, so only "its source node lives in the removed file"
+    // can retire it. Support keeps the edge alive (dangling source) until its owner retracts.
+    store
+        .upsert_nodes(&[Node::new(
+            sym("s_src_in_file"),
+            NodeKind::Function,
+            "s_src_in_file",
+            Language::new("typescript"),
+            Location::new("sup/src_node.ts", Span::ZERO),
+        )])
+        .expect("source node");
+    let loc_less = Edge::new(
+        sym("s_src_in_file"),
+        sym("s_a"),
+        EdgeKind::Calls,
+        ResolutionTier::Parsed,
+        "tree-sitter",
+    );
+    let backed = Edge::new(
+        sym("s_src_in_file"),
+        sym("s_a"),
+        EdgeKind::Calls,
+        ResolutionTier::Heuristic,
+        "scip-typescript",
+    )
+    .with_location(Location::new("sup/web.ts", Span::ZERO));
+    store
+        .upsert_edges(std::slice::from_ref(&loc_less))
+        .expect("base");
+    let sf = sup_owner("scip-typescript", "src-in-file");
+    sup_replace(store, &sf, 1, std::slice::from_ref(&backed)).expect("support");
+    assert_eq!(
+        sup_public(store, "s_src_in_file", "s_a", &EdgeKind::Calls),
+        Some(loc_less.clone()),
+        "base wins at 1.0"
+    );
+    store
+        .remove_file("sup/src_node.ts")
+        .expect("remove the source's file");
+    assert_eq!(
+        sup_public(store, "s_src_in_file", "s_a", &EdgeKind::Calls),
+        Some(backed.clone()),
+        "base retired by the source predicate; support survives"
+    );
+    sup_replace(store, &sf, 2, &[]).expect("retract");
+    assert_eq!(
+        sup_public(store, "s_src_in_file", "s_a", &EdgeKind::Calls),
+        None,
+        "nothing resurrects the base"
+    );
+
+    // ── 13. prune retires a dangling supported key's base contribution ─────────────────
+    let dangling_base = Edge::new(
+        sym("s_y"),
+        sym("ghost_both"),
+        EdgeKind::Calls,
+        ResolutionTier::Parsed,
+        "tree-sitter",
+    );
+    let dangling_support = Edge::new(
+        sym("s_y"),
+        sym("ghost_both"),
+        EdgeKind::Calls,
+        ResolutionTier::Heuristic,
+        "scip-typescript",
+    );
+    store
+        .upsert_edges(std::slice::from_ref(&dangling_base))
+        .expect("dangling base");
+    let pr = sup_owner("scip-typescript", "prune-base");
+    sup_replace(store, &pr, 1, std::slice::from_ref(&dangling_support)).expect("support");
+    assert_eq!(
+        store.prune_dangling_edges().expect("prune"),
+        0,
+        "a supported edge is not counted"
+    );
+    assert_eq!(
+        sup_public(store, "s_y", "ghost_both", &EdgeKind::Calls),
+        Some(dangling_support.clone()),
+        "prune retired the base contribution, kept the support"
+    );
+    sup_replace(store, &pr, 2, &[]).expect("retract");
+    assert_eq!(
+        sup_public(store, "s_y", "ghost_both", &EdgeKind::Calls),
+        None
+    );
+
+    // ── 14. Support never keeps a shared Import node alive ────────────────────────────
+    // Only a BASE-plane importer in another file keeps an Import node on remove_file. A support
+    // fact's site is not an importer: counting it would pin the node to a file that nothing will
+    // ever remove again.
+    store
+        .upsert_nodes(&[Node::new(
+            sym("s_import"),
+            NodeKind::Import,
+            "s_import",
+            Language::new("typescript"),
+            Location::new("sup/imp_b.ts", Span::ZERO),
+        )])
+        .expect("import node");
+    let imp = Edge::new(
+        sym("s_x"),
+        sym("s_import"),
+        EdgeKind::Imports,
+        ResolutionTier::Scip,
+        "scip-typescript",
+    )
+    .with_location(Location::new("sup/imp_a.ts", Span::ZERO));
+    let io = sup_owner("scip-typescript", "import");
+    sup_replace(store, &io, 1, std::slice::from_ref(&imp)).expect("support");
+    store
+        .remove_file("sup/imp_b.ts")
+        .expect("remove the import's home");
+    assert!(
+        store.get_node(&sym("s_import")).expect("get").is_none(),
+        "support at sup/imp_a.ts must not keep the Import node"
+    );
+    sup_replace(store, &io, 2, &[]).expect("retract");
+
+    // ── 15. Fact identity is producer-owned and opaque ─────────────────────────────────
+    use crate::support::SupportFact;
+    let lsp = sup_owner("language-server", "polyglot");
+    // Byte-identical edge content under two producer ids: two facts, not one.
+    let same = sup_flow(
+        "s_c",
+        "s_a3",
+        "assignment",
+        "sup/web.ts",
+        5,
+        ResolutionTier::Scip,
+        "lsp",
+    );
+    // Ids that differ only by whitespace, case or Unicode normalization form are distinct; the
+    // store neither trims, case-folds nor normalizes, and returns each id exactly.
+    let ids = [
+        "java:User#save()",
+        "ts:User.save",
+        "ts:User.save ",
+        "TS:User.save",
+        "caf\u{e9}",
+        "cafe\u{301}",
+    ];
+    let opaque: Vec<SupportFact> = ids
+        .iter()
+        .map(|id| SupportFact::new(*id, same.clone()).expect("fact"))
+        .collect();
+    let r = store
+        .replace_edge_supports(&lsp, 1, &opaque)
+        .expect("opaque ids");
+    assert_eq!(r.asserted, ids.len(), "{r:?}");
+    let rows = sup_rows(store, "s_c", "s_a3", &flows);
+    let mut want: Vec<&str> = ids.to_vec();
+    want.sort();
+    assert_eq!(
+        rows.iter().map(|r| r.fact_id.as_str()).collect::<Vec<_>>(),
+        want,
+        "every id stored exactly, ordered by byte order"
+    );
+    assert!(rows.iter().all(|r| r.fact == same));
+    let mut shuffled = opaque.clone();
+    shuffled.reverse();
+    assert!(
+        store
+            .replace_edge_supports(&lsp, 1, &shuffled)
+            .expect("replay")
+            .replayed,
+        "same ids + same content in any order is a replay"
+    );
+    // The same id re-asserted with different content is a change: retracted and asserted.
+    let moved = sup_flow(
+        "s_c",
+        "s_a3",
+        "assignment",
+        "sup/web.ts",
+        6,
+        ResolutionTier::Scip,
+        "lsp",
+    );
+    let mut changed = opaque.clone();
+    changed[0] = SupportFact::new(ids[0], moved.clone()).expect("fact");
+    let r = store
+        .replace_edge_supports(&lsp, 2, &changed)
+        .expect("changed content");
+    assert_eq!(
+        (r.asserted, r.retained, r.retracted),
+        (1, ids.len() - 1, 1),
+        "{r:?}"
+    );
+    let rows = sup_rows(store, "s_c", "s_a3", &flows);
+    assert_eq!(rows.len(), ids.len());
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.fact_id == ids[0])
+            .map(|r| r.fact.clone()),
+        Some(moved)
+    );
+    // One id, two contents, one submission: rejected, nothing written.
+    let clash = [
+        SupportFact::new("dup", same.clone()).unwrap(),
+        changed[0].clone().with_id("dup").unwrap(),
+    ];
+    store
+        .replace_edge_supports(&lsp, 3, &clash)
+        .expect_err("one id asserted twice with different content");
+    assert_eq!(store.support_generation(&lsp).expect("gen"), Some(2));
+    store
+        .replace_edge_supports(&lsp, 3, &[])
+        .expect("lsp clean");
+
+    // ── 16. Identical display names across languages/toolchains never collide ──────────
+    // Two toolchains each index a symbol displayed as `User`, with their own symbol schemes, and
+    // both use the producer-local fact id "User". Storage keys on the full ids and never parses a
+    // symbol scheme, so neither fact touches the other.
+    let display = |id: &str, file: &str, lang: &str| {
+        Node::new(
+            crate::symbol::SymbolId(id.into()),
+            NodeKind::Class,
+            "User",
+            Language::new(lang),
+            Location::new(file, Span::ZERO),
+        )
+    };
+    store
+        .upsert_nodes(&[
+            display(
+                "scip-java maven acme 1.0 com/acme/User#",
+                "sup/User.java",
+                "java",
+            ),
+            display(
+                "scip-typescript npm acme 1.0 src/`user.ts`/User#",
+                "sup/user.ts",
+                "typescript",
+            ),
+        ])
+        .expect("same display name, two languages");
+    let link = |src: &str, by: &str| {
+        Edge::new(
+            crate::symbol::SymbolId(src.into()),
+            sym("s_a"),
+            EdgeKind::Imports,
+            ResolutionTier::Scip,
+            by,
+        )
+    };
+    let java = sup_owner("scip-java", "acme");
+    let ts = sup_owner("scip-typescript", "acme");
+    let java_fact = link("scip-java maven acme 1.0 com/acme/User#", "scip-java");
+    let ts_fact = link(
+        "scip-typescript npm acme 1.0 src/`user.ts`/User#",
+        "scip-typescript",
+    );
+    store
+        .replace_edge_supports(
+            &java,
+            1,
+            &[SupportFact::new("User", java_fact.clone()).unwrap()],
+        )
+        .expect("java");
+    store
+        .replace_edge_supports(
+            &ts,
+            1,
+            &[SupportFact::new("User", ts_fact.clone()).unwrap()],
+        )
+        .expect("ts");
+    let read = |s: &S, e: &Edge| {
+        s.edge_supports(&e.source, &e.target, &e.kind)
+            .expect("rows")
+    };
+    assert_eq!(read(store, &java_fact).len(), 1);
+    assert_eq!(read(store, &ts_fact).len(), 1);
+    store
+        .replace_edge_supports(&java, 2, &[])
+        .expect("java retracts");
+    assert!(read(store, &java_fact).is_empty());
+    assert_eq!(
+        read(store, &ts_fact).len(),
+        1,
+        "the other toolchain's `User` is untouched"
+    );
+    assert_eq!(read(store, &ts_fact)[0].fact, ts_fact);
+    store.replace_edge_supports(&ts, 2, &[]).expect("ts clean");
+
+    // ── 17. Owners are listed, ordered, including those whose set is now empty ─────────
+    let owners = store.support_owners().expect("owners");
+    let names: Vec<(String, String)> = owners
+        .iter()
+        .map(|o| (o.owner.producer.clone(), o.owner.snapshot.clone()))
+        .collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(names, sorted, "ordered by (producer, snapshot), each once");
+    for o in &owners {
+        assert_eq!(
+            store.support_generation(&o.owner).expect("gen"),
+            Some(o.generation)
+        );
+    }
+    for (owner, generation) in [(&p, 10), (&java, 2), (&ts, 2), (&lsp, 3)] {
+        assert!(
+            owners
+                .iter()
+                .any(|o| &o.owner == owner && o.generation == generation),
+            "{owner:?} at {generation} must be listed even with an empty set: {owners:?}"
+        );
+    }
+
+    // The public envelope of a projected flow edge is exactly TS-S1's: every key a plain merge
+    // carries, nothing more.
+    let env = sup_public(store, "s_c6", "s_a6", &flows).expect("edge");
+    let plain_merge = merge_flow_edges(set).remove(0);
+    let keys = |e: &Edge| {
+        e.metadata
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert_eq!(keys(&env), keys(&plain_merge));
+    assert!(env.metadata.contains_key(FLOW_SUPPORT_KEY));
 }

@@ -514,6 +514,26 @@ impl<H: GraphRead + Sync + ?Sized> GraphRead for OverlayReader<'_, H> {
         Ok(None)
     }
 
+    // #23/#24/#25 edge_supports / support_generation / support_owners — HOME-ONLY. Support (TS-S2A) is the home
+    // store's authoritative fact table behind ITS public edges; a foreign engine's support is
+    // that engine's business, and the cross fold never projects through it.
+    fn edge_supports(
+        &self,
+        source: &SymbolId,
+        target: &SymbolId,
+        kind: &wicked_estate_core::EdgeKind,
+    ) -> Result<Vec<wicked_estate_core::EdgeSupport>> {
+        self.home.edge_supports(source, target, kind)
+    }
+
+    fn support_generation(&self, owner: &wicked_estate_core::SupportOwner) -> Result<Option<u64>> {
+        self.home.support_generation(owner)
+    }
+
+    fn support_owners(&self) -> Result<Vec<wicked_estate_core::SupportOwnerState>> {
+        self.home.support_owners()
+    }
+
     // #23 stats — HOME-ONLY (home stats).
     fn stats(&self) -> Result<wicked_estate_core::query::GraphStats> {
         self.home.stats()

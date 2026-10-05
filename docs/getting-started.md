@@ -388,6 +388,25 @@ time their file is re-indexed (`docs/ENGINE-CONTRACT.md` §2.1, exception 2).
 `npx @sourcegraph/scip-typescript@0.4.0 index` manually in the project root, then re-run
 `wicked-estate scip`.
 
+### Supports — who asserts an edge, and clearing a producer
+
+Producers that re-emit whole snapshots (SCIP, compilers, language servers) record their facts in
+the **support plane** (`docs/ENGINE-CONTRACT.md` §3.4), so a later run retracts whatever it no
+longer asserts. No producer writes support yet (TS-S2/TS-S3). The CLI reads and clears it:
+
+```bash
+wicked-estate supports owners --db graph.db             # every (producer, snapshot) and its generation
+wicked-estate supports edge --source <SYMBOL_ID> --target <SYMBOL_ID> --kind calls --json
+wicked-estate supports retract --producer scip-typescript --snapshot apps/web
+```
+
+`edge` takes exact `SymbolId`s (no name resolution) and a kind such as `calls`, `imports` or the
+tag `flows_to`; it returns the authoritative rows — each with the producer's own opaque `fact_id`
+— not the bounded `flow_support` sample. `retract` replaces the owner's set with nothing at its
+next generation; an edge the indexer also wrote is restored exactly. Retract every owner before
+downgrading to a binary without TS-S2A. `--json` output stays under the 25K-char R4 budget
+(`total` exact, `truncated` when rows were dropped). A missing or empty `--db` is refused.
+
 ---
 
 ## 9. Incremental re-indexing

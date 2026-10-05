@@ -154,6 +154,20 @@ impl GraphRead for OverlayMemStore {
     fn symbol_epoch(&self, id: &SymbolId) -> Result<Option<u64>> {
         self.overlay().symbol_epoch(id)
     }
+    fn edge_supports(
+        &self,
+        source: &SymbolId,
+        target: &SymbolId,
+        kind: &wicked_estate_core::EdgeKind,
+    ) -> Result<Vec<wicked_estate_core::EdgeSupport>> {
+        self.overlay().edge_supports(source, target, kind)
+    }
+    fn support_generation(&self, owner: &wicked_estate_core::SupportOwner) -> Result<Option<u64>> {
+        self.overlay().support_generation(owner)
+    }
+    fn support_owners(&self) -> Result<Vec<wicked_estate_core::SupportOwnerState>> {
+        self.overlay().support_owners()
+    }
     fn stats(&self) -> Result<GraphStats> {
         self.overlay().stats()
     }
@@ -214,6 +228,14 @@ impl GraphWrite for OverlayMemStore {
         key: &str,
     ) -> Result<usize> {
         self.home.delete_annotations(symbol, ty, key)
+    }
+    fn replace_edge_supports(
+        &mut self,
+        owner: &wicked_estate_core::SupportOwner,
+        generation: u64,
+        facts: &[wicked_estate_core::SupportFact],
+    ) -> Result<wicked_estate_core::SupportReplacement> {
+        self.home.replace_edge_supports(owner, generation, facts)
     }
 }
 

@@ -107,6 +107,43 @@ CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target);
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source);
 CREATE INDEX IF NOT EXISTS idx_edges_file ON edges(file);
 
+-- TS-S2A support plane (wicked_estate_core::support; docs/ENGINE-CONTRACT.md §3.4). Additive:
+-- `CREATE TABLE IF NOT EXISTS` adds all three to any older DB on open, and while they are empty
+-- every existing code path behaves exactly as before.
+--   support_owners: one row per (producer, snapshot) owner — its last applied generation.
+--   edge_supports:  the owner's authoritative facts, one row per (owner, edge key, fact_id);
+--                   fact_id is the producer's OPAQUE id (stored and compared byte-for-byte, never
+--                   parsed), data the full fact Edge JSON (content is derived from it).
+--   edge_base:      for a SUPPORTED edge key only, the base plane's (upsert_edges) contribution,
+--                   kept aside so the public `edges` row can be re-projected from base + support.
+--                   `file` mirrors edges.file so remove_file retires it by the same predicate.
+CREATE TABLE IF NOT EXISTS support_owners (
+  producer   TEXT NOT NULL,
+  snapshot   TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  PRIMARY KEY (producer, snapshot)
+);
+CREATE TABLE IF NOT EXISTS edge_supports (
+  producer TEXT NOT NULL,
+  snapshot TEXT NOT NULL,
+  source   INTEGER NOT NULL,   -- sid, as edges.source
+  target   INTEGER NOT NULL,   -- sid, as edges.target
+  kind     TEXT NOT NULL,      -- serialized EdgeKind, as edges.kind
+  fact_id  TEXT NOT NULL,
+  data     TEXT NOT NULL,
+  PRIMARY KEY (producer, snapshot, source, target, kind, fact_id)
+);
+CREATE INDEX IF NOT EXISTS idx_edge_supports_key ON edge_supports(source, target, kind);
+CREATE TABLE IF NOT EXISTS edge_base (
+  source INTEGER NOT NULL,
+  target INTEGER NOT NULL,
+  kind   TEXT NOT NULL,
+  file   TEXT NOT NULL DEFAULT '',
+  data   TEXT NOT NULL,
+  PRIMARY KEY (source, target, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_edge_base_file ON edge_base(file);
+
 -- Unresolved references: calls/imports the resolver could NOT bind to a target symbol.
 -- Kept to power honest blast-radius coverage (never silently claim "no dependents" when
 -- calls to that name went unresolved). raw_name is indexed for exact-name lookup.

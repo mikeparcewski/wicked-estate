@@ -13,6 +13,11 @@
 //!   wicked-estate lineage --symbol <SYMBOL_ID> [--depth N] [--relation flows_to] [--json] [--db ...]
 //!                                     the MCP `Lineage` tool: dependency lineage by default;
 //!                                     `flows_to` = static semantic value lineage (not taint)
+//!   wicked-estate supports owners        [--json] [--db ...]
+//!   wicked-estate supports edge --source <ID> --target <ID> --kind <KIND> [--json] [--db ...]
+//!   wicked-estate supports retract --producer <P> --snapshot <S> [--json] [--db ...]
+//!                                     the authoritative edge-support plane (TS-S2A): who supports
+//!                                     an edge, every owner's generation, and retracting an owner
 //!   wicked-estate stats                  [--db ...]
 //!   wicked-estate source [<name>]        [--cluster <id>] [--file <path>] [--symbols id1,id2,...]
 //!                                     [--json] [--max-total-chars <N>] [--max-node-chars <N>]
@@ -1764,6 +1769,51 @@ fn main() -> Result<()> {
                         result.content["total"].as_i64().unwrap_or(0),
                     ),
                 ],
+                t_cmd_start,
+                t_cmd_end,
+            );
+        }
+        // ── supports ────────────────────────────────────────────────────────
+        //   wicked-estate supports owners        [--json]
+        //   wicked-estate supports edge --source <ID> --target <ID> --kind <KIND> [--json]
+        //   wicked-estate supports retract --producer <P> --snapshot <S> [--json]
+        //
+        // The CLI face of the TS-S2A support plane (`docs/ENGINE-CONTRACT.md` §3.4): the same
+        // `GraphRead::{support_owners, edge_supports}` / `GraphWrite::replace_edge_supports` every
+        // store implements — no second implementation. `retract` is `replace_edge_supports(owner,
+        // generation + 1, [])`, the documented way to clear an owner (e.g. before a downgrade).
+        // Every subcommand refuses a missing/empty graph instead of creating one.
+        "supports" => {
+            let args = parse_supports_args(rest)?;
+            require_existing_graph(&db, "supports")?;
+            let mut store = open_store_ext(&db).map_err(to_any)?;
+            let t_cmd_start = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            let doc = run_supports(store.as_mut(), &args)?;
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&doc).map_err(|e| anyhow::anyhow!(e))?
+                );
+            } else {
+                let mut out = std::io::stdout().lock();
+                write_supports_text(&mut out, &doc).map_err(|e| anyhow::anyhow!(e))?;
+            }
+            let t_cmd_end = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            emit_cli_span(
+                &otel_sink,
+                &otel_resource,
+                &otel_scope,
+                "wicked_estate.supports",
+                vec![wicked_estate_core::observability::KeyValue::str(
+                    "supports.mode",
+                    args.mode.name(),
+                )],
                 t_cmd_start,
                 t_cmd_end,
             );
@@ -3935,6 +3985,9 @@ fn main() -> Result<()> {
                     c.name
                 );
             }
+            for line in SUPPORTS_USAGE.lines() {
+                println!("  {}", line.trim_start_matches("usage: "));
+            }
             println!(
                 "  wicked-estate lineage --symbol <SYMBOL_ID> [--depth N] [--relation flows_to] [--json] [--db ...]"
             );
@@ -4566,6 +4619,316 @@ fn write_path_text(
         )?;
     }
     Ok(())
+}
+
+const SUPPORTS_USAGE: &str = "usage: wicked-estate supports owners [--json] [--db ...]\n  \
+     wicked-estate supports edge --source <SYMBOL_ID> --target <SYMBOL_ID> --kind <KIND> [--json] [--db ...]\n  \
+     wicked-estate supports retract --producer <P> --snapshot <S> [--json] [--db ...]\n  \
+     owners   every support owner (producer, snapshot) and its last generation\n  \
+     edge     the authoritative support rows behind one public edge (exact ids, no name resolution;\n           \
+     --kind is an edge kind such as `calls`, `imports` or a tag such as `flows_to`)\n  \
+     retract  replace the owner's support with nothing at its next generation";
+
+/// The whole `supports` document — every field, not one section — stays under this. It is the one
+/// R4 response budget (`docs/agent-behavior-rules.md`), the same figure every RetrievalTool uses;
+/// rows past it are dropped in order and `truncated` says so, `total` stays exact.
+const SUPPORTS_CHAR_BUDGET: usize = 25_000;
+
+#[derive(Debug, PartialEq)]
+enum SupportsMode {
+    Owners,
+    Edge {
+        source: String,
+        target: String,
+        kind: String,
+    },
+    Retract {
+        producer: String,
+        snapshot: String,
+    },
+}
+
+impl SupportsMode {
+    fn name(&self) -> &'static str {
+        match self {
+            SupportsMode::Owners => "owners",
+            SupportsMode::Edge { .. } => "edge",
+            SupportsMode::Retract { .. } => "retract",
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct SupportsArgs {
+    mode: SupportsMode,
+    json: bool,
+}
+
+/// Parse `supports` from the RAW argument list, strictly (the `lineage` rule): every token is
+/// classified, and an unknown, foreign, repeated or valueless flag, a flag another subcommand
+/// owns, an empty value, or a stray operand fails with usage before any store is opened.
+fn parse_supports_args(raw: &[String]) -> Result<SupportsArgs> {
+    let usage = |why: String| anyhow::anyhow!("{SUPPORTS_USAGE}\n{why}");
+    let (sub, rest) = raw
+        .split_first()
+        .ok_or_else(|| usage("a subcommand is required: owners | edge | retract".into()))?;
+    let allowed: &[&str] = match sub.as_str() {
+        "owners" => &[],
+        "edge" => &["--source", "--target", "--kind"],
+        "retract" => &["--producer", "--snapshot"],
+        other => return Err(usage(format!("unknown subcommand {other:?}"))),
+    };
+    let mut values: std::collections::BTreeMap<&'static str, String> = Default::default();
+    let mut json = false;
+    let mut db_seen = false;
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        let (flag, inline) = match a.split_once('=') {
+            Some((f, v)) if f.starts_with("--") => (f, Some(v.to_string())),
+            _ => (a.as_str(), None),
+        };
+        let mut value = |flag: &str| -> Result<String> {
+            let v = match &inline {
+                Some(v) => v.clone(),
+                None => match it.next() {
+                    None => return Err(usage(format!("{flag} requires a value"))),
+                    Some(v) if v.starts_with("--") => {
+                        return Err(usage(format!("{flag} needs a value, got the flag {v:?}")));
+                    }
+                    Some(v) => v.clone(),
+                },
+            };
+            if v.is_empty() {
+                return Err(usage(format!("{flag} must not be empty")));
+            }
+            Ok(v)
+        };
+        match flag {
+            "--json" if inline.is_none() => {
+                if json {
+                    return Err(usage("--json given more than once".into()));
+                }
+                json = true;
+            }
+            // `--db=` is not a form the shared loop selects a store from — refused, not ignored.
+            "--db" if inline.is_none() => {
+                if db_seen {
+                    return Err(usage("--db given more than once".into()));
+                }
+                value("--db")?;
+                db_seen = true;
+            }
+            f if allowed.contains(&f) => {
+                let key = allowed
+                    .iter()
+                    .find(|k| **k == f)
+                    .copied()
+                    .unwrap_or_default();
+                if values.contains_key(key) {
+                    return Err(usage(format!("{f} given more than once")));
+                }
+                let v = value(f)?;
+                values.insert(key, v);
+            }
+            f if f.starts_with('-') => {
+                return Err(usage(format!("unknown flag {a:?} for `supports {sub}`")));
+            }
+            other => {
+                return Err(usage(format!(
+                    "unexpected operand {other:?}: `supports {sub}` takes flags only"
+                )));
+            }
+        }
+    }
+    let mut take = |k: &'static str| -> Result<String> {
+        values
+            .remove(k)
+            .ok_or_else(|| usage(format!("{k} is required for `supports {sub}`")))
+    };
+    let mode = match sub.as_str() {
+        "owners" => SupportsMode::Owners,
+        "edge" => SupportsMode::Edge {
+            source: take("--source")?,
+            target: take("--target")?,
+            kind: take("--kind")?,
+        },
+        _ => SupportsMode::Retract {
+            producer: take("--producer")?,
+            snapshot: take("--snapshot")?,
+        },
+    };
+    Ok(SupportsArgs { mode, json })
+}
+
+/// `--kind`: a built-in kind by its stored spelling (`calls`, `imports`, …), otherwise a tag
+/// stored as `EdgeKind::Other` (`flows_to`). The same spelling `export`/`path --json` print.
+fn parse_edge_kind(kind: &str) -> wicked_estate_core::EdgeKind {
+    serde_json::from_value(serde_json::Value::String(kind.to_string()))
+        .unwrap_or_else(|_| wicked_estate_core::EdgeKind::Other(kind.to_string()))
+}
+
+/// Keep rows, in order, while the whole document stays under [`SUPPORTS_CHAR_BUDGET`].
+fn bounded_rows(
+    rows: Vec<serde_json::Value>,
+    frame: impl Fn(&[serde_json::Value], bool) -> serde_json::Value,
+) -> serde_json::Value {
+    let mut kept: Vec<serde_json::Value> = Vec::new();
+    let total = rows.len();
+    for row in rows {
+        kept.push(row);
+        let size = serde_json::to_string(&frame(&kept, true)).map_or(usize::MAX, |s| s.len());
+        if size >= SUPPORTS_CHAR_BUDGET {
+            kept.pop();
+            break;
+        }
+    }
+    let truncated = kept.len() < total;
+    frame(&kept, truncated)
+}
+
+/// Run one `supports` subcommand and return its JSON document (text mode renders the same one).
+fn run_supports(
+    store: &mut dyn wicked_estate_store::GraphStoreMutExt,
+    args: &SupportsArgs,
+) -> Result<serde_json::Value> {
+    use serde_json::json;
+    match &args.mode {
+        SupportsMode::Owners => {
+            let owners = store.support_owners().map_err(to_any)?;
+            let total = owners.len();
+            let rows = owners
+                .iter()
+                .map(|o| serde_json::to_value(o).map_err(|e| anyhow::anyhow!(e)))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(bounded_rows(
+                rows,
+                |kept, truncated| json!({"owners": kept, "total": total, "truncated": truncated}),
+            ))
+        }
+        SupportsMode::Edge {
+            source,
+            target,
+            kind,
+        } => {
+            let k = parse_edge_kind(kind);
+            let rows = store
+                .edge_supports(
+                    &wicked_estate_core::SymbolId(source.clone()),
+                    &wicked_estate_core::SymbolId(target.clone()),
+                    &k,
+                )
+                .map_err(to_any)?;
+            let total = rows.len();
+            let rows = rows
+                .iter()
+                .map(|r| serde_json::to_value(r).map_err(|e| anyhow::anyhow!(e)))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(bounded_rows(rows, |kept, truncated| {
+                json!({
+                    "source": source, "target": target, "kind": k,
+                    "supports": kept, "total": total, "truncated": truncated,
+                })
+            }))
+        }
+        SupportsMode::Retract { producer, snapshot } => {
+            let owner =
+                wicked_estate_core::SupportOwner::new(producer, snapshot).map_err(to_any)?;
+            let Some(current) = store.support_generation(&owner).map_err(to_any)? else {
+                anyhow::bail!(
+                    "no support owner ({producer}, {snapshot}) in this graph — nothing to \
+                     retract (`wicked-estate supports owners` lists them)"
+                );
+            };
+            let next = current
+                .checked_add(1)
+                .filter(|g| *g <= wicked_estate_core::support::MAX_SUPPORT_GENERATION)
+                .ok_or_else(|| anyhow::anyhow!("owner is at the maximum generation {current}"))?;
+            store.begin_batch().map_err(to_any)?;
+            let report = store
+                .replace_edge_supports(&owner, next, &[])
+                .map_err(to_any)?;
+            store.commit_batch().map_err(to_any)?;
+            Ok(json!({ "retracted": report }))
+        }
+    }
+}
+
+/// Text mode: a reading of the same document, one line per row, every cut named (R3).
+fn write_supports_text(
+    out: &mut impl std::io::Write,
+    doc: &serde_json::Value,
+) -> std::io::Result<()> {
+    let cut = |out: &mut dyn std::io::Write, shown: usize| -> std::io::Result<()> {
+        if doc["truncated"].as_bool() == Some(true) {
+            writeln!(
+                out,
+                "truncated: showing {shown} of {} (R4 output budget) — use --json for the bounded document",
+                doc["total"]
+            )?;
+        }
+        Ok(())
+    };
+    if let Some(owners) = doc.get("owners").and_then(|v| v.as_array()) {
+        if owners.is_empty() {
+            writeln!(out, "no support owners in this graph")?;
+        }
+        for o in owners {
+            writeln!(
+                out,
+                "{}\t{}\tgeneration {}",
+                o["owner"]["producer"].as_str().unwrap_or(""),
+                o["owner"]["snapshot"].as_str().unwrap_or(""),
+                o["generation"]
+            )?;
+        }
+        return cut(out, owners.len());
+    }
+    if let Some(rows) = doc.get("supports").and_then(|v| v.as_array()) {
+        writeln!(
+            out,
+            "support for {} -[{}]-> {}: {} fact(s)",
+            doc["source"].as_str().unwrap_or(""),
+            match &doc["kind"] {
+                serde_json::Value::String(s) => s.clone(),
+                other => other
+                    .get("other")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string(),
+            },
+            doc["target"].as_str().unwrap_or(""),
+            doc["total"]
+        )?;
+        for r in rows {
+            let f = &r["fact"];
+            let site = f["location"]["file"]
+                .as_str()
+                .map(|file| format!(" at {file}:{}", f["location"]["span"]["start_line"]))
+                .unwrap_or_default();
+            writeln!(
+                out,
+                "  {}/{} gen {}  fact_id {}  confidence {} ({}, {}){site}",
+                r["owner"]["producer"].as_str().unwrap_or(""),
+                r["owner"]["snapshot"].as_str().unwrap_or(""),
+                r["generation"],
+                serde_json::Value::String(r["fact_id"].as_str().unwrap_or("").into()),
+                f["confidence"],
+                f["provenance"].as_str().unwrap_or(""),
+                f["resolved_by"].as_str().unwrap_or("")
+            )?;
+        }
+        return cut(out, rows.len());
+    }
+    let r = &doc["retracted"];
+    writeln!(
+        out,
+        "retracted {} fact(s) of {}/{} at generation {} ({} public edge(s) re-projected)",
+        r["retracted"],
+        r["owner"]["producer"].as_str().unwrap_or(""),
+        r["owner"]["snapshot"].as_str().unwrap_or(""),
+        r["generation"],
+        r["edges_touched"]
+    )
 }
 
 const LINEAGE_USAGE: &str = "usage: wicked-estate lineage --symbol <SYMBOL_ID> [--depth N] [--relation flows_to] [--json] [--db ...]\n  \

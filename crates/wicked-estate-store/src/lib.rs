@@ -48,8 +48,13 @@ fn mem_cosine_similarity(a: &[f32], b: &[f32], a_norm: f32) -> f32 {
     (dot / (a_norm * b_norm)).clamp(-1.0, 1.0)
 }
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 // `Annotation` is brought into module scope by the `pub use wicked_estate_core::Annotation` above.
+use wicked_estate_core::support::{
+    EdgeKey, EdgeSupport, StoredFacts, SupportFact, SupportOwner, SupportOwnerState,
+    SupportReplacement, base_upsert_wins, fact_key, normalize_facts, plan_replacement,
+    project_edge,
+};
 use wicked_estate_core::{
     Change, ChangeOp, Direction, Edge, EdgeKind, Error, GraphRead, GraphStats, GraphStore,
     GraphWrite, HistoricalEdge, Node, NodeKind, NodeSemantics, RepoInfo, Result, StoreCapabilities,
@@ -115,6 +120,14 @@ pub struct MemStore {
     // reuse-after-delete (in this set, no live node → bump) from a first-ever / edge-only symbol
     // getting its first node (not in this set → no bump, epoch stays 0).
     had_node: HashSet<SymbolId>,
+    // TS-S2A support plane (`wicked_estate_core::support`): per public edge key, every owner's
+    // facts keyed by `(owner, fact_id)` (the producer's opaque id); the same identities indexed per owner; each owner's
+    // generation; and the kept-aside base contribution of every supported key. `BTreeMap`s, so
+    // reads are ordered `(producer, snapshot, fact_key)` with no sort step.
+    supports: BTreeMap<EdgeKey, BTreeMap<(SupportOwner, String), Edge>>,
+    owner_facts: BTreeMap<SupportOwner, BTreeSet<(EdgeKey, String)>>,
+    support_generations: BTreeMap<SupportOwner, u64>,
+    edge_base: BTreeMap<EdgeKey, Edge>,
 }
 
 impl MemStore {
@@ -360,6 +373,65 @@ fn preferred_contribution(contribs: &BTreeMap<String, Node>) -> Option<&Node> {
         .map(|(_, n)| n)
 }
 
+/// TS-S2A support-plane helpers (contract: `wicked_estate_core::support`).
+impl MemStore {
+    fn set_public_edge(&mut self, key: &EdgeKey, edge: Option<Edge>) {
+        let at = self.edges.iter().position(|e| &e.dedup_key() == key);
+        match (at, edge) {
+            (Some(i), Some(e)) => self.edges[i] = e,
+            (Some(i), None) => {
+                self.edges.remove(i);
+            }
+            (None, Some(e)) => self.edges.push(e),
+            (None, None) => {}
+        }
+    }
+
+    /// Recompute `key`'s public edge from its base contribution and every owner's facts. With no
+    /// support left, the base contribution becomes the plain public edge again.
+    fn reproject(&mut self, key: &EdgeKey) {
+        let facts: Vec<Edge> = self
+            .supports
+            .get(key)
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default();
+        if facts.is_empty() {
+            self.supports.remove(key);
+            let base = self.edge_base.remove(key);
+            self.set_public_edge(key, base);
+            return;
+        }
+        let refs: Vec<&Edge> = facts.iter().collect();
+        let projected = project_edge(self.edge_base.get(key), &refs);
+        self.set_public_edge(key, projected);
+    }
+
+    /// The location that decides which FILE owns a public edge for `remove_file`, history and
+    /// the shared-Import keep. A plain edge: its own. A supported edge: its base contribution's,
+    /// or none — support is producer-owned, so a fact's site must not make `remove_file` of that
+    /// site delete the row, nor count as a surviving importer (which would pin an Import node to a
+    /// file nothing will ever remove again). Mirrors SqliteStore's `edges.file` for projections.
+    fn owning_location<'a>(&'a self, e: &'a Edge) -> Option<&'a wicked_estate_core::Location> {
+        if self.supports.is_empty() {
+            return e.location.as_ref();
+        }
+        let key = e.dedup_key();
+        if self.supports.contains_key(&key) {
+            self.edge_base.get(&key).and_then(|b| b.location.as_ref())
+        } else {
+            e.location.as_ref()
+        }
+    }
+
+    /// Re-project the supported keys an edge-deleting step removed or whose base contribution it
+    /// retired. Support is producer-owned, so every removed supported edge comes back.
+    fn reproject_all(&mut self, keys: BTreeSet<EdgeKey>) {
+        for key in keys {
+            self.reproject(&key);
+        }
+    }
+}
+
 impl GraphWrite for MemStore {
     fn begin_batch(&mut self) -> Result<()> {
         self.in_batch = true;
@@ -398,6 +470,19 @@ impl GraphWrite for MemStore {
     fn upsert_edges(&mut self, edges: &[Edge]) -> Result<()> {
         for e in edges {
             let key = e.dedup_key();
+            // A supported key (TS-S2A): the base rule applies to the kept-aside base contribution,
+            // and the public edge is re-projected — a base write never erases support.
+            if self.supports.contains_key(&key) {
+                let wins = self
+                    .edge_base
+                    .get(&key)
+                    .is_none_or(|existing| base_upsert_wins(existing, e));
+                if wins {
+                    self.edge_base.insert(key.clone(), e.clone());
+                    self.reproject(&key);
+                }
+                continue;
+            }
             match self.edges.iter_mut().find(|x| x.dedup_key() == key) {
                 // On a collision the higher-confidence edge wins (W3.4 max-confidence merge) —
                 // UNLESS the incoming edge carries more evidence. evidence_count is a monotonic
@@ -474,7 +559,10 @@ impl GraphWrite for MemStore {
                 .edges
                 .iter()
                 .filter(|e| {
-                    let loc_file = e.location.as_ref().map(|l| l.file.as_str()).unwrap_or("");
+                    let loc_file = self
+                        .owning_location(e)
+                        .map(|l| l.file.as_str())
+                        .unwrap_or("");
                     loc_file == file || file_symbols.contains(&e.source)
                 })
                 .cloned()
@@ -508,7 +596,7 @@ impl GraphWrite for MemStore {
                     .edges
                     .iter()
                     .filter(|e| e.target == n.symbol && !file_symbols.contains(&e.source))
-                    .filter_map(|e| e.location.as_ref())
+                    .filter_map(|e| self.owning_location(e))
                     .filter(|l| !l.file.is_empty() && l.file != file)
                     .min_by(|a, b| a.file.cmp(&b.file));
                 if let Some(loc) = survivor_loc {
@@ -528,10 +616,45 @@ impl GraphWrite for MemStore {
         // a kept node's own outgoing edges die below — SqliteStore parity); kept nodes no longer
         // match the by-file retain because they were re-homed above.
         self.nodes.retain(|_, n| n.location.file != file);
-        self.edges.retain(|e| {
-            let loc_file = e.location.as_ref().map(|l| l.file.as_str()).unwrap_or("");
-            loc_file != file && !file_symbols.contains(&e.source)
-        });
+        let doomed: Vec<bool> = self
+            .edges
+            .iter()
+            .map(|e| {
+                let loc_file = self
+                    .owning_location(e)
+                    .map(|l| l.file.as_str())
+                    .unwrap_or("");
+                loc_file == file || file_symbols.contains(&e.source)
+            })
+            .collect();
+        // TS-S2A: capture the supported edges this step removes, and retire supported keys' base
+        // contributions by exactly the edge predicate.
+        let mut heal: BTreeSet<EdgeKey> = BTreeSet::new();
+        if !self.supports.is_empty() {
+            for (e, _) in self.edges.iter().zip(&doomed).filter(|(_, d)| **d) {
+                let key = e.dedup_key();
+                if self.supports.contains_key(&key) {
+                    heal.insert(key);
+                }
+            }
+            let retired: Vec<EdgeKey> = self
+                .edge_base
+                .iter()
+                .filter(|(_, e)| {
+                    let loc_file = e.location.as_ref().map(|l| l.file.as_str()).unwrap_or("");
+                    loc_file == file || file_symbols.contains(&e.source)
+                })
+                .map(|(k, _)| k.clone())
+                .collect();
+            for key in retired {
+                self.edge_base.remove(&key);
+                heal.insert(key);
+            }
+        }
+        let mut doomed = doomed.into_iter();
+        self.edges.retain(|_| !doomed.next().unwrap_or(false));
+        // Support is producer-owned: re-project every supported edge the retain removed.
+        self.reproject_all(heal);
         self.unresolved.retain(|r| r.location.file != file);
         self.file_digests.remove(file);
         self.file_git_shas.remove(file);
@@ -565,9 +688,37 @@ impl GraphWrite for MemStore {
 
     fn prune_dangling_edges(&mut self) -> Result<usize> {
         let before = self.edges.len();
-        self.edges
-            .retain(|e| self.nodes.contains_key(&e.source) && self.nodes.contains_key(&e.target));
-        Ok(before - self.edges.len())
+        let live =
+            |e: &Edge| self.nodes.contains_key(&e.source) && self.nodes.contains_key(&e.target);
+        // TS-S2A: a dangling supported key loses its base contribution (same predicate) but not
+        // its support; it is re-projected below and not counted as pruned.
+        let (deleted, retired): (BTreeSet<EdgeKey>, Vec<EdgeKey>) = if self.supports.is_empty() {
+            (BTreeSet::new(), Vec::new())
+        } else {
+            (
+                self.edges
+                    .iter()
+                    .filter(|e| !live(e))
+                    .map(Edge::dedup_key)
+                    .filter(|k| self.supports.contains_key(k))
+                    .collect(),
+                self.edge_base
+                    .iter()
+                    .filter(|(_, e)| !live(e))
+                    .map(|(k, _)| k.clone())
+                    .collect(),
+            )
+        };
+        self.edges.retain(|e| live(e));
+        let pruned = before - self.edges.len();
+        let restored = deleted.len();
+        let mut heal = deleted;
+        for key in retired {
+            self.edge_base.remove(&key);
+            heal.insert(key);
+        }
+        self.reproject_all(heal);
+        Ok(pruned.saturating_sub(restored))
     }
 
     fn set_repo_info(&mut self, info: &RepoInfo) -> Result<()> {
@@ -652,6 +803,65 @@ impl GraphWrite for MemStore {
             !matches
         });
         Ok(before - self.annotations.len())
+    }
+
+    fn replace_edge_supports(
+        &mut self,
+        owner: &SupportOwner,
+        generation: u64,
+        facts: &[SupportFact],
+    ) -> Result<SupportReplacement> {
+        // Validate and decide before touching anything: every error leaves the store as it was.
+        let incoming = normalize_facts(facts)?;
+        let stored: StoredFacts = self
+            .owner_facts
+            .get(owner)
+            .into_iter()
+            .flatten()
+            .filter_map(|(key, id)| {
+                let fact = self.supports.get(key)?.get(&(owner.clone(), id.clone()))?;
+                Some(((key.clone(), id.clone()), fact_key(fact)))
+            })
+            .collect();
+        let plan = plan_replacement(
+            owner,
+            generation,
+            self.support_generations.get(owner).copied(),
+            &stored,
+            incoming,
+        )?;
+        if plan.report.replayed {
+            return Ok(plan.report);
+        }
+        // Nothing below can fail, so the replacement is all-or-nothing.
+        for key in &plan.touched {
+            // First support on this key: the base plane's edge becomes its base contribution.
+            if !self.supports.contains_key(key) {
+                match self.edges.iter().find(|e| &e.dedup_key() == key) {
+                    Some(base) => self.edge_base.insert(key.clone(), base.clone()),
+                    None => self.edge_base.remove(key),
+                };
+            }
+        }
+        let owned = self.owner_facts.entry(owner.clone()).or_default();
+        for (key, fact_id) in &plan.delete {
+            owned.remove(&(key.clone(), fact_id.clone()));
+            if let Some(m) = self.supports.get_mut(key) {
+                m.remove(&(owner.clone(), fact_id.clone()));
+            }
+        }
+        for fact in &plan.insert {
+            owned.insert(fact.id());
+            self.supports
+                .entry(fact.key.clone())
+                .or_default()
+                .insert((owner.clone(), fact.fact_id.clone()), fact.edge.clone());
+        }
+        self.support_generations.insert(owner.clone(), generation);
+        for key in &plan.touched {
+            self.reproject(key);
+        }
+        Ok(plan.report)
     }
 }
 
@@ -960,6 +1170,47 @@ impl GraphRead for MemStore {
         } else {
             Ok(None)
         }
+    }
+
+    fn edge_supports(
+        &self,
+        source: &SymbolId,
+        target: &SymbolId,
+        kind: &EdgeKind,
+    ) -> Result<Vec<EdgeSupport>> {
+        let key: EdgeKey = (
+            source.0.clone(),
+            target.0.clone(),
+            serde_json::to_string(kind)?,
+        );
+        Ok(self
+            .supports
+            .get(&key)
+            .map(|m| {
+                m.iter()
+                    .map(|((owner, fact_id), fact)| {
+                        EdgeSupport::new(
+                            owner.clone(),
+                            self.support_generations.get(owner).copied().unwrap_or(0),
+                            fact_id.clone(),
+                            fact.clone(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    fn support_generation(&self, owner: &SupportOwner) -> Result<Option<u64>> {
+        Ok(self.support_generations.get(owner).copied())
+    }
+
+    fn support_owners(&self) -> Result<Vec<SupportOwnerState>> {
+        Ok(self
+            .support_generations
+            .iter()
+            .map(|(o, g)| SupportOwnerState::new(o.clone(), *g))
+            .collect())
     }
 
     fn stats(&self) -> Result<GraphStats> {

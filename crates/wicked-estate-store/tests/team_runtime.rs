@@ -66,7 +66,8 @@ fn drop_all_tables(url: &str) {
         sqlx::query(
             "DROP TABLE IF EXISTS \
              annotations, edge_history, changes, meta, cache, content, \
-             unresolved_refs, edges, nodes, node_files, files, symbol_gen CASCADE",
+             unresolved_refs, edges, nodes, node_files, files, symbol_gen, \
+             support_owners, edge_supports, edge_base CASCADE",
         )
         .execute(&pool)
         .await

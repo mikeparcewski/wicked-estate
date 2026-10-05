@@ -205,6 +205,25 @@ impl GraphRead for CountingStore<'_> {
     fn symbol_epoch(&self, id: &SymbolId) -> wicked_estate_core::Result<Option<u64>> {
         self.inner.symbol_epoch(id)
     }
+    fn edge_supports(
+        &self,
+        source: &SymbolId,
+        target: &SymbolId,
+        kind: &wicked_estate_core::EdgeKind,
+    ) -> wicked_estate_core::Result<Vec<wicked_estate_core::EdgeSupport>> {
+        self.inner.edge_supports(source, target, kind)
+    }
+    fn support_generation(
+        &self,
+        owner: &wicked_estate_core::SupportOwner,
+    ) -> wicked_estate_core::Result<Option<u64>> {
+        self.inner.support_generation(owner)
+    }
+    fn support_owners(
+        &self,
+    ) -> wicked_estate_core::Result<Vec<wicked_estate_core::SupportOwnerState>> {
+        self.inner.support_owners()
+    }
     fn stats(&self) -> wicked_estate_core::Result<GraphStats> {
         self.inner.stats()
     }

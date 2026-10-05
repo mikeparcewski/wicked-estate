@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+Implies a minor bump (**0.21.0**), not a patch: the bespoke CLI arms now reject flags they do
+not read (#197, #206), and `GraphRead`/`GraphWrite` gain required methods (TS-S2A), so
+out-of-tree store implementations must add them. See **Changed (breaking)**.
+
 ### Added
 - **`wicked-estate rules-inventory` and `wicked-estate rules-recall` (#196).** The MCP
   `RulesInventory` and `rules.recall` tools from the CLI. Each is one row of
@@ -14,6 +18,32 @@
   empty string is rejected, because the tool reads `""` as an absent facet. A graph with no
   rules gives an empty document and exit 0 (R1). Memory, knowledge and proposal tools are not
   RetrievalTools and still have no CLI.
+- **Authoritative, replaceable edge support (TS-S2A).** A producer can now replace the complete
+  support set it owns for one snapshot — `replace_edge_supports(owner, generation, facts)` —
+  instead of only adding facts that nothing can retract. Facts it stops asserting disappear;
+  identical replays are no-ops; an older or conflicting generation is rejected and writes
+  nothing; replacement is atomic on every store. Each fact carries the producer's own opaque
+  `fact_id`, compared byte-for-byte and never parsed or normalized, so toolchains whose display
+  names coincide never collide. Two producers supporting the same edge never delete each other's
+  facts, and the edge written by ordinary indexing is kept and restored exactly when the last
+  support goes. The public edge is re-projected from the authoritative rows, so `flow_support`
+  stays a bounded explanatory sample and evicting a row from it changes nothing else. No
+  producer writes support yet; that is TS-S2 (SCIP) and TS-S3 (Angular). Contract:
+  `docs/ENGINE-CONTRACT.md` §3.4.
+  - **CLI:** `wicked-estate supports owners | edge --source --target --kind | retract --producer
+    --snapshot` lists owners and generations, shows the authoritative rows behind one edge, and
+    clears an owner. `--json` equals the store's answer, the whole document stays under the 25K
+    R4 budget, arguments are strict, and a missing or empty `--db` is refused, not created.
+  - **Storage:** additive `support_owners`, `edge_supports` and `edge_base` tables (SQLite,
+    Postgres) and `support_owner`, `edge_support`, `edge_base` (SurrealDB). They are created on
+    open, and no existing edge is rewritten. A graph without support behaves exactly as before.
+    Before downgrading a graph that holds support, retract every owner
+    (`wicked-estate supports retract`).
+  - **Postgres:** support writes are serialized across concurrent writers by a
+    transaction-scoped advisory lock — exclusive for a replacement, shared for `upsert_edges`,
+    `remove_file` and `prune_dangling_edges`. Called outside a batch, those three now run in a
+    transaction of their own (previously each statement autocommitted), so the lock covers the
+    whole call and an unbatched `remove_file` is atomic.
 
 ### Changed (breaking)
 - **Bespoke CLI commands reject flags they do not read (#197, #206).** Before, the shared argv
@@ -44,10 +74,22 @@
   are now a usage error instead of being ignored. With no selector and no `<name>`, `source`
   fails with usage before opening `--db`, so a mistyped path no longer leaves an empty store
   behind.
+- **`GraphRead` and `GraphWrite` gain required methods (TS-S2A).** `GraphRead::edge_supports`,
+  `GraphRead::support_generation`, `GraphRead::support_owners` and
+  `GraphWrite::replace_edge_supports` have no default: a store that could not honour atomic,
+  producer-owned replacement must not pretend to. An out-of-tree `GraphRead`/`GraphWrite`
+  implementation fails to compile until it implements them (a delegating wrapper forwards all
+  four). The new `SupportFact`, `SupportOwner`, `SupportOwnerState`, `EdgeSupport` and
+  `SupportReplacement` are `#[non_exhaustive]`; build them with their `new` constructors.
 
 ### Fixed
 - **`rules.recall` reports a `limit` above its ceiling of 500** as a `CLAMPED:` diagnostic, like
   every other clamping RetrievalTool (#190). Before, it silently used 500.
+- **SurrealStore `remove_file` left edges sourced from the removed file (found in TS-S2A).** An
+  edge with no location whose source node lived in the removed file survived, dangling: the
+  delete's `file = … OR src INSIDE …` predicate matched only its first half under surrealdb 3.2.
+  It now selects the edges and deletes them by key. `graph_store_suite` checks both halves on
+  every store.
 
 ## [0.20.0] — 2026-10-04
 
