@@ -279,7 +279,8 @@ pairing is tree-sitter parsed facts vs. post-resolution call-derived facts, and 
 endpoint-disjoint — parsed flow joins two values owned by one callable (or a class field), while
 call-derived flow joins the *callee's* parameter/return slot to the *caller's* local, so a
 collision needs `caller == callee` **and** an assignment in the reverse direction, which is a
-different dedup key. The authoritative, replaceable multi-support model is TS-S2A's seam.
+different dedup key. The authoritative, replaceable multi-support model is §3.4 (TS-S2A); a
+producer that needs retraction writes there instead of folding into this batch.
 
 ### 3.3 Visibility matrix for synthetic value slots
 
@@ -294,6 +295,7 @@ explicit — a node hidden from human-facing search is **not** automatically hid
 | Exact `SymbolId` lookup (`RetrieveEntity`, `FetchContent`, `get_node`, `graph-view --focus <id>`) | **yes** | deliberate: you addressed this node |
 | `Lineage relation=flows_to` (MCP) / `lineage --relation flows_to` (CLI) | **yes** | the explicit semantic query; this is the whole point. `flows` and the `confidence` summary list only flow hops whose two ends are both in the answer; `dependencies` and `flows` share one R4 budget, and a row dropped from either sets `truncated`. The CLI invokes the same tool and its `--json` is the same `RetrievalResult` plus the MCP server's own staleness line (`crates/wicked-estate/tests/lineage_cli.rs`) |
 | `Lineage` start (MCP `symbol`) / `lineage --symbol` (CLI) | **yes** (exact `SymbolId` only) | no name resolution on either frontend, so a slot is reached only by its id — same reasoning as the exact-lookup row |
+| CLI `supports edge` (TS-S2A) | **yes** (exact `SymbolId`s only) | the authoritative rows behind one addressed edge; no name resolution, so a slot appears only when its id is passed — same reasoning as the exact-lookup row |
 | `SearchEntity include_values=true` | **yes** | explicit opt-in. The default path is the one with a diagnostic naming the hidden count and this way back in; this path hides nothing, so it has none |
 | Default name/FTS search (`SearchEntity`, `wicked_estate::search`, CLI `query`) | no | `find_seed_symbols` / `is_structural_symbol` |
 | `ContextPack` / `ContextBundle` seeds | no | `find_seed_symbols` |
@@ -312,12 +314,82 @@ explicit — a node hidden from human-facing search is **not** automatically hid
 | CLI `blast-radius --json` `confidence` envelope (#194) | follows the rows | `{min, avg, edge_count}` over the edges that admitted the returned rows: the source is a row and the target is a node the walk reached; `Contains`/`Defines` are excluded. When slots are rows (File-rooted), their `flows_to` admission edges count, as the locked "every edge kind" contract implies. MCP `BlastRadius`'s envelope still averages every walked edge, including `Contains`, so the two can differ on the same graph |
 | `graph-view` edges (#194) | no | edges are `Calls`/`Imports` between selected nodes only, keyed `(src, tgt, kind)`. Slots carry neither kind, and selection is the `graph-view` roots row above |
 
+### 3.4 Authoritative, replaceable edge support (TS-S2A)
+
+Implemented by `wicked_estate_core::support`, `GraphWrite::replace_edge_supports` and
+`GraphRead::{edge_supports, support_generation, support_owners}`, on every store (MemStore,
+SqliteStore, PostgresStore, SurrealStore), and exposed on the CLI as `wicked-estate supports`. §3.2's fold is a one-batch, bounded display: it cannot retract a
+fact a producer stopped asserting, and a fact the `flow_support` cap evicted is gone from it. The
+**support plane** is the authoritative set a later producer (TS-S2 SCIP, TS-S3/S4 Angular) owns
+and replaces — and any other producer (compiler, language server, database, repository,
+framework): nothing in the plane is language-specific.
+
+| Question | Contract |
+|---|---|
+| **Who owns a fact** | exactly one `SupportOwner { producer, snapshot }` — two non-empty opaque strings. `producer` names the asserting system, `snapshot` the unit it re-emits whole (one SCIP index / project root, one compilation unit). |
+| **Fact identity (the opaque boundary)** | a fact is a `SupportFact { fact_id, edge }`; within its owner it is identified by `(dedup_key, fact_id)`. `fact_id` is **producer-owned and opaque**: storage compares it byte-for-byte and never parses, trims, case-folds or Unicode-normalizes it — nor any `SymbolId` — so two languages or toolchains whose display names coincide never collide when their ids differ, and a new producer's id scheme needs no core change. The only rule is non-empty and NUL-free (Postgres `TEXT` cannot hold NUL). `SupportFact::from_edge` uses the fact's canonical content (key-sorted JSON) as its id, for a producer without ids of its own. The same id re-asserted with different content is a change (retracted + asserted); one id with two contents in one submission is rejected. The input is a set — order and duplicates never change what is stored or shown. |
+| **Replacement** | `replace_edge_supports(owner, generation, facts)` makes `facts` the owner's **complete** set. Facts it held and does not re-assert are retracted; `facts = []` retracts all of them. No occurrence-by-occurrence delete exists. |
+| **Generations** | per owner, `u64` in `0..=i64::MAX`, never backwards. Higher → applies. Equal + same set → **idempotent replay** (`replayed: true`, nothing written). Equal + different set → `Error::Invalid` "generation conflict". Lower → `Error::Invalid` "stale generation". An empty replacement keeps the generation, so a stale replay cannot resurrect retracted support. |
+| **Atomicity** | all-or-nothing on every backend, inside or outside an open batch: SQLite a `SAVEPOINT`, Postgres a transaction (a `SAVEPOINT` inside a batch), MemStore validate-then-apply, SurrealStore one `BEGIN … COMMIT` query. A rejected or failed replacement does not roll back the caller's batch — unless the engine itself aborts the whole transaction (SQLite `SQLITE_FULL`/`IOERR`/`NOMEM`), which is reported with the original error. |
+| **Independence** | no operation on one owner modifies another owner's facts or generation (re-projection reads every owner's facts, by design). Two producers supporting one public edge each retract only their own. |
+| **Concurrency** | MemStore, SQLite and SurrealStore are single-writer. PostgresStore (`shared_writers: true`) serializes the support plane with a transaction-scoped advisory lock: `replace_edge_supports` takes it exclusive; `upsert_edges`, `remove_file` and `prune_dangling_edges` take it shared, so a replacement never interleaves with them (generation check-then-write, cross-owner re-projection, first-support base capture). Outside a batch those three calls run in a transaction of their own, so the lock covers the whole call, not one statement. Pinned by `postgres_concurrent_support_replacements_serialize` and `postgres_replacement_rolls_back_a_failure_inside_the_transaction`. |
+| **Projection** | the public edge of a supported key is a pure function of the SET `(base contribution, every owner's facts)` (`support::project_edge`, which orders its input by canonical content, `support::fact_key`, before folding, so a tie in §3.2's representative order is never decided by row order), recomputed from those rows on every change — never from the previously projected edge. `flows_to` folds through §3.2's `merge_flow_edges`, so the public envelope is exactly TS-S1's; any other kind takes the max-confidence fact (then max `evidence_count`, then min `fact_key`). |
+| **Sample vs identity** | `flow_support` on the projected edge is explanatory and bounded. Identity is `edge_supports(...)`, ordered `(producer, snapshot, fact_id)` by byte order on every backend (Postgres/Surreal sort in Rust, not by the database collation). Evicting a row from the sample cannot change identity, a later projection, or a later representative. |
+| **Base plane** | `upsert_edges` is unchanged for unsupported keys. When a key gains its first support, the stored edge is kept aside as its *base contribution*; `upsert_edges` on a supported key updates that contribution by the usual `>=` / evidence rule and re-projects; `remove_file` and `prune_dangling_edges` retire it by exactly the predicate they apply to edges. When the last support is retracted the base contribution is restored byte-for-byte (its stored JSON text, not a re-serialization). |
+| **Files and dangling endpoints** | support is producer-owned: `remove_file` and `prune_dangling_edges` never delete a support fact, and a supported edge they remove is re-projected (`prune` does not count it). A projected edge's *owning file* (SQLite/Postgres/Surreal `edges.file`; MemStore's equivalent) is its base contribution's file, or `''` without one — never a support fact's site — so removing a fact's site file does not delete the edge, and a fact's site never counts as a surviving importer in the shared-Import keep (§4). A supported edge whose endpoint is absent stays visible until its owner retracts it. Support naming a `SymbolId` the graph never saw interns it in the store's symbol table (SQLite `symbols`); that row is not a node, and it outlives the retraction, as the store never deletes interned symbols. |
+| **Erasure** | `remove_nodes` (SQLite, Postgres) deletes every support fact and base contribution naming an erased symbol. The owner's generation is kept, so replaying the same generation then reports a conflict — bump it. |
+
+**Exactness.** For a key whose base contribution is absent or a single fact, and whose facts are
+single (un-merged) edges, `flow_support.len() + flow_support_truncated` equals the number of
+distinct support *rows*: the projection is one fold over the authoritative set. A row is keyed by
+§3.2's support order, so facts that differ only outside it (line/column, provenance,
+`evidence_count`, extra metadata) are distinct facts but one row — count facts with
+`edge_supports`. A *pre-merged* fact (an
+edge that already carries `flow_support`) contributes its recorded rows and its recorded
+truncation, which §3.2 sums; past the cap that count is "at least", and overlapping pre-merged
+inputs over-count by the overlap (pinned by `support_replacement_suite`). Staged replacement
+(any history of generations) equals a one-shot replacement of the final set exactly; a pre-merged
+submission projects like its raw facts only up to the cap, and its support identity is the one
+submitted fact, not the facts it folded.
+
+**Migration.** Additive on every backend: SQLite and Postgres create `support_owners`,
+`edge_supports` and `edge_base` with `CREATE TABLE IF NOT EXISTS` on open (Postgres keys a fact by
+`fact_hash` = SHA-1 of the opaque `fact_id`, because a btree entry is capped at ~2.7 KB); SurrealStore
+defines `support_owner`, `edge_support`, `edge_base`. No stored edge is rewritten, and while the
+tables are empty every pre-TS-S2A path takes its original branch (plus one `EXISTS` probe per
+`upsert_edges`/`remove_file`/`prune_dangling_edges` call; Postgres also takes the shared lock).
+With support present, `remove_file`/`prune` touch only the supported rows their own predicate
+deletes — no whole-table scan. A pre-TS-S2A SQLite file opened
+read-only reads as "no support". Downgrade: an older binary ignores the tables, but it will treat a
+projected edge as a plain edge — retract support (`replace_edge_supports(owner, next, [])`) first.
+
+**Edge history.** With history on, `remove_file` archives the public rows its predicate matches —
+for a supported key, the projected edge (it is re-projected right after, so history records a
+version that is still live). A base contribution retired from a key whose projected row is NOT
+deleted is not archived separately.
+
+**CLI.** `wicked-estate supports owners | edge --source --target --kind | retract --producer
+--snapshot` is the operator surface: `owners` lists every owner and generation (including emptied
+ones), `edge` the authoritative rows behind one public edge (exact `SymbolId`s, no name
+resolution), and `retract` is `replace_edge_supports(owner, generation + 1, [])` — the documented
+way to clear an owner, e.g. before a downgrade. `--json` documents equal what the store returns
+through the trait (`crates/wicked-estate/tests/supports_cli.rs`); the whole document stays under
+the one 25K-char R4 budget (rows dropped in order, exact `total`, `truncated`). Strict argv
+(nothing opens a store on a bad flag), and a missing or zero-length graph is refused, never
+created.
+
+**What it does not do.** No producer writes support yet (TS-S2 / TS-S3 do). No retrieval tool,
+MCP tool or existing budget changes: `Lineage` and every other surface read the projected edge
+through the existing read paths. Support is not exposed over MCP, and the CLI bridge is
+untouched (`supports` is not a RetrievalTool).
+
 ## 4. GraphStore contract
 
 Read methods (`get_node`, `find_symbols`, `neighbors`, `traverse`, `stats`) are `&self`; mutation
 (`begin_batch`/`commit_batch`/`upsert_*`) is `&mut self`. `traverse` is **bounded only**
 (`max_depth` + `max_nodes` required; unbounded whole-graph walks are out — see research/09).
-Any new store MUST pass `wicked_estate_core::conformance::graph_store_suite`.
+Any new store MUST pass `wicked_estate_core::conformance::graph_store_suite`, and — run on a fresh
+store — `multi_file_contribution_suite` and `support_replacement_suite` (§3.4).
 
 **`remove_file` and shared Import nodes (incr-integrity lane).** `remove_file(f)` removes `f`'s
 nodes, edges, and unresolved rows — with ONE exception: a `NodeKind::Import` node located in `f`

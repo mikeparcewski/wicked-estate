@@ -72,3 +72,10 @@ fn surrealstore_traverse_multi_matches_union() {
 fn surrealstore_multi_file_contributions() {
     conformance::multi_file_contribution_suite(&mut fresh());
 }
+
+/// TS-S2A authoritative, replaceable edge support — the same suite every shipped backend runs.
+/// SurrealStore has no batch transaction, so each replacement commits as one `BEGIN … COMMIT`.
+#[test]
+fn surrealstore_support_replacement() {
+    conformance::support_replacement_suite(&mut fresh());
+}

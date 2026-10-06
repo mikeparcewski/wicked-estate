@@ -18,9 +18,14 @@
 #![cfg(feature = "surrealdb")]
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem};
+use wicked_estate_core::support::{
+    EdgeKey, EdgeSupport, StoredFacts, SupportFact, SupportOwner, SupportOwnerState,
+    SupportReplacement, base_upsert_wins, fact_key, normalize_facts, plan_replacement,
+    project_edge,
+};
 use wicked_estate_core::{
     Annotation, Change, ChangeOp, Direction, Edge, Error, GraphRead, GraphStats, GraphWrite,
     HistoricalEdge, Node, NodeKind, NodeSemantics, RepoInfo, Result, StoreCapabilities, Subgraph,
@@ -151,6 +156,32 @@ impl SurrealStore {
                  DEFINE INDEX edge_tgt   ON edge_rel COLUMNS tgt;
                  DEFINE INDEX edge_file  ON edge_rel COLUMNS file;
                  DEFINE INDEX edge_dedup ON edge_rel COLUMNS src, tgt, kind UNIQUE;
+
+                 -- TS-S2A support plane (wicked_estate_core::support): owner generations, the
+                 -- owners' authoritative facts, and the base contribution of supported keys.
+                 DEFINE TABLE support_owner SCHEMAFULL;
+                 DEFINE FIELD producer   ON support_owner TYPE string;
+                 DEFINE FIELD snapshot   ON support_owner TYPE string;
+                 DEFINE FIELD generation ON support_owner TYPE int;
+                 DEFINE INDEX support_owner_key ON support_owner COLUMNS producer, snapshot UNIQUE;
+                 DEFINE TABLE edge_support SCHEMAFULL;
+                 DEFINE FIELD producer ON edge_support TYPE string;
+                 DEFINE FIELD snapshot ON edge_support TYPE string;
+                 DEFINE FIELD src      ON edge_support TYPE string;
+                 DEFINE FIELD tgt      ON edge_support TYPE string;
+                 DEFINE FIELD kind     ON edge_support TYPE string;
+                 DEFINE FIELD fact_id  ON edge_support TYPE string;
+                 DEFINE FIELD data     ON edge_support TYPE string;
+                 DEFINE INDEX edge_support_key   ON edge_support COLUMNS src, tgt, kind;
+                 DEFINE INDEX edge_support_owner ON edge_support COLUMNS producer, snapshot;
+                 DEFINE TABLE edge_base SCHEMAFULL;
+                 DEFINE FIELD src  ON edge_base TYPE string;
+                 DEFINE FIELD tgt  ON edge_base TYPE string;
+                 DEFINE FIELD kind ON edge_base TYPE string;
+                 DEFINE FIELD file ON edge_base TYPE string;
+                 DEFINE FIELD data ON edge_base TYPE string;
+                 DEFINE INDEX edge_base_key  ON edge_base COLUMNS src, tgt, kind UNIQUE;
+                 DEFINE INDEX edge_base_file ON edge_base COLUMNS file;
 
                  DEFINE TABLE unresolved SCHEMAFULL;
                  DEFINE FIELD raw_name ON unresolved TYPE string;
@@ -287,6 +318,235 @@ async fn file_text_async(db: &Surreal<Db>, file: &str) -> Result<Option<String>>
     Ok(texts.into_iter().next())
 }
 
+// ── TS-S2A support plane (contract: `wicked_estate_core::support`) ─────────────
+//
+// SurrealStore has no batch transaction (`transactional_batch: false`), so every support-plane
+// write is computed client-side first and then applied as ONE `BEGIN … COMMIT` query by
+// [`sr_apply`]: either every statement lands or none does.
+
+fn key_json(key: &EdgeKey) -> serde_json::Value {
+    serde_json::json!({ "src": key.0, "tgt": key.1, "kind": key.2 })
+}
+
+fn edge_row(key: &EdgeKey, edge: &Edge) -> Result<serde_json::Value> {
+    Ok(serde_json::json!({
+        "src": key.0,
+        "tgt": key.1,
+        "kind": key.2,
+        "file": edge.location.as_ref().map(|l| l.file.clone()).unwrap_or_default(),
+        "data": serde_json::to_string(edge).map_err(se)?,
+    }))
+}
+
+/// One atomic support-plane write. Statements run in this order, so a key can be deleted and
+/// re-created in one call.
+#[derive(Default)]
+struct SupportOps {
+    del_support: Vec<serde_json::Value>,
+    add_support: Vec<serde_json::Value>,
+    del_base: Vec<serde_json::Value>,
+    add_base: Vec<serde_json::Value>,
+    del_public: Vec<serde_json::Value>,
+    add_public: Vec<serde_json::Value>,
+    owner: Option<serde_json::Value>,
+}
+
+/// A stored edge row: parsed, plus its exact JSON text (so a restore writes back the same bytes).
+type RawEdge = (Edge, String);
+
+fn location_file(e: &Edge) -> String {
+    e.location
+        .as_ref()
+        .map(|l| l.file.clone())
+        .unwrap_or_default()
+}
+
+impl SupportOps {
+    /// Replace `key`'s public row. `file` is its OWNING file (see [`SupportOps::project`]).
+    fn set_public(&mut self, key: &EdgeKey, row: Option<(&str, String)>) {
+        self.del_public.push(key_json(key));
+        if let Some((data, file)) = row {
+            self.add_public.push(serde_json::json!({
+                "src": key.0, "tgt": key.1, "kind": key.2, "file": file, "data": data,
+            }));
+        }
+    }
+
+    /// The writes that make `key`'s public edge the projection of `base` + `facts`; with no facts,
+    /// the base contribution is dropped and becomes the plain public edge again (its exact bytes).
+    /// A projected row's `file` is the base contribution's file or `''`, never a fact's site — the
+    /// same rule as `SqliteStore::reproject`.
+    fn project(&mut self, key: &EdgeKey, base: Option<&RawEdge>, facts: &[Edge]) -> Result<()> {
+        if facts.is_empty() {
+            self.del_base.push(key_json(key));
+            self.set_public(key, base.map(|(b, raw)| (raw.as_str(), location_file(b))));
+            return Ok(());
+        }
+        let refs: Vec<&Edge> = facts.iter().collect();
+        let file = base.map(|(b, _)| location_file(b)).unwrap_or_default();
+        match project_edge(base.map(|(b, _)| b), &refs) {
+            Some(p) => {
+                let data = serde_json::to_string(&p).map_err(se)?;
+                self.set_public(key, Some((&data, file)));
+            }
+            None => self.set_public(key, None),
+        }
+        Ok(())
+    }
+}
+
+async fn sr_apply(db: &Surreal<Db>, ops: SupportOps) -> Result<()> {
+    let owner = ops.owner.into_iter().collect::<Vec<_>>();
+    let vars = serde_json::json!({
+        "del_support": ops.del_support,
+        "add_support": ops.add_support,
+        "del_base": ops.del_base,
+        "add_base": ops.add_base,
+        "del_public": ops.del_public,
+        "add_public": ops.add_public,
+        "owner": owner,
+    });
+    db.query(
+        "BEGIN TRANSACTION;
+         FOR $k IN $del_support { DELETE edge_support WHERE producer=$k.producer AND snapshot=$k.snapshot
+             AND src=$k.src AND tgt=$k.tgt AND kind=$k.kind AND fact_id=$k.fact_id; };
+         FOR $r IN $add_support { CREATE edge_support CONTENT $r; };
+         FOR $k IN $del_base { DELETE edge_base WHERE src=$k.src AND tgt=$k.tgt AND kind=$k.kind; };
+         FOR $r IN $add_base { CREATE edge_base CONTENT $r; };
+         FOR $k IN $del_public { DELETE edge_rel WHERE src=$k.src AND tgt=$k.tgt AND kind=$k.kind; };
+         FOR $r IN $add_public { CREATE edge_rel CONTENT $r; };
+         FOR $o IN $owner {
+             DELETE support_owner WHERE producer=$o.producer AND snapshot=$o.snapshot;
+             CREATE support_owner CONTENT $o;
+         };
+         COMMIT TRANSACTION;",
+    )
+    .bind(vars)
+    .await
+    .map_err(se)?
+    .check()
+    .map_err(se)?;
+    Ok(())
+}
+
+async fn sr_key_data(db: &Surreal<Db>, table: &str, key: &EdgeKey) -> Result<Vec<Edge>> {
+    let mut res = db
+        .query(format!(
+            "SELECT data FROM {table} WHERE src=$src AND tgt=$tgt AND kind=$kind"
+        ))
+        .bind(("src", key.0.clone()))
+        .bind(("tgt", key.1.clone()))
+        .bind(("kind", key.2.clone()))
+        .await
+        .map_err(se)?;
+    data_col(&mut res, 0)
+}
+
+/// The exact stored row (parsed + raw JSON) of `table` for `key`.
+async fn sr_raw(db: &Surreal<Db>, table: &str, key: &EdgeKey) -> Result<Option<RawEdge>> {
+    let mut res = db
+        .query(format!(
+            "SELECT data FROM {table} WHERE src=$src AND tgt=$tgt AND kind=$kind LIMIT 1"
+        ))
+        .bind(("src", key.0.clone()))
+        .bind(("tgt", key.1.clone()))
+        .bind(("kind", key.2.clone()))
+        .await
+        .map_err(se)?;
+    let blobs: Vec<String> = res.take((0, "data")).map_err(se)?;
+    blobs
+        .into_iter()
+        .next()
+        .map(|d| Ok((serde_json::from_str(&d).map_err(se)?, d)))
+        .transpose()
+}
+
+async fn sr_count(db: &Surreal<Db>, query: &str, key: Option<&EdgeKey>) -> Result<u64> {
+    let mut q = db.query(query);
+    if let Some(k) = key {
+        q = q
+            .bind(("src", k.0.clone()))
+            .bind(("tgt", k.1.clone()))
+            .bind(("kind", k.2.clone()));
+    }
+    let mut res = q.await.map_err(se)?;
+    count_of(&mut res, 0)
+}
+
+async fn sr_any_support(db: &Surreal<Db>) -> Result<bool> {
+    Ok(sr_count(db, "SELECT count() FROM edge_support GROUP ALL", None).await? > 0)
+}
+
+async fn sr_key_supported(db: &Surreal<Db>, key: &EdgeKey) -> Result<bool> {
+    Ok(sr_count(
+        db,
+        "SELECT count() FROM edge_support WHERE src=$src AND tgt=$tgt AND kind=$kind GROUP ALL",
+        Some(key),
+    )
+    .await?
+        > 0)
+}
+
+async fn sr_reproject(db: &Surreal<Db>, key: &EdgeKey) -> Result<()> {
+    let facts = sr_key_data(db, "edge_support", key).await?;
+    let base = sr_raw(db, "edge_base", key).await?;
+    let mut ops = SupportOps::default();
+    ops.project(key, base.as_ref(), &facts)?;
+    sr_apply(db, ops).await
+}
+
+/// Three string columns of statement `idx`, zipped into keys.
+fn key_cols(res: &mut surrealdb::IndexedResults, idx: usize) -> Result<Vec<EdgeKey>> {
+    let src: Vec<String> = res.take((idx, "src")).map_err(se)?;
+    let tgt: Vec<String> = res.take((idx, "tgt")).map_err(se)?;
+    let kind: Vec<String> = res.take((idx, "kind")).map_err(se)?;
+    Ok(src
+        .into_iter()
+        .zip(tgt)
+        .zip(kind)
+        .map(|((s, t), k)| (s, t, k))
+        .collect())
+}
+
+/// Delete the base contributions of `keys` — by exact key, the delete shape `sr_apply` uses. (A
+/// predicate DELETE `… WHERE file=$file OR src INSIDE $syms` on `edge_base` matched in SELECT
+/// but removed nothing under surrealdb 3.2's planner; selecting the keys and deleting by key is
+/// the same predicate, applied in two steps.)
+async fn sr_retire_base(db: &Surreal<Db>, keys: &BTreeSet<EdgeKey>) -> Result<()> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let ops = SupportOps {
+        del_base: keys.iter().map(key_json).collect(),
+        ..SupportOps::default()
+    };
+    sr_apply(db, ops).await
+}
+
+/// Of `candidates` (the keys an edge-deleting step is about to remove), those with support.
+async fn sr_supported_of(db: &Surreal<Db>, candidates: Vec<EdgeKey>) -> Result<BTreeSet<EdgeKey>> {
+    let mut out = BTreeSet::new();
+    for key in candidates {
+        if sr_key_supported(db, &key).await? {
+            out.insert(key);
+        }
+    }
+    Ok(out)
+}
+
+/// After an edge-deleting step: re-project the supported keys it removed and the keys whose base
+/// contribution it retired. Returns how many removed supported rows came back (all of them).
+async fn sr_support_post_delete(
+    db: &Surreal<Db>,
+    deleted: BTreeSet<EdgeKey>,
+    retired: BTreeSet<EdgeKey>,
+) -> Result<usize> {
+    for key in deleted.union(&retired) {
+        sr_reproject(db, key).await?;
+    }
+    Ok(deleted.len())
+}
+
 // ── GraphWrite ────────────────────────────────────────────────────────────────
 
 impl GraphWrite for SurrealStore {
@@ -368,8 +628,28 @@ impl GraphWrite for SurrealStore {
         let db = self.db.clone();
         let edges = edges.to_vec();
         self.rt.block_on(async move {
+            // TS-S2A: while no support exists anywhere this is the original path.
+            let supported = sr_any_support(&db).await?;
             for e in &edges {
                 let kind = serde_json::to_string(&e.kind).map_err(se)?;
+                if supported {
+                    let key: EdgeKey = (e.source.0.clone(), e.target.0.clone(), kind.clone());
+                    if sr_key_supported(&db, &key).await? {
+                        // The base rule applies to the kept-aside base contribution; the public
+                        // row is re-projected — a base write never erases support.
+                        let base = sr_raw(&db, "edge_base", &key).await?;
+                        if base.as_ref().is_none_or(|(b, _)| base_upsert_wins(b, e)) {
+                            let facts = sr_key_data(&db, "edge_support", &key).await?;
+                            let mut ops = SupportOps::default();
+                            ops.del_base.push(key_json(&key));
+                            ops.add_base.push(edge_row(&key, e)?);
+                            let raw = (e.clone(), serde_json::to_string(e).map_err(se)?);
+                            ops.project(&key, Some(&raw), &facts)?;
+                            sr_apply(&db, ops).await?;
+                        }
+                        continue;
+                    }
+                }
                 let data = serde_json::to_string(e).map_err(se)?;
                 let mut res = db
                     .query(
@@ -527,13 +807,29 @@ impl GraphWrite for SurrealStore {
             // neither '' nor this file and whose source does not live in this file (exactly what
             // Step 4 deletes, so pre-delete evaluation equals post-delete state). It is re-homed to
             // the survivor with the MIN location file, so the keep self-terminates.
+            let support_on = sr_any_support(&db).await?;
             for n in file_nodes.iter().filter(|n| n.kind == NodeKind::Import) {
                 let mut res = db
                     .query("SELECT data FROM edge_rel WHERE tgt=$sym")
                     .bind(("sym", n.symbol.0.clone()))
                     .await
                     .map_err(se)?;
-                let incoming: Vec<Edge> = data_col(&mut res, 0)?;
+                let mut incoming: Vec<Edge> = data_col(&mut res, 0)?;
+                // TS-S2A: a supported edge's owning location is its base contribution's (or none)
+                // — a support fact's site is not an importer.
+                if support_on {
+                    let mut owned = Vec::with_capacity(incoming.len());
+                    for mut e in incoming {
+                        let key: EdgeKey = e.dedup_key();
+                        if sr_key_supported(&db, &key).await? {
+                            e.location = sr_raw(&db, "edge_base", &key)
+                                .await?
+                                .and_then(|(b, _)| b.location);
+                        }
+                        owned.push(e);
+                    }
+                    incoming = owned;
+                }
                 let survivor_loc = incoming
                     .iter()
                     .filter(|e| !file_sym_set.contains(e.source.0.as_str()))
@@ -548,12 +844,38 @@ impl GraphWrite for SurrealStore {
                 }
             }
 
+            // TS-S2A: capture the supported rows Step 4 removes, and retire supported keys' base
+            // contributions by exactly the edge predicate. Skipped when no support exists.
+            let (deleted, retired) = if support_on {
+                let mut res = db
+                    .query(
+                        "SELECT src, tgt, kind FROM edge_rel WHERE file=$file OR src INSIDE $syms;
+                         SELECT src, tgt, kind FROM edge_base WHERE file=$file OR src INSIDE $syms;",
+                    )
+                    .bind(("file", file.clone()))
+                    .bind(("syms", file_symbols.clone()))
+                    .await
+                    .map_err(se)?;
+                let candidates = key_cols(&mut res, 0)?;
+                let retired: BTreeSet<EdgeKey> = key_cols(&mut res, 1)?.into_iter().collect();
+                res.check().map_err(se)?;
+                sr_retire_base(&db, &retired).await?;
+                (sr_supported_of(&db, candidates).await?, retired)
+            } else {
+                (BTreeSet::new(), BTreeSet::new())
+            };
+
             // Step 4: remove nodes (kept ones were re-homed, so no longer match), the owned edges
             // (a kept node's own OUTGOING edges still die — SqliteStore parity), unresolved refs,
             // digest, and content.
+            // The owned edges are SELECTED by the two-part predicate and deleted by exact key: a
+            // predicate DELETE `WHERE file=$file OR src INSIDE $syms` matched only the `file`
+            // half under surrealdb 3.2, leaving every location-less edge sourced from this file
+            // behind (pinned by `graph_store_suite`'s remove_file block).
             db.query(
-                "DELETE node WHERE file=$file;
-                 DELETE edge_rel WHERE file=$file OR src INSIDE $syms;
+                "LET $doomed = (SELECT src, tgt, kind FROM edge_rel WHERE file=$file OR src INSIDE $syms);
+                 FOR $k IN $doomed { DELETE edge_rel WHERE src=$k.src AND tgt=$k.tgt AND kind=$k.kind; };
+                 DELETE node WHERE file=$file;
                  DELETE unresolved WHERE file=$file;
                  DELETE file_meta WHERE path=$file;
                  DELETE file_content WHERE path=$file;",
@@ -564,6 +886,8 @@ impl GraphWrite for SurrealStore {
             .map_err(se)?
             .check()
             .map_err(se)?;
+            // Support is producer-owned: re-project every supported edge the deletes removed.
+            sr_support_post_delete(&db, deleted, retired).await?;
             Ok::<_, Error>(())
         })
     }
@@ -621,6 +945,25 @@ impl GraphWrite for SurrealStore {
     fn prune_dangling_edges(&mut self) -> Result<usize> {
         let db = self.db.clone();
         self.rt.block_on(async move {
+            // TS-S2A: a dangling supported key loses its base contribution (same predicate) but
+            // not its support; it is re-projected below and not counted as pruned.
+            let (deleted, retired) = if sr_any_support(&db).await? {
+                let mut res = db
+                    .query(
+                        "LET $live = (SELECT VALUE symbol FROM node);
+                         SELECT src, tgt, kind FROM edge_rel WHERE src NOTINSIDE $live OR tgt NOTINSIDE $live;
+                         SELECT src, tgt, kind FROM edge_base WHERE src NOTINSIDE $live OR tgt NOTINSIDE $live;",
+                    )
+                    .await
+                    .map_err(se)?;
+                let candidates = key_cols(&mut res, 1)?;
+                let retired: BTreeSet<EdgeKey> = key_cols(&mut res, 2)?.into_iter().collect();
+                res.check().map_err(se)?;
+                sr_retire_base(&db, &retired).await?;
+                (sr_supported_of(&db, candidates).await?, retired)
+            } else {
+                (BTreeSet::new(), BTreeSet::new())
+            };
             let mut res = db
                 .query(
                     "SELECT count() FROM edge_rel GROUP ALL;
@@ -635,7 +978,8 @@ impl GraphWrite for SurrealStore {
             // Taking the two counts does not surface an error from the DELETE (or the LET):
             // check the whole response so a failed prune cannot report success.
             res.check().map_err(se)?;
-            Ok::<_, Error>(before.saturating_sub(after) as usize)
+            let restored = sr_support_post_delete(&db, deleted, retired).await?;
+            Ok::<_, Error>((before.saturating_sub(after) as usize).saturating_sub(restored))
         })
     }
 
@@ -772,6 +1116,114 @@ impl GraphWrite for SurrealStore {
             Ok::<_, Error>(n as usize)
         })
     }
+
+    fn replace_edge_supports(
+        &mut self,
+        owner: &SupportOwner,
+        generation: u64,
+        facts: &[SupportFact],
+    ) -> Result<SupportReplacement> {
+        let incoming = normalize_facts(facts)?;
+        let db = self.db.clone();
+        let owner = owner.clone();
+        self.rt.block_on(async move {
+            // Read and decide everything first; the only write is one transactional `sr_apply`,
+            // so every error path below leaves the store untouched.
+            let mut res = db
+                .query(
+                    "SELECT VALUE generation FROM support_owner WHERE producer=$p AND snapshot=$s;
+                     SELECT src, tgt, kind, fact_id, data FROM edge_support WHERE producer=$p AND snapshot=$s;",
+                )
+                .bind(("p", owner.producer.clone()))
+                .bind(("s", owner.snapshot.clone()))
+                .await
+                .map_err(se)?;
+            let stored_generation: Vec<i64> = res.take(0).map_err(se)?;
+            let keys = key_cols(&mut res, 1)?;
+            let fact_ids: Vec<String> = res.take((1, "fact_id")).map_err(se)?;
+            let contents: Vec<Edge> = data_col(&mut res, 1)?;
+            let stored: StoredFacts = keys
+                .into_iter()
+                .zip(fact_ids)
+                .zip(contents)
+                .map(|(id, fact)| (id, fact_key(&fact)))
+                .collect();
+            let plan = plan_replacement(
+                &owner,
+                generation,
+                stored_generation.first().map(|g| *g as u64),
+                &stored,
+                incoming,
+            )?;
+            if plan.report.replayed {
+                return Ok(plan.report);
+            }
+            let removed: BTreeSet<&(EdgeKey, String)> = plan.delete.iter().collect();
+            let mut ops = SupportOps::default();
+            for key in &plan.touched {
+                // The key's final fact set, every owner: what is stored, minus this owner's
+                // retractions, plus its insertions.
+                let mut res = db
+                    .query(
+                        "SELECT producer, snapshot, fact_id, data FROM edge_support \
+                         WHERE src=$src AND tgt=$tgt AND kind=$kind",
+                    )
+                    .bind(("src", key.0.clone()))
+                    .bind(("tgt", key.1.clone()))
+                    .bind(("kind", key.2.clone()))
+                    .await
+                    .map_err(se)?;
+                let producers: Vec<String> = res.take((0, "producer")).map_err(se)?;
+                let snapshots: Vec<String> = res.take((0, "snapshot")).map_err(se)?;
+                let row_keys: Vec<String> = res.take((0, "fact_id")).map_err(se)?;
+                let rows: Vec<Edge> = data_col(&mut res, 0)?;
+                let had_support = !rows.is_empty();
+                let mut final_facts: Vec<Edge> = Vec::new();
+                for (((p, s), fk), fact) in producers.into_iter().zip(snapshots).zip(row_keys).zip(rows) {
+                    let own = p == owner.producer && s == owner.snapshot;
+                    if !(own && removed.contains(&(key.clone(), fk))) {
+                        final_facts.push(fact);
+                    }
+                }
+                final_facts.extend(plan.insert.iter().filter(|f| &f.key == key).map(|f| f.edge.clone()));
+                // First support on this key: the base plane's edge becomes its base contribution.
+                let base = if had_support {
+                    sr_raw(&db, "edge_base", key).await?
+                } else {
+                    let public = sr_raw(&db, "edge_rel", key).await?;
+                    ops.del_base.push(key_json(key));
+                    if let Some((p, raw)) = &public {
+                        ops.add_base.push(serde_json::json!({
+                            "src": key.0, "tgt": key.1, "kind": key.2,
+                            "file": location_file(p), "data": raw,
+                        }));
+                    }
+                    public
+                };
+                ops.project(key, base.as_ref(), &final_facts)?;
+            }
+            for (key, fact_id) in &plan.delete {
+                ops.del_support.push(serde_json::json!({
+                    "producer": owner.producer, "snapshot": owner.snapshot,
+                    "src": key.0, "tgt": key.1, "kind": key.2, "fact_id": fact_id,
+                }));
+            }
+            for fact in &plan.insert {
+                ops.add_support.push(serde_json::json!({
+                    "producer": owner.producer, "snapshot": owner.snapshot,
+                    "src": fact.key.0, "tgt": fact.key.1, "kind": fact.key.2,
+                    "fact_id": fact.fact_id,
+                    "data": serde_json::to_string(&fact.edge).map_err(se)?,
+                }));
+            }
+            ops.owner = Some(serde_json::json!({
+                "producer": owner.producer, "snapshot": owner.snapshot,
+                "generation": generation as i64,
+            }));
+            sr_apply(&db, ops).await?;
+            Ok(plan.report)
+        })
+    }
 }
 
 // ── GraphRead ────────────────────────────────────────────────────────────────
@@ -843,6 +1295,97 @@ impl GraphRead for SurrealStore {
             }
             let epoch: Option<i64> = res.take(1).map_err(se)?;
             Ok(Some(epoch.unwrap_or(0).max(0) as u64))
+        })
+    }
+
+    fn edge_supports(
+        &self,
+        source: &SymbolId,
+        target: &SymbolId,
+        kind: &wicked_estate_core::EdgeKind,
+    ) -> Result<Vec<EdgeSupport>> {
+        let db = self.db.clone();
+        let key: EdgeKey = (
+            source.0.clone(),
+            target.0.clone(),
+            serde_json::to_string(kind).map_err(se)?,
+        );
+        self.rt.block_on(async move {
+            let mut res = db
+                .query(
+                    "SELECT producer, snapshot, fact_id, data FROM edge_support \
+                     WHERE src=$src AND tgt=$tgt AND kind=$kind",
+                )
+                .bind(("src", key.0.clone()))
+                .bind(("tgt", key.1.clone()))
+                .bind(("kind", key.2.clone()))
+                .await
+                .map_err(se)?;
+            let producers: Vec<String> = res.take((0, "producer")).map_err(se)?;
+            let snapshots: Vec<String> = res.take((0, "snapshot")).map_err(se)?;
+            let fact_keys: Vec<String> = res.take((0, "fact_id")).map_err(se)?;
+            let facts: Vec<Edge> = data_col(&mut res, 0)?;
+            let mut out = Vec::with_capacity(facts.len());
+            let mut generations: BTreeMap<SupportOwner, u64> = BTreeMap::new();
+            for (((p, s), fk), fact) in producers.into_iter().zip(snapshots).zip(fact_keys).zip(facts) {
+                let owner = SupportOwner::new(p, s)?;
+                let generation = match generations.get(&owner) {
+                    Some(g) => *g,
+                    None => {
+                        let mut res = db
+                            .query("SELECT VALUE generation FROM support_owner WHERE producer=$p AND snapshot=$s")
+                            .bind(("p", owner.producer.clone()))
+                            .bind(("s", owner.snapshot.clone()))
+                            .await
+                            .map_err(se)?;
+                        let g: Vec<i64> = res.take(0).map_err(se)?;
+                        let g = g.first().copied().unwrap_or(0) as u64;
+                        generations.insert(owner.clone(), g);
+                        g
+                    }
+                };
+                out.push(EdgeSupport::new(owner, generation, fk, fact));
+            }
+            out.sort_by(|a, b| (&a.owner, &a.fact_id).cmp(&(&b.owner, &b.fact_id)));
+            Ok(out)
+        })
+    }
+
+    fn support_generation(&self, owner: &SupportOwner) -> Result<Option<u64>> {
+        let db = self.db.clone();
+        let owner = owner.clone();
+        self.rt.block_on(async move {
+            let mut res = db
+                .query(
+                    "SELECT VALUE generation FROM support_owner WHERE producer=$p AND snapshot=$s",
+                )
+                .bind(("p", owner.producer))
+                .bind(("s", owner.snapshot))
+                .await
+                .map_err(se)?;
+            let g: Vec<i64> = res.take(0).map_err(se)?;
+            Ok(g.first().map(|g| *g as u64))
+        })
+    }
+
+    fn support_owners(&self) -> Result<Vec<SupportOwnerState>> {
+        let db = self.db.clone();
+        self.rt.block_on(async move {
+            let mut res = db
+                .query("SELECT producer, snapshot, generation FROM support_owner")
+                .await
+                .map_err(se)?;
+            let producers: Vec<String> = res.take((0, "producer")).map_err(se)?;
+            let snapshots: Vec<String> = res.take((0, "snapshot")).map_err(se)?;
+            let generations: Vec<i64> = res.take((0, "generation")).map_err(se)?;
+            let mut out = producers
+                .into_iter()
+                .zip(snapshots)
+                .zip(generations)
+                .map(|((p, s), g)| Ok(SupportOwnerState::new(SupportOwner::new(p, s)?, g as u64)))
+                .collect::<Result<Vec<_>>>()?;
+            out.sort_by(|a, b| a.owner.cmp(&b.owner));
+            Ok(out)
         })
     }
 
@@ -1214,5 +1757,91 @@ impl GraphRead for SurrealStore {
             edges_by_kind,
             db_size_bytes: 0,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wicked_estate_core::{EdgeKind, ResolutionTier, SupportFact};
+
+    fn calls(target: &str, by: &str) -> Edge {
+        Edge::new(
+            SymbolId("s:src".into()),
+            SymbolId(format!("s:{target}")),
+            EdgeKind::Calls,
+            ResolutionTier::Scip,
+            by,
+        )
+    }
+
+    fn define(store: &SurrealStore, ddl: &str) {
+        let db = store.db.clone();
+        let ddl = ddl.to_string();
+        store
+            .rt
+            .block_on(async move { db.query(ddl).await?.check() })
+            .unwrap();
+    }
+
+    fn state(
+        store: &SurrealStore,
+        owner: &SupportOwner,
+    ) -> (Vec<Edge>, Vec<EdgeSupport>, Option<u64>) {
+        let mut edges = store.all_edges().unwrap();
+        edges.sort_by_key(|e| e.dedup_key());
+        let mut rows = Vec::new();
+        for t in ["a", "b", "c", "d"] {
+            let e = calls(t, "x");
+            rows.extend(store.edge_supports(&e.source, &e.target, &e.kind).unwrap());
+        }
+        (edges, rows, store.support_generation(owner).unwrap())
+    }
+
+    /// The conformance suite's failures are all rejected before any write; this one fails INSIDE
+    /// the single `BEGIN … COMMIT` (a field ASSERT refuses the poison row after the retraction and
+    /// an earlier insert ran) and requires the store to be unchanged — the transaction, not
+    /// up-front validation, is what keeps a half-old/half-new generation out.
+    #[test]
+    fn a_failure_inside_the_replacement_transaction_rolls_everything_back() {
+        let mut store = SurrealStore::in_memory().unwrap();
+        let owner = SupportOwner::new("scip-typescript", "web").unwrap();
+        let facts = |targets: &[(&str, &str)]| -> Vec<SupportFact> {
+            targets
+                .iter()
+                .map(|(t, by)| SupportFact::new(format!("occ:{t}"), calls(t, by)).unwrap())
+                .collect()
+        };
+        store
+            .replace_edge_supports(&owner, 1, &facts(&[("a", "scip"), ("b", "scip")]))
+            .unwrap();
+        define(
+            &store,
+            "DEFINE FIELD OVERWRITE data ON edge_support TYPE string \
+             ASSERT !string::contains($value, 'poison');",
+        );
+        let before = state(&store, &owner);
+        // `{a,b}` → `{b,c,d}` where d is poisoned: the delete of a and the insert of c precede it.
+        let err = store
+            .replace_edge_supports(
+                &owner,
+                2,
+                &facts(&[("b", "scip"), ("c", "scip"), ("d", "poison")]),
+            )
+            .expect_err("the ASSERT rejects the poison row");
+        assert!(!err.to_string().is_empty());
+        assert_eq!(
+            state(&store, &owner),
+            before,
+            "no half-old/half-new generation"
+        );
+        define(
+            &store,
+            "DEFINE FIELD OVERWRITE data ON edge_support TYPE string;",
+        );
+        let ok = store
+            .replace_edge_supports(&owner, 2, &facts(&[("b", "scip"), ("c", "scip")]))
+            .expect("generation 2 is still free after the rollback");
+        assert_eq!((ok.asserted, ok.retained, ok.retracted), (1, 1, 1));
     }
 }

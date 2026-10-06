@@ -54,6 +54,28 @@ fn memstore_multi_file_contributions() {
     conformance::multi_file_contribution_suite(&mut store);
 }
 
+/// TS-S2A: authoritative, replaceable edge support — the same suite every shipped backend runs.
+#[test]
+fn sqlite_support_replacement() {
+    let mut store = wicked_estate_store::SqliteStore::in_memory().expect("in-memory sqlite");
+    conformance::support_replacement_suite(&mut store);
+}
+
+#[test]
+fn memstore_support_replacement() {
+    let mut store = MemStore::new();
+    conformance::support_replacement_suite(&mut store);
+}
+
+/// The support plane under edge history: `remove_file` archives a supported edge it deletes (it
+/// was in the file's edge set) and the heal re-projects it — support is not file-owned.
+#[test]
+fn sqlite_support_replacement_with_history() {
+    let mut store = wicked_estate_store::SqliteStore::in_memory().expect("in-memory sqlite");
+    store.set_history_enabled(true).expect("history on");
+    conformance::support_replacement_suite(&mut store);
+}
+
 fn epoch_sym(name: &str) -> SymbolId {
     Symbol::global("test", None, vec![Descriptor::method(name, None)]).id()
 }

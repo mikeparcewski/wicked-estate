@@ -66,10 +66,11 @@
 //! [`merge_flow_edges`] folds the facts in **one emission batch**. It is not an occurrence table
 //! and it has no retirement semantics: it cannot notice that a support disappeared in a later run,
 //! and it cannot merge across two batches that reach the store separately. A cross-batch
-//! equal-confidence `flows_to` collision would still be lossy. That is deliberately out of scope —
-//! the authoritative, replaceable multi-support model is TS-S2A's seam. The reachable cross-batch
-//! pairing (tree-sitter parsed facts vs. post-resolution call-derived facts) is audited as
-//! endpoint-disjoint in `docs/ENGINE-CONTRACT.md` §3.2.
+//! equal-confidence `flows_to` collision would still be lossy. The authoritative, replaceable
+//! multi-support model is [`crate::support`] (TS-S2A): a producer that must retract facts writes
+//! there, and its public edge is re-projected through this fold from the authoritative rows. The
+//! reachable cross-batch pairing (tree-sitter parsed facts vs. post-resolution call-derived facts)
+//! is audited as endpoint-disjoint in `docs/ENGINE-CONTRACT.md` §3.2.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -371,8 +372,9 @@ fn support_order(edge: &Edge) -> SupportOrder {
 ///
 /// Reusing existing rows is what makes [`merge_flow_edges`] **idempotent and composable**: folding
 /// an already-folded edge must not collapse its two-class `flow_semantics` array into whichever
-/// value happens to sort first. A caller that merges per file and then again per run (TS-S2A's
-/// likely shape) gets the same answer as one merge over everything.
+/// value happens to sort first. A caller that merges per file and then again per run gets the same
+/// answer as one merge over everything — which is what lets [`crate::support::project_edge`] fold
+/// a pre-merged base contribution together with raw support facts.
 ///
 /// **The cap is the boundary of that promise.** Up to [`MAX_FLOW_SUPPORT`] facts per edge, a
 /// staged fold equals one fold exactly. Beyond it, the dropped facts' identities are gone: the

@@ -26,7 +26,12 @@
 
 use sha1::{Digest as Sha1Digest, Sha1};
 use sqlx::Row;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use wicked_estate_core::support::{
+    EdgeKey, EdgeSupport, StoredFacts, SupportFact, SupportOwner, SupportOwnerState,
+    SupportReplacement, base_upsert_wins, fact_key, normalize_facts, plan_replacement,
+    project_edge,
+};
 use wicked_estate_core::{
     Annotation, Change, ChangeOp, Direction, Edge, Error, GraphRead, GraphStats, GraphWrite,
     HistoricalEdge, Node, NodeKind, NodeSemantics, RepoInfo, Result, StoreCapabilities, Subgraph,
@@ -219,6 +224,38 @@ CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target);
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source);
 CREATE INDEX IF NOT EXISTS idx_edges_file   ON edges(file);
 
+-- TS-S2A support plane (wicked_estate_core::support; docs/ENGINE-CONTRACT.md §3.4) — additive,
+-- created on any older database by this same CREATE ... IF NOT EXISTS DDL on open. Mirrors the
+-- SQLite tables, except that a fact is keyed by `fact_hash` (SHA-1 of the producer's opaque `fact_id`):
+-- a btree index entry is capped at ~2.7 KB and a canonical flow fact can exceed it.
+CREATE TABLE IF NOT EXISTS support_owners (
+  producer   TEXT NOT NULL,
+  snapshot   TEXT NOT NULL,
+  generation BIGINT NOT NULL,
+  PRIMARY KEY (producer, snapshot)
+);
+CREATE TABLE IF NOT EXISTS edge_supports (
+  producer  TEXT NOT NULL,
+  snapshot  TEXT NOT NULL,
+  source    TEXT NOT NULL,
+  target    TEXT NOT NULL,
+  kind      TEXT NOT NULL,
+  fact_hash TEXT NOT NULL,
+  fact_id   TEXT NOT NULL,
+  data      TEXT NOT NULL,
+  PRIMARY KEY (producer, snapshot, source, target, kind, fact_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_edge_supports_key ON edge_supports(source, target, kind);
+CREATE TABLE IF NOT EXISTS edge_base (
+  source TEXT NOT NULL,
+  target TEXT NOT NULL,
+  kind   TEXT NOT NULL,
+  file   TEXT NOT NULL DEFAULT '',
+  data   TEXT NOT NULL,
+  PRIMARY KEY (source, target, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_edge_base_file ON edge_base(file);
+
 CREATE TABLE IF NOT EXISTS unresolved_refs (
   id       BIGSERIAL PRIMARY KEY,
   from_sym TEXT NOT NULL,
@@ -360,6 +397,52 @@ impl Drop for ConnHandle<'_> {
 }
 
 impl PostgresStore {
+    /// Run `f` inside a transaction of its own when no batch is open (TS-S2A). The support lock is
+    /// transaction-scoped, so an unbatched base-plane write would otherwise hold it only for the
+    /// one statement that takes it — and a replacement could interleave between that writer's
+    /// support check and its write. With a batch open, `f` simply joins it. On error the implicit
+    /// transaction is dropped, which rolls it back.
+    fn batch_open(&mut self) -> bool {
+        self.batch
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
+    fn in_implicit_batch<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let open = self
+            .batch
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some();
+        if open {
+            return f(self);
+        }
+        self.begin_batch()?;
+        match f(self) {
+            Ok(v) => {
+                self.commit_batch()?;
+                Ok(v)
+            }
+            Err(e) => {
+                let tx = self
+                    .batch
+                    .get_mut()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some(tx) = tx {
+                    // Report the ORIGINAL error even if the rollback itself fails.
+                    if let Err(rollback) = rt_block(tx.rollback()) {
+                        return Err(Error::Storage(format!(
+                            "{e}; rolling the implicit transaction back also failed ({rollback})"
+                        )));
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
     /// Open (or create) a Postgres graph store at `url`.
     ///
     /// Runs the schema DDL (`CREATE TABLE IF NOT EXISTS ...`) and inserts the initial
@@ -711,6 +794,16 @@ impl PostgresStore {
                 .bind(&syms)
                 .execute(&mut *tx)
                 .await?;
+            // TS-S2A: erasure is total — support facts and base contributions naming the symbols
+            // go too (support is otherwise never deleted outside `replace_edge_supports`).
+            sqlx::query("DELETE FROM edge_supports WHERE source = ANY($1) OR target = ANY($1)")
+                .bind(&syms)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM edge_base WHERE source = ANY($1) OR target = ANY($1)")
+                .bind(&syms)
+                .execute(&mut *tx)
+                .await?;
             // Erasure removes the symbols' contribution records too (wicked-estate#152).
             sqlx::query("DELETE FROM node_files WHERE symbol = ANY($1)")
                 .bind(&syms)
@@ -743,6 +836,367 @@ impl Drop for PostgresStore {
             drop(tx);
         }
     }
+}
+
+// ── TS-S2A support plane (contract: `wicked_estate_core::support`) ─────────────
+//
+// Free async helpers over one `PgConnection`, so they run inside whatever transaction or savepoint
+// the caller opened (`replace_edge_supports` opens its own; `remove_file`/`prune_dangling_edges`/
+// `upsert_edges` run on the batch transaction when one is open).
+
+fn fact_hash(fact_id: &str) -> String {
+    let mut h = Sha1::new();
+    h.update(fact_id.as_bytes());
+    format!("{:x}", h.finalize())
+}
+
+async fn pg_any_support(c: &mut sqlx::PgConnection) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM edge_supports)")
+        .fetch_one(c)
+        .await
+        .map_err(st)
+}
+
+async fn pg_key_supported(c: &mut sqlx::PgConnection, key: &EdgeKey) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM edge_supports WHERE source = $1 AND target = $2 AND kind = $3)",
+    )
+    .bind(&key.0)
+    .bind(&key.1)
+    .bind(&key.2)
+    .fetch_one(c)
+    .await
+    .map_err(st)
+}
+
+/// The advisory-lock key serializing the support plane across concurrent Postgres writers
+/// (`shared_writers: true`). `replace_edge_supports` takes it EXCLUSIVE for its transaction; every
+/// base-plane write that can touch a supported row (`upsert_edges`, `remove_file`,
+/// `prune_dangling_edges`) takes it SHARED first, so a replacement never interleaves with them and
+/// two replacements never interleave with each other (generation check-then-write, cross-owner
+/// re-projection, first-support base capture). Transaction-scoped: it holds until the batch (or
+/// the replacement's own transaction) ends; outside a batch, base-plane statements autocommit and
+/// the shared lock protects only the statement it precedes.
+const SUPPORT_LOCK_KEY: i64 = 0x5453_3241; // "TS2A"
+
+async fn pg_support_lock(c: &mut sqlx::PgConnection, exclusive: bool) -> Result<()> {
+    let sql = if exclusive {
+        "SELECT pg_advisory_xact_lock($1)"
+    } else {
+        "SELECT pg_advisory_xact_lock_shared($1)"
+    };
+    sqlx::query(sql)
+        .bind(SUPPORT_LOCK_KEY)
+        .execute(c)
+        .await
+        .map_err(st)?;
+    Ok(())
+}
+
+/// The kept-aside base contribution: parsed, and its stored JSON text so a restore writes back
+/// the exact bytes.
+async fn pg_edge_base_of(
+    c: &mut sqlx::PgConnection,
+    key: &EdgeKey,
+) -> Result<Option<(Edge, String)>> {
+    let data: Option<String> = sqlx::query_scalar(
+        "SELECT data FROM edge_base WHERE source = $1 AND target = $2 AND kind = $3",
+    )
+    .bind(&key.0)
+    .bind(&key.1)
+    .bind(&key.2)
+    .fetch_optional(c)
+    .await
+    .map_err(st)?;
+    data.map(|d| Ok((serde_json::from_str(&d)?, d))).transpose()
+}
+
+async fn pg_set_edge_base(c: &mut sqlx::PgConnection, key: &EdgeKey, edge: &Edge) -> Result<()> {
+    let file = edge
+        .location
+        .as_ref()
+        .map(|l| l.file.as_str())
+        .unwrap_or("");
+    sqlx::query(
+        "INSERT INTO edge_base(source, target, kind, file, data) VALUES($1, $2, $3, $4, $5) \
+         ON CONFLICT(source, target, kind) DO UPDATE SET file = EXCLUDED.file, data = EXCLUDED.data",
+    )
+    .bind(&key.0)
+    .bind(&key.1)
+    .bind(&key.2)
+    .bind(file)
+    .bind(serde_json::to_string(edge)?)
+    .execute(c)
+    .await
+    .map_err(st)?;
+    Ok(())
+}
+
+/// Write (or delete) the public `edges` row unconditionally — a projection is authoritative, so
+/// the base plane's `>=` rule does not apply to it. `row` = (edge, exact JSON, owning file).
+async fn pg_set_public_edge(
+    c: &mut sqlx::PgConnection,
+    key: &EdgeKey,
+    row: Option<(&Edge, &str, &str)>,
+) -> Result<()> {
+    match row {
+        Some((e, data, file)) => {
+            sqlx::query(
+                "INSERT INTO edges(source, target, kind, confidence, file, data) \
+                 VALUES($1, $2, $3, $4, $5, $6) \
+                 ON CONFLICT(source, target, kind) DO UPDATE SET \
+                   confidence = EXCLUDED.confidence, file = EXCLUDED.file, data = EXCLUDED.data",
+            )
+            .bind(&key.0)
+            .bind(&key.1)
+            .bind(&key.2)
+            .bind(e.confidence.get() as f64)
+            .bind(file)
+            .bind(data)
+            .execute(c)
+            .await
+            .map_err(st)?;
+        }
+        None => {
+            sqlx::query("DELETE FROM edges WHERE source = $1 AND target = $2 AND kind = $3")
+                .bind(&key.0)
+                .bind(&key.1)
+                .bind(&key.2)
+                .execute(c)
+                .await
+                .map_err(st)?;
+        }
+    }
+    Ok(())
+}
+
+/// Recompute `key`'s public edge from its base contribution and every owner's facts. With no
+/// support left, the base contribution becomes the plain public edge again (its exact bytes). A
+/// projected row's `edges.file` is the base contribution's file or `''` — never a fact's site
+/// (see `SqliteStore::reproject`).
+async fn pg_reproject(c: &mut sqlx::PgConnection, key: &EdgeKey) -> Result<()> {
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT data FROM edge_supports WHERE source = $1 AND target = $2 AND kind = $3",
+    )
+    .bind(&key.0)
+    .bind(&key.1)
+    .bind(&key.2)
+    .fetch_all(&mut *c)
+    .await
+    .map_err(st)?;
+    let facts: Vec<Edge> = rows
+        .iter()
+        .map(|d| serde_json::from_str(d))
+        .collect::<std::result::Result<_, _>>()?;
+    let base = pg_edge_base_of(&mut *c, key).await?;
+    let base_file = |b: &Edge| {
+        b.location
+            .as_ref()
+            .map(|l| l.file.clone())
+            .unwrap_or_default()
+    };
+    if facts.is_empty() {
+        sqlx::query("DELETE FROM edge_base WHERE source = $1 AND target = $2 AND kind = $3")
+            .bind(&key.0)
+            .bind(&key.1)
+            .bind(&key.2)
+            .execute(&mut *c)
+            .await
+            .map_err(st)?;
+        return match &base {
+            Some((b, raw)) => pg_set_public_edge(c, key, Some((b, raw, &base_file(b)))).await,
+            None => pg_set_public_edge(c, key, None).await,
+        };
+    }
+    let refs: Vec<&Edge> = facts.iter().collect();
+    let file = base.as_ref().map(|(b, _)| base_file(b)).unwrap_or_default();
+    match project_edge(base.as_ref().map(|(b, _)| b), &refs) {
+        Some(p) => {
+            let data = serde_json::to_string(&p)?;
+            pg_set_public_edge(c, key, Some((&p, &data, &file))).await
+        }
+        None => pg_set_public_edge(c, key, None).await,
+    }
+}
+
+fn pg_keys(rows: &[sqlx::postgres::PgRow]) -> Result<BTreeSet<EdgeKey>> {
+    rows.iter()
+        .map(|r| {
+            Ok((
+                r.try_get("source").map_err(st)?,
+                r.try_get("target").map_err(st)?,
+                r.try_get("kind").map_err(st)?,
+            ))
+        })
+        .collect()
+}
+
+/// The support-plane half of an edge-deleting step, run BEFORE its edge DELETE with the same
+/// predicate (unaliased columns, `$1` bound to `arg`): take the shared support lock, capture the
+/// supported rows about to be deleted, and retire matching base contributions. `None` when no
+/// support exists — the step then runs exactly its pre-TS-S2A statements.
+async fn pg_support_pre_delete(
+    c: &mut sqlx::PgConnection,
+    predicate: &str,
+    arg: Option<&str>,
+) -> Result<Option<(BTreeSet<EdgeKey>, BTreeSet<EdgeKey>)>> {
+    pg_support_lock(&mut *c, false).await?;
+    if !pg_any_support(&mut *c).await? {
+        return Ok(None);
+    }
+    let select = format!(
+        "SELECT source, target, kind FROM edges WHERE ({predicate}) AND EXISTS ( \
+           SELECT 1 FROM edge_supports s WHERE s.source = edges.source \
+             AND s.target = edges.target AND s.kind = edges.kind)"
+    );
+    let mut q = sqlx::query(&select);
+    if let Some(a) = arg {
+        q = q.bind(a);
+    }
+    let deleted = pg_keys(&q.fetch_all(&mut *c).await.map_err(st)?)?;
+    let retire = format!("DELETE FROM edge_base WHERE {predicate} RETURNING source, target, kind");
+    let mut q = sqlx::query(&retire);
+    if let Some(a) = arg {
+        q = q.bind(a);
+    }
+    let retired = pg_keys(&q.fetch_all(&mut *c).await.map_err(st)?)?;
+    Ok(Some((deleted, retired)))
+}
+
+/// The other half, AFTER the DELETE: re-project the captured keys. Returns how many deleted
+/// supported rows came back (all of them — support is producer-owned).
+async fn pg_support_post_delete(
+    c: &mut sqlx::PgConnection,
+    captured: Option<(BTreeSet<EdgeKey>, BTreeSet<EdgeKey>)>,
+) -> Result<usize> {
+    let Some((deleted, retired)) = captured else {
+        return Ok(0);
+    };
+    for key in deleted.union(&retired) {
+        pg_reproject(&mut *c, key).await?;
+    }
+    Ok(deleted.len())
+}
+
+async fn pg_replace_edge_supports(
+    c: &mut sqlx::PgConnection,
+    owner: &SupportOwner,
+    generation: u64,
+    incoming: Vec<SupportFact>,
+) -> Result<SupportReplacement> {
+    pg_support_lock(&mut *c, true).await?;
+    let stored_generation: Option<i64> = sqlx::query_scalar(
+        "SELECT generation FROM support_owners WHERE producer = $1 AND snapshot = $2",
+    )
+    .bind(&owner.producer)
+    .bind(&owner.snapshot)
+    .fetch_optional(&mut *c)
+    .await
+    .map_err(st)?;
+    let rows = sqlx::query(
+        "SELECT source, target, kind, fact_id, data FROM edge_supports \
+         WHERE producer = $1 AND snapshot = $2",
+    )
+    .bind(&owner.producer)
+    .bind(&owner.snapshot)
+    .fetch_all(&mut *c)
+    .await
+    .map_err(st)?;
+    let mut stored = StoredFacts::new();
+    for r in &rows {
+        let data: String = r.try_get("data").map_err(st)?;
+        let fact: Edge = serde_json::from_str(&data)?;
+        stored.insert(
+            (
+                (
+                    r.try_get("source").map_err(st)?,
+                    r.try_get("target").map_err(st)?,
+                    r.try_get("kind").map_err(st)?,
+                ),
+                r.try_get("fact_id").map_err(st)?,
+            ),
+            fact_key(&fact),
+        );
+    }
+    let plan = plan_replacement(
+        owner,
+        generation,
+        stored_generation.map(|g| g as u64),
+        &stored,
+        incoming,
+    )?;
+    if plan.report.replayed {
+        return Ok(plan.report);
+    }
+    for key in &plan.touched {
+        // First support on this key: the base plane's edge becomes its base contribution.
+        if !pg_key_supported(&mut *c, key).await? {
+            sqlx::query("DELETE FROM edge_base WHERE source = $1 AND target = $2 AND kind = $3")
+                .bind(&key.0)
+                .bind(&key.1)
+                .bind(&key.2)
+                .execute(&mut *c)
+                .await
+                .map_err(st)?;
+            sqlx::query(
+                "INSERT INTO edge_base(source, target, kind, file, data) \
+                 SELECT source, target, kind, file, data FROM edges \
+                 WHERE source = $1 AND target = $2 AND kind = $3",
+            )
+            .bind(&key.0)
+            .bind(&key.1)
+            .bind(&key.2)
+            .execute(&mut *c)
+            .await
+            .map_err(st)?;
+        }
+    }
+    for (key, fact_id) in &plan.delete {
+        sqlx::query(
+            "DELETE FROM edge_supports WHERE producer = $1 AND snapshot = $2 \
+             AND source = $3 AND target = $4 AND kind = $5 AND fact_hash = $6",
+        )
+        .bind(&owner.producer)
+        .bind(&owner.snapshot)
+        .bind(&key.0)
+        .bind(&key.1)
+        .bind(&key.2)
+        .bind(fact_hash(fact_id))
+        .execute(&mut *c)
+        .await
+        .map_err(st)?;
+    }
+    for fact in &plan.insert {
+        sqlx::query(
+            "INSERT INTO edge_supports(producer, snapshot, source, target, kind, fact_hash, fact_id, data) \
+             VALUES($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(&owner.producer)
+        .bind(&owner.snapshot)
+        .bind(&fact.key.0)
+        .bind(&fact.key.1)
+        .bind(&fact.key.2)
+        .bind(fact_hash(&fact.fact_id))
+        .bind(&fact.fact_id)
+        .bind(serde_json::to_string(&fact.edge)?)
+        .execute(&mut *c)
+        .await
+        .map_err(st)?;
+    }
+    sqlx::query(
+        "INSERT INTO support_owners(producer, snapshot, generation) VALUES($1, $2, $3) \
+         ON CONFLICT(producer, snapshot) DO UPDATE SET generation = EXCLUDED.generation",
+    )
+    .bind(&owner.producer)
+    .bind(&owner.snapshot)
+    .bind(generation as i64)
+    .execute(&mut *c)
+    .await
+    .map_err(st)?;
+    for key in &plan.touched {
+        pg_reproject(&mut *c, key).await?;
+    }
+    Ok(plan.report)
 }
 
 // ── GraphWrite ────────────────────────────────────────────────────────────────
@@ -896,9 +1350,40 @@ impl GraphWrite for PostgresStore {
     }
 
     fn upsert_edges(&mut self, edges: &[Edge]) -> Result<()> {
+        if !self.batch_open() {
+            return self.in_implicit_batch(|s| s.upsert_edges(edges));
+        }
         let mut h = self.conn()?;
+        // TS-S2A: while no support exists anywhere this is the original single-statement path.
+        // The shared support lock first, so no replacement can interleave with this write.
+        let supported = rt_block(async {
+            pg_support_lock(h.as_conn(), false).await?;
+            pg_any_support(h.as_conn()).await
+        })?;
         for e in edges {
             let kind = serde_json::to_string(&e.kind)?;
+            if supported {
+                let key: EdgeKey = (e.source.0.clone(), e.target.0.clone(), kind.clone());
+                let handled = rt_block(async {
+                    let c = h.as_conn();
+                    if !pg_key_supported(&mut *c, &key).await? {
+                        return Ok::<bool, Error>(false);
+                    }
+                    // The base rule applies to the kept-aside base contribution; the public row
+                    // is re-projected — a base write never erases support.
+                    let wins = pg_edge_base_of(&mut *c, &key)
+                        .await?
+                        .is_none_or(|(existing, _)| base_upsert_wins(&existing, e));
+                    if wins {
+                        pg_set_edge_base(&mut *c, &key, e).await?;
+                        pg_reproject(&mut *c, &key).await?;
+                    }
+                    Ok(true)
+                })?;
+                if handled {
+                    continue;
+                }
+            }
             let data = serde_json::to_string(e)?;
             let file = e.location.as_ref().map(|l| l.file.as_str()).unwrap_or("");
             let confidence = e.confidence.get() as f64;
@@ -959,6 +1444,9 @@ impl GraphWrite for PostgresStore {
     }
 
     fn remove_file(&mut self, file: &str) -> Result<()> {
+        if !self.batch_open() {
+            return self.in_implicit_batch(|s| s.remove_file(file));
+        }
         let mut h = self.conn()?;
         // Step 1: read the file's current git_sha.
         let current_git_sha: String = rt_block(async {
@@ -1155,6 +1643,14 @@ impl GraphWrite for PostgresStore {
             kept
         };
 
+        // TS-S2A: retire supported keys' base contributions by exactly the edge predicate, and
+        // capture the supported rows this DELETE removes (healed below).
+        let support = rt_block(pg_support_pre_delete(
+            h.as_conn(),
+            "file = $1 OR source IN (SELECT symbol FROM nodes WHERE file = $1)",
+            Some(file),
+        ))?;
+
         // Step 3: delete edges BEFORE nodes (subquery on nodes must still be valid).
         rt_block(
             sqlx::query(
@@ -1199,6 +1695,8 @@ impl GraphWrite for PostgresStore {
                 .execute(h.as_conn()),
         )
         .map_err(st)?;
+        // Support is producer-owned: re-project every supported edge the deletes removed.
+        rt_block(pg_support_post_delete(h.as_conn(), support))?;
 
         Ok(())
     }
@@ -1244,7 +1742,17 @@ impl GraphWrite for PostgresStore {
     }
 
     fn prune_dangling_edges(&mut self) -> Result<usize> {
+        if !self.batch_open() {
+            return self.in_implicit_batch(|s| s.prune_dangling_edges());
+        }
         let mut h = self.conn()?;
+        // TS-S2A: a dangling supported key loses its base contribution (same predicate) but not
+        // its support; it is re-projected below and not counted as pruned.
+        let support = rt_block(pg_support_pre_delete(
+            h.as_conn(),
+            "source NOT IN (SELECT symbol FROM nodes) OR target NOT IN (SELECT symbol FROM nodes)",
+            None,
+        ))?;
         let result = rt_block(
             sqlx::query(
                 "DELETE FROM edges \
@@ -1254,7 +1762,8 @@ impl GraphWrite for PostgresStore {
             .execute(h.as_conn()),
         )
         .map_err(st)?;
-        Ok(result.rows_affected() as usize)
+        let restored = rt_block(pg_support_post_delete(h.as_conn(), support))?;
+        Ok((result.rows_affected() as usize).saturating_sub(restored))
     }
 
     fn set_repo_info(&mut self, info: &RepoInfo) -> Result<()> {
@@ -1429,6 +1938,38 @@ impl GraphWrite for PostgresStore {
         .map_err(st)?;
         Ok(n as usize)
     }
+
+    fn replace_edge_supports(
+        &mut self,
+        owner: &SupportOwner,
+        generation: u64,
+        facts: &[SupportFact],
+    ) -> Result<SupportReplacement> {
+        let incoming = normalize_facts(facts)?;
+        let mut h = self.conn()?;
+        rt_block(async {
+            // `Connection::begin` on the handle's connection: a real transaction when no batch is
+            // open, a SAVEPOINT inside an open batch — all-or-nothing in both modes. Inside a
+            // batch the exclusive support lock is held until the batch ends.
+            use sqlx::Connection;
+            let mut tx = h.as_conn().begin().await.map_err(st)?;
+            match pg_replace_edge_supports(&mut tx, owner, generation, incoming).await {
+                Ok(report) => {
+                    tx.commit().await.map_err(st)?;
+                    Ok(report)
+                }
+                Err(e) => {
+                    // Report the ORIGINAL error even if the rollback itself fails.
+                    match tx.rollback().await {
+                        Ok(()) => Err(e),
+                        Err(rollback) => Err(Error::Storage(format!(
+                            "{e}; rolling the replacement back also failed ({rollback})"
+                        ))),
+                    }
+                }
+            }
+        })
+    }
 }
 
 // ── GraphRead ─────────────────────────────────────────────────────────────────
@@ -1491,6 +2032,84 @@ impl GraphRead for PostgresStore {
             }
         })
         .map_err(st)
+    }
+
+    fn edge_supports(
+        &self,
+        source: &SymbolId,
+        target: &SymbolId,
+        kind: &wicked_estate_core::EdgeKind,
+    ) -> Result<Vec<EdgeSupport>> {
+        let kind = serde_json::to_string(kind)?;
+        let mut h = self.conn()?;
+        let rows = rt_block(
+            sqlx::query(
+                "SELECT s.producer, s.snapshot, o.generation, s.fact_id, s.data \
+                 FROM edge_supports s JOIN support_owners o \
+                   ON o.producer = s.producer AND o.snapshot = s.snapshot \
+                 WHERE s.source = $1 AND s.target = $2 AND s.kind = $3",
+            )
+            .bind(&source.0)
+            .bind(&target.0)
+            .bind(&kind)
+            .fetch_all(h.as_conn()),
+        )
+        .map_err(st)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let generation: i64 = r.try_get("generation").map_err(st)?;
+            let data: String = r.try_get("data").map_err(st)?;
+            out.push(EdgeSupport::new(
+                SupportOwner::new(
+                    r.try_get::<String, _>("producer").map_err(st)?,
+                    r.try_get::<String, _>("snapshot").map_err(st)?,
+                )?,
+                generation as u64,
+                r.try_get::<String, _>("fact_id").map_err(st)?,
+                serde_json::from_str(&data)?,
+            ));
+        }
+        // Sorted here, not by ORDER BY: Postgres text order follows the database collation, and
+        // the contract is byte order — the order MemStore and SQLite (BINARY) return.
+        out.sort_by(|a, b| (&a.owner, &a.fact_id).cmp(&(&b.owner, &b.fact_id)));
+        Ok(out)
+    }
+
+    fn support_generation(&self, owner: &SupportOwner) -> Result<Option<u64>> {
+        let mut h = self.conn()?;
+        let generation: Option<i64> = rt_block(
+            sqlx::query_scalar(
+                "SELECT generation FROM support_owners WHERE producer = $1 AND snapshot = $2",
+            )
+            .bind(&owner.producer)
+            .bind(&owner.snapshot)
+            .fetch_optional(h.as_conn()),
+        )
+        .map_err(st)?;
+        Ok(generation.map(|g| g as u64))
+    }
+
+    fn support_owners(&self) -> Result<Vec<SupportOwnerState>> {
+        let mut h = self.conn()?;
+        let rows = rt_block(
+            sqlx::query("SELECT producer, snapshot, generation FROM support_owners")
+                .fetch_all(h.as_conn()),
+        )
+        .map_err(st)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let generation: i64 = r.try_get("generation").map_err(st)?;
+            out.push(SupportOwnerState::new(
+                SupportOwner::new(
+                    r.try_get::<String, _>("producer").map_err(st)?,
+                    r.try_get::<String, _>("snapshot").map_err(st)?,
+                )?,
+                generation as u64,
+            ));
+        }
+        // Byte order, not the database collation (see `edge_supports`).
+        out.sort_by(|a, b| a.owner.cmp(&b.owner));
+        Ok(out)
     }
 
     fn find_symbols(&self, query: &SymbolQuery) -> Result<Vec<Node>> {

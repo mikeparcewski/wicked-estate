@@ -127,6 +127,11 @@ jobs:
         run: cargo clippy -p wicked-estate-store --features surrealdb --all-targets -- -D warnings
       - name: conformance (graph_store_suite · traverse_multi · multi-file contributions)
         run: cargo test -p wicked-estate-store --features surrealdb --test surreal_conformance
+      # The Surreal in-transaction rollback falsifier (TS-S2A) is a `#[cfg(test)]` lib test in
+      # `surreal.rs`; `--test surreal_conformance` never runs it, so run the lib tests under the
+      # feature too (the Postgres job above runs lib + integration in one `cargo test`).
+      - name: store lib tests under the feature (surreal.rs rollback falsifier)
+        run: cargo test -p wicked-estate-store --features surrealdb --lib
 
   # ── Feature-gated semantic embedders. These tests download an embedding model on
   #    first run, so they CANNOT live in the default `gate` job (which must stay
