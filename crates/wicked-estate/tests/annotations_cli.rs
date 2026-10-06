@@ -529,3 +529,110 @@ fn c() { a(); b(); }
         );
     }
 }
+
+/// Run `wicked-estate <args> --db <db>` from `cwd`; assert it FAILS; return stderr.
+fn run_fail(cwd: &Path, db: &Path, args: &[&str]) -> String {
+    let out = Command::new(bin())
+        .current_dir(cwd)
+        .args(args)
+        .args(["--db", db.to_str().unwrap()])
+        .output()
+        .expect("spawn wicked-estate");
+    assert!(
+        !out.status.success(),
+        "command {args:?} unexpectedly succeeded: stdout={}",
+        String::from_utf8_lossy(&out.stdout),
+    );
+    String::from_utf8(out.stderr).expect("utf8 stderr")
+}
+
+/// #204: every `--json` arm that renders an annotation carries the evidence envelope, so a reader
+/// never has `ts` (write time) as the only clock and infers "verified just now". The decisive case
+/// is `stale-annotations`: its human and JSON renderings must agree the row was never verified.
+#[test]
+fn every_json_arm_carries_the_evidence_envelope() {
+    let (dir, db) = index_one_fn("envelope", "fn target() {}\n");
+    run(
+        &dir,
+        &db,
+        &[
+            "annotate",
+            "target",
+            "--key",
+            "owner",
+            "--value",
+            "payments-team",
+        ],
+    );
+    let by_name: serde_json::Value =
+        serde_json::from_str(&run(&dir, &db, &["annotations", "target", "--json"])).unwrap();
+    let id = by_name[0]["symbol"].as_str().unwrap().to_string();
+
+    let assert_envelope = |arm: &str, a: &serde_json::Value| {
+        assert_eq!(a["key"], "owner", "{arm}: wrong annotation");
+        assert!(a["ts"].as_i64().unwrap() > 0, "{arm}: ts is the write time");
+        assert_eq!(a["last_verified"], 0, "{arm}: never verified is explicit 0");
+        assert_eq!(a["source_type"], "unspecified", "{arm}: source_type");
+        assert_eq!(a["extraction_method"], "manual", "{arm}: extraction_method");
+    };
+
+    let human = run(&dir, &db, &["stale-annotations", "9999999999"]);
+    assert!(human.contains("last_verified=0"), "human line: {human}");
+    let stale: serde_json::Value = serde_json::from_str(&run(
+        &dir,
+        &db,
+        &["stale-annotations", "9999999999", "--json"],
+    ))
+    .unwrap();
+    assert_envelope("stale-annotations", &stale[0]["annotation"]);
+
+    assert_envelope("annotations <name>", &by_name[0]["annotations"][0]);
+    let by_id: serde_json::Value =
+        serde_json::from_str(&run(&dir, &db, &["annotations", "--symbol", &id, "--json"])).unwrap();
+    assert_envelope("annotations --symbol", &by_id["annotations"][0]);
+
+    let nodes: serde_json::Value =
+        serde_json::from_str(&run(&dir, &db, &["nodes", "--json"])).unwrap();
+    let node = nodes
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["annotations"].is_array())
+        .expect("annotated node in nodes --json");
+    assert_envelope("nodes", &node["annotations"][0]);
+
+    let bundle: serde_json::Value =
+        serde_json::from_str(&run(&dir, &db, &["source", "--symbols", &id, "--json"])).unwrap();
+    assert_envelope("source", &bundle["nodes"][0]["annotations"][0]);
+}
+
+/// #205: the cutoff takes exactly one integer operand. The old `find_map` took the first
+/// parseable token anywhere, so a stray or misordered operand silently set the cutoff.
+#[test]
+fn stale_annotations_cutoff_is_exactly_one_integer_operand() {
+    let (dir, db) = index_one_fn("cutoff", "fn target() {}\n");
+    for args in [
+        &["stale-annotations"][..],
+        &["stale-annotations", "2026-01-01"],
+        &["stale-annotations", "soon", "100"],
+        &["stale-annotations", "100", "200"],
+    ] {
+        let err = run_fail(&dir, &db, args);
+        assert!(
+            err.contains("<cutoff-unix-seconds>"),
+            "{args:?} names the unit: {err}"
+        );
+    }
+    run(&dir, &db, &["stale-annotations", "100", "--json"]);
+}
+
+/// #205: the banner names the unit the parser demands.
+#[test]
+fn help_banner_states_the_cutoff_unit() {
+    let out = Command::new(bin()).arg("--help").output().unwrap();
+    let help = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        help.contains("stale-annotations <cutoff-unix-seconds>"),
+        "banner: {help}"
+    );
+}

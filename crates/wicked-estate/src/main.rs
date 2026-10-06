@@ -34,7 +34,7 @@
 //!   wicked-estate annotate --symbol <id> --key K --value V [--type T] [--confidence F] [--provenance P] [--author A] [--db ...]
 //!   wicked-estate annotations <name>     [--type T] [--json] [--db ...]
 //!   wicked-estate annotations --symbol <id> [--type T] [--json] [--db ...]
-//!   wicked-estate stale-annotations <cutoff> [--json] [--db ...]
+//!   wicked-estate stale-annotations <cutoff-unix-seconds> [--json] [--db ...]
 //!   wicked-estate context <name>         [--budget <chars>] [--json] [--db ...]
 //!   wicked-estate entrypoints            [--json] [--db ...]
 //!   wicked-estate leaves                 [--json] [--db ...]
@@ -3002,9 +3002,10 @@ fn main() -> Result<()> {
         //
         // Reads via the `GraphRead::annotations` seam (oldest-first). `--type T` filters to that
         // exact type (fixed convention OR custom, matched identically). `--json` emits the spec
-        // shape `{symbol, annotations:[{type,key,value,confidence,provenance,author,ts,advisory}]}`
+        // shape `{symbol, annotations:[…]}`, items rendered by `wicked_estate_retrieve::annotation_json`
         // — one object per matched symbol (an array under `<name>`, a single object under
-        // `--symbol`). `advisory:true` is emitted for assumption/question (computed from `type`,
+        // `--symbol`). The container split is deliberate (#203, kept): a name is a search that can
+        // match many symbols, an id names one. `advisory:true` is emitted for assumption/question (computed from `type`,
         // not hard-coded). This direct read is NOT R4-capped — only structured payloads are.
         "annotations" => {
             let json_out = positional.iter().any(|a| a == "--json");
@@ -3026,7 +3027,7 @@ fn main() -> Result<()> {
                             anns: &[wicked_estate_core::Annotation]| {
                 serde_json::json!({
                     "symbol": sym.to_string(),
-                    "annotations": anns.iter().map(source_bundle::annotation_json).collect::<Vec<_>>(),
+                    "annotations": anns.iter().map(wicked_estate_retrieve::annotation_json).collect::<Vec<_>>(),
                 })
             };
             // Human line for one annotation (advisory marker shown when advisory).
@@ -3089,15 +3090,21 @@ fn main() -> Result<()> {
         // Thin surface over the `GraphRead::annotations_stale_since` seam (ordered symbol then ts).
         //
         // Usage:
-        //   wicked-estate stale-annotations <cutoff> [--json] [--db ...]
+        //   wicked-estate stale-annotations <cutoff-unix-seconds> [--json] [--db ...]
         "stale-annotations" => {
             let json_out = positional.iter().any(|a| a == "--json");
-            let cutoff: i64 = positional
-                .iter()
-                .find_map(|a| a.parse::<i64>().ok())
-                .context(
-                    "usage: wicked-estate stale-annotations <cutoff-unix-seconds> [--json] [--db ...]",
-                )?;
+            // Exactly one operand, and it must be an integer: `find_map` over all of argv took
+            // the first parseable token, so `stale-annotations soon 100` ran at 100 and
+            // `stale-annotations 2026 01 01` ran at 2026 with the rest dropped.
+            let operands: Vec<&String> =
+                positional.iter().filter(|a| !a.starts_with("--")).collect();
+            let cutoff: i64 = match operands.as_slice() {
+                [one] => one.parse::<i64>().ok(),
+                _ => None,
+            }
+            .context(
+                "usage: wicked-estate stale-annotations <cutoff-unix-seconds> [--json] [--db ...]",
+            )?;
             // ADR-003: backend-agnostic factory — annotations_stale_since is a GraphRead method.
             let store = open_store(&db).map_err(to_any)?;
             let stale = store.annotations_stale_since(cutoff).map_err(to_any)?;
@@ -3107,7 +3114,7 @@ fn main() -> Result<()> {
                     .map(|(sym, a)| {
                         serde_json::json!({
                             "symbol": sym.to_string(),
-                            "annotation": source_bundle::annotation_json(a),
+                            "annotation": wicked_estate_retrieve::annotation_json(a),
                         })
                     })
                     .collect();
@@ -3418,7 +3425,7 @@ fn main() -> Result<()> {
                     let capped: Vec<serde_json::Value> =
                         source_bundle::cap_annotations_for_payload(all_anns)
                             .iter()
-                            .map(source_bundle::annotation_json)
+                            .map(wicked_estate_retrieve::annotation_json)
                             .collect();
                     obj["annotations"] = serde_json::Value::Array(capped);
                 }
@@ -4067,11 +4074,21 @@ fn main() -> Result<()> {
             println!("    --provenance  provenance string (default: empty)");
             println!("    --author      author string (default: empty)");
             println!("  wicked-estate annotations <name>   [--type T] [--json] [--db ...]");
+            println!("  wicked-estate annotations --symbol <id> [--type T] [--json] [--db ...]");
             println!(
-                "    Show annotations for matching symbols. --type filters; --json emits {{symbol, annotations:[...]}} with an `advisory` flag."
+                "    Show annotations for matching symbols. --type filters. Each item carries `advisory`, `ts` (write time) and the"
             );
             println!(
-                "  wicked-estate stale-annotations <cutoff> [--json] [--db ...]  # (symbol, annotation) pairs with last_verified < cutoff"
+                "    evidence envelope `source_type`, `extraction_method`, `last_verified` (0 = never verified)."
+            );
+            println!(
+                "    --json container depends on the lookup: <name> is a search and emits an ARRAY [{{symbol, annotations:[...]}}, ...]"
+            );
+            println!(
+                "    (one per matched symbol, possibly empty); --symbol <id> names exactly one and emits a single {{symbol, annotations:[...]}}."
+            );
+            println!(
+                "  wicked-estate stale-annotations <cutoff-unix-seconds> [--json] [--db ...]  # (symbol, annotation) pairs with last_verified < cutoff"
             );
             println!(
                 "    Evidence-envelope freshness read: \"what needs re-verification?\". Never-verified rows (last_verified=0) are always stale."

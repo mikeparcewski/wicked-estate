@@ -230,7 +230,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "stale-annotations",
-        spec: owns("<cutoff>", &[DB, JSON]),
+        spec: owns("<cutoff-unix-seconds>", &[DB, JSON]),
     },
     Command {
         name: "fingerprint",
