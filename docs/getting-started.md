@@ -400,9 +400,10 @@ wicked-estate supports edge --source <SYMBOL_ID> --target <SYMBOL_ID> --kind cal
 wicked-estate supports retract --producer scip-typescript --snapshot apps/web
 ```
 
-`edge` takes exact `SymbolId`s (no name resolution) and a kind such as `calls`, `imports` or the
-tag `flows_to`; it returns the authoritative rows — each with the producer's own opaque `fact_id`
-— not the bounded `flow_support` sample. `retract` replaces the owner's set with nothing at its
+`edge` takes exact `SymbolId`s (no name resolution) and a kind by its stored spelling — `calls`,
+`imports`, or a tag such as `flows_to` (`Calls` is refused; a tag the built-in kinds do not define
+is matched as-is, with a note); it returns the authoritative rows — each with the producer's own
+opaque `fact_id` — not the bounded `flow_support` sample. `retract` replaces the owner's set with nothing at its
 next generation; an edge the indexer also wrote is restored exactly. Retract every owner before
 downgrading to a binary without TS-S2A. `--json` output stays under the 25K-char R4 budget
 (`total` exact, `truncated` when rows were dropped). A missing or empty `--db` is refused.

@@ -34,6 +34,10 @@ out-of-tree store implementations must add them. See **Changed (breaking)**.
     --snapshot` lists owners and generations, shows the authoritative rows behind one edge, and
     clears an owner. `--json` equals the store's answer, the whole document stays under the 25K
     R4 budget, arguments are strict, and a missing or empty `--db` is refused, not created.
+    `--kind` takes the stored spelling: a case variant of a built-in kind (`Calls`) is a usage
+    error, not a tag that answers an empty result; a tag the built-in kinds do not define is
+    matched as `{"other": …}` with a note on stderr. Text mode prints a fact's site with a
+    1-based line, like the rest of the CLI (`--json` keeps the raw span).
   - **Storage:** additive `support_owners`, `edge_supports` and `edge_base` tables (SQLite,
     Postgres) and `support_owner`, `edge_support`, `edge_base` (SurrealDB). They are created on
     open, and no existing edge is rewritten. A graph without support behaves exactly as before.
@@ -79,8 +83,11 @@ out-of-tree store implementations must add them. See **Changed (breaking)**.
   `GraphWrite::replace_edge_supports` have no default: a store that could not honour atomic,
   producer-owned replacement must not pretend to. An out-of-tree `GraphRead`/`GraphWrite`
   implementation fails to compile until it implements them (a delegating wrapper forwards all
-  four). The new `SupportFact`, `SupportOwner`, `SupportOwnerState`, `EdgeSupport` and
-  `SupportReplacement` are `#[non_exhaustive]`; build them with their `new` constructors.
+  four). The one known out-of-tree implementation is wicked-core's `AnyStore`
+  (`crates/wicked-apps-core/src/store_any.rs`), pinned to estate 0.16.7: it needs the four
+  forwarding arms when that pin moves. The new `SupportFact`, `SupportOwner`,
+  `SupportOwnerState`, `EdgeSupport` and `SupportReplacement` are `#[non_exhaustive]`; build
+  them with their `new` constructors.
 
 ### Fixed
 - **`rules.recall` reports a `limit` above its ceiling of 500** as a `CLAMPED:` diagnostic, like
