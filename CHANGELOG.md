@@ -2,9 +2,11 @@
 
 ## [Unreleased]
 
-Implies a minor bump (**0.21.0**), not a patch: the bespoke CLI arms now reject flags they do
-not read (#197, #206), and `GraphRead`/`GraphWrite` gain required methods (TS-S2A), so
-out-of-tree store implementations must add them. See **Changed (breaking)**.
+## [0.21.0] — 2026-10-06
+
+Minor bump, not a patch: the bespoke CLI arms now reject flags they do not read (#197, #206),
+and `GraphRead`/`GraphWrite` gain required methods (TS-S2A), so out-of-tree store
+implementations must add them. See **Changed (breaking)**.
 
 ### Added
 - **`wicked-estate rules-inventory` and `wicked-estate rules-recall` (#196).** The MCP
