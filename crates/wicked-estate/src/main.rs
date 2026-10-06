@@ -3957,7 +3957,7 @@ fn main() -> Result<()> {
                 "  wicked-estate stats                 [--db ...]  # includes git provenance if indexed"
             );
             println!(
-                "  wicked-estate source <name>         [--db ...]  # print source slice(s) for symbol"
+                "  wicked-estate source [<name>]       [--db ...]  # print source slice(s) for symbol"
             );
             println!(
                 "    Bulk selectors (mutually exclusive; precedence --symbols > --cluster > --file > <name>):"
@@ -3968,7 +3968,7 @@ fn main() -> Result<()> {
             println!("      --file <path>         all symbols whose location.file == path");
             println!("      --symbols <ids>       comma-separated SymbolIds (exact)");
             println!(
-                "    Output options: --json  --signatures-only  --max-total-chars <N>  --max-node-chars <N>"
+                "    Output options: --json  --signatures-only  --max-total-chars <N>  --max-node-chars <N>  (the budgets need --json)"
             );
             println!(
                 "  wicked-estate semantic <query>      [--db ...]  # embedding-based symbol search (requires prior --embeddings)"

@@ -29,6 +29,9 @@
   - a missing value, or a value that is itself a `--flag`;
   - `--flag=value` where the command only parses `--flag value`;
   - a value given to a switch.
+  A value may not begin with `--`, and there is no `--` end-of-options separator. `--help`/`-h`
+  is a help request only in flag position; in a value slot it is a refused value, so
+  `nodes --db --help` fails instead of running on a store named `--help`.
   `--repo=`/`--as=` and `blast-radius --depth=` keep their inline forms. `lineage` and the
   bridged commands already parsed strictly and are unchanged. **Scripts that pass a flag a
   command ignores now fail instead of getting output.** That failure is the fix: the output
@@ -38,7 +41,9 @@
   (`--symbols > --cluster > --file > <name>`). The header names the selector, e.g.
   `1 match(es) for --symbols <id>:`. A bare `<name>` prints exactly as before.
   `--max-total-chars`/`--max-node-chars` shape only the JSON bundle, so without `--json` they
-  are now a usage error instead of being ignored.
+  are now a usage error instead of being ignored. With no selector and no `<name>`, `source`
+  fails with usage before opening `--db`, so a mistyped path no longer leaves an empty store
+  behind.
 
 ### Fixed
 - **`rules.recall` reports a `limit` above its ceiling of 500** as a `CLAMPED:` diagnostic, like
