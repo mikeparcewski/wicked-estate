@@ -15,6 +15,36 @@
   rules gives an empty document and exit 0 (R1). Memory, knowledge and proposal tools are not
   RetrievalTools and still have no CLI.
 
+### Changed (breaking)
+- **Bespoke CLI commands reject flags they do not read (#197, #206).** Before, the shared argv
+  parser swallowed any flag it knew, including flags owned by other commands, and pushed
+  unknown ones into the operand list. Each command then ran on its defaults and exited 0.
+  `nodes --bogus-flag zzz` and `nodes --symbol <id>` both printed every node in the graph
+  (61,182 rows on one real index). `source <name> --symbols <id>` printed both bodies of a
+  duplicated name, because the text path dropped the selector that pinned one. Now every
+  bespoke command checks its argv against the flags it owns (`cli_flags::COMMANDS`) before
+  parsing. The command fails with usage and exit 1 on any of these:
+  - an unknown flag;
+  - a flag owned by another command (the error names the commands that take it);
+  - a missing value, or a value that is itself a `--flag`;
+  - `--flag=value` where the command only parses `--flag value`;
+  - a value given to a switch.
+  A value may not begin with `--`, and there is no `--` end-of-options separator. `--help`/`-h`
+  is a help request only in flag position; in a value slot it is a refused value, so
+  `nodes --db --help` fails instead of running on a store named `--help`.
+  `--repo=`/`--as=` and `blast-radius --depth=` keep their inline forms. `lineage` and the
+  bridged commands already parsed strictly and are unchanged. **Scripts that pass a flag a
+  command ignores now fail instead of getting output.** That failure is the fix: the output
+  answered a different question than the one asked. No command loses a flag it reads.
+- **`source` text mode honours `--symbols`, `--cluster`, `--file` and `--signatures-only`
+  (#206).** It uses the same documented precedence as `--json`
+  (`--symbols > --cluster > --file > <name>`). The header names the selector, e.g.
+  `1 match(es) for --symbols <id>:`. A bare `<name>` prints exactly as before.
+  `--max-total-chars`/`--max-node-chars` shape only the JSON bundle, so without `--json` they
+  are now a usage error instead of being ignored. With no selector and no `<name>`, `source`
+  fails with usage before opening `--db`, so a mistyped path no longer leaves an empty store
+  behind.
+
 ### Fixed
 - **`rules.recall` reports a `limit` above its ceiling of 500** as a `CLAMPED:` diagnostic, like
   every other clamping RetrievalTool (#190). Before, it silently used 500.

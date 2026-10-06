@@ -321,11 +321,15 @@ A graph without rules returns an empty document and exit 0.
 ## 6. Source — print the source slice for a symbol
 
 ```bash
-wicked-estate source <name> [--db ...]
+wicked-estate source [<name>] [--symbols id1,id2] [--cluster <id>] [--file <path>] [--signatures-only] [--db ...]
+wicked-estate source ... --json [--max-total-chars N] [--max-node-chars N]
 ```
 
 Fetches the source text stored at index time for each matching symbol. Useful for reading a
-function without opening the file.
+function without opening the file. A selector narrows the set, in both text and `--json` mode,
+with precedence `--symbols > --cluster > --file > <name>`. `--symbols <SymbolId>` pins one of
+several same-named symbols. `--signatures-only` prints signatures without bodies. The two
+`--max-*-chars` budgets shape the JSON bundle and are a usage error without `--json`.
 
 ```
 $ wicked-estate source bark --db /tmp/demo.db

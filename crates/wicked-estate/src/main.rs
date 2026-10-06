@@ -44,6 +44,7 @@
 //!   wicked-estate rules-recall           [--severity S] [--rule-type S] [--language S] [--layer S]
 //!                                     [--framework S] [--scope S] [--projects a,b] [--limit N] [--json] [--db ...]
 
+mod cli_flags;
 mod emit;
 mod scip_auto;
 mod source_bundle;
@@ -819,6 +820,10 @@ fn main() -> Result<()> {
             )
         });
     }
+    // The shared parser below swallows any flag it knows and pushes the rest into
+    // `positional`, so an arm cannot tell a flag it never reads from one it does. Reject
+    // those first, against the dispatched command's own flags (#197, #206).
+    cli_flags::check(cmd, rest).map_err(anyhow::Error::msg)?;
     let mut db_paths: Vec<String> = Vec::new();
     let mut scip_file: Option<String> = None;
     let mut since: u64 = 0;
@@ -1629,9 +1634,7 @@ fn main() -> Result<()> {
                             }
                             max_depth = parsed.min(MAX_MAX_DEPTH);
                         }
-                        other if other.starts_with("--") => {
-                            anyhow::bail!("{USAGE}\nunknown flag {other:?}");
-                        }
+                        // Any other flag was rejected by `cli_flags::check`.
                         _ => operands.push(a),
                     }
                 }
@@ -2131,75 +2134,112 @@ fn main() -> Result<()> {
                 .iter()
                 .find(|a| !a.starts_with("--"))
                 .map(String::as_str);
+            const SOURCE_USAGE: &str = "usage: wicked-estate source [<name>] [--symbols id1,id2,...] \
+                 [--cluster <id>] [--file <path>] [--signatures-only] [--json [--max-total-chars N] \
+                 [--max-node-chars N]]";
+            // The budget caps shape the JSON bundle; text mode prints whole bodies, so a cap
+            // there would be accepted and ignored (#206).
+            if !json_out && (src_max_total.is_some() || src_max_node.is_some()) {
+                anyhow::bail!(
+                    "{SOURCE_USAGE}\n--max-total-chars and --max-node-chars apply only with --json"
+                );
+            }
+            // No selector and no <name> is a usage error — raised before `--db` is opened, since
+            // opening a missing SQLite path creates an empty store that the error would leave
+            // behind (`source --db typo.db` used to exit 1 and create `typo.db`).
+            if name.is_none()
+                && src_symbols.is_none()
+                && src_cluster.is_none()
+                && src_file.is_none()
+            {
+                anyhow::bail!(
+                    "{SOURCE_USAGE}\na <name> or one of --symbols/--cluster/--file is required"
+                );
+            }
             let store = open_store(&db).map_err(to_any)?;
 
-            if !json_out {
-                // ── Legacy text path (unchanged): fuzzy <name> → bodies to stdout. ──
-                let name = name.context("usage: wicked-estate source <name>")?;
-                let hits = wicked_estate::search(&*store, name).map_err(to_any)?;
-                if hits.is_empty() {
-                    println!("no symbols found for '{name}'");
+            // Resolve the selector — one rule for both output modes (#206: the text path used to
+            // drop every selector but <name>). Precedence: --symbols > --cluster > --file > <name>.
+            let (nodes, selector): (Vec<wicked_estate_core::Node>, serde_json::Value) =
+                if let Some(csv) = &src_symbols {
+                    let ids: Vec<String> = csv
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    let mut out = Vec::new();
+                    for id in &ids {
+                        let sid = wicked_estate_core::symbol::SymbolId::from(id.as_str());
+                        if let Some(n) = store.get_node(&sid).map_err(to_any)? {
+                            out.push(n);
+                        }
+                    }
+                    (out, serde_json::json!({ "symbols": ids }))
+                } else if let Some(cid) = src_cluster {
+                    // Members of community `cid` (index into detect_communities, largest-first).
+                    let params = wicked_estate_rank::CommunityParams::default();
+                    let communities =
+                        wicked_estate_rank::detect_communities(&*store, &params).map_err(to_any)?;
+                    let members = communities.get(cid).cloned().unwrap_or_default();
+                    let mut out = Vec::new();
+                    for sid in &members {
+                        if let Some(n) = store.get_node(sid).map_err(to_any)? {
+                            out.push(n);
+                        }
+                    }
+                    (out, serde_json::json!({ "cluster": cid }))
+                } else if let Some(path) = &src_file {
+                    let all = store.all_nodes().map_err(to_any)?;
+                    let out: Vec<_> = all
+                        .into_iter()
+                        .filter(|n| &n.location.file == path)
+                        .collect();
+                    (out, serde_json::json!({ "file": path }))
                 } else {
-                    println!("{} match(es) for '{name}':", hits.len());
-                    for n in &hits {
-                        let src = store.symbol_source(n).map_err(to_any)?;
+                    // Guarded above, before the store was opened.
+                    let name = name.context(SOURCE_USAGE)?;
+                    let hits = wicked_estate::search(&*store, name).map_err(to_any)?;
+                    (hits, serde_json::json!({ "name": name }))
+                };
+
+            if !json_out {
+                // Text: one block per node, in selection order. `<name>`'s header is unchanged.
+                let what = match &selector {
+                    serde_json::Value::Object(o) => match o.iter().next() {
+                        Some((k, serde_json::Value::String(v))) if k == "name" => format!("'{v}'"),
+                        Some((k, serde_json::Value::String(v))) => format!("--{k} {v}"),
+                        Some((k, serde_json::Value::Array(v))) => format!(
+                            "--{k} {}",
+                            v.iter()
+                                .filter_map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        ),
+                        Some((k, v)) => format!("--{k} {v}"),
+                        None => String::new(),
+                    },
+                    _ => String::new(),
+                };
+                if nodes.is_empty() {
+                    println!("no symbols found for {what}");
+                } else {
+                    println!("{} match(es) for {what}:", nodes.len());
+                    for n in &nodes {
                         println!("  [{:?}] {} @ {}", n.kind, n.name, loc(n));
-                        match src {
-                            Some(text) => println!("{text}"),
-                            None => {
-                                println!("  (source not stored — re-run 'index' to populate)")
+                        if signatures_only {
+                            println!("{}", n.signature.as_deref().unwrap_or("  (no signature)"));
+                        } else {
+                            match store.symbol_source(n).map_err(to_any)? {
+                                Some(text) => println!("{text}"),
+                                None => {
+                                    println!("  (source not stored — re-run 'index' to populate)")
+                                }
                             }
                         }
                         println!();
                     }
                 }
             } else {
-                // ── JSON bundle path: resolve the selector, build the bundle, print it. ──
-                // Precedence: --symbols > --cluster > --file > <name>.
-                let (nodes, selector): (Vec<wicked_estate_core::Node>, serde_json::Value) =
-                    if let Some(csv) = &src_symbols {
-                        let ids: Vec<String> = csv
-                            .split(',')
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect();
-                        let mut out = Vec::new();
-                        for id in &ids {
-                            let sid = wicked_estate_core::symbol::SymbolId::from(id.as_str());
-                            if let Some(n) = store.get_node(&sid).map_err(to_any)? {
-                                out.push(n);
-                            }
-                        }
-                        (out, serde_json::json!({ "symbols": ids }))
-                    } else if let Some(cid) = src_cluster {
-                        // Members of community `cid` (index into detect_communities, largest-first).
-                        let params = wicked_estate_rank::CommunityParams::default();
-                        let communities = wicked_estate_rank::detect_communities(&*store, &params)
-                            .map_err(to_any)?;
-                        let members = communities.get(cid).cloned().unwrap_or_default();
-                        let mut out = Vec::new();
-                        for sid in &members {
-                            if let Some(n) = store.get_node(sid).map_err(to_any)? {
-                                out.push(n);
-                            }
-                        }
-                        (out, serde_json::json!({ "cluster": cid }))
-                    } else if let Some(path) = &src_file {
-                        let all = store.all_nodes().map_err(to_any)?;
-                        let out: Vec<_> = all
-                            .into_iter()
-                            .filter(|n| &n.location.file == path)
-                            .collect();
-                        (out, serde_json::json!({ "file": path }))
-                    } else {
-                        let name = name.context(
-                            "usage: wicked-estate source [<name>] [--cluster <id>] \
-                             [--file <path>] [--symbols id1,id2,...] --json",
-                        )?;
-                        let hits = wicked_estate::search(&*store, name).map_err(to_any)?;
-                        (hits, serde_json::json!({ "name": name }))
-                    };
-
                 let opts = source_bundle::BudgetOpts {
                     max_total_chars: src_max_total,
                     max_node_chars: src_max_node,
@@ -3917,7 +3957,7 @@ fn main() -> Result<()> {
                 "  wicked-estate stats                 [--db ...]  # includes git provenance if indexed"
             );
             println!(
-                "  wicked-estate source <name>         [--db ...]  # print source slice(s) for symbol"
+                "  wicked-estate source [<name>]       [--db ...]  # print source slice(s) for symbol"
             );
             println!(
                 "    Bulk selectors (mutually exclusive; precedence --symbols > --cluster > --file > <name>):"
@@ -3928,7 +3968,7 @@ fn main() -> Result<()> {
             println!("      --file <path>         all symbols whose location.file == path");
             println!("      --symbols <ids>       comma-separated SymbolIds (exact)");
             println!(
-                "    Output options: --json  --signatures-only  --max-total-chars <N>  --max-node-chars <N>"
+                "    Output options: --json  --signatures-only  --max-total-chars <N>  --max-node-chars <N>  (the budgets need --json)"
             );
             println!(
                 "  wicked-estate semantic <query>      [--db ...]  # embedding-based symbol search (requires prior --embeddings)"

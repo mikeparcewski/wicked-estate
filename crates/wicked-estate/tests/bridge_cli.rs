@@ -6,6 +6,9 @@
 //! deliberately do not pin `TraverseGraph`'s payload shape — that envelope is owned by the tool
 //! and is being reworked by the TypeScript-semantics wave; a snapshot here would break under it
 //! for no bridge reason. `rank` reads only `RankHotspots`' row array, outside that rework.
+//!
+//! The bespoke arms get the same strictness from `cli_flags` (#197, #206); the tests at the end
+//! pin it for `nodes` and `source`, the two commands those issues reproduced on.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -696,5 +699,268 @@ fn rules_commands_have_help_and_appear_in_the_banner() {
     assert!(
         banner.contains("wicked-estate rules-recall [--severity S]"),
         "{banner}"
+    );
+}
+
+// ── Strict flags on the bespoke arms (#197, #206) ────────────────────────────────────────────
+
+/// Two Python functions sharing one name — the #206 fixture: a name alone cannot pin either.
+fn duplicate_names(tag: &str) -> Scratch {
+    let s = scratch(tag);
+    for (file, root) in [("alpha.py", "alpha"), ("beta.py", "beta")] {
+        fs::write(
+            s.join(file),
+            format!(
+                "def validate_confined_directory(path):\n    return path.startswith(\"/safe/{root}\")\n"
+            ),
+        )
+        .unwrap();
+    }
+    git(&s, &["init", "-q", "."]);
+    git(&s, &["add", "-A"]);
+    git(&s, &["commit", "-qm", "fx"]);
+    index(&s);
+    s
+}
+
+fn symbol_id_in(dir: &Path, file: &str) -> String {
+    let out = run(
+        dir,
+        &[
+            "resolve",
+            "validate_confined_directory",
+            "--json",
+            "--db",
+            "graph.db",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    documents(&out)
+        .remove(0)
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["file"] == file)
+        .unwrap_or_else(|| panic!("no match in {file}: {}", stdout(&out)))["symbol_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn assert_usage_error(out: &Output, cmd: &str, why: &str) {
+    assert!(!out.status.success(), "exited 0: {}", stdout(out));
+    assert!(out.stdout.is_empty(), "wrote stdout: {}", stdout(out));
+    let err = stderr(out);
+    assert!(
+        err.contains(&format!("usage: wicked-estate {cmd}")),
+        "{err}"
+    );
+    assert!(err.contains(why), "{err}");
+}
+
+#[test]
+fn nodes_rejects_flags_it_does_not_read_197() {
+    let fx = duplicate_names("strict_nodes");
+    let id = symbol_id_in(&fx, "alpha.py");
+    // Before: every node in the graph, exit 0.
+    let out = run(&fx, &["nodes", "--bogus-flag", "zzz", "--db", "graph.db"]);
+    assert_usage_error(&out, "nodes", "unknown flag \"--bogus-flag\"");
+    // `--symbol` is a real flag, of `annotate`/`annotations`; `nodes` never filtered by it.
+    let out = run(&fx, &["nodes", "--symbol", &id, "--db", "graph.db"]);
+    assert_usage_error(&out, "nodes", "accepted by: annotate, annotations");
+    // Its own flags still work.
+    let out = run(
+        &fx,
+        &["nodes", "--kind", "Function", "--json", "--db", "graph.db"],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(documents(&out).remove(0).as_array().unwrap().len(), 2);
+}
+
+/// `--help`/`-h` wins only where a flag is read. In a value slot it is a refused value: before,
+/// any `--help` token anywhere skipped the check, the shared parser took it as the value, and
+/// `nodes --db --help --bogus-flag zzz` ran on a store literally named `--help` with the bogus
+/// flag ignored — the accept-and-ignore path #197 closes, open for that one token.
+#[test]
+fn help_in_a_value_slot_is_a_value_not_a_help_request_197() {
+    let fx = duplicate_names("strict_help");
+    // Before: exit 0, "0 node(s)", a 200 KB empty store created at `<fx>/--help`.
+    let out = run(&fx, &["nodes", "--db", "--help", "--bogus-flag", "zzz"]);
+    assert_usage_error(
+        &out,
+        "nodes",
+        "--db requires a value, got the flag \"--help\"",
+    );
+    assert!(
+        !fx.join("--help").exists(),
+        "a store named `--help` was created"
+    );
+    // Before: exit 0, `k=--help` written to both symbols, the bogus flag ignored.
+    let before = run(
+        &fx,
+        &[
+            "annotations",
+            "validate_confined_directory",
+            "--json",
+            "--db",
+            "graph.db",
+        ],
+    );
+    assert!(before.status.success(), "{}", stderr(&before));
+    let out = run(
+        &fx,
+        &[
+            "annotate",
+            "validate_confined_directory",
+            "--key",
+            "k",
+            "--value",
+            "--help",
+            "--bogus-flag",
+            "zzz",
+            "--db",
+            "graph.db",
+        ],
+    );
+    assert_usage_error(
+        &out,
+        "annotate",
+        "--value requires a value, got the flag \"--help\"",
+    );
+    let after = run(
+        &fx,
+        &[
+            "annotations",
+            "validate_confined_directory",
+            "--json",
+            "--db",
+            "graph.db",
+        ],
+    );
+    assert_eq!(stdout(&before), stdout(&after), "annotation written");
+    // Control: in flag position help still wins, even over an earlier unknown flag.
+    let out = run(&fx, &["nodes", "--bogus", "--help", "--db", "graph.db"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("wicked-estate nodes [--kind K]"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn source_text_honours_the_selector_instead_of_dropping_it_206() {
+    let fx = duplicate_names("strict_source");
+    let id = symbol_id_in(&fx, "alpha.py");
+
+    // Before: "2 match(es)", both bodies — the selector that pinned one was dropped.
+    let out = run(
+        &fx,
+        &[
+            "source",
+            "validate_confined_directory",
+            "--symbols",
+            &id,
+            "--db",
+            "graph.db",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.starts_with("1 match(es) for --symbols "), "{text}");
+    assert!(
+        text.contains("/safe/alpha") && !text.contains("/safe/beta"),
+        "{text}"
+    );
+
+    // The JSON path resolves the same selector to the same single node.
+    let out = run(
+        &fx,
+        &[
+            "source",
+            "validate_confined_directory",
+            "--symbols",
+            &id,
+            "--json",
+            "--db",
+            "graph.db",
+        ],
+    );
+    let bundle = documents(&out).remove(0);
+    assert_eq!(bundle["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(bundle["nodes"][0]["symbol_id"], id.as_str());
+
+    // `--file` too, and `--signatures-only` drops the body in text mode as it does in JSON.
+    let out = run(
+        &fx,
+        &[
+            "source",
+            "--file",
+            "beta.py",
+            "--signatures-only",
+            "--db",
+            "graph.db",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("match(es) for --file beta.py:"), "{text}");
+    assert!(
+        !text.contains("startswith"),
+        "body printed under --signatures-only: {text}"
+    );
+
+    // A bare <name> keeps its legacy output.
+    let out = run(
+        &fx,
+        &["source", "validate_confined_directory", "--db", "graph.db"],
+    );
+    let text = stdout(&out);
+    assert!(
+        text.starts_with("2 match(es) for 'validate_confined_directory':"),
+        "{text}"
+    );
+}
+
+#[test]
+fn source_rejects_what_its_text_path_cannot_honour_206() {
+    let fx = duplicate_names("strict_source_rej");
+    for (args, why) in [
+        (
+            &[
+                "source",
+                "validate_confined_directory",
+                "--max-total-chars",
+                "5",
+            ][..],
+            "apply only with --json",
+        ),
+        (&["source", "--file=alpha.py"][..], "write --file <value>"),
+        (
+            &["source", "validate_confined_directory", "--top", "1"][..],
+            "unknown flag \"--top\"",
+        ),
+        (
+            &["source", "validate_confined_directory", "--symbols"][..],
+            "--symbols requires a value, got the flag \"--db\"",
+        ),
+    ] {
+        let mut full = args.to_vec();
+        full.extend_from_slice(&["--db", "graph.db"]);
+        assert_usage_error(&run(&fx, &full), "source", why);
+    }
+}
+
+/// `source` with no selector and no `<name>` is a usage error, raised before `--db` is opened:
+/// opening a missing SQLite path creates an empty store, so `source --db typo2.db` used to exit 1
+/// AND leave `typo2.db` behind. The `--max-*-chars` guard above the open shows the right order.
+#[test]
+fn source_usage_error_does_not_create_the_store_206() {
+    let s = scratch("strict_source_nodb");
+    let out = run(&s, &["source", "--db", "typo2.db"]);
+    assert_usage_error(&out, "source", "usage: wicked-estate source");
+    assert!(
+        !s.join("typo2.db").exists(),
+        "typo2.db created by a usage error"
     );
 }
