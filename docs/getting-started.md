@@ -20,7 +20,7 @@ Produces two binaries:
 
 | Binary | Purpose |
 |--------|---------|
-| `target/release/wicked-estate` | CLI — index, query, blast-radius, path, lineage, traverse, rank, source, stats, scip, semantic, watch, subscribe, compact, tfstate, drift, cross-graph, clusters, context, annotate, nodes, resolve, export, plugins list, … |
+| `target/release/wicked-estate` | CLI — index, query, blast-radius, path, lineage, traverse, rank, rules-inventory, rules-recall, source, stats, scip, semantic, watch, subscribe, compact, tfstate, drift, cross-graph, clusters, context, annotate, nodes, resolve, export, plugins list, … |
 | `target/release/wicked-estate-mcp` | MCP stdio server — 30 tools (12 estate + 7 memory + 7 knowledge + 4 proposal) for LLM agents |
 
 Zero runtime deps. Single static binary on each target.
