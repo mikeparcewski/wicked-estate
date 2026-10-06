@@ -301,6 +301,7 @@ impl RetrievalTool for RulesRecall {
 
         let total = matched.len();
         let mut diagnostics = vec![crate::staleness_note()];
+        diagnostics.extend(crate::clamp_note(request, "limit", MAX_LIMIT as u64));
         if total > limit {
             diagnostics.push(format!(
                 "rules.recall: output capped at {limit} of {total} matched rules (R4) — narrow \

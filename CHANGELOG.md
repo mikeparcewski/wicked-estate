@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+- **`wicked-estate rules-inventory` and `wicked-estate rules-recall` (#196).** The MCP
+  `RulesInventory` and `rules.recall` tools from the CLI. Each is one row of
+  `tool_bridge::COMMANDS`, with no new dispatch arm. `--json` writes the tool's `content`
+  unchanged as one document on stdout, with diagnostics on stderr. Flags are strict:
+  `rules-inventory --bogus x` exits non-zero. `rules-recall` takes `--severity`, `--rule-type`,
+  `--language`, `--layer`, `--framework`, `--scope`, `--projects` and `--limit`. They carry the
+  tool's facet rules: language, layer and framework are wildcards, severity and rule type are
+  exact, and scope is a subtree prefix. The bridge gains `FlagType::Str`, a verbatim string. An
+  empty string is rejected, because the tool reads `""` as an absent facet. A graph with no
+  rules gives an empty document and exit 0 (R1). Memory, knowledge and proposal tools are not
+  RetrievalTools and still have no CLI.
+
+### Fixed
+- **`rules.recall` reports a `limit` above its ceiling of 500** as a `CLAMPED:` diagnostic, like
+  every other clamping RetrievalTool (#190). Before, it silently used 500.
+
 ## [0.20.0] — 2026-10-04
 
 Minor bump, not a patch: the CLI `rank`/`hotspots` output and the

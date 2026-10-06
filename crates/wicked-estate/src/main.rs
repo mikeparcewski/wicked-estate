@@ -40,6 +40,9 @@
 //! RetrievalTool-backed commands (see `tool_bridge::COMMANDS`; strict flags, `--help` per command):
 //!   wicked-estate traverse <symbol>      [--depth N] [--direction D] [--edge-kinds a,b] [--max-nodes N] [--json] [--db ...]
 //!   wicked-estate rank                   [--limit N] [--seeds s1,s2] [--json] [--db ...]   (alias: hotspots)
+//!   wicked-estate rules-inventory        [--json] [--db ...]
+//!   wicked-estate rules-recall           [--severity S] [--rule-type S] [--language S] [--layer S]
+//!                                     [--framework S] [--scope S] [--projects a,b] [--limit N] [--json] [--db ...]
 
 mod emit;
 mod scip_auto;
