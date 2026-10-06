@@ -777,6 +777,77 @@ fn nodes_rejects_flags_it_does_not_read_197() {
     assert_eq!(documents(&out).remove(0).as_array().unwrap().len(), 2);
 }
 
+/// `--help`/`-h` wins only where a flag is read. In a value slot it is a refused value: before,
+/// any `--help` token anywhere skipped the check, the shared parser took it as the value, and
+/// `nodes --db --help --bogus-flag zzz` ran on a store literally named `--help` with the bogus
+/// flag ignored — the accept-and-ignore path #197 closes, open for that one token.
+#[test]
+fn help_in_a_value_slot_is_a_value_not_a_help_request_197() {
+    let fx = duplicate_names("strict_help");
+    // Before: exit 0, "0 node(s)", a 200 KB empty store created at `<fx>/--help`.
+    let out = run(&fx, &["nodes", "--db", "--help", "--bogus-flag", "zzz"]);
+    assert_usage_error(
+        &out,
+        "nodes",
+        "--db requires a value, got the flag \"--help\"",
+    );
+    assert!(
+        !fx.join("--help").exists(),
+        "a store named `--help` was created"
+    );
+    // Before: exit 0, `k=--help` written to both symbols, the bogus flag ignored.
+    let before = run(
+        &fx,
+        &[
+            "annotations",
+            "validate_confined_directory",
+            "--json",
+            "--db",
+            "graph.db",
+        ],
+    );
+    assert!(before.status.success(), "{}", stderr(&before));
+    let out = run(
+        &fx,
+        &[
+            "annotate",
+            "validate_confined_directory",
+            "--key",
+            "k",
+            "--value",
+            "--help",
+            "--bogus-flag",
+            "zzz",
+            "--db",
+            "graph.db",
+        ],
+    );
+    assert_usage_error(
+        &out,
+        "annotate",
+        "--value requires a value, got the flag \"--help\"",
+    );
+    let after = run(
+        &fx,
+        &[
+            "annotations",
+            "validate_confined_directory",
+            "--json",
+            "--db",
+            "graph.db",
+        ],
+    );
+    assert_eq!(stdout(&before), stdout(&after), "annotation written");
+    // Control: in flag position help still wins, even over an earlier unknown flag.
+    let out = run(&fx, &["nodes", "--bogus", "--help", "--db", "graph.db"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("wicked-estate nodes [--kind K]"),
+        "{}",
+        stdout(&out)
+    );
+}
+
 #[test]
 fn source_text_honours_the_selector_instead_of_dropping_it_206() {
     let fx = duplicate_names("strict_source");
@@ -878,4 +949,18 @@ fn source_rejects_what_its_text_path_cannot_honour_206() {
         full.extend_from_slice(&["--db", "graph.db"]);
         assert_usage_error(&run(&fx, &full), "source", why);
     }
+}
+
+/// `source` with no selector and no `<name>` is a usage error, raised before `--db` is opened:
+/// opening a missing SQLite path creates an empty store, so `source --db typo2.db` used to exit 1
+/// AND leave `typo2.db` behind. The `--max-*-chars` guard above the open shows the right order.
+#[test]
+fn source_usage_error_does_not_create_the_store_206() {
+    let s = scratch("strict_source_nodb");
+    let out = run(&s, &["source", "--db", "typo2.db"]);
+    assert_usage_error(&out, "source", "usage: wicked-estate source");
+    assert!(
+        !s.join("typo2.db").exists(),
+        "typo2.db created by a usage error"
+    );
 }

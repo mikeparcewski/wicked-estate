@@ -2134,13 +2134,26 @@ fn main() -> Result<()> {
                 .iter()
                 .find(|a| !a.starts_with("--"))
                 .map(String::as_str);
+            const SOURCE_USAGE: &str = "usage: wicked-estate source [<name>] [--symbols id1,id2,...] \
+                 [--cluster <id>] [--file <path>] [--signatures-only] [--json [--max-total-chars N] \
+                 [--max-node-chars N]]";
             // The budget caps shape the JSON bundle; text mode prints whole bodies, so a cap
             // there would be accepted and ignored (#206).
             if !json_out && (src_max_total.is_some() || src_max_node.is_some()) {
                 anyhow::bail!(
-                    "usage: wicked-estate source [<name>] [--symbols id1,id2,...] [--cluster <id>] \
-                     [--file <path>] [--signatures-only] [--json [--max-total-chars N] \
-                     [--max-node-chars N]]\n--max-total-chars and --max-node-chars apply only with --json"
+                    "{SOURCE_USAGE}\n--max-total-chars and --max-node-chars apply only with --json"
+                );
+            }
+            // No selector and no <name> is a usage error — raised before `--db` is opened, since
+            // opening a missing SQLite path creates an empty store that the error would leave
+            // behind (`source --db typo.db` used to exit 1 and create `typo.db`).
+            if name.is_none()
+                && src_symbols.is_none()
+                && src_cluster.is_none()
+                && src_file.is_none()
+            {
+                anyhow::bail!(
+                    "{SOURCE_USAGE}\na <name> or one of --symbols/--cluster/--file is required"
                 );
             }
             let store = open_store(&db).map_err(to_any)?;
@@ -2183,10 +2196,8 @@ fn main() -> Result<()> {
                         .collect();
                     (out, serde_json::json!({ "file": path }))
                 } else {
-                    let name = name.context(
-                        "usage: wicked-estate source [<name>] [--cluster <id>] \
-                         [--file <path>] [--symbols id1,id2,...] [--json]",
-                    )?;
+                    // Guarded above, before the store was opened.
+                    let name = name.context(SOURCE_USAGE)?;
                     let hits = wicked_estate::search(&*store, name).map_err(to_any)?;
                     (hits, serde_json::json!({ "name": name }))
                 };

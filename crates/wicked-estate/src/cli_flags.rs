@@ -322,9 +322,33 @@ fn usage(name: &str, operands: &str, flags: &[Flag]) -> String {
     s
 }
 
+/// Is `--help`/`-h` present in flag position? A known `Value`/`ValueOrInline` flag without an
+/// inline `=` consumes the next token, so a `--help` there is that flag's value, not a help
+/// request. Unknown flags are stepped over: help still wins over an earlier typo, as it did
+/// before [`check`] existed.
+fn help_in_flag_position(args: &[String], flags: &[Flag]) -> bool {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--help" || a == "-h" {
+            return true;
+        }
+        let Some(body) = a.strip_prefix("--") else {
+            continue;
+        };
+        if body.contains('=') {
+            continue;
+        }
+        if let Some(Flag(_, Value | ValueOrInline)) = flags.iter().find(|f| f.0 == body) {
+            it.next();
+        }
+    }
+    false
+}
+
 /// Reject any flag `cmd` does not own, before the shared parser can swallow it. `Ok` for a
 /// command not in the table (the usage arm reports it), a self-parsing one, or a help request
-/// (help wins, as it did before this check existed). `Err` is the full usage message.
+/// in flag position (help wins, as it did before this check existed). `Err` is the full usage
+/// message.
 pub fn check(cmd: &str, args: &[String]) -> Result<(), String> {
     let Some(Command {
         spec: Spec::Owns { operands, flags },
@@ -333,7 +357,10 @@ pub fn check(cmd: &str, args: &[String]) -> Result<(), String> {
     else {
         return Ok(());
     };
-    if args.iter().any(|a| a == "--help" || a == "-h") {
+    // Not `any(--help)`: the shared parser takes the token after `--db` unconditionally, so a
+    // `--help` in that slot skipped this check and `nodes --db --help --bogus` ran on a store
+    // literally named `--help`, bogus flag ignored — the accept-and-ignore path, for one token.
+    if help_in_flag_position(args, flags) {
         return Ok(());
     }
     let fail = |why: String| Err(format!("{}\n{why}", usage(cmd, operands, flags)));
@@ -431,6 +458,25 @@ mod tests {
         assert!(check_args("correspond", &["--db", "x.db"]).is_err());
         assert!(check_args("nodes", &["-x"]).is_err());
         assert!(check_args("nodes", &["--"]).is_err());
+    }
+
+    /// Help wins in flag position, even after an unknown flag; in a value slot it is the
+    /// (refused) value, so the check still runs and the unknown flag is still reported.
+    #[test]
+    fn help_wins_only_in_flag_position_197() {
+        assert!(check_args("nodes", &["--bogus", "--help"]).is_ok());
+        assert!(check_args("nodes", &["-h"]).is_ok());
+        let e = check_args("nodes", &["--db", "--help", "--bogus"]).unwrap_err();
+        assert!(
+            e.ends_with("--db requires a value, got the flag \"--help\""),
+            "{e}"
+        );
+        // A single-dash token is a value by the table's own rule (`--value -x` passes), so
+        // `-h` in a value slot is the value `-h`; only a `--`-led token there is refused.
+        assert!(check_args("annotate", &["f", "--key", "k", "--value", "-h"]).is_ok());
+        assert!(check_args("annotate", &["f", "--key", "k", "--value", "--help"]).is_err());
+        // An inline value does not consume the next token, so help after it is a help request.
+        assert!(check_args("index", &["--repo=x", "--help"]).is_ok());
     }
 
     #[test]
