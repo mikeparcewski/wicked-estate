@@ -517,3 +517,101 @@ fn output_is_bounded_by_the_r4_budget() {
         "{t}"
     );
 }
+
+/// `--kind` is checked with the rest of argv, before the graph is looked for: a case variant of a
+/// built-in spelling (`Calls`) is a usage error with exit 1 and nothing on stdout, never an
+/// `Other("Calls")` tag that answers an honest-looking empty result. A lowercase tag the graph
+/// does not define (`nonsense`) is still matched as `Other`, exit 0, and says so on stderr.
+#[test]
+fn a_case_variant_kind_is_refused() {
+    let dir = scratch("kindcase");
+    let (_db, _) = build(&dir);
+    let edge = |kind: &str, db: &str, json: bool| {
+        let mut args = vec![
+            "supports", "edge", "--source", "app:a", "--target", "app:b", "--kind", kind,
+        ];
+        if json {
+            args.push("--json");
+        }
+        args.extend_from_slice(&["--db", db]);
+        args.into_iter().map(str::to_owned).collect::<Vec<_>>()
+    };
+    let run_s = |args: &[String]| run(&dir, &args.iter().map(String::as_str).collect::<Vec<_>>());
+    for kind in ["Calls", "CALLS", "Imports"] {
+        let out = run_s(&edge(kind, "graph.db", true));
+        assert!(!out.status.success(), "--kind {kind} must fail");
+        assert_eq!(out.stdout.len(), 0, "--kind {kind}: {}", stdout(&out));
+        let want = format!("did you mean {:?}", kind.to_lowercase());
+        assert!(
+            stderr(&out).contains(&want),
+            "--kind {kind}: {}",
+            stderr(&out)
+        );
+    }
+    // The check is part of argv parsing: usage, and the missing graph is never looked for.
+    let never = run_s(&edge("Calls", "never.db", false));
+    assert!(!never.status.success());
+    let e = stderr(&never);
+    assert!(
+        e.contains("usage: wicked-estate supports") && !e.contains("no graph at"),
+        "{e}"
+    );
+    assert!(!dir.join("never.db").exists());
+    // A built-in spelling: no note. An unknown lowercase tag: the `Other` tag, with a note.
+    let ok = run_s(&edge("calls", "graph.db", true));
+    assert!(ok.status.success(), "{}", stderr(&ok));
+    assert!(!stderr(&ok).contains("note:"), "{}", stderr(&ok));
+    let tag = run_s(&edge("nonsense", "graph.db", true));
+    let doc = json_out(&tag);
+    assert_eq!(doc["kind"], json!({"other": "nonsense"}));
+    assert_eq!(doc["total"], json!(0));
+    assert!(
+        stderr(&tag).contains("not a built-in kind"),
+        "{}",
+        stderr(&tag)
+    );
+}
+
+/// Text mode prints a fact's site with a 1-based line, like every other text path of the CLI;
+/// `--json` carries the raw 0-based span unchanged.
+#[test]
+fn text_site_line_is_one_based() {
+    let dir = scratch("line");
+    let db = dir.join("graph.db");
+    let mut store = SqliteStore::open(&db).unwrap();
+    store.upsert_nodes(&[node("app:a"), node("app:b")]).unwrap();
+    let mut fact = calls("scip-typescript", ResolutionTier::Scip, "src/forty_two.ts");
+    fact.location = Some(Location::new(
+        "src/forty_two.ts",
+        Span {
+            start_line: 41,
+            end_line: 41,
+            ..Span::ZERO
+        },
+    ));
+    store
+        .replace_edge_supports(
+            &owner("scip-typescript", "apps/web"),
+            1,
+            &[SupportFact::new("occ:42", fact).unwrap()],
+        )
+        .unwrap();
+    drop(store);
+    let args = [
+        "supports", "edge", "--source", "app:a", "--target", "app:b", "--kind", "calls", "--db",
+        "graph.db",
+    ];
+    let t = stdout(&run(&dir, &args));
+    let row = t
+        .lines()
+        .find(|l| l.contains("fact_id \"occ:42\""))
+        .unwrap_or_else(|| panic!("no row for occ:42 in {t}"));
+    assert!(row.ends_with(" at src/forty_two.ts:42"), "{row}");
+    let mut json_args = args.to_vec();
+    json_args.insert(8, "--json");
+    let doc = json_out(&run(&dir, &json_args));
+    assert_eq!(
+        doc["supports"][0]["fact"]["location"]["span"]["start_line"],
+        json!(41)
+    );
+}

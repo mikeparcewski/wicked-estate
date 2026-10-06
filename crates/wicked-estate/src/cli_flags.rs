@@ -10,8 +10,9 @@
 //!
 //! The table is ownership and arity only, so a value is never mistaken for a flag. Parsing,
 //! defaults and value coercion stay in the shared parser and the arms; a row must list exactly
-//! the flags its arm reads. Bridged commands (`tool_bridge`) never reach here, and `lineage`
-//! parses its own argv strictly.
+//! the flags its arm reads. Bridged commands (`tool_bridge`) never reach here; `lineage` and
+//! `supports` parse their own argv strictly and are listed as [`Spec::SelfParsed`] so the table
+//! stays the inventory of every bespoke arm.
 
 /// How a flag consumes argv.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -103,6 +104,10 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "lineage",
+        spec: Spec::SelfParsed,
+    },
+    Command {
+        name: "supports",
         spec: Spec::SelfParsed,
     },
     Command {
@@ -523,5 +528,25 @@ mod tests {
         assert!(check_args("no-such-command", &["--bogus"]).is_ok());
         // `lineage` rejects unknown flags itself, with its own usage.
         assert!(check_args("lineage", &["--bogus"]).is_ok());
+        assert!(check_args("supports", &["owners", "--bogus"]).is_ok());
+    }
+
+    /// Every bespoke arm that parses its own argv has a `SelfParsed` row, so the table stays the
+    /// inventory of what `main` dispatches: an arm with neither a row nor a bridge entry would
+    /// inherit the old accept-and-ignore path without anyone noticing.
+    #[test]
+    fn every_self_parsing_arm_has_a_row() {
+        for cmd in ["lineage", "supports"] {
+            assert!(
+                matches!(
+                    lookup(cmd),
+                    Some(Command {
+                        spec: Spec::SelfParsed,
+                        ..
+                    })
+                ),
+                "{cmd} has no SelfParsed row"
+            );
+        }
     }
 }

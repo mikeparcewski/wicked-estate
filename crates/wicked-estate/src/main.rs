@@ -4757,14 +4757,31 @@ fn parse_supports_args(raw: &[String]) -> Result<SupportsArgs> {
             snapshot: take("--snapshot")?,
         },
     };
+    if let SupportsMode::Edge { kind, .. } = &mode {
+        parse_edge_kind(kind).map_err(usage)?;
+    }
     Ok(SupportsArgs { mode, json })
 }
 
 /// `--kind`: a built-in kind by its stored spelling (`calls`, `imports`, …), otherwise a tag
 /// stored as `EdgeKind::Other` (`flows_to`). The same spelling `export`/`path --json` print.
-fn parse_edge_kind(kind: &str) -> wicked_estate_core::EdgeKind {
-    serde_json::from_value(serde_json::Value::String(kind.to_string()))
-        .unwrap_or_else(|_| wicked_estate_core::EdgeKind::Other(kind.to_string()))
+/// A case variant of a built-in spelling (`Calls`) is refused rather than taken as the tag
+/// `{"other":"Calls"}`: no store writes that tag, so it would answer an honest-looking empty
+/// result for the kind the user meant (the accept-and-ignore class #197 closed for flags).
+fn parse_edge_kind(kind: &str) -> std::result::Result<wicked_estate_core::EdgeKind, String> {
+    let builtin = |s: &str| -> Option<wicked_estate_core::EdgeKind> {
+        serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
+    };
+    if let Some(k) = builtin(kind) {
+        return Ok(k);
+    }
+    let lower = kind.to_lowercase();
+    if lower != kind && builtin(&lower).is_some() {
+        return Err(format!(
+            "--kind {kind:?} is not a kind; did you mean {lower:?}?"
+        ));
+    }
+    Ok(wicked_estate_core::EdgeKind::Other(kind.to_string()))
 }
 
 /// Keep rows, in order, while the whole document stays under [`SUPPORTS_CHAR_BUDGET`].
@@ -4810,7 +4827,13 @@ fn run_supports(
             target,
             kind,
         } => {
-            let k = parse_edge_kind(kind);
+            let k = parse_edge_kind(kind).map_err(|e| anyhow::anyhow!(e))?;
+            if let wicked_estate_core::EdgeKind::Other(tag) = &k {
+                eprintln!(
+                    "note: --kind {tag:?} is not a built-in kind; matching the tag {}",
+                    json!({ "other": tag })
+                );
+            }
             let rows = store
                 .edge_supports(
                     &wicked_estate_core::SymbolId(source.clone()),
@@ -4901,10 +4924,16 @@ fn write_supports_text(
         )?;
         for r in rows {
             let f = &r["fact"];
-            let site = f["location"]["file"]
-                .as_str()
-                .map(|file| format!(" at {file}:{}", f["location"]["span"]["start_line"]))
-                .unwrap_or_default();
+            // 1-based, like every other text path (`--json` keeps the raw 0-based span).
+            let site = match (
+                f["location"]["file"].as_str(),
+                f["location"]["span"]["start_line"].as_u64(),
+            ) {
+                (Some(file), Some(line)) if !file.is_empty() => {
+                    format!(" at {file}:{}", line + 1)
+                }
+                _ => String::new(),
+            };
             writeln!(
                 out,
                 "  {}/{} gen {}  fact_id {}  confidence {} ({}, {}){site}",
