@@ -767,3 +767,100 @@ fn annotate_refuses_a_degenerate_envelope() {
         serde_json::from_str(&run(&dir, &db, &["annotations", "target", "--json"])).unwrap();
     assert!(v[0]["annotations"].as_array().unwrap().is_empty());
 }
+
+/// A malformed numeric flag value is a usage error, not the default. `--confidence high` used to
+/// store 1.0 — a confident fact from a typo — and `source --max-total-chars 10k` ran unbounded.
+#[test]
+fn numeric_flag_values_are_strict() {
+    let (dir, db) = index_one_fn("numeric", "fn target() {}\n");
+    let base = [
+        "annotate",
+        "target",
+        "--key",
+        "k",
+        "--value",
+        "v",
+        "--confidence",
+    ];
+    for bad in ["high", "1.5", "-0.1", "NaN"] {
+        let mut args = base.to_vec();
+        args.push(bad);
+        let err = run_fail(&dir, &db, &args);
+        assert!(err.contains("--confidence"), "{bad:?}: {err}");
+    }
+    let mut ok = base.to_vec();
+    ok.push("0.4");
+    run(&dir, &db, &ok);
+    let v: serde_json::Value =
+        serde_json::from_str(&run(&dir, &db, &["annotations", "target", "--json"])).unwrap();
+    let anns = v[0]["annotations"].as_array().unwrap();
+    assert_eq!(anns.len(), 1, "only the valid call wrote a row");
+    assert_eq!(anns[0]["confidence"], 0.4);
+
+    for (args, flag) in [
+        (
+            &[
+                "source",
+                "--file",
+                "src/a.rs",
+                "--json",
+                "--max-total-chars",
+                "10k",
+            ][..],
+            "--max-total-chars",
+        ),
+        (
+            &[
+                "source",
+                "--file",
+                "src/a.rs",
+                "--json",
+                "--max-node-chars",
+                "x",
+            ],
+            "--max-node-chars",
+        ),
+        (&["graph-view", "--limit", "lots"], "--limit"),
+        (&["context", "target", "--budget", "x"], "--budget"),
+        (&["clusters", "big"], "<min_size>"),
+        (&["clusters", "1", "2"], "at most one operand"),
+    ] {
+        let err = run_fail(&dir, &db, args);
+        assert!(err.contains(flag), "{args:?}: {err}");
+    }
+}
+
+/// PR #259 review: `--older-than '90é'` panicked (exit 101) — `split_at` on a byte offset inside a
+/// multibyte char. Malformed input is a usage error, exit 1, for every byte shape; a panic would
+/// also "fail", so the exit code itself is asserted.
+#[test]
+fn malformed_cutoffs_exit_1_never_panic() {
+    let (dir, db) = index_one_fn("cutoff_utf8", "fn target() {}\n");
+    for args in [
+        &["stale-annotations", "--older-than", "90é"][..],
+        &["stale-annotations", "--older-than", "é"],
+        &["stale-annotations", "--older-than", "9日"],
+        &["stale-annotations", "+100"],
+        &["stale-annotations", "2026-01-0é"],
+        &[
+            "annotate",
+            "target",
+            "--key",
+            "k",
+            "--value",
+            "v",
+            "--last-verified",
+            "1é",
+        ],
+    ] {
+        let out = Command::new(bin())
+            .current_dir(&dir)
+            .args(args)
+            .args(["--db", db.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(!stderr.contains("panicked"), "{args:?}: {stderr}");
+    }
+}

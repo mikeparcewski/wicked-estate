@@ -57,10 +57,13 @@ pub fn parse_verified(s: &str, now: i64) -> Result<i64, String> {
     Ok(at)
 }
 
-/// `<unix-seconds>` or `<YYYY-MM-DD>` (UTC midnight).
+/// `<unix-seconds>` or `<YYYY-MM-DD>` (UTC midnight). Seconds are ASCII digits only:
+/// `i64::from_str` also takes a leading `+` / `-`, so `+100` ran at 100 (PR #259 review).
 fn parse_instant(s: &str) -> Result<i64, String> {
-    if let Ok(secs) = s.parse::<i64>() {
-        return Ok(secs);
+    if !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()) {
+        if let Ok(secs) = s.parse::<i64>() {
+            return Ok(secs);
+        }
     }
     parse_date(s)
         .ok_or_else(|| format!("cutoff {s:?} is neither Unix seconds nor a YYYY-MM-DD date"))
@@ -90,16 +93,18 @@ fn parse_date(s: &str) -> Option<i64> {
 fn parse_window(s: &str) -> Result<i64, String> {
     let bad =
         || format!("--older-than {s:?}: expected <N><unit> with unit s, m, h, d or w (e.g. 90d)");
-    let split = s.len().checked_sub(1).ok_or_else(bad)?;
-    let (n, unit) = s.split_at(split);
-    let per = match unit {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3_600,
-        "d" => DAY,
-        "w" => 7 * DAY,
-        _ => return Err(bad()),
-    };
+    // `strip_suffix`, not `split_at(len - 1)`: a byte offset lands inside a multibyte last char
+    // (`90é`) and `split_at` panics — exit 101 instead of a usage error (PR #259 review).
+    let (n, unit, per) = [
+        ("s", 1),
+        ("m", 60),
+        ("h", 3_600),
+        ("d", DAY),
+        ("w", 7 * DAY),
+    ]
+    .into_iter()
+    .find_map(|(unit, per)| s.strip_suffix(unit).map(|n| (n, unit, per)))
+    .ok_or_else(bad)?;
     if n.is_empty() || !n.bytes().all(|c| c.is_ascii_digit()) {
         return Err(bad());
     }
@@ -172,6 +177,12 @@ mod tests {
     fn unix_seconds_pass_through() {
         assert_eq!(resolve(&["1767225600"], None, NOW), Ok(1_767_225_600));
         assert_eq!(resolve(&["0"], None, NOW), Ok(0));
+        for signed in ["+100", "-100", " 100", "１００"] {
+            assert!(
+                resolve(&[signed], None, NOW).is_err(),
+                "{signed:?} accepted"
+            );
+        }
     }
 
     #[test]
@@ -221,6 +232,13 @@ mod tests {
             "90D",
             "",
             "99999999999999999999d",
+            "+5d",
+            // Multibyte last / only char: once a `split_at` panic, now a usage error.
+            "90é",
+            "é",
+            "9日",
+            "90d\u{301}",
+            "٩٠d",
         ] {
             assert!(resolve(&[], Some(bad), NOW).is_err(), "{bad:?} accepted");
         }
@@ -246,7 +264,16 @@ mod tests {
         assert_eq!(parse_verified("0", NOW), Ok(0), "explicit never-verified");
         assert_eq!(parse_verified("1767225600", NOW), Ok(1_767_225_600));
         assert_eq!(parse_verified("2026-01-01", NOW), Ok(1_767_225_600));
-        for bad in ["-1", "1969-12-31", "yesterday", "2026-02-30", "NOW", ""] {
+        for bad in [
+            "-1",
+            "+100",
+            "1969-12-31",
+            "yesterday",
+            "2026-02-30",
+            "NOW",
+            "",
+            "1é",
+        ] {
             assert!(parse_verified(bad, NOW).is_err(), "{bad:?} accepted");
         }
     }

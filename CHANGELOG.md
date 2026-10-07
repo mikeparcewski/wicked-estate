@@ -8,7 +8,19 @@
   `stale-annotations 2026 01 01` ran at 2026 with the rest dropped — a plausible wrong answer
   with exit 0. Stray operands, two operands, or an operand together with `--older-than` are now
   a usage error (exit 1). A caller that passed stray operands breaks; that is the fix, as with
-  #197/#206.
+  #197/#206. Unix seconds are ASCII digits only: `+100` and `-100` are refused (`i64` parsing
+  had accepted the sign).
+- **Numeric flag values are strict.** Every numeric flag of the bespoke arms parsed with
+  `unwrap_or(default)` or `.ok()`, so a malformed value ran on the default and exited 0:
+  `annotate --confidence high` stored a confidence-1.0 fact from a typo, and
+  `source --max-total-chars 10k` / `--max-node-chars x` ran **unbounded**. Now a usage error
+  naming the flag (exit 1) for `--confidence`, `--since`, `--top`, `--min-score`,
+  `--resolution`, `--package-bias`, `--k`, `--eps`, `--min-pts`, `--cluster`,
+  `--max-total-chars`, `--max-node-chars`, `context --budget` and `graph-view --limit`. Floats
+  must be finite (`NaN`/`inf` refused). `--confidence` must be within 0.0–1.0. The `clusters`
+  `<min_size>` operand takes at most one integer: it had used the same first-parseable-token
+  scan as `stale-annotations`, so `clusters big` ran on the default 2. This is the
+  accept-and-ignore class #197/#206 closed for flag names, closed here for flag values.
 - **Payload annotations are ranked at every size.** `RetrieveEntity` (MCP) kept insertion order
   under the 20-annotation cap and ranked only over it; `nodes --json` / `source --json` always
   ranked. One entity therefore listed its annotations in two orders depending on the surface.
