@@ -1126,7 +1126,11 @@ pub fn index_path_as(
     // leaves the singular `repo_*` keys untouched — that is what stops the second repo indexed
     // into a graph from clobbering the first's commit/branch/remote/dirty.
     match repo {
-        Some(label) => repo_scope::write_record(store, label, root, &repo_info),
+        // #248 (codex round 1 on #264): the registry root is canonical too, so a co-located
+        // graph's per-repo freshness is not cwd-dependent either.
+        Some(label) => {
+            repo_scope::write_record(store, label, Path::new(&canonical_root(root)), &repo_info)
+        }
         None => {
             let _ = store.set_repo_info(&repo_info);
         }
@@ -2352,21 +2356,37 @@ fn canonical_root(root: &Path) -> String {
         .into_owned()
 }
 
-/// The root recorded in `indexed_root`, as a path a freshness check can use (#248). An absolute
-/// root is returned as is. A relative one — a graph indexed as `index .` before roots were
-/// canonicalised — is kept when it is visible from the current directory and otherwise resolved
-/// against the db file's own directory, the one place a relative root was ever meaningful.
+/// The root recorded in `indexed_root`, as a path a freshness check can use (#248):
+/// [`recorded_root_path`] of the meta value.
 pub fn indexed_root_path(store: &dyn GraphStoreMutExt, db_path: &str) -> Option<PathBuf> {
-    let root = PathBuf::from(store.meta_get_key("indexed_root")?);
-    if root.is_absolute() || root.is_dir() {
-        return Some(root);
+    store
+        .meta_get_key("indexed_root")
+        .map(|root| recorded_root_path(&root, db_path))
+}
+
+/// A recorded root (`indexed_root`, or a registry record's `repo:<label>:root`) as a path a
+/// freshness check can use (#248). Roots are written canonical since 0.21.1, so an absolute
+/// root is returned as is. A relative one was written by an older binary as the caller spelled
+/// it (`index .`), relative to a working directory nobody recorded; the db file's own directory
+/// is the best evidence of where that was (`index . --db graph.db`), so the root resolves
+/// against it whenever that directory exists, and only otherwise stays as spelled — which is
+/// what the pre-#248 code always did.
+pub fn recorded_root_path(root: &str, db_path: &str) -> PathBuf {
+    let root = PathBuf::from(root);
+    if root.is_absolute() {
+        return root;
     }
     let base = Path::new(db_path)
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    Some(base.join(root))
+    let from_db = base.join(&root);
+    if from_db.is_dir() || !root.is_dir() {
+        from_db
+    } else {
+        root
+    }
 }
 
 /// Now, as RFC 3339 UTC — the `indexed_at` meta value.
@@ -2410,7 +2430,11 @@ pub fn graph_commits_behind(store: &dyn GraphStoreMutExt, db_path: &str) -> Opti
         return repos
             .iter()
             .filter_map(|r| {
-                commits_behind_since(Path::new(&r.root), r.info.commit.as_deref(), db_path)
+                commits_behind_since(
+                    &recorded_root_path(&r.root, db_path),
+                    r.info.commit.as_deref(),
+                    db_path,
+                )
             })
             .max();
     }
@@ -3420,12 +3444,35 @@ mod tests {
             at.len() == 20 && at.ends_with('Z') && &at[4..5] == "-" && &at[10..11] == "T",
             "indexed_at is RFC 3339 UTC: {at}"
         );
-        // Legacy relative root, not visible from here: resolved against the db's directory.
+        // Legacy relative roots (written by an older binary as spelled). `"."` — always a
+        // directory from ANY cwd — resolves against the db file's directory when that exists
+        // (codex round 1 on #264), never the caller's cwd; one that exists nowhere resolves
+        // there too; one visible only from the cwd stays as spelled (the pre-#248 behaviour).
+        store.meta_set_key("indexed_root", ".");
+        assert_eq!(
+            indexed_root_path(&store, root.join("graph.db").to_str().unwrap()).unwrap(),
+            root.join("."),
+            "a legacy '.' is the db's directory, not the cwd"
+        );
         store.meta_set_key("indexed_root", "no-such-dir-for-this-test");
         assert_eq!(
             indexed_root_path(&store, "/graphs/acme/graph.db").unwrap(),
             PathBuf::from("/graphs/acme/no-such-dir-for-this-test")
         );
+        store.meta_set_key("indexed_root", rel.to_str().unwrap());
+        assert_eq!(
+            indexed_root_path(&store, "/graphs/acme/graph.db").unwrap(),
+            rel,
+            "visible only from the cwd: kept as spelled"
+        );
+        // A labelled record is written canonical too (codex round 1 on #264).
+        let mut labelled = MemStore::new();
+        index_path_as(&mut labelled, &rel, Some("rel")).unwrap();
+        let rec = repo_scope::registry(&labelled)
+            .into_iter()
+            .find(|r| r.label == "rel")
+            .expect("the record");
+        assert_eq!(PathBuf::from(&rec.root), std::fs::canonicalize(&root).unwrap());
         let _ = std::fs::remove_dir_all(&root);
     }
 

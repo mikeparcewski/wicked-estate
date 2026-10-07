@@ -162,7 +162,7 @@ fn staleness_report(
     if !repos.is_empty() {
         for rec in repos {
             match wicked_estate::commits_behind_since(
-                Path::new(&rec.root),
+                &wicked_estate::recorded_root_path(&rec.root, db),
                 rec.info.commit.as_deref(),
                 db,
             ) {
@@ -238,7 +238,7 @@ fn stats_json(
                 "indexed_version": key("indexed_version"),
                 "id_scheme": key("id_scheme"),
                 "commits_behind": wicked_estate::commits_behind_since(
-                    Path::new(&rec.root),
+                    &wicked_estate::recorded_root_path(&rec.root, db),
                     rec.info.commit.as_deref(),
                     db,
                 ),
