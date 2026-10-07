@@ -3472,7 +3472,10 @@ mod tests {
             .into_iter()
             .find(|r| r.label == "rel")
             .expect("the record");
-        assert_eq!(PathBuf::from(&rec.root), std::fs::canonicalize(&root).unwrap());
+        assert_eq!(
+            PathBuf::from(&rec.root),
+            std::fs::canonicalize(&root).unwrap()
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

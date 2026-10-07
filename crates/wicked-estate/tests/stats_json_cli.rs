@@ -157,10 +157,13 @@ fn stats_json_has_one_provenance_block_per_repo() {
     let head_a = committed_repo(&a, "alpha");
     let head_b = committed_repo(&b, "beta");
     let db = dir.join("shared.db");
-    run(&dir, &db, &["index", a.to_str().unwrap(), "--repo", "a"]);
-    run(&dir, &db, &["index", b.to_str().unwrap(), "--repo", "b"]);
+    // Indexed by RELATIVE paths from `dir`; read back from another cwd below (#248 for the
+    // registry's roots — codex round 1 on #264).
+    run(&dir, &db, &["index", "a", "--repo", "a"]);
+    run(&dir, &db, &["index", "b", "--repo", "b"]);
 
-    let doc = stats_json(&dir, &db);
+    let elsewhere = fresh_dir("per_repo_elsewhere");
+    let doc = stats_json(&elsewhere, &db);
     let repos = doc["repos"].as_array().expect("repos");
     assert_eq!(repos.len(), 2, "{doc}");
     let by_label = |l: &str| {
@@ -171,6 +174,11 @@ fn stats_json_has_one_provenance_block_per_repo() {
             .clone()
     };
     let (ra, rb) = (by_label("a"), by_label("b"));
+    assert_eq!(
+        PathBuf::from(ra["root"].as_str().unwrap()),
+        fs::canonicalize(&a).unwrap(),
+        "the registry root is canonical, not 'a': {doc}"
+    );
     assert_eq!(ra["commit"].as_str(), Some(head_a.as_str()));
     assert_eq!(rb["commit"].as_str(), Some(head_b.as_str()));
     assert_eq!(ra["files"], serde_json::json!(1));
@@ -187,7 +195,7 @@ fn stats_json_has_one_provenance_block_per_repo() {
     // block says which (#245).
     commit_one(&b, "b1");
     commit_one(&b, "b2");
-    let doc = stats_json(&dir, &db);
+    let doc = stats_json(&elsewhere, &db);
     let repos = doc["repos"].as_array().unwrap();
     let behind =
         |l: &str| repos.iter().find(|r| r["label"] == l).unwrap()["commits_behind"].clone();
@@ -200,4 +208,5 @@ fn stats_json_has_one_provenance_block_per_repo() {
     );
 
     let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&elsewhere);
 }
