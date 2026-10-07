@@ -54,7 +54,8 @@ wicked-estate annotations <name> [--type <t>] [--json] [--db <file>]
       "provenance":"...", "author":"...", "ts":1718500000, "advisory":true,
       "source_type":"unspecified", "extraction_method":"manual", "last_verified":0 } ] }
 ```
-- `ts` is write time; `last_verified` is the freshness clock (`0` = never verified). Both are always
+- `ts` is write time; `last_verified` is the freshness clock (`0` = never verified). The CLI writes
+  the envelope with `annotate --source-type S --extraction-method M --last-verified now|<secs>|YYYY-MM-DD`. Both are always
   present, so a reader never infers freshness from `ts` (#204).
 - `annotations <name>` emits an **array** of these objects (a name is a search); `--symbol <id>`
   emits one object (an id names one symbol). Kept by decision (#203).

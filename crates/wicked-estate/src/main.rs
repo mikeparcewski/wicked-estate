@@ -30,8 +30,9 @@
 //!   wicked-estate clusters [<min_size>]  [--json] [--annotate] [--db ...]
 //!   wicked-estate fingerprint <name>     [--content] [--db ...]
 //!   wicked-estate changed-since <sha>    [--json] [--db ...]
-//!   wicked-estate annotate <name>        --key K --value V [--type T] [--confidence F] [--provenance P] [--author A] [--db ...]
-//!   wicked-estate annotate --symbol <id> --key K --value V [--type T] [--confidence F] [--provenance P] [--author A] [--db ...]
+//!   wicked-estate annotate <name>        --key K --value V [--type T] [--confidence F] [--provenance P] [--author A]
+//!                                        [--source-type S] [--extraction-method M] [--last-verified now|<secs>|YYYY-MM-DD] [--db ...]
+//!   wicked-estate annotate --symbol <id> --key K --value V [same flags] [--db ...]
 //!   wicked-estate annotations <name>     [--type T] [--json] [--db ...]
 //!   wicked-estate annotations --symbol <id> [--type T] [--json] [--db ...]
 //!   wicked-estate stale-annotations <cutoff-unix-seconds | YYYY-MM-DD> [--json] [--db ...]
@@ -853,6 +854,11 @@ fn main() -> Result<()> {
     let mut ann_confidence: f64 = 1.0;
     let mut ann_provenance: String = String::new();
     let mut ann_author: String = String::new();
+    // Evidence envelope for `annotate` (#204 follow-on): None = the Annotation defaults
+    // (`unspecified` / `manual` / 0 = never verified). Validated in the arm, not here.
+    let mut ann_source_type: Option<String> = None;
+    let mut ann_extraction_method: Option<String> = None;
+    let mut ann_last_verified: Option<String> = None;
     // --type <t>: annotation type. Write side (annotate) defaults to `note`; read side
     // (annotations) treats absence as "no filter". A plain string — fixed convention OR custom.
     let mut ann_type: Option<String> = None;
@@ -1022,6 +1028,21 @@ fn main() -> Result<()> {
             "--author" => {
                 if let Some(v) = it.next() {
                     ann_author = v.clone();
+                }
+            }
+            "--source-type" => {
+                if let Some(v) = it.next() {
+                    ann_source_type = Some(v.clone());
+                }
+            }
+            "--extraction-method" => {
+                if let Some(v) = it.next() {
+                    ann_extraction_method = Some(v.clone());
+                }
+            }
+            "--last-verified" => {
+                if let Some(v) = it.next() {
+                    ann_last_verified = Some(v.clone());
                 }
             }
             "--type" => {
@@ -2942,14 +2963,42 @@ fn main() -> Result<()> {
                 .as_deref()
                 .context("--value is required for the annotate command")?;
             let ty = ann_type.as_deref().unwrap_or(DEFAULT_ANNOTATION_TYPE);
+            // Evidence envelope. An empty string is refused rather than stored: it would read back
+            // as a claim of "no source" distinct from the `unspecified` default (§3, fail closed).
+            for (flag, v) in [
+                ("--source-type", &ann_source_type),
+                ("--extraction-method", &ann_extraction_method),
+            ] {
+                if v.as_deref() == Some("") {
+                    anyhow::bail!("{flag} must not be empty; omit it for the default");
+                }
+            }
+            let last_verified = match ann_last_verified.as_deref() {
+                None => 0,
+                Some(v) => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    cutoff::parse_verified(v, now).map_err(anyhow::Error::msg)?
+                }
+            };
             ensure_db_dir(&db)?;
             let mut store = SqliteStore::open(&db).map_err(to_any)?;
             // Build the typed annotation once; clone per target. ts=0 → store stamps it.
             let make = |sym_present_value: &str| {
-                Annotation::new(ty, key, sym_present_value)
+                let mut a = Annotation::new(ty, key, sym_present_value)
                     .with_confidence(ann_confidence)
                     .with_provenance(ann_provenance.clone())
                     .with_author(ann_author.clone())
+                    .with_last_verified(last_verified);
+                if let Some(st) = &ann_source_type {
+                    a = a.with_source_type(st.clone());
+                }
+                if let Some(em) = &ann_extraction_method {
+                    a = a.with_extraction_method(em.clone());
+                }
+                a
             };
             // Upsert helper: when `--replace`, delete the (type, key) row(s) first and accumulate
             // the deleted count; then append. Returns the number of rows replaced for this symbol.
@@ -4087,6 +4136,15 @@ fn main() -> Result<()> {
             println!("    --confidence  confidence score 0.0–1.0 (default: 1.0)");
             println!("    --provenance  provenance string (default: empty)");
             println!("    --author      author string (default: empty)");
+            println!(
+                "    --source-type        what kind of source backed it (default: unspecified; code/config/sme-answer/static-analysis/runtime-trace/documentation or custom)"
+            );
+            println!(
+                "    --extraction-method  how it was extracted, e.g. scip-rust@0.3 (default: manual)"
+            );
+            println!(
+                "    --last-verified      now | <unix-seconds> | YYYY-MM-DD (UTC) — the freshness clock stale-annotations reads (default: 0 = never verified)"
+            );
             println!("  wicked-estate annotations <name>   [--type T] [--json] [--db ...]");
             println!("  wicked-estate annotations --symbol <id> [--type T] [--json] [--db ...]");
             println!(

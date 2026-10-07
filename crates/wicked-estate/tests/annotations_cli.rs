@@ -675,3 +675,95 @@ fn help_banner_states_the_cutoff_unit() {
         "banner: {help}"
     );
 }
+
+/// `annotate` writes the evidence envelope, and `stale-annotations` judges the row by the clock
+/// it was written with — before this a CLI-written row was always `last_verified = 0`, so no
+/// CLI user could ever record a re-verification.
+#[test]
+fn annotate_writes_the_evidence_envelope() {
+    let (dir, db) = index_one_fn("ann_envelope", "fn target() {}\n");
+    run(
+        &dir,
+        &db,
+        &[
+            "annotate",
+            "target",
+            "--key",
+            "owner",
+            "--value",
+            "payments-team",
+            "--source-type",
+            "sme-answer",
+            "--extraction-method",
+            "interview@2026-01",
+            "--last-verified",
+            "2026-01-01",
+        ],
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(&run(&dir, &db, &["annotations", "target", "--json"])).unwrap();
+    let a = &v[0]["annotations"][0];
+    assert_eq!(a["source_type"], "sme-answer");
+    assert_eq!(a["extraction_method"], "interview@2026-01");
+    assert_eq!(a["last_verified"], 1_767_225_600_i64);
+
+    let stale = |cutoff: &str| -> usize {
+        let out = run(&dir, &db, &["stale-annotations", cutoff, "--json"]);
+        serde_json::from_str::<serde_json::Value>(&out)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    assert_eq!(stale("2025-06-01"), 0, "verified after this cutoff → fresh");
+    assert_eq!(
+        stale("2026-06-01"),
+        1,
+        "verified before this cutoff → stale"
+    );
+
+    // `now` is fresh for any window that ends now.
+    run(
+        &dir,
+        &db,
+        &[
+            "annotate",
+            "target",
+            "--key",
+            "owner",
+            "--value",
+            "p",
+            "--last-verified",
+            "now",
+            "--replace",
+        ],
+    );
+    let out = run(
+        &dir,
+        &db,
+        &["stale-annotations", "--older-than", "1d", "--json"],
+    );
+    assert_eq!(out.trim(), "[]", "just verified → not stale: {out}");
+}
+
+#[test]
+fn annotate_refuses_a_degenerate_envelope() {
+    let (dir, db) = index_one_fn("ann_envelope_bad", "fn target() {}\n");
+    let base = ["annotate", "target", "--key", "k", "--value", "v"];
+    for extra in [
+        &["--source-type", ""][..],
+        &["--extraction-method", ""],
+        &["--last-verified", "yesterday"],
+        &["--last-verified", "-1"],
+        &["--last-verified", "2026-02-30"],
+    ] {
+        let mut args = base.to_vec();
+        args.extend_from_slice(extra);
+        let err = run_fail(&dir, &db, &args);
+        assert!(err.contains(extra[0]), "{extra:?} names the flag: {err}");
+    }
+    // Nothing was written by any refused call.
+    let v: serde_json::Value =
+        serde_json::from_str(&run(&dir, &db, &["annotations", "target", "--json"])).unwrap();
+    assert!(v[0]["annotations"].as_array().unwrap().is_empty());
+}

@@ -11,6 +11,9 @@
 //!   last 90 days" is `--older-than 90d`. The unit is required; a bare `90` is refused rather than
 //!   guessed as seconds or days.
 //!
+//! [`parse_verified`] reads the same instant spellings (plus `now`) for `annotate --last-verified`,
+//! so the clock a row is written with and the clock it is judged by are spelled identically.
+//!
 //! No date crate: the only calendar arithmetic needed is proleptic-Gregorian days-from-civil
 //! (Howard Hinnant's algorithm), plus its inverse to echo the resolved instant in human output.
 
@@ -33,6 +36,25 @@ pub fn resolve(operands: &[&str], older_than: Option<&str>, now: i64) -> Result<
             many.len()
         )),
     }
+}
+
+/// `annotate --last-verified`: `now`, `<unix-seconds>` or `<YYYY-MM-DD>` (UTC midnight). `0` is
+/// the explicit "never verified"; a negative instant is refused — no fact was verified before 1970,
+/// and a negative value would sort as never-verified-but-older on every freshness read.
+pub fn parse_verified(s: &str, now: i64) -> Result<i64, String> {
+    let at = if s == "now" {
+        now
+    } else {
+        parse_instant(s).map_err(|_| {
+            format!("--last-verified {s:?}: expected now, Unix seconds or a YYYY-MM-DD date")
+        })?
+    };
+    if at < 0 {
+        return Err(format!(
+            "--last-verified {s:?}: must not be before 1970-01-01"
+        ));
+    }
+    Ok(at)
 }
 
 /// `<unix-seconds>` or `<YYYY-MM-DD>` (UTC midnight).
@@ -216,6 +238,17 @@ mod tests {
             resolve(&["100"], Some("90d"), NOW).is_err(),
             "operand and window"
         );
+    }
+
+    #[test]
+    fn last_verified_takes_now_seconds_or_a_date() {
+        assert_eq!(parse_verified("now", NOW), Ok(NOW));
+        assert_eq!(parse_verified("0", NOW), Ok(0), "explicit never-verified");
+        assert_eq!(parse_verified("1767225600", NOW), Ok(1_767_225_600));
+        assert_eq!(parse_verified("2026-01-01", NOW), Ok(1_767_225_600));
+        for bad in ["-1", "1969-12-31", "yesterday", "2026-02-30", "NOW", ""] {
+            assert!(parse_verified(bad, NOW).is_err(), "{bad:?} accepted");
+        }
     }
 
     #[test]

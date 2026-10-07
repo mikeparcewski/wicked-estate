@@ -18,6 +18,14 @@
   unchanged. The spec (`docs/recon/annotation-consumer-spec.md`) fixed the order only over the cap.
 
 ### Added
+- **`annotate` writes the evidence envelope.** `--source-type S`, `--extraction-method M` and
+  `--last-verified now|<unix-seconds>|YYYY-MM-DD` (UTC) set the three fields `stale-annotations`
+  and every `--json` read now surface. Before, a CLI-written row was always
+  `unspecified` / `manual` / `last_verified = 0`, so a CLI user could never record a
+  re-verification and `stale-annotations` reported every CLI fact as stale forever. Re-verify
+  with `annotate … --last-verified now --replace`. Omitted flags keep those defaults. An empty
+  `--source-type` / `--extraction-method`, an unparseable or pre-1970 `--last-verified` is a usage
+  error that writes nothing. The flags are declared in `cli_flags` for `annotate` only.
 - **`stale-annotations` accepts a date or a window (#205).** Besides Unix seconds, the cutoff
   may be `YYYY-MM-DD` (00:00:00 UTC, strict: `2026-02-30` is refused) or
   `--older-than <N>{s,m,h,d,w}` (`now − N`; `--older-than 90d` is "not verified in 90 days"; a
