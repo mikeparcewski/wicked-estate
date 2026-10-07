@@ -5716,7 +5716,10 @@ mod path_render_tests {
         let mut same = PathResult::default();
         same.found = true;
         let text = rendered(&same, "x", "x", 5_000);
-        assert!(text.contains("same symbol"), "{text}");
+        assert!(
+            text.contains("resolve to a candidate for both endpoints — zero hops"),
+            "{text}"
+        );
         assert!(!text.contains("no path"), "{text}");
     }
 
