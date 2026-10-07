@@ -1577,9 +1577,9 @@ fn main() -> Result<()> {
                 let rows: Vec<serde_json::Value> = hits.iter().map(resolve_row).collect();
                 print_line(&serde_json::to_string_pretty(&rows)?)?;
             } else {
-                println!("{} match(es) for '{name}':", hits.len());
+                print_line(&format!("{} match(es) for '{name}':", hits.len()))?;
                 for n in &hits {
-                    println!("  {:?} {} ({})", n.kind, n.name, loc(n));
+                    print_line(&format!("  {:?} {} ({})", n.kind, n.name, loc(n)))?;
                 }
             }
             emit_cli_span(
@@ -1681,14 +1681,18 @@ fn main() -> Result<()> {
                 let out = blast_radius_json(name, &deps[..kept], dropped, unresolved, &br, depth);
                 print_line(&serde_json::to_string(&out).map_err(|e| anyhow::anyhow!(e))?)?;
             } else if deps.is_empty() {
-                println!("no resolved dependents for '{name}' (symbol may not be indexed)");
+                print_line(&format!(
+                    "no resolved dependents for '{name}' (symbol may not be indexed)"
+                ))?;
             } else {
-                println!("{} symbol(s) depend on '{name}':", deps.len());
+                print_line(&format!("{} symbol(s) depend on '{name}':", deps.len()))?;
                 for n in deps.iter().take(kept) {
-                    println!("  {:?} {} ({})", n.kind, n.name, loc(n));
+                    print_line(&format!("  {:?} {} ({})", n.kind, n.name, loc(n)))?;
                 }
                 if dropped > 0 {
-                    println!("  …and {dropped} more (output bounded at 25K chars)");
+                    print_line(&format!(
+                        "  …and {dropped} more (output bounded at 25K chars)"
+                    ))?;
                 }
             }
             // Honest coverage — never let the absence of dependents read as "safe to change".
@@ -1712,15 +1716,15 @@ fn main() -> Result<()> {
                     }
                     (false, false) => String::new(),
                 };
-                println!(
+                print_line(&format!(
                     "coverage: {} resolved dependent(s) within depth {depth}; {unresolved} \
                      unresolved call(s) reference '{name}' — best-effort static resolution, MAY \
                      be incomplete (precise tier pending){cut}",
                     deps.len()
-                );
+                ))?;
                 // How much to believe the rows above (wicked-estate#194), on the line after the
                 // completeness line a human already reads.
-                println!("evidence: {}", evidence_text(&br.confidence));
+                print_line(&format!("evidence: {}", evidence_text(&br.confidence)))?;
             }
             emit_cli_span(
                 &otel_sink,
@@ -1880,7 +1884,10 @@ fn main() -> Result<()> {
                 print_line(&serde_json::to_string(&result).map_err(|e| anyhow::anyhow!(e))?)?;
             } else {
                 let mut out = std::io::stdout().lock();
-                match write_lineage_text(&mut out, &args, &result) {
+                // Flushed before anything goes to stderr, so a merged stream keeps the order.
+                match write_lineage_text(&mut out, &args, &result)
+                    .and_then(|()| std::io::Write::flush(&mut out))
+                {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
                     Err(e) => return Err(anyhow::anyhow!(e)),
@@ -3718,15 +3725,15 @@ fn main() -> Result<()> {
                 let rows: Vec<serde_json::Value> = nodes.iter().map(resolve_row).collect();
                 print_line(&serde_json::to_string_pretty(&rows)?)?;
             } else {
-                println!("{} match(es) for '{name}':", nodes.len());
+                print_line(&format!("{} match(es) for '{name}':", nodes.len()))?;
                 for n in &nodes {
-                    println!(
+                    print_line(&format!(
                         "  {} {:?} ({}:{})",
                         n.name,
                         n.kind,
                         n.location.file,
                         n.location.span.start_line + 1
-                    );
+                    ))?;
                 }
             }
         }

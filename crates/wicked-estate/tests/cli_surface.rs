@@ -235,6 +235,9 @@ fn json_arms_survive_a_closed_stdout() {
         vec!["resolve", "f", "--json"],
         vec!["query", "f", "--json"],
         vec!["blast-radius", "f", "--json"],
+        vec!["resolve", "f"],
+        vec!["query", "f"],
+        vec!["blast-radius", "f"],
     ];
     for args in table {
         let mut child = Command::new(bin())
