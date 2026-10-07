@@ -177,3 +177,47 @@ fn cross_graph_prints_evidence_per_repo() {
     }
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// #191: every `--json` dependent row carries `depth` — hops from the target along the walk
+/// that admitted it (`1` = direct dependent), the field the MCP `BlastRadius` tool always had.
+#[test]
+fn json_rows_carry_depth_from_the_target() {
+    let dir = scratch("depthrows");
+    fs::write(
+        dir.join("src/a.ts"),
+        "export function f(): number { return 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/b.ts"),
+        "import { f } from './a';\nexport function g(): number { return f(); }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/c.ts"),
+        "import { g } from './b';\nexport function h(): number { return g(); }\n",
+    )
+    .unwrap();
+    let db = dir.join("g.db");
+    let db = db.to_str().unwrap();
+    let src = dir.join("src");
+    let out = run(&dir, &["index", src.to_str().unwrap(), "--db", db]);
+    assert!(out.status.success(), "index failed: {out:?}");
+    let out = run(&dir, &["blast-radius", "f", "--json", "--db", db]);
+    assert!(out.status.success(), "{out:?}");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let rows = doc["dependents"].as_array().expect("dependents");
+    let depth_of = |name: &str| -> Option<u64> {
+        rows.iter()
+            .find(|r| r["name"] == name)
+            .and_then(|r| r["depth"].as_u64())
+    };
+    assert_eq!(depth_of("g"), Some(1), "g calls f directly: {doc}");
+    assert_eq!(depth_of("h"), Some(2), "h reaches f through g: {doc}");
+    assert!(
+        rows.iter()
+            .all(|r| r["depth"].as_u64().is_some_and(|d| d >= 1)),
+        "every row names its depth: {doc}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}

@@ -1931,6 +1931,10 @@ pub struct BlastRadius {
     pub node_cap_reached: bool,
     /// The `depth` horizon cut the walk short — real dependents exist BEYOND these rows.
     pub depth_horizon_reached: bool,
+    /// (#191) Hops from the target to each dependent, keyed by symbol id — the SMALLEST across
+    /// the walks when several same-named symbols matched. `1` is a direct dependent. The MCP
+    /// `BlastRadius` tool reads the same `Subgraph::depths`; the CLI row carries it from here.
+    pub depths: std::collections::BTreeMap<String, u32>,
     /// How much to believe the dependency edges that admitted [`Self::dependents`]
     /// (wicked-estate#194): edges whose source is a returned row and whose target the walk
     /// reached. Structural `Contains`/`Defines` are excluded, so a File row admitted only by
@@ -2031,6 +2035,12 @@ pub fn blast_radius_by_name(store: &dyn GraphRead, name: &str, depth: u32) -> Re
             }
         }
         for n in answer {
+            if let Some(d) = sub.depths.get(n.symbol.as_str()).copied() {
+                out.depths
+                    .entry(n.symbol.as_str().to_string())
+                    .and_modify(|cur| *cur = (*cur).min(d))
+                    .or_insert(d);
+            }
             if seen.insert(n.symbol.clone()) {
                 out.dependents.push(n.clone());
             }

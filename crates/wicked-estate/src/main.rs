@@ -133,6 +133,42 @@ impl StalenessReport {
 /// (the `index` arm's wicked-core#170 class). The store factory decides what a spec names:
 /// `sqlite://<path>` is a file too, and a zero-length file is not a graph (SQLite would grow it
 /// into an empty one). `:memory:` and non-file backends are left to the factory.
+/// (#246) The dispatch arms that only READ the graph named by `--db`; each fails closed through
+/// [`require_existing_graph`] before it opens the store. `lineage` and `supports` check inside
+/// their arms (they parse their own argv); the bridged tools check in `tool_bridge`; multi-db
+/// commands (`cross-graph`, `correspond`) and writers are not here.
+const READ_ONLY_COMMANDS: &[&str] = &[
+    "query",
+    "blast-radius",
+    "path",
+    "stats",
+    "graph-view",
+    "source",
+    "by-requirement",
+    "annotations",
+    "stale-annotations",
+    "fingerprint",
+    "changed-since",
+    "entrypoints",
+    "leaves",
+    "dead-code",
+    "nodes",
+    "resolve",
+    "export",
+];
+
+/// (#247) Write one line to stdout; a reader that went away (`| head -1`) is not an error —
+/// the line is simply not wanted. Every other write error is returned.
+fn print_line(line: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    match writeln!(out, "{line}").and_then(|()| out.flush()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn require_existing_graph(db: &str, cmd: &str) -> anyhow::Result<()> {
     if let wicked_estate_store::StoreBackend::Sqlite { path } =
         wicked_estate_store::StoreBackend::parse(db)
@@ -869,6 +905,13 @@ fn main() -> Result<()> {
         Some((c, r)) => (c.as_str(), r),
         None => ("help", &[][..]),
     };
+    // (#200) The conventional version flag: one line, nothing else on stdout, exit 0. Before
+    // the bridge and the flag check — a caller gating on the indexer version must not have to
+    // scrape the usage banner's first line.
+    if matches!(cmd, "--version" | "-V" | "version") {
+        println!("wicked-estate {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
 
     // Parse shared flags: `--db <spec>`, `--dbs a,b,c`, and `--scip-file <path>`;
     // everything else is positional.
@@ -1216,6 +1259,13 @@ fn main() -> Result<()> {
     // Re-dispatch to the usage arm. `help` matches no command, so it falls through to `_`.
     let cmd = if help_requested { "help" } else { cmd };
 
+    // (#246) Every READ command shares `lineage`'s fail-closed check: opening a missing SQLite
+    // path would create an empty graph and answer "absent" with exit 0 — indistinguishable from
+    // the real answer. Writers (`index`, `annotate`, …) keep creating.
+    if READ_ONLY_COMMANDS.contains(&cmd) {
+        require_existing_graph(&db, cmd)?;
+    }
+
     match cmd {
         "index" => {
             let path = positional.first().map(String::as_str).unwrap_or(".");
@@ -1520,9 +1570,17 @@ fn main() -> Result<()> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos() as u64;
-            println!("{} match(es) for '{name}':", hits.len());
-            for n in &hits {
-                println!("  {:?} {} ({})", n.kind, n.name, loc(n));
+            if positional.iter().any(|a| a == "--json") {
+                // (#199) The machine shape is `resolve --json`'s: one row per hit,
+                // `{symbol_id,name,kind,file,line}` — the same keys, so a parser written against
+                // either command reads the other.
+                let rows: Vec<serde_json::Value> = hits.iter().map(resolve_row).collect();
+                print_line(&serde_json::to_string_pretty(&rows)?)?;
+            } else {
+                println!("{} match(es) for '{name}':", hits.len());
+                for n in &hits {
+                    println!("  {:?} {} ({})", n.kind, n.name, loc(n));
+                }
             }
             emit_cli_span(
                 &otel_sink,
@@ -1621,10 +1679,7 @@ fn main() -> Result<()> {
                 // text path: dependents PLUS the unresolved count — absence of dependents must
                 // never silently read as "safe to change".
                 let out = blast_radius_json(name, &deps[..kept], dropped, unresolved, &br, depth);
-                println!(
-                    "{}",
-                    serde_json::to_string(&out).map_err(|e| anyhow::anyhow!(e))?
-                );
+                print_line(&serde_json::to_string(&out).map_err(|e| anyhow::anyhow!(e))?)?;
             } else if deps.is_empty() {
                 println!("no resolved dependents for '{name}' (symbol may not be indexed)");
             } else {
@@ -1820,13 +1875,38 @@ fn main() -> Result<()> {
                             .push(wicked_estate::staleness_diagnostic(n));
                     }
                 }
-                println!(
-                    "{}",
-                    serde_json::to_string(&result).map_err(|e| anyhow::anyhow!(e))?
-                );
+                // (#247) `| head -1` closes the reader: not an error, the document is simply not
+                // wanted — the text path already reports it cleanly, this one did not.
+                print_line(&serde_json::to_string(&result).map_err(|e| anyhow::anyhow!(e))?)?;
             } else {
                 let mut out = std::io::stdout().lock();
-                write_lineage_text(&mut out, &args, &result).map_err(|e| anyhow::anyhow!(e))?;
+                match write_lineage_text(&mut out, &args, &result) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
+                    Err(e) => return Err(anyhow::anyhow!(e)),
+                }
+                // (#244) An operand that is a symbol NAME (not an id) yields an honest empty
+                // leaf; say so, and name the command that turns a name into an id.
+                let empty = result.content["dependencies"]
+                    .as_array()
+                    .is_some_and(Vec::is_empty);
+                if empty
+                    && store
+                        .get_node(&wicked_estate_core::SymbolId(args.symbol.clone()))
+                        .map_err(to_any)?
+                        .is_none()
+                {
+                    let same_name = wicked_estate::search(&*store, &args.symbol).map_err(to_any)?;
+                    if !same_name.is_empty() {
+                        eprintln!(
+                            "note: '{}' matches no symbol id but {} symbol name(s); `lineage --symbol` \
+                             takes an exact id — run `wicked-estate resolve {} --json` to get it",
+                            args.symbol,
+                            same_name.len(),
+                            args.symbol
+                        );
+                    }
+                }
                 // The tool's `STALENESS: commits_behind not available at this layer …` line is
                 // its cue to the hosting layer to run the git check. This frontend did
                 // (`maybe_print_staleness`, on stdout), so echoing the cue would contradict that
@@ -3588,11 +3668,13 @@ fn main() -> Result<()> {
             // `--file` is globally parsed into `src_file`; `--kind` lands in `positional` (like `nodes`).
             let file_filter = src_file.clone();
             let mut kind_filter: Option<String> = None;
+            let mut include_values = false;
             let mut name: Option<String> = None;
             let mut it2 = positional.iter();
             while let Some(a) = it2.next() {
                 match a.as_str() {
                     "--json" => {}
+                    "--include-values" => include_values = true,
                     "--kind" => kind_filter = it2.next().cloned(),
                     other => {
                         if name.is_none() {
@@ -3601,8 +3683,9 @@ fn main() -> Result<()> {
                     }
                 }
             }
-            let name =
-                name.context("usage: wicked-estate resolve <name> [--file F] [--kind K] [--json]")?;
+            let name = name.context(
+                "usage: wicked-estate resolve <name> [--file F] [--kind K] [--include-values] [--json]",
+            )?;
 
             // Brain-facing read surface → route through the open_store factory so it
             // is backend-agnostic (postgres:// under --features postgres) per ADR-003,
@@ -3616,6 +3699,13 @@ fn main() -> Result<()> {
                 ..Default::default()
             };
             let mut nodes = store.find_symbols(&q).map_err(to_any)?;
+            // (#234) Synthetic value slots share real symbols' names (`resolve runs` on a
+            // 905-file repo: 63 slots beside 1 function). Like every other name-based arm, the
+            // default answer is the structural symbols; `--include-values` is the way back in
+            // (docs/ENGINE-CONTRACT.md §3.3).
+            if !include_values {
+                nodes.retain(wicked_estate_core::is_structural_symbol);
+            }
             if let Some(f) = &file_filter {
                 nodes.retain(|n| &n.location.file == f);
             }
@@ -3625,19 +3715,8 @@ fn main() -> Result<()> {
             }
 
             if json_out {
-                let rows: Vec<serde_json::Value> = nodes
-                    .iter()
-                    .map(|n| {
-                        serde_json::json!({
-                            "symbol_id": n.symbol.to_string(),
-                            "name": n.name,
-                            "kind": format!("{:?}", n.kind),
-                            "file": n.location.file,
-                            "line": n.location.span.start_line + 1,
-                        })
-                    })
-                    .collect();
-                println!("{}", serde_json::to_string_pretty(&rows)?);
+                let rows: Vec<serde_json::Value> = nodes.iter().map(resolve_row).collect();
+                print_line(&serde_json::to_string_pretty(&rows)?)?;
             } else {
                 println!("{} match(es) for '{name}':", nodes.len());
                 for n in &nodes {
@@ -4026,6 +4105,9 @@ fn main() -> Result<()> {
         _ => {
             println!("wicked-estate {} — usage:", env!("CARGO_PKG_VERSION"));
             println!(
+                "  wicked-estate --version            # `wicked-estate <version>`, one line, exit 0"
+            );
+            println!(
                 "  wicked-estate index <path>         [--db <file|:memory:>] [--repo <name>] [--history] [--embeddings] [--force]"
             );
             println!(
@@ -4064,6 +4146,9 @@ fn main() -> Result<()> {
                 "  wicked-estate drift                 [--db ...]  # IaC vs live resource diff (W10)"
             );
             println!("  wicked-estate query <name>          [--db ...]");
+            println!(
+                "    --json emits `resolve --json`'s rows [{{symbol_id,name,kind,file,line}}] (#199)"
+            );
             println!("  wicked-estate blast-radius <name>   [--depth N] [--json] [--db ...]");
             println!("  wicked-estate path <from> <to>      [--max-depth N] [--json] [--db ...]");
             println!(
@@ -4212,10 +4297,25 @@ fn main() -> Result<()> {
                 "    --semantics (with --json) adds per-node requirement, requirement_validated, rule_confidence, out_edges[] for domain-brain"
             );
             println!(
-                "  wicked-estate resolve <name> [--file F] [--kind K] [--json]  # name → [{{symbol_id,name,kind,file,line}}]"
+                "  wicked-estate resolve <name> [--file F] [--kind K] [--include-values] [--json]  # name → [{{symbol_id,name,kind,file,line}}]"
             );
             println!(
                 "    Resolve a simple name to its stable SymbolId(s) before an --symbol write (names are not unique)."
+            );
+            println!(
+                "    Structural symbols only by default; --include-values adds synthetic value slots (ENGINE-CONTRACT §3.3)."
+            );
+            println!(
+                "  wicked-estate graph-view [--limit N] [--focus <name|id>] [--include-tests] [--include-trivial] [--ignore <glob>]  # JSON {{nodes,edges}} around the hotspots"
+            );
+            println!(
+                "    The one command that returns EDGES; its JSON shape is not yet a committed contract."
+            );
+            println!(
+                "  wicked-estate by-requirement <requirement>  # symbols whose semantics name this requirement"
+            );
+            println!(
+                "  wicked-estate semantics <symbol-id> [--description D] [--requirement R] [--validated true|false] [--validated-by W]  # read, or set with any flag"
             );
             println!(
                 "  wicked-estate export [--format ndjson|json] [--nodes-only] [--edges-only]  # full graph export"
@@ -4323,13 +4423,30 @@ fn evidence_text(c: &wicked_estate::EdgeConfidence) -> String {
 const BLAST_RADIUS_CHAR_BUDGET: usize = 25_000;
 
 /// One serialized dependent row for the blast-radius `--json` output.
-fn blast_radius_row(n: &wicked_estate_core::Node) -> serde_json::Value {
+/// One `resolve --json` row — also `query --json`'s (#199): `{symbol_id,name,kind,file,line}`.
+fn resolve_row(n: &wicked_estate_core::Node) -> serde_json::Value {
+    serde_json::json!({
+        "symbol_id": n.symbol.to_string(),
+        "name": n.name,
+        "kind": format!("{:?}", n.kind),
+        "file": n.location.file,
+        "line": n.location.span.start_line + 1,
+    })
+}
+
+fn blast_radius_row(
+    n: &wicked_estate_core::Node,
+    br: &wicked_estate::BlastRadius,
+) -> serde_json::Value {
     serde_json::json!({
         "id": n.symbol.as_str(),
         "name": n.name,
         "kind": &n.kind,
         "file": n.location.file,
         "line": n.location.span.start_line + 1,
+        // (#191) Hops from the target along the walk that admitted the row — `1` is a direct
+        // dependent. The MCP `BlastRadius` tool has always returned it; the CLI row now does too.
+        "depth": br.depths.get(n.symbol.as_str()).copied().unwrap_or(0),
     })
 }
 
@@ -4354,7 +4471,8 @@ fn cap_blast_radius_rows(
     // The empty `[]` already counted in the envelope is replaced by the rows' own `[...]`.
     let row_budget = (BLAST_RADIUS_CHAR_BUDGET + 2).saturating_sub(envelope_len);
     let fits = |k: usize| -> bool {
-        let rows: Vec<serde_json::Value> = deps[..k].iter().map(blast_radius_row).collect();
+        let rows: Vec<serde_json::Value> =
+            deps[..k].iter().map(|n| blast_radius_row(n, br)).collect();
         serde_json::to_string(&rows).is_ok_and(|s| s.len() <= row_budget)
     };
     if fits(deps.len()) {
@@ -4399,7 +4517,7 @@ fn blast_radius_json(
 ) -> serde_json::Value {
     serde_json::json!({
         "target": name,
-        "dependents": kept.iter().map(blast_radius_row).collect::<Vec<_>>(),
+        "dependents": kept.iter().map(|n| blast_radius_row(n, br)).collect::<Vec<_>>(),
         "unresolved": unresolved,
         "truncated_dependents": dropped,
         "searched_depth": depth,

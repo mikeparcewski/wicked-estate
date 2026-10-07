@@ -3,6 +3,42 @@
 ## [Unreleased]
 
 ### Changed (breaking)
+- **Read commands fail closed on a missing `--db` (#246).** `query`, `blast-radius`, `path`,
+  `stats`, `graph-view`, `source`, `by-requirement`, `annotations`, `stale-annotations`,
+  `fingerprint`, `changed-since`, `entrypoints`, `leaves`, `dead-code`, `nodes`, `resolve` and
+  `export` now share `lineage`'s check: a SQLite path that does not exist (or a zero-byte file)
+  is `no graph at <db> (<cmd> never creates one)`, exit 1, and the file is NOT created. Before,
+  each opened an empty graph and answered "absent" with exit 0. Writers (`index`, `annotate`,
+  `semantics`, …) keep creating. A shell-out that relied on exit 0 against a missing db breaks;
+  that is the fix.
+- **`resolve <name>` returns structural symbols only (#234).** Synthetic value slots share real
+  symbols' names (`resolve runs`: 63 slots beside 1 function on a 905-file repo); the default is
+  now `is_structural_symbol`, like every other name-based arm, and `--include-values` is the
+  explicit way back in. ENGINE-CONTRACT §3.3 row updated. Crew's cross-repo symbol search
+  (which shells out to `resolve <name> --json`) sees fewer rows — the real ones.
+
+### Added
+- **`wicked-estate --version` / `-V` / `version` (#200)** prints `wicked-estate <version>` —
+  one line, nothing else on stdout, exit 0. Before, all three fell into the ~100-line usage
+  banner (exit 0), and the version had to be scraped off its first line.
+- **`query --json` (#199)** emits `resolve --json`'s rows (`[{symbol_id,name,kind,file,line}]`)
+  instead of being rejected as a foreign flag; the `query` banner line points at it.
+- **`blast-radius --json` rows carry `depth` (#191)** — hops from the target, `1` = direct
+  dependent — the field the MCP `BlastRadius` tool always returned. `BlastRadius::depths` carries
+  it from `blast_radius_by_name` (additive on a `#[non_exhaustive]` struct).
+- **The usage banner is a complete command inventory (#202):** `graph-view`, `by-requirement`
+  and `semantics` were dispatched but undocumented; `graph-view`'s line says its JSON shape is
+  not yet a committed contract. `tests/cli_surface.rs::banner_lists_every_dispatch_arm` reads the
+  dispatch arms off `main.rs` and fails when one is missing from `help`.
+- **`lineage` text mode hints when the operand is a NAME (#244):** an empty leaf whose operand
+  matches no symbol id but one or more symbol names prints a note naming
+  `wicked-estate resolve <name> --json`. JSON output unchanged.
+
+### Fixed
+- **`lineage --json` no longer panics on a closed stdout (#247):** `| head -1` ends the document
+  quietly (exit 0) instead of a `failed printing to stdout` panic; text mode's broken pipe is
+  handled the same way, and `resolve --json` / `query --json` write through the same seam. Every
+  other write error is still returned.
 - **`stale-annotations` takes exactly one integer cutoff (#205).** The arm took the first
   parseable integer anywhere in argv, so `stale-annotations soon 100` ran at cutoff 100 and
   `stale-annotations 2026 01 01` ran at 2026 with the rest dropped — a plausible wrong answer
