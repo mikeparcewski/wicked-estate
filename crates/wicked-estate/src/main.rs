@@ -133,6 +133,18 @@ impl StalenessReport {
 /// (the `index` arm's wicked-core#170 class). The store factory decides what a spec names:
 /// `sqlite://<path>` is a file too, and a zero-length file is not a graph (SQLite would grow it
 /// into an empty one). `:memory:` and non-file backends are left to the factory.
+/// (#247) Write one line to stdout; a reader that went away (`| head -1`) is not an error —
+/// the line is simply not wanted. Every other write error is returned.
+fn print_line(line: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    match writeln!(out, "{line}").and_then(|()| out.flush()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn require_existing_graph(db: &str, cmd: &str) -> anyhow::Result<()> {
     if let wicked_estate_store::StoreBackend::Sqlite { path } =
         wicked_estate_store::StoreBackend::parse(db)
@@ -869,6 +881,13 @@ fn main() -> Result<()> {
         Some((c, r)) => (c.as_str(), r),
         None => ("help", &[][..]),
     };
+    // (#200) The conventional version flag: one line, nothing else on stdout, exit 0. Before
+    // the bridge and the flag check — a caller gating on the indexer version must not have to
+    // scrape the usage banner's first line.
+    if matches!(cmd, "--version" | "-V" | "version") {
+        println!("wicked-estate {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
 
     // Parse shared flags: `--db <spec>`, `--dbs a,b,c`, and `--scip-file <path>`;
     // everything else is positional.
@@ -1508,6 +1527,9 @@ fn main() -> Result<()> {
             let name = positional
                 .first()
                 .context("usage: wicked-estate query <name>")?;
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "query")?;
             let store = open_store_ext(&db).map_err(to_any)?;
             maybe_print_staleness(store.as_ref(), &db);
             maybe_warn_version_mismatch(store.as_ref(), &db);
@@ -1520,9 +1542,17 @@ fn main() -> Result<()> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos() as u64;
-            println!("{} match(es) for '{name}':", hits.len());
-            for n in &hits {
-                println!("  {:?} {} ({})", n.kind, n.name, loc(n));
+            if positional.iter().any(|a| a == "--json") {
+                // (#199) The machine shape is `resolve --json`'s: one row per hit,
+                // `{symbol_id,name,kind,file,line}` — the same keys, so a parser written against
+                // either command reads the other.
+                let rows: Vec<serde_json::Value> = hits.iter().map(resolve_row).collect();
+                print_line(&serde_json::to_string_pretty(&rows)?)?;
+            } else {
+                print_line(&format!("{} match(es) for '{name}':", hits.len()))?;
+                for n in &hits {
+                    print_line(&format!("  {:?} {} ({})", n.kind, n.name, loc(n)))?;
+                }
             }
             emit_cli_span(
                 &otel_sink,
@@ -1594,6 +1624,9 @@ fn main() -> Result<()> {
                 }
                 found.context("usage: wicked-estate blast-radius <name> [--depth N] [--json]")?
             };
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "blast-radius")?;
             let store = open_store_ext(&db).map_err(to_any)?;
             // Machine output must be exactly one JSON document — notices would corrupt it.
             if !json_out {
@@ -1621,19 +1654,20 @@ fn main() -> Result<()> {
                 // text path: dependents PLUS the unresolved count — absence of dependents must
                 // never silently read as "safe to change".
                 let out = blast_radius_json(name, &deps[..kept], dropped, unresolved, &br, depth);
-                println!(
-                    "{}",
-                    serde_json::to_string(&out).map_err(|e| anyhow::anyhow!(e))?
-                );
+                print_line(&serde_json::to_string(&out).map_err(|e| anyhow::anyhow!(e))?)?;
             } else if deps.is_empty() {
-                println!("no resolved dependents for '{name}' (symbol may not be indexed)");
+                print_line(&format!(
+                    "no resolved dependents for '{name}' (symbol may not be indexed)"
+                ))?;
             } else {
-                println!("{} symbol(s) depend on '{name}':", deps.len());
+                print_line(&format!("{} symbol(s) depend on '{name}':", deps.len()))?;
                 for n in deps.iter().take(kept) {
-                    println!("  {:?} {} ({})", n.kind, n.name, loc(n));
+                    print_line(&format!("  {:?} {} ({})", n.kind, n.name, loc(n)))?;
                 }
                 if dropped > 0 {
-                    println!("  …and {dropped} more (output bounded at 25K chars)");
+                    print_line(&format!(
+                        "  …and {dropped} more (output bounded at 25K chars)"
+                    ))?;
                 }
             }
             // Honest coverage — never let the absence of dependents read as "safe to change".
@@ -1657,15 +1691,15 @@ fn main() -> Result<()> {
                     }
                     (false, false) => String::new(),
                 };
-                println!(
+                print_line(&format!(
                     "coverage: {} resolved dependent(s) within depth {depth}; {unresolved} \
                      unresolved call(s) reference '{name}' — best-effort static resolution, MAY \
                      be incomplete (precise tier pending){cut}",
                     deps.len()
-                );
+                ))?;
                 // How much to believe the rows above (wicked-estate#194), on the line after the
                 // completeness line a human already reads.
-                println!("evidence: {}", evidence_text(&br.confidence));
+                print_line(&format!("evidence: {}", evidence_text(&br.confidence)))?;
             }
             emit_cli_span(
                 &otel_sink,
@@ -1734,6 +1768,9 @@ fn main() -> Result<()> {
             }
             let (from, to) = (operands[0].as_str(), operands[1].as_str());
 
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "path")?;
             let store = open_store_ext(&db).map_err(to_any)?;
             // Machine output must be exactly one JSON document — notices would corrupt it.
             if !json_out {
@@ -1820,13 +1857,41 @@ fn main() -> Result<()> {
                             .push(wicked_estate::staleness_diagnostic(n));
                     }
                 }
-                println!(
-                    "{}",
-                    serde_json::to_string(&result).map_err(|e| anyhow::anyhow!(e))?
-                );
+                // (#247) `| head -1` closes the reader: not an error, the document is simply not
+                // wanted — the text path already reports it cleanly, this one did not.
+                print_line(&serde_json::to_string(&result).map_err(|e| anyhow::anyhow!(e))?)?;
             } else {
                 let mut out = std::io::stdout().lock();
-                write_lineage_text(&mut out, &args, &result).map_err(|e| anyhow::anyhow!(e))?;
+                // Flushed before anything goes to stderr, so a merged stream keeps the order.
+                match write_lineage_text(&mut out, &args, &result)
+                    .and_then(|()| std::io::Write::flush(&mut out))
+                {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
+                    Err(e) => return Err(anyhow::anyhow!(e)),
+                }
+                // (#244) An operand that is a symbol NAME (not an id) yields an honest empty
+                // leaf; say so, and name the command that turns a name into an id.
+                let empty = result.content["dependencies"]
+                    .as_array()
+                    .is_some_and(Vec::is_empty);
+                if empty
+                    && store
+                        .get_node(&wicked_estate_core::SymbolId(args.symbol.clone()))
+                        .map_err(to_any)?
+                        .is_none()
+                {
+                    let same_name = wicked_estate::search(&*store, &args.symbol).map_err(to_any)?;
+                    if !same_name.is_empty() {
+                        eprintln!(
+                            "note: '{}' matches no symbol id but {} symbol name(s); `lineage --symbol` \
+                             takes an exact id — run `wicked-estate resolve {} --json` to get it",
+                            args.symbol,
+                            same_name.len(),
+                            args.symbol
+                        );
+                    }
+                }
                 // The tool's `STALENESS: commits_behind not available at this layer …` line is
                 // its cue to the hosting layer to run the git check. This frontend did
                 // (`maybe_print_staleness`, on stdout), so echoing the cue would contradict that
@@ -1902,6 +1967,9 @@ fn main() -> Result<()> {
         }
         "stats" => {
             let json_out = positional.iter().any(|a| a == "--json");
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "stats")?;
             let store = open_store_ext(&db).map_err(to_any)?;
             // Machine output is exactly one JSON document (#198): the freshness notice lives
             // INSIDE it (`staleness`), never as a line beside it.
@@ -2017,6 +2085,9 @@ fn main() -> Result<()> {
                 }
             };
 
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "graph-view")?;
             let store = open_store_ext(&db).map_err(to_any)?;
             // Oversample PageRank candidates so filters don't under-deliver.
             // Fetch 4× the requested limit (at least limit+200) so that after
@@ -2300,6 +2371,9 @@ fn main() -> Result<()> {
                     "{SOURCE_USAGE}\na <name> or one of --symbols/--cluster/--file is required"
                 );
             }
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "source")?;
             let store = open_store(&db).map_err(to_any)?;
 
             // Resolve the selector — one rule for both output modes (#206: the text path used to
@@ -2773,6 +2847,9 @@ fn main() -> Result<()> {
         // Reverse link: every symbol annotated with a given requirement.
         "by-requirement" => {
             let req = positional.first().cloned().unwrap_or_default();
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "by-requirement")?;
             let store = open_store_ext(&db).map_err(to_any)?;
             let hits = wicked_estate::symbols_for_requirement(&*store, &req).map_err(to_any)?;
             println!("symbols satisfying requirement {req:?}: {}", hits.len());
@@ -3106,6 +3183,9 @@ fn main() -> Result<()> {
             let type_filter = ann_type.as_deref();
             // ADR-003: route through the open_store factory (backend-agnostic) — this arm
             // needs only GraphRead methods, which deref through Box<dyn GraphStore>.
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "annotations")?;
             let store = open_store(&db).map_err(to_any)?;
 
             // Fetch + apply the optional type filter for one symbol.
@@ -3200,6 +3280,9 @@ fn main() -> Result<()> {
                 "usage: wicked-estate stale-annotations <cutoff-unix-seconds> [--json] [--db ...]",
             )?;
             // ADR-003: backend-agnostic factory — annotations_stale_since is a GraphRead method.
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "stale-annotations")?;
             let store = open_store(&db).map_err(to_any)?;
             let stale = store.annotations_stale_since(cutoff).map_err(to_any)?;
             if json_out {
@@ -3243,6 +3326,9 @@ fn main() -> Result<()> {
             let name = positional
                 .first()
                 .context("usage: wicked-estate fingerprint <name> [--content] [--db ...]")?;
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "fingerprint")?;
             let store = open_store(&db).map_err(to_any)?;
             let hits = wicked_estate::search(&*store, name).map_err(to_any)?;
             drop(store);
@@ -3319,6 +3405,9 @@ fn main() -> Result<()> {
                 }
                 return Ok(());
             }
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "changed-since")?;
             let store = SqliteStore::open(&db).map_err(to_any)?;
             let mut all_nodes: Vec<wicked_estate_core::Node> = Vec::new();
             for file in &changed_files {
@@ -3358,6 +3447,9 @@ fn main() -> Result<()> {
         //   wicked-estate entrypoints [--json] [--db ...]
         "entrypoints" => {
             let json_out = positional.iter().any(|a| a == "--json");
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "entrypoints")?;
             let store = SqliteStore::open(&db).map_err(to_any)?;
             let nodes = store.entrypoint_nodes().map_err(to_any)?;
             if json_out {
@@ -3388,6 +3480,9 @@ fn main() -> Result<()> {
         //   wicked-estate leaves [--json] [--db ...]
         "leaves" => {
             let json_out = positional.iter().any(|a| a == "--json");
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "leaves")?;
             let store = SqliteStore::open(&db).map_err(to_any)?;
             let nodes = store.leaf_nodes().map_err(to_any)?;
             if json_out {
@@ -3418,6 +3513,9 @@ fn main() -> Result<()> {
         //   wicked-estate dead-code [--json] [--db ...]
         "dead-code" => {
             let json_out = positional.iter().any(|a| a == "--json");
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "dead-code")?;
             let store = SqliteStore::open(&db).map_err(to_any)?;
             let nodes = store.isolated_nodes().map_err(to_any)?;
             if json_out {
@@ -3468,6 +3566,9 @@ fn main() -> Result<()> {
             // per-node `get_semantics` read nor the `neighbors` edge fetch (and its shape is
             // unchanged for existing consumers).
             let with_semantics = positional.iter().any(|a| a == "--semantics");
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "nodes")?;
             let store = SqliteStore::open(&db).map_err(to_any)?;
 
             // Per-node JSON for the `--json` paths: base metadata + typed annotations.
@@ -3588,11 +3689,13 @@ fn main() -> Result<()> {
             // `--file` is globally parsed into `src_file`; `--kind` lands in `positional` (like `nodes`).
             let file_filter = src_file.clone();
             let mut kind_filter: Option<String> = None;
+            let mut include_values = false;
             let mut name: Option<String> = None;
             let mut it2 = positional.iter();
             while let Some(a) = it2.next() {
                 match a.as_str() {
                     "--json" => {}
+                    "--include-values" => include_values = true,
                     "--kind" => kind_filter = it2.next().cloned(),
                     other => {
                         if name.is_none() {
@@ -3601,8 +3704,9 @@ fn main() -> Result<()> {
                     }
                 }
             }
-            let name =
-                name.context("usage: wicked-estate resolve <name> [--file F] [--kind K] [--json]")?;
+            let name = name.context(
+                "usage: wicked-estate resolve <name> [--file F] [--kind K] [--include-values] [--json]",
+            )?;
 
             // Brain-facing read surface → route through the open_store factory so it
             // is backend-agnostic (postgres:// under --features postgres) per ADR-003,
@@ -3610,12 +3714,22 @@ fn main() -> Result<()> {
             // GraphRead::find_symbols, a GraphStore supertrait method, so Box<dyn
             // GraphStore> derefs cleanly. (The other read arms are pre-existing debt —
             // a dedicated open_store migration, not this PHASE-1 surface's job.)
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "resolve")?;
             let store = open_store(&db).map_err(to_any)?;
             let q = SymbolQuery {
                 exact_name: Some(name.clone()),
                 ..Default::default()
             };
             let mut nodes = store.find_symbols(&q).map_err(to_any)?;
+            // (#234) Synthetic value slots share real symbols' names (`resolve runs` on a
+            // 905-file repo: 63 slots beside 1 function). Like every other name-based arm, the
+            // default answer is the structural symbols; `--include-values` is the way back in
+            // (docs/ENGINE-CONTRACT.md §3.3).
+            if !include_values {
+                nodes.retain(wicked_estate_core::is_structural_symbol);
+            }
             if let Some(f) = &file_filter {
                 nodes.retain(|n| &n.location.file == f);
             }
@@ -3625,29 +3739,18 @@ fn main() -> Result<()> {
             }
 
             if json_out {
-                let rows: Vec<serde_json::Value> = nodes
-                    .iter()
-                    .map(|n| {
-                        serde_json::json!({
-                            "symbol_id": n.symbol.to_string(),
-                            "name": n.name,
-                            "kind": format!("{:?}", n.kind),
-                            "file": n.location.file,
-                            "line": n.location.span.start_line + 1,
-                        })
-                    })
-                    .collect();
-                println!("{}", serde_json::to_string_pretty(&rows)?);
+                let rows: Vec<serde_json::Value> = nodes.iter().map(resolve_row).collect();
+                print_line(&serde_json::to_string_pretty(&rows)?)?;
             } else {
-                println!("{} match(es) for '{name}':", nodes.len());
+                print_line(&format!("{} match(es) for '{name}':", nodes.len()))?;
                 for n in &nodes {
-                    println!(
+                    print_line(&format!(
                         "  {} {:?} ({}:{})",
                         n.name,
                         n.kind,
                         n.location.file,
                         n.location.span.start_line + 1
-                    );
+                    ))?;
                 }
             }
         }
@@ -3957,6 +4060,9 @@ fn main() -> Result<()> {
             let edges_only = positional.iter().any(|a| a == "--edges-only");
 
             // ADR-003: backend-agnostic factory — all_nodes/all_edges are GraphRead methods.
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "export")?;
             let store = open_store(&db).map_err(to_any)?;
             let nodes = if !edges_only {
                 store.all_nodes().map_err(to_any)?
@@ -4026,6 +4132,9 @@ fn main() -> Result<()> {
         _ => {
             println!("wicked-estate {} — usage:", env!("CARGO_PKG_VERSION"));
             println!(
+                "  wicked-estate --version            # `wicked-estate <version>`, one line, exit 0"
+            );
+            println!(
                 "  wicked-estate index <path>         [--db <file|:memory:>] [--repo <name>] [--history] [--embeddings] [--force]"
             );
             println!(
@@ -4064,6 +4173,9 @@ fn main() -> Result<()> {
                 "  wicked-estate drift                 [--db ...]  # IaC vs live resource diff (W10)"
             );
             println!("  wicked-estate query <name>          [--db ...]");
+            println!(
+                "    --json emits `resolve --json`'s rows [{{symbol_id,name,kind,file,line}}] (#199)"
+            );
             println!("  wicked-estate blast-radius <name>   [--depth N] [--json] [--db ...]");
             println!("  wicked-estate path <from> <to>      [--max-depth N] [--json] [--db ...]");
             println!(
@@ -4212,10 +4324,25 @@ fn main() -> Result<()> {
                 "    --semantics (with --json) adds per-node requirement, requirement_validated, rule_confidence, out_edges[] for domain-brain"
             );
             println!(
-                "  wicked-estate resolve <name> [--file F] [--kind K] [--json]  # name → [{{symbol_id,name,kind,file,line}}]"
+                "  wicked-estate resolve <name> [--file F] [--kind K] [--include-values] [--json]  # name → [{{symbol_id,name,kind,file,line}}]"
             );
             println!(
                 "    Resolve a simple name to its stable SymbolId(s) before an --symbol write (names are not unique)."
+            );
+            println!(
+                "    Structural symbols only by default; --include-values adds synthetic value slots (ENGINE-CONTRACT §3.3)."
+            );
+            println!(
+                "  wicked-estate graph-view [--limit N] [--focus <name|id>] [--include-tests] [--include-trivial] [--ignore <glob>]  # JSON {{nodes,edges}} around the hotspots"
+            );
+            println!(
+                "    The one command that returns EDGES; its JSON shape is not yet a committed contract."
+            );
+            println!(
+                "  wicked-estate by-requirement <requirement>  # symbols whose semantics name this requirement"
+            );
+            println!(
+                "  wicked-estate semantics <symbol-id> [--description D] [--requirement R] [--validated true|false] [--validated-by W]  # read, or set with any flag"
             );
             println!(
                 "  wicked-estate export [--format ndjson|json] [--nodes-only] [--edges-only]  # full graph export"
@@ -4323,13 +4450,30 @@ fn evidence_text(c: &wicked_estate::EdgeConfidence) -> String {
 const BLAST_RADIUS_CHAR_BUDGET: usize = 25_000;
 
 /// One serialized dependent row for the blast-radius `--json` output.
-fn blast_radius_row(n: &wicked_estate_core::Node) -> serde_json::Value {
+/// One `resolve --json` row — also `query --json`'s (#199): `{symbol_id,name,kind,file,line}`.
+fn resolve_row(n: &wicked_estate_core::Node) -> serde_json::Value {
+    serde_json::json!({
+        "symbol_id": n.symbol.to_string(),
+        "name": n.name,
+        "kind": format!("{:?}", n.kind),
+        "file": n.location.file,
+        "line": n.location.span.start_line + 1,
+    })
+}
+
+fn blast_radius_row(
+    n: &wicked_estate_core::Node,
+    br: &wicked_estate::BlastRadius,
+) -> serde_json::Value {
     serde_json::json!({
         "id": n.symbol.as_str(),
         "name": n.name,
         "kind": &n.kind,
         "file": n.location.file,
         "line": n.location.span.start_line + 1,
+        // (#191) Hops from the target along the walk that admitted the row — `1` is a direct
+        // dependent. The MCP `BlastRadius` tool has always returned it; the CLI row now does too.
+        "depth": br.depths.get(n.symbol.as_str()).copied().unwrap_or(0),
     })
 }
 
@@ -4354,7 +4498,8 @@ fn cap_blast_radius_rows(
     // The empty `[]` already counted in the envelope is replaced by the rows' own `[...]`.
     let row_budget = (BLAST_RADIUS_CHAR_BUDGET + 2).saturating_sub(envelope_len);
     let fits = |k: usize| -> bool {
-        let rows: Vec<serde_json::Value> = deps[..k].iter().map(blast_radius_row).collect();
+        let rows: Vec<serde_json::Value> =
+            deps[..k].iter().map(|n| blast_radius_row(n, br)).collect();
         serde_json::to_string(&rows).is_ok_and(|s| s.len() <= row_budget)
     };
     if fits(deps.len()) {
@@ -4399,7 +4544,7 @@ fn blast_radius_json(
 ) -> serde_json::Value {
     serde_json::json!({
         "target": name,
-        "dependents": kept.iter().map(blast_radius_row).collect::<Vec<_>>(),
+        "dependents": kept.iter().map(|n| blast_radius_row(n, br)).collect::<Vec<_>>(),
         "unresolved": unresolved,
         "truncated_dependents": dropped,
         "searched_depth": depth,
