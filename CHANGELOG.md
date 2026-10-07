@@ -53,8 +53,6 @@
   the bound lines only on `no path found`; both operands resolving to one candidate is a zero-hop
   route decided before any walk (no bounds, worded "resolve to a candidate for both endpoints",
   not "the same symbol" — 79 nodes may share a name).
-
-### Fixed
 - **Missing-`symbol` replies carry the #190 cause keys (#227).** `TraverseGraph{}`,
   `BlastRadius{}` and `Lineage{}` now emit `depth_horizon_reached: false`,
   `node_cap_reached: false` and `searched_depth` = the effective default, like every other reply.
@@ -76,8 +74,6 @@ dropping hops would make a route invalid, so it wants a structured, flagged elis
   `stale-annotations 2026 01 01` ran at 2026 with the rest dropped — a plausible wrong answer
   with exit 0. Anything other than one integer operand is now a usage error (exit 1). A caller
   that passed stray operands breaks; that is the fix, as with #197/#206.
-
-### Fixed
 - **Annotation `--json` carries the evidence envelope (#204).** `annotations`,
   `annotations --symbol`, `stale-annotations`, `nodes` and `source` `--json` now emit
   `last_verified`, `source_type` and `extraction_method` on every annotation. Before, `ts`
