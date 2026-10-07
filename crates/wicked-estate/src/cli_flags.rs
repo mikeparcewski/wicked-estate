@@ -230,7 +230,10 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "stale-annotations",
-        spec: owns("<cutoff-unix-seconds>", &[DB, JSON]),
+        spec: owns(
+            "[<cutoff-unix-seconds> | <YYYY-MM-DD>]",
+            &[DB, JSON, Flag("older-than", Value)],
+        ),
     },
     Command {
         name: "fingerprint",
@@ -482,6 +485,19 @@ mod tests {
         assert!(check_args("annotate", &["f", "--key", "k", "--value", "--help"]).is_err());
         // An inline value does not consume the next token, so help after it is a help request.
         assert!(check_args("index", &["--repo=x", "--help"]).is_ok());
+    }
+
+    /// `--older-than` is owned by `stale-annotations` alone (#205): accepted there, named as
+    /// foreign everywhere else, and it takes a value — never a switch, never inline.
+    #[test]
+    fn older_than_is_owned_by_stale_annotations_205() {
+        assert!(check_args("stale-annotations", &["--older-than", "90d", "--json"]).is_ok());
+        let e = check_args("annotations", &["f", "--older-than", "90d"]).unwrap_err();
+        assert!(e.contains("accepted by: stale-annotations"), "{e}");
+        assert!(check_args("nodes", &["--older-than", "90d"]).is_err());
+        assert!(check_args("stale-annotations", &["--older-than"]).is_err());
+        assert!(check_args("stale-annotations", &["--older-than=90d"]).is_err());
+        assert!(check_args("stale-annotations", &["--older-than", "--json"]).is_err());
     }
 
     #[test]

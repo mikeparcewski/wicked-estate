@@ -51,21 +51,28 @@ wicked-estate annotations <name> [--type <t>] [--json] [--db <file>]
 { "symbol": "<symbol_id>",
   "annotations": [
     { "type":"assumption", "key":"...", "value":"...", "confidence":0.7,
-      "provenance":"...", "author":"...", "ts":1718500000, "advisory":true } ] }
+      "provenance":"...", "author":"...", "ts":1718500000, "advisory":true,
+      "source_type":"unspecified", "extraction_method":"manual", "last_verified":0 } ] }
 ```
+- `ts` is write time; `last_verified` is the freshness clock (`0` = never verified). Both are always
+  present, so a reader never infers freshness from `ts` (#204).
+- `annotations <name>` emits an **array** of these objects (a name is a search); `--symbol <id>`
+  emits one object (an id names one symbol). Kept by decision (#203).
 - `--type <t>` filters (fixed or custom). `advisory:true` is emitted for `assumption`/`question`, else absent/false.
 
 ## Annotations in structured payloads
 `nodes --json` and `source --json` (the bulk bundle) — each node object gains, when present:
 ```json
-"annotations": [ { type,key,value,confidence,provenance,author,ts,advisory } ],
+"annotations": [ { type,key,value,confidence,provenance,author,ts,advisory,source_type,extraction_method,last_verified } ],
 "annotation_summary": { "count": N, "by_type": {"note":2,"assumption":1}, "has_advisory": true }
 ```
 `RetrieveEntity` (MCP) gains the same two fields.
 
 ## R4 payload cap
-Annotations in payloads are capped at **20 per entity**. When an entity has more, **advisory-class
-(`assumption`/`question`) are kept first**, then the rest by recency (`ts` desc). `annotation_summary.count`
+Annotations in payloads are capped at **20 per entity**, ranked **advisory-class
+(`assumption`/`question`) first**, then the rest by recency (`ts` desc) — at every size, not only over
+the cap, so the order does not change when an entity crosses 20. One implementation serves every
+payload: `wicked_estate_retrieve::payload_annotations_json`. `annotation_summary.count`
 always reflects the TRUE total, so a consumer knows it was capped (mirrors the source-bundle "summary
 is always exact" rule). `annotations` queried directly via the CLI is **not** capped — only payloads.
 

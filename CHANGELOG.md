@@ -3,11 +3,27 @@
 ## [Unreleased]
 
 ### Changed (breaking)
-- **`stale-annotations` takes exactly one integer cutoff (#205).** The arm took the first
-  parseable integer anywhere in argv, so `stale-annotations soon 100` ran at cutoff 100 and
+- **`stale-annotations` takes exactly one cutoff (#205).** The arm took the first parseable
+  integer anywhere in argv, so `stale-annotations soon 100` ran at cutoff 100 and
   `stale-annotations 2026 01 01` ran at 2026 with the rest dropped — a plausible wrong answer
-  with exit 0. Anything other than one integer operand is now a usage error (exit 1). A caller
-  that passed stray operands breaks; that is the fix, as with #197/#206.
+  with exit 0. Stray operands, two operands, or an operand together with `--older-than` are now
+  a usage error (exit 1). A caller that passed stray operands breaks; that is the fix, as with
+  #197/#206.
+- **Payload annotations are ranked at every size.** `RetrieveEntity` (MCP) kept insertion order
+  under the 20-annotation cap and ranked only over it; `nodes --json` / `source --json` always
+  ranked. One entity therefore listed its annotations in two orders depending on the surface.
+  Every payload now ranks advisory-class first, then `ts` descending, at any count, so the order
+  no longer flips when an entity crosses 20. A consumer of `RetrieveEntity` that read
+  `annotations[]` positionally sees a new order; the set, the cap and `annotation_summary` are
+  unchanged. The spec (`docs/recon/annotation-consumer-spec.md`) fixed the order only over the cap.
+
+### Added
+- **`stale-annotations` accepts a date or a window (#205).** Besides Unix seconds, the cutoff
+  may be `YYYY-MM-DD` (00:00:00 UTC, strict: `2026-02-30` is refused) or
+  `--older-than <N>{s,m,h,d,w}` (`now − N`; `--older-than 90d` is "not verified in 90 days"; a
+  bare `90` is refused rather than guessed). The human line echoes the resolved instant,
+  `cutoff 1767225600 (2026-01-01T00:00:00Z)`; `--json` is unchanged. `--older-than` is declared in
+  `cli_flags` for `stale-annotations` only. No new dependency.
 
 ### Fixed
 - **Annotation `--json` carries the evidence envelope (#204).** `annotations`,
@@ -16,12 +32,15 @@
   (write time) was the only clock in the document, so a never-verified row
   (`last_verified: 0`) read as "verified just now" — in the JSON of the very command that
   selects on `last_verified`. The CLI's private renderer (`source_bundle::annotation_json`) is
-  deleted; every CLI arm and the MCP payloads now share `wicked_estate_retrieve::annotation_json`,
-  so the two surfaces cannot drift again. Additive: existing keys are unchanged. Cost: ~105 chars
+  deleted, and so are its copies of the payload cap and summary
+  (`MAX_ANNOTATIONS_PER_ENTITY`, `cap_annotations_for_payload`, `annotation_summary`): every CLI
+  arm and the MCP payloads now share `wicked_estate_retrieve::{annotation_json,
+  annotation_summary, payload_annotations_json, MAX_PAYLOAD_ANNOTATIONS}`, so the two surfaces
+  cannot drift again. Additive: existing keys are unchanged. Cost: ~105 chars
   per annotation pretty-printed (~2.1K for a node at the 20-annotation cap); `--max-total-chars`
   budgets source text only and is unaffected.
-- **The `stale-annotations` banner states the cutoff unit (#205):** `<cutoff-unix-seconds>`,
-  matching the usage error.
+- **The `stale-annotations` banner states the cutoff unit (#205):**
+  `<cutoff-unix-seconds | YYYY-MM-DD>` and the `--older-than` form, matching the usage error.
 
 ### Documentation
 - **`annotations --json` container shape (#203, kept by decision).** `--help` now documents
