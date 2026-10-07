@@ -788,13 +788,6 @@ fn main() -> Result<()> {
         None => ("help", &[][..]),
     };
 
-    // Parse shared flags: `--db <spec>`, `--dbs a,b,c`, and `--scip-file <path>`;
-    // everything else is positional.
-    //
-    // `--db` may be repeated; the LAST single `--db` value is used for single-db commands
-    // (backward-compatible).  All `--db` values are collected into `db_paths` for the
-    // `cross-graph` command.  `--dbs a,b,c` is an alias that accepts a comma-delimited list.
-    //
     // The DEFAULT spec resolves through the WICKED_RUNTIME profile seam
     // (docs/team-runtime.md): team → WICKED_STORE_URL (shared Postgres, needs a
     // `--features postgres` build) > WICKED_ESTATE_DB > the local graph.db. An explicit
@@ -825,318 +818,33 @@ fn main() -> Result<()> {
             )
         });
     }
-    // The shared parser below swallows any flag it knows and pushes the rest into
-    // `positional`, so an arm cannot tell a flag it never reads from one it does. Reject
-    // those first, against the dispatched command's own flags (#197, #206).
-    cli_flags::check(cmd, rest).map_err(anyhow::Error::msg)?;
-    let mut db_paths: Vec<String> = Vec::new();
-    let mut scip_file: Option<String> = None;
-    let mut since: u64 = 0;
-    // history_enabled: OFF by default; opt-in with `--history`.
-    let mut history = false;
-    // embeddings: OFF by default; opt-in with `--embeddings`.
-    let mut embeddings = false;
-    // --force: bypass incremental digest skip; re-extract all files even if unchanged.
-    let mut force_reindex = false;
-    // --repo <name>: index into a MULTI-REPO graph under this label. None = single-repo mode.
-    let mut repo_label: Option<String> = None;
-    // Semantic-annotation flags for the `semantics` command (requirement↔functionality linking).
-    let mut sem_description: Option<String> = None;
-    let mut sem_requirement: Option<String> = None;
-    let mut sem_validated: Option<bool> = None;
-    let mut sem_validated_by: Option<String> = None;
-    // Annotation flags for the `annotate` command.
-    let mut ann_key: Option<String> = None;
-    let mut ann_value: Option<String> = None;
-    let mut ann_confidence: f64 = 1.0;
-    let mut ann_provenance: String = String::new();
-    let mut ann_author: String = String::new();
-    // --type <t>: annotation type. Write side (annotate) defaults to `note`; read side
-    // (annotations) treats absence as "no filter". A plain string — fixed convention OR custom.
-    let mut ann_type: Option<String> = None;
-    // --symbol <SymbolId>: target a single node by stable ID (annotate + annotations).
-    let mut ann_symbol: Option<String> = None;
-    // --replace: idempotent upsert by (type, key) for the `annotate` command. Default OFF =
-    // append (today's behavior). When set, delete_annotations(sym, Some(type), key) before the
-    // append, so re-projecting a cache-class annotation replaces the row instead of duplicating it.
-    let mut ann_replace = false;
-    // --content: fingerprint uses body byte-slice hash instead of identity hash.
-    let mut fp_content = false;
-    // correspond command flags.
-    let mut db_a: Option<String> = None;
-    let mut db_b: Option<String> = None;
-    let mut correspond_top: usize = 20;
-    let mut correspond_min_score: f64 = 0.35;
-    // --annotated-with KEY or KEY=VALUE: filter nodes by annotation.
-    let mut annotated_with: Option<String> = None;
-    // `clusters` command tuning — community detection (graph) + semantic clustering.
-    let mut cluster_resolution: f64 = 1.0;
-    let mut cluster_hierarchical = false;
-    let mut cluster_package_bias: f64 = 0.0;
-    let mut cluster_weight: String = "graph".to_string();
-    // `--summary`: emit enriched per-community objects instead of bare member-id arrays.
-    let mut cluster_summary = false;
-    // `--annotate`: opt-in mutation — write a `community`-type annotation on every member of every
-    // detected community (Chunk 4). Default OFF: `clusters` is read-only unless this is passed.
-    let mut cluster_annotate = false;
-    let mut cluster_k: Option<usize> = None;
-    let mut cluster_eps: f32 = 0.25;
-    let mut cluster_min_pts: usize = 3;
-    // `source` bundle selectors + budget. Selectors are mutually-exclusive; precedence is
-    // resolved in the arm (--symbols > --cluster > --file > <name>).
-    let mut src_cluster: Option<usize> = None;
-    let mut src_file: Option<String> = None;
-    let mut src_symbols: Option<String> = None;
-    // Budget caps for the `source` bundle. None = unbounded (the caller owns its context).
-    let mut src_max_total: Option<usize> = None;
-    let mut src_max_node: Option<usize> = None;
-    let mut positional: Vec<String> = Vec::new();
-    let mut help_requested = false;
-    let mut it = rest.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--db" => {
-                if let Some(v) = it.next() {
-                    db = v.clone();
-                    db_paths.push(v.clone());
+    // Every bespoke arm's flags, values, operands and repeats are checked against its
+    // `cli_flags::COMMANDS` row before any I/O, and the arm reads the coerced result (#197,
+    // #206, W8.6). There is no second, permissive parse: a default applies only when its flag
+    // is absent. A help request, or a command no row names, goes to the usage arm.
+    // `db` is the resolved default here, so a store rule sees the store this run would open.
+    let (cmd, args) = match cli_flags::parse(cmd, rest, &db).map_err(anyhow::Error::msg)? {
+        cli_flags::Parsed::Unlisted | cli_flags::Parsed::Help => ("help", cli_flags::Args::none()),
+        // `lineage`/`supports` read `--db` themselves, strictly.
+        cli_flags::Parsed::SelfParsing => (cmd, cli_flags::Args::none()),
+        cli_flags::Parsed::Args(a) => {
+            if a.owns("db") {
+                if let Some(spec) = a.all(&["db"]).last() {
+                    db = spec.to_string();
                 }
             }
-            "--dbs" => {
-                if let Some(v) = it.next() {
-                    for part in v.split(',') {
-                        let p = part.trim().to_string();
-                        if !p.is_empty() {
-                            db_paths.push(p.clone());
-                            db = p; // last one becomes the single-db default
-                        }
-                    }
-                }
-            }
-            "--scip-file" => {
-                if let Some(v) = it.next() {
-                    scip_file = Some(v.clone());
-                }
-            }
-            "--since" => {
-                if let Some(v) = it.next() {
-                    since = v.parse::<u64>().unwrap_or(0);
-                }
-            }
-            "--history" => {
-                history = true;
-            }
-            "--embeddings" => {
-                embeddings = true;
-            }
-            "--force" => {
-                force_reindex = true;
-            }
-            // `--repo <name>` names the repo this run is indexing, so several repos can share
-            // one db. Noun-shaped like the CLI's other value flags (`--db`, `--file`,
-            // `--symbol`), and it is the word that shows up in `stats`, in the guard's errors,
-            // and as the path prefix on every row. `--as` is accepted as an alias.
-            // A missing value is a HARD error here, unlike the other value flags. Every other one
-            // degrades to a visible default; this one degrades to "index un-labelled", which is a
-            // different write to the graph than the caller asked for and looks like success.
-            // `--repo --force` fell into the same hole twice: `--force` became the label AND was
-            // dropped as a flag.
-            "--repo" | "--as" => match it.next() {
-                // Validate HERE, not only deep in `index_path_as` (Copilot on #117). The `=` arm
-                // below already does, and an argument error that names the argument is this CLI's
-                // convention — `--repo a/b` reporting only a bad label, with no mention of the
-                // flag that carried it, is the asymmetry that fix introduced.
-                Some(v) if !v.starts_with('-') => {
-                    if let Err(e) = wicked_estate::repo_scope::validate_label(v) {
-                        anyhow::bail!("{a} {v}: {e}");
-                    }
-                    repo_label = Some(v.clone());
-                }
-                Some(v) => anyhow::bail!(
-                    "{a} needs a repo name, got the flag `{v}` — write `{a} <name> {v}`"
-                ),
-                None => anyhow::bail!("{a} needs a repo name (e.g. `{a} ledger`)"),
-            },
-            // `--repo=<name>` is accepted too. Before this arm existed the whole argument fell
-            // through the match and was SILENTLY DROPPED, so `--repo=x` indexed the repo
-            // UN-LABELLED while reporting success — the operator ends up with a graph in a
-            // different shape than the one they asked for, and finds out later when the guard
-            // refuses something confusing. Same failure family as `--repo --force`.
-            _ if a.starts_with("--repo=") || a.starts_with("--as=") => {
-                let v = a.split_once('=').map(|(_, v)| v).unwrap_or_default();
-                if v.is_empty() {
-                    anyhow::bail!("{a} needs a repo name (e.g. `--repo=ledger`)");
-                }
-                // Validate at PARSE time, not just deep in the index call, so the message can
-                // name the argument the caller actually typed. `validate_label` alone reports the
-                // bad label but not which flag carried it, and the CLI's convention (see
-                // tests/repo_flag_cli.rs) is that an argument error names the argument.
-                if let Err(e) = wicked_estate::repo_scope::validate_label(v) {
-                    anyhow::bail!("{a}: {e}");
-                }
-                repo_label = Some(v.to_string());
-            }
-            "--description" => {
-                if let Some(v) = it.next() {
-                    sem_description = Some(v.clone());
-                }
-            }
-            "--requirement" => {
-                if let Some(v) = it.next() {
-                    sem_requirement = Some(v.clone());
-                }
-            }
-            "--validated-by" => {
-                if let Some(v) = it.next() {
-                    sem_validated_by = Some(v.clone());
-                }
-            }
-            "--validated" => {
-                if let Some(v) = it.next() {
-                    sem_validated = Some(matches!(v.as_str(), "true" | "1" | "yes"));
-                }
-            }
-            "--key" => {
-                if let Some(v) = it.next() {
-                    ann_key = Some(v.clone());
-                }
-            }
-            "--value" => {
-                if let Some(v) = it.next() {
-                    ann_value = Some(v.clone());
-                }
-            }
-            "--confidence" => {
-                if let Some(v) = it.next() {
-                    ann_confidence = v.parse::<f64>().unwrap_or(1.0);
-                }
-            }
-            "--provenance" => {
-                if let Some(v) = it.next() {
-                    ann_provenance = v.clone();
-                }
-            }
-            "--author" => {
-                if let Some(v) = it.next() {
-                    ann_author = v.clone();
-                }
-            }
-            "--type" => {
-                if let Some(v) = it.next() {
-                    ann_type = Some(v.clone());
-                }
-            }
-            "--symbol" => {
-                if let Some(v) = it.next() {
-                    ann_symbol = Some(v.clone());
-                }
-            }
-            "--replace" => {
-                ann_replace = true;
-            }
-            "--content" => {
-                fp_content = true;
-            }
-            "--db-a" => {
-                if let Some(v) = it.next() {
-                    db_a = Some(v.clone());
-                }
-            }
-            "--db-b" => {
-                if let Some(v) = it.next() {
-                    db_b = Some(v.clone());
-                }
-            }
-            "--top" => {
-                if let Some(v) = it.next() {
-                    correspond_top = v.parse::<usize>().unwrap_or(20);
-                }
-            }
-            "--min-score" => {
-                if let Some(v) = it.next() {
-                    correspond_min_score = v.parse::<f64>().unwrap_or(0.35);
-                }
-            }
-            "--annotated-with" => {
-                if let Some(v) = it.next() {
-                    annotated_with = Some(v.clone());
-                }
-            }
-            "--resolution" => {
-                if let Some(v) = it.next() {
-                    cluster_resolution = v.parse::<f64>().unwrap_or(1.0);
-                }
-            }
-            "--hierarchical" => {
-                cluster_hierarchical = true;
-            }
-            "--summary" => {
-                cluster_summary = true;
-            }
-            "--annotate" => {
-                cluster_annotate = true;
-            }
-            "--package-bias" => {
-                if let Some(v) = it.next() {
-                    cluster_package_bias = v.parse::<f64>().unwrap_or(0.0);
-                }
-            }
-            "--weight" => {
-                if let Some(v) = it.next() {
-                    cluster_weight = v.clone();
-                }
-            }
-            "--k" => {
-                if let Some(v) = it.next() {
-                    cluster_k = Some(v.parse::<usize>().unwrap_or(16));
-                }
-            }
-            "--eps" => {
-                if let Some(v) = it.next() {
-                    cluster_eps = v.parse::<f32>().unwrap_or(0.25);
-                }
-            }
-            "--min-pts" => {
-                if let Some(v) = it.next() {
-                    cluster_min_pts = v.parse::<usize>().unwrap_or(3);
-                }
-            }
-            "--cluster" => {
-                if let Some(v) = it.next() {
-                    src_cluster = v.parse::<usize>().ok();
-                }
-            }
-            "--file" => {
-                if let Some(v) = it.next() {
-                    src_file = Some(v.clone());
-                }
-            }
-            "--symbols" => {
-                if let Some(v) = it.next() {
-                    src_symbols = Some(v.clone());
-                }
-            }
-            "--max-total-chars" => {
-                if let Some(v) = it.next() {
-                    src_max_total = v.parse::<usize>().ok();
-                }
-            }
-            "--max-node-chars" => {
-                if let Some(v) = it.next() {
-                    src_max_node = v.parse::<usize>().ok();
-                }
-            }
-            // Before the catch-all: otherwise these land in `positional` and the `index` arm
-            // treats `--help` as a path to walk, printing "indexed --help → 0 nodes" and exiting 0.
-            "--help" | "-h" => help_requested = true,
-            _ => positional.push(a.clone()),
+            (cmd, a)
         }
-    }
-    // Re-dispatch to the usage arm. `help` matches no command, so it falls through to `_`.
-    let cmd = if help_requested { "help" } else { cmd };
+    };
 
     match cmd {
         "index" => {
-            let path = positional.first().map(String::as_str).unwrap_or(".");
+            let path = args.operand(0).unwrap_or(".");
+            let (history, embeddings, force_reindex) = (
+                args.switch("history"),
+                args.switch("embeddings"),
+                args.switch("force"),
+            );
             // Fail CLOSED on a path that is not there. Walking a missing directory yields zero files,
             // and reporting that as `indexed <path> → 0 nodes` with exit 0 makes every upstream path
             // bug look like an empty repository: the caller gets a real, queryable, EMPTY graph and a
@@ -1152,7 +860,7 @@ fn main() -> Result<()> {
                 );
             }
             ensure_db_dir(&db)?;
-            let as_repo = repo_label.as_deref();
+            let as_repo = args.str("repo");
             // --force: invalidate the stored digests so index_path treats every file as changed —
             // but only THIS repo's, or forcing one repo would silently make every other repo in a
             // co-located graph re-extract from scratch on its next run.
@@ -1163,7 +871,8 @@ fn main() -> Result<()> {
                     .clear_file_digests_under(scope.as_deref())
                     .map_err(to_any)?;
             }
-            let stats = if history && db != ":memory:" {
+            // The row refuses --history/--embeddings on an in-memory store (`Cond::Store`).
+            let stats = if history {
                 // Caller explicitly opted in to history — open the concrete store to call
                 // set_history_enabled(true) (inherent method, not on any trait), then box it.
                 // Mirrors the `compact` arm pattern.
@@ -1209,7 +918,7 @@ fn main() -> Result<()> {
             // W5.2: optional embeddings pass — OFF by default, opt-in with --embeddings.
             // Runs as a separate step so index_path's public signature is unchanged.
             // :memory: is skipped (embeddings live in the same store; nothing to persist).
-            if embeddings && db != ":memory:" {
+            if embeddings {
                 let mut emb_store = SqliteStore::open(&db).map_err(to_any)?;
                 let embedder = wicked_estate::default_embedder();
                 let n = wicked_estate::compute_embeddings(&mut emb_store, &*embedder)
@@ -1218,10 +927,10 @@ fn main() -> Result<()> {
             }
         }
         "scip" => {
-            let root_str = positional.first().map(String::as_str).unwrap_or(".");
+            let root_str = args.operand(0).unwrap_or(".");
             let root = Path::new(root_str);
             ensure_db_dir(&db)?;
-            let as_repo = repo_label.as_deref();
+            let as_repo = args.str("repo");
             // SCIP paths are repo-relative; a labelled graph's nodes are not. Correlating the two
             // without knowing which repo this index belongs to matches nothing and reports "0
             // precise edges" — refuse instead of ingesting silence.
@@ -1251,7 +960,7 @@ fn main() -> Result<()> {
                 }
             }
 
-            if let Some(explicit) = scip_file.as_deref() {
+            if let Some(explicit) = args.str("scip-file") {
                 let scip_path = Path::new(explicit);
                 let mut store = open_store_ext(&db).map_err(to_any)?;
                 let count = wicked_estate::ingest_scip_as(store.as_mut(), root, scip_path, as_repo)
@@ -1300,9 +1009,7 @@ fn main() -> Result<()> {
         }
         // Task B: ingest a Terraform state file (live resource nodes → estate LIVE side).
         "tfstate" => {
-            let file_path = positional
-                .first()
-                .context("usage: wicked-estate tfstate <file.tfstate> [--db ...]")?;
+            let file_path = args.required(0);
             let json = std::fs::read_to_string(file_path)
                 .with_context(|| format!("cannot read tfstate file '{file_path}'"))?;
             ensure_db_dir(&db)?;
@@ -1319,9 +1026,7 @@ fn main() -> Result<()> {
         // SqliteStore methods, so non-SQLite specs fail fast instead of silently creating a junk
         // file named after the connection URL. Additive: never touches nodes/edges.
         "import-telemetry" => {
-            let file_path = positional
-                .first()
-                .context("usage: wicked-estate import-telemetry <file.json> [--db ...]")?;
+            let file_path = args.required(0);
             let json = std::fs::read_to_string(file_path)
                 .with_context(|| format!("cannot read telemetry file '{file_path}'"))?;
             let payload: wicked_estate_store::TelemetryImport = serde_json::from_str(&json)
@@ -1423,9 +1128,7 @@ fn main() -> Result<()> {
             ));
         }
         "query" => {
-            let name = positional
-                .first()
-                .context("usage: wicked-estate query <name>")?;
+            let name = args.required(0);
             let store = open_store_ext(&db).map_err(to_any)?;
             maybe_print_staleness(store.as_ref(), &db);
             maybe_warn_version_mismatch(store.as_ref(), &db);
@@ -1448,7 +1151,7 @@ fn main() -> Result<()> {
                 &otel_scope,
                 "wicked_estate.query",
                 vec![
-                    wicked_estate_core::observability::KeyValue::str("symbol.name", name.as_str()),
+                    wicked_estate_core::observability::KeyValue::str("symbol.name", name),
                     wicked_estate_core::observability::KeyValue::int(
                         "result.count",
                         hits.len() as i64,
@@ -1459,59 +1162,15 @@ fn main() -> Result<()> {
             );
         }
         "blast-radius" => {
-            let json_out = positional.iter().any(|a| a == "--json");
+            let json_out = args.switch("json");
             // `--depth N` (wicked-estate#190). DEFAULT 12 — the previously hardcoded horizon, so
             // existing invocations behave identically; the difference is that a cut at 12 is now
             // REPORTED instead of silent, and a deep estate chain can be followed by raising it.
-            let mut depth: u32 = 12;
-            {
-                let mut it = positional.iter();
-                while let Some(a) = it.next() {
-                    match a.as_str() {
-                        "--depth" => match it.next() {
-                            Some(v) => {
-                                depth = v.parse().with_context(|| {
-                                    format!("blast-radius --depth expects a number, got '{v}'")
-                                })?
-                            }
-                            None => anyhow::bail!("blast-radius --depth requires a value"),
-                        },
-                        _ if a.starts_with("--depth=") => {
-                            let v = a.trim_start_matches("--depth=");
-                            depth = v.parse().with_context(|| {
-                                format!("blast-radius --depth expects a number, got '{v}'")
-                            })?;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            // Same ceiling as the MCP BlastRadius tool. An unbounded value hangs on a cyclic graph
-            // (the recursive walk grows with depth), so reject it instead of clamping silently.
+            // The row bounds it by the MCP BlastRadius ceiling: an unbounded value hangs on a
+            // cyclic graph (the recursive walk grows with depth), so it is refused, not clamped.
+            let depth: u32 = args.u32("depth").unwrap_or(12);
             let max_depth = wicked_estate_retrieve::BLAST_DEPTH_CEILING;
-            if depth > max_depth {
-                anyhow::bail!(
-                    "blast-radius --depth {depth} is above the maximum of {max_depth} \
-                     (the same ceiling the MCP BlastRadius tool applies)"
-                );
-            }
-            // The positional <name> is the first arg that is neither a flag nor a flag's value.
-            let name = {
-                let mut it = positional.iter();
-                let mut found: Option<&String> = None;
-                while let Some(a) = it.next() {
-                    if a == "--depth" {
-                        it.next(); // consume the value so it is never read as <name>
-                        continue;
-                    }
-                    if a.starts_with("--") {
-                        continue;
-                    }
-                    found = Some(a);
-                    break;
-                }
-                found.context("usage: wicked-estate blast-radius <name> [--depth N] [--json]")?
-            };
+            let name = args.required(0);
             let store = open_store_ext(&db).map_err(to_any)?;
             // Machine output must be exactly one JSON document — notices would corrupt it.
             if !json_out {
@@ -1591,7 +1250,7 @@ fn main() -> Result<()> {
                 &otel_scope,
                 "wicked_estate.blast_radius",
                 vec![
-                    wicked_estate_core::observability::KeyValue::str("symbol.name", name.as_str()),
+                    wicked_estate_core::observability::KeyValue::str("symbol.name", name),
                     wicked_estate_core::observability::KeyValue::int(
                         "dependent.count",
                         deps.len() as i64,
@@ -1604,53 +1263,18 @@ fn main() -> Result<()> {
         // ── path ────────────────────────────────────────────────────────────
         //   wicked-estate path <from> <to> [--max-depth N] [--json]
         //
-        // The shared parser pushes every token it does not know into `positional`, so
-        // `--max-depth` and `--json` arrive here as ordinary strings. A one-operand command
-        // like `blast-radius` can scan for `--json` and ignore the rest; a two-operand one
-        // cannot — `path A --json` would otherwise resolve `to` to "--json". So every token
-        // is classified before either operand is read.
+        // `cli_flags` classifies every token before either operand is read, so `path A --json`
+        // is one operand (a usage error), never `to = "--json"`.
         "path" => {
             const DEFAULT_MAX_DEPTH: u32 = 12; // matches `blast-radius`
             const MAX_MAX_DEPTH: u32 = 16;
             const CLI_MAX_NODES: usize = 5_000;
-            const USAGE: &str = "usage: wicked-estate path <from> <to> [--max-depth N] [--json] [--db ...]\n\
-                 <from> and <to> are each an exact symbol name or a SymbolId; \
-                 --max-depth accepts 1..=16 (default 12, values above 16 clamp to 16)";
-
-            let mut json_out = false;
-            let mut max_depth = DEFAULT_MAX_DEPTH;
-            let mut operands: Vec<&String> = Vec::new();
-            {
-                let mut it = positional.iter();
-                while let Some(a) = it.next() {
-                    match a.as_str() {
-                        "--json" => json_out = true,
-                        "--max-depth" => {
-                            let Some(v) = it.next() else {
-                                anyhow::bail!("{USAGE}\n--max-depth requires a value");
-                            };
-                            let parsed: u32 = v.parse().map_err(|_| {
-                                anyhow::anyhow!(
-                                    "{USAGE}\n--max-depth must be an integer, got {v:?}"
-                                )
-                            })?;
-                            if parsed == 0 {
-                                anyhow::bail!("{USAGE}\n--max-depth must be at least 1, got 0");
-                            }
-                            max_depth = parsed.min(MAX_MAX_DEPTH);
-                        }
-                        // Any other flag was rejected by `cli_flags::check`.
-                        _ => operands.push(a),
-                    }
-                }
-            }
-            if operands.len() != 2 {
-                anyhow::bail!(
-                    "{USAGE}\nexpected exactly two operands (<from> and <to>), got {}",
-                    operands.len()
-                );
-            }
-            let (from, to) = (operands[0].as_str(), operands[1].as_str());
+            let json_out = args.switch("json");
+            // The row refuses 0 and non-integers; above 16 clamps, as documented.
+            let max_depth = args
+                .u32("max-depth")
+                .map_or(DEFAULT_MAX_DEPTH, |d| d.min(MAX_MAX_DEPTH));
+            let (from, to) = (args.required(0), args.required(1));
 
             let store = open_store_ext(&db).map_err(to_any)?;
             // Machine output must be exactly one JSON document — notices would corrupt it.
@@ -1707,6 +1331,9 @@ fn main() -> Result<()> {
         // live in the tool, so `--json` is byte-for-byte the result MCP serializes.
         "lineage" => {
             let args = parse_lineage_args(rest)?;
+            if let Some(spec) = &args.db {
+                db = spec.clone();
+            }
             require_existing_graph(&db, "lineage")?;
             let store = open_store_ext(&db).map_err(to_any)?;
             // Machine output must be exactly one JSON document — notices would corrupt it.
@@ -1785,6 +1412,9 @@ fn main() -> Result<()> {
         // Every subcommand refuses a missing/empty graph instead of creating one.
         "supports" => {
             let args = parse_supports_args(rest)?;
+            if let Some(spec) = &args.db {
+                db = spec.clone();
+            }
             require_existing_graph(&db, "supports")?;
             let mut store = open_store_ext(&db).map_err(to_any)?;
             let t_cmd_start = std::time::SystemTime::now()
@@ -1893,35 +1523,16 @@ fn main() -> Result<()> {
             use std::collections::HashSet;
             use wicked_estate_core::{Direction, EdgeKind, NodeKind};
 
-            let mut limit = 80usize;
-            let mut include_tests = false;
-            let mut include_trivial = false;
-            let mut focus: Option<String> = None;
-            let mut ignore_patterns: Vec<String> = Vec::new();
-            {
-                let mut it = positional.iter();
-                while let Some(a) = it.next() {
-                    match a.as_str() {
-                        "--limit" => {
-                            if let Some(v) = it.next() {
-                                limit = v.parse().unwrap_or(80);
-                            }
-                        }
-                        "--focus" => match it.next() {
-                            Some(v) => focus = Some(v.clone()),
-                            None => anyhow::bail!("graph-view --focus requires a value"),
-                        },
-                        "--include-tests" => include_tests = true,
-                        "--include-trivial" => include_trivial = true,
-                        "--ignore" => {
-                            if let Some(p) = it.next() {
-                                ignore_patterns.push(p.clone());
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            };
+            let limit = args.usize("limit").unwrap_or(80);
+            let include_tests = args.switch("include-tests");
+            let include_trivial = args.switch("include-trivial");
+            let focus: Option<String> = args.str("focus").map(str::to_string);
+            // Repeatable by design: every pattern applies.
+            let ignore_patterns: Vec<String> = args
+                .all(&["ignore"])
+                .into_iter()
+                .map(str::to_string)
+                .collect();
 
             let store = open_store_ext(&db).map_err(to_any)?;
             // Oversample PageRank candidates so filters don't under-deliver.
@@ -2177,48 +1788,24 @@ fn main() -> Result<()> {
         // omitted budget = UNBOUNDED (the caller owns its context). This path is a pure READ —
         // it never opens the read-write `open_store_ext` dance the `clusters` arm uses.
         "source" => {
-            let json_out = positional.iter().any(|a| a == "--json");
-            let signatures_only = positional.iter().any(|a| a == "--signatures-only");
-            // The positional <name> is the first arg that is not a recognised bare flag.
-            let name = positional
-                .iter()
-                .find(|a| !a.starts_with("--"))
-                .map(String::as_str);
-            const SOURCE_USAGE: &str = "usage: wicked-estate source [<name>] [--symbols id1,id2,...] \
-                 [--cluster <id>] [--file <path>] [--signatures-only] [--json [--max-total-chars N] \
-                 [--max-node-chars N]]";
-            // The budget caps shape the JSON bundle; text mode prints whole bodies, so a cap
-            // there would be accepted and ignored (#206).
-            if !json_out && (src_max_total.is_some() || src_max_node.is_some()) {
-                anyhow::bail!(
-                    "{SOURCE_USAGE}\n--max-total-chars and --max-node-chars apply only with --json"
-                );
-            }
-            // No selector and no <name> is a usage error — raised before `--db` is opened, since
-            // opening a missing SQLite path creates an empty store that the error would leave
-            // behind (`source --db typo.db` used to exit 1 and create `typo.db`).
-            if name.is_none()
-                && src_symbols.is_none()
-                && src_cluster.is_none()
-                && src_file.is_none()
-            {
-                anyhow::bail!(
-                    "{SOURCE_USAGE}\na <name> or one of --symbols/--cluster/--file is required"
-                );
-            }
+            let json_out = args.switch("json");
+            let signatures_only = args.switch("signatures-only");
+            let name = args.operand(0);
+            // The row requires <name> or a selector, and --json for the budgets (#206), so a
+            // usage error never reaches the store: opening a missing SQLite path creates it.
+            let src_symbols = args.list("symbols");
+            let src_cluster = args.usize("cluster");
+            let src_file = args.str("file");
+            let src_max_total = args.usize("max-total-chars");
+            let src_max_node = args.usize("max-node-chars");
             let store = open_store(&db).map_err(to_any)?;
 
             // Resolve the selector — one rule for both output modes (#206: the text path used to
             // drop every selector but <name>). Precedence: --symbols > --cluster > --file > <name>.
             let (nodes, selector): (Vec<wicked_estate_core::Node>, serde_json::Value) =
-                if let Some(csv) = &src_symbols {
-                    let ids: Vec<String> = csv
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
+                if let Some(ids) = src_symbols {
                     let mut out = Vec::new();
-                    for id in &ids {
+                    for id in ids {
                         let sid = wicked_estate_core::symbol::SymbolId::from(id.as_str());
                         if let Some(n) = store.get_node(&sid).map_err(to_any)? {
                             out.push(n);
@@ -2238,16 +1825,15 @@ fn main() -> Result<()> {
                         }
                     }
                     (out, serde_json::json!({ "cluster": cid }))
-                } else if let Some(path) = &src_file {
+                } else if let Some(path) = src_file {
                     let all = store.all_nodes().map_err(to_any)?;
                     let out: Vec<_> = all
                         .into_iter()
-                        .filter(|n| &n.location.file == path)
+                        .filter(|n| n.location.file == path)
                         .collect();
                     (out, serde_json::json!({ "file": path }))
                 } else {
-                    // Guarded above, before the store was opened.
-                    let name = name.context(SOURCE_USAGE)?;
+                    let name = name.expect("the row requires <name> when no selector is given");
                     let hits = wicked_estate::search(&*store, name).map_err(to_any)?;
                     (hits, serde_json::json!({ "name": name }))
                 };
@@ -2308,9 +1894,7 @@ fn main() -> Result<()> {
         }
         // Task F: semantic search via embedding-based ANN.
         "semantic" => {
-            let query = positional
-                .first()
-                .context("usage: wicked-estate semantic <query> [--db ...]")?;
+            let query = args.required(0);
             // SemanticSearch needs a concrete VectorStore (not the trait object). Open a separate
             // SqliteStore handle for the vector side; the main store handle is for GraphRead.
             use wicked_estate_retrieve::SemanticSearch;
@@ -2382,15 +1966,13 @@ fn main() -> Result<()> {
         //
         // Prints, per repo, the matching symbols and a combined cross-repo blast-radius.
         "cross-graph" => {
-            let name = positional
-                .first()
-                .context("usage: wicked-estate cross-graph <name> --db <a.db> --db <b.db> ...")?;
-
-            if db_paths.is_empty() {
-                anyhow::bail!(
-                    "cross-graph requires at least one --db <path> or --dbs a,b,c argument"
-                );
-            }
+            let name = args.required(0);
+            // Every `--db`, and every item of `--dbs`, in argv order; the row requires one.
+            let db_paths: Vec<String> = args
+                .all(&["db", "dbs"])
+                .into_iter()
+                .map(str::to_string)
+                .collect();
 
             // ── Symbol search across all repos ───────────────────────────────
             println!(
@@ -2496,12 +2078,14 @@ fn main() -> Result<()> {
         // The watch loop itself does not benefit from history, but enabling it means the
         // edge provenance is preserved for `subscribe` callers that want it.
         "watch" => {
-            let path_str = positional.first().map(String::as_str).unwrap_or(".");
+            let path_str = args.operand(0).unwrap_or(".");
             let watch_path = Path::new(path_str);
+            let history = args.switch("history");
             ensure_db_dir(&db)?;
 
             // Initial index.
-            let mut store: Box<dyn GraphStoreMutExt> = if history && db != ":memory:" {
+            // The row refuses --history on an in-memory store (`Cond::Store`).
+            let mut store: Box<dyn GraphStoreMutExt> = if history {
                 let mut concrete = SqliteStore::open(&db).map_err(to_any)?;
                 concrete.set_history_enabled(true).map_err(to_any)?;
                 Box::new(concrete)
@@ -2509,7 +2093,7 @@ fn main() -> Result<()> {
                 open_store_ext(&db).map_err(to_any)?
             };
 
-            let as_repo = repo_label.as_deref();
+            let as_repo = args.str("repo");
             let stats = wicked_estate::index_path_as(store.as_mut(), watch_path, as_repo)
                 .map_err(to_any)?;
             println!(
@@ -2597,6 +2181,7 @@ fn main() -> Result<()> {
         //
         // This is intentionally a one-shot poll.  A daemon would loop: sleep → poll → sleep.
         "subscribe" => {
+            let since = args.u64("since").unwrap_or(0);
             let store = open_store_ext(&db).map_err(to_any)?;
             let changes = store.changes_since(since).map_err(to_any)?;
             let mut max_seq = since;
@@ -2622,65 +2207,62 @@ fn main() -> Result<()> {
         // Semantic linking: annotate a symbol with its description / matched requirement /
         // validation, or show the current annotations. (Set ⇄ Show by presence of --set flags.)
         "semantics" => {
-            let symbol = positional.first().cloned().unwrap_or_default();
-            if symbol.is_empty() {
-                eprintln!(
-                    "usage: wicked-estate semantics <symbol> [--description X] [--requirement Y] [--validated true|false --validated-by <actor>] [--db ...]"
-                );
+            let symbol = args.required(0);
+            let sem_description = args.str("description");
+            let sem_requirement = args.str("requirement");
+            let sem_validated = args.bool("validated");
+            let sem_validated_by = args.str("validated-by");
+            let mut store = open_store_ext(&db).map_err(to_any)?;
+            let setting =
+                sem_description.is_some() || sem_requirement.is_some() || sem_validated.is_some();
+            if setting {
+                wicked_estate::set_semantics(
+                    &mut *store,
+                    symbol,
+                    sem_description,
+                    sem_requirement,
+                    sem_validated,
+                    sem_validated_by,
+                )
+                .map_err(to_any)?;
+                println!("updated semantics for {symbol}");
             } else {
-                let mut store = open_store_ext(&db).map_err(to_any)?;
-                let setting = sem_description.is_some()
-                    || sem_requirement.is_some()
-                    || sem_validated.is_some();
-                if setting {
-                    wicked_estate::set_semantics(
-                        &mut *store,
-                        &symbol,
-                        sem_description.as_deref(),
-                        sem_requirement.as_deref(),
-                        sem_validated,
-                        sem_validated_by.as_deref(),
-                    )
-                    .map_err(to_any)?;
-                    println!("updated semantics for {symbol}");
-                } else {
-                    match wicked_estate::get_semantics(&*store, &symbol).map_err(to_any)? {
-                        Some(s) => {
-                            println!("symbol: {symbol}");
+                match wicked_estate::get_semantics(&*store, symbol).map_err(to_any)? {
+                    Some(s) => {
+                        println!("symbol: {symbol}");
+                        println!(
+                            "  description: {}",
+                            s.description.as_deref().unwrap_or("(none)")
+                        );
+                        println!(
+                            "  requirement: {}",
+                            s.requirement.as_deref().unwrap_or("(none)")
+                        );
+                        println!("  validated:   {}", s.requirement_validated);
+                        // Only when something WAS validated. Printing "(unattributed)" against
+                        // `validated: false` describes a claim nobody made, which reads as a
+                        // defect in the record rather than the absence of a claim.
+                        if s.requirement_validated {
                             println!(
-                                "  description: {}",
-                                s.description.as_deref().unwrap_or("(none)")
+                                "  validated by: {}",
+                                s.requirement_validated_by.as_deref().unwrap_or(
+                                    "(unattributed — written before authorship was recorded)"
+                                )
                             );
-                            println!(
-                                "  requirement: {}",
-                                s.requirement.as_deref().unwrap_or("(none)")
-                            );
-                            println!("  validated:   {}", s.requirement_validated);
-                            // Only when something WAS validated. Printing "(unattributed)" against
-                            // `validated: false` describes a claim nobody made, which reads as a
-                            // defect in the record rather than the absence of a claim.
-                            if s.requirement_validated {
-                                println!(
-                                    "  validated by: {}",
-                                    s.requirement_validated_by.as_deref().unwrap_or(
-                                        "(unattributed — written before authorship was recorded)"
-                                    )
-                                );
-                                if let Some(at) = s.requirement_validated_at {
-                                    println!("  validated at: {at}");
-                                }
+                            if let Some(at) = s.requirement_validated_at {
+                                println!("  validated at: {at}");
                             }
                         }
-                        None => println!("no semantics set for {symbol}"),
                     }
+                    None => println!("no semantics set for {symbol}"),
                 }
             }
         }
         // Reverse link: every symbol annotated with a given requirement.
         "by-requirement" => {
-            let req = positional.first().cloned().unwrap_or_default();
+            let req = args.required(0);
             let store = open_store_ext(&db).map_err(to_any)?;
-            let hits = wicked_estate::symbols_for_requirement(&*store, &req).map_err(to_any)?;
+            let hits = wicked_estate::symbols_for_requirement(&*store, req).map_err(to_any)?;
             println!("symbols satisfying requirement {req:?}: {}", hits.len());
             for n in &hits {
                 println!(
@@ -2704,18 +2286,20 @@ fn main() -> Result<()> {
         // Semantic mode (`--weight semantic`): clusters by embedding proximity (DBSCAN by default;
         // `--k` switches to k-means). Requires an `--embeddings` index.
         "clusters" => {
-            let min_size = positional
-                .iter()
-                .find(|a| a.parse::<usize>().is_ok())
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(2);
-            let json_out = positional.iter().any(|a| a == "--json");
+            let min_size = args.operand_usize(0).unwrap_or(2);
+            let json_out = args.switch("json");
+            let cluster_resolution = args.f64("resolution").unwrap_or(1.0);
+            let cluster_package_bias = args.f64("package-bias").unwrap_or(0.0);
+            let cluster_k = args.usize("k");
+            // The row bounds eps to 0.0..=2.0, so the narrowing is exact enough for a radius.
+            let cluster_eps = args.f64("eps").map_or(0.25, |e| e as f32);
+            let cluster_min_pts = args.usize("min-pts").unwrap_or(3);
             // `--annotate` needs the write side; bind mutably (read methods still work via as_ref).
             let mut store = open_store_ext(&db).map_err(to_any)?;
             maybe_print_staleness(store.as_ref(), &db);
             maybe_warn_version_mismatch(store.as_ref(), &db);
 
-            let semantic = cluster_weight == "semantic";
+            let semantic = args.str("weight") == Some("semantic");
             let (communities, modularity): (Vec<Vec<wicked_estate_core::SymbolId>>, Option<f64>) =
                 if semantic {
                     use wicked_estate_store::SqliteStore;
@@ -2753,7 +2337,7 @@ fn main() -> Result<()> {
                         min_size,
                         include_singletons: false,
                         resolution: cluster_resolution,
-                        hierarchical: cluster_hierarchical,
+                        hierarchical: args.switch("hierarchical"),
                         package_bias: cluster_package_bias,
                     };
                     let c = wicked_estate_rank::detect_communities(store.as_ref(), &params)
@@ -2773,7 +2357,7 @@ fn main() -> Result<()> {
             // (type="community", key="community") row is deleted before the append, so a second run
             // yields exactly one `community` annotation per member instead of duplicating it. Upsert
             // is the right default for cache-class annotations — no flag (unlike advisory `annotate`).
-            if cluster_annotate {
+            if args.switch("annotate") {
                 use wicked_estate_core::Annotation;
                 let provenance = if semantic {
                     "clusters:semantic".to_string()
@@ -2800,7 +2384,7 @@ fn main() -> Result<()> {
             }
 
             if json_out {
-                if cluster_summary && !semantic {
+                if args.switch("summary") && !semantic {
                     // Enriched summary mode: emit per-community objects with metadata.
                     let summaries = wicked_estate_rank::summarize_communities(
                         store.as_ref(),
@@ -2864,19 +2448,9 @@ fn main() -> Result<()> {
         // Returns the highest-PageRank symbols reachable from <name> that fit within
         // the character budget, suitable for injecting into an LLM prompt.
         "context" => {
-            let name = positional
-                .first()
-                .context("usage: wicked-estate context <name> --budget <chars>")?;
-            let mut budget = 4096usize;
-            let mut it2 = rest.iter();
-            while let Some(a) = it2.next() {
-                if a.as_str() == "--budget" {
-                    if let Some(v) = it2.next() {
-                        budget = v.parse::<usize>().unwrap_or(4096);
-                    }
-                }
-            }
-            let json_out = positional.iter().any(|a| a == "--json");
+            let name = args.required(0);
+            let budget = args.usize("budget").unwrap_or(4096);
+            let json_out = args.switch("json");
             // open_store_ext returns Box<dyn GraphStoreMutExt> so as_ref() satisfies
             // maybe_print_staleness's &dyn GraphStoreMutExt parameter.
             let store = open_store_ext(&db).map_err(to_any)?;
@@ -2926,21 +2500,20 @@ fn main() -> Result<()> {
         // replace path leaves other keys (and other types under the same key) on the symbol intact.
         "annotate" => {
             use wicked_estate_core::{Annotation, DEFAULT_ANNOTATION_TYPE, GraphWrite};
-            let key = ann_key
-                .as_deref()
-                .context("--key is required for the annotate command")?;
-            let value = ann_value
-                .as_deref()
-                .context("--value is required for the annotate command")?;
-            let ty = ann_type.as_deref().unwrap_or(DEFAULT_ANNOTATION_TYPE);
+            let (key, value) = (args.given("key"), args.given("value"));
+            let ty = args.str("type").unwrap_or(DEFAULT_ANNOTATION_TYPE);
+            let ann_confidence = args.f64("confidence").unwrap_or(1.0);
+            let ann_provenance = args.str("provenance").unwrap_or_default();
+            let ann_author = args.str("author").unwrap_or_default();
+            let ann_replace = args.switch("replace");
             ensure_db_dir(&db)?;
             let mut store = SqliteStore::open(&db).map_err(to_any)?;
             // Build the typed annotation once; clone per target. ts=0 → store stamps it.
             let make = |sym_present_value: &str| {
                 Annotation::new(ty, key, sym_present_value)
                     .with_confidence(ann_confidence)
-                    .with_provenance(ann_provenance.clone())
-                    .with_author(ann_author.clone())
+                    .with_provenance(ann_provenance)
+                    .with_author(ann_author)
             };
             // Upsert helper: when `--replace`, delete the (type, key) row(s) first and accumulate
             // the deleted count; then append. Returns the number of rows replaced for this symbol.
@@ -2958,15 +2531,13 @@ fn main() -> Result<()> {
                 };
             let mut count = 0usize;
             let mut replaced = 0usize;
-            if let Some(sym_str) = &ann_symbol {
-                let symbol = wicked_estate_core::symbol::SymbolId::from(sym_str.as_str());
+            // The row admits exactly one of `<name>` and `--symbol`.
+            if let Some(sym_str) = args.str("symbol") {
+                let symbol = wicked_estate_core::symbol::SymbolId::from(sym_str);
                 replaced += upsert(&mut store, &symbol)?;
                 count = 1;
             } else {
-                let name = positional.first().context(
-                    "usage: wicked-estate annotate <name> --key K --value V [--type T] [--replace] [--db ...]\n       \
-                     wicked-estate annotate --symbol <id> --key K --value V [--type T] [--replace] [--db ...]",
-                )?;
+                let name = args.required(0);
                 let hits = wicked_estate::search(&store, name).map_err(to_any)?;
                 for n in &hits {
                     let sym = n.symbol.clone();
@@ -3008,8 +2579,8 @@ fn main() -> Result<()> {
         // match many symbols, an id names one. `advisory:true` is emitted for assumption/question (computed from `type`,
         // not hard-coded). This direct read is NOT R4-capped — only structured payloads are.
         "annotations" => {
-            let json_out = positional.iter().any(|a| a == "--json");
-            let type_filter = ann_type.as_deref();
+            let json_out = args.switch("json");
+            let type_filter = args.str("type");
             // ADR-003: route through the open_store factory (backend-agnostic) — this arm
             // needs only GraphRead methods, which deref through Box<dyn GraphStore>.
             let store = open_store(&db).map_err(to_any)?;
@@ -3039,8 +2610,9 @@ fn main() -> Result<()> {
                 );
             };
 
-            if let Some(sym_str) = &ann_symbol {
-                let symbol = wicked_estate_core::symbol::SymbolId::from(sym_str.as_str());
+            // The row admits exactly one of `<name>` and `--symbol`.
+            if let Some(sym_str) = args.str("symbol") {
+                let symbol = wicked_estate_core::symbol::SymbolId::from(sym_str);
                 let anns = fetch(&symbol)?;
                 if json_out {
                     println!(
@@ -3055,10 +2627,7 @@ fn main() -> Result<()> {
                     }
                 }
             } else {
-                let name = positional.first().context(
-                    "usage: wicked-estate annotations <name> [--type T] [--json] [--db ...]\n       \
-                     wicked-estate annotations --symbol <id> [--type T] [--json] [--db ...]",
-                )?;
+                let name = args.required(0);
                 let hits = wicked_estate::search(&*store, name).map_err(to_any)?;
                 if json_out {
                     let mut arr: Vec<serde_json::Value> = Vec::with_capacity(hits.len());
@@ -3092,19 +2661,10 @@ fn main() -> Result<()> {
         // Usage:
         //   wicked-estate stale-annotations <cutoff-unix-seconds> [--json] [--db ...]
         "stale-annotations" => {
-            let json_out = positional.iter().any(|a| a == "--json");
-            // Exactly one operand, and it must be an integer: `find_map` over all of argv took
-            // the first parseable token, so `stale-annotations soon 100` ran at 100 and
-            // `stale-annotations 2026 01 01` ran at 2026 with the rest dropped.
-            let operands: Vec<&String> =
-                positional.iter().filter(|a| !a.starts_with("--")).collect();
-            let cutoff: i64 = match operands.as_slice() {
-                [one] => one.parse::<i64>().ok(),
-                _ => None,
-            }
-            .context(
-                "usage: wicked-estate stale-annotations <cutoff-unix-seconds> [--json] [--db ...]",
-            )?;
+            let json_out = args.switch("json");
+            let cutoff: i64 = args
+                .operand_i64(0)
+                .expect("the row requires an integer <cutoff-unix-seconds>");
             // ADR-003: backend-agnostic factory — annotations_stale_since is a GraphRead method.
             let store = open_store(&db).map_err(to_any)?;
             let stale = store.annotations_stale_since(cutoff).map_err(to_any)?;
@@ -3146,9 +2706,7 @@ fn main() -> Result<()> {
         //   wicked-estate fingerprint <name>          [--db ...]   -- identity hash (id+name+kind+file+sig)
         //   wicked-estate fingerprint <name> --content [--db ...]  -- body hash (xxh3 of source slice)
         "fingerprint" => {
-            let name = positional
-                .first()
-                .context("usage: wicked-estate fingerprint <name> [--content] [--db ...]")?;
+            let name = args.required(0);
             let store = open_store(&db).map_err(to_any)?;
             let hits = wicked_estate::search(&*store, name).map_err(to_any)?;
             drop(store);
@@ -3156,7 +2714,7 @@ fn main() -> Result<()> {
                 println!("no symbol found matching '{name}'");
                 return Ok(());
             }
-            if fp_content {
+            if args.switch("content") {
                 // Resolve paths against the stored index root so --content works
                 // regardless of CWD (the indexed path is root-relative, not CWD-relative).
                 let concrete = SqliteStore::open(&db).map_err(to_any)?;
@@ -3200,9 +2758,7 @@ fn main() -> Result<()> {
         // Usage:
         //   wicked-estate changed-since <git-sha> [--json] [--db ...]
         "changed-since" => {
-            let sha = positional
-                .first()
-                .context("usage: wicked-estate changed-since <git-sha>")?;
+            let sha = args.required(0);
             let output = std::process::Command::new("git")
                 .args(["diff", "--name-only", &format!("{sha}..HEAD")])
                 .output()
@@ -3216,7 +2772,7 @@ fn main() -> Result<()> {
                 .map(|l| l.trim().to_string())
                 .filter(|l| !l.is_empty())
                 .collect();
-            let json_out = positional.iter().any(|a| a == "--json");
+            let json_out = args.switch("json");
             if changed_files.is_empty() {
                 if json_out {
                     println!("[]");
@@ -3263,7 +2819,7 @@ fn main() -> Result<()> {
         // Usage:
         //   wicked-estate entrypoints [--json] [--db ...]
         "entrypoints" => {
-            let json_out = positional.iter().any(|a| a == "--json");
+            let json_out = args.switch("json");
             let store = SqliteStore::open(&db).map_err(to_any)?;
             let nodes = store.entrypoint_nodes().map_err(to_any)?;
             if json_out {
@@ -3293,7 +2849,7 @@ fn main() -> Result<()> {
         // Usage:
         //   wicked-estate leaves [--json] [--db ...]
         "leaves" => {
-            let json_out = positional.iter().any(|a| a == "--json");
+            let json_out = args.switch("json");
             let store = SqliteStore::open(&db).map_err(to_any)?;
             let nodes = store.leaf_nodes().map_err(to_any)?;
             if json_out {
@@ -3323,7 +2879,7 @@ fn main() -> Result<()> {
         // Usage:
         //   wicked-estate dead-code [--json] [--db ...]
         "dead-code" => {
-            let json_out = positional.iter().any(|a| a == "--json");
+            let json_out = args.switch("json");
             let store = SqliteStore::open(&db).map_err(to_any)?;
             let nodes = store.isolated_nodes().map_err(to_any)?;
             if json_out {
@@ -3357,23 +2913,14 @@ fn main() -> Result<()> {
         //   wicked-estate nodes [--kind K] [--annotated-with K[=V]] [--json] [--semantics] [--db ...]
         "nodes" => {
             use wicked_estate_core::GraphRead;
-            let kind = {
-                let mut k = String::new();
-                let mut it2 = positional.iter();
-                while let Some(a) = it2.next() {
-                    if a.as_str() == "--kind" {
-                        k = it2.next().cloned().unwrap_or_default();
-                    }
-                }
-                k
-            };
-            let json_out = positional.iter().any(|a| a == "--json");
+            let kind = args.str("kind").unwrap_or_default().to_string();
+            let json_out = args.switch("json");
             // Opt-in: `nodes --json --semantics` adds four extra per-node keys the domain-brain
             // extraction engine needs — `rule_confidence`, `requirement`, `requirement_validated`,
             // `out_edges`. OFF by default so the plain `nodes --json` path pays neither the
             // per-node `get_semantics` read nor the `neighbors` edge fetch (and its shape is
             // unchanged for existing consumers).
-            let with_semantics = positional.iter().any(|a| a == "--semantics");
+            let with_semantics = args.switch("semantics");
             let store = SqliteStore::open(&db).map_err(to_any)?;
 
             // Per-node JSON for the `--json` paths: base metadata + typed annotations.
@@ -3432,12 +2979,12 @@ fn main() -> Result<()> {
                 obj
             };
 
-            if let Some(ann_filter) = &annotated_with {
+            if let Some(ann_filter) = args.str("annotated-with") {
                 // --annotated-with KEY or KEY=VALUE
                 let (ann_key, ann_val) = if let Some((k, v)) = ann_filter.split_once('=') {
                     (k, Some(v))
                 } else {
-                    (ann_filter.as_str(), None)
+                    (ann_filter, None)
                 };
                 let nodes = store.find_by_annotation(ann_key, ann_val).map_err(to_any)?;
                 if json_out {
@@ -3490,25 +3037,10 @@ fn main() -> Result<()> {
         // bare name is a silent no-op. Deterministic: `find_symbols(exact_name)` orders by SymbolId.
         "resolve" => {
             use wicked_estate_core::query::SymbolQuery;
-            let json_out = positional.iter().any(|a| a == "--json");
-            // `--file` is globally parsed into `src_file`; `--kind` lands in `positional` (like `nodes`).
-            let file_filter = src_file.clone();
-            let mut kind_filter: Option<String> = None;
-            let mut name: Option<String> = None;
-            let mut it2 = positional.iter();
-            while let Some(a) = it2.next() {
-                match a.as_str() {
-                    "--json" => {}
-                    "--kind" => kind_filter = it2.next().cloned(),
-                    other => {
-                        if name.is_none() {
-                            name = Some(other.to_string());
-                        }
-                    }
-                }
-            }
-            let name =
-                name.context("usage: wicked-estate resolve <name> [--file F] [--kind K] [--json]")?;
+            let json_out = args.switch("json");
+            let file_filter = args.str("file");
+            let kind_filter = args.str("kind");
+            let name = args.required(0);
 
             // Brain-facing read surface → route through the open_store factory so it
             // is backend-agnostic (postgres:// under --features postgres) per ADR-003,
@@ -3518,14 +3050,14 @@ fn main() -> Result<()> {
             // a dedicated open_store migration, not this PHASE-1 surface's job.)
             let store = open_store(&db).map_err(to_any)?;
             let q = SymbolQuery {
-                exact_name: Some(name.clone()),
+                exact_name: Some(name.to_string()),
                 ..Default::default()
             };
             let mut nodes = store.find_symbols(&q).map_err(to_any)?;
-            if let Some(f) = &file_filter {
-                nodes.retain(|n| &n.location.file == f);
+            if let Some(f) = file_filter {
+                nodes.retain(|n| n.location.file == f);
             }
-            if let Some(k) = &kind_filter {
+            if let Some(k) = kind_filter {
                 let kl = k.to_lowercase();
                 nodes.retain(|n| format!("{:?}", n.kind).to_lowercase() == kl);
             }
@@ -3571,25 +3103,13 @@ fn main() -> Result<()> {
             use wicked_estate_core::{GraphRead, query::SymbolQuery};
             use wicked_estate_retrieve::reciprocal_rank_fusion;
 
-            let path_a = db_a
-                .as_deref()
-                .context("--db-a <path> is required for the correspond command")?;
-            let path_b = db_b
-                .as_deref()
-                .context("--db-b <path> is required for the correspond command")?;
+            let (path_a, path_b) = (args.given("db-a"), args.given("db-b"));
 
-            let json_out = positional.iter().any(|a| a == "--json");
-            let explain = positional.iter().any(|a| a == "--explain");
-            let filter_kind = {
-                let mut k: Option<String> = None;
-                let mut it2 = positional.iter();
-                while let Some(a) = it2.next() {
-                    if a.as_str() == "--kind" {
-                        k = it2.next().cloned();
-                    }
-                }
-                k
-            };
+            let json_out = args.switch("json");
+            let explain = args.switch("explain");
+            let filter_kind = args.str("kind");
+            let correspond_top = args.usize("top").unwrap_or(20);
+            let correspond_min_score = args.f64("min-score").unwrap_or(0.35);
 
             let store_a = SqliteStore::open(path_a).map_err(to_any)?;
             let store_b = SqliteStore::open(path_b).map_err(to_any)?;
@@ -3604,7 +3124,6 @@ fn main() -> Result<()> {
                 .filter(|n| is_correspond_kind(&n.kind))
                 .filter(|n| {
                     filter_kind
-                        .as_deref()
                         .is_none_or(|k| format!("{:?}", n.kind).to_lowercase() == k.to_lowercase())
                 })
                 .collect();
@@ -3849,18 +3368,9 @@ fn main() -> Result<()> {
             }
         }
         "export" => {
-            let format = {
-                let mut f = "ndjson".to_string();
-                let mut it2 = positional.iter();
-                while let Some(a) = it2.next() {
-                    if a.as_str() == "--format" {
-                        f = it2.next().cloned().unwrap_or_else(|| "ndjson".to_string());
-                    }
-                }
-                f
-            };
-            let nodes_only = positional.iter().any(|a| a == "--nodes-only");
-            let edges_only = positional.iter().any(|a| a == "--edges-only");
+            let format = args.str("format").unwrap_or("ndjson");
+            let nodes_only = args.switch("nodes-only");
+            let edges_only = args.switch("edges-only");
 
             // ADR-003: backend-agnostic factory — all_nodes/all_edges are GraphRead methods.
             let store = open_store(&db).map_err(to_any)?;
@@ -3875,7 +3385,7 @@ fn main() -> Result<()> {
                 vec![]
             };
 
-            match format.as_str() {
+            match format {
                 "json" => {
                     let out = serde_json::json!({ "nodes": nodes, "edges": edges });
                     println!("{}", serde_json::to_string_pretty(&out)?);
@@ -3893,38 +3403,29 @@ fn main() -> Result<()> {
         "plugins" => {
             // `wicked-estate plugins list` — show runtime language plugins loaded from the plugins
             // dir ($WICKED_ESTATE_PLUGINS or ~/.wicked-estate/plugins). See PLUGIN.md.
-            let sub = positional.first().map(String::as_str).unwrap_or("list");
-            match sub {
-                "list" => {
-                    if let Some(d) = wicked_estate_extract::plugin::plugins_dir() {
-                        println!("plugins dir: {}", d.display());
-                    }
-                    // Listings cover additive plugins AND every override plugin dir — active,
-                    // FAILED (built-in in use), armed, INERT, and DISABLED-duplicate (ADR-010).
-                    let listings = wicked_estate_extract::plugin::listings();
-                    if listings.is_empty() {
-                        println!(
-                            "(no plugins loaded — drop a plugin dir into the plugins dir; see PLUGIN.md)"
-                        );
-                    } else {
-                        for l in listings {
-                            let status = l
-                                .status
-                                .as_deref()
-                                .map(|s| format!("  {s}"))
-                                .unwrap_or_default();
-                            println!(
-                                "{}  exts=[{}]  license={}{status}",
-                                l.name,
-                                l.extensions.join(", "),
-                                l.license.as_deref().unwrap_or("unspecified"),
-                            );
-                        }
-                    }
-                }
-                other => {
-                    eprintln!(
-                        "unknown `plugins` subcommand `{other}` (try: wicked-estate plugins list)"
+            // `list` is the only subcommand, and the row refuses any other operand.
+            if let Some(d) = wicked_estate_extract::plugin::plugins_dir() {
+                println!("plugins dir: {}", d.display());
+            }
+            // Listings cover additive plugins AND every override plugin dir — active,
+            // FAILED (built-in in use), armed, INERT, and DISABLED-duplicate (ADR-010).
+            let listings = wicked_estate_extract::plugin::listings();
+            if listings.is_empty() {
+                println!(
+                    "(no plugins loaded — drop a plugin dir into the plugins dir; see PLUGIN.md)"
+                );
+            } else {
+                for l in listings {
+                    let status = l
+                        .status
+                        .as_deref()
+                        .map(|s| format!("  {s}"))
+                        .unwrap_or_default();
+                    println!(
+                        "{}  exts=[{}]  license={}{status}",
+                        l.name,
+                        l.extensions.join(", "),
+                        l.license.as_deref().unwrap_or("unspecified"),
                     );
                 }
             }
@@ -4679,6 +4180,8 @@ impl SupportsMode {
 struct SupportsArgs {
     mode: SupportsMode,
     json: bool,
+    /// `--db`, if given; otherwise the resolved default store.
+    db: Option<String>,
 }
 
 /// Parse `supports` from the RAW argument list, strictly (the `lineage` rule): every token is
@@ -4697,7 +4200,7 @@ fn parse_supports_args(raw: &[String]) -> Result<SupportsArgs> {
     };
     let mut values: std::collections::BTreeMap<&'static str, String> = Default::default();
     let mut json = false;
-    let mut db_seen = false;
+    let mut db: Option<String> = None;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         let (flag, inline) = match a.split_once('=') {
@@ -4727,13 +4230,12 @@ fn parse_supports_args(raw: &[String]) -> Result<SupportsArgs> {
                 }
                 json = true;
             }
-            // `--db=` is not a form the shared loop selects a store from — refused, not ignored.
+            // `--db value` only, like every bespoke command; `--db=` is refused, not ignored.
             "--db" if inline.is_none() => {
-                if db_seen {
+                if db.is_some() {
                     return Err(usage("--db given more than once".into()));
                 }
-                value("--db")?;
-                db_seen = true;
+                db = Some(value("--db")?);
             }
             f if allowed.contains(&f) => {
                 let key = allowed
@@ -4777,7 +4279,7 @@ fn parse_supports_args(raw: &[String]) -> Result<SupportsArgs> {
     if let SupportsMode::Edge { kind, .. } = &mode {
         parse_edge_kind(kind).map_err(usage)?;
     }
-    Ok(SupportsArgs { mode, json })
+    Ok(SupportsArgs { mode, json, db })
 }
 
 /// `--kind`: a built-in kind by its stored spelling (`calls`, `imports`, …), otherwise a tag
@@ -4991,21 +4493,20 @@ struct LineageArgs {
     depth: Option<u32>,
     relation: Option<String>,
     json: bool,
+    /// `--db`, if given; otherwise the resolved default store.
+    db: Option<String>,
 }
 
 /// Parse `lineage`'s arguments from the RAW argument list (everything after the command).
 ///
-/// Not from the shared loop's leftovers: that loop consumes every flag any command knows
-/// (`--file`, `--type`, `--top`, …) and a dangling `--db`/`--symbol` without complaint, so a
-/// mistyped or foreign flag would be silently dropped and the unscoped query answered. Here every
-/// token is classified; anything `lineage` does not accept, a value flag with no value or with a
-/// flag as its value, and any repeated flag fail with the usage text before a store is opened.
-/// `--db` is validated here and its value is the one the shared loop already selected.
+/// Every token is classified; anything `lineage` does not accept, a value flag with no value or
+/// with a flag as its value, and any repeated flag fail with the usage text before a store is
+/// opened. `--db` is parsed here too and returned for the arm to open.
 fn parse_lineage_args(raw: &[String]) -> Result<LineageArgs> {
     let mut symbol: Option<String> = None;
     let mut depth: Option<u32> = None;
     let mut relation: Option<String> = None;
-    let mut db_seen = false;
+    let mut db: Option<String> = None;
     let mut json = false;
 
     let parse_depth = |v: &str| -> Result<u32> {
@@ -5081,12 +4582,10 @@ fn parse_lineage_args(raw: &[String]) -> Result<LineageArgs> {
                 once(relation.is_some(), "--relation")?;
                 relation = Some(parse_relation(&value("--relation")?)?);
             }
-            // `--db=` is not a form the shared loop selects a store from, so it is refused
-            // rather than accepted here and silently ignored there.
+            // `--db value` only, like every bespoke command; `--db=` is refused, not ignored.
             "--db" if inline.is_none() => {
-                once(db_seen, "--db")?;
-                value("--db")?;
-                db_seen = true;
+                once(db.is_some(), "--db")?;
+                db = Some(value("--db")?);
             }
             other if other.starts_with('-') => {
                 anyhow::bail!("{LINEAGE_USAGE}\nunknown flag {a:?}");
@@ -5107,6 +4606,7 @@ fn parse_lineage_args(raw: &[String]) -> Result<LineageArgs> {
         depth,
         relation,
         json,
+        db,
     })
 }
 
@@ -5501,7 +5001,8 @@ mod lineage_cli_tests {
                 symbol: "s#".into(),
                 depth: None,
                 relation: None,
-                json: false
+                json: false,
+                db: None,
             }
         );
         // The CLI must not restate the tool's defaults: the request carries only `symbol`.
@@ -5649,6 +5150,7 @@ mod lineage_cli_tests {
             depth: Some(1),
             relation: Some("flows_to".into()),
             json: false,
+            db: None,
         }
     }
 
