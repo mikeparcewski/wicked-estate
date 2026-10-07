@@ -112,7 +112,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "stats",
-        spec: owns("", &[DB]),
+        spec: owns("", &[DB, JSON]),
     },
     Command {
         name: "graph-view",

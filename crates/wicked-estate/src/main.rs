@@ -100,6 +100,8 @@ struct StalenessReport {
     unknown: Vec<String>,
     /// Roots whose commits-behind count was read, stale or not.
     checked: usize,
+    /// The worst count over every checked root — the one number machine output reports (R5).
+    worst: Option<u64>,
 }
 
 impl StalenessReport {
@@ -147,7 +149,8 @@ fn require_existing_graph(db: &str, cmd: &str) -> anyhow::Result<()> {
 }
 
 /// Freshness of every indexed root in this db. Reads the indexed root(s) from store meta and
-/// the db path's mtime.
+/// measures each from the commit it was indexed at (#243; the db file's mtime only as the
+/// fallback for a graph that recorded no commit).
 fn staleness_report(
     store: &dyn wicked_estate_store::GraphStoreMutExt,
     db: &str,
@@ -158,9 +161,14 @@ fn staleness_report(
     let repos = wicked_estate::repo_scope::registry(store);
     if !repos.is_empty() {
         for rec in repos {
-            match wicked_estate::commits_behind(Path::new(&rec.root), db) {
+            match wicked_estate::commits_behind_since(
+                &wicked_estate::recorded_root_path(&rec.root, db),
+                rec.info.commit.as_deref(),
+                db,
+            ) {
                 Some(n) => {
                     report.checked += 1;
+                    report.worst = Some(report.worst.map_or(n, |w| w.max(n)));
                     if n > 0 {
                         report.stale.push(format!(
                             "STALENESS: {n} commit(s) in '{label}' since last index — run \
@@ -176,12 +184,15 @@ fn staleness_report(
         return report;
     }
     // Never indexed: no root to check (`statements` says so).
-    let Some(root_str) = store.meta_get_key("indexed_root") else {
+    let Some(root) = wicked_estate::indexed_root_path(store, db) else {
         return report;
     };
-    match wicked_estate::commits_behind(Path::new(&root_str), db) {
+    let root_str = root.to_string_lossy().into_owned();
+    let baseline = store.repo_info().ok().flatten().and_then(|i| i.commit);
+    match wicked_estate::commits_behind_since(&root, baseline.as_deref(), db) {
         Some(n) => {
             report.checked += 1;
+            report.worst = Some(n);
             if n > 0 {
                 report.stale.push(format!(
                     "STALENESS: {n} commit(s) since last index — run `wicked-estate index {root_str}` to refresh"
@@ -191,6 +202,77 @@ fn staleness_report(
         None => report.unknown.push(root_str),
     }
     report
+}
+
+/// `stats --json` (#201, #198): the graph's identity and freshness as ONE document — the counts,
+/// a `provenance` block (FULL commit SHA, branch, dirty, canonical `indexed_root`, `indexed_at`,
+/// `indexed_version`, `id_scheme`, `graph_version`), one block per co-located repo under
+/// `repos` (each with its own `commits_behind`), and `staleness.commits_behind` — the worst over
+/// every checked root, `null` when none could be checked (`unknown` names them). An integrator
+/// caching derived analysis keys it on `provenance.commit`; one that must know "is this answer
+/// current" reads `staleness.commits_behind` here instead of parsing the human `STALENESS:` line.
+fn stats_json(
+    store: &dyn wicked_estate_store::GraphStoreMutExt,
+    db: &str,
+    s: &wicked_estate_core::GraphStats,
+) -> serde_json::Value {
+    let report = staleness_report(store, db);
+    let meta = |k: &str| store.meta_get_key(k);
+    let indexed = store.indexed_files().unwrap_or_default();
+    let repos: Vec<serde_json::Value> = wicked_estate::repo_scope::registry(store)
+        .iter()
+        .map(|rec| {
+            let prefix = wicked_estate::repo_scope::prefix(&rec.label);
+            let files = indexed.iter().filter(|f| f.starts_with(&prefix)).count();
+            let key =
+                |name: &str| meta(&wicked_estate::repo_scope::meta_key(Some(&rec.label), name));
+            serde_json::json!({
+                "label": rec.label,
+                "root": rec.root,
+                "subpath": rec.subpath,
+                "files": files,
+                "commit": rec.info.commit,
+                "branch": rec.info.branch,
+                "remote": rec.info.remote,
+                "dirty": rec.info.dirty,
+                "indexed_version": key("indexed_version"),
+                "id_scheme": key("id_scheme"),
+                "commits_behind": wicked_estate::commits_behind_since(
+                    &wicked_estate::recorded_root_path(&rec.root, db),
+                    rec.info.commit.as_deref(),
+                    db,
+                ),
+            })
+        })
+        .collect();
+    let info = store.repo_info().ok().flatten();
+    serde_json::json!({
+        "nodes": s.node_count,
+        "edges": s.edge_count,
+        "files": s.file_count,
+        "unresolved": s.unresolved_ref_count,
+        "db_size_bytes": s.db_size_bytes,
+        "nodes_by_kind": s.nodes_by_kind,
+        "edges_by_kind": s.edges_by_kind,
+        "provenance": {
+            "commit": info.as_ref().and_then(|i| i.commit.clone()),
+            "branch": info.as_ref().and_then(|i| i.branch.clone()),
+            "remote": info.as_ref().and_then(|i| i.remote.clone()),
+            "dirty": info.as_ref().map(|i| i.dirty),
+            "indexed_root": wicked_estate::indexed_root_path(store, db)
+                .map(|p| p.to_string_lossy().into_owned()),
+            "indexed_at": meta("indexed_at"),
+            "indexed_version": meta("indexed_version"),
+            "id_scheme": meta("id_scheme"),
+            "graph_version": meta("graph_version"),
+        },
+        "repos": repos,
+        "staleness": {
+            "commits_behind": report.worst,
+            "checked": report.checked,
+            "unknown": report.unknown,
+        },
+    })
 }
 
 /// Warn when the database was indexed under a different binary version or an older symbol-id
@@ -1819,10 +1901,22 @@ fn main() -> Result<()> {
             );
         }
         "stats" => {
+            let json_out = positional.iter().any(|a| a == "--json");
             let store = open_store_ext(&db).map_err(to_any)?;
-            maybe_print_staleness(store.as_ref(), &db);
+            // Machine output is exactly one JSON document (#198): the freshness notice lives
+            // INSIDE it (`staleness`), never as a line beside it.
+            if !json_out {
+                maybe_print_staleness(store.as_ref(), &db);
+            }
             maybe_warn_version_mismatch(store.as_ref(), &db);
             let s = store.stats().map_err(to_any)?;
+            if json_out {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&stats_json(store.as_ref(), &db, &s))?
+                );
+                return Ok(());
+            }
             let db_mb = s.db_size_bytes as f64 / 1_048_576.0;
             println!(
                 "nodes={} edges={} files={} unresolved={} db={:.1}MB",
