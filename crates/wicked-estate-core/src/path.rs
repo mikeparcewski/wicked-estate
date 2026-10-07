@@ -60,7 +60,7 @@ pub struct PathResult {
     pub endpoints: Vec<Node>,
     /// A route was found.
     pub found: bool,
-    /// Some candidate traversal reached its depth frontier — a node sits at exactly
+    /// Some candidate traversal was cut by its depth horizon — a node at exactly
     /// `max_depth` in its `depths` map.
     ///
     /// Derived here from `depths`, never read off [`Subgraph::truncated`], which folds the node
@@ -68,9 +68,10 @@ pub struct PathResult {
     /// traversal: reporting the winning candidate's flag alone would let a query whose other
     /// candidate walk was cut off return a proven-absence signal for a bounded search.
     ///
-    /// Deliberately conservative — true whenever the frontier is *touched*, including when a
-    /// route was found and when nothing remained to expand. `false` means the walk saw its
-    /// whole reachable set; `true` does not mean a route exists further out.
+    /// Exact since #230: [`Subgraph::depth_horizon_reached`] — true only when something lay
+    /// BEYOND the horizon (a frontier node with an unreached neighbour), whether or not a route
+    /// was found. `false` means the walk saw everything `max_depth` could show it. A zero-hop
+    /// route (both endpoints share a candidate) is decided before any walk: both flags false.
     pub depth_bounded: bool,
     /// Some candidate traversal exhausted its node budget ([`Subgraph::node_cap_reached`]).
     ///
@@ -127,13 +128,6 @@ pub fn resolve_operand(store: &dyn GraphRead, value: &str) -> Result<Vec<SymbolI
     Ok(ids)
 }
 
-/// True when this traversal reached its depth frontier — some node sits at exactly
-/// `max_depth`. Deliberately coarser than [`Subgraph::depth_horizon_reached`]: it is true
-/// whenever the frontier is touched, whether or not anything lay beyond it.
-fn touched_depth_frontier(subgraph: &Subgraph, max_depth: u32) -> bool {
-    subgraph.depths.values().any(|d| *d >= max_depth)
-}
-
 /// The route from `from` to `to` following dependency edges, within `max_depth` hops and
 /// `max_nodes` visited nodes.
 ///
@@ -161,6 +155,18 @@ pub fn path_between(
             ..Default::default()
         });
     }
+    // (#230) A candidate shared by both endpoints is a zero-hop route, decided before any
+    // traverse: nothing was walked, so neither bound can be set.
+    if let Some(same) = from_ids.iter().find(|f| to_ids.contains(f)) {
+        return Ok(PathResult {
+            hops: Vec::new(),
+            endpoints: store.get_node(same)?.into_iter().collect(),
+            found: true,
+            depth_bounded: false,
+            node_bounded: false,
+            unresolved: None,
+        });
+    }
 
     let spec = TraversalSpec {
         direction: Direction::Dependencies,
@@ -179,7 +185,10 @@ pub fn path_between(
 
     for start in &from_ids {
         let subgraph = store.traverse(start, &spec)?;
-        depth_bounded |= touched_depth_frontier(&subgraph, max_depth);
+        // (#230) The EXACT cause (wicked-estate#222): the horizon declined to expand a node that
+        // had an unreached neighbour. A frontier merely touched, with nothing beyond it, is not
+        // a bound — the walk saw everything it could.
+        depth_bounded |= subgraph.depth_horizon_reached;
         node_bounded |= subgraph.node_cap_reached;
 
         if let Some(hops) = subgraph.shortest_path(start, &to_ids) {

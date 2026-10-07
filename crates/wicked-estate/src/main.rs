@@ -4835,7 +4835,12 @@ fn write_path_text(
     }
     if r.found {
         if r.hops.is_empty() {
-            writeln!(out, "'{from}' and '{to}' are the same symbol — zero hops")?;
+            // (#230) Both operands RESOLVED to one candidate — not "the same symbol": 79 nodes
+            // may be named `Props`, and this says only that one of them answered for both.
+            writeln!(
+                out,
+                "'{from}' and '{to}' resolve to a candidate for both endpoints — zero hops"
+            )?;
         } else {
             writeln!(out, "{} hop(s) from '{from}' to '{to}':", r.hops.len())?;
             for e in &r.hops {
@@ -4853,7 +4858,12 @@ fn write_path_text(
     } else {
         writeln!(out, "no path found from '{from}' to '{to}'")?;
     }
-    // R3: a bounded search must never read as a proven absence.
+    // R3: a bounded search must never read as a proven absence. (#230) A FOUND route is not an
+    // absence: the bound lines are for the `no path found` reader, who must know whether the
+    // absence was proven or merely bounded; on a found route they only add noise.
+    if r.found {
+        return Ok(());
+    }
     if r.depth_bounded {
         writeln!(
             out,

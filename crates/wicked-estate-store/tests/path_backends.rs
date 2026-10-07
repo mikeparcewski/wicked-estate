@@ -372,28 +372,108 @@ fn endpoints_covers_both_ends_of_every_hop() {
 
 // ── the bound flags ──────────────────────────────────────────────────────────
 
-/// D1b's falsifier pair. `depth_bounded` means "the walk reached its depth frontier", NOT
-/// "a route was cut off" — so it is true even when the route was found at exactly the bound,
-/// and false when the whole reachable set sat inside it. An implementation computing it as
-/// "no route and the frontier was reached" passes every other test here.
+/// D1b's falsifier pair, re-pointed by #230 at the EXACT cause (`Subgraph::depth_horizon_reached`,
+/// wicked-estate#222): `depth_bounded` is true only when something lay BEYOND the horizon —
+/// whether or not a route was found — and false when the walk saw everything, even if a node sat
+/// exactly at the bound. The old "frontier touched" heuristic reported a found 3-hop route at
+/// depth 3 as bounded; an implementation computing "no route and the frontier was reached" still
+/// fails the found-and-bounded case. Both backends agree.
 #[test]
-fn depth_bounded_is_true_at_the_bound_even_when_the_route_is_found() {
+fn depth_bounded_is_exact_true_only_when_something_lies_beyond_the_horizon() {
+    let (nodes, edges) = chain(4);
+    for (label, r) in [
+        (
+            "mem",
+            path_between(&mem(&nodes, &edges), "a0", "a3", 3, 5_000).expect("mem"),
+        ),
+        (
+            "sqlite",
+            path_between(&sqlite(&nodes, &edges), "a0", "a3", 3, 5_000).expect("sqlite"),
+        ),
+    ] {
+        assert!(r.found, "{label}: a 3-hop route is reachable at depth 3");
+        assert_eq!(r.hops.len(), 3, "{label}");
+        assert!(
+            r.depth_bounded,
+            "{label}: a4 lies beyond the horizon, so the flag is true despite the found route"
+        );
+    }
     let (nodes, edges) = chain(3);
-    let store = mem(&nodes, &edges);
+    for (label, r) in [
+        (
+            "mem",
+            path_between(&mem(&nodes, &edges), "a0", "a3", 3, 5_000).expect("mem"),
+        ),
+        (
+            "sqlite",
+            path_between(&sqlite(&nodes, &edges), "a0", "a3", 3, 5_000).expect("sqlite"),
+        ),
+    ] {
+        assert!(r.found, "{label}");
+        assert!(
+            !r.depth_bounded,
+            "{label}: a3 sits AT the bound but nothing lies beyond it — the walk saw everything"
+        );
+    }
+    let (nodes, edges) = chain(3);
+    let inside = path_between(&mem(&nodes, &edges), "a0", "a3", 8, 5_000).expect("query");
+    assert!(inside.found && !inside.depth_bounded);
+}
 
-    let at_bound = path_between(&store, "a0", "a3", 3, 5_000).expect("query");
-    assert!(at_bound.found, "a 3-hop chain is reachable at depth 3");
-    assert!(
-        at_bound.depth_bounded,
-        "the walk touched its frontier, so the flag is true despite the route being found"
-    );
+/// #230: both operands resolving to one candidate is a zero-hop route decided BEFORE any
+/// traverse — no bound can be set, and the endpoint is the node itself.
+#[test]
+fn a_shared_candidate_is_a_zero_hop_route_with_no_bounds() {
+    let (nodes, edges) = chain(2);
+    let r = path_between(&mem(&nodes, &edges), "a1", "a1", 1, 1).expect("query");
+    assert!(r.found && r.hops.is_empty(), "{r:?}");
+    assert!(!r.depth_bounded && !r.node_bounded, "{r:?}");
+    assert_eq!(r.endpoints.len(), 1);
+    assert_eq!(r.endpoints[0].symbol.as_str(), "a1");
+}
 
-    let inside_bound = path_between(&store, "a0", "a3", 8, 5_000).expect("query");
-    assert!(inside_bound.found);
-    assert!(
-        !inside_bound.depth_bounded,
-        "the whole reachable set sits inside depth 8, so nothing was bounded"
+/// #228 item 2: `path_between` against LIVE Postgres, in the `postgres-conformance` job (which
+/// runs this crate's whole suite under `--features postgres`). Skips without `TEST_POSTGRES_URL`.
+/// Ids carry a per-run tag so a shared database never hands this run another run's rows.
+#[cfg(feature = "postgres")]
+#[test]
+fn path_between_on_postgres_matches_the_embedded_backends() {
+    let url = match std::env::var("TEST_POSTGRES_URL") {
+        Ok(u) if !u.is_empty() => u,
+        _ => {
+            eprintln!("path_backends: TEST_POSTGRES_URL not set — skipping the Postgres case");
+            return;
+        }
+    };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let tag = format!("pb{}-{nanos}", std::process::id());
+    let id = |i: usize| format!("{tag}-a{i}");
+    let nodes: Vec<Node> = (0..=4).map(|i| named_node(&id(i), &id(i))).collect();
+    let edges: Vec<Edge> = (0..4).map(|i| edge(&id(i), &id(i + 1))).collect();
+    let mut pg = wicked_estate_store::PostgresStore::open(&url).expect("open postgres store");
+    load(&mut pg, &nodes, &edges);
+    let sq = sqlite(&nodes, &edges);
+
+    let p = path_between(&pg, &id(0), &id(3), 3, 5_000).expect("postgres");
+    let s = path_between(&sq, &id(0), &id(3), 3, 5_000).expect("sqlite");
+    assert!(p.found && s.found, "postgres={p:?} sqlite={s:?}");
+    assert_eq!(
+        hop_ids(&p.hops),
+        hop_ids(&s.hops),
+        "the route is backend-independent"
     );
+    assert_eq!(
+        (p.depth_bounded, p.node_bounded),
+        (s.depth_bounded, s.node_bounded),
+        "the bound flags agree: postgres={p:?} sqlite={s:?}"
+    );
+    assert!(p.depth_bounded, "a4 lies beyond depth 3 on Postgres too");
+
+    let absent = path_between(&pg, &id(0), &id(4), 2, 5_000).expect("postgres");
+    assert!(!absent.found && absent.depth_bounded, "{absent:?}");
 }
 
 #[test]
