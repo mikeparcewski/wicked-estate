@@ -1465,13 +1465,15 @@ impl RetrievalTool for Lineage {
         // (#211) The relation is decided — and an unsupported one REFUSED — before anything else:
         // a near-miss (`flow_to`) used to fall back to dependency lineage and answer with the same
         // keys as the real thing, so 11 confident rows and 0 were indistinguishable on the wire.
-        let relation = request.get("relation").and_then(|v| v.as_str());
-        let semantic_flow = match relation {
-            None | Some("") => false,
-            Some(r) if r == edge_tags::FLOWS_TO => true,
-            Some(r) => {
+        let semantic_flow = match request.get("relation") {
+            None | Some(Value::Null) => false,
+            Some(Value::String(r)) if r.is_empty() => false,
+            Some(Value::String(r)) if r == edge_tags::FLOWS_TO => true,
+            // A wrong string AND a wrong type (`123`, `true`, an object) are refused alike —
+            // a non-string used to read as "absent" and fall open (Codex on #266).
+            Some(other) => {
                 return Err(wicked_estate_core::Error::Invalid(format!(
-                    "Lineage: unsupported relation {r:?} — omit it for dependency lineage \
+                    "Lineage: unsupported relation {other} — omit it for dependency lineage \
                      (Calls + Imports) or pass \"{}\"",
                     edge_tags::FLOWS_TO
                 )));
@@ -5044,25 +5046,38 @@ mod tests {
     #[test]
     fn lineage_rejects_an_unsupported_relation_with_error_invalid() {
         let store = lineage_fixture();
-        for bad in ["flow_to", "flows-to", "FLOWS_TO", "dependency", "calls"] {
-            let err = Lineage
-                .invoke(&store, &json!({"symbol": "root", "relation": bad}))
-                .expect_err(&format!("relation {bad:?} must be refused"));
+        for bad in [
+            json!("flow_to"),
+            json!("flows-to"),
+            json!("FLOWS_TO"),
+            json!("dependency"),
+            json!("calls"),
+            json!(123),
+            json!(true),
+            json!({"relation": "flows_to"}),
+        ] {
+            let err = match Lineage.invoke(&store, &json!({"symbol": "root", "relation": bad})) {
+                Err(e) => e,
+                Ok(res) => panic!("relation {bad} must be refused, got {}", res.content),
+            };
             assert!(
                 matches!(err, wicked_estate_core::Error::Invalid(_)),
                 "{bad}: {err:?}"
             );
             let msg = err.to_string();
+            let shown = bad.as_str().map_or_else(|| bad.to_string(), str::to_string);
             assert!(
-                msg.contains(bad) && msg.contains("flows_to"),
+                msg.contains(&shown) && msg.contains("flows_to"),
                 "the error names the bad value and the supported one: {msg}"
             );
         }
-        // An empty string is "not set", like an absent key.
-        let res = Lineage
-            .invoke(&store, &json!({"symbol": "root", "relation": ""}))
-            .unwrap();
-        assert_eq!(res.content["relation"], json!("dependency"));
+        // An empty string and JSON null are "not set", like an absent key.
+        for unset in [json!(""), json!(null)] {
+            let res = Lineage
+                .invoke(&store, &json!({"symbol": "root", "relation": unset}))
+                .unwrap();
+            assert_eq!(res.content["relation"], json!("dependency"), "{unset}");
+        }
     }
 
     /// #211: every reply echoes the EFFECTIVE relation, so an older server (no key) and an
