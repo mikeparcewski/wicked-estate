@@ -2369,8 +2369,9 @@ pub fn indexed_root_path(store: &dyn GraphStoreMutExt, db_path: &str) -> Option<
 /// root is returned as is. A relative one was written by an older binary as the caller spelled
 /// it (`index .`), relative to a working directory nobody recorded; the db file's own directory
 /// is the best evidence of where that was (`index . --db graph.db`), so the root resolves
-/// against it whenever that directory exists, and only otherwise stays as spelled — which is
-/// what the pre-#248 code always did.
+/// against it whenever THAT resolution is a directory, and otherwise stays as spelled — which
+/// is what the pre-#248 code always did (codex round 2 on #264: a missing db directory must not
+/// rewrite the recorded spelling into another path that does not exist).
 pub fn recorded_root_path(root: &str, db_path: &str) -> PathBuf {
     let root = PathBuf::from(root);
     if root.is_absolute() {
@@ -2382,11 +2383,7 @@ pub fn recorded_root_path(root: &str, db_path: &str) -> PathBuf {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     let from_db = base.join(&root);
-    if from_db.is_dir() || !root.is_dir() {
-        from_db
-    } else {
-        root
-    }
+    if from_db.is_dir() { from_db } else { root }
 }
 
 /// Now, as RFC 3339 UTC — the `indexed_at` meta value.
@@ -3445,9 +3442,11 @@ mod tests {
             "indexed_at is RFC 3339 UTC: {at}"
         );
         // Legacy relative roots (written by an older binary as spelled). `"."` — always a
-        // directory from ANY cwd — resolves against the db file's directory when that exists
-        // (codex round 1 on #264), never the caller's cwd; one that exists nowhere resolves
-        // there too; one visible only from the cwd stays as spelled (the pre-#248 behaviour).
+        // directory from ANY cwd — resolves against the db file's directory when that is a
+        // directory (codex round 1 on #264), never the caller's cwd; one that resolves to no
+        // directory there stays as spelled (codex round 2: a missing db directory must not
+        // rewrite it into another missing path); one visible only from the cwd stays as spelled
+        // (the pre-#248 behaviour).
         store.meta_set_key("indexed_root", ".");
         assert_eq!(
             indexed_root_path(&store, root.join("graph.db").to_str().unwrap()).unwrap(),
@@ -3457,7 +3456,8 @@ mod tests {
         store.meta_set_key("indexed_root", "no-such-dir-for-this-test");
         assert_eq!(
             indexed_root_path(&store, "/graphs/acme/graph.db").unwrap(),
-            PathBuf::from("/graphs/acme/no-such-dir-for-this-test")
+            PathBuf::from("no-such-dir-for-this-test"),
+            "nothing to resolve against: the recorded spelling is kept"
         );
         store.meta_set_key("indexed_root", rel.to_str().unwrap());
         assert_eq!(
