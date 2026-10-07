@@ -1,6 +1,6 @@
 {
-  "captured_from": "wicked-estate-mcp-0.12.0",
-  "description": "Transitive dependencies of a symbol (forward-reachability on Calls+Imports edges). Optional relation='flows_to' traces semantic value flow from producer to consumer. Answers 'what does this symbol depend on?' \u2014 the complement of BlastRadius. Use to understand the full dependency chain before a refactor or to build a change-impact picture from the dependency side.",
+  "captured_from": "wicked-estate-mcp-0.12.0 (description re-stamped at 0.21.0, #211: relation echo + flows)",
+  "description": "Transitive dependencies of a symbol (forward-reachability on Calls+Imports edges). Optional relation='flows_to' traces semantic value flow from producer to consumer; the reply echoes the effective `relation` ('dependency' | 'flows_to'), any other value is an error, and in flows_to mode a `flows` array classifies each hop (the rows under `dependencies` are then the consumers). Answers 'what does this symbol depend on?' — the complement of BlastRadius. Use to understand the full dependency chain before a refactor or to build a change-impact picture from the dependency side.",
   "inputSchema": {
     "additionalProperties": false,
     "properties": {

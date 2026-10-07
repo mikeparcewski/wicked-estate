@@ -40,13 +40,40 @@
   quietly (exit 0) instead of a `failed printing to stdout` panic; text mode's broken pipe is
   handled the same way, and `resolve --json` / `query --json` write through the same seam. Every
   other write error is still returned.
+- **`Lineage` refuses an unsupported `relation` (#211).** `relation: "flow_to"` (any value other
+  than `flows_to`) used to fall back to dependency lineage with the same response keys — 11
+  confident rows and 0 indistinguishable on the wire. It is now `Error::Invalid` (MCP `isError`,
+  CLI exit 1) naming the bad value and the supported one. Every reply echoes the effective
+  `"relation": "dependency" | "flows_to"`: its absence identifies an older server, a mismatch an
+  ignored argument. The tool description says so and names the `flows` array. No wicked-core
+  caller passes `relation`; wicked-garden's search skill should spell it `flows_to`.
+- **`Path.depth_bounded` is the exact cause (#230).** It followed a "frontier touched" heuristic
+  (a found 3-hop route at depth 3 read as bounded); it is now `Subgraph::depth_horizon_reached`
+  (#222) — true only when something lay beyond the horizon, found route or not. CLI text prints
+  the bound lines only on `no path found`; both operands resolving to one candidate is a zero-hop
+  route decided before any walk (no bounds, worded "resolve to a candidate for both endpoints",
+  not "the same symbol" — 79 nodes may share a name).
+- **Missing-`symbol` replies carry the #190 cause keys (#227).** `TraverseGraph{}`,
+  `BlastRadius{}` and `Lineage{}` now emit `depth_horizon_reached: false`,
+  `node_cap_reached: false` and `searched_depth` = the effective default, like every other reply.
+- **`Path`'s description tells agents what an absence means (#230):** proven only when both
+  bound flags are false; raise `depth` / `max_nodes` (MCP defaults are smaller than the CLI's)
+  before concluding from one.
+- **Conformance goldens (#230 item 4):** `schemas/Path.json` names the release that introduced
+  the tool (0.18.0, #221) instead of 0.16.7, ends with a newline, and carries the current
+  description; `schemas/Lineage.json`'s description re-stamped for #211. The conformance test
+  compares `inputSchema.required`/`properties`, which are unchanged.
+- **`path_between` runs against live Postgres in `postgres-conformance` (#228 item 2):**
+  `path_backends::path_between_on_postgres_matches_the_embedded_backends` (feature-gated, skips
+  without `TEST_POSTGRES_URL`).
+
+Not in this change: #230 item 6 (an R4 payload-size marker for `Path`) needs its own design —
+dropping hops would make a route invalid, so it wants a structured, flagged elision.
 - **`stale-annotations` takes exactly one integer cutoff (#205).** The arm took the first
   parseable integer anywhere in argv, so `stale-annotations soon 100` ran at cutoff 100 and
   `stale-annotations 2026 01 01` ran at 2026 with the rest dropped — a plausible wrong answer
   with exit 0. Anything other than one integer operand is now a usage error (exit 1). A caller
   that passed stray operands breaks; that is the fix, as with #197/#206.
-
-### Fixed
 - **Annotation `--json` carries the evidence envelope (#204).** `annotations`,
   `annotations --symbol`, `stale-annotations`, `nodes` and `source` `--json` now emit
   `last_verified`, `source_type` and `extraction_method` on every annotation. Before, `ts`

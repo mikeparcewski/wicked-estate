@@ -1,6 +1,6 @@
 {
-  "captured_from": "wicked-estate-mcp-0.16.7",
-  "description": "The ordered hops from one symbol to another — how A reaches B, not merely that it does. Each hop carries its edge kind, confidence, provenance and resolving tier, and both endpoints are denormalized (name, file, line), so an agent can name the intermediate functions and open only those files. Use this instead of reconstructing a route from TraverseGraph's edge list. `from` and `to` accept a symbol name or a SymbolId.",
+  "captured_from": "wicked-estate-mcp-0.18.0 (#221: new tool; description re-stamped at 0.21.0, #230)",
+  "description": "The ordered hops from one symbol to another — how A reaches B, not merely that it does. Each hop carries its edge kind, confidence, provenance and resolving tier, and both endpoints are denormalized (name, file, line), so an agent can name the intermediate functions and open only those files. Use this instead of reconstructing a route from TraverseGraph's edge list. `from` and `to` accept a symbol name or a SymbolId. `found: false` is a PROVEN absence only when `depth_bounded` and `node_bounded` are both false; when either is set, raise `depth` / `max_nodes` (the defaults are smaller than the CLI's) before concluding anything from the absence.",
   "inputSchema": {
     "additionalProperties": false,
     "properties": {
