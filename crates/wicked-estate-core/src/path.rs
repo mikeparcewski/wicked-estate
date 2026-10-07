@@ -156,16 +156,20 @@ pub fn path_between(
         });
     }
     // (#230) A candidate shared by both endpoints is a zero-hop route, decided before any
-    // traverse: nothing was walked, so neither bound can be set.
+    // traverse: nothing was walked, so neither bound can be set. Only when the node itself
+    // loads — an id the name index hands out but the store cannot load (a stale index) is not
+    // an answer, and falls through to the walk like any other candidate (Codex on #266).
     if let Some(same) = from_ids.iter().find(|f| to_ids.contains(f)) {
-        return Ok(PathResult {
-            hops: Vec::new(),
-            endpoints: store.get_node(same)?.into_iter().collect(),
-            found: true,
-            depth_bounded: false,
-            node_bounded: false,
-            unresolved: None,
-        });
+        if let Some(node) = store.get_node(same)? {
+            return Ok(PathResult {
+                hops: Vec::new(),
+                endpoints: vec![node],
+                found: true,
+                depth_bounded: false,
+                node_bounded: false,
+                unresolved: None,
+            });
+        }
     }
 
     let spec = TraversalSpec {

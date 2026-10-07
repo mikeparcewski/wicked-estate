@@ -474,6 +474,18 @@ fn path_between_on_postgres_matches_the_embedded_backends() {
 
     let absent = path_between(&pg, &id(0), &id(4), 2, 5_000).expect("postgres");
     assert!(!absent.found && absent.depth_bounded, "{absent:?}");
+
+    // The other half of the exactness claim: a route found AT the bound with nothing beyond it
+    // is not bounded — a second, shorter chain so the first one's a4 cannot sit past the horizon.
+    let id3 = |i: usize| format!("{tag}-b{i}");
+    let nodes3: Vec<Node> = (0..=3).map(|i| named_node(&id3(i), &id3(i))).collect();
+    let edges3: Vec<Edge> = (0..3).map(|i| edge(&id3(i), &id3(i + 1))).collect();
+    load(&mut pg, &nodes3, &edges3);
+    let exact = path_between(&pg, &id3(0), &id3(3), 3, 5_000).expect("postgres");
+    assert!(
+        exact.found && !exact.depth_bounded,
+        "b3 sits AT the bound with nothing beyond it: {exact:?}"
+    );
 }
 
 #[test]
