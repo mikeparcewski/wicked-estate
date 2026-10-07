@@ -133,30 +133,6 @@ impl StalenessReport {
 /// (the `index` arm's wicked-core#170 class). The store factory decides what a spec names:
 /// `sqlite://<path>` is a file too, and a zero-length file is not a graph (SQLite would grow it
 /// into an empty one). `:memory:` and non-file backends are left to the factory.
-/// (#246) The dispatch arms that only READ the graph named by `--db`; each fails closed through
-/// [`require_existing_graph`] before it opens the store. `lineage` and `supports` check inside
-/// their arms (they parse their own argv); the bridged tools check in `tool_bridge`; multi-db
-/// commands (`cross-graph`, `correspond`) and writers are not here.
-const READ_ONLY_COMMANDS: &[&str] = &[
-    "query",
-    "blast-radius",
-    "path",
-    "stats",
-    "graph-view",
-    "source",
-    "by-requirement",
-    "annotations",
-    "stale-annotations",
-    "fingerprint",
-    "changed-since",
-    "entrypoints",
-    "leaves",
-    "dead-code",
-    "nodes",
-    "resolve",
-    "export",
-];
-
 /// (#247) Write one line to stdout; a reader that went away (`| head -1`) is not an error —
 /// the line is simply not wanted. Every other write error is returned.
 fn print_line(line: &str) -> anyhow::Result<()> {
@@ -1259,13 +1235,6 @@ fn main() -> Result<()> {
     // Re-dispatch to the usage arm. `help` matches no command, so it falls through to `_`.
     let cmd = if help_requested { "help" } else { cmd };
 
-    // (#246) Every READ command shares `lineage`'s fail-closed check: opening a missing SQLite
-    // path would create an empty graph and answer "absent" with exit 0 — indistinguishable from
-    // the real answer. Writers (`index`, `annotate`, …) keep creating.
-    if READ_ONLY_COMMANDS.contains(&cmd) {
-        require_existing_graph(&db, cmd)?;
-    }
-
     match cmd {
         "index" => {
             let path = positional.first().map(String::as_str).unwrap_or(".");
@@ -1558,6 +1527,9 @@ fn main() -> Result<()> {
             let name = positional
                 .first()
                 .context("usage: wicked-estate query <name>")?;
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "query")?;
             let store = open_store_ext(&db).map_err(to_any)?;
             maybe_print_staleness(store.as_ref(), &db);
             maybe_warn_version_mismatch(store.as_ref(), &db);
@@ -1652,6 +1624,9 @@ fn main() -> Result<()> {
                 }
                 found.context("usage: wicked-estate blast-radius <name> [--depth N] [--json]")?
             };
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "blast-radius")?;
             let store = open_store_ext(&db).map_err(to_any)?;
             // Machine output must be exactly one JSON document — notices would corrupt it.
             if !json_out {
@@ -1793,6 +1768,9 @@ fn main() -> Result<()> {
             }
             let (from, to) = (operands[0].as_str(), operands[1].as_str());
 
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "path")?;
             let store = open_store_ext(&db).map_err(to_any)?;
             // Machine output must be exactly one JSON document — notices would corrupt it.
             if !json_out {
@@ -1989,6 +1967,9 @@ fn main() -> Result<()> {
         }
         "stats" => {
             let json_out = positional.iter().any(|a| a == "--json");
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "stats")?;
             let store = open_store_ext(&db).map_err(to_any)?;
             // Machine output is exactly one JSON document (#198): the freshness notice lives
             // INSIDE it (`staleness`), never as a line beside it.
@@ -2104,6 +2085,9 @@ fn main() -> Result<()> {
                 }
             };
 
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "graph-view")?;
             let store = open_store_ext(&db).map_err(to_any)?;
             // Oversample PageRank candidates so filters don't under-deliver.
             // Fetch 4× the requested limit (at least limit+200) so that after
@@ -2387,6 +2371,9 @@ fn main() -> Result<()> {
                     "{SOURCE_USAGE}\na <name> or one of --symbols/--cluster/--file is required"
                 );
             }
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "source")?;
             let store = open_store(&db).map_err(to_any)?;
 
             // Resolve the selector — one rule for both output modes (#206: the text path used to
@@ -2860,6 +2847,9 @@ fn main() -> Result<()> {
         // Reverse link: every symbol annotated with a given requirement.
         "by-requirement" => {
             let req = positional.first().cloned().unwrap_or_default();
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "by-requirement")?;
             let store = open_store_ext(&db).map_err(to_any)?;
             let hits = wicked_estate::symbols_for_requirement(&*store, &req).map_err(to_any)?;
             println!("symbols satisfying requirement {req:?}: {}", hits.len());
@@ -3193,6 +3183,9 @@ fn main() -> Result<()> {
             let type_filter = ann_type.as_deref();
             // ADR-003: route through the open_store factory (backend-agnostic) — this arm
             // needs only GraphRead methods, which deref through Box<dyn GraphStore>.
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "annotations")?;
             let store = open_store(&db).map_err(to_any)?;
 
             // Fetch + apply the optional type filter for one symbol.
@@ -3287,6 +3280,9 @@ fn main() -> Result<()> {
                 "usage: wicked-estate stale-annotations <cutoff-unix-seconds> [--json] [--db ...]",
             )?;
             // ADR-003: backend-agnostic factory — annotations_stale_since is a GraphRead method.
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "stale-annotations")?;
             let store = open_store(&db).map_err(to_any)?;
             let stale = store.annotations_stale_since(cutoff).map_err(to_any)?;
             if json_out {
@@ -3330,6 +3326,9 @@ fn main() -> Result<()> {
             let name = positional
                 .first()
                 .context("usage: wicked-estate fingerprint <name> [--content] [--db ...]")?;
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "fingerprint")?;
             let store = open_store(&db).map_err(to_any)?;
             let hits = wicked_estate::search(&*store, name).map_err(to_any)?;
             drop(store);
@@ -3406,6 +3405,9 @@ fn main() -> Result<()> {
                 }
                 return Ok(());
             }
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "changed-since")?;
             let store = SqliteStore::open(&db).map_err(to_any)?;
             let mut all_nodes: Vec<wicked_estate_core::Node> = Vec::new();
             for file in &changed_files {
@@ -3445,6 +3447,9 @@ fn main() -> Result<()> {
         //   wicked-estate entrypoints [--json] [--db ...]
         "entrypoints" => {
             let json_out = positional.iter().any(|a| a == "--json");
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "entrypoints")?;
             let store = SqliteStore::open(&db).map_err(to_any)?;
             let nodes = store.entrypoint_nodes().map_err(to_any)?;
             if json_out {
@@ -3475,6 +3480,9 @@ fn main() -> Result<()> {
         //   wicked-estate leaves [--json] [--db ...]
         "leaves" => {
             let json_out = positional.iter().any(|a| a == "--json");
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "leaves")?;
             let store = SqliteStore::open(&db).map_err(to_any)?;
             let nodes = store.leaf_nodes().map_err(to_any)?;
             if json_out {
@@ -3505,6 +3513,9 @@ fn main() -> Result<()> {
         //   wicked-estate dead-code [--json] [--db ...]
         "dead-code" => {
             let json_out = positional.iter().any(|a| a == "--json");
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "dead-code")?;
             let store = SqliteStore::open(&db).map_err(to_any)?;
             let nodes = store.isolated_nodes().map_err(to_any)?;
             if json_out {
@@ -3555,6 +3566,9 @@ fn main() -> Result<()> {
             // per-node `get_semantics` read nor the `neighbors` edge fetch (and its shape is
             // unchanged for existing consumers).
             let with_semantics = positional.iter().any(|a| a == "--semantics");
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "nodes")?;
             let store = SqliteStore::open(&db).map_err(to_any)?;
 
             // Per-node JSON for the `--json` paths: base metadata + typed annotations.
@@ -3700,6 +3714,9 @@ fn main() -> Result<()> {
             // GraphRead::find_symbols, a GraphStore supertrait method, so Box<dyn
             // GraphStore> derefs cleanly. (The other read arms are pre-existing debt —
             // a dedicated open_store migration, not this PHASE-1 surface's job.)
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "resolve")?;
             let store = open_store(&db).map_err(to_any)?;
             let q = SymbolQuery {
                 exact_name: Some(name.clone()),
@@ -4043,6 +4060,9 @@ fn main() -> Result<()> {
             let edges_only = positional.iter().any(|a| a == "--edges-only");
 
             // ADR-003: backend-agnostic factory — all_nodes/all_edges are GraphRead methods.
+            // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
+            // open that would otherwise create an empty one.
+            require_existing_graph(&db, "export")?;
             let store = open_store(&db).map_err(to_any)?;
             let nodes = if !edges_only {
                 store.all_nodes().map_err(to_any)?

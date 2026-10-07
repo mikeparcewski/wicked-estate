@@ -6,7 +6,8 @@
 - **Read commands fail closed on a missing `--db` (#246).** `query`, `blast-radius`, `path`,
   `stats`, `graph-view`, `source`, `by-requirement`, `annotations`, `stale-annotations`,
   `fingerprint`, `changed-since`, `entrypoints`, `leaves`, `dead-code`, `nodes`, `resolve` and
-  `export` now share `lineage`'s check: a SQLite path that does not exist (or a zero-byte file)
+  `export` now share `lineage`'s check (after the arm's own usage checks, before the store is
+  opened): a SQLite path that does not exist (or a zero-byte file)
   is `no graph at <db> (<cmd> never creates one)`, exit 1, and the file is NOT created. Before,
   each opened an empty graph and answered "absent" with exit 0. Writers (`index`, `annotate`,
   `semantics`, …) keep creating. A shell-out that relied on exit 0 against a missing db breaks;
