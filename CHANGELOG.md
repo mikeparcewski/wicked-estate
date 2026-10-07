@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+### Changed (breaking)
+- **`stale-annotations` takes exactly one integer cutoff (#205).** The arm took the first
+  parseable integer anywhere in argv, so `stale-annotations soon 100` ran at cutoff 100 and
+  `stale-annotations 2026 01 01` ran at 2026 with the rest dropped — a plausible wrong answer
+  with exit 0. Anything other than one integer operand is now a usage error (exit 1). A caller
+  that passed stray operands breaks; that is the fix, as with #197/#206.
+
+### Fixed
+- **Annotation `--json` carries the evidence envelope (#204).** `annotations`,
+  `annotations --symbol`, `stale-annotations`, `nodes` and `source` `--json` now emit
+  `last_verified`, `source_type` and `extraction_method` on every annotation. Before, `ts`
+  (write time) was the only clock in the document, so a never-verified row
+  (`last_verified: 0`) read as "verified just now" — in the JSON of the very command that
+  selects on `last_verified`. The CLI's private renderer (`source_bundle::annotation_json`) is
+  deleted; every CLI arm and the MCP payloads now share `wicked_estate_retrieve::annotation_json`,
+  so the two surfaces cannot drift again. Additive: existing keys are unchanged. Cost: ~105 chars
+  per annotation pretty-printed (~2.1K for a node at the 20-annotation cap); `--max-total-chars`
+  budgets source text only and is unaffected.
+- **The `stale-annotations` banner states the cutoff unit (#205):** `<cutoff-unix-seconds>`,
+  matching the usage error.
+
+### Documentation
+- **`annotations --json` container shape (#203, kept by decision).** `--help` now documents
+  that `annotations <name>` emits an array (a name is a search; it can match many symbols) and
+  `annotations --symbol <id>` a single object (an id names one). Not harmonized: the split
+  reflects the lookup's cardinality, and changing it would break every `--symbol` reader to
+  save a consumer one `if`.
+
 ## [0.21.0] — 2026-10-06
 
 Minor bump, not a patch: the bespoke CLI arms now reject flags they do not read (#197, #206),

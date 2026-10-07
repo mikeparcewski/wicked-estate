@@ -23,28 +23,12 @@
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use wicked_estate_core::{Annotation, Node, is_advisory};
+use wicked_estate_retrieve::annotation_json;
 
 /// R4 payload cap: at most this many annotations are inlined per entity in a structured payload
 /// (`nodes --json`, `source --json`, `RetrieveEntity`). `annotation_summary.count` always carries
 /// the TRUE total so a consumer can tell it was capped (the spec's "summary is always exact" rule).
 pub const MAX_ANNOTATIONS_PER_ENTITY: usize = 20;
-
-/// Render a single annotation as the spec's payload object:
-/// `{type, key, value, confidence, provenance, author, ts, advisory}`. `advisory` is computed from
-/// the `type` via [`is_advisory`] (assumption / question) — a consumer gates "is this a fact?" off
-/// this field, never the type string (spec build-ahead note 1).
-pub fn annotation_json(a: &Annotation) -> Value {
-    json!({
-        "type": a.r#type,
-        "key": a.key,
-        "value": a.value,
-        "confidence": a.confidence,
-        "provenance": a.provenance,
-        "author": a.author,
-        "ts": a.ts,
-        "advisory": is_advisory(&a.r#type),
-    })
-}
 
 /// Apply the R4 cap to a symbol's annotations for inlining in a payload.
 ///
@@ -542,14 +526,26 @@ mod tests {
         );
     }
 
-    // 8. annotation_json shape: every spec field present; `advisory` computed from `type`.
+    // 8. annotation_json shape: every spec field present; `advisory` computed from `type`; the
+    //    evidence envelope rides along so `ts` (write time) is never the only clock (#204).
     #[test]
     fn annotation_json_carries_advisory_flag() {
         let assume = Annotation::new("assumption", "k", "v")
             .with_confidence(0.7)
             .with_provenance("manual")
-            .with_author("alice");
+            .with_author("alice")
+            .with_source_type("static-analysis")
+            .with_extraction_method("scip-rust@0.3")
+            .with_last_verified(1_700_000_000);
         let j = annotation_json(&assume);
+        assert_eq!(j["source_type"], json!("static-analysis"));
+        assert_eq!(j["extraction_method"], json!("scip-rust@0.3"));
+        assert_eq!(j["last_verified"], json!(1_700_000_000));
+        // Never-verified is an explicit 0, not an absent key a reader backfills from `ts`.
+        assert_eq!(
+            annotation_json(&Annotation::note("k", "v"))["last_verified"],
+            json!(0)
+        );
         assert_eq!(j["type"], json!("assumption"));
         assert_eq!(j["key"], json!("k"));
         assert_eq!(j["value"], json!("v"));

@@ -249,7 +249,11 @@ const MAX_PAYLOAD_ANNOTATIONS: usize = 20;
 /// `extraction_method` / `last_verified`) is surfaced so a consuming agent can answer "what kind of
 /// source backed this, by what method, and is it still fresh?" — the audit-traceability the
 /// envelope adds. Additive: existing consumers that ignore the new keys are unaffected.
-fn annotation_item_json(a: &Annotation) -> Value {
+///
+/// The ONE annotation renderer: the MCP payloads here and every CLI `--json` arm (`annotations`,
+/// `stale-annotations`, `nodes`, `source`) call it, so the two surfaces cannot drift apart (#204 —
+/// the CLI's private copy dropped the envelope, and `stale-annotations --json` showed only `ts`).
+pub fn annotation_json(a: &Annotation) -> Value {
     json!({
         "type": a.r#type,
         "key": a.key,
@@ -307,10 +311,10 @@ fn annotation_payload(store: &dyn GraphRead, id: &SymbolId) -> Result<Option<(Va
         ranked
             .into_iter()
             .take(MAX_PAYLOAD_ANNOTATIONS)
-            .map(annotation_item_json)
+            .map(annotation_json)
             .collect()
     } else {
-        anns.iter().map(annotation_item_json).collect()
+        anns.iter().map(annotation_json).collect()
     };
 
     Ok(Some((Value::Array(items), summary)))
@@ -5899,6 +5903,9 @@ mod tests {
                 "author",
                 "ts",
                 "advisory",
+                "source_type",
+                "extraction_method",
+                "last_verified",
             ] {
                 assert!(item.get(f).is_some(), "annotation item missing field '{f}'");
             }

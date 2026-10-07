@@ -231,7 +231,7 @@ pub trait GraphRead: Send {
     /// is the freshness read the evidence envelope adds: "what needs re-verification?" — the store
     /// counterpart of [`Annotation::is_stale_since`]. Pairs are ordered by symbol then `ts` for
     /// deterministic output, parallel to [`Self::annotations_by_type`]. Surfaced to consumers via
-    /// the `wicked-estate stale-annotations <cutoff>` CLI command.
+    /// the `wicked-estate stale-annotations <cutoff-unix-seconds>` CLI command.
     fn annotations_stale_since(&self, cutoff: i64) -> Result<Vec<(SymbolId, Annotation)>>;
     /// The live symbol's current EPOCH (`symbols.gen`) — a monotonic generation that increments each
     /// time a symbol with the same stable [`SymbolId`] is re-added after its node was deleted
