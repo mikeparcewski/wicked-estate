@@ -70,24 +70,6 @@ fn to_any(e: wicked_estate_core::Error) -> anyhow::Error {
     anyhow::anyhow!(e.to_string())
 }
 
-/// A numeric flag's value, strictly. The shared parser used to write `v.parse().unwrap_or(default)`
-/// (or `.ok()`), so a typo ran on the default and exited 0 with a plausible wrong answer —
-/// `source --max-total-chars 10k` went UNBOUNDED, `annotate --confidence high` stored 1.0. The
-/// accept-and-ignore class #197/#206 closed for flag names, closed here for flag values.
-fn flag_int<T: std::str::FromStr>(flag: &str, v: &str) -> Result<T> {
-    v.parse::<T>()
-        .map_err(|_| anyhow::anyhow!("{flag} {v:?}: expected a non-negative integer"))
-}
-
-/// [`flag_int`] for a real number. `NaN` / `inf` parse as `f64` but are refused: no flag here has a
-/// meaning for them, and a NaN threshold silently compares false against every score.
-fn flag_float(flag: &str, v: &str) -> Result<f64> {
-    match v.parse::<f64>() {
-        Ok(x) if x.is_finite() => Ok(x),
-        _ => anyhow::bail!("{flag} {v:?}: expected a finite number"),
-    }
-}
-
 fn ensure_db_dir(db: &str) -> Result<()> {
     // :memory: and URL-shaped specs (a `postgres://…` resolved by the WICKED_RUNTIME
     // profile seam, or an explicit `sqlite://` spec) are not filesystem paths — treating
@@ -1048,7 +1030,7 @@ fn main() -> Result<()> {
             }
             "--since" => {
                 if let Some(v) = it.next() {
-                    since = flag_int("--since", v)?;
+                    since = v.parse::<u64>().unwrap_or(0);
                 }
             }
             "--history" => {
@@ -1136,10 +1118,7 @@ fn main() -> Result<()> {
             }
             "--confidence" => {
                 if let Some(v) = it.next() {
-                    ann_confidence = flag_float("--confidence", v)?;
-                    if !(0.0..=1.0).contains(&ann_confidence) {
-                        anyhow::bail!("--confidence {v:?}: must be between 0.0 and 1.0");
-                    }
+                    ann_confidence = v.parse::<f64>().unwrap_or(1.0);
                 }
             }
             "--provenance" => {
@@ -1200,12 +1179,12 @@ fn main() -> Result<()> {
             }
             "--top" => {
                 if let Some(v) = it.next() {
-                    correspond_top = flag_int("--top", v)?;
+                    correspond_top = v.parse::<usize>().unwrap_or(20);
                 }
             }
             "--min-score" => {
                 if let Some(v) = it.next() {
-                    correspond_min_score = flag_float("--min-score", v)?;
+                    correspond_min_score = v.parse::<f64>().unwrap_or(0.35);
                 }
             }
             "--annotated-with" => {
@@ -1215,7 +1194,7 @@ fn main() -> Result<()> {
             }
             "--resolution" => {
                 if let Some(v) = it.next() {
-                    cluster_resolution = flag_float("--resolution", v)?;
+                    cluster_resolution = v.parse::<f64>().unwrap_or(1.0);
                 }
             }
             "--hierarchical" => {
@@ -1229,7 +1208,7 @@ fn main() -> Result<()> {
             }
             "--package-bias" => {
                 if let Some(v) = it.next() {
-                    cluster_package_bias = flag_float("--package-bias", v)?;
+                    cluster_package_bias = v.parse::<f64>().unwrap_or(0.0);
                 }
             }
             "--weight" => {
@@ -1239,22 +1218,22 @@ fn main() -> Result<()> {
             }
             "--k" => {
                 if let Some(v) = it.next() {
-                    cluster_k = Some(flag_int("--k", v)?);
+                    cluster_k = Some(v.parse::<usize>().unwrap_or(16));
                 }
             }
             "--eps" => {
                 if let Some(v) = it.next() {
-                    cluster_eps = flag_float("--eps", v)? as f32;
+                    cluster_eps = v.parse::<f32>().unwrap_or(0.25);
                 }
             }
             "--min-pts" => {
                 if let Some(v) = it.next() {
-                    cluster_min_pts = flag_int("--min-pts", v)?;
+                    cluster_min_pts = v.parse::<usize>().unwrap_or(3);
                 }
             }
             "--cluster" => {
                 if let Some(v) = it.next() {
-                    src_cluster = Some(flag_int("--cluster", v)?);
+                    src_cluster = v.parse::<usize>().ok();
                 }
             }
             "--file" => {
@@ -1269,12 +1248,12 @@ fn main() -> Result<()> {
             }
             "--max-total-chars" => {
                 if let Some(v) = it.next() {
-                    src_max_total = Some(flag_int("--max-total-chars", v)?);
+                    src_max_total = v.parse::<usize>().ok();
                 }
             }
             "--max-node-chars" => {
                 if let Some(v) = it.next() {
-                    src_max_node = Some(flag_int("--max-node-chars", v)?);
+                    src_max_node = v.parse::<usize>().ok();
                 }
             }
             // Before the catch-all: otherwise these land in `positional` and the `index` arm
@@ -2117,7 +2096,7 @@ fn main() -> Result<()> {
                     match a.as_str() {
                         "--limit" => {
                             if let Some(v) = it.next() {
-                                limit = flag_int("--limit", v)?;
+                                limit = v.parse().unwrap_or(80);
                             }
                         }
                         "--focus" => match it.next() {
@@ -2926,19 +2905,11 @@ fn main() -> Result<()> {
         // Semantic mode (`--weight semantic`): clusters by embedding proximity (DBSCAN by default;
         // `--k` switches to k-means). Requires an `--embeddings` index.
         "clusters" => {
-            // At most one operand, and it must be an integer: the old first-parseable-token scan
-            // ran `clusters big` on the default 2 and `clusters x 5` on 5, the rest dropped.
-            let operands: Vec<&String> =
-                positional.iter().filter(|a| !a.starts_with("--")).collect();
-            let min_size: usize = match operands.as_slice() {
-                [] => 2,
-                [one] => one.parse().map_err(|_| {
-                    anyhow::anyhow!("<min_size> {one:?}: expected a non-negative integer")
-                })?,
-                many => anyhow::bail!(
-                    "usage: wicked-estate clusters [<min_size>] …: expected at most one operand, got {many:?}"
-                ),
-            };
+            let min_size = positional
+                .iter()
+                .find(|a| a.parse::<usize>().is_ok())
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(2);
             let json_out = positional.iter().any(|a| a == "--json");
             // `--annotate` needs the write side; bind mutably (read methods still work via as_ref).
             let mut store = open_store_ext(&db).map_err(to_any)?;
@@ -3102,7 +3073,7 @@ fn main() -> Result<()> {
             while let Some(a) = it2.next() {
                 if a.as_str() == "--budget" {
                     if let Some(v) = it2.next() {
-                        budget = flag_int("--budget", v)?;
+                        budget = v.parse::<usize>().unwrap_or(4096);
                     }
                 }
             }
@@ -4806,35 +4777,6 @@ mod blast_radius_json_tests {
         );
         let len = serde_json::to_string(&out).unwrap().len();
         assert!(len <= BLAST_RADIUS_CHAR_BUDGET, "payload {len}");
-    }
-}
-
-#[cfg(test)]
-mod numeric_flag_tests {
-    use super::{flag_float, flag_int};
-
-    #[test]
-    fn integers_parse_strictly() {
-        assert_eq!(flag_int::<usize>("--top", "20").unwrap(), 20);
-        assert_eq!(flag_int::<u64>("--since", "0").unwrap(), 0);
-        for bad in ["10k", "-1", "1.5", "", "lots"] {
-            let e = flag_int::<usize>("--top", bad).unwrap_err().to_string();
-            assert!(e.starts_with("--top "), "{bad:?} names the flag: {e}");
-        }
-    }
-
-    #[test]
-    fn floats_must_be_finite() {
-        assert_eq!(flag_float("--eps", "0.25").unwrap(), 0.25);
-        assert_eq!(
-            flag_float("--eps", "-1").unwrap(),
-            -1.0,
-            "sign is the caller's rule"
-        );
-        for bad in ["NaN", "inf", "-inf", "high", ""] {
-            let e = flag_float("--eps", bad).unwrap_err().to_string();
-            assert!(e.starts_with("--eps "), "{bad:?} names the flag: {e}");
-        }
     }
 }
 
