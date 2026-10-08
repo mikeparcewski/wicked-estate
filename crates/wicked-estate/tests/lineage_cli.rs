@@ -809,3 +809,55 @@ fn help_lists_lineage_as_static_semantic_lineage_not_taint() {
         assert!(stdout.contains("not taint analysis"), "{stdout}");
     }
 }
+
+// ── #244: a NAME operand gets a hint in text mode ───────────────────────────
+
+/// `lineage --symbol` takes an exact id. An operand that matches no id but one or more symbol
+/// NAMES still answers an honest empty leaf (exit 0) — and text mode now says so, naming
+/// `resolve <name> --json` as the way to an id. `--json` carries no such note: that document must
+/// stay the MCP response.
+#[test]
+fn text_mode_hints_when_the_operand_is_a_symbol_name() {
+    let s = indexed_angular("name_hint");
+    let store = open(&s);
+    let name = GraphRead::all_nodes(&store)
+        .unwrap()
+        .into_iter()
+        .find(|n| !n.is_value_flow_node() && n.kind != wicked_estate_core::NodeKind::File)
+        .map(|n| n.name)
+        .expect("a structural symbol with a name");
+    let text = run(&s, &["lineage", "--symbol", &name, "--db", "graph.db"]);
+    assert!(text.status.success(), "{text:?}");
+    let stderr = String::from_utf8_lossy(&text.stderr);
+    assert!(
+        stderr.contains("matches no symbol id")
+            && stderr.contains(&format!("wicked-estate resolve {name} --json")),
+        "text mode must hint at resolve for a name operand: {stderr}"
+    );
+    let json = run(
+        &s,
+        &["lineage", "--symbol", &name, "--json", "--db", "graph.db"],
+    );
+    assert!(json.status.success(), "{json:?}");
+    let stderr = String::from_utf8_lossy(&json.stderr);
+    assert!(
+        !stderr.contains("matches no symbol id"),
+        "--json carries no hint: {stderr}"
+    );
+    // An exact id that exists prints no hint either.
+    let id = node_where(
+        &store,
+        |n| {
+            n.name == name
+                && !n.is_value_flow_node()
+                && n.kind != wicked_estate_core::NodeKind::File
+        },
+        "the named symbol",
+    );
+    let text = run(&s, &["lineage", "--symbol", &id, "--db", "graph.db"]);
+    assert!(text.status.success(), "{text:?}");
+    assert!(
+        !String::from_utf8_lossy(&text.stderr).contains("matches no symbol id"),
+        "an exact id gets no hint"
+    );
+}

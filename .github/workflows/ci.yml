@@ -19,11 +19,11 @@ jobs:
       # so this denies warnings in WORKSPACE crates only — exactly the bar we hold.
       RUSTFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: fmt --check
         run: cargo fmt --all -- --check
       - name: build (0 warnings, all targets)
@@ -48,11 +48,11 @@ jobs:
     name: postgres backend compiles (feature-gated)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: clippy the postgres store
         run: cargo clippy -p wicked-estate-store --features postgres --all-targets -- -D warnings
       # The CLI's `postgres` feature is a one-line forward to the store's, but a forward no
@@ -86,9 +86,9 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: postgres-conformance
       # Runs postgres_conformance.rs::postgres_store_satisfies_graph_store_contract, which drops
@@ -116,11 +116,11 @@ jobs:
     name: surrealdb backend (clippy · conformance)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: surrealdb-backend
       - name: clippy the surrealdb store (-D warnings)
@@ -133,6 +133,30 @@ jobs:
       - name: store lib tests under the feature (surreal.rs rollback falsifier)
         run: cargo test -p wicked-estate-store --features surrealdb --lib
 
+  # ── Public-API semver gate (#228). #222 added public fields to `Subgraph` (not
+  #    `#[non_exhaustive]`) and changed `blast_radius_by_name`'s return type; a downstream probe
+  #    crate compiled against the published 0.17.0 then failed with E0063 / E0027 against the merged
+  #    tree, and nothing in CI noticed — a patch-numbered release could have published a break.
+  #    cargo-semver-checks rustdocs every publishable workspace crate (bench is publish = false) and
+  #    diffs it against the LAST VERSION ON CRATES.IO, failing on a breaking change the manifest
+  #    version does not license (0.x: a minor bump licenses breaks, a patch bump does not).
+  #    Advisory, not in the `required-checks` ruleset: a breaking PR is expected to land with the
+  #    minor bump release.yml would otherwise cut, and this job is what says so before the tag.
+  #    Default features only, like `gate`. ──────────────────────────────────────────────────────
+  semver:
+    name: semver (cargo-semver-checks vs last published)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: semver-checks
+      - name: cargo semver-checks (workspace, baseline = crates.io)
+        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
+        with:
+          rust-toolchain: manual
+
   # ── Feature-gated semantic embedders. These tests download an embedding model on
   #    first run, so they CANNOT live in the default `gate` job (which must stay
   #    offline + dependency-free). This lane proves the semantic tiers keep working:
@@ -144,11 +168,11 @@ jobs:
     name: semantic embedders (model2vec · fastembed)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: cache downloaded embedding models
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           # model2vec-rs uses hf-hub (~/.cache/huggingface); fastembed caches under
           # ~/.cache/fastembed and/or a local .fastembed_cache. Models are immutable,

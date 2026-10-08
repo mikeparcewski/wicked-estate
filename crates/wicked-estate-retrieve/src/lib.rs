@@ -804,7 +804,13 @@ impl RetrievalTool for TraverseGraph {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => {
                 return Ok(RetrievalResult {
-                    content: json!({ "nodes": [], "edges": [], "depths": {}, "truncated": false }),
+                    // (#227) The cause keys every other reply carries.
+                    content: json!({
+                        "nodes": [], "edges": [], "depths": {}, "truncated": false,
+                        "depth_horizon_reached": false,
+                        "node_cap_reached": false,
+                        "searched_depth": opt_u64(request, "depth").unwrap_or(4).min(TRAVERSE_DEPTH_CEILING as u64),
+                    }),
                     diagnostics: vec!["TraverseGraph: 'symbol' field is required".to_string()],
                 });
             }
@@ -957,7 +963,9 @@ impl RetrievalTool for Path {
          both endpoints are denormalized (name, file, line), so an agent can name the \
          intermediate functions and open only those files. Use this instead of reconstructing \
          a route from TraverseGraph's edge list. `from` and `to` accept a symbol name or a \
-         SymbolId."
+         SymbolId. `found: false` is a PROVEN absence only when `depth_bounded` and \
+         `node_bounded` are both false; when either is set, raise `depth` / `max_nodes` (the \
+         defaults are smaller than the CLI's) before concluding anything from the absence."
     }
 
     fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
@@ -1155,6 +1163,10 @@ impl RetrievalTool for BlastRadius {
                         "truncated": false,
                         "unresolved_callers": 0,
                         "confidence": { "min": null, "avg": null, "edge_count": 0 },
+                        // (#227) The cause keys every other reply carries.
+                        "depth_horizon_reached": false,
+                        "node_cap_reached": false,
+                        "searched_depth": opt_u64(request, "depth").unwrap_or(8).min(BLAST_DEPTH_CEILING as u64),
                     }),
                     diagnostics: vec!["BlastRadius: 'symbol' field is required".to_string()],
                 });
@@ -1443,35 +1455,64 @@ impl RetrievalTool for Lineage {
 
     fn description(&self) -> &str {
         "Transitive dependencies of a symbol (forward-reachability on Calls+Imports edges). \
-         Optional relation='flows_to' traces semantic value flow from producer to consumer. \
+         Optional relation='flows_to' traces semantic value flow from producer to consumer; the \
+         reply echoes the effective `relation` ('dependency' | 'flows_to'), any other value is \
+         an error, and in flows_to mode a `flows` array classifies each hop (the rows under \
+         `dependencies` are then the consumers). \
          Answers 'what does this symbol depend on?' — the complement of BlastRadius. \
          Use to understand the full dependency chain before a refactor or to build a \
          change-impact picture from the dependency side."
     }
 
     fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
-        let id_str = match request.get("symbol").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() => s.to_string(),
-            _ => {
-                return Ok(RetrievalResult {
-                    content: json!({
-                        "dependencies": [],
-                        "total": 0,
-                        "truncated": false,
-                        "confidence": { "min": null, "avg": null, "edge_count": 0 },
-                    }),
-                    diagnostics: vec!["Lineage: 'symbol' field is required".to_string()],
-                });
+        // (#211) The relation is decided — and an unsupported one REFUSED — before anything else:
+        // a near-miss (`flow_to`) used to fall back to dependency lineage and answer with the same
+        // keys as the real thing, so 11 confident rows and 0 were indistinguishable on the wire.
+        let semantic_flow = match request.get("relation") {
+            None | Some(Value::Null) => false,
+            Some(Value::String(r)) if r.is_empty() => false,
+            Some(Value::String(r)) if r == edge_tags::FLOWS_TO => true,
+            // A wrong string AND a wrong type (`123`, `true`, an object) are refused alike —
+            // a non-string used to read as "absent" and fall open (Codex on #266).
+            Some(other) => {
+                return Err(wicked_estate_core::Error::Invalid(format!(
+                    "Lineage: unsupported relation {other} — omit it for dependency lineage \
+                     (Calls + Imports) or pass \"{}\"",
+                    edge_tags::FLOWS_TO
+                )));
             }
+        };
+        // Echoed in every reply: its absence identifies an older server, its value the mode.
+        let relation_echo = if semantic_flow {
+            edge_tags::FLOWS_TO
+        } else {
+            "dependency"
         };
 
         let max_depth = opt_u64(request, "depth")
             .unwrap_or(8)
             .min(BLAST_DEPTH_CEILING as u64) as u32;
 
-        let relation = request.get("relation").and_then(|v| v.as_str());
-        let semantic_flow = relation == Some(edge_tags::FLOWS_TO);
-        let invalid_relation = relation.filter(|r| *r != edge_tags::FLOWS_TO);
+        let id_str = match request.get("symbol").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                // (#227) The same cause keys as every other reply — all false, the effective
+                // default depth — so a reader of the documented shape never meets `null`.
+                return Ok(RetrievalResult {
+                    content: json!({
+                        "relation": relation_echo,
+                        "dependencies": [],
+                        "total": 0,
+                        "truncated": false,
+                        "depth_horizon_reached": false,
+                        "node_cap_reached": false,
+                        "searched_depth": max_depth,
+                        "confidence": { "min": null, "avg": null, "edge_count": 0 },
+                    }),
+                    diagnostics: vec!["Lineage: 'symbol' field is required".to_string()],
+                });
+            }
+        };
 
         // Stored flows_to edges preserve the engine invariant: source=consumer, target=producer.
         // A semantic-forward query therefore walks dependents from the producer to consumers.
@@ -1500,11 +1541,6 @@ impl RetrievalTool for Lineage {
 
         let start = SymbolId(id_str.clone());
         let mut diag = vec![staleness_note()];
-        if let Some(relation) = invalid_relation {
-            diag.push(format!(
-                "Lineage: unsupported relation '{relation}', using default dependency lineage"
-            ));
-        }
 
         let subgraph = store.traverse(&start, &spec)?;
 
@@ -1648,6 +1684,7 @@ impl RetrievalTool for Lineage {
         let total = dependencies.len();
 
         let mut content = json!({
+            "relation": relation_echo,
             "dependencies": dependencies,
             "total": total,
             "truncated": truncated,
@@ -5005,6 +5042,102 @@ mod tests {
             res.diagnostics.iter().any(|d| d.contains("Lineage")),
             "diagnostic must name the tool"
         );
+    }
+
+    /// #211: a `relation` that is not `flows_to` is `Error::Invalid`, never a silent fall-back to
+    /// dependency lineage — the near-miss typo is the whole point.
+    #[test]
+    fn lineage_rejects_an_unsupported_relation_with_error_invalid() {
+        let store = lineage_fixture();
+        for bad in [
+            json!("flow_to"),
+            json!("flows-to"),
+            json!("FLOWS_TO"),
+            json!("dependency"),
+            json!("calls"),
+            json!(123),
+            json!(true),
+            json!({"relation": "flows_to"}),
+        ] {
+            let err = match Lineage.invoke(&store, &json!({"symbol": "root", "relation": bad})) {
+                Err(e) => e,
+                Ok(res) => panic!("relation {bad} must be refused, got {}", res.content),
+            };
+            assert!(
+                matches!(err, wicked_estate_core::Error::Invalid(_)),
+                "{bad}: {err:?}"
+            );
+            let msg = err.to_string();
+            let shown = bad.as_str().map_or_else(|| bad.to_string(), str::to_string);
+            assert!(
+                msg.contains(&shown) && msg.contains("flows_to"),
+                "the error names the bad value and the supported one: {msg}"
+            );
+        }
+        // An empty string and JSON null are "not set", like an absent key.
+        for unset in [json!(""), json!(null)] {
+            let res = Lineage
+                .invoke(&store, &json!({"symbol": "root", "relation": unset}))
+                .unwrap();
+            assert_eq!(res.content["relation"], json!("dependency"), "{unset}");
+        }
+    }
+
+    /// #211: every reply echoes the EFFECTIVE relation, so an older server (no key) and an
+    /// ignored argument (mismatch) are both visible on the wire.
+    #[test]
+    fn lineage_echoes_the_effective_relation() {
+        let store = lineage_fixture();
+        let dep = Lineage.invoke(&store, &json!({"symbol": "root"})).unwrap();
+        assert_eq!(
+            dep.content["relation"],
+            json!("dependency"),
+            "{}",
+            dep.content
+        );
+        assert!(dep.content.get("flows").is_none());
+        let flow = Lineage
+            .invoke(&store, &json!({"symbol": "root", "relation": "flows_to"}))
+            .unwrap();
+        assert_eq!(
+            flow.content["relation"],
+            json!("flows_to"),
+            "{}",
+            flow.content
+        );
+        assert!(flow.content["flows"].is_array(), "{}", flow.content);
+    }
+
+    /// #227: the missing-`symbol` replies of TraverseGraph, BlastRadius and Lineage carry the #190
+    /// cause keys like every other reply — all false, `searched_depth` = the effective default —
+    /// so a reader of the documented shape never meets `null` on that path.
+    #[test]
+    fn missing_symbol_replies_carry_the_cause_keys() {
+        let store = lineage_fixture();
+        let cases: Vec<(&str, RetrievalResult, u64)> = vec![
+            (
+                "TraverseGraph",
+                TraverseGraph.invoke(&store, &json!({})).unwrap(),
+                4,
+            ),
+            (
+                "BlastRadius",
+                BlastRadius.invoke(&store, &json!({})).unwrap(),
+                8,
+            ),
+            ("Lineage", Lineage.invoke(&store, &json!({})).unwrap(), 8),
+        ];
+        for (tool, res, default_depth) in cases {
+            let c = &res.content;
+            assert_eq!(c["depth_horizon_reached"], json!(false), "{tool}: {c}");
+            assert_eq!(c["node_cap_reached"], json!(false), "{tool}: {c}");
+            assert_eq!(c["searched_depth"], json!(default_depth), "{tool}: {c}");
+            assert_eq!(c["truncated"], json!(false), "{tool}: {c}");
+        }
+        // A caller-supplied depth is the effective one, clamped.
+        let deep = Lineage.invoke(&store, &json!({"depth": 3})).unwrap();
+        assert_eq!(deep.content["searched_depth"], json!(3));
+        assert_eq!(deep.content["relation"], json!("dependency"));
     }
 
     #[test]

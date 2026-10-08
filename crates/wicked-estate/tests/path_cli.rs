@@ -246,6 +246,46 @@ fn text_mode_states_the_depth_bound_when_the_walk_is_cut_off() {
     );
 }
 
+/// #230: a FOUND route prints no bound line — the bound lines are for the `no path found`
+/// reader; and the exact cause means a route found AT the bound with nothing beyond it is not
+/// bounded at all.
+#[test]
+fn a_found_route_prints_no_bound_line() {
+    let d = indexed_chain("found_nobound", 6);
+    let out = path_in(&d, &["f0", "f2", "--max-depth", "2"]);
+    let s = stdout_of(&out);
+    assert!(s.contains("2 hop(s)"), "{s}");
+    assert!(
+        !s.contains("depth frontier") && !s.contains("longer route"),
+        "a found route is not an absence; no bound line:\n{s}"
+    );
+    let doc = json_of(&path_in(&d, &["f0", "f2", "--max-depth", "2", "--json"]));
+    assert_eq!(doc["found"], serde_json::json!(true), "{doc}");
+    assert_eq!(
+        doc["depth_bounded"],
+        serde_json::json!(true),
+        "f3..f6 lie beyond depth 2, so the JSON flag stays honest: {doc}"
+    );
+}
+
+/// #230: the same operand twice is a zero-hop route, worded as a shared CANDIDATE (names are
+/// not unique), with no bound line.
+#[test]
+fn same_operand_twice_is_a_zero_hop_candidate_not_the_same_symbol() {
+    let d = indexed_chain("same_operand", 3);
+    let out = path_in(&d, &["f1", "f1", "--max-depth", "1"]);
+    let s = stdout_of(&out);
+    assert!(
+        s.contains("resolve to a candidate for both endpoints") && s.contains("zero hops"),
+        "{s}"
+    );
+    assert!(!s.contains("the same symbol"), "{s}");
+    assert!(
+        !s.contains("depth frontier"),
+        "a zero-hop route walked nothing:\n{s}"
+    );
+}
+
 // ── the argument contract ────────────────────────────────────────────────────
 
 #[test]

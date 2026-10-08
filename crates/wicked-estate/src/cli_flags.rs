@@ -92,7 +92,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "query",
-        spec: owns("<name>", &[DB]),
+        spec: owns("<name>", &[DB, JSON]),
     },
     Command {
         name: "blast-radius",
@@ -112,7 +112,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "stats",
-        spec: owns("", &[DB]),
+        spec: owns("", &[DB, JSON]),
     },
     Command {
         name: "graph-view",
@@ -273,7 +273,16 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "resolve",
-        spec: owns("<name>", &[DB, JSON, KIND, Flag("file", Value)]),
+        spec: owns(
+            "<name>",
+            &[
+                DB,
+                JSON,
+                KIND,
+                Flag("file", Value),
+                Flag("include-values", Switch),
+            ],
+        ),
     },
     Command {
         name: "correspond",

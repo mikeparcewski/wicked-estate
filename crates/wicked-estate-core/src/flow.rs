@@ -76,7 +76,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::edge::{Edge, EdgeKind};
+use crate::edge::{Confidence, Edge, EdgeKind, Provenance};
 use crate::edge_tags;
 use crate::node::{Location, Metadata, Node};
 
@@ -322,8 +322,10 @@ fn write_sets(
 /// The total order the support list — and therefore the representative-fact choice — is sorted by.
 /// Every component is stable across runs; none of them is an insertion index.
 /// One fact's identity and sort key: construct, semantics, evidence, rule, file, start byte, end
-/// byte, resolved_by, and the confidence's f32 bits (monotonic for the non-negative range), so
-/// two facts that differ only in confidence are two rows, not one row chosen by input order.
+/// byte, resolved_by, provenance (its JSON text, #236 — a resolver that emits at more than one
+/// tier yields distinct facts), and the confidence's f32 bits (monotonic for the non-negative
+/// range), so two facts that differ only in confidence are two rows, not one row chosen by
+/// input order.
 type SupportOrder = (
     String,
     String,
@@ -332,6 +334,7 @@ type SupportOrder = (
     String,
     u32,
     u32,
+    String,
     String,
     u32,
 );
@@ -363,8 +366,27 @@ fn support_order(edge: &Edge) -> SupportOrder {
         start,
         end,
         edge.resolved_by.clone(),
+        provenance_value(&edge.provenance).to_string(),
         edge.confidence.get().to_bits(),
     )
+}
+
+/// A support row's `provenance`: [`Edge::provenance`] as it serializes everywhere else
+/// (`"parsed"`, `{"synthesizer":"…"}`). Infallible: the enum has no failing arm.
+fn provenance_value(provenance: &Provenance) -> serde_json::Value {
+    serde_json::to_value(provenance).unwrap_or(serde_json::Value::Null)
+}
+
+/// A support row's `confidence`, printing EXACTLY as [`Edge::confidence`] prints (#236).
+///
+/// The edge serializes straight from its f32 (shortest round-trip decimal: `0.6`), but a
+/// [`serde_json::Value`] holds only an f64, and widening `0.6f32` gives `0.6000000238418579` —
+/// so `max(flow_support[].confidence) == confidence` failed for every call-derived edge. Route
+/// through the same shortest decimal the edge prints; `as f32` on the way back is exact, so the
+/// order ([`support_entry_order`]) and the merge arithmetic read the original f32.
+fn confidence_value(confidence: Confidence) -> serde_json::Value {
+    let c = confidence.get();
+    serde_json::Value::from(c.to_string().parse::<f64>().unwrap_or(c as f64))
 }
 
 /// The support rows an edge contributes: its own already-recorded [`FLOW_SUPPORT_KEY`] entries if
@@ -441,6 +463,11 @@ fn support_entry_order(entry: &serde_json::Value) -> SupportOrder {
         num("start_byte"),
         num("end_byte"),
         text("resolved_by"),
+        // Pre-#236 rows carry no provenance: they order as the empty text, stably.
+        entry
+            .get("provenance")
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
         entry
             .get("confidence")
             .and_then(|v| v.as_f64())
@@ -471,14 +498,12 @@ fn support_entry(edge: &Edge) -> serde_json::Value {
             entry.insert(singular.to_string(), flat);
         }
     }
-    entry.insert(
-        "confidence".to_string(),
-        serde_json::json!(edge.confidence.get()),
-    );
+    entry.insert("confidence".to_string(), confidence_value(edge.confidence));
     entry.insert(
         "resolved_by".to_string(),
         serde_json::Value::String(edge.resolved_by.clone()),
     );
+    entry.insert("provenance".to_string(), provenance_value(&edge.provenance));
     if let Some(location) = &edge.location {
         entry.insert(
             "file".to_string(),
@@ -1033,6 +1058,121 @@ mod tests {
             "{:?}",
             forward[0].metadata
         );
+    }
+
+    /// #236 (1): a support row's `confidence` prints exactly as the edge's does. The edge
+    /// serializes its f32 directly (`0.6`); a row used to go through `json!(f32)`, which widens
+    /// to f64 (`0.6000000238418579`), so `max(flow_support[].confidence) == confidence` failed on
+    /// every call-derived edge. Checked on the serialized document, as an integrator reads it.
+    #[test]
+    fn support_row_confidence_round_trips_exactly() {
+        let mut strong = flow_edge(
+            "assignment",
+            FlowSemantics::ValuePreserving,
+            10,
+            ResolutionTier::Parsed,
+        );
+        strong.confidence = Confidence::new(0.6);
+        let mut weak = flow_edge(
+            "expression",
+            FlowSemantics::MayInfluence,
+            20,
+            ResolutionTier::Heuristic,
+        );
+        weak.confidence = Confidence::new(0.3);
+        let merged = merge_flow_edges(vec![weak, strong]);
+        assert_eq!(merged.len(), 1);
+        let doc: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&merged[0]).unwrap()).unwrap();
+        let rows = doc["metadata"][FLOW_SUPPORT_KEY].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        let max_row = rows
+            .iter()
+            .map(|r| r["confidence"].as_f64().unwrap())
+            .fold(f64::MIN, f64::max);
+        assert_eq!(
+            max_row,
+            doc["confidence"].as_f64().unwrap(),
+            "the strongest row prints exactly as the edge's confidence: {doc}"
+        );
+        assert_eq!(doc["confidence"].to_string(), "0.6", "{doc}");
+        for row in rows {
+            let printed = row["confidence"].to_string();
+            assert!(
+                printed == "0.6" || printed == "0.3",
+                "a row's confidence is the f32's shortest decimal, not its f64 widening: {printed}"
+            );
+            // Exact on the way back too, so the order and the merge arithmetic see the original.
+            let back = row["confidence"].as_f64().unwrap() as f32;
+            assert!(back == 0.6f32 || back == 0.3f32);
+        }
+        assert_eq!(
+            merged[0].metadata[FLOW_CONFIDENCE_MIN_KEY]
+                .as_f64()
+                .unwrap() as f32,
+            0.3f32
+        );
+    }
+
+    /// #236 (2): a support row records the fact's `provenance`, and provenance is part of a
+    /// row's identity and order. Two facts that differ ONLY in provenance (same resolver string,
+    /// confidence and location) are two rows; the merged edge's own provenance is the least
+    /// under the total order regardless of input order; a pre-#236 row with no `provenance`
+    /// still orders (as the empty text).
+    #[test]
+    fn support_rows_carry_provenance_and_it_orders_them() {
+        let parsed = flow_edge(
+            "assignment",
+            FlowSemantics::ValuePreserving,
+            10,
+            ResolutionTier::Parsed,
+        );
+        let mut tsg = parsed.clone();
+        tsg.provenance = Provenance::Tsg;
+        assert_eq!(parsed.confidence, tsg.confidence);
+        assert_eq!(parsed.resolved_by, tsg.resolved_by);
+
+        let forward = merge_flow_edges(vec![parsed.clone(), tsg.clone()]);
+        let backward = merge_flow_edges(vec![tsg.clone(), parsed.clone()]);
+        assert_eq!(
+            forward, backward,
+            "provenance order must not depend on input order"
+        );
+        let rows = forward[0].metadata[FLOW_SUPPORT_KEY].as_array().unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "facts that differ only in provenance are two rows: {rows:?}"
+        );
+        let provenances: Vec<serde_json::Value> =
+            rows.iter().map(|r| r["provenance"].clone()).collect();
+        assert_eq!(
+            provenances,
+            vec![
+                serde_json::to_value(&Provenance::Parsed).unwrap(),
+                serde_json::to_value(&Provenance::Tsg).unwrap()
+            ],
+            "each row carries its fact's provenance, in the total order"
+        );
+        assert_eq!(
+            forward[0].provenance,
+            Provenance::Parsed,
+            "the representative is the least-ordered of the equally strong facts"
+        );
+        // A named variant serializes as everywhere else, and the order reads it back.
+        let mut synth = parsed.clone();
+        synth.provenance = Provenance::Synthesizer("callback-edge-v2".into());
+        let row = support_entry(&synth);
+        assert_eq!(
+            row["provenance"],
+            serde_json::json!({"synthesizer": "callback-edge-v2"})
+        );
+        assert_eq!(support_entry_order(&row), support_order(&synth));
+        // A pre-#236 row (no provenance) orders as the empty text — stable, never a panic.
+        let mut legacy = support_entry(&parsed);
+        legacy.as_object_mut().unwrap().remove("provenance");
+        assert_eq!(support_entry_order(&legacy).8, "");
+        assert!(support_entry_order(&legacy) < support_entry_order(&support_entry(&parsed)));
     }
 
     /// Copilot review of #231: when the support cap dropped every strongest row, a second fold
