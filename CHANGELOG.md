@@ -3,11 +3,21 @@
 ## [Unreleased]
 
 ### Changed (breaking)
-- **`stale-annotations` takes exactly one integer cutoff (#205).** The arm took the first
-  parseable integer anywhere in argv, so `stale-annotations soon 100` ran at cutoff 100 and
-  `stale-annotations 2026 01 01` ran at 2026 with the rest dropped — a plausible wrong answer
-  with exit 0. Anything other than one integer operand is now a usage error (exit 1). A caller
-  that passed stray operands breaks; that is the fix, as with #197/#206.
+- **Read commands fail closed on a missing `--db` (#246).** `query`, `blast-radius`, `path`,
+  `stats`, `graph-view`, `source`, `by-requirement`, `annotations`, `stale-annotations`,
+  `fingerprint`, `changed-since`, `entrypoints`, `leaves`, `dead-code`, `nodes`, `resolve` and
+  `export` now share `lineage`'s check (after the arm's own usage checks, before the store is
+  opened): a SQLite path that does not exist (or a zero-byte file)
+  is `no graph at <db> (<cmd> never creates one)`, exit 1, and the file is NOT created. Before,
+  each opened an empty graph and answered "absent" with exit 0. Writers (`index`, `annotate`,
+  `semantics`, …) keep creating. A shell-out that relied on exit 0 against a missing db breaks;
+  that is the fix.
+- **`resolve <name>` returns structural symbols only (#234).** Synthetic value slots share real
+  symbols' names (`resolve runs`: 63 slots beside 1 function on a 905-file repo); the default is
+  now `is_structural_symbol`, like every other name-based arm, and `--include-values` is the
+  explicit way back in. ENGINE-CONTRACT §3.3 row updated. Crew's cross-repo symbol search
+  (which shells out to `resolve <name> --json`) sees fewer rows — the real ones.
+
 - **Bespoke CLI commands reject malformed values, surplus or missing operands, accidental
   repeats, and flags they would ignore in combination (W8.6).** 0.21.0 made each command reject
   flags it does not read (#197, #206). Four more accept-and-ignore paths remained in the shared
@@ -19,8 +29,9 @@
     back silently. `--weight` other than `semantic` meant graph mode, `export --format` other
     than `json` meant ndjson, and `semantics --validated` other than `true|1|yes` meant false.
   - **Extra operands were dropped.** `stats foo` ignored `foo` and `query a b` searched for `a`
-    (#205 above fixed the same class in `stale-annotations` alone). A missing operand ran on an
+    (#205 fixed the same class in `stale-annotations` alone). A missing operand ran on an
     empty one: `by-requirement` searched for `""`, and `semantics` printed usage but exited 0.
+    `version foo` (#200's new command) printed the version and ignored `foo`.
   - **A repeated flag took its last value.** `nodes --kind A --kind B` listed only `B`.
   - **A flag that meant nothing in combination was dropped.**
     - `semantics --validated-by` without `--validated` was recorded nowhere.
@@ -62,7 +73,62 @@
   JSON-only budgets are unchanged, as is every documented working invocation and every result
   schema. **Scripts that relied on an ignored value, operand, repeat or flag now fail.**
 
+### Added
+- **`wicked-estate --version` / `-V` / `version` (#200)** prints `wicked-estate <version>` —
+  one line, nothing else on stdout, exit 0. Before, all three fell into the ~100-line usage
+  banner (exit 0), and the version had to be scraped off its first line.
+- **`query --json` (#199)** emits `resolve --json`'s rows (`[{symbol_id,name,kind,file,line}]`)
+  instead of being rejected as a foreign flag; the `query` banner line points at it.
+- **`blast-radius --json` rows carry `depth` (#191)** — hops from the target, `1` = direct
+  dependent — the field the MCP `BlastRadius` tool always returned. `BlastRadius::depths` carries
+  it from `blast_radius_by_name` (additive on a `#[non_exhaustive]` struct).
+- **The usage banner is a complete command inventory (#202):** `graph-view`, `by-requirement`
+  and `semantics` were dispatched but undocumented; `graph-view`'s line says its JSON shape is
+  not yet a committed contract. `tests/cli_surface.rs::banner_lists_every_dispatch_arm` reads the
+  dispatch arms off `main.rs` and fails when one is missing from `help`.
+- **`lineage` text mode hints when the operand is a NAME (#244):** an empty leaf whose operand
+  matches no symbol id but one or more symbol names prints a note naming
+  `wicked-estate resolve <name> --json`. JSON output unchanged.
+
 ### Fixed
+- **`lineage --json` no longer panics on a closed stdout (#247):** `| head -1` ends the document
+  quietly (exit 0) instead of a `failed printing to stdout` panic; text mode's broken pipe is
+  handled the same way, and `resolve --json` / `query --json` write through the same seam. Every
+  other write error is still returned.
+- **`Lineage` refuses an unsupported `relation` (#211).** `relation: "flow_to"` (any value other
+  than `flows_to`) used to fall back to dependency lineage with the same response keys — 11
+  confident rows and 0 indistinguishable on the wire. It is now `Error::Invalid` (MCP `isError`,
+  CLI exit 1) naming the bad value and the supported one. Every reply echoes the effective
+  `"relation": "dependency" | "flows_to"`: its absence identifies an older server, a mismatch an
+  ignored argument. The tool description says so and names the `flows` array. No wicked-core
+  caller passes `relation`; wicked-garden's search skill should spell it `flows_to`.
+- **`Path.depth_bounded` is the exact cause (#230).** It followed a "frontier touched" heuristic
+  (a found 3-hop route at depth 3 read as bounded); it is now `Subgraph::depth_horizon_reached`
+  (#222) — true only when something lay beyond the horizon, found route or not. CLI text prints
+  the bound lines only on `no path found`; both operands resolving to one candidate is a zero-hop
+  route decided before any walk (no bounds, worded "resolve to a candidate for both endpoints",
+  not "the same symbol" — 79 nodes may share a name).
+- **Missing-`symbol` replies carry the #190 cause keys (#227).** `TraverseGraph{}`,
+  `BlastRadius{}` and `Lineage{}` now emit `depth_horizon_reached: false`,
+  `node_cap_reached: false` and `searched_depth` = the effective default, like every other reply.
+- **`Path`'s description tells agents what an absence means (#230):** proven only when both
+  bound flags are false; raise `depth` / `max_nodes` (MCP defaults are smaller than the CLI's)
+  before concluding from one.
+- **Conformance goldens (#230 item 4):** `schemas/Path.json` names the release that introduced
+  the tool (0.18.0, #221) instead of 0.16.7, ends with a newline, and carries the current
+  description; `schemas/Lineage.json`'s description re-stamped for #211. The conformance test
+  compares `inputSchema.required`/`properties`, which are unchanged.
+- **`path_between` runs against live Postgres in `postgres-conformance` (#228 item 2):**
+  `path_backends::path_between_on_postgres_matches_the_embedded_backends` (feature-gated, skips
+  without `TEST_POSTGRES_URL`).
+
+Not in this change: #230 item 6 (an R4 payload-size marker for `Path`) needs its own design —
+dropping hops would make a route invalid, so it wants a structured, flagged elision.
+- **`stale-annotations` takes exactly one integer cutoff (#205).** The arm took the first
+  parseable integer anywhere in argv, so `stale-annotations soon 100` ran at cutoff 100 and
+  `stale-annotations 2026 01 01` ran at 2026 with the rest dropped — a plausible wrong answer
+  with exit 0. Anything other than one integer operand is now a usage error (exit 1). A caller
+  that passed stray operands breaks; that is the fix, as with #197/#206.
 - **Annotation `--json` carries the evidence envelope (#204).** `annotations`,
   `annotations --symbol`, `stale-annotations`, `nodes` and `source` `--json` now emit
   `last_verified`, `source_type` and `extraction_method` on every annotation. Before, `ts`

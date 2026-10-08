@@ -1007,9 +1007,14 @@ pub fn index_path_as(
     // W11.3: bump the graph version so any prior cache entries become stale.
     store.version_bump();
 
-    // W7.4: persist the indexed root so staleness checks can find the git repo. In a multi-repo
-    // graph this is the LAST root indexed; each repo's own root is in its `repo:<label>:root`.
-    store.meta_set_key("indexed_root", &root.to_string_lossy());
+    // W7.4 / #248: persist the indexed root CANONICAL (absolute, symlinks resolved) so freshness
+    // is not cwd-dependent — `index .` used to store "." and every other working directory then
+    // read "STALENESS: unknown for .". Readers still accept the old relative spelling
+    // ([`indexed_root_path`]). In a multi-repo graph this is the LAST root indexed; each repo's
+    // own root is in its `repo:<label>:root`.
+    store.meta_set_key("indexed_root", &canonical_root(root));
+    // #201: WHEN this graph was built, so "which commit, built when" is one read (`stats --json`).
+    store.meta_set_key("indexed_at", &rfc3339_now());
     // Read the previously-stored binary version BEFORE overwriting it so we can detect a
     // version upgrade and force full re-extraction when the binary has changed. Per repo: an
     // upgrade must force a re-extract of EACH repo the next time it is indexed, not just the
@@ -1121,7 +1126,11 @@ pub fn index_path_as(
     // leaves the singular `repo_*` keys untouched — that is what stops the second repo indexed
     // into a graph from clobbering the first's commit/branch/remote/dirty.
     match repo {
-        Some(label) => repo_scope::write_record(store, label, root, &repo_info),
+        // #248 (codex round 1 on #264): the registry root is canonical too, so a co-located
+        // graph's per-repo freshness is not cwd-dependent either.
+        Some(label) => {
+            repo_scope::write_record(store, label, Path::new(&canonical_root(root)), &repo_info)
+        }
         None => {
             let _ = store.set_repo_info(&repo_info);
         }
@@ -1922,6 +1931,10 @@ pub struct BlastRadius {
     pub node_cap_reached: bool,
     /// The `depth` horizon cut the walk short — real dependents exist BEYOND these rows.
     pub depth_horizon_reached: bool,
+    /// (#191) Hops from the target to each dependent, keyed by symbol id — the SMALLEST across
+    /// the walks when several same-named symbols matched. `1` is a direct dependent. The MCP
+    /// `BlastRadius` tool reads the same `Subgraph::depths`; the CLI row carries it from here.
+    pub depths: std::collections::BTreeMap<String, u32>,
     /// How much to believe the dependency edges that admitted [`Self::dependents`]
     /// (wicked-estate#194): edges whose source is a returned row and whose target the walk
     /// reached. Structural `Contains`/`Defines` are excluded, so a File row admitted only by
@@ -2022,6 +2035,12 @@ pub fn blast_radius_by_name(store: &dyn GraphRead, name: &str, depth: u32) -> Re
             }
         }
         for n in answer {
+            if let Some(d) = sub.depths.get(n.symbol.as_str()).copied() {
+                out.depths
+                    .entry(n.symbol.as_str().to_string())
+                    .and_modify(|cur| *cur = (*cur).min(d))
+                    .or_insert(d);
+            }
             if seen.insert(n.symbol.clone()) {
                 out.dependents.push(n.clone());
             }
@@ -2309,22 +2328,126 @@ pub fn commits_behind(root: &Path, db_path: &str) -> Option<u64> {
     s.trim().parse::<u64>().ok()
 }
 
-/// The whole graph's staleness: the worst [`commits_behind`] over every registered repo root.
+/// #243: commits in `root` since `baseline` — the commit the graph was indexed at
+/// (`repo_commit`, or `repo:<label>:commit` in a co-located graph) — falling back to
+/// [`commits_behind`]'s db-mtime measure only when no baseline was recorded (a pre-0.21 graph)
+/// or git no longer knows it (rewritten history, a shallow clone deepened past it). The mtime
+/// measure is wrong on its own terms: the server's cache write moves the file's mtime, so a
+/// graph indexed at X read as "current" after any read that writes. `None` when neither measure
+/// can answer (not a git repository, git absent).
+pub fn commits_behind_since(root: &Path, baseline: Option<&str>, db_path: &str) -> Option<u64> {
+    if let Some(base) = baseline.map(str::trim).filter(|b| !b.is_empty()) {
+        let counted = std::process::Command::new("git")
+            .args([
+                "-C",
+                &root.to_string_lossy(),
+                "rev-list",
+                "--count",
+                &format!("{base}..HEAD"),
+            ])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        if counted.is_some() {
+            return counted;
+        }
+    }
+    commits_behind(root, db_path)
+}
+
+/// `root` as [`index_path`] records it in `indexed_root` (#248): absolute with symlinks
+/// resolved, or as written when it cannot be resolved (a root that is gone is still recorded).
+fn canonical_root(root: &Path) -> String {
+    std::fs::canonicalize(root)
+        .unwrap_or_else(|_| root.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The root recorded in `indexed_root`, as a path a freshness check can use (#248):
+/// [`recorded_root_path`] of the meta value.
+pub fn indexed_root_path(store: &dyn GraphStoreMutExt, db_path: &str) -> Option<PathBuf> {
+    store
+        .meta_get_key("indexed_root")
+        .map(|root| recorded_root_path(&root, db_path))
+}
+
+/// A recorded root (`indexed_root`, or a registry record's `repo:<label>:root`) as a path a
+/// freshness check can use (#248). Roots are written canonical since 0.21.1, so an absolute
+/// root is returned as is. A relative one was written by an older binary as the caller spelled
+/// it (`index .`), relative to a working directory nobody recorded; the db file's own directory
+/// is the best evidence of where that was (`index . --db graph.db`), so the root resolves
+/// against it whenever THAT resolution is a directory, and otherwise stays as spelled — which
+/// is what the pre-#248 code always did (codex round 2 on #264: a missing db directory must not
+/// rewrite the recorded spelling into another path that does not exist).
+pub fn recorded_root_path(root: &str, db_path: &str) -> PathBuf {
+    let root = PathBuf::from(root);
+    if root.is_absolute() {
+        return root;
+    }
+    let base = Path::new(db_path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let from_db = base.join(&root);
+    if from_db.is_dir() { from_db } else { root }
+}
+
+/// Now, as RFC 3339 UTC — the `indexed_at` meta value.
+fn rfc3339_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    rfc3339_utc(secs)
+}
+
+/// Unix seconds as RFC 3339 UTC (`2026-10-07T01:52:03Z`), without a date crate: the proleptic
+/// Gregorian civil-from-days conversion (H. Hinnant), exact for every non-negative instant.
+pub fn rfc3339_utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(mo <= 2);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+/// The whole graph's staleness: the worst [`commits_behind_since`] over every registered repo
+/// root, each measured from the commit IT was indexed at (#243).
 ///
 /// A co-located graph has one root PER REPO, and `indexed_root` is only the last one indexed —
 /// reading it alone reports one arbitrary repo's staleness as the whole graph's, and answers
-/// "fresh" while every other repo is behind. A single-repo graph falls back to `indexed_root`.
-/// The MCP server and the CLI's machine output both report this one number (R5).
+/// "fresh" while every other repo is behind. A single-repo graph falls back to `indexed_root`
+/// ([`indexed_root_path`]) and the singular `repo_commit`. The MCP server and the CLI's machine
+/// output (`stats --json`) both report this one number (R5).
 pub fn graph_commits_behind(store: &dyn GraphStoreMutExt, db_path: &str) -> Option<u64> {
     let repos = repo_scope::registry(store);
     if !repos.is_empty() {
         return repos
             .iter()
-            .filter_map(|r| commits_behind(Path::new(&r.root), db_path))
+            .filter_map(|r| {
+                commits_behind_since(
+                    &recorded_root_path(&r.root, db_path),
+                    r.info.commit.as_deref(),
+                    db_path,
+                )
+            })
             .max();
     }
-    let root = store.meta_get_key("indexed_root")?;
-    commits_behind(Path::new(&root), db_path)
+    let root = indexed_root_path(store, db_path)?;
+    let baseline = store.repo_info().ok().flatten().and_then(|i| i.commit);
+    commits_behind_since(&root, baseline.as_deref(), db_path)
 }
 
 /// The R5 diagnostic a frontend appends to a retrieval result when the graph is `n > 0` commits
@@ -3173,6 +3296,205 @@ mod tests {
             result.is_none(),
             "commits_behind must return None for non-git dir"
         );
+    }
+
+    /// A git repo with one committed TypeScript file at a scratch path. Returns the root and
+    /// HEAD's full SHA.
+    fn committed_repo(tag: &str) -> (std::path::PathBuf, String) {
+        let root = std::env::temp_dir().join(format!(
+            "wicked-estate-freshness-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/index.ts"),
+            format!("export function {tag}() {{ return 1; }}\n"),
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["config", "user.email", "t@example.invalid"]);
+        git(&root, &["config", "user.name", "wicked-test"]);
+        git(&root, &["config", "commit.gpgsign", "false"]);
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-qm", "base"]);
+        let head = git(&root, &["rev-parse", "HEAD"]);
+        (root, head)
+    }
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn commit_one(root: &Path, name: &str) {
+        std::fs::write(root.join(format!("src/{name}.ts")), "export const x = 1;\n").unwrap();
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-qm", name]);
+    }
+
+    /// #243: freshness is measured from the commit the graph was indexed at, not the db file's
+    /// mtime. The server's own cache write moves the mtime, so the mtime measure answered
+    /// "current" for a graph that was a commit behind; the baseline measure does not. With no
+    /// baseline (a pre-0.21 graph) or one git does not know, the mtime measure is the fallback.
+    #[test]
+    fn commits_behind_uses_meta_repo_commit_not_mtime() {
+        let (root, base) = committed_repo("baseline");
+        let db = root.join("graph.db");
+        std::fs::write(&db, b"not a real graph; only its mtime matters here").unwrap();
+        commit_one(&root, "after_index");
+        // The write that moves the mtime past the new commit — what a cache write does.
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&db)
+            .unwrap()
+            .set_modified(future)
+            .unwrap();
+        assert_eq!(
+            commits_behind(&root, db.to_str().unwrap()),
+            Some(0),
+            "the mtime measure is blind to the commit once the file is touched"
+        );
+        assert_eq!(
+            commits_behind_since(&root, Some(&base), db.to_str().unwrap()),
+            Some(1),
+            "the baseline measure counts the commit regardless of the file's mtime"
+        );
+        assert_eq!(
+            commits_behind_since(&root, None, db.to_str().unwrap()),
+            Some(0),
+            "no recorded baseline: the mtime measure is the fallback"
+        );
+        assert_eq!(
+            commits_behind_since(
+                &root,
+                Some("0123456789abcdef0123456789abcdef01234567"),
+                db.to_str().unwrap()
+            ),
+            Some(0),
+            "a baseline git does not know: the mtime measure is the fallback"
+        );
+        assert_eq!(
+            commits_behind_since(&root, Some(&base), ":memory:"),
+            Some(1),
+            "the baseline needs no db file at all"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #245: a db indexed from two repos reports the WORST repo's staleness, each repo measured
+    /// from its own recorded commit — not whichever root happened to be indexed last.
+    #[test]
+    fn graph_commits_behind_two_repos_returns_the_worst() {
+        let (a, _) = committed_repo("two_a");
+        let (b, _) = committed_repo("two_b");
+        let dir =
+            std::env::temp_dir().join(format!("wicked-estate-two-repos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("shared.db");
+        let mut store = wicked_estate_store::SqliteStore::open(&db).unwrap();
+        index_path_as(&mut store, &a, Some("a")).unwrap();
+        index_path_as(&mut store, &b, Some("b")).unwrap();
+        let db_str = db.to_str().unwrap();
+        assert_eq!(graph_commits_behind(&store, db_str), Some(0));
+        commit_one(&a, "a1");
+        commit_one(&b, "b1");
+        commit_one(&b, "b2");
+        // `b` (indexed LAST, so the old single-root read would have seen only it) is 2 behind;
+        // `a` is 1 behind; the graph is as stale as its stalest repo.
+        assert_eq!(graph_commits_behind(&store, db_str), Some(2));
+        // Re-index `b` alone: it is current, `a` is still 1 behind — the worst is now `a`'s.
+        index_path_as(&mut store, &b, Some("b")).unwrap();
+        assert_eq!(graph_commits_behind(&store, db_str), Some(1));
+        for d in [&a, &b, &dir] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// #248: `index <relative path>` records the ABSOLUTE, symlink-resolved root (and when it
+    /// was indexed), so a freshness check from any other working directory finds the repo. A
+    /// pre-#248 relative root that is not visible from the current directory resolves against
+    /// the db file's own directory.
+    #[cfg(unix)]
+    #[test]
+    fn indexed_root_is_absolute_after_index_dot() {
+        let (root, _) = committed_repo("relroot");
+        // The repo spelled RELATIVE to the current directory, the way `index .` or
+        // `index ../repo` is typed.
+        let cwd = std::env::current_dir().unwrap();
+        let ups = cwd.components().count() - 1;
+        let rel = PathBuf::from("../".repeat(ups)).join(root.strip_prefix("/").unwrap());
+        assert!(rel.is_relative() && rel.is_dir(), "{}", rel.display());
+        let mut store = MemStore::new();
+        index_path(&mut store, &rel).unwrap();
+        let recorded = store.meta_get_key("indexed_root").unwrap();
+        assert_eq!(
+            PathBuf::from(&recorded),
+            std::fs::canonicalize(&root).unwrap(),
+            "the recorded root is canonical, not the relative spelling"
+        );
+        assert!(Path::new(&recorded).is_absolute());
+        assert_eq!(
+            indexed_root_path(&store, ":memory:").unwrap(),
+            PathBuf::from(&recorded)
+        );
+        let at = store.meta_get_key("indexed_at").unwrap();
+        assert!(
+            at.len() == 20 && at.ends_with('Z') && &at[4..5] == "-" && &at[10..11] == "T",
+            "indexed_at is RFC 3339 UTC: {at}"
+        );
+        // Legacy relative roots (written by an older binary as spelled). `"."` — always a
+        // directory from ANY cwd — resolves against the db file's directory when that is a
+        // directory (codex round 1 on #264), never the caller's cwd; one that resolves to no
+        // directory there stays as spelled (codex round 2: a missing db directory must not
+        // rewrite it into another missing path); one visible only from the cwd stays as spelled
+        // (the pre-#248 behaviour).
+        store.meta_set_key("indexed_root", ".");
+        assert_eq!(
+            indexed_root_path(&store, root.join("graph.db").to_str().unwrap()).unwrap(),
+            root.join("."),
+            "a legacy '.' is the db's directory, not the cwd"
+        );
+        store.meta_set_key("indexed_root", "no-such-dir-for-this-test");
+        assert_eq!(
+            indexed_root_path(&store, "/graphs/acme/graph.db").unwrap(),
+            PathBuf::from("no-such-dir-for-this-test"),
+            "nothing to resolve against: the recorded spelling is kept"
+        );
+        store.meta_set_key("indexed_root", rel.to_str().unwrap());
+        assert_eq!(
+            indexed_root_path(&store, "/graphs/acme/graph.db").unwrap(),
+            rel,
+            "visible only from the cwd: kept as spelled"
+        );
+        // A labelled record is written canonical too (codex round 1 on #264).
+        let mut labelled = MemStore::new();
+        index_path_as(&mut labelled, &rel, Some("rel")).unwrap();
+        let rec = repo_scope::registry(&labelled)
+            .into_iter()
+            .find(|r| r.label == "rel")
+            .expect("the record");
+        assert_eq!(
+            PathBuf::from(&rec.root),
+            std::fs::canonicalize(&root).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn indexed_at_rfc3339_matches_known_instants() {
+        assert_eq!(rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_utc(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(rfc3339_utc(1_700_000_000), "2023-11-14T22:13:20Z");
+        assert_eq!(rfc3339_utc(4_102_444_799), "2099-12-31T23:59:59Z");
     }
 
     // ── Task A: InfraResolver in resolver slice ──────────────────────────────

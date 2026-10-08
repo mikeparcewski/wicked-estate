@@ -255,7 +255,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "query",
-        spec: owns(&[req("name")], &[DB]),
+        spec: owns(&[req("name")], &[DB, JSON]),
     },
     Command {
         name: "blast-radius",
@@ -310,7 +310,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "stats",
-        spec: owns(&[], &[DB]),
+        spec: owns(&[], &[DB, JSON]),
     },
     Command {
         name: "graph-view",
@@ -530,7 +530,10 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "resolve",
-        spec: owns(&[req("name")], &[DB, JSON, KIND, str_flag("file")]),
+        spec: owns(
+            &[req("name")],
+            &[DB, JSON, KIND, str_flag("file"), switch("include-values")],
+        ),
     },
     Command {
         name: "correspond",
@@ -561,6 +564,11 @@ pub const COMMANDS: &[Command] = &[
             // Together they export nothing.
             &[Rule::Excludes(&["nodes-only"], Cond::Given("edges-only"))],
         ),
+    },
+    // Dispatched before the store spec resolves (#200), as `version`, `--version` or `-V`.
+    Command {
+        name: "version",
+        spec: owns(&[], &[]),
     },
     Command {
         name: "plugins",
@@ -1273,13 +1281,19 @@ mod tests {
             .expect("main's dispatch match");
         let body = &main[start..];
         let end = body.find("\n        _ => {").expect("the usage arm");
-        let arms: Vec<&str> = body[..end]
+        let mut arms: Vec<&str> = body[..end]
             .lines()
             .filter_map(|l| l.strip_prefix("        \""))
             .filter_map(|l| l.split_once("\" => {"))
             .map(|(name, _)| name)
             .collect();
         assert!(arms.len() > 30, "parsed too few arms: {arms:?}");
+        // `version` is dispatched before the match, ahead of store resolution (#200).
+        assert!(
+            main.contains(r#"cli_flags::parse("version", rest, "")"#),
+            "the early `version` dispatch no longer checks its row"
+        );
+        arms.push("version");
         for arm in &arms {
             assert!(
                 lookup(arm).is_some() || crate::tool_bridge::lookup(arm).is_some(),
@@ -1740,6 +1754,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "which its row does not own")]
     fn reading_an_undeclared_flag_is_a_bug() {
-        args("stats", &[]).switch("json");
+        args("stats", &[]).str("kind");
     }
 }
