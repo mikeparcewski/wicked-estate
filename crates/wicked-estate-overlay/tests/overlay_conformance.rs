@@ -366,3 +366,141 @@ fn overlay_implements_full_graphread_trait_object() {
     assert!(as_trait.symbol_epoch(&code_id("x")).unwrap().is_none()); // ROUTE
     let _ = EdgeKind::Calls; // keep the EdgeKind import meaningful for future kind-specific asserts
 }
+
+// ── #226: every bound the cross ply applies is reported ──────────────────────
+
+/// Run `f` against an overlay whose home holds `code` and whose foreign "memory" pool holds `docs`,
+/// with `about` rows `edges` (doc uuid, code name) and the given cross budget — inside
+/// `spawn_blocking` under a multi-thread runtime (the seam shape).
+fn with_overlay<R: Send + 'static>(
+    code: &[&str],
+    docs: &[&str],
+    edges: &[(&str, &str)],
+    budget: CrossBudget,
+    f: impl FnOnce(&dyn GraphRead) -> R + Send + 'static,
+) -> R {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let code: Vec<Node> = code.iter().map(|c| code_node(c)).collect();
+    let docs: Vec<Node> = docs.iter().map(|d| doc_node(d, d)).collect();
+    let edges: Vec<(String, String)> = edges
+        .iter()
+        .map(|(d, c)| (doc_id(d).0, code_id(c).0))
+        .collect();
+    rt.block_on(async move {
+        let (_dir, mem_pool) = foreign_memory_with_docs(&docs);
+        let home = home_estate_with_code(&code);
+        let xedge = XedgeStore::in_memory().unwrap();
+        for (d, c) in &edges {
+            xedge
+                .put_edge(&XEdge::about(d.clone(), c.clone(), 0))
+                .unwrap();
+        }
+        let others = pools(vec![("memory", mem_pool)]);
+        tokio::task::spawn_blocking(move || {
+            let overlay = OverlayReader::new(
+                &home,
+                "estate",
+                xedge.reader(),
+                others,
+                vec!["about".to_string()],
+                budget,
+            );
+            f(&overlay)
+        })
+        .await
+        .unwrap()
+    })
+}
+
+fn has_doc(sub: &wicked_estate_core::Subgraph, uuid: &str) -> bool {
+    sub.nodes.iter().any(|n| n.symbol == doc_id(uuid))
+}
+
+/// #226.1: one anchor with MORE cross edges than `max_cross_nodes` returns exactly the budget and
+/// reports the node cap; exactly the budget is complete.
+#[test]
+fn cross_budget_overflow_from_one_anchor_marks_the_node_cap_226() {
+    let budget = CrossBudget {
+        max_cross_hops: 1,
+        max_cross_nodes: 2,
+    };
+    let spec = wicked_estate_core::TraversalSpec::blast_radius(1);
+    let over = with_overlay(
+        &["a"],
+        &["d1", "d2", "d3"],
+        &[("d1", "a"), ("d2", "a"), ("d3", "a")],
+        budget,
+        move |o| o.traverse(&code_id("a"), &spec).unwrap(),
+    );
+    let folded = ["d1", "d2", "d3"]
+        .iter()
+        .filter(|d| has_doc(&over, d))
+        .count();
+    assert_eq!(folded, 2, "{over:?}");
+    assert!(over.node_cap_reached && over.truncated, "{over:?}");
+    assert!(over.truncation_invariant_holds());
+
+    let spec = wicked_estate_core::TraversalSpec::blast_radius(1);
+    let exact = with_overlay(
+        &["a"],
+        &["d1", "d2"],
+        &[("d1", "a"), ("d2", "a")],
+        budget,
+        move |o| o.traverse(&code_id("a"), &spec).unwrap(),
+    );
+    assert!(has_doc(&exact, "d1") && has_doc(&exact, "d2"));
+    assert!(
+        !exact.truncated,
+        "exactly the budget is a complete fold: {exact:?}"
+    );
+}
+
+/// #226.2: an anchor at `max_depth` is not expanded across the boundary (no foreign node past the
+/// horizon) and the cut is reported as the depth horizon.
+#[test]
+fn cross_ply_respects_max_depth_and_reports_the_horizon_226() {
+    let spec = wicked_estate_core::TraversalSpec::blast_radius(0);
+    let sub = with_overlay(
+        &["a"],
+        &["d1"],
+        &[("d1", "a")],
+        CrossBudget::default(),
+        move |o| o.traverse(&code_id("a"), &spec).unwrap(),
+    );
+    assert!(!has_doc(&sub, "d1"), "no node past max_depth: {sub:?}");
+    assert!(sub.depths.values().all(|d| *d == 0));
+    assert!(sub.depth_horizon_reached && sub.truncated, "{sub:?}");
+    assert!(!sub.node_cap_reached);
+}
+
+/// #226.2: a folded foreign node with a cross edge of its own toward a node the result does not hold
+/// is a `max_cross_hops` cut, reported as the depth horizon; without one the fold is complete.
+#[test]
+fn cross_hop_cut_is_reported_226() {
+    let spec = wicked_estate_core::TraversalSpec::blast_radius(1);
+    let cut = with_overlay(
+        &["a", "b"],
+        &["d1"],
+        &[("d1", "a"), ("d1", "b")],
+        CrossBudget::default(),
+        move |o| o.traverse(&code_id("a"), &spec).unwrap(),
+    );
+    assert!(has_doc(&cut, "d1"));
+    assert!(!cut.nodes.iter().any(|n| n.symbol == code_id("b")));
+    assert!(cut.depth_horizon_reached && cut.truncated, "{cut:?}");
+
+    let spec = wicked_estate_core::TraversalSpec::blast_radius(1);
+    let whole = with_overlay(
+        &["a"],
+        &["d1"],
+        &[("d1", "a")],
+        CrossBudget::default(),
+        move |o| o.traverse(&code_id("a"), &spec).unwrap(),
+    );
+    assert!(has_doc(&whole, "d1"));
+    assert!(!whole.truncated, "{whole:?}");
+}

@@ -80,6 +80,11 @@ pub struct Subgraph {
     /// Historically every `traverse` impl derived `truncated` from the node cap alone, so a deep,
     /// narrow graph (a 20-hop COBOL `PERFORM` chain: few nodes, many hops) was cut silently and
     /// reported complete — wicked-estate#190. Deriving `truncated` from BOTH is the fix.
+    ///
+    /// When `node_cap_reached` is also set, this flag is a LOWER BOUND, not exact (#225): nodes the
+    /// node cap declined are never expanded or probed, so a horizon past them can go unreported.
+    /// `truncated` stays exact either way. Raise `max_nodes` until the node cap clears to read the
+    /// depth cause exactly.
     #[serde(default)]
     pub depth_horizon_reached: bool,
 }
