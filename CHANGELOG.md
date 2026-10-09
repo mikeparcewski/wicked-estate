@@ -2,7 +2,32 @@
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-10-09
+
+Minor bump, not a patch: MCP `tools/call` now rejects arguments outside the advertised
+schema (#212), a reserved or misspelt `@flow.*` capture fails the query load (#235),
+property-read value nodes change kind and identity (#214, #208), and several CLI read
+commands fail closed or take stricter operands (#246, #234, #205). See **Changed (breaking)**.
+
 ### Changed (breaking)
+- **MCP `tools/call` validates arguments against the advertised `inputSchema` (#212).** An unknown
+  argument (every retrieval schema sets `additionalProperties: false`), a missing required
+  argument, a wrong `type`, a value outside an `enum` or a wrong array item type now returns an
+  `isError` tool result naming the property, e.g. `SearchEntity: invalid arguments: unknown
+  argument 'totally_unknown' (accepted: …)`. Before, `{"symbol": …, "totally_unknown": 1}` was
+  silently accepted. Out-of-range numbers still dispatch (the tools clamp them by contract), and
+  an explicit `null` for an optional argument is accepted. A client that sent a misspelt or extra
+  argument breaks. That is the fix.
+- **A reserved or misspelt `@flow.*` capture fails the query load (#235).** A plugin or override
+  query that names a `scip` / `compiler` / `call_derived` evidence class or a misspelt anchor
+  (`@flow.valeu.syntax.assignment`) is now refused at load. An override falls back to the built-in
+  query loudly, and a plugin language does not load. Before, the capture was dropped silently.
+  Every shipped `.scm` is pinned by a test that walks its `@flow.*` captures.
+- **Property-read value nodes are `NodeKind::Synthetic` and keyed by their `object.property` path
+  (#214, #208).** A function-scoped `const a = customer.id` no longer mints a `field` node owned
+  by a function. A prettier-wrapped `customer⏎ .id` or an optional `raw?.name` now mints the same
+  node as the plain form. Ids that carried whitespace change, and consumers grouping `Field` nodes
+  by owner type no longer see them.
 - **Read commands fail closed on a missing `--db` (#246).** `query`, `blast-radius`, `path`,
   `stats`, `graph-view`, `source`, `by-requirement`, `annotations`, `stale-annotations`,
   `fingerprint`, `changed-since`, `entrypoints`, `leaves`, `dead-code`, `nodes`, `resolve` and
@@ -33,6 +58,16 @@
   unchanged. The spec (`docs/recon/annotation-consumer-spec.md`) fixed the order only over the cap.
 
 ### Added
+- **`GraphRead::count_symbols` and `GraphRead::find_structural_symbols` (#177, #218).** Both are
+  provided methods, so existing stores keep compiling. `count_symbols` returns the unlimited
+  `find_symbols` length; `SqliteStore` counts over the `name` / `kind` / `language` columns
+  without decoding any `Node`. `find_structural_symbols` excludes synthetic value-flow slots
+  before `limit`. Name→symbol seeding (`SearchEntity`, `ContextPack`, `ContextBundle`,
+  `budget_context`) now uses it, so the over-fetch-and-escalate heuristic is gone. The overlay and
+  `OverlayMemStore` delegate both. A conformance suite pins them on MemStore and SqliteStore.
+- **A plain reassignment is a value hop (#217).** `typescript.scm` records `out = tainted`
+  (`typescript/syntax/reassignment`), so `let out = trusted; out = tainted; return out;` reports
+  both producers instead of a lineage that looked complete with one.
 - **`wicked-estate --version` / `-V` / `version` (#200)** prints `wicked-estate <version>` —
   one line, nothing else on stdout, exit 0. Before, all three fell into the ~100-line usage
   banner (exit 0), and the version had to be scraped off its first line.
@@ -64,6 +99,26 @@
   `cli_flags` for `stale-annotations` only. No new dependency.
 
 ### Fixed
+- **An incremental re-index keeps the call-derived edges unchanged callers own (#229).**
+  `remove_file` deletes every edge sourced at a re-extracted file's nodes, including
+  `call_argument` flows (callee parameter ← caller argument) owned by the caller's call site.
+  Forcing the one-hop callers of an edit therefore dropped *their* callers' hops: 446 `flows_to`
+  were lost on a 564-file TypeScript repo, all owned by files that were not re-extracted. The
+  indexer now restores those value-flow edges after the write, so incremental equals full.
+- **SQLite traverse reports the node cap only when a node was dropped (#225).** Each reach leg
+  fetches `max_nodes + 1` rows (fencepost) and keeps the nearest nodes by depth, then symbol.
+  Exactly `max_nodes` reachable nodes is a complete walk; before, it said `node_cap_reached`.
+  `Subgraph::depth_horizon_reached` documents that it is a lower bound when the node cap also bit.
+- **Traverse bound reporting on the overlay and Postgres (#226).** The overlay cross ply reads its
+  rows uncapped and marks the node cap for any new foreign node the `max_cross_nodes` budget
+  leaves out. It no longer expands an anchor at `max_depth` (that marks the depth horizon
+  instead), and it reports a `max_cross_hops` cut. `PostgresStore` truncates by depth then id,
+  never by id alone.
+- **Value-flow locations are deterministic (#209).** Call sites are grouped in key order, so the
+  site that mints a shared value node, and its stored location, is the same on every index.
+- **No `call_result` hop into a callee without a return value (#210).** Before, it was minted and
+  then pruned as dangling, orphaning the consumer local. The prune message no longer says
+  "incremental" on a first index.
 - **`lineage --json` no longer panics on a closed stdout (#247):** `| head -1` ends the document
   quietly (exit 0) instead of a `failed printing to stdout` panic; text mode's broken pipe is
   handled the same way, and `resolve --json` / `query --json` write through the same seam. Every
