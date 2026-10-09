@@ -1579,6 +1579,53 @@ fn value_flow_hint_kind(kind: FlowEndpointKind) -> Option<&'static str> {
     }
 }
 
+/// Whether the `this` receiver of a `this.<name>` capture is the enclosing CLASS instance.
+///
+/// A `Field` endpoint is minted on the enclosing class (`{class}:field:{name}`), which is only true
+/// when `this` is lexically the class instance: inside a class member, through any number of arrow
+/// functions. An ordinary function, generator or object-literal method rebinds `this`, so
+/// `class C { m() { const o = { read() { const t = this.f; } }; } }` reads `o.f`, not `C.f`, and
+/// minting `C:field:f` there would assert a false Parsed flow (#215 review). Captures that are not a
+/// `this.<name>` member (an `@Input()` field's own name) are class-owned by construction.
+fn field_receiver_is_class_instance(node: tree_sitter::Node) -> bool {
+    let Some(member) = node.parent().filter(|p| p.kind() == "member_expression") else {
+        return true;
+    };
+    if member.child_by_field_name("object").map(|o| o.kind()) != Some("this") {
+        return true;
+    }
+    let mut cur = member.parent();
+    while let Some(n) = cur {
+        match n.kind() {
+            "method_definition"
+            | "public_field_definition"
+            | "field_definition"
+            | "class_static_block" => {
+                return n.parent().is_some_and(|p| p.kind() == "class_body");
+            }
+            "function_declaration"
+            | "function_expression"
+            | "function"
+            | "generator_function"
+            | "generator_function_declaration" => return false,
+            "class_body" => return true,
+            _ => {}
+        }
+        cur = n.parent();
+    }
+    false
+}
+
+/// A `Field` endpoint whose `this` is not the class instance becomes a def-owned, path-keyed
+/// `Property` read (`this.<name>`), like any other receiver's member: still a value node, never
+/// joined to the class field slot.
+fn rebind_non_class_field(endpoint: &mut PendingFlowEndpoint, node: tree_sitter::Node) {
+    if endpoint.kind == FlowEndpointKind::Field && !field_receiver_is_class_instance(node) {
+        endpoint.kind = FlowEndpointKind::Property;
+        endpoint.name = format!("this.{}", endpoint.name);
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PendingFlowEndpoint {
     kind: FlowEndpointKind,
@@ -2193,6 +2240,10 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
             "producer.local" => CaptureRole::FlowProducer {
                 kind: FlowEndpointKind::Local,
             },
+            // `this.<name>` read (#215): the class-owned field slot, not a per-method property.
+            "producer.field" => CaptureRole::FlowProducer {
+                kind: FlowEndpointKind::Field,
+            },
             "producer.property" => CaptureRole::FlowProducer {
                 kind: FlowEndpointKind::Property,
             },
@@ -2591,13 +2642,15 @@ impl Extractor for TreeSitterExtractor {
                         flow_construct = Some((class.to_owned_class(), span));
                     }
                     CaptureRole::FlowConsumer { kind } => {
-                        flow_consumers.push(PendingFlowEndpoint {
+                        let mut endpoint = PendingFlowEndpoint {
                             kind,
                             name: strip_def_name(&text),
                             pos,
                             span,
                             slot: None,
-                        });
+                        };
+                        rebind_non_class_field(&mut endpoint, c.node);
+                        flow_consumers.push(endpoint);
                     }
                     CaptureRole::FlowProducer { kind } => {
                         let name = match kind {
@@ -2607,13 +2660,15 @@ impl Extractor for TreeSitterExtractor {
                             FlowEndpointKind::Property => property_path_name(&text),
                             _ => strip_def_name(&text),
                         };
-                        flow_producers.push(PendingFlowEndpoint {
+                        let mut endpoint = PendingFlowEndpoint {
                             kind,
                             name,
                             pos,
                             span,
                             slot: None,
-                        });
+                        };
+                        rebind_non_class_field(&mut endpoint, c.node);
+                        flow_producers.push(endpoint);
                     }
                     CaptureRole::FlowParameter { kind } => {
                         flow_parameter_sites.push(PendingFlowEndpoint {
@@ -2646,13 +2701,15 @@ impl Extractor for TreeSitterExtractor {
                         call_arguments_node = Some(c.node);
                     }
                     CaptureRole::CallArg { kind } => {
-                        call_arg_sites.push(PendingFlowEndpoint {
+                        let mut endpoint = PendingFlowEndpoint {
                             kind,
                             name: strip_def_name(&text),
                             pos,
                             span,
                             slot: None,
-                        });
+                        };
+                        rebind_non_class_field(&mut endpoint, c.node);
+                        call_arg_sites.push(endpoint);
                     }
                     CaptureRole::CallResult { kind } => {
                         call_result_site = Some(PendingFlowEndpoint {
@@ -5030,21 +5087,30 @@ export function factory() {
             "top-level 'topVar' should be Variable; got {kinds:?}"
         );
 
-        // function-local bindings NOT captured
+        // function-local bindings NOT captured as definitions. A local that takes part in value
+        // flow (`return localResult`) gets a value slot (#213) — a different record, excluded here.
         assert!(
-            !ex.nodes.iter().any(|n| n.name == "localResult"),
+            !ex.nodes
+                .iter()
+                .any(|n| n.name == "localResult" && !n.is_value_flow_node()),
             "function-local 'localResult' must NOT be captured; got {kinds:?}"
         );
         assert!(
-            !ex.nodes.iter().any(|n| n.name == "localTemp"),
+            !ex.nodes
+                .iter()
+                .any(|n| n.name == "localTemp" && !n.is_value_flow_node()),
             "function-local 'localTemp' must NOT be captured; got {kinds:?}"
         );
         assert!(
-            !ex.nodes.iter().any(|n| n.name == "legacyLocal"),
+            !ex.nodes
+                .iter()
+                .any(|n| n.name == "legacyLocal" && !n.is_value_flow_node()),
             "function-local 'legacyLocal' must NOT be captured; got {kinds:?}"
         );
         assert!(
-            !ex.nodes.iter().any(|n| n.name == "innerObj"),
+            !ex.nodes
+                .iter()
+                .any(|n| n.name == "innerObj" && !n.is_value_flow_node()),
             "inner function-local 'innerObj' must NOT be captured; got {kinds:?}"
         );
     }

@@ -266,6 +266,16 @@
     property: (property_identifier)) @flow.producer.property
 ) @flow.value.syntax.property_read
 
+; const t = this.tenantId — a read of the CLASS's field (#215). `@flow.producer.field` mints the
+; same class-owned `:field:<name>` slot an `@Input()` / `this.f = v` writes, so the read joins that
+; slot instead of minting a per-method `:property:` node, and `@Input() tenantId` reaches `t`.
+(variable_declarator
+  name: (identifier) @flow.consumer.local
+  value: (member_expression
+    object: (this)
+    property: (property_identifier) @flow.producer.field)
+) @flow.value.syntax.field_read
+
 ; @Input() tenantId
 (public_field_definition
   decorator: (decorator
@@ -295,15 +305,21 @@
 
 ; Callable parameters and simple returns become stable value nodes/edges. The call resolver
 ; later joins exact call-site argument facts to these callable-owned values.
+; `optional_parameter` (`a?: string`) fills its own positional slot like a required one (#213):
+; without it `value_params` held `null` there and the call-site argument hop was lost.
 (function_declaration
   parameters: (formal_parameters
-    (required_parameter
-      pattern: (identifier) @flow.parameter.local)))
+    [(required_parameter
+      pattern: (identifier) @flow.parameter.local)
+     (optional_parameter
+      pattern: (identifier) @flow.parameter.local)]))
 
 (method_definition
   parameters: (formal_parameters
-    (required_parameter
-      pattern: (identifier) @flow.parameter.local)))
+    [(required_parameter
+      pattern: (identifier) @flow.parameter.local)
+     (optional_parameter
+      pattern: (identifier) @flow.parameter.local)]))
 
 (return_statement
   (identifier) @flow.return.local)
@@ -317,6 +333,10 @@
 ; arrow bound to a const or a class field is captured as a def above), whose returns are kept.
 (arrow_function body: (statement_block) @flow.barrier)
 (function_expression body: (statement_block) @flow.barrier)
+; Generators are callables too, and no definition pattern captures them: their returns are the
+; generator's, never the enclosing definition's.
+(generator_function body: (statement_block) @flow.barrier)
+(generator_function_declaration body: (statement_block) @flow.barrier)
 
 (variable_declarator
   value: (arrow_function body: (statement_block) @flow.barrier.owned))
@@ -327,7 +347,14 @@
 ; callback: `items.map(() => { function inner() { return v; } })` returns `v` from `inner`, and
 ; `inner` is a definition record, so the barrier must stop at it rather than at the arrow.
 (function_declaration body: (statement_block) @flow.barrier.owned)
-(method_definition body: (statement_block) @flow.barrier.owned)
+; Only a method a definition pattern captures (a `property_identifier` name) owns its returns: a
+; computed (`[key]() {}`) or private method has no definition record, so its body is a plain
+; barrier and its `return` is dropped rather than attributed to the enclosing definition. The
+; barrier map ORs `owned`, so a named method's body is owned by the second pattern.
+(method_definition body: (statement_block) @flow.barrier)
+(method_definition
+  name: (property_identifier)
+  body: (statement_block) @flow.barrier.owned)
 
 ; Generic call value-flow facts. These are carried as UnresolvedRef hints and only become
 ; edges when the existing Calls resolver binds the exact site.
