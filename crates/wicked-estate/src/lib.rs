@@ -2883,6 +2883,16 @@ mod tests {
                 ),
                 callee_node,
                 other_node,
+                // The callee returns a value (`return <ident>`), so it has a return endpoint and a
+                // `call_result` hop joins to it (#210: no endpoint, no hop).
+                Node::new(
+                    value_symbol(&callee, "return", "value"),
+                    NodeKind::Synthetic,
+                    "normalize.return",
+                    Language::new("typescript"),
+                    Location::new("callee.ts", Span::ZERO),
+                )
+                .with_value_role("Return"),
             ])
             .unwrap();
         store.commit_batch().unwrap();
