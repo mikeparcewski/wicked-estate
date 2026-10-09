@@ -2130,6 +2130,30 @@ enum CaptureRole<'a> {
     Other,
 }
 
+/// (#235) The `@flow.*` captures of `query` that classify to no role: a reserved evidence class
+/// (`scip` / `compiler`), the engine-owned `call_derived`, or a misspelt anchor. They would be
+/// ignored at extract time, so a plugin or override query carrying one is refused at load
+/// instead: `Err` names each one.
+pub(crate) fn flow_capture_lint(query: &Query) -> std::result::Result<(), String> {
+    let bad: Vec<String> = query
+        .capture_names()
+        .iter()
+        .filter(|n| n.starts_with("flow.") && matches!(classify_capture(n), CaptureRole::Other))
+        .map(|n| format!("@{n}"))
+        .collect();
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "unknown or reserved flow capture(s) {} — a `@flow.<semantics>.<evidence>.<construct>` \
+             anchor needs semantics `value`/`influence` and a shipped evidence class (`syntax`/\
+             `convention`; `scip`/`compiler` are reserved, `call_derived` is engine-owned), or \
+             one of the endpoint roles",
+            bad.join(", ")
+        ))
+    }
+}
+
 fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
     // Framework relationships (DI wiring, route handlers). Generic across languages — a `.scm`
     // emits these captures; the relationship logic stays in the query file, not in Rust per-lang.
@@ -2174,8 +2198,9 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
             },
             "barrier" => CaptureRole::FlowBarrier { owned: false },
             "barrier.owned" => CaptureRole::FlowBarrier { owned: true },
-            // Anything else under `flow.` is a classified construct anchor. Unparseable =
-            // ignored, never silently emitted as an unclassified fact.
+            // Anything else under `flow.` is a classified construct anchor. Unparseable = never
+            // emitted as an unclassified fact; a plugin/override query carrying one fails its
+            // load ([`flow_capture_lint`], #235).
             other => match FlowClass::parse(other) {
                 Some(class) => CaptureRole::FlowConstruct { class },
                 None => CaptureRole::Other,
@@ -3879,6 +3904,49 @@ mod tests {
             "wired languages whose query does not compile:\n  {}",
             failures.join("\n  ")
         );
+    }
+
+    /// #235: every `@flow.*` capture in every shipped `.scm` classifies to a known role, and a
+    /// reserved or misspelt anchor fails the lint plugins and overrides load through.
+    #[test]
+    fn every_shipped_flow_capture_classifies_235() {
+        let mut flow_total = 0;
+        for e in LANG_TABLE {
+            let lang = (e.make_language)();
+            let q = tree_sitter::Query::new(&lang, e.query_src).expect("compiles");
+            flow_total += q
+                .capture_names()
+                .iter()
+                .filter(|n| n.starts_with("flow."))
+                .count();
+            if let Err(err) = flow_capture_lint(&q) {
+                panic!("{}: {err}", e.name);
+            }
+        }
+        assert!(
+            flow_total >= 15,
+            "the TS flow anchors are walked: {flow_total}"
+        );
+
+        let lang = (LANG_TABLE
+            .iter()
+            .find(|e| e.name == "typescript")
+            .unwrap()
+            .make_language)();
+        for bad in [
+            "flow.valeu.syntax.assignment",
+            "flow.value.scip.call_argument",
+            "flow.value.compiler.angular_input",
+            "flow.value.call_derived.call_argument",
+        ] {
+            let src = format!("(identifier) @{bad}");
+            let q = tree_sitter::Query::new(&lang, &src).expect("compiles");
+            let err = flow_capture_lint(&q).expect_err(bad);
+            assert!(err.contains(&format!("@{bad}")), "{err}");
+        }
+        let ok = tree_sitter::Query::new(&lang, "(identifier) @flow.value.syntax.assignment")
+            .expect("compiles");
+        assert!(flow_capture_lint(&ok).is_ok());
     }
 
     #[test]
