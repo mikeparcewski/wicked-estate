@@ -2,6 +2,64 @@
 
 ## [Unreleased]
 
+## [0.23.0] — 2026-10-09
+
+Minor bump, not a patch: value-slot ids change (#216). `SYMBOL_ID_SCHEME` goes 3 → 4, so a graph
+written by an older version is fully re-extracted on its next `wicked-estate index`. The existing
+scheme gate does this automatically: no flag and no manual step. Until that re-index, a stored
+graph keeps its old value ids. See **Changed (breaking)**.
+
+### Changed (breaking)
+- **Value slots are binding-scoped (#216).** A value slot was `{owner}:local:{name}` for every
+  binding of a name in one callable, so a callback parameter that shadowed the method's
+  parameter, or a block-scoped `const` that shadowed it, merged with it into ONE node and a false
+  flow ran between them. A reference now resolves to the innermost declaration of its name in its
+  owner:
+  - the owner's parameter is `{owner}:param:{name}` (was `:local:`);
+  - a binding of the owner's own body keeps `{owner}:local:{name}`;
+  - a binding of a nested block, `for`, `catch`, `switch` or callback is `{owner}:local:{name}@{n}`,
+    where `n` numbers, from 1 in source order, the owner's nested scopes that bind that name.
+
+  Line shifts and unrelated blocks keep every id (ADR-002). Destructured bindings
+  (`{a, b: c, ...d}`, `[e = f]`) are bound too, and `var` binds in its function. A read of a
+  parameter is the parameter's own node; it is no longer re-emitted as a Variable. Consumers that
+  matched a parameter slot by its `:local:` id must use `:param:`. The ENGINE-CONTRACT §3.2
+  shadowing example now yields two slots, each carrying only its own fact.
+
+### Added
+- **Value lineage for `.tsx` and JavaScript (`.js` / `.jsx` / `.mjs` / `.cjs`) (#213).**
+  `tsx.scm` carries the TypeScript value-flow block. `javascript.scm` has the JS spelling: bare and
+  defaulted parameters, `field_definition`, and no Angular conventions. Rule ids are
+  `tsx/<evidence>/<construct>` and `javascript/<evidence>/<construct>`. TSX/JS call sites anchor the
+  whole call expression, as TypeScript's do, so their `Calls` edge location is now the call span
+  instead of the callee identifier.
+- **`this.<field>` reads join the class field slot (#215).** `const t = this.tenantId` reads the
+  class-owned `:field:tenantId` slot, the one an `@Input()` or a `this.f = v` writes, so an
+  `@Input()` value reaches the methods that read it. A `this` under an ordinary function, a
+  generator or an object-literal method is not the class instance, and stays a def-owned
+  `this.<name>` property read.
+- **`GraphRead::file_call_refs` / `GraphWrite::set_file_call_refs` (#220).** These are provided
+  trait methods with defaults, so no implementor breaks. Each indexed file records the value-flow
+  call references its extraction produced. SQLite stores them in a new `file_call_refs` table
+  (created on open), and `remove_file` deletes the file's row. MemStore also stores them, and the
+  memory and overlay wrappers forward both methods. Postgres and Surreal use the default, which
+  records nothing.
+
+### Changed
+- **A callee-only edit no longer re-extracts its callers (#220).** The callers' recorded refs are
+  re-resolved against the new index, and the call-derived `flows_to` edges into the changed callee
+  are re-derived from them, so only the edited file is parsed. The replay runs only when it equals
+  a re-extraction: the changed files define the same symbols of the same kinds, and lose no return
+  endpoint. A rename, a removed definition, a lost `return <ident>`, or a caller with no record (a
+  graph indexed before 0.23.0) still re-extracts the callers. The back-fill pass also reads the
+  record instead of re-parsing stored content.
+
+### Fixed
+- An optional parameter (`a?: string`) fills its own positional value slot, so its call-argument
+  hop is no longer lost (#213).
+- A generator body and an unnamed (computed or private) method body are return barriers. A
+  `return` inside them is no longer attributed to the enclosing definition (#213 review).
+
 ## [0.22.0] — 2026-10-09
 
 Minor bump, not a patch: MCP `tools/call` now rejects arguments outside the advertised
