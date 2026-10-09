@@ -165,29 +165,201 @@
     source: (string) @import.source)
 ) @import
 
+; ── Direct value-flow sites ─────────────────────────────────────────────────
+;
+; Mirrors typescript.scm (#213): the TSX grammar is a superset of the TypeScript grammar, so the
+; node shapes are identical and the value-lineage patterns carry over unchanged. Keep the two in
+; step when either changes.
+;
+; The whole-pattern anchor capture names the fact's CLASSIFICATION, so the classification is data
+; in this file rather than a `match language` arm in Rust:
+;
+;     @flow.<semantics>.<evidence>.<construct>
+;
+;   <semantics>  value     — the producer's value becomes the consumer's value, whole
+;                influence — the producer contributes to it (NOT a claim the value is preserved)
+;   <evidence>   syntax     — the AST proves this fact at this site
+;                convention — a framework naming/shape match the parser CANNOT prove. An
+;                             identifier named `Input` is not necessarily `@angular/core`'s
+;                             `Input`; a receiver named `route` is not necessarily an
+;                             `ActivatedRoute`. These edges are emitted at the Heuristic tier.
+;   <construct>  free-form; becomes part of the stable rule id
+;                `tsx/<evidence>/<construct>` carried on every emitted edge.
+;
+; See `wicked_estate_core::flow` and docs/ENGINE-CONTRACT.md §3.2.
+
+; const a = b / let a = b / var a = b
+(variable_declarator
+  name: (identifier) @flow.consumer.local
+  value: (identifier) @flow.producer.local
+) @flow.value.syntax.assignment
+
+; const c = a + b
+(variable_declarator
+  name: (identifier) @flow.consumer.local
+  value: (binary_expression
+    left: (identifier) @flow.producer.local
+    right: (identifier) @flow.producer.local)
+) @flow.influence.syntax.expression
+
+; out = tainted — a REASSIGNMENT is a value hop too (#217): without it `let out = trusted;
+; out = tainted; return out;` stored only the `trusted` hop and the partial lineage looked whole.
+(expression_statement
+  (assignment_expression
+    left: (identifier) @flow.consumer.local
+    right: (identifier) @flow.producer.local)
+) @flow.value.syntax.reassignment
+
+; this.field = value
+(expression_statement
+  (assignment_expression
+    left: (member_expression
+      object: (this)
+      property: (property_identifier) @flow.consumer.field)
+    right: (identifier) @flow.producer.local)
+) @flow.value.syntax.assignment
+
+; const id = customer.id
+(variable_declarator
+  name: (identifier) @flow.consumer.local
+  value: (member_expression
+    object: (identifier)
+    property: (property_identifier)) @flow.producer.property
+) @flow.value.syntax.property_read
+
+; const t = this.tenantId — a read of the CLASS's field (#215). `@flow.producer.field` mints the
+; same class-owned `:field:<name>` slot an `@Input()` / `this.f = v` writes, so the read joins that
+; slot instead of minting a per-method `:property:` node, and `@Input() tenantId` reaches `t`.
+(variable_declarator
+  name: (identifier) @flow.consumer.local
+  value: (member_expression
+    object: (this)
+    property: (property_identifier) @flow.producer.field)
+) @flow.value.syntax.field_read
+
+; @Input() tenantId
+(public_field_definition
+  decorator: (decorator
+    (call_expression
+      function: (identifier) @_input_dec
+      (#eq? @_input_dec "Input")))
+  name: (property_identifier) @flow.consumer.field @flow.producer.angular_input
+) @flow.value.convention.angular_input
+
+; const routeId = route.snapshot.paramMap.get('id')
+(variable_declarator
+  name: (identifier) @flow.consumer.local
+  value: (call_expression
+    function: (member_expression
+      object: (member_expression
+        object: (member_expression
+          object: (identifier) @_route_obj
+          property: (property_identifier) @_snapshot)
+        property: (property_identifier) @_param_map)
+      property: (property_identifier) @_get)
+    arguments: (arguments (string) @flow.producer.route_param)
+    (#eq? @_route_obj "route")
+    (#eq? @_snapshot "snapshot")
+    (#eq? @_param_map "paramMap")
+    (#eq? @_get "get"))
+) @flow.value.convention.route_param
+
+; Callable parameters and simple returns become stable value nodes/edges. The call resolver
+; later joins exact call-site argument facts to these callable-owned values.
+; `optional_parameter` (`a?: string`) fills its own positional slot like a required one (#213):
+; without it `value_params` held `null` there and the call-site argument hop was lost.
+(function_declaration
+  parameters: (formal_parameters
+    [(required_parameter
+      pattern: (identifier) @flow.parameter.local)
+     (optional_parameter
+      pattern: (identifier) @flow.parameter.local)]))
+
+(method_definition
+  parameters: (formal_parameters
+    [(required_parameter
+      pattern: (identifier) @flow.parameter.local)
+     (optional_parameter
+      pattern: (identifier) @flow.parameter.local)]))
+
+(return_statement
+  (identifier) @flow.return.local)
+
+; Return barriers. A `return x` is only the OWNER callable's return value when no other callable
+; body lies between them: in the canonical RxJS shape
+; `svc.get(id).subscribe((customer) => { return customer; })` the returned value belongs to the
+; callback, not to the enclosing method, and anonymous callables are not definition records — so
+; without this the method's return value is asserted to be the callback's, at confidence 1.00
+; (wicked-estate#207 review, C5a). `.owned` marks a body that IS its own definition's body (an
+; arrow bound to a const or a class field is captured as a def above), whose returns are kept.
+(arrow_function body: (statement_block) @flow.barrier)
+(function_expression body: (statement_block) @flow.barrier)
+; Generators are callables too, and no definition pattern captures them: their returns are the
+; generator's, never the enclosing definition's.
+(generator_function body: (statement_block) @flow.barrier)
+(generator_function_declaration body: (statement_block) @flow.barrier)
+
+(variable_declarator
+  value: (arrow_function body: (statement_block) @flow.barrier.owned))
+(public_field_definition
+  value: (arrow_function body: (statement_block) @flow.barrier.owned))
+
+; A named callable's body is an OWNED barrier even when the callable is declared inside a
+; callback: `items.map(() => { function inner() { return v; } })` returns `v` from `inner`, and
+; `inner` is a definition record, so the barrier must stop at it rather than at the arrow.
+(function_declaration body: (statement_block) @flow.barrier.owned)
+; Only a method a definition pattern captures (a `property_identifier` name) owns its returns: a
+; computed (`[key]() {}`) or private method has no definition record, so its body is a plain
+; barrier and its `return` is dropped rather than attributed to the enclosing definition. The
+; barrier map ORs `owned`, so a named method's body is owned by the second pattern.
+(method_definition body: (statement_block) @flow.barrier)
+(method_definition
+  name: (property_identifier)
+  body: (statement_block) @flow.barrier.owned)
+
+; Generic call value-flow facts. These are carried as UnresolvedRef hints and only become
+; edges when the existing Calls resolver binds the exact site.
+(call_expression
+  arguments: (arguments
+    (identifier) @call.arg.local) @call.arguments
+) @call.value
+
+; this.field passed as an argument, e.g. this.loadCustomer(service, this.customerId)
+(call_expression
+  arguments: (arguments
+    (member_expression
+      object: (this)
+      property: (property_identifier) @call.arg.field)) @call.arguments
+) @call.value
+
+(variable_declarator
+  name: (identifier) @call.result.local
+  value: (call_expression) @call.value)
+
 ; ── Call sites ───────────────────────────────────────────────────────────────
 
 ; Function calls — simple: foo()
 (call_expression
   function: (identifier) @call.function
   arguments: (arguments) @call.args
-) @call
+) @call.value
 
 ; Method calls — member expression: a.b(), a.b.c(), a?.b()
+; The optional_chain variant also uses member_expression with property_identifier
 (call_expression
   function: (member_expression
     property: (property_identifier) @call.method
   )
-) @call.method
+) @call.value
 
 ; Constructor calls — new X()
 (new_expression
   constructor: (identifier) @call.function
-) @call
+) @call.value
 
 ; Constructor calls — new a.B()
 (new_expression
   constructor: (member_expression
     property: (property_identifier) @call.method
   )
-) @call.method
+) @call.value

@@ -555,6 +555,58 @@ fn angular_fixture_flows_to_lineage_recovers_route_and_input_chains() {
         "Angular input chain missing from persisted flows_to graph; got {pairs:?}"
     );
 
+    // #215: the `@Input()` value reaches a method that READS it through `this.tenantId`:
+    // `:input:tenantId -> :field:tenantId -> tenant -> sink(v)`. The read joins the class-owned
+    // field slot the decorator writes; it does not mint a per-method `:property:` node.
+    let input = one_symbol_named_with(
+        &store,
+        "AngularInput:tenantId",
+        "CustomerComponent#:input:tenantId",
+    );
+    let tenant_field =
+        one_symbol_named_with(&store, "tenantId", "CustomerComponent#:field:tenantId");
+    let tenant = one_symbol_named_with(&store, "tenant", "CustomerComponent#audit().");
+    let sink_v = one_symbol_named_with(&store, "v", "CustomerComponent#sink().");
+    let sink_return = one_symbol_named_with(
+        &store,
+        "sink.return",
+        "CustomerComponent#sink().:return:value",
+    );
+    let pairs = semantic_flow_symbol_pairs(&store);
+    for (producer, consumer) in [
+        (input.clone(), tenant_field.clone()),
+        (tenant_field.clone(), tenant.clone()),
+        (tenant.clone(), sink_v.clone()),
+        (sink_v.clone(), sink_return.clone()),
+    ] {
+        assert!(
+            pairs.contains(&(producer.clone(), consumer.clone())),
+            "missing @Input() read hop {producer:?} -> {consumer:?}; got {pairs:?}"
+        );
+    }
+    assert!(
+        symbol_ids_named(&store, "this.tenantId").is_empty(),
+        "a `this.<field>` read must join the field slot, not mint a property node"
+    );
+    let input_lineage = Lineage
+        .invoke(
+            &store,
+            &serde_json::json!({"symbol": input.as_str(), "depth": 8, "relation": "flows_to"}),
+        )
+        .unwrap();
+    let input_reached: BTreeSet<_> = input_lineage.content["dependencies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| SymbolId(node["symbol"].as_str().unwrap().to_string()))
+        .collect();
+    for expected in [&tenant_field, &tenant, &sink_v, &sink_return] {
+        assert!(
+            input_reached.contains(expected),
+            "AngularInput:tenantId lineage missing {expected:?}; got {input_reached:?}"
+        );
+    }
+
     let default = Lineage
         .invoke(
             &store,
@@ -1365,4 +1417,297 @@ fn value_flow_locations_are_deterministic_across_indexes_209() {
             "index {tag} stored different locations"
         );
     }
+}
+
+// ── #215: `this.<field>` reads join the class-owned field slot ───────────────
+
+#[test]
+fn this_field_read_joins_the_class_field_slot_215() {
+    let source = r#"
+        class Holder {
+            current = '';
+            write(next: string) {
+                this.current = next;
+            }
+            read(): string {
+                const seen = this.current;
+                return seen;
+            }
+        }
+    "#;
+    let (root, store) = indexed_typescript("this_field_215", source);
+    let field = one_symbol_named_with(&store, "current", "Holder#:field:current");
+    let next = one_symbol_named_with(&store, "next", "Holder#write().");
+    let seen = one_symbol_named_with(&store, "seen", "Holder#read().");
+    let pairs = semantic_flow_symbol_pairs(&store);
+    for (producer, consumer) in [(next, field.clone()), (field, seen)] {
+        assert!(
+            pairs.contains(&(producer.clone(), consumer.clone())),
+            "missing hop {producer:?} -> {consumer:?}; got {pairs:?}"
+        );
+    }
+    let read_edge = semantic_flow_edges(&store)
+        .into_iter()
+        .find(|e| e.metadata.get("construct").and_then(|c| c.as_str()) == Some("field_read"))
+        .expect("the this.<field> read carries the field_read construct");
+    assert_eq!(read_edge.provenance, Provenance::Parsed);
+    let _ = fs::remove_dir_all(root);
+}
+
+// ── #213: optional parameters + TSX / JavaScript value lineage ──────────────
+
+#[test]
+fn optional_parameters_fill_their_own_slot_213() {
+    let source = r#"
+        class Api {
+            optFn(a?: string): string { return a; }
+            mixed(a: string, b?: string, c?: string): string { return c; }
+        }
+        class Caller {
+            run(api: Api, x: string, p: string, q: string, r: string) {
+                const one = api.optFn(x);
+                const two = api.mixed(p, q, r);
+            }
+        }
+    "#;
+    let (root, store) = indexed_typescript("optional_213", source);
+    let pairs = semantic_flow_name_pairs(&store);
+    for expected in [
+        ("x", "a"),
+        ("p", "a"),
+        ("q", "b"),
+        ("r", "c"),
+        ("a", "optFn.return"),
+        ("optFn.return", "one"),
+        ("mixed.return", "two"),
+    ] {
+        assert!(
+            pairs.contains(&(expected.0.to_string(), expected.1.to_string())),
+            "missing optional-parameter hop {expected:?}; got {pairs:?}"
+        );
+    }
+    assert!(
+        !pairs.contains(&("q".to_string(), "c".to_string())),
+        "an optional parameter must not shift later arguments: {pairs:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn tsx_components_carry_value_lineage_213() {
+    let component = r#"
+        import { load } from './api';
+        export class Panel {
+            label = '';
+            render(id: string, hint?: string) {
+                const key = id;
+                this.label = key;
+                const shown = this.label;
+                const fetched = load(shown);
+                return <div>{fetched}</div>;
+            }
+        }
+        export function pick(a: string): string {
+            const b = a;
+            return b;
+        }
+    "#;
+    let api = r#"
+        export function load(target: string): string { return target; }
+    "#;
+    let (root, store) =
+        indexed_typescript_files("tsx_213", &[("panel.tsx", component), ("api.ts", api)]);
+    let pairs = semantic_flow_name_pairs(&store);
+    for expected in [
+        ("id", "key"),
+        ("key", "label"),
+        ("label", "shown"),
+        ("shown", "target"),
+        ("target", "load.return"),
+        ("load.return", "fetched"),
+        ("a", "b"),
+        ("b", "pick.return"),
+    ] {
+        assert!(
+            pairs.contains(&(expected.0.to_string(), expected.1.to_string())),
+            "missing .tsx value hop {expected:?}; got {pairs:?}"
+        );
+    }
+    let tsx_rules: BTreeSet<String> = semantic_flow_edges(&store)
+        .into_iter()
+        .filter(|e| {
+            e.location
+                .as_ref()
+                .is_some_and(|l| l.file.ends_with("panel.tsx"))
+        })
+        .flat_map(|e| {
+            e.metadata
+                .get("flow_rules")
+                .and_then(|r| r.as_array())
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|r| r.as_str().map(str::to_string))
+        .collect();
+    assert!(
+        tsx_rules.iter().any(|r| r.starts_with("tsx/")),
+        "direct .tsx hops carry a tsx rule id: {tsx_rules:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn javascript_modules_carry_value_lineage_213() {
+    let module = r#"
+        import { load } from './api.js';
+        export class Store {
+            constructor() { this.current = ''; }
+            set(next, fallback = '') {
+                this.current = next;
+            }
+            get() {
+                const seen = this.current;
+                const loaded = load(seen);
+                return loaded;
+            }
+        }
+        export function relay(a, b = a) {
+            const c = a + b;
+            let out = c;
+            out = b;
+            return out;
+        }
+        export function caller(x, y) {
+            return relay(x, y);
+        }
+    "#;
+    let api = r#"
+        export function load(target) { return target; }
+    "#;
+    let (root, store) =
+        indexed_typescript_files("js_213", &[("store.js", module), ("api.js", api)]);
+    let pairs = semantic_flow_name_pairs(&store);
+    for expected in [
+        ("next", "current"),
+        ("current", "seen"),
+        ("seen", "target"),
+        ("target", "load.return"),
+        ("load.return", "loaded"),
+        ("loaded", "get.return"),
+        ("a", "c"),
+        ("b", "c"),
+        ("c", "out"),
+        ("b", "out"),
+        ("out", "relay.return"),
+        ("x", "a"),
+        ("y", "b"),
+    ] {
+        assert!(
+            pairs.contains(&(expected.0.to_string(), expected.1.to_string())),
+            "missing .js value hop {expected:?}; got {pairs:?}"
+        );
+    }
+    // Exact identities, not names: the write and the read must meet on the ONE class-owned slot.
+    let field = one_symbol_named_with(&store, "current", "Store#:field:current");
+    let next = one_symbol_named_with(&store, "next", "Store#set().");
+    let seen = one_symbol_named_with(&store, "seen", "Store#get().");
+    let symbols = semantic_flow_symbol_pairs(&store);
+    for (producer, consumer) in [(next, field.clone()), (field, seen)] {
+        assert!(
+            symbols.contains(&(producer.clone(), consumer.clone())),
+            "missing .js field hop {producer:?} -> {consumer:?}; got {symbols:?}"
+        );
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+// ── #213/#215 review: `this` rebinding and callable barriers ────────────────
+
+#[test]
+fn rebinding_callables_neither_join_the_class_field_nor_leak_returns() {
+    let ts = r#"
+        class C {
+            f = '';
+            m(key: string) {
+                const o = {
+                    read() {
+                        const t = this.f;
+                        return t;
+                    },
+                };
+                function plain() {
+                    const u = this.f;
+                    return u;
+                }
+                const arrow = () => {
+                    const w = this.f;
+                    return w;
+                };
+            }
+        }
+        function outerGen(v: string) {
+            const g = function* () { return v; };
+            return 0;
+        }
+        function outerComputed(v: string, key: string) {
+            const o = { [key]() { return v; } };
+            return 0;
+        }
+    "#;
+    let js = r#"
+        function outerGenJs(v) {
+            const g = function* () { return v; };
+            return 0;
+        }
+        function outerComputedJs(v, key) {
+            const o = { [key]() { return v; } };
+            return 0;
+        }
+        class D {
+            m() {
+                const o = { read() { const t2 = this.g; return t2; } };
+            }
+        }
+    "#;
+    let (root, store) =
+        indexed_typescript_files("rebinding", &[("rebind.ts", ts), ("rebind.js", js)]);
+    let field = one_symbol_named_with(&store, "f", "C#:field:f");
+    let w = one_symbol_named_with(&store, "w", ":local:w");
+    let symbols = semantic_flow_symbol_pairs(&store);
+    assert!(
+        symbols.contains(&(field.clone(), w)),
+        "an arrow keeps the class `this`: {symbols:?}"
+    );
+    for local in ["t", "u", "t2"] {
+        for consumer in symbol_ids_named(&store, local) {
+            assert!(
+                !symbols
+                    .iter()
+                    .any(|(p, c)| c == &consumer && p.as_str().contains(":field:")),
+                "`this` inside an object method / ordinary function is not the class: {local} {symbols:?}"
+            );
+        }
+    }
+    assert!(
+        GraphRead::all_edges(&store)
+            .unwrap()
+            .iter()
+            .filter(|e| e.target.as_str().contains(":field:g"))
+            .count()
+            == 0,
+        "no class field slot is minted for an object-literal `this.g`"
+    );
+    let pairs = semantic_flow_name_pairs(&store);
+    for owner in [
+        "outerGen.return",
+        "outerComputed.return",
+        "outerGenJs.return",
+        "outerComputedJs.return",
+    ] {
+        assert!(
+            !pairs.contains(&("v".to_string(), owner.to_string())),
+            "a generator / computed-method return is not {owner}: {pairs:?}"
+        );
+    }
+    let _ = fs::remove_dir_all(root);
 }

@@ -130,29 +130,146 @@
   (#eq? @_req "require")
 ) @import
 
+; ── Direct value-flow sites ─────────────────────────────────────────────────
+;
+; The JavaScript spelling of typescript.scm's value-lineage block (#213). Same classification
+; grammar — `@flow.<semantics>.<evidence>.<construct>`, rule id `javascript/<evidence>/<construct>`
+; (see `wicked_estate_core::flow` and docs/ENGINE-CONTRACT.md §3.2) — on the JS node shapes:
+; formal parameters are bare `identifier` / `assignment_pattern` (no `required_parameter`
+; wrapper) and class fields are `field_definition` (`property:`). The Angular `@Input()` and
+; route-param conventions are TypeScript-decorator shaped and are not carried here.
+
+; const a = b / let a = b / var a = b
+(variable_declarator
+  name: (identifier) @flow.consumer.local
+  value: (identifier) @flow.producer.local
+) @flow.value.syntax.assignment
+
+; const c = a + b
+(variable_declarator
+  name: (identifier) @flow.consumer.local
+  value: (binary_expression
+    left: (identifier) @flow.producer.local
+    right: (identifier) @flow.producer.local)
+) @flow.influence.syntax.expression
+
+; out = tainted — a reassignment is a value hop too (#217).
+(expression_statement
+  (assignment_expression
+    left: (identifier) @flow.consumer.local
+    right: (identifier) @flow.producer.local)
+) @flow.value.syntax.reassignment
+
+; this.field = value
+(expression_statement
+  (assignment_expression
+    left: (member_expression
+      object: (this)
+      property: (property_identifier) @flow.consumer.field)
+    right: (identifier) @flow.producer.local)
+) @flow.value.syntax.assignment
+
+; const id = customer.id
+(variable_declarator
+  name: (identifier) @flow.consumer.local
+  value: (member_expression
+    object: (identifier)
+    property: (property_identifier)) @flow.producer.property
+) @flow.value.syntax.property_read
+
+; const t = this.tenantId — a read of the class-owned field slot (#215).
+(variable_declarator
+  name: (identifier) @flow.consumer.local
+  value: (member_expression
+    object: (this)
+    property: (property_identifier) @flow.producer.field)
+) @flow.value.syntax.field_read
+
+; Callable parameters and simple returns. JS formal parameters are bare: `id` or `id = dflt`.
+; Each fills its own positional `value_params` slot; destructured / rest parameters stay `null`.
+(function_declaration
+  parameters: (formal_parameters
+    [(identifier) @flow.parameter.local
+     (assignment_pattern
+      left: (identifier) @flow.parameter.local)]))
+
+(method_definition
+  parameters: (formal_parameters
+    [(identifier) @flow.parameter.local
+     (assignment_pattern
+      left: (identifier) @flow.parameter.local)]))
+
+(return_statement
+  (identifier) @flow.return.local)
+
+; Return barriers — see typescript.scm: a `return` inside a callback is the callback's value, not
+; the enclosing method's; `.owned` marks a body that is its own definition's body.
+(arrow_function body: (statement_block) @flow.barrier)
+(function_expression body: (statement_block) @flow.barrier)
+; Generators are callables too, and no definition pattern captures them: their returns are the
+; generator's, never the enclosing definition's.
+(generator_function body: (statement_block) @flow.barrier)
+(generator_function_declaration body: (statement_block) @flow.barrier)
+
+(variable_declarator
+  value: (arrow_function body: (statement_block) @flow.barrier.owned))
+(field_definition
+  value: (arrow_function body: (statement_block) @flow.barrier.owned))
+
+(function_declaration body: (statement_block) @flow.barrier.owned)
+; Only a method a definition pattern captures (a `property_identifier` name) owns its returns: a
+; computed (`[key]() {}`) or private method has no definition record, so its body is a plain
+; barrier and its `return` is dropped rather than attributed to the enclosing definition. The
+; barrier map ORs `owned`, so a named method's body is owned by the second pattern.
+(method_definition body: (statement_block) @flow.barrier)
+(method_definition
+  name: (property_identifier)
+  body: (statement_block) @flow.barrier.owned)
+
+; Generic call value-flow facts, carried as UnresolvedRef hints; edges only once the Calls
+; resolver binds the exact site.
+(call_expression
+  arguments: (arguments
+    (identifier) @call.arg.local) @call.arguments
+) @call.value
+
+(call_expression
+  arguments: (arguments
+    (member_expression
+      object: (this)
+      property: (property_identifier) @call.arg.field)) @call.arguments
+) @call.value
+
+(variable_declarator
+  name: (identifier) @call.result.local
+  value: (call_expression) @call.value)
+
 ; ── Call sites ───────────────────────────────────────────────────────────────
+;
+; `@call.value` anchors (as typescript.scm): the Calls ref is keyed by the whole call_expression,
+; the same span the call-argument facts above use, so the resolver can join them per site.
 
 ; Function calls — simple: foo()
 (call_expression
   function: (identifier) @call.function
   arguments: (arguments) @call.args
-) @call
+) @call.value
 
 ; Method calls — member expression: a.b(), a.b.c(), a?.b()
 (call_expression
   function: (member_expression
     property: (property_identifier) @call.method
   )
-) @call.method
+) @call.value
 
 ; Constructor calls — new X()
 (new_expression
   constructor: (identifier) @call.function
-) @call
+) @call.value
 
 ; Constructor calls — new a.B()
 (new_expression
   constructor: (member_expression
     property: (property_identifier) @call.method
   )
-) @call.method
+) @call.value
