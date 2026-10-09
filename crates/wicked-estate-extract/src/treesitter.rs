@@ -5087,21 +5087,30 @@ export function factory() {
             "top-level 'topVar' should be Variable; got {kinds:?}"
         );
 
-        // function-local bindings NOT captured
+        // function-local bindings NOT captured as definitions. A local that takes part in value
+        // flow (`return localResult`) gets a value slot (#213) — a different record, excluded here.
         assert!(
-            !ex.nodes.iter().any(|n| n.name == "localResult"),
+            !ex.nodes
+                .iter()
+                .any(|n| n.name == "localResult" && !n.is_value_flow_node()),
             "function-local 'localResult' must NOT be captured; got {kinds:?}"
         );
         assert!(
-            !ex.nodes.iter().any(|n| n.name == "localTemp"),
+            !ex.nodes
+                .iter()
+                .any(|n| n.name == "localTemp" && !n.is_value_flow_node()),
             "function-local 'localTemp' must NOT be captured; got {kinds:?}"
         );
         assert!(
-            !ex.nodes.iter().any(|n| n.name == "legacyLocal"),
+            !ex.nodes
+                .iter()
+                .any(|n| n.name == "legacyLocal" && !n.is_value_flow_node()),
             "function-local 'legacyLocal' must NOT be captured; got {kinds:?}"
         );
         assert!(
-            !ex.nodes.iter().any(|n| n.name == "innerObj"),
+            !ex.nodes
+                .iter()
+                .any(|n| n.name == "innerObj" && !n.is_value_flow_node()),
             "inner function-local 'innerObj' must NOT be captured; got {kinds:?}"
         );
     }
