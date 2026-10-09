@@ -623,7 +623,11 @@ fn call_value_flow(
 ) -> Result<(Vec<Node>, Vec<Edge>)> {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
-    let mut by_site: HashMap<CallSiteKey, HashMap<SymbolId, Edge>> = HashMap::new();
+    // #209: a BTreeMap, not a HashMap — two call sites in one owner that pass the same identifier
+    // mint the same value node, and the FIRST site (in key order) must win on every run; hash
+    // order made the stored location differ index to index.
+    let mut by_site: std::collections::BTreeMap<CallSiteKey, HashMap<SymbolId, Edge>> =
+        std::collections::BTreeMap::new();
 
     for call_edge in site_edges {
         if call_edge.kind != EdgeKind::Calls {
@@ -702,6 +706,10 @@ fn call_value_flow(
         }
 
         let return_symbol = value_symbol(&callee.symbol, "return", "value");
+        // #210: the callee's return endpoint exists only when it has a literal `return <ident>`;
+        // a `call_result` edge to a missing endpoint was minted, then pruned as dangling, leaving
+        // the consumer local an orphan. No endpoint, no hop, no orphan node.
+        let target = target.filter(|_| index.get(&return_symbol).is_some());
         if let Some(target) = target {
             let target_symbol = target
                 .symbol
@@ -1812,7 +1820,7 @@ pub fn index_path_as(
     // pass cleans them up so blast-radius never returns nodes that no longer exist.
     match store.prune_dangling_edges() {
         Ok(n) if n > 0 => {
-            eprintln!("GRAPH-CLEANUP: pruned {n} dangling edge(s) after incremental index");
+            eprintln!("GRAPH-CLEANUP: pruned {n} dangling edge(s) after index");
         }
         Ok(_) => {}
         Err(e) => {

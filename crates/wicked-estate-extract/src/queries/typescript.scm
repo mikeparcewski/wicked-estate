@@ -241,6 +241,14 @@
     right: (identifier) @flow.producer.local)
 ) @flow.influence.syntax.expression
 
+; out = tainted — a REASSIGNMENT is a value hop too (#217): without it `let out = trusted;
+; out = tainted; return out;` stored only the `trusted` hop and the partial lineage looked whole.
+(expression_statement
+  (assignment_expression
+    left: (identifier) @flow.consumer.local
+    right: (identifier) @flow.producer.local)
+) @flow.value.syntax.reassignment
+
 ; this.field = value
 (expression_statement
   (assignment_expression

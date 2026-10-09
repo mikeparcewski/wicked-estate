@@ -1735,6 +1735,16 @@ fn strip_leading_symbol_colon(name: String) -> String {
 /// `<=>` to `=`). Leading-`:` stripping is NOT done here: it is opt-in per query
 /// via the `.name.symbol` capture suffix (see [`strip_leading_symbol_colon`]),
 /// because CSS/YAML def names legitimately start with `:`.
+/// #208: the identity of a property read is its `object.property` PATH, not its source text: a
+/// prettier wrap (`customer⏎    .id`) or optional chaining (`raw?.name`) must mint the same node
+/// as `customer.id` / `raw.name` (ADR-002 — formatting never changes identity). The captured
+/// `member_expression` is `identifier . property_identifier`, so dropping whitespace and folding
+/// `?.` to `.` reconstructs exactly `object.property`.
+fn property_path_name(raw: &str) -> String {
+    let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.replace("?.", ".")
+}
+
 fn strip_def_name(raw: &str) -> String {
     let s = raw.trim();
     if s.len() >= 2
@@ -1996,7 +2006,9 @@ fn flow_endpoint_node(endpoint: &PendingFlowEndpoint, symbol: SymbolId, file: &S
         FlowEndpointKind::Local => (NodeKind::Variable, endpoint.name.clone()),
         FlowEndpointKind::Parameter => (NodeKind::Parameter, endpoint.name.clone()),
         FlowEndpointKind::Field => (NodeKind::Field, endpoint.name.clone()),
-        FlowEndpointKind::Property => (NodeKind::Field, endpoint.name.clone()),
+        // #214: a property read is not a type member — `Synthetic`, like the other non-member
+        // endpoints, never a function-owned `Field`.
+        FlowEndpointKind::Property => (NodeKind::Synthetic, endpoint.name.clone()),
         FlowEndpointKind::AngularInput => (
             NodeKind::Synthetic,
             format!("AngularInput:{}", endpoint.name),
@@ -2592,6 +2604,7 @@ impl Extractor for TreeSitterExtractor {
                             FlowEndpointKind::AngularInput | FlowEndpointKind::RouteParam => {
                                 strip_literal_quotes(&text)
                             }
+                            FlowEndpointKind::Property => property_path_name(&text),
                             _ => strip_def_name(&text),
                         };
                         flow_producers.push(PendingFlowEndpoint {
