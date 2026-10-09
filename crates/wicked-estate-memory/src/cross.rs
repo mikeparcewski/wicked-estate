@@ -136,6 +136,9 @@ impl GraphRead for OverlayMemStore {
     fn file_content(&self, file: &str) -> Result<Option<String>> {
         self.overlay().file_content(file)
     }
+    fn file_call_refs(&self, file: &str) -> Result<Option<String>> {
+        self.overlay().file_call_refs(file)
+    }
     fn symbol_source(&self, node: &Node) -> Result<Option<String>> {
         self.overlay().symbol_source(node)
     }
@@ -207,6 +210,9 @@ impl GraphWrite for OverlayMemStore {
     }
     fn set_file_content(&mut self, file: &str, text: &str) -> Result<()> {
         self.home.set_file_content(file, text)
+    }
+    fn set_file_call_refs(&mut self, file: &str, refs_json: &str) -> Result<()> {
+        self.home.set_file_call_refs(file, refs_json)
     }
     fn prune_dangling_edges(&mut self) -> Result<usize> {
         self.home.prune_dangling_edges()

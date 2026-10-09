@@ -80,6 +80,8 @@ pub struct MemStore {
     content: HashMap<String, String>,
     // W11.1: file → git_sha pointer into content.
     file_git_shas: HashMap<String, String>,
+    // #220: file → its value-flow call references (JSON), removed with the file.
+    file_call_refs: HashMap<String, String>,
     // W11.2: versioned query cache.
     cache: HashMap<String, (i64, String)>, // key → (version, value)
     graph_version: i64,
@@ -658,6 +660,7 @@ impl GraphWrite for MemStore {
         self.unresolved.retain(|r| r.location.file != file);
         self.file_digests.remove(file);
         self.file_git_shas.remove(file);
+        self.file_call_refs.remove(file);
         // NOTE: do NOT remove from self.content — content is content-addressed and may be
         // retained for history; orphans are pruned in compact().
         // Remove embeddings for all removed symbols (kept Import nodes keep theirs — D5).
@@ -672,6 +675,12 @@ impl GraphWrite for MemStore {
     fn set_file_digest(&mut self, file: &str, digest: &str) -> Result<()> {
         self.file_digests
             .insert(file.to_string(), digest.to_string());
+        Ok(())
+    }
+
+    fn set_file_call_refs(&mut self, file: &str, refs_json: &str) -> Result<()> {
+        self.file_call_refs
+            .insert(file.to_string(), refs_json.to_string());
         Ok(())
     }
 
@@ -1077,6 +1086,10 @@ impl GraphRead for MemStore {
             .collect();
         out.sort_by_key(|h| std::cmp::Reverse(h.archived_seq));
         Ok(out)
+    }
+
+    fn file_call_refs(&self, file: &str) -> Result<Option<String>> {
+        Ok(self.file_call_refs.get(file).cloned())
     }
 
     fn file_content(&self, file: &str) -> Result<Option<String>> {

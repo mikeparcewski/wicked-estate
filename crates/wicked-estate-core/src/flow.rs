@@ -35,10 +35,12 @@
 //! }
 //! ```
 //!
-//! Both locals resolve to one owner-scoped identity (`f:local:c`, `f:local:a`), so the two facts
-//! share `(source, target, kind)`. Measured on the shipped code at `c4fa938`, exactly one survived
-//! — `construct="assignment"` at byte 116 — and the may-influence contribution at byte 62 was
-//! gone, with nothing recording that it had ever been asserted. A **scalar** classification cannot
+//! Before #216, both locals resolved to one owner-scoped identity (`f:local:c`, `f:local:a`), so
+//! the two facts shared `(source, target, kind)`; value slots are binding-scoped now
+//! (`f:local:c@1`), but any collision that remains folds the same way. Measured on the shipped
+//! code at `c4fa938`, exactly one survived — `construct="assignment"` at byte 116 — and the
+//! may-influence contribution at byte 62 was gone, with nothing recording that it had ever been
+//! asserted. A **scalar** classification cannot
 //! represent the facts, so the vocabulary is set-valued and [`merge_flow_edges`] folds colliding
 //! facts through a deterministic lattice *before* they reach a store.
 //!

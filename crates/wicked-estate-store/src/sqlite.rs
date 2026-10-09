@@ -2817,6 +2817,9 @@ impl GraphWrite for SqliteStore {
             .execute("DELETE FROM unresolved_refs WHERE file=?1", params![file])
             .map_err(st)?;
         self.conn
+            .execute("DELETE FROM file_call_refs WHERE path=?1", params![file])
+            .map_err(st)?;
+        self.conn
             .execute("DELETE FROM files WHERE path=?1", params![file])
             .map_err(st)?;
         // Support is producer-owned: re-project every supported edge the deletes removed.
@@ -2830,6 +2833,17 @@ impl GraphWrite for SqliteStore {
                 "INSERT INTO files(path, digest) VALUES(?1, ?2)
                  ON CONFLICT(path) DO UPDATE SET digest=excluded.digest",
                 params![file, digest],
+            )
+            .map_err(st)?;
+        Ok(())
+    }
+
+    fn set_file_call_refs(&mut self, file: &str, refs_json: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO file_call_refs(path, refs) VALUES(?1, ?2)
+                 ON CONFLICT(path) DO UPDATE SET refs=excluded.refs",
+                params![file, refs_json],
             )
             .map_err(st)?;
         Ok(())
@@ -3638,6 +3652,17 @@ impl GraphRead for SqliteStore {
             });
         }
         Ok(out)
+    }
+
+    fn file_call_refs(&self, file: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT refs FROM file_call_refs WHERE path=?1",
+                params![file],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(st)
     }
 
     fn file_content(&self, file: &str) -> Result<Option<String>> {

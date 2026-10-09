@@ -317,6 +317,51 @@
   name: (property_identifier)
   body: (statement_block) @flow.barrier.owned)
 
+; ── Value scopes (#216) ─────────────────────────────────────────────────────
+;
+; Value identity is owner-scoped (`{owner}:local:{name}`), so two distinct bindings with one name in
+; one callable used to become ONE node and a false flow ran between them: a callback parameter
+; shadowing the method's parameter, or a block-scoped `const` shadowing it. These captures give the
+; extractor the binding structure. A reference resolves to the innermost declaration of its name
+; whose scope contains it; a declaration in a nested scope is keyed `{owner}:local:{name}@{n}`,
+; where `n` numbers the owner's nested scopes that bind THAT name, in source order (structural:
+; line shifts and unrelated blocks keep it — ADR-002).
+; A declaration in the owner's own body keeps the plain `{owner}:local:{name}`, and a read of the
+; owner's parameter joins its `{owner}:param:{name}` slot.
+;
+;   @flow.scope            a block scope (let/const/class bindings live here)
+;   @flow.scope.callable   a callback boundary (its parameters and its `var`s live here)
+;   @flow.scope.owned      a callable that IS its definition's body (an arrow bound to a const or a
+;                          class field): transparent, its parameters belong to the owner itself
+;   @flow.declare.block    a let/const/catch/callback-parameter binding, bound in the innermost
+;                          scope. The capture is a binding PATTERN: the extractor walks it for every
+;                          name it binds (`{a, b: c, ...d}`, `[e = f]`), never into default values.
+;   @flow.declare.var      the same for a `var` binding, bound in the innermost callable scope
+(statement_block) @flow.scope
+(for_statement) @flow.scope
+(for_in_statement) @flow.scope
+(catch_clause) @flow.scope
+(switch_body) @flow.scope
+
+(arrow_function) @flow.scope.callable
+(function_expression) @flow.scope.callable
+(generator_function) @flow.scope.callable
+
+(variable_declarator value: (arrow_function) @flow.scope.owned)
+(public_field_definition value: (arrow_function) @flow.scope.owned)
+
+(lexical_declaration (variable_declarator name: (_) @flow.declare.block))
+(variable_declaration (variable_declarator name: (_) @flow.declare.var))
+(for_in_statement kind: "const" left: (_) @flow.declare.block)
+(for_in_statement kind: "let" left: (_) @flow.declare.block)
+(for_in_statement kind: "var" left: (_) @flow.declare.var)
+(catch_clause parameter: (_) @flow.declare.block)
+
+(arrow_function parameter: (identifier) @flow.declare.block)
+(arrow_function parameters: (formal_parameters (_) @flow.declare.block))
+(function_expression parameters: (formal_parameters (_) @flow.declare.block))
+(generator_function parameters: (formal_parameters (_) @flow.declare.block))
+
 ; Generic call value-flow facts. These are carried as UnresolvedRef hints and only become
 ; edges when the existing Calls resolver binds the exact site.
 (call_expression
