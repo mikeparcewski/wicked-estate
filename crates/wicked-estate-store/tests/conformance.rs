@@ -79,6 +79,26 @@ fn memstore_support_replacement() {
     conformance::support_replacement_suite(&mut store);
 }
 
+/// TS-S2C: semantic evidence ingested through the support plane, on every in-tree backend.
+#[test]
+fn sqlite_semantic_evidence() {
+    let mut store = wicked_estate_store::SqliteStore::in_memory().expect("in-memory sqlite");
+    conformance::semantic_evidence_suite(&mut store);
+}
+
+#[test]
+fn memstore_semantic_evidence() {
+    let mut store = MemStore::new();
+    conformance::semantic_evidence_suite(&mut store);
+}
+
+#[test]
+fn sqlite_semantic_evidence_with_history() {
+    let mut store = wicked_estate_store::SqliteStore::in_memory().expect("in-memory sqlite");
+    store.set_history_enabled(true).expect("history on");
+    conformance::semantic_evidence_suite(&mut store);
+}
+
 /// The support plane under edge history: `remove_file` archives a supported edge it deletes (it
 /// was in the file's edge set) and the heal re-projects it — support is not file-owned.
 #[test]

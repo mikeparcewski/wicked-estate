@@ -147,6 +147,27 @@ fn postgres_store_satisfies_support_replacement_contract() {
     wicked_estate_core::conformance::support_replacement_suite(&mut store);
 }
 
+/// TS-S2C semantic evidence on a live Postgres — the same shared suite every backend runs.
+#[test]
+fn postgres_store_satisfies_semantic_evidence_contract() {
+    let url = match std::env::var("TEST_POSTGRES_URL") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("postgres_conformance: TEST_POSTGRES_URL not set — skipping");
+            return;
+        }
+    };
+    let _guard = PG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lease = PgTestLease::acquire(&url);
+
+    drop_all_tables(&url);
+
+    let mut store = wicked_estate_store::PostgresStore::open(&url).expect("open postgres store");
+    wicked_estate_core::conformance::semantic_evidence_suite(&mut store);
+}
+
 /// The back-fill support surface (#141) on a live Postgres — the SAME shared body the
 /// Mem/Sqlite unit tests pin, so the PG implementations of `parked_relative_import_refs`
 /// and `delete_unresolved_refs` cannot drift without a test signal.

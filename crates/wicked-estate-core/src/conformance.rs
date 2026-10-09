@@ -3427,3 +3427,249 @@ pub fn symbol_count_and_structural_suite<S: GraphStore>(store: &mut S) {
     );
     assert!(got.iter().all(|n| !n.is_value_flow_node()));
 }
+
+// ── TS-S2C: semantic evidence through the support plane ─────────────────────────────────────
+
+fn ev_node(name: &str, kind: NodeKind, lines: (u32, u32)) -> Node {
+    Node::new(
+        sym(&format!("ev_{name}")),
+        kind,
+        name,
+        Language::new("typescript"),
+        Location::new(
+            "ev/a.ts",
+            Span {
+                start_byte: 0,
+                end_byte: 0,
+                start_line: lines.0,
+                start_col: 0,
+                end_line: lines.1,
+                end_col: 1,
+            },
+        ),
+    )
+}
+
+fn ev_envelope(
+    producer: &str,
+    class: crate::evidence::ProducerClass,
+    caps: &[crate::evidence::Capability],
+    generation: Option<u64>,
+    facts: Vec<crate::evidence::EvidenceFact>,
+) -> crate::evidence::SemanticEvidence {
+    use crate::evidence::*;
+    SemanticEvidence {
+        schema_version: SEMANTIC_EVIDENCE_SCHEMA_VERSION,
+        producer: ProducerProfile {
+            name: producer.into(),
+            version: "1.0".into(),
+            class,
+            capabilities: caps.iter().copied().collect(),
+        },
+        snapshot: "ev/project".into(),
+        generation,
+        documents: vec![EvidenceDocument {
+            path: "ev/a.ts".into(),
+            position_encoding: PositionEncoding::Utf8,
+        }],
+        facts,
+    }
+}
+
+fn ev_site(line: u32, col: u32, len: u32) -> crate::evidence::EvidenceSite {
+    crate::evidence::EvidenceSite {
+        document: "ev/a.ts".into(),
+        range: crate::evidence::EvidenceRange {
+            start_line: line,
+            start_col: col,
+            end_line: line,
+            end_col: col + len,
+        },
+    }
+}
+
+fn ev_def(symbol: &str, line: u32) -> crate::evidence::EvidenceFact {
+    crate::evidence::EvidenceFact::Definition {
+        fact_id: format!("def {symbol}"),
+        symbol: symbol.into(),
+        name: symbol.into(),
+        site: ev_site(line, 9, symbol.len() as u32),
+    }
+}
+
+/// TS-S2C: an evidence envelope projected and ingested on this store obeys every support-plane
+/// law end to end — references stay references, trusted calls need capability plus site, replay
+/// and generations, producer isolation, and last-support restoration of the tree-sitter base
+/// edge byte for byte. Driven on every backend (MemStore, SQLite with and without history,
+/// Postgres, SurrealDB).
+pub fn semantic_evidence_suite<S: GraphStore>(store: &mut S) {
+    use crate::evidence::{
+        CallTarget, Capability, EvidenceFact, EvidenceSkip, ProducerClass, ingest_evidence,
+    };
+    let none = |_: &str| -> Option<String> { None };
+    let nodes = vec![
+        ev_node("a.ts", NodeKind::File, (0, 0)),
+        ev_node("f", NodeKind::Function, (0, 2)),
+        ev_node("g", NodeKind::Function, (4, 8)),
+    ];
+    store.upsert_nodes(&nodes).expect("evidence nodes");
+    let base = Edge::new(
+        sym("ev_g"),
+        sym("ev_f"),
+        EdgeKind::Calls,
+        ResolutionTier::ImportMap,
+        "scoped-name-resolver",
+    )
+    .with_location(Location::new("ev/a.ts", Span::ZERO));
+    store
+        .upsert_edges(std::slice::from_ref(&base))
+        .expect("base call");
+    let base_stored = sup_public(store, "ev_g", "ev_f", &EdgeKind::Calls).expect("base edge");
+
+    let reference = |id: &str, line: u32| EvidenceFact::Reference {
+        fact_id: id.into(),
+        symbol: "f".into(),
+        site: ev_site(line, 2, 1),
+        roles: vec![],
+    };
+    let refs = |generation: Option<u64>, extra: bool| {
+        let mut facts = vec![ev_def("f", 0), ev_def("g", 4), reference("r1", 5)];
+        if extra {
+            facts.push(reference("r2", 6));
+        }
+        ev_envelope(
+            "idx",
+            ProducerClass::Index,
+            &[Capability::Definitions, Capability::References],
+            generation,
+            facts,
+        )
+    };
+
+    // 1. References project as References from the index producer; the base Calls is untouched.
+    let r = ingest_evidence(store, &refs(None, false), &nodes, &none).expect("ingest refs");
+    assert_eq!(
+        (
+            r.generation,
+            r.replayed,
+            r.references_projected,
+            r.calls_projected
+        ),
+        (Some(1), false, 1, 0),
+        "{r:?}"
+    );
+    let public = sup_public(store, "ev_g", "ev_f", &EdgeKind::References).expect("reference");
+    assert_eq!(public.resolved_by, "idx");
+    assert_eq!(public.provenance, crate::edge::Provenance::Scip);
+    assert_eq!(
+        sup_public(store, "ev_g", "ev_f", &EdgeKind::Calls).as_ref(),
+        Some(&base_stored),
+        "a reference never touches the call edge"
+    );
+
+    // 2. An identical replay of the stored generation writes nothing.
+    let r = ingest_evidence(store, &refs(Some(1), false), &nodes, &none).expect("replay");
+    assert!(r.replayed, "{r:?}");
+    // 3. Without a producer generation the next one applies.
+    let r = ingest_evidence(store, &refs(None, false), &nodes, &none).expect("next");
+    assert_eq!((r.generation, r.replayed), (Some(2), false));
+    // 4. Stale and 5. equal-but-different generations are rejected and change nothing.
+    assert!(ingest_evidence(store, &refs(Some(1), true), &nodes, &none).is_err());
+    assert!(ingest_evidence(store, &refs(Some(2), true), &nodes, &none).is_err());
+    assert_eq!(
+        sup_rows(store, "ev_g", "ev_f", &EdgeKind::References).len(),
+        1,
+        "rejected replacements wrote nothing"
+    );
+    let r = ingest_evidence(store, &refs(None, true), &nodes, &none).expect("gen 3");
+    assert_eq!(r.generation, Some(3));
+    assert_eq!(
+        sup_rows(store, "ev_g", "ev_f", &EdgeKind::References).len(),
+        2
+    );
+
+    // 6. A compiler producer's call needs the capability AND an exact, correlated target.
+    let call = |id: &str, target: CallTarget| EvidenceFact::Call {
+        fact_id: id.into(),
+        site: ev_site(5, 2, 1),
+        target,
+    };
+    let calls = |caps: &[Capability], facts: Vec<EvidenceFact>| {
+        let mut all = vec![ev_def("f", 0), ev_def("g", 4)];
+        all.extend(facts);
+        ev_envelope("cc", ProducerClass::Compiler, caps, None, all)
+    };
+    let exact = || call("c1", CallTarget::Exact { symbol: "f".into() });
+    let r = ingest_evidence(
+        store,
+        &calls(&[Capability::Definitions], vec![exact()]),
+        &nodes,
+        &none,
+    )
+    .expect("undeclared");
+    assert_eq!(r.calls_projected, 0);
+    assert_eq!(r.skipped.get(&EvidenceSkip::UndeclaredCapability), Some(&1));
+    assert!(sup_rows(store, "ev_g", "ev_f", &EdgeKind::Calls).is_empty());
+    let r = ingest_evidence(
+        store,
+        &calls(
+            &[Capability::Definitions, Capability::Calls],
+            vec![exact(), call("c2", CallTarget::Dynamic)],
+        ),
+        &nodes,
+        &none,
+    )
+    .expect("declared");
+    assert_eq!(r.calls_projected, 1, "{r:?}");
+    assert_eq!(r.skipped.get(&EvidenceSkip::DynamicTarget), Some(&1));
+    let rows = sup_rows(store, "ev_g", "ev_f", &EdgeKind::Calls);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (
+            rows[0].owner.producer.as_str(),
+            rows[0].fact.provenance.clone()
+        ),
+        ("cc", crate::edge::Provenance::Compiler)
+    );
+
+    // 7. Producer isolation: the index retracting everything leaves the compiler's call.
+    let r = ingest_evidence(
+        store,
+        &ev_envelope(
+            "idx",
+            ProducerClass::Index,
+            &[Capability::Definitions, Capability::References],
+            None,
+            vec![],
+        ),
+        &nodes,
+        &none,
+    )
+    .expect("empty index snapshot");
+    assert_eq!(r.generation, Some(4), "an empty snapshot still advances");
+    assert!(sup_public(store, "ev_g", "ev_f", &EdgeKind::References).is_none());
+    assert_eq!(sup_rows(store, "ev_g", "ev_f", &EdgeKind::Calls).len(), 1);
+
+    // 8. Last-support restoration: the base edge comes back exactly.
+    ingest_evidence(
+        store,
+        &calls(&[Capability::Definitions, Capability::Calls], vec![]),
+        &nodes,
+        &none,
+    )
+    .expect("empty compiler snapshot");
+    assert!(sup_rows(store, "ev_g", "ev_f", &EdgeKind::Calls).is_empty());
+    assert_eq!(
+        sup_public(store, "ev_g", "ev_f", &EdgeKind::Calls).as_ref(),
+        Some(&base_stored),
+        "retracting the last support restores the base edge byte for byte"
+    );
+    let owners: Vec<(String, u64)> = store
+        .support_owners()
+        .expect("owners")
+        .into_iter()
+        .filter(|o| o.owner.snapshot == "ev/project")
+        .map(|o| (o.owner.producer, o.generation))
+        .collect();
+    assert_eq!(owners, vec![("cc".into(), 3), ("idx".into(), 4)]);
+}
