@@ -241,6 +241,25 @@ impl<'a, H: GraphRead + ?Sized> OverlayReader<'a, H> {
         true
     }
 
+    /// The epoch-validated xedge rows touching `(engine, id)` in direction `dir` whose rel is in
+    /// `cross_edge_kinds` — UNCAPPED (the rows are already in memory; the caller applies the budget
+    /// and reports what it leaves out).
+    fn cross_rows(&self, engine: &str, id: &str, dir: Direction) -> Result<Vec<XEdge>> {
+        // Dependents = edges pointing AT id (in_edges); Dependencies = edges FROM id (out_edges).
+        // Both = the union. This mirrors the estate edge-direction invariant.
+        let rels = self.cross_rels();
+        let rows = match dir {
+            Direction::Dependents => self.xedge.in_edges(engine, id, &rels)?,
+            Direction::Dependencies => self.xedge.out_edges(engine, id, &rels)?,
+            Direction::Both => {
+                let mut r = self.xedge.in_edges(engine, id, &rels)?;
+                r.extend(self.xedge.out_edges(engine, id, &rels)?);
+                r
+            }
+        };
+        Ok(rows.into_iter().filter(|r| self.epoch_valid(r)).collect())
+    }
+
     /// The cross-store dependents of `id` (home engine = `self.home_engine`): xedge rows whose TARGET
     /// is `(home_engine, id)` and whose rel ∈ `cross_edge_kinds`, epoch-validated, hydrated into
     /// `core::Edge`s. The FOLD core (method #4). Bounded by `max_cross_nodes`.
@@ -248,30 +267,12 @@ impl<'a, H: GraphRead + ?Sized> OverlayReader<'a, H> {
         if !self.cross_on() {
             return Ok(vec![]);
         }
-        // Dependents = edges pointing AT id (in_edges); Dependencies = edges FROM id (out_edges).
-        // Both = the union. This mirrors the estate edge-direction invariant.
-        let rels = self.cross_rels();
-        let rows = match dir {
-            Direction::Dependents => self.xedge.in_edges(self.home_engine, id.as_str(), &rels)?,
-            Direction::Dependencies => {
-                self.xedge.out_edges(self.home_engine, id.as_str(), &rels)?
-            }
-            Direction::Both => {
-                let mut r = self.xedge.in_edges(self.home_engine, id.as_str(), &rels)?;
-                r.extend(self.xedge.out_edges(self.home_engine, id.as_str(), &rels)?);
-                r
-            }
-        };
-        let mut out = Vec::new();
-        for row in rows {
-            if out.len() >= self.budget.max_cross_nodes {
-                break;
-            }
-            if self.epoch_valid(&row) {
-                out.push(row.to_core_edge());
-            }
-        }
-        Ok(out)
+        Ok(self
+            .cross_rows(self.home_engine, id.as_str(), dir)?
+            .iter()
+            .take(self.budget.max_cross_nodes)
+            .map(XEdge::to_core_edge)
+            .collect())
     }
 
     /// Fetch the cross-store endpoint NODE for a folded edge from the foreign engine that owns it, so
@@ -330,6 +331,16 @@ impl<H: GraphRead + Sync + ?Sized> GraphRead for OverlayReader<'_, H> {
         self.home.find_symbols(query)
     }
 
+    // #3b/#3c count_symbols / find_structural_symbols — HOME-ONLY, like find_symbols (#177/#218):
+    // delegated so the home's store-side override is used, not the trait default.
+    fn count_symbols(&self, query: &SymbolQuery) -> Result<usize> {
+        self.home.count_symbols(query)
+    }
+
+    fn find_structural_symbols(&self, query: &SymbolQuery) -> Result<Vec<Node>> {
+        self.home.find_structural_symbols(query)
+    }
+
     // #4 neighbors — FOLD (gated): home neighbors ∪ epoch-validated xedge rows. The about-arm's core.
     fn neighbors(&self, id: &SymbolId, dir: Direction) -> Result<Vec<Edge>> {
         let mut edges = self.home.neighbors(id, dir)?;
@@ -354,11 +365,23 @@ impl<H: GraphRead + Sync + ?Sized> GraphRead for OverlayReader<'_, H> {
 
         // One cross ply (DEC-X4 default max_cross_hops=1): for each home anchor, fold the
         // cross-store edges + hydrate the foreign endpoint node, depth = anchor_depth + 1.
+        //
+        // Every bound the ply applies is REPORTED (#226), through the cause markers so the
+        // `truncated == node_cap_reached || depth_horizon_reached` invariant holds (#190):
+        // - a new foreign node left out by the `max_cross_nodes` budget marks the node cap — the
+        //   rows are read uncapped, so one anchor with more cross edges than the budget, or an
+        //   anchor the spent budget never visits, is never reported complete;
+        // - an anchor AT `spec.max_depth` is not expanded across the boundary (its foreign end
+        //   would sit past the requested horizon); a new foreign end there marks the depth horizon;
+        // - the `max_cross_hops` cut: a folded foreign node with a cross edge of its own toward a
+        //   node the result does not hold marks the depth horizon.
         let mut seen_nodes: std::collections::HashSet<String> =
             sub.nodes.iter().map(|n| n.symbol.0.clone()).collect();
         let mut seen_edges: std::collections::HashSet<(String, String, String)> =
             sub.edges.iter().map(Edge::dedup_key).collect();
         let mut cross_added = 0usize;
+        // (engine, id) of each folded foreign node, for the hop-cut probe.
+        let mut folded: Vec<(String, String)> = Vec::new();
 
         // Anchor set = the seeds plus everything the home walk reached (depth 0 for seeds).
         let anchors: Vec<(SymbolId, u32)> = sub
@@ -370,45 +393,61 @@ impl<H: GraphRead + Sync + ?Sized> GraphRead for OverlayReader<'_, H> {
             })
             .collect();
 
-        for (anchor, depth) in anchors {
-            if cross_added >= self.budget.max_cross_nodes {
-                break;
-            }
-            let rows = {
-                let mut r = self.cross_neighbors(&anchor, Direction::Dependents)?;
-                r.extend(self.cross_neighbors(&anchor, Direction::Dependencies)?);
-                r
-            };
-            for edge in rows {
-                if cross_added >= self.budget.max_cross_nodes {
-                    // A cross-node BUDGET cut is a node-cap cut; set it through the marker so the
-                    // `truncated == node_cap_reached || depth_horizon_reached` invariant holds
-                    // (wicked-estate#190 — a bare `truncated = true` leaves the causes blank and
-                    // breaks the invariant the conformance kit now asserts).
-                    sub.mark_node_cap();
-                    break;
+        'anchors: for (anchor, depth) in anchors {
+            for row in self.cross_rows(self.home_engine, anchor.as_str(), Direction::Both)? {
+                // The foreign endpoint is the end that is NOT the anchor.
+                let foreign_end =
+                    if row.source.engine == self.home_engine && row.source.stable_id == anchor.0 {
+                        &row.target
+                    } else {
+                        &row.source
+                    };
+                let foreign = SymbolId(foreign_end.stable_id.clone());
+                let edge = row.to_core_edge();
+                if !seen_nodes.contains(&foreign.0) {
+                    if depth >= spec.max_depth {
+                        sub.mark_depth_horizon();
+                        continue;
+                    }
+                    if cross_added >= self.budget.max_cross_nodes {
+                        sub.mark_node_cap();
+                        // The depth cause is a lower bound once the node cap bites (#225).
+                        break 'anchors;
+                    }
                 }
-                let key = edge.dedup_key();
-                if !seen_edges.insert(key) {
+                if !seen_edges.insert(edge.dedup_key()) {
                     continue;
                 }
-                // The foreign endpoint is the end that is NOT the anchor.
-                let foreign = if edge.source == anchor {
-                    &edge.target
-                } else {
-                    &edge.source
-                };
-                if let Some(node) = self.cross_endpoint_node(foreign, &anchor)? {
+                if let Some(node) = self.cross_endpoint_node(&foreign, &anchor)? {
                     if seen_nodes.insert(node.symbol.0.clone()) {
                         sub.depths
                             .entry(node.symbol.0.clone())
                             .and_modify(|d| *d = (*d).min(depth + 1))
                             .or_insert(depth + 1);
                         sub.nodes.push(node);
+                        folded.push((foreign_end.engine.clone(), foreign_end.stable_id.clone()));
                         cross_added += 1;
                     }
                 }
                 sub.edges.push(edge);
+            }
+        }
+
+        // The `max_cross_hops` cut (one ply): a folded foreign node with a further cross edge to a
+        // node outside the result means real results lie beyond the hop horizon.
+        if !sub.depth_horizon_reached {
+            'probe: for (engine, id) in &folded {
+                for row in self.cross_rows(engine, id, Direction::Both)? {
+                    let other = if row.source.engine == *engine && row.source.stable_id == *id {
+                        &row.target
+                    } else {
+                        &row.source
+                    };
+                    if !seen_nodes.contains(&other.stable_id) {
+                        sub.mark_depth_horizon();
+                        break 'probe;
+                    }
+                }
             }
         }
         Ok(sub)

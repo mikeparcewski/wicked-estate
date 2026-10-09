@@ -97,6 +97,35 @@ pub trait GraphRead: Send {
     fn capabilities(&self) -> StoreCapabilities;
     fn get_node(&self, id: &SymbolId) -> Result<Option<Node>>;
     fn find_symbols(&self, query: &SymbolQuery) -> Result<Vec<Node>>;
+    /// How many nodes [`find_symbols`](Self::find_symbols) would return for `query` with no
+    /// `limit` (`query.limit` is ignored) — without materialising them (#177).
+    ///
+    /// The default counts `find_symbols(..)` and so stays correct for every backend; a backend that
+    /// can push the `kinds` / `language` / `exact_name` / `scope_prefix` predicates into a `COUNT`
+    /// should override it (`SqliteStore` does). Conformance pins equality with the default.
+    fn count_symbols(&self, query: &SymbolQuery) -> Result<usize> {
+        let mut q = query.clone();
+        q.limit = None;
+        Ok(self.find_symbols(&q)?.len())
+    }
+    /// [`find_symbols`](Self::find_symbols) with synthetic value-flow slots
+    /// ([`Node::is_value_flow_node`]) excluded BEFORE `limit` applies (#218): the `limit` real
+    /// symbols in the store's own order, never a window a slot displaced. Name→symbol seeding goes
+    /// through this, so the exclusion is a guarantee rather than an over-fetch heuristic.
+    ///
+    /// The default fetches without a limit, filters, then truncates — exact on every backend. A
+    /// backend whose `find_symbols` pushes `LIMIT` into its query may override it with a
+    /// store-side predicate.
+    fn find_structural_symbols(&self, query: &SymbolQuery) -> Result<Vec<Node>> {
+        let mut q = query.clone();
+        q.limit = None;
+        let mut nodes = self.find_symbols(&q)?;
+        nodes.retain(|n| !n.is_value_flow_node());
+        if let Some(limit) = query.limit {
+            nodes.truncate(limit);
+        }
+        Ok(nodes)
+    }
     /// Edges incident to `id` in the given direction. The edge-direction invariant is enforced
     /// here: `Direction::Dependents` returns edges where `target == id`.
     fn neighbors(&self, id: &SymbolId, dir: Direction) -> Result<Vec<Edge>>;

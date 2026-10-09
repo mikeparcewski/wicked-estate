@@ -1774,8 +1774,8 @@ impl SqliteStore {
                  SELECT s.sym AS sym, mins.d AS d
                    FROM mins JOIN symbols s ON s.sid = mins.id
                   WHERE mins.id <> ?1
-                  ORDER BY mins.d
-                  LIMIT ?4)
+                  ORDER BY mins.d, s.sym
+                  LIMIT ?5)
              UNION ALL
              SELECT '', 0, 1 FROM (
                  SELECT 1 FROM edges e JOIN frontier f ON e.{match_col} = f.id
@@ -1790,7 +1790,9 @@ impl SqliteStore {
                     start_sid,
                     spec.max_depth,
                     spec.min_confidence as f64,
-                    spec.max_nodes as i64
+                    spec.max_nodes as i64,
+                    // #225: the fencepost row — `max_nodes + 1` reached rows mean an overflow.
+                    spec.max_nodes as i64 + 1
                 ],
                 |r| {
                     Ok((
@@ -1876,8 +1878,8 @@ impl SqliteStore {
                  SELECT s.sym AS sym, mins.d AS d
                    FROM mins JOIN symbols s ON s.sid = mins.id
                   WHERE mins.id NOT IN ({seed_list})
-                  ORDER BY mins.d
-                  LIMIT ?3)
+                  ORDER BY mins.d, s.sym
+                  LIMIT ?4)
              UNION ALL
              SELECT '', 0, 1 FROM (
                  SELECT 1 FROM edges e JOIN frontier f ON e.{match_col} = f.id
@@ -1891,7 +1893,9 @@ impl SqliteStore {
                 params![
                     spec.max_depth,
                     spec.min_confidence as f64,
-                    spec.max_nodes as i64
+                    spec.max_nodes as i64,
+                    // #225: the fencepost row.
+                    spec.max_nodes as i64 + 1
                 ],
                 |r| {
                     Ok((
@@ -1918,6 +1922,20 @@ impl SqliteStore {
 
 /// A public edge key in SQLite's on-disk form: interned `(source sid, target sid, kind JSON)`.
 type SidKey = (i64, i64, String);
+
+/// Keep the `max_nodes` nearest reached nodes — by depth, then symbol, so the cut is deterministic
+/// and never drops a near node for a far one (#225) — and report whether anything was dropped.
+/// The reach CTEs fetch `max_nodes + 1` rows per leg, so a surplus is a real overflow, never a
+/// complete walk of exactly `max_nodes` nodes; a `Both` merge can hold up to twice that.
+fn cap_by_depth(depths: BTreeMap<String, u32>, max_nodes: usize) -> (BTreeMap<String, u32>, bool) {
+    if depths.len() <= max_nodes {
+        return (depths, false);
+    }
+    let mut pairs: Vec<(String, u32)> = depths.into_iter().collect();
+    pairs.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    pairs.truncate(max_nodes);
+    (pairs.into_iter().collect(), true)
+}
 
 /// TS-S2A support-plane helpers (contract: `wicked_estate_core::support`). Every helper runs on
 /// `self.conn` and therefore inside whatever transaction/savepoint the caller holds.
@@ -3231,6 +3249,53 @@ impl GraphRead for SqliteStore {
         Ok(nodes)
     }
 
+    /// #177: `COUNT` with the `exact_name` / `kinds` / `language` predicates pushed into SQL and no
+    /// `Node` materialised (only the `scope` column is read, for the segment-aware `scope_prefix`
+    /// test). A `text` query keeps the BM25 path through the trait default.
+    fn count_symbols(&self, query: &SymbolQuery) -> Result<usize> {
+        if query.text.is_some() {
+            let mut q = query.clone();
+            q.limit = None;
+            return Ok(self.find_symbols(&q)?.len());
+        }
+        let mut sql = String::from("SELECT scope FROM nodes WHERE 1=1");
+        let mut binds: Vec<String> = Vec::new();
+        if let Some(name) = &query.exact_name {
+            binds.push(name.clone());
+            sql.push_str(&format!(" AND name=?{}", binds.len()));
+        }
+        if !query.kinds.is_empty() {
+            let mut ph = Vec::with_capacity(query.kinds.len());
+            for k in &query.kinds {
+                binds.push(serde_json::to_string(k)?);
+                ph.push(format!("?{}", binds.len()));
+            }
+            sql.push_str(&format!(" AND kind IN ({})", ph.join(",")));
+        }
+        if let Some(lang) = &query.language {
+            binds.push(lang.0.clone());
+            sql.push_str(&format!(" AND language=?{}", binds.len()));
+        }
+        let mut stmt = self.conn.prepare(&sql).map_err(st)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(binds.iter()), |r| {
+                r.get::<_, String>(0)
+            })
+            .map_err(st)?;
+        let mut n = 0usize;
+        for row in rows {
+            let scope = row.map_err(st)?;
+            if query
+                .scope_prefix
+                .as_deref()
+                .is_none_or(|p| wicked_estate_core::scope::path_in_prefix(&scope, p))
+            {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
     fn neighbors(&self, id: &SymbolId, dir: Direction) -> Result<Vec<Edge>> {
         // Resolve string → sid; if not interned, no edges can exist for this symbol.
         let sid: Option<i64> = self
@@ -3274,7 +3339,9 @@ impl GraphRead for SqliteStore {
             }
             d => self.cte_reach(start, d, spec)?,
         };
-        let node_cap = depths.len() >= spec.max_nodes;
+        // #225: each leg fetches `max_nodes + 1` rows (fencepost), so exactly `max_nodes` reachable
+        // nodes is a complete walk and only a surplus row means the cap cut it.
+        let (depths, node_cap) = cap_by_depth(depths, spec.max_nodes);
 
         let mut nodes = Vec::new();
         if let Some(n) = self.get_node(start)? {
@@ -3339,7 +3406,9 @@ impl GraphRead for SqliteStore {
             }
             d => self.cte_reach_multi(&seed_sids, d, spec)?,
         };
-        let node_cap = depths.len() >= spec.max_nodes;
+        // #225: each leg fetches `max_nodes + 1` rows (fencepost), so exactly `max_nodes` reachable
+        // nodes is a complete walk and only a surplus row means the cap cut it.
+        let (depths, node_cap) = cap_by_depth(depths, spec.max_nodes);
 
         // Nodes: each live seed + each reached node (dedup by symbol).
         let mut nodes = Vec::new();
@@ -4656,6 +4725,73 @@ mod tests {
         let _ = store.traverse_multi(&seeds, &spec).expect("traverse_multi");
         store.conn.trace(None);
         RECURSIVE_CTE_COUNT.with(|c| c.get())
+    }
+
+    /// #225: exactly `max_nodes` reachable nodes is a COMPLETE walk (the CTE fetches one surplus
+    /// row as the fencepost), one more is a node-cap cut that keeps the NEAREST nodes, and the
+    /// multi-seed walk agrees.
+    #[test]
+    fn sqlite_node_cap_is_a_fencepost_not_an_exact_count_225() {
+        use wicked_estate_core::{Language, Location, ResolutionTier, Span};
+        let node = |name: &str| {
+            Node::new(
+                sym(name),
+                NodeKind::Function,
+                name,
+                Language::new("rust"),
+                Location::new("src/lib.rs", Span::ZERO),
+            )
+        };
+        let calls = |a: &str, b: &str| {
+            Edge::new(sym(a), sym(b), EdgeKind::Calls, ResolutionTier::Scip, "t")
+        };
+        // `t` has callers c1..c6; only c6 has a caller (`far`, depth 2).
+        let mut nodes = vec![node("t"), node("far")];
+        let mut edges = vec![calls("far", "c6")];
+        for i in 1..=6 {
+            let c = format!("c{i}");
+            nodes.push(node(&c));
+            edges.push(calls(&c, "t"));
+        }
+        let mut store = open();
+        store.begin_batch().unwrap();
+        store.upsert_nodes(&nodes).unwrap();
+        store.upsert_edges(&edges).unwrap();
+        store.commit_batch().unwrap();
+        let spec = |depth: u32, max_nodes: usize| TraversalSpec {
+            max_depth: depth,
+            max_nodes,
+            ..TraversalSpec::blast_radius(depth)
+        };
+
+        // depth 1: exactly 6 reachable, max_nodes 6 → complete (the depth horizon still bites:
+        // `far` lies beyond it).
+        let sub = store.traverse(&sym("t"), &spec(1, 6)).unwrap();
+        assert_eq!(sub.depths.len(), 6);
+        assert!(
+            !sub.node_cap_reached,
+            "exactly max_nodes is complete: {sub:?}"
+        );
+        assert!(sub.depth_horizon_reached && sub.truncation_invariant_holds());
+        let multi = store.traverse_multi(&[sym("t")], &spec(1, 6)).unwrap();
+        assert!(!multi.node_cap_reached, "{multi:?}");
+
+        // depth 2: 7 reachable, max_nodes 6 → capped, and the far node is the one dropped.
+        let sub = store.traverse(&sym("t"), &spec(2, 6)).unwrap();
+        assert!(sub.node_cap_reached && sub.truncated, "{sub:?}");
+        assert_eq!(sub.depths.len(), 6);
+        assert!(
+            !sub.depths.contains_key("far"),
+            "the cut keeps the nearest nodes: {sub:?}"
+        );
+        let multi = store.traverse_multi(&[sym("t")], &spec(2, 6)).unwrap();
+        assert_eq!(multi.depths, sub.depths);
+        assert!(multi.node_cap_reached);
+
+        // depth 2, max_nodes 7 → the whole graph, complete.
+        let sub = store.traverse(&sym("t"), &spec(2, 7)).unwrap();
+        assert_eq!(sub.depths.len(), 7);
+        assert!(!sub.truncated, "{sub:?}");
     }
 
     #[test]

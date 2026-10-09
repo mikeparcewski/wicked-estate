@@ -3331,3 +3331,99 @@ pub fn support_replacement_suite<S: GraphStore>(store: &mut S) {
     assert_eq!(keys(&env), keys(&plain_merge));
     assert!(env.metadata.contains_key(FLOW_SUPPORT_KEY));
 }
+
+/// #177 / #218: `count_symbols` equals the unlimited `find_symbols` length for every predicate
+/// shape (no `limit` honoured), and `find_structural_symbols` drops value-flow slots BEFORE `limit`
+/// — with more slots than `limit` sharing the name, the `limit` real symbols still come back.
+pub fn symbol_count_and_structural_suite<S: GraphStore>(store: &mut S) {
+    use crate::scope::Scope;
+    let mut nodes = vec![
+        func_node("cs_real_a"),
+        func_node("cs_real_b").with_scope(Scope::parse("org:acme/unit:pay")),
+        func_node("cs_real_c").with_scope(Scope::parse("org:acme2")),
+        Node::new(
+            sym("cs_type"),
+            NodeKind::Struct,
+            "cs_real_a",
+            Language::new("go"),
+            Location::new("src/t.go", Span::ZERO),
+        ),
+    ];
+    // Eight value slots all named like a real symbol, so an unfiltered `limit 2` would be all slots.
+    for i in 0..8 {
+        nodes.push(
+            Node::new(
+                sym(&format!("cs_slot_{i}")),
+                NodeKind::Function,
+                "cs_real_a",
+                Language::new("rust"),
+                Location::new("src/lib.rs", Span::ZERO),
+            )
+            .with_value_role("Local"),
+        );
+    }
+    store.begin_batch().expect("begin");
+    store.upsert_nodes(&nodes).expect("upsert");
+    store.commit_batch().expect("commit");
+
+    let queries = [
+        SymbolQuery {
+            exact_name: Some("cs_real_a".into()),
+            ..Default::default()
+        },
+        SymbolQuery {
+            exact_name: Some("cs_real_a".into()),
+            kinds: vec![NodeKind::Function],
+            limit: Some(1),
+            ..Default::default()
+        },
+        SymbolQuery {
+            kinds: vec![NodeKind::Struct],
+            ..Default::default()
+        },
+        SymbolQuery {
+            language: Some(Language::new("go")),
+            ..Default::default()
+        },
+        SymbolQuery {
+            scope_prefix: Some("org:acme".into()),
+            ..Default::default()
+        },
+    ];
+    for q in &queries {
+        let mut unlimited = q.clone();
+        unlimited.limit = None;
+        let want = store.find_symbols(&unlimited).expect("find").len();
+        assert_eq!(
+            store.count_symbols(q).expect("count"),
+            want,
+            "count_symbols must equal the unlimited find_symbols length for {q:?}"
+        );
+    }
+    assert_eq!(
+        store
+            .count_symbols(&SymbolQuery {
+                scope_prefix: Some("org:acme".into()),
+                ..Default::default()
+            })
+            .unwrap(),
+        1,
+        "scope_prefix is segment-aware (org:acme2 is not under org:acme)"
+    );
+
+    let q = SymbolQuery {
+        exact_name: Some("cs_real_a".into()),
+        limit: Some(2),
+        ..Default::default()
+    };
+    let got = store.find_structural_symbols(&q).expect("structural");
+    let mut names: Vec<String> = got.iter().map(|n| n.symbol.0.clone()).collect();
+    names.sort();
+    let mut expect = vec![sym("cs_real_a").0, sym("cs_type").0];
+    expect.sort();
+    assert_eq!(
+        names, expect,
+        "the value slots must be excluded before limit, never displace the real symbols"
+    );
+    assert!(got.iter().all(|n| !n.is_value_flow_node()));
+}
