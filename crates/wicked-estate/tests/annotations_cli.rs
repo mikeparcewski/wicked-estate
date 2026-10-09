@@ -606,24 +606,62 @@ fn every_json_arm_carries_the_evidence_envelope() {
     assert_envelope("source", &bundle["nodes"][0]["annotations"][0]);
 }
 
-/// #205: the cutoff takes exactly one integer operand. The old `find_map` took the first
-/// parseable token anywhere, so a stray or misordered operand silently set the cutoff.
+/// #205: the cutoff is given exactly one way. The old `find_map` took the first parseable token
+/// anywhere, so a stray or misordered operand silently set the cutoff.
 #[test]
-fn stale_annotations_cutoff_is_exactly_one_integer_operand() {
+fn stale_annotations_cutoff_takes_exactly_one_spelling() {
     let (dir, db) = index_one_fn("cutoff", "fn target() {}\n");
     for args in [
         &["stale-annotations"][..],
-        &["stale-annotations", "2026-01-01"],
+        &["stale-annotations", "2026-02-30"],
         &["stale-annotations", "soon", "100"],
         &["stale-annotations", "100", "200"],
+        &["stale-annotations", "100", "--older-than", "90d"],
+        &["stale-annotations", "--older-than", "90"],
     ] {
         let err = run_fail(&dir, &db, args);
         assert!(
-            err.contains("<cutoff-unix-seconds>"),
-            "{args:?} names the unit: {err}"
+            err.contains("<cutoff-unix-seconds | YYYY-MM-DD>") && err.contains("--older-than"),
+            "{args:?} names every accepted spelling: {err}"
         );
     }
-    run(&dir, &db, &["stale-annotations", "100", "--json"]);
+}
+
+/// #205: a date and a window are real cutoffs, not decoration. A never-verified row
+/// (`last_verified = 0`) is stale for any cutoff after the epoch and for none at or before it.
+#[test]
+fn stale_annotations_accepts_a_date_and_a_window() {
+    let (dir, db) = index_one_fn("cutoff_forms", "fn target() {}\n");
+    run(
+        &dir,
+        &db,
+        &["annotate", "target", "--key", "owner", "--value", "x"],
+    );
+    let rows = |args: &[&str]| -> usize {
+        let mut a = vec!["stale-annotations"];
+        a.extend_from_slice(args);
+        a.push("--json");
+        let v: serde_json::Value = serde_json::from_str(&run(&dir, &db, &a)).unwrap();
+        v.as_array().unwrap().len()
+    };
+    assert_eq!(rows(&["2026-01-01"]), 1, "a date after the epoch");
+    assert_eq!(
+        rows(&["1970-01-01"]),
+        0,
+        "1970-01-01 is cutoff 0: last_verified 0 is not < 0"
+    );
+    assert_eq!(rows(&["--older-than", "1s"]), 1, "a window ending now");
+    assert_eq!(
+        rows(&["--older-than", "3000w"]),
+        0,
+        "a window reaching before 1970"
+    );
+
+    let human = run(&dir, &db, &["stale-annotations", "2026-01-01"]);
+    assert!(
+        human.contains("cutoff 1767225600 (2026-01-01T00:00:00Z)"),
+        "human line echoes the resolved instant: {human}"
+    );
 }
 
 /// #205: the banner names the unit the parser demands.
@@ -632,7 +670,135 @@ fn help_banner_states_the_cutoff_unit() {
     let out = Command::new(bin()).arg("--help").output().unwrap();
     let help = String::from_utf8(out.stdout).unwrap();
     assert!(
-        help.contains("stale-annotations <cutoff-unix-seconds>"),
+        help.contains("stale-annotations <cutoff-unix-seconds | YYYY-MM-DD>")
+            && help.contains("stale-annotations --older-than <N>{s,m,h,d,w}"),
         "banner: {help}"
     );
+}
+
+/// `annotate` writes the evidence envelope, and `stale-annotations` judges the row by the clock
+/// it was written with — before this a CLI-written row was always `last_verified = 0`, so no
+/// CLI user could ever record a re-verification.
+#[test]
+fn annotate_writes_the_evidence_envelope() {
+    let (dir, db) = index_one_fn("ann_envelope", "fn target() {}\n");
+    run(
+        &dir,
+        &db,
+        &[
+            "annotate",
+            "target",
+            "--key",
+            "owner",
+            "--value",
+            "payments-team",
+            "--source-type",
+            "sme-answer",
+            "--extraction-method",
+            "interview@2026-01",
+            "--last-verified",
+            "2026-01-01",
+        ],
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(&run(&dir, &db, &["annotations", "target", "--json"])).unwrap();
+    let a = &v[0]["annotations"][0];
+    assert_eq!(a["source_type"], "sme-answer");
+    assert_eq!(a["extraction_method"], "interview@2026-01");
+    assert_eq!(a["last_verified"], 1_767_225_600_i64);
+
+    let stale = |cutoff: &str| -> usize {
+        let out = run(&dir, &db, &["stale-annotations", cutoff, "--json"]);
+        serde_json::from_str::<serde_json::Value>(&out)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    assert_eq!(stale("2025-06-01"), 0, "verified after this cutoff → fresh");
+    assert_eq!(
+        stale("2026-06-01"),
+        1,
+        "verified before this cutoff → stale"
+    );
+
+    // `now` is fresh for any window that ends now.
+    run(
+        &dir,
+        &db,
+        &[
+            "annotate",
+            "target",
+            "--key",
+            "owner",
+            "--value",
+            "p",
+            "--last-verified",
+            "now",
+            "--replace",
+        ],
+    );
+    let out = run(
+        &dir,
+        &db,
+        &["stale-annotations", "--older-than", "1d", "--json"],
+    );
+    assert_eq!(out.trim(), "[]", "just verified → not stale: {out}");
+}
+
+#[test]
+fn annotate_refuses_a_degenerate_envelope() {
+    let (dir, db) = index_one_fn("ann_envelope_bad", "fn target() {}\n");
+    let base = ["annotate", "target", "--key", "k", "--value", "v"];
+    for extra in [
+        &["--source-type", ""][..],
+        &["--extraction-method", ""],
+        &["--last-verified", "yesterday"],
+        &["--last-verified", "-1"],
+        &["--last-verified", "2026-02-30"],
+    ] {
+        let mut args = base.to_vec();
+        args.extend_from_slice(extra);
+        let err = run_fail(&dir, &db, &args);
+        assert!(err.contains(extra[0]), "{extra:?} names the flag: {err}");
+    }
+    // Nothing was written by any refused call.
+    let v: serde_json::Value =
+        serde_json::from_str(&run(&dir, &db, &["annotations", "target", "--json"])).unwrap();
+    assert!(v[0]["annotations"].as_array().unwrap().is_empty());
+}
+
+/// PR #259 review: `--older-than '90é'` panicked (exit 101) — `split_at` on a byte offset inside a
+/// multibyte char. Malformed input is a usage error, exit 1, for every byte shape; a panic would
+/// also "fail", so the exit code itself is asserted.
+#[test]
+fn malformed_cutoffs_exit_1_never_panic() {
+    let (dir, db) = index_one_fn("cutoff_utf8", "fn target() {}\n");
+    for args in [
+        &["stale-annotations", "--older-than", "90é"][..],
+        &["stale-annotations", "--older-than", "é"],
+        &["stale-annotations", "--older-than", "9日"],
+        &["stale-annotations", "+100"],
+        &["stale-annotations", "2026-01-0é"],
+        &[
+            "annotate",
+            "target",
+            "--key",
+            "k",
+            "--value",
+            "v",
+            "--last-verified",
+            "1é",
+        ],
+    ] {
+        let out = Command::new(bin())
+            .current_dir(&dir)
+            .args(args)
+            .args(["--db", db.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(!stderr.contains("panicked"), "{args:?}: {stderr}");
+    }
 }

@@ -17,6 +17,20 @@
   now `is_structural_symbol`, like every other name-based arm, and `--include-values` is the
   explicit way back in. ENGINE-CONTRACT §3.3 row updated. Crew's cross-repo symbol search
   (which shells out to `resolve <name> --json`) sees fewer rows — the real ones.
+- **`stale-annotations` takes exactly one cutoff (#205).** The arm took the first parseable
+  integer anywhere in argv, so `stale-annotations soon 100` ran at cutoff 100 and
+  `stale-annotations 2026 01 01` ran at 2026 with the rest dropped — a plausible wrong answer
+  with exit 0. Stray operands, two operands, or an operand together with `--older-than` are now
+  a usage error (exit 1). A caller that passed stray operands breaks; that is the fix, as with
+  #197/#206. Unix seconds are ASCII digits only: `+100` and `-100` are refused (`i64` parsing
+  had accepted the sign).
+- **Payload annotations are ranked at every size.** `RetrieveEntity` (MCP) kept insertion order
+  under the 20-annotation cap and ranked only over it; `nodes --json` / `source --json` always
+  ranked. One entity therefore listed its annotations in two orders depending on the surface.
+  Every payload now ranks advisory-class first, then `ts` descending, at any count, so the order
+  no longer flips when an entity crosses 20. A consumer of `RetrieveEntity` that read
+  `annotations[]` positionally sees a new order; the set, the cap and `annotation_summary` are
+  unchanged. The spec (`docs/recon/annotation-consumer-spec.md`) fixed the order only over the cap.
 
 - **Bespoke CLI commands reject malformed values, surplus or missing operands, accidental
   repeats, and flags they would ignore in combination (W8.6).** 0.21.0 made each command reject
@@ -55,7 +69,13 @@
   - "one of these";
   - "this flag needs that one";
   - "this flag is ignored with that one";
-  - flags that can stand in for the operand (`source` selectors, `annotate --symbol`).
+  - flags that can stand in for the operand (`source` selectors, `annotate --symbol`,
+    `stale-annotations --older-than`).
+
+  #205's cutoff spellings and the `annotate` evidence envelope are typed rows too: `Instant`
+  (`<unix-seconds | YYYY-MM-DD>`), `Window` (`--older-than <N>{s,m,h,d,w}`) and `Verified`
+  (`--last-verified now|<secs>|YYYY-MM-DD`), each coerced by the `cutoff` parsers. The table's
+  exclusive-operand rule replaces `cutoff::resolve`.
 
   Each case above now exits 1 before any store is opened, with usage and the offending field on
   stderr and nothing on stdout. Counts reject signs, fractions and overflow. Numbers must be
@@ -89,6 +109,20 @@
 - **`lineage` text mode hints when the operand is a NAME (#244):** an empty leaf whose operand
   matches no symbol id but one or more symbol names prints a note naming
   `wicked-estate resolve <name> --json`. JSON output unchanged.
+- **`annotate` writes the evidence envelope.** `--source-type S`, `--extraction-method M` and
+  `--last-verified now|<unix-seconds>|YYYY-MM-DD` (UTC) set the three fields `stale-annotations`
+  and every `--json` read now surface. Before, a CLI-written row was always
+  `unspecified` / `manual` / `last_verified = 0`, so a CLI user could never record a
+  re-verification and `stale-annotations` reported every CLI fact as stale forever. Re-verify
+  with `annotate … --last-verified now --replace`. Omitted flags keep those defaults. An empty
+  `--source-type` / `--extraction-method`, an unparseable or pre-1970 `--last-verified` is a usage
+  error that writes nothing. The flags are declared in `cli_flags` for `annotate` only.
+- **`stale-annotations` accepts a date or a window (#205).** Besides Unix seconds, the cutoff
+  may be `YYYY-MM-DD` (00:00:00 UTC, strict: `2026-02-30` is refused) or
+  `--older-than <N>{s,m,h,d,w}` (`now − N`; `--older-than 90d` is "not verified in 90 days"; a
+  bare `90` is refused rather than guessed). The human line echoes the resolved instant,
+  `cutoff 1767225600 (2026-01-01T00:00:00Z)`; `--json` is unchanged. `--older-than` is declared in
+  `cli_flags` for `stale-annotations` only. No new dependency.
 
 ### Fixed
 - **`lineage --json` no longer panics on a closed stdout (#247):** `| head -1` ends the document
@@ -124,23 +158,21 @@
 
 Not in this change: #230 item 6 (an R4 payload-size marker for `Path`) needs its own design —
 dropping hops would make a route invalid, so it wants a structured, flagged elision.
-- **`stale-annotations` takes exactly one integer cutoff (#205).** The arm took the first
-  parseable integer anywhere in argv, so `stale-annotations soon 100` ran at cutoff 100 and
-  `stale-annotations 2026 01 01` ran at 2026 with the rest dropped — a plausible wrong answer
-  with exit 0. Anything other than one integer operand is now a usage error (exit 1). A caller
-  that passed stray operands breaks; that is the fix, as with #197/#206.
 - **Annotation `--json` carries the evidence envelope (#204).** `annotations`,
   `annotations --symbol`, `stale-annotations`, `nodes` and `source` `--json` now emit
   `last_verified`, `source_type` and `extraction_method` on every annotation. Before, `ts`
   (write time) was the only clock in the document, so a never-verified row
   (`last_verified: 0`) read as "verified just now" — in the JSON of the very command that
   selects on `last_verified`. The CLI's private renderer (`source_bundle::annotation_json`) is
-  deleted; every CLI arm and the MCP payloads now share `wicked_estate_retrieve::annotation_json`,
-  so the two surfaces cannot drift again. Additive: existing keys are unchanged. Cost: ~105 chars
+  deleted, and so are its copies of the payload cap and summary
+  (`MAX_ANNOTATIONS_PER_ENTITY`, `cap_annotations_for_payload`, `annotation_summary`): every CLI
+  arm and the MCP payloads now share `wicked_estate_retrieve::{annotation_json,
+  annotation_summary, payload_annotations_json, MAX_PAYLOAD_ANNOTATIONS}`, so the two surfaces
+  cannot drift again. Additive: existing keys are unchanged. Cost: ~105 chars
   per annotation pretty-printed (~2.1K for a node at the 20-annotation cap); `--max-total-chars`
   budgets source text only and is unaffected.
-- **The `stale-annotations` banner states the cutoff unit (#205):** `<cutoff-unix-seconds>`,
-  matching the usage error.
+- **The `stale-annotations` banner states the cutoff unit (#205):**
+  `<cutoff-unix-seconds | YYYY-MM-DD>` and the `--older-than` form, matching the usage error.
 
 ### Documentation
 - **`annotations --json` container shape (#203, kept by decision).** `--help` now documents

@@ -232,8 +232,11 @@ The classification is declared in the query file, not in Rust:
 `treesitter.rs` parses those three segments structurally and knows nothing about what
 `angular_input` means. The rule id is derived — `<language>/<evidence>/<construct>` — so a new
 construct or a new language mints its own id with zero core change. A capture naming a reserved
-(`scip`/`compiler`) or `call_derived` evidence class is **ignored**: it is never emitted, but it
-does not fail the query load either (nor does a misspelt anchor), so a typo drops silently.
+(`scip`/`compiler`) or `call_derived` evidence class, or a misspelt `@flow.*` anchor, never
+classifies, and it **fails the query load** for a plugin or an override (#235). A query-only or
+grammar override falls back to the built-in, loudly. A plugin language does not load. A typo can
+therefore never drop flow facts silently. Every shipped `.scm` is pinned by a test that walks its
+`@flow.*` captures.
 
 #### Endpoint dedup: why the vocabulary is set-valued
 

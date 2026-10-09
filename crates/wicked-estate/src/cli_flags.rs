@@ -26,8 +26,6 @@ pub enum Ty {
     Str,
     /// Decimal digits only (no sign), at most `max`.
     UInt { min: u64, max: u64 },
-    /// Signed decimal integer (`i64`).
-    Int,
     /// A finite decimal number in `min..=max`.
     Float { min: f64, max: f64 },
     /// `true|false` (and the `1|0`, `yes|no` spellings the CLI always accepted for true).
@@ -39,6 +37,13 @@ pub enum Ty {
     List,
     /// A repo label (`repo_scope::validate_label`).
     Label,
+    /// An instant: Unix seconds (digits only) or `YYYY-MM-DD` at 00:00:00 UTC
+    /// (`cutoff::parse_instant`), as seconds.
+    Instant,
+    /// A window `<N>{s,m,h,d,w}`, N ≥ 1 (`cutoff::parse_window`), as seconds.
+    Window,
+    /// `now`, or an [`Ty::Instant`] not before 1970 (`cutoff::parse_verified`), as seconds.
+    Verified,
 }
 
 /// One `--flag` a command owns.
@@ -460,6 +465,10 @@ pub const COMMANDS: &[Command] = &[
                 Flag::new("confidence", Ty::Float { min: 0.0, max: 1.0 }),
                 str_flag("provenance"),
                 str_flag("author"),
+                // The evidence envelope (#204 follow-on).
+                str_flag("source-type"),
+                str_flag("extraction-method"),
+                Flag::new("last-verified", Ty::Verified),
                 switch("replace"),
             ],
             rules: &[
@@ -480,13 +489,18 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "stale-annotations",
-        spec: owns(
+        // The cutoff is spelled exactly one way (#205): the operand, or `--older-than`.
+        spec: ruled(
             &[Operand {
-                name: "cutoff-unix-seconds",
-                ty: Ty::Int,
+                name: "cutoff-unix-seconds | YYYY-MM-DD",
+                ty: Ty::Instant,
                 required: true,
             }],
-            &[DB, JSON],
+            &[DB, JSON, Flag::new("older-than", Ty::Window)],
+            &[Rule::OperandOr {
+                flags: &["older-than"],
+                exclusive: true,
+            }],
         ),
     },
     Command {
@@ -716,6 +730,13 @@ impl Args {
         })
     }
 
+    pub fn i64(&self, key: &str) -> Option<i64> {
+        self.one(key).map(|v| match v {
+            Value::Int(n) => *n,
+            other => panic!("--{key} is {other:?}, not an integer"),
+        })
+    }
+
     pub fn bool(&self, key: &str) -> Option<bool> {
         self.one(key).map(|v| match v {
             Value::Bool(b) => *b,
@@ -778,11 +799,14 @@ fn placeholder(ty: Ty) -> String {
     match ty {
         Ty::Switch => String::new(),
         Ty::Str | Ty::Label => "V".into(),
-        Ty::UInt { .. } | Ty::Int => "N".into(),
+        Ty::UInt { .. } => "N".into(),
         Ty::Float { .. } => "F".into(),
         Ty::Bool => "true|false".into(),
         Ty::OneOf(vals) => vals.join("|"),
         Ty::List => "a,b".into(),
+        Ty::Instant => "SECS|YYYY-MM-DD".into(),
+        Ty::Window => "<N>{s,m,h,d,w}".into(),
+        Ty::Verified => "now|SECS|YYYY-MM-DD".into(),
     }
 }
 
@@ -895,15 +919,6 @@ fn coerce(ty: Ty, what: &str, v: &str) -> Result<Value, String> {
             }
             Ok(Value::UInt(n))
         }
-        Ty::Int => {
-            let digits = v.strip_prefix('-').unwrap_or(v);
-            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-                return Err(format!("{what} must be an integer, got {v:?}"));
-            }
-            v.parse()
-                .map(Value::Int)
-                .map_err(|_| format!("{what} {v} is out of range for a 64-bit integer"))
-        }
         Ty::Float { min, max } => {
             let n: f64 = v
                 .parse()
@@ -925,6 +940,12 @@ fn coerce(ty: Ty, what: &str, v: &str) -> Result<Value, String> {
             "false" | "0" | "no" => Ok(Value::Bool(false)),
             _ => Err(format!("{what} must be true or false, got {v:?}")),
         },
+        Ty::Instant => crate::cutoff::parse_instant(v)
+            .map(Value::Int)
+            .map_err(|e| format!("{what}: {e}")),
+        // These two name their flag in the message already.
+        Ty::Window => crate::cutoff::parse_window(v).map(Value::Int),
+        Ty::Verified => crate::cutoff::parse_verified(v, crate::cutoff::now()).map(Value::Int),
         Ty::List => {
             let items: Vec<String> = v.split(',').map(|i| i.trim().to_string()).collect();
             if items.iter().any(String::is_empty) {
@@ -1389,8 +1410,15 @@ mod tests {
         assert_eq!(a.operand_usize(0), Some(5));
         assert_eq!(a.str("weight"), Some("semantic"));
         assert_eq!(a.f64("eps"), Some(0.2));
-        let a = args("stale-annotations", &["-1"]);
-        assert_eq!(a.operand_i64(0), Some(-1));
+        let a = args("stale-annotations", &["2026-01-01"]);
+        assert_eq!(a.operand_i64(0), Some(1_767_225_600));
+        let a = args("stale-annotations", &["--older-than", "2d"]);
+        assert_eq!(a.i64("older-than"), Some(2 * 86_400));
+        let a = args(
+            "annotate",
+            &["f", "--key", "k", "--value", "v", "--last-verified", "0"],
+        );
+        assert_eq!(a.i64("last-verified"), Some(0));
         let a = args(
             "semantics",
             &["s", "--validated", "no", "--validated-by", "me"],
@@ -1457,7 +1485,7 @@ mod tests {
             (
                 "stale-annotations",
                 &["1.5"][..],
-                "<cutoff-unix-seconds> must be an integer",
+                "<cutoff-unix-seconds | YYYY-MM-DD>: cutoff \"1.5\" is neither Unix seconds nor a YYYY-MM-DD date",
             ),
             ("plugins", &["lsit"][..], "<list> must be one of list"),
             ("blast-radius", &["f", "--depth=99"][..], "maximum of"),
@@ -1731,6 +1759,91 @@ mod tests {
             e.ends_with("--history does not apply with --db :memory:"),
             "{e}"
         );
+    }
+
+    /// `--older-than` is owned by `stale-annotations` alone (#205), takes a typed value, and
+    /// replaces the cutoff operand — exactly one spelling, never both, never neither.
+    #[test]
+    fn older_than_is_owned_by_stale_annotations_and_replaces_the_operand_205() {
+        args("stale-annotations", &["--older-than", "90d", "--json"]);
+        args("stale-annotations", &["1767225600"]);
+        assert!(
+            err("annotations", &["f", "--older-than", "90d"])
+                .contains("accepted by: stale-annotations")
+        );
+        err("nodes", &["--older-than", "90d"]);
+        assert!(
+            err("stale-annotations", &["--older-than"]).ends_with("--older-than requires a value")
+        );
+        assert!(
+            err("stale-annotations", &["--older-than=90d"]).contains("write --older-than <value>")
+        );
+        err("stale-annotations", &["--older-than", "--json"]);
+        assert!(err("stale-annotations", &["100", "--older-than", "90d"]).contains("not both"));
+        assert!(
+            err("stale-annotations", &[])
+                .ends_with("<cutoff-unix-seconds | YYYY-MM-DD> or --older-than is required")
+        );
+        assert!(err("stale-annotations", &["100", "200"]).ends_with("unexpected operand \"200\""));
+        for bad in ["90", "0d", "90é", "+5d"] {
+            assert!(
+                err("stale-annotations", &["--older-than", bad]).contains("--older-than"),
+                "{bad}"
+            );
+        }
+        // Seconds are digits only (#259 review), so `-1` is a refused cutoff, not a flag.
+        assert!(
+            err("stale-annotations", &["-1"])
+                .contains("<cutoff-unix-seconds | YYYY-MM-DD>: cutoff")
+        );
+    }
+
+    /// The evidence-envelope flags are owned by `annotate` alone: accepted there, named as foreign
+    /// on the read commands (which would otherwise look like they filter by them).
+    #[test]
+    fn evidence_envelope_flags_are_owned_by_annotate() {
+        let a = args(
+            "annotate",
+            &[
+                "f",
+                "--key",
+                "k",
+                "--value",
+                "v",
+                "--source-type",
+                "code",
+                "--extraction-method",
+                "scip-rust@0.3",
+                "--last-verified",
+                "2026-01-01",
+            ],
+        );
+        assert_eq!(a.str("source-type"), Some("code"));
+        assert_eq!(a.i64("last-verified"), Some(1_767_225_600));
+        for f in ["--source-type", "--extraction-method", "--last-verified"] {
+            assert!(
+                err("annotations", &["f", f, "x"]).contains("accepted by: annotate"),
+                "{f}"
+            );
+            err("stale-annotations", &["100", f, "x"]);
+            assert!(
+                err("annotate", &["f", "--key", "k", "--value", "v", f])
+                    .contains("requires a value"),
+                "{f}"
+            );
+        }
+        for bad in ["yesterday", "-1", "2026-02-30", "1969-12-31"] {
+            let e = err(
+                "annotate",
+                &["f", "--key", "k", "--value", "v", "--last-verified", bad],
+            );
+            assert!(e.contains("--last-verified"), "{bad}: {e}");
+        }
+        let e = err(
+            "annotate",
+            &["f", "--key", "k", "--value", "v", "--source-type", ""],
+        );
+        assert!(e.ends_with("--source-type must not be empty"), "{e}");
     }
 
     #[test]

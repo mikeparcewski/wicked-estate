@@ -21,52 +21,8 @@
 //!   truncates identically every run; the same db + selector + budget → byte-identical JSON.
 
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
-use wicked_estate_core::{Annotation, Node, is_advisory};
-use wicked_estate_retrieve::annotation_json;
-
-/// R4 payload cap: at most this many annotations are inlined per entity in a structured payload
-/// (`nodes --json`, `source --json`, `RetrieveEntity`). `annotation_summary.count` always carries
-/// the TRUE total so a consumer can tell it was capped (the spec's "summary is always exact" rule).
-pub const MAX_ANNOTATIONS_PER_ENTITY: usize = 20;
-
-/// Apply the R4 cap to a symbol's annotations for inlining in a payload.
-///
-/// Ordering: **advisory-class (`assumption`/`question`) first, then the rest by recency (`ts`
-/// desc)**, then truncated to [`MAX_ANNOTATIONS_PER_ENTITY`]. This keeps the trust-relevant rows
-/// (the ones a consumer must surface as not-a-fact, R7) when an entity exceeds the cap. The input
-/// is taken by value and reordered in place; the TRUE total is captured by the caller via
-/// [`annotation_summary`] BEFORE capping. Sort is stable so equal-`ts` rows keep their relative
-/// (insertion / oldest-first) order from the store.
-pub fn cap_annotations_for_payload(mut anns: Vec<Annotation>) -> Vec<Annotation> {
-    anns.sort_by(|a, b| {
-        let adv = is_advisory(&b.r#type).cmp(&is_advisory(&a.r#type)); // advisory (true) first
-        adv.then_with(|| b.ts.cmp(&a.ts)) // then newest first
-    });
-    anns.truncate(MAX_ANNOTATIONS_PER_ENTITY);
-    anns
-}
-
-/// Build the `annotation_summary` object — `{count, by_type, has_advisory}` — over the FULL
-/// annotation set (before any R4 cap). `count` is the true total; `by_type` is a per-`type` tally
-/// (deterministic key order via `BTreeMap`); `has_advisory` is true when any annotation is
-/// advisory-class. This is the cheap-triage field a consumer reads instead of pulling every value
-/// (spec build-ahead note 2).
-pub fn annotation_summary(anns: &[Annotation]) -> Value {
-    let mut by_type: BTreeMap<&str, u64> = BTreeMap::new();
-    let mut has_advisory = false;
-    for a in anns {
-        *by_type.entry(a.r#type.as_str()).or_insert(0) += 1;
-        if is_advisory(&a.r#type) {
-            has_advisory = true;
-        }
-    }
-    json!({
-        "count": anns.len(),
-        "by_type": by_type,
-        "has_advisory": has_advisory,
-    })
-}
+use wicked_estate_core::{Annotation, Node};
+use wicked_estate_retrieve::{annotation_summary, payload_annotations_json};
 
 /// Explicit budget / shaping options for a source bundle. All caps are opt-in: `None` (and the
 /// CLI's "flag omitted") means UNBOUNDED. `0` is treated as unbounded too — a cap of zero would
@@ -127,7 +83,7 @@ fn truncate_chars(s: &str, max: usize) -> (String, bool) {
 /// `annotations_of` yields a node's FULL typed-annotation set (the CLI passes
 /// `store.annotations`). Each node gains `annotation_summary` (always exact, over the full set)
 /// and, when non-empty, an `annotations` array capped per the R4 rule
-/// ([`cap_annotations_for_payload`]) — advisory-class first, then `ts` desc, ≤ 20.
+/// ([`payload_annotations_json`]) — advisory-class first, then `ts` desc, ≤ 20.
 pub fn build_bundle<S, H, A>(
     mut nodes: Vec<Node>,
     selector: Value,
@@ -225,11 +181,7 @@ where
             "annotation_summary": summary,
         });
         if !all_anns.is_empty() {
-            let capped: Vec<Value> = cap_annotations_for_payload(all_anns)
-                .iter()
-                .map(annotation_json)
-                .collect();
-            node_obj["annotations"] = Value::Array(capped);
+            node_obj["annotations"] = Value::Array(payload_annotations_json(&all_anns));
         }
         out_nodes.push(node_obj);
     }
@@ -523,110 +475,6 @@ mod tests {
             store.file_content("src/a.rs").unwrap(),
             before_a,
             "content unchanged"
-        );
-    }
-
-    // 8. annotation_json shape: every spec field present; `advisory` computed from `type`; the
-    //    evidence envelope rides along so `ts` (write time) is never the only clock (#204).
-    #[test]
-    fn annotation_json_carries_advisory_flag() {
-        let assume = Annotation::new("assumption", "k", "v")
-            .with_confidence(0.7)
-            .with_provenance("manual")
-            .with_author("alice")
-            .with_source_type("static-analysis")
-            .with_extraction_method("scip-rust@0.3")
-            .with_last_verified(1_700_000_000);
-        let j = annotation_json(&assume);
-        assert_eq!(j["source_type"], json!("static-analysis"));
-        assert_eq!(j["extraction_method"], json!("scip-rust@0.3"));
-        assert_eq!(j["last_verified"], json!(1_700_000_000));
-        // Never-verified is an explicit 0, not an absent key a reader backfills from `ts`.
-        assert_eq!(
-            annotation_json(&Annotation::note("k", "v"))["last_verified"],
-            json!(0)
-        );
-        assert_eq!(j["type"], json!("assumption"));
-        assert_eq!(j["key"], json!("k"));
-        assert_eq!(j["value"], json!("v"));
-        assert_eq!(j["confidence"], json!(0.7));
-        assert_eq!(j["provenance"], json!("manual"));
-        assert_eq!(j["author"], json!("alice"));
-        assert_eq!(j["advisory"], json!(true), "assumption is advisory");
-
-        // A note is NOT advisory; a custom type is NOT advisory.
-        assert_eq!(
-            annotation_json(&Annotation::note("k", "v"))["advisory"],
-            json!(false)
-        );
-        assert_eq!(
-            annotation_json(&Annotation::new("adr-ref", "k", "v"))["advisory"],
-            json!(false),
-            "custom type is not advisory"
-        );
-        // A question IS advisory.
-        assert_eq!(
-            annotation_json(&Annotation::new("question", "k", "v"))["advisory"],
-            json!(true)
-        );
-    }
-
-    // 9. annotation_summary: exact count, per-type tally, has_advisory.
-    #[test]
-    fn annotation_summary_is_exact() {
-        let anns = vec![
-            Annotation::note("a", "1"),
-            Annotation::note("b", "2"),
-            Annotation::new("assumption", "c", "3"),
-        ];
-        let s = annotation_summary(&anns);
-        assert_eq!(s["count"], json!(3), "count is the true total");
-        assert_eq!(s["by_type"]["note"], json!(2));
-        assert_eq!(s["by_type"]["assumption"], json!(1));
-        assert_eq!(s["has_advisory"], json!(true), "an assumption is present");
-
-        let none = annotation_summary(&[]);
-        assert_eq!(none["count"], json!(0));
-        assert_eq!(none["has_advisory"], json!(false));
-    }
-
-    // 10. R4 cap: advisory-class first, then ts desc, truncated to 20; summary count stays TRUE.
-    #[test]
-    fn cap_orders_advisory_first_then_ts_desc_and_truncates() {
-        // 25 annotations: indices 0..25, ts = index. Make a few advisory at LOW ts so the
-        // ordering rule (advisory-first) is observable distinct from pure recency.
-        let mut anns: Vec<Annotation> = Vec::new();
-        for i in 0..25i64 {
-            // ts = i; types: i==0,1 are questions (advisory, oldest); rest are notes.
-            let ty = if i < 2 { "question" } else { "note" };
-            let mut a = Annotation::new(ty, format!("k{i}"), format!("v{i}"));
-            a.ts = i;
-            anns.push(a);
-        }
-        let total = anns.len();
-        let summary = annotation_summary(&anns);
-        assert_eq!(
-            summary["count"],
-            json!(total as u64),
-            "summary is true total (25)"
-        );
-
-        let capped = cap_annotations_for_payload(anns);
-        assert_eq!(capped.len(), MAX_ANNOTATIONS_PER_ENTITY, "capped to 20");
-        // The two advisory (question, ts 0 and 1) must survive the cap despite being the OLDEST,
-        // and appear FIRST. Among the two advisory rows, ts desc → ts=1 before ts=0.
-        assert!(capped[0].is_advisory(), "first row is advisory");
-        assert!(capped[1].is_advisory(), "second row is advisory");
-        assert_eq!(
-            capped[0].ts, 1,
-            "advisory ordered ts desc within advisory class"
-        );
-        assert_eq!(capped[1].ts, 0);
-        // After the two advisory rows, the remaining 18 are the NEWEST notes (ts 24..7), ts desc.
-        assert_eq!(capped[2].ts, 24, "newest note after advisory rows");
-        assert!(
-            capped.iter().all(|a| a.is_advisory() || a.ts >= 7),
-            "the oldest notes (ts 2..6) were dropped by the cap"
         );
     }
 

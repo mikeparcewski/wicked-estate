@@ -321,7 +321,10 @@ fn required_operands_reject_missing_and_surplus_values() {
         ("fingerprint", "<name>"),
         ("changed-since", "<sha>"),
         ("resolve", "<name>"),
-        ("stale-annotations", "<cutoff-unix-seconds>"),
+        (
+            "stale-annotations",
+            "<cutoff-unix-seconds | YYYY-MM-DD> or --older-than",
+        ),
         ("semantics", "<symbol>"),
         ("by-requirement", "<requirement>"),
     ] {
@@ -368,10 +371,20 @@ fn dash_negative_and_single_dash_tokens_keep_their_classes() {
     rejected_with_db(&s, &["clusters", "-x"], "unknown flag \"-x\"");
     // `-1` is an operand: typed, so a negative min-size is refused as a value, not as a flag.
     rejected_with_db(&s, &["clusters", "-1"], "<min-size>");
-    rejected_with_db(&s, &["stale-annotations", "abc"], "<cutoff-unix-seconds>");
+    // Cutoff seconds are digits only (#259), so `-1` is a refused cutoff — still not a flag.
+    rejected_with_db(
+        &s,
+        &["stale-annotations", "-1"],
+        "<cutoff-unix-seconds | YYYY-MM-DD>: cutoff \"-1\"",
+    );
+    rejected_with_db(
+        &s,
+        &["stale-annotations", "abc"],
+        "<cutoff-unix-seconds | YYYY-MM-DD>",
+    );
 
     let fx = indexed("dashes_ok");
-    // `-` is an ordinary name, and a negative cutoff is a valid i64.
+    // `-` is an ordinary name; a cutoff may be the epoch itself.
     let out = run(&fx, &["query", "-", "--db", "graph.db"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(
@@ -379,9 +392,9 @@ fn dash_negative_and_single_dash_tokens_keep_their_classes() {
         "{}",
         stdout(&out)
     );
-    let out = run(&fx, &["stale-annotations", "-1", "--db", "graph.db"]);
+    let out = run(&fx, &["stale-annotations", "0", "--db", "graph.db"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("cutoff -1"), "{}", stdout(&out));
+    assert!(stdout(&out).contains("cutoff 0"), "{}", stdout(&out));
 }
 
 // ── (c) repeats ─────────────────────────────────────────────────────────────────────────────
