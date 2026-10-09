@@ -98,7 +98,7 @@ pub const MAX_SUPPORT_GENERATION: u64 = i64::MAX as u64;
 
 /// An opaque identity string (owner part or `fact_id`) every backend stores exactly: non-empty and
 /// free of NUL, which Postgres `TEXT` cannot hold. Nothing else is checked or rewritten.
-fn check_opaque(what: &str, value: &str) -> Result<()> {
+pub(crate) fn check_opaque(what: &str, value: &str) -> Result<()> {
     if value.is_empty() || value.contains('\0') {
         return Err(Error::Invalid(format!(
             "{what} must be non-empty and contain no NUL byte, got {value:?}"

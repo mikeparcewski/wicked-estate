@@ -189,7 +189,7 @@ dedups by `(source, target, kind)`, keeping the highest-confidence edge.
 - `InfraResolver` ✅ — resolves IaC/tfstate resource refs (resource-to-resource only).
 - `RulesBridgeResolver` ✅ — connects code call sites to real `RuleSet` nodes (`rules-engine:*`
   InvokedBy edges; wired into the production `index` slice since 0.15.0).
-- `scip_edges()` ✅ — ingests a SCIP index (`index.scip`), correlates occurrences to nodes, emits **precise** Scip-tier edges (the precise call tier; supersedes TSG per ADR-007).
+- `scip_evidence()` ✅ — translates a SCIP index (`index.scip`) into the TS-S2C semantic-evidence envelope; `ingest_scip_report_as` correlates it against structural nodes and writes **precise `References`** into the support plane (`docs/ENGINE-CONTRACT.md` §3.5). SCIP has no call role, so it never emits `Calls`; trusted calls come only from a producer that declares `calls` and supplies call sites.
 - `estate_edges()` ✅ — **cross-domain estate join** (see §7): RACF profiles → datasets / MQ assets by **RACF generic-pattern matching** (`%` / `*` / `**`, most-specific-wins), exact→Parsed, generic→Heuristic.
 - **On-demand LSP client library** (`lsp.rs`) 🟡 — a working JSON-RPC stdio client driving installed
   language servers (typescript-language-server, rust-analyzer, pyright) for precise single-symbol

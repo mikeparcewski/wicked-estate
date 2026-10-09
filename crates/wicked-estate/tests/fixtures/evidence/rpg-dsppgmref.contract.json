@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "producer": {"name": "contract-fixture-dsppgmref", "version": "7.5", "class": "compiler", "capabilities": ["references"]},
+  "snapshot": "PAYLIB/PAYCALC",
+  "documents": [{"path": "qrpglesrc/paycalc.rpgle", "position_encoding": "unspecified"}],
+  "facts": [
+    {"kind": "reference", "fact_id": "PAYLIB/PAYCALC -> *LIBL/TAXRATE *FILE", "symbol": "*FILE TAXRATE",
+     "site": {"document": "qrpglesrc/paycalc.rpgle", "range": {"start_line": 0, "start_col": 0, "end_line": 0, "end_col": 0}}},
+    {"kind": "call", "fact_id": "PAYLIB/PAYCALC -> *LIBL/TAXCALC *PGM", "target": {"resolution": "exact", "symbol": "*PGM TAXCALC"},
+     "site": {"document": "qrpglesrc/paycalc.rpgle", "range": {"start_line": 0, "start_col": 0, "end_line": 0, "end_col": 0}}}
+  ]
+}

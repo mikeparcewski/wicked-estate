@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "producer": {"name": "contract-fixture-plscope", "version": "23ai", "class": "compiler", "capabilities": ["definitions", "references", "calls"]},
+  "snapshot": "HR.HR_PKG",
+  "generation": 7,
+  "documents": [{"path": "db/hr_pkg.pkb", "position_encoding": "utf8"}],
+  "facts": [
+    {"kind": "definition", "fact_id": "HR_PKG:DEFINITION:3", "symbol": "6F1C0A9E2B7D4C58A1E3F0B2C4D6E8F0", "name": "RAISE",
+     "site": {"document": "db/hr_pkg.pkb", "range": {"start_line": 2, "start_col": 12, "end_line": 2, "end_col": 17}}},
+    {"kind": "definition", "fact_id": "HR_PKG:DEFINITION:9", "symbol": "0B2C4D6E8F06F1C0A9E2B7D4C58A1E3F", "name": "Raise",
+     "site": {"document": "db/hr_pkg.pkb", "range": {"start_line": 8, "start_col": 12, "end_line": 8, "end_col": 19}}},
+    {"kind": "definition", "fact_id": "HR_PKG:DEFINITION:15", "symbol": "A1E3F0B2C4D6E8F06F1C0A9E2B7D4C58", "name": "GIVE_BONUS",
+     "site": {"document": "db/hr_pkg.pkb", "range": {"start_line": 14, "start_col": 12, "end_line": 14, "end_col": 22}}},
+    {"kind": "call", "fact_id": "HR_PKG:CALL:17", "target": {"resolution": "exact", "symbol": "6F1C0A9E2B7D4C58A1E3F0B2C4D6E8F0"},
+     "site": {"document": "db/hr_pkg.pkb", "range": {"start_line": 16, "start_col": 4, "end_line": 16, "end_col": 9}}},
+    {"kind": "call", "fact_id": "HR_PKG:CALL:18", "target": {"resolution": "exact", "symbol": "0B2C4D6E8F06F1C0A9E2B7D4C58A1E3F"},
+     "site": {"document": "db/hr_pkg.pkb", "range": {"start_line": 17, "start_col": 4, "end_line": 17, "end_col": 11}}},
+    {"kind": "call", "fact_id": "HR_PKG:CALL:19", "target": {"resolution": "dynamic"},
+     "site": {"document": "db/hr_pkg.pkb", "range": {"start_line": 18, "start_col": 4, "end_line": 18, "end_col": 21}}}
+  ]
+}

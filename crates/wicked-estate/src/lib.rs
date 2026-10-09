@@ -2280,17 +2280,13 @@ pub fn blast_radius_by_name(store: &dyn GraphRead, name: &str, depth: u32) -> Re
     Ok(out)
 }
 
-/// Ingest a SCIP index file into the store: reads `scip_path`, correlates its occurrences
-/// against nodes already in the store, and upserts the resulting confidence-1.0 edges.
-///
-/// `root` is unused at this layer (SCIP paths are repo-relative already); it is accepted for
-/// caller symmetry with `index_path`.
-///
-/// Returns the number of edges upserted.
+/// Ingest a SCIP index file into the store's **support plane** (TS-S2C) and return the number of
+/// distinct public edges its facts now support (several sites can support one edge). See
+/// [`ingest_scip_report_as`] for the full report.
 ///
 /// # Prerequisite
 /// The project must already be indexed (`index_path`) so that nodes exist to correlate against.
-/// Running `ingest_scip` on an empty store produces 0 edges (no matching nodes → nothing to wire).
+/// Running `ingest_scip` on an empty store projects nothing (no nodes → nothing to correlate).
 pub fn ingest_scip(
     store: &mut dyn GraphStoreMutExt,
     root: &Path,
@@ -2299,24 +2295,55 @@ pub fn ingest_scip(
     ingest_scip_as(store, root, scip_path, None)
 }
 
-/// [`ingest_scip`] against one repo of a multi-repo graph.
-///
-/// SCIP documents carry REPO-relative paths, while a labelled repo's nodes carry `<label>/…`. The
-/// correlation is done on the repo-relative form (the label is stripped from a scratch copy of the
-/// nodes and re-applied to the resulting edge locations), so a `.scip` file produced by a plain
-/// `scip-typescript` run correlates without the indexer having to know about labels. Without this
-/// the correlation matches nothing and reports "0 precise edges" — a silent no-op.
+/// [`ingest_scip`] against one repo of a multi-repo graph; the count of distinct edges supported.
 pub fn ingest_scip_as(
     store: &mut dyn GraphStoreMutExt,
-    _root: &Path,
+    root: &Path,
     scip_path: &Path,
     repo: Option<&str>,
 ) -> Result<usize> {
-    // Validate here too, not only in `index_path_as` (Copilot on #117). `repo` becomes the
-    // `<label>/` prefix that is stripped from SCIP's relative paths and re-applied to the edge
-    // locations written back, so an unvalidated label — one containing `/` or `..` — writes
-    // nonsensical or forged locations. Label validation is the single thing that makes path
-    // forging unreachable; a second entry point that skips it is a hole in that guarantee.
+    Ok(ingest_scip_report_as(store, root, scip_path, repo)?.edges_projected)
+}
+
+/// The support-owner snapshot of a SCIP index: `<repo label or .>:<index path>` — the index path
+/// relative to `root` when it lies under it (with `/` separators), else its file name. It names
+/// the stable unit a re-run replaces, never the index's contents.
+pub fn scip_snapshot(root: &Path, scip_path: &Path, repo: Option<&str>) -> String {
+    let rel = std::fs::canonicalize(root)
+        .ok()
+        .zip(std::fs::canonicalize(scip_path).ok())
+        .and_then(|(r, p)| p.strip_prefix(&r).ok().map(Path::to_path_buf))
+        .or_else(|| scip_path.strip_prefix(root).ok().map(Path::to_path_buf))
+        .map(|p| {
+            p.components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .unwrap_or_else(|| {
+            scip_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| scip_path.to_string_lossy().into_owned())
+        });
+    format!("{}:{rel}", repo.unwrap_or("."))
+}
+
+/// Translate a SCIP index (`wicked_estate_resolve::scip_evidence`) and ingest it with
+/// [`ingest_semantic_evidence`]. SCIP declares definitions and references only — it has no call
+/// role — so this never writes a `Calls` edge. The report folds in what the adapter dropped.
+///
+/// SCIP documents carry REPO-relative paths, while a labelled repo's nodes carry `<label>/…`; the
+/// label is stripped for correlation and re-applied to the written locations (see
+/// [`ingest_semantic_evidence`]).
+pub fn ingest_scip_report_as(
+    store: &mut dyn GraphStoreMutExt,
+    root: &Path,
+    scip_path: &Path,
+    repo: Option<&str>,
+) -> Result<wicked_estate_core::evidence::EvidenceReport> {
+    // Validate here too, not only in `index_path_as` (Copilot on #117): the label becomes the
+    // `<label>/` prefix re-applied to written locations, so an unvalidated one forges paths.
     if let Some(label) = repo {
         repo_scope::validate_label(label)?;
     }
@@ -2326,31 +2353,70 @@ pub fn ingest_scip_as(
             scip_path
         )))
     })?;
+    let translated =
+        wicked_estate_resolve::scip_evidence(&bytes, &scip_snapshot(root, scip_path, repo))?;
+    let mut report = ingest_semantic_evidence(store, Some(root), &translated.evidence, repo)?;
+    for (reason, n) in translated.skipped {
+        report.skip(reason, n);
+    }
+    Ok(report)
+}
 
-    let mut nodes = store.all_nodes()?;
+/// Ingest one [`SemanticEvidence`](wicked_estate_core::evidence::SemanticEvidence) envelope:
+/// correlate it against the graph's nodes and make the accepted facts its owner's complete
+/// support set (`docs/ENGINE-CONTRACT.md` §3.5). Nothing is written for an invalid envelope or a
+/// rejected generation.
+///
+/// With `repo`, only that repo's nodes (`<label>/…`) are correlated, the documents are read as
+/// repo-relative, and written locations carry the label. `root` is the repo checkout, used only to
+/// read a document's text when its columns are not UTF-8.
+pub fn ingest_semantic_evidence(
+    store: &mut dyn GraphStoreMutExt,
+    root: Option<&Path>,
+    evidence: &wicked_estate_core::evidence::SemanticEvidence,
+    repo: Option<&str>,
+) -> Result<wicked_estate_core::evidence::EvidenceReport> {
+    if let Some(label) = repo {
+        repo_scope::validate_label(label)?;
+    }
     let prefix = repo.map(repo_scope::prefix);
-    if let Some(p) = &prefix {
-        for n in &mut nodes {
-            if let Some(rest) = n.location.file.strip_prefix(p.as_str()) {
-                n.location.file = rest.to_string();
+    let nodes: Vec<Node> = store
+        .all_nodes()?
+        .into_iter()
+        .filter_map(|mut n| match &prefix {
+            None => Some(n),
+            Some(p) => {
+                let rest = n.location.file.strip_prefix(p.as_str())?.to_string();
+                n.location.file = rest;
+                Some(n)
             }
-        }
-    }
-    let mut edges = wicked_estate_resolve::scip_edges(&bytes, &nodes)?;
+        })
+        .collect();
+    let read = |doc: &str| -> Option<String> { std::fs::read_to_string(root?.join(doc)).ok() };
+    let mut projection = wicked_estate_core::evidence::project_evidence(evidence, &nodes, &read)?;
     if let Some(p) = &prefix {
-        for e in &mut edges {
-            if let Some(loc) = &mut e.location {
-                loc.file = format!("{p}{}", loc.file);
-            }
-        }
+        projection.facts = projection
+            .facts
+            .into_iter()
+            .map(|f| {
+                let id = f.fact_id.clone();
+                let mut edge = f.edge;
+                if let Some(loc) = &mut edge.location {
+                    loc.file = format!("{p}{}", loc.file);
+                }
+                wicked_estate_core::SupportFact::new(id, edge)
+            })
+            .collect::<wicked_estate_core::Result<_>>()?;
     }
-    let count = edges.len();
-
-    store.begin_batch()?;
-    store.upsert_edges(&edges)?;
-    store.commit_batch()?;
-
-    Ok(count)
+    let report = wicked_estate_core::evidence::apply_projection(
+        &mut *store,
+        projection,
+        evidence.generation,
+    )?;
+    if !report.replayed {
+        store.version_bump();
+    }
+    Ok(report)
 }
 
 /// The most important symbols by global PageRank (the "where do I even start" view for a complex
