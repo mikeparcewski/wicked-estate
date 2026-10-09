@@ -967,6 +967,59 @@ fn full_and_incremental_index_of_one_tree_agree() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// #229 — a leaf edit forces its direct caller `mid` to re-extract (one hop), and `remove_file`
+/// deletes every edge SOURCED at `mid`'s nodes — including the call_argument edge from `top`'s
+/// argument into `mid`'s parameter, which `top` (unchanged, not re-extracted) owns. The incremental
+/// graph lost exactly those edges (446 on a 564-file TS repo); it must equal a full index.
+#[test]
+fn incremental_edit_keeps_call_derived_edges_owned_by_unforced_callers_229() {
+    let files = [
+        (
+            "leaf.ts",
+            "export function leaf(seed: string): string {\n    return seed;\n}\n",
+        ),
+        (
+            "mid.ts",
+            "import { leaf } from './leaf';\nexport function mid(seed: string): string {\n    const midValue = leaf(seed);\n    return midValue;\n}\n",
+        ),
+        (
+            "top.ts",
+            "import { mid } from './mid';\nexport function top(seed: string): string {\n    const topValue = mid(seed);\n    return topValue;\n}\n",
+        ),
+    ];
+    let (root, mut incremental) = indexed_typescript_files("incremental_collateral_229", &files);
+    fs::write(
+        root.join("leaf.ts"),
+        format!("{}// one-line edit\n", files[0].1),
+    )
+    .unwrap();
+    wicked_estate::index_path(&mut incremental, &root).expect("incremental re-index");
+
+    let full = {
+        let mut store = SqliteStore::in_memory().expect("open sqlite");
+        wicked_estate::index_path(&mut store, &root).expect("full index of the edited tree");
+        edge_triples(&store)
+    };
+    let inc = edge_triples(&incremental);
+    let lost: Vec<_> = full.difference(&inc).collect();
+    let gained: Vec<_> = inc.difference(&full).collect();
+    assert!(
+        lost.is_empty() && gained.is_empty(),
+        "incremental must equal full after a leaf edit; lost {lost:?}, gained {gained:?}"
+    );
+    // The edge the bug dropped: the call_argument hop `top`'s `seed` → `mid`'s parameter, sourced
+    // at mid's parameter node but owned by top's call site.
+    assert!(
+        GraphRead::all_edges(&incremental).unwrap().iter().any(|e| {
+            e.kind == edge_tags::other(edge_tags::FLOWS_TO)
+                && e.source.0.contains("mid().:local:seed")
+                && e.location.as_ref().is_some_and(|l| l.file == "top.ts")
+        }),
+        "top's argument must still flow into mid's parameter after the leaf edit"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 /// C5a — the canonical Angular/RxJS shape. A `return` inside a callback is the callback's value;
 /// attributing it to the enclosing method asserted, at confidence 1.00, that `loadCustomer`
 /// returns the subscribe payload when it returns an entirely different local.

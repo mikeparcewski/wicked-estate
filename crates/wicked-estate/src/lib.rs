@@ -78,7 +78,7 @@ use wicked_estate_core::{
     ChangeOp, Edge, EdgeKind, Extraction, Extractor, FlowEvidence, FlowFact, FlowSemantics,
     GraphRead, GraphStats, Language, Location, Node, NodeKind, NodeSemantics, RepoInfo,
     ResolutionTier, Resolver, Result, SourceFile, Span, Symbol, SymbolId, SymbolIndex, SymbolQuery,
-    TraversalSpec, edge_tags, is_structural_symbol, merge_flow_edges,
+    TraversalSpec, edge_tags, is_flow_edge, is_structural_symbol, merge_flow_edges,
 };
 use wicked_estate_extract::{
     BlazeBrlExtractor, CicsSqlExtractor, DrlExtractor, ExtraEdgeExtractor, HlasmExtractor,
@@ -1298,6 +1298,15 @@ pub fn index_path_as(
     // call-site facts — the same full-vs-incremental divergence this change exists to remove.
     // Pinned by `an_edit_that_first_makes_a_callee_flow_capable_forces_its_callers`.
     let mut forced_value_flow_callers: HashSet<String> = HashSet::new();
+    // #229: edges a forced, content-UNCHANGED file's re-extraction deletes on behalf of OTHER,
+    // unchanged files. `remove_file` deletes every edge SOURCED at the file's nodes, and a
+    // call-derived `call_argument` edge (callee parameter ← caller argument) is sourced at the
+    // callee but OWNED by the caller (its location is the caller's call site). Forcing the
+    // one-hop callers of an edit re-extracts them, so their own callers' call-derived edges into
+    // them vanished and nothing re-emitted them (446 `flows_to` lost on a 564-file TS repo, 97 on
+    // the 905-file one). The forced file's extraction is byte-identical, so those edges are
+    // still exactly right: they are captured here and restored after the write.
+    let mut collateral_edges: Vec<Edge> = Vec::new();
     if !force_full && !changed_seed.is_empty() {
         let mut changed_symbols: HashSet<SymbolId> = HashSet::new();
         let mut file_by_symbol: HashMap<SymbolId, String> = HashMap::new();
@@ -1307,7 +1316,8 @@ pub fn index_path_as(
             }
             file_by_symbol.insert(node.symbol, node.location.file);
         }
-        for edge in store.all_edges()? {
+        let all_edges = store.all_edges()?;
+        for edge in &all_edges {
             // Only a DIRECT caller of a changed callee holds call-site facts about it.
             if edge.kind != EdgeKind::Calls || !changed_symbols.contains(&edge.target) {
                 continue;
@@ -1324,6 +1334,40 @@ pub fn index_path_as(
                     && work_by_rel.contains_key(candidate)
                 {
                     forced_value_flow_callers.insert(candidate.to_string());
+                }
+            }
+        }
+        // Files re-extracted with identical content: the forced value-flow callers, plus the
+        // Decision-J forced importers whose digest did not change.
+        let unchanged_forced: HashSet<&str> = changed_seed
+            .iter()
+            .filter(|rel| {
+                stored_digest_by_rel
+                    .get(rel.as_str())
+                    .and_then(|d| d.as_deref())
+                    .zip(work_by_rel.get(rel.as_str()))
+                    .is_some_and(|(stored, fw)| stored == fw.digest)
+            })
+            .map(String::as_str)
+            .chain(forced_value_flow_callers.iter().map(String::as_str))
+            .collect();
+        if !unchanged_forced.is_empty() {
+            for edge in all_edges {
+                let Some(owner) = edge.location.as_ref().map(|l| l.file.as_str()) else {
+                    continue;
+                };
+                // Only value-flow edges: the call-derived hops are the edges another file's
+                // facts source at a callee's nodes (codex review: keep the restore that narrow).
+                if !is_flow_edge(&edge) {
+                    continue;
+                }
+                let source_file = file_by_symbol.get(&edge.source).map(String::as_str);
+                if source_file.is_some_and(|f| unchanged_forced.contains(f))
+                    && owner != source_file.unwrap_or_default()
+                    && !changed_seed.contains(owner)
+                    && !forced_value_flow_callers.contains(owner)
+                {
+                    collateral_edges.push(edge);
                 }
             }
         }
@@ -1724,6 +1768,23 @@ pub fn index_path_as(
                 "BACKFILL: re-resolved {backfill_resolved} previously-parked ref(s) into edges; \
                  {backfill_still_parked} candidate(s) still parked"
             );
+        }
+    }
+
+    // #229: restore the edges unchanged files owned that the forced re-extraction deleted (see
+    // `collateral_edges`), when both endpoints exist again. Before PageRank and the dangling
+    // prune, so both see the same graph a full index would.
+    if !collateral_edges.is_empty() {
+        let mut restore = Vec::with_capacity(collateral_edges.len());
+        for edge in collateral_edges {
+            if store.get_node(&edge.source)?.is_some() && store.get_node(&edge.target)?.is_some() {
+                restore.push(edge);
+            }
+        }
+        if !restore.is_empty() {
+            store.begin_batch()?;
+            store.upsert_edges(&restore)?;
+            store.commit_batch()?;
         }
     }
 
