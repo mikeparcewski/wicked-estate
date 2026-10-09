@@ -1215,3 +1215,154 @@ fn an_edit_that_first_makes_a_callee_flow_capable_forces_its_callers() {
     );
     let _ = fs::remove_dir_all(root);
 }
+
+/// #210 — a callee with no `return <ident>` has no return endpoint, so a call into it mints no
+/// `call_result` hop (it used to be minted and then pruned as dangling, orphaning the consumer);
+/// the argument hop into its parameter is unaffected.
+#[test]
+fn call_into_a_void_callee_mints_no_call_result_hop_210() {
+    let source = "export function voidFn(input: string): void {}\n\
+                  export function caller(input: string): void { const dangling = voidFn(input); }\n";
+    let (root, store) = indexed_typescript("void_callee_210", source);
+    let names: BTreeMap<SymbolId, String> = GraphRead::all_nodes(&store)
+        .unwrap()
+        .into_iter()
+        .map(|n| (n.symbol, n.name))
+        .collect();
+    for e in GraphRead::all_edges(&store).unwrap() {
+        assert!(
+            names.contains_key(&e.source) && names.contains_key(&e.target),
+            "no edge may point at a missing node: {e:?}"
+        );
+        if e.kind == edge_tags::other(edge_tags::FLOWS_TO) {
+            assert_ne!(
+                names[&e.source], "dangling",
+                "a void callee has no result to flow into `dangling`: {e:?}"
+            );
+        }
+    }
+    let pairs = semantic_flow_name_pairs(&store);
+    assert!(
+        pairs.contains(&("input".to_string(), "input".to_string())),
+        "the argument hop survives; got {pairs:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// #208 / #214 — a property read's identity is its `object.property` path (a prettier wrap and
+/// optional chaining mint the SAME node), and the node is `Synthetic`, not a function-owned `Field`.
+#[test]
+fn property_reads_are_path_keyed_synthetic_nodes_208_214() {
+    let source = "export function read(customer: any, raw: any): void {\n\
+                  \x20   const a = customer.id;\n\
+                  \x20   const b = customer\n\
+                  \x20       .id;\n\
+                  \x20   const c = raw?.name;\n\
+                  \x20   const d = raw.name;\n\
+                  }\n";
+    let (root, store) = indexed_typescript("property_identity_208", source);
+    let props: Vec<_> = GraphRead::all_nodes(&store)
+        .unwrap()
+        .into_iter()
+        .filter(|n| n.symbol.0.contains(":property:"))
+        .collect();
+    let names: BTreeSet<String> = props.iter().map(|n| n.name.clone()).collect();
+    assert_eq!(
+        names,
+        ["customer.id", "raw.name"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>(),
+        "formatting and `?.` never change a property read's identity; got {props:?}"
+    );
+    assert_eq!(props.len(), 2, "one node per property path: {props:?}");
+    assert!(
+        props
+            .iter()
+            .all(|n| n.kind == wicked_estate_core::NodeKind::Synthetic),
+        "a property read is Synthetic, not a Field: {props:?}"
+    );
+    let pairs = semantic_flow_name_pairs(&store);
+    for local in ["a", "b"] {
+        assert!(pairs.contains(&("customer.id".to_string(), local.to_string())));
+    }
+    for local in ["c", "d"] {
+        assert!(pairs.contains(&("raw.name".to_string(), local.to_string())));
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+/// #217 — a reassignment is a value hop: `tainted` reaches `out`, so the lineage of the return
+/// value is no longer silently partial.
+#[test]
+fn reassignment_is_a_value_hop_217() {
+    let source = "export function flow(trusted: string, tainted: string): string {\n\
+                  \x20   let out = trusted;\n\
+                  \x20   out = tainted;\n\
+                  \x20   return out;\n\
+                  }\n";
+    let (root, store) = indexed_typescript("reassignment_217", source);
+    let pairs = semantic_flow_name_pairs(&store);
+    assert!(
+        pairs.contains(&("trusted".to_string(), "out".to_string())),
+        "{pairs:?}"
+    );
+    assert!(
+        pairs.contains(&("tainted".to_string(), "out".to_string())),
+        "the reassignment must be recorded; got {pairs:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// #209 — two call sites in one owner passing the same identifier mint one value node; which
+/// site's location it keeps must not depend on hash order, so repeated fresh indexes of one tree
+/// store identical node and edge locations.
+#[test]
+fn value_flow_locations_are_deterministic_across_indexes_209() {
+    let source = "export function sink(v: string): void {}\n\
+                  export function twice(x: string): void {\n\
+                  \x20   sink(x);\n\
+                  \x20   sink(x);\n\
+                  \x20   const y = x;\n\
+                  \x20   sink(y);\n\
+                  \x20   sink(y);\n\
+                  }\n";
+    let snapshot = |tag: &str| {
+        let (root, store) = indexed_typescript(tag, source);
+        let nodes: BTreeMap<String, (u32, u32)> = GraphRead::all_nodes(&store)
+            .unwrap()
+            .into_iter()
+            .map(|n| {
+                (
+                    n.symbol.0,
+                    (n.location.span.start_byte, n.location.span.end_byte),
+                )
+            })
+            .collect();
+        let edges: BTreeSet<(String, String, Option<u32>)> = GraphRead::all_edges(&store)
+            .unwrap()
+            .into_iter()
+            .map(|e| {
+                (
+                    e.source.0,
+                    e.target.0,
+                    e.location.map(|l| l.span.start_byte),
+                )
+            })
+            .collect();
+        let _ = fs::remove_dir_all(root);
+        (nodes, edges)
+    };
+    let first = snapshot("determinism_209_a");
+    for tag in [
+        "determinism_209_b",
+        "determinism_209_c",
+        "determinism_209_d",
+    ] {
+        assert_eq!(
+            snapshot(tag),
+            first,
+            "index {tag} stored different locations"
+        );
+    }
+}
