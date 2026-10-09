@@ -499,6 +499,11 @@ impl<H: GraphRead + Sync + ?Sized> GraphRead for OverlayReader<'_, H> {
         self.home.file_content(file)
     }
 
+    // #14b file_call_refs — HOME-ONLY (the home indexer's per-file record, #220).
+    fn file_call_refs(&self, file: &str) -> Result<Option<String>> {
+        self.home.file_call_refs(file)
+    }
+
     // #15 symbol_source — HOME-ONLY (home content slice).
     fn symbol_source(&self, node: &Node) -> Result<Option<String>> {
         self.home.symbol_source(node)

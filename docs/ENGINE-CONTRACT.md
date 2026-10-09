@@ -252,10 +252,18 @@ function f(a: string, b: string) {
 }
 ```
 
-The two `c`s are **distinct variables** that share one value slot, because slot identity is
-owner-scoped, not block-scoped (`f:local:c`). The merge keeps both facts, but a read of `c` after
-the block (say a `return c`) sees the outer `c`, whose fact is `may_influence`: the merged
-`value_preserving` belongs only to the inner `c`. Scope-sensitive slot identity is TS-S2 work.
+The two `c`s are **distinct variables**. Until #216 they shared one value slot, because slot
+identity was owner-scoped, not block-scoped (`f:local:c`): the merge kept both facts, but a read of
+`c` after the block (say a `return c`) saw the outer `c`, whose fact is `may_influence`, while the
+merged `value_preserving` belonged only to the inner `c`.
+
+Since #216 (id scheme 4) slot identity follows the binding. A reference resolves to the innermost
+declaration of its name whose scope contains it (`@flow.scope*` / `@flow.declare.*` in the query
+files). A binding of a nested block or callback is `{owner}:local:{name}@{n}`, where `n` is the
+scope's ordinal inside the owner, so a line shift keeps the id. A binding of the owner's own body
+keeps `{owner}:local:{name}`, and the owner's parameter is `{owner}:param:{name}`. The two `c`s
+above are now `f:local:c` and `f:local:c@1`, and each carries only its own fact. The merge lattice
+below still governs any remaining collision.
 
 Measured on `c4fa938`, exactly one survived (`construct="assignment"`, byte 116) and the
 may-influence contribution vanished with nothing recording that it had been asserted.

@@ -503,9 +503,9 @@ fn angular_fixture_flows_to_lineage_recovers_route_and_input_chains() {
     let customer_id =
         one_symbol_named_with(&store, "customerId", "CustomerComponent#:field:customerId");
     let load_customer_id =
-        one_symbol_named_with(&store, "id", "CustomerComponent#loadCustomer().:local:id");
+        one_symbol_named_with(&store, "id", "CustomerComponent#loadCustomer().:param:id");
     let service_get_customer_id =
-        one_symbol_named_with(&store, "id", "CustomerService#getCustomer().:local:id");
+        one_symbol_named_with(&store, "id", "CustomerService#getCustomer().:param:id");
     let service_return = one_symbol_named_with(
         &store,
         "getCustomer.return",
@@ -644,9 +644,9 @@ fn incremental_callee_only_edit_preserves_call_derived_value_flow() {
     let customer_id = one_symbol_named_with(
         &store,
         "customerId",
-        "CustomerComponent#loadCustomer().:local:customerId",
+        "CustomerComponent#loadCustomer().:param:customerId",
     );
-    let service_id = one_symbol_named_with(&store, "id", "CustomerService#getCustomer().:local:id");
+    let service_id = one_symbol_named_with(&store, "id", "CustomerService#getCustomer().:param:id");
     let service_return = one_symbol_named_with(
         &store,
         "getCustomer.return",
@@ -712,9 +712,9 @@ fn incremental_backfill_adds_call_value_flow_for_previously_parked_call() {
     let customer_id = one_symbol_named_with(
         &store,
         "customerId",
-        "CustomerComponent#loadCustomer().:local:customerId",
+        "CustomerComponent#loadCustomer().:param:customerId",
     );
-    let service_id = one_symbol_named_with(&store, "id", "getCustomer().:local:id");
+    let service_id = one_symbol_named_with(&store, "id", "getCustomer().:param:id");
     let service_return =
         one_symbol_named_with(&store, "getCustomer.return", "getCustomer().:return:value");
     let customer = one_symbol_named_with(
@@ -902,12 +902,13 @@ fn value_nodes_are_reachable_from_a_real_node() {
     );
 }
 
-/// C2 — a leaf edit must force only the callee's DIRECT callers into re-extraction. The transitive
-/// reverse-`Calls` fixed point this replaces turned a one-line edit to a leaf test file into a
+/// C2 — a leaf edit must not force the callee's callers' callers into re-extraction. The transitive
+/// reverse-`Calls` fixed point that did turned a one-line edit to a leaf test file into a
 /// 719-of-905-file, 20.7 s, 1.2 GB re-index on a real repo — three times its own full index — and
-/// `wicked-estate watch` paid it on every save.
+/// `wicked-estate watch` paid it on every save. #220: the DIRECT caller is not re-extracted either
+/// once its value-flow call refs are on record — its flows into the leaf are re-derived from them.
 #[test]
-fn incremental_leaf_edit_forces_only_direct_callers() {
+fn incremental_leaf_edit_reextracts_only_the_leaf_220() {
     let leaf = r#"
         export function leaf(seed: string): string {
             return seed;
@@ -972,11 +973,11 @@ fn incremental_leaf_edit_forces_only_direct_callers() {
         .collect();
     assert_eq!(
         touched,
-        ["leaf.ts", "mid.ts"]
+        ["leaf.ts"]
             .into_iter()
             .map(str::to_string)
             .collect::<BTreeSet<_>>(),
-        "only the edited leaf and its DIRECT caller may be re-extracted"
+        "only the edited leaf is re-extracted; its caller's flows are re-derived from its record"
     );
 
     // …and the one-hop invariant the forcing exists for still holds.
@@ -1064,7 +1065,7 @@ fn incremental_edit_keeps_call_derived_edges_owned_by_unforced_callers_229() {
     assert!(
         GraphRead::all_edges(&incremental).unwrap().iter().any(|e| {
             e.kind == edge_tags::other(edge_tags::FLOWS_TO)
-                && e.source.0.contains("mid().:local:seed")
+                && e.source.0.contains("mid().:param:seed")
                 && e.location.as_ref().is_some_and(|l| l.file == "top.ts")
         }),
         "top's argument must still flow into mid's parameter after the leaf edit"
@@ -1710,4 +1711,554 @@ fn rebinding_callables_neither_join_the_class_field_nor_leak_returns() {
         );
     }
     let _ = fs::remove_dir_all(root);
+}
+
+// ── #216: block-scope and callback-parameter shadowing keep distinct values ──
+
+/// Every value slot whose node name is `name`.
+fn value_slots_named(store: &SqliteStore, name: &str) -> BTreeSet<SymbolId> {
+    GraphRead::all_nodes(store)
+        .unwrap()
+        .into_iter()
+        .filter(|node| node.name == name && node.is_value_flow_node())
+        .map(|node| node.symbol)
+        .collect()
+}
+
+/// Everything forward `flows_to` lineage reaches from `seed`.
+fn flows_reached(store: &SqliteStore, seed: &SymbolId) -> BTreeSet<SymbolId> {
+    let lineage = Lineage
+        .invoke(
+            store,
+            &serde_json::json!({"symbol": seed.as_str(), "depth": 8, "relation": "flows_to"}),
+        )
+        .unwrap();
+    lineage.content["dependencies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| SymbolId(node["symbol"].as_str().unwrap().to_string()))
+        .collect()
+}
+
+#[test]
+fn a_callback_parameter_shadowing_the_owners_parameter_is_a_distinct_value_216() {
+    let source = r#"
+        export function use(x: string): string { return x; }
+        export function render(items: any, id: string) {
+            items.forEach(function (id: string) {
+                const label = id;
+                use(label);
+            });
+        }
+    "#;
+    let (root, store) = indexed_typescript("shadow_callback_216", source);
+    let outer = one_symbol_named_with(&store, "id", "render().:param:id:");
+    let inner = one_symbol_named_with(&store, "id", "render().:local:id@");
+    let label = one_symbol_named_with(&store, "label", "render().:local:label@");
+    let pairs = semantic_flow_symbol_pairs(&store);
+    assert!(
+        pairs.contains(&(inner.clone(), label.clone())),
+        "the callback's own `id` flows to `label`: {pairs:?}"
+    );
+    assert!(
+        !pairs.contains(&(outer.clone(), label.clone())),
+        "the OUTER parameter must not reach the callback's `label`: {pairs:?}"
+    );
+    let reached = flows_reached(&store, &outer);
+    assert!(
+        !reached.contains(&label) && !reached.iter().any(|s| s.as_str().contains("use().")),
+        "no false trail from the outer parameter across the iteration boundary: {reached:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_block_scoped_const_shadowing_a_parameter_is_a_distinct_value_216() {
+    let source = r#"
+        export function pick(id: string): string {
+            {
+                const id = "constant";
+                const chosen = id;
+                return chosen;
+            }
+        }
+    "#;
+    let (root, store) = indexed_typescript("shadow_block_216", source);
+    let param = one_symbol_named_with(&store, "id", "pick().:param:id:");
+    let chosen = one_symbol_named_with(&store, "chosen", "pick().:local:chosen@");
+    let pairs = semantic_flow_symbol_pairs(&store);
+    assert!(
+        !pairs.contains(&(param.clone(), chosen.clone())),
+        "the parameter is not asserted to reach a string literal's binding: {pairs:?}"
+    );
+    let reached = flows_reached(&store, &param);
+    assert!(
+        reached.is_empty(),
+        "nothing in pick() reads the parameter: {reached:?}"
+    );
+    let inner_id = value_slots_named(&store, "id")
+        .into_iter()
+        .find(|s| s.as_str().contains(":local:id@"))
+        .expect("the inner `id` read binds the block's own slot");
+    assert!(
+        pairs.contains(&(inner_id, chosen)),
+        "`chosen` reads the block's `id`: {pairs:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// docs/ENGINE-CONTRACT.md §3.2's shadowing example: the two `c`s are distinct variables and now
+/// distinct slots, so the may-influence fact of the outer `c` and the value-preserving fact of the
+/// inner `c` no longer fold onto one edge.
+#[test]
+fn engine_contract_shadowing_example_keeps_both_facts_apart_216() {
+    let source = r#"
+        export function f(a: string, b: string): string {
+            const c = a + b;
+            if (b) { const c = a; }
+            return c;
+        }
+    "#;
+    let (root, store) = indexed_typescript("contract_shadow_216", source);
+    let cs = value_slots_named(&store, "c");
+    assert_eq!(cs.len(), 2, "two `c` bindings, two slots: {cs:?}");
+    let outer = one_symbol_named_with(&store, "c", "f().:local:c:");
+    let inner = cs.iter().find(|s| **s != outer).unwrap().clone();
+    assert!(inner.as_str().contains(":local:c@"), "{inner:?}");
+    let a = one_symbol_named_with(&store, "a", "f().:param:a:");
+    let edges = semantic_flow_edges(&store);
+    let construct_of = |consumer: &SymbolId| {
+        edges
+            .iter()
+            .find(|e| &e.source == consumer && e.target == a)
+            .and_then(|e| e.metadata.get("constructs").cloned())
+    };
+    assert_eq!(
+        construct_of(&outer),
+        Some(serde_json::json!(["expression"])),
+        "the outer `c` carries only its own may-influence fact"
+    );
+    assert_eq!(
+        construct_of(&inner),
+        Some(serde_json::json!(["assignment"])),
+        "the inner `c` carries only its own value-preserving fact"
+    );
+    let ret = one_symbol_named_with(&store, "f.return", "f().:return:value");
+    let pairs = semantic_flow_symbol_pairs(&store);
+    assert!(pairs.contains(&(outer, ret.clone())));
+    assert!(
+        !pairs.contains(&(inner, ret)),
+        "`return c` reads the outer `c`"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_parameter_read_joins_the_parameter_slot_and_keeps_its_kind_216() {
+    let source = r#"
+        export function g(id: string): string {
+            const x = id;
+            return x;
+        }
+        export const h = (a: string): string => {
+            const b = a;
+            return b;
+        };
+        export function v(a: string): string {
+            if (a) { var w = a; }
+            return w;
+        }
+    "#;
+    let (root, store) = indexed_typescript("param_slot_216", source);
+    let id = one_symbol_named_with(&store, "id", "g().:param:id:");
+    let node = GraphRead::get_node(&store, &id).unwrap().unwrap();
+    assert_eq!(
+        node.kind,
+        wicked_estate_core::NodeKind::Parameter,
+        "a read must not overwrite the parameter node as a Variable"
+    );
+    assert!(
+        value_slots_named(&store, "id")
+            .iter()
+            .all(|s| !s.as_str().contains(":local:id")),
+        "the parameter has one slot, not a second `:local:` one"
+    );
+    let x = one_symbol_named_with(&store, "x", "g().:local:x:");
+    assert!(semantic_flow_symbol_pairs(&store).contains(&(id, x)));
+
+    // An arrow bound to a const is its own definition: its parameter and body keep the plain
+    // owner-level ids (no scope suffix).
+    let b = one_symbol_named_with(&store, "b", ":local:b:");
+    assert!(!b.as_str().contains('@'), "{b:?}");
+    let pairs = semantic_flow_name_pairs(&store);
+    assert!(
+        pairs.contains(&("a".to_string(), "b".to_string())),
+        "{pairs:?}"
+    );
+
+    // `var` is function-scoped: the block's `var w` is the one `return w` reads.
+    for expected in [("a", "w"), ("w", "v.return")] {
+        assert!(
+            pairs.contains(&(expected.0.to_string(), expected.1.to_string())),
+            "missing {expected:?}: {pairs:?}"
+        );
+    }
+    let w = one_symbol_named_with(&store, "w", "v().:local:w");
+    assert!(
+        !w.as_str().contains('@'),
+        "a `var` binds at the owner level: {w:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn scoped_value_ids_survive_line_shifts_216() {
+    let source = r#"
+        export function render(items: any, id: string) {
+            items.forEach((id: string) => {
+                const label = id;
+                return label;
+            });
+            for (const id of items) { const seen = id; }
+            try { } catch (id) { const caught = id; }
+        }
+    "#;
+    let shifted = format!("\n\n// header\n{source}");
+    let (root_a, a) = indexed_typescript("scoped_shift_a", source);
+    let (root_b, b) = indexed_typescript("scoped_shift_b", &shifted);
+    let ids_a = value_slots_named(&a, "id");
+    assert_eq!(
+        ids_a.len(),
+        4,
+        "parameter + callback + loop + catch bindings are four slots: {ids_a:?}"
+    );
+    for name in ["id", "label", "seen", "caught"] {
+        assert_eq!(
+            value_slots_named(&a, name),
+            value_slots_named(&b, name),
+            "{name} identities must survive an unrelated line shift"
+        );
+    }
+    let _ = fs::remove_dir_all(root_a);
+    let _ = fs::remove_dir_all(root_b);
+}
+
+/// #220 — the no-flag-day path: a caller whose value-flow call refs are NOT on record (a DB
+/// written before the record existed; simulated here by an unreadable record) is re-extracted as
+/// before, and the incremental graph still equals a full index of the same tree.
+#[test]
+fn a_caller_without_recorded_call_refs_is_reextracted_220() {
+    let leaf = r#"
+        export function leaf(seed: string): string {
+            return seed;
+        }
+    "#;
+    let mid = r#"
+        import { leaf } from './leaf';
+        export function mid(seed: string): string {
+            const midValue = leaf(seed);
+            return midValue;
+        }
+    "#;
+    let (root, mut store) = indexed_typescript_files(
+        "unrecorded_caller_220",
+        &[("leaf.ts", leaf), ("mid.ts", mid)],
+    );
+    assert!(
+        GraphRead::file_call_refs(&store, "mid.ts")
+            .unwrap()
+            .is_some_and(|json| json.contains("value_flow")),
+        "an indexed caller records its value-flow call refs"
+    );
+    wicked_estate_core::GraphWrite::set_file_call_refs(&mut store, "mid.ts", "not json").unwrap();
+    let cursor = GraphRead::changes_since(&store, 0)
+        .unwrap()
+        .iter()
+        .map(|change| change.seq)
+        .max()
+        .unwrap_or(0);
+    fs::write(root.join("leaf.ts"), format!("{leaf}\n// edit\n")).unwrap();
+    wicked_estate::index_path(&mut store, &root).expect("incremental re-index");
+    let touched: BTreeSet<String> = GraphRead::changes_since(&store, cursor)
+        .unwrap()
+        .into_iter()
+        .map(|change| change.target)
+        .collect();
+    assert_eq!(
+        touched,
+        ["leaf.ts", "mid.ts"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>(),
+        "a caller with no readable record falls back to re-extraction"
+    );
+    let full = {
+        let mut fresh = SqliteStore::in_memory().expect("open sqlite");
+        wicked_estate::index_path(&mut fresh, &root).expect("full index");
+        edge_triples(&fresh)
+    };
+    assert_eq!(edge_triples(&store), full, "incremental must equal full");
+    let _ = fs::remove_dir_all(root);
+}
+
+/// #220 — re-deriving instead of re-extracting must leave exactly the graph a full index builds,
+/// across a hub callee with callers in several files, two call sites in one caller, and an edit
+/// that changes the callee's parameter name (so every call_argument edge must move).
+#[test]
+fn rederived_call_flows_equal_a_full_index_220() {
+    let hub_v1 = r#"
+        export function hub(seed: string): string {
+            return seed;
+        }
+    "#;
+    let hub_v2 = r#"
+        export function hub(renamed: string): string {
+            const kept = renamed;
+            return kept;
+        }
+    "#;
+    let one = r#"
+        import { hub } from './hub';
+        export function one(a: string, b: string): string {
+            const first = hub(a);
+            const second = hub(b);
+            return second;
+        }
+    "#;
+    let two = r#"
+        import { hub } from './hub';
+        export function two(c: string): string {
+            const out = hub(c);
+            return out;
+        }
+    "#;
+    let (root, mut store) = indexed_typescript_files(
+        "rederive_equals_full_220",
+        &[("hub.ts", hub_v1), ("one.ts", one), ("two.ts", two)],
+    );
+    let cursor = GraphRead::changes_since(&store, 0)
+        .unwrap()
+        .iter()
+        .map(|change| change.seq)
+        .max()
+        .unwrap_or(0);
+    fs::write(root.join("hub.ts"), hub_v2).unwrap();
+    wicked_estate::index_path(&mut store, &root).expect("incremental re-index");
+    let touched: BTreeSet<String> = GraphRead::changes_since(&store, cursor)
+        .unwrap()
+        .into_iter()
+        .map(|change| change.target)
+        .collect();
+    assert_eq!(touched, BTreeSet::from(["hub.ts".to_string()]));
+    let pairs = semantic_flow_name_pairs(&store);
+    for expected in [("a", "renamed"), ("b", "renamed"), ("c", "renamed")] {
+        assert!(
+            pairs.contains(&(expected.0.to_string(), expected.1.to_string())),
+            "missing re-derived hop {expected:?}: {pairs:?}"
+        );
+    }
+    assert!(
+        !pairs.iter().any(|(_, consumer)| consumer == "seed"),
+        "the old parameter's hops are gone: {pairs:?}"
+    );
+    let full = {
+        let mut fresh = SqliteStore::in_memory().expect("open sqlite");
+        wicked_estate::index_path(&mut fresh, &root).expect("full index");
+        edge_triples(&fresh)
+    };
+    let incremental = edge_triples(&store);
+    let lost: Vec<_> = full.difference(&incremental).collect();
+    let gained: Vec<_> = incremental.difference(&full).collect();
+    assert!(
+        lost.is_empty() && gained.is_empty(),
+        "re-derived graph must equal a full index; lost {lost:?}, gained {gained:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+// ── #216/#220 review (codex round 1) ─────────────────────────────────────────
+
+#[test]
+fn binding_shapes_that_shadow_a_parameter_216_review() {
+    let source = r#"
+        export function use(x: string): string { return x; }
+        export function arrowBinding(cb: string) {
+            { const cb = () => 1; use(cb); }
+        }
+        export function destructured(id: string, obj: any, items: any) {
+            { const { id } = obj; const chosen = id; }
+            items.map(({ id }: any) => { const fromCallback = id; });
+            const [first, ...rest] = obj;
+        }
+        export function switched(x: string, y: string, k: number): string {
+            switch (k) { case 0: const x = y; }
+            return x;
+        }
+    "#;
+    let (root, store) = indexed_typescript("binding_shapes_216", source);
+    let pairs = semantic_flow_symbol_pairs(&store);
+    let flows_from = |producer: &SymbolId| -> Vec<SymbolId> {
+        pairs
+            .iter()
+            .filter(|(p, _)| p == producer)
+            .map(|(_, c)| c.clone())
+            .collect()
+    };
+    let use_x = one_symbol_named_with(&store, "x", "use().:param:x:");
+
+    // `const cb = () => 1` binds in arrowBinding's block, not in the arrow's own definition.
+    let cb = one_symbol_named_with(&store, "cb", "arrowBinding().:param:cb:");
+    assert!(
+        !flows_from(&cb).contains(&use_x),
+        "the block's `cb` is passed to use(), not the parameter: {pairs:?}"
+    );
+
+    // Destructured bindings shadow too, in a block and in a callback parameter.
+    let id = one_symbol_named_with(&store, "id", "destructured().:param:id:");
+    let reached = flows_from(&id);
+    for local in ["chosen", "fromCallback"] {
+        assert!(
+            symbol_ids_named(&store, local)
+                .iter()
+                .all(|s| !reached.contains(s)),
+            "the parameter must not reach `{local}`: {reached:?}"
+        );
+    }
+
+    // A `switch` body is a lexical scope: the case's `const x` is not the parameter.
+    let param_x = one_symbol_named_with(&store, "x", "switched().:param:x:");
+    let y = one_symbol_named_with(&store, "y", "switched().:param:y:");
+    assert!(
+        !flows_from(&y).contains(&param_x),
+        "`const x = y` in a case does not write the parameter: {pairs:?}"
+    );
+    let case_x = one_symbol_named_with(&store, "x", "switched().:local:x@1:");
+    assert!(flows_from(&y).contains(&case_x), "{pairs:?}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn an_unrelated_block_does_not_renumber_scoped_ids_216_review() {
+    let before = r#"
+        export function f(id: string, items: any) {
+            items.forEach((id: string) => { const a = id; });
+        }
+    "#;
+    let after = r#"
+        export function f(id: string, items: any) {
+            { const unrelated = 1; }
+            if (items) { const other = 2; }
+            items.forEach((id: string) => { const a = id; });
+        }
+    "#;
+    let (root_a, a) = indexed_typescript("renumber_a_216", before);
+    let (root_b, b) = indexed_typescript("renumber_b_216", after);
+    for name in ["id", "a"] {
+        assert_eq!(
+            value_slots_named(&a, name),
+            value_slots_named(&b, name),
+            "`{name}` keeps its id when an unrelated block is inserted"
+        );
+    }
+    let _ = fs::remove_dir_all(root_a);
+    let _ = fs::remove_dir_all(root_b);
+}
+
+/// Index `files`, apply each edit in turn, and after each assert the incremental graph equals a
+/// full index of the same tree. Returns the files the LAST edit re-extracted.
+fn incremental_equals_full_after(
+    tag: &str,
+    files: &[(&str, &str)],
+    edits: &[(&str, &str)],
+) -> BTreeSet<String> {
+    let (root, mut store) = indexed_typescript_files(tag, files);
+    let mut touched = BTreeSet::new();
+    for (path, content) in edits {
+        let cursor = GraphRead::changes_since(&store, 0)
+            .unwrap()
+            .iter()
+            .map(|change| change.seq)
+            .max()
+            .unwrap_or(0);
+        fs::write(root.join(path), content).unwrap();
+        wicked_estate::index_path(&mut store, &root).expect("incremental re-index");
+        touched = GraphRead::changes_since(&store, cursor)
+            .unwrap()
+            .into_iter()
+            .map(|change| change.target)
+            .collect();
+        let mut fresh = SqliteStore::in_memory().expect("open sqlite");
+        wicked_estate::index_path(&mut fresh, &root).expect("full index");
+        let full = edge_triples(&fresh);
+        let incremental = edge_triples(&store);
+        let lost: Vec<_> = full.difference(&incremental).collect();
+        let gained: Vec<_> = incremental.difference(&full).collect();
+        assert!(
+            lost.is_empty() && gained.is_empty(),
+            "after editing {path}: lost {lost:?}, gained {gained:?}"
+        );
+        let full_nodes: BTreeSet<_> = GraphRead::all_nodes(&fresh)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.symbol)
+            .collect();
+        let incremental_nodes: BTreeSet<_> = GraphRead::all_nodes(&store)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.symbol)
+            .collect();
+        assert_eq!(
+            incremental_nodes, full_nodes,
+            "after editing {path}: node sets differ"
+        );
+    }
+    let _ = fs::remove_dir_all(root);
+    touched
+}
+
+#[test]
+fn a_callee_rename_reextracts_its_callers_and_round_trips_220_review() {
+    let leaf = "export function leaf(seed: string): string {\n    return seed;\n}\n";
+    let renamed = "export function renamed(seed: string): string {\n    return seed;\n}\n";
+    let mid = r#"
+        import { leaf } from './leaf';
+        export function mid(a: string): string {
+            const out = leaf(a);
+            return out;
+        }
+    "#;
+    let files = [("leaf.ts", leaf), ("mid.ts", mid)];
+    let touched = incremental_equals_full_after("rename_220", &files, &[("leaf.ts", renamed)]);
+    assert!(
+        touched.contains("mid.ts"),
+        "a rename changes the caller's resolution: it must be re-extracted, got {touched:?}"
+    );
+    incremental_equals_full_after(
+        "rename_back_220",
+        &files,
+        &[("leaf.ts", renamed), ("leaf.ts", leaf)],
+    );
+}
+
+#[test]
+fn a_callee_that_stops_returning_a_value_leaves_no_orphan_220_review() {
+    let leaf = "export function leaf(seed: string): string {\n    return seed;\n}\n";
+    let literal = "export function leaf(seed: string): string {\n    return \"x\";\n}\n";
+    let mid = r#"
+        import { leaf } from './leaf';
+        export function mid(a: string) {
+            const out = leaf(a);
+        }
+    "#;
+    let touched = incremental_equals_full_after(
+        "return_loss_220",
+        &[("leaf.ts", leaf), ("mid.ts", mid)],
+        &[("leaf.ts", literal), ("leaf.ts", leaf)],
+    );
+    assert_eq!(
+        touched,
+        BTreeSet::from(["leaf.ts".to_string()]),
+        "gaining a return endpoint back is replayed, not re-extracted"
+    );
 }

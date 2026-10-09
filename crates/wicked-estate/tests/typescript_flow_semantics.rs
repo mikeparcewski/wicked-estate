@@ -135,17 +135,50 @@ fn flow_semantics_are_separate_from_evidence_origin() {
 
 // ── AC-S1-02: endpoint deduplication is non-lossy and order-independent ──────
 
-/// The audit that drove the representation choice. Block-scoped shadowing puts a may-influence and
+/// The audit that drove the representation choice. Block-scoped shadowing put a may-influence and
 /// a value-preserving fact on ONE `(source, target, kind)`; on `c4fa938` the stores' `>=` upsert
 /// kept whichever landed last and the other vanished with no record it had been asserted.
+///
+/// #216 made the shadowed `c`s two slots, so that shape no longer collides (pinned below). ONE
+/// binding written twice still does — `let c = a + b; c = a;` — and the lattice must keep both.
 #[test]
-fn shadowed_endpoint_collision_keeps_both_classes_and_both_sites() {
-    let source = r#"
+fn same_binding_collision_keeps_both_classes_and_both_sites() {
+    let shadowed = r#"
         function f(a: string, b: string) {
             const c = a + b;
             if (b) {
                 const c = a;
             }
+        }
+    "#;
+    let (shadow_root, shadow_store) = indexed("collision_shadowed", shadowed);
+    let names_of = names(&shadow_store);
+    let c_from_a: Vec<Edge> = flow_edges(&shadow_store)
+        .into_iter()
+        .filter(|e| {
+            names_of.get(&e.source).map(String::as_str) == Some("c")
+                && names_of.get(&e.target).map(String::as_str) == Some("a")
+        })
+        .collect();
+    assert_eq!(
+        c_from_a.len(),
+        2,
+        "#216: two `c` bindings are two slots, each with its own fact: {c_from_a:?}"
+    );
+    for edge in &c_from_a {
+        assert_eq!(
+            strings(edge, FLOW_SEMANTICS_KEY).len(),
+            1,
+            "a shadowed binding carries only its own classification: {:?}",
+            edge.metadata
+        );
+    }
+    let _ = fs::remove_dir_all(shadow_root);
+
+    let source = r#"
+        function f(a: string, b: string) {
+            let c = a + b;
+            c = a;
         }
     "#;
     let (root, store) = indexed("collision", source);
@@ -159,7 +192,7 @@ fn shadowed_endpoint_collision_keeps_both_classes_and_both_sites() {
     );
     assert_eq!(
         strings(&edge, FLOW_CONSTRUCTS_KEY),
-        set(&["assignment", "expression"])
+        set(&["expression", "reassignment"])
     );
 
     let support = edge.metadata[FLOW_SUPPORT_KEY].as_array().unwrap();
@@ -174,8 +207,9 @@ fn shadowed_endpoint_collision_keeps_both_classes_and_both_sites() {
         .collect();
     assert_eq!(sites.len(), 2, "the two sites must be distinguishable");
 
-    // The pre-existing public scalar stays readable and deterministic (not last-writer-wins).
-    assert_eq!(edge.metadata[CONSTRUCT_KEY], "assignment");
+    // The pre-existing public scalar stays readable and deterministic (not last-writer-wins): the
+    // lexicographic minimum of the construct set.
+    assert_eq!(edge.metadata[CONSTRUCT_KEY], "expression");
 
     let _ = fs::remove_dir_all(root);
 }
@@ -186,10 +220,8 @@ fn shadowed_endpoint_collision_keeps_both_classes_and_both_sites() {
 fn collision_merge_is_stable_across_independent_indexes() {
     let source = r#"
         function f(a: string, b: string) {
-            const c = a + b;
-            if (b) {
-                const c = a;
-            }
+            let c = a + b;
+            c = a;
         }
     "#;
     let (root, first) = indexed("collision_stable", source);
