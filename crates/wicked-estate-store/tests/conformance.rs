@@ -38,6 +38,18 @@ fn memstore_traverse_multi_matches_union() {
     conformance::traverse_multi_matches_union_of_traverse(&mut store);
 }
 
+#[test]
+fn sqlite_symbol_count_and_structural() {
+    let mut store = wicked_estate_store::SqliteStore::in_memory().expect("in-memory sqlite");
+    conformance::symbol_count_and_structural_suite(&mut store);
+}
+
+#[test]
+fn memstore_symbol_count_and_structural() {
+    let mut store = MemStore::new();
+    conformance::symbol_count_and_structural_suite(&mut store);
+}
+
 /// Multi-file symbol contributions (M4 / Option A — wicked-estate#152): the h+cpp arc
 /// (definition-preferred primary, remove-one-file survivor re-home, delete on last contribution),
 /// idempotent re-index, deterministic tiebreak — the store-side retirement of the extract-level

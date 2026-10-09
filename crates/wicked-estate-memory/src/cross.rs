@@ -94,6 +94,12 @@ impl GraphRead for OverlayMemStore {
     fn find_symbols(&self, query: &SymbolQuery) -> Result<Vec<Node>> {
         self.overlay().find_symbols(query)
     }
+    fn count_symbols(&self, query: &SymbolQuery) -> Result<usize> {
+        self.overlay().count_symbols(query)
+    }
+    fn find_structural_symbols(&self, query: &SymbolQuery) -> Result<Vec<Node>> {
+        self.overlay().find_structural_symbols(query)
+    }
     fn neighbors(&self, id: &SymbolId, dir: Direction) -> Result<Vec<Edge>> {
         self.overlay().neighbors(id, dir)
     }
