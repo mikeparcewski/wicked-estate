@@ -217,6 +217,9 @@ pub const COMMANDS: &[Command] = &[
                 Flag("confidence", Value),
                 Flag("provenance", Value),
                 Flag("author", Value),
+                Flag("source-type", Value),
+                Flag("extraction-method", Value),
+                Flag("last-verified", Value),
                 Flag("replace", Switch),
             ],
         ),
@@ -230,7 +233,10 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "stale-annotations",
-        spec: owns("<cutoff-unix-seconds>", &[DB, JSON]),
+        spec: owns(
+            "[<cutoff-unix-seconds> | <YYYY-MM-DD>]",
+            &[DB, JSON, Flag("older-than", Value)],
+        ),
     },
     Command {
         name: "fingerprint",
@@ -491,6 +497,51 @@ mod tests {
         assert!(check_args("annotate", &["f", "--key", "k", "--value", "--help"]).is_err());
         // An inline value does not consume the next token, so help after it is a help request.
         assert!(check_args("index", &["--repo=x", "--help"]).is_ok());
+    }
+
+    /// `--older-than` is owned by `stale-annotations` alone (#205): accepted there, named as
+    /// foreign everywhere else, and it takes a value — never a switch, never inline.
+    #[test]
+    fn older_than_is_owned_by_stale_annotations_205() {
+        assert!(check_args("stale-annotations", &["--older-than", "90d", "--json"]).is_ok());
+        let e = check_args("annotations", &["f", "--older-than", "90d"]).unwrap_err();
+        assert!(e.contains("accepted by: stale-annotations"), "{e}");
+        assert!(check_args("nodes", &["--older-than", "90d"]).is_err());
+        assert!(check_args("stale-annotations", &["--older-than"]).is_err());
+        assert!(check_args("stale-annotations", &["--older-than=90d"]).is_err());
+        assert!(check_args("stale-annotations", &["--older-than", "--json"]).is_err());
+    }
+
+    /// The evidence-envelope flags are owned by `annotate` alone: accepted there, named as foreign
+    /// on the read commands (which would otherwise look like they filter by them).
+    #[test]
+    fn evidence_envelope_flags_are_owned_by_annotate() {
+        let ok = [
+            "f",
+            "--key",
+            "k",
+            "--value",
+            "v",
+            "--source-type",
+            "code",
+            "--extraction-method",
+            "scip-rust@0.3",
+            "--last-verified",
+            "now",
+        ];
+        assert!(check_args("annotate", &ok).is_ok());
+        for f in ["--source-type", "--extraction-method", "--last-verified"] {
+            let e = check_args("annotations", &["f", f, "x"]).unwrap_err();
+            assert!(e.contains("accepted by: annotate"), "{f}: {e}");
+            assert!(
+                check_args("stale-annotations", &["100", f, "x"]).is_err(),
+                "{f}"
+            );
+            assert!(
+                check_args("annotate", &["f", f]).is_err(),
+                "{f} needs a value"
+            );
+        }
     }
 
     #[test]

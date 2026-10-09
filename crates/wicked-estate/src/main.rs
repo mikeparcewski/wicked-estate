@@ -30,11 +30,13 @@
 //!   wicked-estate clusters [<min_size>]  [--json] [--annotate] [--db ...]
 //!   wicked-estate fingerprint <name>     [--content] [--db ...]
 //!   wicked-estate changed-since <sha>    [--json] [--db ...]
-//!   wicked-estate annotate <name>        --key K --value V [--type T] [--confidence F] [--provenance P] [--author A] [--db ...]
-//!   wicked-estate annotate --symbol <id> --key K --value V [--type T] [--confidence F] [--provenance P] [--author A] [--db ...]
+//!   wicked-estate annotate <name>        --key K --value V [--type T] [--confidence F] [--provenance P] [--author A]
+//!                                        [--source-type S] [--extraction-method M] [--last-verified now|<secs>|YYYY-MM-DD] [--db ...]
+//!   wicked-estate annotate --symbol <id> --key K --value V [same flags] [--db ...]
 //!   wicked-estate annotations <name>     [--type T] [--json] [--db ...]
 //!   wicked-estate annotations --symbol <id> [--type T] [--json] [--db ...]
-//!   wicked-estate stale-annotations <cutoff-unix-seconds> [--json] [--db ...]
+//!   wicked-estate stale-annotations <cutoff-unix-seconds | YYYY-MM-DD> [--json] [--db ...]
+//!   wicked-estate stale-annotations --older-than <N>{s,m,h,d,w} [--json] [--db ...]
 //!   wicked-estate context <name>         [--budget <chars>] [--json] [--db ...]
 //!   wicked-estate entrypoints            [--json] [--db ...]
 //!   wicked-estate leaves                 [--json] [--db ...]
@@ -50,6 +52,7 @@
 //!                                     [--framework S] [--scope S] [--projects a,b] [--limit N] [--json] [--db ...]
 
 mod cli_flags;
+mod cutoff;
 mod emit;
 mod scip_auto;
 mod source_bundle;
@@ -952,11 +955,18 @@ fn main() -> Result<()> {
     let mut ann_confidence: f64 = 1.0;
     let mut ann_provenance: String = String::new();
     let mut ann_author: String = String::new();
+    // Evidence envelope for `annotate` (#204 follow-on): None = the Annotation defaults
+    // (`unspecified` / `manual` / 0 = never verified). Validated in the arm, not here.
+    let mut ann_source_type: Option<String> = None;
+    let mut ann_extraction_method: Option<String> = None;
+    let mut ann_last_verified: Option<String> = None;
     // --type <t>: annotation type. Write side (annotate) defaults to `note`; read side
     // (annotations) treats absence as "no filter". A plain string — fixed convention OR custom.
     let mut ann_type: Option<String> = None;
     // --symbol <SymbolId>: target a single node by stable ID (annotate + annotations).
     let mut ann_symbol: Option<String> = None;
+    // --older-than <N><unit>: the `stale-annotations` window form of the cutoff (see `cutoff`).
+    let mut older_than: Option<String> = None;
     // --replace: idempotent upsert by (type, key) for the `annotate` command. Default OFF =
     // append (today's behavior). When set, delete_annotations(sym, Some(type), key) before the
     // append, so re-projecting a cache-class annotation replaces the row instead of duplicating it.
@@ -1121,6 +1131,21 @@ fn main() -> Result<()> {
                     ann_author = v.clone();
                 }
             }
+            "--source-type" => {
+                if let Some(v) = it.next() {
+                    ann_source_type = Some(v.clone());
+                }
+            }
+            "--extraction-method" => {
+                if let Some(v) = it.next() {
+                    ann_extraction_method = Some(v.clone());
+                }
+            }
+            "--last-verified" => {
+                if let Some(v) = it.next() {
+                    ann_last_verified = Some(v.clone());
+                }
+            }
             "--type" => {
                 if let Some(v) = it.next() {
                     ann_type = Some(v.clone());
@@ -1129,6 +1154,11 @@ fn main() -> Result<()> {
             "--symbol" => {
                 if let Some(v) = it.next() {
                     ann_symbol = Some(v.clone());
+                }
+            }
+            "--older-than" => {
+                if let Some(v) = it.next() {
+                    older_than = Some(v.clone());
                 }
             }
             "--replace" => {
@@ -3104,14 +3134,42 @@ fn main() -> Result<()> {
                 .as_deref()
                 .context("--value is required for the annotate command")?;
             let ty = ann_type.as_deref().unwrap_or(DEFAULT_ANNOTATION_TYPE);
+            // Evidence envelope. An empty string is refused rather than stored: it would read back
+            // as a claim of "no source" distinct from the `unspecified` default (§3, fail closed).
+            for (flag, v) in [
+                ("--source-type", &ann_source_type),
+                ("--extraction-method", &ann_extraction_method),
+            ] {
+                if v.as_deref() == Some("") {
+                    anyhow::bail!("{flag} must not be empty; omit it for the default");
+                }
+            }
+            let last_verified = match ann_last_verified.as_deref() {
+                None => 0,
+                Some(v) => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    cutoff::parse_verified(v, now).map_err(anyhow::Error::msg)?
+                }
+            };
             ensure_db_dir(&db)?;
             let mut store = SqliteStore::open(&db).map_err(to_any)?;
             // Build the typed annotation once; clone per target. ts=0 → store stamps it.
             let make = |sym_present_value: &str| {
-                Annotation::new(ty, key, sym_present_value)
+                let mut a = Annotation::new(ty, key, sym_present_value)
                     .with_confidence(ann_confidence)
                     .with_provenance(ann_provenance.clone())
                     .with_author(ann_author.clone())
+                    .with_last_verified(last_verified);
+                if let Some(st) = &ann_source_type {
+                    a = a.with_source_type(st.clone());
+                }
+                if let Some(em) = &ann_extraction_method {
+                    a = a.with_extraction_method(em.clone());
+                }
+                a
             };
             // Upsert helper: when `--replace`, delete the (type, key) row(s) first and accumulate
             // the deleted count; then append. Returns the number of rows replaced for this symbol.
@@ -3259,26 +3317,34 @@ fn main() -> Result<()> {
             }
         }
         // Freshness read: every (symbol, annotation) pair whose evidence-envelope `last_verified`
-        // is strictly before <cutoff> (Unix-seconds) — i.e. the facts a re-verification window
-        // deems stale. Never-verified rows (last_verified == 0) are stale for any positive cutoff.
-        // Thin surface over the `GraphRead::annotations_stale_since` seam (ordered symbol then ts).
+        // is strictly before the cutoff — i.e. the facts a re-verification window deems stale.
+        // Never-verified rows (last_verified == 0) are stale for any positive cutoff. Thin surface
+        // over the `GraphRead::annotations_stale_since` seam (ordered symbol then ts).
         //
         // Usage:
-        //   wicked-estate stale-annotations <cutoff-unix-seconds> [--json] [--db ...]
+        //   wicked-estate stale-annotations <cutoff-unix-seconds | YYYY-MM-DD> [--json] [--db ...]
+        //   wicked-estate stale-annotations --older-than <N>{s,m,h,d,w}       [--json] [--db ...]
         "stale-annotations" => {
             let json_out = positional.iter().any(|a| a == "--json");
-            // Exactly one operand, and it must be an integer: `find_map` over all of argv took
-            // the first parseable token, so `stale-annotations soon 100` ran at 100 and
-            // `stale-annotations 2026 01 01` ran at 2026 with the rest dropped.
-            let operands: Vec<&String> =
-                positional.iter().filter(|a| !a.starts_with("--")).collect();
-            let cutoff: i64 = match operands.as_slice() {
-                [one] => one.parse::<i64>().ok(),
-                _ => None,
-            }
-            .context(
-                "usage: wicked-estate stale-annotations <cutoff-unix-seconds> [--json] [--db ...]",
-            )?;
+            // Exactly one spelling of the cutoff (`cutoff::resolve`). The old `find_map` over all
+            // of argv took the first parseable token, so `stale-annotations soon 100` ran at 100
+            // and `stale-annotations 2026 01 01` ran at 2026 with the rest dropped.
+            let operands: Vec<&str> = positional
+                .iter()
+                .map(String::as_str)
+                .filter(|a| !a.starts_with("--"))
+                .collect();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let cutoff = cutoff::resolve(&operands, older_than.as_deref(), now).map_err(|why| {
+                anyhow::anyhow!(
+                    "{why}\nusage: wicked-estate stale-annotations <cutoff-unix-seconds | YYYY-MM-DD> [--json] [--db ...]\n       \
+                     wicked-estate stale-annotations --older-than <N>{{s,m,h,d,w}} [--json] [--db ...]"
+                )
+            })?;
+            let shown = format!("{cutoff} ({})", cutoff::format_utc(cutoff));
             // ADR-003: backend-agnostic factory — annotations_stale_since is a GraphRead method.
             // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
             // open that would otherwise create an empty one.
@@ -3297,10 +3363,10 @@ fn main() -> Result<()> {
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&arr)?);
             } else if stale.is_empty() {
-                println!("no annotations stale as of cutoff {cutoff}");
+                println!("no annotations stale as of cutoff {shown}");
             } else {
                 println!(
-                    "{} annotation(s) stale as of cutoff {cutoff} (last_verified < {cutoff}):",
+                    "{} annotation(s) stale as of cutoff {shown} (last_verified < {cutoff}):",
                     stale.len()
                 );
                 for (sym, a) in &stale {
@@ -3583,7 +3649,7 @@ fn main() -> Result<()> {
                     "file": n.location.file,
                     "line": n.location.span.start_line + 1,
                     "signature": n.signature,
-                    "annotation_summary": source_bundle::annotation_summary(&all_anns),
+                    "annotation_summary": wicked_estate_retrieve::annotation_summary(&all_anns),
                 });
                 if with_semantics {
                     use wicked_estate_core::Direction;
@@ -3617,12 +3683,9 @@ fn main() -> Result<()> {
                     obj["out_edges"] = serde_json::json!(out_edges);
                 }
                 if !all_anns.is_empty() {
-                    let capped: Vec<serde_json::Value> =
-                        source_bundle::cap_annotations_for_payload(all_anns)
-                            .iter()
-                            .map(wicked_estate_retrieve::annotation_json)
-                            .collect();
-                    obj["annotations"] = serde_json::Value::Array(capped);
+                    obj["annotations"] = serde_json::Value::Array(
+                        wicked_estate_retrieve::payload_annotations_json(&all_anns),
+                    );
                 }
                 obj
             };
@@ -4279,6 +4342,15 @@ fn main() -> Result<()> {
             println!("    --confidence  confidence score 0.0–1.0 (default: 1.0)");
             println!("    --provenance  provenance string (default: empty)");
             println!("    --author      author string (default: empty)");
+            println!(
+                "    --source-type        what kind of source backed it (default: unspecified; code/config/sme-answer/static-analysis/runtime-trace/documentation or custom)"
+            );
+            println!(
+                "    --extraction-method  how it was extracted, e.g. scip-rust@0.3 (default: manual)"
+            );
+            println!(
+                "    --last-verified      now | <unix-seconds> | YYYY-MM-DD (UTC) — the freshness clock stale-annotations reads (default: 0 = never verified)"
+            );
             println!("  wicked-estate annotations <name>   [--type T] [--json] [--db ...]");
             println!("  wicked-estate annotations --symbol <id> [--type T] [--json] [--db ...]");
             println!(
@@ -4294,10 +4366,13 @@ fn main() -> Result<()> {
                 "    (one per matched symbol, possibly empty); --symbol <id> names exactly one and emits a single {{symbol, annotations:[...]}}."
             );
             println!(
-                "  wicked-estate stale-annotations <cutoff-unix-seconds> [--json] [--db ...]  # (symbol, annotation) pairs with last_verified < cutoff"
+                "  wicked-estate stale-annotations <cutoff-unix-seconds | YYYY-MM-DD> [--json] [--db ...]  # (symbol, annotation) pairs with last_verified < cutoff"
             );
             println!(
-                "    Evidence-envelope freshness read: \"what needs re-verification?\". Never-verified rows (last_verified=0) are always stale."
+                "  wicked-estate stale-annotations --older-than <N>{{s,m,h,d,w}} [--json] [--db ...]  # cutoff = now - N (e.g. 90d)"
+            );
+            println!(
+                "    Evidence-envelope freshness read: \"what needs re-verification?\". A date is 00:00:00 UTC. Never-verified rows (last_verified=0) are always stale."
             );
             println!(
                 "  wicked-estate fingerprint <name>   [--db ...]  # stable hex fingerprint for symbol"
