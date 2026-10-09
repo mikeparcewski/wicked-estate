@@ -436,6 +436,101 @@ pub fn input_schema(name: &str) -> Option<Value> {
     }
 }
 
+/// Validate `tools/call` arguments against a tool's advertised `inputSchema` (#212), within the
+/// JSON-Schema subset the schemas use: the arguments must be an object; with
+/// `additionalProperties: false` every key must be a declared property; every `required` key must
+/// be present (and non-null); a present, non-null value must match its property's `type`
+/// (`string` / `integer` / `number` / `boolean` / `array` / `object`), its `enum`, and — for an
+/// array — its `items.type`. Bounds (`minimum` / `maximum`) are NOT checked here: the tools clamp
+/// out-of-range values by documented contract. `Err` names the offending property.
+pub fn validate_arguments(schema: &Value, args: &Value) -> Result<(), String> {
+    let Some(obj) = args.as_object() else {
+        return Err("arguments must be a JSON object".to_string());
+    };
+    let props = schema.get("properties").and_then(Value::as_object);
+    if schema.get("additionalProperties") == Some(&Value::Bool(false)) {
+        let mut unknown: Vec<&str> = obj
+            .keys()
+            .filter(|k| !props.is_some_and(|p| p.contains_key(k.as_str())))
+            .map(String::as_str)
+            .collect();
+        unknown.sort_unstable();
+        if let Some(k) = unknown.first() {
+            let mut known: Vec<&str> = props
+                .map(|p| p.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            known.sort_unstable();
+            return Err(format!(
+                "unknown argument '{k}' (accepted: {})",
+                if known.is_empty() {
+                    "none".to_string()
+                } else {
+                    known.join(", ")
+                }
+            ));
+        }
+    }
+    if let Some(req) = schema.get("required").and_then(Value::as_array) {
+        for k in req.iter().filter_map(Value::as_str) {
+            if obj.get(k).is_none_or(Value::is_null) {
+                return Err(format!("missing required argument '{k}'"));
+            }
+        }
+    }
+    let Some(props) = props else {
+        return Ok(());
+    };
+    let mut keys: Vec<&String> = obj.keys().collect();
+    keys.sort_unstable();
+    for k in keys {
+        let v = &obj[k.as_str()];
+        let Some(p) = props.get(k.as_str()) else {
+            continue;
+        };
+        if v.is_null() {
+            continue;
+        }
+        if let Some(t) = p.get("type").and_then(Value::as_str) {
+            if !json_type_matches(t, v) {
+                return Err(format!("argument '{k}' must be of type {t}"));
+            }
+        }
+        if let Some(allowed) = p.get("enum").and_then(Value::as_array) {
+            if !allowed.contains(v) {
+                let names: Vec<String> = allowed.iter().map(Value::to_string).collect();
+                return Err(format!(
+                    "argument '{k}' must be one of {}",
+                    names.join(", ")
+                ));
+            }
+        }
+        if let (Some(items), Some(arr)) = (
+            p.get("items")
+                .and_then(|i| i.get("type"))
+                .and_then(Value::as_str),
+            v.as_array(),
+        ) {
+            if let Some(i) = arr.iter().position(|e| !json_type_matches(items, e)) {
+                return Err(format!("argument '{k}[{i}]' must be of type {items}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Does `v` satisfy JSON-Schema `type: t`? An unknown type name never rejects.
+fn json_type_matches(t: &str, v: &Value) -> bool {
+    match t {
+        "string" => v.is_string(),
+        "integer" => v.is_i64() || v.is_u64(),
+        "number" => v.is_number(),
+        "boolean" => v.is_boolean(),
+        "array" => v.is_array(),
+        "object" => v.is_object(),
+        _ => true,
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // JSON-RPC helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -542,6 +637,19 @@ fn handle_tools_call_ctx(
             }
         },
     };
+
+    // #212: the advertised schema is enforced — an unknown, missing or mistyped argument is an
+    // MCP tool error naming the property, never a silently-defaulted call.
+    let schema = input_schema(tool_name).unwrap_or_else(|| json!({"type": "object"}));
+    if let Err(e) = validate_arguments(&schema, &arguments) {
+        return ok_response(
+            id,
+            json!({
+                "content": [{ "type": "text", "text": format!("{tool_name}: invalid arguments: {e}") }],
+                "isError": true
+            }),
+        );
+    }
 
     match tool.invoke(store, &arguments) {
         Ok(result) => {
@@ -1347,6 +1455,96 @@ mod tests {
         );
         assert!(resp["result"]["content"].is_array());
         assert!(resp["result"]["isError"].is_boolean());
+    }
+
+    // ── tools/call — argument validation (#212) ───────────────────────────────
+
+    fn call_args(tool: &str, args: Value) -> Value {
+        let store = fixture();
+        handle_request(
+            &store,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 99,
+                "method": "tools/call",
+                "params": { "name": tool, "arguments": args }
+            }),
+        )
+    }
+
+    fn tool_error_text(resp: &Value) -> Option<String> {
+        (resp["result"]["isError"] == json!(true)).then(|| {
+            resp["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        })
+    }
+
+    #[test]
+    fn tools_call_rejects_arguments_outside_the_advertised_schema_212() {
+        let unknown = call_args(
+            "RetrieveEntity",
+            json!({ "symbol": "x", "totally_unknown": 1 }),
+        );
+        let text = tool_error_text(&unknown).expect("an unknown argument is a tool error");
+        assert!(
+            text.contains("unknown argument 'totally_unknown'"),
+            "{text}"
+        );
+        assert!(text.contains("accepted: symbol"), "{text}");
+
+        let missing = call_args("SearchEntity", json!({ "limit": 5 }));
+        let text = tool_error_text(&missing).expect("a missing required argument");
+        assert!(text.contains("missing required argument 'name'"), "{text}");
+
+        let mistyped = call_args("SearchEntity", json!({ "name": "middle_fn", "limit": "5" }));
+        let text = tool_error_text(&mistyped).expect("a mistyped argument");
+        assert!(
+            text.contains("argument 'limit' must be of type integer"),
+            "{text}"
+        );
+
+        let not_object = call_args("SearchEntity", json!(["middle_fn"]));
+        assert!(tool_error_text(&not_object).is_some());
+
+        // A valid call, an explicit null for an optional argument and an out-of-range bound (the
+        // tools clamp) all still dispatch.
+        for args in [
+            json!({ "name": "middle_fn" }),
+            json!({ "name": "middle_fn", "limit": null }),
+            json!({ "name": "middle_fn", "limit": 100000 }),
+        ] {
+            let resp = call_args("SearchEntity", args.clone());
+            assert!(tool_error_text(&resp).is_none(), "{args}: {resp}");
+        }
+    }
+
+    #[test]
+    fn validate_arguments_checks_enum_and_item_types_212() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "mode": { "type": "string", "enum": ["a", "b"] },
+                "ids": { "type": "array", "items": { "type": "string" } }
+            },
+            "additionalProperties": false
+        });
+        assert!(validate_arguments(&schema, &json!({ "mode": "a", "ids": ["x"] })).is_ok());
+        assert_eq!(
+            validate_arguments(&schema, &json!({ "mode": "c" })).unwrap_err(),
+            "argument 'mode' must be one of \"a\", \"b\""
+        );
+        assert_eq!(
+            validate_arguments(&schema, &json!({ "ids": ["x", 2] })).unwrap_err(),
+            "argument 'ids[1]' must be of type string"
+        );
+        // Every advertised estate schema is an object schema that rejects unknown keys.
+        for t in all_tools() {
+            let s = input_schema(t.name()).expect("every tool has a schema");
+            assert_eq!(s["additionalProperties"], json!(false), "{}", t.name());
+            assert!(validate_arguments(&s, &json!({ "zz_unknown": 1 })).is_err());
+        }
     }
 
     // ── tools/call — BlastRadius ──────────────────────────────────────────────

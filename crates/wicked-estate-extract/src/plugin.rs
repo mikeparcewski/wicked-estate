@@ -519,7 +519,11 @@ fn classify_one(
             .map_err(|e| format!("read query `{}`: {e}", m.query))?;
         // Eager compile against the built-in grammar (ADR-010): a broken override must fall back
         // to the built-in query LOUDLY at load — never inherit the silent-deletion `.ok()?` path.
-        let compiled = match tree_sitter::Query::new(&language, &query_src) {
+        // (#235) A reserved or misspelt `@flow.*` capture is a load failure too, not a silent drop.
+        let compiled = match tree_sitter::Query::new(&language, &query_src)
+            .map_err(|e| e.to_string())
+            .and_then(|q| crate::treesitter::flow_capture_lint(&q).map(|()| q))
+        {
             Ok(q) => {
                 warn_zero_roles(dir, lang, &q);
                 Ok(())
@@ -597,7 +601,10 @@ fn classify_one(
     // Eager compile against the plugin's OWN grammar (ADR-010): an armed override with a broken
     // query disarms to built-in grammar + built-in query, loudly — the `from_grammar` silent
     // `.ok()?` path must never see a user query for a built-in language.
-    match tree_sitter::Query::new(&plugin.language, &plugin.query_src) {
+    match tree_sitter::Query::new(&plugin.language, &plugin.query_src)
+        .map_err(|e| e.to_string())
+        .and_then(|q| crate::treesitter::flow_capture_lint(&q).map(|()| q))
+    {
         Ok(q) => warn_zero_roles(dir, &lang, &q),
         Err(e) => {
             eprintln!(
@@ -705,6 +712,12 @@ fn load_dylib(
 
     let query_src = std::fs::read_to_string(dir.join(&m.query))
         .map_err(|e| format!("read query `{}`: {e}", m.query))?;
+    // (#235) A query that compiles but carries a reserved or misspelt `@flow.*` capture would drop
+    // flow facts silently at extract time: refuse the plugin at load instead.
+    if let Ok(q) = tree_sitter::Query::new(&language, &query_src) {
+        crate::treesitter::flow_capture_lint(&q)
+            .map_err(|e| format!("query `{}`: {e}", m.query))?;
+    }
 
     Ok((
         LoadedPlugin {
