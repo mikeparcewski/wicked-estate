@@ -2049,6 +2049,62 @@ fn pattern_bindings(node: tree_sitter::Node, src: &[u8], out: &mut Vec<(String, 
     }
 }
 
+/// The identifier contributors of the value an INLINE callable returns (ADR-014 S6): its expression
+/// body, or the expression of each `return` directly in its block body. Only the shapes the other
+/// `may_influence` constructs take count: the expression itself when it is an identifier, a call's
+/// identifier receiver and arguments (`return_call`), a binary expression's identifier operands
+/// (`expression`), and a member read's identifier object. A `return` nested in a branch or loop,
+/// a nested callable, a literal and every other shape contribute nothing. Whether a contributor is
+/// the callable's own parameter or a captured value is decided by the value scopes, like any read.
+fn callable_return_contributors(callable: tree_sitter::Node) -> Vec<tree_sitter::Node> {
+    fn contributors<'t>(expr: tree_sitter::Node<'t>, out: &mut Vec<tree_sitter::Node<'t>>) {
+        let identifier =
+            |node: Option<tree_sitter::Node<'t>>| node.filter(|n| n.kind() == "identifier");
+        match expr.kind() {
+            "identifier" => out.push(expr),
+            "call_expression" => {
+                if let Some(function) = expr
+                    .child_by_field_name("function")
+                    .filter(|f| f.kind() == "member_expression")
+                {
+                    out.extend(identifier(function.child_by_field_name("object")));
+                }
+                if let Some(arguments) = expr.child_by_field_name("arguments") {
+                    let mut cursor = arguments.walk();
+                    out.extend(
+                        arguments
+                            .named_children(&mut cursor)
+                            .filter(|a| a.kind() == "identifier"),
+                    );
+                }
+            }
+            "binary_expression" => {
+                out.extend(identifier(expr.child_by_field_name("left")));
+                out.extend(identifier(expr.child_by_field_name("right")));
+            }
+            "member_expression" => out.extend(identifier(expr.child_by_field_name("object"))),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    let Some(body) = callable.child_by_field_name("body") else {
+        return out;
+    };
+    if body.kind() == "statement_block" {
+        let mut cursor = body.walk();
+        for expr in body
+            .named_children(&mut cursor)
+            .filter(|statement| statement.kind() == "return_statement")
+            .filter_map(|statement| statement.named_child(0))
+        {
+            contributors(expr, &mut out);
+        }
+    } else {
+        contributors(body, &mut out);
+    }
+    out
+}
+
 fn enclosing_def(defs: &[DefRec], pos: usize) -> Option<&DefRec> {
     defs.iter()
         .filter(|d| d.start <= pos && pos < d.end)
@@ -2456,6 +2512,10 @@ enum CaptureRole<'a> {
     FlowSlot { kind: FlowEndpointKind },
     /// `@flow.return.<kind>` — a value returned by the enclosing callable.
     FlowReturn { kind: FlowEndpointKind },
+    /// `@flow.producer.callable_return` — an INLINE callable (an arrow or function expression)
+    /// whose returned value is the producer (ADR-014 S6): its identifier contributors
+    /// ([`callable_return_contributors`]) each become a `Local` producer of the match.
+    FlowCallableReturn,
     /// `@flow.barrier` / `@flow.barrier.owned` — the body of a callable, marking whose return
     /// value a `return` statement inside it is. A barrier that is NOT `.owned` belongs to an
     /// anonymous callable (a callback), which is not a definition record: a `return` inside it
@@ -2555,6 +2615,7 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
             "return.local" => CaptureRole::FlowReturn {
                 kind: FlowEndpointKind::Local,
             },
+            "producer.callable_return" => CaptureRole::FlowCallableReturn,
             "barrier" => CaptureRole::FlowBarrier { owned: false },
             "barrier.owned" => CaptureRole::FlowBarrier { owned: true },
             "scope" => CaptureRole::FlowScope {
@@ -2980,6 +3041,17 @@ impl Extractor for TreeSitterExtractor {
                         };
                         rebind_non_class_field(&mut endpoint, c.node);
                         flow_producers.push(endpoint);
+                    }
+                    CaptureRole::FlowCallableReturn => {
+                        for node in callable_return_contributors(c.node) {
+                            flow_producers.push(PendingFlowEndpoint {
+                                kind: FlowEndpointKind::Local,
+                                name: node.utf8_text(src).unwrap_or("").to_string(),
+                                pos: node.start_byte(),
+                                span: ts_span(node),
+                                slot: None,
+                            });
+                        }
                     }
                     CaptureRole::FlowParameter { kind } => {
                         flow_parameter_sites.push(PendingFlowEndpoint {
