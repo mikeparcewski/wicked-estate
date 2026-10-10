@@ -129,3 +129,35 @@ export function destructuringNested(obj: { a: { b: string } }): string {
   } = obj;
   return b;
 }
+
+// ADR-014 S5d loop shapes and expected NON-flows.
+export function loopAugmented(items: string[]): string {
+  let total = '';
+  for (const s of items) {
+    total += s;
+  }
+  return total;
+}
+
+export function loopPattern(pairs: [string, string][]): string {
+  for (const [k, v] of pairs) {
+    return v;
+  }
+  return '';
+}
+
+// `for…in` binds KEYS, not elements: no flow from the object.
+export function loopKeys(obj: { [k: string]: string }): string {
+  let last = '';
+  for (const key in obj) {
+    last = key;
+  }
+  return last;
+}
+
+// The loop binding shadows the parameter of the same name; the return reads the parameter.
+export function loopShadow(items: string[], it: string): string {
+  for (const it of items) {
+  }
+  return it;
+}

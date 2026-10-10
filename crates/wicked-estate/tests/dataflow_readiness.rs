@@ -151,12 +151,6 @@ fn present_rows_are_reachable() {
 fn missing_primitives_are_unreachable() {
     for (owner, from, to, why) in [
         (
-            "loop",
-            "items",
-            "loop.return",
-            "for-of element binding / loop-carried reassignment",
-        ),
-        (
             "promise",
             "src",
             "promise.return",
@@ -324,6 +318,9 @@ fn every_edge_matches_the_expected_semantics_table() {
         ("return_call", "may_influence"),
         ("return_closure", "may_influence"),
         ("destructuring", "may_influence"),
+        ("loop_element", "may_influence"),
+        ("reassignment_expression", "may_influence"),
+        ("augmented_assignment", "may_influence"),
     ]
     .into_iter()
     .collect();
@@ -347,7 +344,14 @@ fn every_edge_matches_the_expected_semantics_table() {
             seen.insert(construct.clone());
         }
     }
-    for construct in ["return_call", "return_closure", "destructuring"] {
+    for construct in [
+        "return_call",
+        "return_closure",
+        "destructuring",
+        "loop_element",
+        "reassignment_expression",
+        "augmented_assignment",
+    ] {
         assert!(seen.contains(construct), "{construct} never fired");
     }
 }
@@ -403,4 +407,71 @@ fn s5c_destructuring() {
     assert!(reaches(&inner.symbol.0, &shadow_ret));
     let nested_ret = value("destructuringNested", "destructuringNested.return");
     assert!(!reaches(&value("destructuringNested", "obj"), &nested_ret));
+}
+
+/// A value node of `owner` whose qualified id ends in `suffix` (for scoped bindings `name@n`).
+fn scoped(owner: &str, suffix: &str) -> String {
+    let hits: Vec<&Node> = graph()
+        .nodes
+        .iter()
+        .filter(|n| {
+            n.is_value_flow_node()
+                && n.symbol.0.contains(&format!("{owner}()."))
+                && n.symbol.0.ends_with(&format!("{suffix}:"))
+        })
+        .collect();
+    assert_eq!(hits.len(), 1, "{owner}{suffix}");
+    hits[0].symbol.0.clone()
+}
+
+/// ADR-014 S5d (primitive 3, loops): a `for…of` binding is ONE element of the iterable, and a
+/// loop-carried `acc = acc + it` / `acc += it` combines values, so every hop is `may_influence`.
+#[test]
+fn s5d_loop_binding() {
+    let it = scoped("loop", ":local:it@1");
+    for (producer, consumer, construct) in [
+        (value("loop", "items"), it.clone(), "loop_element"),
+        (it.clone(), value("loop", "acc"), "reassignment_expression"),
+        (
+            scoped("loopAugmented", ":local:s@1"),
+            value("loopAugmented", "total"),
+            "augmented_assignment",
+        ),
+        (
+            value("loopPattern", "pairs"),
+            scoped("loopPattern", ":local:v@1"),
+            "loop_element",
+        ),
+    ] {
+        let e = edge(&producer, &consumer);
+        assert_eq!(
+            e.supports,
+            vec![(construct.to_string(), "may_influence".to_string())],
+            "{producer} → {consumer}"
+        );
+    }
+    for owner in ["loop", "loopAugmented", "loopPattern"] {
+        let from = if owner == "loopPattern" {
+            "pairs"
+        } else {
+            "items"
+        };
+        assert!(reaches(
+            &value(owner, from),
+            &value(owner, &format!("{owner}.return"))
+        ));
+    }
+    // Expected non-flows: `for…in` keys, and a loop binding that shadows the returned parameter.
+    assert!(!reaches(
+        &value("loopKeys", "obj"),
+        &value("loopKeys", "loopKeys.return")
+    ));
+    assert!(!reaches(
+        &value("loopShadow", "items"),
+        &value("loopShadow", "loopShadow.return")
+    ));
+    assert!(reaches(
+        &value("loopShadow", "items"),
+        &scoped("loopShadow", ":local:it@1")
+    ));
 }
