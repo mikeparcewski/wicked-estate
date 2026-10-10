@@ -161,3 +161,67 @@ export function loopShadow(items: string[], it: string): string {
   }
   return it;
 }
+
+// ADR-014 S6a inline array callbacks and expected NON-flows.
+export function cbMap(items: string[]): string[] {
+  const out = items.map((x) => x.trim());
+  return out;
+}
+
+export function cbMapFn(items: string[]): string[] {
+  const out = items.map(function (x) {
+    return x;
+  });
+  return out;
+}
+
+export function cbFlatMapBlock(items: string[]): string[] {
+  const out = items.flatMap((x) => {
+    const y = x;
+    return y;
+  });
+  return out;
+}
+
+export function cbFilter(items: string[], needle: string): string[] {
+  const kept = items.filter((x) => x === needle);
+  return kept;
+}
+
+export function cbFind(items: string[]): string | undefined {
+  return items.find((x) => x.length > 0);
+}
+
+export function cbForEach(items: string[]): string {
+  let last = '';
+  items.forEach((x) => {
+    last = x;
+  });
+  return last;
+}
+
+export function cbReduce(items: string[], seed: string): string {
+  return items.reduce((acc, x) => acc + x, seed);
+}
+
+// A named callback is out of scope: binding its parameter would be interprocedural.
+export function cbNamed(items: string[]): string[] {
+  const out = items.map(fmt);
+  return out;
+}
+
+export function fmt(v: string): string {
+  return v;
+}
+
+// `some` / `every` return a boolean: neither the receiver nor a captured value reaches it.
+export function cbSome(items: string[], needle: string): boolean {
+  const ok = items.some((x) => x === needle);
+  return ok;
+}
+
+// The callback parameter shadows the returned parameter of the same name.
+export function cbShadow(items: string[], x: string): string {
+  const out = items.map((x) => x);
+  return x;
+}

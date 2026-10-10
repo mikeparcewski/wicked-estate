@@ -321,6 +321,10 @@ fn every_edge_matches_the_expected_semantics_table() {
         ("loop_element", "may_influence"),
         ("reassignment_expression", "may_influence"),
         ("augmented_assignment", "may_influence"),
+        ("callback_element", "may_influence"),
+        ("callback_accumulator", "may_influence"),
+        ("callback_return", "may_influence"),
+        ("callback_select", "may_influence"),
     ]
     .into_iter()
     .collect();
@@ -351,6 +355,10 @@ fn every_edge_matches_the_expected_semantics_table() {
         "loop_element",
         "reassignment_expression",
         "augmented_assignment",
+        "callback_element",
+        "callback_accumulator",
+        "callback_return",
+        "callback_select",
     ] {
         assert!(seen.contains(construct), "{construct} never fired");
     }
@@ -474,4 +482,99 @@ fn s5d_loop_binding() {
         &value("loopShadow", "items"),
         &scoped("loopShadow", ":local:it@1")
     ));
+}
+
+/// The support rows of the one edge `producer → consumer`, as `(construct, semantics)`.
+fn supports(producer: &str, consumer: &str) -> Vec<(String, String)> {
+    edge(producer, consumer).supports.clone()
+}
+
+fn influence(construct: &str) -> (String, String) {
+    (construct.to_string(), "may_influence".to_string())
+}
+
+/// ADR-014 S6a (inline array callbacks): an inline callback's parameter is ONE element of the
+/// receiver (the accumulator for `reduce`'s first), the callback's return is the call's result for
+/// `map` / `flatMap` / `reduce`, and `filter` / `find` select the receiver's elements. Every hop is
+/// `may_influence`. A named callback, a boolean-returning method and a shadowed name stay out.
+#[test]
+fn s6a_inline_callbacks() {
+    for owner in ["cbMap", "cbMapFn"] {
+        let x = scoped(owner, ":local:x@1");
+        assert_eq!(
+            supports(&value(owner, "items"), &x),
+            vec![influence("callback_element")],
+            "{owner}"
+        );
+        assert_eq!(
+            supports(&x, &value(owner, "out")),
+            vec![influence("callback_return")],
+            "{owner}"
+        );
+    }
+    for (owner, to) in [
+        ("cbMap", "cbMap.return"),
+        ("cbMapFn", "cbMapFn.return"),
+        ("cbFlatMapBlock", "cbFlatMapBlock.return"),
+        ("cbFilter", "cbFilter.return"),
+        ("cbFind", "cbFind.return"),
+        ("cbForEach", "cbForEach.return"),
+    ] {
+        assert!(
+            reaches(&value(owner, "items"), &value(owner, to)),
+            "{owner}: items should reach {to}"
+        );
+    }
+    assert_eq!(
+        supports(&value("cbFilter", "items"), &value("cbFilter", "kept")),
+        vec![influence("callback_select")]
+    );
+    assert!(
+        supports(&value("cbFind", "items"), &value("cbFind", "cbFind.return"))
+            .contains(&influence("callback_select"))
+    );
+    // `reduce`: the seed is the accumulator's first value, each element binds the 2nd parameter,
+    // and the callback's return is the result.
+    let (acc, x) = (
+        scoped("cbReduce", ":local:acc@1"),
+        scoped("cbReduce", ":local:x@1"),
+    );
+    let ret = value("cbReduce", "cbReduce.return");
+    assert_eq!(
+        supports(&value("cbReduce", "seed"), &acc),
+        vec![influence("callback_accumulator")]
+    );
+    assert_eq!(
+        supports(&value("cbReduce", "items"), &x),
+        vec![influence("callback_element")]
+    );
+    for p in [&acc, &x] {
+        assert_eq!(supports(p, &ret), vec![influence("callback_return")]);
+    }
+    // Expected non-flows. A predicate's operand never reaches the selected result.
+    assert!(!reaches(
+        &value("cbFilter", "needle"),
+        &value("cbFilter", "cbFilter.return")
+    ));
+    // A named callback: no element binding, no result.
+    assert!(!reaches(
+        &value("cbNamed", "items"),
+        &value("cbNamed", "out")
+    ));
+    assert!(!reaches(&value("cbNamed", "items"), &value("fmt", "v")));
+    // `some` returns a boolean: neither the receiver nor the predicate's operand reaches it.
+    for from in ["items", "needle"] {
+        assert!(
+            !reaches(&value("cbSome", from), &value("cbSome", "ok")),
+            "{from}"
+        );
+    }
+    // The callback's `x` shadows the returned parameter `x`.
+    let shadow_ret = value("cbShadow", "cbShadow.return");
+    assert!(!reaches(&value("cbShadow", "items"), &shadow_ret));
+    assert!(reaches(
+        &value("cbShadow", "items"),
+        &value("cbShadow", "out")
+    ));
+    assert!(reaches(&scoped("cbShadow", ":param:x"), &shadow_ret));
 }
