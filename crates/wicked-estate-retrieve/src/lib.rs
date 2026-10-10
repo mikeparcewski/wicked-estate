@@ -1500,7 +1500,9 @@ impl RetrievalTool for Lineage {
                         "searched_depth": max_depth,
                         "confidence": { "min": null, "avg": null, "edge_count": 0 },
                     }),
-                    diagnostics: vec!["Lineage: 'symbol' field is required".to_string()],
+                    diagnostics: std::iter::once("Lineage: 'symbol' field is required".to_string())
+                        .chain(clamp_note(request, "depth", BLAST_DEPTH_CEILING as u64))
+                        .collect(),
                 });
             }
         };
@@ -1688,6 +1690,9 @@ impl RetrievalTool for Lineage {
             content["flows"] = Value::Array(rows);
         }
 
+        // W8.5: the tool owns its depth ceiling and says when it applied it, like every other
+        // clamping RetrievalTool (the CLI no longer refuses `--depth > 24` at argv).
+        diag.extend(clamp_note(request, "depth", BLAST_DEPTH_CEILING as u64));
         Ok(RetrievalResult {
             content,
             diagnostics: diag,
@@ -4286,11 +4291,13 @@ mod tests {
             .unwrap();
         assert_eq!(res.content["found"], true);
         assert_eq!(res.content["hops"].as_array().unwrap().len(), 16);
+        // Exactly one `get_node` per OPERAND, spent by `resolve_operand`'s exact-id check (an id
+        // wins over a same-spelled name, W8.5). Rendering adds none: the endpoints come from the
+        // traversal, and an unseeded cache would cost one more query per endpoint (4, not 2).
         assert_eq!(
             counting.get_node_calls.get(),
-            0,
-            "endpoints come from the traversal; an unseeded cache would cost one query per \
-             endpoint"
+            2,
+            "endpoints come from the traversal; only operand resolution may call get_node"
         );
     }
 

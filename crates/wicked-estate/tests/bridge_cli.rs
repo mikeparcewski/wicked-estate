@@ -971,3 +971,41 @@ fn source_usage_error_does_not_create_the_store_206() {
         "typo2.db created by a usage error"
     );
 }
+
+/// W8.5: `traverse` addresses a value-flow node by its exact `SymbolId` — a value slot that
+/// name search hides — and walks its `flows_to` neighbourhood like any other node.
+#[test]
+fn traverse_accepts_a_value_flow_node_by_exact_symbol_id() {
+    let d = std::env::temp_dir().join(format!("ci_travcli_valueid_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&d);
+    let scratch = Scratch(d);
+    fs::create_dir_all(&*scratch).unwrap();
+    fs::write(
+        scratch.join("v.ts"),
+        "export function f(a: string): string {\n  const b = a;\n  return b;\n}\n",
+    )
+    .unwrap();
+    index(&scratch);
+    let store = wicked_estate_store::SqliteStore::open(scratch.join("graph.db")).unwrap();
+    let slot = |suffix: &str| {
+        use wicked_estate_core::GraphRead;
+        let hits: Vec<_> = store
+            .all_nodes()
+            .unwrap()
+            .into_iter()
+            .filter(|n| n.is_value_flow_node() && n.symbol.0.ends_with(suffix))
+            .collect();
+        assert_eq!(hits.len(), 1, "{suffix}: {hits:?}");
+        hits[0].symbol.0.clone()
+    };
+    let (a, b) = (slot("f().:param:a:"), slot("f().:local:b:"));
+    let out = traverse(&scratch, &[&a, "--direction", "dependents", "--json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let docs = documents(&out);
+    assert_eq!(docs.len(), 1);
+    assert!(
+        docs[0].to_string().contains(&b),
+        "the slot's flows_to consumer must be reached: {}",
+        docs[0]
+    );
+}

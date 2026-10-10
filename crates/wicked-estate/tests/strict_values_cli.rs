@@ -599,8 +599,8 @@ fn help_is_recognised_only_in_flag_position() {
         );
         assert_eq!(before, snapshot(&s), "{args:?} touched the directory");
     }
-    // In a self-parsed command's value slot, `--help` is that flag's (refused) value too.
-    let out = run(&s, &["lineage", "--symbol", "x", "--depth", "--help"]);
+    // In a bridged command's value slot, `--help` is that flag's (refused) value too.
+    let out = run(&s, &["lineage", "x", "--depth", "--help"]);
     assert!(!out.status.success(), "{}", stdout(&out));
     assert!(stderr(&out).contains("--depth"), "{}", stderr(&out));
 }

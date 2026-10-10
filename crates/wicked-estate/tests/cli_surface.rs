@@ -231,8 +231,8 @@ fn json_arms_survive_a_closed_stdout() {
     let resolved: serde_json::Value = serde_json::from_slice(&r.stdout).unwrap();
     let id = resolved[0]["symbol_id"].as_str().unwrap().to_string();
     let table: Vec<Vec<&str>> = vec![
-        vec!["lineage", "--symbol", &id, "--json"],
-        vec!["lineage", "--symbol", &id],
+        vec!["lineage", &id, "--json"],
+        vec!["lineage", &id],
         vec!["resolve", "f", "--json"],
         vec!["query", "f", "--json"],
         vec!["blast-radius", "f", "--json"],
@@ -256,6 +256,12 @@ fn json_arms_survive_a_closed_stdout() {
         assert!(
             !stderr.contains("panicked") && out.status.code() != Some(101),
             "{args:?} must not panic on a closed stdout: {stderr}"
+        );
+        // A reader that went away is not an error (#247): exit 0, no `Broken pipe` noise.
+        assert!(
+            out.status.success() && !stderr.contains("Broken pipe"),
+            "{args:?} must exit 0 on a closed stdout: {:?} {stderr}",
+            out.status
         );
     }
     let _ = fs::remove_dir_all(&dir);
