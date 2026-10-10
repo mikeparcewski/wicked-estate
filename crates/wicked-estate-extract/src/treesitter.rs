@@ -1316,27 +1316,123 @@ impl TreeSitterExtractor {
 /// aspirational `languages.toml` manifest — that tracks the 73-language coverage target, which is
 /// a superset of what is actually wired). Returns `None` when no wired grammar claims the extension.
 pub fn extractor_for_extension(ext: &str) -> Option<TreeSitterExtractor> {
+    dispatch_for_extension(ext)?.build()
+}
+
+/// Which extractor an extension dispatches to, resolved WITHOUT compiling its query. The one
+/// resolution [`extractor_for_extension`] and [`ExtractorCache`] share, so they cannot disagree.
+#[derive(Clone, Copy)]
+enum Dispatch {
+    /// ADR-010 tier 3: an ARMED grammar override's SURVIVING extension claim (post the
+    /// cross-language ownership filter) wins before the built-in extension match.
+    GrammarOverride(&'static crate::plugin::GrammarOverride),
+    /// A built-in `LANG_TABLE` entry, by name. Query-only overrides need no hook here:
+    /// `for_language` applies them.
+    Builtin(&'static str),
+    /// Not built in: a runtime-loaded additive plugin grammar claiming the extension.
+    Plugin(&'static crate::plugin::LoadedPlugin),
+}
+
+fn dispatch_for_extension(ext: &str) -> Option<Dispatch> {
     let needle = ext.trim_start_matches('.').to_ascii_lowercase();
-    // ADR-010 tier 3: an ARMED grammar override's SURVIVING extension claims (post the
-    // cross-language ownership filter) win before the built-in extension match. Query-only
-    // overrides need no hook here — the built-in match below delegates to `for_language`,
-    // which applies them.
     if let Some(g) = crate::plugin::grammar_override_for_ext(&needle) {
-        return TreeSitterExtractor::from_grammar(
-            &g.lang,
-            g.plugin.language.clone(),
-            &g.plugin.query_src,
-        );
+        return Some(Dispatch::GrammarOverride(g));
     }
     if let Some(entry) = LANG_TABLE
         .iter()
         .find(|e| e.ext.iter().any(|x| *x == needle))
     {
-        return TreeSitterExtractor::for_language(entry.name);
+        return Some(Dispatch::Builtin(entry.name));
     }
-    // Not built in — fall back to a runtime-loaded plugin grammar claiming this extension.
-    let p = crate::plugin::find_by_extension(&needle)?;
-    TreeSitterExtractor::from_grammar(&p.name, p.language.clone(), &p.query_src)
+    crate::plugin::find_by_extension(&needle).map(Dispatch::Plugin)
+}
+
+impl Dispatch {
+    /// Identity of the extractor this dispatch builds: two extensions with the same key build
+    /// the same extractor (`.ts`/`.mts`/`.cts` all resolve to the built-in `typescript`).
+    fn key(self) -> String {
+        match self {
+            Dispatch::GrammarOverride(g) => format!("grammar-override:{g:p}"),
+            Dispatch::Builtin(name) => format!("builtin:{name}"),
+            Dispatch::Plugin(p) => format!("plugin:{p:p}"),
+        }
+    }
+
+    fn build(self) -> Option<TreeSitterExtractor> {
+        match self {
+            Dispatch::GrammarOverride(g) => TreeSitterExtractor::from_grammar(
+                &g.lang,
+                g.plugin.language.clone(),
+                &g.plugin.query_src,
+            ),
+            Dispatch::Builtin(name) => TreeSitterExtractor::for_language(name),
+            Dispatch::Plugin(p) => {
+                TreeSitterExtractor::from_grammar(&p.name, p.language.clone(), &p.query_src)
+            }
+        }
+    }
+}
+
+/// The tree-sitter extractors of one index pass, compiled LAZILY: a language's query is compiled
+/// the first time a file of it is extracted, and once per extractor, not per extension (ADR-014
+/// "Cumulative": compiling every present extension's query up front was the fixed per-process
+/// cost of an incremental re-index). `Sync`, so parallel extraction shares one cache.
+pub struct ExtractorCache {
+    /// Extension (lower case) → the key of its extractor slot.
+    keys: HashMap<String, String>,
+    /// Extractor key → its extractor, built on first use (`None` = the query failed to compile).
+    slots: HashMap<String, std::sync::OnceLock<Option<TreeSitterExtractor>>>,
+}
+
+impl ExtractorCache {
+    /// Resolve each extension's dispatch (nothing is compiled here).
+    pub fn for_extensions<I, S>(exts: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut keys = HashMap::new();
+        let mut slots = HashMap::new();
+        for ext in exts {
+            let ext = ext.as_ref().to_ascii_lowercase();
+            if keys.contains_key(&ext) {
+                continue;
+            }
+            if let Some(d) = dispatch_for_extension(&ext) {
+                let key = d.key();
+                slots
+                    .entry(key.clone())
+                    .or_insert_with(std::sync::OnceLock::new);
+                keys.insert(ext, key);
+            }
+        }
+        Self { keys, slots }
+    }
+
+    /// The extractor for `ext`, compiling its query on first use. `None` when no wired grammar
+    /// claims the extension, or its query does not compile.
+    pub fn get(&self, ext: &str) -> Option<&TreeSitterExtractor> {
+        let ext = ext.to_ascii_lowercase();
+        let slot = self.slots.get(self.keys.get(&ext)?)?;
+        slot.get_or_init(|| dispatch_for_extension(&ext).and_then(Dispatch::build))
+            .as_ref()
+    }
+
+    /// Whether [`ExtractorCache::get`] would return an extractor for `ext`, without compiling
+    /// where the answer is known: a built-in query always compiles (pinned by
+    /// `every_wired_query_compiles`) and an armed grammar override is
+    /// compile-verified at registry load. An additive plugin's query is not verified at load, so
+    /// that one case compiles to answer.
+    pub fn claims(&self, ext: &str) -> bool {
+        let ext = ext.to_ascii_lowercase();
+        match dispatch_for_extension(&ext) {
+            None => false,
+            Some(Dispatch::Builtin(_)) | Some(Dispatch::GrammarOverride(_)) => {
+                self.keys.contains_key(&ext)
+            }
+            Some(Dispatch::Plugin(_)) => self.get(&ext).is_some(),
+        }
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -4793,6 +4889,31 @@ mod tests {
             language: Language::new(lang),
             text: text.into(),
         }
+    }
+
+    /// ADR-014 "Cumulative": the cache compiles nothing up front, `claims` answers for a built-in
+    /// without compiling, and `.ts`/`.mts`/`.cts` share ONE compiled extractor.
+    #[test]
+    fn extractor_cache_is_lazy_and_shared_per_language() {
+        let cache = ExtractorCache::for_extensions(["ts", "MTS", "cts", "js", "nope"]);
+        let compiled = |c: &ExtractorCache| c.slots.values().filter(|s| s.get().is_some()).count();
+        assert_eq!(cache.slots.len(), 2, "typescript + javascript slots");
+        assert!(cache.claims("ts") && cache.claims("mts") && cache.claims("js"));
+        assert!(
+            !cache.claims("nope") && !cache.claims("py"),
+            "unclaimed / not in the pass"
+        );
+        assert_eq!(
+            compiled(&cache),
+            0,
+            "claims compiles nothing for a built-in"
+        );
+        let ts = cache.get("ts").expect("typescript") as *const TreeSitterExtractor;
+        assert_eq!(cache.get("mts").map(|e| e as *const _), Some(ts));
+        assert_eq!(cache.get("CTS").map(|e| e as *const _), Some(ts));
+        assert_eq!(compiled(&cache), 1, "javascript still not compiled");
+        assert_eq!(cache.get("ts").unwrap().lang_name, "typescript");
+        assert!(cache.get("py").is_none());
     }
 
     /// Every wired language's `.scm` MUST compile against its grammar. A failure here means the
