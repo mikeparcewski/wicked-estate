@@ -2,7 +2,37 @@
 
 ## [Unreleased]
 
+## [0.24.0] — 2026-10-10
+
+Minor bump, not a patch: public API breaks, as the 0.x scheme allows.
+- `scip_edges` is removed.
+- `ResolutionTier` and `Provenance` gain `Compiler`.
+- The CLI's `lineage` and the bespoke arms change their argv contracts (W8.5, W8.6).
+
+**Re-index note:** the version bump re-extracts every graph on its next `index`. That retires
+the `Calls`/`References` base edges older `scip` runs wrote; re-run `scip` to write support-plane
+`References`. Ingest Angular evidence with `adapters/angular-evidence` plus `wicked-estate evidence`.
+
 ### Changed (breaking)
+- **Semantic evidence: one envelope for every precise producer, and SCIP references never become
+  calls (TS-S2C, #275).** `wicked_estate_core::evidence` is the versioned `SemanticEvidence` v1
+  envelope: a producer profile (name, version, `index`/`compiler` class, declared capabilities),
+  a snapshot, an optional generation, documents with their position encoding, and facts.
+  Correlation is deterministic and counts every fact it does not project by reason. Accepted
+  facts go through the TS-S2A support plane (`replace_edge_supports`), so the snapshot replaces
+  that owner's previous facts. A `Calls` edge needs a declared `calls` capability, a site and an
+  exact target. The SCIP adapter (`wicked_estate_resolve::scip_evidence`, scip crate 0.10, typed
+  ranges) replaces `scip_edges`. It declares definitions and references only, because SCIP has
+  no call role, so `wicked-estate scip` now writes support-plane `References` and never `Calls`.
+  `ResolutionTier::Compiler` / `Provenance::Compiler` are new. Contract: ENGINE-CONTRACT §3.5.
+- **`wicked-estate lineage` runs on the RetrievalTool bridge (W8.5, #276).** The selector is a
+  positional `<symbol>` (an exact name or `SymbolId`, value slots included), and `--symbol` is
+  removed. An unknown, ambiguous or absent selector exits non-zero with nothing on stdout.
+  `--json` prints the tool's `content` on stdout, with every diagnostic and the real per-root
+  freshness on stderr. A `--depth` above 24 is clamped by the tool and reported as `CLAMPED:`
+  instead of being refused. `resolve_operand` checks an exact `SymbolId` before names, for
+  `path` and every bridged command. Bridged commands refuse `+N` integers and empty operands,
+  and exit 0 on a closed stdout.
 - **Bespoke CLI commands reject malformed values, surplus or missing operands, accidental
   repeats, and flags they would ignore in combination (W8.6).** 0.21.0 made each command reject
   flags it does not read (#197, #206). Four more accept-and-ignore paths remained in the shared
@@ -63,6 +93,33 @@
   (`lineage --depth --help`), instead of printing the banner. `source` selector precedence and its
   JSON-only budgets are unchanged, as is every documented working invocation and every result
   schema. **Scripts that relied on an ignored value, operand, repeat or flag now fail.**
+
+### Added
+- **Angular compiler adapter and compiler-resolved inputs (TS-S3, #277).** A companion adapter,
+  `adapters/angular-evidence`, pinned exactly to Angular 22.2.2, emits `input_binding` facts.
+  It resolves every input through the compiler's directive metadata: aliases, inheritance,
+  signal and model inputs, transforms, host directives, structural directives, control flow and
+  `templateUrl`. The engine projects them as `compiler`-evidence `flows_to` between canonical
+  field slots. Every property and accessor of a decorated class gets its field slot, and
+  `abstract class` declarations are `Class` nodes. A new
+  `wicked-estate evidence <envelope.json>` CLI ingests an envelope. Fixtures are
+  compiler-derived and re-derived in CI. The decision is recorded in ADR-013.
+- **Angular outputs and template events (TS-S4, #278).** `event_binding` facts give each handler
+  an `event-listens` edge to the output's field slot (event delivery, never `Calls`) and carry
+  `$event` as `flows_to` into host fields or handler parameters (`flow::param_slot_id`).
+  Confirmed DOM events are counted and never projected.
+- **ADR-014: the data-flow / taint decision record (TS-S5, #279).** Status Proposed, with a
+  pinned readiness test (`tests/dataflow_readiness.rs`).
+
+### Fixed
+- **`rules.recall` steering parity with core (FND-EST-02).** It adds the `steering_type` facet
+  (MCP and `rules-recall --steering-type`; a pre-steering rule is `architecture`; exact match,
+  as core does). It no longer recalls effect-bearing decide-lane rules. The semantics are
+  pinned by a golden fixture shared byte-identical with wicked-core.
+- **Bench measures what it says (BENCH-01/02).** `blast_radius_coverage_pct` is replaced by
+  `direct_ref_resolution_*`: a matched population, `null` when either side cannot be read.
+  The bench CLI rejects unknown flags and missing paths, implements `--no-report`, and fails a
+  run that drops a requested repo. Its docs no longer claim an agent A/B runner.
 
 ## [0.23.0] — 2026-10-09
 
