@@ -161,3 +161,100 @@ export function loopShadow(items: string[], it: string): string {
   }
   return it;
 }
+
+// ADR-014 S6a inline array callbacks and expected NON-flows.
+export function cbMap(items: string[]): string[] {
+  const out = items.map((x) => x.trim());
+  return out;
+}
+
+export function cbMapFn(items: string[]): string[] {
+  const out = items.map(function (x) {
+    return x;
+  });
+  return out;
+}
+
+export function cbFlatMapBlock(items: string[]): string[] {
+  const out = items.flatMap((x) => {
+    const y = x;
+    return y;
+  });
+  return out;
+}
+
+export function cbFilter(items: string[], needle: string): string[] {
+  const kept = items.filter((x) => x === needle);
+  return kept;
+}
+
+export function cbFind(items: string[]): string | undefined {
+  return items.find((x) => x.length > 0);
+}
+
+export function cbForEach(items: string[]): string {
+  let last = '';
+  items.forEach((x) => {
+    last = x;
+  });
+  return last;
+}
+
+export function cbReduce(items: string[], seed: string): string {
+  return items.reduce((acc, x) => acc + x, seed);
+}
+
+// A named callback is out of scope: binding its parameter would be interprocedural.
+export function cbNamed(items: string[]): string[] {
+  const out = items.map(fmt);
+  return out;
+}
+
+export function fmt(v: string): string {
+  return v;
+}
+
+// `some` / `every` return a boolean: neither the receiver nor a captured value reaches it.
+export function cbSome(items: string[], needle: string): boolean {
+  const ok = items.some((x) => x === needle);
+  return ok;
+}
+
+// S6a review cases: a named function expression's own name, a commented return, a single
+// unparenthesized `reduce` parameter, and a TypeScript `this` parameter (erased at runtime).
+export function cbNamedExpr(items: string[], x: string): string[] {
+  const out = items.map(function x(v) {
+    return x;
+  });
+  return out;
+}
+
+export function cbCommented(items: string[]): string[] {
+  const out = items.map((x) => {
+    return /* the element */ x;
+  });
+  return out;
+}
+
+export function cbReduceSingle(items: string[], seed: string): string {
+  const out = items.reduce(acc => acc, seed);
+  return out;
+}
+
+export function cbReduceDestructured(items: string[], seed: { total: string }): string {
+  const out = items.reduce(({ total }, x) => x, seed);
+  return out;
+}
+
+export function cbReduceThis(items: string[], seed: string): string {
+  const out = items.reduce(function (this: void, acc: string, x: string) {
+    return acc;
+  }, seed);
+  return out;
+}
+
+// The callback parameter shadows the returned parameter of the same name.
+export function cbShadow(items: string[], x: string): string {
+  const out = items.map((x) => x);
+  return x;
+}
