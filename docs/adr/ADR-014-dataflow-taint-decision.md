@@ -34,7 +34,7 @@ Three options, judged per producer tier:
 | loops (`for … of`, loop-carried `acc = acc + it`) | ✅ `for…of` over an identifier binds each element (identifier, flat array or shorthand object pattern); `acc = acc + it` and `acc += it` combine their identifier operands; all `may_influence` (S5d). `for…in` keys ❌ by design | `s5d_loop_binding` |
 | inline array callbacks (`map`/`forEach`/`filter`/`find`/`some`/`every`/`flatMap`/`reduce`) | ✅ an inline arrow or function expression passed first: its first parameter binds one element of an identifier or `this.field` receiver (`reduce`: the second, its first seeded by an identifier initial value); its return (expression body or a direct block `return`) becomes the result of `map`/`flatMap`/`reduce`; `filter`/`find` select the receiver's elements. All `may_influence` (S6a). A named callback ❌ (interprocedural); `some`/`every`/`forEach` results carry nothing | `s6a_inline_callbacks` |
 | `await` and `.then` | ✅ `const r = await p` / `return await p`; `await f(x)` composes from the call's identifier receiver and arguments (like `return_call`), and a uniquely resolved callee's return reaches the awaited binding (`await_result`, engine). `p.then(v => …)` binds the promise (an identifier, `this.field`, a composed call, or a chained inline `.then`'s callback return) to `v`, and the callback's return to the chain result; a resolved callee reaches `v` as `then_result`. All `may_influence` (S6b); `then_*` are `convention` evidence (the name proves no Promise), `then_result` capped at Heuristic confidence. A `.then` call no longer composes from its receiver in `await_call` or S5b's `return_call` (that bypassed the callback). Named callbacks, `.catch` and the rejection handler ❌ | `s6b_await_and_then` |
-| object-literal property writes | ❌ absent (reads are path-keyed slots) | `missing_primitives_are_unreachable` |
+| local object properties | ✅ `o.k = raw`, `const o = { k: raw }` / `{ raw }`, then `const v = o.k` or `return o.k`, through the owner's path-keyed `:property:o.k` slot, all `may_influence` (S6c), **only for a local object**: declared once, directly in the function's own body, by a `const`/`let` object literal without accessors, and only ever used as `o.k` in that body (no argument, return, alias, spread, method call, reassignment, nested callable). No alias model: every other object ❌ | `s6c_local_object_properties` |
 | sanitizer-like calls (`clean = sanitize(raw)`) | ✅ the argument enters, and the result comes back out (S5b): `return raw.replace(..)` is a `may_influence` hop from the identifier receiver and arguments. A chained receiver (`raw.trim().x()`) is ❌. This is value flow, **not** a sanitizer model | `s5b_return_composition` |
 | branches | ⚠️ **path-insensitive**: `if (flag) out = src` reports `value_preserving`, with no guard and no literal default | `branches_are_path_insensitive` |
 | imports | ✅ through resolved calls | `present_rows_are_reachable` |
@@ -143,6 +143,22 @@ Baseline `b4660ba` (the S6a code, = main `1cfa3e3`). Candidate `2d0de1a` (code-i
 | capped-away new-construct rows (inconclusive) | 0 | 0 | 0 |
 
 **Verdict: S6b passes every gate**, but its yield on Covalent is small: 11 edges, all `await_call`. That Angular code moves async data through RxJS Observables (`subscribe`, `pipe(map(…))`), which S6b does not model. The other constructs fire only on the readiness fixture, which is part of estate's tree (`await_value`, `await_result` and `then_result` not even there: the tree is measured at the baseline commit, before this slice's fixture cases). The incremental cost rose by a fixed +0.12 s per process (query compile), within the gate.
+
+### S6c: local object properties
+Baseline `d06d673` (the S6b code, = main `cfbfcb5`). Candidate `a64d53a` (code-identical to this slice after its rebase). Workflow run `38082650676`, branch `measure/ts-s6c`.
+
+| metric | Covalent `438c297` | estate tree `d06d673` | gate |
+|---|---|---|---|
+| `flows_to` edges | 1600 → 1600 (**+0.00 %**) | 251 → 253 (+0.80 %) | ≤ +25 % |
+| full index, median of 3 | 7.31 s → 7.32 s (+0.22 %) | 5.66 s → 5.70 s (+0.80 %) | ≤ +15 % |
+| incremental re-index, median of 3 | 1.16 s → 1.17 s (+1.37 %) | 2.25 s → 2.29 s (+1.46 %) | ≤ +15 % |
+| DB size | 80,830,464 → 80,859,136 B (+0.04 %) | 56,233,984 → 56,295,424 B (+0.11 %) | ≤ +10 % |
+| Lineage, 10 fixed queries newly truncated | 0 | 0 | 0 |
+| Lineage sweep newly truncated | 0 of 520 (1 truncated in both) | 0 of 178 | 0 |
+| `value_preserving` rows from a new construct | 0 (none fired) | 0 (1 `object_literal`, 1 `return_property`) | 0 |
+| capped-away new-construct rows (inconclusive) | 0 | 0 | 0 |
+
+**Verdict: S6c passes every gate, with zero yield on Covalent.** Its only firings are the readiness fixture's `property()` row, which is part of estate's tree. A real object literal is built to be passed on: returned, handed to a call, spread or assigned to a field. The no-alias gate correctly refuses every such object, and what is left (a literal only ever read back as `o.k` in the same body) barely occurs in that Angular code. A property flow that follows an object INTO a call or a field needs a heap or alias model, which this ADR keeps out.
 
 ### Graduation (S5b–S5d together)
 All three slices passed every gate. **Primitives 1–3 graduate.** Cumulative on Covalent against `2b6bf7f`: `flows_to` 1394 → 1502 (+7.7 %), and full index 7.15 s → 7.20 s, each slice measured against the one before it. Still unsupported:
