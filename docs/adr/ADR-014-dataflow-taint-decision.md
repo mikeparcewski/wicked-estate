@@ -71,14 +71,14 @@ Presenting that as security analysis violates agent rule R7 (a heuristic must ne
 3. Loop element binding (`for (x of xs)`: `xs → x`) and loop-carried reassignment.
 4. Closure returns through arrow bodies.
 
-Promises, property writes and path conditions are explicitly **out** of Option 2. The prototype evaluates **primitives 1–3**. Primitive 4 (closure returns) is evaluated only if 1–3 graduate. After graduation, these remain unsupported: closures (until primitive 4), promises and callbacks, property writes, path conditions, and aliasing.
+Promises, property writes and path conditions are explicitly **out** of Option 2. The prototype evaluates **primitives 1–3**, plus one narrow case of primitive 4 that the program pulled forward into S5b: a returned arrow whose body is a single identifier (`return () => captured`), as `may_influence`, measured under the same gates. The rest of primitive 4 is evaluated only if 1–3 graduate. After graduation, these remain unsupported: every other closure shape (until primitive 4), promises and callbacks, property writes, path conditions, and aliasing.
 
 ## Bounded prototype (selected: Option 2)
-- **Scope:** primitives 1–3 only, TypeScript only, as tree-sitter query data plus the existing call-derived pass. No new storage and no new response fields.
+- **Scope:** primitives 1–3 (plus the single-identifier returned arrow above), TypeScript only, as tree-sitter query data plus the existing call-derived pass. No new storage and no new response fields.
 - **The one uncertainty it resolves:** whether the edge growth and index time stay within budget.
-- **Timebox:** one session for S5b and one for S5c. Anything still failing after that is a kill.
+- **Timebox:** one session each for S5b, S5c and S5d. A slice still failing after its session is a kill: it is deleted and its numbers are recorded here.
 - **Measurement procedure** (recorded in the ADR with the commit SHAs):
-  - **Corpora:** estate's own tree at the baseline commit, plus the 905-file TypeScript corpus pinned by its revision, which is not on this host and has to be supplied.
+  - **Corpora:** estate's own tree at the baseline commit, plus a pinned TypeScript corpus. The original 905-file corpus could not be identified (see "Corpus substitution"), so the pinned public substitute `Teradata/covalent@438c297e399dd9cae6243f0955d78f04c9875c21` stands in for it. Its numbers are reported as Covalent numbers, never as numbers for the original corpus.
   - **Baseline:** the same commit without the change.
   - **Runs:** each run is `wicked-estate index --force` into a fresh DB; take the median of 3 for timings.
   - **Edges:** the `flows_to` count from `stats --json`; the denominator is the baseline's `flows_to` count.
@@ -98,9 +98,9 @@ Promises, property writes and path conditions are explicitly **out** of Option 2
 
 ## Staged plan (each slice fits one session)
 - **S5a (this ADR):** the decision and the readiness test.
-- **S5b:** primitive 1 (callee return composition), with the readiness row flipped and metrics recorded. The operator's brief folds the narrowest form of primitive 4 into this slice: a returned arrow whose body is one identifier (`return () => captured`), as `may_influence`. Every other closure shape stays out.
+- **S5b:** primitive 1 (callee return composition), with the readiness row flipped and metrics recorded. It also carries the single-identifier returned arrow pulled forward from primitive 4 (see "Minimum missing primitives"). Every other closure shape stays out.
 - **S5c:** primitive 2 (destructuring), measured against the kill criteria.
 - **S5d:** primitive 3 (loop element binding and loop-carried reassignment), measured against the kill criteria. Each primitive lands as its own PR, so a gate miss deletes exactly one primitive. Graduation evidence is the metrics table, the readiness diff and the corpus revisions.
 
 ## Next-session prompt
-> Read docs/adr/ADR-014-dataflow-taint-decision.md (Accepted: Option 2) and its "Measurements" section. Implement the next unlanded slice of S5b–S5d only, as TypeScript query data in `crates/wicked-estate-extract/src/queries/typescript.scm` plus the smallest engine change it needs. Flip its row in `crates/wicked-estate/tests/dataflow_readiness.rs` into a positive test with expected flows, expected non-flows and expected semantics per construct (path-insensitive constructs are `may_influence`). Then measure it with this ADR's procedure against the baseline commit on the pinned corpus. A gate miss deletes the slice, and its numbers are recorded here either way.
+> Read docs/adr/ADR-014-dataflow-taint-decision.md (Accepted: Option 2) and its "Measurements" section. Implement the next unlanded slice of S5b–S5d only, as TypeScript query data in `crates/wicked-estate-extract/src/queries/typescript.scm` plus the smallest engine change it needs. Flip its row in `crates/wicked-estate/tests/dataflow_readiness.rs` into a positive test with expected flows, expected non-flows and the expected semantics of every edge: `value_preserving` only for a whole-value transfer, `may_influence` for a contribution or transformation. Every summary stays path-insensitive whatever its semantics. Then measure it with this ADR's procedure against the baseline commit on both corpora (estate's own tree and the pinned Covalent substitute). A gate miss deletes the slice, and its numbers are recorded here either way.
