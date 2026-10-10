@@ -2,6 +2,7 @@
 
 - **Status:** **Accepted: Option 2** (bounded intraprocedural value-flow summaries), decided by the operator on 2026-10-10 (#279). Option 3 stays no-go; its positive-evidence reopening criterion is unchanged.
 - **Operator ruling (verbatim):** "data flow - evidence is important".
+- **Extended 2026-10-10 (S6):** after 0.25.0 the operator read its limits as "makes this sound like a useless feature" (relayed by the program brief): most TypeScript data moves through callbacks, `await` and properties. S6 closes those gaps **inside** the same bounded intraprocedural Option 2, under the same gates and kill rule. See "Extension S6".
 - **Date:** 2026-10-10
 - **Builds on:** TS-S1 (`flows_to` semantics), TS-S2A (the support plane), TS-S2C (#275, the semantic-evidence envelope), TS-S3/S4 (#277/#278, Angular compiler bindings and events).
 - **Evidence:** `crates/wicked-estate/tests/dataflow_readiness.rs`, which pins today's behaviour per construct; `crates/wicked-estate/tests/angular_bindings.rs`; ENGINE-CONTRACT §3.2–§3.5.
@@ -31,7 +32,8 @@ Three options, judged per producer tier:
 | closure-captured local | ✅ captured; ✅ through a returned no-parameter, single-identifier arrow (`return () => captured`, `may_influence`, S5b); every other closure shape ❌ | `s5b_return_composition` |
 | destructuring (`const {k} = obj`) | ✅ flat patterns over an identifier (shorthand, renamed, defaulted, rest, array elements), `may_influence` (S5c); nested patterns and member/call sources ❌ | `s5c_destructuring` |
 | loops (`for … of`, loop-carried `acc = acc + it`) | ✅ `for…of` over an identifier binds each element (identifier, flat array or shorthand object pattern); `acc = acc + it` and `acc += it` combine their identifier operands; all `may_influence` (S5d). `for…in` keys ❌ by design | `s5d_loop_binding` |
-| promises and callbacks | ❌ absent | `missing_primitives_are_unreachable` |
+| inline array callbacks (`map`/`forEach`/`filter`/`find`/`some`/`every`/`flatMap`/`reduce`) | ✅ an inline arrow or function expression passed first: its first parameter binds one element of an identifier or `this.field` receiver (`reduce`: the second, its first seeded by an identifier initial value); its return (expression body or a direct block `return`) becomes the result of `map`/`flatMap`/`reduce`; `filter`/`find` select the receiver's elements. All `may_influence` (S6a). A named callback ❌ (interprocedural); `some`/`every`/`forEach` results carry nothing | `s6a_inline_callbacks` |
+| promises | ❌ absent | `missing_primitives_are_unreachable` |
 | object-literal property writes | ❌ absent (reads are path-keyed slots) | `missing_primitives_are_unreachable` |
 | sanitizer-like calls (`clean = sanitize(raw)`) | ✅ the argument enters, and the result comes back out (S5b): `return raw.replace(..)` is a `may_influence` hop from the identifier receiver and arguments. A chained receiver (`raw.trim().x()`) is ❌. This is value flow, **not** a sanitizer model | `s5b_return_composition` |
 | branches | ⚠️ **path-insensitive**: `if (flag) out = src` reports `value_preserving`, with no guard and no literal default | `branches_are_path_insensitive` |
@@ -43,6 +45,15 @@ Three options, judged per producer tier:
 The operator ruled "data flow - evidence is important" on #279. That selects **Option 2**: primitives 1–3 are built as the bounded slices S5b–S5d below, and each is measured against this ADR's acceptance metrics and kill criteria. Evidence decides. A slice that misses any gate is deleted, not flagged off, and its numbers are recorded here. **Option 3 (interprocedural taint) stays no-go.** It reopens only on the positive evidence named under "Falsifier". The prohibited claims below still apply in full: Option 2 adds value-flow summaries. It does not add taint analysis, sanitizer verification or a completeness claim.
 
 **Corpus substitution.** The 905-file TypeScript corpus named in the procedure is not identified anywhere in this repository (the CHANGELOG cites only "a 905-file TypeScript repo"), and it is not on the build host. The measurement therefore uses a pinned **public** Angular corpus of comparable size: `Teradata/covalent` at `438c297e399dd9cae6243f0955d78f04c9875c21` (860 non-declaration `.ts` files). The baseline and each candidate are measured on the same machine and corpus revision. Results are recorded under "Measurements" as each slice lands.
+
+## Extension S6 (2026-10-10): callbacks, `await`, local properties, closures
+The program brief extends Option 2 to the constructs most TypeScript data actually moves through, **within one function**: no taint, no interprocedural heap and no alias model. Each is one slice and one PR, measured against the merged state before it under the gates and kill criteria below; a miss deletes the slice.
+- **S6a, inline array callbacks:** an inline arrow or function expression passed to `map`/`forEach`/`filter`/`find`/`some`/`every`/`flatMap`/`reduce` binds the receiver's element to its parameter, and its return to the result where the method returns it. A named callback stays out: binding its parameters would be interprocedural.
+- **S6b, `await` and `.then`:** `const r = await f(x)` composes like return composition; `p.then(v => …)` binds the promise's source to `v`, and the callback's return to the chain result.
+- **S6c, local object properties:** `o.k = raw` or `{k: raw}`, then `o.k`, for a local `const`/`let` object of one function. If the object escapes or is reassigned, no edge.
+- **S6d, closure returns** beyond `return () => x` (the rest of primitive 4).
+
+Every new edge is `may_influence`, and the semantics table in `dataflow_readiness.rs` grows with each construct. Promises, properties and callbacks therefore leave the Option 2 exclusions below to the extent each slice graduates; path conditions, aliasing and everything interprocedural stay out.
 
 ## Measurements
 Procedure: `scripts/measure-dataflow.py` (its `--self-test` pins the semantics gate), run by a scratch-branch workflow on one GitHub-hosted `ubuntu-latest` runner. Both binaries are built there with the shipped release profile (LTO, one codegen unit) into one target dir, then measured interleaved, base then candidate, median of 3. The estate-tree corpus is `git archive` of the baseline commit. The 10 fixed Lineage queries are the baseline graph's 10 largest `flows_to` producers by out-degree (ids recorded in each run's artifact). The sweep runs one Lineage query per baseline `Parameter` slot. All queries use the default depth.
@@ -95,6 +106,26 @@ Baseline `0b5d2d3` (the S5c slice's code, = main `7c6d876`). Candidate `26c6de2`
 
 **Verdict: S5d passes every gate.** Its yield on Covalent is small (6 edges). That Angular code iterates mostly through `forEach`/`map` callbacks, which stay out of Option 2 with every other callback. `reassignment_expression` never fired on Covalent.
 
+### S6a: inline array callbacks
+Baseline `490c547` (main = 0.25.0). Workflow branch `measure/ts-s6a`.
+
+**First candidate `e0c59ee` (run `38078353963`): missed the incremental gate on Covalent**, 0.70 s → 0.83 s (**+18.91 %**, all three runs 0.82–0.84 s against 0.70–0.72 s). Full index was flat (−0.90 %), so the cost was fixed per process, not per file: it encoded the callback-return shapes as six nested copies of one alternation, and that query is costlier to compile. Its numbers are kept here, per the kill rule. Within the slice's session, the shapes moved into one Rust walk (`callable_return_contributors`, captured once as `@flow.producer.callable_return`) with the same expected table. The re-measurement:
+
+Candidate `4d689c3`, run `38078966290`.
+
+| metric | Covalent `438c297` | estate tree `490c547` | gate |
+|---|---|---|---|
+| `flows_to` edges | 1502 → 1589 (**+5.79 %**) | 150 → 152 (+1.33 %) | ≤ +25 % |
+| full index, median of 3 | 7.19 s → 7.13 s (−0.85 %) | 5.42 s → 5.52 s (+1.77 %) | ≤ +15 % |
+| incremental re-index, median of 3 | 0.96 s → 1.03 s (+7.06 %) | 2.07 s → 2.13 s (+3.08 %) | ≤ +15 % |
+| DB size | 80,175,104 → 80,744,448 B (+0.71 %) | 55,595,008 → 55,578,624 B (−0.03 %) | ≤ +10 % |
+| Lineage, 10 fixed queries newly truncated | 0 | 0 | 0 |
+| Lineage sweep newly truncated | 0 of 520 (1 truncated in both) | 0 of 120 | 0 |
+| `value_preserving` rows from a new construct | 0 (70 `callback_element`, 9 `callback_return`, 7 `callback_select`) | 0 (2 `callback_element`) | 0 |
+| capped-away new-construct rows (inconclusive) | 0 | 0 | 0 |
+
+**Verdict: S6a passes every gate.** `callback_accumulator` (the `reduce` seed) never fired on either corpus; its only firing is the readiness fixture. The slice adds 87 Covalent edges in one slice, against 108 for S5b–S5d together. The incremental cost stays mostly fixed per process (+0.07 s), so later slices are measured for the same effect.
+
 ### Graduation (S5b–S5d together)
 All three slices passed every gate. **Primitives 1–3 graduate.** Cumulative on Covalent against `2b6bf7f`: `flows_to` 1394 → 1502 (+7.7 %), and full index 7.15 s → 7.20 s, each slice measured against the one before it. Still unsupported:
 - every closure shape other than the single-identifier returned arrow;
@@ -129,7 +160,7 @@ Presenting that as security analysis violates agent rule R7 (a heuristic must ne
 3. Loop element binding (`for (x of xs)`: `xs → x`) and loop-carried reassignment.
 4. Closure returns through arrow bodies.
 
-Promises, property writes and path conditions are explicitly **out** of Option 2. The prototype evaluates **primitives 1–3**, plus one narrow case of primitive 4 that the program pulled forward into S5b: a returned arrow whose body is a single identifier (`return () => captured`), as `may_influence`, measured under the same gates. The rest of primitive 4 is evaluated only if 1–3 graduate. After graduation, these remain unsupported: every other closure shape (until primitive 4), promises and callbacks, property writes, path conditions, and aliasing.
+Promises, property writes and path conditions were explicitly **out** of Option 2; the 2026-10-10 extension (see "Extension S6") brings promises, callbacks and local-object property writes in, one gated slice each. Path conditions stay out. The prototype evaluates **primitives 1–3**, plus one narrow case of primitive 4 that the program pulled forward into S5b: a returned arrow whose body is a single identifier (`return () => captured`), as `may_influence`, measured under the same gates. The rest of primitive 4 is evaluated only if 1–3 graduate. After graduation, these remain unsupported: every other closure shape (until primitive 4), promises and callbacks, property writes, path conditions, and aliasing.
 
 ## Bounded prototype (selected: Option 2)
 - **Scope:** primitives 1–3 (plus the single-identifier returned arrow above), TypeScript only, as tree-sitter query data plus the existing call-derived pass. No new storage and no new response fields.
