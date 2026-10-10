@@ -2095,7 +2095,13 @@ fn callable_return_contributors(callable: tree_sitter::Node) -> Vec<tree_sitter:
         for expr in body
             .named_children(&mut cursor)
             .filter(|statement| statement.kind() == "return_statement")
-            .filter_map(|statement| statement.named_child(0))
+            .filter_map(|statement| {
+                // A comment is a named (extra) child: `return /* why */ x;` still returns `x`.
+                let mut cursor = statement.walk();
+                statement
+                    .named_children(&mut cursor)
+                    .find(|child| !child.is_extra())
+            })
         {
             contributors(expr, &mut out);
         }

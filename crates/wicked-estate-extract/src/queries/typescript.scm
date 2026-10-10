@@ -318,7 +318,9 @@
   right: (identifier) @flow.producer.local
 ) @flow.influence.syntax.loop_element
 
-; ADR-014 S6a, inline array callbacks. An INLINE arrow or function expression passed first to an
+; ADR-014 S6a, inline array callbacks. These are `convention` evidence (Heuristic tier): a method
+; NAME (`map`, `find`, …) does not prove an array receiver; `repo.find(x => …)` or an Observable's
+; `map` matches the same shape. An INLINE arrow or function expression passed first to an
 ; array method runs once per element: its first parameter is ONE element of the receiver (the
 ; second for `reduce`, whose first is the accumulator), so `may_influence`. A named callback
 ; (`items.map(fmt)`) contributes nothing: binding its parameters would be interprocedural. The
@@ -344,7 +346,7 @@
   (#any-of? @_cb_method
     "map" "flatMap" "forEach" "filter" "find" "findLast" "findIndex" "findLastIndex" "some"
     "every")
-) @flow.influence.syntax.callback_element
+) @flow.influence.convention.callback_element
 
 (call_expression
   function: (member_expression
@@ -358,17 +360,17 @@
     [(arrow_function
        parameters: (formal_parameters
          .
-         (required_parameter)
+         (required_parameter pattern: (identifier))
          .
          (required_parameter pattern: (identifier) @flow.consumer.local)))
      (function_expression
        parameters: (formal_parameters
          .
-         (required_parameter)
+         (required_parameter pattern: (identifier))
          .
          (required_parameter pattern: (identifier) @flow.consumer.local)))])
   (#any-of? @_cb_method "reduce" "reduceRight")
-) @flow.influence.syntax.callback_element
+) @flow.influence.convention.callback_element
 
 ; `reduce(cb, init)`: the initial value is the accumulator's first value.
 (call_expression
@@ -376,7 +378,8 @@
     property: (property_identifier) @_cb_method)
   arguments: (arguments
     .
-    [(arrow_function
+    [(arrow_function parameter: (identifier) @flow.consumer.local)
+     (arrow_function
        parameters: (formal_parameters
          .
          (required_parameter pattern: (identifier) @flow.consumer.local)))
@@ -388,7 +391,7 @@
     (identifier) @flow.producer.local
     .)
   (#any-of? @_cb_method "reduce" "reduceRight")
-) @flow.influence.syntax.callback_accumulator
+) @flow.influence.convention.callback_accumulator
 
 ; The callback's RETURN becomes the call's result for `map` / `flatMap` / `reduce`: its expression
 ; body, or a `return` directly in its block body. `@flow.producer.callable_return` expands to that
@@ -406,7 +409,7 @@
       .
       [(arrow_function) (function_expression)] @flow.producer.callable_return))
   (#any-of? @_cb_method "map" "flatMap" "reduce" "reduceRight")
-) @flow.influence.syntax.callback_return
+) @flow.influence.convention.callback_return
 
 (return_statement
   (call_expression
@@ -416,7 +419,7 @@
       .
       [(arrow_function) (function_expression)] @flow.producer.callable_return)) @flow.consumer.return
   (#any-of? @_cb_method "map" "flatMap" "reduce" "reduceRight")
-) @flow.influence.syntax.callback_return
+) @flow.influence.convention.callback_return
 
 ; `filter` / `find` select ELEMENTS of the receiver: the receiver influences the result, the
 ; callback's boolean does not. An inline callback is required, as above, so `repo.find(query)`
@@ -432,7 +435,7 @@
       property: (property_identifier) @_cb_method)
     arguments: (arguments . [(arrow_function) (function_expression)]))
   (#any-of? @_cb_method "filter" "find" "findLast")
-) @flow.influence.syntax.callback_select
+) @flow.influence.convention.callback_select
 
 (return_statement
   (call_expression
@@ -444,7 +447,7 @@
       property: (property_identifier) @_cb_method)
     arguments: (arguments . [(arrow_function) (function_expression)])) @flow.consumer.return
   (#any-of? @_cb_method "filter" "find" "findLast")
-) @flow.influence.syntax.callback_select
+) @flow.influence.convention.callback_select
 
 ; this.field = value
 (expression_statement
@@ -689,6 +692,9 @@
 (arrow_function parameter: (identifier) @flow.declare.block)
 (arrow_function parameters: (formal_parameters (_) @flow.declare.block))
 (function_expression parameters: (formal_parameters (_) @flow.declare.block))
+; A named function expression's name is bound inside it (ADR-014 S6a review): in
+; `items.map(function x(v) { return x; })` the returned `x` is the callback, not an outer `x`.
+(function_expression name: (identifier) @flow.declare.block)
 (generator_function parameters: (formal_parameters (_) @flow.declare.block))
 
 ; Generic call value-flow facts. These are carried as UnresolvedRef hints and only become

@@ -569,6 +569,40 @@ fn s6a_inline_callbacks() {
             "{from}"
         );
     }
+    // Review cases. A named function expression returns ITSELF, not the outer `x`.
+    assert!(!reaches(
+        &scoped("cbNamedExpr", ":param:x"),
+        &value("cbNamedExpr", "out")
+    ));
+    // A comment after `return` is no expression: the element still reaches the result.
+    assert_eq!(
+        supports(
+            &scoped("cbCommented", ":local:x@1"),
+            &value("cbCommented", "out")
+        ),
+        vec![influence("callback_return")]
+    );
+    // An unparenthesized single `reduce` parameter is still seeded.
+    assert_eq!(
+        supports(
+            &value("cbReduceSingle", "seed"),
+            &scoped("cbReduceSingle", ":local:acc@1")
+        ),
+        vec![influence("callback_accumulator")]
+    );
+    assert!(reaches(
+        &value("cbReduceSingle", "seed"),
+        &value("cbReduceSingle", "cbReduceSingle.return")
+    ));
+    // A TypeScript `this` parameter is erased at runtime: it does not shift the binding.
+    assert!(
+        !graph()
+            .flows
+            .iter()
+            .any(|f| f.producer.contains("cbReduceThis().:param:items")
+                && f.consumer.contains(":local:acc")),
+        "items must not bind the accumulator"
+    );
     // The callback's `x` shadows the returned parameter `x`.
     let shadow_ret = value("cbShadow", "cbShadow.return");
     assert!(!reaches(&value("cbShadow", "items"), &shadow_ret));

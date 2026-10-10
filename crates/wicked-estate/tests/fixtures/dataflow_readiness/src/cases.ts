@@ -220,6 +220,34 @@ export function cbSome(items: string[], needle: string): boolean {
   return ok;
 }
 
+// S6a review cases: a named function expression's own name, a commented return, a single
+// unparenthesized `reduce` parameter, and a TypeScript `this` parameter (erased at runtime).
+export function cbNamedExpr(items: string[], x: string): string[] {
+  const out = items.map(function x(v) {
+    return x;
+  });
+  return out;
+}
+
+export function cbCommented(items: string[]): string[] {
+  const out = items.map((x) => {
+    return /* the element */ x;
+  });
+  return out;
+}
+
+export function cbReduceSingle(items: string[], seed: string): string {
+  const out = items.reduce(acc => acc, seed);
+  return out;
+}
+
+export function cbReduceThis(items: string[], seed: string): string {
+  const out = items.reduce(function (this: void, acc: string, x: string) {
+    return acc;
+  }, seed);
+  return out;
+}
+
 // The callback parameter shadows the returned parameter of the same name.
 export function cbShadow(items: string[], x: string): string {
   const out = items.map((x) => x);
