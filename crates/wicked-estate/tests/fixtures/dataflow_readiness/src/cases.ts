@@ -100,3 +100,32 @@ export class PrivateArrow {
     return raw;
   };
 }
+
+// ADR-014 S5c destructuring shapes and expected NON-flows.
+export function destructuringShapes(obj: { a: string; b: string; c?: string }, arr: string[]): string {
+  const { a: alias, b: bb = 'd', c = 'd', ...rest } = obj;
+  const [first, second = 'd', ...others] = arr;
+  return alias;
+}
+
+export function destructuringOther(obj: { k: string }, other: { j: string }): string {
+  const { k } = obj;
+  const { j } = other;
+  return j;
+}
+
+export function destructuringShadow(obj: { k: string }): string {
+  const { k } = obj;
+  {
+    const k = 'x';
+    return k;
+  }
+}
+
+// Out of S5c's scope: a nested pattern binds nothing from `obj`.
+export function destructuringNested(obj: { a: { b: string } }): string {
+  const {
+    a: { b },
+  } = obj;
+  return b;
+}

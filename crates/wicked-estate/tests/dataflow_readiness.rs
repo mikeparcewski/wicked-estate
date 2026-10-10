@@ -151,12 +151,6 @@ fn present_rows_are_reachable() {
 fn missing_primitives_are_unreachable() {
     for (owner, from, to, why) in [
         (
-            "destructuring",
-            "obj",
-            "destructuring.return",
-            "destructuring",
-        ),
-        (
             "loop",
             "items",
             "loop.return",
@@ -329,6 +323,7 @@ fn every_edge_matches_the_expected_semantics_table() {
         ("expression", "may_influence"),
         ("return_call", "may_influence"),
         ("return_closure", "may_influence"),
+        ("destructuring", "may_influence"),
     ]
     .into_iter()
     .collect();
@@ -352,7 +347,60 @@ fn every_edge_matches_the_expected_semantics_table() {
             seen.insert(construct.clone());
         }
     }
-    for construct in ["return_call", "return_closure"] {
+    for construct in ["return_call", "return_closure", "destructuring"] {
         assert!(seen.contains(construct), "{construct} never fired");
     }
+}
+
+/// ADR-014 S5c (primitive 2, destructuring): a binding destructured from a value is a part of it,
+/// so the hop is `may_influence`, never the value whole. Every binding shape of a flat pattern
+/// takes part: shorthand, renamed, defaulted, rest, and array elements.
+#[test]
+fn s5c_destructuring() {
+    assert!(reaches(
+        &value("destructuring", "obj"),
+        &value("destructuring", "destructuring.return")
+    ));
+    for (owner, from, to) in [
+        ("destructuring", "obj", "k"),
+        ("destructuringShapes", "obj", "alias"),
+        ("destructuringShapes", "obj", "bb"),
+        ("destructuringShapes", "obj", "c"),
+        ("destructuringShapes", "arr", "second"),
+        ("destructuringShapes", "obj", "rest"),
+        ("destructuringShapes", "arr", "first"),
+        ("destructuringShapes", "arr", "others"),
+    ] {
+        let e = edge(&value(owner, from), &value(owner, to));
+        assert_eq!(
+            e.supports,
+            vec![("destructuring".to_string(), "may_influence".to_string())],
+            "{owner}: {from} → {to}"
+        );
+    }
+    assert!(reaches(
+        &value("destructuringShapes", "obj"),
+        &value("destructuringShapes", "destructuringShapes.return")
+    ));
+    // Expected non-flows: another object's binding, a shadowing inner binding, a nested pattern.
+    assert!(reaches(
+        &value("destructuringOther", "other"),
+        &value("destructuringOther", "destructuringOther.return")
+    ));
+    assert!(!reaches(
+        &value("destructuringOther", "obj"),
+        &value("destructuringOther", "destructuringOther.return")
+    ));
+    let shadow_ret = value("destructuringShadow", "destructuringShadow.return");
+    assert!(!reaches(&value("destructuringShadow", "obj"), &shadow_ret));
+    let inner = graph()
+        .nodes
+        .iter()
+        .find(|n| {
+            n.symbol.0.contains("destructuringShadow().") && n.symbol.0.contains(":local:k@1")
+        })
+        .expect("the inner `k` is its own scoped binding");
+    assert!(reaches(&inner.symbol.0, &shadow_ret));
+    let nested_ret = value("destructuringNested", "destructuringNested.return");
+    assert!(!reaches(&value("destructuringNested", "obj"), &nested_ret));
 }
