@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "producer": {
+    "name": "angular-compiler-adapter",
+    "version": "0.1.0+angular.22.2.2",
+    "class": "compiler",
+    "capabilities": [
+      "definitions",
+      "input_bindings"
+    ]
+  },
+  "snapshot": "fixtures/partial",
+  "documents": [
+    {
+      "path": "src/app.ts",
+      "position_encoding": "utf16"
+    }
+  ],
+  "facts": [
+    {
+      "kind": "definition",
+      "fact_id": "class src/app.ts#Leaf",
+      "symbol": "src/app.ts#Leaf",
+      "name": "Leaf",
+      "site": {
+        "document": "src/app.ts",
+        "range": {
+          "start_line": 3,
+          "start_col": 13,
+          "end_line": 3,
+          "end_col": 17
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/app.ts#Root",
+      "symbol": "src/app.ts#Root",
+      "name": "Root",
+      "site": {
+        "document": "src/app.ts",
+        "range": {
+          "start_line": 15,
+          "start_col": 13,
+          "end_line": 15,
+          "end_col": 17
+        }
+      }
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/app.ts:13:24:user->src/app.ts#Leaf.user",
+      "site": {
+        "document": "src/app.ts",
+        "range": {
+          "start_line": 13,
+          "start_col": 24,
+          "end_line": 13,
+          "end_col": 28
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "value_preserving",
+      "consumer": {
+        "class": "src/app.ts#Leaf",
+        "member": "user"
+      },
+      "producers": [
+        {
+          "class": "src/app.ts#Root",
+          "member": "name"
+        }
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/app.ts:13:95:user->src/app.ts#Leaf.user",
+      "site": {
+        "document": "src/app.ts",
+        "range": {
+          "start_line": 13,
+          "start_col": 95,
+          "end_line": 13,
+          "end_col": 99
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "may_influence",
+      "consumer": {
+        "class": "src/app.ts#Leaf",
+        "member": "user"
+      },
+      "producers": [],
+      "unresolved": [
+        "member:nope"
+      ]
+    }
+  ]
+}

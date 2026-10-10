@@ -1,0 +1,22 @@
+{
+  "name": "wicked-estate-angular-evidence",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Angular compiler adapter for wicked-estate: emits SemanticEvidence v1 (docs/ENGINE-CONTRACT.md §3.5) from compiler-resolved template bindings.",
+  "type": "module",
+  "bin": { "wicked-estate-angular-evidence": "./extract.mjs" },
+  "scripts": {
+    "test": "node --test test/adapter.test.mjs",
+    "fixtures": "node scripts/regenerate-fixtures.mjs",
+    "fixtures:check": "node scripts/regenerate-fixtures.mjs --check"
+  },
+  "engines": { "node": ">=22" },
+  "dependencies": {
+    "@angular/compiler": "22.2.2",
+    "@angular/compiler-cli": "22.2.2",
+    "@angular/core": "22.2.2",
+    "rxjs": "7.8.2",
+    "typescript": "6.0.3"
+  },
+  "license": "MIT"
+}

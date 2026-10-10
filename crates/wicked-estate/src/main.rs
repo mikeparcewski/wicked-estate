@@ -5,6 +5,8 @@
 //!                                     every path this run stores is namespaced `<name>/…`. Without it
 //!                                     the behaviour is unchanged. Edges do NOT resolve across repos.
 //!   wicked-estate scip  <root>           [--db ...] [--repo <name>] [--scip-file <path>]
+//!   wicked-estate evidence <envelope.json> [--root <dir>] [--repo <name>] [--json] [--db ...]
+//!                                     ingest one SemanticEvidence v1 envelope (ENGINE-CONTRACT §3.5)
 //!   wicked-estate tfstate <file>         [--db ...]
 //!   wicked-estate import-telemetry <file.json> [--db ...]
 //!   wicked-estate drift                  [--db ...]
@@ -1112,6 +1114,88 @@ fn main() -> Result<()> {
             }
         }
         // Task B: ingest a Terraform state file (live resource nodes → estate LIVE side).
+        // ── evidence ────────────────────────────────────────────────────────
+        //   wicked-estate evidence <envelope.json> [--root <dir>] [--repo <name>] [--json] [--db ...]
+        //
+        // Ingest one SemanticEvidence v1 envelope (a SCIP-free producer: the Angular compiler
+        // adapter, a database catalog, ...) into the support plane (docs/ENGINE-CONTRACT.md §3.5).
+        // The envelope's owner (producer, snapshot) replaces its previous facts. `--root` is the
+        // checkout the documents are relative to (read only to convert UTF-16/32 columns).
+        "evidence" => {
+            let file = args.operand(0).unwrap_or_default();
+            require_existing_graph(&db, "evidence")?;
+            let text = std::fs::read_to_string(file)
+                .map_err(|e| anyhow::anyhow!("evidence: cannot read {file}: {e}"))?;
+            let envelope: wicked_estate_core::evidence::SemanticEvidence =
+                serde_json::from_str(&text).map_err(|e| {
+                    anyhow::anyhow!("evidence: {file} is not a SemanticEvidence v1 envelope: {e}")
+                })?;
+            // Refuse an envelope this build cannot ingest BEFORE any store opens: opening runs
+            // schema creation/migration, and an invalid envelope must write nothing.
+            envelope.validate().map_err(to_any)?;
+            let as_repo = args.str("repo");
+            let mut store = open_store_ext(&db).map_err(to_any)?;
+            {
+                // Same rule as `scip`: a labelled graph needs to be told which repo this is.
+                let known = wicked_estate::repo_scope::labels(store.as_ref());
+                match (known.is_empty(), as_repo) {
+                    (false, None) => anyhow::bail!(
+                        "REPO COLLISION: {db} holds {} labelled repo(s) [{}] — pass --repo <name>",
+                        known.len(),
+                        known.join(", ")
+                    ),
+                    (false, Some(l)) if !known.iter().any(|k| k == l) => anyhow::bail!(
+                        "unknown repo label '{l}' in {db} — this graph holds [{}]",
+                        known.join(", ")
+                    ),
+                    (true, Some(l)) => anyhow::bail!(
+                        "--repo {l} was given but {db} is a single-repo graph (no labelled repos)"
+                    ),
+                    _ => {}
+                }
+            }
+            // Documents are read only to convert UTF-16/32 columns. Default root: the checkout the
+            // graph recorded for this repo (the labelled repo's root, or the single indexed root).
+            let recorded = match as_repo {
+                Some(label) => wicked_estate::repo_scope::registry(store.as_ref())
+                    .into_iter()
+                    .find(|r| r.label == label)
+                    .map(|r| wicked_estate::recorded_root_path(&r.root, &db)),
+                None => wicked_estate::indexed_root_path(store.as_ref(), &db),
+            };
+            let root = args.str("root").map(std::path::PathBuf::from).or(recorded);
+            let report = wicked_estate::ingest_semantic_evidence(
+                store.as_mut(),
+                root.as_deref(),
+                &envelope,
+                as_repo,
+            )
+            .map_err(to_any)?;
+            if args.switch("json") {
+                print_line(&serde_json::to_string(&report)?)?;
+            } else {
+                print_line(&format!(
+                    "evidence: {}/{} generation {}{} — {} reference(s), {} call(s), {} flow(s) over {} \
+                     edge(s); {} position(s) unconverted; skipped {}",
+                    report.producer,
+                    report.snapshot,
+                    report
+                        .generation
+                        .map_or_else(|| "?".to_string(), |g| g.to_string()),
+                    if report.replayed {
+                        " (replay: nothing written)"
+                    } else {
+                        ""
+                    },
+                    report.references_projected,
+                    report.calls_projected,
+                    report.flows_projected,
+                    report.edges_projected,
+                    report.positions_unconverted,
+                    serde_json::to_string(&report.skipped)?
+                ))?;
+            }
+        }
         "tfstate" => {
             let file_path = args.required(0);
             let json = std::fs::read_to_string(file_path)
@@ -3574,7 +3658,16 @@ fn main() -> Result<()> {
                 "  wicked-estate scip  <root>         [--db ...] [--repo <name>] [--scip-file <path>]"
             );
             println!(
-                "    Ingest a SCIP index (precise call resolution). Requires `wicked-estate index`"
+                "  wicked-estate evidence <envelope.json> [--root <dir>] [--repo <name>] [--json] [--db ...]"
+            );
+            println!(
+                "    Ingest one SemanticEvidence v1 envelope (e.g. adapters/angular-evidence output) into"
+            );
+            println!(
+                "    the support plane; it replaces that producer/snapshot's previous facts (§3.5)."
+            );
+            println!(
+                "    Ingest a SCIP index (exact references; SCIP has no call role). Requires `wicked-estate index`"
             );
             println!(
                 "    to have been run first. Auto-runs npx scip-typescript if index.scip absent."

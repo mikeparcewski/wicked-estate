@@ -247,6 +247,10 @@ pub const COMMANDS: &[Command] = &[
         spec: owns(&[opt("root")], &[DB, REPO, AS, str_flag("scip-file")]),
     },
     Command {
+        name: "evidence",
+        spec: owns(&[req("envelope.json")], &[DB, REPO, JSON, str_flag("root")]),
+    },
+    Command {
         name: "tfstate",
         spec: owns(&[req("file")], &[DB]),
     },

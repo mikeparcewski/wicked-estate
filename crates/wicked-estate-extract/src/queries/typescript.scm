@@ -55,6 +55,13 @@
   body: (class_body) @code_class.body
 ) @code_class.def
 
+; `abstract class` declarations are classes too (TS-S3): without this an abstract base — the
+; usual home of an inherited Angular `@Input()` — has no node, and its fields have no type owner.
+(abstract_class_declaration
+  name: (type_identifier) @code_class.name
+  body: (class_body) @code_class.body
+) @code_class.def
+
 ; Class extends clause
 (class_declaration
   name: (type_identifier) @code_class.name
@@ -275,6 +282,67 @@
     object: (this)
     property: (property_identifier) @flow.producer.field)
 ) @flow.value.syntax.field_read
+
+; TS-S3: every property and accessor of a DECORATED class (`@Component`, `@Directive`, however
+; the decorator is spelled or imported: `@Cmp`, `@ng.Component`) gets its class-owned `:field:`
+; slot, so compiler-resolved template bindings (semantic evidence, docs/ENGINE-CONTRACT.md §3.5)
+; have a canonical endpoint. A slot only: no flow, no edge. Undecorated classes gain nothing.
+; `@Component(...) export class X` puts the decorator on the export statement.
+(class_declaration
+  decorator: (decorator)
+  body: (class_body
+    (public_field_definition
+      name: (property_identifier) @flow.slot.field)))
+
+(export_statement
+  decorator: (decorator)
+  declaration: (class_declaration
+    body: (class_body
+      (public_field_definition
+        name: (property_identifier) @flow.slot.field))))
+
+(class_declaration
+  decorator: (decorator)
+  body: (class_body
+    (method_definition
+      ["get" "set"]
+      name: (property_identifier) @flow.slot.field)))
+
+(export_statement
+  decorator: (decorator)
+  declaration: (class_declaration
+    body: (class_body
+      (method_definition
+        ["get" "set"]
+        name: (property_identifier) @flow.slot.field))))
+
+(abstract_class_declaration
+  decorator: (decorator)
+  body: (class_body
+    (public_field_definition
+      name: (property_identifier) @flow.slot.field)))
+
+(export_statement
+  decorator: (decorator)
+  declaration: (abstract_class_declaration
+    body: (class_body
+      (public_field_definition
+        name: (property_identifier) @flow.slot.field))))
+
+(abstract_class_declaration
+  decorator: (decorator)
+  body: (class_body
+    (method_definition
+      ["get" "set"]
+      name: (property_identifier) @flow.slot.field)))
+
+(export_statement
+  decorator: (decorator)
+  declaration: (abstract_class_declaration
+    body: (class_body
+      (method_definition
+        ["get" "set"]
+        name: (property_identifier) @flow.slot.field))))
 
 ; @Input() tenantId
 (public_field_definition

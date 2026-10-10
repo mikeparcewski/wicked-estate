@@ -1,0 +1,862 @@
+{
+  "schema_version": 1,
+  "producer": {
+    "name": "angular-compiler-adapter",
+    "version": "0.1.0+angular.22.2.2",
+    "class": "compiler",
+    "capabilities": [
+      "definitions",
+      "input_bindings"
+    ]
+  },
+  "snapshot": "fixtures/bindings",
+  "documents": [
+    {
+      "path": "src/child.ts",
+      "position_encoding": "utf16"
+    },
+    {
+      "path": "src/ext.component.html",
+      "position_encoding": "utf16"
+    },
+    {
+      "path": "src/ext.component.ts",
+      "position_encoding": "utf16"
+    },
+    {
+      "path": "src/other/child.ts",
+      "position_encoding": "utf16"
+    },
+    {
+      "path": "src/parent.ts",
+      "position_encoding": "utf16"
+    },
+    {
+      "path": "src/review.ts",
+      "position_encoding": "utf16"
+    }
+  ],
+  "facts": [
+    {
+      "kind": "definition",
+      "fact_id": "class src/child.ts#Base",
+      "symbol": "src/child.ts#Base",
+      "name": "Base",
+      "site": {
+        "document": "src/child.ts",
+        "range": {
+          "start_line": 3,
+          "start_col": 22,
+          "end_line": 3,
+          "end_col": 26
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/child.ts#Child",
+      "symbol": "src/child.ts#Child",
+      "name": "Child",
+      "site": {
+        "document": "src/child.ts",
+        "range": {
+          "start_line": 8,
+          "start_col": 13,
+          "end_line": 8,
+          "end_col": 18
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/ext.component.ts#Ext",
+      "symbol": "src/ext.component.ts#Ext",
+      "name": "Ext",
+      "site": {
+        "document": "src/ext.component.ts",
+        "range": {
+          "start_line": 4,
+          "start_col": 13,
+          "end_line": 4,
+          "end_col": 16
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/other/child.ts#Child",
+      "symbol": "src/other/child.ts#Child",
+      "name": "Child",
+      "site": {
+        "document": "src/other/child.ts",
+        "range": {
+          "start_line": 4,
+          "start_col": 13,
+          "end_line": 4,
+          "end_col": 18
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/parent.ts#Parent",
+      "symbol": "src/parent.ts#Parent",
+      "name": "Parent",
+      "site": {
+        "document": "src/parent.ts",
+        "range": {
+          "start_line": 23,
+          "start_col": 13,
+          "end_line": 23,
+          "end_col": 19
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/review.ts#AliasCmp",
+      "symbol": "src/review.ts#AliasCmp",
+      "name": "AliasCmp",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 43,
+          "start_col": 13,
+          "end_line": 43,
+          "end_col": 21
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/review.ts#Badge",
+      "symbol": "src/review.ts#Badge",
+      "name": "Badge",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 13,
+          "start_col": 13,
+          "end_line": 13,
+          "end_col": 18
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/review.ts#Flag",
+      "symbol": "src/review.ts#Flag",
+      "name": "Flag",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 50,
+          "start_col": 13,
+          "end_line": 50,
+          "end_col": 17
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/review.ts#Hd",
+      "symbol": "src/review.ts#Hd",
+      "name": "Hd",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 72,
+          "start_col": 13,
+          "end_line": 72,
+          "end_col": 15
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/review.ts#MyIf",
+      "symbol": "src/review.ts#MyIf",
+      "name": "MyIf",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 8,
+          "start_col": 13,
+          "end_line": 8,
+          "end_col": 17
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/review.ts#NsCmp",
+      "symbol": "src/review.ts#NsCmp",
+      "name": "NsCmp",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 38,
+          "start_col": 13,
+          "end_line": 38,
+          "end_col": 18
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/review.ts#Order",
+      "symbol": "src/review.ts#Order",
+      "name": "Order",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 61,
+          "start_col": 13,
+          "end_line": 61,
+          "end_col": 18
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/review.ts#Quoted",
+      "symbol": "src/review.ts#Quoted",
+      "name": "Quoted",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 91,
+          "start_col": 13,
+          "end_line": 91,
+          "end_col": 19
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/review.ts#R3",
+      "symbol": "src/review.ts#R3",
+      "name": "R3",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 101,
+          "start_col": 13,
+          "end_line": 101,
+          "end_col": 15
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/review.ts#Review",
+      "symbol": "src/review.ts#Review",
+      "name": "Review",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 28,
+          "start_col": 13,
+          "end_line": 28,
+          "end_col": 19
+        }
+      }
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/ext.component.html:1:14:user->src/child.ts#Child.user",
+      "site": {
+        "document": "src/ext.component.html",
+        "range": {
+          "start_line": 1,
+          "start_col": 14,
+          "end_line": 1,
+          "end_col": 18
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "value_preserving",
+      "consumer": {
+        "class": "src/child.ts#Child",
+        "member": "user"
+      },
+      "producers": [
+        {
+          "class": "src/ext.component.ts#Ext",
+          "member": "title"
+        }
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/parent.ts:11:16:user->src/child.ts#Child.user",
+      "site": {
+        "document": "src/parent.ts",
+        "range": {
+          "start_line": 11,
+          "start_col": 16,
+          "end_line": 11,
+          "end_col": 20
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "value_preserving",
+      "consumer": {
+        "class": "src/child.ts#Child",
+        "member": "user"
+      },
+      "producers": [
+        {
+          "class": "src/parent.ts#Parent",
+          "member": "current"
+        }
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/parent.ts:11:33:aliasIn->src/child.ts#Child.renamed",
+      "site": {
+        "document": "src/parent.ts",
+        "range": {
+          "start_line": 11,
+          "start_col": 33,
+          "end_line": 11,
+          "end_col": 40
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "may_influence",
+      "consumer": {
+        "class": "src/child.ts#Child",
+        "member": "renamed"
+      },
+      "producers": [
+        {
+          "class": "src/parent.ts#Parent",
+          "member": "count"
+        }
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/parent.ts:11:55:name->src/child.ts#Child.name",
+      "site": {
+        "document": "src/parent.ts",
+        "range": {
+          "start_line": 11,
+          "start_col": 55,
+          "end_line": 11,
+          "end_col": 59
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "value_preserving",
+      "consumer": {
+        "class": "src/child.ts#Child",
+        "member": "name"
+      },
+      "producers": [
+        {
+          "class": "src/parent.ts#Parent",
+          "member": "label"
+        }
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/parent.ts:11:70:inherited->src/child.ts#Base.inherited",
+      "site": {
+        "document": "src/parent.ts",
+        "range": {
+          "start_line": 11,
+          "start_col": 70,
+          "end_line": 11,
+          "end_col": 79
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "may_influence",
+      "consumer": {
+        "class": "src/child.ts#Base",
+        "member": "inherited"
+      },
+      "producers": []
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/parent.ts:11:89:value->src/child.ts#Child.value",
+      "site": {
+        "document": "src/parent.ts",
+        "range": {
+          "start_line": 11,
+          "start_col": 89,
+          "end_line": 11,
+          "end_col": 94
+        }
+      },
+      "construct": "angular_two_way_binding",
+      "semantics": "value_preserving",
+      "consumer": {
+        "class": "src/child.ts#Child",
+        "member": "value"
+      },
+      "producers": [
+        {
+          "class": "src/parent.ts#Parent",
+          "member": "v"
+        }
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/parent.ts:12:31:user->src/other/child.ts#Child.user",
+      "site": {
+        "document": "src/parent.ts",
+        "range": {
+          "start_line": 12,
+          "start_col": 31,
+          "end_line": 12,
+          "end_col": 35
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "value_preserving",
+      "consumer": {
+        "class": "src/other/child.ts#Child",
+        "member": "user"
+      },
+      "producers": [
+        {
+          "class": "src/parent.ts#Parent",
+          "member": "other"
+        }
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/parent.ts:13:51:user->src/child.ts#Child.user",
+      "site": {
+        "document": "src/parent.ts",
+        "range": {
+          "start_line": 13,
+          "start_col": 51,
+          "end_line": 13,
+          "end_col": 55
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "may_influence",
+      "consumer": {
+        "class": "src/child.ts#Child",
+        "member": "user"
+      },
+      "producers": [],
+      "unresolved": [
+        "local:item"
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/parent.ts:14:40:user->src/child.ts#Child.user",
+      "site": {
+        "document": "src/parent.ts",
+        "range": {
+          "start_line": 14,
+          "start_col": 40,
+          "end_line": 14,
+          "end_col": 44
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "may_influence",
+      "consumer": {
+        "class": "src/child.ts#Child",
+        "member": "user"
+      },
+      "producers": [],
+      "unresolved": [
+        "local:x"
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/parent.ts:15:30:user->src/child.ts#Child.user",
+      "site": {
+        "document": "src/parent.ts",
+        "range": {
+          "start_line": 15,
+          "start_col": 30,
+          "end_line": 15,
+          "end_col": 34
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "may_influence",
+      "consumer": {
+        "class": "src/child.ts#Child",
+        "member": "user"
+      },
+      "producers": [],
+      "unresolved": [
+        "local:box"
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/parent.ts:16:16:user->src/child.ts#Child.user",
+      "site": {
+        "document": "src/parent.ts",
+        "range": {
+          "start_line": 16,
+          "start_col": 16,
+          "end_line": 16,
+          "end_col": 20
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "may_influence",
+      "consumer": {
+        "class": "src/child.ts#Child",
+        "member": "user"
+      },
+      "producers": [
+        {
+          "class": "src/parent.ts#Parent",
+          "member": "label"
+        }
+      ],
+      "unresolved": [
+        "pipe:shout"
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/parent.ts:18:37:user->src/other/child.ts#Child.user",
+      "site": {
+        "document": "src/parent.ts",
+        "range": {
+          "start_line": 18,
+          "start_col": 37,
+          "end_line": 18,
+          "end_col": 41
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "value_preserving",
+      "consumer": {
+        "class": "src/other/child.ts#Child",
+        "member": "user"
+      },
+      "producers": [
+        {
+          "class": "src/parent.ts#Parent",
+          "member": "current"
+        }
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/parent.ts:20:9:user->src/child.ts#Child.user",
+      "site": {
+        "document": "src/parent.ts",
+        "range": {
+          "start_line": 20,
+          "start_col": 9,
+          "end_line": 20,
+          "end_col": 13
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "value_preserving",
+      "consumer": {
+        "class": "src/child.ts#Child",
+        "member": "user"
+      },
+      "producers": [
+        {
+          "class": "src/parent.ts#Parent",
+          "member": "current"
+        }
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/review.ts:22:16:user->src/child.ts#Child.user",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 22,
+          "start_col": 16,
+          "end_line": 22,
+          "end_col": 20
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "value_preserving",
+      "consumer": {
+        "class": "src/child.ts#Child",
+        "member": "user"
+      },
+      "producers": [
+        {
+          "class": "src/review.ts#Review",
+          "member": "current"
+        }
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/review.ts:23:10:myIf->src/review.ts#MyIf.myIf",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 23,
+          "start_col": 10,
+          "end_line": 23,
+          "end_col": 14
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "value_preserving",
+      "consumer": {
+        "class": "src/review.ts#MyIf",
+        "member": "myIf"
+      },
+      "producers": [
+        {
+          "class": "src/review.ts#Review",
+          "member": "current"
+        }
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/review.ts:24:17:value->src/child.ts#Child.value",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 24,
+          "start_col": 17,
+          "end_line": 24,
+          "end_col": 22
+        }
+      },
+      "construct": "angular_two_way_binding",
+      "semantics": "may_influence",
+      "consumer": {
+        "class": "src/child.ts#Child",
+        "member": "value"
+      },
+      "producers": [
+        {
+          "class": "src/review.ts#Review",
+          "member": "nums"
+        },
+        {
+          "class": "src/review.ts#Review",
+          "member": "idx"
+        }
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/review.ts:25:16:badge->src/review.ts#Badge.badge",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 25,
+          "start_col": 16,
+          "end_line": 25,
+          "end_col": 21
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "value_preserving",
+      "consumer": {
+        "class": "src/review.ts#Badge",
+        "member": "badge"
+      },
+      "producers": [
+        {
+          "class": "src/review.ts#Review",
+          "member": "computed"
+        }
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/review.ts:37:95:user->src/child.ts#Child.user",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 37,
+          "start_col": 95,
+          "end_line": 37,
+          "end_col": 99
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "value_preserving",
+      "consumer": {
+        "class": "src/child.ts#Child",
+        "member": "user"
+      },
+      "producers": [
+        {
+          "class": "src/review.ts#NsCmp",
+          "member": "nsField"
+        }
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/review.ts:42:89:user->src/child.ts#Child.user",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 42,
+          "start_col": 89,
+          "end_line": 42,
+          "end_col": 93
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "value_preserving",
+      "consumer": {
+        "class": "src/child.ts#Child",
+        "member": "user"
+      },
+      "producers": [
+        {
+          "class": "src/review.ts#AliasCmp",
+          "member": "aliasField"
+        }
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/review.ts:59:24:enabled->src/review.ts#Flag.enabled",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 59,
+          "start_col": 24,
+          "end_line": 59,
+          "end_col": 31
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "may_influence",
+      "consumer": {
+        "class": "src/review.ts#Flag",
+        "member": "enabled"
+      },
+      "producers": [
+        {
+          "class": "src/review.ts#Order",
+          "member": "text"
+        }
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/review.ts:59:41:on->src/review.ts#Flag.on",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 59,
+          "start_col": 41,
+          "end_line": 59,
+          "end_col": 43
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "may_influence",
+      "consumer": {
+        "class": "src/review.ts#Flag",
+        "member": "on"
+      },
+      "producers": [
+        {
+          "class": "src/review.ts#Order",
+          "member": "text"
+        }
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/review.ts:59:75:user->src/child.ts#Child.user",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 59,
+          "start_col": 75,
+          "end_line": 59,
+          "end_col": 79
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "value_preserving",
+      "consumer": {
+        "class": "src/child.ts#Child",
+        "member": "user"
+      },
+      "producers": [
+        {
+          "class": "src/review.ts#Order",
+          "member": "ordered"
+        }
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/review.ts:99:136:q->src/review.ts#Quoted.q",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 99,
+          "start_col": 136,
+          "end_line": 99,
+          "end_col": 137
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "may_influence",
+      "consumer": {
+        "class": "src/review.ts#Quoted",
+        "member": "q"
+      },
+      "producers": [
+        {
+          "class": "src/review.ts#R3",
+          "member": "field"
+        }
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/review.ts:99:26:renamed->src/review.ts#Hd.raw",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 99,
+          "start_col": 26,
+          "end_line": 99,
+          "end_col": 33
+        }
+      },
+      "construct": "angular_input_binding",
+      "semantics": "value_preserving",
+      "consumer": {
+        "class": "src/review.ts#Hd",
+        "member": "raw"
+      },
+      "producers": [
+        {
+          "class": "src/review.ts#R3",
+          "member": "field"
+        }
+      ]
+    }
+  ]
+}
