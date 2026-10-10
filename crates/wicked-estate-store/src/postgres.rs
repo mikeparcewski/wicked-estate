@@ -737,7 +737,7 @@ impl PostgresStore {
              ),
              frontier AS (SELECT id FROM mins WHERE d = $2 LIMIT $4)
              SELECT id, d AS min_depth, 0 AS horizon FROM (
-                 SELECT id, d FROM mins WHERE id <> $1 ORDER BY d LIMIT $4) ranked
+                 SELECT id, d FROM mins WHERE id <> $1 ORDER BY d, id LIMIT $4) ranked
              UNION ALL
              SELECT ''::TEXT, 0, 1 FROM (
                  SELECT 1 FROM edges e JOIN frontier f ON e.{match_col} = f.id
@@ -2259,7 +2259,7 @@ impl GraphRead for PostgresStore {
                     let was_truncated = merged.len() > spec.max_nodes;
                     // Sort by depth and keep only the closest max_nodes nodes.
                     let mut pairs: Vec<(String, u32)> = merged.into_iter().collect();
-                    pairs.sort_unstable_by_key(|&(_, d)| d);
+                    pairs.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
                     pairs.truncate(spec.max_nodes);
                     (pairs.into_iter().collect(), was_truncated, h1 || h2)
                 }
@@ -2267,7 +2267,10 @@ impl GraphRead for PostgresStore {
                     let (raw, horizon) = self.cte_reach(start, d, spec)?;
                     // cte_reach fetches max_nodes+1; more than max_nodes means something was cut.
                     let was_truncated = raw.len() > spec.max_nodes;
+                    // #226: truncate by depth (then id), never by id alone — the map is ordered by
+                    // symbol id, so a bare truncate could drop a near node and keep a far one.
                     let mut pairs: Vec<(String, u32)> = raw.into_iter().collect();
+                    pairs.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
                     pairs.truncate(spec.max_nodes);
                     (pairs.into_iter().collect(), was_truncated, horizon)
                 }

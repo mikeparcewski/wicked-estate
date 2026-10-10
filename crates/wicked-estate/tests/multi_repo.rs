@@ -358,8 +358,9 @@ fn scip_ingest_correlates_against_a_labelled_repo() {
         Descriptor, GraphWrite, Language, Location, Node, NodeKind, Span, Symbol,
     };
 
-    let fixture: &[u8] =
-        include_bytes!("../../wicked-estate-resolve/tests/fixtures/sample-ts.scip");
+    let fixture: &[u8] = include_bytes!(
+        "../../wicked-estate-resolve/tests/fixtures/scip-typescript-0.4.0/index.scip"
+    );
     let root = fresh_dir("scip");
     let scip_path = root.join("index.scip");
     let mut f = fs::File::create(&scip_path).unwrap();
@@ -367,7 +368,7 @@ fn scip_ingest_correlates_against_a_labelled_repo() {
     drop(f);
 
     // Two nodes as the labelled indexer would have stored them: paths under `repoa/`.
-    let node = |name: &str, file: &str, l0: u32, l1: u32| {
+    let node = |name: &str, file: &str, l0: u32, c0: u32, l1: u32, c1: u32| {
         Node::new(
             Symbol::global(
                 "ci-test",
@@ -384,9 +385,9 @@ fn scip_ingest_correlates_against_a_labelled_repo() {
                     start_byte: 0,
                     end_byte: 0,
                     start_line: l0,
-                    start_col: 0,
+                    start_col: c0,
                     end_line: l1,
-                    end_col: 80,
+                    end_col: c1,
                 },
             ),
         )
@@ -394,8 +395,8 @@ fn scip_ingest_correlates_against_a_labelled_repo() {
     let mut store = SqliteStore::open(root.join("scip.db")).unwrap();
     store
         .upsert_nodes(&[
-            node("helper", "repoa/src/util.ts", 0, 0),
-            node("run", "repoa/src/main.ts", 1, 2),
+            node("helper", "repoa/src/util.ts", 0, 7, 2, 1),
+            node("run", "repoa/src/main.ts", 2, 7, 7, 1),
         ])
         .unwrap();
 
@@ -406,9 +407,28 @@ fn scip_ingest_correlates_against_a_labelled_repo() {
     );
     let scoped =
         wicked_estate::ingest_scip_as(&mut store, &root, &scip_path, Some("repoa")).unwrap();
+    assert_eq!(
+        scoped, 1,
+        "labelled correlation must find run → helper (two reference sites, 5:12 and 6:9, one edge)"
+    );
+    let locations: Vec<String> = store
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.resolved_by == "scip-typescript")
+        .filter_map(|e| e.location.map(|l| l.file))
+        .collect();
+    assert_eq!(
+        locations,
+        vec!["repoa/src/main.ts".to_string()],
+        "written locations carry the label again"
+    );
+    let owners = store.support_owners().unwrap();
     assert!(
-        scoped > 0,
-        "labelled correlation must find the precise edges"
+        owners.iter().any(
+            |o| o.owner.producer == "scip-typescript" && o.owner.snapshot == "repoa:index.scip"
+        ),
+        "{owners:?}"
     );
 }
 

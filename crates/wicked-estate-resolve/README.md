@@ -10,7 +10,7 @@ Cross-file reference resolvers: binds `UnresolvedRef` values emitted by extracto
 - `RelativeImportResolver` binds quoted relative JS/TS import specifiers (`'./foo'`, `'../bar'`) to their target File node by exact joined-path match, root-guarded against the repo/label root — `ImportMap` tier with a per-edge confidence override of 0.9 (`resolved_by = "relative-import"`); ambiguity parks the reference.
 - `InfraResolver` binds IaC resource-to-resource `depends_on` references at Parsed confidence (1.0) without interfering with code resolvers.
 - `resolve_all_with_coverage` runs multiple resolvers, preserves exact-site resolver output for syntax-site consumers, deduplicates relationship edges by `(source, target, kind)` keeping the highest-confidence edge, and returns the unresolved references under the one definition in `docs/ENGINE-CONTRACT.md` §2.1 (a reference is unresolved iff no resolver emitted an edge attributed to it — same `(location, kind)`).
-- `scip_edges` ingests a SCIP `index.scip` protobuf and emits confidence-1.0 edges by correlating SCIP occurrences to tree-sitter-derived nodes.
+- `scip_evidence` translates a SCIP `index.scip` protobuf into the language-neutral semantic-evidence envelope (`wicked_estate_core::evidence`): definitions and references only — SCIP has no call role. Correlation and projection into the support plane are the engine's (`docs/ENGINE-CONTRACT.md` §3.5).
 - `lsp` provides an on-demand JSON-RPC stdio client for `typescript-language-server`, `rust-analyzer`, and `pyright-langserver` — on-demand single-symbol queries only, never bulk. A client library by design: no `Resolver` impl, no edge emission; the on-demand consumer (MCP/CLI definition/references tool) is the W3.6 follow-up.
 
 ## Key types / traits
@@ -24,7 +24,7 @@ Cross-file reference resolvers: binds `UnresolvedRef` values emitted by extracto
 | `InfraResolver` | `Resolver` impl: IaC resource deps at Parsed tier (1.0). |
 | `Resolution` | `{ edges, site_edges, unresolved }` — one resolve pass's output. `site_edges` is the pre-dedup exact-site edge stream for syntax-site consumers such as call-derived value flow; `edges` is the relationship-deduped graph output. |
 | `resolve_all_with_coverage(resolvers, refs, index)` | Run N resolvers; deduplicated edges + per-reference unresolved set (ENGINE-CONTRACT §2.1). |
-| `scip_edges(index_bytes, nodes)` | Parse a SCIP index protobuf; emit `ResolutionTier::Scip` edges. |
+| `scip_evidence(index_bytes, snapshot)` | Parse a SCIP index protobuf (typed and legacy ranges) into a `SemanticEvidence` envelope plus the adapter's skip counts. |
 | `RulesBridgeResolver` | W15.13 — connects code call sites to real RuleSet nodes. Handles `UnresolvedRef`s with `raw_name = "rules-engine:<scheme>"` emitted by `ExtraEdgeExtractor`. Queries all `NodeKind::RuleSet` nodes and emits `InvokedBy` edges at `ResolutionTier::Heuristic`. |
 
 ## Usage

@@ -258,8 +258,8 @@ fn flows_to_matches_mcp_and_direct_lineage_on_the_angular_fixture() {
     let id = |suffix: &str| node_where(&store, |n| n.symbol.as_str().ends_with(suffix), suffix);
     let route_id = id("CustomerComponent#load().:local:routeId:");
     let field = id("CustomerComponent#:field:customerId:");
-    let load_customer_id = id("CustomerComponent#loadCustomer().:local:id:");
-    let service_id = id("CustomerService#getCustomer().:local:id:");
+    let load_customer_id = id("CustomerComponent#loadCustomer().:param:id:");
+    let service_id = id("CustomerService#getCustomer().:param:id:");
     let got = hops(&doc);
     for pair in [
         (route.clone(), route_id.clone()),
@@ -443,7 +443,7 @@ fn dependencies_and_flows_share_the_tools_single_budget() {
     let store = open(&s);
     let seed = node_where(
         &store,
-        |n| n.is_value_flow_node() && n.symbol.as_str().ends_with("fan().:local:seed:"),
+        |n| n.is_value_flow_node() && n.symbol.as_str().ends_with("fan().:param:seed:"),
         "seed slot",
     );
 

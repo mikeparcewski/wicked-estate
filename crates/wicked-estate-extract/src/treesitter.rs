@@ -1401,9 +1401,11 @@ fn module_path(path: &str) -> String {
 /// `@code_<kind>.owner` — an owner type name spliced as the innermost Type descriptor where no
 /// containing node exists, e.g. a Go receiver or a C++ `Foo::` qualifier), so members whose
 /// owner is not an enclosing definition node nest too — see the 2026-08 amendment in
-/// `docs/adr/ADR-002-stable-symbol-identity.md`. Stored per repo as the `id_scheme` meta key;
-/// a mismatch forces a full re-extraction so a DB never mixes schemes.
-pub const SYMBOL_ID_SCHEME: &str = "3";
+/// `docs/adr/ADR-002-stable-symbol-identity.md`. Scheme "4" (#216) gives value slots their binding
+/// scope: a callable's parameter is `{owner}:param:{name}` (was `:local:`), and a binding of a
+/// nested block or callback is `{owner}:local:{name}@{n}`. Stored per repo as the `id_scheme`
+/// meta key; a mismatch forces a full re-extraction so a DB never mixes schemes.
+pub const SYMBOL_ID_SCHEME: &str = "4";
 
 fn def_suffix(kind: &str) -> Suffix {
     match kind {
@@ -1579,6 +1581,53 @@ fn value_flow_hint_kind(kind: FlowEndpointKind) -> Option<&'static str> {
     }
 }
 
+/// Whether the `this` receiver of a `this.<name>` capture is the enclosing CLASS instance.
+///
+/// A `Field` endpoint is minted on the enclosing class (`{class}:field:{name}`), which is only true
+/// when `this` is lexically the class instance: inside a class member, through any number of arrow
+/// functions. An ordinary function, generator or object-literal method rebinds `this`, so
+/// `class C { m() { const o = { read() { const t = this.f; } }; } }` reads `o.f`, not `C.f`, and
+/// minting `C:field:f` there would assert a false Parsed flow (#215 review). Captures that are not a
+/// `this.<name>` member (an `@Input()` field's own name) are class-owned by construction.
+fn field_receiver_is_class_instance(node: tree_sitter::Node) -> bool {
+    let Some(member) = node.parent().filter(|p| p.kind() == "member_expression") else {
+        return true;
+    };
+    if member.child_by_field_name("object").map(|o| o.kind()) != Some("this") {
+        return true;
+    }
+    let mut cur = member.parent();
+    while let Some(n) = cur {
+        match n.kind() {
+            "method_definition"
+            | "public_field_definition"
+            | "field_definition"
+            | "class_static_block" => {
+                return n.parent().is_some_and(|p| p.kind() == "class_body");
+            }
+            "function_declaration"
+            | "function_expression"
+            | "function"
+            | "generator_function"
+            | "generator_function_declaration" => return false,
+            "class_body" => return true,
+            _ => {}
+        }
+        cur = n.parent();
+    }
+    false
+}
+
+/// A `Field` endpoint whose `this` is not the class instance becomes a def-owned, path-keyed
+/// `Property` read (`this.<name>`), like any other receiver's member: still a value node, never
+/// joined to the class field slot.
+fn rebind_non_class_field(endpoint: &mut PendingFlowEndpoint, node: tree_sitter::Node) {
+    if endpoint.kind == FlowEndpointKind::Field && !field_receiver_is_class_instance(node) {
+        endpoint.kind = FlowEndpointKind::Property;
+        endpoint.name = format!("this.{}", endpoint.name);
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PendingFlowEndpoint {
     kind: FlowEndpointKind,
@@ -1735,6 +1784,16 @@ fn strip_leading_symbol_colon(name: String) -> String {
 /// `<=>` to `=`). Leading-`:` stripping is NOT done here: it is opt-in per query
 /// via the `.name.symbol` capture suffix (see [`strip_leading_symbol_colon`]),
 /// because CSS/YAML def names legitimately start with `:`.
+/// #208: the identity of a property read is its `object.property` PATH, not its source text: a
+/// prettier wrap (`customer⏎    .id`) or optional chaining (`raw?.name`) must mint the same node
+/// as `customer.id` / `raw.name` (ADR-002 — formatting never changes identity). The captured
+/// `member_expression` is `identifier . property_identifier`, so dropping whitespace and folding
+/// `?.` to `.` reconstructs exactly `object.property`.
+fn property_path_name(raw: &str) -> String {
+    let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.replace("?.", ".")
+}
+
 fn strip_def_name(raw: &str) -> String {
     let s = raw.trim();
     if s.len() >= 2
@@ -1899,6 +1958,241 @@ fn enclosing_type_symbol(
         })
 }
 
+/// What kind of binding scope a `@flow.scope*` capture marks (#216).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopeKind {
+    /// `@flow.scope` — a block: `let` / `const` / catch / loop bindings live here.
+    Block,
+    /// `@flow.scope.callable` — a callback: its parameters and its `var`s live here.
+    Callable,
+    /// `@flow.scope.owned` — a callable that IS its definition's body (an arrow bound to a const
+    /// or a class field). Transparent: what it binds belongs to the definition itself.
+    Owned,
+}
+
+/// How a value reference binds inside its owner definition (#216).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValueBinding {
+    /// The owner's own parameter: `{owner}:param:{name}`.
+    Param,
+    /// A binding of the owner's own body, or a name declared nowhere in the owner (a global, a
+    /// closure capture): `{owner}:local:{name}`, the pre-#216 identity.
+    Local,
+    /// A binding of a NESTED scope — a block or a callback inside the owner:
+    /// `{owner}:local:{name}@{n}`, `n` numbering (from 1, in source order) the owner's nested
+    /// scopes that bind this name. Structural, not a byte offset: a line shift or an unrelated
+    /// block keeps the id (ADR-002).
+    Scoped(usize),
+}
+
+#[derive(Debug, Clone)]
+struct ValueDecl {
+    name: String,
+    owner: Option<SymbolId>,
+    /// The innermost scope that binds the name; `None` = bound at the owner's own level.
+    scope: Option<(usize, usize)>,
+}
+
+/// The binding structure of one file's value references (#216): which scopes exist, which names
+/// each declares, and which names are the owners' own parameters. Empty for a grammar whose query
+/// carries no `@flow.scope*` / `@flow.declare.*` captures, where every reference binds
+/// [`ValueBinding::Local`] — the owner-scoped identity every language had before.
+#[derive(Debug, Default)]
+struct ValueScopes {
+    /// Scope ranges, sorted `(start asc, end desc)` and deduplicated; owned callables excluded.
+    /// The `bool` marks a callable (callback) scope.
+    scopes: Vec<(usize, usize, bool)>,
+    decls: Vec<ValueDecl>,
+    params: HashSet<(Option<SymbolId>, String)>,
+}
+
+/// Every name a binding pattern binds, with its byte position (#216 review): `x`, `{a, b: c,
+/// ...d}`, `[e = f, ...g]`, a TS `required_parameter` / `optional_parameter` wrapper. Never walks
+/// into a default value (`= f` reads `f`, it does not bind it), a property key or a computed name.
+fn pattern_bindings(node: tree_sitter::Node, src: &[u8], out: &mut Vec<(String, usize)>) {
+    match node.kind() {
+        "identifier" | "shorthand_property_identifier_pattern" => {
+            if let Ok(text) = node.utf8_text(src) {
+                out.push((text.to_string(), node.start_byte()));
+            }
+        }
+        "pair_pattern" => {
+            if let Some(value) = node.child_by_field_name("value") {
+                pattern_bindings(value, src, out);
+            }
+        }
+        "assignment_pattern" | "object_assignment_pattern" => {
+            if let Some(left) = node.child_by_field_name("left") {
+                pattern_bindings(left, src, out);
+            }
+        }
+        "required_parameter" | "optional_parameter" => {
+            if let Some(pattern) = node.child_by_field_name("pattern") {
+                pattern_bindings(pattern, src, out);
+            }
+        }
+        "object_pattern" | "array_pattern" | "rest_pattern" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                pattern_bindings(child, src, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn enclosing_def(defs: &[DefRec], pos: usize) -> Option<&DefRec> {
+    defs.iter()
+        .filter(|d| d.start <= pos && pos < d.end)
+        .min_by_key(|d| d.end - d.start)
+}
+
+fn def_range(def: Option<&DefRec>) -> (usize, usize) {
+    def.map_or((0, usize::MAX), |d| (d.start, d.end))
+}
+
+impl ValueScopes {
+    fn build(
+        sites: &[(usize, usize, ScopeKind)],
+        decls: &[(String, usize, bool)],
+        params: &[PendingFlowEndpoint],
+        defs: &[DefRec],
+    ) -> Self {
+        let owned: HashSet<(usize, usize)> = sites
+            .iter()
+            .filter(|(_, _, kind)| *kind == ScopeKind::Owned)
+            .map(|(start, end, _)| (*start, *end))
+            .collect();
+        let callable: HashSet<(usize, usize)> = sites
+            .iter()
+            .filter(|(_, _, kind)| *kind == ScopeKind::Callable)
+            .map(|(start, end, _)| (*start, *end))
+            .collect();
+        let mut scopes: Vec<(usize, usize, bool)> = sites
+            .iter()
+            .filter(|(start, end, kind)| {
+                *kind != ScopeKind::Owned && !owned.contains(&(*start, *end))
+            })
+            .map(|(start, end, _)| (*start, *end, callable.contains(&(*start, *end))))
+            .collect();
+        scopes.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+        scopes.dedup_by_key(|(start, end, _)| (*start, *end));
+        let decls = decls
+            .iter()
+            .map(|(name, pos, is_var)| {
+                // The def a declaration NAMES is not its owner: `const cb = () => {}` is a binding
+                // of the enclosing scope, though its declarator is also the arrow's def range.
+                let owner = defs
+                    .iter()
+                    .filter(|d| d.start <= *pos && *pos < d.end && d.start != *pos)
+                    .min_by_key(|d| d.end - d.start);
+                let (os, oe) = def_range(owner);
+                // Only the declaring OWNER's scopes bind: the parameter of an arrow bound to a
+                // const inside `f` belongs to that arrow's definition, never to `f`'s body.
+                let scope = scopes
+                    .iter()
+                    .filter(|(s, e, callable)| {
+                        *s <= *pos && *pos < *e && os <= *s && *e <= oe && (!*is_var || *callable)
+                    })
+                    .min_by_key(|(s, e, _)| e - s)
+                    .map(|(s, e, _)| (*s, *e));
+                ValueDecl {
+                    name: name.clone(),
+                    owner: owner.map(|d| d.symbol.clone()),
+                    scope,
+                }
+            })
+            .collect();
+        let params = params
+            .iter()
+            .map(|p| {
+                (
+                    enclosing_def(defs, p.pos).map(|d| d.symbol.clone()),
+                    p.name.clone(),
+                )
+            })
+            .collect();
+        ValueScopes {
+            scopes,
+            decls,
+            params,
+        }
+    }
+
+    /// The owner's own body: its largest block scope that no callback inside it contains. A
+    /// binding there keeps the plain owner-scoped id. A file-level owner has no body.
+    fn owner_body(&self, owner: Option<&DefRec>) -> Option<(usize, usize)> {
+        let (os, oe) = def_range(owner);
+        owner?;
+        let within = |s: usize, e: usize| os <= s && e <= oe;
+        self.scopes
+            .iter()
+            .filter(|(s, e, callable)| !*callable && within(*s, *e))
+            .filter(|(s, e, _)| {
+                !self
+                    .scopes
+                    .iter()
+                    .any(|(cs, ce, c)| *c && within(*cs, *ce) && *cs <= *s && *e <= *ce)
+            })
+            .max_by_key(|(s, e, _)| e - s)
+            .map(|(s, e, _)| (*s, *e))
+    }
+
+    fn bind(&self, name: &str, pos: usize, owner: Option<&DefRec>) -> ValueBinding {
+        let owner_symbol = owner.map(|d| d.symbol.clone());
+        let innermost = self
+            .decls
+            .iter()
+            .filter(|d| d.name == name && d.owner == owner_symbol)
+            .filter_map(|d| match d.scope {
+                Some((s, e)) if s <= pos && pos < e => Some(Some((s, e))),
+                Some(_) => None,
+                None => Some(None),
+            })
+            .min_by_key(|scope| scope.map_or(usize::MAX, |(s, e)| e - s));
+        if let Some(Some(scope)) = innermost {
+            let body = self.owner_body(owner);
+            if Some(scope) != body {
+                // `n` numbers only the owner's nested scopes that bind THIS name, from 1 in source
+                // order: an unrelated block inserted earlier leaves every id alone (#216 review).
+                let mut binding: Vec<(usize, usize)> = self
+                    .decls
+                    .iter()
+                    .filter(|d| d.name == name && d.owner == owner_symbol)
+                    .filter_map(|d| d.scope)
+                    .filter(|scope| Some(*scope) != body)
+                    .collect();
+                binding.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+                binding.dedup();
+                let ordinal = binding.iter().position(|s| *s == scope).unwrap_or(0) + 1;
+                return ValueBinding::Scoped(ordinal);
+            }
+        }
+        if self.params.contains(&(owner_symbol, name.to_string())) {
+            ValueBinding::Param
+        } else {
+            ValueBinding::Local
+        }
+    }
+
+    /// The binding of a `Local` endpoint (every other kind binds as itself).
+    fn binding(&self, endpoint: &PendingFlowEndpoint, defs: &[DefRec]) -> Option<ValueBinding> {
+        (endpoint.kind == FlowEndpointKind::Local).then(|| {
+            self.bind(
+                &endpoint.name,
+                endpoint.pos,
+                enclosing_def(defs, endpoint.pos),
+            )
+        })
+    }
+
+    /// A `Local` read of the owner's own parameter: its node is the parameter's node, already
+    /// emitted from the parameter capture, so the read site must not re-emit it as a Variable.
+    fn is_param_read(&self, endpoint: &PendingFlowEndpoint, defs: &[DefRec]) -> bool {
+        self.binding(endpoint, defs) == Some(ValueBinding::Param)
+    }
+}
+
 fn flow_owner_key(
     endpoint: &PendingFlowEndpoint,
     defs: &[DefRec],
@@ -1933,6 +2227,7 @@ fn flow_endpoint_symbol(
     scheme: &str,
     module: &str,
     file_symbol: &SymbolId,
+    scopes: &ValueScopes,
 ) -> SymbolId {
     match endpoint.kind {
         FlowEndpointKind::RouteParam => {
@@ -1951,9 +2246,19 @@ fn flow_endpoint_symbol(
             let owner = flow_owner_key(endpoint, defs, pending, scheme, module, file_symbol);
             Symbol::synthetic("value", format!("{owner}:property:{}", endpoint.name)).id()
         }
-        FlowEndpointKind::Local | FlowEndpointKind::Parameter => {
+        FlowEndpointKind::Parameter => {
             let owner = flow_owner_key(endpoint, defs, pending, scheme, module, file_symbol);
-            Symbol::synthetic("value", format!("{owner}:local:{}", endpoint.name)).id()
+            Symbol::synthetic("value", format!("{owner}:param:{}", endpoint.name)).id()
+        }
+        FlowEndpointKind::Local => {
+            let owner = flow_owner_key(endpoint, defs, pending, scheme, module, file_symbol);
+            let name = &endpoint.name;
+            let id = match scopes.bind(name, endpoint.pos, enclosing_def(defs, endpoint.pos)) {
+                ValueBinding::Param => format!("{owner}:param:{name}"),
+                ValueBinding::Local => format!("{owner}:local:{name}"),
+                ValueBinding::Scoped(n) => format!("{owner}:local:{name}@{n}"),
+            };
+            Symbol::synthetic("value", id).id()
         }
     }
 }
@@ -1996,7 +2301,9 @@ fn flow_endpoint_node(endpoint: &PendingFlowEndpoint, symbol: SymbolId, file: &S
         FlowEndpointKind::Local => (NodeKind::Variable, endpoint.name.clone()),
         FlowEndpointKind::Parameter => (NodeKind::Parameter, endpoint.name.clone()),
         FlowEndpointKind::Field => (NodeKind::Field, endpoint.name.clone()),
-        FlowEndpointKind::Property => (NodeKind::Field, endpoint.name.clone()),
+        // #214: a property read is not a type member — `Synthetic`, like the other non-member
+        // endpoints, never a function-owned `Field`.
+        FlowEndpointKind::Property => (NodeKind::Synthetic, endpoint.name.clone()),
         FlowEndpointKind::AngularInput => (
             NodeKind::Synthetic,
             format!("AngularInput:{}", endpoint.name),
@@ -2118,6 +2425,11 @@ enum CaptureRole<'a> {
     /// anonymous callable (a callback), which is not a definition record: a `return` inside it
     /// must not be attributed to the enclosing definition.
     FlowBarrier { owned: bool },
+    /// `@flow.scope` / `@flow.scope.callable` / `@flow.scope.owned` — a binding scope (#216).
+    FlowScope { kind: ScopeKind },
+    /// `@flow.declare.block` / `@flow.declare.var` — a name a scope binds (#216). `var` binds in
+    /// the innermost callable scope rather than the innermost block.
+    FlowDeclare { var: bool },
     /// `@call.value` — call-expression anchor for per-site semantic call facts.
     CallValue,
     /// `@call.arguments` — enclosing arguments node used to compute original zero-based slots.
@@ -2181,6 +2493,10 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
             "producer.local" => CaptureRole::FlowProducer {
                 kind: FlowEndpointKind::Local,
             },
+            // `this.<name>` read (#215): the class-owned field slot, not a per-method property.
+            "producer.field" => CaptureRole::FlowProducer {
+                kind: FlowEndpointKind::Field,
+            },
             "producer.property" => CaptureRole::FlowProducer {
                 kind: FlowEndpointKind::Property,
             },
@@ -2198,6 +2514,17 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
             },
             "barrier" => CaptureRole::FlowBarrier { owned: false },
             "barrier.owned" => CaptureRole::FlowBarrier { owned: true },
+            "scope" => CaptureRole::FlowScope {
+                kind: ScopeKind::Block,
+            },
+            "scope.callable" => CaptureRole::FlowScope {
+                kind: ScopeKind::Callable,
+            },
+            "scope.owned" => CaptureRole::FlowScope {
+                kind: ScopeKind::Owned,
+            },
+            "declare.block" => CaptureRole::FlowDeclare { var: false },
+            "declare.var" => CaptureRole::FlowDeclare { var: true },
             // Anything else under `flow.` is a classified construct anchor. Unparseable = never
             // emitted as an unclassified fact; a plugin/override query carrying one fails its
             // load ([`flow_capture_lint`], #235).
@@ -2434,6 +2761,9 @@ impl Extractor for TreeSitterExtractor {
         // Callable bodies by byte range → `true` when the body is its own definition's body.
         // A `return` inside the innermost NON-owned body is a callback's return value.
         let mut flow_return_barriers: HashMap<(usize, usize), bool> = HashMap::new();
+        // #216: binding scopes and the names they declare, resolved once the defs exist.
+        let mut flow_scope_sites: Vec<(usize, usize, ScopeKind)> = Vec::new();
+        let mut flow_decl_sites: Vec<(String, usize, bool)> = Vec::new();
         let mut call_facts: HashMap<Span, PendingCallFact> = HashMap::new();
         let mut import_targets: Vec<(String, Span)> = Vec::new();
         let mut seen_imports: HashSet<String> = HashSet::new();
@@ -2579,28 +2909,33 @@ impl Extractor for TreeSitterExtractor {
                         flow_construct = Some((class.to_owned_class(), span));
                     }
                     CaptureRole::FlowConsumer { kind } => {
-                        flow_consumers.push(PendingFlowEndpoint {
+                        let mut endpoint = PendingFlowEndpoint {
                             kind,
                             name: strip_def_name(&text),
                             pos,
                             span,
                             slot: None,
-                        });
+                        };
+                        rebind_non_class_field(&mut endpoint, c.node);
+                        flow_consumers.push(endpoint);
                     }
                     CaptureRole::FlowProducer { kind } => {
                         let name = match kind {
                             FlowEndpointKind::AngularInput | FlowEndpointKind::RouteParam => {
                                 strip_literal_quotes(&text)
                             }
+                            FlowEndpointKind::Property => property_path_name(&text),
                             _ => strip_def_name(&text),
                         };
-                        flow_producers.push(PendingFlowEndpoint {
+                        let mut endpoint = PendingFlowEndpoint {
                             kind,
                             name,
                             pos,
                             span,
                             slot: None,
-                        });
+                        };
+                        rebind_non_class_field(&mut endpoint, c.node);
+                        flow_producers.push(endpoint);
                     }
                     CaptureRole::FlowParameter { kind } => {
                         flow_parameter_sites.push(PendingFlowEndpoint {
@@ -2616,6 +2951,14 @@ impl Extractor for TreeSitterExtractor {
                             .entry((c.node.start_byte(), c.node.end_byte()))
                             .or_insert(false);
                         *entry |= owned;
+                    }
+                    CaptureRole::FlowScope { kind } => {
+                        flow_scope_sites.push((c.node.start_byte(), c.node.end_byte(), kind));
+                    }
+                    CaptureRole::FlowDeclare { var } => {
+                        let mut names = Vec::new();
+                        pattern_bindings(c.node, src, &mut names);
+                        flow_decl_sites.extend(names.into_iter().map(|(name, at)| (name, at, var)));
                     }
                     CaptureRole::FlowReturn { kind } => {
                         flow_return_sites.push(PendingFlowEndpoint {
@@ -2633,13 +2976,15 @@ impl Extractor for TreeSitterExtractor {
                         call_arguments_node = Some(c.node);
                     }
                     CaptureRole::CallArg { kind } => {
-                        call_arg_sites.push(PendingFlowEndpoint {
+                        let mut endpoint = PendingFlowEndpoint {
                             kind,
                             name: strip_def_name(&text),
                             pos,
                             span,
                             slot: None,
-                        });
+                        };
+                        rebind_non_class_field(&mut endpoint, c.node);
+                        call_arg_sites.push(endpoint);
                     }
                     CaptureRole::CallResult { kind } => {
                         call_result_site = Some(PendingFlowEndpoint {
@@ -3042,9 +3387,18 @@ impl Extractor for TreeSitterExtractor {
         }
 
         // ── Semantic value-flow nodes + direct edges ───────────────────────
+        let value_scopes =
+            ValueScopes::build(&flow_scope_sites, &flow_decl_sites, &flow_parameters, &defs);
         for parameter in &flow_parameters {
-            let symbol =
-                flow_endpoint_symbol(parameter, &defs, &pending, &scheme, &module, &file_symbol);
+            let symbol = flow_endpoint_symbol(
+                parameter,
+                &defs,
+                &pending,
+                &scheme,
+                &module,
+                &file_symbol,
+                &value_scopes,
+            );
             nodes.push(flow_endpoint_node(parameter, symbol, file));
         }
         for ret in &flow_returns {
@@ -3067,12 +3421,16 @@ impl Extractor for TreeSitterExtractor {
                 &scheme,
                 &module,
                 &file_symbol,
+                &value_scopes,
             );
-            nodes.push(flow_endpoint_node(
-                &ret.producer,
-                producer_symbol.clone(),
-                file,
-            ));
+            // A read of the owner's parameter IS the parameter's node (#216), emitted above.
+            if !value_scopes.is_param_read(&ret.producer, &defs) {
+                nodes.push(flow_endpoint_node(
+                    &ret.producer,
+                    producer_symbol.clone(),
+                    file,
+                ));
+            }
             let class = OwnedFlowClass::returns();
             let mut edge = Edge::new(
                 return_symbol,
@@ -3087,13 +3445,19 @@ impl Extractor for TreeSitterExtractor {
         }
         for flow in flow_sites {
             for consumer in &flow.consumers {
-                let consumer_symbol =
-                    flow_endpoint_symbol(consumer, &defs, &pending, &scheme, &module, &file_symbol);
-                nodes.push(flow_endpoint_node(consumer, consumer_symbol.clone(), file));
+                let consumer_symbol = flow_endpoint_symbol(
+                    consumer,
+                    &defs,
+                    &pending,
+                    &scheme,
+                    &module,
+                    &file_symbol,
+                    &value_scopes,
+                );
+                if !value_scopes.is_param_read(consumer, &defs) {
+                    nodes.push(flow_endpoint_node(consumer, consumer_symbol.clone(), file));
+                }
                 for producer in &flow.producers {
-                    if producer.name == consumer.name && producer.kind == consumer.kind {
-                        continue;
-                    }
                     let producer_symbol = flow_endpoint_symbol(
                         producer,
                         &defs,
@@ -3101,8 +3465,16 @@ impl Extractor for TreeSitterExtractor {
                         &scheme,
                         &module,
                         &file_symbol,
+                        &value_scopes,
                     );
-                    nodes.push(flow_endpoint_node(producer, producer_symbol.clone(), file));
+                    // A self-hop is no fact. Compared by BINDING (#216), not by name: an inner
+                    // `const id = id` reads a different `id` than the one it declares.
+                    if producer_symbol == consumer_symbol {
+                        continue;
+                    }
+                    if !value_scopes.is_param_read(producer, &defs) {
+                        nodes.push(flow_endpoint_node(producer, producer_symbol.clone(), file));
+                    }
                     let mut edge = Edge::new(
                         consumer_symbol.clone(),
                         producer_symbol,
@@ -3195,7 +3567,10 @@ impl Extractor for TreeSitterExtractor {
                             .args
                             .iter()
                             .filter_map(|arg| {
-                                let kind = value_flow_hint_kind(arg.kind)?;
+                                let mut kind = value_flow_hint_kind(arg.kind)?;
+                                if value_scopes.is_param_read(arg, &defs) {
+                                    kind = "parameter";
+                                }
                                 let mut item = serde_json::Map::new();
                                 item.insert(
                                     "name".to_string(),
@@ -3221,6 +3596,7 @@ impl Extractor for TreeSitterExtractor {
                                             &scheme,
                                             &module,
                                             &file_symbol,
+                                            &value_scopes,
                                         )
                                         .0,
                                     ),
@@ -3253,6 +3629,7 @@ impl Extractor for TreeSitterExtractor {
                                         &scheme,
                                         &module,
                                         &file_symbol,
+                                        &value_scopes,
                                     )
                                     .0,
                                 ),
@@ -5017,21 +5394,30 @@ export function factory() {
             "top-level 'topVar' should be Variable; got {kinds:?}"
         );
 
-        // function-local bindings NOT captured
+        // function-local bindings NOT captured as definitions. A local that takes part in value
+        // flow (`return localResult`) gets a value slot (#213) — a different record, excluded here.
         assert!(
-            !ex.nodes.iter().any(|n| n.name == "localResult"),
+            !ex.nodes
+                .iter()
+                .any(|n| n.name == "localResult" && !n.is_value_flow_node()),
             "function-local 'localResult' must NOT be captured; got {kinds:?}"
         );
         assert!(
-            !ex.nodes.iter().any(|n| n.name == "localTemp"),
+            !ex.nodes
+                .iter()
+                .any(|n| n.name == "localTemp" && !n.is_value_flow_node()),
             "function-local 'localTemp' must NOT be captured; got {kinds:?}"
         );
         assert!(
-            !ex.nodes.iter().any(|n| n.name == "legacyLocal"),
+            !ex.nodes
+                .iter()
+                .any(|n| n.name == "legacyLocal" && !n.is_value_flow_node()),
             "function-local 'legacyLocal' must NOT be captured; got {kinds:?}"
         );
         assert!(
-            !ex.nodes.iter().any(|n| n.name == "innerObj"),
+            !ex.nodes
+                .iter()
+                .any(|n| n.name == "innerObj" && !n.is_value_flow_node()),
             "inner function-local 'innerObj' must NOT be captured; got {kinds:?}"
         );
     }

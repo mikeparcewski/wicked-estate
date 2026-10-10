@@ -181,6 +181,15 @@ CREATE TABLE IF NOT EXISTS content (
   blob    BLOB NOT NULL
 );
 
+-- #220: per-file value-flow call references (a JSON array of UnresolvedRef, hints included), so an
+-- incremental index re-derives the call-derived flows_to edges into a changed callee from an
+-- unchanged caller by re-resolving them, without re-parsing the caller. Owned by the file:
+-- remove_file deletes the row; no row = not recorded (an older DB) = re-extract the caller.
+CREATE TABLE IF NOT EXISTS file_call_refs (
+  path TEXT PRIMARY KEY,
+  refs TEXT NOT NULL
+);
+
 -- W11.2: versioned query cache (prior art versioned cache-port pattern).
 -- cache rows are keyed by (key, version); cache_get returns a value only when the stored
 -- version matches the current graph_version held in meta. bump_version increments graph_version

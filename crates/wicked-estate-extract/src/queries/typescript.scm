@@ -241,6 +241,14 @@
     right: (identifier) @flow.producer.local)
 ) @flow.influence.syntax.expression
 
+; out = tainted — a REASSIGNMENT is a value hop too (#217): without it `let out = trusted;
+; out = tainted; return out;` stored only the `trusted` hop and the partial lineage looked whole.
+(expression_statement
+  (assignment_expression
+    left: (identifier) @flow.consumer.local
+    right: (identifier) @flow.producer.local)
+) @flow.value.syntax.reassignment
+
 ; this.field = value
 (expression_statement
   (assignment_expression
@@ -257,6 +265,16 @@
     object: (identifier)
     property: (property_identifier)) @flow.producer.property
 ) @flow.value.syntax.property_read
+
+; const t = this.tenantId — a read of the CLASS's field (#215). `@flow.producer.field` mints the
+; same class-owned `:field:<name>` slot an `@Input()` / `this.f = v` writes, so the read joins that
+; slot instead of minting a per-method `:property:` node, and `@Input() tenantId` reaches `t`.
+(variable_declarator
+  name: (identifier) @flow.consumer.local
+  value: (member_expression
+    object: (this)
+    property: (property_identifier) @flow.producer.field)
+) @flow.value.syntax.field_read
 
 ; @Input() tenantId
 (public_field_definition
@@ -287,15 +305,21 @@
 
 ; Callable parameters and simple returns become stable value nodes/edges. The call resolver
 ; later joins exact call-site argument facts to these callable-owned values.
+; `optional_parameter` (`a?: string`) fills its own positional slot like a required one (#213):
+; without it `value_params` held `null` there and the call-site argument hop was lost.
 (function_declaration
   parameters: (formal_parameters
-    (required_parameter
-      pattern: (identifier) @flow.parameter.local)))
+    [(required_parameter
+      pattern: (identifier) @flow.parameter.local)
+     (optional_parameter
+      pattern: (identifier) @flow.parameter.local)]))
 
 (method_definition
   parameters: (formal_parameters
-    (required_parameter
-      pattern: (identifier) @flow.parameter.local)))
+    [(required_parameter
+      pattern: (identifier) @flow.parameter.local)
+     (optional_parameter
+      pattern: (identifier) @flow.parameter.local)]))
 
 (return_statement
   (identifier) @flow.return.local)
@@ -309,6 +333,10 @@
 ; arrow bound to a const or a class field is captured as a def above), whose returns are kept.
 (arrow_function body: (statement_block) @flow.barrier)
 (function_expression body: (statement_block) @flow.barrier)
+; Generators are callables too, and no definition pattern captures them: their returns are the
+; generator's, never the enclosing definition's.
+(generator_function body: (statement_block) @flow.barrier)
+(generator_function_declaration body: (statement_block) @flow.barrier)
 
 (variable_declarator
   value: (arrow_function body: (statement_block) @flow.barrier.owned))
@@ -319,7 +347,59 @@
 ; callback: `items.map(() => { function inner() { return v; } })` returns `v` from `inner`, and
 ; `inner` is a definition record, so the barrier must stop at it rather than at the arrow.
 (function_declaration body: (statement_block) @flow.barrier.owned)
-(method_definition body: (statement_block) @flow.barrier.owned)
+; Only a method a definition pattern captures (a `property_identifier` name) owns its returns: a
+; computed (`[key]() {}`) or private method has no definition record, so its body is a plain
+; barrier and its `return` is dropped rather than attributed to the enclosing definition. The
+; barrier map ORs `owned`, so a named method's body is owned by the second pattern.
+(method_definition body: (statement_block) @flow.barrier)
+(method_definition
+  name: (property_identifier)
+  body: (statement_block) @flow.barrier.owned)
+
+; ── Value scopes (#216) ─────────────────────────────────────────────────────
+;
+; Value identity is owner-scoped (`{owner}:local:{name}`), so two distinct bindings with one name in
+; one callable used to become ONE node and a false flow ran between them: a callback parameter
+; shadowing the method's parameter, or a block-scoped `const` shadowing it. These captures give the
+; extractor the binding structure. A reference resolves to the innermost declaration of its name
+; whose scope contains it; a declaration in a nested scope is keyed `{owner}:local:{name}@{n}`,
+; where `n` numbers the owner's nested scopes that bind THAT name, in source order (structural:
+; line shifts and unrelated blocks keep it — ADR-002).
+; A declaration in the owner's own body keeps the plain `{owner}:local:{name}`, and a read of the
+; owner's parameter joins its `{owner}:param:{name}` slot.
+;
+;   @flow.scope            a block scope (let/const/class bindings live here)
+;   @flow.scope.callable   a callback boundary (its parameters and its `var`s live here)
+;   @flow.scope.owned      a callable that IS its definition's body (an arrow bound to a const or a
+;                          class field): transparent, its parameters belong to the owner itself
+;   @flow.declare.block    a let/const/catch/callback-parameter binding, bound in the innermost
+;                          scope. The capture is a binding PATTERN: the extractor walks it for every
+;                          name it binds (`{a, b: c, ...d}`, `[e = f]`), never into default values.
+;   @flow.declare.var      the same for a `var` binding, bound in the innermost callable scope
+(statement_block) @flow.scope
+(for_statement) @flow.scope
+(for_in_statement) @flow.scope
+(catch_clause) @flow.scope
+(switch_body) @flow.scope
+
+(arrow_function) @flow.scope.callable
+(function_expression) @flow.scope.callable
+(generator_function) @flow.scope.callable
+
+(variable_declarator value: (arrow_function) @flow.scope.owned)
+(public_field_definition value: (arrow_function) @flow.scope.owned)
+
+(lexical_declaration (variable_declarator name: (_) @flow.declare.block))
+(variable_declaration (variable_declarator name: (_) @flow.declare.var))
+(for_in_statement kind: "const" left: (_) @flow.declare.block)
+(for_in_statement kind: "let" left: (_) @flow.declare.block)
+(for_in_statement kind: "var" left: (_) @flow.declare.var)
+(catch_clause parameter: (_) @flow.declare.block)
+
+(arrow_function parameter: (identifier) @flow.declare.block)
+(arrow_function parameters: (formal_parameters (_) @flow.declare.block))
+(function_expression parameters: (formal_parameters (_) @flow.declare.block))
+(generator_function parameters: (formal_parameters (_) @flow.declare.block))
 
 ; Generic call value-flow facts. These are carried as UnresolvedRef hints and only become
 ; edges when the existing Calls resolver binds the exact site.

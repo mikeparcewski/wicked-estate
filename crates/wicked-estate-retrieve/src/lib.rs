@@ -333,36 +333,27 @@ fn annotation_payload(store: &dyn GraphRead, id: &SymbolId) -> Result<Option<(Va
 /// lives in one place rather than in four copies. Value slots stay addressable by exact
 /// [`SymbolId`], and `SearchEntity` re-admits them with `include_values=true`.
 ///
-/// The store is over-fetched and filtered here rather than filtered after `limit`, so the
-/// exclusion costs recall instead of matches; if the over-fetch saturates and still yields fewer
-/// than `want` real symbols, it escalates ONCE. A store-level predicate would remove the
-/// escalation entirely — tracked as a follow-up.
+/// The exclusion runs in the store, before `limit` ([`GraphRead::find_structural_symbols`], #218),
+/// so the `want` real symbols are exact — no over-fetch, no escalation. The hidden count is the
+/// number of value slots among the first `want` raw matches: the slots that WOULD have displaced a
+/// real symbol in an unfiltered answer (one more bounded query), which is what the
+/// `include_values=true` hint is about.
 ///
-/// Returns the surviving nodes (NOT truncated to `want`, so callers can merge result sets) and
-/// the number of slots hidden.
+/// Returns the surviving nodes (at most `want`) and the number of slots hidden.
 pub(crate) fn find_seed_symbols(
     store: &dyn GraphRead,
     base: &SymbolQuery,
     want: usize,
 ) -> Result<(Vec<Node>, usize)> {
-    const ESCALATED_LIMIT: usize = 5_000;
-    let limits = [want.saturating_mul(10).clamp(want, 500), ESCALATED_LIMIT];
-    let mut out = (Vec::new(), 0);
-    for (i, limit) in limits.into_iter().enumerate() {
-        let mut query = base.clone();
-        query.limit = Some(limit);
-        let raw = store.find_symbols(&query)?;
-        let saturated = raw.len() >= limit;
-        let total = raw.len();
-        let kept: Vec<Node> = raw.into_iter().filter(is_structural_symbol).collect();
-        let hidden = total - kept.len();
-        let enough = kept.len() >= want;
-        out = (kept, hidden);
-        if enough || !saturated || i + 1 == limits.len() {
-            break;
-        }
-    }
-    Ok(out)
+    let mut query = base.clone();
+    query.limit = Some(want);
+    let kept = store.find_structural_symbols(&query)?;
+    let hidden = store
+        .find_symbols(&query)?
+        .iter()
+        .filter(|n| !is_structural_symbol(n))
+        .count();
+    Ok((kept, hidden))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
