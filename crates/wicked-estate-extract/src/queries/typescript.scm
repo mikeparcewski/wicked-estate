@@ -392,6 +392,29 @@
 (return_statement
   (identifier) @flow.return.local)
 
+; ADR-014 S5b, callee return composition: `return raw.replace(...)` / `return f(x)`. The call's
+; result is influenced by its receiver and by its arguments, and it is never claimed to be either
+; one whole, so the hop into the owner's return slot is `may_influence`. Only an identifier
+; receiver or argument counts: a chained receiver (`raw.trim().x()`), `this.f.x()`, a literal or a
+; callback contributes nothing. `@flow.consumer.return` obeys the `return x` barriers below.
+(return_statement
+  (call_expression
+    function: (member_expression
+      object: (identifier) @flow.producer.local)) @flow.consumer.return
+) @flow.influence.syntax.return_call
+
+(return_statement
+  (call_expression
+    arguments: (arguments (identifier) @flow.producer.local)) @flow.consumer.return
+) @flow.influence.syntax.return_call
+
+; The one closure shape S5b carries (ADR-014): a returned arrow whose body is ONE identifier,
+; `return () => captured`. The returned value is a function, not `captured`, so `may_influence`.
+(return_statement
+  (arrow_function
+    body: (identifier) @flow.producer.local) @flow.consumer.return
+) @flow.influence.syntax.return_closure
+
 ; Return barriers. A `return x` is only the OWNER callable's return value when no other callable
 ; body lies between them: in the canonical RxJS shape
 ; `svc.get(id).subscribe((customer) => { return customer; })` the returned value belongs to the
