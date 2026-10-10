@@ -225,3 +225,64 @@ export function cbShadow(items: string[], x: string): string {
   const out = items.map((x) => x);
   return x;
 }
+
+// ADR-014 S6c local object properties, and expected NON-flows.
+export function propWrite(raw: string): string {
+  const o = { k: '' };
+  o.k = raw;
+  const v = o.k;
+  return v;
+}
+
+export function propLiteral(raw: string, other: string): string {
+  const o = { k: raw, other };
+  return o.k;
+}
+
+// The object escapes into a call: an alias may write it, so no edge.
+export function propEscapes(raw: string): string {
+  const o = { k: '' };
+  o.k = raw;
+  sink(o);
+  return o.k;
+}
+
+export function sink(x: object): void {}
+
+// Reassigned: the read may see either object.
+export function propReassigned(raw: string): string {
+  let o = { k: raw };
+  o = { k: '' };
+  return o.k;
+}
+
+// A parameter is not a local object: the caller holds it.
+export function propParam(o: { k: string }, raw: string): string {
+  o.k = raw;
+  return o.k;
+}
+
+// Aliased: `p` IS `o`.
+export function propAliased(raw: string): string {
+  const o = { k: '' };
+  const p = o;
+  p.k = raw;
+  return o.k;
+}
+
+export function propOtherKey(raw: string): string {
+  const o = { k: raw, j: '' };
+  return o.j;
+}
+
+// A method call passes the object as `this`.
+export function propMethod(raw: string): string {
+  const o = {
+    k: raw,
+    get(): string {
+      return '';
+    },
+  };
+  o.get();
+  return o.k;
+}
