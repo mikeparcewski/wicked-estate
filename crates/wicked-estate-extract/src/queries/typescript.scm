@@ -318,6 +318,187 @@
   right: (identifier) @flow.producer.local
 ) @flow.influence.syntax.loop_element
 
+; ADR-014 S6a, inline array callbacks. An INLINE arrow or function expression passed first to an
+; array method runs once per element: its first parameter is ONE element of the receiver (the
+; second for `reduce`, whose first is the accumulator), so `may_influence`. A named callback
+; (`items.map(fmt)`) contributes nothing: binding its parameters would be interprocedural. The
+; receiver is an identifier or a class field (`this.items`); a chained receiver contributes nothing.
+(call_expression
+  function: (member_expression
+    object: [(identifier) @flow.producer.local
+             (member_expression
+               object: (this)
+               property: (property_identifier) @flow.producer.field)]
+    property: (property_identifier) @_cb_method)
+  arguments: (arguments
+    .
+    [(arrow_function parameter: (identifier) @flow.consumer.local)
+     (arrow_function
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))
+     (function_expression
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))])
+  (#any-of? @_cb_method
+    "map" "flatMap" "forEach" "filter" "find" "findLast" "findIndex" "findLastIndex" "some"
+    "every")
+) @flow.influence.syntax.callback_element
+
+(call_expression
+  function: (member_expression
+    object: [(identifier) @flow.producer.local
+             (member_expression
+               object: (this)
+               property: (property_identifier) @flow.producer.field)]
+    property: (property_identifier) @_cb_method)
+  arguments: (arguments
+    .
+    [(arrow_function
+       parameters: (formal_parameters
+         .
+         (required_parameter)
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))
+     (function_expression
+       parameters: (formal_parameters
+         .
+         (required_parameter)
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))])
+  (#any-of? @_cb_method "reduce" "reduceRight")
+) @flow.influence.syntax.callback_element
+
+; `reduce(cb, init)`: the initial value is the accumulator's first value.
+(call_expression
+  function: (member_expression
+    property: (property_identifier) @_cb_method)
+  arguments: (arguments
+    .
+    [(arrow_function
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))
+     (function_expression
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))]
+    .
+    (identifier) @flow.producer.local
+    .)
+  (#any-of? @_cb_method "reduce" "reduceRight")
+) @flow.influence.syntax.callback_accumulator
+
+; The callback's RETURN becomes the call's result for `map` / `flatMap` / `reduce`: an expression
+; body, or a `return` directly in a block body. Its identifier contributors are the same shapes
+; `return_call` / `expression` take: the expression itself, an identifier receiver or argument of a
+; call, an operand, a member read's object. The result is a new value (an array of results, an
+; accumulation), so `may_influence`. The result's consumer is a `const`/`let` binding, a reassigned
+; identifier or the owner's return. `filter` / `find` return ELEMENTS, not the callback's
+; boolean: their result comes from the receiver (`callback_select` below).
+(variable_declarator
+  name: (identifier) @flow.consumer.local
+  value: (call_expression
+    function: (member_expression
+      property: (property_identifier) @_cb_method)
+    arguments: (arguments
+      .
+      [(arrow_function
+         body: [(identifier) @flow.producer.local
+                (call_expression
+                  function: (member_expression object: (identifier) @flow.producer.local))
+                (call_expression arguments: (arguments (identifier) @flow.producer.local))
+                (binary_expression left: (identifier) @flow.producer.local)
+                (binary_expression right: (identifier) @flow.producer.local)
+                (member_expression object: (identifier) @flow.producer.local)
+                (statement_block
+                  (return_statement
+                    [(identifier) @flow.producer.local
+                     (call_expression
+                       function: (member_expression object: (identifier) @flow.producer.local))
+                     (call_expression arguments: (arguments (identifier) @flow.producer.local))
+                     (binary_expression left: (identifier) @flow.producer.local)
+                     (binary_expression right: (identifier) @flow.producer.local)
+                     (member_expression object: (identifier) @flow.producer.local)]))])
+       (function_expression
+         body: (statement_block
+           (return_statement
+             [(identifier) @flow.producer.local
+              (call_expression
+                function: (member_expression object: (identifier) @flow.producer.local))
+              (call_expression arguments: (arguments (identifier) @flow.producer.local))
+              (binary_expression left: (identifier) @flow.producer.local)
+              (binary_expression right: (identifier) @flow.producer.local)
+              (member_expression object: (identifier) @flow.producer.local)])))]))
+  (#any-of? @_cb_method "map" "flatMap" "reduce" "reduceRight")
+) @flow.influence.syntax.callback_return
+
+(return_statement
+  (call_expression
+    function: (member_expression
+      property: (property_identifier) @_cb_method)
+    arguments: (arguments
+      .
+      [(arrow_function
+         body: [(identifier) @flow.producer.local
+                (call_expression
+                  function: (member_expression object: (identifier) @flow.producer.local))
+                (call_expression arguments: (arguments (identifier) @flow.producer.local))
+                (binary_expression left: (identifier) @flow.producer.local)
+                (binary_expression right: (identifier) @flow.producer.local)
+                (member_expression object: (identifier) @flow.producer.local)
+                (statement_block
+                  (return_statement
+                    [(identifier) @flow.producer.local
+                     (call_expression
+                       function: (member_expression object: (identifier) @flow.producer.local))
+                     (call_expression arguments: (arguments (identifier) @flow.producer.local))
+                     (binary_expression left: (identifier) @flow.producer.local)
+                     (binary_expression right: (identifier) @flow.producer.local)
+                     (member_expression object: (identifier) @flow.producer.local)]))])
+       (function_expression
+         body: (statement_block
+           (return_statement
+             [(identifier) @flow.producer.local
+              (call_expression
+                function: (member_expression object: (identifier) @flow.producer.local))
+              (call_expression arguments: (arguments (identifier) @flow.producer.local))
+              (binary_expression left: (identifier) @flow.producer.local)
+              (binary_expression right: (identifier) @flow.producer.local)
+              (member_expression object: (identifier) @flow.producer.local)])))])) @flow.consumer.return
+  (#any-of? @_cb_method "map" "flatMap" "reduce" "reduceRight")
+) @flow.influence.syntax.callback_return
+
+
+; `filter` / `find` select ELEMENTS of the receiver: the receiver influences the result, the
+; callback's boolean does not. An inline callback is required, as above, so `repo.find(query)`
+; (a repository lookup, not an array) contributes nothing.
+(variable_declarator
+  name: (identifier) @flow.consumer.local
+  value: (call_expression
+    function: (member_expression
+      object: [(identifier) @flow.producer.local
+               (member_expression
+                 object: (this)
+                 property: (property_identifier) @flow.producer.field)]
+      property: (property_identifier) @_cb_method)
+    arguments: (arguments . [(arrow_function) (function_expression)]))
+  (#any-of? @_cb_method "filter" "find" "findLast")
+) @flow.influence.syntax.callback_select
+
+(return_statement
+  (call_expression
+    function: (member_expression
+      object: [(identifier) @flow.producer.local
+               (member_expression
+                 object: (this)
+                 property: (property_identifier) @flow.producer.field)]
+      property: (property_identifier) @_cb_method)
+    arguments: (arguments . [(arrow_function) (function_expression)])) @flow.consumer.return
+  (#any-of? @_cb_method "filter" "find" "findLast")
+) @flow.influence.syntax.callback_select
+
 ; this.field = value
 (expression_statement
   (assignment_expression
