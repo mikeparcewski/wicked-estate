@@ -29,7 +29,7 @@ Three options, judged per producer tier:
 | assignment chains | ✅ present (`src → a → b → return`) | `present_rows_are_reachable` |
 | cross-file call argument and result | ✅ present when the call resolves uniquely | `present_rows_are_reachable` |
 | closure-captured local | ✅ captured; ✅ through a returned no-parameter, single-identifier arrow (`return () => captured`, `may_influence`, S5b); every other closure shape ❌ | `s5b_return_composition` |
-| destructuring (`const {k} = obj`) | ❌ absent | `missing_primitives_are_unreachable` |
+| destructuring (`const {k} = obj`) | ✅ flat patterns over an identifier (shorthand, renamed, defaulted, rest, array elements), `may_influence` (S5c); nested patterns and member/call sources ❌ | `s5c_destructuring` |
 | loops (`for … of`, loop-carried `acc = acc + it`) | ❌ absent | `missing_primitives_are_unreachable` |
 | promises and callbacks | ❌ absent | `missing_primitives_are_unreachable` |
 | object-literal property writes | ❌ absent (reads are path-keyed slots) | `missing_primitives_are_unreachable` |
@@ -62,6 +62,22 @@ Baseline `2b6bf7f` (main). Candidate `2c14000` (code-identical to the merged sli
 | capped-away new-construct rows (inconclusive) | 0 | 0 | 0 |
 
 **Verdict: S5b passes every gate.** `return_closure` never fired on Covalent; its only firing in either corpus is the readiness fixture in estate's own tree. The readiness table diff is in `dataflow_readiness.rs`: `s5b_return_composition`, `every_edge_matches_the_expected_semantics_table`, and `returns_of_undefined_callables_write_no_slot`. The last is a pre-existing false return attribution (a destructured arrow or a private arrow field), reproduced with the 0.24.0 extractor and fixed in this slice.
+
+### S5c: destructuring
+Baseline `4470b52` (the S5b slice's code, = main `b9a0348`). Candidate `0b5d2d3` (code-identical to this slice after its rebase). Workflow run `38066120495`, branch `measure/ts-s5c`.
+
+| metric | Covalent `438c297` | estate tree `4470b52` | gate |
+|---|---|---|---|
+| `flows_to` edges | 1477 → 1496 (**+1.29 %**) | 123 → 124 (+0.81 %) | ≤ +25 % |
+| full index, median of 3 | 7.29 s → 7.16 s (−1.73 %) | 5.48 s → 5.48 s (−0.06 %) | ≤ +15 % |
+| incremental re-index, median of 3 | 0.94 s → 0.95 s (+0.97 %) | 2.04 s → 2.03 s (−0.57 %) | ≤ +15 % |
+| DB size | 80,158,720 → 80,220,160 B (+0.08 %) | 55,480,320 → 55,357,440 B (−0.22 %) | ≤ +10 % |
+| Lineage, 10 fixed queries newly truncated | 0 | 0 | 0 |
+| Lineage sweep newly truncated | 0 of 520 | 0 of 109 | 0 |
+| `value_preserving` rows from a new construct | 0 (19 `destructuring` rows, all `may_influence`) | 0 (1) | 0 |
+| capped-away new-construct rows (inconclusive) | 0 | 0 | 0 |
+
+**Verdict: S5c passes every gate.** Readiness diff: `s5c_destructuring`, plus the `destructuring` row of the semantics table.
 
 ## Original recommendation (superseded by the decision above): Option 1 now, Option 2 only behind one bounded prototype, Option 3 no-go
 
