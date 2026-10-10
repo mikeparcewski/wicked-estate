@@ -43,4 +43,14 @@ All are exported from the package roots and used by the Angular language service
 ## Consequences
 - `flow_evidence: compiler` is now emitted, and only through §3.5 ingest. Query files still cannot claim it.
 - The TypeScript base plane gives the properties and get/set accessors of decorated classes their `{class}:field:{name}` slot, and `abstract class` declarations become `Class` nodes. A decorator's spelling is not matched (`@Cmp` and `@ng.Component` are Angular too, and a query cannot resolve imports), so every decorated class is included. This is a visible node delta, bounded to decorated classes; undecorated classes are unchanged.
-- Out of scope here: outputs and events (TS-S4), host bindings, multi-member property paths, RxJS and taint.
+- Out of scope: host bindings and host listeners, multi-member property paths, `EventEmitter.emit(x)` flows inside component code (the output slot is the payload producer until that lands), RxJS and taint.
+
+## Addendum: outputs and template events (TS-S4, #278)
+The same adapter, profile and owner now add the `output_bindings` capability and `event_binding` facts.
+- Outputs resolve through `getDirectivesOfNode(...).outputs.getByBindingPropertyName`: aliases, inherited and signal `output()`, two directives declaring one name, an output named like a DOM event, and the two-way `…Change` half mapped to its model member.
+- Handlers are classified per statement of a `Chain`:
+  - a host method call gives a handler, with `$event` arguments mapped to declared parameter names (rest and destructured parameters are unresolved);
+  - an assignment gives a host-field payload;
+  - anything else mentioning `$event` is unresolved.
+- A confirmed DOM event (no directive output on the node) is emitted with `output: null` and projects nothing.
+- Projection: handler → output slot as `event-listens`, never `Calls`; payload as `flows_to` from the output slot. One snapshot carries inputs and events together, so a newer or empty snapshot retracts both. Deleting a file does not.

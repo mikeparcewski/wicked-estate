@@ -1,3 +1,4 @@
 <section>
   <app-child [user]="title"></app-child>
+  <ev-child (picked)="title = $event"></ev-child>
 </section>

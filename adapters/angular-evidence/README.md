@@ -1,6 +1,6 @@
 # wicked-estate Angular evidence adapter (TS-S3)
 
-This adapter drives the Angular compiler and writes the compiler-resolved template **input bindings** as one `SemanticEvidence` v1 document. wicked-estate then ingests that document into its support plane. The contract is in `docs/ENGINE-CONTRACT.md` §3.5, and the decision record is `docs/adr/ADR-013-angular-compiler-adapter.md`.
+This adapter drives the Angular compiler and writes the compiler-resolved template **input bindings, outputs and template events** as one `SemanticEvidence` v1 document. wicked-estate then ingests that document into its support plane. The contract is in `docs/ENGINE-CONTRACT.md` §3.5, and the decision record is `docs/adr/ADR-013-angular-compiler-adapter.md`.
 
 ```
 npm ci
@@ -13,4 +13,4 @@ node extract.mjs --project path/to/tsconfig.json --root path/to/repo [--snapshot
 - Reads the compiler could not tie to a class member are listed under `unresolved`, never guessed. These are template locals, pipes, calls, and inputs from libraries without source.
 - `fixtures/` holds real Angular projects together with the envelopes this adapter generated from them. CI runs `npm run fixtures:check` to prove those envelopes are the compiler's output.
 
-This adapter does **not** handle outputs or template events (TS-S4), host bindings, or anything beyond input bindings. It is not taint analysis.
+It covers input bindings (TS-S3) and outputs and template events (TS-S4). It does **not** handle host bindings or host listeners, or `EventEmitter.emit` inside component code. It is not taint analysis.

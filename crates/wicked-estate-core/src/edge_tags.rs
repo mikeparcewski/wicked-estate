@@ -33,7 +33,8 @@ pub const EVENT_EMITS: &str = "event-emits";
 
 /// A symbol that subscribes to / handles an event or message
 /// (`@EventListener`, `@KafkaListener`, `@EventPattern`, `@MessagePattern`).
-/// `source` = the listener, `target` = the event/topic node.
+/// `source` = the listener, `target` = the event/topic node — or, for an Angular template event
+/// (TS-S4, compiler evidence), the handler method → the directive output's field slot.
 pub const EVENT_LISTENS: &str = "event-listens";
 
 /// A framework lifecycle hook binding (`@PostConstruct`, `@PreDestroy`, `OnModuleInit`).

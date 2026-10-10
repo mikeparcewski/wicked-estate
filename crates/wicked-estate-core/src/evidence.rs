@@ -119,6 +119,9 @@ pub enum Capability {
     /// Compiler-resolved input bindings (TS-S3): a template binding whose target member a
     /// framework compiler resolved (aliases, inheritance and signal inputs included).
     InputBindings,
+    /// Compiler-resolved output bindings and template events (TS-S4): which directive output an
+    /// event binding listens to, which host methods its handler calls, and where `$event` goes.
+    OutputBindings,
 }
 
 /// One document a fact may cite. `path` is repository-relative with `/` separators.
@@ -190,6 +193,24 @@ pub struct MemberRef {
     pub member: String,
 }
 
+/// Where an event's `$event` payload is written, and whether it arrives whole.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "slot", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PayloadTarget {
+    /// A member of the host class (`n = $event`).
+    Field {
+        class: String,
+        member: String,
+        semantics: crate::flow::FlowSemantics,
+    },
+    /// A parameter of a host method the handler calls (`onPick($event)`), by declared name.
+    Param {
+        method: String,
+        param: String,
+        semantics: crate::flow::FlowSemantics,
+    },
+}
+
 /// One fact. Its `fact_id` is producer-owned and opaque (the support fact id).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -231,6 +252,24 @@ pub enum EvidenceFact {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         unresolved: Vec<String>,
     },
+    /// A compiler-resolved template event at `site` (TS-S4). `output` is the directive output the
+    /// event binds, or `None` for a confirmed DOM event (no directive on the node declares it),
+    /// which projects nothing. Each `handlers` method gets an `event-listens` edge to the output's
+    /// field slot (event delivery, never `Calls`); each `payload` target receives the output's
+    /// value as `flows_to` from that slot, the payload producer.
+    EventBinding {
+        fact_id: String,
+        site: EvidenceSite,
+        construct: String,
+        output: Option<MemberRef>,
+        event: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        handlers: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        payload: Vec<PayloadTarget>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unresolved: Vec<String>,
+    },
 }
 
 impl EvidenceFact {
@@ -239,7 +278,8 @@ impl EvidenceFact {
             EvidenceFact::Definition { fact_id, .. }
             | EvidenceFact::Reference { fact_id, .. }
             | EvidenceFact::Call { fact_id, .. }
-            | EvidenceFact::InputBinding { fact_id, .. } => fact_id,
+            | EvidenceFact::InputBinding { fact_id, .. }
+            | EvidenceFact::EventBinding { fact_id, .. } => fact_id,
         }
     }
 
@@ -248,7 +288,8 @@ impl EvidenceFact {
             EvidenceFact::Definition { site, .. }
             | EvidenceFact::Reference { site, .. }
             | EvidenceFact::Call { site, .. }
-            | EvidenceFact::InputBinding { site, .. } => site,
+            | EvidenceFact::InputBinding { site, .. }
+            | EvidenceFact::EventBinding { site, .. } => site,
         }
     }
 
@@ -258,6 +299,7 @@ impl EvidenceFact {
             EvidenceFact::Reference { .. } => Capability::References,
             EvidenceFact::Call { .. } => Capability::Calls,
             EvidenceFact::InputBinding { .. } => Capability::InputBindings,
+            EvidenceFact::EventBinding { .. } => Capability::OutputBindings,
         }
     }
 }
@@ -298,6 +340,8 @@ pub enum EvidenceSkip {
     UnknownSlot,
     /// A binding whose consumer is also its producer.
     SelfFlow,
+    /// A confirmed DOM event: no directive output, and no DOM-event node to point at.
+    DomEvent,
     /// The range is malformed: an adapter could not read it, or the document's text is known and
     /// the site cannot exist in it.
     MalformedRange,
@@ -316,8 +360,11 @@ pub struct EvidenceReport {
     pub definitions_mapped: usize,
     pub references_projected: usize,
     pub calls_projected: usize,
-    /// Value flows projected from compiler-resolved input bindings (TS-S3).
+    /// Value flows projected from compiler-resolved bindings: inputs (TS-S3) and event payloads
+    /// (TS-S4).
     pub flows_projected: usize,
+    /// `event-listens` edges projected from template event handlers (TS-S4).
+    pub listeners_projected: usize,
     /// Distinct public edges `(source, target, kind)` those facts support. Several facts (sites)
     /// can support one edge, so this is at most `references_projected + calls_projected`.
     pub edges_projected: usize,
@@ -330,7 +377,10 @@ pub struct EvidenceReport {
 impl EvidenceReport {
     /// Support facts written (references + calls + flows).
     pub fn projected(&self) -> usize {
-        self.references_projected + self.calls_projected + self.flows_projected
+        self.references_projected
+            + self.calls_projected
+            + self.flows_projected
+            + self.listeners_projected
     }
 
     /// Add `n` skips for `reason` (adapters fold their own counts in this way).
@@ -440,6 +490,36 @@ impl SemanticEvidence {
                     for m in std::iter::once(consumer).chain(producers) {
                         check_opaque("evidence member class", &m.class)?;
                         check_opaque("evidence member name", &m.member)?;
+                    }
+                }
+                EvidenceFact::EventBinding {
+                    construct,
+                    output,
+                    event,
+                    handlers,
+                    payload,
+                    ..
+                } => {
+                    check_opaque("evidence binding construct", construct)?;
+                    check_opaque("evidence event name", event)?;
+                    if let Some(m) = output {
+                        check_opaque("evidence member class", &m.class)?;
+                        check_opaque("evidence member name", &m.member)?;
+                    }
+                    for h in handlers {
+                        check_opaque("evidence handler", h)?;
+                    }
+                    for t in payload {
+                        match t {
+                            PayloadTarget::Field { class, member, .. } => {
+                                check_opaque("evidence member class", class)?;
+                                check_opaque("evidence member name", member)?;
+                            }
+                            PayloadTarget::Param { method, param, .. } => {
+                                check_opaque("evidence handler", method)?;
+                                check_opaque("evidence parameter", param)?;
+                            }
+                        }
                     }
                 }
             }
@@ -799,10 +879,141 @@ pub fn project_evidence(
         }
     }
 
+    // Pass 2b: compiler-resolved template events (TS-S4) → `event-listens` + payload `flows_to`.
+    for f in &facts {
+        let EvidenceFact::EventBinding {
+            fact_id,
+            site,
+            construct,
+            output,
+            handlers,
+            payload,
+            unresolved,
+            ..
+        } = f
+        else {
+            continue;
+        };
+        if !caps.contains(&Capability::OutputBindings) {
+            report.skip(EvidenceSkip::UndeclaredCapability, 1);
+            continue;
+        }
+        report.skip(EvidenceSkip::UnresolvedRead, unresolved.len());
+        let Some(output) = output else {
+            report.skip(EvidenceSkip::DomEvent, 1);
+            continue;
+        };
+        let Some((span, unconverted)) = docs.span(site) else {
+            report.skip(EvidenceSkip::MalformedRange, 1);
+            continue;
+        };
+        let output_slot = match slot_of(output) {
+            Ok(s) => s,
+            Err(reason) => {
+                report.skip(reason, 1);
+                continue;
+            }
+        };
+        let stamp = |edge: &mut Edge, word: &str| {
+            edge.metadata.insert(
+                EVIDENCE_PRODUCER_VERSION_KEY.into(),
+                evidence.producer.version.clone().into(),
+            );
+            edge.metadata.insert(EVIDENCE_FACT_KEY.into(), word.into());
+        };
+        let location = Location::new(site.document.clone(), span);
+        let handlers: BTreeSet<&String> = handlers.iter().collect();
+        for h in handlers {
+            let method = match target_of(h) {
+                Ok(m) => m,
+                Err(reason) => {
+                    report.skip(reason, 1);
+                    continue;
+                }
+            };
+            let mut edge = Edge::new(
+                method.clone(),
+                output_slot.clone(),
+                crate::edge_tags::other(crate::edge_tags::EVENT_LISTENS),
+                tier,
+                evidence.producer.name.clone(),
+            )
+            .with_location(location.clone());
+            stamp(&mut edge, "event_binding");
+            out.push(SupportFact::new(fact_id.clone(), edge)?);
+            report.listeners_projected += 1;
+        }
+        let payload: BTreeSet<&PayloadTarget> = payload.iter().collect();
+        for t in payload {
+            let (consumer, semantics) = match t {
+                PayloadTarget::Field {
+                    class,
+                    member,
+                    semantics,
+                } => (
+                    slot_of(&MemberRef {
+                        class: class.clone(),
+                        member: member.clone(),
+                    }),
+                    semantics,
+                ),
+                PayloadTarget::Param {
+                    method,
+                    param,
+                    semantics,
+                } => (
+                    target_of(method).and_then(|m| {
+                        let slot = crate::flow::param_slot_id(m, param);
+                        if known.contains(&slot) {
+                            Ok(slot)
+                        } else {
+                            Err(EvidenceSkip::UnknownSlot)
+                        }
+                    }),
+                    semantics,
+                ),
+            };
+            let consumer = match consumer {
+                Ok(c) if c == output_slot => {
+                    report.skip(EvidenceSkip::SelfFlow, 1);
+                    continue;
+                }
+                Ok(c) => c,
+                Err(reason) => {
+                    report.skip(reason, 1);
+                    continue;
+                }
+            };
+            let mut edge = Edge::new(
+                consumer,
+                output_slot.clone(),
+                crate::edge_tags::other(crate::edge_tags::FLOWS_TO),
+                tier,
+                evidence.producer.name.clone(),
+            )
+            .with_location(location.clone());
+            crate::flow::FlowFact::new(
+                *semantics,
+                crate::flow::FlowEvidence::Compiler,
+                construct.clone(),
+                &evidence.producer.name,
+            )
+            .apply(&mut edge);
+            stamp(&mut edge, "event_binding");
+            out.push(SupportFact::new(fact_id.clone(), edge)?);
+            report.flows_projected += 1;
+        }
+        if unconverted {
+            report.positions_unconverted += 1;
+        }
+    }
+
     // Pass 3: references and calls → support facts.
     for f in &facts {
         let (fact_id, site, kind, target, roles) = match f {
-            EvidenceFact::Definition { .. } | EvidenceFact::InputBinding { .. } => continue,
+            EvidenceFact::Definition { .. }
+            | EvidenceFact::InputBinding { .. }
+            | EvidenceFact::EventBinding { .. } => continue,
             EvidenceFact::Reference {
                 fact_id,
                 symbol,
@@ -1357,6 +1568,109 @@ mod tests {
         let p = project_evidence(&selfy, &nodes, &no_source).unwrap();
         assert!(p.facts.is_empty());
         assert_eq!(p.report.skipped[&EvidenceSkip::SelfFlow], 1);
+    }
+
+    #[test]
+    fn template_events_listen_and_carry_their_payload_without_calls() {
+        use crate::flow::{FlowSemantics, field_slot_id, param_slot_id};
+        let child = node("Child", NodeKind::Class, "a.ts", (0, 0, 5, 1));
+        let host = node("Host", NodeKind::Class, "a.ts", (7, 0, 20, 1));
+        let on_pick = node("onPick", NodeKind::Method, "a.ts", (9, 2, 11, 3));
+        let value = |sym: SymbolId, name: &str| {
+            let mut n = node(name, NodeKind::Field, "a.ts", (1, 2, 1, 10));
+            n.symbol = sym;
+            n.metadata
+                .insert(crate::node::VALUE_ROLE_METADATA_KEY.into(), "Field".into());
+            n
+        };
+        let nodes = vec![
+            node("a.ts", NodeKind::File, "a.ts", (0, 0, 0, 0)),
+            child.clone(),
+            host.clone(),
+            on_pick.clone(),
+            value(field_slot_id(&child.symbol, "picked"), "picked"),
+            value(field_slot_id(&host.symbol, "n"), "n"),
+            value(param_slot_id(&on_pick.symbol, "v"), "v"),
+        ];
+        let out = |id: &str, output: Option<MemberRef>| EvidenceFact::EventBinding {
+            fact_id: id.into(),
+            site: site("a.ts", (8, 10, 8, 16)),
+            construct: "angular_output_event".into(),
+            output,
+            event: "picked".into(),
+            handlers: vec!["M".into()],
+            payload: vec![
+                PayloadTarget::Param {
+                    method: "M".into(),
+                    param: "v".into(),
+                    semantics: FlowSemantics::ValuePreserving,
+                },
+                PayloadTarget::Field {
+                    class: "H".into(),
+                    member: "n".into(),
+                    semantics: FlowSemantics::MayInfluence,
+                },
+            ],
+            unresolved: vec![],
+        };
+        let facts = vec![
+            def("dc", "C", "Child", (0, 13, 0, 18)),
+            def("dh", "H", "Host", (7, 13, 7, 17)),
+            def("dm", "M", "onPick", (9, 2, 9, 8)),
+            out(
+                "e1",
+                Some(MemberRef {
+                    class: "C".into(),
+                    member: "picked".into(),
+                }),
+            ),
+            out("dom", None),
+        ];
+        let mut ev = envelope(
+            &[Capability::Definitions, Capability::OutputBindings],
+            facts,
+        );
+        ev.producer.class = ProducerClass::Compiler;
+        let p = project_evidence(&ev, &nodes, &no_source).unwrap();
+        let picked = field_slot_id(&child.symbol, "picked");
+        let mut got: Vec<(String, SymbolId, SymbolId)> = p
+            .facts
+            .iter()
+            .map(|f| {
+                let kind = match &f.edge.kind {
+                    EdgeKind::Other(t) => t.clone(),
+                    k => format!("{k:?}"),
+                };
+                (kind, f.edge.source.clone(), f.edge.target.clone())
+            })
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "event-listens".into(),
+                    on_pick.symbol.clone(),
+                    picked.clone()
+                ),
+                (
+                    "flows_to".into(),
+                    field_slot_id(&host.symbol, "n"),
+                    picked.clone()
+                ),
+                (
+                    "flows_to".into(),
+                    param_slot_id(&on_pick.symbol, "v"),
+                    picked.clone()
+                ),
+            ]
+        );
+        assert!(p.facts.iter().all(|f| f.edge.kind != EdgeKind::Calls));
+        assert_eq!(
+            (p.report.listeners_projected, p.report.flows_projected),
+            (1, 2)
+        );
+        assert_eq!(p.report.skipped[&EvidenceSkip::DomEvent], 1);
     }
 
     #[test]

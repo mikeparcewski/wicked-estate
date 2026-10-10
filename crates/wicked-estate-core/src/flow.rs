@@ -736,6 +736,13 @@ pub fn field_slot_id(owner: &crate::symbol::SymbolId, field: &str) -> crate::sym
     crate::symbol::Symbol::synthetic("value", format!("{}:field:{field}", owner.0)).id()
 }
 
+/// The canonical value slot of parameter `param` of the callable `owner`: `{owner}:param:{param}`.
+/// The extractor mints parameter slots with this and semantic evidence (TS-S4 event payloads into
+/// handler parameters) addresses them with it.
+pub fn param_slot_id(owner: &crate::symbol::SymbolId, param: &str) -> crate::symbol::SymbolId {
+    crate::symbol::Symbol::synthetic("value", format!("{}:param:{param}", owner.0)).id()
+}
+
 pub fn is_structural_symbol(node: &Node) -> bool {
     !node.is_value_flow_node()
 }

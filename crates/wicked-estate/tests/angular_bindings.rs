@@ -94,6 +94,7 @@ fn compiler_resolved_inputs_project_between_canonical_field_slots() {
     // Stored consumer → producer, one public edge per (input slot, host slot).
     let keys: BTreeSet<(String, String)> = compiler_flows(&store)
         .into_iter()
+        .filter(|e| e.metadata.get("evidence_fact") == Some(&json!("input_binding")))
         .map(|e| (e.source.0, e.target.0))
         .collect();
     let want: BTreeSet<(String, String)> = [
@@ -132,9 +133,20 @@ fn compiler_resolved_inputs_project_between_canonical_field_slots() {
         );
     }
     // Every binding the adapter could not resolve is counted, never guessed.
-    assert_eq!(report.skipped.get(&EvidenceSkip::UnresolvedRead), Some(&4));
+    // 4 input reads (template locals, a pipe) + TS-S4: a keyed two-way target, a `@let` handler
+    // shadowing a host method, and both halves of a two-way binding to a `@let` local.
+    assert_eq!(report.skipped.get(&EvidenceSkip::UnresolvedRead), Some(&8));
+    let ev_host3 = class(&store, "src/events.ts", "EvHost3");
+    assert!(
+        compiler_flows(&store)
+            .iter()
+            .all(|e| e.source != field_slot_id(&ev_host3.symbol, "mine")
+                && e.target != field_slot_id(&ev_host3.symbol, "mine")),
+        "a `@let mine` must not resolve to the shadowed host field"
+    );
     assert_eq!(
-        report.flows_projected, 21,
+        report.flows_projected,
+        21 + 11, // 21 input-binding flows + 11 TS-S4 event payload flows
         "current→user is asserted at two sites"
     );
     assert_eq!(
@@ -357,5 +369,187 @@ fn the_evidence_cli_ingests_an_envelope_and_refuses_bad_input() {
     let out = run(&["evidence", env_s, "--db", "missing.db"]);
     assert!(!out.status.success());
     assert!(!root.join("missing.db").exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+fn method(store: &SqliteStore, file: &str, class_name: &str, name: &str) -> Node {
+    let owner = class(store, file, class_name);
+    let found: Vec<Node> = store
+        .all_nodes()
+        .unwrap()
+        .into_iter()
+        .filter(|n| {
+            n.kind == NodeKind::Method
+                && n.name == name
+                && n.location.file == file
+                && n.location.span.start_line >= owner.location.span.start_line
+                && n.location.span.end_line <= owner.location.span.end_line
+        })
+        .collect();
+    assert_eq!(found.len(), 1, "{class_name}.{name}: {found:?}");
+    found.into_iter().next().unwrap()
+}
+
+/// TS-S4: template events deliver to handlers (`event-listens`, never `Calls`) and carry `$event`
+/// as compiler-evidence `flows_to` from the output's field slot (the payload producer).
+#[test]
+fn template_events_listen_and_carry_their_payload() {
+    use wicked_estate_core::param_slot_id;
+    let (root, mut store, ev) = indexed("bindings", "events");
+    let report = ingest_semantic_evidence(&mut store, Some(&root), &ev, None).unwrap();
+    let f = "src/events.ts";
+    let child = class(&store, f, "EvChild");
+    let base = class(&store, f, "EvBase");
+    let host = class(&store, f, "EvHost");
+    let (ping_a, ping_b, clicky) = (
+        class(&store, f, "PingA"),
+        class(&store, f, "PingB"),
+        class(&store, f, "Clicky"),
+    );
+    let on_pick = method(&store, f, "EvHost", "onPick");
+    let on_pick2 = method(&store, f, "EvHost2", "onPick");
+    let done = method(&store, f, "EvHost", "done");
+    let pinged = method(&store, f, "EvHost", "pinged");
+    let slot = |c: &Node, m: &str| field_slot_id(&c.symbol, m).0;
+
+    let listens: BTreeSet<(String, String)> = store
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| {
+            e.kind
+                == wicked_estate_core::edge_tags::other(
+                    wicked_estate_core::edge_tags::EVENT_LISTENS,
+                )
+        })
+        .map(|e| (e.source.0, e.target.0))
+        .collect();
+    let want: BTreeSet<(String, String)> = [
+        (on_pick.symbol.0.clone(), slot(&child, "picked")),
+        (done.symbol.0.clone(), slot(&child, "closed")), // signal output, chained handler
+        (on_pick.symbol.0.clone(), slot(&base, "baseEv")), // inherited output
+        (pinged.symbol.0.clone(), slot(&ping_a, "ping")), // two directives, one name
+        (pinged.symbol.0.clone(), slot(&ping_b, "ping")),
+        (on_pick.symbol.0.clone(), slot(&clicky, "click")), // an output named like a DOM event
+        (on_pick2.symbol.0.clone(), slot(&child, "picked")), // same handler name, other host
+        (
+            method(&store, f, "EvHost3", "withThis").symbol.0,
+            slot(&child, "picked"),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(listens, want, "{report:?}");
+    // A `@let pick` shadows `EvHost3.pick`: no listener is invented for the host method.
+    let pick = method(&store, f, "EvHost3", "pick");
+    assert!(
+        !listens.iter().any(|(src, _)| src == &pick.symbol.0),
+        "a template-local handler must not resolve to the host method"
+    );
+    // The DOM `(click)` projects nothing; no template event ever becomes a call.
+    assert_eq!(report.skipped.get(&EvidenceSkip::DomEvent), Some(&1));
+    assert!(
+        store
+            .all_edges()
+            .unwrap()
+            .iter()
+            .all(|e| !(e.kind == wicked_estate_core::EdgeKind::Calls
+                && e.resolved_by == "angular-compiler-adapter"))
+    );
+
+    let flows: BTreeSet<(String, String)> = compiler_flows(&store)
+        .into_iter()
+        .filter(|e| e.target.0.contains("src/events/") || e.source.0.contains("src/events/"))
+        .map(|e| (e.source.0, e.target.0))
+        .collect();
+    for pair in [
+        (
+            param_slot_id(&on_pick.symbol, "value").0,
+            slot(&child, "picked"),
+        ),
+        (slot(&host, "n"), slot(&child, "changed")), // alias `renamedOut`, `n = $event`
+        (
+            param_slot_id(&on_pick.symbol, "value").0,
+            slot(&base, "baseEv"),
+        ),
+        (param_slot_id(&pinged.symbol, "p").0, slot(&ping_a, "ping")),
+        (param_slot_id(&pinged.symbol, "p").0, slot(&ping_b, "ping")),
+        (slot(&host, "last"), slot(&child, "picked")),
+        (
+            param_slot_id(&on_pick2.symbol, "other").0,
+            slot(&child, "picked"),
+        ),
+        // `withThis(this: EvHost3, value, n)`: the type-only `this` takes no argument position.
+        (
+            param_slot_id(&method(&store, f, "EvHost3", "withThis").symbol, "value").0,
+            slot(&child, "picked"),
+        ),
+    ] {
+        assert!(
+            flows.contains(&pair),
+            "missing payload flow {pair:?} in {flows:?}"
+        );
+    }
+    // `$event.trim()` is derived: it influences, it does not preserve.
+    let derived = compiler_flows(&store)
+        .into_iter()
+        .find(|e| {
+            e.source == param_slot_id(&on_pick.symbol, "value")
+                && e.target.0 == slot(&base, "baseEv")
+        })
+        .unwrap();
+    assert_eq!(
+        wicked_estate_core::flow_semantics_of(&derived)
+            .into_iter()
+            .collect::<Vec<_>>(),
+        vec![wicked_estate_core::FlowSemantics::MayInfluence]
+    );
+
+    // Two-way output half: the host field receives the child's model, the reverse key of the
+    // input half (which stays as it was).
+    let parent = class(&store, "src/parent.ts", "Parent");
+    let model = class(&store, "src/child.ts", "Child");
+    let keys: BTreeSet<(String, String)> = compiler_flows(&store)
+        .into_iter()
+        .map(|e| (e.source.0, e.target.0))
+        .collect();
+    assert!(keys.contains(&(slot(&parent, "v"), slot(&model, "value"))));
+    assert!(keys.contains(&(slot(&model, "value"), slot(&parent, "v"))));
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Deleting a template's file does not retract producer support located in it; the next
+/// snapshot does.
+#[test]
+fn file_deletion_alone_does_not_retract_event_support() {
+    let (root, mut store, ev) = indexed("bindings", "events_delete");
+    ingest_semantic_evidence(&mut store, Some(&root), &ev, None).unwrap();
+    let ext = class(&store, "src/ext.component.ts", "Ext");
+    let child = class(&store, "src/events.ts", "EvChild");
+    let consumer = field_slot_id(&ext.symbol, "title");
+    let producer = field_slot_id(&child.symbol, "picked");
+    let flows = wicked_estate_core::edge_tags::other(wicked_estate_core::edge_tags::FLOWS_TO);
+    let rows = |s: &SqliteStore| s.edge_supports(&consumer, &producer, &flows).unwrap();
+    let before = rows(&store);
+    assert_eq!(before.len(), 1);
+    assert_eq!(
+        before[0].fact.location.as_ref().unwrap().file,
+        "src/ext.component.html",
+        "the support under test is located in the file we delete"
+    );
+    fs::remove_file(root.join("src/ext.component.html")).unwrap();
+    wicked_estate::index_path(&mut store, &root).unwrap();
+    assert_eq!(
+        rows(&store),
+        before,
+        "a file deletion is not a producer retraction"
+    );
+    let empty = SemanticEvidence {
+        facts: vec![],
+        documents: vec![],
+        ..ev
+    };
+    ingest_semantic_evidence(&mut store, Some(&root), &empty, None).unwrap();
+    assert!(rows(&store).is_empty());
     let _ = fs::remove_dir_all(root);
 }
