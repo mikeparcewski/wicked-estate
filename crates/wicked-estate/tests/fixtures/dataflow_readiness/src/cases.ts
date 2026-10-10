@@ -241,6 +241,11 @@ export function cbReduceSingle(items: string[], seed: string): string {
   return out;
 }
 
+export function cbReduceDestructured(items: string[], seed: { total: string }): string {
+  const out = items.reduce(({ total }, x) => x, seed);
+  return out;
+}
+
 export function cbReduceThis(items: string[], seed: string): string {
   const out = items.reduce(function (this: void, acc: string, x: string) {
     return acc;

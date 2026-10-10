@@ -325,6 +325,7 @@
 ; second for `reduce`, whose first is the accumulator), so `may_influence`. A named callback
 ; (`items.map(fmt)`) contributes nothing: binding its parameters would be interprocedural. The
 ; receiver is an identifier or a class field (`this.items`); a chained receiver contributes nothing.
+; A function expression's TypeScript `this` parameter is erased at runtime and is skipped.
 (call_expression
   function: (member_expression
     object: [(identifier) @flow.producer.local
@@ -341,6 +342,12 @@
          (required_parameter pattern: (identifier) @flow.consumer.local)))
      (function_expression
        parameters: (formal_parameters
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))
+     (function_expression
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (this))
          .
          (required_parameter pattern: (identifier) @flow.consumer.local)))])
   (#any-of? @_cb_method
@@ -360,13 +367,21 @@
     [(arrow_function
        parameters: (formal_parameters
          .
-         (required_parameter pattern: (identifier))
+         (required_parameter pattern: [(identifier) (object_pattern) (array_pattern)])
          .
          (required_parameter pattern: (identifier) @flow.consumer.local)))
      (function_expression
        parameters: (formal_parameters
          .
-         (required_parameter pattern: (identifier))
+         (required_parameter pattern: [(identifier) (object_pattern) (array_pattern)])
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))
+     (function_expression
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (this))
+         .
+         (required_parameter)
          .
          (required_parameter pattern: (identifier) @flow.consumer.local)))])
   (#any-of? @_cb_method "reduce" "reduceRight")
@@ -385,6 +400,12 @@
          (required_parameter pattern: (identifier) @flow.consumer.local)))
      (function_expression
        parameters: (formal_parameters
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))
+     (function_expression
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (this))
          .
          (required_parameter pattern: (identifier) @flow.consumer.local)))]
     .

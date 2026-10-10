@@ -594,7 +594,7 @@ fn s6a_inline_callbacks() {
         &value("cbReduceSingle", "seed"),
         &value("cbReduceSingle", "cbReduceSingle.return")
     ));
-    // A TypeScript `this` parameter is erased at runtime: it does not shift the binding.
+    // A TypeScript `this` parameter is erased at runtime: it is skipped, never bound.
     assert!(
         !graph()
             .flows
@@ -603,6 +603,28 @@ fn s6a_inline_callbacks() {
                 && f.consumer.contains(":local:acc")),
         "items must not bind the accumulator"
     );
+    for (producer, param, construct) in [
+        ("seed", ":local:acc@1", "callback_accumulator"),
+        ("items", ":local:x@1", "callback_element"),
+    ] {
+        assert_eq!(
+            supports(
+                &value("cbReduceThis", producer),
+                &scoped("cbReduceThis", param)
+            ),
+            vec![influence(construct)],
+            "cbReduceThis: {producer}"
+        );
+    }
+    assert!(reaches(
+        &value("cbReduceThis", "seed"),
+        &value("cbReduceThis", "cbReduceThis.return")
+    ));
+    // A destructured accumulator still lets the element bind the second parameter.
+    assert!(reaches(
+        &value("cbReduceDestructured", "items"),
+        &value("cbReduceDestructured", "cbReduceDestructured.return")
+    ));
     // The callback's `x` shadows the returned parameter `x`.
     let shadow_ret = value("cbShadow", "cbShadow.return");
     assert!(!reaches(&value("cbShadow", "items"), &shadow_ret));
