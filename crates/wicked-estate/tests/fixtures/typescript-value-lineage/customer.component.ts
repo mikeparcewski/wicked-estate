@@ -15,4 +15,13 @@ export class CustomerComponent {
         const customer = service.getCustomer(id);
         return customer;
     }
+
+    audit(): string {
+        const tenant = this.tenantId;
+        return this.sink(tenant);
+    }
+
+    sink(v: string): string {
+        return v;
+    }
 }

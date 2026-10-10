@@ -78,7 +78,7 @@ use wicked_estate_core::{
     ChangeOp, Edge, EdgeKind, Extraction, Extractor, FlowEvidence, FlowFact, FlowSemantics,
     GraphRead, GraphStats, Language, Location, Node, NodeKind, NodeSemantics, RepoInfo,
     ResolutionTier, Resolver, Result, SourceFile, Span, Symbol, SymbolId, SymbolIndex, SymbolQuery,
-    TraversalSpec, edge_tags, is_structural_symbol, merge_flow_edges,
+    TraversalSpec, edge_tags, is_flow_edge, is_structural_symbol, merge_flow_edges,
 };
 use wicked_estate_extract::{
     BlazeBrlExtractor, CicsSqlExtractor, DrlExtractor, ExtraEdgeExtractor, HlasmExtractor,
@@ -434,6 +434,53 @@ fn call_value_ref_hints(
         .collect()
 }
 
+/// What a callee-only edit must leave alone for the #220 replay to equal a re-extraction of the
+/// callers: the definitions caller resolution can see, and the return endpoints a recorded
+/// `call_result` hop can stand on.
+#[derive(Debug, Default)]
+struct ReplaySignature {
+    /// `(symbol, kind)` of every definition node. File and Import nodes are left out: the File
+    /// node never changes id, and an Import node is shared by specifier and homed on whichever
+    /// importer sorts first, so it would read as a change on nearly every edit.
+    defs: std::collections::BTreeSet<(String, String)>,
+    returns: std::collections::BTreeSet<String>,
+}
+
+impl ReplaySignature {
+    fn add(&mut self, node: &Node) {
+        if node.is_value_flow_node() {
+            if node.metadata.get("value_role").and_then(|v| v.as_str()) == Some("Return") {
+                self.returns.insert(node.symbol.0.clone());
+            }
+        } else if !matches!(node.kind, NodeKind::File | NodeKind::Import) {
+            self.defs
+                .insert((node.symbol.0.clone(), format!("{:?}", node.kind)));
+        }
+    }
+
+    /// Same definitions, and no return endpoint lost (a gained one only adds hops).
+    fn replay_is_exact(&self, new: &Self) -> bool {
+        self.defs == new.defs && self.returns.is_subset(&new.returns)
+    }
+}
+
+/// A Calls ref that carries call-site value-flow facts — the refs [`call_value_flow`] reads.
+fn is_value_flow_call_ref(r: &wicked_estate_core::UnresolvedRef) -> bool {
+    r.kind == EdgeKind::Calls && r.hints.contains_key("value_flow")
+}
+
+/// The value-flow call refs `file`'s last extraction recorded (#220), or `None` when the store
+/// holds no readable record — an older DB, a backend that does not persist them, or a record
+/// that does not parse. `None` always means "re-extract to recover them", never "there are none".
+fn recorded_call_refs(
+    store: &dyn GraphRead,
+    file: &str,
+) -> Result<Option<Vec<wicked_estate_core::UnresolvedRef>>> {
+    Ok(store
+        .file_call_refs(file)?
+        .and_then(|json| serde_json::from_str(&json).ok()))
+}
+
 fn call_value_ref_hints_from_files(
     store: &dyn GraphRead,
     files: impl IntoIterator<Item = String>,
@@ -441,6 +488,11 @@ fn call_value_ref_hints_from_files(
 ) -> Result<HashMap<CallSiteKey, serde_json::Value>> {
     let mut refs = Vec::new();
     for file in files {
+        // #220: the recorded refs are exactly what re-parsing would produce; parse only without.
+        if let Some(recorded) = recorded_call_refs(store, &file)? {
+            refs.extend(recorded);
+            continue;
+        }
         let Some(text) = store.file_content(&file)? else {
             continue;
         };
@@ -623,7 +675,11 @@ fn call_value_flow(
 ) -> Result<(Vec<Node>, Vec<Edge>)> {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
-    let mut by_site: HashMap<CallSiteKey, HashMap<SymbolId, Edge>> = HashMap::new();
+    // #209: a BTreeMap, not a HashMap — two call sites in one owner that pass the same identifier
+    // mint the same value node, and the FIRST site (in key order) must win on every run; hash
+    // order made the stored location differ index to index.
+    let mut by_site: std::collections::BTreeMap<CallSiteKey, HashMap<SymbolId, Edge>> =
+        std::collections::BTreeMap::new();
 
     for call_edge in site_edges {
         if call_edge.kind != EdgeKind::Calls {
@@ -680,7 +736,8 @@ fn call_value_flow(
                 .symbol
                 .clone()
                 .unwrap_or_else(|| value_symbol(&caller.symbol, "local", &arg.name));
-            let param_symbol = value_symbol(&callee.symbol, "local", param);
+            // #216: a parameter owns its own `:param:` slot, distinct from any same-named local.
+            let param_symbol = value_symbol(&callee.symbol, "param", param);
             if index.get(&arg_symbol).is_none() {
                 let node = value_node(
                     arg_symbol.clone(),
@@ -702,6 +759,10 @@ fn call_value_flow(
         }
 
         let return_symbol = value_symbol(&callee.symbol, "return", "value");
+        // #210: the callee's return endpoint exists only when it has a literal `return <ident>`;
+        // a `call_result` edge to a missing endpoint was minted, then pruned as dangling, leaving
+        // the consumer local an orphan. No endpoint, no hop, no orphan node.
+        let target = target.filter(|_| index.get(&return_symbol).is_some());
         if let Some(target) = target {
             let target_symbol = target
                 .symbol
@@ -1298,16 +1359,38 @@ pub fn index_path_as(
     // call-site facts — the same full-vs-incremental divergence this change exists to remove.
     // Pinned by `an_edit_that_first_makes_a_callee_flow_capable_forces_its_callers`.
     let mut forced_value_flow_callers: HashSet<String> = HashSet::new();
+    // #229: edges a forced, content-UNCHANGED file's re-extraction deletes on behalf of OTHER,
+    // unchanged files. `remove_file` deletes every edge SOURCED at the file's nodes, and a
+    // call-derived `call_argument` edge (callee parameter ← caller argument) is sourced at the
+    // callee but OWNED by the caller (its location is the caller's call site). Forcing the
+    // one-hop callers of an edit re-extracts them, so their own callers' call-derived edges into
+    // them vanished and nothing re-emitted them (446 `flows_to` lost on a 564-file TS repo, 97 on
+    // the 905-file one). The forced file's extraction is byte-identical, so those edges are
+    // still exactly right: they are captured here and restored after the write.
+    let mut collateral_edges: Vec<Edge> = Vec::new();
+    // #220: an unchanged direct caller whose value-flow call refs are on record is NOT
+    // re-extracted. Its recorded refs are re-resolved against the post-write index instead and
+    // `call_value_flow` re-derives exactly its sites into the changed callees — the same function
+    // of (site Calls edges, index, hints) a re-extraction would have fed, minus the re-parse. On a
+    // 905-file repo a hub edit re-parsed 121 callers to recover facts computed once already. A
+    // caller with no readable record (a DB from before the record existed) still takes the
+    // re-extract path below, so there is no flag day.
+    let mut changed_symbols: HashSet<SymbolId> = HashSet::new();
+    let mut rederive_files: HashSet<String> = HashSet::new();
+    let mut rederive_refs: Vec<wicked_estate_core::UnresolvedRef> = Vec::new();
     if !force_full && !changed_seed.is_empty() {
-        let mut changed_symbols: HashSet<SymbolId> = HashSet::new();
         let mut file_by_symbol: HashMap<SymbolId, String> = HashMap::new();
+        // The changed files' pre-edit replay signature (see `replay_signature`).
+        let mut old_signature = ReplaySignature::default();
         for node in store.all_nodes()? {
             if changed_seed.contains(&node.location.file) {
                 changed_symbols.insert(node.symbol.clone());
+                old_signature.add(&node);
             }
             file_by_symbol.insert(node.symbol, node.location.file);
         }
-        for edge in store.all_edges()? {
+        let all_edges = store.all_edges()?;
+        for edge in &all_edges {
             // Only a DIRECT caller of a changed callee holds call-site facts about it.
             if edge.kind != EdgeKind::Calls || !changed_symbols.contains(&edge.target) {
                 continue;
@@ -1322,8 +1405,90 @@ pub fn index_path_as(
                 if !changed_seed.contains(candidate)
                     && current_rel_paths.contains(candidate)
                     && work_by_rel.contains_key(candidate)
+                    && !rederive_files.contains(candidate)
+                    && !forced_value_flow_callers.contains(candidate)
                 {
-                    forced_value_flow_callers.insert(candidate.to_string());
+                    match recorded_call_refs(&*store, candidate)? {
+                        Some(refs) => {
+                            rederive_files.insert(candidate.to_string());
+                            rederive_refs.extend(refs);
+                        }
+                        None => {
+                            forced_value_flow_callers.insert(candidate.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        // #220 review: replaying the recorded refs is exact only while the edit changes no
+        // caller's RESOLUTION — the changed files define the same symbols of the same kinds — and
+        // takes away no return endpoint a recorded `call_result` hop stands on (a full index would
+        // then not mint that hop's consumer node at all). Anything else re-extracts the callers,
+        // which re-parks a call that no longer resolves and retires what it no longer emits.
+        if !rederive_files.is_empty() {
+            // The post-edit signature, from a parse of just the changed files (pure; the write
+            // below parses them again). `None` = cannot tell (a rule-matched, minified or
+            // non-UTF-8 file): re-extract.
+            let new_signature = (|| {
+                let mut signature = ReplaySignature::default();
+                for rel in &changed_seed {
+                    let fw = work_by_rel.get(rel)?;
+                    if extra.as_ref().is_some_and(|x| x.matches_path(&fw.raw)) {
+                        return None;
+                    }
+                    let text = std::str::from_utf8(&fw.bytes).ok()?;
+                    if is_minified_or_huge(text) {
+                        return None;
+                    }
+                    let ext = fw
+                        .abs
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    if let Some(extraction) = base_extraction(&fw.rel, &ext, text, &ext_map) {
+                        extraction.nodes.iter().for_each(|n| signature.add(n));
+                    }
+                }
+                Some(signature)
+            })();
+            let exact = new_signature.is_some_and(|new| old_signature.replay_is_exact(&new));
+            if !exact {
+                forced_value_flow_callers.extend(rederive_files.drain());
+                rederive_refs.clear();
+            }
+        }
+        // Files re-extracted with identical content: the forced value-flow callers, plus the
+        // Decision-J forced importers whose digest did not change.
+        let unchanged_forced: HashSet<&str> = changed_seed
+            .iter()
+            .filter(|rel| {
+                stored_digest_by_rel
+                    .get(rel.as_str())
+                    .and_then(|d| d.as_deref())
+                    .zip(work_by_rel.get(rel.as_str()))
+                    .is_some_and(|(stored, fw)| stored == fw.digest)
+            })
+            .map(String::as_str)
+            .chain(forced_value_flow_callers.iter().map(String::as_str))
+            .collect();
+        if !unchanged_forced.is_empty() {
+            for edge in all_edges {
+                let Some(owner) = edge.location.as_ref().map(|l| l.file.as_str()) else {
+                    continue;
+                };
+                // Only value-flow edges: the call-derived hops are the edges another file's
+                // facts source at a callee's nodes (codex review: keep the restore that narrow).
+                if !is_flow_edge(&edge) {
+                    continue;
+                }
+                let source_file = file_by_symbol.get(&edge.source).map(String::as_str);
+                if source_file.is_some_and(|f| unchanged_forced.contains(f))
+                    && owner != source_file.unwrap_or_default()
+                    && !changed_seed.contains(owner)
+                    && !forced_value_flow_callers.contains(owner)
+                {
+                    collateral_edges.push(edge);
                 }
             }
         }
@@ -1552,6 +1717,17 @@ pub fn index_path_as(
         if let Err(e) = store.set_file_content(rel_path, text) {
             eprintln!("warning: set_file_content({rel_path}) failed: {e}");
         }
+        // #220: record the file's value-flow call refs (`[]` records "none") so a later edit to a
+        // callee re-derives this file's call-derived flows without re-parsing it.
+        let call_refs: Vec<&wicked_estate_core::UnresolvedRef> = extraction
+            .refs
+            .iter()
+            .filter(|r| is_value_flow_call_ref(r))
+            .collect();
+        let call_refs_json = serde_json::to_string(&call_refs).map_err(|e| {
+            wicked_estate_core::Error::Invalid(format!("call refs of {rel_path}: {e}"))
+        })?;
+        store.set_file_call_refs(rel_path, &call_refs_json)?;
     }
 
     // Bulk-rebuild FTS for every node that belongs to a changed file in one SQL pass.
@@ -1621,6 +1797,43 @@ pub fn index_path_as(
     store.upsert_edges(&estate)?;
     store.upsert_unresolved_refs(&resolution.unresolved)?;
     store.commit_batch()?;
+
+    // ── RE-DERIVE call-derived value flow for unchanged callers (#220) ──────────────────────
+    // The callees were just re-extracted (their parameter/return endpoints exist again); the
+    // callers' recorded refs re-resolve against the same index a full run would build. Only the
+    // sites that bind a changed callee — before or after the edit — are re-derived: every other
+    // site's edges were never touched. The callers' own `Calls` edges and parked rows are left
+    // as they are, exactly as for any unchanged dependent of an edit.
+    if !rederive_refs.is_empty() {
+        let mut targets = changed_symbols.clone();
+        for (_, extraction, _) in &extractions {
+            targets.extend(extraction.nodes.iter().map(|n| n.symbol.clone()));
+        }
+        let rederived = resolve_all_with_coverage(resolvers, &rederive_refs, &index)?;
+        let sites: HashSet<CallSiteKey> = rederived
+            .site_edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Calls && targets.contains(&e.target))
+            .filter_map(|e| e.location.as_ref().map(call_site_key))
+            .collect();
+        let site_edges: Vec<Edge> = rederived
+            .site_edges
+            .into_iter()
+            .filter(|e| {
+                e.location
+                    .as_ref()
+                    .is_some_and(|l| sites.contains(&call_site_key(l)))
+            })
+            .collect();
+        let hints = call_value_ref_hints(&rederive_refs);
+        let (flow_nodes, flow_edges) = call_value_flow(&site_edges, &index, &hints)?;
+        if !flow_nodes.is_empty() || !flow_edges.is_empty() {
+            store.begin_batch()?;
+            store.upsert_nodes(&flow_nodes)?;
+            store.upsert_edges(&flow_edges)?;
+            store.commit_batch()?;
+        }
+    }
 
     // ── BACK-FILL previously-parked refs (lane importer-backfill, #141) ─────────────────────
     // The main pass resolves CHANGED files' refs only; a ref parked in an EARLIER run — an
@@ -1727,6 +1940,23 @@ pub fn index_path_as(
         }
     }
 
+    // #229: restore the edges unchanged files owned that the forced re-extraction deleted (see
+    // `collateral_edges`), when both endpoints exist again. Before PageRank and the dangling
+    // prune, so both see the same graph a full index would.
+    if !collateral_edges.is_empty() {
+        let mut restore = Vec::with_capacity(collateral_edges.len());
+        for edge in collateral_edges {
+            if store.get_node(&edge.source)?.is_some() && store.get_node(&edge.target)?.is_some() {
+                restore.push(edge);
+            }
+        }
+        if !restore.is_empty() {
+            store.begin_batch()?;
+            store.upsert_edges(&restore)?;
+            store.commit_batch()?;
+        }
+    }
+
     // W11.3: populate the pagerank.top cache so `important_symbols` (graph-view, the bench) can
     // serve from cache instead of recomputing. CLI `rank` computes live since #193 — this cache
     // is not refreshed by `scip` or overlay edges. Best-effort: failure is non-fatal.
@@ -1751,7 +1981,7 @@ pub fn index_path_as(
     // pass cleans them up so blast-radius never returns nodes that no longer exist.
     match store.prune_dangling_edges() {
         Ok(n) if n > 0 => {
-            eprintln!("GRAPH-CLEANUP: pruned {n} dangling edge(s) after incremental index");
+            eprintln!("GRAPH-CLEANUP: pruned {n} dangling edge(s) after index");
         }
         Ok(_) => {}
         Err(e) => {
@@ -2050,17 +2280,13 @@ pub fn blast_radius_by_name(store: &dyn GraphRead, name: &str, depth: u32) -> Re
     Ok(out)
 }
 
-/// Ingest a SCIP index file into the store: reads `scip_path`, correlates its occurrences
-/// against nodes already in the store, and upserts the resulting confidence-1.0 edges.
-///
-/// `root` is unused at this layer (SCIP paths are repo-relative already); it is accepted for
-/// caller symmetry with `index_path`.
-///
-/// Returns the number of edges upserted.
+/// Ingest a SCIP index file into the store's **support plane** (TS-S2C) and return the number of
+/// distinct public edges its facts now support (several sites can support one edge). See
+/// [`ingest_scip_report_as`] for the full report.
 ///
 /// # Prerequisite
 /// The project must already be indexed (`index_path`) so that nodes exist to correlate against.
-/// Running `ingest_scip` on an empty store produces 0 edges (no matching nodes → nothing to wire).
+/// Running `ingest_scip` on an empty store projects nothing (no nodes → nothing to correlate).
 pub fn ingest_scip(
     store: &mut dyn GraphStoreMutExt,
     root: &Path,
@@ -2069,24 +2295,55 @@ pub fn ingest_scip(
     ingest_scip_as(store, root, scip_path, None)
 }
 
-/// [`ingest_scip`] against one repo of a multi-repo graph.
-///
-/// SCIP documents carry REPO-relative paths, while a labelled repo's nodes carry `<label>/…`. The
-/// correlation is done on the repo-relative form (the label is stripped from a scratch copy of the
-/// nodes and re-applied to the resulting edge locations), so a `.scip` file produced by a plain
-/// `scip-typescript` run correlates without the indexer having to know about labels. Without this
-/// the correlation matches nothing and reports "0 precise edges" — a silent no-op.
+/// [`ingest_scip`] against one repo of a multi-repo graph; the count of distinct edges supported.
 pub fn ingest_scip_as(
     store: &mut dyn GraphStoreMutExt,
-    _root: &Path,
+    root: &Path,
     scip_path: &Path,
     repo: Option<&str>,
 ) -> Result<usize> {
-    // Validate here too, not only in `index_path_as` (Copilot on #117). `repo` becomes the
-    // `<label>/` prefix that is stripped from SCIP's relative paths and re-applied to the edge
-    // locations written back, so an unvalidated label — one containing `/` or `..` — writes
-    // nonsensical or forged locations. Label validation is the single thing that makes path
-    // forging unreachable; a second entry point that skips it is a hole in that guarantee.
+    Ok(ingest_scip_report_as(store, root, scip_path, repo)?.edges_projected)
+}
+
+/// The support-owner snapshot of a SCIP index: `<repo label or .>:<index path>` — the index path
+/// relative to `root` when it lies under it (with `/` separators), else its file name. It names
+/// the stable unit a re-run replaces, never the index's contents.
+pub fn scip_snapshot(root: &Path, scip_path: &Path, repo: Option<&str>) -> String {
+    let rel = std::fs::canonicalize(root)
+        .ok()
+        .zip(std::fs::canonicalize(scip_path).ok())
+        .and_then(|(r, p)| p.strip_prefix(&r).ok().map(Path::to_path_buf))
+        .or_else(|| scip_path.strip_prefix(root).ok().map(Path::to_path_buf))
+        .map(|p| {
+            p.components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .unwrap_or_else(|| {
+            scip_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| scip_path.to_string_lossy().into_owned())
+        });
+    format!("{}:{rel}", repo.unwrap_or("."))
+}
+
+/// Translate a SCIP index (`wicked_estate_resolve::scip_evidence`) and ingest it with
+/// [`ingest_semantic_evidence`]. SCIP declares definitions and references only — it has no call
+/// role — so this never writes a `Calls` edge. The report folds in what the adapter dropped.
+///
+/// SCIP documents carry REPO-relative paths, while a labelled repo's nodes carry `<label>/…`; the
+/// label is stripped for correlation and re-applied to the written locations (see
+/// [`ingest_semantic_evidence`]).
+pub fn ingest_scip_report_as(
+    store: &mut dyn GraphStoreMutExt,
+    root: &Path,
+    scip_path: &Path,
+    repo: Option<&str>,
+) -> Result<wicked_estate_core::evidence::EvidenceReport> {
+    // Validate here too, not only in `index_path_as` (Copilot on #117): the label becomes the
+    // `<label>/` prefix re-applied to written locations, so an unvalidated one forges paths.
     if let Some(label) = repo {
         repo_scope::validate_label(label)?;
     }
@@ -2096,31 +2353,70 @@ pub fn ingest_scip_as(
             scip_path
         )))
     })?;
+    let translated =
+        wicked_estate_resolve::scip_evidence(&bytes, &scip_snapshot(root, scip_path, repo))?;
+    let mut report = ingest_semantic_evidence(store, Some(root), &translated.evidence, repo)?;
+    for (reason, n) in translated.skipped {
+        report.skip(reason, n);
+    }
+    Ok(report)
+}
 
-    let mut nodes = store.all_nodes()?;
+/// Ingest one [`SemanticEvidence`](wicked_estate_core::evidence::SemanticEvidence) envelope:
+/// correlate it against the graph's nodes and make the accepted facts its owner's complete
+/// support set (`docs/ENGINE-CONTRACT.md` §3.5). Nothing is written for an invalid envelope or a
+/// rejected generation.
+///
+/// With `repo`, only that repo's nodes (`<label>/…`) are correlated, the documents are read as
+/// repo-relative, and written locations carry the label. `root` is the repo checkout, used only to
+/// read a document's text when its columns are not UTF-8.
+pub fn ingest_semantic_evidence(
+    store: &mut dyn GraphStoreMutExt,
+    root: Option<&Path>,
+    evidence: &wicked_estate_core::evidence::SemanticEvidence,
+    repo: Option<&str>,
+) -> Result<wicked_estate_core::evidence::EvidenceReport> {
+    if let Some(label) = repo {
+        repo_scope::validate_label(label)?;
+    }
     let prefix = repo.map(repo_scope::prefix);
-    if let Some(p) = &prefix {
-        for n in &mut nodes {
-            if let Some(rest) = n.location.file.strip_prefix(p.as_str()) {
-                n.location.file = rest.to_string();
+    let nodes: Vec<Node> = store
+        .all_nodes()?
+        .into_iter()
+        .filter_map(|mut n| match &prefix {
+            None => Some(n),
+            Some(p) => {
+                let rest = n.location.file.strip_prefix(p.as_str())?.to_string();
+                n.location.file = rest;
+                Some(n)
             }
-        }
-    }
-    let mut edges = wicked_estate_resolve::scip_edges(&bytes, &nodes)?;
+        })
+        .collect();
+    let read = |doc: &str| -> Option<String> { std::fs::read_to_string(root?.join(doc)).ok() };
+    let mut projection = wicked_estate_core::evidence::project_evidence(evidence, &nodes, &read)?;
     if let Some(p) = &prefix {
-        for e in &mut edges {
-            if let Some(loc) = &mut e.location {
-                loc.file = format!("{p}{}", loc.file);
-            }
-        }
+        projection.facts = projection
+            .facts
+            .into_iter()
+            .map(|f| {
+                let id = f.fact_id.clone();
+                let mut edge = f.edge;
+                if let Some(loc) = &mut edge.location {
+                    loc.file = format!("{p}{}", loc.file);
+                }
+                wicked_estate_core::SupportFact::new(id, edge)
+            })
+            .collect::<wicked_estate_core::Result<_>>()?;
     }
-    let count = edges.len();
-
-    store.begin_batch()?;
-    store.upsert_edges(&edges)?;
-    store.commit_batch()?;
-
-    Ok(count)
+    let report = wicked_estate_core::evidence::apply_projection(
+        &mut *store,
+        projection,
+        evidence.generation,
+    )?;
+    if !report.replayed {
+        store.version_bump();
+    }
+    Ok(report)
 }
 
 /// The most important symbols by global PageRank (the "where do I even start" view for a complex
@@ -2814,6 +3110,16 @@ mod tests {
                 ),
                 callee_node,
                 other_node,
+                // The callee returns a value (`return <ident>`), so it has a return endpoint and a
+                // `call_result` hop joins to it (#210: no endpoint, no hop).
+                Node::new(
+                    value_symbol(&callee, "return", "value"),
+                    NodeKind::Synthetic,
+                    "normalize.return",
+                    Language::new("typescript"),
+                    Location::new("callee.ts", Span::ZERO),
+                )
+                .with_value_role("Return"),
             ])
             .unwrap();
         store.commit_batch().unwrap();
@@ -2966,7 +3272,7 @@ mod tests {
 
         assert!(pairs.contains(&(
             value_symbol(&caller, "local", "raw"),
-            value_symbol(&callee, "local", "id")
+            value_symbol(&callee, "param", "id")
         )));
         assert!(pairs.contains(&(
             value_symbol(&callee, "return", "value"),

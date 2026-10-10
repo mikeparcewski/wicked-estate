@@ -3,35 +3,6 @@
 ## [Unreleased]
 
 ### Changed (breaking)
-- **Read commands fail closed on a missing `--db` (#246).** `query`, `blast-radius`, `path`,
-  `stats`, `graph-view`, `source`, `by-requirement`, `annotations`, `stale-annotations`,
-  `fingerprint`, `changed-since`, `entrypoints`, `leaves`, `dead-code`, `nodes`, `resolve` and
-  `export` now share `lineage`'s check (after the arm's own usage checks, before the store is
-  opened): a SQLite path that does not exist (or a zero-byte file)
-  is `no graph at <db> (<cmd> never creates one)`, exit 1, and the file is NOT created. Before,
-  each opened an empty graph and answered "absent" with exit 0. Writers (`index`, `annotate`,
-  `semantics`, …) keep creating. A shell-out that relied on exit 0 against a missing db breaks;
-  that is the fix.
-- **`resolve <name>` returns structural symbols only (#234).** Synthetic value slots share real
-  symbols' names (`resolve runs`: 63 slots beside 1 function on a 905-file repo); the default is
-  now `is_structural_symbol`, like every other name-based arm, and `--include-values` is the
-  explicit way back in. ENGINE-CONTRACT §3.3 row updated. Crew's cross-repo symbol search
-  (which shells out to `resolve <name> --json`) sees fewer rows — the real ones.
-- **`stale-annotations` takes exactly one cutoff (#205).** The arm took the first parseable
-  integer anywhere in argv, so `stale-annotations soon 100` ran at cutoff 100 and
-  `stale-annotations 2026 01 01` ran at 2026 with the rest dropped — a plausible wrong answer
-  with exit 0. Stray operands, two operands, or an operand together with `--older-than` are now
-  a usage error (exit 1). A caller that passed stray operands breaks; that is the fix, as with
-  #197/#206. Unix seconds are ASCII digits only: `+100` and `-100` are refused (`i64` parsing
-  had accepted the sign).
-- **Payload annotations are ranked at every size.** `RetrieveEntity` (MCP) kept insertion order
-  under the 20-annotation cap and ranked only over it; `nodes --json` / `source --json` always
-  ranked. One entity therefore listed its annotations in two orders depending on the surface.
-  Every payload now ranks advisory-class first, then `ts` descending, at any count, so the order
-  no longer flips when an entity crosses 20. A consumer of `RetrieveEntity` that read
-  `annotations[]` positionally sees a new order; the set, the cap and `annotation_summary` are
-  unchanged. The spec (`docs/recon/annotation-consumer-spec.md`) fixed the order only over the cap.
-
 - **Bespoke CLI commands reject malformed values, surplus or missing operands, accidental
   repeats, and flags they would ignore in combination (W8.6).** 0.21.0 made each command reject
   flags it does not read (#197, #206). Four more accept-and-ignore paths remained in the shared
@@ -93,7 +64,130 @@
   JSON-only budgets are unchanged, as is every documented working invocation and every result
   schema. **Scripts that relied on an ignored value, operand, repeat or flag now fail.**
 
+## [0.23.0] — 2026-10-09
+
+Minor bump, not a patch: value-slot ids change (#216). `SYMBOL_ID_SCHEME` goes 3 → 4, so a graph
+written by an older version is fully re-extracted on its next `wicked-estate index`. The existing
+scheme gate does this automatically: no flag and no manual step. Until that re-index, a stored
+graph keeps its old value ids. See **Changed (breaking)**.
+
+### Changed (breaking)
+- **Value slots are binding-scoped (#216).** A value slot was `{owner}:local:{name}` for every
+  binding of a name in one callable, so a callback parameter that shadowed the method's
+  parameter, or a block-scoped `const` that shadowed it, merged with it into ONE node and a false
+  flow ran between them. A reference now resolves to the innermost declaration of its name in its
+  owner:
+  - the owner's parameter is `{owner}:param:{name}` (was `:local:`);
+  - a binding of the owner's own body keeps `{owner}:local:{name}`;
+  - a binding of a nested block, `for`, `catch`, `switch` or callback is `{owner}:local:{name}@{n}`,
+    where `n` numbers, from 1 in source order, the owner's nested scopes that bind that name.
+
+  Line shifts and unrelated blocks keep every id (ADR-002). Destructured bindings
+  (`{a, b: c, ...d}`, `[e = f]`) are bound too, and `var` binds in its function. A read of a
+  parameter is the parameter's own node; it is no longer re-emitted as a Variable. Consumers that
+  matched a parameter slot by its `:local:` id must use `:param:`. The ENGINE-CONTRACT §3.2
+  shadowing example now yields two slots, each carrying only its own fact.
+
 ### Added
+- **Value lineage for `.tsx` and JavaScript (`.js` / `.jsx` / `.mjs` / `.cjs`) (#213).**
+  `tsx.scm` carries the TypeScript value-flow block. `javascript.scm` has the JS spelling: bare and
+  defaulted parameters, `field_definition`, and no Angular conventions. Rule ids are
+  `tsx/<evidence>/<construct>` and `javascript/<evidence>/<construct>`. TSX/JS call sites anchor the
+  whole call expression, as TypeScript's do, so their `Calls` edge location is now the call span
+  instead of the callee identifier.
+- **`this.<field>` reads join the class field slot (#215).** `const t = this.tenantId` reads the
+  class-owned `:field:tenantId` slot, the one an `@Input()` or a `this.f = v` writes, so an
+  `@Input()` value reaches the methods that read it. A `this` under an ordinary function, a
+  generator or an object-literal method is not the class instance, and stays a def-owned
+  `this.<name>` property read.
+- **`GraphRead::file_call_refs` / `GraphWrite::set_file_call_refs` (#220).** These are provided
+  trait methods with defaults, so no implementor breaks. Each indexed file records the value-flow
+  call references its extraction produced. SQLite stores them in a new `file_call_refs` table
+  (created on open), and `remove_file` deletes the file's row. MemStore also stores them, and the
+  memory and overlay wrappers forward both methods. Postgres and Surreal use the default, which
+  records nothing.
+
+### Changed
+- **A callee-only edit no longer re-extracts its callers (#220).** The callers' recorded refs are
+  re-resolved against the new index, and the call-derived `flows_to` edges into the changed callee
+  are re-derived from them, so only the edited file is parsed. The replay runs only when it equals
+  a re-extraction: the changed files define the same symbols of the same kinds, and lose no return
+  endpoint. A rename, a removed definition, a lost `return <ident>`, or a caller with no record (a
+  graph indexed before 0.23.0) still re-extracts the callers. The back-fill pass also reads the
+  record instead of re-parsing stored content.
+
+### Fixed
+- An optional parameter (`a?: string`) fills its own positional value slot, so its call-argument
+  hop is no longer lost (#213).
+- A generator body and an unnamed (computed or private) method body are return barriers. A
+  `return` inside them is no longer attributed to the enclosing definition (#213 review).
+
+## [0.22.0] — 2026-10-09
+
+Minor bump, not a patch: MCP `tools/call` now rejects arguments outside the advertised
+schema (#212), a reserved or misspelt `@flow.*` capture fails the query load (#235),
+property-read value nodes change kind and identity (#214, #208), and several CLI read
+commands fail closed or take stricter operands (#246, #234, #205). See **Changed (breaking)**.
+
+### Changed (breaking)
+- **MCP `tools/call` validates arguments against the advertised `inputSchema` (#212).** An unknown
+  argument (every retrieval schema sets `additionalProperties: false`), a missing required
+  argument, a wrong `type`, a value outside an `enum` or a wrong array item type now returns an
+  `isError` tool result naming the property, e.g. `SearchEntity: invalid arguments: unknown
+  argument 'totally_unknown' (accepted: …)`. Before, `{"symbol": …, "totally_unknown": 1}` was
+  silently accepted. Out-of-range numbers still dispatch (the tools clamp them by contract), and
+  an explicit `null` for an optional argument is accepted. A client that sent a misspelt or extra
+  argument breaks. That is the fix.
+- **A reserved or misspelt `@flow.*` capture fails the query load (#235).** A plugin or override
+  query that names a `scip` / `compiler` / `call_derived` evidence class or a misspelt anchor
+  (`@flow.valeu.syntax.assignment`) is now refused at load. An override falls back to the built-in
+  query loudly, and a plugin language does not load. Before, the capture was dropped silently.
+  Every shipped `.scm` is pinned by a test that walks its `@flow.*` captures.
+- **Property-read value nodes are `NodeKind::Synthetic` and keyed by their `object.property` path
+  (#214, #208).** A function-scoped `const a = customer.id` no longer mints a `field` node owned
+  by a function. A prettier-wrapped `customer⏎ .id` or an optional `raw?.name` now mints the same
+  node as the plain form. Ids that carried whitespace change, and consumers grouping `Field` nodes
+  by owner type no longer see them.
+- **Read commands fail closed on a missing `--db` (#246).** `query`, `blast-radius`, `path`,
+  `stats`, `graph-view`, `source`, `by-requirement`, `annotations`, `stale-annotations`,
+  `fingerprint`, `changed-since`, `entrypoints`, `leaves`, `dead-code`, `nodes`, `resolve` and
+  `export` now share `lineage`'s check (after the arm's own usage checks, before the store is
+  opened): a SQLite path that does not exist (or a zero-byte file)
+  is `no graph at <db> (<cmd> never creates one)`, exit 1, and the file is NOT created. Before,
+  each opened an empty graph and answered "absent" with exit 0. Writers (`index`, `annotate`,
+  `semantics`, …) keep creating. A shell-out that relied on exit 0 against a missing db breaks;
+  that is the fix.
+- **`resolve <name>` returns structural symbols only (#234).** Synthetic value slots share real
+  symbols' names (`resolve runs`: 63 slots beside 1 function on a 905-file repo); the default is
+  now `is_structural_symbol`, like every other name-based arm, and `--include-values` is the
+  explicit way back in. ENGINE-CONTRACT §3.3 row updated. Crew's cross-repo symbol search
+  (which shells out to `resolve <name> --json`) sees fewer rows — the real ones.
+- **`stale-annotations` takes exactly one cutoff (#205).** The arm took the first parseable
+  integer anywhere in argv, so `stale-annotations soon 100` ran at cutoff 100 and
+  `stale-annotations 2026 01 01` ran at 2026 with the rest dropped — a plausible wrong answer
+  with exit 0. Stray operands, two operands, or an operand together with `--older-than` are now
+  a usage error (exit 1). A caller that passed stray operands breaks; that is the fix, as with
+  #197/#206. Unix seconds are ASCII digits only: `+100` and `-100` are refused (`i64` parsing
+  had accepted the sign).
+- **Payload annotations are ranked at every size.** `RetrieveEntity` (MCP) kept insertion order
+  under the 20-annotation cap and ranked only over it; `nodes --json` / `source --json` always
+  ranked. One entity therefore listed its annotations in two orders depending on the surface.
+  Every payload now ranks advisory-class first, then `ts` descending, at any count, so the order
+  no longer flips when an entity crosses 20. A consumer of `RetrieveEntity` that read
+  `annotations[]` positionally sees a new order; the set, the cap and `annotation_summary` are
+  unchanged. The spec (`docs/recon/annotation-consumer-spec.md`) fixed the order only over the cap.
+
+### Added
+- **`GraphRead::count_symbols` and `GraphRead::find_structural_symbols` (#177, #218).** Both are
+  provided methods, so existing stores keep compiling. `count_symbols` returns the unlimited
+  `find_symbols` length; `SqliteStore` counts over the `name` / `kind` / `language` columns
+  without decoding any `Node`. `find_structural_symbols` excludes synthetic value-flow slots
+  before `limit`. Name→symbol seeding (`SearchEntity`, `ContextPack`, `ContextBundle`,
+  `budget_context`) now uses it, so the over-fetch-and-escalate heuristic is gone. The overlay and
+  `OverlayMemStore` delegate both. A conformance suite pins them on MemStore and SqliteStore.
+- **A plain reassignment is a value hop (#217).** `typescript.scm` records `out = tainted`
+  (`typescript/syntax/reassignment`), so `let out = trusted; out = tainted; return out;` reports
+  both producers instead of a lineage that looked complete with one.
 - **`wicked-estate --version` / `-V` / `version` (#200)** prints `wicked-estate <version>` —
   one line, nothing else on stdout, exit 0. Before, all three fell into the ~100-line usage
   banner (exit 0), and the version had to be scraped off its first line.
@@ -125,6 +219,26 @@
   `cli_flags` for `stale-annotations` only. No new dependency.
 
 ### Fixed
+- **An incremental re-index keeps the call-derived edges unchanged callers own (#229).**
+  `remove_file` deletes every edge sourced at a re-extracted file's nodes, including
+  `call_argument` flows (callee parameter ← caller argument) owned by the caller's call site.
+  Forcing the one-hop callers of an edit therefore dropped *their* callers' hops: 446 `flows_to`
+  were lost on a 564-file TypeScript repo, all owned by files that were not re-extracted. The
+  indexer now restores those value-flow edges after the write, so incremental equals full.
+- **SQLite traverse reports the node cap only when a node was dropped (#225).** Each reach leg
+  fetches `max_nodes + 1` rows (fencepost) and keeps the nearest nodes by depth, then symbol.
+  Exactly `max_nodes` reachable nodes is a complete walk; before, it said `node_cap_reached`.
+  `Subgraph::depth_horizon_reached` documents that it is a lower bound when the node cap also bit.
+- **Traverse bound reporting on the overlay and Postgres (#226).** The overlay cross ply reads its
+  rows uncapped and marks the node cap for any new foreign node the `max_cross_nodes` budget
+  leaves out. It no longer expands an anchor at `max_depth` (that marks the depth horizon
+  instead), and it reports a `max_cross_hops` cut. `PostgresStore` truncates by depth then id,
+  never by id alone.
+- **Value-flow locations are deterministic (#209).** Call sites are grouped in key order, so the
+  site that mints a shared value node, and its stored location, is the same on every index.
+- **No `call_result` hop into a callee without a return value (#210).** Before, it was minted and
+  then pruned as dangling, orphaning the consumer local. The prune message no longer says
+  "incremental" on a first index.
 - **`lineage --json` no longer panics on a closed stdout (#247):** `| head -1` ends the document
   quietly (exit 0) instead of a `failed printing to stdout` panic; text mode's broken pipe is
   handled the same way, and `resolve --json` / `query --json` write through the same seam. Every

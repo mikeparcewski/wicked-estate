@@ -121,6 +121,7 @@ labelled graph.
 |---|---|---|
 | `Parsed` | 1.0 | direct AST facts (contains/defines) |
 | `Scip` / `Lsp` | 1.0 | precise indexers / on-demand LSP |
+| `Compiler` | 1.0 | a compiler or toolchain catalog's semantic evidence (§3.5) — precise for exactly what its producer profile declares |
 | `Tsg` | 0.8 | stack-graphs name resolution |
 | `ImportMap` | 0.6 | import-map heuristics |
 | `Heuristic` | 0.5 | synthesizers / other heuristics |
@@ -155,7 +156,7 @@ the production resolver slice — guarded against drift by
 | `rules-bridge-resolver` | `Heuristic` | 0.5 | yes (slice) | `rules-engine:*` refs → every `RuleSet` node (N×M by design; no engine-scheme match yet). Overwrites the extractor's own synthetic-RuleSet `InvokedBy` edge on equal confidence (sqlite upsert `>=`) — asserted by `tests/rules_bridge_index.rs` |
 | `estate-racf` (`estate_edges`) | `Parsed` / `Heuristic` | 1.0 / 0.5 | yes (estate pass, same index run) | RACF profile → protected assets, exact→Parsed / generic→Heuristic |
 | extra-edge rules (`ExtraEdgeExtractor`) | `Heuristic` | 0.5 | yes (extract phase) | `Provenance::Extractor(rule)`; drop-in `.wicked-estate-extractors/*.toml` |
-| `scip` (`scip_edges`) | `Scip` | 1.0 | no — separate `wicked-estate scip` command, requires external `index.scip` bytes | precise tier; dominates on dedup |
+| `scip` (`scip_evidence` → §3.5) | `Scip` | 1.0 | no — separate `wicked-estate scip` command, requires external `index.scip` bytes | writes the **support plane** (§3.4), owner `(tool_info.name, <repo label or .>:<index path>)`; emits `References` only — SCIP has no call role, so it never emits `Calls` (TS-S2C). Tree-sitter's own edges are the base plane and stay untouched |
 | `Tsg` | `Tsg` | 0.8 | no production path | enum variant only, no `Resolver` impl (superseded — ADR-007) |
 | `Lsp` (`lsp.rs`) | `Lsp` | 1.0 | no production path | client library by design (locked: on-demand only, never bulk); no `Resolver` impl, no edge emission; consumer = W3.6 follow-up |
 | `ast-synth-method` | `Heuristic` | 0.5 | retired 2026-08-28 | emit set ⊂ `scoped-name-resolver`; never in any production slice (ADR-007 superseding note) |
@@ -252,10 +253,18 @@ function f(a: string, b: string) {
 }
 ```
 
-The two `c`s are **distinct variables** that share one value slot, because slot identity is
-owner-scoped, not block-scoped (`f:local:c`). The merge keeps both facts, but a read of `c` after
-the block (say a `return c`) sees the outer `c`, whose fact is `may_influence`: the merged
-`value_preserving` belongs only to the inner `c`. Scope-sensitive slot identity is TS-S2 work.
+The two `c`s are **distinct variables**. Until #216 they shared one value slot, because slot
+identity was owner-scoped, not block-scoped (`f:local:c`): the merge kept both facts, but a read of
+`c` after the block (say a `return c`) saw the outer `c`, whose fact is `may_influence`, while the
+merged `value_preserving` belonged only to the inner `c`.
+
+Since #216 (id scheme 4) slot identity follows the binding. A reference resolves to the innermost
+declaration of its name whose scope contains it (`@flow.scope*` / `@flow.declare.*` in the query
+files). A binding of a nested block or callback is `{owner}:local:{name}@{n}`, where `n` is the
+scope's ordinal inside the owner, so a line shift keeps the id. A binding of the owner's own body
+keeps `{owner}:local:{name}`, and the owner's parameter is `{owner}:param:{name}`. The two `c`s
+above are now `f:local:c` and `f:local:c@1`, and each carries only its own fact. The merge lattice
+below still governs any remaining collision.
 
 Measured on `c4fa938`, exactly one survived (`construct="assignment"`, byte 116) and the
 may-influence contribution vanished with nothing recording that it had been asserted.
@@ -381,10 +390,50 @@ the one 25K-char R4 budget (rows dropped in order, exact `total`, `truncated`). 
 (nothing opens a store on a bad flag), and a missing or zero-length graph is refused, never
 created.
 
-**What it does not do.** No producer writes support yet (TS-S2 / TS-S3 do). No retrieval tool,
+**What it does not do.** The one producer path that writes support is §3.5's semantic-evidence ingest (TS-S2C; the SCIP adapter today, TS-S3/S4's Angular producer next). No retrieval tool,
 MCP tool or existing budget changes: `Lineage` and every other surface read the projected edge
 through the existing read paths. Support is not exposed over MCP, and the CLI bridge is
 untouched (`supports` is not a RetrievalTool).
+
+### 3.5 Semantic evidence — one envelope for every precise producer (TS-S2C)
+
+Implemented by `wicked_estate_core::evidence` (envelope, validation, correlation, projection),
+`wicked_estate_resolve::scip_evidence` (the SCIP adapter) and `wicked_estate::{ingest_semantic_evidence,
+ingest_scip_report_as}`. Every producer — a SCIP indexer, a compiler, a database catalog — hands the
+engine the same versioned `SemanticEvidence` document, and the engine alone decides what it proves.
+
+| Question | Contract |
+|---|---|
+| **Envelope** | `{schema_version: 1, producer: {name, version, class: index \| compiler, capabilities}, snapshot, generation?, documents: [{path, position_encoding}], facts}`. Any other `schema_version` is rejected and every object denies unknown fields, so a v1 reader never drops a later meaning silently. An invalid envelope writes nothing. |
+| **Facts** | `definition {fact_id, symbol, name, site}`, `reference {fact_id, symbol, site, roles?}`, `call {fact_id, site, target: exact{symbol} \| ambiguous{candidates} \| dynamic}`. A `site` is `{document, range}` — 0-based, half-open, columns in the document's `position_encoding` (`utf8`, `utf16`, `utf32`, `unspecified`); a fact must cite a declared document and a range that does not end before it starts. Document paths are repository-relative with `/` separators (no `..`, `.`, empty segment, drive letter or `\`). |
+| **Opaque identities** | `producer`, `snapshot`, `fact_id` and every `symbol` are compared byte for byte — never trimmed, case-folded or Unicode-normalized (`Raise` ≠ `RAISE`, NFC ≠ NFD). Only empty or NUL values are rejected, and an owner part (`producer`, `snapshot`) may not be whitespace-only (§3.4's `SupportOwner` rule) — whitespace inside any id is kept and significant. One `fact_id` with two different facts is rejected; exact duplicates are one fact. |
+| **Capabilities** | `definitions`, `references`, `calls`. A fact of an undeclared kind is never projected (counted `undeclared_capability`). |
+| **Correlation** | candidates are the document's **structural** nodes (value slots, `File` and `Import` nodes excluded). A definition maps to the unique innermost candidate whose span contains the whole site **and** whose `name` equals the fact's `name`. A reference/call site's source is the unique innermost candidate containing the site, or the document's `File` node for a module-level use. "Innermost" means no other candidate nests inside it; two equal or crossing spans are ambiguous. A symbol whose definitions map to two nodes is ambiguous everywhere. Columns in `utf16`/`utf32` are converted to the graph's UTF-8 byte columns against the document's source text when it is readable; otherwise they are used as given and counted (`positions_unconverted`). The input is a set: order never decides. |
+| **What projects** | `reference` → `References`, whatever shape the target has. `call` → `Calls` only when the profile declares `calls`, the site is valid, and the target is `exact` and correlates — a declared capability without that site evidence emits nothing. Tier: `Scip` for an `index` producer, `Compiler` for a `compiler` one; `resolved_by` = the producer name; metadata `evidence_producer_version`, `evidence_fact` (`reference`/`call`), and `evidence_roles` when the producer gave any. Definitions are correlation evidence only (the base plane owns `Contains`/`Defines`). Self-references are dropped; a self-call (recursion) is kept. |
+| **What never projects** | everything else is counted in the `EvidenceReport` by reason — `document_not_in_graph`, `unmapped_definition`, `ambiguous_definition`, `ambiguous_source`, `unknown_target` (external, local, unmapped), `ambiguous_target`, `dynamic_target`, `self_reference`, `malformed_range` (also a site that cannot exist in the document's known text), and the adapter's `generated`, `forward_definition`, `module_symbol`. The report also counts `edges_projected`, the distinct public edges the projected facts support (several sites can support one edge). No node or target is fabricated. |
+| **Ownership and replacement** | accepted facts are §3.4 support facts owned by `(producer.name, snapshot)` and written with one `replace_edge_supports`: complete replacement, producer isolation, last-support restoration, endpoint erasure — unchanged. `snapshot` must be unique within one graph (include the repository for a multi-repo graph). The generation is the envelope's own when it has one (stale/equal rules unchanged), else the owner's stored generation + 1 (1 for a new owner) — which orders ingestion, not source freshness. An empty envelope retracts everything the owner held. |
+| **SCIP adapter** | profile `{name: tool_info.name or "scip", version: tool_info.version or "unknown", class: index, capabilities: [definitions, references]}` — **never `calls`**: SCIP's `SymbolRole` has no call role, so `f()` and `const g = f` are the same role-less occurrence. Typed ranges (SCIP 0.9+) win over the deprecated `repeated int32 range`. `Generated` occurrences, bare `ForwardDefinition`s and module symbols (trailing `/`) are dropped and counted; a malformed range is counted, never clamped to a zero span. A definition is named after the symbol's last descriptor; `local N` symbols are qualified by their document (they are document-scoped in SCIP) and named by the document's `display_name` when there is one. Snapshot: `<repo label or .>:<index path relative to the root, or its file name>`. |
+
+**Support matrix (what is real today).**
+
+| Producer | Status | Definitions | References | Calls |
+|---|---|---|---|---|
+| scip-typescript 0.4.0 | **real**: pinned sample index (`wicked-estate-resolve/tests/fixtures/scip-typescript-0.4.0`), ingested end to end | yes | yes | **no** (no call role) |
+| any other SCIP indexer (scip-java 0.13.1 Java/Kotlin, scip-dotnet 0.2.14 C#/VB, scip-clang 0.4.0 C/C++, rust-analyzer, scip-go, scip-python, …) | same adapter, **no pinned sample** in this repo | yes | yes | **no** |
+| COBOL, PL/SQL, ABAP, RPG | **contract fixtures only** (`wicked-estate/tests/fixtures/evidence/`) — no producer integration exists | fixture | fixture | PL/SQL fixture only (modelled on PL/Scope `USAGE = 'CALL'`) |
+
+A contract fixture proves that the envelope can carry a toolchain's identity shapes, not that the
+language is supported, precise or taint-ready. None of this is data-flow or taint analysis: a
+`References` or `Calls` edge says *what is used or invoked where*, nothing about values.
+
+**Migration.** Before 0.24.0 the `scip` command wrote `Calls`/`References` into the base plane
+(start-line correlation over all nodes, so since TS-S1 it could land on value slots). Those
+base edges are file-owned: the version bump's forced full re-extract on the next `index` retires
+them, and `scip` then writes support. No schema change.
+
+**Not yet.** No CLI for a raw envelope (`wicked-estate evidence ingest`) and no MCP tool: the library
+entry point is `ingest_semantic_evidence`. No document digests and no stored record of unprojected
+facts (the report is returned, not persisted).
 
 ## 4. GraphStore contract
 

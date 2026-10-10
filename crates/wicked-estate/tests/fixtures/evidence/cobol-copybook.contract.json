@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "producer": {"name": "contract-fixture-cobol-ls", "version": "0", "class": "index", "capabilities": ["definitions", "references"]},
+  "snapshot": "payroll",
+  "documents": [
+    {"path": "src/PAYROLL.cbl", "position_encoding": "utf8"},
+    {"path": "copy/EMPREC.cpy", "position_encoding": "utf8"}
+  ],
+  "facts": [
+    {"kind": "definition", "fact_id": "def CALC-TAX", "symbol": "cobol PAYROLL CALC-TAX", "name": "CALC-TAX",
+     "site": {"document": "src/PAYROLL.cbl", "range": {"start_line": 20, "start_col": 7, "end_line": 20, "end_col": 15}}},
+    {"kind": "definition", "fact_id": "def EMP-SALARY", "symbol": "cobol copybook EMPREC EMP-SALARY", "name": "EMP-SALARY",
+     "site": {"document": "copy/EMPREC.cpy", "range": {"start_line": 3, "start_col": 11, "end_line": 3, "end_col": 21}}},
+    {"kind": "reference", "fact_id": "ref EMP-SALARY 22", "symbol": "cobol copybook EMPREC EMP-SALARY", "roles": ["read"],
+     "site": {"document": "src/PAYROLL.cbl", "range": {"start_line": 22, "start_col": 22, "end_line": 22, "end_col": 32}}},
+    {"kind": "call", "fact_id": "call TAXCALC 24", "target": {"resolution": "exact", "symbol": "cobol TAXCALC"},
+     "site": {"document": "src/PAYROLL.cbl", "range": {"start_line": 24, "start_col": 11, "end_line": 24, "end_col": 25}}}
+  ]
+}

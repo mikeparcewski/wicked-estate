@@ -42,12 +42,18 @@ pub enum ResolutionTier {
     Scip,
     /// on-demand LSP — precise.
     Lsp,
+    /// A compiler or toolchain catalog's semantic evidence (TS-S2C) — precise for what it
+    /// declares. Distinct from `Scip` so a compiler fact is never attributed to an index.
+    Compiler,
 }
 
 impl ResolutionTier {
     pub fn default_confidence(self) -> Confidence {
         Confidence::new(match self {
-            ResolutionTier::Parsed | ResolutionTier::Scip | ResolutionTier::Lsp => 1.0,
+            ResolutionTier::Parsed
+            | ResolutionTier::Scip
+            | ResolutionTier::Lsp
+            | ResolutionTier::Compiler => 1.0,
             ResolutionTier::Tsg => 0.8,
             ResolutionTier::ImportMap => 0.6,
             ResolutionTier::Heuristic => 0.5,
@@ -64,6 +70,7 @@ impl ResolutionTier {
             ResolutionTier::Tsg => Provenance::Tsg,
             ResolutionTier::Scip => Provenance::Scip,
             ResolutionTier::Lsp => Provenance::Lsp,
+            ResolutionTier::Compiler => Provenance::Compiler,
         }
     }
 }
@@ -81,6 +88,8 @@ pub enum Provenance {
     Tsg,
     Scip,
     Lsp,
+    /// A compiler or toolchain catalog (TS-S2C semantic evidence, `ProducerClass::Compiler`).
+    Compiler,
     /// A dynamic-dispatch synthesizer, by name (e.g. "callback-edge-v2").
     Synthesizer(String),
     /// A drop-in extractor, by name (e.g. "event-bus", "django-orm").

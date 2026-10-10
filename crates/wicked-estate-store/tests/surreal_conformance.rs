@@ -79,3 +79,9 @@ fn surrealstore_multi_file_contributions() {
 fn surrealstore_support_replacement() {
     conformance::support_replacement_suite(&mut fresh());
 }
+
+/// TS-S2C semantic evidence ingested through the support plane.
+#[test]
+fn surrealstore_semantic_evidence() {
+    conformance::semantic_evidence_suite(&mut fresh());
+}

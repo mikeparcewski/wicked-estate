@@ -43,6 +43,7 @@ fn arb_resolution_tier() -> impl Strategy<Value = ResolutionTier> {
         Just(ResolutionTier::Tsg),
         Just(ResolutionTier::Scip),
         Just(ResolutionTier::Lsp),
+        Just(ResolutionTier::Compiler),
     ]
 }
 

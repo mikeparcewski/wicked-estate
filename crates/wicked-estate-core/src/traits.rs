@@ -97,6 +97,35 @@ pub trait GraphRead: Send {
     fn capabilities(&self) -> StoreCapabilities;
     fn get_node(&self, id: &SymbolId) -> Result<Option<Node>>;
     fn find_symbols(&self, query: &SymbolQuery) -> Result<Vec<Node>>;
+    /// How many nodes [`find_symbols`](Self::find_symbols) would return for `query` with no
+    /// `limit` (`query.limit` is ignored) — without materialising them (#177).
+    ///
+    /// The default counts `find_symbols(..)` and so stays correct for every backend; a backend that
+    /// can push the `kinds` / `language` / `exact_name` / `scope_prefix` predicates into a `COUNT`
+    /// should override it (`SqliteStore` does). Conformance pins equality with the default.
+    fn count_symbols(&self, query: &SymbolQuery) -> Result<usize> {
+        let mut q = query.clone();
+        q.limit = None;
+        Ok(self.find_symbols(&q)?.len())
+    }
+    /// [`find_symbols`](Self::find_symbols) with synthetic value-flow slots
+    /// ([`Node::is_value_flow_node`]) excluded BEFORE `limit` applies (#218): the `limit` real
+    /// symbols in the store's own order, never a window a slot displaced. Name→symbol seeding goes
+    /// through this, so the exclusion is a guarantee rather than an over-fetch heuristic.
+    ///
+    /// The default fetches without a limit, filters, then truncates — exact on every backend. A
+    /// backend whose `find_symbols` pushes `LIMIT` into its query may override it with a
+    /// store-side predicate.
+    fn find_structural_symbols(&self, query: &SymbolQuery) -> Result<Vec<Node>> {
+        let mut q = query.clone();
+        q.limit = None;
+        let mut nodes = self.find_symbols(&q)?;
+        nodes.retain(|n| !n.is_value_flow_node());
+        if let Some(limit) = query.limit {
+            nodes.truncate(limit);
+        }
+        Ok(nodes)
+    }
     /// Edges incident to `id` in the given direction. The edge-direction invariant is enforced
     /// here: `Direction::Dependents` returns edges where `target == id`.
     fn neighbors(&self, id: &SymbolId, dir: Direction) -> Result<Vec<Edge>>;
@@ -205,6 +234,19 @@ pub trait GraphRead: Send {
     fn edge_history(&self, file: &str) -> Result<Vec<HistoricalEdge>>;
     /// The stored source text for `file`, if any. (Wave 11.1 content store)
     fn file_content(&self, file: &str) -> Result<Option<String>>;
+    /// The call references carrying value-flow facts that `file`'s last extraction produced — a
+    /// JSON array of [`UnresolvedRef`], hints included — as recorded by
+    /// [`GraphWrite::set_file_call_refs`] (#220). They let an incremental index re-derive the
+    /// call-derived `flows_to` edges into a changed callee from an UNCHANGED caller by
+    /// re-resolving these refs, instead of re-parsing the caller.
+    ///
+    /// `None` = not recorded: a store written before 0.23, or a backend that does not persist
+    /// them (this default). The indexer then re-extracts the caller, the pre-#220 behaviour, so
+    /// the default is always correct, only slower.
+    fn file_call_refs(&self, file: &str) -> Result<Option<String>> {
+        let _ = file;
+        Ok(None)
+    }
     /// The source slice for `node` (from its file's stored content + location span). (Wave 11.1)
     fn symbol_source(&self, node: &Node) -> Result<Option<String>>;
     /// Change-log deltas with `seq > cursor`, oldest first — for reactive subscription. A subscriber
@@ -320,6 +362,14 @@ pub trait GraphWrite {
     fn set_repo_info(&mut self, info: &RepoInfo) -> Result<()>;
     /// Store a file's source text (the content store — lets retrieval return real code). (Wave 11.1)
     fn set_file_content(&mut self, file: &str, text: &str) -> Result<()>;
+    /// Record the value-flow call references `file`'s extraction produced (a JSON array of
+    /// [`UnresolvedRef`]; `[]` records "none"), read back by [`GraphRead::file_call_refs`].
+    /// Owned by `file`: [`GraphWrite::remove_file`] deletes the record. The default records
+    /// nothing, which keeps the indexer on its re-extract path for this store (#220).
+    fn set_file_call_refs(&mut self, file: &str, refs_json: &str) -> Result<()> {
+        let _ = (file, refs_json);
+        Ok(())
+    }
     /// Delete edges whose `source` or `target` is no longer a node (orphans left by incremental
     /// removal of a file's symbols). Returns the count pruned. Keeps blast-radius from over-reporting.
     ///
