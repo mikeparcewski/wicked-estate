@@ -51,3 +51,22 @@ export function sanitized(raw: string): string {
   const clean = sanitize(raw);
   return clean;
 }
+
+// ADR-014 S5b expected NON-flows. An unrelated parameter does not reach a call's result.
+export function returnCallUnrelated(raw: string, unrelated: string): string {
+  const unused = unrelated;
+  return raw.trim();
+}
+
+// A `return` inside a callback is the callback's, never the enclosing function's.
+export function callbackReturn(src: string, items: string[]): string {
+  items.forEach((it) => {
+    return src.trim();
+  });
+  return 'done';
+}
+
+// Out of S5b's scope: a chained receiver (the outer call's receiver is itself a call).
+export function chainedReceiver(raw: string): string {
+  return raw.trim().toLowerCase();
+}
