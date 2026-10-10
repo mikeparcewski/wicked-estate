@@ -30,7 +30,7 @@ Three options, judged per producer tier:
 | cross-file call argument and result | ✅ present when the call resolves uniquely | `present_rows_are_reachable` |
 | closure-captured local | ✅ captured; ✅ through a returned no-parameter, single-identifier arrow (`return () => captured`, `may_influence`, S5b); every other closure shape ❌ | `s5b_return_composition` |
 | destructuring (`const {k} = obj`) | ✅ flat patterns over an identifier (shorthand, renamed, defaulted, rest, array elements), `may_influence` (S5c); nested patterns and member/call sources ❌ | `s5c_destructuring` |
-| loops (`for … of`, loop-carried `acc = acc + it`) | ❌ absent | `missing_primitives_are_unreachable` |
+| loops (`for … of`, loop-carried `acc = acc + it`) | ✅ `for…of` over an identifier binds each element (identifier, flat array or shorthand object pattern); `acc = acc + it` and `acc += it` combine their identifier operands; all `may_influence` (S5d). `for…in` keys ❌ by design | `s5d_loop_binding` |
 | promises and callbacks | ❌ absent | `missing_primitives_are_unreachable` |
 | object-literal property writes | ❌ absent (reads are path-keyed slots) | `missing_primitives_are_unreachable` |
 | sanitizer-like calls (`clean = sanitize(raw)`) | ✅ the argument enters, and the result comes back out (S5b): `return raw.replace(..)` is a `may_influence` hop from the identifier receiver and arguments. A chained receiver (`raw.trim().x()`) is ❌. This is value flow, **not** a sanitizer model | `s5b_return_composition` |
@@ -78,6 +78,32 @@ Baseline `4470b52` (the S5b slice's code, = main `b9a0348`). Candidate `0b5d2d3`
 | capped-away new-construct rows (inconclusive) | 0 | 0 | 0 |
 
 **Verdict: S5c passes every gate.** Readiness diff: `s5c_destructuring`, plus the `destructuring` row of the semantics table.
+
+### S5d: loop element binding and loop-carried reassignment
+Baseline `0b5d2d3` (the S5c slice's code, = main `7c6d876`). Candidate `26c6de2` (code-identical to this slice after its rebase). Workflow run `38066772500`, branch `measure/ts-s5d`.
+
+| metric | Covalent `438c297` | estate tree `0b5d2d3` | gate |
+|---|---|---|---|
+| `flows_to` edges | 1496 → 1502 (**+0.40 %**) | 138 → 140 (+1.45 %) | ≤ +25 % |
+| full index, median of 3 | 7.33 s → 7.20 s (−1.70 %) | 5.56 s → 5.52 s (−0.60 %) | ≤ +15 % |
+| incremental re-index, median of 3 | 0.96 s → 0.98 s (+2.70 %) | 2.06 s → 2.08 s (+0.85 %) | ≤ +15 % |
+| DB size | 80,199,680 → 80,269,312 B (+0.09 %) | 55,439,360 → 55,439,360 B (0.00 %) | ≤ +10 % |
+| Lineage, 10 fixed queries newly truncated | 0 | 0 | 0 |
+| Lineage sweep newly truncated | 0 of 520 | 0 of 115 | 0 |
+| `value_preserving` rows from a new construct | 0 (4 `loop_element`, 2 `augmented_assignment`) | 0 (1 `loop_element`, 1 `reassignment_expression`) | 0 |
+| capped-away new-construct rows (inconclusive) | 0 | 0 | 0 |
+
+**Verdict: S5d passes every gate.** Its yield on Covalent is small (6 edges). That Angular code iterates mostly through `forEach`/`map` callbacks, which stay out of Option 2 with every other callback. `reassignment_expression` never fired on Covalent.
+
+### Graduation (S5b–S5d together)
+All three slices passed every gate. **Primitives 1–3 graduate.** Cumulative on Covalent against `2b6bf7f`: `flows_to` 1394 → 1502 (+7.7 %), and full index 7.15 s → 7.20 s, each slice measured against the one before it. Still unsupported:
+- every closure shape other than the single-identifier returned arrow;
+- promises and callbacks;
+- property writes;
+- path conditions;
+- aliasing.
+
+Option 3 stays no-go. Primitive 4 (closure returns, beyond the narrow S5b form) may now be evaluated under the same gates.
 
 ## Original recommendation (superseded by the decision above): Option 1 now, Option 2 only behind one bounded prototype, Option 3 no-go
 
@@ -135,4 +161,4 @@ Promises, property writes and path conditions are explicitly **out** of Option 2
 - **S5d:** primitive 3 (loop element binding and loop-carried reassignment), measured against the kill criteria. Each slice lands as its own PR, so a gate miss deletes exactly that slice (see "Kill criteria"). Graduation evidence is the metrics table, the readiness diff and the corpus revisions.
 
 ## Next-session prompt
-> Read docs/adr/ADR-014-dataflow-taint-decision.md (Accepted: Option 2) and its "Measurements" section. Implement the next unlanded slice of S5b–S5d only, as TypeScript query data in `crates/wicked-estate-extract/src/queries/typescript.scm` plus the smallest engine change it needs. Flip its row in `crates/wicked-estate/tests/dataflow_readiness.rs` into a positive test with expected flows, expected non-flows and the expected semantics of every edge: `value_preserving` only for a whole-value transfer, `may_influence` for a contribution or transformation. Every summary stays path-insensitive whatever its semantics. Then measure it with this ADR's procedure against the baseline commit on both corpora (estate's own tree and the pinned Covalent substitute). A gate miss deletes the slice, and its numbers are recorded here either way.
+> Read docs/adr/ADR-014-dataflow-taint-decision.md (Accepted: Option 2; S5b–S5d graduated, see "Measurements"). Primitive 4 (closure returns beyond `return () => ident`) may be evaluated as one slice: TypeScript query data, a positive readiness test with expected flows, non-flows and semantics that is red before the change, then `scripts/measure-dataflow.py` against main on estate's tree and `Teradata/covalent@438c297`. A gate miss deletes the slice. Option 3 stays no-go unless its positive-evidence falsifier is met.
