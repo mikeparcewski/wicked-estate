@@ -470,6 +470,257 @@
   (#any-of? @_cb_method "filter" "find" "findLast")
 ) @flow.influence.convention.callback_select
 
+; ADR-014 S6b, `await` and `.then`. An awaited or `.then`-resolved value is the promise's RESULT,
+; not the promise, so every hop is `may_influence`. `await p` reads an identifier promise; `await
+; f(x)` composes like `return_call` (S5b): the call's identifier receiver and arguments influence
+; its awaited result. When the callee resolves uniquely, its return slot reaches the awaited
+; binding too (`@call.result.awaited`, the engine's `await_result` hop). No async model: the
+; ordering of settlements, rejections and `.catch` are not represented. A `.then` call is excluded
+; from this composition (and from S5b's `return_call`): its result is its callback's returned
+; value (`then_return` below), and `p` reaching it directly would bypass the callback. The callee's
+; text must not END in the word `then` (`p.then`, `p. then`, `p./* c */then`, a bare `then`);
+; every other callee composes as before.
+(variable_declarator
+  name: (identifier) @flow.consumer.local
+  value: (await_expression (identifier) @flow.producer.local)
+) @flow.influence.syntax.await_value
+
+(return_statement
+  (await_expression (identifier) @flow.producer.local) @flow.consumer.return
+) @flow.influence.syntax.await_value
+
+(variable_declarator
+  name: (identifier) @flow.consumer.local
+  value: (await_expression
+    [(call_expression
+       function: (member_expression object: (identifier) @flow.producer.local) @_await_fn)
+     (call_expression
+       function: (_) @_await_fn
+       arguments: (arguments (identifier) @flow.producer.local))])
+  (#not-match? @_await_fn "(^|[^A-Za-z0-9_$])then$")
+) @flow.influence.syntax.await_call
+
+(return_statement
+  (await_expression
+    [(call_expression
+       function: (member_expression object: (identifier) @flow.producer.local) @_await_fn)
+     (call_expression
+       function: (_) @_await_fn
+       arguments: (arguments (identifier) @flow.producer.local))])
+    @flow.consumer.return
+  (#not-match? @_await_fn "(^|[^A-Za-z0-9_$])then$")
+) @flow.influence.syntax.await_call
+
+(variable_declarator
+  name: (identifier) @call.result.awaited
+  value: (await_expression (call_expression) @call.value))
+
+; `p.then(v => …)`: `convention` evidence, like S6a's callbacks: the name `then` does not prove a
+; Promise (any thenable matches). The callback's first parameter (a TypeScript `this` parameter is
+; skipped) is the promise's result. The promise is an identifier, a class field, a call whose
+; identifier receiver and arguments compose into it, or an inline `.then` whose callback's returned
+; value it is (a chain). A resolved call's return slot reaches `v` through `@call.result.then`
+; (the engine's `then_result`). A named callback (`p.then(fmt)`), the rejection handler and `.catch`
+; contribute nothing.
+(call_expression
+  function: (member_expression
+    object: [(identifier) @flow.producer.local
+             (member_expression
+               object: (this)
+               property: (property_identifier) @flow.producer.field)]
+    property: (property_identifier) @_then)
+  arguments: (arguments
+    .
+    [(arrow_function parameter: (identifier) @flow.consumer.local)
+     (arrow_function
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))
+     (function_expression
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))
+     (function_expression
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (this))
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))])
+  (#eq? @_then "then")
+) @flow.influence.convention.then_value
+
+(call_expression
+  function: (member_expression
+    object: (call_expression
+              function: (identifier)
+              arguments: (arguments (identifier) @flow.producer.local))
+    property: (property_identifier) @_then)
+  arguments: (arguments
+    .
+    [(arrow_function parameter: (identifier) @flow.consumer.local)
+     (arrow_function
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))
+     (function_expression
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))
+     (function_expression
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (this))
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))])
+  (#eq? @_then "then")
+) @flow.influence.convention.then_value
+
+(call_expression
+  function: (member_expression
+    object: (call_expression
+              function: (member_expression
+                object: (identifier) @flow.producer.local
+                property: (property_identifier) @_inner))
+    property: (property_identifier) @_then)
+  arguments: (arguments
+    .
+    [(arrow_function parameter: (identifier) @flow.consumer.local)
+     (arrow_function
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))
+     (function_expression
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))
+     (function_expression
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (this))
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))])
+  (#eq? @_then "then")
+  (#not-eq? @_inner "then")
+) @flow.influence.convention.then_value
+
+(call_expression
+  function: (member_expression
+    object: (call_expression
+              function: (member_expression
+                property: (property_identifier) @_inner)
+              arguments: (arguments (identifier) @flow.producer.local))
+    property: (property_identifier) @_then)
+  arguments: (arguments
+    .
+    [(arrow_function parameter: (identifier) @flow.consumer.local)
+     (arrow_function
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))
+     (function_expression
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))
+     (function_expression
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (this))
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))])
+  (#eq? @_then "then")
+  (#not-eq? @_inner "then")
+) @flow.influence.convention.then_value
+
+(call_expression
+  function: (member_expression
+    object: (call_expression
+              function: (member_expression
+                property: (property_identifier) @_inner)
+              arguments: (arguments
+                .
+                [(arrow_function) (function_expression)] @flow.producer.callable_return))
+    property: (property_identifier) @_then)
+  arguments: (arguments
+    .
+    [(arrow_function parameter: (identifier) @flow.consumer.local)
+     (arrow_function
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))
+     (function_expression
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))
+     (function_expression
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (this))
+         .
+         (required_parameter pattern: (identifier) @flow.consumer.local)))])
+  (#eq? @_then "then")
+  (#eq? @_inner "then")
+) @flow.influence.convention.then_value
+
+(call_expression
+  function: (member_expression
+    object: (call_expression) @call.value
+    property: (property_identifier) @_then)
+  arguments: (arguments
+    .
+    [(arrow_function parameter: (identifier) @call.result.then)
+     (arrow_function
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (identifier) @call.result.then)))
+     (function_expression
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (identifier) @call.result.then)))
+     (function_expression
+       parameters: (formal_parameters
+         .
+         (required_parameter pattern: (this))
+         .
+         (required_parameter pattern: (identifier) @call.result.then)))])
+  (#eq? @_then "then"))
+
+; The `.then` callback's RETURN is the chained promise's result (`@flow.producer.callable_return`,
+; as `callback_return` in S6a), read by a binding, an `await`ed binding or the owner's return.
+(variable_declarator
+  name: (identifier) @flow.consumer.local
+  value: [(call_expression
+            function: (member_expression
+              property: (property_identifier) @_then)
+            arguments: (arguments
+              .
+              [(arrow_function) (function_expression)] @flow.producer.callable_return))
+          (await_expression
+            (call_expression
+              function: (member_expression
+                property: (property_identifier) @_then)
+              arguments: (arguments
+                .
+                [(arrow_function) (function_expression)] @flow.producer.callable_return)))]
+  (#eq? @_then "then")
+) @flow.influence.convention.then_return
+
+(return_statement
+  [(call_expression
+     function: (member_expression
+       property: (property_identifier) @_then)
+     arguments: (arguments
+       .
+       [(arrow_function) (function_expression)] @flow.producer.callable_return))
+   (await_expression
+     (call_expression
+       function: (member_expression
+         property: (property_identifier) @_then)
+       arguments: (arguments
+         .
+         [(arrow_function) (function_expression)] @flow.producer.callable_return)))] @flow.consumer.return
+  (#eq? @_then "then")
+) @flow.influence.convention.then_return
+
 ; this.field = value
 (expression_statement
   (assignment_expression
@@ -614,12 +865,15 @@
 (return_statement
   (call_expression
     function: (member_expression
-      object: (identifier) @flow.producer.local)) @flow.consumer.return
+      object: (identifier) @flow.producer.local) @_return_fn) @flow.consumer.return
+  (#not-match? @_return_fn "(^|[^A-Za-z0-9_$])then$")
 ) @flow.influence.syntax.return_call
 
 (return_statement
   (call_expression
+    function: (_) @_return_fn
     arguments: (arguments (identifier) @flow.producer.local)) @flow.consumer.return
+  (#not-match? @_return_fn "(^|[^A-Za-z0-9_$])then$")
 ) @flow.influence.syntax.return_call
 
 ; The one closure shape S5b carries (ADR-014): a returned arrow with NO parameters whose body is

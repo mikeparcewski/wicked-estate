@@ -383,7 +383,14 @@ fn value_containment_edge(node: &Node) -> Edge {
 /// call was resolved, so a 0.5 `name-resolver` binding yields 0.5 flow, never Parsed
 /// (`docs/ENGINE-CONTRACT.md` §3.2). The classification is orthogonal — argument→parameter and
 /// return→callsite both carry the producer's value whole, hence `ValuePreserving`.
-fn flow_edge(source: SymbolId, target: SymbolId, call_edge: &Edge, construct: &str) -> Edge {
+fn flow_edge(
+    source: SymbolId,
+    target: SymbolId,
+    call_edge: &Edge,
+    construct: &str,
+    semantics: FlowSemantics,
+    evidence: FlowEvidence,
+) -> Edge {
     let mut edge = Edge::new(
         source,
         target,
@@ -394,13 +401,7 @@ fn flow_edge(source: SymbolId, target: SymbolId, call_edge: &Edge, construct: &s
     edge.confidence = call_edge.confidence;
     edge.provenance = call_edge.provenance.clone();
     edge.location = call_edge.location.clone();
-    FlowFact::new(
-        FlowSemantics::ValuePreserving,
-        FlowEvidence::CallDerived,
-        construct,
-        CALL_FLOW_PRODUCER,
-    )
-    .apply(&mut edge);
+    FlowFact::new(semantics, evidence, construct, CALL_FLOW_PRODUCER).apply(&mut edge);
     edge
 }
 
@@ -718,6 +719,13 @@ fn call_value_flow(
             .map_err(|error| value_flow_hint_decode_error(&site_key, error))?;
         let target = value_flow_result(hint)
             .map_err(|error| value_flow_hint_decode_error(&site_key, error))?;
+        // ADR-014 S6b: `"await"` / `"then"` when the target binds what the returned promise
+        // settles to; absent for a plain result.
+        let settled = hint
+            .get("result")
+            .and_then(|result| result.get("settled"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         let params = callable_param_names(&callee);
         let Some(site) = call_edge.location.clone() else {
             continue;
@@ -755,6 +763,8 @@ fn call_value_flow(
                 arg_symbol,
                 &call_edge,
                 "call_argument",
+                FlowSemantics::ValuePreserving,
+                FlowEvidence::CallDerived,
             ));
         }
 
@@ -781,12 +791,42 @@ fn call_value_flow(
                 edges.push(value_containment_edge(&node));
                 nodes.push(node);
             }
-            edges.push(flow_edge(
+            // ADR-014 S6b: a SETTLED result (`await f(x)`, `f(x).then(r => …)`) is what the
+            // returned promise settles to, not the returned value itself: `may_influence`. The
+            // `then` binding rests on a naming convention that proves no Promise, so its evidence
+            // is `convention` and it is no surer than a Heuristic edge.
+            let (construct, semantics, evidence) = match settled.as_deref() {
+                Some("await") => (
+                    "await_result",
+                    FlowSemantics::MayInfluence,
+                    FlowEvidence::CallDerived,
+                ),
+                Some("then") => (
+                    "then_result",
+                    FlowSemantics::MayInfluence,
+                    FlowEvidence::Convention,
+                ),
+                _ => (
+                    "call_result",
+                    FlowSemantics::ValuePreserving,
+                    FlowEvidence::CallDerived,
+                ),
+            };
+            let mut edge = flow_edge(
                 target_symbol,
                 return_symbol,
                 &call_edge,
-                "call_result",
-            ));
+                construct,
+                semantics,
+                evidence,
+            );
+            if evidence == FlowEvidence::Convention {
+                let cap = ResolutionTier::Heuristic.default_confidence();
+                if edge.confidence.get() > cap.get() {
+                    edge.confidence = cap;
+                }
+            }
+            edges.push(edge);
         }
     }
 

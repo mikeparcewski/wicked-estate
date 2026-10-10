@@ -18,6 +18,7 @@ struct Flow {
     consumer: String,
     semantics: Vec<String>,
     metadata_keys: Vec<String>,
+    confidence: f32,
     /// `(construct, semantics)` of every support row merged into this edge.
     supports: Vec<(String, String)>,
 }
@@ -55,6 +56,7 @@ fn graph() -> &'static Graph {
                     .map(|s| s.as_str().to_string())
                     .collect(),
                 metadata_keys: e.metadata.keys().cloned().collect(),
+                confidence: e.confidence.get(),
                 supports: e
                     .metadata
                     .get("flow_support")
@@ -315,6 +317,7 @@ fn every_edge_matches_the_expected_semantics_table() {
         ("await_result", "may_influence"),
         ("then_value", "may_influence"),
         ("then_return", "may_influence"),
+        ("then_result", "may_influence"),
     ]
     .into_iter()
     .collect();
@@ -354,6 +357,7 @@ fn every_edge_matches_the_expected_semantics_table() {
         "await_result",
         "then_value",
         "then_return",
+        "then_result",
     ] {
         assert!(seen.contains(construct), "{construct} never fired");
     }
@@ -675,7 +679,7 @@ fn s6b_await_and_then() {
         (
             value("fetchName", "fetchName.return"),
             scoped("thenCall", ":local:v@1"),
-            "await_result",
+            "then_result",
         ),
         (
             scoped("thenAwait", ":local:v@1"),
@@ -705,6 +709,69 @@ fn s6b_await_and_then() {
             "{owner}: {from}"
         );
     }
+    // `then` is a naming convention: its resolved-callee hop is no surer than a Heuristic edge.
+    let then_result = edge(
+        &value("fetchName", "fetchName.return"),
+        &scoped("thenCall", ":local:v@1"),
+    );
+    assert!(then_result.confidence <= 0.5, "{}", then_result.confidence);
+    // A chain: the second callback's parameter is the FIRST callback's returned value, not `p`.
+    let w = scoped("thenChain", ":local:w@1");
+    assert_eq!(
+        supports(&value("thenChain", "fallback"), &w),
+        vec![influence("then_value")]
+    );
+    assert!(reaches(
+        &value("thenChain", "fallback"),
+        &value("thenChain", "thenChain.return")
+    ));
+    assert!(
+        !graph()
+            .flows
+            .iter()
+            .any(|f| f.producer == value("thenChain", "p") && f.consumer == w),
+        "p bypasses the first callback"
+    );
+    // An awaited or returned `.then` is its callback's returned value: `p` never bypasses it.
+    for owner in [
+        "thenAwaitConst",
+        "thenAwaitReturn",
+        "thenRejected",
+        "thenSpaced",
+        "thenMultiline",
+        "thenNested",
+        "thenNestedComment",
+    ] {
+        let ret = value(owner, &format!("{owner}.return"));
+        assert!(
+            !reaches(&value(owner, "p"), &ret),
+            "{owner}: p bypasses the callback"
+        );
+        assert!(
+            reaches(&value(owner, "fallback"), &ret),
+            "{owner}: fallback"
+        );
+    }
+    for (owner, arg) in [
+        ("returnNonNull", "raw"),
+        ("returnImport", "path"),
+        ("returnIife", "raw"),
+        ("returnStrengthen", "raw"),
+    ] {
+        assert_eq!(
+            supports(
+                &value(owner, arg),
+                &value(owner, &format!("{owner}.return"))
+            ),
+            vec![influence("return_call")],
+            "{owner}"
+        );
+    }
+    // A nested `.then`'s receiver is no contributor of the outer callback's return.
+    assert!(!reaches(
+        &value("thenNested", "other"),
+        &value("thenNested", "thenNested.return")
+    ));
     // Expected non-flows.
     assert!(!reaches(
         &value("awaitCall", "unrelated"),
