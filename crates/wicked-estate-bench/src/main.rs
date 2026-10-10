@@ -3,10 +3,14 @@
 //! All benchmark logic lives in [`wicked_estate_bench::capability`]; this file is intentionally thin.
 //!
 //! Usage:
-//!   cargo run -p wicked-estate-bench --bin wicked-estate-bench -- [path ...]
+//!   wicked-estate-bench [--no-report] [path ...]   capability benchmark (index speed, footprint,
+//!                                                   resolution diagnostics); JSON on stdout
+//!   wicked-estate-bench --recall                    memory recall@5 gate (exit 1 below the gate)
 //!
-//! With no arguments, benchmarks the workspace root. Pass one or more repo paths as arguments to
-//! benchmark additional repositories.
+//! With no paths, benchmarks the workspace root. `--no-report` skips rewriting the committed
+//! Markdown report. An unknown flag or a path that does not exist is a usage error (exit 2), and a
+//! requested repo that fails to benchmark fails the run (exit 1) — a receipt never silently drops
+//! an input (BENCH-02). There is no golden-set / agent A/B runner here.
 
 use std::path::PathBuf;
 
@@ -29,8 +33,39 @@ fn main() -> Result<()> {
     eprintln!("bench: WICKED_ESTATE_PLUGINS pinned to empty dir for hermetic baselines");
 
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let usage =
+        "usage: wicked-estate-bench [--no-report] [path ...]\n       wicked-estate-bench --recall";
+    let mut recall = false;
+    let mut write_report = true;
+    let mut path_args: Vec<PathBuf> = Vec::new();
+    for a in &args {
+        match a.as_str() {
+            "--recall" => recall = true,
+            "--no-report" => write_report = false,
+            "-h" | "--help" => {
+                println!("{usage}");
+                return Ok(());
+            }
+            flag if flag.starts_with('-') => {
+                eprintln!("{usage}\nunknown flag {flag:?}");
+                std::process::exit(2);
+            }
+            path => {
+                let p = PathBuf::from(path);
+                if !p.exists() {
+                    eprintln!("{usage}\npath does not exist: {}", p.display());
+                    std::process::exit(2);
+                }
+                path_args.push(p);
+            }
+        }
+    }
+    if recall && (!path_args.is_empty() || !write_report) {
+        eprintln!("{usage}\n--recall takes no paths and no --no-report");
+        std::process::exit(2);
+    }
 
-    if args.iter().any(|a| a == "--recall") {
+    if recall {
         let k = 5;
         eprintln!("wicked-estate-bench: running memory recall@{k} benchmark ...");
         let report = run_memory_recall_bench(k)?;
@@ -48,7 +83,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let paths: Vec<PathBuf> = if args.is_empty() {
+    let paths: Vec<PathBuf> = if path_args.is_empty() {
         let defaults = default_paths();
         if defaults.is_empty() {
             eprintln!("No paths provided and no defaults found on disk.");
@@ -56,7 +91,7 @@ fn main() -> Result<()> {
             eprintln!(
                 "  cargo run -p wicked-estate-bench --bin wicked-estate-bench -- /path/to/repo"
             );
-            return Ok(());
+            std::process::exit(2);
         }
         eprintln!(
             "wicked-estate-bench: using {} default repo(s)",
@@ -67,26 +102,25 @@ fn main() -> Result<()> {
         }
         defaults
     } else {
-        args.iter()
-            .map(PathBuf::from)
-            .filter(|p| {
-                if p.exists() {
-                    true
-                } else {
-                    eprintln!("WARN: path does not exist, skipping: {}", p.display());
-                    false
-                }
-            })
-            .collect()
+        path_args
     };
 
     eprintln!();
-    let report = run_benchmark(&paths, /* write_report = */ true)?;
+    let report = run_benchmark(&paths, write_report)?;
     print_summary_table(&report.repos);
 
     // Machine-readable JSON to stdout.
     println!("{}", serde_json::to_string_pretty(&report)?);
 
+    // Corpus admission: every requested repo must be measured.
+    if report.repos.len() != paths.len() {
+        eprintln!(
+            "wicked-estate-bench: measured {} of {} requested repo(s) — failing the run",
+            report.repos.len(),
+            paths.len()
+        );
+        std::process::exit(1);
+    }
     Ok(())
 }
 

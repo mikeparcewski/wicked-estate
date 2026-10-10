@@ -300,8 +300,13 @@ fn footprint_and_speed_within_ceilings() {
         "who_calls_count must equal blast_radius_node_count"
     );
     assert!(
-        m.blast_radius_coverage_pct >= 0.0 && m.blast_radius_coverage_pct <= 100.0,
-        "blast_radius_coverage_pct must be in [0, 100]"
+        m.direct_ref_resolution_pct
+            .is_none_or(|p| (0.0..=100.0).contains(&p)),
+        "direct_ref_resolution_pct must be in [0, 100] when known"
+    );
+    assert!(
+        m.direct_ref_resolution_pct.is_none() || m.direct_refs_unresolved.is_some(),
+        "a percentage requires a known denominator"
     );
     // languages Vec must have at least one entry for a non-empty repo.
     assert!(
