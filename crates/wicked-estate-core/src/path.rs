@@ -94,8 +94,8 @@ pub struct PathResult {
 ///
 /// The name query matches the one `blast-radius` issues, including its rule that a synthetic
 /// value-flow node (wicked-estate#207, `Node::is_value_flow_node`) is never resolved by NAME:
-/// those slots are addressable only by their exact `SymbolId`, which the fallback below still
-/// accepts. The same semantics hold by construction, not by sharing a helper (that helper
+/// those slots are addressable only by their exact `SymbolId`, which the exact-id check
+/// accepts first. The same semantics hold by construction, not by sharing a helper (that helper
 /// lives in a crate core cannot depend on). Candidates are sorted by `SymbolId` string so the
 /// winner is a property of the data: `MemStore` sorts `find_symbols` by symbol string while
 /// `SqliteStore` orders by an autoincrement row id, and taking either store's order would
@@ -104,7 +104,14 @@ pub struct PathResult {
 /// Public so the CLI's RetrievalTool bridge resolves a `traverse` operand under exactly this
 /// rule — one name-vs-id visibility policy for `path` and every bridged command, not a copy
 /// per surface (CLAUDE.md §11).
+///
+/// An exact `SymbolId` wins first (W8.5 review): an id is the most specific form, and a name
+/// that happens to spell another node's id must not redirect the query to a different symbol.
 pub fn resolve_operand(store: &dyn GraphRead, value: &str) -> Result<Vec<SymbolId>> {
+    let as_id = SymbolId(value.to_string());
+    if store.get_node(&as_id)?.is_some() {
+        return Ok(vec![as_id]);
+    }
     let query = SymbolQuery {
         exact_name: Some(value.to_string()),
         ..Default::default()
@@ -115,14 +122,6 @@ pub fn resolve_operand(store: &dyn GraphRead, value: &str) -> Result<Vec<SymbolI
         .filter(|n| !n.is_value_flow_node())
         .map(|n| n.symbol)
         .collect();
-    if ids.is_empty() {
-        // Not a symbol name — the caller may be passing an id straight back from
-        // SearchEntity or TraverseGraph, which is the form an agent actually holds.
-        let as_id = SymbolId(value.to_string());
-        if store.get_node(&as_id)?.is_some() {
-            ids.push(as_id);
-        }
-    }
     ids.sort_by(|a, b| a.0.cmp(&b.0));
     ids.dedup();
     Ok(ids)

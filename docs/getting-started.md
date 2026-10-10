@@ -213,55 +213,37 @@ The same query is available to agents as the MCP `Path` tool (§10).
 ### Lineage — what a symbol depends on, or where its value goes
 
 ```bash
-wicked-estate lineage --symbol <SYMBOL_ID> [--depth N] [--relation flows_to] [--json] [--db ...]
+wicked-estate lineage <symbol> [--depth N] [--relation flows_to] [--json] [--db ...]
 ```
 
-The CLI twin of the MCP `Lineage` tool (§10): it parses the flags, invokes the same tool, and
-renders its result. Without `--relation` it is dependency lineage over `Calls` + `Imports`. With
-`--relation flows_to` it is **static semantic value lineage**, producer → consumer, over the
-evidence-bearing `flows_to` graph — not taint analysis, not compiler-exact data flow, and not a
-claim about runtime behaviour.
+The CLI twin of the MCP `Lineage` tool (§10), run on the RetrievalTool→CLI bridge
+(`crates/wicked-estate/src/tool_bridge.rs`) since W8.5, so it shares `traverse`'s contract below.
+Without `--relation` it is dependency lineage over `Calls` + `Imports`. With `--relation flows_to`
+it is **static semantic value lineage**, producer → consumer, over the evidence-bearing `flows_to`
+graph — not taint analysis, not compiler-exact data flow, and not a claim about runtime behaviour.
 
-- `--symbol` takes an **exact `SymbolId`**, the same as the MCP tool. There is no name resolution
-  and no "first match": get the id from `nodes --json`, `SearchEntity`, or `RetrieveEntity`. Exact
-  ids may name synthetic value slots (a `RouteParam:id` source, a local, a parameter), which the
-  name-oriented commands such as `query` deliberately hide.
-- `--depth` accepts `0..=24` and defaults to 8 — the MCP tool's default and ceiling. A larger value
-  is an error, not a silent clamp.
-- `--relation` accepts only `flows_to`. Any other value, a missing flag value, an unknown flag, or a
-  bare name instead of `--symbol` fails non-zero with the usage text.
-- The flag set is closed: a flag another command owns (`--file`, `--type`, `--top`, …), a
-  repeated flag, or a value flag whose value is missing or is itself a flag (`--db --json`) fails
-  before any store is opened. Two flags are still handled by the CLI-wide parser first: a
-  standalone `-h` / `--help`, or one given as the value of `--depth` or `--relation`, prints the
-  general help with exit 0 (after `--symbol` or `--db` it is that flag's value: `--help` is
-  refused as a flag, `-h` is taken literally), and a malformed `--repo` fails non-zero with that
-  parser's own message rather than the `lineage` usage.
-- An exact id that is not in the graph is **not** an error: it returns the tool's empty result
-  with a diagnostic, exit 0. A `--db` file that does not exist (a bare path or `sqlite://<path>`),
-  or is empty, **is** an error — `lineage` never creates a graph, so a typo cannot read as
-  "absent id".
+- `<symbol>` is an exact name or a `SymbolId`, resolved by the same rule as `path` and `traverse`
+  (an exact id is checked first, so a value-slot id such as a `RouteParam:id` source, a local or a
+  parameter works although name search hides those slots). A name several symbols share fails and
+  lists the ids; one that matches nothing fails with `no symbol named …`; a missing `<symbol>` is
+  a usage error. **Changed in 0.24.0:** `--symbol` is gone, and an unknown id is an error (exit 1)
+  rather than an empty answer with exit 0.
+- `--depth` defaults to 8. A value above the tool's ceiling (24) is clamped **by the tool** and
+  reported as `CLAMPED: depth=… is above this tool's ceiling; used depth=24`; `0` is the floor.
+- `--relation` accepts only `flows_to`. Flags are strict, as for every bridged command.
+- A `--db` that does not exist (a bare path or `sqlite://<path>`) or is zero-length is an error;
+  `lineage` never creates a graph.
 
-Text mode prints each node row and, for `flows_to`, each hop with its `flow_semantics`,
-`flow_evidence`, confidence, resolver, rule ids and site, then names any depth, node-cap or
-budget cut. The tool's diagnostics go to stderr as `note: …`, with one exception: the tool's own
-`STALENESS: commits_behind not available at this layer …` placeholder is the retrieval layer's
-cue to its host (it says only that the tool cannot see git), and the CLI, having run the real
-check itself, does not echo it. On a graph behind its repo, text mode prints
-`STALENESS: N commit(s) since last index …` on **stdout** (the same notice `query`, `path` and
-`blast-radius` print), and a binary-version mismatch prints `VERSION MISMATCH: …` on stderr
-without the `note:` prefix. `--json` keeps the placeholder in `diagnostics`, because that document
-must equal the MCP response. Use `--json` for one machine-readable channel.
-
-`--json` prints exactly one document — the tool's `RetrievalResult` as
-`{"content": {…}, "diagnostics": […]}` — and nothing else on stdout or stderr. When the graph is
-behind its git repo, `diagnostics` ends with the same `STALENESS: commits_behind=N …` line the MCP
-server appends (R5), computed by the same function. With that, `content` is identical to the MCP
-`Lineage` response's first text block and `diagnostics` to its second (split on newlines), for the
-same database and arguments; `crates/wicked-estate/tests/lineage_cli.rs` pins it. Row `line`
-values in `--json` are the tool's **0-based** lines (unlike `path --json`, there is no
-`line_1based`, because the document is the MCP one verbatim); text mode prints 1-based `file:line`.
-The one 25K-char R4 budget is the tool's and covers `content`; the CLI adds no budget of its own.
+`--json` writes the tool's `content` unchanged — the MCP `Lineage` response's first text block —
+as exactly one JSON document on stdout, and every diagnostic on stderr, one per line, ending with
+the real freshness statement (`STALENESS: N commit(s) since last index …`, `STALENESS: 0 commits
+since last index`, or `STALENESS: unknown …`; per repo on a multi-repo graph). **Changed in
+0.24.0:** before, `--json` printed `{"content", "diagnostics"}` on stdout. Text mode prints each
+node row and, for `flows_to`, each hop with its `flow_semantics`, `flow_evidence`, confidence,
+resolver, rule ids and site, names any depth, node-cap or budget cut, then the diagnostics — all on
+stdout. Row `line` values in `--json` are the tool's **0-based** lines; text mode prints 1-based
+`file:line`. The one 25K-char R4 budget is the tool's; `crates/wicked-estate/tests/lineage_cli.rs`
+pins CLI `content` against a direct invocation and the MCP response.
 
 ### Traverse — walk the graph from a symbol, as the MCP `TraverseGraph` tool does
 
@@ -296,10 +278,7 @@ adds only argv parsing, operand resolution and freshness.
 - Text mode prints the document rendered as indented `key: value` lines, then the diagnostics,
   all on stdout.
 
-Note the interim difference from `lineage --json` (§4, above), which states freshness inside the
-JSON `diagnostics` in the MCP server's `STALENESS: commits_behind=N` wording and keeps the
-placeholder: one binary, two freshness channels under `--json`, until W8.5 moves `lineage` onto
-the bridge.
+`lineage` (above) follows the same contract since W8.5: one freshness channel under `--json`.
 
 ---
 
@@ -404,8 +383,11 @@ nodes=8 edges=11 files=2
 wicked-estate scip <root> [--db ...] [--scip-file <path>]
 ```
 
-Ingests a SCIP index (`index.scip`) produced by `scip-typescript` (or another SCIP indexer)
-and promotes matching edges to `confidence:1.0, source:scip`. Run `index` first, then `scip`.
+Ingests a SCIP index (`index.scip`) produced by `scip-typescript` (or another SCIP indexer) as
+**semantic evidence** (`docs/ENGINE-CONTRACT.md` §3.5): occurrences are correlated with the indexed
+structural symbols and written as confidence-1.0 `References` support facts owned by the indexer.
+SCIP has no call role, so `scip` never writes `Calls` — `f()` and `const g = f` are the same
+role-less occurrence. Re-running it replaces the indexer's previous facts. Run `index` first.
 
 ```bash
 # First: tree-sitter extraction
@@ -415,9 +397,10 @@ wicked-estate index ./my-ts-project
 wicked-estate scip ./my-ts-project
 # notice: ./my-ts-project/index.scip not found — attempting: npx @sourcegraph/scip-typescript@0.4.0 index
 # scip: ingested 412 precise edge(s) from ./my-ts-project/index.scip into .wicked-estate/graph.db
+# (the count is distinct References edges; several sites can support one edge)
 ```
 
-After `scip`, blast-radius results for TypeScript symbols carry `confidence:1.0` edges.
+After `scip`, blast-radius results for TypeScript symbols include the indexer's exact `References`.
 Existing `unresolved_refs` rows are NOT pruned by the ingest itself — they are rebuilt the next
 time their file is re-indexed (`docs/ENGINE-CONTRACT.md` §2.1, exception 2).
 
@@ -578,7 +561,7 @@ the displayed source node, such as `RouteParam:id`, to its stable `symbol` with 
 The stored `flows_to` edge still follows the engine edge-direction invariant (`source` is the
 consumer, `target` is the producer); `Lineage` reverses the walk for this relation so the response
 reads as producer → consumer. The same query runs from a shell as
-`wicked-estate lineage --symbol <SymbolId> --relation flows_to [--json]` (§4).
+`wicked-estate lineage <SymbolId> --relation flows_to [--json]` (§4).
 
 In `flows_to` mode the response carries a `flows` array alongside `dependencies` — one row per
 traversed hop, because the hop list alone does not tell you what the hop *claims*:

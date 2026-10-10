@@ -1,10 +1,12 @@
-//! `wicked-estate lineage` end to end, through the real binary (TS-S1B).
+//! `wicked-estate lineage` end to end, through the real binary — a RetrievalTool-bridge row since
+//! W8.5 (#276), with the bridge's contract: a positional `<symbol>` (exact name or `SymbolId`,
+//! value slots included), `--json` = the tool's `content` as one JSON document on stdout with every
+//! diagnostic on stderr, text mode = prose then diagnostics on stdout, honest per-root freshness,
+//! strict argv before any I/O.
 //!
-//! The CLI is a frontend over `wicked_estate_retrieve::Lineage`, so the oracle here is not a
-//! renderer this crate owns: every `--json` document is compared with (a) a direct `Lineage`
-//! invocation and (b) the MCP `tools/call` response, parsed back from its two text blocks into
-//! `{content, diagnostics}`. Both sides read the same indexed SQLite file, built by the binary's
-//! own `index` over a real TypeScript fixture.
+//! The oracle is not a renderer this crate owns: the CLI's `content` is compared with (a) a direct
+//! `Lineage` invocation and (b) the MCP `tools/call` response — three independently produced JSON
+//! values over the same SQLite file, built by the binary's own `index` over a real fixture.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -107,8 +109,8 @@ fn node_where(store: &SqliteStore, pred: impl Fn(&Node) -> bool, what: &str) -> 
     hits[0].symbol.as_str().to_string()
 }
 
-/// `wicked-estate lineage … --json`: asserts exit 0, stdout is exactly one JSON document with
-/// exactly the `RetrievalResult` keys, and stderr carries no prose.
+/// `wicked-estate lineage <args> --json`: asserts exit 0 and that stdout is exactly one JSON
+/// document (the tool's `content`); returns `{content, diagnostics}` with the stderr lines.
 fn cli_json(dir: &Path, args: &[&str]) -> Value {
     let mut argv = vec!["lineage"];
     argv.extend_from_slice(args);
@@ -125,27 +127,23 @@ fn cli_json(dir: &Path, args: &[&str]) -> Value {
         1,
         "--json must print exactly one line: {stdout}"
     );
-    let doc: Value = serde_json::from_str(&stdout).expect("--json stdout must be JSON");
-    let keys: Vec<&str> = doc
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    assert_eq!(keys, vec!["content", "diagnostics"], "{doc}");
+    let content: Value = serde_json::from_str(&stdout).expect("--json stdout must be JSON");
     assert!(
-        out.stderr.is_empty(),
-        "--json must not print notices: {}",
-        String::from_utf8_lossy(&out.stderr)
+        content.get("dependencies").is_some() && content.get("diagnostics").is_none(),
+        "stdout is the tool's content, not a wrapped result: {content}"
     );
-    doc
+    let diagnostics: Vec<String> = String::from_utf8(out.stderr)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    json!({ "content": content, "diagnostics": diagnostics })
 }
 
 /// The in-memory tool result, normalized through the same serializer the CLI and MCP print with.
 /// Without the round trip the comparison depends on `serde_json`'s best-effort float parsing: a
 /// `confidence.avg` such as `0.9093789458274841` reparses one ulp off (`…484`) unless the
-/// `float_roundtrip` feature is on, so `assert_eq!(cli, direct)` could fail on a richer fixture
-/// with byte-identical output (15 of 850 cases on a real repo).
+/// `float_roundtrip` feature is on, so a byte-identical answer could compare unequal.
 fn direct(store: &SqliteStore, args: &Value) -> Value {
     let r = Lineage.invoke(store, args).unwrap();
     let doc = json!({ "content": r.content, "diagnostics": r.diagnostics });
@@ -184,19 +182,45 @@ fn mcp_with(store: &SqliteStore, args: &Value, ctx: &McpContext) -> Value {
     json!({ "content": content, "diagnostics": diagnostics })
 }
 
-/// The whole normalized result must agree across the three paths. A diagnostic containing `\n`
-/// would make the MCP split ambiguous, so that is ruled out first.
+/// `content` must agree across the three paths. Diagnostics: the CLI carries every tool
+/// diagnostic except the retrieval layer's staleness placeholder (it is the transport, and
+/// REPLACES that cue with the real per-root statement), and at least one `STALENESS:` line.
 fn assert_parity(dir: &Path, store: &SqliteStore, cli_args: &[&str], args: Value) -> Value {
     let cli = cli_json(dir, cli_args);
-    for d in cli["diagnostics"].as_array().unwrap() {
-        assert!(!d.as_str().unwrap().contains('\n'), "{d}");
-    }
+    let tool = direct(store, &args);
     assert_eq!(
-        cli,
-        direct(store, &args),
+        cli["content"], tool["content"],
         "CLI vs direct Lineage for {args}"
     );
-    assert_eq!(cli, mcp(store, &args), "CLI vs MCP Lineage for {args}");
+    assert_eq!(
+        cli["content"],
+        mcp(store, &args)["content"],
+        "CLI vs MCP Lineage for {args}"
+    );
+    let cli_diags: Vec<&str> = cli["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d.as_str().unwrap())
+        .collect();
+    for d in tool["diagnostics"].as_array().unwrap() {
+        let d = d.as_str().unwrap();
+        if d == wicked_estate_retrieve::STALENESS_PLACEHOLDER {
+            assert!(
+                !cli_diags.contains(&d),
+                "the placeholder must be replaced: {cli_diags:?}"
+            );
+        } else {
+            assert!(
+                cli_diags.contains(&d),
+                "tool diagnostic {d:?} missing: {cli_diags:?}"
+            );
+        }
+    }
+    assert!(
+        cli_diags.iter().any(|d| d.starts_with("STALENESS: ")),
+        "freshness is always stated: {cli_diags:?}"
+    );
     cli
 }
 
@@ -247,7 +271,7 @@ fn flows_to_matches_mcp_and_direct_lineage_on_the_angular_fixture() {
     let doc = assert_parity(
         &s,
         &store,
-        &["--symbol", &route, "--relation", "flows_to", "--depth", "8"],
+        &[&route, "--relation", "flows_to", "--depth", "8"],
         json!({"symbol": route, "depth": 8, "relation": "flows_to"}),
     );
     let c = &doc["content"];
@@ -289,8 +313,7 @@ fn flows_to_matches_mcp_and_direct_lineage_on_the_angular_fixture() {
         assert!(h["file"].is_string() && h["line"].is_number(), "{h}");
     }
 
-    // The summary describes exactly the flow hops: the slots' `File` `Contains` edges (and any
-    // other relation the traversal touched) are not counted.
+    // The summary describes exactly the flow hops.
     let confs: Vec<f64> = c["flows"]
         .as_array()
         .unwrap()
@@ -320,7 +343,7 @@ fn default_dependency_lineage_is_the_unchanged_tool_result() {
     );
 
     // No `--depth`: the tool's own default applies, identically on every path.
-    let doc = assert_parity(&s, &store, &["--symbol", &load], json!({"symbol": load}));
+    let doc = assert_parity(&s, &store, &[&load], json!({"symbol": load}));
     assert!(
         doc["content"].get("flows").is_none(),
         "default lineage must not gain the flows_to evidence array: {doc}"
@@ -333,6 +356,8 @@ fn default_dependency_lineage_is_the_unchanged_tool_result() {
             .any(|d| d.ends_with("CustomerComponent#loadCustomer().")),
         "load -> loadCustomer is a resolved Calls dependency: {doc}"
     );
+    // The structural name resolves to the same symbol (an intentional bridge convenience).
+    assert_eq!(cli_json(&s, &["load"])["content"], doc["content"]);
 }
 
 #[test]
@@ -344,7 +369,7 @@ fn a_depth_one_answer_excludes_frontier_hops() {
     let doc = assert_parity(
         &s,
         &store,
-        &["--symbol", &route, "--relation", "flows_to", "--depth=1"],
+        &[&route, "--relation", "flows_to", "--depth=1"],
         json!({"symbol": route, "depth": 1, "relation": "flows_to"}),
     );
     let deps = dep_ids(&doc);
@@ -365,6 +390,38 @@ fn a_depth_one_answer_excludes_frontier_hops() {
     assert_horizon_keys(&doc);
 }
 
+/// W8.5: the tool owns its depth defaults and ceiling. Default 8, `0` is the tool's floor, `24`
+/// is accepted, and an over-ceiling depth is CLAMPED and reported — not refused at argv.
+#[test]
+fn depth_default_zero_ceiling_and_over_ceiling() {
+    let s = indexed_angular("depth_matrix");
+    let store = open(&s);
+    let route = node_where(&store, |n| n.name == "RouteParam:id", "RouteParam:id");
+    for (given, searched, clamped) in [
+        (None, 8, false),
+        (Some("0"), 0, false),
+        (Some("24"), 24, false),
+        (Some("99"), 24, true),
+    ] {
+        let mut cli: Vec<&str> = vec![&route, "--relation", "flows_to"];
+        let mut args = json!({"symbol": route, "relation": "flows_to"});
+        if let Some(d) = given {
+            cli.extend(["--depth", d]);
+            args["depth"] = json!(d.parse::<u64>().unwrap());
+        }
+        let doc = assert_parity(&s, &store, &cli, args);
+        assert_eq!(
+            doc["content"]["searched_depth"],
+            json!(searched),
+            "{given:?}"
+        );
+        let has_clamp = doc["diagnostics"].as_array().unwrap().iter().any(|d| {
+            d.as_str().unwrap() == "CLAMPED: depth=99 is above this tool's ceiling; used depth=24"
+        });
+        assert_eq!(has_clamp, clamped, "{given:?}: {doc}");
+    }
+}
+
 #[test]
 fn an_exact_value_slot_id_is_accepted_although_name_search_hides_it() {
     let s = indexed_angular("value_slot");
@@ -382,7 +439,7 @@ fn an_exact_value_slot_id_is_accepted_although_name_search_hides_it() {
     let doc = assert_parity(
         &s,
         &store,
-        &["--symbol", &route_id, "--relation", "flows_to"],
+        &[&route_id, "--relation", "flows_to"],
         json!({"symbol": route_id, "relation": "flows_to"}),
     );
     assert!(
@@ -399,31 +456,90 @@ fn an_exact_value_slot_id_is_accepted_although_name_search_hides_it() {
     assert!(q.contains("0 match(es) for 'routeId'"), "{q}");
 }
 
+/// W8.5 (breaking): an unknown selector is an error, not an honest-empty answer with exit 0 —
+/// an empty lineage for a typo is indistinguishable from a real leaf (R3). An ambiguous name
+/// lists its candidates; an absent selector is a usage error.
 #[test]
-fn an_absent_exact_id_is_an_honest_empty_result_not_an_error() {
-    let s = indexed_angular("absent");
+fn unknown_ambiguous_and_absent_selectors_fail_with_nothing_on_stdout() {
+    let s = indexed_angular("selectors");
+    let fail = |args: &[&str], want: &str| {
+        let mut argv = vec!["lineage"];
+        argv.extend_from_slice(args);
+        argv.extend_from_slice(&["--json", "--db", "graph.db"]);
+        let out = run(&s, &argv);
+        assert!(!out.status.success(), "{args:?} must fail");
+        assert!(out.stdout.is_empty(), "{args:?} printed to stdout");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(want), "{args:?}: want {want:?} in {stderr}");
+    };
+    fail(&["no such symbol#"], "no symbol named \"no such symbol#\"");
+    fail(
+        &["no such symbol#", "--relation", "flows_to"],
+        "no symbol named",
+    );
+    fail(&[], "missing <symbol>");
+    fail(&[""], "<symbol> must not be empty");
+}
+
+/// A structural name two symbols share is ambiguous: the CLI fails and lists every candidate id.
+#[test]
+fn an_ambiguous_name_fails_and_lists_every_candidate() {
+    let s = scratch("ambiguous");
+    fs::write(
+        s.join("a.ts"),
+        "export function dup(): number { return 1; }\n",
+    )
+    .unwrap();
+    fs::write(
+        s.join("b.ts"),
+        "export function dup(): number { return 2; }\n",
+    )
+    .unwrap();
+    index(&s);
     let store = open(&s);
-    for (cli, args) in [
-        (
-            vec!["--symbol", "no such symbol#"],
-            json!({"symbol": "no such symbol#"}),
-        ),
-        (
-            vec!["--symbol", "no such symbol#", "--relation", "flows_to"],
-            json!({"symbol": "no such symbol#", "relation": "flows_to"}),
-        ),
-    ] {
-        let doc = assert_parity(&s, &store, &cli, args);
-        assert_eq!(doc["content"]["total"], json!(0), "{doc}");
+    let ids: Vec<String> = GraphRead::all_nodes(&store)
+        .unwrap()
+        .into_iter()
+        .filter(|n| n.name == "dup" && !n.is_value_flow_node())
+        .map(|n| n.symbol.as_str().to_string())
+        .collect();
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    let out = run(&s, &["lineage", "dup", "--json", "--db", "graph.db"]);
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("pass one SymbolId"), "{stderr}");
+    for id in &ids {
         assert!(
-            doc["diagnostics"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|d| d.as_str().unwrap().contains("no such symbol#")),
-            "{doc}"
+            stderr.contains(id.as_str()),
+            "candidate {id} missing: {stderr}"
         );
     }
+}
+
+/// An exact id wins over a name that happens to spell it (W8.5 review): the query must reach the
+/// node whose id it is, not a different node named like that id.
+#[test]
+fn an_exact_id_wins_over_a_same_spelled_name() {
+    use wicked_estate_core::{GraphWrite, Language, Location, NodeKind, Span, SymbolId};
+    let s = scratch("id_first");
+    let mut store = SqliteStore::open(s.join("graph.db").to_str().unwrap()).unwrap();
+    let node = |id: &str, name: &str| {
+        Node::new(
+            SymbolId(id.into()),
+            NodeKind::Function,
+            name,
+            Language::new("typescript"),
+            Location::new("a.ts", Span::ZERO),
+        )
+    };
+    store
+        .upsert_nodes(&[node("the-id", "a"), node("other", "the-id")])
+        .unwrap();
+    assert_eq!(
+        wicked_estate_core::resolve_operand(&store, "the-id").unwrap(),
+        vec![SymbolId("the-id".into())]
+    );
 }
 
 // ── R4: one shared budget, owned by the tool ────────────────────────────────
@@ -450,7 +566,7 @@ fn dependencies_and_flows_share_the_tools_single_budget() {
     let doc = assert_parity(
         &s,
         &store,
-        &["--symbol", &seed, "--relation", "flows_to", "--depth", "1"],
+        &[&seed, "--relation", "flows_to", "--depth", "1"],
         json!({"symbol": seed, "depth": 1, "relation": "flows_to"}),
     );
     let c = &doc["content"];
@@ -481,7 +597,6 @@ fn text_mode_is_prose_and_json_mode_is_only_json() {
         &s,
         &[
             "lineage",
-            "--symbol",
             &route,
             "--relation",
             "flows_to",
@@ -491,39 +606,36 @@ fn text_mode_is_prose_and_json_mode_is_only_json() {
     );
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
-    let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        serde_json::from_str::<Value>(&stdout).is_err() && !stdout.contains("\"content\""),
+        serde_json::from_str::<Value>(&stdout).is_err() && !stdout.contains("\"dependencies\""),
         "text mode must not print the JSON document: {stdout}"
     );
     assert!(stdout.contains("not taint analysis"), "{stdout}");
     assert!(stdout.contains("semantics=value_preserving"), "{stdout}");
     assert!(stdout.contains("evidence=convention"), "{stdout}");
     assert!(stdout.contains("(tree-sitter-convention)"), "{stdout}");
-    assert!(!stdout.contains("note:"), "{stdout}");
-    // The tool's `STALENESS: commits_behind not available at this layer …` diagnostic is the
-    // retrieval layer's cue to its host, not a user notice: this frontend runs the real check
-    // itself and prints it on stdout (see the stale-graph test), so the cue is not echoed.
+    // The bridge's text contract: prose, then the diagnostics, on stdout — the real freshness
+    // statement, never the retrieval layer's placeholder cue.
+    assert!(stdout.contains("STALENESS: "), "{stdout}");
     assert!(
-        !stderr.contains("STALENESS"),
-        "the retrieve placeholder must not reach the user: {stderr}"
+        !stdout.contains(wicked_estate_retrieve::STALENESS_PLACEHOLDER),
+        "the retrieve placeholder must not reach the user: {stdout}"
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
 
-    // The tool's other diagnostics still go to stderr as `note: …`.
-    let out = run(
-        &s,
-        &["lineage", "--symbol", "absent-id", "--db", "graph.db"],
-    );
-    assert!(out.status.success());
-    let stderr = String::from_utf8(out.stderr).unwrap();
+    // `cli_json` asserts the converse: one JSON line on stdout, diagnostics on stderr.
+    let doc = cli_json(&s, &[&route, "--relation", "flows_to"]);
     assert!(
-        stderr.contains("note: Lineage: no dependencies found for 'absent-id'"),
-        "diagnostics go to stderr: {stderr}"
+        doc["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d.as_str().unwrap() != wicked_estate_retrieve::STALENESS_PLACEHOLDER)
     );
-    assert!(!stderr.contains("STALENESS"), "{stderr}");
-
-    // `cli_json` asserts the converse: one JSON line, nothing on stderr.
-    cli_json(&s, &["--symbol", &route, "--relation", "flows_to"]);
 }
 
 #[test]
@@ -534,93 +646,54 @@ fn malformed_arguments_fail_before_any_query() {
     // dangling `--db` must not fall back to the default store, and `--db --json` must not open a
     // file named `--json`.
     let cases: &[(&[&str], &str)] = &[
+        (&["lineage", "--db", "graph.db"], "missing <symbol>"),
         (
-            &["lineage", "--db", "graph.db"],
-            "--symbol <SYMBOL_ID> is required",
+            &["lineage", "a", "b", "--db", "graph.db"],
+            "expected exactly one <symbol>",
+        ),
+        (&["lineage", "--symbol", "x"], "unknown flag \"--symbol\""),
+        (&["lineage", "x", "--depth"], "--depth requires a number"),
+        (
+            &["lineage", "x", "--depth", "deep"],
+            "--depth expects a non-negative integer",
         ),
         (
-            &["lineage", "--db", "graph.db", "--symbol"],
-            "--symbol requires a value",
+            &["lineage", "x", "--depth", "-1"],
+            "--depth expects a non-negative integer",
         ),
         (
-            &["lineage", "--db", "graph.db", "--symbol", "--json"],
-            "--symbol needs a value, got the flag \"--json\"",
+            &["lineage", "x", "--depth", "+5"],
+            "--depth expects a non-negative integer",
         ),
         (
-            &["lineage", "--db", "graph.db", "--symbol", ""],
-            "--symbol must not be empty",
-        ),
-        (
-            &[
-                "lineage", "--symbol", "a", "--symbol", "b", "--db", "graph.db",
-            ],
-            "--symbol given more than once",
-        ),
-        (
-            &["lineage", "--symbol", "x", "--depth"],
-            "--depth requires a value",
-        ),
-        (
-            &["lineage", "--symbol", "x", "--depth", "deep"],
-            "--depth must be a non-negative integer",
-        ),
-        (
-            &["lineage", "--symbol", "x", "--depth", "-1"],
-            "--depth must be a non-negative integer",
-        ),
-        (
-            &["lineage", "--symbol", "x", "--depth", "+5"],
-            "--depth must be a non-negative integer",
-        ),
-        (
-            &["lineage", "--symbol", "x", "--depth", "25"],
-            "--depth 25 is above the maximum of 24",
-        ),
-        (
-            &["lineage", "--symbol", "x", "--depth", "2", "--depth", "3"],
+            &["lineage", "x", "--depth", "2", "--depth", "3"],
             "--depth given more than once",
         ),
         (
-            &["lineage", "--symbol", "x", "--relation"],
-            "--relation requires a value",
+            &["lineage", "x", "--relation"],
+            "--relation requires one of flows_to",
         ),
         (
-            &["lineage", "--symbol", "x", "--relation", "calls"],
-            "unsupported --relation \"calls\"",
+            &["lineage", "x", "--relation", "calls"],
+            "--relation expects one of flows_to",
         ),
         (
-            &["lineage", "--symbol", "x", "--relation=FLOWS_TO"],
-            "unsupported --relation \"FLOWS_TO\"",
+            &["lineage", "x", "--relation=FLOWS_TO"],
+            "--relation expects one of flows_to",
         ),
+        (&["lineage", "x", "--bogus"], "unknown flag \"--bogus\""),
         (
-            &["lineage", "--symbol", "x", "--bogus"],
-            "unknown flag \"--bogus\"",
-        ),
-        (
-            &["lineage", "--symbol", "x", "--file", "a.ts"],
+            &["lineage", "x", "--file", "a.ts"],
             "unknown flag \"--file\"",
         ),
+        (&["lineage", "x", "--top", "5"], "unknown flag \"--top\""),
+        (&["lineage", "x", "--type", "t"], "unknown flag \"--type\""),
+        (&["lineage", "x", "--force"], "unknown flag \"--force\""),
+        (&["lineage", "x", "--db"], "--db requires a database spec"),
         (
-            &["lineage", "--symbol", "x", "--top", "5"],
-            "unknown flag \"--top\"",
+            &["lineage", "--db", "--json", "x"],
+            "--db requires a database spec",
         ),
-        (
-            &["lineage", "--symbol", "x", "--type", "t"],
-            "unknown flag \"--type\"",
-        ),
-        (
-            &["lineage", "--symbol", "x", "--force"],
-            "unknown flag \"--force\"",
-        ),
-        (
-            &["lineage", "--symbol", "x", "--db"],
-            "--db requires a value",
-        ),
-        (
-            &["lineage", "--db", "--json", "--symbol", "x"],
-            "--db needs a value, got the flag \"--json\"",
-        ),
-        (&["lineage", "RouteParam:id"], "does not resolve names"),
     ];
     for (args, want) in cases {
         let out = run(&s, args);
@@ -628,7 +701,7 @@ fn malformed_arguments_fail_before_any_query() {
         assert!(!out.status.success(), "{args:?} must fail");
         assert!(out.stdout.is_empty(), "{args:?} printed to stdout");
         assert!(
-            stderr.contains("usage: wicked-estate lineage --symbol <SYMBOL_ID>"),
+            stderr.contains("usage: wicked-estate lineage <symbol>"),
             "{args:?}: {stderr}"
         );
         assert!(stderr.contains(want), "{args:?}: want {want:?} in {stderr}");
@@ -646,7 +719,7 @@ fn a_missing_graph_fails_closed_instead_of_answering_empty() {
     let s = scratch("missing_db");
     // A bare path and the `sqlite://` spelling of the same path are both file specs.
     for spec in ["typo.db", "sqlite://typo.db"] {
-        let out = run(&s, &["lineage", "--symbol", "x", "--json", "--db", spec]);
+        let out = run(&s, &["lineage", "x", "--json", "--db", spec]);
         assert!(!out.status.success(), "{spec} must fail");
         assert!(out.stdout.is_empty(), "{spec} printed to stdout");
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -658,16 +731,13 @@ fn a_missing_graph_fails_closed_instead_of_answering_empty() {
     }
     // A zero-length file is not a graph either, and must not be grown into an empty one.
     fs::write(s.join("empty.db"), b"").unwrap();
-    let out = run(
-        &s,
-        &["lineage", "--symbol", "x", "--json", "--db", "empty.db"],
-    );
+    let out = run(&s, &["lineage", "x", "--json", "--db", "empty.db"]);
     assert!(!out.status.success(), "a zero-length file must fail");
     assert!(out.stdout.is_empty());
     assert_eq!(fs::metadata(s.join("empty.db")).unwrap().len(), 0);
 }
 
-// ── R5: the server-level staleness line is part of the parity ───────────────
+// ── R5: freshness is honest, per root, and never the placeholder ────────────
 
 fn git(dir: &Path, date: &str, args: &[&str]) {
     let out = Command::new("git")
@@ -695,8 +765,8 @@ fn git(dir: &Path, date: &str, args: &[&str]) {
     );
 }
 
-/// The Angular fixture as a git repo whose graph is exactly two commits behind HEAD.
-fn stale_fixture(tag: &str) -> Scratch {
+/// The Angular fixture as a git repo whose graph is `behind` commits behind HEAD.
+fn git_fixture(tag: &str, behind: usize) -> Scratch {
     let s = scratch(tag);
     let src =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typescript-value-lineage");
@@ -705,159 +775,154 @@ fn stale_fixture(tag: &str) -> Scratch {
         fs::copy(&p, s.join(p.file_name().unwrap())).unwrap();
     }
     // Commit dates are pinned so the count is exact whatever the clock: the indexed commit is
-    // long before the db's mtime, the two later ones long after it.
+    // long before the db's mtime, the later ones long after it.
     git(&s, "2000-01-01T00:00:00Z", &["init", "-q"]);
     git(&s, "2000-01-01T00:00:00Z", &["add", "-A"]);
     git(&s, "2000-01-01T00:00:00Z", &["commit", "-qm", "fixture"]);
     index(&s);
-    for msg in ["later one", "later two"] {
+    for i in 0..behind {
         git(
             &s,
             "2090-01-01T00:00:00Z",
-            &["commit", "-q", "--allow-empty", "-m", msg],
+            &["commit", "-q", "--allow-empty", "-m", &format!("later {i}")],
         );
     }
     s
 }
 
-#[test]
-fn json_on_a_stale_graph_carries_the_same_staleness_line_as_mcp() {
-    let s = stale_fixture("stale");
-    let store = open(&s);
-    let route = node_where(&store, |n| n.name == "RouteParam:id", "RouteParam:id");
-    let cli = cli_json(&s, &["--symbol", &route, "--relation", "flows_to"]);
-    let args = json!({"symbol": route, "relation": "flows_to"});
-
-    // The MCP server computes `commits_behind` once at startup; this is the value it would hold.
-    let ctx = McpContext {
-        commits_behind: Some(2),
-        ..McpContext::default()
-    };
-    assert_eq!(cli, mcp_with(&store, &args, &ctx), "CLI vs stale MCP");
-    let diags = cli["diagnostics"].as_array().unwrap();
-    assert_eq!(
-        diags.last().unwrap(),
-        &json!(wicked_estate::staleness_diagnostic(2)),
-        "{cli}"
-    );
-    // Pinned as a literal: both frontends share one function, so comparing them with each other
-    // cannot see the wording itself change.
-    assert_eq!(
-        wicked_estate::staleness_diagnostic(2),
-        "STALENESS: commits_behind=2 — re-run `wicked-estate index` to refresh"
-    );
-    // Everything before the server line is the tool's own result, untouched.
-    let mut tool = direct(&store, &args);
-    tool["diagnostics"]
-        .as_array_mut()
+fn staleness(doc: &Value) -> Vec<String> {
+    doc["diagnostics"]
+        .as_array()
         .unwrap()
-        .push(json!(wicked_estate::staleness_diagnostic(2)));
-    assert_eq!(cli, tool);
+        .iter()
+        .map(|d| d.as_str().unwrap().to_string())
+        .filter(|d| d.starts_with("STALENESS"))
+        .collect()
 }
 
 #[test]
-fn text_mode_on_a_stale_graph_prints_the_real_notice_and_not_the_placeholder() {
-    let s = stale_fixture("stale_text");
+fn freshness_is_stated_for_stale_fresh_and_unknown_graphs() {
+    // Stale: the real count, once, with the fix.
+    let s = git_fixture("stale", 2);
     let store = open(&s);
     let route = node_where(&store, |n| n.name == "RouteParam:id", "RouteParam:id");
-    let out = run(
+    let doc = assert_parity(
         &s,
+        &store,
+        &[&route, "--relation", "flows_to"],
+        json!({"symbol": route, "relation": "flows_to"}),
+    );
+    let lines = staleness(&doc);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].starts_with("STALENESS: 2 commit(s) since last index"),
+        "{lines:?}"
+    );
+
+    // Fresh: zero is stated, because the root was checked.
+    let s = git_fixture("fresh", 0);
+    let doc = cli_json(&s, &[&route, "--relation", "flows_to"]);
+    assert_eq!(
+        staleness(&doc),
+        vec!["STALENESS: 0 commits since last index".to_string()]
+    );
+
+    // Unknown: no git root to check, so zero is NOT claimed.
+    let s = indexed_angular("unknown");
+    let doc = cli_json(&s, &[&route, "--relation", "flows_to"]);
+    let lines = staleness(&doc);
+    assert!(
+        !lines.is_empty() && lines.iter().all(|l| l.contains("unknown")),
+        "{lines:?}"
+    );
+}
+
+/// A multi-repo graph states freshness per root: the stale repo is named, and "0" is never
+/// claimed for a root that was not checked.
+#[test]
+fn freshness_is_per_root_on_a_multi_repo_graph() {
+    let a = git_fixture("multi_a", 0);
+    let b = scratch("multi_b"); // not a git repo: its freshness is unknown
+    let src =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typescript-value-lineage");
+    for entry in fs::read_dir(&src).unwrap() {
+        let p = entry.unwrap().path();
+        fs::copy(&p, b.join(p.file_name().unwrap())).unwrap();
+    }
+    let db = a
+        .parent()
+        .unwrap()
+        .join(format!("ci_lineagecli_multi_{}.db", std::process::id()));
+    let _ = fs::remove_file(&db);
+    let db_s = db.to_str().unwrap();
+    for (dir, label) in [(&a, "ra"), (&b, "rb")] {
+        let out = run(dir, &["index", ".", "--repo", label, "--db", db_s]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    // One commit after `ra` was indexed: that root is stale by exactly one.
+    git(
+        &a,
+        "2090-01-01T00:00:00Z",
+        &["commit", "-q", "--allow-empty", "-m", "after ra"],
+    );
+    let store = SqliteStore::open(db_s).unwrap();
+    let route = node_where(
+        &store,
+        |n| n.name == "RouteParam:id" && n.location.file.starts_with("ra/"),
+        "ra RouteParam:id",
+    );
+    let out = run(
+        &a,
         &[
             "lineage",
-            "--symbol",
             &route,
             "--relation",
             "flows_to",
+            "--json",
             "--db",
-            "graph.db",
+            db_s,
         ],
     );
-    assert!(out.status.success());
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    // One real notice, on stdout, the same one `query`, `path` and `blast-radius` print …
-    assert_eq!(
-        stdout
-            .lines()
-            .filter(|l| l.starts_with("STALENESS: 2 commit(s) since last index"))
-            .count(),
-        1,
-        "{stdout}"
-    );
-    // … and not the tool's `commits_behind not available at this layer` cue beside it, which
-    // would tell the reader the opposite of the line above.
     assert!(
-        !stderr.contains("STALENESS"),
-        "the retrieve placeholder must not reach the user: {stderr}"
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with("STALENESS"))
+        .collect();
+    assert!(
+        lines.iter().any(|l| l.contains("1 commit(s) in 'ra'")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("unknown for repo 'rb'")),
+        "{lines:?}"
+    );
+    assert!(!lines.iter().any(|l| l.contains("0 commits")), "{lines:?}");
+    let _ = fs::remove_file(&db);
 }
 
 #[test]
 fn help_lists_lineage_as_static_semantic_lineage_not_taint() {
     let s = scratch("help");
-    for args in [&["--help"][..], &["lineage", "--help"][..]] {
-        let out = run(&s, args);
-        assert!(out.status.success());
-        let stdout = String::from_utf8(out.stdout).unwrap();
-        assert!(
-            stdout.contains(
-                "wicked-estate lineage --symbol <SYMBOL_ID> [--depth N] [--relation flows_to] [--json]"
-            ),
-            "{stdout}"
-        );
-        assert!(stdout.contains("static semantic value lineage"), "{stdout}");
-        assert!(stdout.contains("not taint analysis"), "{stdout}");
-    }
-}
-
-// ── #244: a NAME operand gets a hint in text mode ───────────────────────────
-
-/// `lineage --symbol` takes an exact id. An operand that matches no id but one or more symbol
-/// NAMES still answers an honest empty leaf (exit 0) — and text mode now says so, naming
-/// `resolve <name> --json` as the way to an id. `--json` carries no such note: that document must
-/// stay the MCP response.
-#[test]
-fn text_mode_hints_when_the_operand_is_a_symbol_name() {
-    let s = indexed_angular("name_hint");
-    let store = open(&s);
-    let name = GraphRead::all_nodes(&store)
-        .unwrap()
-        .into_iter()
-        .find(|n| !n.is_value_flow_node() && n.kind != wicked_estate_core::NodeKind::File)
-        .map(|n| n.name)
-        .expect("a structural symbol with a name");
-    let text = run(&s, &["lineage", "--symbol", &name, "--db", "graph.db"]);
-    assert!(text.status.success(), "{text:?}");
-    let stderr = String::from_utf8_lossy(&text.stderr);
+    let top = run(&s, &["--help"]);
+    assert!(top.status.success());
+    let top = String::from_utf8(top.stdout).unwrap();
     assert!(
-        stderr.contains("matches no symbol id")
-            && stderr.contains(&format!("wicked-estate resolve {name} --json")),
-        "text mode must hint at resolve for a name operand: {stderr}"
+        top.contains("wicked-estate lineage <symbol> [--depth N] [--relation flows_to] [--json]"),
+        "{top}"
     );
-    let json = run(
-        &s,
-        &["lineage", "--symbol", &name, "--json", "--db", "graph.db"],
-    );
-    assert!(json.status.success(), "{json:?}");
-    let stderr = String::from_utf8_lossy(&json.stderr);
-    assert!(
-        !stderr.contains("matches no symbol id"),
-        "--json carries no hint: {stderr}"
-    );
-    // An exact id that exists prints no hint either.
-    let id = node_where(
-        &store,
-        |n| {
-            n.name == name
-                && !n.is_value_flow_node()
-                && n.kind != wicked_estate_core::NodeKind::File
-        },
-        "the named symbol",
-    );
-    let text = run(&s, &["lineage", "--symbol", &id, "--db", "graph.db"]);
-    assert!(text.status.success(), "{text:?}");
-    assert!(
-        !String::from_utf8_lossy(&text.stderr).contains("matches no symbol id"),
-        "an exact id gets no hint"
-    );
+    let own = run(&s, &["lineage", "--help"]);
+    assert!(own.status.success());
+    let own = String::from_utf8(own.stdout).unwrap();
+    assert!(own.contains("static semantic value lineage"), "{own}");
+    assert!(own.contains("not taint"), "{own}");
+    assert!(own.contains("clamps to its ceiling"), "{own}");
 }
