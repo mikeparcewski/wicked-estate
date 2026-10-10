@@ -432,3 +432,46 @@ export function propMethod(raw: string): string {
   o.get();
   return o.k;
 }
+
+// S6c review cases: a block-local object shadowing an outer one, a deferred callback's write,
+// accessor-backed properties, and a method call through parentheses.
+export const shared = { k: '' };
+
+export function propBlockShadow(raw: string): string {
+  {
+    const shared = { k: raw };
+  }
+  const v = shared.k;
+  return v;
+}
+
+export function propDeferred(raw: string): string {
+  const o = { k: '' };
+  setTimeout(() => {
+    o.k = raw;
+  }, 0);
+  return o.k;
+}
+
+export function propAccessor(raw: string): string {
+  const o = {
+    set k(v: string) {},
+    get k(): string {
+      return '';
+    },
+  };
+  o.k = raw;
+  return o.k;
+}
+
+export function propWrappedCall(raw: string): string {
+  const o = { k: raw, m(): void {} };
+  (o.m)();
+  return o.k;
+}
+
+export function propCastCall(raw: string): string {
+  const o = { k: raw, m(): void {} };
+  (o.m as () => void)();
+  return o.k;
+}

@@ -838,6 +838,11 @@ fn s6c_local_object_properties() {
         "propParam",
         "propAliased",
         "propMethod",
+        "propBlockShadow",
+        "propDeferred",
+        "propAccessor",
+        "propWrappedCall",
+        "propCastCall",
     ] {
         assert!(
             !graph()

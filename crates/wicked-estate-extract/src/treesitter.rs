@@ -1736,6 +1736,10 @@ struct PendingFlow {
     span: Span,
     consumers: Vec<PendingFlowEndpoint>,
     producers: Vec<PendingFlowEndpoint>,
+    /// The objects whose property paths this site reads or writes (`@flow.*.object_property`,
+    /// ADR-014 S6c), with a byte position inside the owner: the site is kept only when every one is
+    /// a local object of its owner ([`is_local_object`]).
+    object_roots: Vec<(String, usize)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2151,6 +2155,178 @@ fn callable_return_contributors<'t>(
     out
 }
 
+/// The `(object, path)` of an `@flow.*.object_property` capture (ADR-014 S6c): `o.k` for a member
+/// expression `o.k` over an identifier, and for a `k: v` pair or a shorthand `k` entry of the
+/// object literal initialising `const o`. A computed key, a string key or any other shape: `None`.
+fn object_property_path(node: tree_sitter::Node, src: &[u8]) -> Option<(String, String)> {
+    let text = |n: tree_sitter::Node| n.utf8_text(src).ok().map(str::to_string);
+    let (root, key) = match node.kind() {
+        "member_expression" => {
+            let object = node
+                .child_by_field_name("object")
+                .filter(|o| o.kind() == "identifier")?;
+            let property = node
+                .child_by_field_name("property")
+                .filter(|p| p.kind() == "property_identifier")?;
+            (text(object)?, text(property)?)
+        }
+        "pair" | "shorthand_property_identifier" => {
+            let key = if node.kind() == "pair" {
+                node.child_by_field_name("key")
+                    .filter(|k| k.kind() == "property_identifier")?
+            } else {
+                node
+            };
+            let declarator = node
+                .parent()
+                .filter(|o| o.kind() == "object")?
+                .parent()
+                .filter(|d| d.kind() == "variable_declarator")?;
+            let name = declarator
+                .child_by_field_name("name")
+                .filter(|n| n.kind() == "identifier")?;
+            (text(name)?, text(key)?)
+        }
+        _ => return None,
+    };
+    let path = format!("{root}.{key}");
+    Some((root, path))
+}
+
+/// The callable node kinds whose body is a function body (ADR-014 S6c's gate).
+const CALLABLE_KINDS: &[&str] = &[
+    "function_declaration",
+    "generator_function_declaration",
+    "method_definition",
+    "arrow_function",
+    "function_expression",
+    "generator_function",
+];
+
+fn enclosing_callable(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
+    let mut cur = node.parent();
+    while let Some(n) = cur {
+        if CALLABLE_KINDS.contains(&n.kind()) {
+            return Some(n);
+        }
+        cur = n.parent();
+    }
+    None
+}
+
+/// Whether `name` is a LOCAL object of the definition spanning `start..end` (ADR-014 S6c):
+/// - declared exactly once there, by a `const`/`let` declarator directly in the definition's own
+///   function body, initialised with an object literal that has no getter or setter;
+/// - every other occurrence is the object of a member read or write (`o.k`) that is not a method
+///   call (also through `(o.m)()` / `o.m!()`), in that same function body, never inside a nested
+///   callable (a callback may run at any time, so its write has no place in the order).
+///
+/// There is no alias model, so every other use may alias the object and disqualifies it: an
+/// argument, a return, an assignment to or from it, a spread, a shorthand entry, a method call
+/// (`this` is the object), a computed access, a second binding of the name, or a parameter.
+fn is_local_object(
+    root: tree_sitter::Node,
+    src: &[u8],
+    name: &str,
+    (start, end): (usize, usize),
+) -> bool {
+    fn is_field(parent: tree_sitter::Node, field: &str, child: tree_sitter::Node) -> bool {
+        parent
+            .child_by_field_name(field)
+            .is_some_and(|c| c.id() == child.id())
+    }
+    /// `o.m(…)`, `(o.m)(…)`, `o.m!(…)`, `(o.m as F)(…)`: the member is (through transparent
+    /// wrappers and type assertions) a callee.
+    fn is_called(member: tree_sitter::Node) -> bool {
+        let mut callee = member;
+        while let Some(parent) = callee.parent() {
+            match parent.kind() {
+                "parenthesized_expression"
+                | "non_null_expression"
+                | "as_expression"
+                | "satisfies_expression"
+                | "type_assertion" => callee = parent,
+                "call_expression" => return is_field(parent, "function", callee),
+                _ => return false,
+            }
+        }
+        false
+    }
+    fn has_accessor(object: tree_sitter::Node) -> bool {
+        let mut cursor = object.walk();
+        object
+            .named_children(&mut cursor)
+            .filter(|m| m.kind() == "method_definition")
+            .any(|m| {
+                (0..m.child_count()).any(|i| {
+                    m.child(i)
+                        .is_some_and(|c| matches!(c.kind(), "get" | "set"))
+                })
+            })
+    }
+    let mut declaration: Option<tree_sitter::Node> = None;
+    let mut members: Vec<tree_sitter::Node> = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.end_byte() <= start || node.start_byte() >= end {
+            continue;
+        }
+        let named = matches!(
+            node.kind(),
+            "identifier"
+                | "shorthand_property_identifier"
+                | "shorthand_property_identifier_pattern"
+        );
+        if named && node.utf8_text(src).ok() == Some(name) {
+            let Some(parent) = node.parent() else {
+                return false;
+            };
+            let declares = parent.kind() == "variable_declarator"
+                && is_field(parent, "name", node)
+                && parent
+                    .child_by_field_name("value")
+                    .is_some_and(|v| v.kind() == "object" && !has_accessor(v))
+                && parent
+                    .parent()
+                    .is_some_and(|d| d.kind() == "lexical_declaration");
+            if declares && declaration.is_none() {
+                declaration = Some(parent);
+            } else if parent.kind() == "member_expression"
+                && is_field(parent, "object", node)
+                && !is_called(parent)
+            {
+                members.push(node);
+            } else {
+                return false;
+            }
+            continue;
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.children(&mut cursor));
+    }
+    let Some(declarator) = declaration else {
+        return false;
+    };
+    // The declaration sits directly in the OWNER's own function body: the callable whose node
+    // (or, for an arrow bound to a const or a field, whose parent) is the definition's range.
+    let Some(callable) = enclosing_callable(declarator) else {
+        return false;
+    };
+    let range = |n: tree_sitter::Node| (n.start_byte(), n.end_byte());
+    let owned = range(callable) == (start, end)
+        || callable.parent().is_some_and(|p| range(p) == (start, end));
+    let in_body = declarator
+        .parent()
+        .and_then(|declaration| declaration.parent())
+        .zip(callable.child_by_field_name("body"))
+        .is_some_and(|(block, body)| block.id() == body.id());
+    owned
+        && in_body
+        && members
+            .iter()
+            .all(|m| enclosing_callable(*m).is_some_and(|c| c.id() == callable.id()))
+}
+
 fn enclosing_def(defs: &[DefRec], pos: usize) -> Option<&DefRec> {
     defs.iter()
         .filter(|d| d.start <= pos && pos < d.end)
@@ -2562,6 +2738,11 @@ enum CaptureRole<'a> {
     /// whose returned value is the producer (ADR-014 S6): its identifier contributors
     /// ([`callable_return_contributors`]) each become a `Local` producer of the match.
     FlowCallableReturn,
+    /// `@flow.consumer.object_property` / `@flow.producer.object_property` — a property path of a
+    /// LOCAL object (ADR-014 S6c): `o.k` as a member write or read, or a `k: v` / shorthand `k`
+    /// entry of `const o = { … }`. It is the same `:property:o.k` slot a `const v = o.k` read
+    /// mints, and the site is gated on `o` being a local object ([`is_local_object`]).
+    FlowObjectProperty { consumer: bool },
     /// `@flow.barrier` / `@flow.barrier.owned` — the body of a callable, marking whose return
     /// value a `return` statement inside it is. A barrier that is NOT `.owned` belongs to an
     /// anonymous callable (a callback), which is not a definition record: a `return` inside it
@@ -2666,6 +2847,8 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
                 kind: FlowEndpointKind::Local,
             },
             "producer.callable_return" => CaptureRole::FlowCallableReturn,
+            "consumer.object_property" => CaptureRole::FlowObjectProperty { consumer: true },
+            "producer.object_property" => CaptureRole::FlowObjectProperty { consumer: false },
             "barrier" => CaptureRole::FlowBarrier { owned: false },
             "barrier.owned" => CaptureRole::FlowBarrier { owned: true },
             "scope" => CaptureRole::FlowScope {
@@ -2981,6 +3164,7 @@ impl Extractor for TreeSitterExtractor {
             let mut flow_construct: Option<(OwnedFlowClass, Span)> = None;
             let mut flow_consumers: Vec<PendingFlowEndpoint> = Vec::new();
             let mut flow_producers: Vec<PendingFlowEndpoint> = Vec::new();
+            let mut flow_object_roots: Vec<(String, usize)> = Vec::new();
             let mut def_params: Option<(&str, Vec<(usize, usize)>)> = None;
             let mut flow_parameter_sites: Vec<PendingFlowEndpoint> = Vec::new();
             let mut flow_return_sites: Vec<PendingFlowEndpoint> = Vec::new();
@@ -3105,6 +3289,23 @@ impl Extractor for TreeSitterExtractor {
                         };
                         rebind_non_class_field(&mut endpoint, c.node);
                         flow_producers.push(endpoint);
+                    }
+                    CaptureRole::FlowObjectProperty { consumer } => {
+                        if let Some((root, path)) = object_property_path(c.node, src) {
+                            flow_object_roots.push((root, pos));
+                            let endpoint = PendingFlowEndpoint {
+                                kind: FlowEndpointKind::Property,
+                                name: path,
+                                pos,
+                                span,
+                                slot: None,
+                            };
+                            if consumer {
+                                flow_consumers.push(endpoint);
+                            } else {
+                                flow_producers.push(endpoint);
+                            }
+                        }
                     }
                     CaptureRole::FlowCallableReturn => {
                         for node in callable_return_contributors(c.node, src) {
@@ -3354,6 +3555,7 @@ impl Extractor for TreeSitterExtractor {
                         span,
                         consumers: flow_consumers,
                         producers: flow_producers,
+                        object_roots: flow_object_roots,
                     });
                 }
             }
@@ -3639,7 +3841,22 @@ impl Extractor for TreeSitterExtractor {
             class.fact(&file.language).apply(&mut edge);
             local_edges.push(edge);
         }
+        let mut local_objects: HashMap<(String, (usize, usize)), bool> = HashMap::new();
         for flow in flow_sites {
+            // ADR-014 S6c: a property path joins only when its object is a local object of the
+            // owner; anything that may alias it drops the whole site.
+            let local = flow.object_roots.iter().all(|(root, pos)| {
+                let Some(owner) = enclosing_def(&defs, *pos) else {
+                    return false;
+                };
+                let range = (owner.start, owner.end);
+                *local_objects
+                    .entry((root.clone(), range))
+                    .or_insert_with(|| is_local_object(tree.root_node(), src, root, range))
+            });
+            if !local {
+                continue;
+            }
             for consumer in &flow.consumers {
                 let consumer_symbol = if consumer.kind == FlowEndpointKind::Return {
                     // A return consumer obeys the plain `return x` barriers: a return inside a
