@@ -290,6 +290,34 @@
     right: (identifier) @flow.producer.local)
 ) @flow.value.syntax.reassignment
 
+; ADR-014 S5d, loop-carried reassignment: `acc = acc + it` and `acc += it`. The new value combines
+; its operands, so `may_influence`. Identifier operands only, like `const c = a + b` above.
+(expression_statement
+  (assignment_expression
+    left: (identifier) @flow.consumer.local
+    right: (binary_expression
+      left: (identifier) @flow.producer.local
+      right: (identifier) @flow.producer.local))
+) @flow.influence.syntax.reassignment_expression
+
+(expression_statement
+  (augmented_assignment_expression
+    left: (identifier) @flow.consumer.local
+    right: (identifier) @flow.producer.local)
+) @flow.influence.syntax.augmented_assignment
+
+; ADR-014 S5d, loop element binding: `for (const it of items)` / `for (const [k, v] of pairs)` /
+; `for (const { a } of rows)`. The binding is ONE element of the iterable, so `may_influence`.
+; `for…in` binds keys, not elements, and contributes nothing. The binding is scoped to the loop by
+; the `for_in_statement` scope and `@flow.declare.*` below.
+(for_in_statement
+  left: [(identifier) @flow.consumer.local
+         (array_pattern (identifier) @flow.consumer.local)
+         (object_pattern (shorthand_property_identifier_pattern) @flow.consumer.local)]
+  operator: "of"
+  right: (identifier) @flow.producer.local
+) @flow.influence.syntax.loop_element
+
 ; this.field = value
 (expression_statement
   (assignment_expression
