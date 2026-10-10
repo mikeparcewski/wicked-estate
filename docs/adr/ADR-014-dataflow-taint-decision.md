@@ -1,6 +1,7 @@
 # ADR-014: Does the evidence justify data-flow or taint analysis? (TS-S5)
 
-- **Status:** Proposed. The recommendation is below; the go/no-go is an operator decision (#279).
+- **Status:** **Accepted: Option 2** (bounded intraprocedural value-flow summaries), decided by the operator on 2026-10-10 (#279). Option 3 stays no-go; its positive-evidence reopening criterion is unchanged.
+- **Operator ruling (verbatim):** "data flow - evidence is important".
 - **Date:** 2026-10-10
 - **Builds on:** TS-S1 (`flows_to` semantics), TS-S2A (the support plane), TS-S2C (#275, the semantic-evidence envelope), TS-S3/S4 (#277/#278, Angular compiler bindings and events).
 - **Evidence:** `crates/wicked-estate/tests/dataflow_readiness.rs`, which pins today's behaviour per construct; `crates/wicked-estate/tests/angular_bindings.rs`; ENGINE-CONTRACT §3.2–§3.5.
@@ -38,7 +39,15 @@ Three options, judged per producer tier:
 | Angular inputs, outputs, `$event` | ✅ compiler-exact at the template boundary; the `EventEmitter.emit(x)` producer side is absent | `angular_bindings.rs` |
 | stale snapshot replacement | ✅ support-plane laws on every backend | conformance suites |
 
-## Recommendation: **Option 1 now. Option 2 only behind one bounded prototype. Option 3 no-go.**
+## Decision (2026-10-10)
+The operator ruled "data flow - evidence is important" on #279. That selects **Option 2**: primitives 1–3 are built as the bounded slices S5b–S5d below, and each is measured against this ADR's acceptance metrics and kill criteria. Evidence decides. A slice that misses any gate is deleted, not flagged off, and its numbers are recorded here. **Option 3 (interprocedural taint) stays no-go.** It reopens only on the positive evidence named under "Falsifier". The prohibited claims below still apply in full: Option 2 adds value-flow summaries. It does not add taint analysis, sanitizer verification or a completeness claim.
+
+**Corpus substitution.** The 905-file TypeScript corpus named in the procedure is not identified anywhere in this repository (the CHANGELOG cites only "a 905-file TypeScript repo"), and it is not on the build host. The measurement therefore uses a pinned **public** Angular corpus of comparable size: `Teradata/covalent` at `438c297e399dd9cae6243f0955d78f04c9875c21` (860 non-declaration `.ts` files). The baseline and each candidate are measured on the same machine and corpus revision. Results are recorded under "Measurements" as each slice lands.
+
+## Measurements
+Filled in by S5b–S5d (one table per slice, with baseline and candidate SHAs).
+
+## Original recommendation (superseded by the decision above): Option 1 now, Option 2 only behind one bounded prototype, Option 3 no-go
 
 **Why Option 3 (taint) is no-go, falsifiably.** Taint on this layer would **miss** flows through properties, destructuring, loops, closures and promises. All are unreachable on the readiness fixture, so a "no taint found" answer would be unsound. It would also have no sanitizer model at all: a sanitizer's result does not even flow back, and a flowing result alone would still not establish sanitizer semantics. Path sensitivity is *not* a prerequisite for a conservative taint analysis, but recording no guard means the analysis could not explain a sanitized branch either.
 
@@ -62,14 +71,14 @@ Presenting that as security analysis violates agent rule R7 (a heuristic must ne
 3. Loop element binding (`for (x of xs)`: `xs → x`) and loop-carried reassignment.
 4. Closure returns through arrow bodies.
 
-Promises, property writes and path conditions are explicitly **out** of Option 2. The prototype evaluates **primitives 1–3**. Primitive 4 (closure returns) is evaluated only if 1–3 graduate. After graduation, these remain unsupported: closures (until primitive 4), promises and callbacks, property writes, path conditions, and aliasing.
+Promises, property writes and path conditions are explicitly **out** of Option 2. The prototype evaluates **primitives 1–3**, plus one narrow case of primitive 4 that the program pulled forward into S5b: a returned arrow whose body is a single identifier (`return () => captured`), as `may_influence`, measured under the same gates. The rest of primitive 4 is evaluated only if 1–3 graduate. After graduation, these remain unsupported: every other closure shape (until primitive 4), promises and callbacks, property writes, path conditions, and aliasing.
 
-## Bounded prototype (only if the operator picks "Option 2 prototype")
-- **Scope:** primitives 1–3 only, TypeScript only, as tree-sitter query data plus the existing call-derived pass. No new storage and no new response fields.
+## Bounded prototype (selected: Option 2)
+- **Scope:** primitives 1–3 (plus the single-identifier returned arrow above), TypeScript only, as tree-sitter query data plus the existing call-derived pass. No new storage and no new response fields.
 - **The one uncertainty it resolves:** whether the edge growth and index time stay within budget.
-- **Timebox:** one session for S5b and one for S5c. Anything still failing after that is a kill.
+- **Timebox:** one session each for S5b, S5c and S5d. A slice still failing after its session is a kill: it is deleted and its numbers are recorded here.
 - **Measurement procedure** (recorded in the ADR with the commit SHAs):
-  - **Corpora:** estate's own tree at the baseline commit, plus the 905-file TypeScript corpus pinned by its revision, which is not on this host and has to be supplied.
+  - **Corpora:** estate's own tree at the baseline commit, plus a pinned TypeScript corpus. The original 905-file corpus could not be identified (see "Corpus substitution"), so the pinned public substitute `Teradata/covalent@438c297e399dd9cae6243f0955d78f04c9875c21` stands in for it. Its numbers are reported as Covalent numbers, never as numbers for the original corpus.
   - **Baseline:** the same commit without the change.
   - **Runs:** each run is `wicked-estate index --force` into a fresh DB; take the median of 3 for timings.
   - **Edges:** the `flows_to` count from `stats --json`; the denominator is the baseline's `flows_to` count.
@@ -80,7 +89,7 @@ Promises, property writes and path conditions are explicitly **out** of Option 2
   - `flows_to` growth ≤ 25 %; full-index time ≤ +15 %; incremental re-index ≤ +15 %; DB size ≤ +10 %;
   - no Lineage query newly truncated at the default depth;
   - 0 new `value_preserving` edges from a `may_influence` construct. The oracle is the readiness fixture's **expected table**, extended with the prototype's constructs and their expected semantics, so "wrong" means "differs from the table", not a reviewer's opinion.
-- **Kill criteria:** any metric missed, any readiness-table mismatch, or the timebox exceeded. The prototype is then deleted, not flagged off (CLAUDE.md §3, §8), and the measured numbers are recorded here.
+- **Kill criteria:** any metric missed, any readiness-table mismatch, or the timebox exceeded. The failing **slice** (S5b, S5c or S5d, with everything that slice added) is then deleted, not flagged off (CLAUDE.md §3, §8), and the measured numbers are recorded here. Slices that already passed their own gates stay. Each later slice is measured against the merged state before it, so its numbers are its own.
 
 ## Consequences
 - **Option 1:** no API, storage, budget or semver change. The readiness test becomes the regression guard: a row cannot flip silently.
@@ -89,9 +98,9 @@ Promises, property writes and path conditions are explicitly **out** of Option 2
 
 ## Staged plan (each slice fits one session)
 - **S5a (this ADR):** the decision and the readiness test.
-- **S5b (only if Option 2 is chosen):** primitive 1 (callee return composition), with the readiness row flipped and metrics recorded.
-- **S5c:** primitives 2–3, with metrics re-measured against the kill criteria.
-- **S5d:** decide whether Option 2 graduates, or is deleted. The recorded graduation evidence is the metrics table, the readiness diff and the corpus revisions.
+- **S5b:** primitive 1 (callee return composition), with the readiness row flipped and metrics recorded. It also carries the single-identifier returned arrow pulled forward from primitive 4 (see "Minimum missing primitives"). Every other closure shape stays out.
+- **S5c:** primitive 2 (destructuring), measured against the kill criteria.
+- **S5d:** primitive 3 (loop element binding and loop-carried reassignment), measured against the kill criteria. Each slice lands as its own PR, so a gate miss deletes exactly that slice (see "Kill criteria"). Graduation evidence is the metrics table, the readiness diff and the corpus revisions.
 
 ## Next-session prompt
-> Read docs/adr/ADR-014-dataflow-taint-decision.md and the operator's decision on #279. If the operator chose "Option 2 prototype", implement S5b only: make `return <call-expression>` contribute `may_influence` flows from the call's receiver and arguments into `<fn>.return` in `crates/wicked-estate-extract/src/queries/typescript.scm` (data, no per-language Rust), flip the `sanitize.return → clean` row in `crates/wicked-estate/tests/dataflow_readiness.rs`, and measure it with ADR-014's procedure on estate's own graph and on the pinned 905-file TypeScript corpus. If any metric fails or the timebox is exceeded, delete the change and record the numbers in the ADR. If the operator chose Option 1, set ADR-014's status to Accepted (Option 1), record the decision with its date and a link to it, and close #279. Change nothing else.
+> Read docs/adr/ADR-014-dataflow-taint-decision.md (Accepted: Option 2) and its "Measurements" section. Implement the next unlanded slice of S5b–S5d only, as TypeScript query data in `crates/wicked-estate-extract/src/queries/typescript.scm` plus the smallest engine change it needs. Flip its row in `crates/wicked-estate/tests/dataflow_readiness.rs` into a positive test with expected flows, expected non-flows and the expected semantics of every edge: `value_preserving` only for a whole-value transfer, `may_influence` for a contribution or transformation. Every summary stays path-insensitive whatever its semantics. Then measure it with this ADR's procedure against the baseline commit on both corpora (estate's own tree and the pinned Covalent substitute). A gate miss deletes the slice, and its numbers are recorded here either way.
