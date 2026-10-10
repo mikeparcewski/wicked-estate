@@ -40,7 +40,7 @@ Three options, judged per producer tier:
 | stale snapshot replacement | ✅ support-plane laws on every backend | conformance suites |
 
 ## Decision (2026-10-10)
-The operator ruled "data flow - evidence is important" on #279. That selects **Option 2**: primitives 1–3 are built as the bounded slices S5b–S5d below, and each is measured against this ADR's acceptance metrics and kill criteria. Evidence decides. A primitive that misses any gate is deleted, not flagged off, and its numbers are recorded here. **Option 3 (interprocedural taint) stays no-go.** It reopens only on the positive evidence named under "Falsifier". The prohibited claims below still apply in full: Option 2 adds value-flow summaries. It does not add taint analysis, sanitizer verification or a completeness claim.
+The operator ruled "data flow - evidence is important" on #279. That selects **Option 2**: primitives 1–3 are built as the bounded slices S5b–S5d below, and each is measured against this ADR's acceptance metrics and kill criteria. Evidence decides. A slice that misses any gate is deleted, not flagged off, and its numbers are recorded here. **Option 3 (interprocedural taint) stays no-go.** It reopens only on the positive evidence named under "Falsifier". The prohibited claims below still apply in full: Option 2 adds value-flow summaries. It does not add taint analysis, sanitizer verification or a completeness claim.
 
 **Corpus substitution.** The 905-file TypeScript corpus named in the procedure is not identified anywhere in this repository (the CHANGELOG cites only "a 905-file TypeScript repo"), and it is not on the build host. The measurement therefore uses a pinned **public** Angular corpus of comparable size: `Teradata/covalent` at `438c297e399dd9cae6243f0955d78f04c9875c21` (860 non-declaration `.ts` files). The baseline and each candidate are measured on the same machine and corpus revision. Results are recorded under "Measurements" as each slice lands.
 
@@ -89,7 +89,7 @@ Promises, property writes and path conditions are explicitly **out** of Option 2
   - `flows_to` growth ≤ 25 %; full-index time ≤ +15 %; incremental re-index ≤ +15 %; DB size ≤ +10 %;
   - no Lineage query newly truncated at the default depth;
   - 0 new `value_preserving` edges from a `may_influence` construct. The oracle is the readiness fixture's **expected table**, extended with the prototype's constructs and their expected semantics, so "wrong" means "differs from the table", not a reviewer's opinion.
-- **Kill criteria:** any metric missed, any readiness-table mismatch, or the timebox exceeded. The prototype is then deleted, not flagged off (CLAUDE.md §3, §8), and the measured numbers are recorded here.
+- **Kill criteria:** any metric missed, any readiness-table mismatch, or the timebox exceeded. The failing **slice** (S5b, S5c or S5d, with everything that slice added) is then deleted, not flagged off (CLAUDE.md §3, §8), and the measured numbers are recorded here. Slices that already passed their own gates stay. Each later slice is measured against the merged state before it, so its numbers are its own.
 
 ## Consequences
 - **Option 1:** no API, storage, budget or semver change. The readiness test becomes the regression guard: a row cannot flip silently.
@@ -100,7 +100,7 @@ Promises, property writes and path conditions are explicitly **out** of Option 2
 - **S5a (this ADR):** the decision and the readiness test.
 - **S5b:** primitive 1 (callee return composition), with the readiness row flipped and metrics recorded. It also carries the single-identifier returned arrow pulled forward from primitive 4 (see "Minimum missing primitives"). Every other closure shape stays out.
 - **S5c:** primitive 2 (destructuring), measured against the kill criteria.
-- **S5d:** primitive 3 (loop element binding and loop-carried reassignment), measured against the kill criteria. Each primitive lands as its own PR, so a gate miss deletes exactly one primitive. Graduation evidence is the metrics table, the readiness diff and the corpus revisions.
+- **S5d:** primitive 3 (loop element binding and loop-carried reassignment), measured against the kill criteria. Each slice lands as its own PR, so a gate miss deletes exactly that slice (see "Kill criteria"). Graduation evidence is the metrics table, the readiness diff and the corpus revisions.
 
 ## Next-session prompt
 > Read docs/adr/ADR-014-dataflow-taint-decision.md (Accepted: Option 2) and its "Measurements" section. Implement the next unlanded slice of S5b–S5d only, as TypeScript query data in `crates/wicked-estate-extract/src/queries/typescript.scm` plus the smallest engine change it needs. Flip its row in `crates/wicked-estate/tests/dataflow_readiness.rs` into a positive test with expected flows, expected non-flows and the expected semantics of every edge: `value_preserving` only for a whole-value transfer, `may_influence` for a contribution or transformation. Every summary stays path-insensitive whatever its semantics. Then measure it with this ADR's procedure against the baseline commit on both corpora (estate's own tree and the pinned Covalent substitute). A gate miss deletes the slice, and its numbers are recorded here either way.
