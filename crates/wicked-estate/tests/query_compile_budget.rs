@@ -20,6 +20,15 @@ fn compiles_during(store: &mut SqliteStore, root: &Path) -> usize {
 
 #[test]
 fn an_index_pass_compiles_each_extracted_language_once() {
+    // An ambient plugin or grammar override would change the dispatch (and so the counts): pin
+    // an empty plugin registry before anything reads it.
+    let plugins = tempfile::tempdir().expect("plugins tempdir");
+    // SAFETY: this binary's only test sets these before any other thread (rayon, the registry)
+    // exists, so nothing reads the environment concurrently.
+    unsafe {
+        std::env::set_var("WICKED_ESTATE_PLUGINS", plugins.path());
+        std::env::remove_var("WICKED_ESTATE_PLUGIN_OVERRIDE");
+    }
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     fs::write(

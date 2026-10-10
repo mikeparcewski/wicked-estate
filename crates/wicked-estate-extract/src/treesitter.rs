@@ -1392,7 +1392,8 @@ impl ExtractorCache {
         S: AsRef<str>,
     {
         let mut keys = HashMap::new();
-        let mut slots = HashMap::new();
+        let mut slots: HashMap<String, std::sync::OnceLock<Option<TreeSitterExtractor>>> =
+            HashMap::new();
         for ext in exts {
             let ext = ext.as_ref().to_ascii_lowercase();
             if keys.contains_key(&ext) {
@@ -1400,9 +1401,7 @@ impl ExtractorCache {
             }
             if let Some(d) = dispatch_for_extension(&ext) {
                 let key = d.key();
-                slots
-                    .entry(key.clone())
-                    .or_insert_with(std::sync::OnceLock::new);
+                slots.entry(key.clone()).or_default();
                 keys.insert(ext, key);
             }
         }
