@@ -191,12 +191,14 @@ A flow edge answers two independent questions. Conflating them is how a tool sta
 | | | `call_derived` | derived from a *resolved* `Calls` edge |
 | | | `convention` | a framework naming/shape match the parser cannot prove |
 | | | `scip` | **RESERVED, not emitted** — a verified SCIP projection (TS-S2) |
-| | | `compiler` | **RESERVED, not emitted** — a framework compiler fact (TS-S3/TS-S4) |
+| | | `compiler` | a framework compiler fact (TS-S3): an Angular template input binding the compiler resolved, ingested as semantic evidence (§3.5). **Only a semantic-evidence producer emits it** — never a query file |
 
 Both keys hold an array sorted in the enum's **declared** order (the order of the table above, so `["value_preserving","may_influence"]`, not lexicographic), never a scalar — see "endpoint dedup" below. `constructs` and `flow_rules` are sorted lexicographically. Evidence
 *strength* stays where this contract already put it: `confidence`, `provenance`, `resolved_by`.
-The two reserved words exist so that a convention match can never later be relabelled as a
-compiler proof; `FlowEvidence::is_emitted()` is the tripwire.
+`scip` stays reserved. `compiler` is emitted only through §3.5's ingest, and a query file cannot
+claim either: the extractor admits `syntax` and `convention` anchors only, so a convention match
+can never be relabelled as a compiler proof. `FlowEvidence::is_emitted()` is the tripwire for
+`scip`.
 
 **What the evidence does not prove.** No flow edge carries CFG, SSA, path-sensitivity, alias or
 heap reasoning. `a flows_to b` means "on some path, by the stated evidence, a value may reach b".
@@ -220,7 +222,9 @@ named `Input` is not necessarily `@angular/core`'s `Input`; a receiver named `ro
 necessarily an `ActivatedRoute`. Those edges are emitted at the `Heuristic` tier with
 `resolved_by = tree-sitter-convention` and a stable rule id in `flow_rules`
 (`typescript/convention/angular_input`, `typescript/convention/route_param`). Template wiring and
-`@angular/core` identity are **not** claimed and are not resolved.
+`@angular/core` identity are **not** claimed by these edges. The compiler-resolved template input
+bindings are a separate producer (§3.5, `angular-compiler-adapter`, `compiler` evidence) whose
+edges have different keys, so both coexist with their own provenance.
 
 #### Rules stay data
 
@@ -407,9 +411,10 @@ engine the same versioned `SemanticEvidence` document, and the engine alone deci
 | **Envelope** | `{schema_version: 1, producer: {name, version, class: index \| compiler, capabilities}, snapshot, generation?, documents: [{path, position_encoding}], facts}`. Any other `schema_version` is rejected and every object denies unknown fields, so a v1 reader never drops a later meaning silently. An invalid envelope writes nothing. |
 | **Facts** | `definition {fact_id, symbol, name, site}`, `reference {fact_id, symbol, site, roles?}`, `call {fact_id, site, target: exact{symbol} \| ambiguous{candidates} \| dynamic}`. A `site` is `{document, range}` — 0-based, half-open, columns in the document's `position_encoding` (`utf8`, `utf16`, `utf32`, `unspecified`); a fact must cite a declared document and a range that does not end before it starts. Document paths are repository-relative with `/` separators (no `..`, `.`, empty segment, drive letter or `\`). |
 | **Opaque identities** | `producer`, `snapshot`, `fact_id` and every `symbol` are compared byte for byte — never trimmed, case-folded or Unicode-normalized (`Raise` ≠ `RAISE`, NFC ≠ NFD). Only empty or NUL values are rejected, and an owner part (`producer`, `snapshot`) may not be whitespace-only (§3.4's `SupportOwner` rule) — whitespace inside any id is kept and significant. One `fact_id` with two different facts is rejected; exact duplicates are one fact. |
-| **Capabilities** | `definitions`, `references`, `calls`. A fact of an undeclared kind is never projected (counted `undeclared_capability`). |
+| **Capabilities** | `definitions`, `references`, `calls`, `input_bindings`. A fact of an undeclared kind is never projected (counted `undeclared_capability`). |
 | **Correlation** | candidates are the document's **structural** nodes (value slots, `File` and `Import` nodes excluded). A definition maps to the unique innermost candidate whose span contains the whole site **and** whose `name` equals the fact's `name`. A reference/call site's source is the unique innermost candidate containing the site, or the document's `File` node for a module-level use. "Innermost" means no other candidate nests inside it; two equal or crossing spans are ambiguous. A symbol whose definitions map to two nodes is ambiguous everywhere. Columns in `utf16`/`utf32` are converted to the graph's UTF-8 byte columns against the document's source text when it is readable; otherwise they are used as given and counted (`positions_unconverted`). The input is a set: order never decides. |
 | **What projects** | `reference` → `References`, whatever shape the target has. `call` → `Calls` only when the profile declares `calls`, the site is valid, and the target is `exact` and correlates — a declared capability without that site evidence emits nothing. Tier: `Scip` for an `index` producer, `Compiler` for a `compiler` one; `resolved_by` = the producer name; metadata `evidence_producer_version`, `evidence_fact` (`reference`/`call`), and `evidence_roles` when the producer gave any. Definitions are correlation evidence only (the base plane owns `Contains`/`Defines`). Self-references are dropped; a self-call (recursion) is kept. |
+| **Input bindings (TS-S3)** | `input_binding {fact_id, site, construct, semantics, consumer: {class, member}, producers: [{class, member}], unresolved?}` projects one `flows_to` per resolvable producer, stored `consumer → producer` (§3.2), between the canonical field slots `synthetic("value", "{class}:field:{member}")` (`flow::field_slot_id`, the same function the TypeScript extractor mints them with). `class` correlates through a definition fact like any symbol. Evidence `compiler`, construct and semantics from the fact, tier `Compiler`. A member whose slot is not in the graph is counted `unknown_slot` (no node is fabricated), each `unresolved` read is counted `unresolved_read`, and a consumer that is its own producer is `self_flow`. The site may be a template file the graph does not index (an Angular `templateUrl`); it is location only. The TypeScript base plane gives every property and get/set accessor of a **decorated** class (`@Component`, `@ng.Component`, a renamed import — including `abstract` classes) its field slot — a slot, no flow — so bindings have endpoints; undecorated classes gain none. |
 | **What never projects** | everything else is counted in the `EvidenceReport` by reason — `document_not_in_graph`, `unmapped_definition`, `ambiguous_definition`, `ambiguous_source`, `unknown_target` (external, local, unmapped), `ambiguous_target`, `dynamic_target`, `self_reference`, `malformed_range` (also a site that cannot exist in the document's known text), and the adapter's `generated`, `forward_definition`, `module_symbol`. The report also counts `edges_projected`, the distinct public edges the projected facts support (several sites can support one edge). No node or target is fabricated. |
 | **Ownership and replacement** | accepted facts are §3.4 support facts owned by `(producer.name, snapshot)` and written with one `replace_edge_supports`: complete replacement, producer isolation, last-support restoration, endpoint erasure — unchanged. `snapshot` must be unique within one graph (include the repository for a multi-repo graph). The generation is the envelope's own when it has one (stale/equal rules unchanged), else the owner's stored generation + 1 (1 for a new owner) — which orders ingestion, not source freshness. An empty envelope retracts everything the owner held. |
 | **SCIP adapter** | profile `{name: tool_info.name or "scip", version: tool_info.version or "unknown", class: index, capabilities: [definitions, references]}` — **never `calls`**: SCIP's `SymbolRole` has no call role, so `f()` and `const g = f` are the same role-less occurrence. Typed ranges (SCIP 0.9+) win over the deprecated `repeated int32 range`. `Generated` occurrences, bare `ForwardDefinition`s and module symbols (trailing `/`) are dropped and counted; a malformed range is counted, never clamped to a zero span. A definition is named after the symbol's last descriptor; `local N` symbols are qualified by their document (they are document-scoped in SCIP) and named by the document's `display_name` when there is one. Snapshot: `<repo label or .>:<index path relative to the root, or its file name>`. |
@@ -420,6 +425,7 @@ engine the same versioned `SemanticEvidence` document, and the engine alone deci
 |---|---|---|---|---|
 | scip-typescript 0.4.0 | **real**: pinned sample index (`wicked-estate-resolve/tests/fixtures/scip-typescript-0.4.0`), ingested end to end | yes | yes | **no** (no call role) |
 | any other SCIP indexer (scip-java 0.13.1 Java/Kotlin, scip-dotnet 0.2.14 C#/VB, scip-clang 0.4.0 C/C++, rust-analyzer, scip-go, scip-python, …) | same adapter, **no pinned sample** in this repo | yes | yes | **no** |
+| Angular compiler 22.2.2 (`adapters/angular-evidence`, companion Node adapter) | **real**: compiler-derived fixtures re-derived in CI; input bindings only (outputs/events: TS-S4) | yes (classes) | — | — |
 | COBOL, PL/SQL, ABAP, RPG | **contract fixtures only** (`wicked-estate/tests/fixtures/evidence/`) — no producer integration exists | fixture | fixture | PL/SQL fixture only (modelled on PL/Scope `USAGE = 'CALL'`) |
 
 A contract fixture proves that the envelope can carry a toolchain's identity shapes, not that the
@@ -431,8 +437,12 @@ language is supported, precise or taint-ready. None of this is data-flow or tain
 base edges are file-owned: the version bump's forced full re-extract on the next `index` retires
 them, and `scip` then writes support. No schema change.
 
-**Not yet.** No CLI for a raw envelope (`wicked-estate evidence ingest`) and no MCP tool: the library
-entry point is `ingest_semantic_evidence`. No document digests and no stored record of unprojected
+**CLI.** `wicked-estate evidence <envelope.json> [--root <dir>] [--repo <label>] [--json] [--db ...]`
+ingests one envelope (strict argv; a missing graph, an unreadable or invalid envelope is refused
+before any store opens; a labelled graph needs `--repo`; `--root` defaults to the checkout the graph
+recorded for that repo and is read only to convert UTF-16/32 columns — the text output counts any
+position left unconverted). **Not yet:** no MCP tool; the library entry
+point is `ingest_semantic_evidence`. No document digests and no stored record of unprojected
 facts (the report is returned, not persisted).
 
 ## 4. GraphStore contract

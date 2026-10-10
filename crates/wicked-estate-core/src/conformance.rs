@@ -3709,4 +3709,73 @@ pub fn semantic_evidence_suite<S: GraphStore>(store: &mut S) {
         .map(|o| (o.owner.producer, o.generation))
         .collect();
     assert_eq!(owners, vec![("cc".into(), 3), ("idx".into(), 4)]);
+
+    // 9. TS-S3: a compiler-resolved input binding projects `flows_to` between field slots,
+    //    stored consumer → producer, and an empty snapshot retracts it.
+    use crate::evidence::MemberRef;
+    let host = ev_node("Host", NodeKind::Class, (10, 14));
+    let leaf = ev_node("Leaf", NodeKind::Class, (16, 20));
+    let slot = |owner: &Node, f: &str| {
+        let mut n = ev_node(f, NodeKind::Field, (11, 11));
+        n.symbol = crate::flow::field_slot_id(&owner.symbol, f);
+        n.metadata
+            .insert(crate::node::VALUE_ROLE_METADATA_KEY.into(), "Field".into());
+        n
+    };
+    let (consumer, producer) = (slot(&leaf, "user"), slot(&host, "current"));
+    let mut all = nodes.clone();
+    all.extend([
+        host.clone(),
+        leaf.clone(),
+        consumer.clone(),
+        producer.clone(),
+    ]);
+    store.upsert_nodes(&all).expect("binding nodes");
+    let binding = |facts: Vec<EvidenceFact>| {
+        let mut defs = vec![ev_def("Host", 10), ev_def("Leaf", 16)];
+        defs.extend(facts);
+        ev_envelope(
+            "ng",
+            ProducerClass::Compiler,
+            &[Capability::Definitions, Capability::InputBindings],
+            None,
+            defs,
+        )
+    };
+    let fact = EvidenceFact::InputBinding {
+        fact_id: "b".into(),
+        site: ev_site(12, 4, 4),
+        construct: "angular_input_binding".into(),
+        semantics: crate::flow::FlowSemantics::ValuePreserving,
+        consumer: MemberRef {
+            class: "Leaf".into(),
+            member: "user".into(),
+        },
+        producers: vec![MemberRef {
+            class: "Host".into(),
+            member: "current".into(),
+        }],
+        unresolved: vec![],
+    };
+    let flows = crate::edge_tags::other(crate::edge_tags::FLOWS_TO);
+    let r = ingest_evidence(store, &binding(vec![fact]), &all, &none).expect("binding");
+    assert_eq!(r.flows_projected, 1, "{r:?}");
+    let rows = store
+        .edge_supports(&consumer.symbol, &producer.symbol, &flows)
+        .expect("rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].fact.provenance, crate::edge::Provenance::Compiler);
+    assert_eq!(
+        crate::flow::flow_evidence_of(&rows[0].fact)
+            .into_iter()
+            .collect::<Vec<_>>(),
+        vec![crate::flow::FlowEvidence::Compiler]
+    );
+    ingest_evidence(store, &binding(vec![]), &all, &none).expect("empty binding snapshot");
+    assert!(
+        store
+            .edge_supports(&consumer.symbol, &producer.symbol, &flows)
+            .expect("rows")
+            .is_empty()
+    );
 }

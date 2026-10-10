@@ -186,3 +186,21 @@ jobs:
         run: cargo test -p wicked-estate-retrieve --features model2vec
       - name: fastembed semantic tests
         run: cargo test -p wicked-estate-retrieve --features fastembed
+
+  # ── TS-S3: the Angular compiler adapter (adapters/angular-evidence). Reinstalls the exact pinned
+  #    compiler and re-derives every committed fixture envelope; a diff means a fixture is not the
+  #    compiler's output (ADR-013). Also runs the adapter's own tests (version gate, paths). ────
+  angular-adapter:
+    name: angular adapter (fixtures re-derived · tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: adapters/angular-evidence
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: npm ci --no-audit --no-fund
+      - run: npm run fixtures:check
+      - run: npm test

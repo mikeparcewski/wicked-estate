@@ -154,9 +154,10 @@ pub enum FlowEvidence {
     Convention,
     /// RESERVED for TS-S2: a verified SCIP symbol/occurrence projection. Nothing emits this yet.
     Scip,
-    /// RESERVED for TS-S3/TS-S4: a framework *compiler* fact (e.g. the Angular compiler's
-    /// resolved template binding). Nothing emits this yet. Reserving the word is what keeps a
-    /// convention match from later being relabelled as a compiler proof.
+    /// A framework *compiler* fact (TS-S3): the Angular compiler's resolved template binding,
+    /// ingested as semantic evidence (`docs/ENGINE-CONTRACT.md` §3.5). Only a semantic-evidence
+    /// producer emits it — a query file cannot (the extractor refuses the anchor), so a
+    /// convention match is never relabelled as a compiler proof.
     Compiler,
 }
 
@@ -187,7 +188,10 @@ impl FlowEvidence {
     pub fn is_emitted(self) -> bool {
         matches!(
             self,
-            FlowEvidence::Syntax | FlowEvidence::CallDerived | FlowEvidence::Convention
+            FlowEvidence::Syntax
+                | FlowEvidence::CallDerived
+                | FlowEvidence::Convention
+                | FlowEvidence::Compiler
         )
     }
 }
@@ -724,6 +728,14 @@ pub fn is_flow_edge(edge: &Edge) -> bool {
 /// locked contract.
 ///
 /// [`NodeKind`]: crate::node::NodeKind
+/// The canonical value slot of field `field` on the type `owner`: `{owner}:field:{field}` (a
+/// `value` synthetic symbol). The TypeScript extractor mints field slots with this, and semantic
+/// evidence (TS-S3 compiler-resolved bindings) addresses them with it, so the two can never name
+/// one field differently.
+pub fn field_slot_id(owner: &crate::symbol::SymbolId, field: &str) -> crate::symbol::SymbolId {
+    crate::symbol::Symbol::synthetic("value", format!("{}:field:{field}", owner.0)).id()
+}
+
 pub fn is_structural_symbol(node: &Node) -> bool {
     !node.is_value_flow_node()
 }
@@ -871,17 +883,15 @@ mod tests {
 
     #[test]
     fn reserved_evidence_classes_are_not_emitted_yet() {
-        for reserved in [FlowEvidence::Scip, FlowEvidence::Compiler] {
-            assert!(
-                !reserved.is_emitted(),
-                "{} is reserved for a later wave",
-                reserved.as_str()
-            );
-        }
+        assert!(
+            !FlowEvidence::Scip.is_emitted(),
+            "scip flow evidence is reserved for a later wave"
+        );
         for live in [
             FlowEvidence::Syntax,
             FlowEvidence::CallDerived,
             FlowEvidence::Convention,
+            FlowEvidence::Compiler,
         ] {
             assert!(live.is_emitted());
         }

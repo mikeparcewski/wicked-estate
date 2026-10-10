@@ -1654,9 +1654,12 @@ impl<'a> FlowClass<'a> {
         let semantics = FlowSemantics::parse(parts.next()?)?;
         let evidence = FlowEvidence::parse(parts.next()?)?;
         let construct = parts.next()?;
-        // A query file may not mint evidence a wave has not shipped: reserving `compiler`/`scip`
-        // is pointless if a `.scm` can claim them (wicked-estate TS-S1).
-        if construct.is_empty() || !evidence.is_emitted() || evidence == FlowEvidence::CallDerived {
+        // A query file proves syntax or matches a convention, nothing more: `compiler`/`scip` come
+        // only from a semantic-evidence producer (TS-S2C/S3) and `call_derived` only from the
+        // engine, so a `.scm` claiming one is refused (wicked-estate TS-S1, #235).
+        if construct.is_empty()
+            || !matches!(evidence, FlowEvidence::Syntax | FlowEvidence::Convention)
+        {
             return None;
         }
         Some(Self {
@@ -2240,7 +2243,7 @@ fn flow_endpoint_symbol(
         }
         FlowEndpointKind::Field => {
             let owner = flow_owner_key(endpoint, defs, pending, scheme, module, file_symbol);
-            Symbol::synthetic("value", format!("{owner}:field:{}", endpoint.name)).id()
+            wicked_estate_core::field_slot_id(&SymbolId(owner), &endpoint.name)
         }
         FlowEndpointKind::Property => {
             let owner = flow_owner_key(endpoint, defs, pending, scheme, module, file_symbol);
@@ -2418,6 +2421,9 @@ enum CaptureRole<'a> {
     FlowProducer { kind: FlowEndpointKind },
     /// `@flow.parameter.local` — a callable parameter that can receive call-site arguments.
     FlowParameter { kind: FlowEndpointKind },
+    /// `@flow.slot.field` — a declared value slot with no flow of its own (TS-S3): an Angular
+    /// component/directive property, so compiler-resolved bindings have a canonical endpoint.
+    FlowSlot { kind: FlowEndpointKind },
     /// `@flow.return.<kind>` — a value returned by the enclosing callable.
     FlowReturn { kind: FlowEndpointKind },
     /// `@flow.barrier` / `@flow.barrier.owned` — the body of a callable, marking whose return
@@ -2458,8 +2464,9 @@ pub(crate) fn flow_capture_lint(query: &Query) -> std::result::Result<(), String
     } else {
         Err(format!(
             "unknown or reserved flow capture(s) {} — a `@flow.<semantics>.<evidence>.<construct>` \
-             anchor needs semantics `value`/`influence` and a shipped evidence class (`syntax`/\
-             `convention`; `scip`/`compiler` are reserved, `call_derived` is engine-owned), or \
+             anchor needs semantics `value`/`influence` and a query-file evidence class (`syntax`/\
+             `convention`; `scip`/`compiler` come only from semantic-evidence producers, \
+             `call_derived` is engine-owned), or \
              one of the endpoint roles",
             bad.join(", ")
         ))
@@ -2508,6 +2515,9 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
             },
             "parameter.local" => CaptureRole::FlowParameter {
                 kind: FlowEndpointKind::Parameter,
+            },
+            "slot.field" => CaptureRole::FlowSlot {
+                kind: FlowEndpointKind::Field,
             },
             "return.local" => CaptureRole::FlowReturn {
                 kind: FlowEndpointKind::Local,
@@ -2757,6 +2767,7 @@ impl Extractor for TreeSitterExtractor {
         let mut event_emit_topic_sites: Vec<(String, usize, Span)> = Vec::new();
         let mut flow_sites: Vec<PendingFlow> = Vec::new();
         let mut flow_parameters: Vec<PendingFlowEndpoint> = Vec::new();
+        let mut flow_slots: Vec<PendingFlowEndpoint> = Vec::new();
         let mut flow_returns: Vec<PendingReturnFlow> = Vec::new();
         // Callable bodies by byte range → `true` when the body is its own definition's body.
         // A `return` inside the innermost NON-owned body is a callback's return value.
@@ -2939,6 +2950,15 @@ impl Extractor for TreeSitterExtractor {
                     }
                     CaptureRole::FlowParameter { kind } => {
                         flow_parameter_sites.push(PendingFlowEndpoint {
+                            kind,
+                            name: strip_def_name(&text),
+                            pos,
+                            span,
+                            slot: None,
+                        });
+                    }
+                    CaptureRole::FlowSlot { kind } => {
+                        flow_slots.push(PendingFlowEndpoint {
                             kind,
                             name: strip_def_name(&text),
                             pos,
@@ -3389,6 +3409,18 @@ impl Extractor for TreeSitterExtractor {
         // ── Semantic value-flow nodes + direct edges ───────────────────────
         let value_scopes =
             ValueScopes::build(&flow_scope_sites, &flow_decl_sites, &flow_parameters, &defs);
+        for slot in &flow_slots {
+            let symbol = flow_endpoint_symbol(
+                slot,
+                &defs,
+                &pending,
+                &scheme,
+                &module,
+                &file_symbol,
+                &value_scopes,
+            );
+            nodes.push(flow_endpoint_node(slot, symbol, file));
+        }
         for parameter in &flow_parameters {
             let symbol = flow_endpoint_symbol(
                 parameter,

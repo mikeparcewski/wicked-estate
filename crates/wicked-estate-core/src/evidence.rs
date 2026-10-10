@@ -116,6 +116,9 @@ pub enum Capability {
     /// Explicit, site-level call evidence. Declaring it is necessary but not sufficient: each call
     /// still needs its own site and an exact target.
     Calls,
+    /// Compiler-resolved input bindings (TS-S3): a template binding whose target member a
+    /// framework compiler resolved (aliases, inheritance and signal inputs included).
+    InputBindings,
 }
 
 /// One document a fact may cite. `path` is repository-relative with `/` separators.
@@ -178,6 +181,15 @@ pub enum CallTarget {
     Dynamic,
 }
 
+/// A class member as a producer names it: the producer `class` symbol (correlated by a
+/// definition fact, like any symbol) and the member's source name, owned by that class.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemberRef {
+    pub class: String,
+    pub member: String,
+}
+
 /// One fact. Its `fact_id` is producer-owned and opaque (the support fact id).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -203,6 +215,22 @@ pub enum EvidenceFact {
         site: EvidenceSite,
         target: CallTarget,
     },
+    /// A compiler-resolved input binding at `site` (TS-S3): the `producers` (members of the
+    /// template's host class the bound expression reads) flow into the `consumer` member (the
+    /// resolved input). Projects to `flows_to` between the members' field slots, stored consumer
+    /// → producer, with `compiler` evidence. `construct` names the binding form (data, e.g.
+    /// `angular_input_binding`); `unresolved` lists reads the producer could not tie to a member
+    /// (template locals, pipes, calls), which are counted, never guessed.
+    InputBinding {
+        fact_id: String,
+        site: EvidenceSite,
+        construct: String,
+        semantics: crate::flow::FlowSemantics,
+        consumer: MemberRef,
+        producers: Vec<MemberRef>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unresolved: Vec<String>,
+    },
 }
 
 impl EvidenceFact {
@@ -210,7 +238,8 @@ impl EvidenceFact {
         match self {
             EvidenceFact::Definition { fact_id, .. }
             | EvidenceFact::Reference { fact_id, .. }
-            | EvidenceFact::Call { fact_id, .. } => fact_id,
+            | EvidenceFact::Call { fact_id, .. }
+            | EvidenceFact::InputBinding { fact_id, .. } => fact_id,
         }
     }
 
@@ -218,7 +247,8 @@ impl EvidenceFact {
         match self {
             EvidenceFact::Definition { site, .. }
             | EvidenceFact::Reference { site, .. }
-            | EvidenceFact::Call { site, .. } => site,
+            | EvidenceFact::Call { site, .. }
+            | EvidenceFact::InputBinding { site, .. } => site,
         }
     }
 
@@ -227,6 +257,7 @@ impl EvidenceFact {
             EvidenceFact::Definition { .. } => Capability::Definitions,
             EvidenceFact::Reference { .. } => Capability::References,
             EvidenceFact::Call { .. } => Capability::Calls,
+            EvidenceFact::InputBinding { .. } => Capability::InputBindings,
         }
     }
 }
@@ -260,6 +291,13 @@ pub enum EvidenceSkip {
     ForwardDefinition,
     /// Adapter: a module/package-level symbol (the base plane's `Imports` already cover files).
     ModuleSymbol,
+    /// A bound expression read the producer could not tie to a class member (template local,
+    /// pipe, call), as the fact's `unresolved` list states.
+    UnresolvedRead,
+    /// A binding member's field slot is not in the graph (the engine never fabricates a node).
+    UnknownSlot,
+    /// A binding whose consumer is also its producer.
+    SelfFlow,
     /// The range is malformed: an adapter could not read it, or the document's text is known and
     /// the site cannot exist in it.
     MalformedRange,
@@ -278,6 +316,8 @@ pub struct EvidenceReport {
     pub definitions_mapped: usize,
     pub references_projected: usize,
     pub calls_projected: usize,
+    /// Value flows projected from compiler-resolved input bindings (TS-S3).
+    pub flows_projected: usize,
     /// Distinct public edges `(source, target, kind)` those facts support. Several facts (sites)
     /// can support one edge, so this is at most `references_projected + calls_projected`.
     pub edges_projected: usize,
@@ -288,9 +328,9 @@ pub struct EvidenceReport {
 }
 
 impl EvidenceReport {
-    /// Support facts written (references + calls).
+    /// Support facts written (references + calls + flows).
     pub fn projected(&self) -> usize {
-        self.references_projected + self.calls_projected
+        self.references_projected + self.calls_projected + self.flows_projected
     }
 
     /// Add `n` skips for `reason` (adapters fold their own counts in this way).
@@ -390,6 +430,18 @@ impl SemanticEvidence {
                     }
                     CallTarget::Dynamic => {}
                 },
+                EvidenceFact::InputBinding {
+                    construct,
+                    consumer,
+                    producers,
+                    ..
+                } => {
+                    check_opaque("evidence binding construct", construct)?;
+                    for m in std::iter::once(consumer).chain(producers) {
+                        check_opaque("evidence member class", &m.class)?;
+                        check_opaque("evidence member name", &m.member)?;
+                    }
+                }
             }
             let site = f.site();
             if !docs.contains(site.document.as_str()) {
@@ -594,7 +646,9 @@ pub fn project_evidence(
                     d.position_encoding,
                     PositionEncoding::Utf16 | PositionEncoding::Utf32
                 );
-                let text = if needs && in_graph(&d.path) {
+                // A binding's site may be a template file the graph does not index, so text is
+                // read for any document whose columns need converting.
+                let text = if needs {
                     source(&d.path).map(DocText::new)
                 } else {
                     None
@@ -662,11 +716,93 @@ pub fn project_evidence(
     };
     let tier = evidence.producer.class.tier();
 
-    // Pass 2: references and calls → support facts.
+    // Pass 2: compiler-resolved input bindings → `flows_to` between field slots (TS-S3).
     let mut out = Vec::new();
+    let known: BTreeSet<&SymbolId> = nodes.iter().map(|n| &n.symbol).collect();
+    let slot_of = |m: &MemberRef| -> std::result::Result<SymbolId, EvidenceSkip> {
+        let class = target_of(&m.class)?;
+        let slot = crate::flow::field_slot_id(class, &m.member);
+        if known.contains(&slot) {
+            Ok(slot)
+        } else {
+            Err(EvidenceSkip::UnknownSlot)
+        }
+    };
+    for f in &facts {
+        let EvidenceFact::InputBinding {
+            fact_id,
+            site,
+            construct,
+            semantics,
+            consumer,
+            producers,
+            unresolved,
+        } = f
+        else {
+            continue;
+        };
+        if !caps.contains(&Capability::InputBindings) {
+            report.skip(EvidenceSkip::UndeclaredCapability, 1);
+            continue;
+        }
+        report.skip(EvidenceSkip::UnresolvedRead, unresolved.len());
+        let Some((span, unconverted)) = docs.span(site) else {
+            report.skip(EvidenceSkip::MalformedRange, 1);
+            continue;
+        };
+        let consumer_slot = match slot_of(consumer) {
+            Ok(s) => s,
+            Err(reason) => {
+                report.skip(reason, 1);
+                continue;
+            }
+        };
+        let producers: BTreeSet<&MemberRef> = producers.iter().collect();
+        for p in producers {
+            let producer_slot = match slot_of(p) {
+                Ok(s) if s == consumer_slot => {
+                    report.skip(EvidenceSkip::SelfFlow, 1);
+                    continue;
+                }
+                Ok(s) => s,
+                Err(reason) => {
+                    report.skip(reason, 1);
+                    continue;
+                }
+            };
+            let mut edge = Edge::new(
+                consumer_slot.clone(),
+                producer_slot,
+                crate::edge_tags::other(crate::edge_tags::FLOWS_TO),
+                tier,
+                evidence.producer.name.clone(),
+            )
+            .with_location(Location::new(site.document.clone(), span));
+            crate::flow::FlowFact::new(
+                *semantics,
+                crate::flow::FlowEvidence::Compiler,
+                construct.clone(),
+                &evidence.producer.name,
+            )
+            .apply(&mut edge);
+            edge.metadata.insert(
+                EVIDENCE_PRODUCER_VERSION_KEY.into(),
+                evidence.producer.version.clone().into(),
+            );
+            edge.metadata
+                .insert(EVIDENCE_FACT_KEY.into(), "input_binding".into());
+            out.push(SupportFact::new(fact_id.clone(), edge)?);
+            report.flows_projected += 1;
+            if unconverted {
+                report.positions_unconverted += 1;
+            }
+        }
+    }
+
+    // Pass 3: references and calls → support facts.
     for f in &facts {
         let (fact_id, site, kind, target, roles) = match f {
-            EvidenceFact::Definition { .. } => continue,
+            EvidenceFact::Definition { .. } | EvidenceFact::InputBinding { .. } => continue,
             EvidenceFact::Reference {
                 fact_id,
                 symbol,
@@ -1150,6 +1286,77 @@ mod tests {
             p.report.skipped.get(&EvidenceSkip::MalformedRange),
             Some(&1)
         );
+    }
+
+    #[test]
+    fn compiler_input_bindings_flow_between_field_slots() {
+        use crate::flow::{FlowEvidence, FlowSemantics, field_slot_id, flow_evidence_of};
+        let child = node("Child", NodeKind::Class, "a.ts", (0, 0, 5, 1));
+        let parent = node("Parent", NodeKind::Class, "a.ts", (7, 0, 12, 1));
+        let slot = |owner: &Node, f: &str| {
+            let mut n = node(f, NodeKind::Field, "a.ts", (1, 2, 1, 10));
+            n.symbol = field_slot_id(&owner.symbol, f);
+            n.metadata
+                .insert(crate::node::VALUE_ROLE_METADATA_KEY.into(), "Field".into());
+            n
+        };
+        let nodes = vec![
+            node("a.ts", NodeKind::File, "a.ts", (0, 0, 0, 0)),
+            slot(&child, "user"),
+            slot(&parent, "current"),
+            child.clone(),
+            parent.clone(),
+        ];
+        let member = |class: &str, m: &str| MemberRef {
+            class: class.into(),
+            member: m.into(),
+        };
+        let binding = |producers: Vec<MemberRef>| EvidenceFact::InputBinding {
+            fact_id: "b1".into(),
+            site: site("a.ts", (9, 10, 9, 14)),
+            construct: "angular_input_binding".into(),
+            semantics: FlowSemantics::ValuePreserving,
+            consumer: member("C", "user"),
+            producers,
+            unresolved: vec!["item".into()],
+        };
+        let facts = vec![
+            def("dc", "C", "Child", (0, 13, 0, 18)),
+            def("dp", "P", "Parent", (7, 13, 7, 19)),
+            binding(vec![member("P", "current"), member("P", "missing")]),
+        ];
+        let undeclared = envelope(&[Capability::Definitions], facts.clone());
+        let p = project_evidence(&undeclared, &nodes, &no_source).unwrap();
+        assert!(p.facts.is_empty());
+        assert_eq!(p.report.skipped[&EvidenceSkip::UndeclaredCapability], 1);
+
+        let mut ev = envelope(&[Capability::Definitions, Capability::InputBindings], facts);
+        ev.producer.class = ProducerClass::Compiler;
+        let p = project_evidence(&ev, &nodes, &no_source).unwrap();
+        assert_eq!(p.facts.len(), 1, "{:?}", p.report);
+        let e = &p.facts[0].edge;
+        assert_eq!(
+            e.source,
+            field_slot_id(&child.symbol, "user"),
+            "stored consumer -> producer"
+        );
+        assert_eq!(e.target, field_slot_id(&parent.symbol, "current"));
+        assert!(crate::flow::is_flow_edge(e));
+        assert_eq!(
+            flow_evidence_of(e).into_iter().collect::<Vec<_>>(),
+            vec![FlowEvidence::Compiler]
+        );
+        assert_eq!(e.provenance, crate::edge::Provenance::Compiler);
+        assert_eq!(p.report.flows_projected, 1);
+        assert_eq!(p.report.skipped[&EvidenceSkip::UnknownSlot], 1);
+        assert_eq!(p.report.skipped[&EvidenceSkip::UnresolvedRead], 1);
+
+        // A self-flow is counted, never written.
+        let mut selfy = ev.clone();
+        selfy.facts[2] = binding(vec![member("C", "user")]);
+        let p = project_evidence(&selfy, &nodes, &no_source).unwrap();
+        assert!(p.facts.is_empty());
+        assert_eq!(p.report.skipped[&EvidenceSkip::SelfFlow], 1);
     }
 
     #[test]
