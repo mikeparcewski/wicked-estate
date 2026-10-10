@@ -201,9 +201,10 @@ On estate's own tree: 107 → 126 edges against 0.24.0 (+17.76 %), and 150 → 1
 
 **Fix:** a per-pass `ExtractorCache`.
 - It resolves each extension's dispatch without compiling.
-- It shares one slot per dispatch key, so `.ts`/`.mts`/`.cts` share one TypeScript query.
-- It compiles a query the first time a file of that dispatch is extracted. An additive plugin, whose query is not verified at load, compiles when its extension is first checked.
-- A re-index therefore compiles only the languages it extracts. For a lone `.ts` edit with no callers in another language, that is the TypeScript query alone.
+- It shares one slot per dispatch key. With built-in dispatch (no grammar override), `.ts`/`.mts`/`.cts` share one TypeScript query.
+- It compiles a query the first time a file of that dispatch is extracted.
+- One exception: an additive plugin's query is not verified at load, so it compiles when its extension is first checked, even if no file of it changed.
+- So, apart from additive plugins, a re-index compiles only the languages it extracts. The budget test pins the TypeScript-only case: one `.ts` edit, an empty plugin registry and no callers to re-extract.
 
 **Evidence for the fix**
 - Node and edge counts are unchanged on both corpora (run `38095443235`). That is a count comparison, not a content diff of the graphs.
