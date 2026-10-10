@@ -1500,7 +1500,9 @@ impl RetrievalTool for Lineage {
                         "searched_depth": max_depth,
                         "confidence": { "min": null, "avg": null, "edge_count": 0 },
                     }),
-                    diagnostics: vec!["Lineage: 'symbol' field is required".to_string()],
+                    diagnostics: std::iter::once("Lineage: 'symbol' field is required".to_string())
+                        .chain(clamp_note(request, "depth", BLAST_DEPTH_CEILING as u64))
+                        .collect(),
                 });
             }
         };
@@ -1688,6 +1690,9 @@ impl RetrievalTool for Lineage {
             content["flows"] = Value::Array(rows);
         }
 
+        // W8.5: the tool owns its depth ceiling and says when it applied it, like every other
+        // clamping RetrievalTool (the CLI no longer refuses `--depth > 24` at argv).
+        diag.extend(clamp_note(request, "depth", BLAST_DEPTH_CEILING as u64));
         Ok(RetrievalResult {
             content,
             diagnostics: diag,

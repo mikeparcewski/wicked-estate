@@ -18,7 +18,7 @@
 //!
 //! **Defaults and ceilings stay in the tool.** The bridge sends only the flags the caller gave
 //! and never clamps. Every RetrievalTool that lowers a caller value to its ceiling reports it as
-//! a `CLAMPED:` diagnostic (`Lineage` excepted: WAVE-PLAN W8.5). Floor clamps (`0` → `1`) are
+//! a `CLAMPED:` diagnostic (`Lineage` included since W8.5). Floor clamps (`0` → `1`) are
 //! not reported.
 //!
 //! **Output contract.** `--json`: `content` — the same document the MCP tool returns, no extra
@@ -135,6 +135,107 @@ fn render_hotspots(content: &Value) -> Vec<String> {
     lines
 }
 
+/// `lineage`'s human output: a reading of the tool's `content`, never a stronger claim than it.
+/// Each flow hop keeps its semantics, evidence, confidence and resolver so a heuristic or
+/// may-influence hop cannot read as a proven value copy (R7); every cut is named (R3).
+fn render_lineage(c: &Value) -> Vec<String> {
+    use wicked_estate_core::flow::{
+        FLOW_CONFIDENCE_MIN_KEY, FLOW_EVIDENCE_KEY, FLOW_RULES_KEY, FLOW_SEMANTICS_KEY,
+    };
+    let mut out = Vec::new();
+    let flows_mode = c.get("flows").is_some();
+    let depth = c["searched_depth"].as_u64().unwrap_or(0);
+    let list = |v: &Value| -> String {
+        v.as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|x| x.as_str().map_or_else(|| x.to_string(), str::to_string))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_else(|| "-".to_string())
+    };
+    out.push(if flows_mode {
+        "flows_to lineage — static semantic value lineage, producer -> consumer (graph evidence; \
+         not taint analysis, compiler-exact data flow, or runtime behaviour)"
+            .to_string()
+    } else {
+        "dependency lineage — what the symbol depends on via Calls + Imports".to_string()
+    });
+    let rows = c["dependencies"].as_array().map_or(&[][..], Vec::as_slice);
+    let noun = if flows_mode {
+        "consumer(s)"
+    } else {
+        "dependency/dependencies"
+    };
+    if rows.is_empty() {
+        out.push(format!("no {noun} returned within depth {depth}"));
+    } else {
+        out.push(format!("{} {noun} within depth {depth}:", rows.len()));
+        for r in rows {
+            out.push(format!(
+                "  [depth {}] {} {} ({}:{})  {}",
+                r["depth"].as_u64().unwrap_or(0),
+                r["kind"]
+                    .as_str()
+                    .map_or_else(|| r["kind"].to_string(), str::to_string),
+                r["name"].as_str().unwrap_or("?"),
+                r["file"].as_str().unwrap_or("?"),
+                r["line"].as_u64().map_or(0, |l| l + 1),
+                r["symbol"].as_str().unwrap_or("?"),
+            ));
+        }
+    }
+    if let Some(hops) = c["flows"].as_array() {
+        out.push(format!("{} flow hop(s):", hops.len()));
+        for h in hops {
+            let mut line = format!(
+                "  {} -> {}  semantics={} evidence={} confidence {:.2} ({}) rules={}",
+                h["producer"].as_str().unwrap_or("?"),
+                h["consumer"].as_str().unwrap_or("?"),
+                list(&h[FLOW_SEMANTICS_KEY]),
+                list(&h[FLOW_EVIDENCE_KEY]),
+                h["confidence"].as_f64().unwrap_or(0.0),
+                h["resolved_by"].as_str().unwrap_or("?"),
+                list(&h[FLOW_RULES_KEY]),
+            );
+            if let Some(min) = h[FLOW_CONFIDENCE_MIN_KEY].as_f64() {
+                line.push_str(&format!(" weakest-support {min:.2}"));
+            }
+            if let (Some(file), Some(l)) = (h["file"].as_str(), h["line"].as_u64()) {
+                line.push_str(&format!(" at {file}:{}", l + 1));
+            }
+            out.push(line);
+        }
+    }
+    out.push(
+        match (
+            c["confidence"]["min"].as_f64(),
+            c["confidence"]["avg"].as_f64(),
+        ) {
+            (Some(min), Some(avg)) => format!(
+                "confidence: min {min:.2} avg {avg:.2} over {} edge(s)",
+                c["confidence"]["edge_count"].as_u64().unwrap_or(0)
+            ),
+            _ => "confidence: no edges described".to_string(),
+        },
+    );
+    // R3: a cut answer must never read as complete.
+    if c["depth_horizon_reached"].as_bool() == Some(true) {
+        out.push(format!(
+            "bound: cut at depth {depth}; more results may exist beyond it (max {})",
+            wicked_estate_retrieve::BLAST_DEPTH_CEILING
+        ));
+    }
+    if c["node_cap_reached"].as_bool() == Some(true) {
+        out.push("bound: the traversal node cap was reached".to_string());
+    }
+    if c["truncated"].as_bool() == Some(true) {
+        out.push("truncated: yes — the answer is incomplete; see the notes below".to_string());
+    }
+    out
+}
+
 /// Every bridged command. Adding one is a row here — no new dispatch arm.
 pub const COMMANDS: &[BridgedCommand] = &[
     BridgedCommand {
@@ -174,6 +275,33 @@ pub const COMMANDS: &[BridgedCommand] = &[
                 ty: FlagType::U64,
                 validate: None,
                 help: "node cap; the tool clamps to its ceiling and reports the clamp",
+            },
+        ],
+    },
+    BridgedCommand {
+        name: "lineage",
+        aliases: &[],
+        tool: &wicked_estate_retrieve::Lineage,
+        operand: Some(OperandSpec {
+            name: "<symbol>",
+            key: "symbol",
+        }),
+        render: Some(render_lineage),
+        flags: &[
+            FlagSpec {
+                flag: "depth",
+                key: "depth",
+                ty: FlagType::U64,
+                validate: None,
+                help: "hops (default 8); the tool clamps to its ceiling (24) and reports the clamp",
+            },
+            FlagSpec {
+                flag: "relation",
+                key: "relation",
+                ty: FlagType::OneOf(&["flows_to"]),
+                validate: None,
+                help: "omit for dependency lineage (Calls + Imports); flows_to = static semantic \
+                       value lineage, producer -> consumer (not taint)",
             },
         ],
     },
@@ -414,9 +542,16 @@ pub fn parse(cmd: &BridgedCommand, args: &[String]) -> std::result::Result<Invoc
                 let v = match f.ty {
                     FlagType::U64 => {
                         let v = value("a number")?;
-                        let n: u64 = v.parse().map_err(|_| {
-                            format!("--{name} expects a non-negative integer, got {v:?}")
-                        })?;
+                        // Digits only: `u64::from_str` also takes `+5`, which no other strict
+                        // argument in this CLI accepts (W8.6's typed grammar refuses it).
+                        let n: u64 = v
+                            .bytes()
+                            .all(|b| b.is_ascii_digit())
+                            .then(|| v.parse().ok())
+                            .flatten()
+                            .ok_or_else(|| {
+                                format!("--{name} expects a non-negative integer, got {v:?}")
+                            })?;
                         Value::from(n)
                     }
                     FlagType::Str => {

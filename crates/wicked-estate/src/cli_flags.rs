@@ -13,8 +13,8 @@
 //! operands, and the [`Rule`]s between them — a required flag, or a flag that means nothing
 //! without (or alongside) another and would otherwise be silently ignored. [`parse`] checks argv
 //! against the row and returns the coerced [`Args`] the arm consumes — there is no second,
-//! permissive parse. A default applies only when a flag is absent. Bridged commands (`tool_bridge`) never reach here; `lineage` and `supports` parse
-//! their own argv strictly and are listed as [`Spec::SelfParsed`] so the table stays the
+//! permissive parse. A default applies only when a flag is absent. Bridged commands (`tool_bridge`, `lineage` included since W8.5) never reach here; `supports`
+//! parses its own argv strictly and are listed as [`Spec::SelfParsed`] so the table stays the
 //! inventory of every bespoke arm.
 
 /// How a value is checked and coerced. Every value must be non-empty.
@@ -299,12 +299,6 @@ pub const COMMANDS: &[Command] = &[
             rules: &[],
             note: "<from> and <to> are each an exact symbol name or a SymbolId; --max-depth \
                    accepts 1..=16 (default 12, values above 16 clamp to 16)",
-        },
-    },
-    Command {
-        name: "lineage",
-        spec: Spec::SelfParsed {
-            values: &["db", "symbol", "depth", "relation"],
         },
     },
     Command {
@@ -1324,7 +1318,7 @@ mod tests {
         for c in COMMANDS {
             assert!(arms.contains(&c.name), "row {} has no dispatch arm", c.name);
         }
-        for cmd in ["lineage", "supports"] {
+        for cmd in ["supports"] {
             assert!(
                 matches!(
                     lookup(cmd),
@@ -1368,8 +1362,7 @@ mod tests {
         // An inline value does not consume the next token, so help after it is a help request.
         assert!(is_help("index", &["--repo=x", "--help"]));
         // Self-parsed rows: help in flag position, but not in one of their value slots.
-        assert!(is_help("lineage", &["--help"]));
-        assert!(!is_help("lineage", &["--symbol", "x", "--depth", "--help"]));
+        assert!(is_help("supports", &["--help"]));
         assert!(!is_help("supports", &["edge", "--source", "--help"]));
     }
 
@@ -1566,11 +1559,9 @@ mod tests {
             parse_args("no-such-command", &["--bogus"]),
             Ok(Parsed::Unlisted)
         ));
-        // `lineage`/`supports` reject unknown flags themselves, with their own usage.
-        assert!(matches!(
-            parse_args("lineage", &["--bogus", "--db", "g.db"]),
-            Ok(Parsed::SelfParsing)
-        ));
+        // `supports` rejects unknown flags itself, with its own usage. `lineage` is a bridged
+        // command (W8.5): it has no row here at all.
+        assert!(lookup("lineage").is_none());
         assert!(matches!(
             parse_args("supports", &["owners"]),
             Ok(Parsed::SelfParsing)
