@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+## [0.25.0] — 2026-10-10
+
+Minor bump for new graph output, as ADR-014 lays out for Option 2. There is no public API break.
+
+**Re-index note:** the version bump re-extracts every graph on its next `index`, so existing graphs
+gain the new TypeScript value-flow edges without `--force`.
+
+### Added
+- **TS value flow: callee return composition (ADR-014 S5b, #279, #296).** A returned call now writes
+  the owner's return slot as `may_influence`: `return raw.replace(..)` from its identifier receiver,
+  and `return f(x)` from its identifier arguments. A returned no-parameter, single-identifier arrow
+  (`return () => captured`) does the same. A callee's result therefore flows back to its call site
+  through the existing `call_result` hop. This is value flow, not a sanitizer model (ADR-014
+  prohibited claims).
+- **TS value flow: destructuring (ADR-014 S5c, #297).** Flat object and array destructuring of an
+  identifier (shorthand, renamed, defaulted, rest, elements) flows into each binding as
+  `may_influence`. Nested patterns and member or call sources contribute nothing.
+- **TS value flow: loops (ADR-014 S5d, #298).** `for…of` element binding (identifier, flat array or
+  shorthand object pattern) and loop-carried `acc = acc + it` / `acc += it` flow as
+  `may_influence`. `for…in` keys contribute nothing.
+- `scripts/measure-dataflow.py` runs ADR-014's measurement procedure (`--self-test` pins its
+  semantics gate). The measured numbers for each slice are recorded in ADR-014.
+
+### Changed
+- **ADR-014 accepted: Option 2 (#279, #295).** Bounded intraprocedural value-flow summaries. Primitives
+  1–3 passed every gate (cumulative `flows_to` growth +7.7 % on the pinned public Angular corpus;
+  index time within noise). Option 3 (taint) stays no-go.
+
+### Fixed
+- **A `return` inside a destructured arrow or a private arrow field (#296).** Such a callable mints
+  no definition, but its body was an owned return barrier. So `const { a } = () => { return raw; }`
+  gave the enclosing function a false return flow, and `#h = (raw) => { return raw; }` gave the
+  enclosing class one. Owned barrier and scope captures now require the definition shapes.
+
 ## [0.24.0] — 2026-10-10
 
 Minor bump, not a patch: public API breaks, as the 0.x scheme allows.
