@@ -258,3 +258,116 @@ export function cbShadow(items: string[], x: string): string {
   const out = items.map((x) => x);
   return x;
 }
+
+// ADR-014 S6b `await` and `.then`, and expected NON-flows.
+export async function awaitValue(p: Promise<string>): Promise<string> {
+  const r = await p;
+  return r;
+}
+
+export async function awaitCall(raw: string, unrelated: string): Promise<string> {
+  const unused = unrelated;
+  const r = await fetchName(raw);
+  return r;
+}
+
+export async function fetchName(key: string): Promise<string> {
+  return key;
+}
+
+export async function awaitReturn(raw: string): Promise<string> {
+  return await fetchName(raw);
+}
+
+export function thenValue(p: Promise<string>): Promise<string> {
+  const q = p.then((v) => v.trim());
+  return q;
+}
+
+export function thenCall(k: string): Promise<string> {
+  return fetchName(k).then(function (v) {
+    return v;
+  });
+}
+
+export async function thenAwait(p: Promise<string>): Promise<string> {
+  const r = await p.then((v) => v);
+  return r;
+}
+
+// A named callback, the rejection handler and `.catch` bind nothing.
+export function thenNamed(p: Promise<string>): Promise<string> {
+  const q = p.then(fmt);
+  return q;
+}
+
+export function thenCatch(p: Promise<string>): Promise<string> {
+  const q = p.catch((e) => e);
+  return q;
+}
+
+export function thenRejected(p: Promise<string>, fallback: string): Promise<string> {
+  return p.then(
+    () => fallback,
+    (err) => err,
+  );
+}
+
+export function thenChain(p: Promise<string>, fallback: string): Promise<string> {
+  const q = p.then((v) => fallback).then((w) => w);
+  return q;
+}
+
+// An awaited `.then` is its callback's returned value: `p` does not bypass the callback.
+export async function thenAwaitConst(p: Promise<string>, fallback: string): Promise<string> {
+  const r = await p.then((v) => fallback);
+  return r;
+}
+
+export async function thenAwaitReturn(p: Promise<string>, fallback: string): Promise<string> {
+  return await p.then((v) => fallback);
+}
+
+// The same, however the `.then` is formatted, and through a nested `.then` in a callback.
+export async function thenSpaced(p: Promise<string>, fallback: string): Promise<string> {
+  return await p. then((v) => fallback);
+}
+
+export async function thenMultiline(p: Promise<string>, fallback: string): Promise<string> {
+  const r = await p
+    // the callback decides
+    .then((v) => fallback);
+  return r;
+}
+
+export function thenNested(p: Promise<string>, other: Promise<string>, fallback: string): Promise<string> {
+  return p.then((v) => other.then((w) => fallback));
+}
+
+export function thenNestedComment(p: Promise<string>, other: Promise<string>, fallback: string): Promise<string> {
+  return p.then((v) => other.then(/* reason */ (w) => fallback));
+}
+
+// Excluding `.then` keeps every other callee composing its identifier arguments (S5b).
+export function returnNonNull(raw: string, f?: (s: string) => string): string {
+  return f!(raw);
+}
+
+export async function returnImport(path: string): Promise<unknown> {
+  return import(path);
+}
+
+export function returnIife(raw: string): string {
+  return (function (s: string) {
+    return s;
+  })(raw);
+}
+
+// A callee that merely ends in the letters `then` is not a `.then`.
+export function returnStrengthen(raw: string): string {
+  return strengthen(raw);
+}
+
+export function strengthen(s: string): string {
+  return s;
+}

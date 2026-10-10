@@ -1742,6 +1742,21 @@ struct PendingFlow {
 struct PendingCallFact {
     args: Vec<PendingFlowEndpoint>,
     result: Option<PendingFlowEndpoint>,
+    /// How the result binds the call's value (ADR-014 S6b).
+    result_binding: ResultBinding,
+}
+
+/// How a call-result target binds the call's value (ADR-014 S6b). The hint spells it
+/// `"settled": "await" | "then"`; a plain result carries no key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ResultBinding {
+    /// `const r = f(x)`: the returned value itself.
+    #[default]
+    Value,
+    /// `const r = await f(x)`: what the returned promise settles to, `may_influence`.
+    Await,
+    /// `f(x).then(r => …)`: the same, by the `then` naming convention, which proves no Promise.
+    Then,
 }
 
 #[derive(Debug, Clone)]
@@ -2056,20 +2071,45 @@ fn pattern_bindings(node: tree_sitter::Node, src: &[u8], out: &mut Vec<(String, 
 /// (`expression`), and a member read's identifier object. A `return` nested in a branch or loop,
 /// a nested callable, a literal and every other shape contribute nothing. Whether a contributor is
 /// the callable's own parameter or a captured value is decided by the value scopes, like any read.
-fn callable_return_contributors(callable: tree_sitter::Node) -> Vec<tree_sitter::Node> {
-    fn contributors<'t>(expr: tree_sitter::Node<'t>, out: &mut Vec<tree_sitter::Node<'t>>) {
+fn callable_return_contributors<'t>(
+    callable: tree_sitter::Node<'t>,
+    src: &[u8],
+) -> Vec<tree_sitter::Node<'t>> {
+    fn contributors<'t>(
+        expr: tree_sitter::Node<'t>,
+        src: &[u8],
+        out: &mut Vec<tree_sitter::Node<'t>>,
+    ) {
         let identifier =
             |node: Option<tree_sitter::Node<'t>>| node.filter(|n| n.kind() == "identifier");
         match expr.kind() {
             "identifier" => out.push(expr),
             "call_expression" => {
-                if let Some(function) = expr
-                    .child_by_field_name("function")
-                    .filter(|f| f.kind() == "member_expression")
+                let function = expr.child_by_field_name("function");
+                let member = function.filter(|f| f.kind() == "member_expression");
+                let arguments = expr.child_by_field_name("arguments");
+                // A `.then(cb)` is its callback's returned value (ADR-014 S6b), never its
+                // receiver's: compose from the inline callback's return, or contribute nothing.
+                if member
+                    .and_then(|m| m.child_by_field_name("property"))
+                    .is_some_and(|p| p.utf8_text(src).ok() == Some("then"))
                 {
+                    // The first argument, skipping comments (named extra nodes).
+                    let callback = arguments
+                        .and_then(|a| {
+                            let mut cursor = a.walk();
+                            a.named_children(&mut cursor).find(|n| !n.is_extra())
+                        })
+                        .filter(|c| matches!(c.kind(), "arrow_function" | "function_expression"));
+                    if let Some(callback) = callback {
+                        out.extend(callable_return_contributors(callback, src));
+                    }
+                    return;
+                }
+                if let Some(function) = member {
                     out.extend(identifier(function.child_by_field_name("object")));
                 }
-                if let Some(arguments) = expr.child_by_field_name("arguments") {
+                if let Some(arguments) = arguments {
                     let mut cursor = arguments.walk();
                     out.extend(
                         arguments
@@ -2103,10 +2143,10 @@ fn callable_return_contributors(callable: tree_sitter::Node) -> Vec<tree_sitter:
                     .find(|child| !child.is_extra())
             })
         {
-            contributors(expr, &mut out);
+            contributors(expr, src, &mut out);
         }
     } else {
-        contributors(body, &mut out);
+        contributors(body, src, &mut out);
     }
     out
 }
@@ -2539,7 +2579,11 @@ enum CaptureRole<'a> {
     /// `@call.arg.<kind>` — a supported argument value at a call site.
     CallArg { kind: FlowEndpointKind },
     /// `@call.result.<kind>` — a supported assignment target for a call result.
-    CallResult { kind: FlowEndpointKind },
+    /// `@call.result.awaited` / `@call.result.then` bind the call's settled value (ADR-014 S6b).
+    CallResult {
+        kind: FlowEndpointKind,
+        binding: ResultBinding,
+    },
     /// Anything else (params, body, return_type, comments, decorators, …) — ignored.
     Other,
 }
@@ -2685,6 +2729,19 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
     if cap_name == "call.result.local" {
         return CaptureRole::CallResult {
             kind: FlowEndpointKind::Local,
+            binding: ResultBinding::Value,
+        };
+    }
+    if cap_name == "call.result.awaited" {
+        return CaptureRole::CallResult {
+            kind: FlowEndpointKind::Local,
+            binding: ResultBinding::Await,
+        };
+    }
+    if cap_name == "call.result.then" {
+        return CaptureRole::CallResult {
+            kind: FlowEndpointKind::Local,
+            binding: ResultBinding::Then,
         };
     }
 
@@ -2931,6 +2988,7 @@ impl Extractor for TreeSitterExtractor {
             let mut call_arguments_node: Option<tree_sitter::Node> = None;
             let mut call_arg_sites: Vec<PendingFlowEndpoint> = Vec::new();
             let mut call_result_site: Option<PendingFlowEndpoint> = None;
+            let mut call_result_binding = ResultBinding::Value;
 
             for c in m.captures {
                 let cap = names[c.index as usize];
@@ -3049,7 +3107,7 @@ impl Extractor for TreeSitterExtractor {
                         flow_producers.push(endpoint);
                     }
                     CaptureRole::FlowCallableReturn => {
-                        for node in callable_return_contributors(c.node) {
+                        for node in callable_return_contributors(c.node, src) {
                             flow_producers.push(PendingFlowEndpoint {
                                 kind: FlowEndpointKind::Local,
                                 name: node.utf8_text(src).unwrap_or("").to_string(),
@@ -3117,7 +3175,8 @@ impl Extractor for TreeSitterExtractor {
                         rebind_non_class_field(&mut endpoint, c.node);
                         call_arg_sites.push(endpoint);
                     }
-                    CaptureRole::CallResult { kind } => {
+                    CaptureRole::CallResult { kind, binding } => {
+                        call_result_binding = binding;
                         call_result_site = Some(PendingFlowEndpoint {
                             kind,
                             name: strip_def_name(&text),
@@ -3318,6 +3377,7 @@ impl Extractor for TreeSitterExtractor {
                 fact.args.extend(call_arg_sites);
                 if call_result_site.is_some() {
                     fact.result = call_result_site;
+                    fact.result_binding = call_result_binding;
                 }
             }
         }
@@ -3782,6 +3842,17 @@ impl Extractor for TreeSitterExtractor {
                                     .0,
                                 ),
                             );
+                            let settled = match fact.result_binding {
+                                ResultBinding::Value => None,
+                                ResultBinding::Await => Some("await"),
+                                ResultBinding::Then => Some("then"),
+                            };
+                            if let Some(settled) = settled {
+                                item.insert(
+                                    "settled".to_string(),
+                                    serde_json::Value::String(settled.to_string()),
+                                );
+                            }
                             flow.insert("result".to_string(), serde_json::Value::Object(item));
                         }
                     }

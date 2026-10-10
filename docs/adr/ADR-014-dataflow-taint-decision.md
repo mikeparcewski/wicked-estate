@@ -33,7 +33,7 @@ Three options, judged per producer tier:
 | destructuring (`const {k} = obj`) | ✅ flat patterns over an identifier (shorthand, renamed, defaulted, rest, array elements), `may_influence` (S5c); nested patterns and member/call sources ❌ | `s5c_destructuring` |
 | loops (`for … of`, loop-carried `acc = acc + it`) | ✅ `for…of` over an identifier binds each element (identifier, flat array or shorthand object pattern); `acc = acc + it` and `acc += it` combine their identifier operands; all `may_influence` (S5d). `for…in` keys ❌ by design | `s5d_loop_binding` |
 | inline array callbacks (`map`/`forEach`/`filter`/`find`/`some`/`every`/`flatMap`/`reduce`) | ✅ an inline arrow or function expression passed first: its first parameter binds one element of an identifier or `this.field` receiver (`reduce`: the second, its first seeded by an identifier initial value); its return (expression body or a direct block `return`) becomes the result of `map`/`flatMap`/`reduce`; `filter`/`find` select the receiver's elements. All `may_influence` (S6a). A named callback ❌ (interprocedural); `some`/`every`/`forEach` results carry nothing | `s6a_inline_callbacks` |
-| promises | ❌ absent | `missing_primitives_are_unreachable` |
+| `await` and `.then` | ✅ `const r = await p` / `return await p`; `await f(x)` composes from the call's identifier receiver and arguments (like `return_call`), and a uniquely resolved callee's return reaches the awaited binding (`await_result`, engine). `p.then(v => …)` binds the promise (an identifier, `this.field`, a composed call, or a chained inline `.then`'s callback return) to `v`, and the callback's return to the chain result; a resolved callee reaches `v` as `then_result`. All `may_influence` (S6b); `then_*` are `convention` evidence (the name proves no Promise), `then_result` capped at Heuristic confidence. A `.then` call no longer composes from its receiver in `await_call` or S5b's `return_call` (that bypassed the callback). Named callbacks, `.catch` and the rejection handler ❌ | `s6b_await_and_then` |
 | object-literal property writes | ❌ absent (reads are path-keyed slots) | `missing_primitives_are_unreachable` |
 | sanitizer-like calls (`clean = sanitize(raw)`) | ✅ the argument enters, and the result comes back out (S5b): `return raw.replace(..)` is a `may_influence` hop from the identifier receiver and arguments. A chained receiver (`raw.trim().x()`) is ❌. This is value flow, **not** a sanitizer model | `s5b_return_composition` |
 | branches | ⚠️ **path-insensitive**: `if (flag) out = src` reports `value_preserving`, with no guard and no literal default | `branches_are_path_insensitive` |
@@ -127,6 +127,22 @@ Candidate `b4660ba`, run `38079969140`.
 | capped-away new-construct rows (inconclusive) | 0 | 0 | 0 |
 
 **Verdict: S6a passes every gate.** `callback_accumulator` (the `reduce` seed) never fired on either corpus; its only firing is the readiness fixture. The slice adds 87 Covalent edges in one slice, against 108 for S5b–S5d together. The incremental cost is still mostly fixed per process (+0.07 s), so later slices are watched for the same effect. The `callback_*` constructs are `convention` evidence (Heuristic tier): a method name does not prove an array receiver.
+
+### S6b: `await` and `.then`
+Baseline `b4660ba` (the S6a code, = main `1cfa3e3`). Candidate `2d0de1a` (code-identical to this slice after its rebase). Workflow run `38081602880`, branch `measure/ts-s6b`.
+
+| metric | Covalent `438c297` | estate tree `b4660ba` | gate |
+|---|---|---|---|
+| `flows_to` edges | 1589 → 1600 (**+0.69 %**) | 199 → 203 (+2.01 %) | ≤ +25 % |
+| full index, median of 3 | 6.54 s → 6.64 s (+1.60 %) | 5.44 s → 5.51 s (+1.18 %) | ≤ +15 % |
+| incremental re-index, median of 3 | 0.99 s → 1.11 s (+11.88 %) | 2.20 s → 2.25 s (+2.34 %) | ≤ +15 % |
+| DB size | 80,785,408 → 80,826,368 B (+0.05 %) | 56,012,800 → 56,045,568 B (+0.06 %) | ≤ +10 % |
+| Lineage, 10 fixed queries newly truncated | 0 | 0 | 0 |
+| Lineage sweep newly truncated | 0 of 520 (1 truncated in both) | 0 of 144 | 0 |
+| `value_preserving` rows from a new construct | 0 (11 `await_call`) | 0 (1 `await_call`, 2 `then_value`, 1 `then_return`) | 0 |
+| capped-away new-construct rows (inconclusive) | 0 | 0 | 0 |
+
+**Verdict: S6b passes every gate**, but its yield on Covalent is small: 11 edges, all `await_call`. That Angular code moves async data through RxJS Observables (`subscribe`, `pipe(map(…))`), which S6b does not model. The other constructs fire only on the readiness fixture, which is part of estate's tree (`await_value`, `await_result` and `then_result` not even there: the tree is measured at the baseline commit, before this slice's fixture cases). The incremental cost rose by a fixed +0.12 s per process (query compile), within the gate.
 
 ### Graduation (S5b–S5d together)
 All three slices passed every gate. **Primitives 1–3 graduate.** Cumulative on Covalent against `2b6bf7f`: `flows_to` 1394 → 1502 (+7.7 %), and full index 7.15 s → 7.20 s, each slice measured against the one before it. Still unsupported:
