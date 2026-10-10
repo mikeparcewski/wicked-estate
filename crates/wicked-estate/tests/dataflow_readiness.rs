@@ -149,28 +149,13 @@ fn present_rows_are_reachable() {
 /// A change that makes one reachable must update the ADR's matrix.
 #[test]
 fn missing_primitives_are_unreachable() {
-    for (owner, from, to, why) in [
-        (
-            "promise",
-            "src",
-            "promise.return",
-            "promise/callback resolution",
-        ),
-        (
-            "property",
-            "src",
-            "property.return",
-            "object-literal property write",
-        ),
-    ] {
-        let from = value(owner, from);
-        // A missing target slot is the strongest form of absence: nothing can reach it.
-        if let Some(to) = value_opt(owner, to) {
-            assert!(
-                !reaches(&from, &to),
-                "{why}: {from} now reaches {to} — update ADR-014"
-            );
-        }
+    let from = value("property", "src");
+    // A missing target slot is the strongest form of absence: nothing can reach it.
+    if let Some(to) = value_opt("property", "property.return") {
+        assert!(
+            !reaches(&from, &to),
+            "object-literal property write: {from} now reaches {to} — update ADR-014"
+        );
     }
 }
 
@@ -325,6 +310,11 @@ fn every_edge_matches_the_expected_semantics_table() {
         ("callback_accumulator", "may_influence"),
         ("callback_return", "may_influence"),
         ("callback_select", "may_influence"),
+        ("await_value", "may_influence"),
+        ("await_call", "may_influence"),
+        ("await_result", "may_influence"),
+        ("then_value", "may_influence"),
+        ("then_return", "may_influence"),
     ]
     .into_iter()
     .collect();
@@ -359,6 +349,11 @@ fn every_edge_matches_the_expected_semantics_table() {
         "callback_accumulator",
         "callback_return",
         "callback_select",
+        "await_value",
+        "await_call",
+        "await_result",
+        "then_value",
+        "then_return",
     ] {
         assert!(seen.contains(construct), "{construct} never fired");
     }
@@ -633,4 +628,101 @@ fn s6a_inline_callbacks() {
         &value("cbShadow", "out")
     ));
     assert!(reaches(&scoped("cbShadow", ":param:x"), &shadow_ret));
+}
+
+/// ADR-014 S6b (`await` and `.then`): an awaited or `.then`-resolved value is what the promise
+/// settles to, so every hop is `may_influence`. `await f(x)` composes like `return_call`, and a
+/// uniquely resolved callee's return reaches the awaited binding (`await_result`). A named
+/// callback, the rejection handler and `.catch` bind nothing.
+#[test]
+fn s6b_await_and_then() {
+    for (producer, consumer, construct) in [
+        (
+            value("awaitValue", "p"),
+            value("awaitValue", "r"),
+            "await_value",
+        ),
+        (
+            value("awaitCall", "raw"),
+            value("awaitCall", "r"),
+            "await_call",
+        ),
+        (
+            value("fetchName", "fetchName.return"),
+            value("awaitCall", "r"),
+            "await_result",
+        ),
+        (
+            value("awaitReturn", "raw"),
+            value("awaitReturn", "awaitReturn.return"),
+            "await_call",
+        ),
+        (
+            value("thenValue", "p"),
+            scoped("thenValue", ":local:v@1"),
+            "then_value",
+        ),
+        (
+            scoped("thenValue", ":local:v@1"),
+            value("thenValue", "q"),
+            "then_return",
+        ),
+        (
+            value("thenCall", "k"),
+            scoped("thenCall", ":local:v@1"),
+            "then_value",
+        ),
+        (
+            value("fetchName", "fetchName.return"),
+            scoped("thenCall", ":local:v@1"),
+            "await_result",
+        ),
+        (
+            scoped("thenAwait", ":local:v@1"),
+            value("thenAwait", "r"),
+            "then_return",
+        ),
+    ] {
+        assert_eq!(
+            supports(&producer, &consumer),
+            vec![influence(construct)],
+            "{producer} → {consumer}"
+        );
+    }
+    for (owner, from) in [
+        ("awaitValue", "p"),
+        ("awaitCall", "raw"),
+        ("thenValue", "p"),
+        ("thenCall", "k"),
+        ("thenAwait", "p"),
+        ("promise", "src"),
+    ] {
+        assert!(
+            reaches(
+                &value(owner, from),
+                &value(owner, &format!("{owner}.return"))
+            ),
+            "{owner}: {from}"
+        );
+    }
+    // Expected non-flows.
+    assert!(!reaches(
+        &value("awaitCall", "unrelated"),
+        &value("awaitCall", "awaitCall.return")
+    ));
+    for owner in ["thenNamed", "thenCatch"] {
+        assert!(
+            !reaches(&value(owner, "p"), &value(owner, "q")),
+            "{owner}: nothing is bound"
+        );
+    }
+    assert!(!reaches(&value("thenNamed", "p"), &value("fmt", "v")));
+    // The rejection handler's parameter is the rejection reason, never the resolved value.
+    assert!(
+        !graph()
+            .flows
+            .iter()
+            .any(|f| f.consumer.contains("thenRejected().") && f.consumer.contains(":local:err")),
+        "the rejection handler binds nothing"
+    );
 }
