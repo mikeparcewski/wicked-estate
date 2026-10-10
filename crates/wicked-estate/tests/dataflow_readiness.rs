@@ -881,8 +881,19 @@ fn s6d_closure_returns() {
             .any(|f| f.producer.contains("closureParam().") && f.producer.contains(":local:x")),
         "the closure's own parameter contributes nothing"
     );
-    assert_eq!(
-        value_opt("returnParamArrow", "returnParamArrow.return"),
-        None
-    );
+    // A binding declared INSIDE the closure is never a contributor: its own parameter, a local
+    // aliasing it, a nested callback's parameter, a local shadowing a captured name.
+    for owner in [
+        "returnParamArrow",
+        "closureAlias",
+        "closureThen",
+        "closureShadow",
+        "closureHoisted",
+    ] {
+        assert_eq!(
+            value_opt(owner, &format!("{owner}.return")),
+            None,
+            "{owner}: the closure captures nothing"
+        );
+    }
 }

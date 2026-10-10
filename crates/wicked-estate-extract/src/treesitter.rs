@@ -1740,6 +1740,10 @@ struct PendingFlow {
     /// ADR-014 S6c), with a byte position inside the owner: the site is kept only when every one is
     /// a local object of its owner ([`is_local_object`]).
     object_roots: Vec<(String, usize)>,
+    /// A returned closure's byte range (`@flow.producer.closure_return`, ADR-014 S6d): only
+    /// producers bound OUTSIDE it (captured values) contribute; a binding declared inside it (its
+    /// parameters, its locals, a nested callback's parameters) is a future call's value.
+    captured_within: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2193,6 +2197,36 @@ fn object_property_path(node: tree_sitter::Node, src: &[u8]) -> Option<(String, 
     Some((root, path))
 }
 
+/// The names of the functions and classes DECLARED inside `node` (ADR-014 S6d review): the value
+/// scopes record no binding for them, so a returned closure's `return handler` naming its own inner
+/// `function handler() {}` would otherwise resolve to an outer `handler` and claim a capture.
+/// Name-based and closure-wide, so it is conservative: a same-named declaration anywhere in the
+/// closure (an unrelated block, a nested callable) also drops a genuinely captured name. That loses
+/// a flow; it never invents one.
+fn declared_callable_names(node: tree_sitter::Node, src: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if matches!(
+            n.kind(),
+            "function_declaration"
+                | "generator_function_declaration"
+                | "class_declaration"
+                | "abstract_class_declaration"
+        ) {
+            if let Some(name) = n
+                .child_by_field_name("name")
+                .and_then(|x| x.utf8_text(src).ok())
+            {
+                names.push(name.to_string());
+            }
+        }
+        let mut cursor = n.walk();
+        stack.extend(n.named_children(&mut cursor));
+    }
+    names
+}
+
 /// The callable node kinds whose body is a function body (ADR-014 S6c's gate).
 const CALLABLE_KINDS: &[&str] = &[
     "function_declaration",
@@ -2459,6 +2493,27 @@ impl ValueScopes {
         } else {
             ValueBinding::Local
         }
+    }
+
+    /// Whether a `Local` endpoint resolves to a declaration whose scope lies inside `start..end`
+    /// (ADR-014 S6d): a binding of that range, not a value captured from outside it.
+    fn is_declared_within(
+        &self,
+        endpoint: &PendingFlowEndpoint,
+        defs: &[DefRec],
+        (start, end): (usize, usize),
+    ) -> bool {
+        if endpoint.kind != FlowEndpointKind::Local {
+            return false;
+        }
+        let owner = enclosing_def(defs, endpoint.pos).map(|d| d.symbol.clone());
+        self.decls
+            .iter()
+            .filter(|d| d.name == endpoint.name && d.owner == owner)
+            .filter_map(|d| d.scope)
+            .filter(|(s, e)| *s <= endpoint.pos && endpoint.pos < *e)
+            .min_by_key(|(s, e)| e - s)
+            .is_some_and(|(s, e)| start <= s && e <= end)
     }
 
     /// The binding of a `Local` endpoint (every other kind binds as itself).
@@ -2737,7 +2792,9 @@ enum CaptureRole<'a> {
     /// `@flow.producer.callable_return` — an INLINE callable (an arrow or function expression)
     /// whose returned value is the producer (ADR-014 S6): its identifier contributors
     /// ([`callable_return_contributors`]) each become a `Local` producer of the match.
-    FlowCallableReturn,
+    /// `@flow.producer.closure_return` is the same for a RETURNED closure (ADR-014 S6d), whose own
+    /// parameters are a future call's arguments: contributors bound by them are dropped.
+    FlowCallableReturn { captured_only: bool },
     /// `@flow.consumer.object_property` / `@flow.producer.object_property` — a property path of a
     /// LOCAL object (ADR-014 S6c): `o.k` as a member write or read, or a `k: v` / shorthand `k`
     /// entry of `const o = { … }`. It is the same `:property:o.k` slot a `const v = o.k` read
@@ -2846,7 +2903,12 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
             "return.local" => CaptureRole::FlowReturn {
                 kind: FlowEndpointKind::Local,
             },
-            "producer.callable_return" => CaptureRole::FlowCallableReturn,
+            "producer.callable_return" => CaptureRole::FlowCallableReturn {
+                captured_only: false,
+            },
+            "producer.closure_return" => CaptureRole::FlowCallableReturn {
+                captured_only: true,
+            },
             "consumer.object_property" => CaptureRole::FlowObjectProperty { consumer: true },
             "producer.object_property" => CaptureRole::FlowObjectProperty { consumer: false },
             "barrier" => CaptureRole::FlowBarrier { owned: false },
@@ -3165,6 +3227,7 @@ impl Extractor for TreeSitterExtractor {
             let mut flow_consumers: Vec<PendingFlowEndpoint> = Vec::new();
             let mut flow_producers: Vec<PendingFlowEndpoint> = Vec::new();
             let mut flow_object_roots: Vec<(String, usize)> = Vec::new();
+            let mut flow_captured_within: Option<(usize, usize)> = None;
             let mut def_params: Option<(&str, Vec<(usize, usize)>)> = None;
             let mut flow_parameter_sites: Vec<PendingFlowEndpoint> = Vec::new();
             let mut flow_return_sites: Vec<PendingFlowEndpoint> = Vec::new();
@@ -3307,11 +3370,20 @@ impl Extractor for TreeSitterExtractor {
                             }
                         }
                     }
-                    CaptureRole::FlowCallableReturn => {
+                    CaptureRole::FlowCallableReturn { captured_only } => {
+                        let mut hoisted = Vec::new();
+                        if captured_only {
+                            flow_captured_within = Some((c.node.start_byte(), c.node.end_byte()));
+                            hoisted = declared_callable_names(c.node, src);
+                        }
                         for node in callable_return_contributors(c.node, src) {
+                            let name = node.utf8_text(src).unwrap_or("");
+                            if hoisted.iter().any(|h| h == name) {
+                                continue;
+                            }
                             flow_producers.push(PendingFlowEndpoint {
                                 kind: FlowEndpointKind::Local,
-                                name: node.utf8_text(src).unwrap_or("").to_string(),
+                                name: name.to_string(),
                                 pos: node.start_byte(),
                                 span: ts_span(node),
                                 slot: None,
@@ -3556,6 +3628,7 @@ impl Extractor for TreeSitterExtractor {
                         consumers: flow_consumers,
                         producers: flow_producers,
                         object_roots: flow_object_roots,
+                        captured_within: flow_captured_within,
                     });
                 }
             }
@@ -3842,7 +3915,7 @@ impl Extractor for TreeSitterExtractor {
             local_edges.push(edge);
         }
         let mut local_objects: HashMap<(String, (usize, usize)), bool> = HashMap::new();
-        for flow in flow_sites {
+        for mut flow in flow_sites {
             // ADR-014 S6c: a property path joins only when its object is a local object of the
             // owner; anything that may alias it drops the whole site.
             let local = flow.object_roots.iter().all(|(root, pos)| {
@@ -3856,6 +3929,13 @@ impl Extractor for TreeSitterExtractor {
             });
             if !local {
                 continue;
+            }
+            if let Some(range) = flow.captured_within {
+                flow.producers
+                    .retain(|p| !value_scopes.is_declared_within(p, &defs, range));
+                if flow.producers.is_empty() {
+                    continue;
+                }
             }
             for consumer in &flow.consumers {
                 let consumer_symbol = if consumer.kind == FlowEndpointKind::Return {
