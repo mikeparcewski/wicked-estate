@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+## [0.26.0] — 2026-10-10
+
+Minor bump for new graph output (ADR-014 Extension S6). There is no public API break.
+
+**Re-index note:** the version bump re-extracts every graph on its next `index`, so existing graphs
+gain the new TypeScript value-flow edges without `--force`.
+
+### Added
+- **TS value flow: inline array callbacks (ADR-014 S6a, #279, #300).** An inline arrow or function
+  expression passed to `map`/`flatMap`/`forEach`/`filter`/`find`/`some`/`every`/`reduce` binds the
+  receiver's elements to its parameter (`reduce`: the second, seeded by its initial value); its
+  return flows to the result of `map`/`flatMap`/`reduce`, and `filter`/`find` results come from the
+  receiver. `may_influence`, `convention` evidence (a method name proves no array). Named callbacks
+  stay out (interprocedural).
+- **TS value flow: `await` and `.then` (ADR-014 S6b, #301).** `await p`, `await f(x)` (composition,
+  plus a resolved callee's return as the engine's `await_result`), and `.then` callbacks (parameter
+  binding, chained results, `then_result` at `convention` evidence capped at Heuristic confidence)
+  flow as `may_influence`.
+- **TS value flow: local object properties (ADR-014 S6c, #302).** A property written on, or
+  initialised in, a local object literal reaches a later `o.k` read in the same function, as
+  `may_influence`. Only for a local object that is never passed on: there is no alias model.
+- **TS value flow: closure returns (ADR-014 S6d, #303).** A returned arrow or function expression
+  carries the captured values its returned expression reads, as `may_influence`; its own
+  parameters and locals never contribute. This generalizes S5b's `return () => captured`.
+
+### Changed
+- **ADR-014 Extension S6 (#300).** Callbacks, `await`/`.then`, local object properties and closure
+  returns join Option 2, one gated slice each; all four passed every gate.
+  Cumulative on the pinned public Angular corpus: `flows_to` +14.78 % against 0.24.0 (+6.52 %
+  against 0.25.0), full index flat; the one-file incremental re-index is about 0.2 s slower than
+  0.25.0 (+19.4 %), consistent with a fixed per-process cost; the cause is not yet profiled
+  (ADR-014).
+- A `.then` call no longer composes from its receiver in S5b's `return_call` (#301): its result is
+  its callback's returned value, and the receiver reaching it directly bypassed the callback.
+- A named function expression binds its own name inside itself (#300).
+
 ## [0.25.0] — 2026-10-10
 
 Minor bump for new graph output, as ADR-014 lays out for Option 2. There is no public API break.
