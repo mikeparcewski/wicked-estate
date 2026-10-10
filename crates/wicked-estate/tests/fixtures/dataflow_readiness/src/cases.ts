@@ -258,3 +258,57 @@ export function cbShadow(items: string[], x: string): string {
   const out = items.map((x) => x);
   return x;
 }
+
+// ADR-014 S6b `await` and `.then`, and expected NON-flows.
+export async function awaitValue(p: Promise<string>): Promise<string> {
+  const r = await p;
+  return r;
+}
+
+export async function awaitCall(raw: string, unrelated: string): Promise<string> {
+  const unused = unrelated;
+  const r = await fetchName(raw);
+  return r;
+}
+
+export async function fetchName(key: string): Promise<string> {
+  return key;
+}
+
+export async function awaitReturn(raw: string): Promise<string> {
+  return await fetchName(raw);
+}
+
+export function thenValue(p: Promise<string>): Promise<string> {
+  const q = p.then((v) => v.trim());
+  return q;
+}
+
+export function thenCall(k: string): Promise<string> {
+  return fetchName(k).then(function (v) {
+    return v;
+  });
+}
+
+export async function thenAwait(p: Promise<string>): Promise<string> {
+  const r = await p.then((v) => v);
+  return r;
+}
+
+// A named callback, the rejection handler and `.catch` bind nothing.
+export function thenNamed(p: Promise<string>): Promise<string> {
+  const q = p.then(fmt);
+  return q;
+}
+
+export function thenCatch(p: Promise<string>): Promise<string> {
+  const q = p.catch((e) => e);
+  return q;
+}
+
+export function thenRejected(p: Promise<string>, fallback: string): Promise<string> {
+  return p.then(
+    () => fallback,
+    (err) => err,
+  );
+}
