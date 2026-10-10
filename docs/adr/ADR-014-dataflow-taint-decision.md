@@ -111,20 +111,22 @@ Baseline `490c547` (main = 0.25.0). Workflow branch `measure/ts-s6a`.
 
 **First candidate `e0c59ee` (run `38078353963`): missed the incremental gate on Covalent**, 0.70 s → 0.83 s (**+18.91 %**, all three runs 0.82–0.84 s against 0.70–0.72 s). Full index was flat (−0.90 %), so the cost was fixed per process, not per file: it encoded the callback-return shapes as six nested copies of one alternation, and that query is costlier to compile. Its numbers are kept here, per the kill rule. Within the slice's session, the shapes moved into one Rust walk (`callable_return_contributors`, captured once as `@flow.producer.callable_return`) with the same expected table. The re-measurement:
 
-Candidate `4d689c3`, run `38078966290`.
+That re-measurement (candidate `4d689c3`, run `38078966290`) passed: incremental +7.06 %. The review fixes that followed (convention evidence, a named function expression's own name, a commented `return`, the `reduce` parameter shapes) were measured again on the code that lands:
+
+Candidate `b4660ba`, run `38079969140`.
 
 | metric | Covalent `438c297` | estate tree `490c547` | gate |
 |---|---|---|---|
 | `flows_to` edges | 1502 → 1589 (**+5.79 %**) | 150 → 152 (+1.33 %) | ≤ +25 % |
-| full index, median of 3 | 7.19 s → 7.13 s (−0.85 %) | 5.42 s → 5.52 s (+1.77 %) | ≤ +15 % |
-| incremental re-index, median of 3 | 0.96 s → 1.03 s (+7.06 %) | 2.07 s → 2.13 s (+3.08 %) | ≤ +15 % |
-| DB size | 80,175,104 → 80,744,448 B (+0.71 %) | 55,595,008 → 55,578,624 B (−0.03 %) | ≤ +10 % |
+| full index, median of 3 | 7.63 s → 7.76 s (+1.61 %) | 5.50 s → 5.61 s (+1.94 %) | ≤ +15 % |
+| incremental re-index, median of 3 | 1.00 s → 1.07 s (+7.20 %) | 2.10 s → 2.18 s (+4.14 %) | ≤ +15 % |
+| DB size | 80,142,336 → 80,785,408 B (+0.80 %) | 55,558,144 → 55,660,544 B (+0.18 %) | ≤ +10 % |
 | Lineage, 10 fixed queries newly truncated | 0 | 0 | 0 |
 | Lineage sweep newly truncated | 0 of 520 (1 truncated in both) | 0 of 120 | 0 |
 | `value_preserving` rows from a new construct | 0 (70 `callback_element`, 9 `callback_return`, 7 `callback_select`) | 0 (2 `callback_element`) | 0 |
 | capped-away new-construct rows (inconclusive) | 0 | 0 | 0 |
 
-**Verdict: S6a passes every gate.** `callback_accumulator` (the `reduce` seed) never fired on either corpus; its only firing is the readiness fixture. The slice adds 87 Covalent edges in one slice, against 108 for S5b–S5d together. The incremental cost stays mostly fixed per process (+0.07 s), so later slices are measured for the same effect.
+**Verdict: S6a passes every gate.** `callback_accumulator` (the `reduce` seed) never fired on either corpus; its only firing is the readiness fixture. The slice adds 87 Covalent edges in one slice, against 108 for S5b–S5d together. The incremental cost is still mostly fixed per process (+0.07 s), so later slices are watched for the same effect. The `callback_*` constructs are `convention` evidence (Heuristic tier): a method name does not prove an array receiver.
 
 ### Graduation (S5b–S5d together)
 All three slices passed every gate. **Primitives 1–3 graduate.** Cumulative on Covalent against `2b6bf7f`: `flows_to` 1394 → 1502 (+7.7 %), and full index 7.15 s → 7.20 s, each slice measured against the one before it. Still unsupported:
