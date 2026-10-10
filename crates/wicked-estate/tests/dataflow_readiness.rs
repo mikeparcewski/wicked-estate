@@ -146,21 +146,6 @@ fn present_rows_are_reachable() {
     }
 }
 
-/// Absent today: each is a primitive a data-flow or taint layer would need (ADR-014 "minimum
-/// missing primitives"). Checked as reachability, so a new intermediate slot cannot hide a flow.
-/// A change that makes one reachable must update the ADR's matrix.
-#[test]
-fn missing_primitives_are_unreachable() {
-    let from = value("property", "src");
-    // A missing target slot is the strongest form of absence: nothing can reach it.
-    if let Some(to) = value_opt("property", "property.return") {
-        assert!(
-            !reaches(&from, &to),
-            "object-literal property write: {from} now reaches {to} — update ADR-014"
-        );
-    }
-}
-
 /// Over-approximate today: a branch-guarded reassignment is reported `value_preserving` with no
 /// guard recorded anywhere on the edge, and the literal default is not a tracked value.
 #[test]
@@ -318,6 +303,9 @@ fn every_edge_matches_the_expected_semantics_table() {
         ("then_value", "may_influence"),
         ("then_return", "may_influence"),
         ("then_result", "may_influence"),
+        ("property_write", "may_influence"),
+        ("object_literal", "may_influence"),
+        ("return_property", "may_influence"),
     ]
     .into_iter()
     .collect();
@@ -358,6 +346,9 @@ fn every_edge_matches_the_expected_semantics_table() {
         "then_value",
         "then_return",
         "then_result",
+        "property_write",
+        "object_literal",
+        "return_property",
     ] {
         assert!(seen.contains(construct), "{construct} never fired");
     }
@@ -792,4 +783,72 @@ fn s6b_await_and_then() {
             .any(|f| f.consumer.contains("thenRejected().") && f.consumer.contains(":local:err")),
         "the rejection handler binds nothing"
     );
+}
+
+/// ADR-014 S6c (local object properties): a property written on, or initialised in, a LOCAL
+/// object literal (`const`/`let`, declared once in the function, only ever used as `o.k`) reaches
+/// a later read of the same path. Every new hop is `may_influence`. No alias model: an object that
+/// escapes (an argument, a method call, an alias), is reassigned, or is a parameter gets no edge.
+#[test]
+fn s6c_local_object_properties() {
+    for (owner, producer, slot, construct) in [
+        ("propWrite", "raw", "o.k", "property_write"),
+        ("propLiteral", "raw", "o.k", "object_literal"),
+        ("property", "src", "o.field", "object_literal"),
+    ] {
+        assert_eq!(
+            supports(&value(owner, producer), &value(owner, slot)),
+            vec![influence(construct)],
+            "{owner}"
+        );
+        assert!(
+            reaches(
+                &value(owner, producer),
+                &value(owner, &format!("{owner}.return"))
+            ),
+            "{owner}"
+        );
+    }
+    assert_eq!(
+        supports(
+            &value("propLiteral", "o.k"),
+            &value("propLiteral", "propLiteral.return")
+        ),
+        vec![influence("return_property")]
+    );
+    // A shorthand property is initialised from the same-named binding.
+    assert_eq!(
+        supports(
+            &value("propLiteral", "other"),
+            &value("propLiteral", "o.other")
+        ),
+        vec![influence("object_literal")]
+    );
+    // Expected non-flows: another key, and every object that may be aliased.
+    assert!(!reaches(
+        &value("propLiteral", "other"),
+        &value("propLiteral", "propLiteral.return")
+    ));
+    if let Some(ret) = value_opt("propOtherKey", "propOtherKey.return") {
+        assert!(!reaches(&value("propOtherKey", "raw"), &ret));
+    }
+    for owner in [
+        "propEscapes",
+        "propReassigned",
+        "propParam",
+        "propAliased",
+        "propMethod",
+    ] {
+        assert!(
+            !graph()
+                .flows
+                .iter()
+                .any(|f| f.consumer.contains(&format!("{owner}()."))
+                    && f.consumer.contains(":property:")),
+            "{owner}: no property slot is written"
+        );
+        if let Some(ret) = value_opt(owner, &format!("{owner}.return")) {
+            assert!(!reaches(&value(owner, "raw"), &ret), "{owner}");
+        }
+    }
 }
