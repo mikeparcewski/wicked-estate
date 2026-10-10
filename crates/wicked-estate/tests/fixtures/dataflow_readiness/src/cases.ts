@@ -475,3 +475,19 @@ export function propCastCall(raw: string): string {
   (o.m as () => void)();
   return o.k;
 }
+
+// ADR-014 S6d closure returns, and expected NON-flows.
+export function closureCall(src: string): () => string {
+  return () => src.trim();
+}
+
+export function closureBlock(src: string): () => string {
+  return function () {
+    return src;
+  };
+}
+
+// The closure's own parameter is a future call's argument; only the captured `src` contributes.
+export function closureParam(src: string): (x: string) => string {
+  return (x) => x + src;
+}
