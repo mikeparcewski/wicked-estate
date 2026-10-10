@@ -1568,6 +1568,10 @@ enum FlowEndpointKind {
     Property,
     AngularInput,
     RouteParam,
+    /// The enclosing callable's return slot (`{owner}:return:value`), as the CONSUMER of a
+    /// classified construct (`@flow.consumer.return`, ADR-014 S5b). It is the same slot a plain
+    /// `return x` writes, and it obeys the same return barriers.
+    Return,
 }
 
 fn value_flow_hint_kind(kind: FlowEndpointKind) -> Option<&'static str> {
@@ -1577,7 +1581,8 @@ fn value_flow_hint_kind(kind: FlowEndpointKind) -> Option<&'static str> {
         FlowEndpointKind::Field => Some("field"),
         FlowEndpointKind::Property
         | FlowEndpointKind::AngularInput
-        | FlowEndpointKind::RouteParam => None,
+        | FlowEndpointKind::RouteParam
+        | FlowEndpointKind::Return => None,
     }
 }
 
@@ -2215,7 +2220,7 @@ fn flow_owner_key(
                 .unwrap_or_else(|| file_symbol.clone())
                 .0
         }
-        FlowEndpointKind::RouteParam => {
+        FlowEndpointKind::RouteParam | FlowEndpointKind::Return => {
             enclosing(defs, endpoint.pos)
                 .unwrap_or_else(|| file_symbol.clone())
                 .0
@@ -2253,6 +2258,10 @@ fn flow_endpoint_symbol(
             let owner = flow_owner_key(endpoint, defs, pending, scheme, module, file_symbol);
             wicked_estate_core::param_slot_id(&SymbolId(owner), &endpoint.name)
         }
+        FlowEndpointKind::Return => {
+            let owner = flow_owner_key(endpoint, defs, pending, scheme, module, file_symbol);
+            return_flow_symbol(&SymbolId(owner))
+        }
         FlowEndpointKind::Local => {
             let owner = flow_owner_key(endpoint, defs, pending, scheme, module, file_symbol);
             let name = &endpoint.name;
@@ -2287,6 +2296,21 @@ fn return_is_owner_scoped(pos: usize, barriers: &HashMap<(usize, usize), bool>) 
         .unwrap_or(true)
 }
 
+/// The definition whose return slot a `return` at byte `pos` writes: the smallest enclosing
+/// definition, when no anonymous callable body lies between them ([`return_is_owner_scoped`]).
+fn return_owner<'d>(
+    defs: &'d [DefRec],
+    pos: usize,
+    barriers: &HashMap<(usize, usize), bool>,
+) -> Option<&'d DefRec> {
+    if !return_is_owner_scoped(pos, barriers) {
+        return None;
+    }
+    defs.iter()
+        .filter(|d| d.start <= pos && pos < d.end)
+        .min_by_key(|d| d.end - d.start)
+}
+
 fn return_flow_symbol(owner: &SymbolId) -> SymbolId {
     Symbol::synthetic("value", format!("{}:return:value", owner.0)).id()
 }
@@ -2317,6 +2341,9 @@ fn flow_endpoint_node(endpoint: &PendingFlowEndpoint, symbol: SymbolId, file: &S
         FlowEndpointKind::RouteParam => {
             (NodeKind::Synthetic, format!("RouteParam:{}", endpoint.name))
         }
+        // The engine mints a return consumer with `return_flow_node` (the owner's name); this arm
+        // only keeps the match total.
+        FlowEndpointKind::Return => (NodeKind::Synthetic, "return".to_string()),
     };
     Node::new(
         symbol,
@@ -2499,6 +2526,9 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
             },
             "consumer.field" => CaptureRole::FlowConsumer {
                 kind: FlowEndpointKind::Field,
+            },
+            "consumer.return" => CaptureRole::FlowConsumer {
+                kind: FlowEndpointKind::Return,
             },
             "producer.local" => CaptureRole::FlowProducer {
                 kind: FlowEndpointKind::Local,
@@ -3437,14 +3467,7 @@ impl Extractor for TreeSitterExtractor {
             nodes.push(flow_endpoint_node(parameter, symbol, file));
         }
         for ret in &flow_returns {
-            if !return_is_owner_scoped(ret.pos, &flow_return_barriers) {
-                continue;
-            }
-            let Some(owner) = defs
-                .iter()
-                .filter(|d| d.start <= ret.pos && ret.pos < d.end)
-                .min_by_key(|d| d.end - d.start)
-            else {
+            let Some(owner) = return_owner(&defs, ret.pos, &flow_return_barriers) else {
                 continue;
             };
             let return_symbol = return_flow_symbol(&owner.symbol);
@@ -3480,18 +3503,30 @@ impl Extractor for TreeSitterExtractor {
         }
         for flow in flow_sites {
             for consumer in &flow.consumers {
-                let consumer_symbol = flow_endpoint_symbol(
-                    consumer,
-                    &defs,
-                    &pending,
-                    &scheme,
-                    &module,
-                    &file_symbol,
-                    &value_scopes,
-                );
-                if !value_scopes.is_param_read(consumer, &defs) {
-                    nodes.push(flow_endpoint_node(consumer, consumer_symbol.clone(), file));
-                }
+                let consumer_symbol = if consumer.kind == FlowEndpointKind::Return {
+                    // A return consumer obeys the plain `return x` barriers: a return inside a
+                    // callback belongs to the callback, which has no slot, so the fact is dropped.
+                    let Some(owner) = return_owner(&defs, consumer.pos, &flow_return_barriers)
+                    else {
+                        continue;
+                    };
+                    nodes.push(return_flow_node(owner, file, consumer.span));
+                    return_flow_symbol(&owner.symbol)
+                } else {
+                    let symbol = flow_endpoint_symbol(
+                        consumer,
+                        &defs,
+                        &pending,
+                        &scheme,
+                        &module,
+                        &file_symbol,
+                        &value_scopes,
+                    );
+                    if !value_scopes.is_param_read(consumer, &defs) {
+                        nodes.push(flow_endpoint_node(consumer, symbol.clone(), file));
+                    }
+                    symbol
+                };
                 for producer in &flow.producers {
                     let producer_symbol = flow_endpoint_symbol(
                         producer,

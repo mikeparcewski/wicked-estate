@@ -759,7 +759,8 @@ fn call_value_flow(
         }
 
         let return_symbol = value_symbol(&callee.symbol, "return", "value");
-        // #210: the callee's return endpoint exists only when it has a literal `return <ident>`;
+        // #210: the callee's return endpoint exists only when it has a literal `return <ident>`
+        // or a classified return construct (`return raw.replace(..)`, ADR-014 S5b);
         // a `call_result` edge to a missing endpoint was minted, then pruned as dangling, leaving
         // the consumer local an orphan. No endpoint, no hop, no orphan node.
         let target = target.filter(|_| index.get(&return_symbol).is_some());

@@ -51,3 +51,52 @@ export function sanitized(raw: string): string {
   const clean = sanitize(raw);
   return clean;
 }
+
+// ADR-014 S5b expected NON-flows. An unrelated parameter does not reach a call's result.
+export function returnCallUnrelated(raw: string, unrelated: string): string {
+  const unused = unrelated;
+  return raw.trim();
+}
+
+// A `return` inside a callback is the callback's, never the enclosing function's.
+export function callbackReturn(src: string, items: string[]): string {
+  items.forEach((it) => {
+    return src.trim();
+  });
+  return 'done';
+}
+
+// Out of S5b's scope: a chained receiver (the outer call's receiver is itself a call).
+export function chainedReceiver(raw: string): string {
+  return raw.trim().toLowerCase();
+}
+
+// A returned call's identifier arguments influence its result; a literal argument does not.
+export function returnCallArgs(raw: string, other: string): string {
+  return combine(raw, 'x', other);
+}
+
+export function combine(a: string, sep: string, b: string): string {
+  return a + sep + b;
+}
+
+// A returned arrow's own parameter is a future call's argument, not a contributor.
+export function returnParamArrow(src: string): (x: string) => string {
+  const unused = src;
+  return (x) => x;
+}
+
+// A destructured arrow and a private arrow field mint no definition, so their `return`s belong to
+// no slot: never to the enclosing function or class.
+export function destructuredArrow(raw: string): string {
+  const { length } = () => {
+    return raw;
+  };
+  return 'safe';
+}
+
+export class PrivateArrow {
+  #handle = (raw: string) => {
+    return raw;
+  };
+}

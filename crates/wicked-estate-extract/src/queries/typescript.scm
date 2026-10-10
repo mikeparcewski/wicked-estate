@@ -392,6 +392,32 @@
 (return_statement
   (identifier) @flow.return.local)
 
+; ADR-014 S5b, callee return composition: `return raw.replace(...)` / `return f(x)`. The call's
+; result is influenced by its receiver and by its arguments, and it is never claimed to be either
+; one whole, so the hop into the owner's return slot is `may_influence`. Only an identifier
+; receiver or argument counts: a chained receiver (`raw.trim().x()`), `this.f.x()`, a literal or a
+; callback contributes nothing. `@flow.consumer.return` obeys the `return x` barriers below.
+(return_statement
+  (call_expression
+    function: (member_expression
+      object: (identifier) @flow.producer.local)) @flow.consumer.return
+) @flow.influence.syntax.return_call
+
+(return_statement
+  (call_expression
+    arguments: (arguments (identifier) @flow.producer.local)) @flow.consumer.return
+) @flow.influence.syntax.return_call
+
+; The one closure shape S5b carries (ADR-014): a returned arrow with NO parameters whose body is
+; ONE identifier, `return () => captured`. The returned value is a function, not `captured`, so
+; `may_influence`. A parameter (`return x => x`) is a future call's argument, not a contributor.
+(return_statement
+  (arrow_function
+    parameters: (formal_parameters) @_no_params
+    body: (identifier) @flow.producer.local
+    (#eq? @_no_params "()")) @flow.consumer.return
+) @flow.influence.syntax.return_closure
+
 ; Return barriers. A `return x` is only the OWNER callable's return value when no other callable
 ; body lies between them: in the canonical RxJS shape
 ; `svc.get(id).subscribe((customer) => { return customer; })` the returned value belongs to the
@@ -406,9 +432,15 @@
 (generator_function body: (statement_block) @flow.barrier)
 (generator_function_declaration body: (statement_block) @flow.barrier)
 
+; Only the shapes a definition pattern above captures OWN their body: an identifier-bound arrow
+; and a `property_identifier` field. A destructured binding (`const { a } = () => {..}`) or a
+; private field (`#h = () => {..}`) mints no definition, so its `return` was attributed to the
+; enclosing function or class (ADR-014 S5b review); now it is a plain barrier and is dropped.
 (variable_declarator
+  name: (identifier)
   value: (arrow_function body: (statement_block) @flow.barrier.owned))
 (public_field_definition
+  name: (property_identifier)
   value: (arrow_function body: (statement_block) @flow.barrier.owned))
 
 ; A named callable's body is an OWNED barrier even when the callable is declared inside a
@@ -454,8 +486,8 @@
 (function_expression) @flow.scope.callable
 (generator_function) @flow.scope.callable
 
-(variable_declarator value: (arrow_function) @flow.scope.owned)
-(public_field_definition value: (arrow_function) @flow.scope.owned)
+(variable_declarator name: (identifier) value: (arrow_function) @flow.scope.owned)
+(public_field_definition name: (property_identifier) value: (arrow_function) @flow.scope.owned)
 
 (lexical_declaration (variable_declarator name: (_) @flow.declare.block))
 (variable_declaration (variable_declarator name: (_) @flow.declare.var))

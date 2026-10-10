@@ -18,6 +18,8 @@ struct Flow {
     consumer: String,
     semantics: Vec<String>,
     metadata_keys: Vec<String>,
+    /// `(construct, semantics)` of every support row merged into this edge.
+    supports: Vec<(String, String)>,
 }
 
 struct Graph {
@@ -53,6 +55,17 @@ fn graph() -> &'static Graph {
                     .map(|s| s.as_str().to_string())
                     .collect(),
                 metadata_keys: e.metadata.keys().cloned().collect(),
+                supports: e
+                    .metadata
+                    .get("flow_support")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .map(|row| {
+                        let field = |k: &str| row[k].as_str().unwrap_or_default().to_string();
+                        (field("construct"), field("semantics"))
+                    })
+                    .collect(),
             })
             .collect();
         let nodes = store.all_nodes().unwrap();
@@ -150,12 +163,6 @@ fn missing_primitives_are_unreachable() {
             "for-of element binding / loop-carried reassignment",
         ),
         (
-            "closure",
-            "src",
-            "closure.return",
-            "closure return through an arrow",
-        ),
-        (
             "promise",
             "src",
             "promise.return",
@@ -166,12 +173,6 @@ fn missing_primitives_are_unreachable() {
             "src",
             "property.return",
             "object-literal property write",
-        ),
-        (
-            "sanitized",
-            "raw",
-            "sanitized.return",
-            "result of a callee that returns an expression",
         ),
     ] {
         let from = value(owner, from);
@@ -212,4 +213,146 @@ fn branches_are_path_insensitive() {
             .any(|f| f.producer.contains("branch().:param:flag")),
         "the guard `flag` contributes no flow"
     );
+}
+
+/// The one edge `producer → consumer`, semantic-forward.
+fn edge(producer: &str, consumer: &str) -> &'static Flow {
+    graph()
+        .flows
+        .iter()
+        .find(|f| f.producer == producer && f.consumer == consumer)
+        .unwrap_or_else(|| panic!("no edge {producer} → {consumer}"))
+}
+
+/// ADR-014 S5b (primitive 1, callee return composition): a returned call's result is influenced by
+/// its receiver and arguments, so the sanitizer's result comes back out, and a returned
+/// single-identifier arrow carries its captured local. Every new hop is `may_influence`.
+#[test]
+fn s5b_return_composition() {
+    // Expected flows.
+    for (from, to) in [
+        (
+            value("sanitize", "raw"),
+            value("sanitize", "sanitize.return"),
+        ),
+        (value("sanitized", "raw"), value("sanitized", "clean")), // via the callee's result
+        (
+            value("sanitized", "raw"),
+            value("sanitized", "sanitized.return"),
+        ),
+        (value("closure", "src"), value("closure", "closure.return")),
+        (
+            value("returnCallUnrelated", "raw"),
+            value("returnCallUnrelated", "returnCallUnrelated.return"),
+        ),
+    ] {
+        assert!(reaches(&from, &to), "{from} should reach {to}");
+    }
+    // Expected semantics of the new hops: contribution, never the value whole.
+    for (producer, consumer, construct) in [
+        (
+            value("sanitize", "raw"),
+            value("sanitize", "sanitize.return"),
+            "return_call",
+        ),
+        (
+            value("closure", "captured"),
+            value("closure", "closure.return"),
+            "return_closure",
+        ),
+    ] {
+        let e = edge(&producer, &consumer);
+        assert_eq!(e.semantics, vec!["may_influence".to_string()], "{producer}");
+        assert_eq!(
+            e.supports,
+            vec![(construct.to_string(), "may_influence".to_string())]
+        );
+    }
+    // Expected non-flows.
+    assert!(!reaches(
+        &value("returnCallUnrelated", "unrelated"),
+        &value("returnCallUnrelated", "returnCallUnrelated.return")
+    ));
+    // A callback's `return` writes no slot of the enclosing function (the barrier law), and the
+    // literal `return 'done'` mints none either.
+    assert_eq!(value_opt("callbackReturn", "callbackReturn.return"), None);
+    // Out of scope, pinned: a chained receiver contributes nothing.
+    assert_eq!(value_opt("chainedReceiver", "chainedReceiver.return"), None);
+    // Identifier arguments of a returned call each influence the result, directly.
+    for arg in ["raw", "other"] {
+        let e = edge(
+            &value("returnCallArgs", arg),
+            &value("returnCallArgs", "returnCallArgs.return"),
+        );
+        assert_eq!(
+            e.supports,
+            vec![("return_call".to_string(), "may_influence".to_string())]
+        );
+    }
+    // A returned arrow's own parameter is no contributor: no slot at all.
+    assert_eq!(
+        value_opt("returnParamArrow", "returnParamArrow.return"),
+        None
+    );
+}
+
+/// A `return` inside a callable that mints no definition (a destructured arrow, a private arrow
+/// field) belongs to no slot. Before the S5b review, the owned barrier accepted any arrow-valued
+/// declarator or field, so the enclosing function or CLASS took the return.
+#[test]
+fn returns_of_undefined_callables_write_no_slot() {
+    for owner in ["destructuredArrow", "PrivateArrow"] {
+        let name = format!("{owner}.return");
+        assert!(
+            !graph()
+                .nodes
+                .iter()
+                .any(|n| n.is_value_flow_node() && n.name == name),
+            "{name} must not exist"
+        );
+    }
+}
+
+/// The readiness oracle (ADR-014 "Acceptance metrics"): every support row on every fixture edge
+/// carries exactly the semantics its construct is declared with here. A construct missing from
+/// the table fails, so a new one cannot land without its expected semantics.
+#[test]
+fn every_edge_matches_the_expected_semantics_table() {
+    let expected: BTreeMap<&str, &str> = [
+        ("assignment", "value_preserving"),
+        ("reassignment", "value_preserving"),
+        ("property_read", "value_preserving"),
+        ("field_read", "value_preserving"),
+        ("return", "value_preserving"),
+        ("call_argument", "value_preserving"),
+        ("call_result", "value_preserving"),
+        ("expression", "may_influence"),
+        ("return_call", "may_influence"),
+        ("return_closure", "may_influence"),
+    ]
+    .into_iter()
+    .collect();
+    let mut seen = BTreeSet::new();
+    for f in &graph().flows {
+        assert!(
+            !f.supports.is_empty(),
+            "{} → {}: no support",
+            f.producer,
+            f.consumer
+        );
+        for (construct, semantics) in &f.supports {
+            let want = expected
+                .get(construct.as_str())
+                .unwrap_or_else(|| panic!("construct {construct} is not in the table"));
+            assert_eq!(
+                semantics, want,
+                "{construct}: {} → {}",
+                f.producer, f.consumer
+            );
+            seen.insert(construct.clone());
+        }
+    }
+    for construct in ["return_call", "return_closure"] {
+        assert!(seen.contains(construct), "{construct} never fired");
+    }
 }
