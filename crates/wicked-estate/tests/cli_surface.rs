@@ -156,7 +156,8 @@ fn read_commands_fail_closed_on_a_missing_db() {
         &["stats"],
         &["nodes"],
         &["graph-view"],
-        &["annotations"],
+        // A <name> (or --symbol) is required: argv is checked before the graph (W8.6, #246).
+        &["annotations", "f"],
         &["source", "f"],
         &["entrypoints"],
         &["export"],

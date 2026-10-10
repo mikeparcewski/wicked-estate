@@ -25,6 +25,44 @@ Produces two binaries:
 
 Zero runtime deps. Single static binary on each target.
 
+### How every command reads its arguments
+
+Every command checks its whole argument list before it opens a store. Any of the following exits
+non-zero with the command's usage line and the offending flag or operand on stderr, writes nothing
+to stdout, and creates no database:
+
+- an unknown flag, or one that belongs to another command;
+- a value of the wrong type. Counts such as `--limit`, `--top`, `--budget` and `--since` are
+  non-negative integers. Scores such as `--min-score` and `--resolution` are finite, non-negative
+  numbers. `--confidence` is `0.0`–`1.0` and `--eps` is `0.0`–`2.0`. Closed sets such as
+  `--weight graph|semantic`, `--format ndjson|json` and `--validated true|false` (or `1|0`,
+  `yes|no`) accept nothing else;
+- an empty value, a missing value, or a value that is itself a `--flag`;
+- `--flag=value` on a flag that takes only `--flag value`. Only `--repo=`/`--as=` and
+  `blast-radius --depth=` have the inline form;
+- a flag given twice. Two flags repeat by design and use every value in order: `cross-graph --db`
+  and `graph-view --ignore`;
+- a missing operand, or one too many (`stats foo`, `query a b`);
+- a required flag left out (`annotate --key/--value`, `correspond --db-a/--db-b`, at least one
+  `cross-graph --db`/`--dbs`), or a comma list with an empty item (`--symbols a,,b`);
+- a flag the command would ignore in that combination:
+  - `semantics --validated` and `--validated-by` must be given together;
+  - `clusters --k/--eps/--min-pts` need `--weight semantic`, and
+    `--resolution/--package-bias/--hierarchical/--summary` are graph-mode only;
+  - `--eps`/`--min-pts` don't combine with `--k`;
+  - `--summary` needs `--json`;
+  - `nodes --kind` doesn't combine with `--annotated-with`, and `nodes --semantics` needs
+    `--json`;
+  - `source --max-*-chars` needs `--json`;
+  - `export --nodes-only` doesn't combine with `--edges-only`;
+  - `graph-view --focus` doesn't combine with `--limit 0`;
+  - `index/watch --history` and `index --embeddings` don't combine with an in-memory store,
+    whether `--db :memory:` names it or `WICKED_ESTATE_DB=:memory:` makes it the default.
+
+A malformed value never falls back to a default; a default applies only when the flag is absent.
+`-` and `-1` are operands and `-x` is a flag. There is no `--` end-of-options separator.
+`--help`/`-h` is a help request only in flag position: after `--db` it is a refused value.
+
 ---
 
 ## 2. Index a repo
@@ -1049,7 +1087,7 @@ even with zero shared edges.
 |------|---------|--------|
 | `--eps <d>` | `0.25` | DBSCAN neighbourhood radius in cosine-distance space (`0.0`–`2.0`). |
 | `--min-pts <n>` | `3` | DBSCAN: minimum points to form a dense region. Points below the threshold are noise and excluded from output. |
-| `--k <n>` | — | Switch to k-means with exactly `k` clusters. When `--k` is present, `--eps` and `--min-pts` are ignored. |
+| `--k <n>` | — | Switch to k-means with exactly `k` clusters. `--eps` and `--min-pts` are DBSCAN-only, so combining them with `--k` is a usage error. |
 
 **Requires:** an `--embeddings` index (pass `--embeddings` during `index`).
 

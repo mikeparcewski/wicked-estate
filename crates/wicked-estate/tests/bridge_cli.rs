@@ -933,7 +933,7 @@ fn source_rejects_what_its_text_path_cannot_honour_206() {
                 "--max-total-chars",
                 "5",
             ][..],
-            "apply only with --json",
+            "max-total-chars applies only with --json",
         ),
         (&["source", "--file=alpha.py"][..], "write --file <value>"),
         (

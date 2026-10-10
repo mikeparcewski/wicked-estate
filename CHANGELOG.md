@@ -2,6 +2,68 @@
 
 ## [Unreleased]
 
+### Changed (breaking)
+- **Bespoke CLI commands reject malformed values, surplus or missing operands, accidental
+  repeats, and flags they would ignore in combination (W8.6).** 0.21.0 made each command reject
+  flags it does not read (#197, #206). Four more accept-and-ignore paths remained in the shared
+  argv parser. Each still exited 0 with an answer to a different question:
+  - **A malformed value fell back to the default.** `correspond --top abc` used 20,
+    `--min-score x` used 0.35, `annotate --confidence x` used 1.0, `subscribe --since x` used 0,
+    `source --cluster abc` dropped the selector, `--max-*-chars x` meant unbounded,
+    `graph-view --limit x` used 80, `context --budget x` used 4096, and the `clusters` knobs fell
+    back silently. `--weight` other than `semantic` meant graph mode, `export --format` other
+    than `json` meant ndjson, and `semantics --validated` other than `true|1|yes` meant false.
+  - **Extra operands were dropped.** `stats foo` ignored `foo` and `query a b` searched for `a`
+    (#205 fixed the same class in `stale-annotations` alone). A missing operand ran on an
+    empty one: `by-requirement` searched for `""`, and `semantics` printed usage but exited 0.
+    `version foo` (#200's new command) printed the version and ignored `foo`.
+  - **A repeated flag took its last value.** `nodes --kind A --kind B` listed only `B`.
+  - **A flag that meant nothing in combination was dropped.**
+    - `semantics --validated-by` without `--validated` was recorded nowhere.
+    - In `clusters`, each mode silently ignored the other mode's knobs. `--eps`/`--min-pts`
+      were ignored under `--k`, and `--summary` without `--json`.
+    - In `nodes`, `--kind` was ignored under `--annotated-with`, and `--semantics` without
+      `--json`.
+    - `export --nodes-only --edges-only` exported nothing.
+    - `graph-view --focus` was never looked up under `--limit 0`.
+    - `index`/`watch --history` and `index --embeddings` were skipped on an in-memory store,
+      whether `--db :memory:` or `WICKED_ESTATE_DB=:memory:` selected it.
+
+  `cli_flags::COMMANDS` is now the one pre-I/O contract for every bespoke command. Each row
+  records the command's typed operands and, for each flag, its value type, whether it accepts
+  `--flag=value`, and whether it may repeat. `cli_flags::parse` checks the argv and coerces each
+  value once, and the command reads that result. There is no second, lenient parse.
+
+  Each row also declares rules between its flags and operands, in place of checks scattered
+  through the arms:
+  - required flags;
+  - "one of these";
+  - "this flag needs that one";
+  - "this flag is ignored with that one";
+  - flags that can stand in for the operand (`source` selectors, `annotate --symbol`,
+    `stale-annotations --older-than`).
+
+  #205's cutoff spellings and the `annotate` evidence envelope are typed rows too: `Instant`
+  (`<unix-seconds | YYYY-MM-DD>`), `Window` (`--older-than <N>{s,m,h,d,w}`) and `Verified`
+  (`--last-verified now|<secs>|YYYY-MM-DD`), each coerced by the `cutoff` parsers. The table's
+  exclusive-operand rule replaces `cutoff::resolve`.
+
+  Each case above now exits 1 before any store is opened, with usage and the offending field on
+  stderr and nothing on stdout. Counts reject signs, fractions and overflow. Numbers must be
+  finite and non-negative. `--confidence` must be in `0.0`–`1.0` and `--eps` in `0.0`–`2.0`, the
+  documented ranges. An empty value is refused, as is an empty item in a comma list
+  (`--symbols a,,b`, `--dbs a,,b`). `annotate`/`annotations` take `<name>` or
+  `--symbol`, not both. `plugins` takes only `list`. `clusters --k` with `--eps`/`--min-pts` was
+  documented as ignoring them; it is now a usage error, like every other ignored combination.
+
+  These are unchanged: `cross-graph --db` and `graph-view --ignore` still repeat and use every
+  value in order; `--repo=`/`--as=` and `blast-radius --depth=` keep their inline forms; `-` and
+  `-1` are still operands and `-x` a flag; `--help` is still help only in flag position. Help is
+  still help after `--repo=x`. In `lineage`/`supports` it is now refused in a value slot too
+  (`lineage --depth --help`), instead of printing the banner. `source` selector precedence and its
+  JSON-only budgets are unchanged, as is every documented working invocation and every result
+  schema. **Scripts that relied on an ignored value, operand, repeat or flag now fail.**
+
 ## [0.23.0] — 2026-10-09
 
 Minor bump, not a patch: value-slot ids change (#216). `SYMBOL_ID_SCHEME` goes 3 → 4, so a graph

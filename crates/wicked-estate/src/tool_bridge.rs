@@ -7,10 +7,12 @@
 //! `semantic` arm of `main.rs`; that arm is NOT a row here (its operand is a free-text query and
 //! it needs a concrete vector store) and stays bespoke until the bridge grows both.
 //!
-//! **Strict flags.** Bridged commands parse their own argv instead of going through `main`'s
-//! shared parser, which pushes unknown tokens into `positional` and silently swallows any flag
-//! another command owns (`--top`, `--file`, …) — the accept-and-ignore defect class of #197 /
-//! #206. Here an unknown or repeated flag, or a value of the wrong type, is a non-zero exit.
+//! **Strict flags.** Bridged commands parse their own argv against [`FlagSpec`]; the bespoke
+//! arms are checked against `cli_flags::COMMANDS` instead. Both close the accept-and-ignore
+//! defect class of #197 / #206 / W8.6: `main` once ran one shared parser that pushed unknown
+//! tokens into `positional` and silently swallowed any flag another command owned (`--top`,
+//! `--file`, …). Here an unknown or repeated flag, or a value of the wrong type, is a non-zero
+//! exit.
 //! Values are coerced through the declared [`FlagType`] rather than guessed: a tool handed
 //! `"4"` where it reads a number falls back to its default and returns a plausible wrong answer.
 //!
@@ -733,7 +735,7 @@ mod tests {
             err(&["f", "--bogus-flag", "x"]),
             "unknown flag \"--bogus-flag\""
         );
-        // Owned by other commands in main's shared parser — swallowed there, rejected here.
+        // Owned by other commands (bespoke arms) — not by this one, so rejected here.
         assert!(err(&["f", "--top", "5"]).starts_with("unknown flag"));
         assert!(err(&["f", "--repo", "a"]).starts_with("unknown flag"));
         assert!(err(&["f", "-x"]).starts_with("unknown flag"));

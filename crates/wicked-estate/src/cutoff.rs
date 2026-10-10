@@ -2,7 +2,8 @@
 //!
 //! `last_verified` is Unix seconds, so the cutoff is too — but a human asking "what needs
 //! re-verification?" thinks in dates and windows (#205). Three spellings resolve to the same
-//! instant, and exactly one may be given:
+//! instant, and exactly one may be given — `cli_flags` declares the operand, `--older-than`, and
+//! the rule that they exclude each other, and coerces each through the parsers here:
 //!
 //! * `<unix-seconds>` — the raw clock, e.g. `1767225600`.
 //! * `<YYYY-MM-DD>` — that date at 00:00:00 **UTC**, so "stale as of 2026-01-01" means
@@ -19,23 +20,12 @@
 
 const DAY: i64 = 86_400;
 
-/// Resolve the cutoff from the command's operands (non-flag argv) and `--older-than`. `now` is
-/// injected so the window form is testable. The error is a reason line; the caller adds usage.
-pub fn resolve(operands: &[&str], older_than: Option<&str>, now: i64) -> Result<i64, String> {
-    match (operands, older_than) {
-        ([], None) => Err("a cutoff is required".into()),
-        ([_, ..], Some(_)) => Err("give a <cutoff> operand or --older-than, not both".into()),
-        ([], Some(window)) => {
-            let secs = parse_window(window)?;
-            now.checked_sub(secs)
-                .ok_or_else(|| format!("--older-than {window:?} is out of range"))
-        }
-        ([one], None) => parse_instant(one),
-        (many, None) => Err(format!(
-            "expected one <cutoff> operand, got {}: {many:?}",
-            many.len()
-        )),
-    }
+/// The current Unix time in seconds; `0` if the clock is before 1970.
+pub fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// `annotate --last-verified`: `now`, `<unix-seconds>` or `<YYYY-MM-DD>` (UTC midnight). `0` is
@@ -59,7 +49,7 @@ pub fn parse_verified(s: &str, now: i64) -> Result<i64, String> {
 
 /// `<unix-seconds>` or `<YYYY-MM-DD>` (UTC midnight). Seconds are ASCII digits only:
 /// `i64::from_str` also takes a leading `+` / `-`, so `+100` ran at 100 (PR #259 review).
-fn parse_instant(s: &str) -> Result<i64, String> {
+pub fn parse_instant(s: &str) -> Result<i64, String> {
     if !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()) {
         if let Ok(secs) = s.parse::<i64>() {
             return Ok(secs);
@@ -89,8 +79,8 @@ fn parse_date(s: &str) -> Option<i64> {
     Some(days_from_civil(y, m, d) * DAY)
 }
 
-/// `<N><unit>`, N ≥ 1, unit in `s m h d w`.
-fn parse_window(s: &str) -> Result<i64, String> {
+/// `<N><unit>`, N ≥ 1, unit in `s m h d w`, as seconds. The cutoff is `now - window`.
+pub fn parse_window(s: &str) -> Result<i64, String> {
     let bad =
         || format!("--older-than {s:?}: expected <N><unit> with unit s, m, h, d or w (e.g. 90d)");
     // `strip_suffix`, not `split_at(len - 1)`: a byte offset lands inside a multibyte last char
@@ -175,22 +165,19 @@ mod tests {
 
     #[test]
     fn unix_seconds_pass_through() {
-        assert_eq!(resolve(&["1767225600"], None, NOW), Ok(1_767_225_600));
-        assert_eq!(resolve(&["0"], None, NOW), Ok(0));
+        assert_eq!(parse_instant("1767225600"), Ok(1_767_225_600));
+        assert_eq!(parse_instant("0"), Ok(0));
         for signed in ["+100", "-100", " 100", "１００"] {
-            assert!(
-                resolve(&[signed], None, NOW).is_err(),
-                "{signed:?} accepted"
-            );
+            assert!(parse_instant(signed).is_err(), "{signed:?} accepted");
         }
     }
 
     #[test]
     fn iso_date_is_utc_midnight() {
-        assert_eq!(resolve(&["1970-01-01"], None, NOW), Ok(0));
-        assert_eq!(resolve(&["2026-01-01"], None, NOW), Ok(1_767_225_600));
-        assert_eq!(resolve(&["2024-02-29"], None, NOW), Ok(1_709_164_800));
-        assert_eq!(resolve(&["2000-03-01"], None, NOW), Ok(951_868_800));
+        assert_eq!(parse_instant("1970-01-01"), Ok(0));
+        assert_eq!(parse_instant("2026-01-01"), Ok(1_767_225_600));
+        assert_eq!(parse_instant("2024-02-29"), Ok(1_709_164_800));
+        assert_eq!(parse_instant("2000-03-01"), Ok(951_868_800));
     }
 
     #[test]
@@ -207,17 +194,17 @@ mod tests {
             "soon",
             "",
         ] {
-            assert!(resolve(&[bad], None, NOW).is_err(), "{bad:?} accepted");
+            assert!(parse_instant(bad).is_err(), "{bad:?} accepted");
         }
     }
 
     #[test]
     fn older_than_subtracts_the_window_from_now() {
-        assert_eq!(resolve(&[], Some("90d"), NOW), Ok(NOW - 90 * DAY));
-        assert_eq!(resolve(&[], Some("2w"), NOW), Ok(NOW - 14 * DAY));
-        assert_eq!(resolve(&[], Some("12h"), NOW), Ok(NOW - 12 * 3_600));
-        assert_eq!(resolve(&[], Some("30m"), NOW), Ok(NOW - 1_800));
-        assert_eq!(resolve(&[], Some("45s"), NOW), Ok(NOW - 45));
+        assert_eq!(parse_window("90d").map(|w| NOW - w), Ok(NOW - 90 * DAY));
+        assert_eq!(parse_window("2w").map(|w| NOW - w), Ok(NOW - 14 * DAY));
+        assert_eq!(parse_window("12h").map(|w| NOW - w), Ok(NOW - 12 * 3_600));
+        assert_eq!(parse_window("30m").map(|w| NOW - w), Ok(NOW - 1_800));
+        assert_eq!(parse_window("45s").map(|w| NOW - w), Ok(NOW - 45));
     }
 
     #[test]
@@ -240,22 +227,8 @@ mod tests {
             "90d\u{301}",
             "٩٠d",
         ] {
-            assert!(resolve(&[], Some(bad), NOW).is_err(), "{bad:?} accepted");
+            assert!(parse_window(bad).is_err(), "{bad:?} accepted");
         }
-    }
-
-    #[test]
-    fn exactly_one_spelling() {
-        assert!(resolve(&[], None, NOW).is_err(), "nothing given");
-        assert!(resolve(&["100", "200"], None, NOW).is_err(), "two operands");
-        assert!(
-            resolve(&["soon", "100"], None, NOW).is_err(),
-            "stray operand"
-        );
-        assert!(
-            resolve(&["100"], Some("90d"), NOW).is_err(),
-            "operand and window"
-        );
     }
 
     #[test]
