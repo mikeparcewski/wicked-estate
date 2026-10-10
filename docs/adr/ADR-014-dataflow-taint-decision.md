@@ -28,12 +28,12 @@ Three options, judged per producer tier:
 |---|---|---|
 | assignment chains | ✅ present (`src → a → b → return`) | `present_rows_are_reachable` |
 | cross-file call argument and result | ✅ present when the call resolves uniquely | `present_rows_are_reachable` |
-| closure-captured local | ✅ captured, ❌ not through the arrow's return | `missing_primitives_are_unreachable` |
+| closure-captured local | ✅ captured; ✅ through a returned no-parameter, single-identifier arrow (`return () => captured`, `may_influence`, S5b); every other closure shape ❌ | `s5b_return_composition` |
 | destructuring (`const {k} = obj`) | ❌ absent | `missing_primitives_are_unreachable` |
 | loops (`for … of`, loop-carried `acc = acc + it`) | ❌ absent | `missing_primitives_are_unreachable` |
 | promises and callbacks | ❌ absent | `missing_primitives_are_unreachable` |
 | object-literal property writes | ❌ absent (reads are path-keyed slots) | `missing_primitives_are_unreachable` |
-| sanitizer-like calls (`clean = sanitize(raw)`) | ⚠️ the argument enters, the result does **not** come back out when the callee returns an expression | `missing_primitives_are_unreachable` |
+| sanitizer-like calls (`clean = sanitize(raw)`) | ✅ the argument enters, and the result comes back out (S5b): `return raw.replace(..)` is a `may_influence` hop from the identifier receiver and arguments. A chained receiver (`raw.trim().x()`) is ❌. This is value flow, **not** a sanitizer model | `s5b_return_composition` |
 | branches | ⚠️ **path-insensitive**: `if (flag) out = src` reports `value_preserving`, with no guard and no literal default | `branches_are_path_insensitive` |
 | imports | ✅ through resolved calls | `present_rows_are_reachable` |
 | Angular inputs, outputs, `$event` | ✅ compiler-exact at the template boundary; the `EventEmitter.emit(x)` producer side is absent | `angular_bindings.rs` |
@@ -45,7 +45,23 @@ The operator ruled "data flow - evidence is important" on #279. That selects **O
 **Corpus substitution.** The 905-file TypeScript corpus named in the procedure is not identified anywhere in this repository (the CHANGELOG cites only "a 905-file TypeScript repo"), and it is not on the build host. The measurement therefore uses a pinned **public** Angular corpus of comparable size: `Teradata/covalent` at `438c297e399dd9cae6243f0955d78f04c9875c21` (860 non-declaration `.ts` files). The baseline and each candidate are measured on the same machine and corpus revision. Results are recorded under "Measurements" as each slice lands.
 
 ## Measurements
-Filled in by S5b–S5d (one table per slice, with baseline and candidate SHAs).
+Procedure: `scripts/measure-dataflow.py` (its `--self-test` pins the semantics gate), run by a scratch-branch workflow on one GitHub-hosted `ubuntu-latest` runner. Both binaries are built there with the shipped release profile (LTO, one codegen unit) into one target dir, then measured interleaved, base then candidate, median of 3. The estate-tree corpus is `git archive` of the baseline commit. The 10 fixed Lineage queries are the baseline graph's 10 largest `flows_to` producers by out-degree (ids recorded in each run's artifact). The sweep runs one Lineage query per baseline `Parameter` slot. All queries use the default depth.
+
+### S5b: callee return composition (+ single-identifier returned arrow)
+Baseline `2b6bf7f` (main). Candidate `2c14000` (code-identical to the merged slice; the rebase only added this ADR's text). Workflow run `38065211483`, branch `measure/ts-s5b`.
+
+| metric | Covalent `438c297` (860 `.ts`) | estate tree `2b6bf7f` | gate |
+|---|---|---|---|
+| `flows_to` edges | 1394 → 1477 (**+5.95 %**) | 107 → 116 (+8.41 %) | ≤ +25 % |
+| full index, median of 3 | 7.15 s → 7.22 s (+1.05 %) | 5.53 s → 5.45 s (−1.27 %) | ≤ +15 % |
+| incremental re-index, median of 3 | 0.96 s → 0.94 s (−2.10 %) | 2.09 s → 2.05 s (−2.06 %) | ≤ +15 % |
+| DB size | 79,826,944 → 80,138,240 B (+0.39 %) | 55,271,424 → 55,087,104 B (−0.33 %) | ≤ +10 % |
+| Lineage, 10 fixed queries newly truncated | 0 (2 were truncated in both) | 0 | 0 |
+| Lineage sweep newly truncated | 0 of 520 (1 truncated in both) | 0 of 97 | 0 |
+| `value_preserving` rows from a new construct | 0 (71 `return_call` rows, all `may_influence`) | 0 (6 `return_call`, 1 `return_closure`) | 0 |
+| capped-away new-construct rows (inconclusive) | 0 | 0 | 0 |
+
+**Verdict: S5b passes every gate.** `return_closure` never fired on Covalent; its only firing in either corpus is the readiness fixture in estate's own tree. The readiness table diff is in `dataflow_readiness.rs`: `s5b_return_composition`, `every_edge_matches_the_expected_semantics_table`, and `returns_of_undefined_callables_write_no_slot`. The last is a pre-existing false return attribution (a destructured arrow or a private arrow field), reproduced with the 0.24.0 extractor and fixed in this slice.
 
 ## Original recommendation (superseded by the decision above): Option 1 now, Option 2 only behind one bounded prototype, Option 3 no-go
 
