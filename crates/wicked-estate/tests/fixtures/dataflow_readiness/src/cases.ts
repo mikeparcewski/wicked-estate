@@ -475,3 +475,49 @@ export function propCastCall(raw: string): string {
   (o.m as () => void)();
   return o.k;
 }
+
+// ADR-014 S6d closure returns, and expected NON-flows.
+export function closureCall(src: string): () => string {
+  return () => src.trim();
+}
+
+export function closureBlock(src: string): () => string {
+  return function () {
+    return src;
+  };
+}
+
+// The closure's own parameter is a future call's argument; only the captured `src` contributes.
+export function closureParam(src: string): (x: string) => string {
+  return (x) => x + src;
+}
+
+// S6d review cases: a closure's own locals, a nested callback's parameter and a shadowing local
+// are bindings of the closure, not captured values.
+export function closureAlias(): (x: string) => string {
+  return (x) => {
+    const copy = x;
+    return copy;
+  };
+}
+
+export function closureThen(): (p: Promise<string>) => Promise<string> {
+  return (p) => p.then((v) => v);
+}
+
+export function closureShadow(src: string): () => string {
+  return () => {
+    const src = 'x';
+    return src;
+  };
+}
+
+// A function or class declared inside the closure is the closure's own, not the captured name.
+export function closureHoisted(handler: () => string): () => () => string {
+  return () => {
+    function handler(): string {
+      return 'fixed';
+    }
+    return handler;
+  };
+}

@@ -857,3 +857,43 @@ fn s6c_local_object_properties() {
         }
     }
 }
+
+/// ADR-014 S6d (closure returns, primitive 4): a returned arrow or function expression carries
+/// the values its returned expression captures, `may_influence`: an expression body or a `return`
+/// directly in its block body, in the shapes `return_call` / `expression` take. The closure's own
+/// parameters are a future call's arguments and contribute nothing.
+#[test]
+fn s6d_closure_returns() {
+    for owner in ["closureCall", "closureBlock", "closureParam"] {
+        assert_eq!(
+            supports(
+                &value(owner, "src"),
+                &value(owner, &format!("{owner}.return"))
+            ),
+            vec![influence("return_closure")],
+            "{owner}"
+        );
+    }
+    assert!(
+        !graph()
+            .flows
+            .iter()
+            .any(|f| f.producer.contains("closureParam().") && f.producer.contains(":local:x")),
+        "the closure's own parameter contributes nothing"
+    );
+    // A binding declared INSIDE the closure is never a contributor: its own parameter, a local
+    // aliasing it, a nested callback's parameter, a local shadowing a captured name.
+    for owner in [
+        "returnParamArrow",
+        "closureAlias",
+        "closureThen",
+        "closureShadow",
+        "closureHoisted",
+    ] {
+        assert_eq!(
+            value_opt(owner, &format!("{owner}.return")),
+            None,
+            "{owner}: the closure captures nothing"
+        );
+    }
+}

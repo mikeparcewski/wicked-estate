@@ -911,14 +911,14 @@
   (#not-match? @_return_fn "(^|[^A-Za-z0-9_$])then$")
 ) @flow.influence.syntax.return_call
 
-; The one closure shape S5b carries (ADR-014): a returned arrow with NO parameters whose body is
-; ONE identifier, `return () => captured`. The returned value is a function, not `captured`, so
-; `may_influence`. A parameter (`return x => x`) is a future call's argument, not a contributor.
+; ADR-014 S6d (primitive 4; S5b carried only `return () => captured`): a RETURNED closure, an arrow
+; or function expression, carries the values its returned expression captures. The returned value
+; is a function, not those values, so `may_influence`. `@flow.producer.closure_return` expands to
+; the contributors of its expression body or of each `return` directly in its block body (the
+; `callable_return_contributors` shapes), minus the closure's own parameters: `return x => x`
+; returns a future call's argument, not a contributor.
 (return_statement
-  (arrow_function
-    parameters: (formal_parameters) @_no_params
-    body: (identifier) @flow.producer.local
-    (#eq? @_no_params "()")) @flow.consumer.return
+  [(arrow_function) (function_expression)] @flow.producer.closure_return @flow.consumer.return
 ) @flow.influence.syntax.return_closure
 
 ; Return barriers. A `return x` is only the OWNER callable's return value when no other callable
