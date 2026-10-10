@@ -46,6 +46,16 @@ def incremental(binary, corpus, db, touch, n):
     return dt
 
 
+def indexed_file(binary, corpus, rel, db):
+    """`--touch` must name a file the index actually reads, or the incremental timing is a no-op."""
+    full_index(binary, corpus, db)
+    c = sqlite3.connect(db)
+    hit = c.execute("select count(*) from nodes where file = ?", (rel,)).fetchone()[0]
+    c.close()
+    if not hit:
+        sys.exit(f"--touch {rel} is not an indexed file of {corpus}")
+
+
 def stats(binary, db):
     r = run([binary, "stats", "--json", "--db", db])
     d = json.loads(r.stdout)
@@ -75,26 +85,40 @@ def lineage_roots(db):
 
 
 def lineage(binary, db, symbol):
+    """One query. A failed command or a malformed document voids the measurement: it must never
+    read as "not truncated"."""
     r = run([binary, "lineage", symbol, "--relation", "flows_to", "--json", "--db", db])
     if r.returncode != 0:
-        return {"error": r.stderr[-300:], "size": 0, "truncated": None, "total": None}
+        sys.exit(f"lineage failed ({binary}, {symbol}): {r.stderr[-500:]}")
     d = json.loads(r.stdout)
-    return {"size": len(r.stdout), "truncated": bool(d.get("truncated")), "total": d.get("total")}
+    if d.get("relation") != "flows_to" or not isinstance(d.get("truncated"), bool):
+        sys.exit(f"lineage document malformed ({binary}, {symbol}): {r.stdout[:300]}")
+    return {"size": len(r.stdout), "truncated": d["truncated"], "total": d.get("total")}
 
 
 def semantics_gate(db, new):
-    by_construct, violations, merged = {}, [], 0
+    """Every support row of a new construct must be `may_influence`. `constructs` is the complete
+    list; `flow_support` may be capped (`flow_support_truncated`), so an edge whose complete list
+    names a new construct that its surviving rows do not show is INCONCLUSIVE, never a pass."""
+    by_construct, violations, inconclusive, merged, edges_with = {}, [], [], 0, {}
     for e in edges(db):
-        rows = e.get("metadata", {}).get("flow_support", [])
-        kinds = {row.get("construct") for row in rows}
-        if kinds & new and kinds - new:
+        md = e.get("metadata", {})
+        rows = md.get("flow_support", [])
+        complete = set(md.get("constructs", [])) or {row.get("construct") for row in rows}
+        for k in complete & new:
+            edges_with[k] = edges_with.get(k, 0) + 1
+        if complete & new and complete - new:
             merged += 1
+        shown = {row.get("construct") for row in rows}
+        if (complete & new) - shown:
+            inconclusive.append((e["source"], e["target"], sorted((complete & new) - shown)))
         for row in rows:
             key = (row.get("construct"), row.get("semantics"))
             by_construct[key] = by_construct.get(key, 0) + 1
             if row.get("construct") in new and row.get("semantics") != "may_influence":
                 violations.append((e["source"], e["target"], key))
-    return by_construct, violations, merged
+    missing = sorted(new - set(edges_with))
+    return by_construct, violations, inconclusive, merged, edges_with, missing
 
 
 def pct(a, b):
@@ -119,6 +143,7 @@ def main():
     bins = {"base": a.base, "cand": a.cand}
     touch_path = os.path.join(corpus, a.touch)
     pristine = open(touch_path).read()
+    indexed_file(a.base, corpus, a.touch, os.path.join(work, "probe.db"))
     t_full = {"base": [], "cand": []}
     t_inc = {"base": [], "cand": []}
     for i in range(a.runs):
@@ -143,7 +168,8 @@ def main():
         sweep_cand_trunc += bool(c["truncated"])
         if c["truncated"] and not b["truncated"]:
             sweep_new_trunc.append(s)
-    by_construct, violations, merged = semantics_gate(dbs["cand"], new)
+    by_construct, violations, inconclusive, merged, edges_with, missing = semantics_gate(
+        dbs["cand"], new)
     med = lambda xs: statistics.median(xs)
     res = {
         "corpus": a.corpus, "runs": a.runs, "stats": st,
@@ -154,7 +180,9 @@ def main():
                           "newly_truncated": sweep_new_trunc},
         "new_construct_support": {f"{k[0]}/{k[1]}": v for k, v in sorted(by_construct.items())
                                   if k[0] in new},
-        "semantics_violations": violations, "edges_merged_with_existing_construct": merged,
+        "semantics_violations": violations, "semantics_inconclusive": inconclusive,
+        "new_construct_edges": edges_with, "new_constructs_never_fired": missing,
+        "edges_merged_with_existing_construct": merged,
     }
     json.dump(res, open(a.out, "w"), indent=2)
     newly_fixed = [s for s, v in lin_fixed.items()
@@ -178,6 +206,10 @@ def main():
           f"{sweep_base_trunc} truncated | {sweep_cand_trunc} truncated | "
           f"{len(sweep_new_trunc)} | 0 |")
     print(f"| `value_preserving` rows from a new construct | | | {len(violations)} | 0 |")
+    print(f"| edges whose new-construct row is capped away (inconclusive) | | | "
+          f"{len(inconclusive)} | 0 |")
+    print(f"\nnew constructs that never fired: {missing or 'none'}; edges per new construct: "
+          f"{edges_with}")
     print(f"\nnodes {sb['nodes']} -> {sc['nodes']}, edges {sb['edges']} -> {sc['edges']}; "
           f"new-construct support rows: {res['new_construct_support']}; "
           f"edges where a new construct merged into an existing construct's edge: {merged}")

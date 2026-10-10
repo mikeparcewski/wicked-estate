@@ -70,3 +70,33 @@ export function callbackReturn(src: string, items: string[]): string {
 export function chainedReceiver(raw: string): string {
   return raw.trim().toLowerCase();
 }
+
+// A returned call's identifier arguments influence its result; a literal argument does not.
+export function returnCallArgs(raw: string, other: string): string {
+  return combine(raw, 'x', other);
+}
+
+export function combine(a: string, sep: string, b: string): string {
+  return a + sep + b;
+}
+
+// A returned arrow's own parameter is a future call's argument, not a contributor.
+export function returnParamArrow(src: string): (x: string) => string {
+  const unused = src;
+  return (x) => x;
+}
+
+// A destructured arrow and a private arrow field mint no definition, so their `return`s belong to
+// no slot: never to the enclosing function or class.
+export function destructuredArrow(raw: string): string {
+  const { length } = () => {
+    return raw;
+  };
+  return 'safe';
+}
+
+export class PrivateArrow {
+  #handle = (raw: string) => {
+    return raw;
+  };
+}

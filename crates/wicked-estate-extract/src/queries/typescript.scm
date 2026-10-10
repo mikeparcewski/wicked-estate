@@ -408,11 +408,14 @@
     arguments: (arguments (identifier) @flow.producer.local)) @flow.consumer.return
 ) @flow.influence.syntax.return_call
 
-; The one closure shape S5b carries (ADR-014): a returned arrow whose body is ONE identifier,
-; `return () => captured`. The returned value is a function, not `captured`, so `may_influence`.
+; The one closure shape S5b carries (ADR-014): a returned arrow with NO parameters whose body is
+; ONE identifier, `return () => captured`. The returned value is a function, not `captured`, so
+; `may_influence`. A parameter (`return x => x`) is a future call's argument, not a contributor.
 (return_statement
   (arrow_function
-    body: (identifier) @flow.producer.local) @flow.consumer.return
+    parameters: (formal_parameters) @_no_params
+    body: (identifier) @flow.producer.local
+    (#eq? @_no_params "()")) @flow.consumer.return
 ) @flow.influence.syntax.return_closure
 
 ; Return barriers. A `return x` is only the OWNER callable's return value when no other callable
@@ -429,9 +432,15 @@
 (generator_function body: (statement_block) @flow.barrier)
 (generator_function_declaration body: (statement_block) @flow.barrier)
 
+; Only the shapes a definition pattern above captures OWN their body: an identifier-bound arrow
+; and a `property_identifier` field. A destructured binding (`const { a } = () => {..}`) or a
+; private field (`#h = () => {..}`) mints no definition, so its `return` was attributed to the
+; enclosing function or class (ADR-014 S5b review); now it is a plain barrier and is dropped.
 (variable_declarator
+  name: (identifier)
   value: (arrow_function body: (statement_block) @flow.barrier.owned))
 (public_field_definition
+  name: (property_identifier)
   value: (arrow_function body: (statement_block) @flow.barrier.owned))
 
 ; A named callable's body is an OWNED barrier even when the callable is declared inside a
@@ -477,8 +486,8 @@
 (function_expression) @flow.scope.callable
 (generator_function) @flow.scope.callable
 
-(variable_declarator value: (arrow_function) @flow.scope.owned)
-(public_field_definition value: (arrow_function) @flow.scope.owned)
+(variable_declarator name: (identifier) value: (arrow_function) @flow.scope.owned)
+(public_field_definition name: (property_identifier) value: (arrow_function) @flow.scope.owned)
 
 (lexical_declaration (variable_declarator name: (_) @flow.declare.block))
 (variable_declaration (variable_declarator name: (_) @flow.declare.var))

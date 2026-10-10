@@ -278,6 +278,39 @@ fn s5b_return_composition() {
     assert_eq!(value_opt("callbackReturn", "callbackReturn.return"), None);
     // Out of scope, pinned: a chained receiver contributes nothing.
     assert_eq!(value_opt("chainedReceiver", "chainedReceiver.return"), None);
+    // Identifier arguments of a returned call each influence the result, directly.
+    for arg in ["raw", "other"] {
+        let e = edge(
+            &value("returnCallArgs", arg),
+            &value("returnCallArgs", "returnCallArgs.return"),
+        );
+        assert_eq!(
+            e.supports,
+            vec![("return_call".to_string(), "may_influence".to_string())]
+        );
+    }
+    // A returned arrow's own parameter is no contributor: no slot at all.
+    assert_eq!(
+        value_opt("returnParamArrow", "returnParamArrow.return"),
+        None
+    );
+}
+
+/// A `return` inside a callable that mints no definition (a destructured arrow, a private arrow
+/// field) belongs to no slot. Before the S5b review, the owned barrier accepted any arrow-valued
+/// declarator or field, so the enclosing function or CLASS took the return.
+#[test]
+fn returns_of_undefined_callables_write_no_slot() {
+    for owner in ["destructuredArrow", "PrivateArrow"] {
+        let name = format!("{owner}.return");
+        assert!(
+            !graph()
+                .nodes
+                .iter()
+                .any(|n| n.is_value_flow_node() && n.name == name),
+            "{name} must not exist"
+        );
+    }
 }
 
 /// The readiness oracle (ADR-014 "Acceptance metrics"): every support row on every fixture edge
