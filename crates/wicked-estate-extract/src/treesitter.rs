@@ -24,6 +24,7 @@
 
 use serde_json;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
 use wicked_estate_core::{
@@ -1223,6 +1224,22 @@ pub(crate) fn builtin_owner_of_ext(ext: &str) -> Option<&'static str> {
 
 // ── Public extractor ──────────────────────────────────────────────────────────
 
+/// Extractor queries compiled in this process (built-in, override or plugin). Compiling a large
+/// query is the fixed per-process price of an index pass (ADR-014 "Cumulative"), so tests pin how
+/// many compiles one pass pays.
+static QUERY_COMPILES: AtomicUsize = AtomicUsize::new(0);
+
+/// How many extractor queries this process has compiled so far (see [`QUERY_COMPILES`]).
+pub fn query_compile_count() -> usize {
+    QUERY_COMPILES.load(Ordering::Relaxed)
+}
+
+/// Compile an extractor query, counted in [`query_compile_count`].
+fn compile_query(language: &tree_sitter::Language, src: &str) -> Option<Query> {
+    QUERY_COMPILES.fetch_add(1, Ordering::Relaxed);
+    Query::new(language, src).ok()
+}
+
 /// A tree-sitter-backed extractor for one language (grammar + query). `Send + Sync` — the
 /// compiled `Query` and `Language` are both `Send + Sync`; the `Parser` is created per
 /// `extract` call because `Parser` is not `Sync`.
@@ -1255,7 +1272,7 @@ impl TreeSitterExtractor {
             // override can never make a built-in language unavailable.
             let query_src =
                 crate::plugin::override_query_for(entry.name).unwrap_or(entry.query_src);
-            let query = Query::new(&language, query_src).ok()?;
+            let query = compile_query(&language, query_src)?;
             return Some(Self {
                 lang_name: entry.name.to_string(),
                 language,
@@ -1274,7 +1291,7 @@ impl TreeSitterExtractor {
         language: tree_sitter::Language,
         query_src: &str,
     ) -> Option<Self> {
-        let query = Query::new(&language, query_src).ok()?;
+        let query = compile_query(&language, query_src)?;
         Some(Self {
             lang_name: name.to_string(),
             language,
