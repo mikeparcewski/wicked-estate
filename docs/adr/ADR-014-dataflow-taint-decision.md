@@ -29,7 +29,7 @@ Three options, judged per producer tier:
 |---|---|---|
 | assignment chains | ✅ present (`src → a → b → return`) | `present_rows_are_reachable` |
 | cross-file call argument and result | ✅ present when the call resolves uniquely | `present_rows_are_reachable` |
-| closure-captured local | ✅ captured; ✅ through a returned no-parameter, single-identifier arrow (`return () => captured`, `may_influence`, S5b); every other closure shape ❌ | `s5b_return_composition` |
+| closure-captured local | ✅ captured; ✅ through a RETURNED arrow or function expression (S6d, primitive 4; S5b carried only `return () => captured`): the captured values among its return contributors (expression body or a direct block `return`, the `callable_return_contributors` shapes), `may_influence`. A binding declared inside the closure (its parameters, its locals, a nested callback's parameters, an inner function or class name) contributes nothing, so a captured value copied into a closure local first is lost (conservative). A closure bound to a const and then returned ❌ | `s5b_return_composition`, `s6d_closure_returns` |
 | destructuring (`const {k} = obj`) | ✅ flat patterns over an identifier (shorthand, renamed, defaulted, rest, array elements), `may_influence` (S5c); nested patterns and member/call sources ❌ | `s5c_destructuring` |
 | loops (`for … of`, loop-carried `acc = acc + it`) | ✅ `for…of` over an identifier binds each element (identifier, flat array or shorthand object pattern); `acc = acc + it` and `acc += it` combine their identifier operands; all `may_influence` (S5d). `for…in` keys ❌ by design | `s5d_loop_binding` |
 | inline array callbacks (`map`/`forEach`/`filter`/`find`/`some`/`every`/`flatMap`/`reduce`) | ✅ an inline arrow or function expression passed first: its first parameter binds one element of an identifier or `this.field` receiver (`reduce`: the second, its first seeded by an identifier initial value); its return (expression body or a direct block `return`) becomes the result of `map`/`flatMap`/`reduce`; `filter`/`find` select the receiver's elements. All `may_influence` (S6a). A named callback ❌ (interprocedural); `some`/`every`/`forEach` results carry nothing | `s6a_inline_callbacks` |
@@ -142,7 +142,7 @@ Baseline `b4660ba` (the S6a code, = main `1cfa3e3`). Candidate `2d0de1a` (code-i
 | `value_preserving` rows from a new construct | 0 (11 `await_call`) | 0 (1 `await_call`, 2 `then_value`, 1 `then_return`) | 0 |
 | capped-away new-construct rows (inconclusive) | 0 | 0 | 0 |
 
-**Verdict: S6b passes every gate**, but its yield on Covalent is small: 11 edges, all `await_call`. That Angular code moves async data through RxJS Observables (`subscribe`, `pipe(map(…))`), which S6b does not model. The other constructs fire only on the readiness fixture, which is part of estate's tree (`await_value`, `await_result` and `then_result` not even there: the tree is measured at the baseline commit, before this slice's fixture cases). The incremental cost rose by a fixed +0.12 s per process (query compile), within the gate.
+**Verdict: S6b passes every gate**, but its yield on Covalent is small: 11 edges, all `await_call`. A source count at the pinned commit explains why. 186 of Covalent's `.then(` calls are `.then(() => …)`: test sequencing with no value to bind. Only 3 bindings take an `await`ed value. Its 86 `.subscribe(` calls are RxJS, which S6b does not model. The other constructs fire only on the readiness fixture, which is part of estate's tree (`await_value`, `await_result` and `then_result` not even there: the tree is measured at the baseline commit, before this slice's fixture cases). The incremental cost rose by a fixed +0.12 s per process (query compile), within the gate.
 
 ### S6c: local object properties
 Baseline `d06d673` (the S6b code, = main `cfbfcb5`). Candidate `a64d53a` (code-identical to this slice after its rebase). Workflow run `38082650676`, branch `measure/ts-s6c`.
@@ -158,7 +158,50 @@ Baseline `d06d673` (the S6b code, = main `cfbfcb5`). Candidate `a64d53a` (code-i
 | `value_preserving` rows from a new construct | 0 (none fired) | 0 (1 `object_literal`, 1 `return_property`) | 0 |
 | capped-away new-construct rows (inconclusive) | 0 | 0 | 0 |
 
-**Verdict: S6c passes every gate, with zero yield on Covalent.** Its only firings are the readiness fixture's `property()` row, which is part of estate's tree. A real object literal is built to be passed on: returned, handed to a call, spread or assigned to a field. The no-alias gate correctly refuses every such object, and what is left (a literal only ever read back as `o.k` in the same body) barely occurs in that Angular code. A property flow that follows an object INTO a call or a field needs a heap or alias model, which this ADR keeps out.
+**Verdict: S6c passes every gate, with zero yield on Covalent.** Its only firings are the readiness fixture's `property()` row, which is part of estate's tree. A real object literal is built to be passed on: returned, handed to a call, spread or assigned to a field. The no-alias gate correctly refuses every such object, and nothing that is left (a literal only ever read back as `o.k` in the same body) fired on Covalent. A property flow that follows an object INTO a call or a field needs a heap or alias model, which this ADR keeps out.
+
+### S6d: closure returns (primitive 4)
+Baseline `ad7c3de` (the S6c code, = main `85ece2d`). Candidate `f71a21d` (code-identical to this slice after its rebase). Workflow run `38083252587`, branch `measure/ts-s6d`.
+
+| metric | Covalent `438c297` | estate tree `ad7c3de` | gate |
+|---|---|---|---|
+| `flows_to` edges | 1600 → 1600 (**+0.00 %**) | 265 → 265 (0.00 %) | ≤ +25 % |
+| full index, median of 3 | 6.24 s → 6.38 s (+2.26 %) | 5.22 s → 5.19 s (−0.67 %) | ≤ +15 % |
+| incremental re-index, median of 3 | 1.01 s → 0.97 s (−3.32 %) | 2.08 s → 2.05 s (−1.46 %) | ≤ +15 % |
+| DB size | 80,687,104 → 80,773,120 B (+0.11 %) | 56,528,896 → 56,553,472 B (+0.04 %) | ≤ +10 % |
+| Lineage, 10 fixed queries newly truncated | 0 | 0 | 0 |
+| Lineage sweep newly truncated | 0 of 520 (1 truncated in both) | 0 of 195 | 0 |
+| `value_preserving` rows from a `return_closure` | 0 (none fired) | 0 (1, the S5b fixture row) | 0 |
+| capped-away new-construct rows (inconclusive) | 0 | 0 | 0 |
+
+**Verdict: S6d passes every gate, with zero yield on Covalent.** It replaces S5b's narrow pattern with one mechanism (the same `callable_return_contributors` walk S6a and S6b use), and the S5b fixture row still holds. S6d emitted no `return_closure` flow on Covalent within its supported shapes. That is an absent flow, not an audit showing the construct is absent. No other corpus was measured.
+
+### Cumulative (S5b–S6d) and the S6 graduation
+All four S6 slices passed every gate against the state before them, so primitives 4–7 graduate (closures, inline callbacks, `await`/`.then`, local object properties). The same runner pairs measured the merged result against the two releases. Candidate `cf4414b` is the S6d code.
+
+| metric (Covalent `438c297`) | 0.24.0 `890cc39` → S6d (run `38083837701`) | 0.25.0 `490c547` → S6d (run `38083840625`) |
+|---|---|---|
+| `flows_to` edges | 1394 → 1600 (**+14.78 %**) | 1502 → 1600 (**+6.52 %**) |
+| full index, median of 3 | 7.36 s → 7.36 s (+0.04 %) | 7.18 s → 7.24 s (+0.88 %) |
+| incremental re-index, median of 3 | 0.96 s → 1.18 s (**+23.25 %**) | 0.98 s → 1.17 s (**+19.40 %**) |
+| DB size | +1.12 % | +0.72 % |
+| Lineage newly truncated (10 fixed + 520 sweep) | 0 | 0 |
+| `value_preserving` rows from a new construct | 0 | 0 |
+
+On estate's own tree: 107 → 126 edges against 0.24.0 (+17.76 %), and 150 → 158 against 0.25.0 (+5.33 %). Incremental re-index rose +8.12 % and +8.80 % there.
+
+**The cumulative incremental cost exceeds the per-slice gate.** Each slice stayed within +15 % of the slice before it: S6a +7.20 %, S6b +11.88 %, S6c +1.37 %, S6d −3.32 %. Added up, Covalent's one-file re-index costs about 0.2 s more than 0.25.0. Full index does not move. That is consistent with a fixed per-process cost, most plausibly compiling the larger TypeScript query (the S6a first candidate's +0.13 s pointed the same way), but no profile isolates it yet. The gates are defined per slice, so no slice is killed. The number is recorded so that a later change can buy it back. Profile first (an isolated query-construction benchmark); if compile cost is confirmed, one candidate is moving the callback-parameter alternations into one Rust capture, the way `callable_return_contributors` did for returns.
+
+**Yield on Covalent:** S6a 87 edges, S6b 11, S6c 0, S6d 0. Inline array callbacks carry most of it. `await`/`.then` add little there, because Covalent's promises are mostly value-free test sequencing (see S6b). RxJS Observables are not modelled. Within the supported shapes, S6c and S6d emitted nothing there: an object literal that is passed on needs an alias model, and no supported closure-return shape fired. No other TypeScript corpus was measured.
+
+Still unsupported:
+- named (non-inline) callbacks, which would be interprocedural;
+- RxJS and every other non-Promise async model;
+- objects that escape;
+- path conditions;
+- aliasing.
+
+Option 3 stays no-go.
 
 ### Graduation (S5b–S5d together)
 All three slices passed every gate. **Primitives 1–3 graduate.** Cumulative on Covalent against `2b6bf7f`: `flows_to` 1394 → 1502 (+7.7 %), and full index 7.15 s → 7.20 s, each slice measured against the one before it. Still unsupported:
@@ -226,4 +269,4 @@ Promises, property writes and path conditions were explicitly **out** of Option 
 - **S5d:** primitive 3 (loop element binding and loop-carried reassignment), measured against the kill criteria. Each slice lands as its own PR, so a gate miss deletes exactly that slice (see "Kill criteria"). Graduation evidence is the metrics table, the readiness diff and the corpus revisions.
 
 ## Next-session prompt
-> Read docs/adr/ADR-014-dataflow-taint-decision.md (Accepted: Option 2; S5b–S5d graduated, see "Measurements"). Primitive 4 (closure returns beyond `return () => ident`) may be evaluated as one slice: TypeScript query data, a positive readiness test with expected flows, non-flows and semantics that is red before the change, then `scripts/measure-dataflow.py` against main on estate's tree and `Teradata/covalent@438c297`. A gate miss deletes the slice. Option 3 stays no-go unless its positive-evidence falsifier is met.
+> Read docs/adr/ADR-014-dataflow-taint-decision.md (Accepted: Option 2; S5b–S5d and the S6 extension graduated, see "Measurements" and "Cumulative"). The open cost is the cumulative fixed incremental re-index overhead (+19.4 % on Covalent against 0.25.0); profile it (an isolated query-construction benchmark), then buy it back without losing a readiness row, measured with `scripts/measure-dataflow.py`. Option 3 stays no-go unless its positive-evidence falsifier is met.
