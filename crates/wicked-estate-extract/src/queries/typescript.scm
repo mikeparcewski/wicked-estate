@@ -248,8 +248,8 @@
     right: (identifier) @flow.producer.local)
 ) @flow.influence.syntax.expression
 
-; ADR-014 S5c, destructuring: `const { k, a: alias, c = d, ...rest } = obj` and
-; `const [first, ...others] = arr`. A destructured binding is a PART of the value, or a default
+; ADR-014 S5c, destructuring: `const { k, a: alias, b: bb = d, c = d, ...rest } = obj` and
+; `const [first, second = d, ...others] = arr`. A destructured binding is a PART of the value, or a default
 ; when the part is absent, so every hop is `may_influence`, never the value whole. Only a flat
 ; pattern over an identifier counts: a nested pattern (`{ a: { b } }`) or a member/call source
 ; contributes nothing. The bindings themselves are scoped by `@flow.declare.*` below.
@@ -262,7 +262,8 @@
 (variable_declarator
   name: (object_pattern
     (pair_pattern
-      value: (identifier) @flow.consumer.local))
+      value: [(identifier) @flow.consumer.local
+              (assignment_pattern left: (identifier) @flow.consumer.local)]))
   value: (identifier) @flow.producer.local
 ) @flow.influence.syntax.destructuring
 
@@ -276,7 +277,8 @@
 (variable_declarator
   name: [(object_pattern (rest_pattern (identifier) @flow.consumer.local))
          (array_pattern (rest_pattern (identifier) @flow.consumer.local))
-         (array_pattern (identifier) @flow.consumer.local)]
+         (array_pattern (identifier) @flow.consumer.local)
+         (array_pattern (assignment_pattern left: (identifier) @flow.consumer.local))]
   value: (identifier) @flow.producer.local
 ) @flow.influence.syntax.destructuring
 

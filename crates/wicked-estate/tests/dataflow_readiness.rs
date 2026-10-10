@@ -364,7 +364,9 @@ fn s5c_destructuring() {
     for (owner, from, to) in [
         ("destructuring", "obj", "k"),
         ("destructuringShapes", "obj", "alias"),
+        ("destructuringShapes", "obj", "bb"),
         ("destructuringShapes", "obj", "c"),
+        ("destructuringShapes", "arr", "second"),
         ("destructuringShapes", "obj", "rest"),
         ("destructuringShapes", "arr", "first"),
         ("destructuringShapes", "arr", "others"),
@@ -389,10 +391,16 @@ fn s5c_destructuring() {
         &value("destructuringOther", "obj"),
         &value("destructuringOther", "destructuringOther.return")
     ));
-    if let Some(ret) = value_opt("destructuringShadow", "destructuringShadow.return") {
-        assert!(!reaches(&value("destructuringShadow", "obj"), &ret));
-    }
-    if let Some(ret) = value_opt("destructuringNested", "destructuringNested.return") {
-        assert!(!reaches(&value("destructuringNested", "obj"), &ret));
-    }
+    let shadow_ret = value("destructuringShadow", "destructuringShadow.return");
+    assert!(!reaches(&value("destructuringShadow", "obj"), &shadow_ret));
+    let inner = graph()
+        .nodes
+        .iter()
+        .find(|n| {
+            n.symbol.0.contains("destructuringShadow().") && n.symbol.0.contains(":local:k@1")
+        })
+        .expect("the inner `k` is its own scoped binding");
+    assert!(reaches(&inner.symbol.0, &shadow_ret));
+    let nested_ret = value("destructuringNested", "destructuringNested.return");
+    assert!(!reaches(&value("destructuringNested", "obj"), &nested_ret));
 }

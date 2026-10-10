@@ -103,8 +103,8 @@ export class PrivateArrow {
 
 // ADR-014 S5c destructuring shapes and expected NON-flows.
 export function destructuringShapes(obj: { a: string; b: string; c?: string }, arr: string[]): string {
-  const { a: alias, c = 'd', ...rest } = obj;
-  const [first, ...others] = arr;
+  const { a: alias, b: bb = 'd', c = 'd', ...rest } = obj;
+  const [first, second = 'd', ...others] = arr;
   return alias;
 }
 
