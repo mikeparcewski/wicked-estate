@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """ADR-014 measurement procedure: a baseline and a candidate `wicked-estate` binary, one corpus.
 
+    measure-dataflow.py --self-test
     measure-dataflow.py --base BIN --cand BIN --corpus DIR --touch REL --new-constructs a,b
                         [--runs 3] [--out results.json]
 
@@ -110,8 +111,10 @@ def semantics_gate(db, new):
         if complete & new and complete - new:
             merged += 1
         shown = {row.get("construct") for row in rows}
-        if (complete & new) - shown:
-            inconclusive.append((e["source"], e["target"], sorted((complete & new) - shown)))
+        # Any capped row may be a new construct's: a capped edge with a new construct is
+        # inconclusive even when a sampled row of that construct looks right.
+        if complete & new and ((complete & new) - shown or md.get("flow_support_truncated")):
+            inconclusive.append((e["source"], e["target"], sorted(complete & new)))
         for row in rows:
             key = (row.get("construct"), row.get("semantics"))
             by_construct[key] = by_construct.get(key, 0) + 1
@@ -121,11 +124,39 @@ def semantics_gate(db, new):
     return by_construct, violations, inconclusive, merged, edges_with, missing
 
 
+def self_test():
+    """The gate's own regression cases, on a crafted edges table."""
+    work = tempfile.mkdtemp(prefix="measure-dataflow-selftest-")
+    db = os.path.join(work, "t.db")
+    c = sqlite3.connect(db)
+    c.execute("create table edges (kind text, data text)")
+    def edge(src, rows, truncated=0):
+        md = {"constructs": sorted({r[0] for r in rows}),
+              "flow_support": [{"construct": k, "semantics": v} for k, v in rows]}
+        if truncated:
+            md["flow_support_truncated"] = truncated
+        c.execute("insert into edges values ('{\"other\":\"flows_to\"}', ?)",
+                  (json.dumps({"source": src, "target": "t", "metadata": md}),))
+    edge("ok", [("return_call", "may_influence")])
+    edge("bad", [("return_call", "value_preserving")])
+    edge("capped", [("return_call", "may_influence")], truncated=1)
+    edge("old", [("return", "value_preserving")])
+    c.commit(); c.close()
+    _, violations, inconclusive, _, edges_with, missing = semantics_gate(db, {"return_call", "x"})
+    assert [v[0] for v in violations] == ["bad"], violations
+    assert [i[0] for i in inconclusive] == ["capped"], inconclusive
+    assert edges_with == {"return_call": 3} and missing == ["x"], (edges_with, missing)
+    shutil.rmtree(work)
+    print("self-test ok")
+
+
 def pct(a, b):
     return 100.0 * (b - a) / a if a else float("nan")
 
 
 def main():
+    if sys.argv[1:] == ["--self-test"]:
+        return self_test()
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", required=True)
     ap.add_argument("--cand", required=True)
