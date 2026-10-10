@@ -13,7 +13,8 @@
 //! * `language` / `layer` / `framework` are **wildcard facets** — a rule with the facet ABSENT
 //!   applies to all values of it (matches any query); a query that omits the facet matches all
 //!   rules.
-//! * `severity` / `rule_type` are **exact** matches.
+//! * `severity` / `rule_type` / `steering_type` are **exact** matches. A pre-steering rule (no
+//!   `steering_type` key) reads as core's `DEFAULT_STEERING_TYPE`, `architecture`.
 //! * `scope` restricts to a scope subtree by canonical path prefix (the estate-wide
 //!   `SymbolQuery::scope_prefix` predicate, e.g. `"wiki:architecture"`).
 //! * `projects` is **asymmetric** (DES-decision-capture §4.2.2, DC-S2): a rule with no
@@ -25,7 +26,12 @@
 //! * Results are ordered severity-first (critical → error → warn → info), then weight
 //!   (heavier first; absent = 1.0), then rule id — deterministic, enforcement-ready, and the
 //!   same order as core's `recall_rules`.
-//! * `retired` rules are withdrawn from recall (same funnel as the Rust-side `recall_rules`).
+//! * `retired` rules are withdrawn from recall (same funnel as the Rust-side `recall_rules`), and
+//!   so are **effect-bearing** (decide-lane) steering rules: core's SELECT/DECIDE fire those, and
+//!   recall attaching them again would double-govern one rule in a gate pass.
+//! * The steering semantics (type facet, weight order, retirement, effect exclusion, legacy
+//!   defaults, invalid values) are pinned by a second golden fixture shared byte-identical with
+//!   core (`tests/fixtures/rules-steering-parity.json`).
 //!
 //! Agent-behavior rules honored: R1 (empty result = successful response + diagnostic, NEVER
 //! `isError`; invalid facet values likewise), R4 (output capped via `limit`, truncation is loud),
@@ -57,6 +63,18 @@ const MAX_LIMIT: usize = 500;
 
 const VALID_SEVERITIES: [&str; 4] = ["info", "warn", "error", "critical"];
 const VALID_RULE_TYPES: [&str; 2] = ["pattern", "policy"];
+/// Core's `STEERING_TYPES` (the seven steering pages), in core's order.
+const STEERING_TYPES: [&str; 7] = [
+    "architecture",
+    "development",
+    "security",
+    "testing",
+    "operations",
+    "compliance",
+    "design-ux",
+];
+/// The `steering_type` a pre-steering rule reads back as (core's `DEFAULT_STEERING_TYPE`).
+const DEFAULT_STEERING_TYPE: &str = "architecture";
 /// The weight a rule without one reads as (core's `DEFAULT_RULE_WEIGHT`).
 const DEFAULT_WEIGHT: f32 = 1.0;
 
@@ -93,9 +111,25 @@ struct RuleView {
     /// the type core stores it in, so two weights core cannot tell apart order by id here too.
     #[serde(default)]
     weight: Option<Value>,
+    /// The steering page; absent on a pre-steering row (reads as [`DEFAULT_STEERING_TYPE`]).
+    #[serde(default)]
+    steering_type: Option<String>,
+    /// The enforcement effect. Any non-null value makes the rule decide-lane, which recall skips.
+    #[serde(default)]
+    effect: Option<Value>,
 }
 
 impl RuleView {
+    fn steering_type(&self) -> &str {
+        self.steering_type
+            .as_deref()
+            .unwrap_or(DEFAULT_STEERING_TYPE)
+    }
+
+    fn enforcing(&self) -> bool {
+        self.effect.as_ref().is_some_and(|e| !e.is_null())
+    }
+
     fn weight(&self) -> f32 {
         self.weight
             .as_ref()
@@ -176,10 +210,12 @@ impl RetrievalTool for RulesRecall {
     fn description(&self) -> &str {
         "Recall the conformance rules (native Rule nodes, PAT-*/POL-* ids) that apply to a query \
          slice. language/layer/framework are wildcard facets (a rule without the facet applies to \
-         all values), severity/rule_type are exact, scope restricts to a scope subtree by prefix. \
+         all values), severity/rule_type/steering_type are exact (a rule without steering_type is \
+         'architecture'), scope restricts to a scope subtree by prefix. \
          projects is asymmetric: a rule scoped to a project is returned only when projects \
          names it; omit projects and you get global rules only. Results are severity-ordered \
-         (critical\u{2192}info), then weight (heavier first), then id. Read-only: rules are \
+         (critical\u{2192}info), then weight (heavier first), then id. Retired and effect-bearing \
+         (decide-lane) rules are not recalled. Read-only: rules are \
          authored via git-tracked docs + `wicked-core rules ingest`, never over MCP."
     }
 
@@ -208,6 +244,20 @@ impl RetrievalTool for RulesRecall {
                 });
             }
         }
+        // Exact string match, as core's `recall_rules` does: core validates the vocabulary when a
+        // rule is REGISTERED, not when it is read, so a stored value outside today's seven pages
+        // (a newer producer) must still be recallable by its own name. An out-of-vocabulary query
+        // is answered — and flagged, since it is usually a typo.
+        let steering_type = opt_str(request, "steering_type");
+        let steering_note = steering_type
+            .as_ref()
+            .filter(|t| !STEERING_TYPES.contains(&t.as_str()))
+            .map(|t| {
+                format!(
+                    "rules.recall: steering_type {t:?} is not one of today's pages {STEERING_TYPES:?} \
+                     — matched exactly anyway"
+                )
+            });
         let projects = match parse_projects(request) {
             Ok(p) => p,
             Err(why) => {
@@ -242,6 +292,7 @@ impl RetrievalTool for RulesRecall {
         let mut foreign = 0usize; // Rule nodes that are NOT conformance rules (e.g. W15 rules-engine artifacts)
         let mut undecodable = 0usize; // conformance-symbol nodes whose metadata failed to decode
         let mut retired = 0usize;
+        let mut enforcing = 0usize; // effect-bearing steering rules: decide-lane, not recall
         let mut out_of_project = 0usize; // project-scoped rules whose project the query did not name
         let mut matched: Vec<(RuleView, Value)> = Vec::new();
 
@@ -272,6 +323,10 @@ impl RetrievalTool for RulesRecall {
                 retired += 1;
                 continue;
             }
+            if view.enforcing() {
+                enforcing += 1;
+                continue;
+            }
             if facet_matches(&view.targets.language, &language)
                 && facet_matches(&view.targets.layer, &layer)
                 && facet_matches(&view.targets.framework, &framework)
@@ -281,6 +336,9 @@ impl RetrievalTool for RulesRecall {
                 && rule_type
                     .as_deref()
                     .is_none_or(|t| view.rule_type.as_deref() == Some(t))
+                && steering_type
+                    .as_deref()
+                    .is_none_or(|t| view.steering_type() == t)
             {
                 if project_admits(&view.targets.project, &projects) {
                     matched.push((view, meta));
@@ -301,6 +359,7 @@ impl RetrievalTool for RulesRecall {
 
         let total = matched.len();
         let mut diagnostics = vec![crate::staleness_note()];
+        diagnostics.extend(steering_note);
         diagnostics.extend(crate::clamp_note(request, "limit", MAX_LIMIT as u64));
         if total > limit {
             diagnostics.push(format!(
@@ -319,8 +378,9 @@ impl RetrievalTool for RulesRecall {
             diagnostics.push(format!(
                 "rules.recall: no active conformance rules matched (facets: language={language:?}, \
                  layer={layer:?}, framework={framework:?}, severity={severity:?}, \
-                 rule_type={rule_type:?}, scope={scope:?}, projects={projects:?}). The graph holds {retired} retired \
-                 conformance rule(s), {out_of_project} rule(s) scoped to a project not in \
+                 rule_type={rule_type:?}, steering_type={steering_type:?}, scope={scope:?}, \
+                 projects={projects:?}). The graph holds {retired} retired conformance rule(s), \
+                 {enforcing} effect-bearing (decide-lane) rule(s), {out_of_project} rule(s) scoped to a project not in \
                  `projects`, and {foreign} non-conformance Rule node(s) (rules-engine \
                  artifacts — see RulesInventory). Rules are populated from git-tracked docs via \
                  `wicked-core rules ingest`, never over MCP."
@@ -579,6 +639,62 @@ mod tests {
             let res = RulesRecall.invoke(&store, &case["query"]).unwrap();
             assert_eq!(recalled_ids(&res), want, "{}", case["name"]);
         }
+    }
+
+    /// FND-EST-02: the steering golden fixture, copied byte-identical into wicked-core
+    /// (`crates/wicked-governance/tests/fixtures/rules-steering-parity.json`), where core's
+    /// `recall_rules` runs the same cases: steering_type facet, weight order, legacy defaults,
+    /// retirement, effect-bearing exclusion and an out-of-vocabulary value.
+    #[test]
+    fn recall_matches_core_steering_parity_fixture() {
+        let fx: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/rules-steering-parity.json"))
+                .unwrap();
+        assert_eq!(fx["version"].as_u64(), Some(1), "fixture version");
+        let nodes: Vec<Node> = fx["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(node_from_rule_json)
+            .collect();
+        let store = store_with(nodes);
+        for case in fx["cases"].as_array().unwrap() {
+            let want: Vec<String> = case["expect"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
+            let res = RulesRecall.invoke(&store, &case["query"]).unwrap();
+            assert_eq!(recalled_ids(&res), want, "{}", case["name"]);
+        }
+        // An out-of-vocabulary value is answered (core matches exactly) and flagged (R1).
+        let res = RulesRecall
+            .invoke(&store, &json!({"steering_type": "secutiry"}))
+            .unwrap();
+        assert!(
+            res.diagnostics
+                .iter()
+                .any(|d| d.contains("is not one of today's pages"))
+        );
+    }
+
+    /// A stored rule from a newer producer whose steering_type is outside today's vocabulary is
+    /// recalled by exact match, as core's read path does (core validates on register only, so
+    /// this case cannot live in the shared fixture, which core loads through `register_rule`).
+    #[test]
+    fn an_unknown_stored_steering_type_is_matched_exactly() {
+        let rule = json!({"id": "PAT-F1", "rule_type": "pattern", "statement": "s",
+                          "severity": "warn", "confidence": 1.0, "steering_type": "future-page"});
+        let store = store_with(vec![node_from_rule_json(&rule)]);
+        let res = RulesRecall
+            .invoke(&store, &json!({"steering_type": "future-page"}))
+            .unwrap();
+        assert_eq!(recalled_ids(&res), vec!["PAT-F1"]);
+        let res = RulesRecall
+            .invoke(&store, &json!({"steering_type": "architecture"}))
+            .unwrap();
+        assert!(recalled_ids(&res).is_empty());
     }
 
     /// A project-less recall (an agent that names no project) never returns a project rule —

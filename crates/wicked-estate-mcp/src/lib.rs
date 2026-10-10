@@ -325,6 +325,10 @@ fn rules_recall_schema() -> Value {
                 "enum": ["pattern", "policy"],
                 "description": "Exact match on rule type (PAT-* pattern / POL-* policy)."
             },
+            "steering_type": {
+                "type": "string",
+                "description": "Exact match on the rule's steering page: architecture, development, security, testing, operations, compliance or design-ux. A rule written before steering types existed counts as \"architecture\"."
+            },
             "scope": {
                 "type": "string",
                 "description": "Restrict to a scope subtree by canonical path prefix (e.g. \"wiki:architecture\")."

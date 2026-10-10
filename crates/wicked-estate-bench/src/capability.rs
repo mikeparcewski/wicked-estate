@@ -78,7 +78,8 @@ pub struct LangMatrixRow {
 ///
 /// New fields added for regression gating (Task 1) and capability receipts (Task 2):
 /// - `db_bytes` / `bytes_per_node` — footprint regression gate; measured on-disk via WAL store.
-/// - `blast_radius_coverage_pct` — resolved callers / (resolved+unresolved) for the top symbol.
+/// - `direct_ref_resolution_pct` — matched-population direct resolution for the top symbol
+///   (see the field); `None` when the unresolved count could not be read.
 /// - `who_calls_count` — number of dependents of the top symbol (depth-3 blast-radius).
 /// - `languages` — node counts by language, sorted by count descending.
 /// - `edges_by_kind_vec` — edge counts as an ordered `Vec` for stable report rendering.
@@ -143,12 +144,20 @@ pub struct RepoMetrics {
     // -----------------------------------------------------------------------
     // Task 2 — must-have-value receipts
     // -----------------------------------------------------------------------
-    /// Blast-radius coverage for the top symbol: resolved callers / (resolved + unresolved).
-    ///
-    /// `resolved` = `blast_radius_node_count`; `unresolved` = callers whose name matched but
-    /// could not be bound to a node (`unresolved_refs_for_name`).  A value of `0.0` means the
-    /// graph has no callers at all (either truly uncalled or an empty repo).
-    pub blast_radius_coverage_pct: f64,
+    /// Direct reference resolution for the top symbol (BENCH-01), over ONE population: distinct
+    /// `(dependent, edge kind)` pairs that name it directly. `direct_refs_resolved` counts the
+    /// resolved ones (direct incoming edges a name-binding resolver emitted into any node of that name);
+    /// `direct_refs_unresolved` the unresolved ones (distinct `(from, kind)` among
+    /// `unresolved_refs_for_name`). Transitive blast-radius dependents are NOT mixed in, so a
+    /// longer downstream chain cannot raise it. A resolver-coverage diagnostic, not recall
+    /// against labelled truth.
+    /// `None` when the resolved side could not be read.
+    pub direct_refs_resolved: Option<usize>,
+    /// `None` when the unresolved query failed: unavailable, never assumed zero.
+    pub direct_refs_unresolved: Option<usize>,
+    /// `resolved / (resolved + unresolved)` in percent; `None` when EITHER side is unavailable
+    /// or there are no direct references at all.
+    pub direct_ref_resolution_pct: Option<f64>,
 
     /// Number of *resolved* dependents of the top symbol (alias of `blast_radius_node_count`
     /// kept as a named receipt field for the report table).
@@ -320,22 +329,12 @@ fn benchmark_repo(repo_path: &Path) -> Result<RepoMetrics> {
         };
 
     // -----------------------------------------------------------------------
-    // Task 2: blast-radius coverage (resolved + unresolved callers).
+    // Task 2: direct reference resolution (BENCH-01: matched populations, honest failure).
     // -----------------------------------------------------------------------
-    let blast_radius_coverage_pct = if query_symbol == "(none)" {
-        0.0f64
+    let direct = if query_symbol == "(none)" {
+        DirectRefResolution::default()
     } else {
-        let unresolved_count = store
-            .unresolved_refs_for_name(&query_symbol)
-            .unwrap_or_default()
-            .len();
-        let resolved = blast_radius_node_count;
-        let total = resolved + unresolved_count;
-        if total == 0 {
-            0.0
-        } else {
-            100.0 * resolved as f64 / total as f64
-        }
+        direct_ref_resolution(&store, &query_symbol)
     };
 
     // -----------------------------------------------------------------------
@@ -526,7 +525,9 @@ fn benchmark_repo(repo_path: &Path) -> Result<RepoMetrics> {
         context_pack_symbol_count,
         db_bytes,
         bytes_per_node,
-        blast_radius_coverage_pct,
+        direct_refs_resolved: direct.resolved,
+        direct_refs_unresolved: direct.unresolved,
+        direct_ref_resolution_pct: direct.pct,
         who_calls_count: blast_radius_node_count,
         languages,
         edges_by_kind_vec,
@@ -539,6 +540,82 @@ fn benchmark_repo(repo_path: &Path) -> Result<RepoMetrics> {
 // Report formatting
 // ---------------------------------------------------------------------------
 
+/// BENCH-01: direct reference resolution for `name` over one population — distinct
+/// `(dependent, edge kind)` pairs naming it directly, resolved vs unresolved. Any failed read makes
+/// the side it feeds `None`, and a `None` side makes the percentage `None`: a measurement that
+/// could not be taken is never reported as a number.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DirectRefResolution {
+    pub resolved: Option<usize>,
+    pub unresolved: Option<usize>,
+    pub pct: Option<f64>,
+}
+
+/// The resolvers that bind an `UnresolvedRef` BY THE TARGET'S NAME (`raw_name` == the target's
+/// name) — the only resolvers whose edges belong to the name-keyed population the unresolved side
+/// counts (`unresolved_refs_for_name`). A relationship an extractor emits locally (`Governs`,
+/// `Contains`, a parsed flow) never was a reference, and two production resolvers bind by
+/// something else: `relative-import` by a quoted path specifier, `rules-bridge-resolver` by a
+/// `rules-engine:<scheme>` marker that fans out to every RuleSet. Counting any of those would
+/// report resolution for references that never named the symbol (BENCH-01 review).
+fn reference_resolver_ids() -> Vec<String> {
+    use wicked_estate_core::Resolver;
+    use wicked_estate_resolve::{
+        ImportMapResolver, InfraResolver, NameResolver, ScopedNameResolver,
+    };
+    vec![
+        NameResolver.id().to_string(),
+        ScopedNameResolver.id().to_string(),
+        ImportMapResolver.id().to_string(),
+        InfraResolver.id().to_string(),
+    ]
+}
+
+/// The percentage, only when both sides are known and the total is non-zero.
+pub fn resolution_pct(resolved: Option<usize>, unresolved: Option<usize>) -> Option<f64> {
+    let (resolved, unresolved) = (resolved?, unresolved?);
+    let total = resolved + unresolved;
+    (total > 0).then(|| 100.0 * resolved as f64 / total as f64)
+}
+
+pub fn direct_ref_resolution(
+    store: &dyn wicked_estate_core::GraphRead,
+    name: &str,
+) -> DirectRefResolution {
+    use wicked_estate_core::{Direction, SymbolQuery};
+    let resolvers = reference_resolver_ids();
+    let resolved = (|| -> wicked_estate_core::Result<usize> {
+        let targets = store.find_symbols(&SymbolQuery {
+            exact_name: Some(name.to_string()),
+            ..Default::default()
+        })?;
+        let mut pairs = BTreeSet::new();
+        for t in &targets {
+            for e in store.neighbors(&t.symbol, Direction::Dependents)? {
+                if e.target == t.symbol && resolvers.contains(&e.resolved_by) {
+                    pairs.insert((e.source.0.clone(), format!("{:?}", e.kind)));
+                }
+            }
+        }
+        Ok(pairs.len())
+    })()
+    .ok();
+    let unresolved = store.unresolved_refs_for_name(name).ok().map(|refs| {
+        refs.iter()
+            .map(|r| (r.from.0.clone(), format!("{:?}", r.kind)))
+            .collect::<BTreeSet<_>>()
+            .len()
+    });
+    DirectRefResolution {
+        resolved,
+        unresolved,
+        pct: resolution_pct(resolved, unresolved),
+    }
+}
+
+/// Resolved-edge share: every stored edge (all kinds) against every unresolved reference. A
+/// graph-wide DIAGNOSTIC of how much the resolvers parked, not coverage or recall — the two
+/// populations differ (Contains/Imports edges are not unresolved calls), see BENCH-01.
 fn coverage_pct(m: &RepoMetrics) -> f64 {
     if m.node_count == 0 {
         return 0.0;
@@ -548,6 +625,11 @@ fn coverage_pct(m: &RepoMetrics) -> f64 {
         return 100.0;
     }
     100.0 * (1.0 - m.unresolved_ref_count as f64 / total_ref as f64)
+}
+
+/// `"12.3%"`, or `"n/a"` when the measurement is unavailable (never a fabricated number).
+fn pct_or_na(p: Option<f64>) -> String {
+    p.map_or_else(|| "n/a".to_string(), |v| format!("{v:.1}%"))
 }
 
 /// Print the human-readable summary table to stdout.
@@ -598,8 +680,13 @@ pub fn print_summary_table(metrics: &[RepoMetrics]) {
                 m.blast_radius_latency_us, m.blast_radius_node_count
             );
             println!(
-                "│  blast coverage  : {:.1}%  ({} who-calls)",
-                m.blast_radius_coverage_pct, m.who_calls_count
+                "│  direct refs     : {} resolved / {} unresolved  ({})  ({} who-calls)",
+                m.direct_refs_resolved
+                    .map_or_else(|| "unavailable".to_string(), |r| r.to_string()),
+                m.direct_refs_unresolved
+                    .map_or_else(|| "unavailable".to_string(), |u| u.to_string()),
+                pct_or_na(m.direct_ref_resolution_pct),
+                m.who_calls_count
             );
             println!(
                 "│  context pack    : {} chars  ~{} tokens  ({} symbols)",
@@ -698,19 +785,19 @@ pub fn write_markdown_report(metrics: &[RepoMetrics], report_path: &Path) -> Res
     writeln!(f)?;
     writeln!(
         f,
-        "**Blast-radius coverage:** `resolved callers / (resolved + unresolved)` for the top symbol."
+        "**Direct reference resolution:** distinct direct `(dependent, relation)` pairs naming the top"
     )?;
     writeln!(
         f,
-        "Unresolved = calls to that name that the resolver could not bind to a node"
+        "symbol, resolved (an edge a name-binding resolver emitted) vs unresolved (`unresolved_refs_for_name`,"
     )?;
     writeln!(
         f,
-        "(`unresolved_refs_for_name`, defined in `docs/ENGINE-CONTRACT.md` §2.1). A lower"
+        "`docs/ENGINE-CONTRACT.md` §2.1). `n/a` when either side could not be read or there are no direct"
     )?;
     writeln!(
         f,
-        "percentage signals incomplete resolution, not fewer callers."
+        "references. A resolver-coverage diagnostic, not recall against labelled truth."
     )?;
     writeln!(f)?;
     writeln!(f, "## Results")?;
@@ -719,7 +806,7 @@ pub fn write_markdown_report(metrics: &[RepoMetrics], report_path: &Path) -> Res
     // Main summary table.
     writeln!(
         f,
-        "| Repo | Index (ms) | Files | Nodes | Edges | Unresolved | Footprint (bytes) | bytes/node | Search (µs) | Blast-radius (µs) | BR coverage% | Who-calls | Context chars | Est. tokens |"
+        "| Repo | Index (ms) | Files | Nodes | Edges | Unresolved | Footprint (bytes) | bytes/node | Search (µs) | Blast-radius (µs) | Direct ref resolution | Who-calls | Context chars | Est. tokens (bytes/4) |"
     )?;
     writeln!(
         f,
@@ -739,7 +826,7 @@ pub fn write_markdown_report(metrics: &[RepoMetrics], report_path: &Path) -> Res
         let br_cov_cell = if m.query_symbol == "(none)" {
             "—".to_string()
         } else {
-            format!("{:.1}", m.blast_radius_coverage_pct)
+            pct_or_na(m.direct_ref_resolution_pct)
         };
         let who_calls_cell = if m.query_symbol == "(none)" {
             "—".to_string()
@@ -775,7 +862,11 @@ pub fn write_markdown_report(metrics: &[RepoMetrics], report_path: &Path) -> Res
         writeln!(f)?;
         writeln!(f, "**Path:** `{}`  ", m.path)?;
         writeln!(f, "**Index time:** {}ms  ", m.index_ms)?;
-        writeln!(f, "**Edge coverage:** {:.1}%  ", coverage_pct(m))?;
+        writeln!(
+            f,
+            "**Resolved-edge share (diagnostic, all edge kinds vs unresolved refs):** {:.1}%  ",
+            coverage_pct(m)
+        )?;
         writeln!(
             f,
             "**Footprint:** {} bytes  ({:.0} bytes/node)  ",
@@ -830,8 +921,12 @@ pub fn write_markdown_report(metrics: &[RepoMetrics], report_path: &Path) -> Res
             )?;
             writeln!(
                 f,
-                "| blast-radius coverage | {:.1}% | Fraction of callers the resolver bound (lower → incomplete resolution) |",
-                m.blast_radius_coverage_pct
+                "| direct ref resolution | {} ({} resolved / {} unresolved) | Distinct direct (dependent, relation) pairs naming the symbol that the resolvers bound; a diagnostic, not recall |",
+                pct_or_na(m.direct_ref_resolution_pct),
+                m.direct_refs_resolved
+                    .map_or_else(|| "unavailable".to_string(), |r| r.to_string()),
+                m.direct_refs_unresolved
+                    .map_or_else(|| "unavailable".to_string(), |u| u.to_string())
             )?;
             writeln!(
                 f,
@@ -1147,4 +1242,146 @@ fn epoch_to_ymd_hms(mut secs: u64) -> (u32, u32, u32, u32, u32, u32) {
 
 fn is_leap(y: u32) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+#[cfg(test)]
+mod direct_ref_tests {
+    use super::*;
+    use wicked_estate_core::{
+        Descriptor, Edge, EdgeKind, GraphWrite, Language, Location, Node, NodeKind, ResolutionTier,
+        Span, Symbol, UnresolvedRef,
+    };
+
+    fn func(name: &str) -> Node {
+        Node::new(
+            Symbol::global("bench", None, vec![Descriptor::method(name, None)]).id(),
+            NodeKind::Function,
+            name,
+            Language::new("rust"),
+            Location::new("a.rs", Span::ZERO),
+        )
+    }
+
+    fn calls(from: &Node, to: &Node) -> Edge {
+        Edge::new(
+            from.symbol.clone(),
+            to.symbol.clone(),
+            EdgeKind::Calls,
+            ResolutionTier::ImportMap,
+            "name-resolver",
+        )
+    }
+
+    /// One resolved and one unresolved direct reference to `target`, plus `downstream` callers
+    /// of the resolved caller. The downstream chain must not move the ratio (BENCH-01).
+    fn store(downstream: usize) -> SqliteStore {
+        let mut s = SqliteStore::in_memory().unwrap();
+        let (t, a, c) = (func("target"), func("caller"), func("unbound_caller"));
+        let mut nodes = vec![t.clone(), a.clone(), c.clone()];
+        let mut edges = vec![calls(&a, &t)];
+        for i in 0..downstream {
+            let d = func(&format!("down{i}"));
+            edges.push(calls(&d, &a));
+            nodes.push(d);
+        }
+        s.upsert_nodes(&nodes).unwrap();
+        s.upsert_edges(&edges).unwrap();
+        s.upsert_unresolved_refs(&[UnresolvedRef::new(
+            c.symbol.clone(),
+            "target",
+            EdgeKind::Calls,
+            Location::new("a.rs", Span::ZERO),
+        )])
+        .unwrap();
+        s
+    }
+
+    #[test]
+    fn downstream_dependents_do_not_change_direct_resolution() {
+        for downstream in [0, 1, 25] {
+            let r = direct_ref_resolution(&store(downstream), "target");
+            assert_eq!(
+                r,
+                DirectRefResolution {
+                    resolved: Some(1),
+                    unresolved: Some(1),
+                    pct: Some(50.0)
+                },
+                "downstream={downstream}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unavailable_denominator_is_never_a_known_percentage() {
+        // Every path into the percentage goes through `resolution_pct`: a failed read on either
+        // side is `None` there (see `direct_ref_resolution`'s `.ok()`s), never a number.
+        assert_eq!(
+            resolution_pct(Some(5), None),
+            None,
+            "a failed unresolved read is not 100%"
+        );
+        assert_eq!(
+            resolution_pct(None, Some(1)),
+            None,
+            "a failed resolved read is not 0%"
+        );
+        assert_eq!(
+            resolution_pct(Some(0), Some(0)),
+            None,
+            "no references: no ratio"
+        );
+        assert_eq!(resolution_pct(Some(3), Some(1)), Some(75.0));
+    }
+
+    /// Resolvers that do not bind by the target's name are outside the population: a
+    /// `rules-bridge-resolver` fan-out edge and a `relative-import` edge into a node named like
+    /// the symbol count as nothing resolved.
+    #[test]
+    fn non_name_binding_resolvers_are_not_counted() {
+        let mut s = store(0);
+        let (t, b, r) = (func("target"), func("bridge_caller"), func("importer"));
+        let edge = |from: &Node, kind: EdgeKind, by: &str| {
+            Edge::new(
+                from.symbol.clone(),
+                t.symbol.clone(),
+                kind,
+                ResolutionTier::Heuristic,
+                by,
+            )
+        };
+        s.upsert_nodes(&[b.clone(), r.clone()]).unwrap();
+        s.upsert_edges(&[
+            edge(&b, EdgeKind::InvokedBy, "rules-bridge-resolver"),
+            edge(&r, EdgeKind::Imports, "relative-import"),
+        ])
+        .unwrap();
+        let r = direct_ref_resolution(&s, "target");
+        assert_eq!(
+            (r.resolved, r.unresolved, r.pct),
+            (Some(1), Some(1), Some(50.0))
+        );
+    }
+
+    /// A relationship an extractor emits locally (`Governs`) was never an unresolved reference:
+    /// it is not counted as resolved.
+    #[test]
+    fn locally_emitted_relations_are_not_resolved_references() {
+        let mut s = store(0);
+        let (t, g) = (func("target"), func("ruleset"));
+        let gov = Edge::new(
+            g.symbol.clone(),
+            t.symbol.clone(),
+            EdgeKind::Governs,
+            ResolutionTier::Parsed,
+            "excel-rules",
+        );
+        s.upsert_nodes(&[g]).unwrap();
+        s.upsert_edges(&[gov]).unwrap();
+        let r = direct_ref_resolution(&s, "target");
+        assert_eq!(
+            (r.resolved, r.unresolved, r.pct),
+            (Some(1), Some(1), Some(50.0))
+        );
+    }
 }

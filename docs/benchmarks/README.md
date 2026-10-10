@@ -30,8 +30,8 @@ JSON is printed to stdout for machine consumption.
 | `db_bytes` | Sum of `.db` + `.db-wal` + `.db-shm` after on-disk index | Storage overhead is bounded (regression gate) |
 | `bytes_per_node` | `db_bytes / node_count` | Per-symbol cost; gate: `< 12_000 bytes/node` |
 | `who_calls_count` | Depth-3 blast-radius via `blast_radius_by_name` | The engine knows exactly who depends on a symbol |
-| `blast_radius_coverage_pct` | `resolved / (resolved + unresolved_refs_for_name)` | Honest coverage: unresolved callers (ENGINE-CONTRACT §2.1) are counted, not hidden |
-| `context_pack_est_tokens` | `top-15 symbol stubs (chars / 4)` | One retrieval costs ~N tokens, not whole-file reads |
+| `direct_refs_resolved` / `direct_refs_unresolved` / `direct_ref_resolution_pct` | Distinct direct `(dependent, relation)` pairs naming the top symbol: resolved = direct incoming edges from the name-binding resolvers (name, scoped-name, import-map, infra), unresolved = distinct `(from, kind)` in `unresolved_refs_for_name`; pct = resolved / (resolved + unresolved), `null` if the unresolved read failed or there are no references | A matched-population resolver diagnostic (unresolved refs per ENGINE-CONTRACT §2.1 are counted, not hidden). Transitive dependents are not mixed in, so downstream fan-out cannot inflate it. Not recall against labelled truth (BENCH-01) |
+| `context_pack_est_tokens` | `top-15 symbol stubs (UTF-8 bytes / 4)` — a payload proxy, not tokenizer billing | One retrieval costs ~N tokens, not whole-file reads |
 | `languages` | Node count per `Language` tag | Polyglot repos are indexed; coverage is verifiable |
 | `edges_by_kind_vec` | Edge count per `EdgeKind`, sorted by count | Call, import, and type edges are all present |
 | `search_latency_us` | `wicked_estate::search` wall-clock (µs) | Symbol lookup is sub-millisecond |
@@ -52,9 +52,9 @@ every `cargo test` run:
 today — once sqlite-vec compression or page-size tuning ships, halve the bytes/node ceiling and
 raise the throughput floor to match the new baseline.
 
-## Interpreting blast-radius coverage
+## Interpreting direct reference resolution
 
-A `blast_radius_coverage_pct` below 100 % does **not** mean the engine is wrong — it means the
+A `direct_ref_resolution_pct` below 100 % does **not** mean the engine is wrong — it means the
 resolver could not bind some call-sites to a node.  Common causes:
 
 - Cross-language calls (TypeScript calling a Python service — not in scope for tree-sitter)
@@ -72,7 +72,7 @@ The node/edge/coverage numbers pinned in `capability-report.md` and `multi-repo-
 predate the ADR-002 amendment (type-nested definition identity — shipped as symbol-id scheme 3; scheme 2 was its
 unreleased first cut, superseded in place). After the
 scheme change, previously-merged same-named members become distinct nodes (`method`/`function`
-counts rise where collisions existed), and `blast_radius_coverage_pct` is expected DOWN on
+counts rise where collisions existed), and `direct_ref_resolution_pct` (then `blast_radius_coverage_pct`, renamed by BENCH-01) is expected DOWN on
 collision-heavy repos: the 0.65 scoped-name edges into merged nodes were false precision
 (review finding D03-2), and the resolver now parks those refs as unresolved instead. That is a
 precision correction, not a regression — the verdict rule is the per-`resolved_by` breakdown

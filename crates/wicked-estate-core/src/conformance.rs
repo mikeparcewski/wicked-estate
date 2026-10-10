@@ -1466,6 +1466,43 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
         "every scoped result must be within the org:acme subtree"
     );
 
+    // The `rules.recall` shape (audit W5 E7): scope + kinds + a limit, where an out-of-scope row
+    // sorts first. Scope must apply BEFORE the limit, on every backend, or the top-k leaks it.
+    let (wiki_a, wiki_b) = (
+        Node::new(
+            sym("aa_rule_other"),
+            NodeKind::Rule,
+            "aa_rule_other",
+            Language::new("wicked-apps"),
+            Location::new("rules/a", Span::ZERO),
+        )
+        .with_scope(crate::scope::Scope::parse("wiki:testing")),
+        Node::new(
+            sym("zz_rule_arch"),
+            NodeKind::Rule,
+            "zz_rule_arch",
+            Language::new("wicked-apps"),
+            Location::new("rules/z", Span::ZERO),
+        )
+        .with_scope(crate::scope::Scope::parse("wiki:architecture")),
+    );
+    store
+        .upsert_nodes(&[wiki_a, wiki_b])
+        .expect("upsert scoped rules");
+    let top1 = store
+        .find_symbols(&SymbolQuery {
+            kinds: vec![NodeKind::Rule],
+            scope_prefix: Some("wiki:architecture".to_string()),
+            limit: Some(1),
+            ..Default::default()
+        })
+        .expect("scoped kinds+limit find_symbols");
+    assert_eq!(
+        top1.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(),
+        vec!["zz_rule_arch"],
+        "scope must filter before the limit: the out-of-scope rule sorted first and leaked"
+    );
+
     // Segment-aware: a non-existent sibling-ish prefix must not match by raw string prefix.
     let none = store
         .find_symbols(&SymbolQuery {

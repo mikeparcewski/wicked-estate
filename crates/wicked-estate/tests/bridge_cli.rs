@@ -621,6 +621,13 @@ fn rules_recall_json_is_the_tool_document_and_str_facets_reach_the_tool() {
     );
     // U64 reaches the tool as a number: a string would fall back to the default cap of 100.
     assert_eq!(rule_ids(&recall(&["--limit", "1"])), ["PAT-1"]);
+    // FND-EST-02: `--steering-type` reaches the tool. These rules predate steering types, so
+    // they are `architecture` (core's default) and no other page.
+    assert_eq!(
+        rule_ids(&recall(&["--steering-type", "architecture"])),
+        rule_ids(&recall(&[]))
+    );
+    assert!(rule_ids(&recall(&["--steering-type", "security"])).is_empty());
 }
 
 #[test]

@@ -230,6 +230,13 @@ pub const COMMANDS: &[BridgedCommand] = &[
                 help: "exact: pattern|policy",
             },
             FlagSpec {
+                flag: "steering-type",
+                key: "steering_type",
+                ty: FlagType::Str,
+                validate: None,
+                help: "exact steering page: architecture|development|security|testing|operations|compliance|design-ux (a pre-steering rule is architecture)",
+            },
+            FlagSpec {
                 flag: "language",
                 key: "language",
                 ty: FlagType::Str,

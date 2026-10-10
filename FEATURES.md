@@ -411,18 +411,21 @@ Footprint discipline is a hard constraint ("can't bloat people's disks"):
 
 ---
 
-## 15. Benchmark harness (truth oracle) ✅
-`wicked-estate-bench` — agent-eval A/B (baseline = no tool vs treatment = with wicked-estate) + a **capability
-matrix** per language (blast-radius latency / node-count / coverage %, mean confidence, language
-matrix). Frozen corpus. Sanity-gated (not a frozen numeric baseline). From W1.6 the benchmark must
-not regress.
+## 15. Benchmark harness ✅ (capability) · 🟡 (agent A/B: arithmetic only, no runner)
+`wicked-estate-bench` runs a **capability benchmark** per repo: index speed, footprint, edge and
+resolver breakdowns, a language matrix, blast-radius latency, and a matched-population **direct
+reference resolution** diagnostic (`null` when its denominator cannot be read). It also has a
+**memory recall@5 gate** (`--recall`, exit 1 below the gate). Sanity-gated, not a frozen numeric
+baseline. The agent A/B types (`EvalReport`, `TaskOutcome`) are aggregation arithmetic with tests;
+there is **no** runner that executes baseline-vs-treatment agent tasks, and no golden-set scorer.
+An unknown flag or a missing path is a usage error, and a repo that fails to benchmark fails the run.
 
 ---
 
 ## 16. Quality gates & CI ✅
 - Gates (every change): `cargo build --workspace` (0 warnings) · `cargo test --workspace` (1,370 at
   time of writing — the count is stale after any new crate; re-run before re-claiming) ·
-  `cargo clippy --workspace --all-targets -D warnings` · GraphStore conformance · agent-eval bench.
+  `cargo clippy --workspace --all-targets -D warnings` · GraphStore conformance · capability bench (sanity-gated).
 - **No grandfathering**: 0 `#[allow]`, 0 `#[ignore]`; lints fixed in code.
 - **GitHub Actions CI** (`.github/workflows/ci.yml`): `gate` job (fmt · build · clippy · test, offline)
   + `semantic-embedders` job (feature-gated model2vec + fastembed tests with HF model caching).

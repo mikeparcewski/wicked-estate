@@ -39,6 +39,9 @@
           "critical"
         ],
         "type": "string"
+      },
+      "steering_type": {
+        "type": "string"
       }
     },
     "type": "object"
