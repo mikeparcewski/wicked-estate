@@ -179,7 +179,7 @@ Baseline `ad7c3de` (the S6c code, = main `85ece2d`). Candidate `f71a21d` (code-i
 **Verdict: S6d passes every gate, with zero yield on Covalent.** It replaces S5b's narrow pattern with one mechanism (the same `callable_return_contributors` walk S6a and S6b use), and the S5b fixture row still holds. S6d emitted no `return_closure` flow on Covalent within its supported shapes. That is an absent flow, not an audit showing the construct is absent. No other corpus was measured.
 
 ### Cumulative (S5b–S6d) and the S6 graduation
-All four S6 slices passed every gate against the state before them, so primitives 4–7 graduate (closures, inline callbacks, `await`/`.then`, local object properties). The same runner pairs measured the merged result against the two releases. Candidate `cf4414b` is the S6d code.
+All four S6 slices passed every gate against the state before them, so primitives 4–7 graduated (closures, inline callbacks, `await`/`.then`, local object properties). Local object properties (S6c) were later deleted for zero yield on a second corpus; see "S6c". The same runner pairs measured the merged result against the two releases. Candidate `cf4414b` is the S6d code.
 
 | metric (Covalent `438c297`) | 0.24.0 `890cc39` → S6d (run `38083837701`) | 0.25.0 `490c547` → S6d (run `38083840625`) |
 |---|---|---|
