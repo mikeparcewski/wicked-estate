@@ -6,13 +6,18 @@
     "class": "compiler",
     "capabilities": [
       "definitions",
-      "input_bindings"
+      "input_bindings",
+      "output_bindings"
     ]
   },
   "snapshot": "fixtures/bindings",
   "documents": [
     {
       "path": "src/child.ts",
+      "position_encoding": "utf16"
+    },
+    {
+      "path": "src/events.ts",
       "position_encoding": "utf16"
     },
     {
@@ -69,15 +74,135 @@
     },
     {
       "kind": "definition",
+      "fact_id": "class src/events.ts#Clicky",
+      "symbol": "src/events.ts#Clicky",
+      "name": "Clicky",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 30,
+          "start_col": 13,
+          "end_line": 30,
+          "end_col": 19
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/events.ts#EvBase",
+      "symbol": "src/events.ts#EvBase",
+      "name": "EvBase",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 7,
+          "start_col": 22,
+          "end_line": 7,
+          "end_col": 28
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/events.ts#EvChild",
+      "symbol": "src/events.ts#EvChild",
+      "name": "EvChild",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 12,
+          "start_col": 13,
+          "end_line": 12,
+          "end_col": 20
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/events.ts#EvHost",
+      "symbol": "src/events.ts#EvHost",
+      "name": "EvHost",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 46,
+          "start_col": 13,
+          "end_line": 46,
+          "end_col": 19
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/events.ts#EvHost2",
+      "symbol": "src/events.ts#EvHost2",
+      "name": "EvHost2",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 62,
+          "start_col": 13,
+          "end_line": 62,
+          "end_col": 20
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/events.ts#EvHost3",
+      "symbol": "src/events.ts#EvHost3",
+      "name": "EvHost3",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 74,
+          "start_col": 13,
+          "end_line": 74,
+          "end_col": 20
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/events.ts#PingA",
+      "symbol": "src/events.ts#PingA",
+      "name": "PingA",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 20,
+          "start_col": 13,
+          "end_line": 20,
+          "end_col": 18
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "class src/events.ts#PingB",
+      "symbol": "src/events.ts#PingB",
+      "name": "PingB",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 25,
+          "start_col": 13,
+          "end_line": 25,
+          "end_col": 18
+        }
+      }
+    },
+    {
+      "kind": "definition",
       "fact_id": "class src/ext.component.ts#Ext",
       "symbol": "src/ext.component.ts#Ext",
       "name": "Ext",
       "site": {
         "document": "src/ext.component.ts",
         "range": {
-          "start_line": 4,
+          "start_line": 5,
           "start_col": 13,
-          "end_line": 4,
+          "end_line": 5,
           "end_col": 16
         }
       }
@@ -263,6 +388,450 @@
       }
     },
     {
+      "kind": "definition",
+      "fact_id": "method src/events.ts#EvHost.done",
+      "symbol": "src/events.ts#EvHost.done",
+      "name": "done",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 53,
+          "start_col": 2,
+          "end_line": 53,
+          "end_col": 6
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "method src/events.ts#EvHost.onPick",
+      "symbol": "src/events.ts#EvHost.onPick",
+      "name": "onPick",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 49,
+          "start_col": 2,
+          "end_line": 49,
+          "end_col": 8
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "method src/events.ts#EvHost.pinged",
+      "symbol": "src/events.ts#EvHost.pinged",
+      "name": "pinged",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 52,
+          "start_col": 2,
+          "end_line": 52,
+          "end_col": 8
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "method src/events.ts#EvHost2.onPick",
+      "symbol": "src/events.ts#EvHost2.onPick",
+      "name": "onPick",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 63,
+          "start_col": 2,
+          "end_line": 63,
+          "end_col": 8
+        }
+      }
+    },
+    {
+      "kind": "definition",
+      "fact_id": "method src/events.ts#EvHost3.withThis",
+      "symbol": "src/events.ts#EvHost3.withThis",
+      "name": "withThis",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 79,
+          "start_col": 2,
+          "end_line": 79,
+          "end_col": 10
+        }
+      }
+    },
+    {
+      "kind": "event_binding",
+      "fact_id": "src/events.ts:39:15:(picked)->src/events.ts#EvChild.picked",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 39,
+          "start_col": 15,
+          "end_line": 39,
+          "end_col": 21
+        }
+      },
+      "construct": "angular_output_event",
+      "output": {
+        "class": "src/events.ts#EvChild",
+        "member": "picked"
+      },
+      "event": "picked",
+      "handlers": [
+        "src/events.ts#EvHost.onPick"
+      ],
+      "payload": [
+        {
+          "slot": "param",
+          "method": "src/events.ts#EvHost.onPick",
+          "param": "value",
+          "semantics": "value_preserving"
+        }
+      ]
+    },
+    {
+      "kind": "event_binding",
+      "fact_id": "src/events.ts:39:44:(renamedOut)->src/events.ts#EvChild.changed",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 39,
+          "start_col": 44,
+          "end_line": 39,
+          "end_col": 54
+        }
+      },
+      "construct": "angular_output_event",
+      "output": {
+        "class": "src/events.ts#EvChild",
+        "member": "changed"
+      },
+      "event": "renamedOut",
+      "payload": [
+        {
+          "slot": "field",
+          "class": "src/events.ts#EvHost",
+          "member": "n",
+          "semantics": "value_preserving"
+        }
+      ]
+    },
+    {
+      "kind": "event_binding",
+      "fact_id": "src/events.ts:39:70:(closed)->src/events.ts#EvChild.closed",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 39,
+          "start_col": 70,
+          "end_line": 39,
+          "end_col": 76
+        }
+      },
+      "construct": "angular_output_event",
+      "output": {
+        "class": "src/events.ts#EvChild",
+        "member": "closed"
+      },
+      "event": "closed",
+      "handlers": [
+        "src/events.ts#EvHost.done"
+      ]
+    },
+    {
+      "kind": "event_binding",
+      "fact_id": "src/events.ts:39:95:(baseEv)->src/events.ts#EvBase.baseEv",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 39,
+          "start_col": 95,
+          "end_line": 39,
+          "end_col": 101
+        }
+      },
+      "construct": "angular_output_event",
+      "output": {
+        "class": "src/events.ts#EvBase",
+        "member": "baseEv"
+      },
+      "event": "baseEv",
+      "handlers": [
+        "src/events.ts#EvHost.onPick"
+      ],
+      "payload": [
+        {
+          "slot": "param",
+          "method": "src/events.ts#EvHost.onPick",
+          "param": "value",
+          "semantics": "may_influence"
+        }
+      ]
+    },
+    {
+      "kind": "event_binding",
+      "fact_id": "src/events.ts:40:22:(ping)->src/events.ts#PingA.ping",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 40,
+          "start_col": 22,
+          "end_line": 40,
+          "end_col": 26
+        }
+      },
+      "construct": "angular_output_event",
+      "output": {
+        "class": "src/events.ts#PingA",
+        "member": "ping"
+      },
+      "event": "ping",
+      "handlers": [
+        "src/events.ts#EvHost.pinged"
+      ],
+      "payload": [
+        {
+          "slot": "param",
+          "method": "src/events.ts#EvHost.pinged",
+          "param": "p",
+          "semantics": "value_preserving"
+        }
+      ]
+    },
+    {
+      "kind": "event_binding",
+      "fact_id": "src/events.ts:40:22:(ping)->src/events.ts#PingB.ping",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 40,
+          "start_col": 22,
+          "end_line": 40,
+          "end_col": 26
+        }
+      },
+      "construct": "angular_output_event",
+      "output": {
+        "class": "src/events.ts#PingB",
+        "member": "ping"
+      },
+      "event": "ping",
+      "handlers": [
+        "src/events.ts#EvHost.pinged"
+      ],
+      "payload": [
+        {
+          "slot": "param",
+          "method": "src/events.ts#EvHost.pinged",
+          "param": "p",
+          "semantics": "value_preserving"
+        }
+      ]
+    },
+    {
+      "kind": "event_binding",
+      "fact_id": "src/events.ts:41:13:(click)->dom",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 41,
+          "start_col": 13,
+          "end_line": 41,
+          "end_col": 18
+        }
+      },
+      "construct": "angular_dom_event",
+      "output": null,
+      "event": "click"
+    },
+    {
+      "kind": "event_binding",
+      "fact_id": "src/events.ts:42:18:(click)->src/events.ts#Clicky.click",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 42,
+          "start_col": 18,
+          "end_line": 42,
+          "end_col": 23
+        }
+      },
+      "construct": "angular_output_event",
+      "output": {
+        "class": "src/events.ts#Clicky",
+        "member": "click"
+      },
+      "event": "click",
+      "handlers": [
+        "src/events.ts#EvHost.onPick"
+      ],
+      "payload": [
+        {
+          "slot": "param",
+          "method": "src/events.ts#EvHost.onPick",
+          "param": "value",
+          "semantics": "value_preserving"
+        }
+      ]
+    },
+    {
+      "kind": "event_binding",
+      "fact_id": "src/events.ts:43:26:(picked)->src/events.ts#EvChild.picked",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 43,
+          "start_col": 26,
+          "end_line": 43,
+          "end_col": 32
+        }
+      },
+      "construct": "angular_output_event",
+      "output": {
+        "class": "src/events.ts#EvChild",
+        "member": "picked"
+      },
+      "event": "picked",
+      "payload": [
+        {
+          "slot": "field",
+          "class": "src/events.ts#EvHost",
+          "member": "last",
+          "semantics": "value_preserving"
+        }
+      ]
+    },
+    {
+      "kind": "event_binding",
+      "fact_id": "src/events.ts:60:24:(picked)->src/events.ts#EvChild.picked",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 60,
+          "start_col": 24,
+          "end_line": 60,
+          "end_col": 30
+        }
+      },
+      "construct": "angular_output_event",
+      "output": {
+        "class": "src/events.ts#EvChild",
+        "member": "picked"
+      },
+      "event": "picked",
+      "handlers": [
+        "src/events.ts#EvHost2.onPick"
+      ],
+      "payload": [
+        {
+          "slot": "param",
+          "method": "src/events.ts#EvHost2.onPick",
+          "param": "other",
+          "semantics": "value_preserving"
+        }
+      ]
+    },
+    {
+      "kind": "event_binding",
+      "fact_id": "src/events.ts:72:159:(valueChange)->src/child.ts#Child.value",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 72,
+          "start_col": 159,
+          "end_line": 72,
+          "end_col": 164
+        }
+      },
+      "construct": "angular_two_way_binding",
+      "output": {
+        "class": "src/child.ts#Child",
+        "member": "value"
+      },
+      "event": "valueChange",
+      "unresolved": [
+        "two_way_target"
+      ]
+    },
+    {
+      "kind": "input_binding",
+      "fact_id": "src/events.ts:72:159:value->src/child.ts#Child.value",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 72,
+          "start_col": 159,
+          "end_line": 72,
+          "end_col": 164
+        }
+      },
+      "construct": "angular_two_way_binding",
+      "semantics": "may_influence",
+      "consumer": {
+        "class": "src/child.ts#Child",
+        "member": "value"
+      },
+      "producers": [],
+      "unresolved": [
+        "local:mine"
+      ]
+    },
+    {
+      "kind": "event_binding",
+      "fact_id": "src/events.ts:72:43:(picked)->src/events.ts#EvChild.picked",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 72,
+          "start_col": 43,
+          "end_line": 72,
+          "end_col": 49
+        }
+      },
+      "construct": "angular_output_event",
+      "output": {
+        "class": "src/events.ts#EvChild",
+        "member": "picked"
+      },
+      "event": "picked",
+      "unresolved": [
+        "local:pick"
+      ]
+    },
+    {
+      "kind": "event_binding",
+      "fact_id": "src/events.ts:72:88:(picked)->src/events.ts#EvChild.picked",
+      "site": {
+        "document": "src/events.ts",
+        "range": {
+          "start_line": 72,
+          "start_col": 88,
+          "end_line": 72,
+          "end_col": 94
+        }
+      },
+      "construct": "angular_output_event",
+      "output": {
+        "class": "src/events.ts#EvChild",
+        "member": "picked"
+      },
+      "event": "picked",
+      "handlers": [
+        "src/events.ts#EvHost3.withThis"
+      ],
+      "payload": [
+        {
+          "slot": "param",
+          "method": "src/events.ts#EvHost3.withThis",
+          "param": "value",
+          "semantics": "value_preserving"
+        }
+      ]
+    },
+    {
       "kind": "input_binding",
       "fact_id": "src/ext.component.html:1:14:user->src/child.ts#Child.user",
       "site": {
@@ -284,6 +853,33 @@
         {
           "class": "src/ext.component.ts#Ext",
           "member": "title"
+        }
+      ]
+    },
+    {
+      "kind": "event_binding",
+      "fact_id": "src/ext.component.html:2:13:(picked)->src/events.ts#EvChild.picked",
+      "site": {
+        "document": "src/ext.component.html",
+        "range": {
+          "start_line": 2,
+          "start_col": 13,
+          "end_line": 2,
+          "end_col": 19
+        }
+      },
+      "construct": "angular_output_event",
+      "output": {
+        "class": "src/events.ts#EvChild",
+        "member": "picked"
+      },
+      "event": "picked",
+      "payload": [
+        {
+          "slot": "field",
+          "class": "src/ext.component.ts#Ext",
+          "member": "title",
+          "semantics": "value_preserving"
         }
       ]
     },
@@ -381,6 +977,33 @@
         "member": "inherited"
       },
       "producers": []
+    },
+    {
+      "kind": "event_binding",
+      "fact_id": "src/parent.ts:11:89:(valueChange)->src/child.ts#Child.value",
+      "site": {
+        "document": "src/parent.ts",
+        "range": {
+          "start_line": 11,
+          "start_col": 89,
+          "end_line": 11,
+          "end_col": 94
+        }
+      },
+      "construct": "angular_two_way_binding",
+      "output": {
+        "class": "src/child.ts#Child",
+        "member": "value"
+      },
+      "event": "valueChange",
+      "payload": [
+        {
+          "slot": "field",
+          "class": "src/parent.ts#Parent",
+          "member": "v",
+          "semantics": "value_preserving"
+        }
+      ]
     },
     {
       "kind": "input_binding",
@@ -627,6 +1250,28 @@
           "class": "src/review.ts#Review",
           "member": "current"
         }
+      ]
+    },
+    {
+      "kind": "event_binding",
+      "fact_id": "src/review.ts:24:17:(valueChange)->src/child.ts#Child.value",
+      "site": {
+        "document": "src/review.ts",
+        "range": {
+          "start_line": 24,
+          "start_col": 17,
+          "end_line": 24,
+          "end_col": 22
+        }
+      },
+      "construct": "angular_two_way_binding",
+      "output": {
+        "class": "src/child.ts#Child",
+        "member": "value"
+      },
+      "event": "valueChange",
+      "unresolved": [
+        "two_way_target"
       ]
     },
     {

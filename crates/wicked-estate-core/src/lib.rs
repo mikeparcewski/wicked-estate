@@ -42,7 +42,7 @@ pub use edge::{Confidence, Direction, Edge, EdgeKind, Provenance, ResolutionTier
 pub use error::{Error, Result};
 pub use flow::{
     FlowEvidence, FlowFact, FlowSemantics, field_slot_id, flow_evidence_of, flow_rule_id,
-    flow_semantics_of, is_flow_edge, is_structural_symbol, merge_flow_edges,
+    flow_semantics_of, is_flow_edge, is_structural_symbol, merge_flow_edges, param_slot_id,
 };
 pub use history::HistoricalEdge;
 pub use node::{

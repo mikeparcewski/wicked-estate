@@ -1175,8 +1175,8 @@ fn main() -> Result<()> {
                 print_line(&serde_json::to_string(&report)?)?;
             } else {
                 print_line(&format!(
-                    "evidence: {}/{} generation {}{} — {} reference(s), {} call(s), {} flow(s) over {} \
-                     edge(s); {} position(s) unconverted; skipped {}",
+                    "evidence: {}/{} generation {}{} — {} reference(s), {} call(s), {} flow(s), {} \
+                     listener(s) over {} edge(s); {} position(s) unconverted; skipped {}",
                     report.producer,
                     report.snapshot,
                     report
@@ -1190,6 +1190,7 @@ fn main() -> Result<()> {
                     report.references_projected,
                     report.calls_projected,
                     report.flows_projected,
+                    report.listeners_projected,
                     report.edges_projected,
                     report.positions_unconverted,
                     serde_json::to_string(&report.skipped)?

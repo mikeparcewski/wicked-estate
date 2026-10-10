@@ -6,7 +6,8 @@
     "class": "compiler",
     "capabilities": [
       "definitions",
-      "input_bindings"
+      "input_bindings",
+      "output_bindings"
     ]
   },
   "snapshot": "fixtures/partial",

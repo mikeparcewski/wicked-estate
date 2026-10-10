@@ -114,7 +114,7 @@ export async function extractEvidence({ tsconfig, root, snapshot }) {
   const documents = new Set();
   const definitions = new Map(); // symbol -> fact
   const facts = [];
-  const stats = { bindings: 0, external: 0, dom: 0, unsupported: 0, partial_build_diagnostics: diagnostics };
+  const stats = { bindings: 0, events: 0, external: 0, dom: 0, dom_events: 0, unsupported: 0, partial_build_diagnostics: diagnostics };
 
   const classSymbol = (cls) => {
     const sf = cls.getSourceFile();
@@ -146,6 +146,35 @@ export async function extractEvidence({ tsconfig, root, snapshot }) {
       (d) => ts.isPropertyDeclaration(d) || (want === 'read' ? ts.isGetAccessorDeclaration(d) : ts.isSetAccessorDeclaration(d)),
     );
     return decl ? { prop, decl } : null;
+  };
+
+  // A host method's definition fact (`<doc>#<Class>.<method>`, site = its name token), and its
+  // implementation declaration (overload signatures have no body).
+  const methodOf = (hostCls, name) => {
+    const sym = hostCls.name && checker.getSymbolAtLocation(hostCls.name);
+    if (!sym) return null;
+    const prop = checker.getPropertyOfType(checker.getDeclaredTypeOfSymbol(sym), name);
+    const impls = (prop?.declarations ?? []).filter((d) => ts.isMethodDeclaration(d) && d.body);
+    if (impls.length !== 1) return null;
+    const decl = impls[0];
+    const owner = classOf(decl);
+    const cls = owner && classSymbol(owner);
+    if (!cls || !ts.isIdentifier(decl.name)) return null;
+    const symbol = `${cls}.${decl.name.text}`;
+    if (!definitions.has(symbol)) {
+      const sf = decl.getSourceFile();
+      const s0 = sf.getLineAndCharacterOfPosition(decl.name.getStart());
+      const e0 = sf.getLineAndCharacterOfPosition(decl.name.getEnd());
+      const doc = toDocPath(sf.fileName, root);
+      definitions.set(symbol, {
+        kind: 'definition',
+        fact_id: `method ${symbol}`,
+        symbol,
+        name: decl.name.text,
+        site: { document: doc, range: { start_line: s0.line, start_col: s0.character, end_line: e0.line, end_col: e0.character } },
+      });
+    }
+    return { symbol, decl };
   };
 
   const memberOfHost = (hostCls, name) => {
@@ -198,6 +227,127 @@ export async function extractEvidence({ tsconfig, root, snapshot }) {
       visitBoundAttribute(attr) {
         handle(attr, owners[owners.length - 1]);
         super.visitBoundAttribute(attr);
+      }
+      visitBoundEvent(ev) {
+        handleEvent(ev, owners[owners.length - 1]);
+        super.visitBoundEvent(ev);
+      }
+    }
+    const directivesOn = (owner) =>
+      (ttc.getDirectivesOfNode(hostCls, owner) ?? []).filter(
+        (meta) => !(owner instanceof ng.TmplAstTemplate && meta.isComponent),
+      );
+    const isEvent = (e) => (e instanceof ng.PropertyRead || e instanceof ng.SafePropertyRead) && e.name === '$event' && e.receiver instanceof ng.ImplicitReceiver && !(e.receiver instanceof ng.ThisReceiver);
+    const mentionsEvent = (e) => {
+      if (!e || typeof e !== 'object') return false;
+      if (isEvent(e)) return true;
+      for (const [k, v] of Object.entries(e)) {
+        if (k === 'span' || k === 'sourceSpan' || k === 'nameSpan') continue;
+        if (Array.isArray(v) ? v.some((x) => x instanceof ng.AST && mentionsEvent(x)) : v instanceof ng.AST && mentionsEvent(v)) return true;
+      }
+      return false;
+    };
+    const hostMember = (e) => (e instanceof ng.PropertyRead || e instanceof ng.SafePropertyRead) && isHostReceiver(e.receiver) && !isEvent(e) ? e.name : null;
+    const fieldTarget = (name, semantics) => {
+      const m = memberDecl(hostCls, name, 'write');
+      const owner = m && classOf(m.decl);
+      const cls = owner && classSymbol(owner);
+      return cls ? { slot: 'field', class: cls, member: m.prop.name, semantics } : null;
+    };
+    function handleEvent(ev, owner) {
+      if (ev.type !== ng.ParsedEventType.Regular && ev.type !== ng.ParsedEventType.TwoWay) {
+        stats.unsupported += 1; // animation events
+        return;
+      }
+      if (!(owner instanceof ng.TmplAstElement || owner instanceof ng.TmplAstTemplate)) {
+        stats.unsupported += 1;
+        return;
+      }
+      const doc = toDocPath(ev.keySpan.start.file.url, root);
+      if (!doc) return;
+      const k = ev.keySpan;
+      const site = { document: doc, range: { start_line: k.start.line, start_col: k.start.col, end_line: k.end.line, end_col: k.end.col } };
+      const matched = directivesOn(owner).flatMap((meta) =>
+        (meta.outputs.getByBindingPropertyName(ev.name) ?? []).map((out) => ({ meta, out })),
+      );
+      documents.add(doc);
+      if (matched.length === 0) {
+        // A confirmed DOM event: no directive on this node declares the output.
+        stats.dom_events += 1;
+        facts.push({ kind: 'event_binding', fact_id: `${doc}:${k.start.line}:${k.start.col}:(${ev.name})->dom`, site, construct: 'angular_dom_event', output: null, event: ev.name });
+        return;
+      }
+      for (const { meta, out } of matched) {
+        const dirCls = meta.ref.node;
+        const m = ts.isClassDeclaration(dirCls) ? memberDecl(dirCls, out.classPropertyName, 'read') : null;
+        const outOwner = m && classOf(m.decl);
+        const outClass = outOwner && classSymbol(outOwner);
+        if (!outClass) {
+          stats.external += 1; // the output is declared in a library without source
+          continue;
+        }
+        stats.events += 1;
+        const handlers = [];
+        const payload = [];
+        const unresolved = [];
+        const whole = ev.handler instanceof ng.ASTWithSource ? ev.handler.ast : ev.handler;
+        const two = ev.type === ng.ParsedEventType.TwoWay;
+        if (two) {
+          // `[(x)]="v"`: the host member written with the child's new value.
+          // A template local (`@let x = sig`) shadows a same-named host field.
+          const name = hostMember(whole) && !ttc.getExpressionTarget(whole, hostCls) ? hostMember(whole) : null;
+          const t = name && fieldTarget(name, 'value_preserving');
+          if (t) payload.push(t);
+          else unresolved.push('two_way_target');
+        } else {
+          for (const stmt of whole instanceof ng.Chain ? whole.expressions : [whole]) {
+            if ((stmt instanceof ng.Call || stmt instanceof ng.SafeCall) && hostMember(stmt.receiver)) {
+              // A template local (`@let`, `let-x`, `#ref`) shadows a same-named host method.
+              if (ttc.getExpressionTarget(stmt.receiver, hostCls)) {
+                unresolved.push(`local:${stmt.receiver.name}`);
+                continue;
+              }
+              const method = methodOf(hostCls, stmt.receiver.name);
+              if (!method) {
+                unresolved.push(`call:${stmt.receiver.name}`);
+                continue;
+              }
+              handlers.push(method.symbol);
+              // A TypeScript `this` parameter is type-only: it takes no argument position.
+              const params = method.decl.parameters.filter((p) => !ts.parameterIsThisKeyword(p));
+              stmt.args.forEach((arg, i) => {
+                if (!mentionsEvent(arg)) return;
+                const param = params[i];
+                if (!param || param.dotDotDotToken || !ts.isIdentifier(param.name)) {
+                  unresolved.push(`param:${stmt.receiver.name}#${i}`);
+                  return;
+                }
+                payload.push({ slot: 'param', method: method.symbol, param: param.name.text, semantics: isEvent(arg) ? 'value_preserving' : 'may_influence' });
+              });
+            } else if (stmt instanceof ng.Binary && stmt.operation === '=') {
+              if (!mentionsEvent(stmt.right)) continue;
+              const local = hostMember(stmt.left) && ttc.getExpressionTarget(stmt.left, hostCls);
+              const name = local ? null : hostMember(stmt.left);
+              const t = name && fieldTarget(name, isEvent(stmt.right) ? 'value_preserving' : 'may_influence');
+              if (t) payload.push(t);
+              else unresolved.push('assign');
+            } else if (mentionsEvent(stmt)) {
+              unresolved.push('event_expression');
+            }
+          }
+        }
+        const sortById = (a, b) => (JSON.stringify(a) < JSON.stringify(b) ? -1 : 1);
+        facts.push({
+          kind: 'event_binding',
+          fact_id: `${doc}:${k.start.line}:${k.start.col}:(${ev.name})->${outClass}.${out.classPropertyName}`,
+          site,
+          construct: two ? 'angular_two_way_binding' : 'angular_output_event',
+          output: { class: outClass, member: out.classPropertyName },
+          event: ev.name,
+          ...(handlers.length ? { handlers: [...new Set(handlers)].sort() } : {}),
+          ...(payload.length ? { payload: payload.sort(sortById) } : {}),
+          ...(unresolved.length ? { unresolved: [...unresolved].sort() } : {}),
+        });
       }
     }
     function handle(attr, owner) {
@@ -286,7 +436,7 @@ export async function extractEvidence({ tsconfig, root, snapshot }) {
       name: PRODUCER,
       version: `${ADAPTER_VERSION}+angular.${versions.compiler}`,
       class: 'compiler',
-      capabilities: ['definitions', 'input_bindings'],
+      capabilities: ['definitions', 'input_bindings', 'output_bindings'],
     },
     snapshot: snapshot ?? toDocPath(path.resolve(tsconfig), root) ?? path.basename(tsconfig),
     documents: [...documents].sort().map((p) => ({ path: p, position_encoding: 'utf16' })),

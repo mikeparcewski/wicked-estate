@@ -2251,17 +2251,20 @@ fn flow_endpoint_symbol(
         }
         FlowEndpointKind::Parameter => {
             let owner = flow_owner_key(endpoint, defs, pending, scheme, module, file_symbol);
-            Symbol::synthetic("value", format!("{owner}:param:{}", endpoint.name)).id()
+            wicked_estate_core::param_slot_id(&SymbolId(owner), &endpoint.name)
         }
         FlowEndpointKind::Local => {
             let owner = flow_owner_key(endpoint, defs, pending, scheme, module, file_symbol);
             let name = &endpoint.name;
-            let id = match scopes.bind(name, endpoint.pos, enclosing_def(defs, endpoint.pos)) {
-                ValueBinding::Param => format!("{owner}:param:{name}"),
-                ValueBinding::Local => format!("{owner}:local:{name}"),
-                ValueBinding::Scoped(n) => format!("{owner}:local:{name}@{n}"),
-            };
-            Symbol::synthetic("value", id).id()
+            match scopes.bind(name, endpoint.pos, enclosing_def(defs, endpoint.pos)) {
+                ValueBinding::Param => wicked_estate_core::param_slot_id(&SymbolId(owner), name),
+                ValueBinding::Local => {
+                    Symbol::synthetic("value", format!("{owner}:local:{name}")).id()
+                }
+                ValueBinding::Scoped(n) => {
+                    Symbol::synthetic("value", format!("{owner}:local:{name}@{n}")).id()
+                }
+            }
         }
     }
 }

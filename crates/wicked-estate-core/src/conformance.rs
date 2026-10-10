@@ -3771,6 +3771,53 @@ pub fn semantic_evidence_suite<S: GraphStore>(store: &mut S) {
             .collect::<Vec<_>>(),
         vec![crate::flow::FlowEvidence::Compiler]
     );
+    // 10. TS-S4: a template event listens (`event-listens`, handler → output slot, never
+    //     `Calls`) and carries `$event` into the host field, from the same snapshot owner.
+    let picked = slot(&leaf, "picked");
+    let handler = ev_node("onPick", NodeKind::Method, (12, 13));
+    store
+        .upsert_nodes(&[picked.clone(), handler.clone()])
+        .expect("event nodes");
+    all.extend([picked.clone(), handler.clone()]);
+    let event = EvidenceFact::EventBinding {
+        fact_id: "e".into(),
+        site: ev_site(12, 4, 4),
+        construct: "angular_output_event".into(),
+        output: Some(MemberRef {
+            class: "Leaf".into(),
+            member: "picked".into(),
+        }),
+        event: "picked".into(),
+        handlers: vec!["onPick".into()],
+        payload: vec![crate::evidence::PayloadTarget::Field {
+            class: "Host".into(),
+            member: "current".into(),
+            semantics: crate::flow::FlowSemantics::ValuePreserving,
+        }],
+        unresolved: vec![],
+    };
+    let mut events = binding(vec![ev_def("onPick", 12), event]);
+    events
+        .producer
+        .capabilities
+        .insert(Capability::OutputBindings);
+    let r = ingest_evidence(store, &events, &all, &none).expect("event");
+    assert_eq!((r.listeners_projected, r.flows_projected), (1, 1), "{r:?}");
+    let listens = crate::edge_tags::other(crate::edge_tags::EVENT_LISTENS);
+    assert_eq!(
+        store
+            .edge_supports(&handler.symbol, &picked.symbol, &listens)
+            .expect("rows")
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .edge_supports(&producer.symbol, &picked.symbol, &flows)
+            .expect("rows")
+            .len(),
+        1
+    );
     ingest_evidence(store, &binding(vec![]), &all, &none).expect("empty binding snapshot");
     assert!(
         store
