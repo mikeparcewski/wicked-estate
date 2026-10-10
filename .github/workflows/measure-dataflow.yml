@@ -1,0 +1,51 @@
+name: measure-dataflow (ADR-014, scratch branch only)
+
+on:
+  push:
+    branches: ['measure/**']
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build baseline and candidate (same runner, same profile, shared target dir)
+        run: |
+          set -euo pipefail
+          . ./measure.env
+          echo "BASE=$BASE CAND=$CAND" >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p "$RUNNER_TEMP/bin"
+          for side in base cand; do
+            sha=$BASE; [ "$side" = cand ] && sha=$CAND
+            git worktree add "$RUNNER_TEMP/src-$side" "$sha"
+            (cd "$RUNNER_TEMP/src-$side" && CARGO_TARGET_DIR="$RUNNER_TEMP/target" cargo build --release -p wicked-estate --bin wicked-estate)
+            cp "$RUNNER_TEMP/target/release/wicked-estate" "$RUNNER_TEMP/bin/wicked-estate-$side"
+            "$RUNNER_TEMP/bin/wicked-estate-$side" --version
+          done
+      - name: corpora
+        run: |
+          set -euo pipefail
+          . ./measure.env
+          git clone -q --filter=blob:none https://github.com/Teradata/covalent.git "$RUNNER_TEMP/covalent"
+          git -C "$RUNNER_TEMP/covalent" checkout -q "$COVALENT"
+          rm -rf "$RUNNER_TEMP/covalent/.git"
+          mkdir -p "$RUNNER_TEMP/estate-tree"
+          git archive "$BASE" | tar -x -C "$RUNNER_TEMP/estate-tree"
+          find "$RUNNER_TEMP/covalent" -name '*.ts' ! -name '*.d.ts' | wc -l
+      - name: measure
+        run: |
+          set -euo pipefail
+          . ./measure.env
+          for c in covalent:libs/angular-echarts/tooltip/src/series-tooltip.component.ts estate-tree:crates/wicked-estate/src/repo_scope.rs; do
+            name=${c%%:*}; touch=${c#*:}
+            python3 measure-dataflow.py --base "$RUNNER_TEMP/bin/wicked-estate-base" --cand "$RUNNER_TEMP/bin/wicked-estate-cand" \
+              --corpus "$RUNNER_TEMP/$name" --touch "$touch" --new-constructs "$NEW_CONSTRUCTS" --runs 3 --out "results-$name.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: measure-dataflow
+          path: results-*.json
