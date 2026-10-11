@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [0.29.2] — 2026-10-11
+
+Patch: the last consolidation leaks from the codex re-review of #329.
+
+### Fixed
+- **Summaries built over expired Working memories are removed.** 0.29.0's archive folded expired
+  scratch into root-scoped, unfaceted summaries; 0.29.1 dropped the sources but left those summaries
+  recallable. Maintenance now removes every summary over an expired Working memory (sidecar and
+  cross-store rows included) and rebuilds a summary that also covered durable sources from those
+  survivors, at their exact scope and facets.
+- **Working memories expire by kind, in every tier.** A `kind: working` capture with no tier lands
+  Episodic, escaped expiry, and was distilled into facts and summaries. Expiry now selects by kind
+  across tiers and runs before reflection; Working-kind memories are never distilled or archived.
+- **A supplied archive summary is used only for an unfiltered, single-group cluster.** When the
+  scope filter dropped members (or the cluster spans groups), the summary is regenerated per group,
+  so another scope's content never lands in this one's archive.
+
 ## [0.29.1] — 2026-10-11
 
 Patch: consolidation (which 0.29.0 wired into `memory.reflect`) could widen who sees a memory.

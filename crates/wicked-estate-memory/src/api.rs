@@ -110,18 +110,18 @@ impl MemoryApi for MemoryEngine {
 
     fn reflect(&mut self, scope: &str, now: i64) -> Result<ReflectResult, anyhow::Error> {
         let s = Scope::parse(scope);
-        // Expired Working memories are dropped by the archive pass: clear their cross-store edges
-        // too, as `erase` does.
-        let expired: Vec<String> = self
-            .expired_working(&s, now)?
-            .iter()
-            .map(|m| m.symbol().0)
+        // Expired Working memories (and summaries built over them) are dropped first; clear their
+        // cross-store edges too, as `erase` does.
+        let removed: Vec<String> = self
+            .drop_expired_working(&s, now)?
+            .into_iter()
+            .map(|id| id.0)
             .collect();
         // The maintenance entry point: reflect (T1→T2) → promote (T2→T3) → archive (→T4, incl.
         // expired Working). `memory.reflect` is a write tool, so only a write-capable caller runs it.
         MemoryEngine::consolidate(self, &s, now)?;
         if let Some(xedge) = self.xedge.as_ref() {
-            for sym_id in &expired {
+            for sym_id in &removed {
                 xedge.delete_by_src_id("memory", sym_id)?;
             }
         }
