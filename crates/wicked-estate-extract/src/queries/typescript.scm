@@ -721,41 +721,6 @@
   (#eq? @_then "then")
 ) @flow.influence.convention.then_return
 
-; ADR-014 S6c, local object properties. A property WRITTEN on an object (`o.k = raw`), or initialised
-; in its literal (`const o = { k: raw }`, shorthand `{ raw }`), reaches a later read of the same
-; path: `const v = o.k` (`property_read`) or `return o.k`. They share the owner's `:property:o.k`
-; slot. Path-insensitive, and there is no alias model, so the extractor keeps a site only when `o`
-; is a LOCAL object: declared once in the function by a `const`/`let` object literal, and only ever
-; used as `o.k` (no argument, return, alias, spread, method call or reassignment; see
-; `is_local_object`). Every hop is `may_influence`.
-(expression_statement
-  (assignment_expression
-    left: (member_expression
-      object: (identifier)
-      property: (property_identifier)) @flow.consumer.object_property
-    right: (identifier) @flow.producer.local)
-) @flow.influence.syntax.property_write
-
-(variable_declarator
-  name: (identifier)
-  value: (object
-    (pair
-      key: (property_identifier)
-      value: (identifier) @flow.producer.local) @flow.consumer.object_property)
-) @flow.influence.syntax.object_literal
-
-(variable_declarator
-  name: (identifier)
-  value: (object
-    (shorthand_property_identifier) @flow.producer.local @flow.consumer.object_property)
-) @flow.influence.syntax.object_literal
-
-(return_statement
-  (member_expression
-    object: (identifier)
-    property: (property_identifier)) @flow.producer.object_property @flow.consumer.return
-) @flow.influence.syntax.return_property
-
 ; this.field = value
 (expression_statement
   (assignment_expression
