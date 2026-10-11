@@ -108,7 +108,9 @@ impl MemoryApi for MemoryEngine {
 
     fn reflect(&mut self, scope: &str, now: i64) -> Result<ReflectResult, anyhow::Error> {
         let s = Scope::parse(scope);
-        MemoryEngine::reflect(self, &s, now)?;
+        // The maintenance entry point: reflect (T1→T2) → promote (T2→T3) → archive (→T4, incl.
+        // expired Working). `memory.reflect` is a write tool, so only a write-capable caller runs it.
+        MemoryEngine::consolidate(self, &s, now)?;
         // collect semantic-tier facts in this scope (post-reflect)
         let all = self.all_memories()?;
         let distilled_facts: Vec<String> = all
@@ -266,6 +268,36 @@ mod tests {
         r.scope = scope.into();
         r.now = now;
         r
+    }
+
+    #[test]
+    fn api_reflect_runs_consolidation_and_expires_working() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        MemoryApi::capture(
+            &mut eng,
+            make_req(
+                "WIP: pre-compaction snapshot",
+                "working",
+                "working",
+                "project:demo",
+                100,
+            ),
+        )
+        .unwrap();
+        let now = 100 + wicked_estate_memory_core::WORKING_TTL_SECS;
+        MemoryApi::reflect(&mut eng, "project:demo", now).unwrap();
+        let tiers: Vec<Tier> = eng
+            .all_memories()
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.content == "WIP: pre-compaction snapshot")
+            .map(|m| m.tier)
+            .collect();
+        assert_eq!(
+            tiers,
+            [Tier::Archival],
+            "memory.reflect archives expired working memory"
+        );
     }
 
     #[test]

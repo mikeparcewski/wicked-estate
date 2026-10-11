@@ -33,7 +33,8 @@ pub use scope::{Scope, ScopeParseError};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier {
-    /// T0 working — current session scratchpad, volatile, capacity-bounded.
+    /// T0 working — current session scratchpad, volatile: it expires [`WORKING_TTL_SECS`] after
+    /// capture (recall stops returning it, consolidation archives it).
     Working,
     /// T1 episodic — timestamped turns/events (raw experience).
     Episodic,
@@ -94,6 +95,10 @@ impl MemKind {
 
 /// The node-kind label all memory nodes carry (so estate stores them generically).
 pub const MEMORY_NODE_KIND: &str = "memory";
+
+/// How long a Working-tier memory lives: 24 h. Working is session scratch, not a learning — after
+/// this age recall no longer returns it and `archive` folds it into the archival tier.
+pub const WORKING_TTL_SECS: i64 = 86_400;
 /// Metadata keys (the opaque ExtensionData slot — estate-core never reads these).
 pub mod meta_keys {
     pub const MEM_KIND: &str = "mem_kind";
