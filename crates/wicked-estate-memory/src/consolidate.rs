@@ -14,8 +14,8 @@
 //! - `reflect`  : the convenience pass wiring read→distill→write deterministically (model-free).
 //! - `reinforce`: learning — bump reinforcement (→ Wilson confidence → salience → recall rank).
 //! - `promote_skills`: T2 → T3 procedural (well-reinforced facts become skills).
-//! - `archive`  : aged low-salience memory, and Working memory past its 24 h TTL → T4 archival
-//!   summary node (self-contained); the sources move to the archival tier (nothing deleted).
+//! - `archive`  : aged low-salience memory → T4 archival summary nodes, one per exact source scope
+//!   + facet set (sources move to the archival tier); Working memory past its 24 h TTL is dropped.
 //!
 //! Implemented on `MemoryEngine` from a child module so it can use the engine internals while
 //! keeping `lib.rs` focused. Fully deterministic and offline/testable (no model in the loop).
@@ -23,8 +23,9 @@
 use crate::MemoryEngine;
 use wicked_estate_core::{Edge, EdgeKind, ResolutionTier, Result, SymbolId};
 use wicked_estate_memory_core::{
-    Extracted, MemKind, Memory, Scope, Tier, WORKING_TTL_SECS, fuzzy_candidates, heuristic_extract,
-    heuristic_same_entity, heuristic_summary, normalize, salience as compute_salience,
+    Extracted, Facets, MemKind, Memory, Scope, Tier, WORKING_TTL_SECS, fuzzy_candidates,
+    heuristic_extract, heuristic_same_entity, heuristic_summary, normalize,
+    salience as compute_salience,
 };
 
 /// What one consolidation pass did (returned by [`MemoryEngine::consolidate`]).
@@ -105,9 +106,19 @@ impl MemoryEngine {
     }
 
     /// Does a memory of `kind` with this exact content already exist in `scope`? (cheap dedup)
-    fn exists(&self, kind: MemKind, content: &str, scope: &Scope) -> Result<Option<SymbolId>> {
+    fn exists(
+        &self,
+        kind: MemKind,
+        content: &str,
+        scope: &Scope,
+        facets: &Facets,
+    ) -> Result<Option<SymbolId>> {
         for m in self.all_memories()? {
-            if m.kind == kind && m.content == content && m.scope.as_path() == scope.as_path() {
+            if m.kind == kind
+                && m.content == content
+                && m.scope.as_path() == scope.as_path()
+                && &m.facets == facets
+            {
                 return Ok(Some(m.symbol()));
             }
         }
@@ -201,16 +212,21 @@ impl MemoryEngine {
 
         let mut new_facts = 0usize;
         for fact in ex.facts {
-            if self.exists(MemKind::Fact, &fact, &episode.scope)?.is_some() {
+            if self
+                .exists(MemKind::Fact, &fact, &episode.scope, &episode.facets)?
+                .is_some()
+            {
                 continue;
             }
+            // A derived fact keeps its episode's restrictions (scope AND facets).
             let fmem = Memory::new(
                 MemKind::Fact,
                 Tier::Semantic,
                 episode.scope.clone(),
                 fact,
                 now,
-            );
+            )
+            .with_facets(episode.facets.clone());
             let fsym = fmem.symbol();
             self.capture(&fmem)?;
             self.store
@@ -283,16 +299,21 @@ impl MemoryEngine {
             .collect();
         let mut n = 0;
         for f in facts {
-            if self.exists(MemKind::Skill, &f.content, &f.scope)?.is_some() {
+            if self
+                .exists(MemKind::Skill, &f.content, &f.scope, &f.facets)?
+                .is_some()
+            {
                 continue;
             }
+            // A promoted skill keeps its fact's restrictions (scope AND facets).
             let skill = Memory::new(
                 MemKind::Skill,
                 Tier::Procedural,
                 f.scope.clone(),
                 f.content.clone(),
                 now,
-            );
+            )
+            .with_facets(f.facets.clone());
             let ssym = skill.symbol();
             self.capture(&skill)?;
             self.store
@@ -302,11 +323,17 @@ impl MemoryEngine {
         Ok(n)
     }
 
-    /// Fold an explicit `cluster` of source memories into a self-contained T4 archival node (DEC-R
+    /// Fold an explicit `cluster` of source memories into self-contained T4 archival nodes (DEC-R
     /// verb). `summary` is the **agent's** abstractive summary; when `None`, fall back to the
     /// deterministic extractive `heuristic_summary` (option (b)). Records the subsumed source ids so
     /// the archive survives a later physical purge of the sources. Returns sources subsumed (0 if
     /// the cluster is empty). No model in the loop.
+    ///
+    /// **Never widens visibility.** Sources outside `scope` are ignored, and the rest are folded
+    /// per (exact scope, facet set): each T4 node lives at its sources' own scope with their facets,
+    /// so a root-scope pass cannot expose project B's or a user-restricted memory to anyone the
+    /// sources were hidden from, and erasing a scope erases its summaries too. An agent `summary`
+    /// is applied only when the cluster is a single such group (it describes those sources alone).
     pub fn archive_cluster(
         &mut self,
         scope: &Scope,
@@ -314,9 +341,33 @@ impl MemoryEngine {
         summary: Option<String>,
         now: i64,
     ) -> Result<usize> {
-        if cluster.is_empty() {
-            return Ok(0);
+        let mut groups: Vec<(Scope, Facets, Vec<Memory>)> = Vec::new();
+        for m in cluster.iter().filter(|m| scope.is_ancestor_of(&m.scope)) {
+            match groups
+                .iter_mut()
+                .find(|(s, f, _)| s.as_path() == m.scope.as_path() && f == &m.facets)
+            {
+                Some((_, _, members)) => members.push(m.clone()),
+                None => groups.push((m.scope.clone(), m.facets.clone(), vec![m.clone()])),
+            }
         }
+        let summary = if groups.len() == 1 { summary } else { None };
+        let mut n = 0;
+        for (group_scope, facets, members) in groups {
+            n += self.archive_group(&group_scope, facets, &members, summary.clone(), now)?;
+        }
+        Ok(n)
+    }
+
+    /// One T4 node over `members`, which share `scope` and `facets` exactly.
+    fn archive_group(
+        &mut self,
+        scope: &Scope,
+        facets: Facets,
+        cluster: &[Memory],
+        summary: Option<String>,
+        now: i64,
+    ) -> Result<usize> {
         let summary = summary.unwrap_or_else(|| {
             let texts: Vec<&str> = cluster.iter().map(|m| m.content.as_str()).collect();
             heuristic_summary(&texts, 2000)
@@ -327,7 +378,8 @@ impl MemoryEngine {
             scope.clone(),
             summary,
             now,
-        );
+        )
+        .with_facets(facets);
         // self-contained provenance: record subsumed source ids in metadata.
         let arc_node = {
             let mut n = arc.to_node();
@@ -372,10 +424,24 @@ impl MemoryEngine {
         Ok(cluster.len())
     }
 
-    /// Archive aged, low-salience memories in `scope` into a self-contained T4 summary node, and
-    /// expire Working memories older than [`WORKING_TTL_SECS`] (session scratch, whatever their
-    /// salience). **Model-free** (DEC-R): selects the cluster deterministically, then folds it via
-    /// `archive_cluster` with the extractive `heuristic_summary` default. Returns sources subsumed.
+    /// Working memories in `scope` (+ descendants) past [`WORKING_TTL_SECS`] at `now`.
+    pub(crate) fn expired_working(&self, scope: &Scope, now: i64) -> Result<Vec<Memory>> {
+        let ids = self
+            .ext
+            .aged_ids(&[Tier::Working, Tier::Archival], now - WORKING_TTL_SECS)?;
+        // Archival covers a Working memory 0.29.0's archive moved there (it must expire too).
+        Ok(self
+            .hydrate(&ids)?
+            .into_iter()
+            .filter(|m| m.kind == MemKind::Working || m.tier == Tier::Working)
+            .filter(|m| scope.is_ancestor_of(&m.scope))
+            .collect())
+    }
+
+    /// Archive aged, low-salience memories in `scope` into self-contained T4 summary nodes (one per
+    /// exact source scope + facet set), and drop Working memories older than [`WORKING_TTL_SECS`]
+    /// (session scratch, whatever their salience; never summarized). **Model-free** (DEC-R).
+    /// Returns sources archived plus working memories dropped.
     pub fn archive(
         &mut self,
         scope: &Scope,
@@ -402,21 +468,15 @@ impl MemoryEngine {
                     ) < salience_floor
             })
             .collect();
-        let expired = self
-            .ext
-            .aged_ids(&[Tier::Working], now - WORKING_TTL_SECS)?;
-        let expired: Vec<Memory> = self
-            .hydrate(&expired)?
-            .into_iter()
-            .filter(|m| m.tier == Tier::Working && scope.is_ancestor_of(&m.scope))
-            .collect();
-        let mut n = 0;
-        // Separate clusters: a summary of session scratch must not dilute one of aged knowledge.
-        for cluster in [cand, expired] {
-            // No agent summary in the convenience pass → the deterministic floor (option (b)).
-            n += self.archive_cluster(scope, &cluster, None, now)?;
-        }
-        Ok(n)
+        // Expired session scratch is dropped, not summarized: a summary (or an archival copy) would
+        // bring back content the TTL already hid from recall.
+        let expired = self.expired_working(scope, now)?;
+        let ids: Vec<SymbolId> = expired.iter().map(Memory::symbol).collect();
+        let id_strs: Vec<String> = ids.iter().map(|s| s.0.clone()).collect();
+        self.store.remove_nodes(&ids)?;
+        self.ext.remove(&id_strs)?;
+        // No agent summary in the convenience pass → the deterministic floor (option (b)).
+        Ok(self.archive_cluster(scope, &cand, None, now)? + ids.len())
     }
 }
 
@@ -800,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_expires_working_after_ttl_and_is_idempotent() {
+    fn archive_drops_expired_working_and_is_idempotent() {
         let mut eng = MemoryEngine::in_memory().unwrap();
         let scope = Scope::parse("project:demo");
         let t0 = 10_000;
@@ -832,22 +892,21 @@ mod tests {
                 .map(|m| m.tier)
                 .collect()
         };
-        assert_eq!(
-            tiers(&eng, "WIP: turn count 4"),
-            [Tier::Archival],
-            "expired, kept, archived"
+        assert!(
+            tiers(&eng, "WIP: turn count 4").is_empty(),
+            "expired working is dropped"
         );
         assert_eq!(
             tiers(&eng, "WIP: fresh task"),
             [Tier::Working],
             "fresh working untouched"
         );
-        // A second pass finds nothing new: no duplicate T4 node for the same sources.
+        // A second pass finds nothing new, and no summary of the scratch was written.
         assert_eq!(eng.archive(&scope, 10 * 365 * 86_400, 0.0, now).unwrap(), 0);
         assert_eq!(
             eng.count().unwrap(),
-            3,
-            "two sources + one T4 summary, nothing deleted"
+            1,
+            "only the fresh working memory remains"
         );
     }
 
@@ -879,6 +938,165 @@ mod tests {
             second.archived, 0,
             "already-archived sources are not folded again"
         );
+    }
+
+    // ── w9-memfix2 (codex post-merge review): consolidation never widens visibility ──
+
+    fn alice() -> wicked_estate_memory_core::Facets {
+        wicked_estate_memory_core::Facets::try_from_map([("user", "alice")]).unwrap()
+    }
+
+    fn contents_visible_from(
+        eng: &MemoryEngine,
+        scope: &Scope,
+        query: &str,
+        now: i64,
+    ) -> Vec<String> {
+        eng.recall(query, ScopeFilter::Ancestors(scope), &[], 100_000, now)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.content)
+            .collect()
+    }
+
+    #[test]
+    fn root_archive_keeps_each_project_in_its_own_scope() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let (a, b) = (Scope::parse("project:a"), Scope::parse("project:b"));
+        cap(
+            &mut eng,
+            MemKind::Fact,
+            Tier::Semantic,
+            &a,
+            "zebra ledger secret of project a",
+            0,
+        );
+        cap(
+            &mut eng,
+            MemKind::Fact,
+            Tier::Semantic,
+            &b,
+            "yak ledger note of project b",
+            0,
+        );
+        let now = 400 * 86_400;
+        eng.archive(&Scope::root(), 30 * 86_400, 0.5, now).unwrap();
+        let leaked = contents_visible_from(&eng, &b, "zebra ledger secret", now);
+        assert!(
+            leaked.iter().all(|c| !c.contains("zebra")),
+            "project a content recallable from project b after a root archive: {leaked:?}"
+        );
+        // Erasing project a leaves no copy of its content behind.
+        eng.erase("project:a").unwrap();
+        let left: Vec<String> = eng
+            .all_memories()
+            .unwrap()
+            .into_iter()
+            .map(|m| m.content)
+            .filter(|c| c.contains("zebra"))
+            .collect();
+        assert!(left.is_empty(), "erase(project:a) left a copy: {left:?}");
+    }
+
+    #[test]
+    fn archive_summary_keeps_its_sources_facets() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let root = Scope::root();
+        let m = Memory::new(
+            MemKind::Fact,
+            Tier::Semantic,
+            root.clone(),
+            "alice private quokka plan",
+            0,
+        )
+        .with_facets(alice());
+        eng.capture(&m).unwrap();
+        let now = 400 * 86_400;
+        eng.archive(&root, 30 * 86_400, 0.5, now).unwrap();
+        let seen = contents_visible_from(&eng, &root, "alice private quokka plan", now);
+        assert!(
+            seen.iter().all(|c| !c.contains("quokka")),
+            "a {{user:alice}} memory became recallable without the facet: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn promoted_skill_and_reflected_fact_keep_facets() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let root = Scope::root();
+        let fact = Memory::new(
+            MemKind::Fact,
+            Tier::Semantic,
+            root.clone(),
+            "alice deploys with the blue lever",
+            1,
+        )
+        .with_facets(alice());
+        let fid = fact.symbol();
+        eng.capture(&fact).unwrap();
+        for _ in 0..5 {
+            eng.reinforce(&fid, true, 2).unwrap();
+        }
+        eng.promote_skills(&root, 5, 0.0, 3).unwrap();
+        let ep = Memory::new(
+            MemKind::Episode,
+            Tier::Episodic,
+            root.clone(),
+            "Alice uses Postgres for billing.",
+            4,
+        )
+        .with_facets(alice());
+        eng.capture(&ep).unwrap();
+        eng.reflect(&root, 5).unwrap();
+        let derived: Vec<Memory> = eng
+            .all_memories()
+            .unwrap()
+            .into_iter()
+            .filter(|m| {
+                matches!(m.kind, MemKind::Skill) || (m.kind == MemKind::Fact && m.id != fact.id)
+            })
+            .collect();
+        assert!(
+            !derived.is_empty(),
+            "expected a promoted skill and a reflected fact"
+        );
+        for m in &derived {
+            assert_eq!(
+                m.facets,
+                alice(),
+                "derived {:?} dropped its source's facets",
+                m.kind
+            );
+        }
+    }
+
+    #[test]
+    fn expired_working_memory_is_dropped_not_archived() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let scope = Scope::parse("project:demo");
+        let t0 = 10_000;
+        cap(
+            &mut eng,
+            MemKind::Working,
+            Tier::Working,
+            &scope,
+            "WIP walrus snapshot",
+            t0,
+        );
+        let now = t0 + WORKING_TTL_SECS;
+        eng.archive(&scope, 10 * 365 * 86_400, 0.0, now).unwrap();
+        let left: Vec<String> = eng
+            .all_memories()
+            .unwrap()
+            .into_iter()
+            .map(|m| m.content)
+            .filter(|c| c.contains("walrus"))
+            .collect();
+        assert!(
+            left.is_empty(),
+            "expired working memory survived maintenance: {left:?}"
+        );
+        assert!(contents_visible_from(&eng, &scope, "WIP walrus snapshot", now + 1).is_empty());
     }
 
     fn eng_get(eng: &MemoryEngine, id: &SymbolId) -> wicked_estate_core::Node {

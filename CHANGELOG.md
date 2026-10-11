@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.29.1] — 2026-10-11
+
+Patch: consolidation (which 0.29.0 wired into `memory.reflect`) could widen who sees a memory.
+Found by a post-merge codex review of #325.
+
+### Fixed
+- **Archiving never widens visibility.** A root-scope `memory.reflect` used to fold every
+  descendant project's aged memories into one root-scoped, unfaceted summary, so project B's content
+  (or a `{user: …}`-restricted memory) became recallable from project A, and `erase` of a project
+  left that copy behind. `archive_cluster` now folds per exact source scope and facet set: each T4
+  summary lives at its sources' scope and carries their facets.
+- **Derived memories keep their source's facets.** Facts reflected from a faceted episode and skills
+  promoted from a faceted fact were written without facets; they now inherit them (dedup compares
+  facets too).
+- **Expired Working memories are dropped, not archived.** 0.29.0 moved an expired Working memory to
+  the archival tier and wrote a fresh summary of it, which made the expired content recallable
+  again. `archive` now removes expired Working memories (and their cross-store edges) and writes no
+  summary; recall also treats a Working-kind memory as expired whatever its tier.
+
 ## [0.29.0] — 2026-10-11
 
 Minor bump: Working memory now expires, consolidation actually runs, and recall items say what they

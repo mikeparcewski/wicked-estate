@@ -110,9 +110,21 @@ impl MemoryApi for MemoryEngine {
 
     fn reflect(&mut self, scope: &str, now: i64) -> Result<ReflectResult, anyhow::Error> {
         let s = Scope::parse(scope);
+        // Expired Working memories are dropped by the archive pass: clear their cross-store edges
+        // too, as `erase` does.
+        let expired: Vec<String> = self
+            .expired_working(&s, now)?
+            .iter()
+            .map(|m| m.symbol().0)
+            .collect();
         // The maintenance entry point: reflect (T1→T2) → promote (T2→T3) → archive (→T4, incl.
         // expired Working). `memory.reflect` is a write tool, so only a write-capable caller runs it.
         MemoryEngine::consolidate(self, &s, now)?;
+        if let Some(xedge) = self.xedge.as_ref() {
+            for sym_id in &expired {
+                xedge.delete_by_src_id("memory", sym_id)?;
+            }
+        }
         // collect semantic-tier facts in this scope (post-reflect)
         let all = self.all_memories()?;
         let distilled_facts: Vec<String> = all
@@ -273,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn api_reflect_runs_consolidation_and_expires_working() {
+    fn api_reflect_runs_consolidation_and_drops_expired_working() {
         let mut eng = MemoryEngine::in_memory().unwrap();
         MemoryApi::capture(
             &mut eng,
@@ -288,17 +300,15 @@ mod tests {
         .unwrap();
         let now = 100 + wicked_estate_memory_core::WORKING_TTL_SECS;
         MemoryApi::reflect(&mut eng, "project:demo", now).unwrap();
-        let tiers: Vec<Tier> = eng
+        let left = eng
             .all_memories()
             .unwrap()
             .into_iter()
-            .filter(|m| m.content == "WIP: pre-compaction snapshot" && m.kind == MemKind::Working)
-            .map(|m| m.tier)
-            .collect();
+            .filter(|m| m.content.contains("pre-compaction snapshot"))
+            .count();
         assert_eq!(
-            tiers,
-            [Tier::Archival],
-            "memory.reflect archives expired working memory"
+            left, 0,
+            "memory.reflect drops expired working memory, no summary"
         );
     }
 
