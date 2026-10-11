@@ -665,7 +665,8 @@ impl MemoryEngine {
                 continue;
             };
             let age = (now - mem.created_at).max(0);
-            if mem.tier == wicked_estate_memory_core::Tier::Working
+            if (mem.tier == wicked_estate_memory_core::Tier::Working
+                || mem.kind == wicked_estate_memory_core::MemKind::Working)
                 && age >= wicked_estate_memory_core::WORKING_TTL_SECS
             {
                 continue; // expired session scratch (T0 TTL)
