@@ -264,6 +264,47 @@ Still unsupported:
 
 Option 3 stays no-go.
 
+### The full graph (2026-10-11)
+The operator ruled on #279: "I want the full graph". Every data-flow slice stays, and no query may be cut off.
+
+**Why answers were cut.** A diagnostic run (`38104899420`, branch `measure/w8d4-trunc`) classified every truncated `flows_to` Lineage query on both corpora, at depth 8 and at depth 24:
+- No query hit the node cap (5,000).
+- At depth 24, every cut was the 25K-char reply budget alone: 2 fixed queries on Covalent, and 10 fixed plus 141 sweep queries on vite.
+- At the old default depth of 8, the depth horizon also cut 1 Covalent sweep query, 4 vite fixed queries and 109 vite sweep queries.
+
+**What changed (estate 0.28.0)**
+- **Paging.** `Lineage` and `BlastRadius` (MCP, plus the `lineage` and `blast-radius` CLIs) page their answer.
+  - The 25K budget bounds one reply, not the answer.
+  - A reply that does not complete the answer has `truncated: true` and a `next_cursor`. Passing that back as `cursor` (or `--cursor`) returns the next rows of the same answer. The last page has `next_cursor: null`.
+  - Rows are ordered (depth, symbol), and `flows` by row, so pages from separate processes join exactly.
+  - A cursor carries a fingerprint over the tool, the effective query and every row. A cursor from another query, or from before the graph changed, is refused: pages are never spliced from two answers.
+  - `total` counts the whole answer, and `page` says which rows a reply holds.
+  - A row wider than the budget is carried whole on its own page, with a diagnostic; nothing is cut.
+- **Default depth.** `Lineage` defaults to its ceiling (24), so the default query is not cut at a horizon the caller never chose. A horizon or node cap that still bites stays reported (`depth_horizon_reached`, `node_cap_reached`, and `truncated` on the last page). Paging never claims a bounded walk is the whole graph.
+- **Consumers.** garden's estate shim (`scripts/_estate_client.py`, `call`) follows every cursor and joins the pages, so a seat gets the whole answer, with `complete` in the result. The `search` skill tells the seat to read `complete`. The MCP schemas advertise `cursor`.
+
+**Measured (run `38105645690`, 0.27.0 `aa957f9` → paging `062f0c9`, same runner)**
+
+| | Covalent `438c297` | vitejs/vite `3b72997` |
+|---|---|---|
+| fixed queries not completely retrievable | 2 → **0** (at most 2 pages) | 10 → **0** (at most 7 pages) |
+| sweep queries not completely retrievable | 1 of 520 → **0** | 146 of 2829 → **0** |
+| largest page | 24,360 chars | 24,673 chars |
+| `flows_to` edges | 1600 → 1600 | 7480 → 7480 |
+| full / incremental index | +0.58 % / +1.37 % | +0.30 % / +0.53 % |
+| DB bytes per stored edge | −0.03 % | −0.07 % |
+
+**Every Lineage query on both corpora is completely retrievable.** The 2 vite queries that 0.24.0 → 0.26.0 newly truncated, and every other cut one, now page to their full answer.
+
+**DB cost per stored edge.** From 0.24.0 to `eb407b1`: Covalent 2,767 → 2,759 bytes per edge (−0.31 %), vite 2,557 → 2,473 (−3.29 %). The raw vite DB grew +14.7 % for +66 % `flows_to`, which the operator accepted on #279. Cheaper edge encoding was not attempted; the ruling made it optional.
+
+**Pruning (the operator's addendum).** The rule is: "only things we should truncate is dead end nodes that have no value - but has to be hard proof of that". **No pruning rule ships.**
+- A candidate such as "a value slot with no incident `flows_to` edge" cannot change a `flows_to` Lineage answer.
+- But it still has a symbol identity: `SearchEntity` lists it with `include_values`, and its `File` reaches it through `Contains`. So the proof that it carries no information for any query fails, and the answer-equivalence evidence the addendum requires (every Lineage, blast-radius and `flows_to` query on both corpora identical with pruning on and off) was not produced for any rule.
+- A future pruning rule must state its predicate here, prove equivalence on both corpora, and record the nodes pruned and the DB and time saved. A rule that fails equivalence is dropped, not tuned.
+
+**Bounds that remain.** Two bounds are explicit and reported, never silent: the depth ceiling (24) and the traversal node cap (5,000). Neither binds any measured query on either corpus at the new default.
+
 ### Graduation (S5b–S5d together)
 All three slices passed every gate. **Primitives 1–3 graduate.** Cumulative on Covalent against `2b6bf7f`: `flows_to` 1394 → 1502 (+7.7 %), and full index 7.15 s → 7.20 s, each slice measured against the one before it. Still unsupported:
 - every closure shape other than the single-identifier returned arrow;
