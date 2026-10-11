@@ -11,7 +11,7 @@
 //!   wicked-estate import-telemetry <file.json> [--db ...]
 //!   wicked-estate drift                  [--db ...]
 //!   wicked-estate query <name>           [--db ...]
-//!   wicked-estate blast-radius <name>    [--depth N] [--json] [--db ...]
+//!   wicked-estate blast-radius <name>    [--depth N] [--cursor C] [--json] [--db ...]
 //!   wicked-estate supports owners        [--json] [--db ...]
 //!   wicked-estate supports edge --source <ID> --target <ID> --kind <KIND> [--json] [--db ...]
 //!   wicked-estate supports retract --producer <P> --snapshot <S> [--json] [--db ...]
@@ -1384,9 +1384,39 @@ fn main() -> Result<()> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos() as u64;
-            let br = wicked_estate::blast_radius_by_name(&*store, name, depth).map_err(to_any)?;
-            let deps = &br.dependents;
+            let mut br =
+                wicked_estate::blast_radius_by_name(&*store, name, depth).map_err(to_any)?;
             let unresolved = store.unresolved_refs_for_name(name).map_err(to_any)?.len();
+            // #279: the 25K bound is per reply, not per answer. Rows are ordered (depth, id) so
+            // pages from separate runs join exactly; `--cursor` resumes the same answer, and a
+            // cursor from another query or a changed graph is refused.
+            br.dependents.sort_by(|a, b| {
+                let d = |n: &wicked_estate_core::Node| br.depths.get(n.symbol.as_str()).copied();
+                (d(a), a.symbol.as_str()).cmp(&(d(b), b.symbol.as_str()))
+            });
+            let total = br.dependents.len();
+            let fp = {
+                let rows: Vec<serde_json::Value> = br
+                    .dependents
+                    .iter()
+                    .map(|n| blast_radius_row(n, &br))
+                    .collect();
+                wicked_estate_retrieve::paging::fingerprint(
+                    "blast-radius",
+                    &format!("{name}|{depth}"),
+                    &[&rows],
+                )
+            };
+            let from = wicked_estate_retrieve::paging::start_offsets(
+                "blast-radius",
+                &serde_json::json!({ "cursor": args.str("cursor") }),
+                &[total],
+                fp,
+            )
+            .map_err(to_any)?[0];
+            let all = std::mem::take(&mut br.dependents);
+            br.dependents = all[from..].to_vec();
+            let deps = &br.dependents;
             let t_cmd_end = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -1395,25 +1425,41 @@ fn main() -> Result<()> {
             // reads this via execCapped, where an oversized payload is TRUNCATED mid-document
             // and JSON.parse throws. 25K chars (the R4 budget) with an ADDITIVE
             // `truncated_dependents` count — crew reads only `dependents`/`unresolved`.
-            let (kept, dropped) = cap_blast_radius_rows(name, unresolved, &br, depth);
+            let (mut kept, _) = cap_blast_radius_rows(name, unresolved, &br, depth);
+            if kept == 0 && !deps.is_empty() {
+                // Progress: a page always carries at least one remaining row, whole, never cut.
+                kept = 1;
+                eprintln!(
+                    "blast-radius: one row is wider than the {BLAST_RADIUS_CHAR_BUDGET}-char \
+                     budget; this page carries it whole rather than cut it"
+                );
+            }
+            // Rows this reply does not print: they follow on later pages, never lost.
+            let dropped = deps.len() - kept;
+            let next_cursor =
+                (dropped > 0).then(|| wicked_estate_retrieve::paging::encode(&[from + kept], fp));
             if json_out {
                 // Machine consumers (wicked-crew studio) get the same honesty contract as the
                 // text path: dependents PLUS the unresolved count — absence of dependents must
                 // never silently read as "safe to change".
-                let out = blast_radius_json(name, &deps[..kept], dropped, unresolved, &br, depth);
+                let mut out =
+                    blast_radius_json(name, &deps[..kept], dropped, unresolved, &br, depth);
+                out["next_cursor"] = serde_json::json!(next_cursor);
+                out["page"] = serde_json::json!({ "from": from, "count": kept, "total": total });
                 print_line(&serde_json::to_string(&out).map_err(|e| anyhow::anyhow!(e))?)?;
             } else if deps.is_empty() {
                 print_line(&format!(
                     "no resolved dependents for '{name}' (symbol may not be indexed)"
                 ))?;
             } else {
-                print_line(&format!("{} symbol(s) depend on '{name}':", deps.len()))?;
+                print_line(&format!("{total} symbol(s) depend on '{name}':"))?;
                 for n in deps.iter().take(kept) {
                     print_line(&format!("  {:?} {} ({})", n.kind, n.name, loc(n)))?;
                 }
-                if dropped > 0 {
+                if let Some(next) = &next_cursor {
                     print_line(&format!(
-                        "  …and {dropped} more (output bounded at 25K chars)"
+                        "  …and {dropped} more (one reply is bounded at 25K chars): \
+                         --cursor {next}"
                     ))?;
                 }
             }
@@ -1442,7 +1488,7 @@ fn main() -> Result<()> {
                     "coverage: {} resolved dependent(s) within depth {depth}; {unresolved} \
                      unresolved call(s) reference '{name}' — best-effort static resolution, MAY \
                      be incomplete (precise tier pending){cut}",
-                    deps.len()
+                    total
                 ))?;
                 // How much to believe the rows above (wicked-estate#194), on the line after the
                 // completeness line a human already reads.
@@ -1457,7 +1503,7 @@ fn main() -> Result<()> {
                     wicked_estate_core::observability::KeyValue::str("symbol.name", name),
                     wicked_estate_core::observability::KeyValue::int(
                         "dependent.count",
-                        deps.len() as i64,
+                        total as i64,
                     ),
                 ],
                 t_cmd_start,
@@ -3686,7 +3732,9 @@ fn main() -> Result<()> {
             println!(
                 "    --json emits `resolve --json`'s rows [{{symbol_id,name,kind,file,line}}] (#199)"
             );
-            println!("  wicked-estate blast-radius <name>   [--depth N] [--json] [--db ...]");
+            println!(
+                "  wicked-estate blast-radius <name>   [--depth N] [--cursor C] [--json] [--db ...]"
+            );
             println!("  wicked-estate path <from> <to>      [--max-depth N] [--json] [--db ...]");
             println!(
                 "    The ordered hops from <from> to <to> — each with its edge kind and confidence."
@@ -3953,6 +4001,10 @@ fn evidence_text(c: &wicked_estate::EdgeConfidence) -> String {
 /// payload is cut mid-document and `JSON.parse` throws — bounding it here fixes that.
 const BLAST_RADIUS_CHAR_BUDGET: usize = 25_000;
 
+/// Room for the #279 paging keys on every page: `"next_cursor":"p1.<offset>.<16 hex>"` and
+/// `"page":{"from":…,"count":…,"total":…}` at their widest (20-digit `usize`s), with margin.
+const BLAST_RADIUS_PAGING_RESERVE: usize = 160;
+
 /// One serialized dependent row for the blast-radius `--json` output.
 /// One `resolve --json` row — also `query --json`'s (#199): `{symbol_id,name,kind,file,line}`.
 fn resolve_row(n: &wicked_estate_core::Node) -> serde_json::Value {
@@ -4000,7 +4052,9 @@ fn cap_blast_radius_rows(
     let envelope = blast_radius_json(name, &[], deps.len(), unresolved, br, depth);
     let envelope_len = serde_json::to_string(&envelope).map_or(usize::MAX, |s| s.len());
     // The empty `[]` already counted in the envelope is replaced by the rows' own `[...]`.
-    let row_budget = (BLAST_RADIUS_CHAR_BUDGET + 2).saturating_sub(envelope_len);
+    // #279: the paging keys (`next_cursor`, `page`) ride every page; reserve their room.
+    let row_budget =
+        (BLAST_RADIUS_CHAR_BUDGET + 2).saturating_sub(envelope_len + BLAST_RADIUS_PAGING_RESERVE);
     let fits = |k: usize| -> bool {
         let rows: Vec<serde_json::Value> =
             deps[..k].iter().map(|n| blast_radius_row(n, br)).collect();

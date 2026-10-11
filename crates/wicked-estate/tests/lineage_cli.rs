@@ -349,7 +349,11 @@ fn default_dependency_lineage_is_the_unchanged_tool_result() {
         "default lineage must not gain the flows_to evidence array: {doc}"
     );
     assert_horizon_keys(&doc);
-    assert_eq!(doc["content"]["searched_depth"], json!(8));
+    assert_eq!(
+        doc["content"]["searched_depth"],
+        json!(24),
+        "#279: the default is the ceiling"
+    );
     assert!(
         dep_ids(&doc)
             .iter()
@@ -390,7 +394,8 @@ fn a_depth_one_answer_excludes_frontier_hops() {
     assert_horizon_keys(&doc);
 }
 
-/// W8.5: the tool owns its depth defaults and ceiling. Default 8, `0` is the tool's floor, `24`
+/// W8.5: the tool owns its depth defaults and ceiling. Default 24 (#279: the ceiling, so the
+/// default answer is not cut at a horizon), `0` is the tool's floor, `24`
 /// is accepted, and an over-ceiling depth is CLAMPED and reported — not refused at argv.
 #[test]
 fn depth_default_zero_ceiling_and_over_ceiling() {
@@ -398,7 +403,7 @@ fn depth_default_zero_ceiling_and_over_ceiling() {
     let store = open(&s);
     let route = node_where(&store, |n| n.name == "RouteParam:id", "RouteParam:id");
     for (given, searched, clamped) in [
-        (None, 8, false),
+        (None, 24, false),
         (Some("0"), 0, false),
         (Some("24"), 24, false),
         (Some("99"), 24, true),
@@ -582,6 +587,104 @@ fn dependencies_and_flows_share_the_tools_single_budget() {
     assert!(
         content_len <= R4_CHAR_BUDGET,
         "content is {content_len} chars; the CLI adds no second budget and must not exceed the tool's"
+    );
+}
+
+/// #279 ("I want the full graph"): the same over-budget answer, paged through the CLI with
+/// `--cursor`, arrives whole. Each page matches the direct tool and MCP, stays under the budget,
+/// and says whether more follow. A cursor from before a re-index changed the answer is refused.
+#[test]
+fn paging_with_cursor_returns_the_whole_answer() {
+    let s = scratch("paging");
+    let write = |n: usize| {
+        let mut src = String::from("export function fan(seed: string) {\n");
+        for i in 0..n {
+            src.push_str(&format!(
+                "    const consumer_with_a_deliberately_long_descriptive_name_{i} = seed;\n"
+            ));
+        }
+        src.push_str("}\n");
+        fs::write(s.join("fan.ts"), src).unwrap();
+    };
+    write(300);
+    index(&s);
+    let store = open(&s);
+    let seed = node_where(
+        &store,
+        |n| n.is_value_flow_node() && n.symbol.as_str().ends_with("fan().:param:seed:"),
+        "seed slot",
+    );
+    let (mut deps, mut hops_seen) = (BTreeSet::new(), BTreeSet::new());
+    let mut cursor: Option<String> = None;
+    let mut first_cursor = None;
+    let mut total = None;
+    let mut pages = 0;
+    loop {
+        let mut cli: Vec<&str> = vec![&seed, "--relation", "flows_to", "--depth", "1"];
+        let mut args = json!({"symbol": seed, "depth": 1, "relation": "flows_to"});
+        if let Some(c) = &cursor {
+            cli.extend(["--cursor", c.as_str()]);
+            args["cursor"] = json!(c);
+        }
+        let doc = assert_parity(&s, &store, &cli, args);
+        pages += 1;
+        let c = &doc["content"];
+        assert!(serde_json::to_string(c).unwrap().len() <= R4_CHAR_BUDGET);
+        assert_eq!(*total.get_or_insert_with(|| c["total"].clone()), c["total"]);
+        for d in dep_ids(&doc) {
+            assert!(deps.insert(d), "a dependency arrived twice");
+        }
+        for h in hops(&doc) {
+            assert!(hops_seen.insert(h), "a hop arrived twice");
+        }
+        cursor = c["next_cursor"].as_str().map(str::to_string);
+        assert_eq!(c["truncated"], json!(cursor.is_some()));
+        if first_cursor.is_none() {
+            first_cursor = cursor.clone();
+        }
+        if cursor.is_none() {
+            break;
+        }
+        assert!(pages < 100, "paging must terminate");
+    }
+    assert!(pages >= 2, "the fixture must overflow one page");
+    assert_eq!(
+        total,
+        Some(json!(deps.len())),
+        "the pages join into `total`"
+    );
+    assert!(deps.len() >= 300, "every consumer arrives: {}", deps.len());
+    assert!(
+        hops_seen.len() >= 300,
+        "every hop arrives: {}",
+        hops_seen.len()
+    );
+
+    // Re-index after a change: page 1's cursor no longer describes this answer.
+    write(301);
+    index(&s);
+    let first = first_cursor.unwrap();
+    let out = run(
+        &s,
+        &[
+            "lineage",
+            &seed,
+            "--relation",
+            "flows_to",
+            "--depth",
+            "1",
+            "--cursor",
+            &first,
+            "--json",
+            "--db",
+            "graph.db",
+        ],
+    );
+    assert!(!out.status.success(), "a stale cursor is refused");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("graph changed"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
@@ -916,7 +1019,9 @@ fn help_lists_lineage_as_static_semantic_lineage_not_taint() {
     assert!(top.status.success());
     let top = String::from_utf8(top.stdout).unwrap();
     assert!(
-        top.contains("wicked-estate lineage <symbol> [--depth N] [--relation flows_to] [--json]"),
+        top.contains(
+            "wicked-estate lineage <symbol> [--depth N] [--relation flows_to] [--cursor S] [--json]"
+        ),
         "{top}"
     );
     let own = run(&s, &["lineage", "--help"]);

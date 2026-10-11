@@ -228,6 +228,10 @@ fn blast_radius_schema() -> Value {
                 "description": "Maximum hop depth (default 8, max 24).",
                 "default": 8,
                 "maximum": 24
+            },
+            "cursor": {
+                "type": "string",
+                "description": "A previous reply's `next_cursor`: returns the next page of the same answer. Keep calling while `next_cursor` is non-null; the answer is complete only when it is null."
             }
         },
         "additionalProperties": false
@@ -360,14 +364,18 @@ fn lineage_schema() -> Value {
             },
             "depth": {
                 "type": "integer",
-                "description": "Maximum hop depth (default 8, max 24).",
-                "default": 8,
+                "description": "Maximum hop depth (default 24 = max: the default answer is the deepest walk).",
+                "default": 24,
                 "maximum": 24
             },
             "relation": {
                 "type": "string",
                 "enum": ["flows_to"],
                 "description": "Optional relation selector. Use 'flows_to' to trace semantic value flow from producer to consumer; omit for default dependency lineage."
+            },
+            "cursor": {
+                "type": "string",
+                "description": "A previous reply's `next_cursor`: returns the next page of the same answer. Keep calling while `next_cursor` is non-null; the answer is complete only when it is null."
             }
         },
         "additionalProperties": false

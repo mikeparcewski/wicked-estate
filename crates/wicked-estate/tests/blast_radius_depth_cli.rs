@@ -221,3 +221,96 @@ fn json_rows_carry_depth_from_the_target() {
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// #279 ("I want the full graph"): `blast-radius --json` bounds one reply at 25K chars, not the
+/// answer. A dependent set wider than one reply pages through `--cursor` until `next_cursor` is
+/// null, and the pages join into every dependent exactly once.
+#[test]
+fn json_pages_through_cursor_to_every_dependent() {
+    let dir = scratch("paging");
+    let n = 600;
+    let mut src = String::from("export function hub(): number { return 1; }\n");
+    for i in 0..n {
+        src.push_str(&format!(
+            "export function a_caller_with_a_deliberately_long_descriptive_name_{i:04}(): number \
+             {{ return hub(); }}\n"
+        ));
+    }
+    fs::write(dir.join("src/fan.ts"), src).unwrap();
+    let db = dir.join("g.db");
+    let db = db.to_str().unwrap();
+    let src_dir = dir.join("src");
+    let out = run(&dir, &["index", src_dir.to_str().unwrap(), "--db", db]);
+    assert!(out.status.success(), "index failed: {out:?}");
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut cursor: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        let mut args = vec!["blast-radius", "hub", "--json", "--db", db];
+        if let Some(c) = &cursor {
+            args.extend(["--cursor", c.as_str()]);
+        }
+        let out = run(&dir, &args);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(
+            stdout.trim_end().len() <= 25_000,
+            "a page is {} chars",
+            stdout.len()
+        );
+        let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        pages += 1;
+        let total = doc["page"]["total"]
+            .as_u64()
+            .expect("every page states the answer's total");
+        assert_eq!(
+            doc["page"]["from"].as_u64().unwrap() as usize,
+            seen.len(),
+            "pages are contiguous"
+        );
+        assert!(total as usize >= n);
+        for d in doc["dependents"].as_array().unwrap() {
+            assert!(
+                seen.insert(d["id"].as_str().unwrap().to_string()),
+                "a row arrived twice"
+            );
+        }
+        cursor = doc["next_cursor"].as_str().map(str::to_string);
+        assert_eq!(
+            doc["truncated_dependents"].as_u64().unwrap() > 0,
+            cursor.is_some(),
+            "rows not in this reply always come with a cursor"
+        );
+        if cursor.is_none() {
+            assert_eq!(doc["page"]["total"], serde_json::json!(seen.len()));
+            break;
+        }
+        assert!(pages < 100, "paging must terminate");
+    }
+    assert!(pages >= 2, "600 wide dependents overflow one reply");
+    let callers = seen
+        .iter()
+        .filter(|id| id.contains("a_caller_with"))
+        .count();
+    assert_eq!(callers, n, "every caller is retrievable");
+
+    // A cursor that does not belong to this query is refused, never read as page 1.
+    let out = run(
+        &dir,
+        &[
+            "blast-radius",
+            "hub",
+            "--json",
+            "--cursor",
+            "p1.1.00",
+            "--db",
+            db,
+        ],
+    );
+    assert!(!out.status.success());
+}
