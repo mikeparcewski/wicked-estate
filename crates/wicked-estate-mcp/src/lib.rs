@@ -942,13 +942,19 @@ pub fn handle_request_unified_ro(
                     None => err_response(&id, -32601, "memory domain not available"),
                 },
 
-                // Proposal queue (DES-MEM-FACETED-001 §5.0). Shares the memory engine handle —
-                // `approve` for a `memory` kind_type reuses the memory capture path. `read_only`
+                // Proposal queue (DES-MEM-FACETED-001 §5.0). The memory engine owns the queue;
+                // knowledge approval uses the knowledge domain writer. `read_only`
                 // already refused `proposal.approve`/`proposal.reject` above (they are write tools);
                 // `proposal.submit`/`proposal.list` fall through here even in read-only mode.
                 "proposal.submit" | "proposal.list" | "proposal.approve" | "proposal.reject" => {
                     match domains {
-                        Some(d) => tools::proposals::dispatch(tool, &id, &params, d.memory),
+                        Some(d) => tools::proposals::dispatch_with_knowledge(
+                            tool,
+                            &id,
+                            &params,
+                            d.memory,
+                            d.knowledge,
+                        ),
                         None => err_response(&id, -32601, "proposal domain not available"),
                     }
                 }
@@ -1127,9 +1133,9 @@ fn memory_tool_schemas() -> Vec<Value> {
 
 fn proposal_tool_schemas() -> Vec<Value> {
     vec![
-        json!({"name":"proposal.submit","description":"Submit an inert proposal to the queue (DES-MEM-FACETED-001 §5.0). SAFE even under --readonly: it lands `pending` and is never recalled or applied until an operator approves it. Provenance (run/unit/agent) is stamped by the server from its launch env — NEVER taken from args. Returns { id }.","inputSchema":{"type":"object","required":["kind_type","payload"],"properties":{"kind_type":{"type":"string","description":"Validated lowercase token routing approval, optionally with one :sub-type. Matches ^[a-z][a-z0-9_-]*(:[a-z][a-z0-9_-]*)?$ (e.g. \"memory\", \"policy:security\"); invalid ⇒ invalid params."},"payload":{"type":"object","description":"Type-specific payload. memory: {content, tier}; policy: {rule, severity, …}."},"facets":{"type":"object","additionalProperties":{"type":"string"},"description":"Orthogonal intent-matching facets carried onto the promoted artifact (e.g. {\"cli\":\"codex\"}). Axis ^[a-z][a-z0-9_-]*$, value non-empty; invalid ⇒ invalid params."}}}}),
-        json!({"name":"proposal.list","description":"List queued proposals, optionally filtered by kind_type and/or state. The approval-queue's source. Each item carries id, kind_type, payload, facets, provenance, state, created_at.","inputSchema":{"type":"object","properties":{"kind_type":{"type":"string","description":"Optional exact kind_type filter (e.g. \"memory\" or \"policy:security\")."},"state":{"type":"string","enum":["pending","approved","rejected"],"description":"Optional lifecycle-state filter."}}}}),
-        json!({"name":"proposal.approve","description":"Approve a pending proposal, promoting it to the ACTIVE store routed by kind_type: \"memory\" materializes a recallable memory (outcome=promoted, active_id); \"policy:*\" writes nothing and hands the payload back for the caller to route to steering (outcome=handed_off, payload). Operator surface — refused under --readonly.","inputSchema":{"type":"object","required":["id"],"properties":{"id":{"type":"string"}}}}),
+        json!({"name":"proposal.submit","description":"Submit an inert memory, knowledge, or policy:<type> proposal to the queue (DES-MEM-FACETED-001 §5.0). SAFE even under --readonly: it lands `pending` and is never recalled or applied until an operator approves it. Provenance (run/unit/agent) is stamped by the server from its launch env — NEVER taken from args. Returns { id }.","inputSchema":{"type":"object","required":["kind_type","payload"],"properties":{"kind_type":{"type":"string","description":"Validated lowercase token routing approval, optionally with one :sub-type. Matches ^[a-z][a-z0-9_-]*(:[a-z][a-z0-9_-]*)?$ (e.g. \"memory\", \"knowledge\", \"policy:security\"); invalid ⇒ invalid params."},"payload":{"type":"object","description":"Type-specific payload. memory: {content, tier}; knowledge: {content, source (required non-empty), class? (doc|section|chunk|concept, default chunk), scope?, observed_at? (ISO-8601 timestamp), source_rev?}; policy: {rule, severity, …}."},"facets":{"type":"object","additionalProperties":{"type":"string"},"description":"Orthogonal intent-matching facets carried onto the promoted artifact (e.g. {\"cli\":\"codex\"}). Axis ^[a-z][a-z0-9_-]*$, value non-empty; invalid ⇒ invalid params."}}}}),
+        json!({"name":"proposal.list","description":"List queued memory, knowledge, or policy:<type> proposals, optionally filtered by kind_type and/or state. The approval-queue's source. Each item carries id, kind_type, payload, facets, provenance, state, created_at.","inputSchema":{"type":"object","properties":{"kind_type":{"type":"string","description":"Optional exact kind_type filter (e.g. \"memory\", \"knowledge\" or \"policy:security\")."},"state":{"type":"string","enum":["pending","approved","rejected"],"description":"Optional lifecycle-state filter."}}}}),
+        json!({"name":"proposal.approve","description":"Approve a pending proposal, promoting it to the ACTIVE store routed by kind_type: \"memory\" materializes a recallable memory and \"knowledge\" a recallable knowledge node with source (outcome=promoted, active_id); \"policy:*\" writes nothing and hands the payload back for the caller to route to steering (outcome=handed_off, payload). Operator surface — refused under --readonly.","inputSchema":{"type":"object","required":["id"],"properties":{"id":{"type":"string"}}}}),
         json!({"name":"proposal.reject","description":"Reject a pending proposal (marks it rejected; it never becomes active). Operator surface — refused under --readonly.","inputSchema":{"type":"object","required":["id"],"properties":{"id":{"type":"string"}}}}),
     ]
 }

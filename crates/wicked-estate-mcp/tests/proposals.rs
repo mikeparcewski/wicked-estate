@@ -53,6 +53,439 @@ fn result_payload(resp: &Value) -> Value {
 }
 
 #[test]
+fn knowledge_proposal_submit_readonly_preserves_payload_and_facets() {
+    let store = SqliteStore::in_memory().unwrap();
+    let mut mem = MemoryEngine::in_memory().unwrap();
+    let mut know = KnowledgeEngine::in_memory().unwrap();
+    let payload = json!({
+        "content": "The ledger is rebuilt nightly from the journal.",
+        "class": "concept",
+        "scope": "project:ledger",
+        "source": "docs/ledger.md",
+        "observed_at": "2026-10-11T12:00:00Z",
+        "source_rev": "abc123"
+    });
+    let resp = call(
+        &store,
+        &mut mem,
+        &mut know,
+        "proposal.submit",
+        json!({"kind_type": "knowledge", "payload": payload, "facets": {"repo": "ledger"}}),
+        true,
+    );
+    let pid = result_payload(&resp)["id"].as_str().unwrap().to_string();
+    let pending = mem
+        .list_proposals(Some("knowledge"), Some(ProposalState::Pending))
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, pid);
+    assert_eq!(pending[0].payload, payload);
+    assert_eq!(pending[0].facets.get("repo"), Some("ledger"));
+    assert_eq!(know.count(None, None).unwrap(), 0);
+    assert_eq!(mem.count().unwrap(), 0);
+    assert!(
+        KnowledgeApi::recall(&mut know, "ledger", 500, None, 1)
+            .unwrap()
+            .is_empty()
+    );
+    for tool in ["proposal.approve", "proposal.reject"] {
+        let resp = call(&store, &mut mem, &mut know, tool, json!({"id": pid}), true);
+        assert_eq!(resp["error"]["code"], -32601);
+    }
+    let listed = call(
+        &store,
+        &mut mem,
+        &mut know,
+        "proposal.list",
+        json!({"kind_type": "knowledge", "state": "pending"}),
+        true,
+    );
+    let listed = result_payload(&listed);
+    assert_eq!(listed["proposals"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["proposals"][0]["id"], pid);
+}
+
+#[test]
+fn knowledge_proposal_submit_requires_source_and_content() {
+    let store = SqliteStore::in_memory().unwrap();
+    let mut mem = MemoryEngine::in_memory().unwrap();
+    let mut know = KnowledgeEngine::in_memory().unwrap();
+    for field in ["source", "content"] {
+        for bad in [
+            None,
+            Some(json!(null)),
+            Some(json!("")),
+            Some(json!("  ")),
+            Some(json!(7)),
+        ] {
+            let mut payload = json!({"content": "ledger fact", "source": "docs/ledger.md"});
+            match bad {
+                None => {
+                    payload.as_object_mut().unwrap().remove(field);
+                }
+                Some(v) => {
+                    payload[field] = v;
+                }
+            }
+            let resp = call(
+                &store,
+                &mut mem,
+                &mut know,
+                "proposal.submit",
+                json!({"kind_type": "knowledge", "payload": payload}),
+                true,
+            );
+            assert_eq!(resp["error"]["code"], -32602, "{resp}");
+            assert!(
+                resp["error"]["message"].as_str().unwrap().contains(field),
+                "{resp}"
+            );
+        }
+    }
+    assert!(mem.list_proposals(None, None).unwrap().is_empty());
+    assert_eq!(know.count(None, None).unwrap(), 0);
+}
+
+#[test]
+fn knowledge_proposal_approve_writes_recallable_node_with_source() {
+    let store = SqliteStore::in_memory().unwrap();
+    let mut mem = MemoryEngine::in_memory().unwrap();
+    let mut know = KnowledgeEngine::in_memory().unwrap();
+    let submitted = call(
+        &store,
+        &mut mem,
+        &mut know,
+        "proposal.submit",
+        json!({"kind_type": "knowledge", "facets": {"repo": "ledger"}, "payload": {
+            "content": "The reconciliation ledger is rebuilt nightly from the journal.",
+            "scope": "project:ledger", "source": "docs/ledger.md"
+        }}),
+        true,
+    );
+    let pid = result_payload(&submitted)["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let approved = call(
+        &store,
+        &mut mem,
+        &mut know,
+        "proposal.approve",
+        json!({"id": pid}),
+        false,
+    );
+    let approved = result_payload(&approved);
+    assert_eq!(approved["outcome"], "promoted");
+    let active_id = approved["active_id"].as_str().unwrap();
+    let expected = wicked_estate_core::Symbol::synthetic("kchunk", format!("proposal:{pid}")).id();
+    assert_eq!(active_id, expected.0);
+    let node = know.node(&expected).unwrap().unwrap();
+    assert_eq!(node.metadata["facets"], json!({"repo": "ledger"}));
+    let node = wicked_estate_knowledge::KNode::from_node(&node).unwrap();
+    assert_eq!(node.scope, "project:ledger");
+    assert_eq!(node.source, "docs/ledger.md");
+    let recalled = KnowledgeApi::recall(
+        &mut know,
+        "reconciliation ledger",
+        500,
+        Some("project:ledger"),
+        1,
+    )
+    .unwrap();
+    assert!(
+        recalled
+            .iter()
+            .any(|r| r.node_id == active_id && r.source == "docs/ledger.md")
+    );
+    assert_eq!(know.count(None, None).unwrap(), 1);
+    assert_eq!(mem.count().unwrap(), 0);
+    let approved_queue = mem
+        .list_proposals(Some("knowledge"), Some(ProposalState::Approved))
+        .unwrap();
+    assert_eq!(approved_queue.len(), 1);
+    assert_eq!(approved_queue[0].id, pid);
+    for tool in ["proposal.approve", "proposal.reject"] {
+        let again = call(&store, &mut mem, &mut know, tool, json!({"id": pid}), false);
+        assert!(
+            again.get("error").is_some(),
+            "decided proposals cannot be decided again: {again}"
+        );
+    }
+}
+
+#[test]
+fn knowledge_proposal_retry_after_write_keeps_one_node() {
+    let store = SqliteStore::in_memory().unwrap();
+    let mut mem = MemoryEngine::in_memory().unwrap();
+    let mut know = KnowledgeEngine::in_memory().unwrap();
+    let pid = mem
+        .submit_proposal(
+            "knowledge",
+            json!({"content": "retry ledger fact", "source": "docs/ledger.md"}),
+            Default::default(),
+            Default::default(),
+            1,
+        )
+        .unwrap();
+    // Inject a failure after writing the node but before the queue can mark it Approved.
+    let failed = mem.approve_proposal_with_knowledge(&pid, 2, &mut |proposal, now| {
+        KnowledgeApi::write_proposal(&mut know, proposal, now)?;
+        anyhow::bail!("injected failure after knowledge write")
+    });
+    assert!(failed.is_err());
+    assert_eq!(
+        mem.list_proposals(Some("knowledge"), Some(ProposalState::Pending))
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(know.count(None, None).unwrap(), 1);
+    let retried = call(
+        &store,
+        &mut mem,
+        &mut know,
+        "proposal.approve",
+        json!({"id": pid}),
+        false,
+    );
+    let retried = result_payload(&retried);
+    assert_eq!(retried["outcome"], "promoted");
+    assert_eq!(
+        retried["active_id"],
+        wicked_estate_core::Symbol::synthetic("kchunk", format!("proposal:{pid}"))
+            .id()
+            .0
+    );
+    assert_eq!(know.count(None, None).unwrap(), 1);
+    assert_eq!(
+        mem.list_proposals(Some("knowledge"), Some(ProposalState::Approved))
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn knowledge_proposal_reject_writes_nothing() {
+    let store = SqliteStore::in_memory().unwrap();
+    let mut mem = MemoryEngine::in_memory().unwrap();
+    let mut know = KnowledgeEngine::in_memory().unwrap();
+    let submitted = call(
+        &store,
+        &mut mem,
+        &mut know,
+        "proposal.submit",
+        json!({"kind_type": "knowledge", "payload": {"content": "discarded ledger fact", "source": "docs/ledger.md"}}),
+        true,
+    );
+    let pid = result_payload(&submitted)["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let rejected = call(
+        &store,
+        &mut mem,
+        &mut know,
+        "proposal.reject",
+        json!({"id": pid}),
+        false,
+    );
+    assert_eq!(result_payload(&rejected)["ok"], true);
+    assert_eq!(know.count(None, None).unwrap(), 0);
+    assert_eq!(mem.count().unwrap(), 0);
+    assert!(
+        KnowledgeApi::recall(&mut know, "discarded ledger", 500, None, 1)
+            .unwrap()
+            .is_empty()
+    );
+    let rejected_queue = mem
+        .list_proposals(Some("knowledge"), Some(ProposalState::Rejected))
+        .unwrap();
+    assert_eq!(rejected_queue.len(), 1);
+    assert_eq!(rejected_queue[0].id, pid);
+    let approved = call(
+        &store,
+        &mut mem,
+        &mut know,
+        "proposal.approve",
+        json!({"id": pid}),
+        false,
+    );
+    assert!(approved.get("error").is_some());
+    assert_eq!(know.count(None, None).unwrap(), 0);
+}
+
+#[test]
+fn knowledge_proposal_submit_validates_optional_fields_and_facets() {
+    let store = SqliteStore::in_memory().unwrap();
+    let mut mem = MemoryEngine::in_memory().unwrap();
+    let mut know = KnowledgeEngine::in_memory().unwrap();
+    for (field, bad) in [
+        ("class", json!("wiki")),
+        ("class", json!(null)),
+        ("scope", json!(3)),
+        ("source_rev", json!(false)),
+        ("observed_at", json!(3)),
+        ("observed_at", json!("not-a-date")),
+        ("observed_at", json!("2026-02-30T12:00:00Z")),
+    ] {
+        let mut payload = json!({"content": "ledger fact", "source": "docs/ledger.md"});
+        payload[field] = bad;
+        let resp = call(
+            &store,
+            &mut mem,
+            &mut know,
+            "proposal.submit",
+            json!({"kind_type": "knowledge", "payload": payload}),
+            true,
+        );
+        assert_eq!(resp["error"]["code"], -32602, "{resp}");
+        assert!(
+            resp["error"]["message"].as_str().unwrap().contains(field),
+            "{resp}"
+        );
+    }
+    let resp = call(
+        &store,
+        &mut mem,
+        &mut know,
+        "proposal.submit",
+        json!({
+            "kind_type": "knowledge", "payload": {"content": "ledger fact", "source": "docs/ledger.md"},
+            "facets": {"repo": ""}
+        }),
+        true,
+    );
+    assert_eq!(resp["error"]["code"], -32602);
+    assert!(mem.list_proposals(None, None).unwrap().is_empty());
+}
+
+#[test]
+fn knowledge_proposal_approve_supports_all_classes() {
+    let store = SqliteStore::in_memory().unwrap();
+    let mut mem = MemoryEngine::in_memory().unwrap();
+    let mut know = KnowledgeEngine::in_memory().unwrap();
+    for class in ["doc", "section", "chunk", "concept"] {
+        let submitted = call(
+            &store,
+            &mut mem,
+            &mut know,
+            "proposal.submit",
+            json!({
+                "kind_type": "knowledge", "payload": {"content": "ledger fact", "source": "docs/ledger.md", "class": class}
+            }),
+            true,
+        );
+        let pid = result_payload(&submitted)["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let approved = call(
+            &store,
+            &mut mem,
+            &mut know,
+            "proposal.approve",
+            json!({"id": pid}),
+            false,
+        );
+        let approved = result_payload(&approved);
+        let active_id =
+            wicked_estate_core::SymbolId(approved["active_id"].as_str().unwrap().to_string());
+        let node = know.node(&active_id).unwrap().unwrap();
+        assert_eq!(
+            node.kind,
+            wicked_estate_core::NodeKind::Other(format!("k{class}"))
+        );
+        let node = wicked_estate_knowledge::KNode::from_node(&node).unwrap();
+        assert_eq!(node.scope, "");
+        assert_eq!(node.source, "docs/ledger.md");
+    }
+    assert_eq!(know.count(None, None).unwrap(), 4);
+}
+
+#[test]
+fn proposal_approve_memory_and_policy_routing_unchanged() {
+    let store = SqliteStore::in_memory().unwrap();
+    let mut mem = MemoryEngine::in_memory().unwrap();
+    let mut know = KnowledgeEngine::in_memory().unwrap();
+    for (kind, payload, outcome) in [
+        (
+            "memory",
+            json!({"content": "codex needs workspace-write", "tier": "semantic"}),
+            "promoted",
+        ),
+        (
+            "policy:security",
+            json!({"rule": "no secrets in logs", "severity": "error"}),
+            "handed_off",
+        ),
+    ] {
+        let submitted = call(
+            &store,
+            &mut mem,
+            &mut know,
+            "proposal.submit",
+            json!({"kind_type": kind, "payload": payload}),
+            true,
+        );
+        let pid = result_payload(&submitted)["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let approved = call(
+            &store,
+            &mut mem,
+            &mut know,
+            "proposal.approve",
+            json!({"id": pid}),
+            false,
+        );
+        let approved = result_payload(&approved);
+        assert_eq!(approved["outcome"], outcome);
+        if kind.starts_with("policy:") {
+            assert_eq!(approved["payload"], payload);
+        }
+        let listed = call(
+            &store,
+            &mut mem,
+            &mut know,
+            "proposal.list",
+            json!({"kind_type": kind, "state": "approved"}),
+            true,
+        );
+        let listed = result_payload(&listed);
+        assert_eq!(listed["proposals"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["proposals"][0]["id"], pid);
+    }
+    assert_eq!(mem.count().unwrap(), 1);
+    assert_eq!(know.count(None, None).unwrap(), 0);
+    let recalled = MemoryApi::recall(
+        &mem,
+        &wicked_estate_memory_core::RecallQuery::new("codex workspace", "", 500, 1),
+    )
+    .unwrap();
+    assert!(
+        recalled
+            .iter()
+            .any(|r| r.content.contains("workspace-write"))
+    );
+    let listed = call(
+        &store,
+        &mut mem,
+        &mut know,
+        "proposal.list",
+        json!({"kind_type": "knowledge"}),
+        true,
+    );
+    assert!(
+        result_payload(&listed)["proposals"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn readonly_allows_proposal_submit_but_refuses_approve_and_reject() {
     let store = SqliteStore::in_memory().unwrap();
     let mut mem = MemoryEngine::in_memory().unwrap();

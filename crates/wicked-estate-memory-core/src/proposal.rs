@@ -25,7 +25,7 @@ pub const PROPOSAL_NODE_KIND: &str = "proposal";
 
 /// Metadata keys for the proposal fields (the opaque extension bag; estate-core never reads these).
 pub mod meta_keys {
-    /// Validated lowercase kind_type token, e.g. `"memory"` or `"policy:security"`.
+    /// Validated lowercase kind_type token, e.g. `"memory"`, `"knowledge"` or `"policy:security"`.
     pub const KIND_TYPE: &str = "kind_type";
     /// Type-specific payload, stored as a JSON **string** (round-tripped via serde_json).
     pub const PAYLOAD: &str = "payload";
@@ -93,7 +93,7 @@ pub fn valid_kind_type(kind_type: &str) -> bool {
 pub struct Proposal {
     /// Stable id (uuid-v7). The node's symbol is `Synthetic{scheme:"proposal", id}`.
     pub id: String,
-    /// Validated kind_type token routing approval (`memory`, `policy:<steering_type>`, …).
+    /// Validated kind_type token routing approval (`memory`, `knowledge`, `policy:<steering_type>`, …).
     pub kind_type: String,
     /// Type-specific payload (memory: `{content, tier}`; policy: `{rule, severity, …}`).
     pub payload: Value,
@@ -231,8 +231,8 @@ impl Proposal {
 /// The outcome of approving a proposal — routed by `kind_type` (DES-MEM-FACETED-001 §5.0).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ApproveOutcome {
-    /// `memory` kind_type: the payload was materialized into the ACTIVE memory store; `active_id`
-    /// is the new memory's estate symbol id (now recallable).
+    /// `memory` / `knowledge`: the payload was materialized into its ACTIVE store; `active_id`
+    /// is the new node's estate symbol id (now recallable).
     Promoted { active_id: String },
     /// `policy:*` kind_type: estate has no rules-write here, so the payload is handed back for the
     /// CALLER (crew) to route into steering. The proposal is marked `Approved`; nothing is written
@@ -258,6 +258,7 @@ mod tests {
     #[test]
     fn kind_type_validation() {
         assert!(valid_kind_type("memory"));
+        assert!(valid_kind_type("knowledge"));
         assert!(valid_kind_type("policy"));
         assert!(valid_kind_type("policy:security"));
         assert!(valid_kind_type("a1_b-c:d2_e-f"));

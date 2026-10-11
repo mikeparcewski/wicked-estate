@@ -634,9 +634,9 @@ development binary needs `wicked-estate index <path> --force` once.
 
 | Tool | Description |
 |------|-------------|
-| `proposal.submit` | Submit a governed-knowledge proposal (memory capture or policy). A SAFE write — lands `Pending`, inert until approved (allowed under `--readonly`). |
-| `proposal.list` | List queued proposals, optionally by kind_type / state. |
-| `proposal.approve` | Approve a proposal → promote it to the active store (memory) or hand it off (policy). |
+| `proposal.submit` | Submit a governed proposal (`memory`, `knowledge`, or `policy:<type>`). Knowledge requires non-empty `content` and `source`; optional `class` defaults to `chunk`, with `scope`, ISO-8601 `observed_at`, and `source_rev` carried in the payload. A SAFE write — lands `Pending`, inert until approved (allowed under `--readonly`). |
+| `proposal.list` | List queued proposals, optionally by exact kind_type (`memory`, `knowledge`, or `policy:<type>`) / state. |
+| `proposal.approve` | Approve a proposal → promote it to the active memory or knowledge store, or hand it off (policy). |
 | `proposal.reject` | Reject a proposal. |
 
 All tools honor the agent-behavior rules from `docs/agent-behavior-rules.md`:
