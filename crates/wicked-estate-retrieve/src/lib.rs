@@ -34,6 +34,7 @@ use wicked_estate_core::{
 // W12 — one-shot context bundle tool (seed + ranked neighbours + budgeted stubs). Lives in its
 // own module; reuses `render_stub` / `render_context` below for budgeting (no reinvention).
 pub mod context_bundle;
+mod paging;
 pub use context_bundle::ContextBundle;
 
 // arch-R2 — faceted conformance-rule recall over MCP (the wire twin of wicked-governance's
@@ -1104,15 +1105,17 @@ impl RetrievalTool for Path {
 ///
 /// **Request shape**
 /// ```json
-/// { "symbol": "<id>", "depth": 8 }
+/// { "symbol": "<id>", "depth": 8, "cursor": "<next_cursor>" }
 /// ```
 /// * `depth` — optional, default 8, max 24.
+/// * `cursor` — optional, a previous page's `next_cursor`, for the next dependents (#279).
 ///
 /// **Response `content` shape**
 /// ```json
 /// { "dependents": [ { "symbol": "…", "name": "…", "kind": "…", "file": "…",
 ///                     "line": 11, "line_1based": 12, "depth": 1 }, … ],
-///   "total": 5, "truncated": false,
+///   "total": 5, "truncated": false, "next_cursor": null,
+///   "page": { "from": 0, "count": 5, "total": 5 },
 ///   "unresolved_callers": 2,
 ///   "confidence": { "min": 0.6, "avg": 0.9, "edge_count": 3 },
 ///   "summary": { "total": 5,
@@ -1140,7 +1143,8 @@ impl RetrievalTool for BlastRadius {
         "Transitive dependents of a symbol (reverse-reachability on Calls edges). \
          Answers 'what breaks if I change this symbol?' \
          Reports coverage: resolved dependents plus the count of unresolved call-site \
-         references that could not be bound (potential missing dependents)."
+         references that could not be bound (potential missing dependents). The answer is \
+         paged: while `next_cursor` is non-null, call again with `cursor` set to it."
     }
 
     fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
@@ -1152,6 +1156,7 @@ impl RetrievalTool for BlastRadius {
                         "dependents": [],
                         "total": 0,
                         "truncated": false,
+                        "next_cursor": null,
                         "unresolved_callers": 0,
                         "confidence": { "min": null, "avg": null, "edge_count": 0 },
                         // (#227) The cause keys every other reply carries.
@@ -1221,7 +1226,7 @@ impl RetrievalTool for BlastRadius {
             ));
         }
 
-        let dependents: Vec<Value> = dependent_nodes
+        let mut dependents: Vec<Value> = dependent_nodes
             .iter()
             .map(|n| {
                 let depth = subgraph.depths.get(n.symbol.as_str()).copied().unwrap_or(0);
@@ -1236,6 +1241,11 @@ impl RetrievalTool for BlastRadius {
                 })
             })
             .collect();
+        // (depth, symbol): nearest first, and one order in every process, so pages join (#279).
+        dependents.sort_by(|a, b| {
+            (a["depth"].as_u64(), a["symbol"].as_str())
+                .cmp(&(b["depth"].as_u64(), b["symbol"].as_str()))
+        });
 
         // Compact summary (Deliverable 4): counts by kind, top files by member count, and
         // (best-effort) top members by personalized PageRank seeded on the start symbol.
@@ -1271,27 +1281,37 @@ impl RetrievalTool for BlastRadius {
         }
 
         // R4 (DoD-A8) — a File-node start returns every transitive importer at depth 8, so the
-        // dependents array can blow the 25K-char budget on a wide graph. Cap it like Lineage
-        // does, with a loud truncation diagnostic. The summary/confidence envelope is measured,
-        // not guessed, so the cap accounts for the real payload.
-        let envelope_overhead = 400
+        // dependents array can blow the 25K-char budget on a wide graph. The budget bounds ONE
+        // reply; #279 pages the answer: a page that does not carry every remaining dependent says
+        // so (`truncated`) and returns `next_cursor` (crate::paging). The summary/confidence
+        // envelope is measured, not guessed, so the cap accounts for the real payload.
+        let total_dependents = dependents.len();
+        let query = format!("{id_str}|{max_depth}");
+        let fp = paging::fingerprint(self.name(), &query, &[&dependents]);
+        let from = paging::start_offsets(self.name(), request, &[total_dependents], fp)?[0];
+        let envelope_overhead = 640
             + serde_json::to_string(&summary)
                 .map(|s| s.len())
                 .unwrap_or(0)
             + serde_json::to_string(&conf_json)
                 .map(|s| s.len())
                 .unwrap_or(0);
-        let (dependents, dropped) = cap_rows_to_budget(dependents, envelope_overhead);
-        if dropped > 0 {
+        let (mut page, _) = cap_rows_to_budget(dependents[from..].to_vec(), envelope_overhead);
+        if page.is_empty() && from < total_dependents {
+            // Progress: a page always carries at least one remaining row.
+            page.push(dependents[from].clone());
+        }
+        let to = from + page.len();
+        let next_cursor = (to < total_dependents).then(|| paging::encode(&[to], fp));
+        if let Some(next) = &next_cursor {
             diag.push(format!(
-                "BlastRadius: result truncated to {} dependent(s) to stay under the \
-                 {}-char R4 budget ({} dropped); lower `depth`",
-                dependents.len(),
-                R4_CHAR_BUDGET,
-                dropped
+                "BlastRadius: page holds dependents {from}..{to} of {total_dependents} (the \
+                 {R4_CHAR_BUDGET}-char budget bounds one reply, not the answer); pass `cursor`: \
+                 \"{next}\" for the rest"
             ));
         }
-        let total = dependents.len();
+        let dependents = page;
+        let total = total_dependents;
 
         // Coverage note — always emitted (even when unresolved_callers == 0) so callers always
         // know the completeness posture of the result.
@@ -1306,8 +1326,10 @@ impl RetrievalTool for BlastRadius {
             content: json!({
                 "dependents": dependents,
                 "total": total,
-                "truncated": subgraph.truncated || dropped > 0,
-                // `truncated` folds the R4 char-budget drop too, so it cannot say WHY. These
+                "truncated": subgraph.truncated || next_cursor.is_some(),
+                "next_cursor": next_cursor,
+                "page": { "from": from, "count": to - from, "total": total_dependents },
+                // `truncated` folds a partial page too, so it cannot say WHY. These
                 // name the traversal-side causes (wicked-estate#190); `searched_depth` tells a
                 // caller what to raise.
                 "depth_horizon_reached": subgraph.depth_horizon_reached,
@@ -1419,10 +1441,12 @@ fn blast_summary(
 ///
 /// **Request shape**
 /// ```json
-/// { "symbol": "<id>", "depth": <n>, "relation": "flows_to" }
+/// { "symbol": "<id>", "depth": <n>, "relation": "flows_to", "cursor": "<next_cursor>" }
 /// ```
 /// * `symbol` (required) — stable [`SymbolId`] of the start symbol.
-/// * `depth`  (optional, default 8, max 24) — maximum traversal hops.
+/// * `depth`  (optional, default 24 = max) — maximum traversal hops (#279: the default answer is
+///   the deepest walk the tool accepts).
+/// * `cursor` (optional) — a previous page's `next_cursor`, for the next rows of the same answer.
 /// * `relation` (optional) — when set to `"flows_to"`, walks stored semantic value-flow edges
 ///   from producer to consumer. Omit it for the existing dependency-lineage behavior.
 ///
@@ -1430,10 +1454,13 @@ fn blast_summary(
 /// ```json
 /// { "dependencies": [ { "symbol": "…", "name": "…", "kind": "…",
 ///                        "file": "…", "line": 0, "depth": 1 }, … ],
-///   "total": 5, "truncated": false,
+///   "total": 5, "truncated": false, "next_cursor": null,
+///   "page": { "dependencies": { "from": 0, "count": 5, "total": 5 },
+///             "flows": { "from": 0, "count": 0, "total": 0 } },
 ///   "confidence": { "min": 0.6, "avg": 0.9, "edge_count": 3 } }
 /// ```
-/// The start symbol itself is **excluded** from `dependencies`.
+/// The start symbol itself is **excluded** from `dependencies`. `total` counts the whole answer;
+/// a page whose rows do not complete it has `truncated: true` and a `next_cursor` (#279).
 /// Agent-behavior rules honored: R1 (no error on empty), R5 (staleness note), R7 (low-confidence
 /// flag), R4 (depth + node caps).
 #[derive(Debug, Default)]
@@ -1452,7 +1479,9 @@ impl RetrievalTool for Lineage {
          `dependencies` are then the consumers). \
          Answers 'what does this symbol depend on?' — the complement of BlastRadius. \
          Use to understand the full dependency chain before a refactor or to build a \
-         change-impact picture from the dependency side."
+         change-impact picture from the dependency side. The answer is paged: while \
+         `next_cursor` is non-null, call again with `cursor` set to it to get the rest; \
+         the answer is complete only when `next_cursor` is null."
     }
 
     fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
@@ -1480,8 +1509,12 @@ impl RetrievalTool for Lineage {
             "dependency"
         };
 
+        // #279 operator ruling ("I want the full graph"): a Lineage answer defaults to the deepest
+        // walk the tool accepts, so the default query is not cut at a horizon the caller never
+        // chose. A horizon or node cap that still bites is reported (`depth_horizon_reached`,
+        // `node_cap_reached`), never silent.
         let max_depth = opt_u64(request, "depth")
-            .unwrap_or(8)
+            .unwrap_or(BLAST_DEPTH_CEILING as u64)
             .min(BLAST_DEPTH_CEILING as u64) as u32;
 
         let id_str = match request.get("symbol").and_then(|v| v.as_str()) {
@@ -1495,6 +1528,7 @@ impl RetrievalTool for Lineage {
                         "dependencies": [],
                         "total": 0,
                         "truncated": false,
+                        "next_cursor": null,
                         "depth_horizon_reached": false,
                         "node_cap_reached": false,
                         "searched_depth": max_depth,
@@ -1537,8 +1571,9 @@ impl RetrievalTool for Lineage {
 
         let subgraph = store.traverse(&start, &spec)?;
 
-        // Exclude the start node itself.
-        let dependencies: Vec<Value> = subgraph
+        // Exclude the start node itself. Rows are ordered (depth, symbol): nearest first, and the
+        // same order in every process, so the pages of one answer join into exactly that answer.
+        let mut dependencies: Vec<Value> = subgraph
             .nodes
             .iter()
             .filter(|n| n.symbol.as_str() != id_str)
@@ -1554,6 +1589,10 @@ impl RetrievalTool for Lineage {
                 })
             })
             .collect();
+        dependencies.sort_by(|a, b| {
+            (a["depth"].as_u64(), a["symbol"].as_str())
+                .cmp(&(b["depth"].as_u64(), b["symbol"].as_str()))
+        });
 
         // The edges this answer describes. Default lineage keeps its historical summary over the
         // whole traversal. In `flows_to` mode it is the flow hops between admitted nodes only:
@@ -1624,69 +1663,92 @@ impl RetrievalTool for Lineage {
         // and on whether the fact came from syntax, a 0.5-confidence resolved call, or a
         // framework naming convention. The node rows carry none of that, so the flow edges ride
         // alongside them with their classification, evidence and site — the `described` hops.
-        let flow_rows: Option<Vec<Value>> =
-            semantic_flow.then(|| described.iter().map(|edge| flow_hop_row(edge)).collect());
+        let flow_rows: Option<Vec<Value>> = semantic_flow.then(|| {
+            let mut rows: Vec<Value> = described.iter().map(|edge| flow_hop_row(edge)).collect();
+            rows.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+            rows
+        });
 
-        // R4 (DoD-A8) — `max_nodes=5000` bounds the traversal, but 5000 wide rows can still exceed
-        // the 25K-char budget. ONE budget covers the whole content: in `flows_to` mode the
-        // `dependencies` and `flows` arrays share it (each is guaranteed half when both
-        // overflow, and either may use what the other leaves), and a row dropped from EITHER
-        // array sets `truncated` — a cut evidence list must never read as complete.
+        // R4 (DoD-A8) bounds ONE reply at the 25K-char budget; #279 makes the ANSWER complete
+        // through paging. A page that cannot carry every remaining row says so (`truncated`) and
+        // returns `next_cursor`; the caller passes it back as `cursor` for the next rows of the
+        // same answer (crate::paging). Within a page, the `dependencies` and `flows` arrays share
+        // the budget: each is guaranteed half when both overflow, and either may use what the
+        // other leaves.
+        let empty: Vec<Value> = Vec::new();
+        let all_flows: &[Value] = flow_rows.as_deref().unwrap_or(&empty);
+        let total_deps = dependencies.len();
+        let total_flows = all_flows.len();
+        let query = format!("{relation_echo}|{id_str}|{max_depth}");
+        let fp = paging::fingerprint(self.name(), &query, &[&dependencies, all_flows]);
+        let starts = paging::start_offsets(self.name(), request, &[total_deps, total_flows], fp)?;
+        let (dep_from, flow_from) = (starts[0], starts[1]);
+        let deps_rest: Vec<Value> = dependencies[dep_from..].to_vec();
+        let flows_rest: Option<Vec<Value>> =
+            flow_rows.as_ref().map(|_| all_flows[flow_from..].to_vec());
         let available = R4_CHAR_BUDGET.saturating_sub(LINEAGE_ENVELOPE_OVERHEAD);
         let serialized_len =
             |rows: &[Value]| serde_json::to_string(rows).map_or(usize::MAX, |s| s.len());
-        let deps_budget = match &flow_rows {
+        let deps_budget = match &flows_rest {
             None => available,
             Some(flows) => {
                 let flows_len = serialized_len(flows);
-                if serialized_len(&dependencies).saturating_add(flows_len) <= available {
+                if serialized_len(&deps_rest).saturating_add(flows_len) <= available {
                     available
                 } else {
                     (available / 2).max(available.saturating_sub(flows_len))
                 }
             }
         };
-        let (dependencies, dropped) =
-            cap_rows_to_budget(dependencies, R4_CHAR_BUDGET.saturating_sub(deps_budget));
-        if dropped > 0 {
+        let deps_rest_len = deps_rest.len();
+        let (mut page_deps, _) =
+            cap_rows_to_budget(deps_rest, R4_CHAR_BUDGET.saturating_sub(deps_budget));
+        let mut page_flows = flows_rest.map(|rows| {
+            let used = LINEAGE_ENVELOPE_OVERHEAD.saturating_add(serialized_len(&page_deps));
+            cap_rows_to_budget(rows, used).0
+        });
+        // Progress: a page always carries at least one remaining row, so paging terminates even
+        // if a single row were wider than the budget.
+        let flows_left = total_flows - flow_from;
+        if page_deps.is_empty() && page_flows.as_ref().is_none_or(Vec::is_empty) {
+            if deps_rest_len > 0 {
+                page_deps.push(dependencies[dep_from].clone());
+            } else if flows_left > 0 {
+                page_flows = Some(vec![all_flows[flow_from].clone()]);
+            }
+        }
+        let page_flow_count = page_flows.as_ref().map_or(0, Vec::len);
+        let (dep_to, flow_to) = (dep_from + page_deps.len(), flow_from + page_flow_count);
+        let more = dep_to < total_deps || flow_to < total_flows;
+        let next_cursor = more.then(|| paging::encode(&[dep_to, flow_to], fp));
+        if let Some(next) = &next_cursor {
             diag.push(format!(
-                "Lineage: result truncated to {} dependency/dependencies to stay under the \
-                 {}-char R4 budget ({} dropped); lower `depth`",
-                dependencies.len(),
-                R4_CHAR_BUDGET,
-                dropped
+                "Lineage: page holds dependencies {dep_from}..{dep_to} of {total_deps} and flow \
+                 rows {flow_from}..{flow_to} of {total_flows} (the {R4_CHAR_BUDGET}-char budget \
+                 bounds one reply, not the answer); pass `cursor`: \"{next}\" for the rest"
             ));
         }
-        let flow_rows = flow_rows.map(|rows| {
-            let used = LINEAGE_ENVELOPE_OVERHEAD.saturating_add(serialized_len(&dependencies));
-            let total_flows = rows.len();
-            let (rows, flow_dropped) = cap_rows_to_budget(rows, used);
-            if flow_dropped > 0 {
-                diag.push(format!(
-                    "Lineage: result truncated to {} of {total_flows} flow-evidence row(s) to \
-                     stay under the {R4_CHAR_BUDGET}-char R4 budget ({flow_dropped} dropped); \
-                     the `dependencies` list shares the budget, so a lower `depth` or a \
-                     narrower start returns the full evidence",
-                    rows.len()
-                ));
-            }
-            (rows, flow_dropped)
-        });
-        let flow_dropped = flow_rows.as_ref().map_or(0, |(_, d)| *d);
-        let truncated = node_truncated || dropped > 0 || flow_dropped > 0;
-        let total = dependencies.len();
+        let truncated = node_truncated || more;
+        let dependencies = page_deps;
+        let flow_rows = page_flows;
+        let total = total_deps;
 
         let mut content = json!({
             "relation": relation_echo,
             "dependencies": dependencies,
             "total": total,
             "truncated": truncated,
+            "next_cursor": next_cursor,
+            "page": {
+                "dependencies": { "from": dep_from, "count": dep_to - dep_from, "total": total_deps },
+                "flows": { "from": flow_from, "count": flow_to - flow_from, "total": total_flows },
+            },
             "depth_horizon_reached": subgraph.depth_horizon_reached,
             "node_cap_reached": subgraph.node_cap_reached,
             "searched_depth": max_depth,
             "confidence": conf_json,
         });
-        if let Some((rows, _)) = flow_rows {
+        if let Some(rows) = flow_rows {
             content["flows"] = Value::Array(rows);
         }
 
@@ -1746,9 +1808,10 @@ fn flow_hop_row(edge: &wicked_estate_core::Edge) -> Value {
 const R4_CHAR_BUDGET: usize = 25_000;
 
 /// Headroom for Lineage's non-array keys: `total`, `truncated`, the three #222 horizon keys,
-/// `confidence` (two f32s rendered at full precision plus `edge_count`) and the `flows` key, with
-/// margin. Everything else in the payload is one of the two capped row arrays.
-const LINEAGE_ENVELOPE_OVERHEAD: usize = 320;
+/// `confidence` (two f32s rendered at full precision plus `edge_count`), the `flows` key, and the
+/// #279 paging keys (`next_cursor`, `page`), with margin. Everything else in the payload is one of
+/// the two paged row arrays.
+const LINEAGE_ENVELOPE_OVERHEAD: usize = 640;
 
 /// Trim `items` (already in priority order: best first) until the serialized JSON array fits under
 /// [`R4_CHAR_BUDGET`], leaving headroom for the surrounding envelope keys. Returns the kept rows and

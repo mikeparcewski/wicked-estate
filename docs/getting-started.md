@@ -213,7 +213,7 @@ The same query is available to agents as the MCP `Path` tool (§10).
 ### Lineage — what a symbol depends on, or where its value goes
 
 ```bash
-wicked-estate lineage <symbol> [--depth N] [--relation flows_to] [--json] [--db ...]
+wicked-estate lineage <symbol> [--depth N] [--relation flows_to] [--cursor C] [--json] [--db ...]
 ```
 
 The CLI twin of the MCP `Lineage` tool (§10), run on the RetrievalTool→CLI bridge
@@ -228,9 +228,15 @@ graph — not taint analysis, not compiler-exact data flow, and not a claim abou
   lists the ids; one that matches nothing fails with `no symbol named …`; a missing `<symbol>` is
   a usage error. **Changed in 0.24.0:** `--symbol` is gone, and an unknown id is an error (exit 1)
   rather than an empty answer with exit 0.
-- `--depth` defaults to 8. A value above the tool's ceiling (24) is clamped **by the tool** and
+- `--depth` defaults to 24, the tool's ceiling (**changed in 0.28.0**, was 8), so the default answer is not cut at a horizon. A value above the tool's ceiling (24) is clamped **by the tool** and
   reported as `CLAMPED: depth=… is above this tool's ceiling; used depth=24`; `0` is the floor.
 - `--relation` accepts only `flows_to`. Flags are strict, as for every bridged command.
+- The answer is **paged** (**new in 0.28.0**, #279). A reply that does not complete the answer has
+  `truncated: true` and a `next_cursor`. Pass it back with `--cursor <next_cursor>` for the next
+  rows of the same answer, and repeat until `next_cursor` is `null`. The pages join into exactly the
+  whole answer. A cursor from another query, or from before a re-index changed the answer, is
+  refused (exit 1); restart without `--cursor`. `total` counts the whole answer, and `page` says
+  which rows this reply holds.
 - A `--db` that does not exist (a bare path or `sqlite://<path>`) or is zero-length is an error;
   `lineage` never creates a graph.
 
@@ -537,14 +543,14 @@ wicked-estate-mcp --db /path/to/graph.db
 | `RetrieveEntity` | Fetch full node details by stable symbol ID. Required: `symbol`. |
 | `Path` | The ordered hops from one symbol to another, each with edge kind and confidence. Required: `from`, `to` (symbol name or SymbolId). Optional: `depth` (default 8, min 1, max 16), `max_nodes` (default 1000, max 5000). `found:false` with `depth_bounded` or `node_bounded` set is a bounded search, not a proven absence: raise the bound before concluding. |
 | `TraverseGraph` | Multi-hop graph traversal from a symbol. Required: `symbol`. Optional: `depth` (default 4, max 16), `direction` (`dependencies`/`dependents`/`both`), `edge_kinds`, `max_nodes` (default 200, max 1000). |
-| `BlastRadius` | Enumerate all transitive dependents of a symbol. Required: `symbol`. Optional: `depth` (default 8, max 24). |
+| `BlastRadius` | Enumerate all transitive dependents of a symbol. Required: `symbol`. Optional: `depth` (default 8, max 24), `cursor` (a previous page's `next_cursor`). The answer is paged: keep calling with `cursor` while `next_cursor` is non-null. |
 | `FetchContent` | Retrieve the source text stored for a symbol. Required: `symbol`. |
 | `ContextBundle` | Return a scoped, ranked context bundle for a symbol — source + callers + dependencies. |
 | `RulesInventory` | List rule engines and rule sets in the graph; link rule sets to calling code. |
 | `rules.recall` | Faceted, severity-ordered recall of conformance `Rule` nodes (`PAT-*`/`POL-*`) — facets: language/layer/framework (wildcard), severity/rule_type (exact), scope subtree prefix. |
 | `RankHotspots` | Return the top N symbols by PageRank × change-frequency churn score. |
 | `Communities` | List detected symbol communities (Louvain clusters) in the graph. |
-| `Lineage` | Trace dependency lineage by default (`Calls` + `Imports`). Optional: `relation: "flows_to"` traces semantic value flow from producer to consumer, for example Angular route/input value chains. |
+| `Lineage` | Trace dependency lineage by default (`Calls` + `Imports`). Optional: `relation: "flows_to"` traces semantic value flow from producer to consumer, for example Angular route/input value chains; `depth` (default 24, the max); `cursor` (a previous page's `next_cursor`). The answer is paged: keep calling with `cursor` while `next_cursor` is non-null. |
 
 Semantic value lineage is opt-in so existing dependency lineage calls do not change. First resolve
 the displayed source node, such as `RouteParam:id`, to its stable `symbol` with `SearchEntity` or
