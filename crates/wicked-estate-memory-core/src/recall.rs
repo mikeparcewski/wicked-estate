@@ -59,7 +59,7 @@ impl Candidate {
 
 /// Greedy token-budgeted assembly (DESIGN §9 step 5). Adds by descending `final_score` until
 /// `token_budget` is exhausted; over-budget prune order = lowest-first (a natural consequence of
-/// greedy-by-score). Guarantees ≥1 Working-tier item if any candidate is Working and it fits.
+/// greedy-by-score). No tier gets a reserved slot: a Working item is packed only on its score.
 /// Returns the selected candidates in final-score order.
 pub fn budget_pack(mut cands: Vec<Candidate>, token_budget: usize, alpha: f64) -> Vec<Candidate> {
     cands.sort_by(|a, b| {
@@ -70,33 +70,42 @@ pub fn budget_pack(mut cands: Vec<Candidate>, token_budget: usize, alpha: f64) -
 
     let mut out: Vec<Candidate> = Vec::new();
     let mut used = 0usize;
-    for c in &cands {
+    for c in cands {
         let cost = c.token_cost();
         if used + cost <= token_budget {
-            out.push(c.clone());
             used += cost;
-        }
-    }
-
-    // Guarantee: ensure at least one Working item is present if one exists and can fit by evicting
-    // the lowest-scoring non-Working selection (the "≥1 T0" rule).
-    let has_working = out.iter().any(|c| c.tier == Tier::Working);
-    if !has_working {
-        if let Some(best_working) = cands.iter().find(|c| c.tier == Tier::Working) {
-            let need = best_working.token_cost();
-            while used + need > token_budget {
-                let Some(victim) = out.pop() else { break };
-                used -= victim.token_cost();
-            }
-            if used + need <= token_budget {
-                out.push(best_working.clone());
-                out.sort_by(|a, b| {
-                    b.final_score(alpha)
-                        .partial_cmp(&a.final_score(alpha))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-            }
+            out.push(c);
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cand(id: &str, tier: Tier, rrf: f64, chars: usize) -> Candidate {
+        Candidate {
+            id: SymbolId(id.into()),
+            content: "x".repeat(chars),
+            tier,
+            rrf,
+            recency: 1.0,
+            salience: 0.5,
+            facet_specificity: 0,
+        }
+    }
+
+    #[test]
+    fn budget_pack_reserves_no_slot_for_working() {
+        // Two strong semantic hits fill the budget; a weak Working item must not evict one.
+        let cands = vec![
+            cand("s1", Tier::Semantic, 0.9, 40),
+            cand("s2", Tier::Semantic, 0.8, 40),
+            cand("w", Tier::Working, 0.1, 40),
+        ];
+        let out = budget_pack(cands, 20, 0.5);
+        let ids: Vec<&str> = out.iter().map(|c| c.id.0.as_str()).collect();
+        assert_eq!(ids, ["s1", "s2"]);
+    }
 }

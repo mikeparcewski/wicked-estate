@@ -979,7 +979,7 @@ const TOOL_DOMAINS: ToolDomain[] = [
       { name: 'memory.recall',   purpose: 'Token-budgeted recall relevant to a query in scope.' },
       { name: 'memory.list',     purpose: 'The complete faceted set — for management, browse, and promote.' },
       { name: 'memory.learn',    purpose: 'Store a semantic fact and link it to code symbols atomically.' },
-      { name: 'memory.reflect',  purpose: 'Distil episodic memories in a scope into semantic facts.' },
+      { name: 'memory.reflect',  purpose: 'Consolidate a scope: distil, promote, and archive (working memory expires after 24 h).' },
       { name: 'memory.coverage', purpose: 'Node counts by tier and kind.' },
       { name: 'memory.erase',    purpose: 'Hard-delete every memory under a scope prefix — erasability as governance.' },
       { name: 'proposal.submit',  purpose: 'The governance queue: an agent proposes a memory capture or a steering-rule change — never a direct write to the record.' },

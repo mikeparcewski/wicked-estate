@@ -14,7 +14,8 @@
 //! - `reflect`  : the convenience pass wiring read→distill→write deterministically (model-free).
 //! - `reinforce`: learning — bump reinforcement (→ Wilson confidence → salience → recall rank).
 //! - `promote_skills`: T2 → T3 procedural (well-reinforced facts become skills).
-//! - `archive`  : aged low-salience memory → T4 archival summary node (self-contained).
+//! - `archive`  : aged low-salience memory, and Working memory past its 24 h TTL → T4 archival
+//!   summary node (self-contained); the sources move to the archival tier (nothing deleted).
 //!
 //! Implemented on `MemoryEngine` from a child module so it can use the engine internals while
 //! keeping `lib.rs` focused. Fully deterministic and offline/testable (no model in the loop).
@@ -22,7 +23,7 @@
 use crate::MemoryEngine;
 use wicked_estate_core::{Edge, EdgeKind, ResolutionTier, Result, SymbolId};
 use wicked_estate_memory_core::{
-    Extracted, MemKind, Memory, Scope, Tier, fuzzy_candidates, heuristic_extract,
+    Extracted, MemKind, Memory, Scope, Tier, WORKING_TTL_SECS, fuzzy_candidates, heuristic_extract,
     heuristic_same_entity, heuristic_summary, normalize, salience as compute_salience,
 };
 
@@ -343,7 +344,23 @@ impl MemoryEngine {
             n
         };
         let arc_sym = arc.symbol();
-        self.store.upsert_nodes(&[arc_node])?;
+        // The sources move to the archival tier with the summary (content kept, nothing deleted):
+        // archiving is idempotent, so the next pass does not fold the same memories again.
+        let moved: Vec<Memory> = cluster
+            .iter()
+            .filter(|m| m.tier != Tier::Archival)
+            .map(|m| {
+                let mut m = m.clone();
+                m.tier = Tier::Archival;
+                m
+            })
+            .collect();
+        let mut nodes = vec![arc_node];
+        nodes.extend(moved.iter().map(Memory::to_node));
+        self.store.upsert_nodes(&nodes)?;
+        for m in &moved {
+            self.ext.upsert(m)?; // keep the sidecar tier index in sync
+        }
         let vec = self.embed_for(&arc.content);
         self.store.set_embedding(&arc_sym, &vec)?;
         self.ext.upsert(&arc)?; // keep the sidecar in sync — archive bypasses capture() (drift fix)
@@ -355,9 +372,10 @@ impl MemoryEngine {
         Ok(cluster.len())
     }
 
-    /// Archive aged, low-salience memories in `scope` into a self-contained T4 summary node.
-    /// **Model-free** (DEC-R): selects the aged/low-salience cluster deterministically, then folds it
-    /// via `archive_cluster` with the extractive `heuristic_summary` default. Returns sources subsumed.
+    /// Archive aged, low-salience memories in `scope` into a self-contained T4 summary node, and
+    /// expire Working memories older than [`WORKING_TTL_SECS`] (session scratch, whatever their
+    /// salience). **Model-free** (DEC-R): selects the cluster deterministically, then folds it via
+    /// `archive_cluster` with the extractive `heuristic_summary` default. Returns sources subsumed.
     pub fn archive(
         &mut self,
         scope: &Scope,
@@ -384,8 +402,21 @@ impl MemoryEngine {
                     ) < salience_floor
             })
             .collect();
-        // No agent summary in the convenience pass → the deterministic floor (option (b)).
-        self.archive_cluster(scope, &cand, None, now)
+        let expired = self
+            .ext
+            .aged_ids(&[Tier::Working], now - WORKING_TTL_SECS)?;
+        let expired: Vec<Memory> = self
+            .hydrate(&expired)?
+            .into_iter()
+            .filter(|m| m.tier == Tier::Working && scope.is_ancestor_of(&m.scope))
+            .collect();
+        let mut n = 0;
+        // Separate clusters: a summary of session scratch must not dilute one of aged knowledge.
+        for cluster in [cand, expired] {
+            // No agent summary in the convenience pass → the deterministic floor (option (b)).
+            n += self.archive_cluster(scope, &cluster, None, now)?;
+        }
+        Ok(n)
     }
 }
 
@@ -765,6 +796,88 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|m| m.tier == Tier::Archival)
+        );
+    }
+
+    #[test]
+    fn archive_expires_working_after_ttl_and_is_idempotent() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let scope = Scope::parse("project:demo");
+        let t0 = 10_000;
+        cap(
+            &mut eng,
+            MemKind::Working,
+            Tier::Working,
+            &scope,
+            "WIP: turn count 4",
+            t0,
+        );
+        let now = t0 + WORKING_TTL_SECS;
+        cap(
+            &mut eng,
+            MemKind::Working,
+            Tier::Working,
+            &scope,
+            "WIP: fresh task",
+            now,
+        );
+
+        // Salience floor 0 and a far max age: only the TTL can select the Working memory.
+        assert_eq!(eng.archive(&scope, 10 * 365 * 86_400, 0.0, now).unwrap(), 1);
+        let tiers = |eng: &MemoryEngine, text: &str| -> Vec<Tier> {
+            eng.all_memories()
+                .unwrap()
+                .into_iter()
+                .filter(|m| m.content == text && m.kind == MemKind::Working)
+                .map(|m| m.tier)
+                .collect()
+        };
+        assert_eq!(
+            tiers(&eng, "WIP: turn count 4"),
+            [Tier::Archival],
+            "expired, kept, archived"
+        );
+        assert_eq!(
+            tiers(&eng, "WIP: fresh task"),
+            [Tier::Working],
+            "fresh working untouched"
+        );
+        // A second pass finds nothing new: no duplicate T4 node for the same sources.
+        assert_eq!(eng.archive(&scope, 10 * 365 * 86_400, 0.0, now).unwrap(), 0);
+        assert_eq!(
+            eng.count().unwrap(),
+            3,
+            "two sources + one T4 summary, nothing deleted"
+        );
+    }
+
+    #[test]
+    fn consolidate_archive_pass_is_idempotent() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let scope = Scope::root();
+        cap(
+            &mut eng,
+            MemKind::Fact,
+            Tier::Semantic,
+            &scope,
+            "old fact one",
+            0,
+        );
+        cap(
+            &mut eng,
+            MemKind::Fact,
+            Tier::Semantic,
+            &scope,
+            "old fact two",
+            0,
+        );
+        let now = 400 * 86_400;
+        let first = eng.consolidate(&scope, now).unwrap();
+        assert_eq!(first.archived, 2);
+        let second = eng.consolidate(&scope, now + 1).unwrap();
+        assert_eq!(
+            second.archived, 0,
+            "already-archived sources are not folded again"
         );
     }
 

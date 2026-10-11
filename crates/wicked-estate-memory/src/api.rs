@@ -102,13 +102,17 @@ impl MemoryApi for MemoryEngine {
                 tier: r.tier.as_str().to_string(),
                 score: r.score,
                 scope: r.scope,
+                kind: r.kind.map(|k| k.as_str().to_string()).unwrap_or_default(),
+                created_at: r.created_at,
             })
             .collect())
     }
 
     fn reflect(&mut self, scope: &str, now: i64) -> Result<ReflectResult, anyhow::Error> {
         let s = Scope::parse(scope);
-        MemoryEngine::reflect(self, &s, now)?;
+        // The maintenance entry point: reflect (T1→T2) → promote (T2→T3) → archive (→T4, incl.
+        // expired Working). `memory.reflect` is a write tool, so only a write-capable caller runs it.
+        MemoryEngine::consolidate(self, &s, now)?;
         // collect semantic-tier facts in this scope (post-reflect)
         let all = self.all_memories()?;
         let distilled_facts: Vec<String> = all
@@ -269,6 +273,36 @@ mod tests {
     }
 
     #[test]
+    fn api_reflect_runs_consolidation_and_expires_working() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        MemoryApi::capture(
+            &mut eng,
+            make_req(
+                "WIP: pre-compaction snapshot",
+                "working",
+                "working",
+                "project:demo",
+                100,
+            ),
+        )
+        .unwrap();
+        let now = 100 + wicked_estate_memory_core::WORKING_TTL_SECS;
+        MemoryApi::reflect(&mut eng, "project:demo", now).unwrap();
+        let tiers: Vec<Tier> = eng
+            .all_memories()
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.content == "WIP: pre-compaction snapshot" && m.kind == MemKind::Working)
+            .map(|m| m.tier)
+            .collect();
+        assert_eq!(
+            tiers,
+            [Tier::Archival],
+            "memory.reflect archives expired working memory"
+        );
+    }
+
+    #[test]
     fn api_capture_recall_roundtrip_via_seam() {
         let mut eng = MemoryEngine::in_memory().unwrap();
         let id = MemoryApi::capture(
@@ -292,6 +326,12 @@ mod tests {
         let out = MemoryApi::recall(&eng, &rq).unwrap();
         assert!(out.iter().any(|r| r.content.contains("oat milk")));
         assert!(out.iter().all(|r| !r.tier.is_empty()));
+        let hit = out.iter().find(|r| r.content.contains("oat milk")).unwrap();
+        assert_eq!(
+            (hit.kind.as_str(), hit.created_at),
+            ("episode", 100),
+            "recall carries kind + capture time"
+        );
     }
 
     #[test]

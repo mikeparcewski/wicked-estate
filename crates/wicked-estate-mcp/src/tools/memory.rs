@@ -212,6 +212,8 @@ fn dispatch_recall(
                         "content":   item.content,
                         "tier":      item.tier,
                         "score":     item.score,
+                        "kind":      item.kind,
+                        "created_at": item.created_at,
                     })
                 })
                 .collect();

@@ -25,7 +25,6 @@ use wicked_estate_retrieve::{Embedder, HashEmbedder, hybrid_search};
 use wicked_estate_store::SqliteStore;
 
 mod api;
-mod background;
 mod consolidate;
 /// Cross-store recall (the differentiator) — feature `cross`. See [`cross::OverlayMemStore`].
 #[cfg(feature = "cross")]
@@ -34,7 +33,6 @@ mod memext;
 /// Proposal-queue operations on the engine (DES-MEM-FACETED-001 §5.0).
 mod proposal;
 mod store;
-pub use background::{ConsolidationHandle, spawn_consolidation};
 pub use consolidate::ConsolidationReport;
 use memext::MemExt;
 pub use store::MemStore;
@@ -59,6 +57,11 @@ pub struct Recalled {
     /// recall time. Empty string when the node could not be found or re-hydrated in the store,
     /// or when `Memory::from_node` returns `None` (node exists but is not a memory node).
     pub scope: String,
+    /// What the memory is (`fact`, `skill`, `episode`, …), recovered with `scope`. `None` when the
+    /// node could not be re-hydrated.
+    pub kind: Option<wicked_estate_memory_core::MemKind>,
+    /// When the memory was captured (unix seconds); 0 when the node could not be re-hydrated.
+    pub created_at: i64,
 }
 
 /// The memory engine (L0b: single-store, single-writer).
@@ -555,20 +558,25 @@ impl MemoryEngine {
             .take(k)
             .map(|c| {
                 let score = c.final_score(self.alpha);
-                let scope = self
+                let mem = self
                     .store
                     .get_node(&c.id)
                     .ok()
                     .flatten()
-                    .and_then(|n| Memory::from_node(&n))
+                    .and_then(|n| Memory::from_node(&n));
+                let scope = mem
+                    .as_ref()
                     .map(|m| m.scope.as_path().to_string())
                     .unwrap_or_default();
+                let (kind, created_at) = mem.map_or((None, 0), |m| (Some(m.kind), m.created_at));
                 Recalled {
                     id: c.id,
                     content: c.content,
                     tier: c.tier,
                     score,
                     scope,
+                    kind,
+                    created_at,
                 }
             })
             .collect())
@@ -657,6 +665,11 @@ impl MemoryEngine {
                 continue;
             };
             let age = (now - mem.created_at).max(0);
+            if mem.tier == wicked_estate_memory_core::Tier::Working
+                && age >= wicked_estate_memory_core::WORKING_TTL_SECS
+            {
+                continue; // expired session scratch (T0 TTL)
+            }
             let recency = wicked_estate_memory_core::decay(age, self.sal.lambda_per_day);
             let sal = compute_salience(&self.sal, mem.confidence(), age, mem.access_count);
             if sal < self.recall_floor {
@@ -690,20 +703,25 @@ impl MemoryEngine {
                 let score = c.final_score(self.alpha);
                 // Recover the item's own scope for S4 attribution. The node was already
                 // hydrated in ranked_candidates; a second get_node is a cheap pk lookup.
-                let scope = self
+                let mem = self
                     .store
                     .get_node(&c.id)
                     .ok()
                     .flatten()
-                    .and_then(|n| Memory::from_node(&n))
+                    .and_then(|n| Memory::from_node(&n));
+                let scope = mem
+                    .as_ref()
                     .map(|m| m.scope.as_path().to_string())
                     .unwrap_or_default();
+                let (kind, created_at) = mem.map_or((None, 0), |m| (Some(m.kind), m.created_at));
                 Recalled {
                     id: c.id,
                     content: c.content,
                     tier: c.tier,
                     score,
                     scope,
+                    kind,
+                    created_at,
                 }
             })
             .collect()
@@ -922,6 +940,41 @@ mod tests {
         assert!(
             !run(false, RecallMode::VectorOnly).is_empty(),
             "explicit VectorOnly ablation must stay honored even for a non-semantic embedder"
+        );
+    }
+
+    #[test]
+    fn recall_skips_working_memory_past_its_ttl() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let scope = Scope::parse("project:demo");
+        let t0 = 1_000;
+        eng.capture(&Memory::new(
+            MemKind::Working,
+            Tier::Working,
+            scope.clone(),
+            "wip snapshot pre compaction turn count",
+            t0,
+        ))
+        .unwrap();
+        let recall = |eng: &MemoryEngine, now| {
+            eng.recall(
+                "wip snapshot",
+                ScopeFilter::Ancestors(&scope),
+                &[],
+                500,
+                now,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            recall(&eng, t0 + 60).len(),
+            1,
+            "fresh working memory is recallable"
+        );
+        let expired = t0 + wicked_estate_memory_core::WORKING_TTL_SECS;
+        assert!(
+            recall(&eng, expired).is_empty(),
+            "working memory expires after 24 h"
         );
     }
 

@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [0.29.0] — 2026-10-11
+
+Minor bump: Working memory now expires, consolidation actually runs, and recall items say what they
+are. Breaking for crate consumers: the unused background loop is removed, and `Recalled` /
+`RecalledItem` gain fields (#325).
+
+### Changed
+- **Working memory expires after 24 h (`WORKING_TTL_SECS`).** Recall skips a Working memory past
+  its TTL, and `archive` folds expired Working memories into a T4 node in their own cluster.
+- **`memory.reflect` runs the full consolidation pass** (reflect → promote → archive). It stays a
+  write tool, so a `--readonly` seat cannot trigger it.
+- **Archiving is idempotent and deletes nothing.** Archived sources move to the archival tier with
+  their content; a later pass no longer folds the same memories into another T4 node.
+- **Recall reserves no slot for Working memories.** `budget_pack` packs every tier on score alone.
+
+### Added
+- `memory.recall` items carry `kind` and `created_at` (DES-memory-vs-knowledge K4); `RecalledItem`
+  gains both with serde defaults, so older responses still deserialize.
+
+### Removed
+- `spawn_consolidation` / `ConsolidationHandle`: the background consolidation loop had no caller.
+  `memory.reflect` is the maintenance entry point.
+
 ## [0.28.0] — 2026-10-11
 
 Minor bump: a new paging API on `Lineage` and `BlastRadius`, and a changed `Lineage` default depth.
