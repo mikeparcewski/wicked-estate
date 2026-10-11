@@ -1,12 +1,16 @@
 {
-  "captured_from": "wicked-estate-mcp-0.12.0 (description re-stamped at 0.21.0, #211: relation echo + flows)",
-  "description": "Transitive dependencies of a symbol (forward-reachability on Calls+Imports edges). Optional relation='flows_to' traces semantic value flow from producer to consumer; the reply echoes the effective `relation` ('dependency' | 'flows_to'), any other value is an error, and in flows_to mode a `flows` array classifies each hop (the rows under `dependencies` are then the consumers). Answers 'what does this symbol depend on?' — the complement of BlastRadius. Use to understand the full dependency chain before a refactor or to build a change-impact picture from the dependency side.",
+  "captured_from": "wicked-estate-mcp-0.12.0 (description re-stamped at 0.21.0, #211: relation echo + flows); cursor added at 0.28.0 (#279 paging); depth default 24",
+  "description": "Transitive dependencies of a symbol (forward-reachability on Calls+Imports edges). Optional relation='flows_to' traces semantic value flow from producer to consumer; the reply echoes the effective `relation` ('dependency' | 'flows_to'), any other value is an error, and in flows_to mode a `flows` array classifies each hop (the rows under `dependencies` are then the consumers). Answers 'what does this symbol depend on?' — the complement of BlastRadius. Use to understand the full dependency chain before a refactor or to build a change-impact picture from the dependency side. The answer is paged: while `next_cursor` is non-null, call again with `cursor` set to it to get the rest; the answer is complete only when `next_cursor` is null.",
   "inputSchema": {
     "additionalProperties": false,
     "properties": {
+      "cursor": {
+        "description": "A previous reply's `next_cursor`: returns the next page of the same answer. Keep calling while `next_cursor` is non-null; the answer is complete only when it is null.",
+        "type": "string"
+      },
       "depth": {
-        "default": 8,
-        "description": "Maximum hop depth (default 8, max 24).",
+        "default": 24,
+        "description": "Maximum hop depth (default 24 = max: the default answer is the deepest walk).",
         "maximum": 24,
         "type": "integer"
       },

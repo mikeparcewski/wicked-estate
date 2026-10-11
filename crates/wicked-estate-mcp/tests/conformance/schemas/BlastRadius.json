@@ -1,9 +1,13 @@
 {
-  "captured_from": "wicked-estate-mcp-0.12.0",
-  "description": "Transitive dependents of a symbol (reverse-reachability on Calls edges). Answers 'what breaks if I change this symbol?' Reports coverage: resolved dependents plus the count of unresolved call-site references that could not be bound (potential missing dependents).",
+  "captured_from": "wicked-estate-mcp-0.12.0; cursor added at 0.28.0 (#279 paging)",
+  "description": "Transitive dependents of a symbol (reverse-reachability on Calls edges). Answers 'what breaks if I change this symbol?' Reports coverage: resolved dependents plus the count of unresolved call-site references that could not be bound (potential missing dependents). The answer is paged: while `next_cursor` is non-null, call again with `cursor` set to it.",
   "inputSchema": {
     "additionalProperties": false,
     "properties": {
+      "cursor": {
+        "description": "A previous reply's `next_cursor`: returns the next page of the same answer. Keep calling while `next_cursor` is non-null; the answer is complete only when it is null.",
+        "type": "string"
+      },
       "depth": {
         "default": 8,
         "description": "Maximum hop depth (default 8, max 24).",

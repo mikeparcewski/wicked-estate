@@ -14,6 +14,7 @@
 //! `proposal.*` tools (DES-MEM-FACETED-001 §5.0) were added ADDITIVELY, raising the total 24 → 28;
 //! `memory.list` (the management browse, DES-MEM-FACETED-001) added the 7th memory tool → 29;
 //! `Path` (issue #192) added the 12th estate tool → 30
+//! `BlastRadius` and `Lineage` gained the `cursor` property with #279 paging (0.28.0)
 //! — all re-frozen in the golden files.)
 //!
 //! Golden files live at `tests/conformance/schemas/<ToolName>.json`.
