@@ -454,6 +454,10 @@ pub struct ReflectResult {
     pub node_count: u32,
 }
 
+/// The knowledge domain's narrow writer a `knowledge` proposal approval calls: the proposal and
+/// the approval time in, the written node's id out.
+pub type KnowledgeWriter<'a, E> = dyn FnMut(&Proposal, i64) -> Result<String, E> + 'a;
+
 /// The extended memory contract (DES-001 §4.2). Implemented by `wicked-estate-memory`.
 ///
 /// `Error` is associated so implementations keep their own error type without this crate depending
@@ -537,12 +541,17 @@ pub trait MemoryApi {
 
     /// Approve with the knowledge domain's writer. A `knowledge` proposal is written before its
     /// state becomes `Approved`; memory/policy use the same routing as [`Self::approve_proposal`].
+    /// Provided (semver-minor): an implementer without a knowledge seam keeps `approve_proposal`'s
+    /// behaviour, which refuses a `knowledge` proposal loudly.
     fn approve_proposal_with_knowledge(
         &mut self,
         id: &str,
         now: i64,
-        write_knowledge: &mut dyn FnMut(&Proposal, i64) -> Result<String, Self::Error>,
-    ) -> Result<ApproveOutcome, Self::Error>;
+        write_knowledge: &mut KnowledgeWriter<'_, Self::Error>,
+    ) -> Result<ApproveOutcome, Self::Error> {
+        let _ = write_knowledge;
+        self.approve_proposal(id, now)
+    }
 
     /// Reject a `Pending` proposal — marks it `Rejected`; it never becomes active.
     fn reject_proposal(&mut self, id: &str, now: i64) -> Result<(), Self::Error>;

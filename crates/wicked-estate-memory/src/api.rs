@@ -269,7 +269,7 @@ impl MemoryApi for MemoryEngine {
         &mut self,
         id: &str,
         now: i64,
-        write_knowledge: &mut dyn FnMut(&Proposal, i64) -> anyhow::Result<String>,
+        write_knowledge: &mut wicked_estate_memory_core::KnowledgeWriter<'_, anyhow::Error>,
     ) -> Result<ApproveOutcome, anyhow::Error> {
         MemoryEngine::approve_proposal_with_knowledge(self, id, now, write_knowledge)
     }

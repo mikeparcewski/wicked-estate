@@ -2699,14 +2699,6 @@ mod tests {
         fn reject_proposal(&mut self, _: &str, _: i64) -> Result<(), anyhow::Error> {
             Ok(())
         }
-        fn approve_proposal_with_knowledge(
-            &mut self,
-            id: &str,
-            now: i64,
-            _: &mut dyn FnMut(&wicked_estate_memory_core::Proposal, i64) -> anyhow::Result<String>,
-        ) -> Result<wicked_estate_memory_core::ApproveOutcome, anyhow::Error> {
-            self.approve_proposal(id, now)
-        }
     }
 
     struct FakeKnowledge;

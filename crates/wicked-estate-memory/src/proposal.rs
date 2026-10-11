@@ -98,7 +98,7 @@ impl MemoryEngine {
         &mut self,
         id: &str,
         now: i64,
-        write_knowledge: &mut dyn FnMut(&Proposal, i64) -> anyhow::Result<String>,
+        write_knowledge: &mut wicked_estate_memory_core::KnowledgeWriter<'_, anyhow::Error>,
     ) -> anyhow::Result<ApproveOutcome> {
         let mut proposal = self.load_pending(id)?;
 
