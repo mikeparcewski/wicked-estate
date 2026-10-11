@@ -5123,7 +5123,9 @@ mod tests {
                 BlastRadius.invoke(&store, &json!({})).unwrap(),
                 8,
             ),
-            ("Lineage", Lineage.invoke(&store, &json!({})).unwrap(), 8),
+            // #279: Lineage defaults to its depth ceiling, so its default answer is not cut at a
+            // horizon the caller never chose.
+            ("Lineage", Lineage.invoke(&store, &json!({})).unwrap(), 24),
         ];
         for (tool, res, default_depth) in cases {
             let c = &res.content;
@@ -7355,9 +7357,132 @@ mod tests {
         );
         assert_eq!(res.content["truncated"], json!(true));
         assert!(
-            res.diagnostics.iter().any(|d| d.contains("R4 budget")),
-            "loud truncation diagnostic required: {:?}",
+            res.diagnostics.iter().any(|d| d.contains("pass `cursor`")),
+            "a partial page names its cursor: {:?}",
             res.diagnostics
+        );
+
+        // #279: the pages join into the whole answer, every one under the budget.
+        let mut seen = std::collections::BTreeSet::new();
+        let mut cursor = Value::Null;
+        let mut pages = 0;
+        loop {
+            let res = BlastRadius
+                .invoke(
+                    &store,
+                    &json!({ "symbol": "file:hub.ts", "cursor": cursor }),
+                )
+                .unwrap();
+            pages += 1;
+            assert!(serde_json::to_string(&res.content).unwrap().len() < R4_CHAR_BUDGET);
+            assert_eq!(
+                res.content["total"],
+                json!(n),
+                "total counts the whole answer"
+            );
+            for d in res.content["dependents"].as_array().unwrap() {
+                assert!(
+                    seen.insert(d["symbol"].as_str().unwrap().to_string()),
+                    "row repeated"
+                );
+            }
+            cursor = res.content["next_cursor"].clone();
+            assert_eq!(res.content["truncated"], json!(cursor.is_string()));
+            if cursor.is_null() {
+                break;
+            }
+            assert!(pages < 100, "paging must terminate");
+        }
+        assert!(pages >= 2, "the fixture overflows one page");
+        assert_eq!(seen.len(), n, "every importer is retrievable");
+    }
+
+    /// #279 ("I want the full graph"): a `flows_to` Lineage answer wider than one reply pages to
+    /// completion. Every consumer and every flow hop arrives exactly once, and every page stays
+    /// under the R4 budget. A cursor from before the graph changed is refused, never spliced.
+    #[test]
+    fn lineage_flows_to_pages_return_every_consumer_and_hop() {
+        let n = 300usize;
+        let build = |extra: bool| {
+            let mut store = MemStore::new();
+            store.begin_batch().unwrap();
+            let mut nodes = vec![make_node("seed", "seed", NodeKind::Variable, "fan.ts", 0)];
+            let mut edges = Vec::new();
+            for i in 0..n + usize::from(extra) {
+                let id = format!("consumer_with_a_deliberately_long_descriptive_name_{i:04}");
+                nodes.push(make_node(
+                    &id,
+                    &id,
+                    NodeKind::Variable,
+                    "fan.ts",
+                    i as u32 + 1,
+                ));
+                edges.push(Edge::new(
+                    SymbolId(id.clone()),
+                    SymbolId("seed".to_string()),
+                    edge_tags::other(edge_tags::FLOWS_TO),
+                    ResolutionTier::Parsed,
+                    "test-fixture",
+                ));
+            }
+            store.upsert_nodes(&nodes).unwrap();
+            store.upsert_edges(&edges).unwrap();
+            store.commit_batch().unwrap();
+            store
+        };
+        let store = build(false);
+        let ask = |store: &MemStore, cursor: &Value| {
+            Lineage.invoke(
+                store,
+                &json!({"symbol": "seed", "relation": "flows_to", "depth": 1, "cursor": cursor}),
+            )
+        };
+        let (mut deps, mut hops) = (
+            std::collections::BTreeSet::new(),
+            std::collections::BTreeSet::new(),
+        );
+        let mut cursor = Value::Null;
+        let mut first_cursor = Value::Null;
+        let mut pages = 0;
+        loop {
+            let res = ask(&store, &cursor).unwrap();
+            pages += 1;
+            let c = &res.content;
+            assert!(serde_json::to_string(c).unwrap().len() <= R4_CHAR_BUDGET);
+            assert_eq!(c["total"], json!(n), "total counts the whole answer");
+            for d in c["dependencies"].as_array().unwrap() {
+                assert!(deps.insert(d["symbol"].as_str().unwrap().to_string()));
+            }
+            for h in c["flows"].as_array().unwrap() {
+                let hop = (
+                    h["producer"].as_str().unwrap().to_string(),
+                    h["consumer"].as_str().unwrap().to_string(),
+                );
+                assert!(hops.insert(hop), "hop repeated");
+            }
+            cursor = c["next_cursor"].clone();
+            assert_eq!(c["truncated"], json!(cursor.is_string()));
+            if first_cursor.is_null() {
+                first_cursor = cursor.clone();
+            }
+            if cursor.is_null() {
+                break;
+            }
+            assert!(pages < 100, "paging must terminate");
+        }
+        assert!(pages >= 2, "the fixture overflows one page");
+        assert_eq!(deps.len(), n, "every consumer is retrievable");
+        assert_eq!(hops.len(), n, "every flow hop is retrievable");
+        // The graph changed after page 1 was issued: its cursor is refused.
+        assert!(ask(&build(true), &first_cursor).is_err());
+        // A cursor from another query is refused too.
+        assert!(
+            Lineage
+                .invoke(
+                    &store,
+                    &json!({"symbol": "seed", "relation": "flows_to", "depth": 2, "cursor": first_cursor}),
+                )
+                .is_err()
         );
     }
 
