@@ -221,7 +221,38 @@ On estate's own tree: 107 → 126 edges against 0.24.0 (+17.76 %), and 150 → 1
 
 **Against 0.24.0, the pre-data-flow baseline, the cumulative incremental cost is now under the +15 % gate on both corpora.** On Covalent about +0.08 s remains. The most plausible cause is the larger TypeScript query (the benchmark puts the difference at about 170 ms per compile), but that has not been isolated after the fix.
 
-**Yield on Covalent:** S6a 87 edges, S6b 11, S6c 0, S6d 0. Inline array callbacks carry most of it. `await`/`.then` add little there, because Covalent's promises are mostly value-free test sequencing (see S6b). RxJS Observables are not modelled. Within the supported shapes, S6c and S6d emitted nothing there: an object literal that is passed on needs an alias model, and no supported closure-return shape fired. No other TypeScript corpus was measured.
+**Yield on Covalent:** S6a 87 edges, S6b 11, S6c 0, S6d 0. Inline array callbacks carry most of it. `await`/`.then` add little there, because Covalent's promises are mostly value-free test sequencing (see S6b). RxJS Observables are not modelled. Within the supported shapes, S6c and S6d emitted nothing there: an object literal that is passed on needs an alias model, and no supported closure-return shape fired. No other TypeScript corpus was measured at the time; see "Two corpora" below.
+
+### Two corpora (2026-10-10): the S6c/S6d check and every gate on vite
+The operator asked for a second real TypeScript corpus in a different style, for the two zero-yield slices, with every gate re-measured there. A slice that still found 0 edges would be deleted. The corpus is **vitejs/vite `3b72997d42e7dd2b31898d0e68461e3025e836b6`**: 552 `.ts` + 17 `.tsx`, Node/TS tooling built from plain object literals, returned closures and `async` functions. Its touch file is `packages/vite/src/node/server/index.ts`. Each slice was measured against the slice before it, on one runner, median of 3, with the same procedure.
+
+**Per-slice `flows_to` yield and outcome**
+
+| slice | Covalent `438c297` | vite `3b72997` (run) | outcome |
+|---|---|---|---|
+| S5b return composition | +83 | +775 (`38093668858`) | kept |
+| S5c destructuring | +19 | +230 (`38095313839`) | kept |
+| S5d loops | +6 | +239 (`38095331701`) | kept |
+| S6a inline callbacks | +87 | +391 (`38092930218`) | kept |
+| S6b `await` / `.then` | +11 | +1302 (`38092957443`) | kept |
+| S6c local object properties | 0 | **0** (`38092981779`) | **deleted** (#319) |
+| S6d closure returns | 0 | +44, of which 24 carry `return_closure` (`38092995748`) | kept |
+
+**The other gates per slice on vite.** Every slice except S6c and S6d misses the **Lineage gate** (0 newly truncated). Fixed / sweep queries newly truncated: S5b 1 / 100, S5c 0 / 9, S5d 1 / 2, S6a 0 / 6, S6b 0 / 24. A Lineage document truncates at its bounded response budget, so a larger, more connected graph truncates more roots. The truncation is reported (`truncated: true`), never silent. S6b also missed the incremental gate (+16.14 %); that was the fixed compile cost which "Cumulative cost: profile and fix" removed. Every slice passed `flows_to` growth, full index, DB size and semantics.
+- **Kill rule not applied to the Lineage misses: operator decision needed.** Read literally, the kill rule would delete S5b–S6b and about 2,980 of vite's edges. That would take the feature back to 0.24.0 against the ruling "data flow - evidence is important". This lane's brief authorized deleting only zero-yield slices and, for cost, the slowest low-yield slice. So the misses are recorded here, the options are posted on #279, and the slices ship as they are until the operator rules.
+
+**Cumulative, the merged state `eb407b1` (S6c deleted, #318 compile fix)**
+
+| metric | Covalent: 0.24.0 → `eb407b1` (run `38097535976`) | vite: 0.24.0 → `eb407b1` (same run) | Covalent: 0.25.0 → `eb407b1` (run `38097553701`) | vite: 0.25.0 → `eb407b1` (same run) | gate |
+|---|---|---|---|---|---|
+| `flows_to` edges | 1394 → 1600 (+14.78 %) | 4499 → 7480 (**+66.26 %**) | 1502 → 1600 (+6.52 %) | 5743 → 7480 (**+30.25 %**) | ≤ +25 % |
+| full index | +4.18 % | +3.40 % | +5.66 % | −0.49 % | ≤ +15 % |
+| **incremental re-index** | 0.63 s → 0.67 s (**+6.91 %**) | 1.34 s → 1.37 s (**+1.90 %**) | +5.35 % | −6.69 % | ≤ +15 % |
+| DB size | +1.21 % | **+14.73 %** | +0.64 % | +8.49 % | ≤ +10 % |
+| Lineage newly truncated (fixed / sweep) | 0 / 0 of 520 | **2 / 141** of 2829 | 0 / 0 | **0 / 30** | 0 |
+| `value_preserving` rows from a new construct | 0 | 0 | 0 | 0 | 0 |
+
+**The cumulative incremental cost is under the +15 % gate against 0.24.0**, the pre-data-flow baseline, on both corpora. This was the operator's ask, and it is measured against 0.24.0, not only 0.25.0. The gates are defined per slice. On vite, the cumulative `flows_to` growth (+66 %) and DB size (+14.7 %) are the sum of slices that each passed those two gates. They are what a corpus with that much more data flow costs, and they are recorded, not used as kill grounds.
 
 Still unsupported:
 - named (non-inline) callbacks, which would be interprocedural;
@@ -298,4 +329,4 @@ Promises, property writes and path conditions were explicitly **out** of Option 
 - **S5d:** primitive 3 (loop element binding and loop-carried reassignment), measured against the kill criteria. Each slice lands as its own PR, so a gate miss deletes exactly that slice (see "Kill criteria"). Graduation evidence is the metrics table, the readiness diff and the corpus revisions.
 
 ## Next-session prompt
-> Read docs/adr/ADR-014-dataflow-taint-decision.md (Accepted: Option 2; S5b–S5d and the S6 extension graduated, see "Measurements" and "Cumulative"). The open cost is the cumulative fixed incremental re-index overhead (+19.4 % on Covalent against 0.25.0); profile it (an isolated query-construction benchmark), then buy it back without losing a readiness row, measured with `scripts/measure-dataflow.py`. Option 3 stays no-go unless its positive-evidence falsifier is met.
+> Read docs/adr/ADR-014-dataflow-taint-decision.md (Accepted: Option 2; S5b–S5d and S6a/S6b/S6d graduated, and S6c was deleted for zero yield on two corpora; see "Measurements", "Cumulative cost: profile and fix" and "Two corpora"). The cumulative incremental cost is under the gate against 0.24.0. Open item: the Lineage-truncation gate fails on vite for S5b–S6b. That waits on the operator's decision on #279: restate the gate as a rate, delete the slices, or raise the Lineage budget. Option 3 stays no-go unless its positive-evidence falsifier is met.
