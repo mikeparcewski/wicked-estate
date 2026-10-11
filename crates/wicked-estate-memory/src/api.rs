@@ -292,7 +292,7 @@ mod tests {
             .all_memories()
             .unwrap()
             .into_iter()
-            .filter(|m| m.content == "WIP: pre-compaction snapshot")
+            .filter(|m| m.content == "WIP: pre-compaction snapshot" && m.kind == MemKind::Working)
             .map(|m| m.tier)
             .collect();
         assert_eq!(

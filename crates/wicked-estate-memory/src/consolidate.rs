@@ -828,7 +828,7 @@ mod tests {
             eng.all_memories()
                 .unwrap()
                 .into_iter()
-                .filter(|m| m.content == text)
+                .filter(|m| m.content == text && m.kind == MemKind::Working)
                 .map(|m| m.tier)
                 .collect()
         };
