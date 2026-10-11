@@ -177,7 +177,10 @@ fn readonly_with_wicked_home_creates_no_store() {
 
     assert!(init.get("error").is_none(), "initialize failed: {init}");
     let names = entries(state.path());
-    assert!(names.is_empty(), "read-only created state entries: {names:?}");
+    assert!(
+        names.is_empty(),
+        "read-only created state entries: {names:?}"
+    );
 }
 
 #[test]
@@ -220,7 +223,10 @@ fn readonly_with_existing_stores_still_serves() {
             })
         })
         .collect();
-    assert!(unexpected.is_empty(), "read-only created entries: {unexpected:?}");
+    assert!(
+        unexpected.is_empty(),
+        "read-only created entries: {unexpected:?}"
+    );
 }
 
 #[test]
