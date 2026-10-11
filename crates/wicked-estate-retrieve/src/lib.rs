@@ -1271,7 +1271,8 @@ impl RetrievalTool for BlastRadius {
 
         if dependents.is_empty() {
             diag.push(format!(
-                "BlastRadius: no dependents found for '{id_str}' (it may be a leaf or not yet indexed)"
+                "BlastRadius: no dependents found for '{}' (it may be a leaf or not yet indexed)",
+                echo_name(&id_str)
             ));
         }
         if let Some(cause) =
@@ -1289,9 +1290,13 @@ impl RetrievalTool for BlastRadius {
         let query = format!("{id_str}|{max_depth}");
         let fp = paging::fingerprint(self.name(), &query, &[&dependents]);
         let from = paging::start_offsets(self.name(), request, &[total_dependents], fp)?[0];
+        // The note echoes the start's name for a human; a name of any length is cut to 200
+        // chars here (the echo only: the row data and the lookup use the full name), so the
+        // diagnostics can never by themselves exceed the budget.
+        let shown_name = echo_name(&symbol_name);
         let coverage_note = format!(
             "coverage: {total_dependents} dependent(s) via resolved calls; \
-             {unresolved_callers} unresolved call(s) reference '{symbol_name}' — \
+             {unresolved_callers} unresolved call(s) reference '{shown_name}' — \
              blast-radius is best-effort static resolution and MAY be incomplete \
              (precise tier pending)."
         );
@@ -1778,6 +1783,17 @@ impl RetrievalTool for Lineage {
             content,
             diagnostics: diag,
         })
+    }
+}
+
+/// A caller-supplied name as a diagnostic echoes it: at most 200 chars, then `…`. The echo is for
+/// a human; the lookup and every row use the full name. Bounding it means the diagnostics alone
+/// can never exceed the R4 budget (#279 review).
+fn echo_name(name: &str) -> String {
+    if name.chars().count() > 200 {
+        format!("{}…", name.chars().take(200).collect::<String>())
+    } else {
+        name.to_string()
     }
 }
 
@@ -7488,7 +7504,7 @@ mod tests {
     /// name (repeated by the coverage note) still gets pages whose content plus diagnostics fit.
     #[test]
     fn blast_radius_pages_fit_with_a_long_start_name() {
-        let long = "n".repeat(5_000);
+        let long = "n".repeat(30_000);
         let mut store = MemStore::new();
         store.begin_batch().unwrap();
         let mut nodes = vec![make_node("hub", &long, NodeKind::Function, "hub.rs", 0)];
