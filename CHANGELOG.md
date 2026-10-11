@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+## [0.28.0] — 2026-10-11
+
+Minor bump: a new paging API on `Lineage` and `BlastRadius`, and a changed `Lineage` default depth.
+The operator ruled on #279, "I want the full graph": every data-flow slice stays, and no answer is
+silently cut off.
+
+### Added
+- **Lineage and BlastRadius answers are paged (#279, #323).** A reply that does not carry every row
+  of its answer sets `truncated` and carries `next_cursor`. Pass it back as `cursor` (MCP), or as
+  `--cursor` (CLI `lineage`, `blast-radius`), for the next rows of the same answer, until
+  `next_cursor` is `null`. A cursor from another query or a changed graph is refused, never spliced.
+  `total` counts the whole answer, and `page` says which rows a reply holds. New public module
+  `wicked_estate_retrieve::paging`. A page keeps content plus diagnostics under the 25K budget;
+  the one exception is a single row wider than the budget, which is carried whole on its own page
+  with a diagnostic. Paging returns every row the bounded walk produced: a depth-ceiling or
+  node-cap cut stays `truncated: true` after the last page.
+  On both measured corpora (Covalent, vitejs/vite), every measured `flows_to` Lineage query is now
+  completely retrievable (vite: 10 fixed and 146 sweep queries were cut before).
+
+### Changed
+- **`Lineage` defaults to depth 24, its ceiling (was 8) (#323).** A cut at the ceiling or the node
+  cap stays reported (`depth_horizon_reached`, `node_cap_reached`, `truncated`).
+- `Lineage` / `BlastRadius` rows are ordered by depth, then symbol, and `flows` by row, so pages
+  join exactly. The CLI `blast-radius --json` `truncated_dependents` counts the rows on later pages.
+- Diagnostics that echo a caller's name or id cut the echo at 200 chars.
+
+### Documentation
+- ADR-014: the ruling, the restated gates (every Lineage query completely retrievable; DB cost per
+  stored edge, with vite's +14.7 % DB accepted; speed gates unchanged), "The full graph", and the
+  pruning addendum (no pruning rule ships; none met the proof bar) (#323).
+
 ## [0.27.0] — 2026-10-11
 
 Minor bump: a graph-output removal (ADR-014 S6c deleted) and a faster incremental re-index. There
