@@ -1399,7 +1399,11 @@ impl KnowledgeApi for KnowledgeEngine {
             now,
         );
         kn.id = format!("proposal:{}", proposal.id);
-        // TODO(K3, DES-memory-vs-knowledge): pass payload.observed_at/source_rev when KNode gains those fields.
+        // K2 + K3: an approved knowledge proposal keeps when its source was observed and at which revision.
+        let opts =
+            KnowledgeWriteOptions::from_arguments(payload, now).map_err(|e| anyhow::anyhow!(e))?;
+        kn.observed_at = opts.observed_at.unwrap_or(now);
+        kn.source_rev = opts.source_rev;
         let sym = KnowledgeEngine::write(self, &kn)?;
         if !proposal.facets.is_empty() {
             let mut node = kn.to_node();
