@@ -407,6 +407,13 @@ pub struct RecalledItem {
     /// that predate this field deserialize to `""` (the documented fallback) rather than erroring.
     #[serde(default)]
     pub scope: String,
+    /// The memory's kind (`fact`, `skill`, `episode`, `entity`, `working`, `archive`), so a reader
+    /// can tell a ruling from an event. `""` when unknown (older responses deserialize to it).
+    #[serde(default)]
+    pub kind: String,
+    /// Capture time, unix seconds (when it was stored, not when it happened); 0 when unknown.
+    #[serde(default)]
+    pub created_at: i64,
 }
 
 /// One memory returned by `memory.list` — the MANAGEMENT browse (DES-MEM-FACETED-001). Unlike

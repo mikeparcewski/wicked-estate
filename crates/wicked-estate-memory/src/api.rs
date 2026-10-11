@@ -102,6 +102,8 @@ impl MemoryApi for MemoryEngine {
                 tier: r.tier.as_str().to_string(),
                 score: r.score,
                 scope: r.scope,
+                kind: r.kind.map(|k| k.as_str().to_string()).unwrap_or_default(),
+                created_at: r.created_at,
             })
             .collect())
     }
@@ -324,6 +326,12 @@ mod tests {
         let out = MemoryApi::recall(&eng, &rq).unwrap();
         assert!(out.iter().any(|r| r.content.contains("oat milk")));
         assert!(out.iter().all(|r| !r.tier.is_empty()));
+        let hit = out.iter().find(|r| r.content.contains("oat milk")).unwrap();
+        assert_eq!(
+            (hit.kind.as_str(), hit.created_at),
+            ("episode", 100),
+            "recall carries kind + capture time"
+        );
     }
 
     #[test]

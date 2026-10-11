@@ -57,6 +57,11 @@ pub struct Recalled {
     /// recall time. Empty string when the node could not be found or re-hydrated in the store,
     /// or when `Memory::from_node` returns `None` (node exists but is not a memory node).
     pub scope: String,
+    /// What the memory is (`fact`, `skill`, `episode`, …), recovered with `scope`. `None` when the
+    /// node could not be re-hydrated.
+    pub kind: Option<wicked_estate_memory_core::MemKind>,
+    /// When the memory was captured (unix seconds); 0 when the node could not be re-hydrated.
+    pub created_at: i64,
 }
 
 /// The memory engine (L0b: single-store, single-writer).
@@ -553,20 +558,25 @@ impl MemoryEngine {
             .take(k)
             .map(|c| {
                 let score = c.final_score(self.alpha);
-                let scope = self
+                let mem = self
                     .store
                     .get_node(&c.id)
                     .ok()
                     .flatten()
-                    .and_then(|n| Memory::from_node(&n))
+                    .and_then(|n| Memory::from_node(&n));
+                let scope = mem
+                    .as_ref()
                     .map(|m| m.scope.as_path().to_string())
                     .unwrap_or_default();
+                let (kind, created_at) = mem.map_or((None, 0), |m| (Some(m.kind), m.created_at));
                 Recalled {
                     id: c.id,
                     content: c.content,
                     tier: c.tier,
                     score,
                     scope,
+                    kind,
+                    created_at,
                 }
             })
             .collect())
@@ -693,20 +703,25 @@ impl MemoryEngine {
                 let score = c.final_score(self.alpha);
                 // Recover the item's own scope for S4 attribution. The node was already
                 // hydrated in ranked_candidates; a second get_node is a cheap pk lookup.
-                let scope = self
+                let mem = self
                     .store
                     .get_node(&c.id)
                     .ok()
                     .flatten()
-                    .and_then(|n| Memory::from_node(&n))
+                    .and_then(|n| Memory::from_node(&n));
+                let scope = mem
+                    .as_ref()
                     .map(|m| m.scope.as_path().to_string())
                     .unwrap_or_default();
+                let (kind, created_at) = mem.map_or((None, 0), |m| (Some(m.kind), m.created_at));
                 Recalled {
                     id: c.id,
                     content: c.content,
                     tier: c.tier,
                     score,
                     scope,
+                    kind,
+                    created_at,
                 }
             })
             .collect()

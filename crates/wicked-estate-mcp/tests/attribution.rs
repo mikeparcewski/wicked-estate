@@ -217,4 +217,12 @@ fn memory_recall_items_carry_item_scope_not_query_scope() {
         "memory.recall: no item carries the item's own scope='{item_scope}'; \
          items: {items:?} (the old bug returned query_scope='{query_scope}' instead)"
     );
+    // DES-memory-vs-knowledge K4: every item says what it is and when it was captured.
+    for (i, item) in items.iter().enumerate() {
+        assert_eq!(item["kind"], "fact", "memory.recall item[{i}] kind: {item}");
+        assert!(
+            item["created_at"].as_i64().is_some_and(|t| t > 0),
+            "memory.recall item[{i}] created_at: {item}"
+        );
+    }
 }
