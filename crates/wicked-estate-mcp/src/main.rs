@@ -74,6 +74,28 @@ fn resolve_read_only() -> bool {
     std::env::args().skip(1).any(|arg| arg == "--readonly")
 }
 
+/// crew#931: a `--readonly` server never creates a file.
+///
+/// Opening a SQLite store creates it when it is missing, so a read-only server pointed at a
+/// directory that holds no stores (a governed worker's shim call with `WICKED_HOME` aimed at a
+/// daemon state home, or the relative default graph in a worktree) used to leave empty
+/// `memory.db` / `memory.db.memext` / `knowledge.db` / `xedge.db` (and the graph) behind it. In a
+/// crew state home those files are unregistered entries, and the state-home fence then refused
+/// every later worker launch. A read-only caller cannot write, so a store that does not exist yet
+/// has nothing to serve: it is opened as an empty in-memory store, and the disk is left untouched.
+/// Write mode is unchanged (it still creates its stores).
+fn read_only_store(spec: String, read_only: bool, store: &str) -> String {
+    let path = spec.strip_prefix("sqlite:").unwrap_or(&spec);
+    if !read_only || path == ":memory:" || std::path::Path::new(path).exists() {
+        return spec;
+    }
+    eprintln!(
+        "[wicked-estate] read-only: no {store} store at '{path}'; serving it empty in memory \
+         (a read-only server creates no file)"
+    );
+    ":memory:".to_string()
+}
+
 fn wicked_home() -> String {
     std::env::var("WICKED_HOME").unwrap_or_else(|_| {
         std::env::var("HOME")
@@ -181,9 +203,9 @@ fn emit_tool_duration(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let db_path = resolve_db_path()?;
     // DES-GROUNDING-001 §3.0: read-only mode — advertise + dispatch only read/query tools.
     let read_only = resolve_read_only();
+    let db_path = read_only_store(resolve_db_path()?, read_only, "graph");
 
     // 2. Open async connection pool instead of a single connection.
     let store = wicked_estate::open_async_store(&db_path)
@@ -256,12 +278,21 @@ async fn main() -> Result<()> {
 
     // 3b. Open domain stores (fail-soft: if any fails, all domains = None).
     let home = wicked_home();
-    let memory_path =
-        std::env::var("WICKED_MEMORY_DB").unwrap_or_else(|_| format!("{home}/memory.db"));
-    let knowledge_path =
-        std::env::var("WICKED_KNOWLEDGE_DB").unwrap_or_else(|_| format!("{home}/knowledge.db"));
-    let xedge_path =
-        std::env::var("WICKED_XEDGE_DB").unwrap_or_else(|_| format!("{home}/xedge.db"));
+    let memory_path = read_only_store(
+        std::env::var("WICKED_MEMORY_DB").unwrap_or_else(|_| format!("{home}/memory.db")),
+        read_only,
+        "memory",
+    );
+    let knowledge_path = read_only_store(
+        std::env::var("WICKED_KNOWLEDGE_DB").unwrap_or_else(|_| format!("{home}/knowledge.db")),
+        read_only,
+        "knowledge",
+    );
+    let xedge_path = read_only_store(
+        std::env::var("WICKED_XEDGE_DB").unwrap_or_else(|_| format!("{home}/xedge.db")),
+        read_only,
+        "xedge",
+    );
 
     // DES-001 §8.4: guard against two engines sharing the same file (data corruption).
     {
