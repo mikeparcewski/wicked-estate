@@ -34,7 +34,7 @@ use wicked_estate_core::{
 // W12 — one-shot context bundle tool (seed + ranked neighbours + budgeted stubs). Lives in its
 // own module; reuses `render_stub` / `render_context` below for budgeting (no reinvention).
 pub mod context_bundle;
-mod paging;
+pub mod paging;
 pub use context_bundle::ContextBundle;
 
 // arch-R2 — faceted conformance-rule recall over MCP (the wire twin of wicked-governance's
@@ -1298,8 +1298,12 @@ impl RetrievalTool for BlastRadius {
                 .unwrap_or(0);
         let (mut page, _) = cap_rows_to_budget(dependents[from..].to_vec(), envelope_overhead);
         if page.is_empty() && from < total_dependents {
-            // Progress: a page always carries at least one remaining row.
+            // Progress: a page always carries at least one remaining row, whole, never cut.
             page.push(dependents[from].clone());
+            diag.push(format!(
+                "BlastRadius: one row is wider than the {R4_CHAR_BUDGET}-char budget; this page \
+                 carries it whole rather than cut it"
+            ));
         }
         let to = from + page.len();
         let next_cursor = (to < total_dependents).then(|| paging::encode(&[to], fp));
@@ -1665,7 +1669,7 @@ impl RetrievalTool for Lineage {
         // alongside them with their classification, evidence and site — the `described` hops.
         let flow_rows: Option<Vec<Value>> = semantic_flow.then(|| {
             let mut rows: Vec<Value> = described.iter().map(|edge| flow_hop_row(edge)).collect();
-            rows.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+            rows.sort_by_cached_key(Value::to_string);
             rows
         });
 
@@ -1715,6 +1719,12 @@ impl RetrievalTool for Lineage {
                 page_deps.push(dependencies[dep_from].clone());
             } else if flows_left > 0 {
                 page_flows = Some(vec![all_flows[flow_from].clone()]);
+            }
+            if deps_rest_len > 0 || flows_left > 0 {
+                diag.push(format!(
+                    "Lineage: one row is wider than the {R4_CHAR_BUDGET}-char budget; this page \
+                     carries it whole rather than cut it"
+                ));
             }
         }
         let page_flow_count = page_flows.as_ref().map_or(0, Vec::len);
@@ -7106,8 +7116,8 @@ mod tests {
             "must report truncation"
         );
         assert!(
-            res.diagnostics.iter().any(|d| d.contains("R4 budget")),
-            "a char-budget truncation diagnostic must be present when capped; got {:?}",
+            res.diagnostics.iter().any(|d| d.contains("pass `cursor`")),
+            "a partial page must name its cursor; got {:?}",
             res.diagnostics
         );
     }
@@ -7129,7 +7139,7 @@ mod tests {
             "narrow graph must not truncate"
         );
         assert!(
-            !res.diagnostics.iter().any(|d| d.contains("R4 budget")),
+            !res.diagnostics.iter().any(|d| d.contains("pass `cursor`")),
             "no R4 truncation diag on a narrow graph; got {:?}",
             res.diagnostics
         );
@@ -7458,6 +7468,44 @@ mod tests {
         }
         assert!(pages >= 2, "the fixture overflows one page");
         assert_eq!(seen.len(), n, "every importer is retrievable");
+    }
+
+    /// #279: paging returns every row the bounded walk produced; it never claims more. A chain
+    /// deeper than the depth ceiling ends with `next_cursor: null` but still `truncated: true` and
+    /// `depth_horizon_reached: true`, so a caller can tell "all pages read" from "whole graph".
+    #[test]
+    fn a_walk_cut_at_the_ceiling_stays_truncated_after_the_last_page() {
+        let len = 30usize;
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        let nodes: Vec<Node> = (0..=len)
+            .map(|i| {
+                make_node(
+                    &format!("n{i}"),
+                    &format!("n{i}"),
+                    NodeKind::Function,
+                    "c.rs",
+                    i as u32,
+                )
+            })
+            .collect();
+        let edges: Vec<Edge> = (0..len)
+            .map(|i| make_call_edge(&format!("n{i}"), &format!("n{}", i + 1)))
+            .collect();
+        store.upsert_nodes(&nodes).unwrap();
+        store.upsert_edges(&edges).unwrap();
+        store.commit_batch().unwrap();
+        let res = Lineage.invoke(&store, &json!({"symbol": "n0"})).unwrap();
+        let c = &res.content;
+        assert_eq!(c["searched_depth"], json!(24));
+        assert_eq!(c["next_cursor"], Value::Null, "one page holds 24 rows");
+        assert_eq!(c["total"], json!(24));
+        assert_eq!(c["depth_horizon_reached"], json!(true));
+        assert_eq!(
+            c["truncated"],
+            json!(true),
+            "the ceiling cut is never read as complete"
+        );
     }
 
     /// #279 ("I want the full graph"): a `flows_to` Lineage answer wider than one reply pages to

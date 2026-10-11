@@ -281,6 +281,8 @@ pub const COMMANDS: &[Command] = &[
                     },
                 )
                 .inline(),
+                // #279: a previous page's `next_cursor`, for the next dependents.
+                Flag::new("cursor", Ty::Str).inline(),
             ],
         ),
     },

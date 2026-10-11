@@ -92,7 +92,8 @@ def lineage(binary, db, symbol):
     `truncated` here means NOT completely retrievable: the last page still reports a cut (a depth
     horizon or the node cap), or the pages do not join into `total`. A binary without paging
     (no `next_cursor` key) is read as one page, as before."""
-    size, pages, cursor, rows, total, last = 0, 0, None, 0, None, None
+    size, pages, cursor, total, last = 0, 0, None, None, None
+    deps, flows, dup = set(), set(), False
     while True:
         cmd = [binary, "lineage", symbol, "--relation", "flows_to", "--json", "--db", db]
         if cursor:
@@ -105,7 +106,13 @@ def lineage(binary, db, symbol):
             sys.exit(f"lineage document malformed ({binary}, {symbol}): {r.stdout[:300]}")
         pages += 1
         size = max(size, len(r.stdout))
-        rows += len(d.get("dependencies", []))
+        for row in d.get("dependencies", []):
+            dup |= row["symbol"] in deps
+            deps.add(row["symbol"])
+        for row in d.get("flows", []):
+            key = json.dumps(row, sort_keys=True)
+            dup |= key in flows
+            flows.add(key)
         total = d.get("total") if total is None else total
         last = d
         cursor = d.get("next_cursor")
@@ -114,7 +121,9 @@ def lineage(binary, db, symbol):
         if pages > 1000:
             sys.exit(f"lineage paging did not terminate ({binary}, {symbol})")
     paged = "next_cursor" in last
-    incomplete = bool(last["truncated"]) or (paged and rows != total)
+    flow_total = last.get("page", {}).get("flows", {}).get("total", len(flows))
+    incomplete = bool(last["truncated"]) or (paged and (
+        dup or len(deps) != total or len(flows) != flow_total))
     return {"size": size, "truncated": incomplete, "total": total, "pages": pages}
 
 
@@ -258,6 +267,9 @@ def main():
     for name, b, c, p, g in rows:
         print(f"| {name} | {b} | {c} | {p:+.2f} % | {g} |")
     print(f"| Lineage, 10 fixed queries newly not completely retrievable | | | {len(newly_fixed)} | 0 |")
+    cand_incomplete = sweep_cand_trunc + sum(1 for v in lin_fixed.values() if v["cand"]["truncated"])
+    print(f"| Lineage queries not completely retrievable (candidate, fixed + sweep) | | | "
+          f"{cand_incomplete} | 0 |")
     print(f"| Lineage sweep ({len(params)} parameter roots) newly not completely retrievable | "
           f"{sweep_base_trunc} truncated | {sweep_cand_trunc} truncated | "
           f"{len(sweep_new_trunc)} | 0 |")

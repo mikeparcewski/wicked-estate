@@ -17,12 +17,12 @@ use std::hash::{Hash, Hasher};
 use wicked_estate_core::{Error, Result};
 
 /// The request key a caller passes a `next_cursor` back under.
-pub(crate) const CURSOR_KEY: &str = "cursor";
+pub const CURSOR_KEY: &str = "cursor";
 
 /// Fingerprint of one complete answer: the tool, its effective query, and every row of every
 /// paged array, in order. The crate version is included, so a cursor from another build reads as
 /// stale rather than as a position in an answer this build may order differently.
-pub(crate) fn fingerprint(tool: &str, query: &str, arrays: &[&[Value]]) -> u64 {
+pub fn fingerprint(tool: &str, query: &str, arrays: &[&[Value]]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     env!("CARGO_PKG_VERSION").hash(&mut h);
     tool.hash(&mut h);
@@ -37,7 +37,7 @@ pub(crate) fn fingerprint(tool: &str, query: &str, arrays: &[&[Value]]) -> u64 {
 }
 
 /// The opaque cursor for the rows starting at `offsets` (one per paged array).
-pub(crate) fn encode(offsets: &[usize], fingerprint: u64) -> String {
+pub fn encode(offsets: &[usize], fingerprint: u64) -> String {
     let offsets: Vec<String> = offsets.iter().map(usize::to_string).collect();
     format!("p1.{}.{fingerprint:016x}", offsets.join("-"))
 }
@@ -45,7 +45,7 @@ pub(crate) fn encode(offsets: &[usize], fingerprint: u64) -> String {
 /// Where this page starts: all zeros without a cursor, else the cursor's offsets. A malformed
 /// cursor, or one issued for another query or another state of the graph, is an error. It never
 /// restarts silently, which would hand a caller page 1 twice and read as the rest of the answer.
-pub(crate) fn start_offsets(
+pub fn start_offsets(
     tool: &str,
     request: &Value,
     lens: &[usize],
