@@ -296,7 +296,7 @@ pub const COMMANDS: &[BridgedCommand] = &[
                 key: "depth",
                 ty: FlagType::U64,
                 validate: None,
-                help: "hops (default 24, the ceiling); the tool clamps to it and reports the clamp",
+                help: "hops (default 24); the tool clamps to its ceiling (24) and reports the clamp",
             },
             FlagSpec {
                 flag: "cursor",

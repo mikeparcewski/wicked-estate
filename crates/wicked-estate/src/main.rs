@@ -11,7 +11,7 @@
 //!   wicked-estate import-telemetry <file.json> [--db ...]
 //!   wicked-estate drift                  [--db ...]
 //!   wicked-estate query <name>           [--db ...]
-//!   wicked-estate blast-radius <name>    [--depth N] [--json] [--db ...]
+//!   wicked-estate blast-radius <name>    [--depth N] [--cursor C] [--json] [--db ...]
 //!   wicked-estate supports owners        [--json] [--db ...]
 //!   wicked-estate supports edge --source <ID> --target <ID> --kind <KIND> [--json] [--db ...]
 //!   wicked-estate supports retract --producer <P> --snapshot <S> [--json] [--db ...]
@@ -3732,7 +3732,9 @@ fn main() -> Result<()> {
             println!(
                 "    --json emits `resolve --json`'s rows [{{symbol_id,name,kind,file,line}}] (#199)"
             );
-            println!("  wicked-estate blast-radius <name>   [--depth N] [--json] [--db ...]");
+            println!(
+                "  wicked-estate blast-radius <name>   [--depth N] [--cursor C] [--json] [--db ...]"
+            );
             println!("  wicked-estate path <from> <to>      [--max-depth N] [--json] [--db ...]");
             println!(
                 "    The ordered hops from <from> to <to> — each with its edge kind and confidence."
