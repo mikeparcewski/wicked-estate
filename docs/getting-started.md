@@ -213,7 +213,7 @@ The same query is available to agents as the MCP `Path` tool (§10).
 ### Lineage — what a symbol depends on, or where its value goes
 
 ```bash
-wicked-estate lineage <symbol> [--depth N] [--relation flows_to] [--cursor C] [--json] [--db ...]
+wicked-estate lineage <symbol> [--depth N] [--relation flows_to] [--cursor S] [--json] [--db ...]
 ```
 
 The CLI twin of the MCP `Lineage` tool (§10), run on the RetrievalTool→CLI bridge

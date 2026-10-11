@@ -299,19 +299,19 @@ pub const COMMANDS: &[BridgedCommand] = &[
                 help: "hops (default 24); the tool clamps to its ceiling (24) and reports the clamp",
             },
             FlagSpec {
-                flag: "cursor",
-                key: "cursor",
-                ty: FlagType::Str,
-                validate: None,
-                help: "a previous page's next_cursor: the next rows of the same answer",
-            },
-            FlagSpec {
                 flag: "relation",
                 key: "relation",
                 ty: FlagType::OneOf(&["flows_to"]),
                 validate: None,
                 help: "omit for dependency lineage (Calls + Imports); flows_to = static semantic \
                        value lineage, producer -> consumer (not taint)",
+            },
+            FlagSpec {
+                flag: "cursor",
+                key: "cursor",
+                ty: FlagType::Str,
+                validate: None,
+                help: "a previous page's next_cursor: the next rows of the same answer",
             },
         ],
     },

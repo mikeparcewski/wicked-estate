@@ -1019,7 +1019,9 @@ fn help_lists_lineage_as_static_semantic_lineage_not_taint() {
     assert!(top.status.success());
     let top = String::from_utf8(top.stdout).unwrap();
     assert!(
-        top.contains("wicked-estate lineage <symbol> [--depth N] [--relation flows_to] [--json]"),
+        top.contains(
+            "wicked-estate lineage <symbol> [--depth N] [--relation flows_to] [--cursor S] [--json]"
+        ),
         "{top}"
     );
     let own = run(&s, &["lineage", "--help"]);
