@@ -1652,8 +1652,9 @@ impl RetrievalTool for Lineage {
 
         if dependencies.is_empty() {
             diag.push(format!(
-                "Lineage: no {empty_label} found for '{id_str}' \
-                 (it may be a leaf or not yet indexed)"
+                "Lineage: no {empty_label} found for '{}' \
+                 (it may be a leaf or not yet indexed)",
+                echo_name(&id_str)
             ));
         }
         let node_truncated = subgraph.truncated;
@@ -7539,6 +7540,22 @@ mod tests {
             cursor.is_null() && seen == 600,
             "every caller arrives: {seen}"
         );
+    }
+
+    /// #279 review: an empty answer for a very long id still fits, diagnostics included.
+    #[test]
+    fn empty_answers_for_a_long_id_fit_the_budget() {
+        let store = MemStore::new();
+        let id = "x".repeat(30_000);
+        for res in [
+            Lineage.invoke(&store, &json!({"symbol": id})).unwrap(),
+            BlastRadius.invoke(&store, &json!({"symbol": id})).unwrap(),
+        ] {
+            let received = serde_json::to_string(&res.content).unwrap().len()
+                + res.diagnostics.iter().map(|d| d.len() + 1).sum::<usize>();
+            assert!(received <= R4_CHAR_BUDGET, "{received} chars");
+            assert_eq!(res.content["next_cursor"], Value::Null);
+        }
     }
 
     /// #279: paging returns every row the bounded walk produced; it never claims more. A chain
