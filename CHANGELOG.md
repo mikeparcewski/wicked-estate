@@ -6,6 +6,11 @@
 
 Patch: the last consolidation leaks from the codex re-review of #329.
 
+### Added
+- **Knowledge proposals (`kind_type: "knowledge"`, DES-memory-vs-knowledge K3, #328).** A governed
+  seat can propose acquired knowledge through the inert proposal queue; approval writes it to the
+  knowledge store. (Merged just before the 0.29.2 release commit, so it ships here.)
+
 ### Fixed
 - **Summaries built over expired Working memories are removed.** 0.29.0's archive folded expired
   scratch into root-scoped, unfaceted summaries; 0.29.1 dropped the sources but left those summaries
