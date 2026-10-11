@@ -83,14 +83,22 @@ fn resolve_read_only() -> bool {
 /// crew state home those files are unregistered entries, and the state-home fence then refused
 /// every later worker launch. A read-only caller cannot write, so a store that does not exist yet
 /// has nothing to serve: it is opened as an empty in-memory store, and the disk is left untouched.
-/// Write mode is unchanged (it still creates its stores).
+/// Write mode is unchanged (it still creates its stores), and only a plain filesystem path is
+/// judged: a `scheme:` spec is left to the opener exactly as before.
 fn read_only_store(spec: String, read_only: bool, store: &str) -> String {
-    let path = spec.strip_prefix("sqlite:").unwrap_or(&spec);
-    if !read_only || path == ":memory:" || std::path::Path::new(path).exists() {
+    // `scheme:` = two or more scheme chars before the colon (`sqlite:`, `postgres://`), so a
+    // Windows drive letter (`C:\…`) is still a path.
+    let scheme = spec.split_once(':').is_some_and(|(head, _)| {
+        head.len() > 1
+            && head
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+    });
+    if !read_only || spec == ":memory:" || scheme || std::path::Path::new(&spec).exists() {
         return spec;
     }
     eprintln!(
-        "[wicked-estate] read-only: no {store} store at '{path}'; serving it empty in memory \
+        "[wicked-estate] read-only: no {store} store at '{spec}'; serving it empty in memory \
          (a read-only server creates no file)"
     );
     ":memory:".to_string()
