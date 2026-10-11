@@ -87,6 +87,19 @@ impl MemoryEngine {
     ///   [`ApproveOutcome::HandedOff`].
     /// - anything else: fail loud (unknown kind_type shape).
     pub fn approve_proposal(&mut self, id: &str, now: i64) -> anyhow::Result<ApproveOutcome> {
+        self.approve_proposal_with_knowledge(id, now, &mut |_, _| {
+            anyhow::bail!("knowledge domain writer required to approve a knowledge proposal")
+        })
+    }
+
+    /// Approve using the knowledge domain's narrow writer, retaining queue lifecycle ownership.
+    /// The writer must derive a stable node id from the proposal id for retry idempotency.
+    pub fn approve_proposal_with_knowledge(
+        &mut self,
+        id: &str,
+        now: i64,
+        write_knowledge: &mut dyn FnMut(&Proposal, i64) -> anyhow::Result<String>,
+    ) -> anyhow::Result<ApproveOutcome> {
         let mut proposal = self.load_pending(id)?;
 
         let outcome = if proposal.kind_type == "memory" {
@@ -125,6 +138,10 @@ impl MemoryEngine {
             let active_id = mem.symbol().0.clone();
             self.capture(&mem)?; // active store write → immediately recallable
             ApproveOutcome::Promoted { active_id }
+        } else if proposal.kind_type == "knowledge" {
+            ApproveOutcome::Promoted {
+                active_id: write_knowledge(&proposal, now)?,
+            }
         } else if proposal.kind_type.starts_with("policy:") {
             // No rules-write in estate: hand the payload off for the caller to route to steering.
             ApproveOutcome::HandedOff {
@@ -132,7 +149,7 @@ impl MemoryEngine {
             }
         } else {
             anyhow::bail!(
-                "cannot approve proposal {id}: unknown kind_type {:?} (expected \"memory\" or \"policy:*\")",
+                "cannot approve proposal {id}: unknown kind_type {:?} (expected \"memory\", \"knowledge\" or \"policy:*\")",
                 proposal.kind_type
             );
         };

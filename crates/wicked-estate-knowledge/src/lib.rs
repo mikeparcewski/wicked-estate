@@ -967,6 +967,14 @@ pub trait KnowledgeApi {
         source: &str,
         now: i64,
     ) -> anyhow::Result<String>;
+    /// Promote a knowledge proposal using a stable id so retries upsert the same node.
+    fn write_proposal(
+        &mut self,
+        _proposal: &wicked_estate_memory_core::Proposal,
+        _now: i64,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("knowledge proposal writer not available")
+    }
     fn write_node(
         &mut self,
         class: &str,
@@ -1034,6 +1042,55 @@ impl KnowledgeApi for KnowledgeEngine {
     ) -> anyhow::Result<String> {
         let kn = KNode::new(class_of(class), content, scope, source, now);
         let sym = KnowledgeEngine::write(self, &kn)?;
+        Ok(sym.0)
+    }
+
+    fn write_proposal(
+        &mut self,
+        proposal: &wicked_estate_memory_core::Proposal,
+        now: i64,
+    ) -> anyhow::Result<String> {
+        let payload = &proposal.payload;
+        let required = |field: &str| -> anyhow::Result<&str> {
+            payload
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("knowledge payload.{field} (non-empty string) required")
+                })
+        };
+        let class = match payload.get("class") {
+            None => KClass::Chunk,
+            Some(v) => match v.as_str() {
+                Some("doc") => KClass::Doc,
+                Some("section") => KClass::Section,
+                Some("chunk") => KClass::Chunk,
+                Some("concept") => KClass::Concept,
+                _ => anyhow::bail!("invalid knowledge class: use doc|section|chunk|concept"),
+            },
+        };
+        let mut kn = KNode::new(
+            class,
+            required("content")?,
+            payload
+                .get("scope")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(""),
+            required("source")?,
+            now,
+        );
+        kn.id = format!("proposal:{}", proposal.id);
+        // TODO(K3, DES-memory-vs-knowledge): pass payload.observed_at/source_rev when KNode gains those fields.
+        let sym = KnowledgeEngine::write(self, &kn)?;
+        if !proposal.facets.is_empty() {
+            let mut node = kn.to_node();
+            node.metadata.insert(
+                wicked_estate_memory_core::meta_keys::FACETS.into(),
+                serde_json::to_value(&proposal.facets)?,
+            );
+            wicked_estate_core::GraphWrite::upsert_nodes(&mut self.store, &[node])?;
+        }
         Ok(sym.0)
     }
 

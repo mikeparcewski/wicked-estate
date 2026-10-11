@@ -535,6 +535,15 @@ pub trait MemoryApi {
     /// the proposal `Approved`. Fails loud on an unknown kind_type shape or a non-`Pending` id.
     fn approve_proposal(&mut self, id: &str, now: i64) -> Result<ApproveOutcome, Self::Error>;
 
+    /// Approve with the knowledge domain's writer. A `knowledge` proposal is written before its
+    /// state becomes `Approved`; memory/policy use the same routing as [`Self::approve_proposal`].
+    fn approve_proposal_with_knowledge(
+        &mut self,
+        id: &str,
+        now: i64,
+        write_knowledge: &mut dyn FnMut(&Proposal, i64) -> Result<String, Self::Error>,
+    ) -> Result<ApproveOutcome, Self::Error>;
+
     /// Reject a `Pending` proposal — marks it `Rejected`; it never becomes active.
     fn reject_proposal(&mut self, id: &str, now: i64) -> Result<(), Self::Error>;
 }

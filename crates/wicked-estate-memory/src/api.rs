@@ -265,6 +265,15 @@ impl MemoryApi for MemoryEngine {
         MemoryEngine::approve_proposal(self, id, now)
     }
 
+    fn approve_proposal_with_knowledge(
+        &mut self,
+        id: &str,
+        now: i64,
+        write_knowledge: &mut dyn FnMut(&Proposal, i64) -> anyhow::Result<String>,
+    ) -> Result<ApproveOutcome, anyhow::Error> {
+        MemoryEngine::approve_proposal_with_knowledge(self, id, now, write_knowledge)
+    }
+
     fn reject_proposal(&mut self, id: &str, now: i64) -> Result<(), anyhow::Error> {
         MemoryEngine::reject_proposal(self, id, now)
     }

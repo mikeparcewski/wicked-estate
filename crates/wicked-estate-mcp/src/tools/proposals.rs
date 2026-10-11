@@ -7,6 +7,7 @@
 
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use wicked_estate_knowledge::KnowledgeApi;
 use wicked_estate_memory_core::{
     ApproveOutcome, Facets, MemoryApi, Proposal, ProposalState, valid_kind_type,
 };
@@ -16,6 +17,7 @@ pub fn dispatch(
     id: &Value,
     params: &Value,
     memory: &mut dyn MemoryApi<Error = anyhow::Error>,
+    knowledge: &mut dyn KnowledgeApi,
 ) -> Value {
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
     let now = std::time::SystemTime::now()
@@ -25,7 +27,7 @@ pub fn dispatch(
     match tool {
         "proposal.submit" => dispatch_submit(id, &args, memory, now),
         "proposal.list" => dispatch_list(id, &args, memory),
-        "proposal.approve" => dispatch_approve(id, &args, memory, now),
+        "proposal.approve" => dispatch_approve(id, &args, memory, knowledge, now),
         "proposal.reject" => dispatch_reject(id, &args, memory, now),
         _ => json_rpc_error(id, -32602, "unknown proposal tool"),
     }
@@ -123,14 +125,14 @@ fn dispatch_submit(
         Ok(f) => f,
         Err(e) => return e,
     };
-    // Fail-fast on the two built-in kinds' key enums (memory `tier` / policy `severity`). Without
+    // Fail-fast on built-in payloads (memory `tier`, knowledge provenance/class, policy `severity`). Without
     // this a worker's drifted value ("long_term", "durable" for tier; "high", "medium", "warning"
     // for severity) passes the INERT submit and only fails much LATER at approval — long after the
     // worker that could have corrected it is gone, so the learning is silently lost. Validating at
     // submit returns a -32602 the worker sees and RETRIES against, at capture time (LLM enum drift is
     // otherwise unfixable — an accept-and-normalize map over an unbounded synonym space is a guess).
     // Only a PRESENT value is checked (absent uses the downstream default). This deliberately couples
-    // the generic queue to its two built-in kinds — memory + policy are what the queue exists for.
+    // the generic queue to its built-in kinds: memory, knowledge, and policy.
     // A PRESENT value must be a string in the enum; absent/null uses the downstream default. A
     // present NON-string (number/object/bool) is invalid too — it would otherwise bypass this
     // check and fail only at approval, the very gap this guard closes.
@@ -147,6 +149,50 @@ fn dispatch_submit(
                         "invalid memory tier {other}: use EXACTLY one of working|episodic|semantic|procedural|archival \
                          (a repo fact/decision is \"semantic\"; a how-to/convention is \"procedural\")"
                     ),
+                );
+            }
+        }
+    } else if kind_type == "knowledge" {
+        for field in ["content", "source"] {
+            if payload
+                .get(field)
+                .and_then(Value::as_str)
+                .is_none_or(|s| s.trim().is_empty())
+            {
+                return json_rpc_error(
+                    id,
+                    -32602,
+                    &format!("knowledge payload.{field} (non-empty string) required"),
+                );
+            }
+        }
+        if let Some(class) = payload.get("class") {
+            if !matches!(
+                class.as_str(),
+                Some("doc" | "section" | "chunk" | "concept")
+            ) {
+                return json_rpc_error(
+                    id,
+                    -32602,
+                    "invalid knowledge class: use doc|section|chunk|concept (default chunk)",
+                );
+            }
+        }
+        for field in ["scope", "observed_at", "source_rev"] {
+            if payload.get(field).is_some_and(|v| !v.is_string()) {
+                return json_rpc_error(
+                    id,
+                    -32602,
+                    &format!("knowledge payload.{field} must be a string"),
+                );
+            }
+        }
+        if let Some(observed_at) = payload.get("observed_at").and_then(Value::as_str) {
+            if chrono::DateTime::parse_from_rfc3339(observed_at).is_err() {
+                return json_rpc_error(
+                    id,
+                    -32602,
+                    "knowledge payload.observed_at must be an ISO-8601 timestamp with timezone",
                 );
             }
         }
@@ -252,13 +298,16 @@ fn dispatch_approve(
     id: &Value,
     args: &Value,
     memory: &mut dyn MemoryApi<Error = anyhow::Error>,
+    knowledge: &mut dyn KnowledgeApi,
     now: i64,
 ) -> Value {
     let proposal_id = match args.get("id").and_then(|v| v.as_str()) {
         Some(i) => i.to_string(),
         None => return json_rpc_error(id, -32602, "id (string) required"),
     };
-    match memory.approve_proposal(&proposal_id, now) {
+    match memory.approve_proposal_with_knowledge(&proposal_id, now, &mut |proposal, now| {
+        knowledge.write_proposal(proposal, now)
+    }) {
         Ok(ApproveOutcome::Promoted { active_id }) => {
             mcp_result(id, json!({"outcome": "promoted", "active_id": active_id}))
         }
