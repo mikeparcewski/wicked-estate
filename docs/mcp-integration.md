@@ -27,7 +27,7 @@ The server is invoked the same way everywhere:
 Use an **absolute** DB path — clients launch the server with an unpredictable working directory.
 (Alternatively set `WICKED_ESTATE_DB` in the server's `env`; `--db` takes precedence.)
 
-It exposes **30 tools across 3 domains** plus `SemanticSearch` when embeddings are present:
+It exposes **31 tools across 3 domains** plus `SemanticSearch` when embeddings are present:
 
 **Estate (12 tools):** `SearchEntity`, `RetrieveEntity`, `TraverseGraph`, `Path`, `BlastRadius`, `FetchContent`, `ContextBundle`, `RulesInventory`, `rules.recall`, `RankHotspots`, `Communities`, `Lineage`
 
@@ -35,7 +35,18 @@ It exposes **30 tools across 3 domains** plus `SemanticSearch` when embeddings a
 
 **Proposal queue (4 tools, memory domain):** `proposal.submit`, `proposal.list`, `proposal.approve`, `proposal.reject`
 
-**Knowledge (7 tools):** `knowledge.ingest`, `knowledge.write`, `knowledge.relate`, `knowledge.recall`, `knowledge.coverage`, `knowledge.relate_code`, `knowledge.recall_about_code`
+**Knowledge (8 tools):** `knowledge.ingest`, `knowledge.write`, `knowledge.forget`, `knowledge.relate`, `knowledge.recall`, `knowledge.coverage`, `knowledge.relate_code`, `knowledge.recall_about_code`
+
+`knowledge.forget` accepts exactly one of `id` (one node), `source` (every node with that exact
+source), or `scope_prefix` (that scope subtree, using recall's segment-aware predicate). An empty
+prefix requires `confirm_erase_all: true`. It returns `deleted_count`, is idempotent, and is
+unavailable under `--readonly`. Other node kinds sharing the scope are preserved.
+
+`knowledge.ingest` and `knowledge.write` accept `observed_at` as an ISO-8601 timestamp with a
+timezone and optional `source_rev`. Recall items return `observed_at` in UTC and `source_rev`
+(or null); old nodes default observation time to `created_at`. Ingest with `replace_source: true`
+first forgets all knowledge with the exact source, then writes the new document and chunks.
+Replacement requires a non-empty `source`.
 
 ---
 

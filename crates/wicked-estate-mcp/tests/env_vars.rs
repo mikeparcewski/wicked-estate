@@ -11,7 +11,7 @@
 //! - ENV-004: `WICKED_XEDGE_DB` custom path → file created at that path
 //! - ENV-006: No env vars → estate at `CWD/.wicked-estate/graph.db` (DEFAULT_DB)
 //! - SMOKE-001: Memory migration smoke — all 6 `memory.*` tools in `tools/list`
-//! - SMOKE-002: Knowledge migration smoke — all 7 `knowledge.*` tools in `tools/list`
+//! - SMOKE-002: Knowledge migration smoke — all 8 `knowledge.*` tools in `tools/list`
 //!
 //! # Default path reality (from main.rs)
 //!
@@ -387,6 +387,7 @@ const MEMORY_TOOLS: &[&str] = &[
 const KNOWLEDGE_TOOLS: &[&str] = &[
     "knowledge.ingest",
     "knowledge.write",
+    "knowledge.forget",
     "knowledge.relate",
     "knowledge.recall",
     "knowledge.coverage",
@@ -429,9 +430,9 @@ fn smoke_001_memory_migration_all_6_tools_present() {
 }
 
 /// SMOKE-002: Replacing `wicked-knowledge-mcp` with `wicked-estate-mcp` — all
-/// 7 `knowledge.*` tools must appear in `tools/list` when all four stores are wired.
+/// 8 `knowledge.*` tools must appear in `tools/list` when all four stores are wired.
 #[test]
-fn smoke_002_knowledge_migration_all_7_tools_present() {
+fn smoke_002_knowledge_migration_all_8_tools_present() {
     let (mut mcp, _tmp) = spawn_all_domains();
 
     let init_resp = mcp.initialize();

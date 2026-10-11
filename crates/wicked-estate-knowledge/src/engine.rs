@@ -64,6 +64,8 @@ pub mod meta_keys {
     pub const SCOPE: &str = "scope";
     pub const SOURCE: &str = "source";
     pub const CREATED_AT: &str = "created_at";
+    pub const OBSERVED_AT: &str = "observed_at";
+    pub const SOURCE_REV: &str = "source_rev";
     /// Dedup: the loser's source/id appended here on collapse-but-surface (D4.1).
     pub const ALSO_FOUND_IN: &str = "also_found_in";
     /// Dedup: the canonical node carries `canonical = true`.
@@ -79,6 +81,8 @@ pub struct KNode {
     pub scope: String,
     pub source: String,
     pub created_at: i64,
+    pub observed_at: i64,
+    pub source_rev: Option<String>,
 }
 
 impl KNode {
@@ -97,6 +101,8 @@ impl KNode {
             scope: scope.into(),
             source: source.into(),
             created_at: now,
+            observed_at: now,
+            source_rev: None,
         }
     }
 
@@ -127,6 +133,8 @@ impl KNode {
         m.insert(meta_keys::SCOPE.into(), self.scope.clone().into());
         m.insert(meta_keys::SOURCE.into(), self.source.clone().into());
         m.insert(meta_keys::CREATED_AT.into(), self.created_at.into());
+        m.insert(meta_keys::OBSERVED_AT.into(), self.observed_at.into());
+        m.insert(meta_keys::SOURCE_REV.into(), self.source_rev.clone().into());
         node
     }
 
@@ -156,6 +164,15 @@ impl KNode {
                 .get(meta_keys::CREATED_AT)
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0),
+            observed_at: m
+                .get(meta_keys::OBSERVED_AT)
+                .and_then(|v| v.as_i64())
+                .unwrap_or_else(|| {
+                    m.get(meta_keys::CREATED_AT)
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0)
+                }),
+            source_rev: s(meta_keys::SOURCE_REV),
         })
     }
 }
@@ -167,6 +184,8 @@ pub struct KRecalled {
     pub content: String,
     pub score: f64,
     pub source: String,
+    pub observed_at: i64,
+    pub source_rev: Option<String>,
 }
 
 /// One recall-miss sidecar row (T-B-MISSLOG seeds this; the foundation scaffolds the shape).
@@ -296,11 +315,49 @@ impl KnowledgeEngine {
         source: &str,
         now: i64,
     ) -> Result<(SymbolId, Vec<SymbolId>)> {
-        let doc = KNode::new(KClass::Doc, title, scope, source, now);
+        self.ingest_with_options(
+            title,
+            chunks,
+            scope,
+            source,
+            &crate::KnowledgeWriteOptions {
+                created_at: now,
+                ..Default::default()
+            },
+        )
+    }
+
+    pub fn ingest_with_options(
+        &mut self,
+        title: &str,
+        chunks: &[String],
+        scope: &str,
+        source: &str,
+        options: &crate::KnowledgeWriteOptions,
+    ) -> Result<(SymbolId, Vec<SymbolId>)> {
+        if options.replace_source {
+            if source.is_empty() {
+                return Err(wicked_estate_core::Error::Invalid(
+                    "replace_source requires a non-empty source".into(),
+                ));
+            }
+            self.forget(&crate::ForgetTarget::Source(source.into()))?;
+        }
+        let mut doc = KNode::new(KClass::Doc, title, scope, source, options.created_at);
+        doc.observed_at = options.observed_at.unwrap_or(options.created_at);
+        doc.source_rev = options.source_rev.clone();
         let doc_sym = self.write(&doc)?;
         let mut chunk_syms = Vec::new();
         for chunk in chunks.iter().filter(|c| !c.trim().is_empty()) {
-            let kn = KNode::new(KClass::Chunk, chunk.clone(), scope, source, now);
+            let mut kn = KNode::new(
+                KClass::Chunk,
+                chunk.clone(),
+                scope,
+                source,
+                options.created_at,
+            );
+            kn.observed_at = doc.observed_at;
+            kn.source_rev = doc.source_rev.clone();
             let sym = self.write(&kn)?;
             self.store
                 .upsert_edges(&[edge(&sym, &doc_sym, "derived_from")])?;
@@ -317,6 +374,55 @@ impl KnowledgeEngine {
     /// Count knowledge nodes (optionally of one class, optionally within a scope subtree).
     pub fn count(&self, class: Option<KClass>, scope_prefix: Option<&str>) -> Result<usize> {
         Ok(self.all_nodes(class, scope_prefix)?.len())
+    }
+
+    /// Hard-delete knowledge in the scope subtree, including FTS, vectors, and incident edges.
+    /// Kind-guarded via `all_nodes`, with the same scope predicate as recall. Idempotent.
+    /// MCP callers must confirm an empty prefix before invoking this root-subtree erase.
+    pub fn erase(&mut self, scope_prefix: &str) -> Result<usize> {
+        let deleted = self.remove_knowledge(self.all_nodes(None, Some(scope_prefix))?)?;
+        self.misses
+            .retain(|miss| !scope_in_prefix(&miss.scope, scope_prefix));
+        Ok(deleted)
+    }
+
+    pub fn forget(&mut self, target: &crate::ForgetTarget) -> Result<usize> {
+        let nodes = self.matching_nodes(target)?;
+        let deleted = self.remove_knowledge(nodes)?;
+        if let crate::ForgetTarget::ScopePrefix(prefix) = target {
+            self.misses
+                .retain(|miss| !scope_in_prefix(&miss.scope, prefix));
+        }
+        Ok(deleted)
+    }
+
+    pub(crate) fn matching_nodes(&self, target: &crate::ForgetTarget) -> Result<Vec<KNode>> {
+        match target {
+            crate::ForgetTarget::ScopePrefix(prefix) => self.all_nodes(None, Some(prefix)),
+            crate::ForgetTarget::Id(id) => Ok(self
+                .all_nodes(None, None)?
+                .into_iter()
+                .filter(|n| n.id == *id || n.symbol().as_str() == id)
+                .collect()),
+            crate::ForgetTarget::Source(source) => Ok(self
+                .all_nodes(None, None)?
+                .into_iter()
+                .filter(|n| n.source == *source)
+                .collect()),
+        }
+    }
+
+    fn remove_knowledge(&mut self, nodes: Vec<KNode>) -> Result<usize> {
+        let ids: Vec<SymbolId> = nodes.iter().map(KNode::symbol).collect();
+        let deleted = self.store.remove_nodes(&ids)?;
+        if let Some(xedge) = &self.xedge {
+            for id in &ids {
+                xedge.delete_by_src_id("knowledge", id.as_str())?;
+                // Standalone knowledge MCP historically used XEdge::about's memory source tag.
+                xedge.delete_by_src_id("memory", id.as_str())?;
+            }
+        }
+        Ok(deleted)
     }
 
     /// All knowledge nodes (optionally of one class, optionally within a scope subtree) decoded.
@@ -545,18 +651,18 @@ impl KnowledgeEngine {
             .into_iter()
             .map(|c| {
                 let score = c.final_score(0.5);
-                let source = self
+                let kn = self
                     .node(&c.id)
                     .ok()
                     .flatten()
-                    .and_then(|n| KNode::from_node(&n))
-                    .map(|kn| kn.source)
-                    .unwrap_or_default();
+                    .and_then(|n| KNode::from_node(&n));
                 KRecalled {
                     id: c.id,
                     content: c.content,
                     score,
-                    source,
+                    source: kn.as_ref().map(|n| n.source.clone()).unwrap_or_default(),
+                    observed_at: kn.as_ref().map(|n| n.observed_at).unwrap_or_default(),
+                    source_rev: kn.and_then(|n| n.source_rev),
                 }
             })
             .collect();
@@ -647,6 +753,270 @@ fn dangling_err(which: &str, id: &SymbolId) -> wicked_estate_core::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forget_id_and_exact_source_are_kind_guarded() {
+        let mut e = KnowledgeEngine::in_memory().unwrap();
+        let a = KNode::new(KClass::Chunk, "sqlite", "learn:demo", "docs/sqlite.md", 1);
+        let b = KNode::new(
+            KClass::Concept,
+            "sqlite concept",
+            "learn:other",
+            "docs/sqlite.md",
+            1,
+        );
+        let sibling = KNode::new(KClass::Chunk, "wal", "learn:demo", "docs/sqlite.md-wal", 1);
+        for n in [&a, &b, &sibling] {
+            e.write(n).unwrap();
+        }
+        let mut foreign = a.to_node();
+        foreign.kind = NodeKind::Other("memory".into());
+        foreign.symbol = Symbol::synthetic("memory", "foreign").id();
+        e.store.upsert_nodes(&[foreign.clone()]).unwrap();
+        assert_eq!(
+            e.forget(&crate::ForgetTarget::Id(foreign.symbol.0.clone()))
+                .unwrap(),
+            0
+        );
+        assert_eq!(e.forget(&crate::ForgetTarget::Id(a.symbol().0)).unwrap(), 1);
+        assert!(e.node(&b.symbol()).unwrap().is_some());
+        assert_eq!(e.forget(&crate::ForgetTarget::Id(a.id)).unwrap(), 0);
+        assert_eq!(
+            e.forget(&crate::ForgetTarget::Source("docs/sqlite.md".into()))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            e.forget(&crate::ForgetTarget::Source("docs/sqlite.md".into()))
+                .unwrap(),
+            0
+        );
+        assert!(e.node(&sibling.symbol()).unwrap().is_some());
+        assert!(e.node(&foreign.symbol).unwrap().is_some());
+    }
+
+    #[test]
+    fn observation_metadata_round_trips_and_legacy_defaults() {
+        let mut node = KNode::new(KClass::Chunk, "sqlite", "", "docs/sqlite.md", 123);
+        node.observed_at = 100;
+        node.source_rev = Some("abc123".into());
+        let stored = node.to_node();
+        let hydrated = KNode::from_node(&stored).unwrap();
+        assert_eq!(hydrated.observed_at, 100);
+        assert_eq!(hydrated.source_rev.as_deref(), Some("abc123"));
+        let mut legacy = stored;
+        legacy.metadata.remove(meta_keys::OBSERVED_AT);
+        legacy.metadata.remove(meta_keys::SOURCE_REV);
+        let hydrated = KNode::from_node(&legacy).unwrap();
+        assert_eq!(hydrated.observed_at, hydrated.created_at);
+        assert_eq!(hydrated.observed_at, 123);
+        assert!(hydrated.source_rev.is_none());
+    }
+
+    #[test]
+    fn ingest_replace_source_replaces_exact_source_only() {
+        let mut e = KnowledgeEngine::in_memory().unwrap();
+        let (old, old_chunks) = e
+            .ingest(
+                "Old",
+                &["old sqlite".into()],
+                "learn:demo",
+                "docs/sqlite.md",
+                1,
+            )
+            .unwrap();
+        let sibling = KNode::new(
+            KClass::Concept,
+            "wal",
+            "learn:demo",
+            "docs/sqlite.md-wal",
+            1,
+        );
+        e.write(&sibling).unwrap();
+        let options = crate::KnowledgeWriteOptions {
+            created_at: 2,
+            observed_at: Some(100),
+            source_rev: Some("rev2".into()),
+            replace_source: true,
+        };
+        assert!(
+            e.ingest_with_options("New", &["new sqlite".into()], "learn:demo", "", &options)
+                .is_err()
+        );
+        assert!(e.node(&old).unwrap().is_some());
+        let (new, chunks) = e
+            .ingest_with_options(
+                "New",
+                &["new sqlite".into()],
+                "learn:other",
+                "docs/sqlite.md",
+                &options,
+            )
+            .unwrap();
+        assert!(e.node(&old).unwrap().is_none());
+        assert!(e.node(&old_chunks[0]).unwrap().is_none());
+        assert!(e.node(&sibling.symbol()).unwrap().is_some());
+        assert_eq!(e.count(None, None).unwrap(), 3);
+        for id in [&new, &chunks[0]] {
+            let n = KNode::from_node(&e.node(id).unwrap().unwrap()).unwrap();
+            assert_eq!(n.observed_at, 100);
+            assert_eq!(n.source_rev.as_deref(), Some("rev2"));
+        }
+        e.ingest_with_options(
+            "New",
+            &["new sqlite".into()],
+            "learn:other",
+            "docs/sqlite.md",
+            &options,
+        )
+        .unwrap();
+        assert_eq!(e.count(None, None).unwrap(), 3);
+    }
+
+    #[test]
+    fn erase_is_kind_guarded_scoped_and_idempotent() {
+        let mut e = KnowledgeEngine::in_memory().unwrap();
+        let prefix = "learn:demo/topic:sqlite";
+        let (doc, chunks) = e
+            .ingest("SQLite", &["sqlite transactions".into()], prefix, "", 1)
+            .unwrap();
+        let section = KNode::new(KClass::Section, "sqlite section", prefix, "", 1);
+        let concept = KNode::new(
+            KClass::Concept,
+            "sqlite nested concept",
+            "learn:demo/topic:sqlite/detail:transactions",
+            "",
+            1,
+        );
+        e.write(&section).unwrap();
+        e.write(&concept).unwrap();
+        let sibling = KNode::new(
+            KClass::Chunk,
+            "sqlite wal survives",
+            "learn:demo/topic:sqlite-wal",
+            "",
+            1,
+        );
+        e.write(&sibling).unwrap();
+        let mut legacy = KNode::new(KClass::Chunk, "sqlite legacy", prefix, "", 1).to_node();
+        legacy.scope = Scope::root(); // Pre-0.16 knowledge has only metadata scope.
+        e.store.upsert_nodes(&[legacy.clone()]).unwrap();
+        let mut others = Vec::new();
+        for kind in [
+            NodeKind::Function,
+            NodeKind::Other("memory".into()),
+            NodeKind::Other("infra".into()),
+        ] {
+            let node = Node::new(
+                Symbol::synthetic("test", format!("{kind:?}")).id(),
+                kind,
+                "sqlite unrelated",
+                Language::new("test"),
+                Location::new("test", Span::ZERO),
+            )
+            .with_scope(Scope::parse(prefix));
+            others.push(node);
+        }
+        e.store.upsert_nodes(&others).unwrap();
+        e.store
+            .upsert_edges(&[
+                edge(&sibling.symbol(), &doc, "references"),
+                edge(&doc, &sibling.symbol(), "references"),
+            ])
+            .unwrap();
+        assert!(
+            !e.recall("sqlite", 2000, Some(prefix), 2)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(e.erase(prefix).unwrap(), 5);
+        for id in [
+            &doc,
+            &chunks[0],
+            &section.symbol(),
+            &concept.symbol(),
+            &legacy.symbol,
+        ] {
+            assert!(e.node(id).unwrap().is_none());
+            assert!(e.store.embedding(id).unwrap().is_none());
+        }
+        assert!(
+            e.store
+                .neighbors(&sibling.symbol(), Direction::Both)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            e.recall("sqlite", 2000, Some(prefix), 3)
+                .unwrap()
+                .is_empty()
+        );
+        let hits = e.recall("sqlite", 2000, None, 3).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, sibling.symbol());
+        for node in others {
+            assert!(e.node(&node.symbol).unwrap().is_some());
+        }
+        assert_eq!(e.erase(prefix).unwrap(), 0);
+    }
+
+    #[test]
+    fn erase_clears_scope_misses_and_reuses_kind_wildcard() {
+        let mut e = KnowledgeEngine::in_memory().unwrap();
+        e.recall("missing", 2000, Some("wiki:architecture"), 1)
+            .unwrap();
+        e.recall("missing", 2000, Some("learn:demo"), 1).unwrap();
+        e.write(&KNode::new(
+            KClass::Chunk,
+            "guidance",
+            "wiki:architecture",
+            "",
+            1,
+        ))
+        .unwrap();
+        e.write(&KNode::new(
+            KClass::Chunk,
+            "guidance",
+            "wikix:architecture",
+            "",
+            1,
+        ))
+        .unwrap();
+        assert_eq!(e.erase("wiki:").unwrap(), 1);
+        assert_eq!(e.misses().len(), 1);
+        assert_eq!(e.misses()[0].scope, "learn:demo");
+        assert_eq!(e.count(None, None).unwrap(), 1);
+        assert_eq!(e.erase("").unwrap(), 1);
+        assert!(e.misses().is_empty());
+    }
+
+    #[test]
+    fn erase_removes_cross_store_links() {
+        let xedge = std::sync::Arc::new(XedgeStore::in_memory().unwrap());
+        let mut e = KnowledgeEngine::in_memory()
+            .unwrap()
+            .with_xedge_store(xedge.clone());
+        let victim = KNode::new(KClass::Chunk, "sqlite", "learn:demo/topic:sqlite", "", 1);
+        let survivor = KNode::new(KClass::Chunk, "wal", "learn:demo/topic:sqlite-wal", "", 1);
+        for node in [&victim, &survivor] {
+            e.write(node).unwrap();
+            xedge
+                .put_edge(&wicked_estate_overlay::XEdge::about(
+                    node.symbol().0,
+                    "code-id",
+                    0,
+                ))
+                .unwrap();
+        }
+        assert_eq!(xedge.len().unwrap(), 2);
+        assert_eq!(e.erase("learn:demo/topic:sqlite").unwrap(), 1);
+        assert_eq!(xedge.len().unwrap(), 1);
+        let links = xedge
+            .reader()
+            .in_edges("estate", "code-id", &["about"])
+            .unwrap();
+        assert_eq!(links[0].source.stable_id, survivor.symbol().0);
+    }
 
     #[test]
     fn ingest_then_recall_round_trips() {

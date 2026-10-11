@@ -13,7 +13,10 @@ nodes (each `derived_from` the doc).
    table row). Keep each chunk independently meaningful so recall can return it verbatim with a
    citation.
 2. Call `knowledge.ingest` with the title, the chunk list, a `scope` (e.g. `project:<repo>`), and the
-   `source` (file path or URL) so every chunk carries provenance.
+   `source` (file path or URL) so every chunk carries provenance. Record `observed_at` (ISO-8601
+   with timezone) and `source_rev` when known. When re-indexing that source, set `replace_source:
+   true` to forget all knowledge with that exact source before ingesting; a non-empty source is
+   required for replacement.
 3. For a single fact that isn't part of a document, use `knowledge.write` with `class: concept`.
 4. Verify with a seeded `knowledge.recall` that the key chunks come back.
 

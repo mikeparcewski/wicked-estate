@@ -20,6 +20,16 @@
       },
       "source": {
         "type": "string"
+      },
+      "observed_at": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "source_rev": {
+        "type": [
+          "string",
+          "null"
+        ]
       }
     },
     "required": [

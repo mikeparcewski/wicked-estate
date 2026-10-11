@@ -851,7 +851,7 @@ pub struct DomainHandles<'a> {
 
 /// Unified routing entry-point: estate tools + optional memory/knowledge tools + resources/prompts.
 ///
-/// `domains = None` → estate-only mode (12/13 tools). `domains = Some(...)` → 30/31 tools (31 with
+/// `domains = None` → estate-only mode (12/13 tools). `domains = Some(...)` → 31/32 tools (32 with
 /// `SemanticSearch`), resources and prompts. Memory/knowledge tools that arrive without domains return a clean JSON-RPC error.
 /// `semantic` is the live SemanticSearch instance; when `None` the tool is neither advertised nor
 /// dispatchable (consistent fail-closed, same as the dim-guard behaviour in the old path).
@@ -872,7 +872,7 @@ pub fn handle_request_unified(
 ///
 /// When `read_only` is `true`, the write/destructive domain tools ([`is_write_tool`]:
 /// `memory.capture`/`memory.erase`/`memory.learn`/`memory.reflect`, `knowledge.ingest`/
-/// `knowledge.write`/`knowledge.relate`/`knowledge.relate_code`) are OMITTED from `tools/list` (the
+/// `knowledge.write`/`knowledge.forget`/`knowledge.relate`/`knowledge.relate_code`) are OMITTED from `tools/list` (the
 /// primary defense —
 /// an agent never sees a tool it cannot call) AND hard-rejected with a JSON-RPC error in
 /// `tools/call` if invoked anyway (the backstop — the write is never executed). Every read/query
@@ -961,6 +961,7 @@ pub fn handle_request_unified_ro(
 
                 "knowledge.ingest"
                 | "knowledge.write"
+                | "knowledge.forget"
                 | "knowledge.relate"
                 | "knowledge.recall"
                 | "knowledge.coverage"
@@ -1054,6 +1055,7 @@ pub fn is_write_tool(tool: &str) -> bool {
             | "memory.reflect"
             | "knowledge.ingest"
             | "knowledge.write"
+            | "knowledge.forget"
             | "knowledge.relate"
             | "knowledge.relate_code"
             | "proposal.approve"
@@ -1142,8 +1144,9 @@ fn proposal_tool_schemas() -> Vec<Value> {
 
 fn knowledge_tool_schemas() -> Vec<Value> {
     vec![
-        json!({"name":"knowledge.ingest","description":"Ingest a document as doc + chunk nodes.","inputSchema":{"type":"object","required":["title","chunks"],"properties":{"title":{"type":"string"},"chunks":{"type":"array","items":{"type":"string"}},"scope":{"type":"string"},"source":{"type":"string"}}}}),
-        json!({"name":"knowledge.write","description":"Write ONE knowledge node.","inputSchema":{"type":"object","required":["content"],"properties":{"content":{"type":"string"},"class":{"type":"string","enum":["doc","section","chunk","concept"]},"scope":{"type":"string"},"source":{"type":"string"}}}}),
+        json!({"name":"knowledge.ingest","description":"Ingest a document as doc + chunk nodes.","inputSchema":{"type":"object","required":["title","chunks"],"properties":{"title":{"type":"string"},"chunks":{"type":"array","items":{"type":"string"}},"scope":{"type":"string"},"source":{"type":"string"},"observed_at":{"type":"string","format":"date-time"},"source_rev":{"type":["string","null"]},"replace_source":{"type":"boolean","default":false}}}}),
+        json!({"name":"knowledge.write","description":"Write ONE knowledge node.","inputSchema":{"type":"object","required":["content"],"properties":{"content":{"type":"string"},"class":{"type":"string","enum":["doc","section","chunk","concept"]},"scope":{"type":"string"},"source":{"type":"string"},"observed_at":{"type":"string","format":"date-time"},"source_rev":{"type":["string","null"]}}}}),
+        json!({"name":"knowledge.forget","description":"Hard-delete knowledge by exactly one of id, exact source, or scope_prefix. An empty prefix requires confirm_erase_all: true.","inputSchema":{"type":"object","oneOf":[{"required":["id"]},{"required":["source"]},{"oneOf":[{"required":["id"]},{"required":["source"]},{"required":["scope_prefix"]}]}],"properties":{"id":{"type":"string"},"source":{"type":"string"},"scope_prefix":{"type":"string"},"confirm_erase_all":{"type":"boolean"}}}}),
         json!({"name":"knowledge.relate","description":"Add a typed relation between two knowledge nodes, with confidence + evidence_count + provenance.","inputSchema":{"type":"object","required":["src","tgt","rel"],"properties":{"src":{"type":"string"},"tgt":{"type":"string"},"rel":{"type":"string"},"confidence":{"type":"number"},"evidence_count":{"type":"integer","minimum":0,"maximum":4294967295u64,"description":"audit counter: confirmations/contradictions (default 0; non-negative, fits u32, else -32602)"},"provenance":{"type":"string"}}}}),
         json!({"name":"knowledge.recall","description":"Hybrid recall (FTS + vector, RRF fused) over the knowledge base. Each item carries node_id, class, label, body_snippet, score, and source (provenance set at ingest, e.g. a file path or URL; empty string when not recorded). Pass scope_prefix to restrict recall to a scope subtree (the wiki convention scopes guidance as wiki:<area> with stable source URIs).","inputSchema":{"type":"object","required":["query"],"properties":{"query":{"type":"string"},"token_budget":{"type":"integer","default":2000},"scope_prefix":{"type":"string","description":"Optional subtree filter: only knowledge whose scope equals this prefix or DESCENDS from it (same predicate as memory.recall scope_prefix, e.g. \"wiki:\" or \"wiki:architecture\"). \"\" = root subtree = everything. Omitted or null = no scope filtering."}}}}),
         json!({"name":"knowledge.coverage","description":"Coverage: node counts per class, optionally within a scope subtree.","inputSchema":{"type":"object","properties":{"class":{"type":"string","enum":["doc","section","chunk","concept"]},"scope_prefix":{"type":"string","description":"Optional subtree filter (same predicate as knowledge.recall scope_prefix)."}}}}),
@@ -2705,15 +2708,87 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unified_knowledge_forget_round_trip_and_guard() {
+        let store = fixture();
+        let mut memory = FakeMemory;
+        let mut knowledge = wicked_estate_knowledge::KnowledgeEngine::in_memory().unwrap();
+        knowledge
+            .ingest(
+                "SQLite",
+                &["sqlite transactions".into()],
+                "learn:demo/topic:sqlite",
+                "",
+                1,
+            )
+            .unwrap();
+        knowledge
+            .ingest(
+                "WAL",
+                &["sqlite wal survives".into()],
+                "learn:demo/topic:sqlite-wal",
+                "",
+                1,
+            )
+            .unwrap();
+        let mut call = |args: Value, readonly: bool| {
+            let mut domains = DomainHandles {
+                memory: &mut memory,
+                knowledge: &mut knowledge,
+            };
+            handle_request_unified_ro(
+                &store,
+                &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"knowledge.forget","arguments":args}}),
+                &McpContext::default(),
+                Some(&mut domains),
+                None,
+                readonly,
+            )
+        };
+        assert_eq!(
+            call(json!({"scope_prefix":"","confirm_erase_all":true}), true)["error"]["code"],
+            -32601
+        );
+        for args in [
+            json!({}),
+            json!({"scope_prefix":null}),
+            json!({"scope_prefix":3}),
+            json!({"scope_prefix":""}),
+            json!({"scope_prefix":"","confirm_erase_all":false}),
+            json!({"scope_prefix":"","confirm_erase_all":"true"}),
+        ] {
+            assert_eq!(call(args, false)["error"]["code"], -32602);
+        }
+        for (args, expected) in [
+            (json!({"scope_prefix":"learn:demo/topic:sqlite"}), 2),
+            (json!({"scope_prefix":"learn:demo/topic:sqlite"}), 0),
+            (json!({"scope_prefix":"","confirm_erase_all":true}), 2),
+        ] {
+            let response = call(args, false);
+            let payload: Value =
+                serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(payload["deleted_count"], expected);
+            assert_eq!(
+                payload["message"],
+                format!("erased {expected} knowledge node(s)")
+            );
+        }
+        assert_eq!(knowledge.count(None, None).unwrap(), 0);
+    }
+
     struct FakeKnowledge;
     impl wicked_estate_knowledge::KnowledgeApi for FakeKnowledge {
+        fn forget(&mut self, _: &wicked_estate_knowledge::ForgetTarget) -> anyhow::Result<u32> {
+            Ok(0)
+        }
         fn ingest(
             &mut self,
             _: &str,
             _: &[String],
             _: &str,
             _: &str,
-            _: i64,
+            _: &wicked_estate_knowledge::KnowledgeWriteOptions,
         ) -> anyhow::Result<String> {
             Ok("fake-doc".to_string())
         }
@@ -2723,7 +2798,7 @@ mod tests {
             _: &str,
             _: &str,
             _: &str,
-            _: i64,
+            _: &wicked_estate_knowledge::KnowledgeWriteOptions,
         ) -> anyhow::Result<String> {
             Ok("fake-node".to_string())
         }
@@ -2827,8 +2902,8 @@ mod tests {
     }
 
     #[test]
-    fn unified_tools_list_with_domains_returns_30_tools() {
-        // tools/list with domains=Some → 12 estate + 7 memory + 7 knowledge + 4 proposal = 30 tools.
+    fn unified_tools_list_with_domains_returns_31_tools() {
+        // tools/list with domains=Some → 12 estate + 7 memory + 8 knowledge + 4 proposal = 31 tools.
         // (SemanticSearch absent: no matching dim-guard in default McpContext)
         let store = fixture();
         let req = json!({ "jsonrpc": "2.0", "id": 203, "method": "tools/list", "params": {} });
@@ -2851,8 +2926,8 @@ mod tests {
             .expect("tools must be array");
         assert_eq!(
             tools.len(),
-            30,
-            "12 estate + 7 memory + 7 knowledge + 4 proposal = 30; got {}",
+            31,
+            "12 estate + 7 memory + 8 knowledge + 4 proposal = 31; got {}",
             tools.len()
         );
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -2894,18 +2969,19 @@ mod tests {
         );
     }
 
-    /// The 10 write/destructive domain tools that `--readonly` must hide + refuse
+    /// The 11 write/destructive domain tools that `--readonly` must hide + refuse
     /// (DES-GROUNDING-001 §3.0). Kept in one place so the test and [`is_write_tool`] can't drift.
     /// `memory.reflect` is here despite its recall-shaped name — it persists distilled facts.
     /// `proposal.approve`/`proposal.reject` write the active store / decide the queue (but
     /// `proposal.submit` is a deliberate safe-write kept under --readonly, so it is NOT here).
-    const WRITE_TOOLS: [&str; 10] = [
+    const WRITE_TOOLS: [&str; 11] = [
         "memory.capture",
         "memory.erase",
         "memory.learn",
         "memory.reflect",
         "knowledge.ingest",
         "knowledge.write",
+        "knowledge.forget",
         "knowledge.relate",
         "knowledge.relate_code",
         "proposal.approve",
@@ -2982,7 +3058,7 @@ mod tests {
                 "--readonly tools/list must KEEP read tool {r}; got {ro_names:?}"
             );
         }
-        // 12 estate + (7-4 write) memory + (7-4 write) knowledge + (4-2 write) proposal
+        // 12 estate + (7-4 write) memory + (8-5 write) knowledge + (4-2 write) proposal
         // = 12 + 3 + 3 + 2 = 20.
         assert_eq!(
             ro_names.len(),
@@ -3088,7 +3164,7 @@ mod tests {
     fn without_readonly_write_tools_are_advertised_and_dispatch() {
         let store = fixture();
 
-        // Default (non-readonly) tools/list advertises all 30, writes included.
+        // Default (non-readonly) tools/list advertises all 31, writes included.
         let names = {
             let mut fake_mem = FakeMemory;
             let mut fake_know = FakeKnowledge;

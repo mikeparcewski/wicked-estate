@@ -606,7 +606,7 @@ line and the one-line-per-hop shape are not.
 `crates/wicked-estate-mcp/tests/conformance/schemas/Path.json`
 
 **Tests:**
-- `tools/list` with all four stores returns exactly 30 tools.
+- `tools/list` with all four stores returns exactly 31 tools.
 - `input_schema("Path")` returns a schema whose `required` is `["from","to"]`.
 - A `tools/call` for `Path` returns hops through the MCP envelope.
 - `Path` is present in the `--readonly` `tools/list` and its call is not refused.

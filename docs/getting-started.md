@@ -21,7 +21,7 @@ Produces two binaries:
 | Binary | Purpose |
 |--------|---------|
 | `target/release/wicked-estate` | CLI — index, query, blast-radius, path, lineage, traverse, rank, rules-inventory, rules-recall, source, stats, scip, semantic, watch, subscribe, compact, tfstate, drift, cross-graph, clusters, context, annotate, nodes, resolve, export, plugins list, … |
-| `target/release/wicked-estate-mcp` | MCP stdio server — 30 tools (12 estate + 7 memory + 7 knowledge + 4 proposal) for LLM agents |
+| `target/release/wicked-estate-mcp` | MCP stdio server — 31 tools (12 estate + 7 memory + 8 knowledge + 4 proposal) for LLM agents |
 
 Zero runtime deps. Single static binary on each target.
 
@@ -534,7 +534,7 @@ wicked-estate-mcp --db /path/to/graph.db
 # or: WICKED_ESTATE_DB=:memory: wicked-estate-mcp
 ```
 
-### The 30 tools (12 estate + 7 memory + 7 knowledge + 4 proposal)
+### The 31 tools (12 estate + 7 memory + 8 knowledge + 4 proposal)
 
 #### Estate tools
 
@@ -622,10 +622,11 @@ development binary needs `wicked-estate index <path> --force` once.
 
 | Tool | Description |
 |------|-------------|
-| `knowledge.ingest` | Ingest a document or chunk into the knowledge store. |
-| `knowledge.write` | Write a curated knowledge node with typed relations. |
+| `knowledge.ingest` | Ingest a document and chunks. Optional `observed_at` (ISO-8601), `source_rev`, and `replace_source: true` (requires non-empty source; replaces every node with that exact source). |
+| `knowledge.write` | Write a curated knowledge node, optionally with ISO-8601 `observed_at` and `source_rev`. |
+| `knowledge.forget` | Hard-delete knowledge by exactly one of `id`, exact `source`, or `scope_prefix`. Empty prefix requires `confirm_erase_all: true`. Returns `deleted_count`; safe to repeat. |
 | `knowledge.relate` | Add a typed relation between two knowledge nodes. |
-| `knowledge.recall` | Retrieve knowledge nodes matching a query. |
+| `knowledge.recall` | Retrieve knowledge nodes matching a query, with UTC ISO-8601 `observed_at` and `source_rev` (or null). |
 | `knowledge.coverage` | Report knowledge store statistics (node count, relation types). |
 | `knowledge.relate_code` | Link a knowledge node to a code symbol in the estate graph. |
 | `knowledge.recall_about_code` | Recall knowledge nodes related to a given code symbol. |

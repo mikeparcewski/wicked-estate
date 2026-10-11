@@ -1,0 +1,38 @@
+{
+  "name": "knowledge.forget",
+  "description": "Hard-delete knowledge by exactly one of id, exact source, or scope_prefix. An empty prefix requires confirm_erase_all: true.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "scope_prefix": {
+        "type": "string"
+      },
+      "confirm_erase_all": {
+        "type": "boolean"
+      },
+      "id": {
+        "type": "string"
+      },
+      "source": {
+        "type": "string"
+      }
+    },
+    "oneOf": [
+      {
+        "required": [
+          "id"
+        ]
+      },
+      {
+        "required": [
+          "source"
+        ]
+      },
+      {
+        "required": [
+          "scope_prefix"
+        ]
+      }
+    ]
+  }
+}

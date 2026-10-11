@@ -234,8 +234,8 @@ attached, so the agent can tell a precise hop from a heuristic one.
       `true`, its diagnostics include a line stating that the search was bounded
       and the absence of a path is not proof of no path; when both are `false`
       that line is absent.
-- [x] `tools/list` with all four stores open returns exactly 30 tools (12 estate
-      + 7 memory + 7 knowledge + 4 proposal). The count is 30 because
+- [x] `tools/list` with all four stores open returns exactly 31 tools (12 estate
+      + 7 memory + 8 knowledge + 4 proposal). The count is 31 because
       `SemanticSearch` is not in the list at these sites: `sc009.rs`'s
       all-four-stores assertion and both unified count tests wire semantic as
       `None` and fail the dim-guard, and none of the three is feature-gated — so
