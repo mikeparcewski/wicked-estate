@@ -25,6 +25,11 @@ are. Breaking for crate consumers: the unused background loop is removed, and `R
 - `spawn_consolidation` / `ConsolidationHandle`: the background consolidation loop had no caller.
   `memory.reflect` is the maintenance entry point.
 
+### Fixed
+- **A `--readonly` server never creates a store file (crew#931, #326).** `wicked-estate-mcp
+  --readonly` used to create every missing store it resolved (graph `--db`, `memory.db`,
+  `knowledge.db`, `xedge.db`), which left debris in a run's state home.
+
 ## [0.28.0] — 2026-10-11
 
 Minor bump: a new paging API on `Lineage` and `BlastRadius`, and a changed `Lineage` default depth.
