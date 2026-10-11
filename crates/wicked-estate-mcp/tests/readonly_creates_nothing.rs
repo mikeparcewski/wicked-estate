@@ -155,21 +155,32 @@ fn readonly_with_wicked_home_creates_no_store() {
     let mut mcp = McpChild::spawn(home.path(), home.path(), Some(state.path()), true);
     let init = mcp.initialize();
     mcp.initialized();
-    let _ = mcp.request(
+    let memory = mcp.request(
         2,
         "tools/call",
         json!({"name": "memory.recall", "arguments": {"query": "release"}}),
     );
-    let _ = mcp.request(
+    let knowledge = mcp.request(
         3,
         "tools/call",
         json!({"name": "knowledge.recall", "arguments": {"query": "release"}}),
     );
     mcp.finish();
 
+    // The domains are still served (empty), not disabled.
+    for (tool, reply) in [("memory.recall", &memory), ("knowledge.recall", &knowledge)] {
+        assert!(
+            reply.get("error").is_none() && reply["result"]["isError"] != json!(true),
+            "{tool} must answer (empty) under --readonly: {reply}"
+        );
+    }
+
     assert!(init.get("error").is_none(), "initialize failed: {init}");
     let names = entries(state.path());
-    assert!(names.is_empty(), "read-only created state entries: {names:?}");
+    assert!(
+        names.is_empty(),
+        "read-only created state entries: {names:?}"
+    );
 }
 
 #[test]
@@ -212,7 +223,10 @@ fn readonly_with_existing_stores_still_serves() {
             })
         })
         .collect();
-    assert!(unexpected.is_empty(), "read-only created entries: {unexpected:?}");
+    assert!(
+        unexpected.is_empty(),
+        "read-only created entries: {unexpected:?}"
+    );
 }
 
 #[test]
