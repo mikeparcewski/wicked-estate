@@ -192,6 +192,33 @@ On estate's own tree: 107 → 126 edges against 0.24.0 (+17.76 %), and 150 → 1
 
 **The cumulative incremental cost exceeds the per-slice gate.** Each slice stayed within +15 % of the slice before it: S6a +7.20 %, S6b +11.88 %, S6c +1.37 %, S6d −3.32 %. Added up, Covalent's one-file re-index costs about 0.2 s more than 0.25.0. Full index does not move. That is consistent with a fixed per-process cost, most plausibly compiling the larger TypeScript query (the S6a first candidate's +0.13 s pointed the same way), but no profile isolates it yet. The gates are defined per slice, so no slice is killed. The number is recorded so that a later change can buy it back. Profile first (an isolated query-construction benchmark); if compile cost is confirmed, one candidate is moving the callback-parameter alternations into one Rust capture, the way `callable_return_contributors` did for returns.
 
+### Cumulative cost: profile and fix (2026-10-10)
+**Profile** (run `38093054271`, branch `measure/w8-profile`): `perf record -g` of one Covalent one-file re-index (release profile with symbols), plus an isolated query-construction benchmark (`extractor_for_extension` per extension, best of 5, same runner).
+- **Query compilation is the dominant hotspot.** `ts_query_new` takes **27.7 %** of the sampled CPU at 0.24.0 and **43.6 %** at 0.26.0 (inclusive; almost all of it `ts_query__perform_analysis`). SQLite and JSON are the next hotspots.
+- The TypeScript query takes about 110 ms to construct at 0.24.0 and about 280 ms at 0.26.0, because S5b–S6d grew it.
+- **The cause is how often it was compiled.** `index_path` compiled the query of every extension present in the repo before it knew which files had changed, once per extension. So `.ts`, `.mts` and `.cts` each compiled the same TypeScript query, `.js`/`.mjs`/`.cjs` each compiled JavaScript, and TSX and the rest were compiled too.
+- Over the extensions found in the checkout, the benchmark's per-extension times sum to 0.67 s at 0.24.0 and 1.17 s at 0.26.0. That sum is a synthetic aggregate, not measured indexing overhead.
+
+**Fix:** a per-pass `ExtractorCache`.
+- It resolves each extension's dispatch without compiling.
+- It shares one slot per dispatch key. With built-in dispatch (no grammar override), `.ts`/`.mts`/`.cts` share one TypeScript query.
+- It compiles a query the first time a file of that dispatch is extracted.
+- One exception: an additive plugin's query is not verified at load, so it compiles when its extension is first checked, even if no file of it changed.
+- So, apart from additive plugins, a re-index compiles only the languages it extracts. The budget test pins the TypeScript-only case: one `.ts` edit, an empty plugin registry and no callers to re-extract.
+
+**Evidence for the fix**
+- Node and edge counts are unchanged on both corpora (run `38095443235`). That is a count comparison, not a content diff of the graphs.
+- `tests/query_compile_budget.rs` pins the compiles per pass: 3 for a full index of `.ts`/`.mts`/`.cts`/`.js`/`.py`, 0 for an unchanged re-index, and 1 after one `.ts` edit. It failed on the previous code with 5 (run `38095277660`).
+
+| median of 3 | Covalent `438c297` | vitejs/vite `3b72997` |
+|---|---|---|
+| incremental re-index, 0.26.0 → fix (run `38095443235`) | 1.13 s → 0.99 s (−12.37 %) | 3.03 s → 2.02 s (−33.26 %) |
+| **incremental re-index, 0.24.0 → fix** (run `38095434122`) | 0.95 s → 1.03 s (**+8.32 %**) | 2.14 s → 2.13 s (**−0.85 %**) |
+| full index, 0.26.0 → fix | 7.28 s → 7.24 s (−0.56 %) | 13.97 s → 12.95 s (−7.36 %) |
+| full index, 0.24.0 → fix | 7.28 s → 7.32 s (+0.56 %) | 13.14 s → 13.66 s (+3.94 %) |
+
+**Against 0.24.0, the pre-data-flow baseline, the cumulative incremental cost is now under the +15 % gate on both corpora.** On Covalent about +0.08 s remains. The most plausible cause is the larger TypeScript query (the benchmark puts the difference at about 170 ms per compile), but that has not been isolated after the fix.
+
 **Yield on Covalent:** S6a 87 edges, S6b 11, S6c 0, S6d 0. Inline array callbacks carry most of it. `await`/`.then` add little there, because Covalent's promises are mostly value-free test sequencing (see S6b). RxJS Observables are not modelled. Within the supported shapes, S6c and S6d emitted nothing there: an object literal that is passed on needs an alias model, and no supported closure-return shape fired. No other TypeScript corpus was measured.
 
 Still unsupported:

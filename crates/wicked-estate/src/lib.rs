@@ -84,7 +84,7 @@ use wicked_estate_extract::{
     BlazeBrlExtractor, CicsSqlExtractor, DrlExtractor, ExtraEdgeExtractor, HlasmExtractor,
     IaCExtractor, ImsExtractor, JclExtractor, MqExtractor, RacfExtractor, RegoRulesExtractor,
     SYMBOL_ID_SCHEME, TfstateCollector,
-    treesitter::{TreeSitterExtractor, extractor_for_extension, is_minified_or_huge},
+    treesitter::{ExtractorCache, is_minified_or_huge},
 };
 use wicked_estate_resolve::{
     ImportMapResolver, InfraResolver, NameResolver, RulesBridgeResolver, ScopedNameResolver,
@@ -166,7 +166,7 @@ fn base_extraction(
     rel_path: &str,
     ext: &str,
     text: &str,
-    ext_map: &HashMap<String, TreeSitterExtractor>,
+    ext_map: &ExtractorCache,
 ) -> Option<Extraction> {
     // Grammar-less mainframe estate languages (JCL batch, HLASM assembler, RACF security,
     // IMS DBD/PSB data, MQ MQSC messaging): line/macro extractors dispatched by extension.
@@ -485,7 +485,7 @@ fn recorded_call_refs(
 fn call_value_ref_hints_from_files(
     store: &dyn GraphRead,
     files: impl IntoIterator<Item = String>,
-    ext_map: &HashMap<String, TreeSitterExtractor>,
+    ext_map: &ExtractorCache,
 ) -> Result<HashMap<CallSiteKey, serde_json::Value>> {
     let mut refs = Vec::new();
     for file in files {
@@ -1251,22 +1251,15 @@ pub fn index_path_as(
         }
     }
 
-    // Build per-extension extractor cache so each language's Query is compiled ONCE.
-    let mut extractor_cache: HashMap<String, Option<TreeSitterExtractor>> = HashMap::new();
-    for path in &files {
-        let ext = path
-            .extension()
+    // Per-pass extractor cache: each language's query is compiled ONCE, and only when a file of
+    // it is actually extracted (ADR-014 "Cumulative": compiling every present extension's query
+    // up front was the fixed cost of a one-file re-index).
+    let ext_map = ExtractorCache::for_extensions(files.iter().map(|path| {
+        path.extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
-            .to_ascii_lowercase();
-        extractor_cache
-            .entry(ext.clone())
-            .or_insert_with(|| extractor_for_extension(&ext));
-    }
-    let ext_map: HashMap<String, TreeSitterExtractor> = extractor_cache
-        .into_iter()
-        .filter_map(|(k, v)| v.map(|ex| (k, ex)))
-        .collect();
+            .to_ascii_lowercase()
+    }));
 
     // ── Classify files: UNCHANGED / CHANGED+NEW ──────────────────────────────────────────────
     // Read all file bytes upfront (needed for digest comparison); filter to supported extensions.
@@ -1297,7 +1290,7 @@ pub fn index_path_as(
             // matched by a drop-in extra-edge rule are admitted too (they may have no language
             // extractor at all — e.g. a JSON catalog only the rules care about).
             let extra_match = extra.as_ref().is_some_and(|x| x.matches_path(&rel_path));
-            if ext_map.contains_key(&ext) || is_grammarless_ext(&ext) || extra_match {
+            if ext_map.claims(&ext) || is_grammarless_ext(&ext) || extra_match {
                 Some((p, rel_path))
             } else {
                 None
