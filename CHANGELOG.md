@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+## [0.27.0] — 2026-10-11
+
+Minor bump: a graph-output removal (ADR-014 S6c deleted) and a faster incremental re-index. There
+is no public API break beyond the additions below; the semver check runs in CI.
+
+**Re-index note:** the version bump re-extracts every graph on its next `index`, so existing graphs
+drop the removed S6c edges without `--force`.
+
+### Removed
+- **TS local-object property flows (ADR-014 S6c, #319).** `property_write`, `object_literal` and
+  `return_property` `flows_to` support is deleted under ADR-014's kill rule: it produced no edges on
+  either real corpus measured (Covalent and vitejs/vite). A consumer that matched those construct
+  names sees them no longer (only the readiness fixture produced them).
+
+### Changed
+- **Faster incremental re-index (ADR-014, #318).** An index pass now compiles each tree-sitter query
+  lazily, once per language, and only for the languages it extracts (an additive plugin's query is
+  still compiled to check its extension). Before, every present extension's query compiled up front,
+  and `.ts`/`.mts`/`.cts` each compiled the same TypeScript query. No edge changes. The cumulative
+  one-file re-index cost of the data-flow work against 0.24.0 is now +6.91 % on Covalent and +1.90 %
+  on vite, under ADR-014's +15 % gate (it was +23.25 % on Covalent at 0.26.0).
+
+### Added
+- `treesitter::ExtractorCache` (lazy per-pass extractor cache) and `treesitter::query_compile_count()`
+  (#318).
+
+### Documentation
+- ADR-014: the profile and fix, a second corpus (vitejs/vite `3b72997`) with every gate re-measured,
+  and the keep/delete outcome (#318, #319, #320). On vite, S5b–S6b miss the unchanged Lineage
+  truncation gate, and S6b also measured +16.14 % on its per-slice incremental gate (before #318;
+  not re-measured per slice since). They are kept pending an operator ruling on #279, recorded in
+  the ADR as a deviation from the kill rule.
+
 ## [0.26.0] — 2026-10-10
 
 Minor bump for new graph output (ADR-014 Extension S6). There is no public API break.
