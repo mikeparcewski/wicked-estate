@@ -3,6 +3,7 @@
 - **Status:** **Accepted: Option 2** (bounded intraprocedural value-flow summaries), decided by the operator on 2026-10-10 (#279). Option 3 stays no-go; its positive-evidence reopening criterion is unchanged.
 - **Operator ruling (verbatim):** "data flow - evidence is important".
 - **Extended 2026-10-10 (S6):** after 0.25.0 the operator read its limits as "makes this sound like a useless feature" (relayed by the program brief): most TypeScript data moves through callbacks, `await` and properties. S6 closes those gaps **inside** the same bounded intraprocedural Option 2, under the same gates and kill rule. See "Extension S6".
+- **Ruled 2026-10-11 (#279), "I want the full graph":** keep every data-flow slice (S5b, S5c, S5d, S6a, S6b, S6d); Lineage returns the complete graph through paging, with nothing silently cut off. The "0 newly truncated Lineage" gate becomes "every Lineage query is completely retrievable", the DB-size gate becomes cost per stored edge (vite's +14.7 % DB for +66 % `flows_to` is accepted by the operator), and the speed gates are unchanged. Addendum (verbatim): "only things we should truncate is dead end nodes that have no value - but has to be hard proof of that". See "The full graph (2026-10-11)".
 - **Date:** 2026-10-10
 - **Builds on:** TS-S1 (`flows_to` semantics), TS-S2A (the support plane), TS-S2C (#275, the semantic-evidence envelope), TS-S3/S4 (#277/#278, Angular compiler bindings and events).
 - **Evidence:** `crates/wicked-estate/tests/dataflow_readiness.rs`, which pins today's behaviour per construct; `crates/wicked-estate/tests/angular_bindings.rs`; ENGINE-CONTRACT §3.2–§3.5.
@@ -238,8 +239,8 @@ The operator asked for a second real TypeScript corpus in a different style, for
 | S6c local object properties | 0 | **0** (`38092981779`) | **deleted** (#319) |
 | S6d closure returns | 0 | +44, of which 24 carry `return_closure` (`38092995748`) | kept |
 
-**The other gates per slice on vite.** Every slice except S6c and S6d misses the **Lineage gate** (0 newly truncated). Fixed / sweep queries newly truncated: S5b 1 / 100, S5c 0 / 9, S5d 1 / 2, S6a 0 / 6, S6b 0 / 24. A Lineage document truncates at its bounded response budget, so a larger, more connected graph truncates more roots. The truncation is reported (`truncated: true`), never silent. S6b also missed the incremental gate (+16.14 % against S6a). The later compile fix ("Cumulative cost: profile and fix") brought the cumulative incremental cost under the gate, but S6b's own per-slice timing was not re-measured after that fix. Every slice passed `flows_to` growth, full index, DB size and semantics.
-- **These five slices violate the unchanged Lineage gate on vite. They have not been deleted, which is a recorded deviation from the kill rule, pending an operator decision.** The kill rule (see "Decision" and "Kill criteria") deletes a slice that misses any gate. Its own sequential growth on vite is 2,937 `flows_to` edges for S5b–S6b together (775 + 230 + 239 + 391 + 1302). What a deletion would leave was not measured. This lane's brief authorized deleting only zero-yield slices and, for cost, the slowest low-yield slice. Deleting five slices that carry real data flow is a product decision, against the ruling "data flow - evidence is important". So the misses are recorded here and the options are posted on #279. Until the operator rules, the slices ship as they are, and the gate is **not** amended.
+**The other gates per slice on vite.** Every slice except S6c and S6d failed the Lineage gate as it was then written ("0 newly truncated" at the default depth). Fixed / sweep queries newly truncated: S5b 1 / 100, S5c 0 / 9, S5d 1 / 2, S6a 0 / 6, S6b 0 / 24. A Lineage reply was cut at its 25K-char response budget, or at the default depth of 8, and a larger, more connected graph reaches more of both. The cut was reported (`truncated: true`), never silent, but the rest of the answer could not be retrieved. S6b also measured +16.14 % on the per-slice incremental gate, against S6a. The later compile fix ("Cumulative cost: profile and fix") brought the cumulative incremental cost under the gate; S6b's own per-slice timing was not re-measured after that fix. Every slice passed `flows_to` growth, full index, DB size and semantics.
+- **Resolved by the operator's ruling on #279 (2026-10-11):** all five slices stay, and the Lineage gate is replaced by "every Lineage query is completely retrievable". 0.28.0 meets it through paging and a default depth at the ceiling; see "The full graph (2026-10-11)".
 
 **Cumulative, the merged state `eb407b1` (S6c deleted, #318 compile fix)**
 
@@ -252,7 +253,7 @@ The operator asked for a second real TypeScript corpus in a different style, for
 | Lineage newly truncated (fixed / sweep) | 0 / 0 of 520 | **2 / 141** of 2829 | 0 / 0 | **0 / 30** | 0 |
 | `value_preserving` rows from a new construct | 0 | 0 | 0 | 0 | 0 |
 
-**The cumulative incremental cost is under the +15 % gate against 0.24.0**, the pre-data-flow baseline, on both corpora. This was the operator's ask, and it is measured against 0.24.0, not only 0.25.0. The gates are defined per slice. On vite, the cumulative `flows_to` growth (+66 %) and DB size (+14.7 %) are the sum of slices that each passed those two gates. They are what a corpus with that much more data flow costs, and they are recorded, not used as kill grounds.
+**The cumulative incremental cost is under the +15 % gate against 0.24.0**, the pre-data-flow baseline, on both corpora. This was the operator's ask, and it is measured against 0.24.0, not only 0.25.0. The gates are defined per slice. On vite, the cumulative `flows_to` growth (+66 %) and DB size (+14.7 %) are the sum of slices that each passed those two gates. The operator accepted both on #279 (2026-10-11), and the DB gate is now a cost per stored edge, which falls on vite (see "The full graph").
 
 Still unsupported:
 - named (non-inline) callbacks, which would be interprocedural;
@@ -310,10 +311,11 @@ Promises, property writes and path conditions were explicitly **out** of Option 
   - **Edges:** the `flows_to` count from `stats --json`; the denominator is the baseline's `flows_to` count.
   - **Persistence:** DB file size.
   - **Incremental:** the re-index time after touching one file.
-  - **Lineage:** a fixed set of 10 `lineage --relation flows_to` queries (listed in the ADR), recording each document's size and `truncated` flag.
-- **Acceptance metrics:**
-  - `flows_to` growth ≤ 25 %; full-index time ≤ +15 %; incremental re-index ≤ +15 %; DB size ≤ +10 %;
-  - no Lineage query newly truncated at the default depth;
+  - **Lineage:** a fixed set of 10 `lineage --relation flows_to` queries (listed in the ADR) plus the sweep over every baseline `Parameter` slot, each paged to completion through `next_cursor`, recording the largest page's size and whether the answer was completely retrievable.
+- **Acceptance metrics** (restated by the operator's ruling on #279, 2026-10-11):
+  - `flows_to` growth ≤ 25 % per slice; full-index time ≤ +15 %; incremental re-index ≤ +15 % (the speed gates, unchanged);
+  - DB cost per stored edge (DB bytes ÷ stored edges) ≤ +10 %; the raw DB size is recorded;
+  - every Lineage query is completely retrievable: its pages join into its whole answer, no reply is silently cut, and no depth horizon or node cap cuts the default query;
   - 0 new `value_preserving` edges from a `may_influence` construct. The oracle is the readiness fixture's **expected table**, extended with the prototype's constructs and their expected semantics, so "wrong" means "differs from the table", not a reviewer's opinion.
 - **Kill criteria:** any metric missed, any readiness-table mismatch, or the timebox exceeded. The failing **slice** (S5b, S5c or S5d, with everything that slice added) is then deleted, not flagged off (CLAUDE.md §3, §8), and the measured numbers are recorded here. Slices that already passed their own gates stay. Each later slice is measured against the merged state before it, so its numbers are its own.
 
@@ -329,4 +331,4 @@ Promises, property writes and path conditions were explicitly **out** of Option 
 - **S5d:** primitive 3 (loop element binding and loop-carried reassignment), measured against the kill criteria. Each slice lands as its own PR, so a gate miss deletes exactly that slice (see "Kill criteria"). Graduation evidence is the metrics table, the readiness diff and the corpus revisions.
 
 ## Next-session prompt
-> Read docs/adr/ADR-014-dataflow-taint-decision.md (Accepted: Option 2; S5b–S5d and S6a/S6b/S6d graduated on Covalent, and S6c was deleted for zero yield on two corpora. On vite, S5b–S6b miss the unchanged Lineage gate and are kept pending an operator ruling, a recorded deviation from the kill rule; see "Measurements", "Cumulative cost: profile and fix" and "Two corpora"). The cumulative incremental cost is under the gate against 0.24.0. Open item: the Lineage-truncation gate fails on vite for S5b–S6b. That waits on the operator's decision on #279: restate the gate as a rate, delete the slices, or raise the Lineage budget. Option 3 stays no-go unless its positive-evidence falsifier is met.
+> Read docs/adr/ADR-014-dataflow-taint-decision.md (Accepted: Option 2; S5b–S5d and S6a/S6b/S6d graduated and are kept by the operator's ruling on #279, and S6c was deleted for zero yield on two corpora; see "Measurements", "Cumulative cost: profile and fix", "Two corpora" and "The full graph (2026-10-11)"). Lineage and BlastRadius answers are paged (`next_cursor`), Lineage defaults to depth 24, and every Lineage query on both corpora is completely retrievable. No pruning rule ships; a future one needs the proof and the answer-equivalence evidence the addendum requires. Option 3 stays no-go unless its positive-evidence falsifier is met.
