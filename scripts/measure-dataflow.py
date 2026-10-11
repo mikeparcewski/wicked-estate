@@ -10,7 +10,8 @@ Incremental = re-index (no --force) after appending one comment line to `--touch
 Edges = the `flows_to` count from `stats --json`; DB size = `db_size_bytes` of a fresh full index.
 Lineage = 10 fixed queries (the baseline's 10 largest flows_to producers by out-degree, ties by id),
 plus a sweep over every baseline Parameter slot: `lineage <id> --relation flows_to --json` at the
-default depth, recording each document's size and `truncated` flag.
+default depth, paged to completion through `next_cursor` (#279), recording the largest page's size
+and whether the answer was completely retrievable (`truncated` = it was not).
 Semantics gate = every `flow_support` row in the candidate graph whose construct is one of
 `--new-constructs` must be `may_influence`.
 
@@ -86,15 +87,35 @@ def lineage_roots(db):
 
 
 def lineage(binary, db, symbol):
-    """One query. A failed command or a malformed document voids the measurement: it must never
-    read as "not truncated"."""
-    r = run([binary, "lineage", symbol, "--relation", "flows_to", "--json", "--db", db])
-    if r.returncode != 0:
-        sys.exit(f"lineage failed ({binary}, {symbol}): {r.stderr[-500:]}")
-    d = json.loads(r.stdout)
-    if d.get("relation") != "flows_to" or not isinstance(d.get("truncated"), bool):
-        sys.exit(f"lineage document malformed ({binary}, {symbol}): {r.stdout[:300]}")
-    return {"size": len(r.stdout), "truncated": d["truncated"], "total": d.get("total")}
+    """One query, paged to completion (#279): follow `next_cursor` until it is null. A failed
+    command or a malformed document voids the measurement: it must never read as "complete".
+    `truncated` here means NOT completely retrievable: the last page still reports a cut (a depth
+    horizon or the node cap), or the pages do not join into `total`. A binary without paging
+    (no `next_cursor` key) is read as one page, as before."""
+    size, pages, cursor, rows, total, last = 0, 0, None, 0, None, None
+    while True:
+        cmd = [binary, "lineage", symbol, "--relation", "flows_to", "--json", "--db", db]
+        if cursor:
+            cmd += ["--cursor", cursor]
+        r = run(cmd)
+        if r.returncode != 0:
+            sys.exit(f"lineage failed ({binary}, {symbol}): {r.stderr[-500:]}")
+        d = json.loads(r.stdout)
+        if d.get("relation") != "flows_to" or not isinstance(d.get("truncated"), bool):
+            sys.exit(f"lineage document malformed ({binary}, {symbol}): {r.stdout[:300]}")
+        pages += 1
+        size = max(size, len(r.stdout))
+        rows += len(d.get("dependencies", []))
+        total = d.get("total") if total is None else total
+        last = d
+        cursor = d.get("next_cursor")
+        if not cursor:
+            break
+        if pages > 1000:
+            sys.exit(f"lineage paging did not terminate ({binary}, {symbol})")
+    paged = "next_cursor" in last
+    incomplete = bool(last["truncated"]) or (paged and rows != total)
+    return {"size": size, "truncated": incomplete, "total": total, "pages": pages}
 
 
 def semantics_gate(db, new):
@@ -226,14 +247,18 @@ def main():
         ("full index (s, median)", round(fb, 2), round(fc, 2), pct(fb, fc), "≤ +15 %"),
         ("incremental re-index (s, median)", round(ib, 2), round(ic, 2), pct(ib, ic), "≤ +15 %"),
         ("DB size (bytes)", sb["db_size_bytes"], sc["db_size_bytes"],
-         pct(sb["db_size_bytes"], sc["db_size_bytes"]), "≤ +10 %"),
+         pct(sb["db_size_bytes"], sc["db_size_bytes"]), "recorded"),
+        ("DB bytes per stored edge", round(sb["db_size_bytes"] / max(sb["edges"], 1), 1),
+         round(sc["db_size_bytes"] / max(sc["edges"], 1), 1),
+         pct(sb["db_size_bytes"] / max(sb["edges"], 1), sc["db_size_bytes"] / max(sc["edges"], 1)),
+         "≤ +10 %"),
     ]
     print(f"### {os.path.basename(a.corpus.rstrip('/'))}\n")
     print("| metric | baseline | candidate | change | gate |\n|---|---|---|---|---|")
     for name, b, c, p, g in rows:
         print(f"| {name} | {b} | {c} | {p:+.2f} % | {g} |")
-    print(f"| Lineage, 10 fixed queries newly truncated | | | {len(newly_fixed)} | 0 |")
-    print(f"| Lineage sweep ({len(params)} parameter roots) newly truncated | "
+    print(f"| Lineage, 10 fixed queries newly not completely retrievable | | | {len(newly_fixed)} | 0 |")
+    print(f"| Lineage sweep ({len(params)} parameter roots) newly not completely retrievable | "
           f"{sweep_base_trunc} truncated | {sweep_cand_trunc} truncated | "
           f"{len(sweep_new_trunc)} | 0 |")
     print(f"| `value_preserving` rows from a new construct | | | {len(violations)} | 0 |")
