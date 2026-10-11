@@ -53,7 +53,6 @@ pub fn start_offsets(
 ) -> Result<Vec<usize>> {
     let raw = match request.get(CURSOR_KEY) {
         None | Some(Value::Null) => return Ok(vec![0; lens.len()]),
-        Some(Value::String(s)) if s.is_empty() => return Ok(vec![0; lens.len()]),
         Some(Value::String(s)) => s.as_str(),
         Some(other) => {
             return Err(Error::Invalid(format!(
@@ -124,6 +123,7 @@ mod tests {
             json!("p1.a.00"),
             json!("p1.1-1.00"),
             json!(7),
+            json!(""),
         ] {
             assert!(start_offsets("T", &json!({ "cursor": bad }), &[2], fp).is_err());
         }

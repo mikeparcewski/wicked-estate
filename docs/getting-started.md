@@ -228,13 +228,14 @@ graph — not taint analysis, not compiler-exact data flow, and not a claim abou
   lists the ids; one that matches nothing fails with `no symbol named …`; a missing `<symbol>` is
   a usage error. **Changed in 0.24.0:** `--symbol` is gone, and an unknown id is an error (exit 1)
   rather than an empty answer with exit 0.
-- `--depth` defaults to 24, the tool's ceiling (**changed in 0.28.0**, was 8), so the default answer is not cut at a horizon. A value above the tool's ceiling (24) is clamped **by the tool** and
+- `--depth` defaults to 24, the tool's ceiling (**changed in 0.28.0**, was 8). A chain deeper than 24 hops is still cut there, and says so (`depth_horizon_reached`). A value above the tool's ceiling (24) is clamped **by the tool** and
   reported as `CLAMPED: depth=… is above this tool's ceiling; used depth=24`; `0` is the floor.
 - `--relation` accepts only `flows_to`. Flags are strict, as for every bridged command.
 - The answer is **paged** (**new in 0.28.0**, #279). A reply that does not complete the answer has
   `truncated: true` and a `next_cursor`. Pass it back with `--cursor <next_cursor>` for the next
-  rows of the same answer, and repeat until `next_cursor` is `null`. The pages join into exactly the
-  whole answer. A cursor from another query, or from before a re-index changed the answer, is
+  rows of the same answer, and repeat until `next_cursor` is `null`. The pages then join into exactly
+  the answer the bounded walk produced. That answer is the whole graph only if the last page also
+  has `truncated: false`; `depth_horizon_reached` or `node_cap_reached` name a cut the walk made. A cursor from another query, or from before a re-index changed the answer, is
   refused (exit 1); restart without `--cursor`. `total` counts the whole answer, and `page` says
   which rows this reply holds.
 - A `--db` that does not exist (a bare path or `sqlite://<path>`) or is zero-length is an error;

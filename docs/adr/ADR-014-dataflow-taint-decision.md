@@ -294,7 +294,7 @@ The operator ruled on #279: "I want the full graph". Every data-flow slice stays
 | full / incremental index | +0.58 % / +1.37 % | +0.30 % / +0.53 % |
 | DB bytes per stored edge | −0.03 % | −0.07 % |
 
-**Every Lineage query on both corpora is completely retrievable.** The 2 vite queries that 0.24.0 → 0.26.0 newly truncated, and every other cut one, now page to their full answer.
+**Every measured Lineage query is completely retrievable on both corpora.** That is the gate's query set: default-depth `flows_to` queries from the 10 fixed producers plus every baseline `Parameter` root. The 2 vite queries that 0.24.0 → 0.26.0 newly truncated, and every other cut query in that set, now page to their full answer. Dependency-mode Lineage and other roots were not swept.
 
 **DB cost per stored edge.** From 0.24.0 to `eb407b1`: Covalent 2,767 → 2,759 bytes per edge (−0.31 %), vite 2,557 → 2,473 (−3.29 %). The raw vite DB grew +14.7 % for +66 % `flows_to`, which the operator accepted on #279. Cheaper edge encoding was not attempted; the ruling made it optional.
 

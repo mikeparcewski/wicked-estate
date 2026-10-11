@@ -1290,6 +1290,7 @@ impl RetrievalTool for BlastRadius {
         let fp = paging::fingerprint(self.name(), &query, &[&dependents]);
         let from = paging::start_offsets(self.name(), request, &[total_dependents], fp)?[0];
         let envelope_overhead = 640
+            + DIAGNOSTICS_RESERVE
             + serde_json::to_string(&summary)
                 .map(|s| s.len())
                 .unwrap_or(0)
@@ -1690,7 +1691,8 @@ impl RetrievalTool for Lineage {
         let deps_rest: Vec<Value> = dependencies[dep_from..].to_vec();
         let flows_rest: Option<Vec<Value>> =
             flow_rows.as_ref().map(|_| all_flows[flow_from..].to_vec());
-        let available = R4_CHAR_BUDGET.saturating_sub(LINEAGE_ENVELOPE_OVERHEAD);
+        let available =
+            R4_CHAR_BUDGET.saturating_sub(LINEAGE_ENVELOPE_OVERHEAD + DIAGNOSTICS_RESERVE);
         let serialized_len =
             |rows: &[Value]| serde_json::to_string(rows).map_or(usize::MAX, |s| s.len());
         let deps_budget = match &flows_rest {
@@ -1708,7 +1710,8 @@ impl RetrievalTool for Lineage {
         let (mut page_deps, _) =
             cap_rows_to_budget(deps_rest, R4_CHAR_BUDGET.saturating_sub(deps_budget));
         let mut page_flows = flows_rest.map(|rows| {
-            let used = LINEAGE_ENVELOPE_OVERHEAD.saturating_add(serialized_len(&page_deps));
+            let used = (LINEAGE_ENVELOPE_OVERHEAD + DIAGNOSTICS_RESERVE)
+                .saturating_add(serialized_len(&page_deps));
             cap_rows_to_budget(rows, used).0
         });
         // Progress: a page always carries at least one remaining row, so paging terminates even
@@ -1822,6 +1825,11 @@ const R4_CHAR_BUDGET: usize = 25_000;
 /// #279 paging keys (`next_cursor`, `page`), with margin. Everything else in the payload is one of
 /// the two paged row arrays.
 const LINEAGE_ENVELOPE_OVERHEAD: usize = 640;
+
+/// Room a paged reply keeps for its diagnostics block (the content block plus diagnostics is what
+/// an agent receives, R4): the staleness note, the R7 confidence line, the page line naming the
+/// cursor, a clamp note and a cut cause, with margin (#279 review).
+const DIAGNOSTICS_RESERVE: usize = 1_200;
 
 /// Trim `items` (already in priority order: best first) until the serialized JSON array fits under
 /// [`R4_CHAR_BUDGET`], leaving headroom for the surrounding envelope keys. Returns the kept rows and
@@ -7528,13 +7536,16 @@ mod tests {
                     "fan.ts",
                     i as u32 + 1,
                 ));
-                edges.push(Edge::new(
+                let mut edge = Edge::new(
                     SymbolId(id.clone()),
                     SymbolId("seed".to_string()),
                     edge_tags::other(edge_tags::FLOWS_TO),
                     ResolutionTier::Parsed,
                     "test-fixture",
-                ));
+                );
+                // Low confidence, so every page also carries the R7 diagnostic line.
+                edge.confidence = Confidence::new(0.25);
+                edges.push(edge);
             }
             store.upsert_nodes(&nodes).unwrap();
             store.upsert_edges(&edges).unwrap();
@@ -7559,7 +7570,13 @@ mod tests {
             let res = ask(&store, &cursor).unwrap();
             pages += 1;
             let c = &res.content;
-            assert!(serde_json::to_string(c).unwrap().len() <= R4_CHAR_BUDGET);
+            // R4 covers what the agent receives: the content block plus the diagnostics.
+            let received = serde_json::to_string(c).unwrap().len()
+                + res.diagnostics.iter().map(|d| d.len() + 1).sum::<usize>();
+            assert!(
+                received <= R4_CHAR_BUDGET,
+                "page {pages} delivers {received} chars"
+            );
             assert_eq!(c["total"], json!(n), "total counts the whole answer");
             for d in c["dependencies"].as_array().unwrap() {
                 assert!(deps.insert(d["symbol"].as_str().unwrap().to_string()));

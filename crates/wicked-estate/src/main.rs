@@ -1427,7 +1427,12 @@ fn main() -> Result<()> {
             // `truncated_dependents` count — crew reads only `dependents`/`unresolved`.
             let (mut kept, _) = cap_blast_radius_rows(name, unresolved, &br, depth);
             if kept == 0 && !deps.is_empty() {
-                kept = 1; // progress: a page always carries at least one remaining row
+                // Progress: a page always carries at least one remaining row, whole, never cut.
+                kept = 1;
+                eprintln!(
+                    "blast-radius: one row is wider than the {BLAST_RADIUS_CHAR_BUDGET}-char \
+                     budget; this page carries it whole rather than cut it"
+                );
             }
             // Rows this reply does not print: they follow on later pages, never lost.
             let dropped = deps.len() - kept;
