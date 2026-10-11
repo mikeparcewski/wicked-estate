@@ -15,6 +15,11 @@ Patch: the last consolidation leaks from the codex re-review of #329.
 - **Working memories expire by kind, in every tier.** A `kind: working` capture with no tier lands
   Episodic, escaped expiry, and was distilled into facts and summaries. Expiry now selects by kind
   across tiers and runs before reflection; Working-kind memories are never distilled or archived.
+- **Maintenance repairs every archive summary whose sources are gone or are scratch.** 0.29.1 could
+  already have deleted the Working sources of a 0.29.0 root summary; such orphans are now found by
+  their missing `source_ids`, removed, and rebuilt from any surviving durable sources at their exact
+  scope and facets (removed outright when none survive). Idempotent.
+- **`archive_cluster` never archives scratch** (Working kind or tier, any scope or age).
 - **A supplied archive summary is used only for an unfiltered, single-group cluster.** When the
   scope filter dropped members (or the cluster spans groups), the summary is regenerated per group,
   so another scope's content never lands in this one's archive.

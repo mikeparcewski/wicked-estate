@@ -194,7 +194,7 @@ impl MemoryEngine {
         Ok(self
             .hydrate(&ids)?
             .into_iter()
-            .filter(|m| m.kind != MemKind::Working) // scratch is never distilled
+            .filter(|m| !is_scratch(m)) // scratch is never distilled
             .filter(|m| scope.is_ancestor_of(&m.scope))
             .collect())
     }
@@ -336,7 +336,8 @@ impl MemoryEngine {
     /// per (exact scope, facet set): each T4 node lives at its sources' own scope with their facets,
     /// so a root-scope pass cannot expose project B's or a user-restricted memory to anyone the
     /// sources were hidden from, and erasing a scope erases its summaries too. An agent `summary`
-    /// is applied only when the WHOLE cluster is one such group with nothing filtered out.
+    /// is applied only when the WHOLE cluster is one such group with nothing filtered out. Scratch
+    /// (Working kind or tier) is never archived.
     pub fn archive_cluster(
         &mut self,
         scope: &Scope,
@@ -346,7 +347,11 @@ impl MemoryEngine {
     ) -> Result<usize> {
         let mut groups: Vec<(Scope, Facets, Vec<Memory>)> = Vec::new();
         let mut kept = 0usize;
-        for m in cluster.iter().filter(|m| scope.is_ancestor_of(&m.scope)) {
+        // Scratch (Working kind or tier) is never archived, whatever its scope or age.
+        for m in cluster
+            .iter()
+            .filter(|m| !is_scratch(m) && scope.is_ancestor_of(&m.scope))
+        {
             kept += 1;
             match groups
                 .iter_mut()
@@ -476,7 +481,7 @@ impl MemoryEngine {
             .hydrate(&ids)?
             .into_iter()
             .filter(|m| {
-                m.kind != MemKind::Working // scratch is dropped by its TTL, never archived
+                !is_scratch(m) // scratch is dropped by its TTL, never archived
                     && scope.is_ancestor_of(&m.scope)
                     && (now - m.created_at) >= max_age_secs
                     && compute_salience(
@@ -492,26 +497,32 @@ impl MemoryEngine {
         Ok(self.archive_cluster(scope, &cand, None, now)? + dropped)
     }
 
-    /// Drop expired Working memories (see [`Self::expired_working`]) and every archive summary built
-    /// over any of them (0.29.0 archived scratch into root-scoped, unfaceted summaries). A summary
-    /// that also covered durable sources is rebuilt from those survivors, per their exact scope and
-    /// facets. Nothing is summarized from scratch: a summary would bring back what the TTL hid.
+    /// Drop expired Working memories (see [`Self::expired_working`]), then repair archive summaries.
+    ///
+    /// Two invariants, enforced on every maintenance pass (idempotent):
+    /// - no summary covers scratch: Working kind or tier is never archived;
+    /// - no summary outlives a source: an Archive whose `source_ids` name a memory that no longer
+    ///   exists (0.29.1 deleted expired scratch but kept 0.29.0's root summaries of it) or a Working
+    ///   memory is removed, and rebuilt from its surviving durable sources at their exact scope and
+    ///   facets; with no survivor it is only removed.
+    ///
     /// Returns the removed node ids (sources + summaries) so the caller can clear cross-store edges.
     pub(crate) fn drop_expired_working(
         &mut self,
         scope: &Scope,
         now: i64,
     ) -> Result<Vec<SymbolId>> {
-        let expired = self.expired_working(scope, now)?;
-        if expired.is_empty() {
-            return Ok(Vec::new());
-        }
-        let gone: std::collections::BTreeSet<String> =
-            expired.iter().map(|m| m.id.clone()).collect();
-        let mut removed: Vec<SymbolId> = expired.iter().map(Memory::symbol).collect();
+        let mut removed: Vec<SymbolId> = self
+            .expired_working(scope, now)?
+            .iter()
+            .map(Memory::symbol)
+            .collect();
+        self.remove_memories(&removed)?;
+
         let all = self.all_memories()?;
         let by_id: std::collections::HashMap<&str, &Memory> =
             all.iter().map(|m| (m.id.as_str(), m)).collect();
+        let mut stale: Vec<SymbolId> = Vec::new();
         let mut survivors: Vec<Memory> = Vec::new();
         for arc in all.iter().filter(|m| m.kind == MemKind::Archive) {
             let Some(node) = self.store.get_node(&arc.symbol())? else {
@@ -527,27 +538,44 @@ impl MemoryEngine {
                         .collect()
                 })
                 .unwrap_or_default();
-            if !sources.iter().any(|id| gone.contains(id)) {
-                continue;
-            }
-            removed.push(arc.symbol());
-            for m in sources
+            let present: Vec<&Memory> = sources
                 .iter()
-                .filter(|id| !gone.contains(*id))
-                .filter_map(|id| by_id.get(id.as_str()))
-            {
+                .filter_map(|id| by_id.get(id.as_str()).copied())
+                .collect();
+            let durable: Vec<&Memory> =
+                present.iter().copied().filter(|m| !is_scratch(m)).collect();
+            if durable.len() == sources.len() {
+                continue; // sound: every source exists and none is scratch
+            }
+            stale.push(arc.symbol());
+            for m in durable {
                 if !survivors.iter().any(|s| s.id == m.id) {
-                    survivors.push((*m).clone());
+                    survivors.push(m.clone());
                 }
             }
         }
-        let id_strs: Vec<String> = removed.iter().map(|s| s.0.clone()).collect();
-        self.store.remove_nodes(&removed)?;
-        self.ext.remove(&id_strs)?;
+        self.remove_memories(&stale)?;
+        removed.extend(stale);
         // Root as the filter scope: every survivor is kept and lands at its own scope + facets.
         self.archive_cluster(&Scope::root(), &survivors, None, now)?;
         Ok(removed)
     }
+
+    /// Hard-delete memory nodes from the graph + the sidecar index.
+    fn remove_memories(&mut self, ids: &[SymbolId]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let id_strs: Vec<String> = ids.iter().map(|s| s.0.clone()).collect();
+        self.store.remove_nodes(ids)?;
+        self.ext.remove(&id_strs)?;
+        Ok(())
+    }
+}
+
+/// Session scratch: Working kind or Working tier. Never distilled, never archived.
+fn is_scratch(m: &Memory) -> bool {
+    m.kind == MemKind::Working || m.tier == Tier::Working
 }
 
 #[cfg(test)]
@@ -1320,6 +1348,115 @@ mod tests {
         assert!(
             leaked.is_empty(),
             "B's content landed in A's archive: {leaked:?}"
+        );
+    }
+
+    // ── w9-memfix3 r2 (codex review of #331) ──────────────────────────────────────
+
+    fn archives_holding(eng: &MemoryEngine, needle: &str) -> Vec<String> {
+        eng.all_memories()
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.kind == MemKind::Archive && m.content.contains(needle))
+            .map(|m| m.content)
+            .collect()
+    }
+
+    #[test]
+    fn orphaned_legacy_summary_is_removed_by_maintenance() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let gone = Memory::new(
+            MemKind::Working,
+            Tier::Working,
+            Scope::parse("project:a"),
+            "x",
+            1,
+        );
+        // 0.29.1 already deleted `gone`; only its root summary is left.
+        legacy_summary(&mut eng, &[&gone], "WIP lynx scratch notes", 2);
+        eng.consolidate(&Scope::root(), 4).unwrap();
+        assert!(
+            holds(&eng, "lynx").is_empty(),
+            "maintenance must remove the orphaned summary"
+        );
+    }
+
+    #[test]
+    fn a_sound_archive_stays_recallable() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let root = Scope::root();
+        cap(
+            &mut eng,
+            MemKind::Fact,
+            Tier::Semantic,
+            &root,
+            "old gecko fact one",
+            0,
+        );
+        let now = 400 * 86_400;
+        eng.archive(&root, 30 * 86_400, 0.5, now).unwrap();
+        eng.consolidate(&root, now + 1).unwrap();
+        assert!(
+            !archives_holding(&eng, "gecko").is_empty(),
+            "sound archive kept by repair"
+        );
+        assert!(!contents_visible_from(&eng, &root, "old gecko fact one", now + 2).is_empty());
+    }
+
+    #[test]
+    fn scoped_cleanup_never_rearchives_sibling_scratch() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let (a, b) = (Scope::parse("project:a"), Scope::parse("project:b"));
+        let t0 = 10_000;
+        let wa = Memory::new(
+            MemKind::Working,
+            Tier::Working,
+            a.clone(),
+            "WIP-A viper",
+            t0,
+        );
+        let wb = Memory::new(
+            MemKind::Working,
+            Tier::Working,
+            b.clone(),
+            "WIP-B cobra",
+            t0,
+        );
+        eng.capture(&wa).unwrap();
+        eng.capture(&wb).unwrap();
+        legacy_summary(&mut eng, &[&wa, &wb], "WIP-A viper WIP-B cobra", t0 + 1);
+        eng.consolidate(&a, t0 + WORKING_TTL_SECS).unwrap();
+        assert!(
+            archives_holding(&eng, "cobra").is_empty(),
+            "sibling scratch re-archived"
+        );
+    }
+
+    #[test]
+    fn archive_cluster_never_summarizes_working() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let root = Scope::root();
+        let f = Memory::new(
+            MemKind::Fact,
+            Tier::Semantic,
+            root.clone(),
+            "durable mongoose rule",
+            0,
+        );
+        let w = Memory::new(
+            MemKind::Working,
+            Tier::Working,
+            root.clone(),
+            "scratch tapir note",
+            0,
+        );
+        eng.capture(&f).unwrap();
+        eng.capture(&w).unwrap();
+        eng.archive_cluster(&root, &[f, w], Some("mongoose and tapir".into()), 5)
+            .unwrap();
+        assert!(
+            archives_holding(&eng, "tapir").is_empty(),
+            "working content archived"
         );
     }
 
