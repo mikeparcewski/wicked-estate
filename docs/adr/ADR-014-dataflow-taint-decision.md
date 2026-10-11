@@ -283,16 +283,16 @@ The operator ruled on #279: "I want the full graph". Every data-flow slice stays
 - **Default depth.** `Lineage` defaults to its ceiling (24), so the default query is not cut at a horizon the caller never chose. A horizon or node cap that still bites stays reported (`depth_horizon_reached`, `node_cap_reached`, and `truncated` on the last page). Paging never claims a bounded walk is the whole graph.
 - **Consumers.** garden's estate shim (`scripts/_estate_client.py`, `call`) follows every cursor and joins the pages, so a seat gets the whole answer, with `complete` in the result. The `search` skill tells the seat to read `complete`. The MCP schemas advertise `cursor`.
 
-**Measured (run `38105645690`, 0.27.0 `aa957f9` → paging `062f0c9`, same runner)**
+**Measured (run `38106571743`, 0.27.0 `aa957f9` → paging `57f4726`, same runner).** The measurement follows every cursor and checks that the pages join into the answer's `total` for both arrays, with no row twice. An earlier run on `062f0c9` (`38105645690`) gave the same counts.
 
 | | Covalent `438c297` | vitejs/vite `3b72997` |
 |---|---|---|
 | fixed queries not completely retrievable | 2 → **0** (at most 2 pages) | 10 → **0** (at most 7 pages) |
 | sweep queries not completely retrievable | 1 of 520 → **0** | 146 of 2829 → **0** |
-| largest page | 24,360 chars | 24,673 chars |
+| largest page (content only) | 23,408 chars | 23,533 chars |
 | `flows_to` edges | 1600 → 1600 | 7480 → 7480 |
-| full / incremental index | +0.58 % / +1.37 % | +0.30 % / +0.53 % |
-| DB bytes per stored edge | −0.03 % | −0.07 % |
+| full / incremental index | −1.19 % / +0.68 % | −1.54 % / +0.85 % |
+| DB bytes per stored edge | −0.09 % | +0.05 % |
 
 **Every measured Lineage query is completely retrievable on both corpora.** That is the gate's query set: default-depth `flows_to` queries from the 10 fixed producers plus every baseline `Parameter` root. The 2 vite queries that 0.24.0 → 0.26.0 newly truncated, and every other cut query in that set, now page to their full answer. Dependency-mode Lineage and other roots were not swept.
 
