@@ -948,9 +948,13 @@ pub fn handle_request_unified_ro(
                 // `proposal.submit`/`proposal.list` fall through here even in read-only mode.
                 "proposal.submit" | "proposal.list" | "proposal.approve" | "proposal.reject" => {
                     match domains {
-                        Some(d) => {
-                            tools::proposals::dispatch(tool, &id, &params, d.memory, d.knowledge)
-                        }
+                        Some(d) => tools::proposals::dispatch_with_knowledge(
+                            tool,
+                            &id,
+                            &params,
+                            d.memory,
+                            d.knowledge,
+                        ),
                         None => err_response(&id, -32601, "proposal domain not available"),
                     }
                 }

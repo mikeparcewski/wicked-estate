@@ -12,12 +12,35 @@ use wicked_estate_memory_core::{
     ApproveOutcome, Facets, MemoryApi, Proposal, ProposalState, valid_kind_type,
 };
 
+/// The proposal tools without a knowledge seam: a `knowledge` proposal's approval is refused
+/// loudly (kept so the published signature does not change; the MCP router uses
+/// [`dispatch_with_knowledge`]).
 pub fn dispatch(
     tool: &str,
     id: &Value,
     params: &Value,
     memory: &mut dyn MemoryApi<Error = anyhow::Error>,
+) -> Value {
+    dispatch_inner(tool, id, params, memory, None)
+}
+
+/// The proposal tools with the knowledge domain, so approving a `knowledge` proposal writes it.
+pub fn dispatch_with_knowledge(
+    tool: &str,
+    id: &Value,
+    params: &Value,
+    memory: &mut dyn MemoryApi<Error = anyhow::Error>,
     knowledge: &mut dyn KnowledgeApi,
+) -> Value {
+    dispatch_inner(tool, id, params, memory, Some(knowledge))
+}
+
+fn dispatch_inner(
+    tool: &str,
+    id: &Value,
+    params: &Value,
+    memory: &mut dyn MemoryApi<Error = anyhow::Error>,
+    knowledge: Option<&mut dyn KnowledgeApi>,
 ) -> Value {
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
     let now = std::time::SystemTime::now()
@@ -298,16 +321,22 @@ fn dispatch_approve(
     id: &Value,
     args: &Value,
     memory: &mut dyn MemoryApi<Error = anyhow::Error>,
-    knowledge: &mut dyn KnowledgeApi,
+    knowledge: Option<&mut dyn KnowledgeApi>,
     now: i64,
 ) -> Value {
     let proposal_id = match args.get("id").and_then(|v| v.as_str()) {
         Some(i) => i.to_string(),
         None => return json_rpc_error(id, -32602, "id (string) required"),
     };
-    match memory.approve_proposal_with_knowledge(&proposal_id, now, &mut |proposal, now| {
-        knowledge.write_proposal(proposal, now)
-    }) {
+    let approved = match knowledge {
+        Some(knowledge) => {
+            memory.approve_proposal_with_knowledge(&proposal_id, now, &mut |proposal, now| {
+                knowledge.write_proposal(proposal, now)
+            })
+        }
+        None => memory.approve_proposal(&proposal_id, now),
+    };
+    match approved {
         Ok(ApproveOutcome::Promoted { active_id }) => {
             mcp_result(id, json!({"outcome": "promoted", "active_id": active_id}))
         }
