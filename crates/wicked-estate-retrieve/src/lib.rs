@@ -1289,8 +1289,19 @@ impl RetrievalTool for BlastRadius {
         let query = format!("{id_str}|{max_depth}");
         let fp = paging::fingerprint(self.name(), &query, &[&dependents]);
         let from = paging::start_offsets(self.name(), request, &[total_dependents], fp)?[0];
+        let coverage_note = format!(
+            "coverage: {total_dependents} dependent(s) via resolved calls; \
+             {unresolved_callers} unresolved call(s) reference '{symbol_name}' — \
+             blast-radius is best-effort static resolution and MAY be incomplete \
+             (precise tier pending)."
+        );
+        // The diagnostics are measured, not guessed: the lines already pushed (they can repeat a
+        // caller's id or the start's name at any length) and the coverage note, plus the reserve
+        // for the page line still to come.
+        let diag_len: usize = diag.iter().map(|d| d.len() + 1).sum::<usize>() + coverage_note.len();
         let envelope_overhead = 640
             + DIAGNOSTICS_RESERVE
+            + diag_len
             + serde_json::to_string(&summary)
                 .map(|s| s.len())
                 .unwrap_or(0)
@@ -1319,13 +1330,8 @@ impl RetrievalTool for BlastRadius {
         let total = total_dependents;
 
         // Coverage note — always emitted (even when unresolved_callers == 0) so callers always
-        // know the completeness posture of the result.
-        diag.push(format!(
-            "coverage: {total} dependent(s) via resolved calls; \
-             {unresolved_callers} unresolved call(s) reference '{symbol_name}' — \
-             blast-radius is best-effort static resolution and MAY be incomplete \
-             (precise tier pending)."
-        ));
+        // know the completeness posture of the result. Built before paging (above).
+        diag.push(coverage_note);
 
         Ok(RetrievalResult {
             content: json!({
@@ -7476,6 +7482,47 @@ mod tests {
         }
         assert!(pages >= 2, "the fixture overflows one page");
         assert_eq!(seen.len(), n, "every importer is retrievable");
+    }
+
+    /// #279 review: a page's diagnostics are measured, not guessed. A start node with a very long
+    /// name (repeated by the coverage note) still gets pages whose content plus diagnostics fit.
+    #[test]
+    fn blast_radius_pages_fit_with_a_long_start_name() {
+        let long = "n".repeat(5_000);
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        let mut nodes = vec![make_node("hub", &long, NodeKind::Function, "hub.rs", 0)];
+        let mut edges = Vec::new();
+        for i in 0..600 {
+            let id = format!("caller_{i:04}");
+            nodes.push(make_node(&id, &id, NodeKind::Function, "c.rs", i));
+            edges.push(make_call_edge(&id, "hub"));
+        }
+        store.upsert_nodes(&nodes).unwrap();
+        store.upsert_edges(&edges).unwrap();
+        store.commit_batch().unwrap();
+        let mut cursor = Value::Null;
+        let mut seen = 0;
+        for _ in 0..100 {
+            let res = BlastRadius
+                .invoke(&store, &json!({"symbol": "hub", "cursor": cursor}))
+                .unwrap();
+            let received = serde_json::to_string(&res.content).unwrap().len()
+                + res.diagnostics.iter().map(|d| d.len() + 1).sum::<usize>();
+            assert!(
+                received <= R4_CHAR_BUDGET,
+                "a page delivers {received} chars"
+            );
+            seen += res.content["dependents"].as_array().unwrap().len();
+            cursor = res.content["next_cursor"].clone();
+            if cursor.is_null() {
+                break;
+            }
+        }
+        assert!(
+            cursor.is_null() && seen == 600,
+            "every caller arrives: {seen}"
+        );
     }
 
     /// #279: paging returns every row the bounded walk produced; it never claims more. A chain
