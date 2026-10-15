@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.29.3] — 2026-10-15
+
+Patch: estate's library crates no longer kill the thread that prints a diagnostic line (#333, the
+estate half of wicked-core#957).
+
+### Fixed
+- **A diagnostic line never kills the thread that writes it.** std's `eprintln!` panics when the
+  write to stderr fails. A Node host (wicked-crew loads wicked-core, which links these crates, as a
+  napi addon) hands the process a non-blocking stderr pipe; when its reader lags, the write fails
+  with EAGAIN, the thread panics, and the panic message is lost the same way. On wicked-core's engine
+  threads that hung a run or stopped the actor. The most common trigger was the memory store's
+  embedder fallback at open (model2vec unavailable: no network, no cached model). The library crate
+  roots that print (store, memory, retrieve, observe, overlay, resolve, extract and the
+  `wicked-estate` library) now shadow `eprintln!` with a write that drops the line when stderr
+  refuses it, the same macro wicked-core 0.11.2 uses. The binaries keep std's macro.
+  `wicked-estate-memory/tests/stderr_refuses_writes.rs` opens the store in a child whose stderr is a
+  full non-blocking pipe, with the model load failing offline (CI: the semantic-embedders job).
+
 ## [0.29.2] — 2026-10-11
 
 Patch: the last consolidation leaks from the codex re-review of #329.
