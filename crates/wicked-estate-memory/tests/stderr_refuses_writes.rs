@@ -9,7 +9,9 @@
 //! This test runs itself as a child whose stderr is a full non-blocking pipe, makes the model2vec
 //! load fail offline (an existing, empty model directory), opens the store on a spawned thread and
 //! requires that thread to finish and the store to work.
-#![cfg(all(unix, feature = "semantic"))]
+// model2vec only: with `semantic-bge` too, the engine picks FastEmbedder, which this test cannot
+// force to fail offline.
+#![cfg(all(unix, feature = "semantic", not(feature = "semantic-bge")))]
 
 use std::time::{Duration, Instant};
 
@@ -69,9 +71,22 @@ fn memory_store_opens_when_stderr_refuses_every_write() {
         // SAFETY: writing a stack buffer to our own fd.
         let n = unsafe { libc::write(write_end, chunk.as_ptr().cast(), chunk.len()) };
         if n < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock, "fill: {err}");
             break;
         }
     }
+    // Full: even one byte is refused.
+    // SAFETY: writing a stack byte to our own fd.
+    let one = unsafe { libc::write(write_end, chunk.as_ptr().cast(), 1) };
+    assert_eq!(
+        (one, std::io::Error::last_os_error().kind()),
+        (-1, std::io::ErrorKind::WouldBlock),
+        "the pipe must refuse a one-byte write"
+    );
     let parent = scratch("parent");
     let result = parent.join("result.txt");
     // An existing directory with no model in it: model2vec fails to load without touching the
