@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.29.3] — 2026-10-15
+
+Patch: a diagnostic line no longer kills the host thread that writes it (#335).
+
 ### Fixed
 - **A diagnostic line no longer kills the thread that writes it (#333, wicked-core#957).** std's
   `eprintln!` panics when the write to stderr fails. A Node host (wicked-crew loading wicked-core
