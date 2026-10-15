@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+- **A diagnostic line no longer kills the thread that writes it (#333, wicked-core#957).** std's
+  `eprintln!` panics when the write to stderr fails. A Node host (wicked-crew loading wicked-core
+  through its napi addon, which links these crates) hands the process a non-blocking stderr pipe;
+  when its reader lags, the write fails with EAGAIN and the logging thread dies, with the panic
+  message lost the same way. The library crates now shadow the macro at their roots (store, memory,
+  retrieve, observe, extract, overlay, resolve, and the `wicked-estate` lib): the same line is
+  written, and dropped when stderr refuses it. The model2vec/FastEmbedder fallback when the memory
+  store opens offline is the path hosts hit most. Binaries and unit tests keep std's macro. A
+  workspace test fails when a library crate calls `eprintln!` without the shadow.
+
 ## [0.29.2] — 2026-10-11
 
 Patch: the last consolidation leaks from the codex re-review of #329.

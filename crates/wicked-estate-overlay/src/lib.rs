@@ -22,6 +22,21 @@
 //! the crate's own tests carry a self-contained `cross_engine_recall_at_k` demonstration over a
 //! zero-lexical-overlap corpus to prove the mechanism in isolation.
 
+// (estate#333, wicked-core#957) A diagnostic line never kills the thread that writes it. std's
+// `eprintln!` PANICS when the write fails, and a Node host (wicked-crew loading wicked-core through
+// its napi addon, which links this crate) hands the process a stderr that is a non-blocking pipe:
+// when the reader lags, the write fails with EAGAIN and the thread dies with no trace. This
+// crate-wide shadow (textual scope: every module declared below) writes the same line and drops it
+// when stderr refuses it. Unit tests keep std's macro, whose output the test harness captures.
+#[cfg(not(test))]
+#[allow(unused_macros)] // some crates only log under a feature (e.g. retrieve's `fastembed`)
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        use ::std::io::Write as _;
+        let _ = ::std::writeln!(::std::io::stderr(), $($arg)*);
+    }};
+}
+
 pub mod overlay;
 pub mod xedge;
 
