@@ -28,7 +28,6 @@
 // crate-wide shadow (textual scope: every module declared below) writes the same line and drops it
 // when stderr refuses it. Unit tests keep std's macro, whose output the test harness captures.
 #[cfg(not(test))]
-#[allow(unused_macros)] // some crates only log under a feature (e.g. retrieve's `fastembed`)
 macro_rules! eprintln {
     ($($arg:tt)*) => {{
         use ::std::io::Write as _;

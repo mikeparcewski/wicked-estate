@@ -29,8 +29,8 @@
 // when the reader lags, the write fails with EAGAIN and the thread dies with no trace. This
 // crate-wide shadow (textual scope: every module declared below) writes the same line and drops it
 // when stderr refuses it. Unit tests keep std's macro, whose output the test harness captures.
-#[cfg(not(test))]
-#[allow(unused_macros)] // some crates only log under a feature (e.g. retrieve's `fastembed`)
+// Its only diagnostic is the fastembed fallback, so the shadow exists exactly when that call does.
+#[cfg(all(not(test), feature = "fastembed"))]
 macro_rules! eprintln {
     ($($arg:tt)*) => {{
         use ::std::io::Write as _;
