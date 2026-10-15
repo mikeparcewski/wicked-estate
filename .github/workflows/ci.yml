@@ -186,6 +186,10 @@ jobs:
         run: cargo test -p wicked-estate-retrieve --features model2vec
       - name: fastembed semantic tests
         run: cargo test -p wicked-estate-retrieve --features fastembed
+      # (#333) Offline: the model load fails on purpose (an empty model dir), and the memory store
+      # must still open while stderr refuses every write (a Node host's non-blocking pipe).
+      - name: memory store opens when stderr refuses writes (semantic fallback)
+        run: cargo test -p wicked-estate-memory --features semantic --test stderr_refuses_writes
 
   # ── TS-S3: the Angular compiler adapter (adapters/angular-evidence). Reinstalls the exact pinned
   #    compiler and re-derives every committed fixture envelope; a diff means a fixture is not the

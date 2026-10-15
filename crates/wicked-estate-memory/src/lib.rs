@@ -13,6 +13,24 @@
 //! predicate (`path_in_prefix`, the one erase/coverage use) so descendant-scoped memories —
 //! e.g. imported leaf scopes like `brain:wicked-garden/doc:<id>` — are recallable from above.
 
+// (wicked-estate#333, after wicked-core#957) A diagnostic line never kills the thread that writes
+// it. std's `eprintln!` PANICS when the write fails, and a Node host (wicked-crew loads wicked-core,
+// which links this crate, as a napi addon) hands the process a stderr that is a non-blocking pipe:
+// when the reader lags, a write fails with EAGAIN. The panic message is lost the same way, so the
+// thread died with no trace — on wicked-core's engine threads a worker took its unit's result with it
+// (the run hung in `executing`) and the actor took the engine. This crate-wide shadow of `eprintln!`
+// (textual scope: every module declared below) writes the same line and drops it when stderr refuses
+// it. Unit tests keep std's macro, whose output the test harness captures.
+// Every `eprintln!` here is in the embedder fallback, which exists only with a semantic feature,
+// so the shadow is compiled exactly when it has a caller.
+#[cfg(all(not(test), any(feature = "semantic", feature = "semantic-bge")))]
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        use ::std::io::Write as _;
+        let _ = ::std::writeln!(::std::io::stderr(), $($arg)*);
+    }};
+}
+
 use wicked_estate_core::{
     Direction, Edge, EdgeKind, NodeKind, ResolutionTier, SymbolId, SymbolQuery,
 };

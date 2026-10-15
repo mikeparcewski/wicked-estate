@@ -23,6 +23,24 @@
 //! * R5 — placeholder staleness note emitted (full git-rev check is the MCP layer's job).
 //! * R7 — low-confidence edges flagged in diagnostics when present in traversals.
 
+// (wicked-estate#333, after wicked-core#957) A diagnostic line never kills the thread that writes
+// it. std's `eprintln!` PANICS when the write fails, and a Node host (wicked-crew loads wicked-core,
+// which links this crate, as a napi addon) hands the process a stderr that is a non-blocking pipe:
+// when the reader lags, a write fails with EAGAIN. The panic message is lost the same way, so the
+// thread died with no trace — on wicked-core's engine threads a worker took its unit's result with it
+// (the run hung in `executing`) and the actor took the engine. This crate-wide shadow of `eprintln!`
+// (textual scope: every module declared below) writes the same line and drops it when stderr refuses
+// it. Unit tests keep std's macro, whose output the test harness captures.
+// The only `eprintln!` here is FastEmbedder's inference fallback (the `fastembed` feature), so
+// the shadow is compiled exactly when it has a caller.
+#[cfg(all(not(test), feature = "fastembed"))]
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        use ::std::io::Write as _;
+        let _ = ::std::writeln!(::std::io::stderr(), $($arg)*);
+    }};
+}
+
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use wicked_estate_core::{

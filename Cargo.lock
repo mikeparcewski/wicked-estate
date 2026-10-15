@@ -10202,6 +10202,7 @@ name = "wicked-estate-memory"
 version = "0.29.2"
 dependencies = [
  "anyhow",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",
