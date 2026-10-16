@@ -18,9 +18,9 @@ scip = "0.10"
 protobuf = "3"
 toml = "0.8"
 
-wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.29.2" }
+wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.29.3" }
 
 [dev-dependencies]
-wicked-estate-store = { path = "../wicked-estate-store", version = "0.29.2" }
+wicked-estate-store = { path = "../wicked-estate-store", version = "0.29.3" }
 tempfile = "3"
 
