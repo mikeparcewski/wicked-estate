@@ -185,6 +185,17 @@ fn dispatch_submit(
             }
         }
     }
+    // An operator memory lands at `operator:<user facet>` — one scope segment, so no `/`.
+    if kind_type == "memory"
+        && payload.get("reach").and_then(Value::as_str) == Some("operator")
+        && facets.get("user").is_some_and(|u| u.contains('/'))
+    {
+        return json_rpc_error(
+            id,
+            -32602,
+            "an operator memory's user facet names its operator scope and cannot contain '/'",
+        );
+    }
     if kind_type == "memory" {
         const TIERS: [&str; 5] = ["working", "episodic", "semantic", "procedural", "archival"];
         match payload.get("tier") {

@@ -8,6 +8,7 @@
 
 use crate::MemoryEngine;
 use wicked_estate_core::{NodeKind, Symbol, SymbolId, SymbolQuery};
+use wicked_estate_memory_core::scope::Seg;
 use wicked_estate_memory_core::{
     ApproveOutcome, Facets, MemKind, Memory, OPERATOR_SCOPE_DEFAULT, OPERATOR_SCOPE_KIND, Proposal,
     ProposalState, Scope, Tier, proposal::PROPOSAL_NODE_KIND,
@@ -186,23 +187,35 @@ impl MemoryEngine {
 }
 
 /// Where an OPERATOR memory lands: `operator:<user facet>` (else [`OPERATOR_SCOPE_DEFAULT`]), with
-/// the `project`, `repo` and `user` facets dropped — the scope carries who it is about, and a
-/// project facet would pin a cross-project memory to one project. Other facets (`cli`, `tool`)
-/// still narrow it.
+/// the `project` and `repo` facets dropped — a project facet would pin a cross-project memory to
+/// one project. Every other facet still gates recall, the `user` facet included: recall admits an
+/// operator scope under every query scope, so only facet admission keeps one user's memory from
+/// another's.
 fn operator_placement(facets: &Facets) -> anyhow::Result<(Scope, Facets)> {
     let scope = match facets.get("user") {
-        Some(user) => Scope::parse_strict(&format!("{OPERATOR_SCOPE_KIND}:{user}"))
-            .map_err(|e| anyhow::anyhow!("operator memory: invalid user facet {user:?}: {e}"))?,
+        Some(user) if operator_user_ok(user) => Scope(vec![Seg {
+            kind: OPERATOR_SCOPE_KIND.to_string(),
+            id: user.to_string(),
+        }]),
+        Some(user) => anyhow::bail!(
+            "operator memory: the user facet {user:?} cannot name an operator scope (no '/')"
+        ),
         None => Scope::parse(OPERATOR_SCOPE_DEFAULT),
     };
     let kept = Facets::try_from_map(
         facets
             .iter()
-            .filter(|(axis, _)| !matches!(axis.as_str(), "project" | "repo" | "user"))
+            .filter(|(axis, _)| !matches!(axis.as_str(), "project" | "repo"))
             .map(|(a, v)| (a.clone(), v.clone())),
     )
     .map_err(|e| anyhow::anyhow!(e))?;
     Ok((scope, kept))
+}
+
+/// Can `user` name ONE operator scope segment? A `/` would split it into a deeper path, and two
+/// users could then share a subtree (erase/coverage by prefix would reach both).
+fn operator_user_ok(user: &str) -> bool {
+    !user.is_empty() && !user.contains('/')
 }
 
 fn parse_tier(s: &str) -> anyhow::Result<Tier> {
@@ -483,10 +496,11 @@ mod tests {
         assert_eq!(m.facets.get("project"), None);
         assert_eq!(m.facets.get("repo"), None);
         assert_eq!(m.facets.get("cli"), Some("codex"));
-        // A `user` facet names whose operator scope it is.
+        // A `user` facet names whose operator scope it is, and still gates recall to that user.
         let m = approve_reach(Some("operator"), &[("user", "mike"), ("project", "wicked")]);
         assert_eq!(m.scope.as_path(), "operator:mike");
-        assert!(m.facets.is_empty());
+        assert_eq!(m.facets.get("user"), Some("mike"));
+        assert_eq!(m.facets.get("project"), None);
     }
 
     #[test]
@@ -548,5 +562,50 @@ mod tests {
                 "an operator memory must be recalled under {scope:?}: {hits:?}"
             );
         }
+    }
+
+    #[test]
+    fn one_users_operator_memory_is_not_recalled_for_another_user() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let id = eng
+            .submit_proposal(
+                "memory",
+                serde_json::json!({"content": "alice wants tables in every reply", "reach": "operator"}),
+                facets(&[("user", "alice")]),
+                BTreeMap::new(),
+                1,
+            )
+            .unwrap();
+        eng.approve_proposal(&id, 2).unwrap();
+        let hits = |intent: &[(&str, &str)]| {
+            let mut q = RecallQuery::new("tables reply", "project:b", 500, 3);
+            q.intent = facets(intent);
+            MemoryApi::recall(&eng, &q)
+                .unwrap()
+                .iter()
+                .filter(|r| r.content.contains("alice"))
+                .count()
+        };
+        assert_eq!(hits(&[("user", "bob")]), 0);
+        assert_eq!(hits(&[]), 0);
+        assert_eq!(hits(&[("user", "alice"), ("repo", "b")]), 1);
+    }
+
+    #[test]
+    fn a_user_facet_with_a_slash_is_refused_and_a_nested_operator_path_is_not_cross_project() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let id = eng
+            .submit_proposal(
+                "memory",
+                serde_json::json!({"content": "team alice wants tables", "reach": "operator"}),
+                facets(&[("user", "alice/team:blue")]),
+                BTreeMap::new(),
+                1,
+            )
+            .unwrap();
+        assert!(eng.approve_proposal(&id, 2).is_err());
+        assert!(Scope::parse("operator:x").is_operator());
+        assert!(!Scope::parse("operator:x/project:y").is_operator());
+        assert!(!Scope::parse("project:x").is_operator());
     }
 }

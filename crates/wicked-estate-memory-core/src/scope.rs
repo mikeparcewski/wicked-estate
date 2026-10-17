@@ -51,12 +51,11 @@ pub const OPERATOR_SCOPE_KIND: &str = "operator";
 pub const OPERATOR_SCOPE_DEFAULT: &str = "operator:local";
 
 impl Scope {
-    /// Is this an operator scope (`operator:<id>` or below)? Operator memories are cross-project
-    /// by design, so ancestor-visible recall admits them under every scope.
+    /// Is this exactly an operator scope (`operator:<id>`, one segment)? Operator memories are
+    /// cross-project by design, so ancestor-visible recall admits them under every scope. A deeper
+    /// path (`operator:x/project:y`) is NOT: it stays as narrow as it was written.
     pub fn is_operator(&self) -> bool {
-        self.0
-            .first()
-            .is_some_and(|s| s.kind == OPERATOR_SCOPE_KIND)
+        self.0.len() == 1 && self.0[0].kind == OPERATOR_SCOPE_KIND
     }
 
     /// The root scope (matches everything as an ancestor).
