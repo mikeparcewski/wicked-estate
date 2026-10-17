@@ -159,6 +159,32 @@ fn dispatch_submit(
     // A PRESENT value must be a string in the enum; absent/null uses the downstream default. A
     // present NON-string (number/object/bool) is invalid too — it would otherwise bypass this
     // check and fail only at approval, the very gap this guard closes.
+    // `payload.reach` says what a memory or policy is ABOUT: `project` (that project/repo),
+    // `operator` (how the operator works — every project), and for a memory `pattern` (a general
+    // pattern the person may let cross projects). Checked here so a drifted value fails at submit.
+    let reaches: &[&str] = if kind_type == "memory" {
+        &["project", "pattern", "operator"]
+    } else if kind_type.starts_with("policy:") {
+        &["project", "operator"]
+    } else {
+        &[]
+    };
+    if !reaches.is_empty() {
+        match payload.get("reach") {
+            None | Some(Value::Null) => {}
+            Some(Value::String(r)) if reaches.contains(&r.as_str()) => {}
+            Some(other) => {
+                return json_rpc_error(
+                    id,
+                    -32602,
+                    &format!(
+                        "invalid {kind_type} reach {other}: use EXACTLY one of {} (\"operator\" = how the operator works, every project)",
+                        reaches.join("|")
+                    ),
+                );
+            }
+        }
+    }
     if kind_type == "memory" {
         const TIERS: [&str; 5] = ["working", "episodic", "semantic", "procedural", "archival"];
         match payload.get("tier") {

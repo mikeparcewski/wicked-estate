@@ -800,3 +800,69 @@ fn proposal_submit_validates_memory_tier_and_policy_severity_enums() {
         "a valid severity must submit; got {ok}"
     );
 }
+
+#[test]
+fn proposal_submit_validates_reach_per_kind() {
+    let store = SqliteStore::in_memory().unwrap();
+    let mut mem = MemoryEngine::in_memory().unwrap();
+    let mut know = KnowledgeEngine::in_memory().unwrap();
+    let cases = [
+        (
+            "memory",
+            json!({"content": "prefers tables in replies", "reach": "operator"}),
+            true,
+        ),
+        (
+            "memory",
+            json!({"content": "prefers tables in replies", "reach": "pattern"}),
+            true,
+        ),
+        (
+            "memory",
+            json!({"content": "prefers tables in replies", "reach": "everywhere"}),
+            false,
+        ),
+        (
+            "policy:development",
+            json!({"rule": "always rebase", "reach": "operator"}),
+            true,
+        ),
+        (
+            "policy:development",
+            json!({"rule": "always rebase", "reach": "project"}),
+            true,
+        ),
+        (
+            "policy:development",
+            json!({"rule": "always rebase", "reach": "pattern"}),
+            false,
+        ),
+        (
+            "policy:development",
+            json!({"rule": "always rebase", "reach": 3}),
+            false,
+        ),
+    ];
+    for (kind_type, payload, ok) in cases {
+        let resp = call(
+            &store,
+            &mut mem,
+            &mut know,
+            "proposal.submit",
+            json!({"kind_type": kind_type, "payload": payload, "facets": {"project": "wicked"}}),
+            true,
+        );
+        if ok {
+            assert!(resp.get("error").is_none(), "{kind_type} {payload}: {resp}");
+        } else {
+            assert_eq!(
+                resp["error"]["code"], -32602,
+                "{kind_type} {payload}: {resp}"
+            );
+            assert!(
+                resp["error"]["message"].as_str().unwrap().contains("reach"),
+                "{resp}"
+            );
+        }
+    }
+}
