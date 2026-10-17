@@ -366,4 +366,55 @@ mod tests {
         assert!(eng.approve_proposal("does-not-exist", 1).is_err());
         assert!(eng.reject_proposal("does-not-exist", 1).is_err());
     }
+
+    /// An approved memory keeps the root scope (the faceted model: scope is tenancy, facets are the
+    /// project/repo partition, DES-MEM-FACETED-001 §4.3), and its facets alone keep it out of every
+    /// other project's recall — at the root, at another project's scope, and under the
+    /// everything opt-in (`scope_prefix: ""`). Pins the no-leak property the review queue relies on.
+    #[test]
+    fn approved_project_memory_is_not_recalled_for_another_project() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let id = eng
+            .submit_proposal(
+                "memory",
+                serde_json::json!({"content": "subtract returns a minus b in tiny-calc", "tier": "semantic"}),
+                facets(&[("project", "tiny-calc"), ("repo", "tiny-calc")]),
+                BTreeMap::new(),
+                1,
+            )
+            .unwrap();
+        eng.approve_proposal(&id, 2).unwrap();
+        let mems = eng.all_memories().unwrap();
+        assert_eq!(mems[0].scope.as_path(), "", "approval keeps the root scope");
+
+        let hits = |scope: &str, prefix: Option<&str>, intent: &[(&str, &str)]| {
+            let mut q = RecallQuery::new("subtract tiny-calc", scope, 500, 3);
+            q.scope_prefix = prefix.map(str::to_string);
+            q.intent = facets(intent);
+            MemoryApi::recall(&eng, &q)
+                .unwrap()
+                .iter()
+                .filter(|r| r.content.contains("subtract"))
+                .count()
+        };
+        let other = [("project", "wicked"), ("repo", "wicked-crew")];
+        assert_eq!(hits("", None, &other), 0, "root recall, another project");
+        assert_eq!(
+            hits("project:wicked-crew", None, &other),
+            0,
+            "another project's scope"
+        );
+        assert_eq!(
+            hits("", Some(""), &other),
+            0,
+            "everything opt-in, another project"
+        );
+        assert_eq!(hits("", None, &[]), 0, "no intent admits no faceted memory");
+        let own = [("project", "tiny-calc"), ("repo", "tiny-calc")];
+        assert_eq!(
+            hits("project:tiny-calc", None, &own),
+            1,
+            "its own project recalls it"
+        );
+    }
 }
