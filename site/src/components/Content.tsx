@@ -72,14 +72,14 @@ function useIsMobile(maxWidth = 760) {
 type StratumId = 'graph' | 'injected' | 'memory' | 'knowledge' | 'provenance'
 
 const STRATA: { id: StratumId; no: string; name: string; depth: string; tools: string; copy: string }[] = [
-  { id: 'graph',      no: '01', name: 'Code graph',     depth: '−0.0m',  tools: '103 languages',
-    copy: 'Symbols, calls, imports, heritage — tree-sitter extraction across 103 wired languages. Languages are data, not code: a new one is a manifest row + a query file, zero core change.' },
+  { id: 'graph',      no: '01', name: 'Code graph',     depth: '−0.0m',  tools: '114 languages',
+    copy: 'Symbols, calls, imports, heritage — extraction across 114 languages, depth varying by language. Languages are data, not code: a new one is a manifest row + a query file, zero core change.' },
   { id: 'injected',   no: '02', name: 'Injected edges', depth: '−4.2m',  tools: 'ExtraEdge TOML',
     copy: 'The relationships grep never sees — event→consumer, command→agent — injected by plain-TOML ExtraEdge rules. A new domain edge type is a rule block, zero Rust; blast-radius crosses the event-bus boundary.' },
   { id: 'memory',     no: '03', name: 'Memory',         depth: '−7.8m',  tools: 'scoped',
-    copy: 'Episodic, semantic, procedural — captured under scopes, recalled on a token budget, distilled by reflection. Erasable by subtree: one call hard-deletes everything under a scope prefix. Erasability is governance.' },
+    copy: 'What happened and what you told it — witnessed or told, kept apart from knowledge. Captured under scopes (yours can apply across every project), recalled on a token budget, distilled by reflection. Erasable by subtree: one call hard-deletes everything under a scope prefix. Erasability is governance.' },
   { id: 'knowledge',  no: '04', name: 'Knowledge',      depth: '−11.5m', tools: 'RRF-fused',
-    copy: 'Docs and wiki as retrievable nodes with typed, confidence-scored relations — linked to the code symbols they describe. Hybrid FTS + vector recall, RRF-fused, benchmarked in the open.' },
+    copy: 'What it learned from your code and docs: docs and wiki as retrievable nodes with typed, confidence-scored relations — linked to the code symbols they describe. Hybrid FTS + vector recall, RRF-fused, benchmarked in the open.' },
   { id: 'provenance', no: '05', name: 'Provenance',     depth: '−14.0m', tools: 'every edge',
     copy: 'Every edge carries {confidence, provenance, resolved_by}. When tiers disagree, the highest wins and the losers are superseded — a 0.3 tag-scan guess is never handed to an agent as a 1.0 fact.' },
 ]
@@ -140,19 +140,18 @@ function Hero() {
       <div className="max-w-6xl mx-auto w-full grid lg:grid-cols-[1.08fr_0.92fr] gap-14 items-center">
         {/* Left — the thesis, committed in sentence one */}
         <div className="text-left">
-          <span className="kicker">wicked-estate · the foundation · 0.16.6 · crates.io</span>
+          <span className="kicker">wicked-estate · v{__WICKED_ESTATE_VERSION__} · crates.io</span>
           <h1 className="mt-4 font-display font-black text-ink text-[clamp(2.1rem,10vw,3rem)] sm:text-6xl lg:text-[4.2rem] leading-[0.92]" style={{ fontStretch: '112%' }}>
             Code graph.<br />Memory.<br />Knowledge.<br />
             <span style={{ color: 'var(--accent)' }}>One binary.</span>
           </h1>
           <p className="mt-5 text-lg text-muted leading-relaxed max-w-xl font-sans">
-            The <span className="text-ink">system of record</span> for your codebase — the record every plane
-            (crew · garden · studio) <span className="text-ink">queries before it acts and writes after</span>. One
-            local-first MCP server,{' '}
-            <span className="text-ink">30 tools across 3 domains</span>. What breaks if you change it, the decision
-            behind it, the doc that explains it — including the{' '}
-            <span className="text-ink">injected edges grep never sees</span>. Every fact stamped with confidence and
-            provenance: a heuristic is never handed to an agent as a fact.
+            <span className="text-ink">What your agents know about your system.</span> One local MCP server,{' '}
+            <span className="text-ink">30 tools across 3 domains</span>: what breaks if you change something, the
+            decision behind it, the doc that explains it — including the{' '}
+            <span className="text-ink">injected edges grep never sees</span>. Memory (what happened, what you told it)
+            and knowledge (what it learned from your code and docs) stay separate. Every fact is stamped with
+            confidence and provenance: a heuristic is never handed to an agent as a fact.
           </p>
           <p className="mt-3 text-sm text-muted leading-relaxed max-w-xl font-sans">
             Zero infrastructure by default — one SQLite file, nothing leaves your box. And it earned the job:
@@ -652,7 +651,7 @@ function AgentIDE() {
       <Section id="query" solid>
         <div className="max-w-6xl mx-auto w-full" ref={rootRef}>
           <div className="mb-4 w-full text-left">
-            <span className="kicker">The record every plane reads</span>
+            <span className="kicker">The record every product reads</span>
             <h2 className="mt-1.5 font-display text-2xl font-black text-ink leading-[0.98]">
               The agent doesn&apos;t grep. It edits in an IDE that <span style={{ color: 'var(--accent)' }}>knows your whole system.</span>
             </h2>
@@ -732,7 +731,7 @@ function AgentIDE() {
       <div className="max-w-6xl mx-auto w-full" ref={rootRef}>
         {/* section header — using an IDE that actually knows your system */}
         <div className="mb-3 w-full text-left max-w-3xl">
-          <span className="kicker">The record every plane reads</span>
+          <span className="kicker">The record every product reads</span>
           <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink leading-[0.98]">
             The agent doesn&apos;t grep. It edits in an IDE that <span style={{ color: 'var(--accent)' }}>knows your whole system.</span>
           </h2>
@@ -1025,7 +1024,7 @@ const CAPABILITIES: string[] = [
   'Typed annotations · survive re-index',
   'Memory scopes · subtree recall + erase',
   'SQLite by default · Postgres for teams',
-  '103 wired languages — a manifest row + a query file',
+  '114 languages — a manifest row + a query file',
   '+ SemanticSearch, an 11th graph tool, when an embedder is wired',
 ]
 
@@ -1052,11 +1051,11 @@ function FullToolface() {
             30 MCP tools. 6 agent skills. <span style={{ color: 'var(--accent)' }}>One binary.</span>
           </h2>
           <p className="mt-1.5 text-sm text-muted font-sans leading-tight max-w-3xl">
-            Not one “search” tool bolted onto a repo — the full MCP surface every plane calls, plus the skills
+            Not one “search” tool bolted onto a repo — the full MCP surface every wicked product calls, plus the skills
             (playbooks) that drive them. The graph domain is the code graph; memory and knowledge are where the{' '}
             wicked-brain consolidation landed — one store, one identity, a{' '}{/* historical */}
             <span className="text-ink">lossless import contract</span> so nothing tuned was dropped; and the proposal
-            queue — the memory domain's governance surface — is where <span className="text-ink">agents propose and humans promote</span>. Grounded to 0.16.6.
+            queue — the memory domain's governance surface — is where <span className="text-ink">agents propose and humans promote</span>. Tool list re-verified at v0.29.3.
           </p>
         </div>
 
@@ -1601,12 +1600,12 @@ function WhatShipped() {
     <Section id="v0150">
       <div className="max-w-6xl mx-auto w-full">
         <div className="mb-4 w-full text-left">
-          <span className="kicker">New in this release</span>
+          <span className="kicker">Shipped in v0.15.0</span>
           <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink leading-[0.98]">
-            What <span style={{ color: 'var(--accent)' }}>v0.15.0</span> ships.
+            What <span style={{ color: 'var(--accent)' }}>v0.15.0</span> shipped.
           </h2>
           <p className="mt-1.5 text-sm text-muted font-sans leading-tight max-w-3xl">
-            The release this page is grounded to. Two shipped changes to the record itself, the accepted
+            A milestone release. Two shipped changes to the record itself, the accepted
             design for the next resolution consumer, and the runbook for bringing a 0.14.x graph across.
             Full detail: the{' '}
             <a className="underline text-ink" href="https://github.com/mikeparcewski/wicked-estate/blob/main/CHANGELOG.md" target="_blank" rel="noreferrer">CHANGELOG</a>.
