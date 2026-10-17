@@ -24,6 +24,9 @@
   to recall the episode itself was gated from. A new entity now carries the episode's facets, and
   merges only into an entity with the same facets.
 
+### Changed
+- **Site, README and the crate description say what ships today.** The site's version stamp is read from `Cargo.toml` at build time (it said 0.16.6), the language count is the manifest's 114 everywhere (the site said 103), "New in this release: v0.15.0" now reads "Shipped in v0.15.0", and the copy separates memory (what happened, what you told it) from knowledge (what it learned from your code and docs). The README retires "the wicked loop" for the four-layer platform and drops the stale 0.15.0 test count. The `wicked-estate` crate description takes effect on the next publish.
+
 ## [0.29.3] — 2026-10-15
 
 Patch: a diagnostic line no longer kills the host thread that writes it (#335).

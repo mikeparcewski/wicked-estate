@@ -7,49 +7,45 @@ __      ___  ___| | _____  __| |______ ___  ___| |_ __ _| |_ ___
   \_/\_/ |_|\___|_|\_\___|\__,_|      \___||___/\__\__,_|\__\___|
 ```
 
-**Your live technical environment, queryable.** wicked-estate is **Equip** for the wicked loop — it
-turns a repo, and the infrastructure, policy, and mainframe estate around it, into a queryable
-technical environment an LLM agent can actually use: **requirements↔implementation**, **blast-radius
-of change**, **infra + policy relationships**, and **operational history**. Every edge carries
-`{confidence, provenance, resolved_by}`; a heuristic is never handed to an agent as a fact. **Portable
-by design** — one static binary, local-first on SQLite, or a shared concurrent team backend on
-Postgres. Solo laptop to enterprise CI fleet, same engine, same queries.
+**What your agents know about your system.** wicked-estate turns a repo, and the infrastructure,
+policy, and mainframe estate around it, into a code graph, memory and knowledge an LLM agent can
+actually use: **blast-radius of change**, **requirements↔implementation**, **infra + policy
+relationships**, and **operational history**, across 114 languages. **Memory** is what happened and
+what you told it; **knowledge** is what it learned from your code and docs; the two stay separate
+and cited. Every edge carries `{confidence, provenance, resolved_by}`; a heuristic is never handed
+to an agent as a fact. **Portable by design** — one static binary, local-first on SQLite, or a
+shared concurrent team backend on Postgres.
 
 <!-- historical -->
-> estate is **all of Equip** now: the code graph, the memory, and the knowledge store in one binary.
 > [`wicked-brain`](https://github.com/mikeparcewski/wicked-brain) (retired 2026-08) migrated its
 > memory + knowledge here zero-loss; the agent surface is wicked-garden's `mem`/`search` skill
-> domains. estate is both the graph the agent can search, challenge, correct, and trace to its
-> source, and the technical environment those symbols sit in: what a change touches, what protects
-> it, what it was.
+> domains.
 <!-- /historical -->
 
 [![CI](https://github.com/mikeparcewski/wicked-estate/actions/workflows/ci.yml/badge.svg)](https://github.com/mikeparcewski/wicked-estate/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-> **Status:** v0.16.7 (published to crates.io 2026-09-07) — 0 build warnings and clippy `-D warnings` clean, both CI-enforced on every push.
-> The last full count recorded here was **1,370 tests passing, 0 failed, 1 ignored** (one marker-ignored doc-test) from `cargo test --workspace` measured 2026-08-29 on 0.15.0; it has not been re-counted since, so read it as a floor, not a current number. Greenfield, pre-1.0. See
+> **Status:** see the [crates.io page](https://crates.io/crates/wicked-estate) for the current release. 0 build warnings and clippy `-D warnings` clean, both CI-enforced on every push. Greenfield, pre-1.0. See
 > [FEATURES.md](./FEATURES.md) for the exhaustive, honestly-tagged capability inventory
 > (✅ built / 🟡 partial / 🟦 designed-not-built).
 
 ---
 
-## Where it sits in the loop
+## Where it sits in the platform
 
-The wicked family is **one loop, under human authority**: intent → **Steer** → **Equip** → (your
-coding-agent harness) → **Verify · Govern** → record, and the record feeds the next run. estate is
-**Equip** — the live technical environment plus the code graph, memory, and knowledge (the
-memory + knowledge layer absorbed 2026-08 — see the note above). SQLite by default; no
-servers, no accounts, nothing leaves your machine. The parts compose rather than lock in.
+*Your coding agents do the work. A different agent checks it against your rules. You get the
+evidence.* The wicked platform is four layers — one surface, one control plane, one catalog, one
+record — and estate is **the record** the others read before they act and write after. SQLite by
+default; no servers, no accounts, nothing leaves your machine.
 
-| Loop role | Product | What it does | Stack |
+| Layer | Product | What it does | Stack |
 |---|---|---|---|
-| **Equip** | **`wicked-estate`** (this repo) | Your live technical environment, queryable — requirements↔implementation, blast-radius, infra + policy relationships, operational history — plus memory + knowledge with provenance. | Rust · crates.io |
-| **Steer** | [`wicked-garden`](https://github.com/mikeparcewski/wicked-garden) | Gap-filling toolkit for what coding agents can't do alone — evidence-gated testing (qe domain), graph-aware refactor, cross-session memory, multi-model review panels. | JS/TS |
-| **Govern** | [`wicked-core`](https://github.com/mikeparcewski/wicked-core) | The engine that makes "done" a mechanism, not a claim — workflow-as-data, dual gates, state re-derived from evidence. | Rust |
-| **Govern** | [`wicked-crew`](https://github.com/mikeparcewski/wicked-crew) | The control room for governed agent delivery — drive, gate, and audit the work; the human stays in command. Includes the Studio browser console. | npm |
-| **Fabric** | [`wicked-bus`](https://github.com/mikeparcewski/wicked-bus) | The durable nervous system beneath it all — local-first, at-least-once, replayable; how the loop coordinates around the harness. | JS/ESM · npm |
-| **Surface** | [`wicked-interactive`](https://github.com/mikeparcewski/wicked-interactive) | A creative surface on the same substrate: describe it, watch it build, ship HTML/PDF/deck. It composes the family's building blocks; it does not close the loop. | TS |
+| **Surface** | [`wicked-studio`](https://github.com/mikeparcewski/wicked-studio) | Where you direct your coding agents: start a job with a chat, watch sandboxed agents work, approve what matters with the evidence. | TS |
+| **Control plane** | [`wicked-crew`](https://github.com/mikeparcewski/wicked-crew) (engine: [`wicked-core`](https://github.com/mikeparcewski/wicked-core)) | Runs the jobs: agents in sandboxes, a different agent reviews the work, app changes pass acceptance testing before delivery. | npm · Rust |
+| **Catalog** | [`wicked-garden`](https://github.com/mikeparcewski/wicked-garden) | The skills your coding agent can't build alone — evidence-gated "done", graph-aware refactor, 40 QE specialists, review panels from other models. | JS/TS |
+| **Record** | **`wicked-estate`** (this repo) | What your agents know about your system — code graph, memory and knowledge with provenance. | Rust · crates.io |
+| Record | [`wicked-interactive`](https://github.com/mikeparcewski/wicked-interactive) | The document engine behind studio's docs, decks and captioned demo recordings. | TS |
+| Infra | [`wicked-bus`](https://github.com/mikeparcewski/wicked-bus) | The durable local event bus beneath it all — at-least-once, replayable. | JS/ESM · npm |
 
 > Absorbed into this repo as internal crates (not separate products): `wicked-memory` →
 > `wicked-estate-memory`, `wicked-knowledge` → `wicked-estate-knowledge`, `wicked-overlay` →

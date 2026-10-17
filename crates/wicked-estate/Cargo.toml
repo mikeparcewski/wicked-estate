@@ -1,6 +1,6 @@
 [package]
 name = "wicked-estate"
-description = "Code + infrastructure estate graph for LLM agents: definitions, who-calls-X, blast-radius, scoped context."
+description = "What your agents know about your system: a code graph over 114 languages (who-calls-X, blast radius, injected edges), plus memory and knowledge, served over MCP."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
