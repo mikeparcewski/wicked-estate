@@ -42,7 +42,22 @@ impl std::fmt::Display for ScopeParseError {
 
 impl std::error::Error for ScopeParseError {}
 
+/// The scope kind of OPERATOR memories: how the operator works (style, preferences, standing
+/// extra steps). An `operator:<id>` memory is about the person, not about any project, so recall
+/// admits it under EVERY query scope (see [`Scope::is_operator`]); facets still gate it.
+pub const OPERATOR_SCOPE_KIND: &str = "operator";
+
+/// The operator scope an approval uses when the proposal names no `user` facet.
+pub const OPERATOR_SCOPE_DEFAULT: &str = "operator:local";
+
 impl Scope {
+    /// Is this exactly an operator scope (`operator:<id>`, one segment)? Operator memories are
+    /// cross-project by design, so ancestor-visible recall admits them under every scope. A deeper
+    /// path (`operator:x/project:y`) is NOT: it stays as narrow as it was written.
+    pub fn is_operator(&self) -> bool {
+        self.0.len() == 1 && self.0[0].kind == OPERATOR_SCOPE_KIND
+    }
+
     /// The root scope (matches everything as an ancestor).
     pub fn root() -> Self {
         Scope(Vec::new())

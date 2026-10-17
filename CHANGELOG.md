@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Added
+- **Operator memories: an explicit cross-project scope (`operator:<id>`).** A memory about how the
+  operator works (style, preferences, the extra steps they always take) applies in every project.
+  Before, it could only land at the root with misleading project facets. A memory proposal now
+  says what it is about in `payload.reach`: `project` (the default), `pattern`, or `operator`.
+  `proposal.approve` lands an `operator` memory at `operator:<user facet>` (else
+  `operator:local`), and drops its `project`/`repo`/`user` facets so no project pins it. Other
+  facets (`cli`, `tool`) still narrow it. Ancestor-visible recall admits operator memories under
+  every query scope, as it does the root. A `project`/`pattern` memory lands exactly as before.
+  `proposal.submit` validates `payload.reach`: `project|pattern|operator` for a memory,
+  `project|operator` for a `policy:<type>`. Crew lands policy reach.
+  An operator memory keeps its `user` facet: recall admits every one-segment `operator:<id>`
+  scope, so facet admission is what keeps one user's memory from another's. A `user` value
+  containing `/` is refused, because it cannot name one scope segment. A deeper path such as
+  `operator:x/project:y` is not cross-project.
+
+### Fixed
+- **A derived entity keeps its episode's facets.** Reflection created entities with no facets and
+  merged a mention into any visible same-name entity, so a facet-gated episode leaked its entities
+  to recall the episode itself was gated from. A new entity now carries the episode's facets, and
+  merges only into an entity with the same facets.
+
 ## [0.29.3] — 2026-10-15
 
 Patch: a diagnostic line no longer kills the host thread that writes it (#335).

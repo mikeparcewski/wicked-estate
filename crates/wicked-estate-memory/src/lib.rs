@@ -162,7 +162,8 @@ impl RecallMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopeFilter<'a> {
     /// Inheritance (the default): memories at the query scope or an ANCESTOR of it — a
-    /// leaf-scoped query also sees broader/root-scoped memories.
+    /// leaf-scoped query also sees broader/root-scoped memories — plus every OPERATOR memory
+    /// (`operator:<id>`, how the operator works), which applies under every scope.
     Ancestors(&'a Scope),
     /// Subtree-inclusive (the `memory.erase`/`memory.coverage` direction, `path_in_prefix`):
     /// memories whose scope equals the prefix or DESCENDS from it (`""` = the root subtree =
@@ -179,7 +180,11 @@ impl ScopeFilter<'_> {
     /// graph-domain predicate and stays `''` for memory nodes.
     fn admits(&self, mem_scope: &Scope) -> bool {
         match self {
-            ScopeFilter::Ancestors(query_scope) => mem_scope.is_ancestor_of(query_scope),
+            // An operator memory (`operator:<id>`) is about the person, not a project: every
+            // scoped recall inherits it, as it inherits the root.
+            ScopeFilter::Ancestors(query_scope) => {
+                mem_scope.is_ancestor_of(query_scope) || mem_scope.is_operator()
+            }
             // Allocation-free segment walk (this runs per candidate in the rerank loop) —
             // exact `path_in_prefix` semantics for parse-normalized scopes, see Scope::path_in_prefix.
             ScopeFilter::Subtree(prefix) => mem_scope.path_in_prefix(prefix),

@@ -142,8 +142,19 @@ impl MemoryEngine {
     /// deterministic-confident matches (exact-CI ∪ the fuzzy hit confirmed by `heuristic_same_entity`);
     /// any residual fuzzy ambiguity is left for the agent/skill to adjudicate (it never calls a model).
     /// Returns the canonical symbols of the confident matches (typically 0 or 1).
-    fn merge_candidates(&self, name: &str, mem_scope: &Scope) -> Result<Vec<SymbolId>> {
-        let entities = self.visible_entities(mem_scope)?;
+    fn merge_candidates(
+        &self,
+        name: &str,
+        mem_scope: &Scope,
+        facets: &Facets,
+    ) -> Result<Vec<SymbolId>> {
+        // Only an entity with the SAME restrictions is a merge target: merging into a less
+        // restricted one would widen who recalls what the episode said.
+        let entities: Vec<Memory> = self
+            .visible_entities(mem_scope)?
+            .into_iter()
+            .filter(|m| &m.facets == facets)
+            .collect();
         // tier 1: exact normalized match.
         if let Some(m) = entities
             .iter()
@@ -168,9 +179,14 @@ impl MemoryEngine {
         &mut self,
         name: &str,
         mem_scope: &Scope,
+        facets: &Facets,
         now: i64,
     ) -> Result<SymbolId> {
-        if let Some(canonical) = self.merge_candidates(name, mem_scope)?.into_iter().next() {
+        if let Some(canonical) = self
+            .merge_candidates(name, mem_scope, facets)?
+            .into_iter()
+            .next()
+        {
             return Ok(canonical);
         }
         // new entity.
@@ -180,7 +196,9 @@ impl MemoryEngine {
             mem_scope.clone(),
             name,
             now,
-        );
+        )
+        // A derived entity keeps its episode's restrictions (scope AND facets), like a fact.
+        .with_facets(facets.clone());
         let s = emem.symbol();
         self.capture(&emem)?;
         Ok(s)
@@ -238,7 +256,8 @@ impl MemoryEngine {
         }
 
         for entity in ex.entities {
-            let esym = self.merge_or_create_entity(&entity, &episode.scope, now)?;
+            let esym =
+                self.merge_or_create_entity(&entity, &episode.scope, &episode.facets, now)?;
             self.store
                 .upsert_edges(&[Self::edge(&ep_sym, &esym, "mentions")])?;
         }
@@ -658,6 +677,48 @@ mod tests {
             mems.iter()
                 .any(|m| m.kind == MemKind::Entity && m.content == "Stripe")
         );
+    }
+
+    #[test]
+    fn a_derived_entity_keeps_its_episodes_facets_and_never_merges_into_a_wider_one() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let scope = Scope::parse("operator:carol");
+        let gated = Facets::try_from_map([("cli", "codex")]).unwrap();
+        // A wider (unfaceted) entity of the same name already exists.
+        eng.capture(&Memory::new(
+            MemKind::Entity,
+            Tier::Semantic,
+            scope.clone(),
+            "Vendorx",
+            1,
+        ))
+        .unwrap();
+        let ep = Memory::new(
+            MemKind::Episode,
+            Tier::Episodic,
+            scope.clone(),
+            "raw turn",
+            1,
+        )
+        .with_facets(gated.clone());
+        eng.capture(&ep).unwrap();
+        let distilled = Extracted {
+            facts: vec![],
+            entities: vec!["Vendorx".into()],
+        };
+        eng.capture_facts(&ep, Some(distilled), 2).unwrap();
+        let entities: Vec<Memory> = eng
+            .all_memories()
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.kind == MemKind::Entity)
+            .collect();
+        assert_eq!(
+            entities.len(),
+            2,
+            "a gated mention is not merged into the ungated entity"
+        );
+        assert!(entities.iter().any(|m| m.facets == gated));
     }
 
     #[test]
