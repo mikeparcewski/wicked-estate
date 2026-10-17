@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.30.0] — 2026-10-17
+
+Minor: operator memories land at an explicit cross-project scope (`operator:<id>`), and a derived
+entity keeps its episode's facets (#338).
+
 ### Added
 - **Operator memories: an explicit cross-project scope (`operator:<id>`).** A memory about how the
   operator works (style, preferences, the extra steps they always take) applies in every project.
