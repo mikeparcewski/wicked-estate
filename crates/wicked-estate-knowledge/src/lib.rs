@@ -1,6 +1,6 @@
 //! `wicked-knowledge-mcp` — the 3rd engine's MCP stdio server over JSON-RPC 2.0, mirroring
-//! `wicked-memory-mcp` (G8). Exposes the knowledge engine's **7 tools** to agents:
-//! `knowledge.ingest`, `knowledge.write`, `knowledge.relate`, `knowledge.recall`,
+//! `wicked-memory-mcp` (G8). Exposes the knowledge engine's **8 tools** to agents:
+//! `knowledge.ingest`, `knowledge.write`, `knowledge.forget`, `knowledge.relate`, `knowledge.recall`,
 //! `knowledge.coverage`, and the cross-store differentiator `knowledge.relate_code` /
 //! `knowledge.recall_about_code` (link knowledge to code symbols, then recall it FROM a code seed).
 //!
@@ -18,6 +18,95 @@ pub use engine::{KClass, KNode, KRecalled, KnowledgeEngine};
 pub use wicked_estate_overlay::{XEdge, XedgeStore};
 
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Debug, Clone, Default)]
+pub struct KnowledgeWriteOptions {
+    pub created_at: i64,
+    pub observed_at: Option<i64>,
+    pub source_rev: Option<String>,
+    pub replace_source: bool,
+}
+
+impl KnowledgeWriteOptions {
+    pub fn from_arguments(args: &Value, now: i64) -> Result<Self, String> {
+        let observed_at = match args.get("observed_at") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) => Some(
+                chrono::DateTime::parse_from_rfc3339(s)
+                    .map_err(|_| {
+                        "observed_at must be an ISO-8601 timestamp with a timezone".to_string()
+                    })?
+                    .timestamp(),
+            ),
+            _ => return Err("observed_at must be an ISO-8601 string".into()),
+        };
+        let source_rev = match args.get("source_rev") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) => Some(s.clone()),
+            _ => return Err("source_rev must be a string or null".into()),
+        };
+        let replace_source = match args.get("replace_source") {
+            None => false,
+            Some(Value::Bool(b)) => *b,
+            _ => return Err("replace_source must be a boolean".into()),
+        };
+        if replace_source
+            && args
+                .get("source")
+                .and_then(Value::as_str)
+                .is_none_or(|s| s.is_empty())
+        {
+            return Err("replace_source requires a non-empty source".into());
+        }
+        Ok(Self {
+            created_at: now,
+            observed_at,
+            source_rev,
+            replace_source,
+        })
+    }
+}
+
+pub fn observed_at_iso(timestamp: i64) -> String {
+    chrono::DateTime::from_timestamp(timestamp, 0)
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH)
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+#[derive(Debug, Clone)]
+pub enum ForgetTarget {
+    Id(String),
+    Source(String),
+    ScopePrefix(String),
+}
+
+impl ForgetTarget {
+    pub fn from_arguments(args: &Value) -> Result<Self, String> {
+        let keys: Vec<_> = ["id", "source", "scope_prefix"]
+            .into_iter()
+            .filter(|key| args.get(*key).is_some())
+            .collect();
+        if keys.len() != 1 {
+            return Err("forget needs exactly one of id, source, or scope_prefix".into());
+        }
+        let key = keys[0];
+        let value = args[key]
+            .as_str()
+            .ok_or_else(|| format!("{key} must be a string"))?;
+        match key {
+            "id" if !value.is_empty() => Ok(Self::Id(value.into())),
+            "source" => Ok(Self::Source(value.into())),
+            "scope_prefix"
+                if !value.is_empty()
+                    || args.get("confirm_erase_all").and_then(Value::as_bool) == Some(true) =>
+            {
+                Ok(Self::ScopePrefix(value.into()))
+            }
+            "scope_prefix" => Err("empty scope_prefix requires confirm_erase_all: true".into()),
+            _ => Err(format!("{key} must be non-empty")),
+        }
+    }
+}
 
 /// Shown to the agent at `initialize` — what this engine is and how to drive it.
 pub const SERVER_INSTRUCTIONS: &str = "\
@@ -107,6 +196,21 @@ fn tool_error(text: String) -> Value {
     json!({ "content": [ { "type": "text", "text": text } ], "isError": true })
 }
 
+fn forget_with_xedge(
+    engine: &mut KnowledgeEngine,
+    xedge: &XedgeStore,
+    target: &ForgetTarget,
+) -> wicked_estate_core::Result<usize> {
+    let victims = engine.matching_nodes(target)?;
+    let n = engine.forget(target)?;
+    for node in victims {
+        for tag in ["knowledge", "memory"] {
+            xedge.delete_by_src_id(tag, node.symbol().as_str())?;
+        }
+    }
+    Ok(n)
+}
+
 fn class_of(s: &str) -> KClass {
     match s {
         "kdoc" | "doc" => KClass::Doc,
@@ -116,7 +220,7 @@ fn class_of(s: &str) -> KClass {
     }
 }
 
-/// The 5 knowledge tools with JSON-Schema input definitions (`tools/list`).
+/// The 8 knowledge tools with JSON-Schema input definitions (`tools/list`).
 pub fn tool_defs() -> Value {
     json!([
         {
@@ -126,7 +230,10 @@ pub fn tool_defs() -> Value {
                 "title": {"type": "string"},
                 "chunks": {"type": "array", "items": {"type": "string"}},
                 "scope": {"type": "string"},
-                "source": {"type": "string", "description": "provenance, e.g. a file path or URL"}
+                "source": {"type": "string", "description": "provenance, e.g. a file path or URL"},
+                "observed_at": {"type":"string","format":"date-time"},
+                "source_rev": {"type":["string","null"]},
+                "replace_source": {"type":"boolean","default":false}
             }}
         },
         {
@@ -136,7 +243,19 @@ pub fn tool_defs() -> Value {
                 "content": {"type": "string"},
                 "class": {"type": "string", "enum": ["doc","section","chunk","concept"]},
                 "scope": {"type": "string"},
-                "source": {"type": "string"}
+                "source": {"type": "string"},
+                "observed_at": {"type":"string", "format":"date-time"},
+                "source_rev": {"type":["string","null"]}
+            }}
+        },
+        {
+            "name": "knowledge.forget",
+            "description": "Hard-delete knowledge by exactly one of id, exact source, or scope_prefix. An empty prefix requires confirm_erase_all: true.",
+            "inputSchema": { "type": "object", "oneOf": [{"required":["id"]},{"required":["source"]},{"required":["scope_prefix"]}], "properties": {
+                "id": {"type":"string"},
+                "source": {"type":"string"},
+                "scope_prefix": {"type": "string"},
+                "confirm_erase_all": {"type": "boolean"}
             }}
         },
         {
@@ -265,6 +384,10 @@ fn handle_call(
 
     let result: Result<Value, String> = match name {
         "knowledge.ingest" => {
+            let mut options = match KnowledgeWriteOptions::from_arguments(&a, now) {
+                Ok(options) => options,
+                Err(message) => return err(id, -32602, &message),
+            };
             let Some(title) = s("title") else {
                 return err(id, -32602, "title required");
             };
@@ -272,32 +395,54 @@ fn handle_call(
             if chunks.is_empty() {
                 return err(id, -32602, "chunks required (non-empty)");
             }
+            if options.replace_source {
+                let target = ForgetTarget::Source(s("source").unwrap_or_default());
+                if let Err(e) = forget_with_xedge(engine, xedge, &target) {
+                    return err(id, -32603, &e.to_string());
+                }
+                options.replace_source = false;
+            }
             engine
-                .ingest(
+                .ingest_with_options(
                     &title,
                     &chunks,
                     &s("scope").unwrap_or_default(),
                     &s("source").unwrap_or_default(),
-                    now,
+                    &options,
                 )
                 .map(|(doc, ch)| content(format!("ingested doc {} + {} chunk(s)", doc.0, ch.len())))
                 .map_err(|e| e.to_string())
         }
         "knowledge.write" => {
+            let options = match KnowledgeWriteOptions::from_arguments(&a, now) {
+                Ok(options) => options,
+                Err(message) => return err(id, -32602, &message),
+            };
             let Some(c) = s("content") else {
                 return err(id, -32602, "content required");
             };
-            let kn = KNode::new(
+            let mut kn = KNode::new(
                 class_of(&s("class").unwrap_or_else(|| "chunk".into())),
                 c,
                 s("scope").unwrap_or_default(),
                 s("source").unwrap_or_default(),
                 now,
             );
+            kn.observed_at = options.observed_at.unwrap_or(now);
+            kn.source_rev = options.source_rev;
             engine
                 .write(&kn)
                 .map(|sym| content(format!("wrote {}", sym.0)))
                 .map_err(|e| e.to_string())
+        }
+        "knowledge.forget" => {
+            let target = match ForgetTarget::from_arguments(&a) {
+                Ok(target) => target,
+                Err(message) => return err(id, -32602, &message),
+            };
+            forget_with_xedge(engine, xedge, &target).map(|n| {
+                json!({"content":[{"type":"text","text":format!("erased {n} knowledge node(s)")}],"deleted_count":n})
+            }).map_err(|e| e.to_string())
         }
         "knowledge.relate" => {
             let (Some(src), Some(tgt), Some(rel)) = (s("src"), s("tgt"), s("rel")) else {
@@ -363,7 +508,9 @@ fn handle_call(
                 .recall(&q, budget, scope_prefix.as_deref(), now)
                 .map(|hits| {
                     if hits.is_empty() {
-                        content("(no relevant knowledge)".into())
+                        let mut result = content("(no relevant knowledge)".into());
+                        result["items"] = json!([]);
+                        result
                     } else {
                         let lines: Vec<String> = hits
                             .iter()
@@ -375,7 +522,14 @@ fn handle_call(
                                 }
                             })
                             .collect();
-                        content(lines.join("\n"))
+                        let mut result = content(lines.join("\n"));
+                        result["items"] = json!(hits.iter().map(|h| json!({
+                            "node_id": h.id.0, "class": "chunk",
+                            "label": h.content.chars().take(60).collect::<String>(),
+                            "body_snippet": h.content, "score": h.score, "source": h.source,
+                            "observed_at": observed_at_iso(h.observed_at), "source_rev": h.source_rev
+                        })).collect::<Vec<_>>());
+                        result
                     }
                 })
                 .map_err(|e| e.to_string())
@@ -475,6 +629,158 @@ mod tests {
         KnowledgeEngine::in_memory().unwrap()
     }
 
+    #[test]
+    fn forget_selectors_observation_and_replace_source_over_jsonrpc() {
+        let mut e = engine();
+        let xedge = XedgeStore::in_memory().unwrap();
+        let call = |e: &mut KnowledgeEngine, tool: &str, args: Value| {
+            handle_request(e, &xedge, 1, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool,"arguments":args}})).unwrap()
+        };
+        for tool in ["knowledge.ingest", "knowledge.write"] {
+            let rejected = call(
+                &mut e,
+                tool,
+                json!({"title":"Doc","chunks":["sqlite"],"content":"sqlite","observed_at":"invalid"}),
+            );
+            assert_eq!(rejected["error"]["code"], -32602);
+        }
+        call(
+            &mut e,
+            "knowledge.ingest",
+            json!({"title":"Old","chunks":["old sqlite"],"source":"doc"}),
+        );
+        let rejected = call(
+            &mut e,
+            "knowledge.ingest",
+            json!({"title":"New","chunks":["sqlite"],"replace_source":true}),
+        );
+        assert_eq!(rejected["error"]["code"], -32602);
+        assert_eq!(e.count(None, None).unwrap(), 2);
+        call(
+            &mut e,
+            "knowledge.ingest",
+            json!({"title":"New","chunks":["fresh sqlite"],"source":"doc","replace_source":true,"observed_at":"2026-10-11T10:30:00-04:00","source_rev":"rev2"}),
+        );
+        let recalled = call(&mut e, "knowledge.recall", json!({"query":"fresh sqlite"}));
+        assert_eq!(
+            recalled["result"]["items"][0]["observed_at"],
+            "2026-10-11T14:30:00Z"
+        );
+        assert_eq!(recalled["result"]["items"][0]["source_rev"], "rev2");
+        assert_eq!(e.count(None, None).unwrap(), 2);
+        let written = call(
+            &mut e,
+            "knowledge.write",
+            json!({"content":"observation example","source":"other","observed_at":"2026-10-10T12:00:00Z"}),
+        );
+        let id = written["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("wrote ")
+            .unwrap();
+        let recalled = call(
+            &mut e,
+            "knowledge.recall",
+            json!({"query":"observation example"}),
+        );
+        assert_eq!(
+            recalled["result"]["items"][0]["observed_at"],
+            "2026-10-10T12:00:00Z"
+        );
+        assert!(recalled["result"]["items"][0]["source_rev"].is_null());
+        for args in [
+            json!({"id":id,"source":"other"}),
+            json!({"source":"doc","scope_prefix":""}),
+        ] {
+            assert_eq!(
+                call(&mut e, "knowledge.forget", args)["error"]["code"],
+                -32602
+            );
+        }
+        assert_eq!(
+            call(&mut e, "knowledge.forget", json!({"id":id}))["result"]["deleted_count"],
+            1
+        );
+        assert_eq!(
+            call(&mut e, "knowledge.forget", json!({"source":"doc"}))["result"]["deleted_count"],
+            2
+        );
+        assert_eq!(
+            call(&mut e, "knowledge.forget", json!({"source":"doc"}))["result"]["deleted_count"],
+            0
+        );
+    }
+
+    #[test]
+    fn forget_round_trip_and_empty_prefix_guard_over_jsonrpc() {
+        let mut e = engine();
+        let xedge = XedgeStore::in_memory().unwrap();
+        let call = |e: &mut KnowledgeEngine, name: &str, args: Value| {
+            handle_request(
+                e, &xedge, 1,
+                &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}}),
+            ).unwrap()
+        };
+        call(
+            &mut e,
+            "knowledge.ingest",
+            json!({
+                "title":"SQLite", "chunks":["sqlite transactions"], "scope":"learn:demo/topic:sqlite"
+            }),
+        );
+        call(
+            &mut e,
+            "knowledge.write",
+            json!({
+                "content":"sqlite wal survives", "scope":"learn:demo/topic:sqlite-wal"
+            }),
+        );
+        for args in [
+            json!({}),
+            json!({"scope_prefix":null}),
+            json!({"scope_prefix":3}),
+            json!({"scope_prefix":""}),
+            json!({"scope_prefix":"","confirm_erase_all":false}),
+            json!({"scope_prefix":"","confirm_erase_all":"true"}),
+        ] {
+            let rejected = call(&mut e, "knowledge.forget", args);
+            assert_eq!(rejected["error"]["code"], -32602);
+            assert_eq!(e.count(None, None).unwrap(), 3);
+        }
+        let erased = call(
+            &mut e,
+            "knowledge.forget",
+            json!({"scope_prefix":"learn:demo/topic:sqlite"}),
+        );
+        assert_eq!(erased["result"]["deleted_count"], 2);
+        assert_eq!(
+            erased["result"]["content"][0]["text"],
+            "erased 2 knowledge node(s)"
+        );
+        let recalled = call(
+            &mut e,
+            "knowledge.recall",
+            json!({"query":"sqlite","scope_prefix":"learn:demo/topic:sqlite"}),
+        );
+        assert_eq!(
+            recalled["result"]["content"][0]["text"],
+            "(no relevant knowledge)"
+        );
+        let again = call(
+            &mut e,
+            "knowledge.forget",
+            json!({"scope_prefix":"learn:demo/topic:sqlite"}),
+        );
+        assert_eq!(again["result"]["deleted_count"], 0);
+        let all = call(
+            &mut e,
+            "knowledge.forget",
+            json!({"scope_prefix":"","confirm_erase_all":true}),
+        );
+        assert_eq!(all["result"]["deleted_count"], 1);
+        assert_eq!(e.count(None, None).unwrap(), 0);
+    }
+
     // The cross-store differentiator, agent-facing: write a knowledge doc, link it to a code symbol
     // via knowledge.relate_code, then knowledge.recall_about_code from that code seed surfaces the doc
     // — with ZERO lexical overlap between the code id and the doc text (keyword/FTS cannot bridge it).
@@ -548,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn initialize_and_tools_list_has_seven_tools() {
+    fn initialize_and_tools_list_has_eight_tools() {
         let mut e = engine();
         let xedge = XedgeStore::in_memory().unwrap();
         let init = handle_request(
@@ -567,10 +873,11 @@ mod tests {
         )
         .unwrap();
         let tools = list["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 8);
         for t in [
             "knowledge.ingest",
             "knowledge.write",
+            "knowledge.forget",
             "knowledge.relate",
             "knowledge.recall",
             "knowledge.coverage",
@@ -947,6 +1254,8 @@ pub struct KnowledgeItem {
     /// predate this field deserialize to `""` rather than erroring.
     #[serde(default)]
     pub source: String,
+    pub observed_at: String,
+    pub source_rev: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -959,13 +1268,15 @@ pub struct KnowledgeCoverage {
 // ── KnowledgeApi trait ────────────────────────────────────────────────────────
 
 pub trait KnowledgeApi {
+    /// Hard-delete a knowledge subtree. Wire callers must confirm an empty prefix.
+    fn forget(&mut self, target: &ForgetTarget) -> anyhow::Result<u32>;
     fn ingest(
         &mut self,
         title: &str,
         chunks: &[String],
         scope: &str,
         source: &str,
-        now: i64,
+        options: &KnowledgeWriteOptions,
     ) -> anyhow::Result<String>;
     /// Promote a knowledge proposal using a stable id so retries upsert the same node.
     fn write_proposal(
@@ -981,7 +1292,7 @@ pub trait KnowledgeApi {
         content: &str,
         scope: &str,
         source: &str,
-        now: i64,
+        options: &KnowledgeWriteOptions,
     ) -> anyhow::Result<String>;
     fn relate(
         &mut self,
@@ -1020,15 +1331,20 @@ pub trait KnowledgeApi {
 }
 
 impl KnowledgeApi for KnowledgeEngine {
+    fn forget(&mut self, target: &ForgetTarget) -> anyhow::Result<u32> {
+        Ok(KnowledgeEngine::forget(self, target)? as u32)
+    }
+
     fn ingest(
         &mut self,
         title: &str,
         chunks: &[String],
         scope: &str,
         source: &str,
-        now: i64,
+        options: &KnowledgeWriteOptions,
     ) -> anyhow::Result<String> {
-        let (doc_sym, _) = KnowledgeEngine::ingest(self, title, chunks, scope, source, now)?;
+        let (doc_sym, _) =
+            KnowledgeEngine::ingest_with_options(self, title, chunks, scope, source, options)?;
         Ok(doc_sym.0)
     }
 
@@ -1038,9 +1354,11 @@ impl KnowledgeApi for KnowledgeEngine {
         content: &str,
         scope: &str,
         source: &str,
-        now: i64,
+        options: &KnowledgeWriteOptions,
     ) -> anyhow::Result<String> {
-        let kn = KNode::new(class_of(class), content, scope, source, now);
+        let mut kn = KNode::new(class_of(class), content, scope, source, options.created_at);
+        kn.observed_at = options.observed_at.unwrap_or(options.created_at);
+        kn.source_rev = options.source_rev.clone();
         let sym = KnowledgeEngine::write(self, &kn)?;
         Ok(sym.0)
     }
@@ -1081,7 +1399,11 @@ impl KnowledgeApi for KnowledgeEngine {
             now,
         );
         kn.id = format!("proposal:{}", proposal.id);
-        // TODO(K3, DES-memory-vs-knowledge): pass payload.observed_at/source_rev when KNode gains those fields.
+        // K2 + K3: an approved knowledge proposal keeps when its source was observed and at which revision.
+        let opts =
+            KnowledgeWriteOptions::from_arguments(payload, now).map_err(|e| anyhow::anyhow!(e))?;
+        kn.observed_at = opts.observed_at.unwrap_or(now);
+        kn.source_rev = opts.source_rev;
         let sym = KnowledgeEngine::write(self, &kn)?;
         if !proposal.facets.is_empty() {
             let mut node = kn.to_node();
@@ -1136,6 +1458,8 @@ impl KnowledgeApi for KnowledgeEngine {
                 label: h.content.chars().take(60).collect(),
                 body_snippet: h.content,
                 score: h.score,
+                observed_at: observed_at_iso(h.observed_at),
+                source_rev: h.source_rev,
                 source: h.source,
             })
             .collect())
@@ -1202,6 +1526,8 @@ impl KnowledgeApi for KnowledgeEngine {
                             label,
                             body_snippet: kn.content,
                             score: edge.confidence as f64,
+                            observed_at: observed_at_iso(kn.observed_at),
+                            source_rev: kn.source_rev,
                             source: kn.source,
                         });
                     }

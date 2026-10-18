@@ -18,6 +18,20 @@
       },
       "title": {
         "type": "string"
+      },
+      "observed_at": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "source_rev": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "replace_source": {
+        "type": "boolean",
+        "default": false
       }
     },
     "required": [

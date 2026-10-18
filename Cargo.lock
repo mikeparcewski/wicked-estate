@@ -10166,6 +10166,7 @@ name = "wicked-estate-knowledge"
 version = "0.30.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "serde",
  "serde_json",
  "tempfile",
