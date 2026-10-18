@@ -19,7 +19,6 @@
   --band-solid-bg: rgba(9, 26, 36, 0.34);                          /* alternate stratum tint (light) */
   --rock: color-mix(in oklab, var(--ink) 5%, var(--canvas));       /* rock-panel surface */
   --rock-2: color-mix(in oklab, var(--ink) 8%, var(--canvas));     /* deeper rock */
-  --seam: #79c0ff;                                                 /* the mineral seam of light */
 }
 
 [data-theme="dark"] {
@@ -59,30 +58,6 @@ html[data-theme="light"], html[data-theme="dark"] {
   --font-display: "Archivo", ui-sans-serif, sans-serif;
   --font-sans: "Hanken Grotesk", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
-}
-
-@keyframes seam-shimmer {
-  0%, 100% { opacity: 0.55; }
-  50%       { opacity: 1; }
-}
-@keyframes core-rise {
-  from { opacity: 0; transform: translateY(6px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-@keyframes live-pulse {
-  0%, 100% { opacity: 1; }
-  50%       { opacity: 0.35; }
-}
-/* the winning-tier label popping into scope */
-@keyframes label-pop {
-  0%   { transform: scale(0.9); opacity: 0.4; }
-  60%  { transform: scale(1.06); }
-  100% { transform: scale(1); opacity: 1; }
-}
-/* auto-demo hint dot */
-@keyframes demo-blink {
-  0%, 100% { opacity: 1; }
-  50%       { opacity: 0.25; }
 }
 
 @layer base {
@@ -208,75 +183,6 @@ html[data-theme="light"], html[data-theme="dark"] {
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
-  .depth-toggle {
-    background: none;
-    border: 0;
-    padding: 0;
-    cursor: pointer;
-    transition: color 0.2s var(--ease);
-  }
-  .depth-toggle:hover { color: var(--accent); }
-
-  /* ── The mineral seam — a vertical vein of accent light ─────────────────── */
-  .seam-line {
-    width: 2px;
-    background: linear-gradient(
-      to bottom,
-      transparent,
-      color-mix(in oklab, var(--accent) 70%, transparent) 12%,
-      var(--accent) 50%,
-      color-mix(in oklab, var(--accent) 70%, transparent) 88%,
-      transparent
-    );
-    box-shadow: 0 0 14px 1px color-mix(in oklab, var(--accent) 45%, transparent);
-    animation: seam-shimmer 5.5s var(--ease) infinite;
-  }
-  @media (prefers-reduced-motion: reduce) { .seam-line { animation: none; } }
-
-  /* ── Provenance chip ────────────────────────────────────────────────────── */
-  .prov {
-    font-family: "JetBrains Mono", ui-monospace, monospace;
-    font-size: 0.58rem;
-    letter-spacing: 0.04em;
-    padding: 2px 7px;
-    border-radius: 4px;
-    white-space: nowrap;
-    border: 1px solid var(--hairline-strong);
-    color: var(--muted);
-    background: color-mix(in oklab, var(--ink) 5%, transparent);
-  }
-
-  /* ── Confidence dial (range input) ──────────────────────────────────────── */
-  .dial {
-    -webkit-appearance: none; appearance: none;
-    width: 100%; height: 4px; border-radius: 2px; outline: none; cursor: pointer;
-    background: linear-gradient(90deg,
-      color-mix(in oklab, var(--ink) 18%, transparent),
-      var(--accent));
-  }
-  .dial::-webkit-slider-thumb {
-    -webkit-appearance: none; appearance: none;
-    width: 24px; height: 24px; border-radius: 50%;
-    background: var(--accent);
-    border: 4px solid var(--canvas);
-    box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 70%, transparent), 0 6px 16px rgba(0,0,0,0.4);
-    cursor: grab;
-  }
-  .dial::-webkit-slider-thumb:active { cursor: grabbing; }
-  .dial::-moz-range-thumb {
-    width: 24px; height: 24px; border-radius: 50%;
-    background: var(--accent); border: 4px solid var(--canvas);
-    box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 70%, transparent);
-    cursor: grab;
-  }
-
-  /* ── Fact row (dossier) ─────────────────────────────────────────────────── */
-  .fact {
-    animation: core-rise 0.4s var(--ease) both;
-    transition: opacity 0.3s var(--ease), filter 0.3s var(--ease);
-  }
-  @media (prefers-reduced-motion: reduce) { .fact { animation: none; } }
-
   /* ── CTA buttons ─────────────────────────────────────────────────────────── */
   .btn-primary {
     display: inline-flex; align-items: center; justify-content: center; gap: 8px;
@@ -309,34 +215,6 @@ html[data-theme="light"], html[data-theme="dark"] {
     border-color: var(--accent);
   }
 
-  /* ── Drill underline — a single scan line that STEPS down the core, settling
-     under one block at a time and pausing there before advancing. It does not
-     sweep behind the rows; it underlines the active block. ──────────────────── */
-  .drill-underline {
-    position: absolute; height: 2px; pointer-events: none;
-    background: linear-gradient(90deg, transparent, var(--accent) 15%, var(--accent) 85%, transparent);
-    box-shadow: 0 0 14px 2px color-mix(in oklab, var(--accent) 55%, transparent);
-    z-index: 2;
-    transition: top 0.5s var(--ease), left 0.5s var(--ease), width 0.5s var(--ease);
-  }
-  @media (prefers-reduced-motion: reduce) { .drill-underline { display: none; } }
-
-  /* ── Demo / driving status pill ──────────────────────────────────────────── */
-  .demo-pill {
-    display: inline-flex; align-items: center; gap: 7px;
-    font-family: "JetBrains Mono", monospace; font-size: 0.6rem; letter-spacing: 0.12em;
-    text-transform: uppercase; padding: 5px 11px; border-radius: 999px;
-    border: 1px solid var(--hairline-strong); color: var(--muted);
-    background: color-mix(in oklab, var(--ink) 5%, transparent); cursor: pointer;
-    transition: all 0.2s var(--ease);
-  }
-  .demo-pill:hover { border-color: var(--accent); color: var(--ink); }
-  .demo-pill .dot {
-    width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
-  }
-  .demo-pill[data-live="true"] .dot { animation: demo-blink 1.4s var(--ease) infinite; }
-  .demo-pill[data-live="false"] .dot { background: var(--muted); }
-
   /* ── Copy-to-clipboard button (GetStarted command rows) ──────────────────── */
   .copy-btn {
     flex-shrink: 0;
@@ -352,375 +230,8 @@ html[data-theme="light"], html[data-theme="dark"] {
     color: var(--on-accent); background: var(--accent); border-color: var(--accent);
   }
 
-  /* ── Provenance winner label — stands out when in scope ──────────────────── */
-  .who-label { transition: all 0.3s var(--ease); }
-  .who-label[data-scope="true"] {
-    color: var(--on-accent); background: var(--accent);
-    border-radius: 5px; padding: 3px 9px; font-weight: 700;
-    animation: label-pop 0.4s var(--ease) both;
-    box-shadow: 0 4px 14px color-mix(in oklab, var(--accent) 40%, transparent);
-  }
-  .tier-row { transition: opacity 0.3s var(--ease); }
-  .tier-row[data-in="false"] { opacity: 0.34; }
 
-  @media (prefers-reduced-motion: reduce) {
-    .demo-pill .dot, .who-label[data-scope="true"] { animation: none; }
-  }
 }
-
-/* ══════════════════════════════════════════════════════════════════════════════
-   THE AGENT'S IDE — the "Query the substrate" section reframed as actually USING an
-   IDE. A code-workspace window (chrome · explorer · editor · tabbed dock · status bar),
-   theme-aware via estate's rock/ink/hairline tokens but with real IDE depth + a mono
-   register. The agent right-clicks a symbol → a context menu of real IDE commands → one
-   runs → the result lands in a tabbed dock (Code intelligence · Memory · Knowledge). The
-   auto-play is a storyboard of these gestures (a visible cursor + the menu opening). The
-   confidence dial gates every result (facts by confidence, memories by salience).
-   ════════════════════════════════════════════════════════════════════════════════ */
-@keyframes ide-menu-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } to { opacity: 1; transform: none; } }
-@keyframes ide-dock-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-
-@layer components {
-  .ide-window {
-    position: relative;
-    width: 100%; max-width: 100%;
-    border-radius: 14px;
-    border: 1px solid var(--hairline-strong);
-    background: var(--rock);
-    overflow: hidden;
-    box-shadow:
-      0 32px 80px rgba(var(--shadow-rgb), 0.42),
-      0 2px 8px rgba(var(--shadow-rgb), 0.28),
-      inset 0 1px 0 color-mix(in oklab, #fff 7%, transparent);
-    font-family: "JetBrains Mono", ui-monospace, monospace;
-  }
-
-  /* ── chrome bar ─────────────────────────────────────────────────────────── */
-  .ide-chrome {
-    display: flex; align-items: center; gap: 12px; padding: 9px 14px;
-    background: linear-gradient(180deg, color-mix(in oklab, var(--ink) 8%, var(--rock)), var(--rock));
-    border-bottom: 1px solid var(--hairline-strong);
-  }
-  .ide-lights { display: inline-flex; gap: 7px; flex-shrink: 0; }
-  .ide-lights i { width: 11px; height: 11px; border-radius: 50%; display: block; }
-  .ide-lights i:nth-child(1) { background: color-mix(in oklab, #e06c60 48%, var(--hairline-strong)); }
-  .ide-lights i:nth-child(2) { background: color-mix(in oklab, #e0b341 48%, var(--hairline-strong)); }
-  .ide-lights i:nth-child(3) { background: color-mix(in oklab, #57a55a 48%, var(--hairline-strong)); }
-  .ide-title {
-    flex: 1; min-width: 0; text-align: center;
-    font-size: 0.72rem; letter-spacing: 0.04em; color: var(--muted);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .ide-run { flex-shrink: 0; }
-
-  /* ── body split ─────────────────────────────────────────────────────────── */
-  .ide-body { display: grid; grid-template-columns: 240px 1fr; }
-  @media (max-width: 1023px) { .ide-body { grid-template-columns: 1fr; } }
-
-  /* ── explorer ───────────────────────────────────────────────────────────── */
-  .ide-explorer {
-    border-right: 1px solid var(--hairline-strong);
-    background: color-mix(in oklab, var(--ink) 3%, var(--rock));
-    padding: 11px 10px; display: flex; flex-direction: column; gap: 13px; min-width: 0;
-  }
-  @media (max-width: 1023px) { .ide-explorer { border-right: 0; border-bottom: 1px solid var(--hairline-strong); } }
-  .ide-sec-label {
-    display: block; font-size: 0.55rem; letter-spacing: 0.2em; text-transform: uppercase;
-    color: var(--faint); padding: 0 6px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .ide-tree, .ide-actions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
-
-  .ide-file {
-    width: 100%; display: flex; align-items: center; gap: 8px;
-    padding: 6px 8px; border-radius: 7px; cursor: pointer; text-align: left;
-    background: transparent; border: 1px solid transparent; color: var(--muted);
-    transition: background 0.16s var(--ease), border-color 0.16s var(--ease), color 0.16s var(--ease);
-  }
-  .ide-file:hover { background: color-mix(in oklab, var(--ink) 7%, transparent); color: var(--ink); }
-  .ide-file[data-on="true"] {
-    background: color-mix(in oklab, var(--accent) 12%, transparent);
-    border-color: color-mix(in oklab, var(--accent) 40%, var(--hairline));
-    color: var(--ink); box-shadow: inset 2px 0 0 var(--accent);
-  }
-  .ide-glyph {
-    flex-shrink: 0; font-size: 0.5rem; font-weight: 700; letter-spacing: 0.04em;
-    padding: 2px 5px; border-radius: 4px;
-    color: var(--link, #79c0ff); background: color-mix(in oklab, var(--link, #79c0ff) 15%, transparent);
-  }
-  .ide-glyph[data-lang="FN"] { color: #a371f7; background: color-mix(in oklab, #a371f7 16%, transparent); }
-  .ide-glyph[data-lang="CLS"] { color: var(--accent); background: color-mix(in oklab, var(--accent) 15%, transparent); }
-  .ide-file-name {
-    flex: 1; min-width: 0; font-size: 0.76rem; font-weight: 600; color: inherit;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .ide-file-kind { flex-shrink: 0; font-size: 0.53rem; letter-spacing: 0.05em; color: var(--faint); }
-
-  /* command rows (the accessible parallel to the right-click menu) */
-  .ide-action {
-    width: 100%; display: flex; align-items: center; gap: 8px;
-    padding: 6px 8px; border-radius: 7px; cursor: pointer; text-align: left;
-    background: transparent; border: 1px solid transparent; color: var(--muted);
-    transition: background 0.16s var(--ease), border-color 0.16s var(--ease), color 0.16s var(--ease);
-  }
-  .ide-action:hover { background: color-mix(in oklab, var(--ink) 7%, transparent); color: var(--ink); }
-  .ide-cmd-label { flex: 1; min-width: 0; font-size: 0.72rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .ide-kbd {
-    flex-shrink: 0; font-size: 0.5rem; color: var(--faint); border: 1px solid var(--hairline-strong);
-    border-radius: 4px; padding: 1px 5px; background: color-mix(in oklab, var(--ink) 4%, transparent);
-  }
-  .ide-action[data-active="true"] {
-    background: color-mix(in oklab, var(--accent) 10%, transparent);
-    border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline)); color: var(--ink);
-  }
-  .ide-action[data-active="true"] .ide-cmd-label { color: var(--accent); }
-  .ide-action[data-active="true"] .ide-kbd { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline)); }
-
-  /* ── editor ─────────────────────────────────────────────────────────────── */
-  .ide-editor { display: flex; flex-direction: column; min-width: 0; background: var(--rock); }
-  .ide-tabbar {
-    display: flex; align-items: center; gap: 10px; padding: 0 12px;
-    border-bottom: 1px solid var(--hairline);
-    background: color-mix(in oklab, var(--ink) 2%, var(--rock));
-  }
-  .ide-tab {
-    display: inline-flex; align-items: center; gap: 7px; padding: 8px 12px;
-    border-bottom: 2px solid transparent; margin-bottom: -1px; font-size: 0.72rem; color: var(--ink);
-  }
-  .ide-tab[data-on="true"] { border-bottom-color: var(--accent); background: color-mix(in oklab, var(--accent) 6%, transparent); }
-  .ide-tab-name { font-weight: 600; }
-  .ide-crumb { margin-left: auto; padding: 8px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-
-  /* ── the code pane (with cursor + context menu overlay) ─────────────────── */
-  .ide-code {
-    position: relative; overflow: visible;
-    padding: 8px 6px 10px; background: color-mix(in oklab, var(--ink) 3%, transparent);
-    border-bottom: 1px solid var(--hairline);
-  }
-  .ide-code-pre { margin: 0; font-size: 0.72rem; line-height: 1.62; overflow-x: auto; }
-  .ide-code-pre code { display: block; }
-  .ide-code-line { display: flex; align-items: baseline; white-space: pre; }
-  .ide-code-ln {
-    flex-shrink: 0; width: 26px; padding-right: 12px; text-align: right; user-select: none;
-    color: color-mix(in oklab, var(--ink) 26%, transparent); font-variant-numeric: tabular-nums;
-  }
-  .ide-code-toks { min-width: 0; color: var(--muted); }
-  .ide-tok[data-k="kw"], .ide-sym[data-k="kw"] { color: #e5534b; }
-  .ide-tok[data-k="fn"], .ide-sym[data-k="fn"] { color: #a371f7; }
-  .ide-tok[data-k="nm"], .ide-sym[data-k="nm"] { color: #4c9ff0; }
-  .ide-sym {
-    font: inherit; padding: 0 2px; margin: 0 -1px; border-radius: 3px; cursor: pointer;
-    background: transparent; border: 0; color: #4c9ff0; text-decoration: none;
-    transition: background 0.14s var(--ease), box-shadow 0.14s var(--ease);
-  }
-  .ide-sym:hover { background: color-mix(in oklab, var(--accent) 14%, transparent); text-decoration: underline; }
-  .ide-sym[data-active="true"] { background: color-mix(in oklab, var(--accent) 18%, transparent); box-shadow: inset 0 -2px 0 var(--accent); }
-
-  /* the auto-play cursor */
-  .ide-cursor {
-    position: absolute; z-index: 7; pointer-events: none;
-    transform: translate(-3px, -2px);
-    transition: left 0.5s var(--ease), top 0.5s var(--ease);
-    filter: drop-shadow(0 2px 3px rgba(0,0,0,0.5));
-  }
-
-  /* the right-click context menu */
-  .ide-ctx-backdrop { position: absolute; inset: 0; z-index: 6; background: transparent; border: 0; cursor: default; }
-  .ide-ctxmenu {
-    position: absolute; z-index: 9; min-width: 210px; padding: 4px;
-    background: color-mix(in oklab, var(--ink) 10%, var(--rock));
-    border: 1px solid var(--hairline-strong); border-radius: 9px;
-    box-shadow: 0 20px 48px rgba(var(--shadow-rgb), 0.55), inset 0 1px 0 color-mix(in oklab, #fff 6%, transparent);
-    animation: ide-menu-in 0.13s var(--ease) both;
-  }
-  .ide-ctxmenu-head { font-size: 0.5rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--faint); padding: 4px 9px 5px; }
-  .ide-ctxmenu-item {
-    width: 100%; display: flex; align-items: center; gap: 12px; justify-content: space-between;
-    padding: 5px 9px; border-radius: 6px; cursor: pointer; text-align: left;
-    background: transparent; border: 0; color: var(--ink); transition: background 0.12s var(--ease);
-  }
-  .ide-ctxmenu-item:hover { background: color-mix(in oklab, var(--ink) 10%, transparent); }
-  .ide-ctxmenu-label { font-size: 0.72rem; white-space: nowrap; }
-  .ide-ctxmenu-note { font-size: 0.55rem; color: var(--faint); flex-shrink: 0; }
-  .ide-ctxmenu-item[data-run="true"] { background: color-mix(in oklab, var(--accent) 20%, transparent); }
-  .ide-ctxmenu-item[data-run="true"] .ide-ctxmenu-label { color: var(--accent); font-weight: 700; }
-  .ide-ctxmenu-item[data-run="true"] .ide-ctxmenu-note { color: var(--accent); }
-
-  /* ── confidence gutter ──────────────────────────────────────────────────── */
-  .ide-gutter {
-    display: flex; align-items: center; gap: 12px; padding: 7px 14px;
-    border-bottom: 1px solid var(--hairline);
-    background: color-mix(in oklab, var(--ink) 4%, transparent);
-  }
-  .ide-gutter-label { font-size: 0.56rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); flex-shrink: 0; }
-  .ide-gutter-val { font-size: 1.05rem; font-weight: 800; color: var(--accent); font-variant-numeric: tabular-nums; flex-shrink: 0; min-width: 3.2ch; }
-  .ide-dial { flex: 1; min-width: 70px; }
-  .ide-gutter-ends { display: flex; gap: 12px; flex-shrink: 0; }
-  .ide-gutter-ends span { font-size: 0.5rem; letter-spacing: 0.05em; color: var(--faint); white-space: nowrap; }
-  @media (max-width: 620px) { .ide-gutter-ends { display: none; } }
-
-  /* ── the DOCK — tabbed: Code intelligence · Memory · Knowledge ──────────── */
-  .ide-dock { display: flex; flex-direction: column; min-width: 0; }
-  .ide-dock-tabs {
-    display: flex; align-items: stretch; gap: 2px; padding: 0 8px;
-    background: color-mix(in oklab, var(--ink) 4%, var(--rock));
-    border-bottom: 1px solid var(--hairline);
-  }
-  .ide-dock-tab {
-    display: inline-flex; align-items: center; gap: 7px; padding: 7px 11px;
-    font-size: 0.62rem; letter-spacing: 0.02em; color: var(--muted); cursor: pointer;
-    background: transparent; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px;
-    transition: color 0.15s var(--ease), border-color 0.15s var(--ease);
-  }
-  .ide-dock-tab:hover { color: var(--ink); }
-  .ide-dock-tab[data-on="true"] { color: var(--ink); border-bottom-color: var(--accent); background: color-mix(in oklab, var(--accent) 6%, transparent); }
-  .ide-dock-badge {
-    font-size: 0.5rem; font-variant-numeric: tabular-nums; color: var(--muted);
-    background: color-mix(in oklab, var(--ink) 10%, transparent); border-radius: 999px; padding: 1px 6px; min-width: 16px; text-align: center;
-  }
-  .ide-dock-tab[data-on="true"] .ide-dock-badge { color: var(--accent); background: color-mix(in oklab, var(--accent) 14%, transparent); }
-  /* FIXED height (not max-height): the tab content swaps but the frame never reflows,
-     so the whole section holds a constant outer height across the gesture cycle — zero
-     vertical bounce. The tallest states (the all-details peek, the 4-row memory panel)
-     scroll internally within this reserved area.
-     Do NOT shrink this to make #query fit a short viewport: at 1440x700 the explorer
-     column (423px) is the taller half of .ide-body, so trimming the dock costs the
-     reader dock rows and buys the section nothing. Measured: 24vh→22vh moved #query
-     716px → 716px. Trim the explorer rows instead. */
-  .ide-dock-body {
-    padding: 5px 16px 9px 14px; overflow-y: auto; scrollbar-gutter: stable;
-    height: min(24vh, 194px); animation: ide-dock-in 0.28s var(--ease) both;
-  }
-  @media (max-width: 1023px) { .ide-dock-body { height: auto; min-height: 150px; scrollbar-gutter: auto; } }
-  .ide-dock-head { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; padding: 4px 0 5px; }
-  .ide-dock-title { font-family: "Archivo", ui-sans-serif, sans-serif; font-weight: 800; font-size: 0.82rem; color: var(--ink); }
-  .ide-dock-sub { }
-  .ide-wiki-ref {
-    font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 0.58rem; font-weight: 600;
-    color: #4c9ff0; margin-left: auto; white-space: nowrap;
-  }
-  .ide-wiki-inline { margin-left: 0; }
-
-  /* result rows (code intelligence + knowledge) */
-  .ide-line { display: flex; gap: 10px; padding: 3px 0; align-items: flex-start; }
-  .ide-ln {
-    flex-shrink: 0; width: 20px; text-align: right; padding-top: 1px;
-    font-size: 0.6rem; color: color-mix(in oklab, var(--ink) 28%, transparent);
-    font-variant-numeric: tabular-nums; user-select: none;
-  }
-  .ide-know-ln { color: #4c9ff0; font-weight: 700; }
-  .ide-line-body { flex: 1; min-width: 0; }
-  .ide-line-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
-  .ide-line-text {
-    flex: 1 1 auto; min-width: 0; font-family: "Hanken Grotesk", ui-sans-serif, sans-serif;
-    font-size: 0.82rem; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .ide-line[data-on="false"] { opacity: 0.5; }
-  .ide-line[data-on="false"] .ide-line-text { color: var(--muted); }
-  .ide-line-chips { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; }
-  .ide-line-detail {
-    display: block; margin-top: 1px; font-family: "JetBrains Mono", ui-monospace, monospace;
-    font-size: 0.6rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .ide-line-detail[data-injected="true"] { color: var(--accent); }
-
-  /* ── the Memory panel ───────────────────────────────────────────────────── */
-  .ide-mem {
-    display: flex; gap: 10px; padding: 6px 8px 6px 6px; align-items: flex-start;
-    border-left: 2px solid transparent; border-radius: 0 6px 6px 0;
-    transition: opacity 0.25s var(--ease), background 0.25s var(--ease), border-color 0.25s var(--ease);
-  }
-  .ide-mem[data-on="false"] { opacity: 0.5; }
-  .ide-mem[data-hot="true"] { border-left-color: var(--accent); background: color-mix(in oklab, var(--accent) 8%, transparent); }
-  .ide-mem-kind {
-    flex-shrink: 0; margin-top: 1px; font-family: "JetBrains Mono", ui-monospace, monospace;
-    font-size: 0.5rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
-    padding: 2px 6px; border-radius: 4px; color: var(--muted);
-    border: 1px solid var(--hairline-strong); background: color-mix(in oklab, var(--ink) 5%, transparent);
-  }
-  .ide-mem-kind[data-kind="decision"] { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline)); background: color-mix(in oklab, var(--accent) 10%, transparent); }
-  .ide-mem-kind[data-kind="pattern"] { color: #4c9ff0; border-color: color-mix(in oklab, #4c9ff0 45%, var(--hairline)); background: color-mix(in oklab, #4c9ff0 12%, transparent); }
-  .ide-mem-kind[data-kind="gotcha"] { color: #e0a53a; border-color: color-mix(in oklab, #e0a53a 45%, var(--hairline)); background: color-mix(in oklab, #e0a53a 12%, transparent); }
-  .ide-mem-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-  .ide-mem-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
-  .ide-mem-text {
-    flex: 1 1 auto; min-width: 0; font-family: "Hanken Grotesk", ui-sans-serif, sans-serif;
-    font-size: 0.82rem; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .ide-mem[data-superseded="true"] .ide-mem-text { text-decoration: line-through; color: var(--muted); }
-  .ide-mem-meta { }
-  .ide-mem-link { color: var(--accent); font-weight: 700; font-style: normal; }
-
-  /* ── status bar ─────────────────────────────────────────────────────────── */
-  .ide-statusbar {
-    display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 7px 14px;
-    border-top: 1px solid var(--hairline-strong);
-    background: linear-gradient(180deg, var(--rock), color-mix(in oklab, var(--ink) 7%, var(--rock)));
-  }
-  .ide-status-left { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
-  .ide-status-seg { font-size: 0.58rem; letter-spacing: 0.05em; color: var(--muted); }
-  .ide-status-seg[data-accent="true"] { color: var(--accent); font-weight: 700; }
-  .ide-sep { font-size: 0.58rem; color: var(--faint); }
-  .ide-status-legend { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .ide-legend-label { font-size: 0.53rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--faint); }
-  .ide-legend-item { display: inline-flex; align-items: center; gap: 5px; }
-
-  @media (prefers-reduced-motion: reduce) {
-    .ide-cursor { transition: none; }
-    .ide-ctxmenu, .ide-dock-body { animation: none; }
-  }
-
-  /* ══ MOBILE (≤760px) · the stacked, static IDE treatment ══════════════════════
-     The desktop split-pane (absolute cursor + right-click context menu + measured
-     positioning) is replaced in JSX by a legible stacked layout: file → tappable
-     IDE gestures → confidence dial → dock. These rules size that treatment to the
-     viewport and let the dock rows WRAP (instead of ellipsis-truncating) so nothing
-     is unreadable and nothing overflows the phone. Desktop is untouched. */
-  .ide-window--mobile { font-size: clamp(0.82rem, 3.6vw, 1rem); }
-  .ide-window--mobile .ide-title { white-space: normal; font-size: clamp(0.6rem, 3vw, 0.72rem); }
-
-  /* static code block — scales its own font, scrolls internally if a line is long */
-  .ide-code--mobile { overflow: visible; }
-  .ide-code--mobile .ide-code-pre { font-size: clamp(0.62rem, 3.1vw, 0.72rem); }
-
-  /* IDE gestures — the command palette as a tap-target list */
-  .ide-m-gestures {
-    padding: 10px 12px 4px;
-    border-bottom: 1px solid var(--hairline);
-    background: color-mix(in oklab, var(--ink) 3%, var(--rock));
-  }
-  .ide-m-cmds {
-    list-style: none; margin: 6px 0 0; padding: 0;
-    display: grid; grid-template-columns: 1fr; gap: 5px; min-width: 0;
-  }
-  /* two-up only on wider phones/tablets, where the tracks comfortably fit */
-  @media (min-width: 520px) and (max-width: 760px) { .ide-m-cmds { grid-template-columns: 1fr 1fr; } }
-  .ide-m-cmds > li { min-width: 0; }
-  .ide-m-cmd {
-    width: 100%; display: flex; align-items: center; gap: 8px;
-    padding: 9px 10px; border-radius: 8px; cursor: pointer; text-align: left;
-    background: color-mix(in oklab, var(--ink) 4%, transparent);
-    border: 1px solid var(--hairline-strong); color: var(--muted);
-    transition: background 0.16s var(--ease), border-color 0.16s var(--ease), color 0.16s var(--ease);
-  }
-  .ide-m-cmd .ide-cmd-label { font-size: clamp(0.68rem, 3.2vw, 0.74rem); }
-  .ide-m-cmd[data-active="true"] {
-    background: color-mix(in oklab, var(--accent) 12%, transparent);
-    border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline)); color: var(--ink);
-  }
-  .ide-m-cmd[data-active="true"] .ide-cmd-label { color: var(--accent); }
-  .ide-m-cmd[data-active="true"] .ide-kbd { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline)); }
-
-  /* dock rows: let text wrap so full facts/memories are readable on a phone */
-  @media (max-width: 760px) {
-    .ide-dock-body { height: auto; min-height: 0; scrollbar-gutter: auto; }
-    .ide-line-top, .ide-mem-top { flex-wrap: wrap; row-gap: 3px; }
-    .ide-line-text, .ide-mem-text, .ide-line-detail { white-space: normal; overflow: visible; }
-    .ide-line-text, .ide-mem-text { font-size: clamp(0.76rem, 3.4vw, 0.82rem); }
-    .ide-statusbar { gap: 8px 12px; }
-    .ide-status-legend { margin-left: 0; }
-  }
-}
-
 
 /* ── The substrate background: estate's OWN illustrative schematic — a faint
    line-art layer of estate's iconography, fixed behind the whole page, in the
@@ -825,4 +336,126 @@ html body::after {
 @media (max-width: 1023px) {
   html { scroll-snap-type: none; }
   .strata { min-height: 0; padding-block: 3rem; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   THE QUERY PLAYGROUND (hero) — pick a question, see which store answers, with
+   provenance on every row. Scripted, never a live query.
+   ════════════════════════════════════════════════════════════════════════════ */
+@layer components {
+  .q-window {
+    border: 1px solid var(--hairline-strong); border-radius: 14px; overflow: hidden;
+    background: var(--rock);
+    box-shadow: 0 32px 80px rgba(var(--shadow-rgb), 0.42), 0 2px 8px rgba(var(--shadow-rgb), 0.28);
+  }
+  .q-bar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--hairline-strong); background: color-mix(in oklab, var(--canvas) 50%, transparent); }
+  .q-dots { display: inline-flex; gap: 6px; }
+  .q-dots i { width: 10px; height: 10px; border-radius: 50%; background: color-mix(in oklab, var(--ink) 22%, transparent); }
+  .q-bar-t { font-family: "JetBrains Mono", monospace; font-size: 0.7rem; color: var(--ink); }
+  .q-bar-r { margin-left: auto; font-family: "JetBrains Mono", monospace; font-size: 0.66rem; color: var(--muted); text-align: right; }
+  .q-body { display: grid; grid-template-columns: 290px minmax(0, 1fr); height: clamp(300px, calc(100svh - 362px), 500px); }
+  .q-asks { display: flex; flex-direction: column; gap: 6px; padding: 14px; border-right: 1px solid var(--hairline-strong); overflow-y: auto; }
+  .q-k { font-size: 0.78rem; color: var(--muted); margin: 0 2px 2px; }
+  .q-ask {
+    text-align: left; font-family: "Hanken Grotesk", sans-serif; font-size: 0.92rem; line-height: 1.3; color: var(--ink);
+    padding: 10px 12px; border-radius: 9px; border: 1px solid var(--hairline-strong); background: transparent; cursor: pointer;
+    transition: border-color .2s var(--ease), background .2s var(--ease);
+  }
+  .q-ask:hover { border-color: color-mix(in oklab, var(--accent) 60%, var(--hairline-strong)); }
+  .q-ask[data-on="true"] { border-color: var(--accent); background: color-mix(in oklab, var(--accent) 14%, transparent); }
+  .q-answer { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .q-call { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px; border-bottom: 1px solid var(--hairline); }
+  .q-call code { font-family: "JetBrains Mono", monospace; font-size: 0.7rem; color: var(--accent); background: color-mix(in oklab, var(--accent) 8%, transparent); border: 1px solid color-mix(in oklab, var(--accent) 30%, transparent); border-radius: 6px; padding: 2px 8px; }
+  .q-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 8px 10px; border-bottom: 1px solid var(--hairline); }
+  .q-tab { font-family: "Hanken Grotesk", sans-serif; font-size: 0.86rem; color: var(--muted); background: transparent; border: 0; border-radius: 7px; padding: 5px 10px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+  .q-tab[data-on="true"] { color: var(--ink); background: color-mix(in oklab, var(--ink) 9%, transparent); }
+  .q-count { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; font-size: 0.68rem; font-weight: 700; color: var(--ink); background: color-mix(in oklab, var(--ink) 12%, transparent); }
+  .q-tab[data-on="true"] .q-count { color: var(--on-accent); background: var(--accent); }
+  .q-toggle { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--muted); cursor: pointer; }
+  .q-toggle input { accent-color: var(--accent); }
+  .q-result { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 16px; }
+  .q-kind { font-size: 0.78rem; color: var(--muted); margin: 0 0 8px; }
+  .q-empty { color: var(--muted); font-size: 0.92rem; margin-top: 20px; }
+  .q-graphview { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px 16px; align-items: start; }
+  @media (min-width: 1100px) { .q-graphview { grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); } }
+  .q-graph { width: 100%; max-width: 420px; height: auto; display: block; }
+  .q-edge { stroke: color-mix(in oklab, var(--ink) 45%, transparent); stroke-width: 1.4; }
+  .q-edge--inj { stroke: var(--accent); stroke-dasharray: 5 4; }
+  .q-edge--lo { stroke-dasharray: 2 4; }
+  .q-node { fill: var(--rock-2); stroke: var(--hairline-strong); }
+  .q-node--center { fill: color-mix(in oklab, var(--accent) 20%, var(--rock-2)); stroke: var(--accent); }
+  .q-node-t { fill: var(--ink); font-family: "JetBrains Mono", monospace; font-size: 9px; }
+  .q-node-t--center { font-weight: 700; font-size: 10px; }
+  .q-rows, .q-cards { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .q-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; padding: 7px 10px; border: 1px solid var(--hairline); border-radius: 8px; font-size: 0.86rem; }
+  .q-row b { font-family: "JetBrains Mono", monospace; font-size: 0.8rem; font-weight: 600; }
+  .q-row-main { min-width: 0; }
+  .q-where { font-family: "JetBrains Mono", monospace; font-size: 0.66rem; color: var(--faint); }
+  .q-row .q-where { grid-column: 1 / -1; }
+  .q-chips { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+  .q-chip { font-family: "JetBrains Mono", monospace; font-size: 0.64rem; padding: 1px 7px; border-radius: 5px; border: 1px solid var(--hairline-strong); color: var(--muted); }
+  .q-chip--inj { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 50%, transparent); }
+  .q-chip--mem { color: #f0a868; border-color: color-mix(in oklab, #f0a868 50%, transparent); }
+  .q-chip--know { color: #56d364; border-color: color-mix(in oklab, #56d364 50%, transparent); }
+  .q-conf { font-family: "JetBrains Mono", monospace; font-size: 0.66rem; font-weight: 700; padding: 1px 7px; border-radius: 5px; }
+  .q-conf--hi { color: var(--on-accent); background: var(--accent); }
+  .q-conf--mid { color: var(--ink); background: color-mix(in oklab, var(--accent) 28%, transparent); }
+  .q-conf--lo { color: var(--muted); background: color-mix(in oklab, var(--ink) 10%, transparent); }
+  .q-card { padding: 10px 12px; border: 1px solid var(--hairline); border-radius: 8px; display: flex; flex-direction: column; gap: 7px; }
+  .q-card p { margin: 0; font-size: 0.92rem; line-height: 1.4; color: var(--ink); }
+  .q-hidden { margin-top: 8px; font-size: 0.8rem; color: var(--muted); }
+  .q-note { margin-top: 8px; font-size: 0.84rem; color: var(--ink); padding-left: 10px; border-left: 2px solid var(--accent); }
+
+  /* proof sections */
+  .fact-line { position: relative; padding-left: 14px; }
+  .fact-line::before { content: ''; position: absolute; left: 0; top: 0.55em; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+  .toml { margin: 12px 0 0; padding: 10px 12px; border: 1px solid var(--hairline); border-radius: 8px; background: color-mix(in oklab, var(--canvas) 45%, transparent); overflow-x: auto; }
+  .toml code { font-family: "JetBrains Mono", monospace; font-size: 0.72rem; line-height: 1.6; color: var(--ink); white-space: pre; }
+  .tiers { width: 100%; border-collapse: collapse; font-family: "Hanken Grotesk", sans-serif; }
+  .tiers th { text-align: left; font-family: "JetBrains Mono", monospace; font-size: 0.72rem; font-weight: 600; color: var(--ink); padding: 10px 10px 10px 20px; white-space: nowrap; }
+  .tiers td { padding: 10px 8px; font-size: 0.86rem; color: var(--muted); }
+  .tiers tr + tr > * { border-top: 1px solid var(--hairline); }
+  .tiers-bar { width: 22%; }
+  .tiers-bar span { display: block; height: 6px; border-radius: 3px; background: var(--accent); }
+  .tiers-n { font-family: "JetBrains Mono", monospace; color: var(--ink) !important; width: 1%; }
+  .tools { border: 1px solid var(--hairline-strong); border-radius: 14px; background: var(--rock); overflow: hidden; }
+  .tools-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--hairline-strong); }
+  .tools-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+  .tools-tab { font-family: "Hanken Grotesk", sans-serif; font-size: 0.92rem; color: var(--muted); background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 6px 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 7px; }
+  .tools-tab[data-on="true"] { color: var(--ink); border-color: var(--accent); background: color-mix(in oklab, var(--accent) 12%, transparent); }
+  .tools-search { font: inherit; font-size: 0.88rem; color: var(--ink); background: color-mix(in oklab, var(--canvas) 45%, transparent); border: 1px solid var(--hairline-strong); border-radius: 8px; padding: 7px 12px; min-width: 0; width: 240px; max-width: 100%; }
+  .tools-search:focus { outline: none; border-color: var(--accent); }
+  .tools-set + .tools-set { border-top: 1px solid var(--hairline-strong); }
+  .tools-note { margin: 0; padding: 10px 16px 0; font-size: 0.8rem; color: var(--muted); }
+  .tools-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 4px 20px; padding: 6px 16px 14px; }
+  .tools-gl { font-family: "Hanken Grotesk", sans-serif; font-size: 0.82rem; font-weight: 700; letter-spacing: 0; font-stretch: 100%; color: var(--accent); margin: 8px 0 4px; }
+  .tools-row { display: grid; grid-template-columns: minmax(0, auto) minmax(0, 1fr); gap: 2px 12px; padding: 5px 0; border-top: 1px solid var(--hairline); }
+  .tools-row dt code { font-family: "JetBrains Mono", monospace; font-size: 0.74rem; color: var(--ink); }
+  .tools-row dd { margin: 0; font-size: 0.86rem; color: var(--muted); text-align: right; }
+  .store-t { width: 100%; border-collapse: collapse; font-family: "Hanken Grotesk", sans-serif; }
+  .store-t th { text-align: left; width: 9rem; font-weight: 500; font-size: 0.86rem; color: var(--muted); padding: 11px 20px; }
+  .store-t td { font-size: 0.94rem; color: var(--ink); padding: 11px 20px 11px 0; }
+  .store-t tr + tr > * { border-top: 1px solid var(--hairline); }
+}
+
+/* The hero is the first section: the fixed topbar overlays it, so it pads itself clear. */
+.strata--hero { padding-top: calc(var(--topbar-h) + clamp(10px, 2svh, 28px)); padding-bottom: clamp(10px, 2svh, 24px); }
+
+@media (max-width: 760px) {
+  .q-body { grid-template-columns: 1fr; height: auto; }
+  .q-asks { border-right: 0; border-bottom: 1px solid var(--hairline-strong); flex-direction: row; overflow-x: auto; overflow-y: hidden; padding: 10px; }
+  .q-k { display: none; }
+  .q-ask { flex: 0 0 200px; font-size: 0.86rem; }
+  .q-result { height: 420px; flex: none; }
+  .q-bar-r { display: none; }
+  .tools-row { grid-template-columns: 1fr; }
+  .tools-row dd { text-align: left; }
+  .tools-search { width: 100%; }
+  .tiers tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; border-top: 1px solid var(--hairline); }
+  .tiers tr:first-child { border-top: 0; }
+  .tiers tr + tr > * { border-top: 0; }
+  .tiers th { white-space: normal; padding-bottom: 2px; }
+  .tiers-bar { display: none; }
+  .tiers-n { grid-column: 2; grid-row: 1; padding-right: 20px !important; }
+  .tiers-who { grid-column: 1 / -1; padding: 0 20px 10px !important; }
 }
