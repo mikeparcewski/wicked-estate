@@ -340,13 +340,16 @@ Treats infrastructure + mainframe as **just more languages/collectors** feeding 
 
 ## 9. MCP server ✅
 `wicked-estate-mcp` — JSON-RPC: `tools/list` returns the tools with derived JSON Schema;
-`tools/call` dispatches + wraps results in the MCP envelope. **24 tools across 3 domains** with all
-stores open: 11 unconditional estate read tools (`all_tools()` — SearchEntity, RetrieveEntity,
-TraverseGraph, BlastRadius, FetchContent, ContextBundle, RulesInventory, `rules.recall`,
-RankHotspots, Communities, Lineage), 6 `memory.*` + 7 `knowledge.*` tools, plus `SemanticSearch`
-when embeddings are present (`live_semantic_search` → `handle_request_with_semantic`). The v1 MCP
-surface is read-only — no mutating tool is listed (write is CLI-only; rule authorship flows only
-through human-merged doc PRs, ADR-012). Implements the R1–R7 behavior contract.
+`tools/call` dispatches + wraps results in the MCP envelope. **30 tools across 3 domains** with all
+stores open: 12 unconditional estate read tools (`all_tools()` — SearchEntity, RetrieveEntity,
+TraverseGraph, Path, BlastRadius, FetchContent, ContextBundle, RulesInventory, `rules.recall`,
+RankHotspots, Communities, Lineage), 7 `memory.*` tools plus the 4 `proposal.*` queue tools, and 7
+`knowledge.*` tools. `SemanticSearch` is a 31st, listed only when embeddings are present
+(`live_semantic_search` → `handle_request_with_semantic`). Estate-only mode (no memory/knowledge
+domains) lists the 12 estate tools (13 with `SemanticSearch`). `--readonly` omits the write tools
+(`memory.capture`/`erase`/`learn`/`reflect`, `knowledge.ingest`/`write`/`relate`/`relate_code`) from
+`tools/list` and rejects them in `tools/call`. Rule authorship flows only through human-merged doc
+PRs (ADR-012). Implements the R1–R7 behavior contract.
 
 ---
 
