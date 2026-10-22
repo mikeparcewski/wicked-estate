@@ -22,7 +22,7 @@
 //!   an f32-epsilon tolerance (see `graph_store_suite`'s annotation block).
 //! - `TEXT` for JSON columns (same round-trip fidelity as SQLite)
 //! - No zstd compression for content — Postgres applies page-level compression internally
-//! - Full-text search via `ILIKE` (upgrade to `pg_trgm` / `tsvector` in a future pass)
+//! - Compatible substring search via `ILIKE`; explicit ranked text via native `simple` tsvector/ts_rank_cd
 
 use sha1::{Digest as Sha1Digest, Sha1};
 use sqlx::Row;
@@ -137,6 +137,8 @@ fn split_ddl(sql: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .collect()
 }
+
+const POSTGRES_SCHEMA_VERSION: &str = "1";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS files (
@@ -450,6 +452,9 @@ impl PostgresStore {
     pub fn open(url: &str) -> Result<Self> {
         let pool = rt_block(sqlx::PgPool::connect(url)).map_err(st)?;
 
+        // Refuse a schema from a newer/incompatible initializer before modifying it.
+        Self::check_schema_version(&pool, true)?;
+
         // Run schema DDL statement by statement (see `split_ddl`).
         rt_block(async {
             for stmt in split_ddl(SCHEMA) {
@@ -468,6 +473,65 @@ impl PostgresStore {
         )
         .map_err(st)?;
 
+        rt_block(
+            sqlx::query(
+                "INSERT INTO meta(k,v) VALUES('postgres_schema_version',$1) ON CONFLICT DO NOTHING",
+            )
+            .bind(POSTGRES_SCHEMA_VERSION)
+            .execute(&pool),
+        )
+        .map_err(st)?;
+        Self::from_existing_pool(pool)
+    }
+
+    /// Connect to a graph schema previously initialized by [`Self::open`].
+    ///
+    /// Performs only reads: no DDL, migrations, metadata inserts, or privilege changes.
+    /// A deployment owner must initialize legacy/unversioned schemas explicitly first.
+    /// Configure the login's search_path to its dedicated, trusted graph schema. Database
+    /// privileges still govern which GraphStore operations this connection can perform.
+    pub fn connect_existing(url: &str) -> Result<Self> {
+        let pool = rt_block(sqlx::PgPool::connect(url)).map_err(st)?;
+        Self::check_schema_version(&pool, false)?;
+        Self::from_existing_pool(pool)
+    }
+
+    fn check_schema_version(pool: &sqlx::PgPool, allow_unversioned: bool) -> Result<()> {
+        let table: Option<String> =
+            rt_block(sqlx::query_scalar("SELECT to_regclass('meta')::text").fetch_one(pool))
+                .map_err(st)?;
+        let version: Option<String> = if table.is_some() {
+            rt_block(
+                sqlx::query_scalar("SELECT v FROM meta WHERE k='postgres_schema_version'")
+                    .fetch_optional(pool),
+            )
+            .map_err(st)?
+        } else {
+            None
+        };
+        match version.as_deref() {
+            Some(POSTGRES_SCHEMA_VERSION) => Ok(()),
+            None if allow_unversioned => Ok(()),
+            None => Err(Error::Storage("Postgres graph schema is not initialized; run PostgresStore::open with the deployment owner".into())),
+            Some(_) => Err(Error::Storage("unsupported Postgres graph schema version".into())),
+        }
+    }
+
+    fn from_existing_pool(pool: sqlx::PgPool) -> Result<Self> {
+        // The initial graph version is required, not silently manufactured by a reader.
+        let version: Option<String> = rt_block(
+            sqlx::query_scalar("SELECT v FROM meta WHERE k='graph_version'").fetch_optional(&pool),
+        )
+        .map_err(st)?;
+        if version
+            .as_deref()
+            .and_then(|v| v.parse::<u64>().ok())
+            .is_none()
+        {
+            return Err(Error::Storage(
+                "missing or invalid Postgres graph_version metadata".into(),
+            ));
+        }
         // Read history_enabled from meta (absent → OFF).
         let history_enabled = rt_block(async {
             let row: Option<sqlx::postgres::PgRow> =
@@ -2110,6 +2174,80 @@ impl GraphRead for PostgresStore {
         // Byte order, not the database collation (see `edge_supports`).
         out.sort_by(|a, b| a.owner.cmp(&b.owner));
         Ok(out)
+    }
+
+    fn ranked_text_search(
+        &self,
+        query: &wicked_estate_core::query::RankedTextQuery,
+    ) -> Result<Vec<wicked_estate_core::query::RankedTextHit>> {
+        use wicked_estate_core::query::RankedTextHit;
+        if query.terms.is_empty()
+            || query.terms.len() > 8
+            || query
+                .terms
+                .iter()
+                .any(|t| t.trim().is_empty() || t.len() > 512 || t.chars().any(char::is_control))
+            || query.scope_prefix.is_empty()
+            || query.scope_prefix.len() > 2048
+            || wicked_estate_core::Scope::parse(&query.scope_prefix).as_path() != query.scope_prefix
+            || query.scope_prefix.chars().any(char::is_control)
+            || query.kinds.len() > 32
+            || query.limit == 0
+            || query.limit > 100
+            || query
+                .language
+                .as_ref()
+                .is_some_and(|l| l.as_str().is_empty() || l.as_str().len() > 128)
+        {
+            return Err(Error::Invalid(
+                "ranked text query bounds or canonical scope invalid".into(),
+            ));
+        }
+        let kinds: Vec<String> = query
+            .kinds
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<std::result::Result<_, _>>()?;
+        let language = query.language.as_ref().map(|l| l.as_str());
+        let mut h = self.conn()?;
+        // MATERIALIZED filters the complete permitted candidate set before native ranking/limit.
+        // Each literal term goes through plainto_tsquery; only its serialized tsquery is joined.
+        // This preserves OR terms without interpreting caller operators or SQL fragments.
+        let rows = rt_block(sqlx::query(
+            "WITH eligible AS MATERIALIZED (
+                SELECT symbol, name, data::jsonb AS body FROM nodes
+                WHERE (scope=$2 OR left(scope,length($2)+1)=$2||'/')
+                  AND (cardinality($3::text[])=0 OR kind=ANY($3))
+                  AND ($4::text IS NULL OR language=$4)
+                  AND (NOT $6::boolean OR NOT coalesce((data::jsonb->'metadata') ? 'value_role',false))
+             ), q AS (
+                SELECT string_agg('('||parsed::text||')',' | ')::tsquery AS query
+                FROM (SELECT plainto_tsquery('simple',term) AS parsed FROM unnest($1::text[]) term) terms
+                WHERE numnode(parsed)>0
+             ), vectors AS (
+                SELECT symbol,body,
+                  setweight(to_tsvector('simple',coalesce(name,'')),'A') ||
+                  setweight(to_tsvector('simple',coalesce(body->>'signature','')),'B') ||
+                  setweight(to_tsvector('simple',coalesce(body->>'doc','')||' '||coalesce(body->'metadata'->>'content','')),'C') AS document
+                FROM eligible
+             )
+             SELECT body::text AS data,ts_rank_cd(document,q.query)::double precision AS score
+             FROM vectors CROSS JOIN q WHERE document @@ q.query
+             ORDER BY score DESC,symbol COLLATE \"C\" LIMIT $5"
+        ).bind(&query.terms).bind(&query.scope_prefix).bind(&kinds).bind(language).bind(query.limit as i64).bind(query.exclude_value_roles).fetch_all(h.as_conn())).map_err(st)?;
+        rows.into_iter()
+            .map(|r| {
+                let data: String = r.try_get("data").map_err(st)?;
+                let score: f64 = r.try_get("score").map_err(st)?;
+                if !score.is_finite() || score < 0.0 {
+                    return Err(Error::Storage("invalid native text rank".into()));
+                }
+                Ok(RankedTextHit {
+                    node: serde_json::from_str(&data)?,
+                    score,
+                })
+            })
+            .collect()
     }
 
     fn find_symbols(&self, query: &SymbolQuery) -> Result<Vec<Node>> {

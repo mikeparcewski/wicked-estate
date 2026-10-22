@@ -97,6 +97,17 @@ pub trait GraphRead: Send {
     fn capabilities(&self) -> StoreCapabilities;
     fn get_node(&self, id: &SymbolId) -> Result<Option<Node>>;
     fn find_symbols(&self, query: &SymbolQuery) -> Result<Vec<Node>>;
+    /// Explicit native ranked-text support, never a substring or embedding substitute.
+    /// Backends without this operation refuse rather than returning a successful empty result.
+    fn ranked_text_search(
+        &self,
+        _query: &crate::query::RankedTextQuery,
+    ) -> Result<Vec<crate::query::RankedTextHit>> {
+        Err(crate::Error::Invalid(
+            "ranked text retrieval unsupported by this backend".into(),
+        ))
+    }
+
     /// How many nodes [`find_symbols`](Self::find_symbols) would return for `query` with no
     /// `limit` (`query.limit` is ignored) — without materialising them (#177).
     ///
