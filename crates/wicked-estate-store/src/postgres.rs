@@ -2181,17 +2181,33 @@ impl GraphRead for PostgresStore {
         query: &wicked_estate_core::query::RankedTextQuery,
     ) -> Result<Vec<wicked_estate_core::query::RankedTextHit>> {
         use wicked_estate_core::query::RankedTextHit;
-        if query.terms.is_empty() || query.terms.len() > 8
-            || query.terms.iter().any(|t| t.trim().is_empty() || t.len() > 512 || t.chars().any(char::is_control))
-            || query.scope_prefix.is_empty() || query.scope_prefix.len() > 2048
+        if query.terms.is_empty()
+            || query.terms.len() > 8
+            || query
+                .terms
+                .iter()
+                .any(|t| t.trim().is_empty() || t.len() > 512 || t.chars().any(char::is_control))
+            || query.scope_prefix.is_empty()
+            || query.scope_prefix.len() > 2048
             || wicked_estate_core::Scope::parse(&query.scope_prefix).as_path() != query.scope_prefix
             || query.scope_prefix.chars().any(char::is_control)
-            || query.kinds.len() > 32 || query.limit == 0 || query.limit > 100
-            || query.language.as_ref().is_some_and(|l| l.as_str().is_empty() || l.as_str().len() > 128)
+            || query.kinds.len() > 32
+            || query.limit == 0
+            || query.limit > 100
+            || query
+                .language
+                .as_ref()
+                .is_some_and(|l| l.as_str().is_empty() || l.as_str().len() > 128)
         {
-            return Err(Error::Invalid("ranked text query bounds or canonical scope invalid".into()));
+            return Err(Error::Invalid(
+                "ranked text query bounds or canonical scope invalid".into(),
+            ));
         }
-        let kinds: Vec<String> = query.kinds.iter().map(serde_json::to_string).collect::<std::result::Result<_, _>>()?;
+        let kinds: Vec<String> = query
+            .kinds
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<std::result::Result<_, _>>()?;
         let language = query.language.as_ref().map(|l| l.as_str());
         let mut h = self.conn()?;
         // MATERIALIZED filters the complete permitted candidate set before native ranking/limit.
@@ -2219,12 +2235,19 @@ impl GraphRead for PostgresStore {
              FROM vectors CROSS JOIN q WHERE document @@ q.query
              ORDER BY score DESC,symbol COLLATE \"C\" LIMIT $5"
         ).bind(&query.terms).bind(&query.scope_prefix).bind(&kinds).bind(language).bind(query.limit as i64).bind(query.exclude_value_roles).fetch_all(h.as_conn())).map_err(st)?;
-        rows.into_iter().map(|r| {
-            let data: String = r.try_get("data").map_err(st)?;
-            let score: f64 = r.try_get("score").map_err(st)?;
-            if !score.is_finite() || score < 0.0 { return Err(Error::Storage("invalid native text rank".into())); }
-            Ok(RankedTextHit { node: serde_json::from_str(&data)?, score })
-        }).collect()
+        rows.into_iter()
+            .map(|r| {
+                let data: String = r.try_get("data").map_err(st)?;
+                let score: f64 = r.try_get("score").map_err(st)?;
+                if !score.is_finite() || score < 0.0 {
+                    return Err(Error::Storage("invalid native text rank".into()));
+                }
+                Ok(RankedTextHit {
+                    node: serde_json::from_str(&data)?,
+                    score,
+                })
+            })
+            .collect()
     }
 
     fn find_symbols(&self, query: &SymbolQuery) -> Result<Vec<Node>> {

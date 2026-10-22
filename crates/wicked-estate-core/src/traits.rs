@@ -103,7 +103,9 @@ pub trait GraphRead: Send {
         &self,
         _query: &crate::query::RankedTextQuery,
     ) -> Result<Vec<crate::query::RankedTextHit>> {
-        Err(crate::Error::Invalid("ranked text retrieval unsupported by this backend".into()))
+        Err(crate::Error::Invalid(
+            "ranked text retrieval unsupported by this backend".into(),
+        ))
     }
 
     /// How many nodes [`find_symbols`](Self::find_symbols) would return for `query` with no
