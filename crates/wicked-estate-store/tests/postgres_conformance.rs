@@ -567,3 +567,57 @@ fn existing_connection_requires_explicit_compatible_initialization() {
     .expect("restore metadata");
     rt.block_on(pool.close());
 }
+
+#[test]
+fn ranked_text_is_scoped_native_rank_without_changing_substring_search() {
+    use wicked_estate_core::{Scope, SymbolQuery};
+    use wicked_estate_core::query::RankedTextQuery;
+    let url = std::env::var("TEST_POSTGRES_URL").expect("actual PostgreSQL required for ranked text");
+    let _guard = PG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lease = PgTestLease::acquire(&url);
+    drop_all_tables(&url);
+    let mut store = wicked_estate_store::PostgresStore::open(&url).unwrap();
+    let make = |id: &str, name: &str, scope: &str, doc: &str| {
+        let mut n = Node::new(SymbolId(id.into()),NodeKind::Function,name,Language::new("rust"),Location::new("src.rs",Span::ZERO)).with_scope(Scope::parse(scope));
+        n.doc = Some(doc.into()); n
+    };
+    store.upsert_nodes(&[
+        make("a-low","invoiceWorker","tenant:a/snapshot:one","invoice"),
+        make("z-high","invoice","tenant:a/snapshot:one","invoice invoice invoice invoice"),
+        make("foreign","invoice","tenant:b","invoice ".repeat(100).as_str()),
+        make("prefix-sibling","invoice","tenant:a/snapshot:one_more","invoice ".repeat(100).as_str()),
+    ]).unwrap();
+    let q = RankedTextQuery {exclude_value_roles:false,terms:vec!["invoice".into()],scope_prefix:"tenant:a/snapshot:one".into(),kinds:vec![NodeKind::Function],language:Some(Language::new("rust")),limit:1};
+    let hits = store.ranked_text_search(&q).unwrap();
+    assert_eq!(hits.len(),1); assert_eq!(hits[0].node.symbol.0,"z-high"); assert!(hits[0].score>0.0);
+    assert_eq!(store.find_symbols(&SymbolQuery{text:Some("voiceWor".into()),scope_prefix:Some(q.scope_prefix.clone()),..Default::default()}).unwrap()[0].symbol.0,"a-low");
+    let mut empty=q.clone(); empty.scope_prefix="tenant:missing".into(); assert!(store.ranked_text_search(&empty).unwrap().is_empty());
+    let mut invalid=q.clone(); invalid.limit=0; assert!(store.ranked_text_search(&invalid).is_err());
+    invalid=q.clone(); invalid.scope_prefix.clear(); assert!(store.ranked_text_search(&invalid).is_err());
+    invalid=q.clone(); invalid.terms=vec!["x".into();9]; assert!(store.ranked_text_search(&invalid).is_err());
+    let mut punctuation=q.clone(); punctuation.terms=vec!["' | ! <-> ;".into()]; assert!(store.ranked_text_search(&punctuation).unwrap().is_empty());
+}
+
+#[test]
+fn ranked_text_value_role_exclusion_precedes_top_k() {
+    use wicked_estate_core::{Scope, query::RankedTextQuery};
+    let url=std::env::var("TEST_POSTGRES_URL").expect("actual PostgreSQL required");
+    let _guard=PG_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lease=PgTestLease::acquire(&url);drop_all_tables(&url);
+    let mut store=wicked_estate_store::PostgresStore::open(&url).unwrap();
+    let mut eligible=Node::new(SymbolId("eligible-code".into()),NodeKind::Function,"handler",Language::new("rust"),Location::new("code.rs",Span::ZERO)).with_scope(Scope::parse("snapshot:one"));
+    eligible.doc=Some("invoice".into());
+    let mut nodes=vec![eligible];
+    for i in 0..150 {
+        let mut n=Node::new(SymbolId(format!("value-role-{i:03}")),NodeKind::Function,"invoice",Language::new("rust"),Location::new("code.rs",Span::ZERO)).with_scope(Scope::parse("snapshot:one"));
+        n.doc=Some("invoice ".repeat(100));n.metadata.insert("value_role".into(),serde_json::json!("local"));nodes.push(n);
+    }
+    store.upsert_nodes(&nodes).unwrap();
+    let q=RankedTextQuery{exclude_value_roles:false,terms:vec!["invoice".into()],scope_prefix:"snapshot:one".into(),kinds:vec![NodeKind::Function],language:None,limit:100};
+    let generic=store.ranked_text_search(&q).unwrap();assert_eq!(generic.len(),100);assert!(generic[0].node.metadata.contains_key("value_role"));
+    // Exclusion must occur before native top-k; the defensive caller filter is intentionally retained.
+    let eligible_query=RankedTextQuery{exclude_value_roles:true,limit:20,..q};
+    let eligible:Vec<_>=store.ranked_text_search(&eligible_query).unwrap().into_iter().filter(|h|!h.node.metadata.contains_key("value_role")).take(20).collect();
+    assert_eq!(eligible.len(),1,"excluded internal values must not crowd the actual code symbol out before top-k");
+    assert_eq!(eligible[0].node.symbol.0,"eligible-code");
+}

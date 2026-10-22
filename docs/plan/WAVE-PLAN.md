@@ -239,3 +239,19 @@ Regex-over-source synthesis (→W3.1 AST) · content-hash IDs (→W0.3/W1 stable
 Owner: platform integration worker, isolated `codex/restricted-postgres-reader`, baseline `97c68a0`. Paths: store PostgreSQL constructor/tests and store documentation. Preserve `open` initialization; add no-DDL/no-DML existing-schema connection with version refusal. Acceptance: real restricted PostgreSQL retrieval over captured immutable source, foreign-schema denial, missing/unknown version refusal, initializer compatibility, store conformance. Semantic retrieval and PostgreSQL document parity remain separate gaps. No production adoption or current dependency approval implied.
 
 Validation: store library 113 passed; actual PostgreSQL18.6 conformance 9 passed (including initializer/version compatibility); store all-target clippy with warnings denied passed. Separate platform consumer exercised 7 actual CU13-to-Estate groups with SELECT-only runtime, exact committed source retrieval, foreign-schema denial and missing/unknown version refusal. Parent independently reproduced frozen source and consumer. Evidence: platform `.intent/maintenance/action-registry-build/initial-compilation/estate-retrieval/` and `root/estate-independent/result.json`. Falsifier: restricted `connect_existing` must succeed without ownership, while absent/unsupported metadata must refuse without writes. Dependent not done: platform task-derived retrieval authorization/span mapping, semantic/document PostgreSQL fit, fresh dependency approval. These results are per-crate, not a workspace-wide release claim.
+
+## PG-RANKED-TEXT — scoped native ranked retrieval (reviewed local implementation)
+
+Owner: platform integration worker in `codex/restricted-postgres-reader`, baseline
+`746488f`. Add an explicit ranked-text GraphRead operation with unsupported default,
+leaving SearchEntity/find_symbols exact and substring compatibility intact. PostgreSQL
+uses native `simple` text search/rank, not a claimed BM25 equivalent. Scope, kind and
+language filters precede ranking/limit. Reuse knowledge KNode public document bodies
+without adopting SQLite KnowledgeEngine or hash embeddings as semantic retrieval.
+Paths: core query/trait, store PostgreSQL implementation/conformance/README. Consumer:
+platform immutable CU13 document/code found bridge. Acceptance requires actual PG
+rank discrimination, scope-before-limit, literal/bounded queries, read-only access,
+existing store conformance, exact document bytes and source release. No production
+semantic/provider qualification or push is authorized by this task.
+
+Validation: actual PostgreSQL conformance 11 passed and platform immutable-source consumer 10 groups passed, independently reproduced against the same source digests. Native eligibility excludes value-role nodes before rank/limit; 150 higher-ranked excluded nodes cannot crowd out the eligible symbol. Generic exclusion=false preserves full-node behavior. The initial failing exclusion-after-limit regression is retained in platform evidence. Final all-target core/store clippy passed; unchanged platform mapper pure 9 tests reused. Evidence: platform `initial-compilation/estate-retrieval/full-found/freeze.json` and `initial-compilation/review/full-found-result.json` under `.intent/maintenance/action-registry-build/`. Dependent not done: merged/released upstream adoption, current dependency approval, qualified semantic route and full platform compilation. No workspace-wide release or performance claim.

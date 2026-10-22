@@ -34,3 +34,23 @@ appropriate explicit deployment migration rather than falling back to `open`.
 split (`index` initializes; `read` connects without migrations). The platform
 consumer conformance records actual restricted-login PostgreSQL checks separately;
 this example's process exit alone is not a production qualification claim.
+
+### Explicit PostgreSQL ranked text
+
+`GraphRead::ranked_text_search(&RankedTextQuery)` is additive; `find_symbols` and
+SearchEntity keep exact/substring behavior. The request requires 1–8 bounded
+literal terms, a nonempty canonical scope prefix, optional kind/language filters,
+and limit 1–100. `exclude_value_roles:true` excludes internal value-role metadata
+inside the eligible set before ranking/limit; false preserves generic node results.
+PostgreSQL filters scope/type before native `simple` tsvector
+ranking (`ts_rank_cd`), with stable symbol ordering for ties. Scores are native
+rank signals, not BM25 values, semantic confidence, or cross-backend comparable.
+No caller SQL/tsquery language is evaluated. Other backends explicitly return an
+unsupported error unless implemented; an empty result means the implemented query
+ran, not that an unavailable capability silently fell back.
+
+This implementation computes vectors over existing name/signature/doc and knowledge
+content fields. It introduces no schema migration or implicit runtime writes, and
+makes no indexed-performance claim. A SELECT-only `connect_existing` login can use
+it after explicit initialization. Source/tenant authorization remains the caller's
+binding responsibility; a scope label is a partition filter, not authentication.

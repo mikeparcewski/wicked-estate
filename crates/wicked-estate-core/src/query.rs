@@ -23,6 +23,28 @@ pub struct SymbolQuery {
     pub scope_prefix: Option<String>,
 }
 
+/// Explicit native ranked text retrieval. Independent of exact/substring `SymbolQuery`.
+/// Terms are literal text, OR-combined by the backend; no caller query language is evaluated.
+#[derive(Debug, Clone)]
+pub struct RankedTextQuery {
+    /// Exclude internal value-flow roles before ranking/limit. False preserves generic nodes.
+    pub exclude_value_roles: bool,
+    pub terms: Vec<String>,
+    /// Required nonempty canonical scope path. Exact scope plus descendants only.
+    pub scope_prefix: String,
+    pub kinds: Vec<NodeKind>,
+    pub language: Option<Language>,
+    /// Required 1..=100, applied after all scope/type filters and native ranking.
+    pub limit: usize,
+}
+
+/// Native score is backend-specific; callers must not treat it as semantic confidence.
+#[derive(Debug, Clone)]
+pub struct RankedTextHit {
+    pub node: Node,
+    pub score: f64,
+}
+
 /// A **bounded** traversal request. We deliberately support only bounded reverse-reachability /
 /// k-hop (the actual agent workload; see the design notes).
 /// `max_depth` and `max_nodes` are required guard rails — unbounded whole-graph walks are out.
