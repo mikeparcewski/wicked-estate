@@ -8,9 +8,10 @@
 
 use crate::MemoryEngine;
 use wicked_estate_core::{NodeKind, Symbol, SymbolId, SymbolQuery};
+use wicked_estate_memory_core::scope::Seg;
 use wicked_estate_memory_core::{
-    ApproveOutcome, Facets, MemKind, Memory, Proposal, ProposalState, Scope, Tier,
-    proposal::PROPOSAL_NODE_KIND,
+    ApproveOutcome, Facets, MemKind, Memory, OPERATOR_SCOPE_DEFAULT, OPERATOR_SCOPE_KIND, Proposal,
+    ProposalState, Scope, Tier, proposal::PROPOSAL_NODE_KIND,
 };
 
 impl MemoryEngine {
@@ -79,7 +80,9 @@ impl MemoryEngine {
     /// Approve a `Pending` proposal, ROUTED by `kind_type`.
     ///
     /// - `memory`: materialize an ACTIVE memory (`Memory::new` from `payload.content` + `payload.tier`,
-    ///   `.with_facets(proposal.facets)`, scope from `provenance["scope"]` or root) and capture it via
+    ///   `.with_facets(proposal.facets)`, scope from `provenance["scope"]` or root; a
+    ///   `payload.reach: "operator"` memory lands at the operator scope instead, see
+    ///   [`operator_placement`]) and capture it via
     ///   the existing memory write path (⇒ now recallable), then mark the proposal `Approved` ⇒
     ///   [`ApproveOutcome::Promoted`].
     /// - `policy:*`: estate has no rules-write here, so write NOTHING; mark the proposal `Approved`
@@ -123,18 +126,32 @@ impl MemoryEngine {
                 Some(k) => parse_kind(k)?,
                 None => kind_for_tier(tier),
             };
-            // Scope rides provenance (authority-stamped) when present; else root.
-            let scope = proposal
-                .provenance
-                .get("scope")
-                .map(|s| Scope::parse(s))
-                .unwrap_or_else(Scope::root);
+            // What the memory is ABOUT decides where it lands (`payload.reach`, set by the proposer
+            // and editable at accept): `operator` = how the operator works (style, preferences,
+            // standing extra steps) → the operator scope every project recalls, with no
+            // project/repo/user facet pinning it to one project; `project` (the default) and
+            // `pattern` keep today's placement — scope from provenance, else root, facets as filed
+            // (a `project`/`repo` facet already admits it only for that project).
+            let (scope, facets) = match payload.get("reach").and_then(|v| v.as_str()) {
+                Some("operator") => operator_placement(&proposal.facets)?,
+                None | Some("project") | Some("pattern") => (
+                    proposal
+                        .provenance
+                        .get("scope")
+                        .map(|s| Scope::parse(s))
+                        .unwrap_or_else(Scope::root),
+                    proposal.facets.clone(),
+                ),
+                Some(other) => anyhow::bail!(
+                    "memory proposal {id}: unknown payload.reach {other:?} (expected \"project\", \"pattern\" or \"operator\")"
+                ),
+            };
             // Deterministic id from the proposal id ⇒ approval is IDEMPOTENT: if a crash or a
             // failed state-write leaves the proposal Pending after capture succeeded, a re-approve
             // upserts the SAME memory node (no duplicate) instead of minting a new random one.
             let mem = Memory::new(kind, tier, scope, content, now)
                 .with_id(format!("proposal:{}", proposal.id))
-                .with_facets(proposal.facets.clone());
+                .with_facets(facets);
             let active_id = mem.symbol().0.clone();
             self.capture(&mem)?; // active store write → immediately recallable
             ApproveOutcome::Promoted { active_id }
@@ -167,6 +184,38 @@ impl MemoryEngine {
         self.store.upsert_nodes(&[proposal.to_node()])?;
         Ok(())
     }
+}
+
+/// Where an OPERATOR memory lands: `operator:<user facet>` (else [`OPERATOR_SCOPE_DEFAULT`]), with
+/// the `project` and `repo` facets dropped — a project facet would pin a cross-project memory to
+/// one project. Every other facet still gates recall, the `user` facet included: recall admits an
+/// operator scope under every query scope, so only facet admission keeps one user's memory from
+/// another's.
+fn operator_placement(facets: &Facets) -> anyhow::Result<(Scope, Facets)> {
+    let scope = match facets.get("user") {
+        Some(user) if operator_user_ok(user) => Scope(vec![Seg {
+            kind: OPERATOR_SCOPE_KIND.to_string(),
+            id: user.to_string(),
+        }]),
+        Some(user) => anyhow::bail!(
+            "operator memory: the user facet {user:?} cannot name an operator scope (no '/')"
+        ),
+        None => Scope::parse(OPERATOR_SCOPE_DEFAULT),
+    };
+    let kept = Facets::try_from_map(
+        facets
+            .iter()
+            .filter(|(axis, _)| !matches!(axis.as_str(), "project" | "repo"))
+            .map(|(a, v)| (a.clone(), v.clone())),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+    Ok((scope, kept))
+}
+
+/// Can `user` name ONE operator scope segment? A `/` would split it into a deeper path, and two
+/// users could then share a subtree (erase/coverage by prefix would reach both).
+fn operator_user_ok(user: &str) -> bool {
+    !user.is_empty() && !user.contains('/')
 }
 
 fn parse_tier(s: &str) -> anyhow::Result<Tier> {
@@ -365,5 +414,198 @@ mod tests {
         let mut eng = MemoryEngine::in_memory().unwrap();
         assert!(eng.approve_proposal("does-not-exist", 1).is_err());
         assert!(eng.reject_proposal("does-not-exist", 1).is_err());
+    }
+
+    /// An approved memory keeps the root scope (the faceted model: scope is tenancy, facets are the
+    /// project/repo partition, DES-MEM-FACETED-001 §4.3), and its facets alone keep it out of every
+    /// other project's recall — at the root, at another project's scope, and under the
+    /// everything opt-in (`scope_prefix: ""`). Pins the no-leak property the review queue relies on.
+    #[test]
+    fn approved_project_memory_is_not_recalled_for_another_project() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let id = eng
+            .submit_proposal(
+                "memory",
+                serde_json::json!({"content": "subtract returns a minus b in tiny-calc", "tier": "semantic"}),
+                facets(&[("project", "tiny-calc"), ("repo", "tiny-calc")]),
+                BTreeMap::new(),
+                1,
+            )
+            .unwrap();
+        eng.approve_proposal(&id, 2).unwrap();
+        let mems = eng.all_memories().unwrap();
+        assert_eq!(mems[0].scope.as_path(), "", "approval keeps the root scope");
+
+        let hits = |scope: &str, prefix: Option<&str>, intent: &[(&str, &str)]| {
+            let mut q = RecallQuery::new("subtract tiny-calc", scope, 500, 3);
+            q.scope_prefix = prefix.map(str::to_string);
+            q.intent = facets(intent);
+            MemoryApi::recall(&eng, &q)
+                .unwrap()
+                .iter()
+                .filter(|r| r.content.contains("subtract"))
+                .count()
+        };
+        let other = [("project", "wicked"), ("repo", "wicked-crew")];
+        assert_eq!(hits("", None, &other), 0, "root recall, another project");
+        assert_eq!(
+            hits("project:wicked-crew", None, &other),
+            0,
+            "another project's scope"
+        );
+        assert_eq!(
+            hits("", Some(""), &other),
+            0,
+            "everything opt-in, another project"
+        );
+        assert_eq!(hits("", None, &[]), 0, "no intent admits no faceted memory");
+        let own = [("project", "tiny-calc"), ("repo", "tiny-calc")];
+        assert_eq!(
+            hits("project:tiny-calc", None, &own),
+            1,
+            "its own project recalls it"
+        );
+    }
+
+    /// Approve a memory proposal with `payload.reach` and return the landed memory.
+    fn approve_reach(reach: Option<&str>, facet_pairs: &[(&str, &str)]) -> Memory {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let mut payload = serde_json::json!({"content": "prefers tables over prose in replies", "tier": "semantic"});
+        if let Some(r) = reach {
+            payload["reach"] = serde_json::json!(r);
+        }
+        let id = eng
+            .submit_proposal("memory", payload, facets(facet_pairs), BTreeMap::new(), 1)
+            .unwrap();
+        eng.approve_proposal(&id, 2).unwrap();
+        eng.all_memories().unwrap().remove(0)
+    }
+
+    #[test]
+    fn operator_memory_lands_at_the_operator_scope_unpinned_from_any_project() {
+        let m = approve_reach(
+            Some("operator"),
+            &[
+                ("project", "wicked"),
+                ("repo", "wicked-crew"),
+                ("cli", "codex"),
+            ],
+        );
+        assert_eq!(m.scope.as_path(), "operator:local");
+        // project/repo would pin it to one project; other axes still narrow it.
+        assert_eq!(m.facets.get("project"), None);
+        assert_eq!(m.facets.get("repo"), None);
+        assert_eq!(m.facets.get("cli"), Some("codex"));
+        // A `user` facet names whose operator scope it is, and still gates recall to that user.
+        let m = approve_reach(Some("operator"), &[("user", "mike"), ("project", "wicked")]);
+        assert_eq!(m.scope.as_path(), "operator:mike");
+        assert_eq!(m.facets.get("user"), Some("mike"));
+        assert_eq!(m.facets.get("project"), None);
+    }
+
+    #[test]
+    fn project_reach_and_absent_reach_keep_todays_placement() {
+        for reach in [None, Some("project"), Some("pattern")] {
+            let m = approve_reach(reach, &[("project", "wicked")]);
+            assert_eq!(m.scope.as_path(), "", "{reach:?}");
+            assert_eq!(m.facets.get("project"), Some("wicked"), "{reach:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_reach_fails_loud_and_leaves_the_proposal_pending() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let id = eng
+            .submit_proposal(
+                "memory",
+                serde_json::json!({"content": "x is y because z", "reach": "galaxy"}),
+                Facets::default(),
+                BTreeMap::new(),
+                1,
+            )
+            .unwrap();
+        assert!(eng.approve_proposal(&id, 2).is_err());
+        assert_eq!(
+            eng.list_proposals(None, Some(ProposalState::Pending))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn operator_memory_is_recalled_in_every_project() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let id = eng
+            .submit_proposal(
+                "memory",
+                serde_json::json!({"content": "operator prefers tables over prose in replies", "reach": "operator"}),
+                facets(&[("project", "wicked")]),
+                BTreeMap::new(),
+                1,
+            )
+            .unwrap();
+        eng.approve_proposal(&id, 2).unwrap();
+        for (scope, intent) in [
+            (
+                "project:wicked-crew",
+                vec![("project", "wicked"), ("repo", "wicked-crew")],
+            ),
+            ("project:tiny-calc", vec![("project", "tiny-calc")]),
+            ("", vec![]),
+        ] {
+            let mut q = RecallQuery::new("tables prose replies", scope, 500, 3);
+            q.intent = facets(&intent);
+            let hits = MemoryApi::recall(&eng, &q).unwrap();
+            assert!(
+                hits.iter().any(|r| r.content.contains("tables")),
+                "an operator memory must be recalled under {scope:?}: {hits:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_users_operator_memory_is_not_recalled_for_another_user() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let id = eng
+            .submit_proposal(
+                "memory",
+                serde_json::json!({"content": "alice wants tables in every reply", "reach": "operator"}),
+                facets(&[("user", "alice")]),
+                BTreeMap::new(),
+                1,
+            )
+            .unwrap();
+        eng.approve_proposal(&id, 2).unwrap();
+        let hits = |intent: &[(&str, &str)]| {
+            let mut q = RecallQuery::new("tables reply", "project:b", 500, 3);
+            q.intent = facets(intent);
+            MemoryApi::recall(&eng, &q)
+                .unwrap()
+                .iter()
+                .filter(|r| r.content.contains("alice"))
+                .count()
+        };
+        assert_eq!(hits(&[("user", "bob")]), 0);
+        assert_eq!(hits(&[]), 0);
+        assert_eq!(hits(&[("user", "alice"), ("repo", "b")]), 1);
+    }
+
+    #[test]
+    fn a_user_facet_with_a_slash_is_refused_and_a_nested_operator_path_is_not_cross_project() {
+        let mut eng = MemoryEngine::in_memory().unwrap();
+        let id = eng
+            .submit_proposal(
+                "memory",
+                serde_json::json!({"content": "team alice wants tables", "reach": "operator"}),
+                facets(&[("user", "alice/team:blue")]),
+                BTreeMap::new(),
+                1,
+            )
+            .unwrap();
+        assert!(eng.approve_proposal(&id, 2).is_err());
+        assert!(Scope::parse("operator:x").is_operator());
+        assert!(!Scope::parse("operator:x/project:y").is_operator());
+        assert!(!Scope::parse("project:x").is_operator());
     }
 }

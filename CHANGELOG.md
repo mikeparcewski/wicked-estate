@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+## [0.30.0] — 2026-10-17
+
+Minor: operator memories land at an explicit cross-project scope (`operator:<id>`), and a derived
+entity keeps its episode's facets (#338).
+
+### Added
+- **Operator memories: an explicit cross-project scope (`operator:<id>`).** A memory about how the
+  operator works (style, preferences, the extra steps they always take) applies in every project.
+  Before, it could only land at the root with misleading project facets. A memory proposal now
+  says what it is about in `payload.reach`: `project` (the default), `pattern`, or `operator`.
+  `proposal.approve` lands an `operator` memory at `operator:<user facet>` (else
+  `operator:local`), and drops its `project`/`repo`/`user` facets so no project pins it. Other
+  facets (`cli`, `tool`) still narrow it. Ancestor-visible recall admits operator memories under
+  every query scope, as it does the root. A `project`/`pattern` memory lands exactly as before.
+  `proposal.submit` validates `payload.reach`: `project|pattern|operator` for a memory,
+  `project|operator` for a `policy:<type>`. Crew lands policy reach.
+  An operator memory keeps its `user` facet: recall admits every one-segment `operator:<id>`
+  scope, so facet admission is what keeps one user's memory from another's. A `user` value
+  containing `/` is refused, because it cannot name one scope segment. A deeper path such as
+  `operator:x/project:y` is not cross-project.
+
+### Fixed
+- **A derived entity keeps its episode's facets.** Reflection created entities with no facets and
+  merged a mention into any visible same-name entity, so a facet-gated episode leaked its entities
+  to recall the episode itself was gated from. A new entity now carries the episode's facets, and
+  merges only into an entity with the same facets.
+
+### Changed
+- **Site, README and the crate description say what ships today.** The site's version stamp is read from `Cargo.toml` at build time (it said 0.16.6), the language count is the manifest's 114 everywhere (the site said 103), "New in this release: v0.15.0" now reads "Shipped in v0.15.0", and the copy separates memory (what happened, what you told it) from knowledge (what it learned from your code and docs). The README retires "the wicked loop" for the four-layer platform and drops the stale 0.15.0 test count. The `wicked-estate` crate description takes effect on the next publish.
+
+## [0.29.3] — 2026-10-15
+
+Patch: a diagnostic line no longer kills the host thread that writes it (#335).
+
+### Fixed
+- **A diagnostic line no longer kills the thread that writes it (#333, wicked-core#957).** std's
+  `eprintln!` panics when the write to stderr fails. A Node host (wicked-crew loading wicked-core
+  through its napi addon, which links these crates) hands the process a non-blocking stderr pipe;
+  when its reader lags, the write fails with EAGAIN and the logging thread dies, with the panic
+  message lost the same way. The library crates now shadow the macro at their roots (store, memory,
+  retrieve, observe, extract, overlay, resolve, and the `wicked-estate` lib): the same line is
+  written, and dropped when stderr refuses it. The model2vec/FastEmbedder fallback when the memory
+  store opens offline is the path hosts hit most. Binaries and unit tests keep std's macro. A
+  workspace test fails when a library crate calls `eprintln!` without the shadow.
+
 ## [0.29.2] — 2026-10-11
 
 Patch: the last consolidation leaks from the codex re-review of #329.

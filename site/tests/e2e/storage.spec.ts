@@ -1,28 +1,23 @@
 import { test, expect } from '@playwright/test';
 import { clickUntil } from './helpers';
 
-// Storage (#storage) — segmented toggle switches the whole panel between the
-// SQLite (solo) and PostgreSQL (shared team, WICKED_RUNTIME profile) views.
+// Storage (#storage): the toggle switches the table between SQLite (solo) and Postgres (team).
 
-test('storage segmented toggle switches SQLite and PostgreSQL views', async ({ page }) => {
+test('storage toggle switches SQLite and PostgreSQL views', async ({ page }) => {
   await page.goto('/');
   const section = page.locator('#storage');
   await section.scrollIntoViewIfNeeded();
 
-  const cmd = section.locator('.font-mono').filter({ hasText: 'wicked-estate index' });
-  await expect(cmd).toHaveText(/graph\.db/); // SQLite is the default
+  const cmd = section.locator('[data-storage-cmd]');
+  await expect(cmd).toHaveText(/graph\.db/);
 
   const pgBtn = section.locator('button.seg').filter({ hasText: 'PostgreSQL' });
   await clickUntil(pgBtn, async () => /WICKED_RUNTIME=team/.test((await cmd.textContent()) ?? ''));
-
-  // the team view is the WICKED_RUNTIME profile story
   await expect(pgBtn).toHaveAttribute('data-on', 'true');
-  await expect(section.getByText('WICKED_STORE_URL=postgres://team/graph', { exact: false })).toBeVisible();
-  await expect(section.getByText('concurrent — the whole team writes')).toBeVisible();
-  await expect(section.getByText('--features postgres', { exact: false })).toBeVisible();
+  await expect(section).toContainText('the whole team, concurrently');
+  await expect(section).toContainText('refuses to start rather than fall back');
 
-  // and back to SQLite
   await section.locator('button.seg').filter({ hasText: 'SQLite' }).click();
   await expect(cmd).toHaveText(/graph\.db/);
-  await expect(section.getByText('single-writer — no daemon, no races')).toBeVisible();
+  await expect(section).toContainText('one writer, no daemon');
 });

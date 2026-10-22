@@ -27,7 +27,7 @@ pub use proposal::{ApproveOutcome, Proposal, ProposalState, valid_kind_type};
 pub use reason::{Extracted, heuristic_extract, heuristic_same_entity, heuristic_summary};
 pub use recall::{Candidate, budget_pack, rrf_fuse};
 pub use salience::{Salience, decay, p50, salience, wilson_lower_bound};
-pub use scope::{Scope, ScopeParseError};
+pub use scope::{OPERATOR_SCOPE_DEFAULT, OPERATOR_SCOPE_KIND, Scope, ScopeParseError};
 
 /// The five memory tiers. Regions of one graph + lifecycle policy (not separate stores).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -116,7 +116,7 @@ fn class_of(s: &str) -> KClass {
     }
 }
 
-/// The 5 knowledge tools with JSON-Schema input definitions (`tools/list`).
+/// The 7 knowledge tools with JSON-Schema input definitions (`tools/list`).
 pub fn tool_defs() -> Value {
     json!([
         {

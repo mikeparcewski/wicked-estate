@@ -3,6 +3,20 @@
 //! Sends spans, metrics, and logs to an OTLP HTTP collector endpoint
 //! using the JSON encoding format over blocking HTTP.
 
+// (estate#333, wicked-core#957) A diagnostic line never kills the thread that writes it. std's
+// `eprintln!` PANICS when the write fails, and a Node host (wicked-crew loading wicked-core through
+// its napi addon, which links this crate) hands the process a stderr that is a non-blocking pipe:
+// when the reader lags, the write fails with EAGAIN and the thread dies with no trace. This
+// crate-wide shadow (textual scope: every module declared below) writes the same line and drops it
+// when stderr refuses it. Unit tests keep std's macro, whose output the test harness captures.
+#[cfg(not(test))]
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        use ::std::io::Write as _;
+        let _ = ::std::writeln!(::std::io::stderr(), $($arg)*);
+    }};
+}
+
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 

@@ -13,6 +13,21 @@
 //! predicate (`path_in_prefix`, the one erase/coverage use) so descendant-scoped memories —
 //! e.g. imported leaf scopes like `brain:wicked-garden/doc:<id>` — are recallable from above.
 
+// (estate#333, wicked-core#957) A diagnostic line never kills the thread that writes it. std's
+// `eprintln!` PANICS when the write fails, and a Node host (wicked-crew loading wicked-core through
+// its napi addon, which links this crate) hands the process a stderr that is a non-blocking pipe:
+// when the reader lags, the write fails with EAGAIN and the thread dies with no trace. This
+// crate-wide shadow (textual scope: every module declared below) writes the same line and drops it
+// when stderr refuses it. Unit tests keep std's macro, whose output the test harness captures.
+// Its only diagnostics are the embedder fallbacks, so the shadow exists exactly when those calls do.
+#[cfg(all(not(test), any(feature = "semantic", feature = "semantic-bge")))]
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        use ::std::io::Write as _;
+        let _ = ::std::writeln!(::std::io::stderr(), $($arg)*);
+    }};
+}
+
 use wicked_estate_core::{
     Direction, Edge, EdgeKind, NodeKind, ResolutionTier, SymbolId, SymbolQuery,
 };
@@ -147,7 +162,8 @@ impl RecallMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopeFilter<'a> {
     /// Inheritance (the default): memories at the query scope or an ANCESTOR of it — a
-    /// leaf-scoped query also sees broader/root-scoped memories.
+    /// leaf-scoped query also sees broader/root-scoped memories — plus every OPERATOR memory
+    /// (`operator:<id>`, how the operator works), which applies under every scope.
     Ancestors(&'a Scope),
     /// Subtree-inclusive (the `memory.erase`/`memory.coverage` direction, `path_in_prefix`):
     /// memories whose scope equals the prefix or DESCENDS from it (`""` = the root subtree =
@@ -164,7 +180,11 @@ impl ScopeFilter<'_> {
     /// graph-domain predicate and stays `''` for memory nodes.
     fn admits(&self, mem_scope: &Scope) -> bool {
         match self {
-            ScopeFilter::Ancestors(query_scope) => mem_scope.is_ancestor_of(query_scope),
+            // An operator memory (`operator:<id>`) is about the person, not a project: every
+            // scoped recall inherits it, as it inherits the root.
+            ScopeFilter::Ancestors(query_scope) => {
+                mem_scope.is_ancestor_of(query_scope) || mem_scope.is_operator()
+            }
             // Allocation-free segment walk (this runs per candidate in the rerank loop) —
             // exact `path_in_prefix` semantics for parse-normalized scopes, see Scope::path_in_prefix.
             ScopeFilter::Subtree(prefix) => mem_scope.path_in_prefix(prefix),

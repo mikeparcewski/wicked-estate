@@ -1,29 +1,30 @@
 import { useState, useEffect, useRef } from 'react'
 
 /* ────────────────────────────────────────────────────────────────────────────
-   wicked-estate — THE FOUNDATION · the system of record.
+   wicked-estate (we.wickedagile.com): memory and knowledge for coding agents,
+   structured and unstructured.
 
-   ROLE · estate is the foundation plane of the wicked platform: code graph +
-   memory + knowledge in ONE binary (30 MCP tools across 3 domains). It is the
-   record every plane (crew · garden · studio) reads before it acts and writes
-   after it's done — every plane reads and writes it through its contract, never
-   around it. Steering doctrine projects into it as citable rules; governed
-   knowledge lands through it (agents propose, humans promote).
+   Shape: hook + a working query playground → three stores → injected edges and
+   confidence → everything an agent can call (an explorer, not a wall) → solo or
+   shared storage → (SameGarden, in index.astro) → get started.
 
-   CONCEPT · "read the record." One durable body you read like a geologist
-   reads a drill core: five bands (code graph · injected edges · memory ·
-   knowledge · provenance), every band keyed to one stable symbol identity,
-   every fact stamped with confidence + provenance. The signature motion is a
-   DRILL that reads the core — sections demo themselves before you touch them.
-
-   Grounded to 0.16.6 (crates.io): 103 wired tree-sitter languages
-   (languages-as-data — 114 in the manifest), ExtraEdge TOML rules injecting
-   the edges grep never sees (event→consumer, command→agent), every edge
-   {confidence, provenance, resolved_by}, memory scopes with subtree
-   recall/erase, hybrid RRF retrieval with a public parity bench
-   (overall r@10 0.849 vs 0.437 for the FTS system it replaced), SQLite by
-   default with the WICKED_RUNTIME team profile seam to shared Postgres.
+   ACCURACY (estate 0.30.0), each grounded in the repo:
+   - MCP tools: 12 graph tools always listed + SemanticSearch when embeddings are
+     wired; 7 memory + 4 proposal tools; 7 knowledge tools = 30
+     (crates/wicked-estate-mcp/src/lib.rs, src/tools/*.rs).
+   - Tier confidences: ResolutionTier::default_confidence,
+     crates/wicked-estate-core/src/edge.rs.
+   - Injected edges: ExtraEdgeExtractor, plain-TOML rules, tier Heuristic (0.5),
+     provenance = the rule name (crates/wicked-estate-extract/src/extra_edge.rs).
+   - Memory kinds working|episode|entity|fact|skill|archive, scoped, erasable by
+     subtree; operator memories apply across projects (0.30.0).
+   - The playground is scripted: it shows the shape of real answers, it never
+     runs a query.
    ──────────────────────────────────────────────────────────────────────────── */
+
+// The hook. Two strings, so the operator can swap a variant in one place.
+const HEADLINE = 'Memory and knowledge for your coding agents.'
+const SUBLINE = 'Your code as a graph, what happened and what you told it, and what your docs say: one local binary your agents query over MCP.'
 
 function GitHubIcon({ size = 16 }: { size?: number }) {
   return (
@@ -33,1393 +34,479 @@ function GitHubIcon({ size = 16 }: { size?: number }) {
   )
 }
 
-// respects the OS reduced-motion setting for every auto-animation on the page
-function useReducedMotion() {
-  const [reduced, setReduced] = useState(false)
-  useEffect(() => {
-    const mq = window.matchMedia('(prefers-reduced-motion: reduce)')
-    setReduced(mq.matches)
-    const on = () => setReduced(mq.matches)
-    mq.addEventListener('change', on)
-    return () => mq.removeEventListener('change', on)
-  }, [])
-  return reduced
-}
-
-// tracks whether the viewport is phone-sized, so components can swap the tuned
-// desktop layout for a legible stacked/simplified mobile treatment. Initial state
-// is `false` (matches the SSR / first-hydration render — desktop), then the effect
-// corrects it on mount, so there is no hydration mismatch.
-function useIsMobile(maxWidth = 760) {
-  const [isMobile, setIsMobile] = useState(false)
-  useEffect(() => {
-    if (typeof window === 'undefined' || !window.matchMedia) return
-    const mq = window.matchMedia(`(max-width: ${maxWidth}px)`)
-    const on = () => setIsMobile(mq.matches)
-    on()
-    // Safari < 14 / older iOS lack addEventListener on MediaQueryList.
-    if (mq.addEventListener) {
-      mq.addEventListener('change', on)
-      return () => mq.removeEventListener('change', on)
-    }
-    mq.addListener(on)
-    return () => mq.removeListener(on)
-  }, [maxWidth])
-  return isMobile
-}
-
-// ── Strata metadata: the five bands of the record ───────────────────────────
-type StratumId = 'graph' | 'injected' | 'memory' | 'knowledge' | 'provenance'
-
-const STRATA: { id: StratumId; no: string; name: string; depth: string; tools: string; copy: string }[] = [
-  { id: 'graph',      no: '01', name: 'Code graph',     depth: '−0.0m',  tools: '103 languages',
-    copy: 'Symbols, calls, imports, heritage — tree-sitter extraction across 103 wired languages. Languages are data, not code: a new one is a manifest row + a query file, zero core change.' },
-  { id: 'injected',   no: '02', name: 'Injected edges', depth: '−4.2m',  tools: 'ExtraEdge TOML',
-    copy: 'The relationships grep never sees — event→consumer, command→agent — injected by plain-TOML ExtraEdge rules. A new domain edge type is a rule block, zero Rust; blast-radius crosses the event-bus boundary.' },
-  { id: 'memory',     no: '03', name: 'Memory',         depth: '−7.8m',  tools: 'scoped',
-    copy: 'Episodic, semantic, procedural — captured under scopes, recalled on a token budget, distilled by reflection. Erasable by subtree: one call hard-deletes everything under a scope prefix. Erasability is governance.' },
-  { id: 'knowledge',  no: '04', name: 'Knowledge',      depth: '−11.5m', tools: 'RRF-fused',
-    copy: 'Docs and wiki as retrievable nodes with typed, confidence-scored relations — linked to the code symbols they describe. Hybrid FTS + vector recall, RRF-fused, benchmarked in the open.' },
-  { id: 'provenance', no: '05', name: 'Provenance',     depth: '−14.0m', tools: 'every edge',
-    copy: 'Every edge carries {confidence, provenance, resolved_by}. When tiers disagree, the highest wins and the losers are superseded — a 0.3 tag-scan guess is never handed to an agent as a 1.0 fact.' },
-]
-
-// ── Section shell ────────────────────────────────────────────────────────────
-function Section({
-  id, solid = false, children, className = '',
-}: { id?: string; solid?: boolean; children: React.ReactNode; className?: string }) {
+function Section({ id, solid = false, hero = false, children }: { id?: string; solid?: boolean; hero?: boolean; children: React.ReactNode }) {
   return (
-    <section
-      id={id}
-      className={`strata${solid ? ' strata-solid' : ''} px-7 ${className}`}
-    >
-      {children}
+    <section id={id} className={`strata${solid ? ' strata-solid' : ''}${hero ? ' strata--hero' : ''} px-4 sm:px-7`}>
+      <div className="max-w-6xl mx-auto w-full">{children}</div>
     </section>
   )
 }
 
-// full-container-width, left-aligned header for sections whose title sits ON TOP of content
-function TopHead({ kicker, title, children }: { kicker: string; title: React.ReactNode; children?: React.ReactNode }) {
+function Head({ title, sub }: { title: React.ReactNode; sub?: React.ReactNode }) {
   return (
-    <div className="mb-8 w-full text-left">
-      <span className="kicker">{kicker}</span>
-      <h2 className="mt-4 font-display text-3xl sm:text-[2.7rem] font-black text-ink w-full leading-[0.98]">{title}</h2>
-      {children && <div className="mt-4 text-ink w-full font-sans leading-relaxed max-w-none">{children}</div>}
+    <div className="mb-7 w-full text-left">
+      <h2 className="font-display text-3xl sm:text-[2.5rem] font-black text-ink leading-[0.98]">{title}</h2>
+      {sub && <p className="mt-3 text-base sm:text-lg text-muted font-sans max-w-3xl leading-snug">{sub}</p>}
     </div>
   )
 }
 
-// ── 1 · HERO ────────────────────────────────────────────────────────────────
-function Hero() {
-  const reduced = useReducedMotion()
-  const [activeRow, setActiveRow] = useState(0)
-  const rowsRef = useRef<(HTMLDivElement | null)[]>([])
-  const [underline, setUnderline] = useState({ top: 0, left: 0, width: 0 })
+// ── 1 · Hook + the query playground ─────────────────────────────────────────
+type Store = 'graph' | 'memory' | 'knowledge'
+interface GEdge { from: string; to: string; via: string; tier: string; conf: number; where: string; injected?: boolean }
+interface Mem { text: string; kind: string; how: 'told' | 'witnessed'; scope: string; when: string; about?: string }
+interface Know { text: string; source: string; linked?: string }
+interface Question { id: string; ask: string; calls: string[]; first: Store; center: string; graph: GEdge[]; memory: Mem[]; knowledge: Know[]; grep?: string }
 
-  // step the underline block-by-block — dwell on each strata row, then advance
-  useEffect(() => {
-    if (reduced) return
-    const t = setInterval(() => setActiveRow(a => (a + 1) % STRATA.length), 1600)
-    return () => clearInterval(t)
-  }, [reduced])
+const BLAST: GEdge[] = [
+  { from: 'checkout()', to: 'applyDiscount', via: 'calls', tier: 'Parsed', conf: 1.0, where: 'src/checkout/checkout.ts:41' },
+  { from: 'POST /price', to: 'applyDiscount', via: 'calls', tier: 'SCIP', conf: 1.0, where: 'src/routes/price.ts:18' },
+  { from: 'sendReceipt()', to: 'applyDiscount', via: 'consumes order.paid', tier: 'Heuristic', conf: 0.5, where: 'rule: event-bus-consume', injected: true },
+  { from: 'referralFlow()', to: 'applyDiscount', via: 'calls?', tier: 'Tags', conf: 0.3, where: 'tag-scan guess, unverified' },
+]
+const WHY: Mem[] = [
+  { text: 'A discount never takes a total below zero. Two stacked coupons produced a negative total in March and refunded the customer.', kind: 'fact', how: 'told', scope: 'project:shop', when: '2026-03-14', about: 'applyDiscount' },
+  { text: 'Run r-412 added the clamp and a test for it after the incident.', kind: 'episode', how: 'witnessed', scope: 'project:shop', when: '2026-03-15', about: 'applyDiscount' },
+]
+const STACK: Know[] = [
+  { text: 'Only one percentage coupon applies per cart. Fixed-amount coupons stack, up to the cart total.', source: 'docs/pricing.md › Coupons › Stacking', linked: 'applyDiscount' },
+  { text: 'Coupon rules live in one function so the price route and checkout cannot disagree.', source: 'docs/adr/ADR-014-discounts.md › Decision', linked: 'applyDiscount' },
+]
 
-  // place the underline at the base of the active block; re-measure on resize
-  useEffect(() => {
-    const measure = () => {
-      const el = rowsRef.current[activeRow]
-      if (!el) return
-      setUnderline({ top: el.offsetTop + el.offsetHeight - 2, left: el.offsetLeft, width: el.offsetWidth })
-    }
-    measure()
-    window.addEventListener('resize', measure)
-    return () => window.removeEventListener('resize', measure)
-  }, [activeRow])
+const QUESTIONS: Question[] = [
+  { id: 'blast', ask: 'What breaks if I change applyDiscount?', calls: ['BlastRadius { symbol: "applyDiscount" }'], first: 'graph', center: 'applyDiscount',
+    graph: BLAST, memory: [], knowledge: [], grep: 'grep finds 2 call sites. The graph finds a third through an event.' },
+  { id: 'event', ask: 'Who reacts when an order is paid?', calls: ['TraverseGraph { symbol: "topic:order.paid" }'], first: 'graph', center: 'order.paid',
+    graph: [
+      { from: 'checkout()', to: 'order.paid', via: 'emits', tier: 'Heuristic', conf: 0.5, where: 'rule: event-bus-emit', injected: true },
+      { from: 'sendReceipt()', to: 'order.paid', via: 'consumes', tier: 'Heuristic', conf: 0.5, where: 'rule: event-bus-consume', injected: true },
+      { from: 'updateLedger()', to: 'order.paid', via: 'consumes', tier: 'Heuristic', conf: 0.5, where: 'rule: event-bus-consume', injected: true },
+    ], memory: [], knowledge: [], grep: 'No function calls another here. A TOML rule adds these edges at index time.' },
+  { id: 'why', ask: 'Why can a discount never go below zero?', calls: ['memory.recall { query: "discount below zero", scope: "project:shop" }'], first: 'memory', center: 'applyDiscount',
+    graph: [], memory: WHY, knowledge: [] },
+  { id: 'stack', ask: 'Can two coupons stack?', calls: ['knowledge.recall { query: "coupon stacking" }'], first: 'knowledge', center: 'applyDiscount',
+    graph: [], memory: [], knowledge: STACK },
+  { id: 'all', ask: 'Everything about applyDiscount', calls: ['BlastRadius', 'memory.recall', 'knowledge.recall_about_code'], first: 'graph', center: 'applyDiscount',
+    graph: BLAST, memory: WHY, knowledge: STACK },
+]
 
+const STORE_LABEL: Record<Store, { name: string; kind: string }> = {
+  graph: { name: 'Code graph', kind: 'structured' },
+  memory: { name: 'Memory', kind: 'told or witnessed' },
+  knowledge: { name: 'Knowledge', kind: 'read from your docs' },
+}
+
+function confClass(c: number) { return c >= 0.8 ? 'q-conf q-conf--hi' : c >= 0.5 ? 'q-conf q-conf--mid' : 'q-conf q-conf--lo' }
+
+function GraphView({ q, showGuesses }: { q: Question; showGuesses: boolean }) {
+  const edges = q.graph.filter(e => showGuesses || e.conf >= 0.5)
+  const hidden = q.graph.length - edges.length
+  // A small radial picture: the asked-about node in the middle, its neighbours around it.
+  const W = 360, H = 150, cx = 180, cy = 75
+  const pts = q.graph.map((_, i) => {
+    const a = (Math.PI * 2 * i) / q.graph.length - Math.PI / 2
+    return { x: cx + Math.cos(a) * 124, y: cy + Math.sin(a) * 54 }
+  })
   return (
-    <Section className="strata--hero !pt-24 overflow-hidden">
-      <div className="max-w-6xl mx-auto w-full grid lg:grid-cols-[1.08fr_0.92fr] gap-14 items-center">
-        {/* Left — the thesis, committed in sentence one */}
-        <div className="text-left">
-          <span className="kicker">wicked-estate · the foundation · 0.16.6 · crates.io</span>
-          <h1 className="mt-4 font-display font-black text-ink text-[clamp(2.1rem,10vw,3rem)] sm:text-6xl lg:text-[4.2rem] leading-[0.92]" style={{ fontStretch: '112%' }}>
-            Code graph.<br />Memory.<br />Knowledge.<br />
-            <span style={{ color: 'var(--accent)' }}>One binary.</span>
-          </h1>
-          <p className="mt-5 text-lg text-muted leading-relaxed max-w-xl font-sans">
-            The <span className="text-ink">system of record</span> for your codebase — the record every plane
-            (crew · garden · studio) <span className="text-ink">queries before it acts and writes after</span>. One
-            local-first MCP server,{' '}
-            <span className="text-ink">30 tools across 3 domains</span>. What breaks if you change it, the decision
-            behind it, the doc that explains it — including the{' '}
-            <span className="text-ink">injected edges grep never sees</span>. Every fact stamped with confidence and
-            provenance: a heuristic is never handed to an agent as a fact.
-          </p>
-          <p className="mt-3 text-sm text-muted leading-relaxed max-w-xl font-sans">
-            Zero infrastructure by default — one SQLite file, nothing leaves your box. And it earned the job:
-            its hybrid retrieval is <span className="text-ink">parity-benchmarked in the open</span> against the
-            dedicated search system it replaced.
-          </p>
-          <div className="mt-5 flex flex-col sm:flex-row gap-3">
-            <a href="#query" className="btn-primary">Read the record ↓</a>
-            <a href="https://github.com/mikeparcewski/wicked-estate" target="_blank" rel="noreferrer" className="btn-outline">
-              <GitHubIcon /> View on GitHub
-            </a>
-          </div>
-        </div>
-
-        {/* Right — a live drill core, always scanning (the concept in one glance) */}
-        <div className="relative">
-          <div className="rock-panel p-0">
-            <div className="flex items-center justify-between px-5 py-3 border-b border-hairline-strong">
-              <span className="depth">CORE LOG · applyDiscount</span>
-              <span className="tag tag-accent">one identity</span>
-            </div>
-            <div className="relative overflow-hidden">
-              {/* a single scan line that STEPS down the core, settling under one
-                  block at a time — a moving underline that pauses on each block */}
-              {!reduced && (
-                <div className="drill-underline" style={{ top: underline.top, left: underline.left, width: underline.width }} />
-              )}
-              {STRATA.map((s, i) => {
-                const on = i === activeRow
-                return (
-                  <div
-                    key={s.id}
-                    ref={el => { rowsRef.current[i] = el }}
-                    onMouseEnter={() => setActiveRow(i)}
-                    className="flex items-center gap-4 px-5 py-4 border-b border-hairline last:border-b-0 transition-colors duration-300"
-                    style={{ background: on
-                      ? 'color-mix(in oklab, var(--accent) 10%, transparent)'
-                      : (i % 2 ? 'color-mix(in oklab, var(--ink) 3%, transparent)' : 'transparent') }}
-                  >
-                    <span className="depth w-14 shrink-0">{s.depth}</span>
-                    <span className="font-mono text-[0.6rem] text-faint w-6 shrink-0">{s.no}</span>
-                    <span className="font-display font-black text-ink text-sm sm:text-base flex-1" style={{ fontStretch: '108%' }}>
-                      {s.name}
-                    </span>
-                    <span className="tag hidden sm:inline">{s.tools}</span>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-          <p className="mt-3 text-center font-mono text-[0.6rem] text-faint tracking-wide">
-            One continuous record — five bands, one symbol identity.
-          </p>
-        </div>
-      </div>
-    </Section>
-  )
-}
-
-// ── 2 · THE RECORD EVERY PLANE READS — shown as the IDE an agent works it in ────
-// The centerpiece. estate is the record crew/garden/studio query before they act
-// and write after; here it's shown the way an agent works it.
-// The agent right-clicks a symbol → a context menu of real IDE
-// commands → one runs → the result lands in a tabbed dock (Code intelligence ·
-// Memory · Knowledge). Clicking a class shows all its details at once. The dock
-// proves the record gives an agent EVERYTHING — code intelligence (callers /
-// blast-radius / requirement / definition), recalled Memory (decisions · patterns ·
-// gotchas, with scope + salience + provenance) and Knowledge (the wiki, RRF-fused).
-// Every result carries confidence + provenance; the dial gates the low-confidence /
-// low-salience ones. The auto-play is a storyboard of these gestures — a visible
-// cursor + the menu opening — driven by an IntersectionObserver; any interaction
-// takes control (driving=true) and stops the demo.
-
-type Prov = 'Parsed' | 'SCIP' | 'Injected' | 'ImportMap' | 'Tags' | 'git' | 'Memory' | 'Knowledge' | 'annotation'
-interface Fact { text: string; detail?: string; conf: number; prov: Prov; advisory?: boolean }
-type SymId = 'PricingService' | 'applyDiscount'
-type DockTab = 'code' | 'memory' | 'knowledge'
-// the record's answer to one code-intelligence command
-interface Peek { title: string; sub: string; facts: Fact[]; wiki?: string }
-// a context-menu / command-palette command and where its result lands
-interface Command { id: string; label: string; note?: string; lands: DockTab; peek?: Peek; memId?: string }
-// a token in the code; `sym` set => it's a clickable symbol
-interface Token { t: string; sym?: SymId; k?: string }
-// one recalled memory node — decision / pattern / gotcha
-interface Memory { id: string; kind: 'decision' | 'pattern' | 'gotcha'; text: string; scope: string; salience: number; prov: string; because: string; superseded?: boolean }
-// one recalled knowledge (wiki) node
-interface Know { id: string; title: string; section: string; detail: string; conf: number }
-
-// The working file shown in the editor (each line is a token list; symbols are buttons).
-const CODE: Token[][] = [
-  [{ t: 'export ', k: 'kw' }, { t: 'class ', k: 'kw' }, { t: 'PricingService', sym: 'PricingService', k: 'nm' }, { t: ' {' }],
-  [{ t: '  ' }, { t: 'applyDiscount', sym: 'applyDiscount', k: 'fn' }, { t: '(cart, coupon) {' }],
-  [{ t: '    ' }, { t: 'const ', k: 'kw' }, { t: 'price = ' }, { t: 'cartTotal', k: 'fn' }, { t: '(cart)' }],
-  [{ t: '    ' }, { t: 'return ', k: 'kw' }, { t: 'clamp', k: 'fn' }, { t: '(price - coupon.value, ' }, { t: '0', k: 'nm' }, { t: ')' }],
-  [{ t: '  }' }],
-  [{ t: '}' }],
-]
-
-// The IDE commands (context menu = command palette). Most land code-intelligence results
-// in the Code tab; "Recall decisions" lands in Memory, "Search knowledge" in Knowledge.
-const COMMANDS: Command[] = [
-  { id: 'definition', label: 'Peek definition', note: 'F12', lands: 'code', peek: {
-    title: 'Peek definition', sub: 'PricingService.applyDiscount',
-    facts: [
-      { text: 'applyDiscount(cart, coupon) → number', detail: 'checkout/PricingService.ts:2 · exported', conf: 1.0, prov: 'Parsed' },
-      { text: 'returns clamp(price − coupon.value, 0)', detail: 'pure · does not mutate cart', conf: 1.0, prov: 'SCIP' },
-    ],
-  } },
-  { id: 'callers', label: 'Find all callers', note: '⇧F12', lands: 'code', peek: {
-    title: 'Find all callers', sub: 'applyDiscount · 3 found',
-    facts: [
-      { text: 'checkout() → applyDiscount', detail: 'checkout/Checkout.ts:41', conf: 1.0, prov: 'SCIP' },
-      { text: 'api/price route → applyDiscount', detail: 'routes/price.ts:18', conf: 1.0, prov: 'SCIP' },
-      { text: 'referralFlow → applyDiscount', detail: 'tag-scan guess · cross-file, unverified', conf: 0.3, prov: 'Tags' },
-    ],
-  } },
-  { id: 'references', label: 'Find all references', note: 'blast radius', lands: 'code', peek: {
-    title: 'Find all references · blast radius', sub: 'what breaks if you change it',
-    facts: [
-      { text: '3 transitive dependents', detail: 'checkout · cartTotal · api/price', conf: 1.0, prov: 'SCIP' },
-      { text: 'emits wicked.shop.order.placed → 2 consumers', detail: 'injected by an ExtraEdge TOML rule · grep never sees this', conf: 1.0, prov: 'Injected' },
-      { text: 'referralFlow → applyDiscount', detail: 'tag-scan guess · cross-file, unverified', conf: 0.3, prov: 'Tags' },
-    ],
-  } },
-  { id: 'requirement', label: 'Go to requirement', note: '⌘R', lands: 'code', peek: {
-    title: 'Go to requirement', sub: 'requirement ↔ implementation', wiki: '[[Pricing Rules]] §Discounts',
-    facts: [
-      { text: 'satisfies REQ-142 · validated ✓', detail: '“coupons never exceed the cart total” · enforced', conf: 1.0, prov: 'Parsed' },
-      { text: 'validated flag flipped 2026-05', detail: 'read-only edge-history log', conf: 1.0, prov: 'git' },
-    ],
-  } },
-  { id: 'decisions', label: 'Recall decisions', note: '⌘K', lands: 'memory', memId: 'm-nostack' },
-  { id: 'policy', label: 'Show governing policy', note: '⌘I', lands: 'code', peek: {
-    title: 'Show governing policy', sub: 'infra + policy, cross-domain',
-    facts: [
-      { text: 'governed by rule-set PricingPolicy', detail: 'ODM ruleset ↔ code edge · same graph', conf: 0.9, prov: 'Parsed' },
-      { text: 'reads dataset PRICING.TBL via api/price', detail: 'code ↔ dataset edge', conf: 0.85, prov: 'ImportMap' },
-    ],
-  } },
-  { id: 'annotations', label: 'Annotations', note: '⌘/', lands: 'code', peek: {
-    title: 'Annotations', sub: 'typed notes · survive re-index',
-    facts: [
-      { text: 'assumption: max one coupon per cart', detail: 'advisory · survives re-index', conf: 0.7, prov: 'annotation', advisory: true },
-      { text: 'note: pricing last audited 2026-05', detail: 'typed note', conf: 0.6, prov: 'annotation', advisory: true },
-    ],
-  } },
-  { id: 'knowledge', label: 'Search knowledge', note: '⌘⇧F', lands: 'knowledge' },
-]
-
-// Clicking the class opens the "all details" peek — everything the record knows, at once.
-const DETAILS: Peek = {
-  title: 'PricingService — all details', sub: 'everything the record knows, at once', wiki: '[[Pricing Rules]] §Discounts',
-  facts: [
-    { text: 'class PricingService · 1 public method', detail: 'checkout/PricingService.ts:1', conf: 1.0, prov: 'Parsed' },
-    { text: 'satisfies REQ-142 · validated ✓', detail: 'coupons never exceed the cart total', conf: 1.0, prov: 'Parsed' },
-    { text: '3 callers · 3 transitive dependents', detail: 'checkout · api/price · cartTotal', conf: 1.0, prov: 'SCIP' },
-    { text: 'emits wicked.shop.order.placed → 2 consumers', detail: 'ExtraEdge rule · grep never sees this', conf: 1.0, prov: 'Injected' },
-    { text: 'decision: coupons never stack', detail: 'recalled from memory · scope project:acme', conf: 0.92, prov: 'Memory' },
-    { text: 'governed by rule-set PricingPolicy', detail: 'ODM ruleset · reads PRICING.TBL', conf: 0.9, prov: 'Parsed' },
-    { text: 'assumption: max one coupon per cart', detail: 'advisory · survives re-index', conf: 0.7, prov: 'annotation', advisory: true },
-  ],
-}
-
-// The Memory panel — recalled memory relevant to the code in view. Salience acts
-// as the confidence the dial gates; the superseded decision falls below the default cutoff.
-const MEMORIES: Memory[] = [
-  { id: 'm-nostack', kind: 'decision', text: 'Coupons never stack — one per cart', scope: 'project:acme', salience: 0.92, prov: 'episodic · spike 2026-06', because: 'applyDiscount' },
-  { id: 'm-clamp', kind: 'pattern', text: 'Discount math clamps at 0 — never a negative total', scope: 'project:acme', salience: 0.8, prov: 'semantic · reflected 2026-05', because: 'applyDiscount' },
-  { id: 'm-tz', kind: 'gotcha', text: 'PRICING.TBL is timezone-naive — normalize before compare', scope: 'project:acme', salience: 0.68, prov: 'episodic · spike 2026-04', because: 'api/price' },
-  { id: 'm-old', kind: 'decision', text: 'Stack up to 2 coupons — superseded by REQ-142', scope: 'project:acme', salience: 0.34, prov: 'episodic · spike 2025-11', because: 'applyDiscount', superseded: true },
-]
-
-// A touch of Knowledge — the wiki, hybrid FTS + vector, RRF-fused.
-const KNOWLEDGE: Know[] = [
-  { id: 'k-rules', title: 'Pricing Rules', section: '§Discounts', detail: 'coupon eligibility + stacking policy · hybrid FTS+vector, RRF-fused', conf: 0.9 },
-  { id: 'k-flow', title: 'Checkout Flow', section: '§Totals', detail: 'where applyDiscount sits in the order lifecycle', conf: 0.85 },
-  { id: 'k-adr', title: 'ADR-014 Coupon Policy', section: '§Decision', detail: 'why stacking was dropped — links REQ-142', conf: 0.88 },
-]
-
-// The auto-play storyboard: real IDE gestures, ~2.6s each. A visible cursor moves to the
-// target; a right-click opens the menu and one command runs; a class click opens details.
-// The result lands in the matching dock tab — so the tour shows code · memory · knowledge.
-interface Gesture { target: SymId; kind: 'menu' | 'click'; run?: string }
-const STORYBOARD: Gesture[] = [
-  { target: 'applyDiscount', kind: 'menu', run: 'callers' },
-  { target: 'PricingService', kind: 'click' },
-  { target: 'applyDiscount', kind: 'menu', run: 'requirement' },
-  { target: 'applyDiscount', kind: 'menu', run: 'decisions' },
-  { target: 'applyDiscount', kind: 'menu', run: 'references' },
-  { target: 'applyDiscount', kind: 'menu', run: 'knowledge' },
-]
-
-const DOCK_TABS: { id: DockTab; label: string }[] = [
-  { id: 'code', label: 'Code intelligence' },
-  { id: 'memory', label: 'Memory' },
-  { id: 'knowledge', label: 'Knowledge' },
-]
-
-// provenance legend for the status bar
-const PROV_LEGEND: { prov: string; note: string; accent?: boolean }[] = [
-  { prov: 'Parsed', note: 'AST · 1.0', accent: true },
-  { prov: 'SCIP', note: 'indexer · 1.0', accent: true },
-  { prov: 'Injected', note: 'ExtraEdge rule', accent: true },
-  { prov: 'Memory', note: 'recalled · salience' },
-  { prov: 'Knowledge', note: 'wiki · RRF' },
-  { prov: 'Tags', note: 'tag-scan · 0.3' },
-]
-
-function confColor(conf: number) {
-  if (conf >= 1.0) return 'var(--accent)'
-  if (conf >= 0.8) return 'var(--ink)'
-  if (conf >= 0.6) return 'var(--muted)'
-  return 'var(--faint)'
-}
-
-function cmdById(id: string | undefined) { return COMMANDS.find(c => c.id === id) }
-
-// a small pointer cursor for the auto-play gestures
-function CursorArrow() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 2l15 8.5-6.4 1.4L9.6 20 4 2z" fill="var(--ink)" stroke="var(--canvas)" strokeWidth="1.4" strokeLinejoin="round" />
-    </svg>
-  )
-}
-
-// one provenance chip + confidence value, reused across code / memory / knowledge rows
-function Chips({ prov, conf, advisory, on, injected }: { prov: string; conf: number; advisory?: boolean; on: boolean; injected?: boolean }) {
-  return (
-    <span className="ide-line-chips">
-      <span className="prov" style={conf >= 1.0 || injected ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>{prov}</span>
-      <span className="prov tabular-nums" style={{ color: confColor(conf) }}>{conf.toFixed(2)}</span>
-      {advisory && <span className="prov">adv</span>}
-      {!on && <span className="prov" style={{ color: 'var(--faint)' }}>below cutoff</span>}
-    </span>
-  )
-}
-
-function AgentIDE() {
-  const reduced = useReducedMotion()
-  const isMobile = useIsMobile()
-  const [driving, setDriving] = useState(false)
-  const [threshold, setThreshold] = useState(0.55)
-  const [step, setStep] = useState(0)
-  const [inView, setInView] = useState(false)
-  const [cursorAt, setCursorAt] = useState<SymId | null>(STORYBOARD[0].target)
-  const [menuOpen, setMenuOpen] = useState(false)
-  const [menuRun, setMenuRun] = useState<string | null>(null)
-  const [codePeek, setCodePeek] = useState<Peek>(cmdById(STORYBOARD[0].run)?.peek ?? DETAILS)
-  const [dockTab, setDockTab] = useState<DockTab>('code')
-  const [memHighlight, setMemHighlight] = useState<string | null>(null)
-
-  // apply a command's result: land it in the right dock tab
-  const applyCommand = (id: string) => {
-    const c = cmdById(id); if (!c) return
-    setDockTab(c.lands)
-    if (c.lands === 'code' && c.peek) { setCodePeek(c.peek); setMemHighlight(null) }
-    else if (c.lands === 'memory') setMemHighlight(c.memId ?? null)
-    else setMemHighlight(null)
-  }
-
-  // ── AUTO-PLAY · a storyboard of real IDE gestures (only while on screen) ─────
-  useEffect(() => {
-    if (driving || reduced || !inView || isMobile) return
-    const g = STORYBOARD[step]
-    setCursorAt(g.target); setMenuOpen(false); setMenuRun(null)
-    const timers: number[] = []
-    if (g.kind === 'menu') {
-      timers.push(window.setTimeout(() => setMenuOpen(true), 620))
-      timers.push(window.setTimeout(() => setMenuRun(g.run ?? null), 1200))
-      timers.push(window.setTimeout(() => { setMenuOpen(false); setMenuRun(null); if (g.run) applyCommand(g.run) }, 1820))
-    } else {
-      timers.push(window.setTimeout(() => { setCodePeek(DETAILS); setDockTab('code'); setMemHighlight(null) }, 980))
-    }
-    timers.push(window.setTimeout(() => setStep(s => (s + 1) % STORYBOARD.length), 2650))
-    return () => timers.forEach(clearTimeout)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, driving, reduced, inView, isMobile])
-
-  // reduced motion: no cursor / menu; show a static, representative result set
-  useEffect(() => {
-    if (reduced) { setCursorAt(null); setMenuOpen(false); setCodePeek(DETAILS); setDockTab('code') }
-  }, [reduced])
-
-  // auto-play the moment the section scrolls into view; pause when it scrolls out.
-  // Arriving shows it already cycling: entry restarts the storyboard from step 0.
-  const rootRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    const el = rootRef.current
-    if (!el || typeof IntersectionObserver === 'undefined') { setInView(true); return }
-    let fired = false
-    const io = new IntersectionObserver(([e]) => { fired = true; setInView(e.isIntersecting) }, { threshold: 0.2 })
-    io.observe(el)
-    // safety net: in a few embedded/automation contexts IO never delivers — rather than
-    // sit frozen, fall back to always-animating if no callback has arrived.
-    const t = window.setTimeout(() => { if (!fired) setInView(true) }, 1600)
-    return () => { io.disconnect(); clearTimeout(t) }
-  }, [])
-  useEffect(() => { if (inView && !driving) setStep(0) }, [inView, driving])
-
-  const takeControl = () => { setDriving(true); setCursorAt(null); setMenuOpen(false); setMenuRun(null) }
-  const runCommand = (id: string) => { takeControl(); applyCommand(id) }
-  const openMenuAt = (sym: SymId) => { setDriving(true); setMenuRun(null); setCursorAt(sym); setMenuOpen(true) }
-  const clickSymbol = (sym: SymId) => {
-    if (sym === 'PricingService') { setDriving(true); setMenuOpen(false); setMenuRun(null); setCursorAt(sym); setCodePeek(DETAILS); setDockTab('code'); setMemHighlight(null) }
-    else openMenuAt(sym)
-  }
-
-  // cursor + menu positioning: measure the target symbol within the code pane
-  const codeRef = useRef<HTMLDivElement>(null)
-  const symRefs = useRef<Record<string, HTMLElement | null>>({})
-  const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
-  useEffect(() => {
-    const host = codeRef.current
-    const el = cursorAt ? symRefs.current[cursorAt] : null
-    if (!host || !el) { setPos(null); return }
-    const hr = host.getBoundingClientRect(); const r = el.getBoundingClientRect()
-    setPos({ x: r.left - hr.left + r.width * 0.6, y: r.top - hr.top + r.height * 0.72 })
-  }, [cursorAt])
-
-  const showCursor = inView && !driving && !reduced && !!pos
-  const showMenu = menuOpen && !!pos
-
-  // per-tab live counts (gated by the dial) for the dock tab badges
-  const codeLive = codePeek.facts.filter(f => f.conf >= threshold).length
-  const memLive = MEMORIES.filter(m => m.salience >= threshold).length
-  const knowLive = KNOWLEDGE.filter(k => k.conf >= threshold).length
-  const tabCount = (id: DockTab) => id === 'code' ? codeLive : id === 'memory' ? memLive : knowLive
-  const statusTitle = dockTab === 'code' ? codePeek.title : dockTab === 'memory' ? 'Recall memory' : 'Search knowledge'
-  const statusLive = dockTab === 'code' ? codeLive : dockTab === 'memory' ? memLive : knowLive
-  const statusTotal = dockTab === 'code' ? codePeek.facts.length : dockTab === 'memory' ? MEMORIES.length : KNOWLEDGE.length
-
-  // ── confidence gutter — the dial gates every dock result. Shared by the
-  //    desktop split-pane and the mobile stacked treatment. ─────────────────
-  const gutterEl = (
-    <div className="ide-gutter">
-      <span className="ide-gutter-label">confidence ≥</span>
-      <span className="ide-gutter-val tabular-nums">{threshold.toFixed(2)}</span>
-      <input
-        type="range" min={0.3} max={1.0} step={0.05} value={threshold}
-        onChange={e => { takeControl(); setThreshold(parseFloat(e.target.value)) }}
-        onMouseDown={takeControl} onTouchStart={takeControl}
-        className="dial ide-dial" aria-label="Confidence threshold"
-      />
-      <span className="ide-gutter-ends">
-        <span>0.30 · heuristics</span>
-        <span>1.00 · SCIP only</span>
-      </span>
-    </div>
-  )
-
-  // ── the DOCK — tabbed: Code intelligence · Memory · Knowledge. Shared by both
-  //    layouts; on mobile the CSS lets its rows wrap instead of ellipsis-truncate. ─
-  const dockEl = (
-    <div className="ide-dock">
-      <div className="ide-dock-tabs" role="tablist" aria-label="Estate panels">
-        {DOCK_TABS.map(t => (
-          <button
-            key={t.id}
-            id={`ide-tab-${t.id}`}
-            role="tab"
-            aria-selected={dockTab === t.id}
-            className="ide-dock-tab"
-            data-on={String(dockTab === t.id)}
-            onClick={() => { takeControl(); setDockTab(t.id) }}
-          >
-            {t.label}
-            <span className="ide-dock-badge">{tabCount(t.id)}</span>
-          </button>
+    <div className="q-graphview">
+      <svg className="q-graph" viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`${q.center} and the ${edges.length} edges shown`}>
+        {q.graph.map((e, i) => {
+          const on = showGuesses || e.conf >= 0.5
+          return (
+            <g key={e.from} opacity={on ? 1 : 0.12}>
+              <line x1={pts[i].x} y1={pts[i].y} x2={cx} y2={cy} className={e.injected ? 'q-edge q-edge--inj' : e.conf < 0.5 ? 'q-edge q-edge--lo' : 'q-edge'} />
+              <rect x={pts[i].x - 46} y={pts[i].y - 10} width="92" height="20" rx="6" className="q-node" />
+              <text x={pts[i].x} y={pts[i].y + 4} textAnchor="middle" className="q-node-t">{e.from}</text>
+            </g>
+          )
+        })}
+        <rect x={cx - 52} y={cy - 12} width="104" height="24" rx="7" className="q-node q-node--center" />
+        <text x={cx} y={cy + 4} textAnchor="middle" className="q-node-t q-node-t--center">{q.center}</text>
+      </svg>
+      <div>
+      <ul className="q-rows" aria-label="Edges">
+        {edges.map(e => (
+          <li key={e.from} className="q-row">
+            <span className="q-row-main"><b>{e.from}</b> <span className="text-muted">{e.via}</span> {e.to}</span>
+            <span className="q-chips">
+              {e.injected && <span className="q-chip q-chip--inj">injected</span>}
+              <span className="q-chip">{e.tier}</span>
+              <span className={confClass(e.conf)}>{e.conf.toFixed(1)}</span>
+            </span>
+            <span className="q-where">{e.where}</span>
+          </li>
         ))}
-      </div>
-
-      <div className="ide-dock-body" id="ide-dock-panel" role="tabpanel" aria-labelledby={`ide-tab-${dockTab}`} key={dockTab + (dockTab === 'code' ? codePeek.title : '')}>
-        {dockTab === 'code' && (
-          <>
-            <div className="ide-dock-head">
-              <span className="ide-dock-title">{codePeek.title}</span>
-              <span className="ide-dock-sub depth">{codePeek.sub}</span>
-              {codePeek.wiki && <span className="ide-wiki-ref">{codePeek.wiki}</span>}
-            </div>
-            {codePeek.facts.map((f, i) => {
-              const on = f.conf >= threshold
-              const injected = f.prov === 'Injected'
-              return (
-                <div key={i} className="ide-line fact" data-on={String(on)}>
-                  <span className="ide-ln">{i + 1}</span>
-                  <span className="ide-line-body">
-                    <span className="ide-line-top">
-                      <span className="ide-line-text" title={f.text}>{f.text}</span>
-                      <Chips prov={f.prov} conf={f.conf} advisory={f.advisory} on={on} injected={injected} />
-                    </span>
-                    {f.detail && <span className="ide-line-detail" data-injected={String(injected)} title={f.detail}>{f.detail}</span>}
-                  </span>
-                </div>
-              )
-            })}
-          </>
-        )}
-
-        {dockTab === 'memory' && (
-          <>
-            <div className="ide-dock-head">
-              <span className="ide-dock-title">Recalled memory</span>
-              <span className="ide-dock-sub depth">decisions · patterns · gotchas — scoped · erasable by subtree</span>
-            </div>
-            {MEMORIES.map(m => {
-              const on = m.salience >= threshold
-              const hot = memHighlight === m.id
-              return (
-                <div key={m.id} className="ide-mem" data-on={String(on)} data-hot={String(hot)} data-superseded={String(!!m.superseded)}>
-                  <span className="ide-mem-kind" data-kind={m.kind}>{m.kind}</span>
-                  <span className="ide-mem-body">
-                    <span className="ide-mem-top">
-                      <span className="ide-mem-text" title={m.text}>{m.text}</span>
-                      <span className="ide-line-chips">
-                        <span className="prov" style={m.salience >= 0.85 ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>{m.scope}</span>
-                        <span className="prov tabular-nums" style={{ color: confColor(m.salience) }}>{m.salience.toFixed(2)}</span>
-                        {m.superseded && <span className="prov">superseded</span>}
-                        {!on && <span className="prov" style={{ color: 'var(--faint)' }}>below cutoff</span>}
-                      </span>
-                    </span>
-                    <span className="ide-mem-meta depth">{m.prov} · recalled because you&apos;re editing <b className="ide-mem-link">{m.because}</b></span>
-                  </span>
-                </div>
-              )
-            })}
-          </>
-        )}
-
-        {dockTab === 'knowledge' && (
-          <>
-            <div className="ide-dock-head">
-              <span className="ide-dock-title">Knowledge · the wiki</span>
-              <span className="ide-dock-sub depth">hybrid FTS + vector, RRF-fused · r@10 0.849 on the parity bench</span>
-            </div>
-            {KNOWLEDGE.map(k => {
-              const on = k.conf >= threshold
-              return (
-                <div key={k.id} className="ide-line fact" data-on={String(on)}>
-                  <span className="ide-ln ide-know-ln" aria-hidden="true">§</span>
-                  <span className="ide-line-body">
-                    <span className="ide-line-top">
-                      <span className="ide-line-text" title={k.detail}>
-                        <b className="ide-wiki-ref ide-wiki-inline">[[{k.title}]]</b> {k.section}
-                      </span>
-                      <Chips prov="Knowledge" conf={k.conf} on={on} />
-                    </span>
-                    <span className="ide-line-detail" title={k.detail}>{k.detail}</span>
-                  </span>
-                </div>
-              )
-            })}
-          </>
-        )}
+      </ul>
+      {hidden > 0 && <p className="q-hidden" data-hidden={hidden}>{hidden} guess below 0.5 hidden. Turn on “Show guesses” to see it, labelled.</p>}
+      {q.grep && <p className="q-note">{q.grep}</p>}
       </div>
     </div>
   )
+}
 
-  // the status bar — reused verbatim across both layouts
-  const statusBarEl = (
-    <div className="ide-statusbar">
-      <span className="ide-status-left">
-        <span className="ide-status-seg" data-accent="true">{statusTitle}</span>
-        <span className="ide-sep" aria-hidden="true">·</span>
-        <span className="ide-status-seg">{statusLive}/{statusTotal} results</span>
-        <span className="ide-sep" aria-hidden="true">·</span>
-        <span className="ide-status-seg">confidence-gated</span>
-      </span>
-      <span className="ide-status-legend">
-        <span className="ide-legend-label">provenance</span>
-        {PROV_LEGEND.map(p => (
-          <span key={p.prov} className="ide-legend-item">
-            <span className="prov" style={p.accent ? { color: 'var(--accent)', borderColor: 'color-mix(in oklab, var(--accent) 45%, var(--hairline))' } : undefined}>{p.prov}</span>
-            <span className="depth">{p.note}</span>
+function MemoryView({ q }: { q: Question }) {
+  return (
+    <ul className="q-cards">
+      {q.memory.map(m => (
+        <li key={m.text} className="q-card">
+          <p>{m.text}</p>
+          <span className="q-chips">
+            <span className="q-chip q-chip--mem">{m.how}</span>
+            <span className="q-chip">kind: {m.kind}</span>
+            <span className="q-chip">{m.scope}</span>
+            {m.about && <span className="q-chip">about: {m.about}</span>}
+            <span className="q-where">{m.when}</span>
           </span>
-        ))}
-      </span>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function KnowledgeView({ q }: { q: Question }) {
+  return (
+    <ul className="q-cards">
+      {q.knowledge.map(k => (
+        <li key={k.source} className="q-card">
+          <p>{k.text}</p>
+          <span className="q-chips">
+            <span className="q-chip q-chip--know">cited</span>
+            <span className="q-where">{k.source}</span>
+            {k.linked && <span className="q-chip">linked to {k.linked}</span>}
+          </span>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function Playground() {
+  const [qid, setQid] = useState('blast')
+  const [tab, setTab] = useState<Store>('graph')
+  const [showGuesses, setShowGuesses] = useState(false)
+  const q = QUESTIONS.find(x => x.id === qid)!
+  const counts: Record<Store, number> = { graph: q.graph.length, memory: q.memory.length, knowledge: q.knowledge.length }
+  const pick = (next: Question) => { setQid(next.id); setTab(next.first) }
+  return (
+    <div className="q-window" id="query" data-q={qid}>
+      <div className="q-bar">
+        <span className="q-dots" aria-hidden><i /><i /><i /></span>
+        <span className="q-bar-t">wicked-estate-mcp · graph.db</span>
+        <span className="q-bar-r">scripted demo · pick a question</span>
+      </div>
+      <div className="q-body">
+        <div className="q-asks" role="listbox" aria-label="Ask the record">
+          <span className="q-k">Ask</span>
+          {QUESTIONS.map(x => (
+            <button key={x.id} type="button" role="option" aria-selected={x.id === qid} className="q-ask" data-on={x.id === qid} onClick={() => pick(x)}>
+              {x.ask}
+            </button>
+          ))}
+        </div>
+        <div className="q-answer">
+          <div className="q-call" aria-label="MCP calls">
+            {q.calls.map(c => <code key={c}>{c}</code>)}
+          </div>
+          <div className="q-tabs" role="tablist" aria-label="Which store answered">
+            {(['graph', 'memory', 'knowledge'] as Store[]).map(s => (
+              <button key={s} type="button" role="tab" aria-selected={tab === s} data-on={tab === s} data-store={s} className="q-tab" onClick={() => setTab(s)}>
+                {STORE_LABEL[s].name} <span className="q-count">{counts[s]}</span>
+              </button>
+            ))}
+            {tab === 'graph' && (
+              <label className="q-toggle">
+                <input type="checkbox" checked={showGuesses} onChange={e => setShowGuesses(e.target.checked)} /> Show guesses
+              </label>
+            )}
+          </div>
+          <div className="q-result" role="tabpanel" aria-label={STORE_LABEL[tab].name}>
+            <p className="q-kind">{STORE_LABEL[tab].name}: {STORE_LABEL[tab].kind}</p>
+            {counts[tab] === 0
+              ? <p className="q-empty">Nothing from this store for this question. Try “Everything about applyDiscount”.</p>
+              : tab === 'graph' ? <GraphView q={q} showGuesses={showGuesses} />
+              : tab === 'memory' ? <MemoryView q={q} /> : <KnowledgeView q={q} />}
+          </div>
+        </div>
+      </div>
     </div>
   )
+}
 
-  // ── MOBILE · a legible stacked treatment. The desktop split-pane (absolute
-  //    cursor + right-click context menu + measured positioning) can't survive a
-  //    phone, so on ≤760px we render a static, tappable representation that still
-  //    tells the whole story: the file, the IDE gestures (find-callers / peek /
-  //    recall / blast-radius) as tap targets, the confidence dial that gates, and
-  //    the Code-intelligence · Memory · Knowledge dock. No auto-play, no overlays,
-  //    nothing that can overflow. ────────────────────────────────────────────────
-  const tapCommand = (id: string) => { setDriving(true); applyCommand(id) }
-  const tapSymbol = (sym: SymId) => {
-    setDriving(true)
-    setCursorAt(sym)
-    if (sym === 'PricingService') { setCodePeek(DETAILS); setDockTab('code'); setMemHighlight(null) }
-    else applyCommand('callers')
-  }
-  if (isMobile) {
-    return (
-      <Section id="query" solid>
-        <div className="max-w-6xl mx-auto w-full" ref={rootRef}>
-          <div className="mb-4 w-full text-left">
-            <span className="kicker">The record every plane reads</span>
-            <h2 className="mt-1.5 font-display text-2xl font-black text-ink leading-[0.98]">
-              The agent doesn&apos;t grep. It edits in an IDE that <span style={{ color: 'var(--accent)' }}>knows your whole system.</span>
-            </h2>
-            <p className="mt-1.5 text-sm text-muted font-sans leading-tight">
-              Tap a symbol or an IDE gesture — every caller, the whole picture of a class, the requirement it
-              satisfies, the <span className="text-ink">decision</span> behind it, the <span className="text-ink">wiki</span>,
-              the blast radius. Each answer a live fact with <span className="text-ink">confidence + provenance</span>;
-              drop the dial and the low-confidence guesses fall out, labeled.
-            </p>
-          </div>
-
-          <div className="ide-window ide-window--mobile">
-            <div className="ide-chrome">
-              <span className="ide-lights" aria-hidden="true"><i /><i /><i /></span>
-              <span className="ide-title">wicked-estate — the agent&apos;s workspace</span>
-            </div>
-
-            {/* the file — static, tappable symbols */}
-            <div className="ide-tabbar">
-              <span className="ide-tab" data-on="true">
-                <span className="ide-glyph" data-lang="TS">TS</span>
-                <span className="ide-tab-name">PricingService.ts</span>
-              </span>
-            </div>
-            <div className="ide-code ide-code--mobile">
-              <pre className="ide-code-pre"><code>{CODE.map((line, li) => (
-                <span className="ide-code-line" key={li}>
-                  <span className="ide-code-ln">{li + 1}</span>
-                  <span className="ide-code-toks">
-                    {line.map((tk, ti) => tk.sym ? (
-                      <button
-                        key={ti}
-                        className="ide-sym"
-                        data-k={tk.k}
-                        data-active={String(cursorAt === tk.sym)}
-                        onClick={() => tapSymbol(tk.sym!)}
-                      >{tk.t}</button>
-                    ) : (
-                      <span key={ti} className="ide-tok" data-k={tk.k}>{tk.t}</span>
-                    ))}
-                  </span>
-                </span>
-              ))}</code></pre>
-            </div>
-
-            {/* IDE gestures — the command palette, as tap targets */}
-            <div className="ide-m-gestures">
-              <span className="ide-sec-label">IDE gestures · tap one — the record answers</span>
-              <ul className="ide-m-cmds" role="list">
-                {COMMANDS.map(c => {
-                  const active = (c.lands === 'code' && dockTab === 'code' && codePeek.title === c.peek?.title)
-                    || (c.lands === 'memory' && dockTab === 'memory')
-                    || (c.lands === 'knowledge' && dockTab === 'knowledge')
-                  return (
-                    <li key={c.id}>
-                      <button className="ide-m-cmd" data-active={String(active)} aria-pressed={active} onClick={() => tapCommand(c.id)}>
-                        <span className="ide-cmd-label">{c.label}</span>
-                        {c.note && <span className="ide-kbd">{c.note}</span>}
-                      </button>
-                    </li>
-                  )
-                })}
-              </ul>
-            </div>
-
-            {gutterEl}
-            {dockEl}
-            {statusBarEl}
-          </div>
-        </div>
-      </Section>
-    )
-  }
-
+function Hero() {
   return (
-    <Section id="query" solid>
-      <div className="max-w-6xl mx-auto w-full" ref={rootRef}>
-        {/* section header — using an IDE that actually knows your system */}
-        <div className="mb-3 w-full text-left max-w-3xl">
-          <span className="kicker">The record every plane reads</span>
-          <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink leading-[0.98]">
-            The agent doesn&apos;t grep. It edits in an IDE that <span style={{ color: 'var(--accent)' }}>knows your whole system.</span>
-          </h2>
-          <p className="mt-1.5 text-sm text-muted font-sans leading-tight">
-            The same record crew, garden, and studio query before they act and write after — here shown the way an agent
-            works it.{' '}
-            Right-click a symbol for every caller, click a class for its whole picture, trace the requirement it satisfies,
-            recall the <span className="text-ink">decision</span> behind it, pull the <span className="text-ink">wiki</span>,
-            see the blast radius — what an agent can do while editing when it reads the record instead of grepping.
-            Code intelligence, memory and knowledge, every answer a live fact with{' '}
-            <span className="text-ink">confidence + provenance</span>; drop the dial and the low-confidence guesses
-            fall out, labeled — never silently promoted.
-          </p>
-        </div>
-
-        {/* ── THE IDE WINDOW ────────────────────────────────────────────── */}
-        <div className="ide-window">
-          {/* chrome bar */}
-          <div className="ide-chrome">
-            <span className="ide-lights" aria-hidden="true"><i /><i /><i /></span>
-            <span className="ide-title">wicked-estate — the agent&apos;s workspace</span>
-            <button
-              className="demo-pill ide-run"
-              data-live={String(!driving)}
-              onClick={() => setDriving(d => !d)}
-              aria-label={driving ? 'Resume the auto demo' : 'Pause and drive the workspace yourself'}
-            >
-              <span className="dot" />
-              {driving ? 'Driving · resume' : 'Auto-demo · drive'}
-            </button>
-          </div>
-
-          {/* body — explorer + editor */}
-          <div className="ide-body">
-            {/* LEFT · explorer */}
-            <aside className="ide-explorer" aria-label="Explorer">
-              <div>
-                <span className="ide-sec-label">Explorer · checkout/PricingService.ts</span>
-                <ul className="ide-tree" role="list">
-                  {([['PricingService', 'CLS', 'class'], ['applyDiscount', 'FN', 'method']] as [SymId, string, string][]).map(([sym, glyph, kind]) => (
-                    <li key={sym}>
-                      <button className="ide-file" data-on={String(cursorAt === sym)} onClick={() => clickSymbol(sym)}>
-                        <span className="ide-glyph" data-lang={glyph}>{glyph}</span>
-                        <span className="ide-file-name">{sym}</span>
-                        <span className="ide-file-kind">{kind}</span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-
-              <div>
-                <span className="ide-sec-label">IDE commands · right-click a symbol</span>
-                <ul className="ide-actions" role="list">
-                  {COMMANDS.map(c => {
-                    const active = (c.lands === 'code' && dockTab === 'code' && codePeek.title === c.peek?.title)
-                      || (c.lands === 'memory' && dockTab === 'memory')
-                      || (c.lands === 'knowledge' && dockTab === 'knowledge')
-                    return (
-                      <li key={c.id}>
-                        <button className="ide-action ide-cmd" data-active={String(active)} aria-pressed={active} onClick={() => runCommand(c.id)}>
-                          <span className="ide-cmd-label">{c.label}</span>
-                          {c.note && <span className="ide-kbd">{c.note}</span>}
-                        </button>
-                      </li>
-                    )
-                  })}
-                </ul>
-              </div>
-            </aside>
-
-            {/* CENTER · editor */}
-            <div className="ide-editor">
-              {/* tab bar */}
-              <div className="ide-tabbar">
-                <span className="ide-tab" data-on="true">
-                  <span className="ide-glyph" data-lang="TS">TS</span>
-                  <span className="ide-tab-name">PricingService.ts</span>
-                </span>
-                <span className="ide-crumb depth">checkout/ · right-click a symbol → the record answers</span>
-              </div>
-
-              {/* the code — clickable symbols, with the cursor + context menu overlay */}
-              <div className="ide-code" ref={codeRef}>
-                <pre className="ide-code-pre"><code>
-                  {CODE.map((line, li) => (
-                    <span className="ide-code-line" key={li}>
-                      <span className="ide-code-ln">{li + 1}</span>
-                      <span className="ide-code-toks">
-                        {line.map((tk, ti) => tk.sym ? (
-                          <button
-                            key={ti}
-                            ref={el => { symRefs.current[tk.sym!] = el }}
-                            className="ide-sym"
-                            data-k={tk.k}
-                            data-active={String(cursorAt === tk.sym)}
-                            onClick={() => clickSymbol(tk.sym!)}
-                            onContextMenu={e => { e.preventDefault(); openMenuAt(tk.sym!) }}
-                          >{tk.t}</button>
-                        ) : (
-                          <span key={ti} className="ide-tok" data-k={tk.k}>{tk.t}</span>
-                        ))}
-                      </span>
-                    </span>
-                  ))}
-                </code></pre>
-
-                {showMenu && (
-                  <button className="ide-ctx-backdrop" aria-label="Close menu" onClick={() => setMenuOpen(false)} />
-                )}
-                {showCursor && (
-                  <span className="ide-cursor" style={{ left: pos!.x, top: pos!.y }} aria-hidden="true"><CursorArrow /></span>
-                )}
-                {showMenu && (
-                  <div className="ide-ctxmenu" style={{ left: pos!.x, top: pos!.y }} role="group" aria-label="Estate commands">
-                    <div className="ide-ctxmenu-head">estate</div>
-                    {COMMANDS.map(c => (
-                      <button key={c.id} className="ide-ctxmenu-item" data-run={String(menuRun === c.id)} onClick={() => runCommand(c.id)}>
-                        <span className="ide-ctxmenu-label">{c.label}</span>
-                        {c.note && <span className="ide-ctxmenu-note">{c.note}</span>}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {gutterEl}
-              {dockEl}
-            </div>
-          </div>
-
-          {statusBarEl}
-        </div>
+    <Section hero>
+      <div className="hero-head text-left">
+        <span className="kicker">wicked-estate · v{__WICKED_ESTATE_VERSION__}</span>
+        <h1 className="mt-3 font-display font-black text-ink leading-[0.95] text-[clamp(2rem,3.7vw,3rem)]" style={{ fontStretch: '112%' }}>
+          {HEADLINE}
+        </h1>
+        <p className="mt-2.5 text-base sm:text-lg text-muted font-sans max-w-3xl leading-snug">{SUBLINE}</p>
       </div>
+      <div className="mt-4"><Playground /></div>
     </Section>
   )
 }
 
-// ── 3 · THE FIVE STRATA — a drill reads the cross-section, band by band ─────────
-function FiveStrata() {
-  const reduced = useReducedMotion()
-  const [active, setActive] = useState(0)
-  const [pinned, setPinned] = useState(false)
+// ── 2 · Three stores ────────────────────────────────────────────────────────
+const STORES: { name: string; kind: string; holds: string; from: string; ask: string[] }[] = [
+  { name: 'Code graph', kind: 'structured', holds: 'Symbols, calls, imports, and the edges grep never sees.', from: 'Indexing your repos, in 114 languages.', ask: ['BlastRadius', 'Path', 'ContextBundle'] },
+  { name: 'Memory', kind: 'told or witnessed', holds: 'What happened, and what you told it.', from: 'Agents and people capture it; reflection distills it.', ask: ['memory.recall', 'memory.capture'] },
+  { name: 'Knowledge', kind: 'read, then cited', holds: 'What your docs and wiki say, linked to the code.', from: 'Ingesting documents; hybrid keyword + vector recall.', ask: ['knowledge.recall', 'knowledge.ingest'] },
+]
 
-  useEffect(() => {
-    if (reduced || pinned) return
-    const t = setInterval(() => setActive(a => (a + 1) % STRATA.length), 1900)
-    return () => clearInterval(t)
-  }, [reduced, pinned])
-
+function Stores() {
   return (
-    <Section id="strata">
-      <div className="max-w-6xl mx-auto w-full">
-        <TopHead
-          kicker="The five strata"
-          title={<>Five bands. One record. <span style={{ color: 'var(--accent)' }}>One symbol identity.</span></>}
-        >
-          <p className="max-w-3xl">
-            Not a pile of scanners — a single continuous body, cut into bands. Each keyed to the same stable{' '}
-            <span className="font-mono text-sm font-semibold">(scheme, qualified-name)</span> that survives reformatting,
-            moves, and re-index.
-          </p>
-        </TopHead>
+    <Section id="stores" solid>
+      <Head title="Three stores. One record." sub="Each answer says which store it came from, so a guess never reads like a fact and a note never reads like a doc." />
+      <div className="grid md:grid-cols-3 gap-3">
+        {STORES.map(s => (
+          <div key={s.name} className="rock-panel p-5 flex flex-col gap-3">
+            <div className="flex items-baseline justify-between gap-2">
+              <h3 className="font-display text-xl font-black text-ink">{s.name}</h3>
+              <span className="tag tag-accent">{s.kind}</span>
+            </div>
+            <p className="text-ink font-sans leading-snug">{s.holds}</p>
+            <p className="text-muted text-sm font-sans leading-snug">{s.from}</p>
+            <div className="mt-auto flex flex-wrap gap-1.5">{s.ask.map(a => <code key={a} className="tag">{a}</code>)}</div>
+          </div>
+        ))}
+      </div>
+      <ul className="mt-4 grid md:grid-cols-3 gap-3 text-sm text-muted font-sans">
+        <li className="fact-line">Agents propose memories and rules. A person approves them.</li>
+        <li className="fact-line">Erase a whole scope in one call: <code className="tag">memory.erase</code></li>
+        <li className="fact-line">Your own memories can apply across every project.</li>
+      </ul>
+    </Section>
+  )
+}
 
-        <div className="mb-3">
-          <button
-            className="demo-pill"
-            data-live={String(!pinned)}
-            onClick={() => setPinned(p => !p)}
-            aria-label={pinned ? 'Resume the auto scan' : 'Pause and explore the bands yourself'}
-          >
-            <span className="dot" />
-            {pinned ? 'Pinned · click to resume scan' : 'Auto-scanning · click a band to pin'}
-          </button>
-        </div>
+// ── 3 · Injected edges + confidence ─────────────────────────────────────────
+// ResolutionTier::default_confidence, crates/wicked-estate-core/src/edge.rs
+const TIERS: { tier: string; conf: number; who: string }[] = [
+  { tier: 'Parsed · SCIP · LSP · Compiler', conf: 1.0, who: 'read straight from the code or a precise indexer' },
+  { tier: 'TSG', conf: 0.8, who: 'graph rules over the syntax tree' },
+  { tier: 'ImportMap', conf: 0.6, who: 'followed through imports' },
+  { tier: 'Heuristic', conf: 0.5, who: 'synthesizers and your TOML rules' },
+  { tier: 'Tags', conf: 0.3, who: 'a tag-scan guess' },
+]
 
+function Provenance() {
+  return (
+    <Section id="provenance">
+      <Head title="Edges grep never sees, each with its confidence." sub="A rule you write in TOML connects an event to its consumers. Every edge says how sure it is and where it came from." />
+      <div className="grid lg:grid-cols-2 gap-4 items-start">
         <div className="rock-panel p-0">
-          <div className="relative">
-            <div className="seam-line absolute top-4 bottom-4" style={{ left: '22%' }} />
-            {STRATA.map((s, i) => {
-              const on = i === active
-              return (
-                <div
-                  key={s.id}
-                  onMouseEnter={() => setActive(i)}
-                  onClick={() => { setPinned(true); setActive(i) }}
-                  className="relative flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-6 px-6 py-3.5 border-b border-hairline last:border-b-0 transition-all duration-300 cursor-pointer"
-                  style={{
-                    background: on
-                      ? 'color-mix(in oklab, var(--accent) 9%, transparent)'
-                      : (i % 2 ? 'color-mix(in oklab, var(--ink) 3%, transparent)' : 'transparent'),
-                    boxShadow: on ? 'inset 3px 0 0 var(--accent)' : 'none',
-                  }}
-                >
-                  <div className="flex items-center gap-4 sm:w-64 shrink-0">
-                    <span className="font-display font-black text-2xl tabular-nums" style={{ fontStretch: '108%', color: on ? 'var(--accent)' : 'var(--faint)' }}>{s.no}</span>
-                    <div>
-                      <div className="font-display font-black text-ink text-lg leading-tight" style={{ fontStretch: '108%' }}>{s.name}</div>
-                      <div className="depth mt-0.5">{s.depth} · {s.tools}</div>
-                    </div>
-                  </div>
-                  <p className="text-sm font-sans flex-1 leading-relaxed transition-colors" style={{ color: on ? 'var(--ink)' : 'var(--muted)' }}>{s.copy}</p>
-                </div>
-              )
-            })}
+          <div className="px-5 py-3 border-b border-hairline-strong text-sm text-muted font-sans">An event bus, made visible</div>
+          <div className="px-5 py-4">
+            <svg viewBox="0 0 420 110" className="w-full h-auto" role="img" aria-label="checkout emits order.paid; sendReceipt and updateLedger consume it">
+              <rect x="6" y="40" width="110" height="30" rx="8" className="q-node" /><text x="61" y="59" textAnchor="middle" className="q-node-t">checkout()</text>
+              <rect x="160" y="40" width="100" height="30" rx="8" className="q-node q-node--center" /><text x="210" y="59" textAnchor="middle" className="q-node-t q-node-t--center">order.paid</text>
+              <rect x="304" y="10" width="110" height="30" rx="8" className="q-node" /><text x="359" y="29" textAnchor="middle" className="q-node-t">sendReceipt()</text>
+              <rect x="304" y="70" width="110" height="30" rx="8" className="q-node" /><text x="359" y="89" textAnchor="middle" className="q-node-t">updateLedger()</text>
+              <line x1="116" y1="55" x2="160" y2="55" className="q-edge q-edge--inj" />
+              <line x1="304" y1="25" x2="260" y2="50" className="q-edge q-edge--inj" />
+              <line x1="304" y1="85" x2="260" y2="60" className="q-edge q-edge--inj" />
+            </svg>
+            <pre className="toml"><code>{`[[rule]]
+name      = "event-bus-consume"
+file_glob = "**/*.js"
+pattern   = "subscribe\\\\([\\"'](?P<topic>[\\\\w.]+)"`}</code></pre>
+            <p className="mt-3 text-sm text-muted font-sans">A new kind of edge is a rule block, not a code change. These land at 0.5, labelled with the rule’s name.</p>
           </div>
         </div>
-        <p className="mt-4 font-mono text-xs text-faint">
-          Code graph · injected edges · memory · knowledge · provenance — one binary, every fact stamped with confidence and provenance.
-        </p>
+        <div className="rock-panel p-0">
+          <div className="px-5 py-3 border-b border-hairline-strong text-sm text-muted font-sans">How sure each edge is</div>
+          <table className="tiers">
+            <tbody>
+              {TIERS.map(t => (
+                <tr key={t.tier}>
+                  <th scope="row">{t.tier}</th>
+                  <td className="tiers-bar"><span style={{ width: `${t.conf * 100}%` }} /></td>
+                  <td className="tiers-n">{t.conf.toFixed(1)}</td>
+                  <td className="tiers-who">{t.who}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="px-5 pb-4 text-sm text-muted font-sans">When two tiers report the same edge, the higher one wins. A 0.3 guess is never handed to an agent as a 1.0 fact.</p>
+        </div>
       </div>
     </Section>
   )
 }
 
-// ── 3b · THE FULL TOOLFACE — every tool + skill an agent can call ───────────────
-// Grounded to 0.16.6 (adds memory.list + the proposal queue on the memory domain — agents propose, humans promote).
-// Tools: crates/wicked-estate-mcp/src/lib.rs (dispatch +
-// memory/knowledge schemas), README.md §MCP. Skills: crates/*/skills/*/SKILL.md.
-type ToolDomain = { no: string; name: string; note: string; tools: { name: string; purpose: string }[] }
-
-const TOOL_DOMAINS: ToolDomain[] = [
-  {
-    no: '01', name: 'Graph', note: '12 estate tools',
-    tools: [
-      { name: 'SearchEntity',   purpose: 'Find symbols by name or kind; optional source inline.' },
-      { name: 'RetrieveEntity', purpose: 'One symbol’s full dossier — callers, edges, annotations, requirement.' },
-      { name: 'TraverseGraph',  purpose: 'Bounded walk out over calls and imports.' },
-      { name: 'Path',           purpose: 'The route from A to B — every hop with its edge kind and confidence.' },
-      { name: 'BlastRadius',    purpose: 'Every dependent — what breaks if you change it.' },
-      { name: 'Lineage',        purpose: 'The dependency chain a symbol rests on, transitively.' },
-      { name: 'RankHotspots',   purpose: 'Most-connected symbols by PageRank — where to start reading.' },
-      { name: 'Communities',    purpose: 'Clusters the graph into modules.' },
-      { name: 'ContextBundle',  purpose: 'Scoped, prompt-ready context pack for a symbol.' },
-      { name: 'FetchContent',   purpose: 'The stored source for a symbol or file.' },
-      { name: 'RulesInventory', purpose: 'Rules engines (ODM · DMN · Drools · CLIPS) + the code that calls them.' },
-      { name: 'rules.recall',   purpose: 'Which steering rules apply — the seven doctrine types projected as citable rules; faceted, severity-ordered, every hit citing its source. The acceptance gate reads this governed record.' },
-    ],
-  },
-  {
-    no: '02', name: 'Memory', note: '7 memory + 4 proposal tools',
-    tools: [
-      { name: 'memory.capture',  purpose: 'Capture a memory node (episodic / semantic / procedural / archival).' },
-      { name: 'memory.recall',   purpose: 'Token-budgeted recall relevant to a query in scope.' },
-      { name: 'memory.list',     purpose: 'The complete faceted set — for management, browse, and promote.' },
-      { name: 'memory.learn',    purpose: 'Store a semantic fact and link it to code symbols atomically.' },
-      { name: 'memory.reflect',  purpose: 'Consolidate a scope: distil, promote, and archive (working memory expires after 24 h).' },
-      { name: 'memory.coverage', purpose: 'Node counts by tier and kind.' },
-      { name: 'memory.erase',    purpose: 'Hard-delete every memory under a scope prefix — erasability as governance.' },
-      { name: 'proposal.submit',  purpose: 'The governance queue: an agent proposes a memory capture or a steering-rule change — never a direct write to the record.' },
-      { name: 'proposal.list',    purpose: 'The review queue — every proposal awaiting a human decision.' },
-      { name: 'proposal.approve', purpose: 'A human promotes a proposal into the record.' },
-      { name: 'proposal.reject',  purpose: 'A human declines it — the record stays clean.' },
-    ],
-  },
-  {
-    no: '03', name: 'Knowledge', note: '7 knowledge tools',
-    tools: [
-      { name: 'knowledge.ingest',            purpose: 'Ingest a document as a doc + retrievable chunk nodes.' },
-      { name: 'knowledge.write',             purpose: 'Write one node (doc / section / chunk / concept).' },
-      { name: 'knowledge.relate',            purpose: 'Add a typed, confidence-scored relation between nodes.' },
-      { name: 'knowledge.recall',            purpose: 'Hybrid FTS + vector recall, RRF-fused.' },
-      { name: 'knowledge.relate_code',       purpose: 'Link a knowledge node to code symbols in the graph.' },
-      { name: 'knowledge.recall_about_code', purpose: 'Recall knowledge linked to given code symbols.' },
-      { name: 'knowledge.coverage',          purpose: 'Node counts per class.' },
-    ],
-  },
+// ── 4 · Everything an agent can call — an explorer ──────────────────────────
+// MCP: crates/wicked-estate-mcp/src/lib.rs + src/tools/{memory,knowledge,proposals}.rs.
+// CLI: crates/wicked-estate/src/main.rs (FEATURES.md §10).
+type Row = { name: string; does: string }
+type Group = { label?: string; rows: Row[] }
+const TOOLSETS: { id: string; name: string; note: string; groups: Group[] }[] = [
+  { id: 'graph', name: 'Graph', note: '12 MCP tools, +1 with embeddings', groups: [
+    { label: 'Find', rows: [
+      { name: 'SearchEntity', does: 'Find symbols by name or kind' },
+      { name: 'RetrieveEntity', does: 'One symbol, with its edges and notes' },
+      { name: 'FetchContent', does: 'The source of a symbol or file' },
+      { name: 'SemanticSearch', does: 'Search by meaning (when embeddings exist)' },
+    ] },
+    { label: 'Follow', rows: [
+      { name: 'BlastRadius', does: 'Everything that depends on it' },
+      { name: 'Lineage', does: 'Everything it depends on' },
+      { name: 'Path', does: 'The route from A to B, hop by hop' },
+      { name: 'TraverseGraph', does: 'A bounded walk out from a symbol' },
+    ] },
+    { label: 'Summarize', rows: [
+      { name: 'ContextBundle', does: 'A prompt-ready pack for one symbol' },
+      { name: 'RankHotspots', does: 'The most-connected code, to read first' },
+      { name: 'Communities', does: 'The graph clustered into modules' },
+    ] },
+    { label: 'Rules', rows: [
+      { name: 'RulesInventory', does: 'Rules engines and the code that calls them' },
+      { name: 'rules.recall', does: 'Which of your rules apply here, cited' },
+    ] },
+  ] },
+  { id: 'memory', name: 'Memory', note: '7 tools + 4 for proposals', groups: [
+    { label: 'Use', rows: [
+      { name: 'memory.capture', does: 'Save a memory under a scope' },
+      { name: 'memory.recall', does: 'The memories that fit a token budget' },
+      { name: 'memory.learn', does: 'Save a fact, linked to code' },
+      { name: 'memory.list', does: 'Every memory in a scope' },
+    ] },
+    { label: 'Maintain', rows: [
+      { name: 'memory.reflect', does: 'Distill a scope; scratch expires in 24 h' },
+      { name: 'memory.coverage', does: 'Counts by tier and kind' },
+      { name: 'memory.erase', does: 'Delete everything under a scope' },
+    ] },
+    { label: 'Propose, then approve', rows: [
+      { name: 'proposal.submit', does: 'An agent proposes a memory or a rule' },
+      { name: 'proposal.list', does: 'What waits for a person' },
+      { name: 'proposal.approve', does: 'A person accepts it into the record' },
+      { name: 'proposal.reject', does: 'A person declines it' },
+    ] },
+  ] },
+  { id: 'knowledge', name: 'Knowledge', note: '7 tools', groups: [
+    { label: 'Add', rows: [
+      { name: 'knowledge.ingest', does: 'A document, split into searchable chunks' },
+      { name: 'knowledge.write', does: 'One doc, section, chunk or concept' },
+      { name: 'knowledge.relate', does: 'A typed link between two nodes' },
+      { name: 'knowledge.relate_code', does: 'A link from a doc to code' },
+    ] },
+    { label: 'Ask', rows: [
+      { name: 'knowledge.recall', does: 'Keyword + vector search, fused' },
+      { name: 'knowledge.recall_about_code', does: 'Docs linked to given code' },
+      { name: 'knowledge.coverage', does: 'Counts by class' },
+    ] },
+  ] },
+  { id: 'cli', name: 'CLI', note: 'same record, from your shell', groups: [
+    { label: 'Keep it fresh', rows: [
+      { name: 'watch', does: 'Re-index on every file change' },
+      { name: 'changed-since', does: 'Symbols changed since a git SHA' },
+      { name: 'subscribe', does: 'Follow the change log as JSON lines' },
+    ] },
+    { label: 'Sharpen it', rows: [
+      { name: 'scip', does: 'Load a SCIP index for exact edges' },
+      { name: 'index --embeddings', does: 'Add vectors for search by meaning' },
+      { name: 'clusters', does: 'Group the graph into communities' },
+    ] },
+    { label: 'Many repos', rows: [
+      { name: 'index --repo', does: 'Several repos in one database' },
+      { name: 'cross-graph', does: 'Search across separate databases' },
+      { name: 'export', does: 'The whole graph as JSON or NDJSON' },
+    ] },
+    { label: 'Infrastructure', rows: [
+      { name: 'tfstate', does: 'Load live Terraform state' },
+      { name: 'drift', does: 'Declared vs deployed resources' },
+    ] },
+    { label: 'Read the shape', rows: [
+      { name: 'entrypoints', does: 'Code nothing calls' },
+      { name: 'dead-code', does: 'Symbols with no edges at all' },
+      { name: 'annotate', does: 'Notes that survive a re-index' },
+      { name: 'by-requirement', does: 'Code that meets a requirement' },
+    ] },
+  ] },
 ]
 
-// Agent skills shipped in-repo (crates/*/skills/*/SKILL.md) — the playbooks an
-// agent runs against the tools above.
-const AGENT_SKILLS: { name: string; purpose: string }[] = [
-  { name: 'codebase-expedition',  purpose: 'Hotspot-first tour: RankHotspots → TraverseGraph → FetchContent.' },
-  { name: 'knowledge-ingest',     purpose: 'Chunk and ingest a document into the knowledge base.' },
-  { name: 'cited-answer',         purpose: 'Answer with a grounded, cited slice — never from model memory.' },
-  { name: 'ontology-expedition',  purpose: 'Connect concepts with typed relations — structure over a flat store.' },
-  { name: 'knowledge-curation',   purpose: 'Dedup as the base grows — collapse-but-surface, never delete.' },
-  { name: 'gap-hunting',          purpose: 'Turn recall misses into ingest tasks — close the loop.' },
-]
-
-// Cross-cutting capabilities, each grounded in a repo path.
-const CAPABILITIES: string[] = [
-  'Injected edges · ExtraEdge TOML rules · event→consumer · command→agent',
-  'Every edge: confidence + provenance + resolved_by',
-  'Tiered resolution · Parsed & SCIP 1.0 → Tags 0.3 · highest wins',
-  'Rules engines in the same graph · ODM · DMN · Drools',
-  'Steering doctrine · seven rule types projected as citable rules · the acceptance gate reads the governed record',
-  'Governed knowledge · agents propose · humans promote',
-  'Requirements graph · requirement ↔ code, the forward view of the app as source of truth',
-  'Typed annotations · survive re-index',
-  'Memory scopes · subtree recall + erase',
-  'SQLite by default · Postgres for teams',
-  '103 wired languages — a manifest row + a query file',
-  '+ SemanticSearch, an 11th graph tool, when an embedder is wired',
-]
-
-// historical
-// The retrieval receipt — the S3 parity bench that gated the wicked-brain
-// consolidation: 60 queries × 5 classes over an identical 357-doc corpus,
-// estate's knowledge surface vs the dedicated FTS search it replaced.
-// /historical
-const BENCH = {
-  rows: [
-    { metric: 'overall r@10', estate: '0.849', fts: '0.437' },
-    { metric: 'overall MRR',  estate: '0.810', fts: '0.571' },
-  ],
-  note: 'Ahead on four of five query classes; within 2.2% on the fifth (identifier-shaped queries — the FTS system’s home turf).',
-}
-
-function FullToolface() {
+function Toolface() {
+  const [set, setSet] = useState('graph')
+  const [filter, setFilter] = useState('')
+  const f = filter.trim().toLowerCase()
+  const shown = f
+    ? TOOLSETS.map(t => ({ ...t, groups: t.groups.map(g => ({ ...g, rows: g.rows.filter(r => (r.name + ' ' + r.does).toLowerCase().includes(f)) })).filter(g => g.rows.length) })).filter(t => t.groups.length)
+    : TOOLSETS.filter(t => t.id === set)
+  const total = (t: typeof TOOLSETS[number]) => t.groups.reduce((n, g) => n + g.rows.length, 0)
   return (
     <Section id="toolface" solid>
-      <div className="max-w-6xl mx-auto w-full">
-        <div className="mb-2.5 w-full text-left">
-          <span className="kicker">Everything an agent can call</span>
-          <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink leading-[0.98]">
-            30 MCP tools. 6 agent skills. <span style={{ color: 'var(--accent)' }}>One binary.</span>
-          </h2>
-          <p className="mt-1.5 text-sm text-muted font-sans leading-tight max-w-3xl">
-            Not one “search” tool bolted onto a repo — the full MCP surface every plane calls, plus the skills
-            (playbooks) that drive them. The graph domain is the code graph; memory and knowledge are where the{' '}
-            wicked-brain consolidation landed — one store, one identity, a{' '}{/* historical */}
-            <span className="text-ink">lossless import contract</span> so nothing tuned was dropped; and the proposal
-            queue — the memory domain's governance surface — is where <span className="text-ink">agents propose and humans promote</span>. Grounded to 0.16.6.
-          </p>
-        </div>
-
-        {/* the three domains — graph, memory (incl. the proposal/governance queue), knowledge */}
-        <div className="grid lg:grid-cols-3 gap-2.5">
-          {TOOL_DOMAINS.map(d => (
-            <div key={d.name} className="rock-panel p-0">
-              <div className="flex items-center gap-2.5 px-4 py-1.5 border-b border-hairline-strong">
-                <span className="font-display font-black text-base tabular-nums" style={{ fontStretch: '108%', color: 'var(--accent)' }}>{d.no}</span>
-                <span className="font-display font-black text-ink text-[0.95rem] flex-1" style={{ fontStretch: '108%' }}>{d.name}</span>
-                <span className="tag tag-accent">{d.note}</span>
-              </div>
-              <div className="divide-y divide-hairline">
-                {d.tools.map(t => (
-                  <div key={t.name} className="px-4 py-[2px] flex items-baseline gap-2">
-                    <span className="font-mono text-[0.7rem] font-semibold text-ink shrink-0">{t.name}</span>
-                    <span className="depth flex-1 min-w-0 text-right" style={{ whiteSpace: 'normal', lineHeight: 1.25 }}>{t.purpose}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {/* the retrieval receipt — the bench that gated the consolidation */}
-        <div className="mt-2 rock-panel p-0" id="bench">
-          <div className="flex items-center gap-3 px-4 py-2 border-b border-hairline-strong flex-wrap">
-            <span className="kicker" style={{ color: 'var(--accent)' }}>The retrieval receipt</span>
-            <span className="depth">parity bench · 60 queries × 5 classes · identical 357-doc corpus · vs the dedicated FTS search it replaced</span>
-          </div>
-          <div className="px-4 py-2.5 flex flex-wrap items-center gap-x-6 gap-y-2">
-            {BENCH.rows.map(r => (
-              <span key={r.metric} className="inline-flex items-baseline gap-2">
-                <span className="depth">{r.metric}</span>
-                <span className="font-mono text-sm font-bold" style={{ color: 'var(--accent)' }}>{r.estate}</span>
-                <span className="depth">vs</span>
-                <span className="font-mono text-sm text-muted">{r.fts}</span>
-              </span>
-            ))}
-            <span className="text-xs text-muted font-sans flex-1 min-w-[16rem]">{BENCH.note}</span>
-          </div>
-        </div>
-
-        {/* the agent skills — the playbooks that ship with estate */}
-        <div className="mt-2 rock-panel p-0">
-          <div className="flex items-center gap-3 px-4 py-2 border-b border-hairline-strong">
-            <span className="kicker">Agent skills · in-repo playbooks</span>
-            <span className="tag ml-auto">6 skills</span>
-          </div>
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 divide-y sm:divide-y-0 divide-hairline">
-            {AGENT_SKILLS.map(s => (
-              <div key={s.name} className="px-4 py-[7px] flex items-baseline gap-2" style={{ boxShadow: 'inset 0 0 0 0.5px var(--hairline)' }}>
-                <span className="font-mono text-[0.7rem] font-semibold text-ink shrink-0">{s.name}</span>
-                <span className="depth flex-1 min-w-0 text-right" style={{ whiteSpace: 'normal', lineHeight: 1.25 }}>{s.purpose}</span>
-              </div>
+      <Head title="Everything an agent can call." sub="30 MCP tools in three groups, and a CLI over the same record. Pick a group, or search them all." />
+      <div className="tools" data-set={f ? 'search' : set}>
+        <div className="tools-bar">
+          <div className="tools-tabs" role="tablist" aria-label="Tool groups">
+            {TOOLSETS.map(t => (
+              <button key={t.id} type="button" role="tab" aria-selected={!f && set === t.id} data-on={!f && set === t.id} className="tools-tab"
+                onClick={() => { setSet(t.id); setFilter('') }}>
+                {t.name} <span className="q-count">{total(t)}</span>
+              </button>
             ))}
           </div>
+          <input className="tools-search" type="search" placeholder="Search tools, e.g. erase" aria-label="Search tools" value={filter} onChange={e => setFilter(e.target.value)} />
         </div>
-
-        {/* cross-cutting capabilities most agents never know the record has —
-            long chips must WRAP on phones (.tag is nowrap and the page clips
-            horizontal overflow, so nowrap here silently truncates at 390px) */}
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {CAPABILITIES.map(c => <span key={c} className="tag" style={{ whiteSpace: 'normal' }}>{c}</span>)}
-        </div>
-      </div>
-    </Section>
-  )
-}
-
-// ── 3c · THE REST OF THE BINARY — the shipped long tail the MCP surface rides on ─
-// Grounded to 0.16.6: the CLI usage block + match arms (crates/wicked-estate/src/main.rs
-// — 33 subcommands), PLUGIN.md (runtime grammars), ADR-004 + `tfstate`/`drift`
-// (infrastructure estate), crates/wicked-estate-mcp/src/resources.rs (skill:// resources),
-// docs/language-coverage-matrix.md (IaC dialects wired as languages).
-type TailGroup = { name: string; note: string; items: { name: string; purpose: string }[] }
-
-const TAIL_GROUPS: TailGroup[] = [
-  {
-    name: 'Keep it fresh', note: 'reactive',
-    items: [
-      { name: 'watch',           purpose: 'Full index once, then re-index on every file change.' },
-      { name: 'subscribe',       purpose: 'Poll the change log since a sequence number — JSON lines.' },
-      { name: 'changed-since',   purpose: 'Symbols in files changed since a git SHA.' },
-      { name: 'index --history', purpose: 'Opt-in edge-history archival — off by default, no bloat.' },
-    ],
-  },
-  {
-    name: 'Sharpen it', note: 'opt-in precision',
-    items: [
-      { name: 'scip',               purpose: 'Ingest a SCIP index — precise, confidence-1.0 resolution.' },
-      { name: 'index --embeddings', purpose: 'Compute and store embedding vectors at index time.' },
-      { name: 'semantic',           purpose: 'Embedding-based symbol search over that index.' },
-      { name: 'clusters',           purpose: 'Louvain communities over calls + imports; semantic weighting too.' },
-    ],
-  },
-  {
-    name: 'Scale it out', note: 'multi-repo',
-    items: [
-      { name: 'index --repo', purpose: 'Co-locate many repos in one db — paths namespaced, nothing collides.' },
-      { name: 'cross-graph',  purpose: 'Federated search + blast radius across separate graphs.' },
-      { name: 'correspond',   purpose: 'Score matching symbols across two graphs.' },
-      { name: 'export',       purpose: 'The whole graph as NDJSON or JSON.' },
-    ],
-  },
-  {
-    name: 'Read the shape', note: 'one-liners',
-    items: [
-      { name: 'entrypoints', purpose: 'Symbols with no callers or importers.' },
-      { name: 'leaves',      purpose: 'Symbols that call or import nothing.' },
-      { name: 'dead-code',   purpose: 'Symbols with no edges at all.' },
-      { name: 'context',     purpose: 'Ranked context for a symbol, within a character budget.' },
-      { name: 'fingerprint', purpose: 'A stable hex fingerprint per symbol.' },
-    ],
-  },
-  {
-    name: 'Pin the meaning', note: 'semantics',
-    items: [
-      { name: 'annotate',          purpose: 'Typed, confidence-scored notes — they survive re-index.' },
-      { name: 'annotations',       purpose: 'Read them back by type, advisory-flagged.' },
-      { name: 'stale-annotations', purpose: 'What needs re-verification, by last-verified cutoff.' },
-      { name: 'semantics',         purpose: 'Set a symbol’s description, requirement, validated flag.' },
-      { name: 'by-requirement',    purpose: 'Every symbol satisfying a requirement id.' },
-      { name: 'resolve',           purpose: 'A name → its stable SymbolId(s), before any write.' },
-    ],
-  },
-  {
-    name: 'Map the estate', note: 'IaC · ADR-004',
-    items: [
-      { name: 'iac as languages', purpose: 'HCL · Bicep · ARM · Kubernetes YAML — resource declarations indexed like code.' },
-      { name: 'tfstate',          purpose: 'Ingest live Terraform state as resource nodes.' },
-      { name: 'drift',            purpose: 'IaC vs live — managed · undeployed · unmanaged.' },
-    ],
-  },
-]
-
-// the long tail past the grid — runtime + housekeeping, each a shipped surface
-const TAIL_CHIPS: string[] = [
-  'Runtime language plugins · drop-in tree-sitter grammars · no rebuild · license-isolated',
-  'skill:// · the six playbooks served as MCP resources',
-  'import-telemetry · bulk access-log + search-miss import',
-  'stats · graph counts + git provenance',
-  'source · bulk source slices by file, cluster, or symbol list',
-  'compact · prune cruft + VACUUM',
-]
-
-function BinaryTail() {
-  return (
-    <Section id="binary">
-      <div className="max-w-6xl mx-auto w-full">
-        <div className="mb-2.5 w-full text-left">
-          <span className="kicker">The rest of the binary</span>
-          <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink leading-[0.98]">
-            The MCP surface is how agents read it. <span style={{ color: 'var(--accent)' }}>The CLI ships the long tail.</span>
-          </h2>
-          <p className="mt-1.5 text-sm text-muted font-sans leading-tight max-w-3xl">
-            Thirty-three subcommands in the same binary, against the same record: a watch mode that
-            re-indexes as you edit, a precise SCIP tier, multi-repo federation, IaC drift against live
-            Terraform state, drop-in language plugins. No sidecar, no daemon farm — one{' '}
-            <span className="font-mono text-ink">wicked-estate</span>.
-          </p>
-        </div>
-
-        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
-          {TAIL_GROUPS.map(g => (
-            <div key={g.name} className="rock-panel p-0">
-              <div className="flex items-center gap-2.5 px-4 py-1.5 border-b border-hairline-strong">
-                <span className="font-display font-black text-ink text-[0.95rem] flex-1" style={{ fontStretch: '108%' }}>{g.name}</span>
-                <span className="tag tag-accent">{g.note}</span>
-              </div>
-              <div className="divide-y divide-hairline">
-                {g.items.map(t => (
-                  <div key={t.name} className="px-4 py-[2px] flex items-baseline gap-2">
-                    <span className="font-mono text-[0.7rem] font-semibold text-ink shrink-0">{t.name}</span>
-                    <span className="depth flex-1 min-w-0 text-right" style={{ whiteSpace: 'normal', lineHeight: 1.25 }}>{t.purpose}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {/* long chips wrap (see the CAPABILITIES row note — .tag is nowrap) */}
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {TAIL_CHIPS.map(c => <span key={c} className="tag" style={{ whiteSpace: 'normal' }}>{c}</span>)}
-        </div>
-      </div>
-    </Section>
-  )
-}
-
-// ── 4 · PROVENANCE SEAM — cycle the collisions; the winning label pops ──────────
-// The shipping tier ladder + default confidences — ResolutionTier::default_confidence,
-// crates/wicked-estate-core/src/edge.rs.
-const TIERS: { tier: string; conf: number; who: string }[] = [
-  { tier: 'Parsed',    conf: 1.0, who: 'Direct AST facts' },
-  { tier: 'SCIP',      conf: 1.0, who: 'Precise indexer output' },
-  { tier: 'ImportMap', conf: 0.6, who: 'Import-map heuristics' },
-  { tier: 'Heuristic', conf: 0.5, who: 'AST synthesizers' },
-  { tier: 'Tags',      conf: 0.3, who: 'Tree-sitter tag scan only' },
-]
-
-// each collision: the same (source,target,kind) edge proposed by several tiers.
-// higher tier wins; the losers are superseded. `proposed` = tier indices in play.
-const COLLISIONS: { edge: string; kind: string; proposed: number[] }[] = [
-  { edge: 'checkout → applyDiscount', kind: 'calls', proposed: [0, 2, 4] },
-  { edge: 'price.ts → utils', kind: 'imports', proposed: [1, 2] },
-  { edge: 'referralFlow → applyDiscount', kind: 'calls', proposed: [4] },
-  { edge: 'service → handler', kind: 'implements', proposed: [1, 3] },
-]
-
-function ProvenanceSeam() {
-  const reduced = useReducedMotion()
-  const [idx, setIdx] = useState(0)
-  const [pinned, setPinned] = useState(false)
-
-  useEffect(() => {
-    if (reduced || pinned) return
-    const t = setInterval(() => setIdx(i => (i + 1) % COLLISIONS.length), 2600)
-    return () => clearInterval(t)
-  }, [reduced, pinned])
-
-  const c = COLLISIONS[idx]
-  const winner = Math.min(...c.proposed) // lowest tier index = highest tier = winner
-
-  return (
-    <Section id="provenance" solid>
-      <div className="max-w-5xl mx-auto w-full grid lg:grid-cols-[1fr_1.15fr] gap-12 items-center">
-        <div className="text-left">
-          <span className="kicker">The provenance seam</span>
-          <h2 className="mt-4 font-display text-3xl sm:text-[2.4rem] font-black text-ink leading-[0.98]">
-            Every edge carries where it came from.
-          </h2>
-          <p className="mt-4 text-ink font-sans leading-relaxed">
-            No edge ships without <span className="font-mono text-ink text-sm">confidence</span>,{' '}
-            <span className="font-mono text-ink text-sm">provenance</span> and{' '}
-            <span className="font-mono text-ink text-sm">resolved_by</span>. When the same{' '}
-            <span className="font-mono text-ink text-sm">(source, target, kind)</span> edge is proposed by several
-            tiers, the <span className="font-semibold">highest tier wins</span> — a 0.3 tag-scan guess is never
-            presented as a 1.0 fact.
-          </p>
-          <div className="mt-6 rock-panel p-4">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="depth">collision</span>
-              <span className="font-mono text-sm text-ink">{c.edge}</span>
-              <span className="tag">{c.kind}</span>
-            </div>
-            <div className="mt-3 flex items-center gap-2 flex-wrap">
-              <span className="depth">resolved_by →</span>
-              <span className="tag tag-accent">{TIERS[winner].tier}</span>
-              <span className="depth">{c.proposed.length > 1 ? `${c.proposed.length - 1} lower tier(s) superseded` : 'sole proposer'}</span>
-            </div>
-            <div className="mt-3 flex gap-1.5">
-              {COLLISIONS.map((_, i) => (
-                <button key={i} onClick={() => { setPinned(true); setIdx(i) }} aria-label={`collision ${i + 1}`}
-                  className="h-1.5 rounded-full transition-all"
-                  style={{ width: i === idx ? 22 : 8, background: i === idx ? 'var(--accent)' : 'var(--hairline-strong)' }} />
-              ))}
-              <span className="depth ml-2">{pinned ? 'pinned' : 'cycling'}</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="rock-panel p-6">
-          <div className="flex flex-col gap-4">
-            {TIERS.map((t, i) => {
-              const inPlay = c.proposed.includes(i)
-              const isWinner = i === winner
-              return (
-                <div key={t.tier} className="tier-row flex items-center gap-4" data-in={String(inPlay)}>
-                  <span className="font-mono text-xs w-24 shrink-0" style={{ color: isWinner ? 'var(--accent)' : 'var(--ink)' }}>{t.tier}</span>
-                  <div className="flex-1 h-1.5 rounded-full" style={{ background: 'var(--hairline-strong)' }}>
-                    <div className="h-full rounded-full transition-all duration-500"
-                      style={{ width: inPlay ? `${t.conf * 100}%` : '0%', background: isWinner ? 'var(--accent)' : 'var(--muted)', opacity: isWinner ? 1 : 0.55 }} />
-                  </div>
-                  <span className="depth w-8 shrink-0 tabular-nums">{t.conf.toFixed(1)}</span>
-                  <span className="who-label prov hidden sm:block w-48 shrink-0 text-center" data-scope={String(isWinner)}>
-                    {t.who}
-                  </span>
+        {shown.length === 0 && <p className="px-5 py-6 text-muted font-sans">No tool matches “{filter}”.</p>}
+        {shown.map(t => (
+          <div key={t.id} className="tools-set">
+            <p className="tools-note">{f ? t.name : t.note}</p>
+            <div className="tools-groups">
+              {t.groups.map(g => (
+                <div key={g.label} className="tools-group">
+                  <h3 className="tools-gl">{g.label}</h3>
+                  <dl>
+                    {g.rows.map(r => (
+                      <div key={r.name} className="tools-row">
+                        <dt><code>{r.name}</code></dt>
+                        <dd>{r.does}</dd>
+                      </div>
+                    ))}
+                  </dl>
                 </div>
-              )
-            })}
+              ))}
+            </div>
           </div>
-          <p className="mt-5 depth">The right-hand label lights when its tier is the one in scope.</p>
-        </div>
+        ))}
       </div>
     </Section>
   )
 }
 
-// ── 5 · SOLO OR SHARED — same record, one profile switch ────────────────────────
+// ── 5 · Solo or shared ──────────────────────────────────────────────────────
 function Storage() {
   const [shared, setShared] = useState(false)
-  const view = shared
-    ? {
-        cmd: 'WICKED_RUNTIME=team wicked-estate index .',
-        rows: [
-          ['store', 'WICKED_STORE_URL=postgres://team/graph — shared, self-hosted'],
-          ['writers', 'concurrent — the whole team writes'],
-          ['traversal', 'server-side WITH RECURSIVE, in-DB'],
-          ['switching', 'one profile switch — same schema, no re-index'],
-          ['mcp server', 'not yet — SQLite-only today; fails loud under team (named follow-up)'],
-        ],
-        note: '--features postgres · fail-loud: a typo’d profile or an unsupported surface errors, never silently local',
-      }
-    : {
-        cmd: 'wicked-estate index . --db graph.db',
-        rows: [
-          ['store', 'graph.db — one local file, repo-scoped'],
-          ['writers', 'single-writer — no daemon, no races'],
-          ['traversal', 'bounded recursive CTE'],
-          ['infrastructure', 'none — nothing to run, nothing leaves your box'],
-        ],
-        note: 'FTS5 · sqlite-vec · WAL · the zero-infra default',
-      }
+  const rows: [string, string, string][] = [
+    ['Store', 'one graph.db file per repo', 'a Postgres you host'],
+    ['Writers', 'one writer, no daemon', 'the whole team, concurrently'],
+    ['Setup', 'nothing to run', 'WICKED_RUNTIME=team and WICKED_STORE_URL, on a --features postgres build'],
+    ['MCP server', 'yes', 'not yet; it refuses to start rather than fall back'],
+  ]
   return (
-    <Section id="storage" solid>
-      <div className="max-w-4xl mx-auto w-full">
-        <TopHead
-          kicker="One record, solo or shared"
-          title={<>SQLite by default. <span style={{ color: 'var(--accent)' }}>One profile switch</span> to a shared team backend.</>}
-        >
-          <p className="max-w-3xl">
-            The engine's store path — the CLI, indexing, the full graph surface — runs on either backend through
-            one <span className="font-mono text-sm font-semibold">open_store(spec)</span> factory: no caller changes,
-            no re-index, and the Postgres backend passes the same store-conformance suite in CI. The{' '}
-            <span className="font-mono text-sm font-semibold">WICKED_RUNTIME=team</span> profile seam retargets it
-            with one environment variable. The MCP server — the 30 tools — is{' '}
-            <span className="text-ink">SQLite-only today</span>: under the team profile it fails loud at startup
-            instead of silently falling back to local; Postgres for the MCP surface is the named follow-up.
-            Local-first is a feature, not a ceiling.
-          </p>
-        </TopHead>
-
-        <div className="inline-flex flex-wrap gap-1.5 p-1.5 rounded-xl mb-5" style={{ background: 'var(--rock)', border: '1px solid var(--hairline-strong)' }}>
-          <button className="seg" data-on={!shared} onClick={() => setShared(false)}>SQLite · solo</button>
-          <button className="seg" data-on={shared} onClick={() => setShared(true)}>PostgreSQL · shared team</button>
+    <Section id="storage">
+      <Head title="SQLite by default. Postgres for a team." sub="Same schema and the same engine either way. Nothing leaves your machine unless you point it at a shared store." />
+      <div className="inline-flex flex-wrap gap-1.5 p-1.5 rounded-xl mb-4" style={{ background: 'var(--rock)', border: '1px solid var(--hairline-strong)' }}>
+        <button className="seg" data-on={!shared} onClick={() => setShared(false)}>SQLite · solo</button>
+        <button className="seg" data-on={shared} onClick={() => setShared(true)}>PostgreSQL · team</button>
+      </div>
+      <div className="rock-panel p-0 max-w-3xl">
+        <div className="px-5 py-3 border-b border-hairline-strong font-mono text-sm text-ink" data-storage-cmd>
+          {shared ? 'WICKED_RUNTIME=team wicked-estate index .' : 'wicked-estate index . --db graph.db'}
         </div>
-
-        <div className="rock-panel p-0">
-          <div className="px-5 py-3 border-b border-hairline-strong flex items-center gap-3">
-            <span className="w-2 h-2 rounded-full" style={{ background: shared ? 'var(--accent)' : 'var(--muted)' }} />
-            <span className="font-mono text-sm text-ink">{view.cmd}</span>
-          </div>
-          <div className="divide-y divide-hairline">
-            {view.rows.map(([k, v]) => (
-              <div key={k} className="flex gap-4 px-5 py-3.5">
-                <span className="font-mono text-xs text-muted w-40 shrink-0">{k}</span>
-                <span className="text-sm text-ink font-sans">{v}</span>
-              </div>
+        <table className="store-t">
+          <tbody>
+            {rows.map(([k, solo, team]) => (
+              <tr key={k}><th scope="row">{k}</th><td>{shared ? team : solo}</td></tr>
             ))}
-          </div>
-          <div className="px-5 py-3 border-t border-hairline-strong">
-            <span className="depth" style={{ color: shared ? 'var(--accent)' : 'var(--faint)' }}>{view.note}</span>
-          </div>
-        </div>
+          </tbody>
+        </table>
       </div>
     </Section>
   )
 }
 
-// ── 6 · GET STARTED (exported separately — the SameGarden four-plane map, an
-//        Astro component, renders between the main island and this one) ─────────
+// ── 6 · Get started (its own island, after the SameGarden map) ──────────────
 function CopyBtn({ text, label }: { text: string; label: string }) {
   const [copied, setCopied] = useState(false)
   const timer = useRef<number | null>(null)
@@ -1457,7 +544,7 @@ function CopyBtn({ text, label }: { text: string; label: string }) {
 
 const INSTALL_CMD = 'npx wicked-installer'
 const DIRECT_CMDS: { comment: string; cmd: string; show?: string }[] = [
-  { comment: '# the CLI + the MCP server', cmd: 'cargo install wicked-estate wicked-estate-mcp' },
+  { comment: '# the CLI and the MCP server', cmd: 'cargo install wicked-estate wicked-estate-mcp' },
   { comment: '# index your repo', cmd: 'wicked-estate index . --db graph.db' },
   { comment: '# connect your agent (Claude Code shown)',
     cmd: 'claude mcp add wicked-estate -s project -- wicked-estate-mcp --db "$PWD/graph.db"',
@@ -1467,185 +554,56 @@ const DIRECT_CMDS: { comment: string; cmd: string; show?: string }[] = [
 export function GetStarted() {
   return (
     <Section id="get-started" solid>
-      <div className="max-w-4xl mx-auto w-full">
-        <TopHead
-          kicker="Get started"
-          title="Zero to a queried record in two minutes."
-        />
-
-        <div className="grid md:grid-cols-2 gap-5">
-          {/* PRIMARY — installer */}
-          <div className="rock-panel p-0">
-            <div className="px-5 py-3 border-b border-hairline-strong flex items-center justify-between">
-              <span className="kicker" style={{ color: 'var(--accent)' }}>Recommended · the whole family</span>
-              <span className="depth">npm</span>
+      <Head title="Index a repo and ask it something." sub="Use an absolute database path: agent CLIs start from unpredictable directories. Works with Claude Code, Antigravity, Codex, OpenCode and Pi." />
+      <div className="grid md:grid-cols-2 gap-4">
+        <div className="rock-panel p-0">
+          <div className="px-5 py-3 border-b border-hairline-strong flex items-center justify-between">
+            <span className="text-sm font-sans text-ink">Recommended: the whole family</span>
+            <span className="depth">npm</span>
+          </div>
+          <div className="px-5 py-5">
+            <div className="flex items-center gap-3">
+              <div className="font-mono text-sm text-ink flex-1 min-w-0"><span style={{ color: 'var(--accent)' }}>$ </span>{INSTALL_CMD}</div>
+              <CopyBtn text={INSTALL_CMD} label={INSTALL_CMD} />
             </div>
-            <div className="px-5 py-5">
-              <div className="flex items-center gap-3">
-                <div className="font-mono text-sm text-ink flex-1 min-w-0">
-                  <span style={{ color: 'var(--accent)' }}>$ </span>{INSTALL_CMD}
+            <p className="mt-3 text-sm text-muted font-sans leading-snug">Pick estate and any siblings, choose your agent CLIs, and it wires them up.</p>
+          </div>
+        </div>
+        <div className="rock-panel p-0">
+          <div className="px-5 py-3 border-b border-hairline-strong flex items-center justify-between">
+            <span className="text-sm font-sans text-ink">Or just estate</span>
+            <span className="depth">crates.io</span>
+          </div>
+          <div className="px-5 py-5 font-mono text-xs leading-[1.9]">
+            {DIRECT_CMDS.map(c => (
+              <div key={c.cmd} className="mb-2 last:mb-0">
+                <div className="text-faint">{c.comment}</div>
+                <div className="flex items-start gap-3">
+                  <div className="text-ink flex-1 min-w-0 whitespace-pre-wrap"><span style={{ color: 'var(--accent)' }}>$ </span>{c.show ?? c.cmd}</div>
+                  <CopyBtn text={c.cmd} label={c.cmd} />
                 </div>
-                <CopyBtn text={INSTALL_CMD} label={INSTALL_CMD} />
               </div>
-              <p className="mt-3 text-xs text-muted font-sans leading-5">
-                Interactive: pick <span className="text-ink">estate</span> (and any siblings), choose your agent
-                CLIs, and it wires everything and ships the cross-family <span className="font-mono text-ink">wicked</span> CLI.
-              </p>
-            </div>
-          </div>
-
-          {/* SECONDARY — direct */}
-          <div className="rock-panel p-0">
-            <div className="px-5 py-3 border-b border-hairline-strong flex items-center justify-between">
-              <span className="kicker">Or install just this directly</span>
-              <span className="depth">crates.io</span>
-            </div>
-            <div className="px-5 py-5 font-mono text-xs leading-[1.9]">
-              {DIRECT_CMDS.map(c => (
-                <div key={c.cmd} className="mb-2 last:mb-0">
-                  <div className="text-faint">{c.comment}</div>
-                  <div className="flex items-start gap-3">
-                    <div className="text-ink flex-1 min-w-0 whitespace-pre-wrap">
-                      <span style={{ color: 'var(--accent)' }}>$ </span>{c.show ?? c.cmd}
-                    </div>
-                    <CopyBtn text={c.cmd} label={c.cmd} />
-                  </div>
-                </div>
-              ))}
-            </div>
+            ))}
           </div>
         </div>
-
-        <p className="mt-4 font-mono text-[0.6rem] text-faint tracking-wide">
-          Use an absolute DB path — clients launch from an unpredictable working directory. Same 30 tools in Claude Code, Antigravity, Codex, OpenCode, and Pi.
-        </p>
-
-        <div className="mt-9 flex flex-col sm:flex-row gap-3">
-          <a href="https://github.com/mikeparcewski/wicked-estate" target="_blank" rel="noreferrer" className="btn-primary">
-            <GitHubIcon /> GitHub
-          </a>
-          <a href="https://github.com/mikeparcewski/wicked-estate/tree/main/docs" target="_blank" rel="noreferrer" className="btn-outline">
-            Documentation
-          </a>
-        </div>
+      </div>
+      <div className="mt-7 flex flex-col sm:flex-row gap-3">
+        <a href="https://github.com/mikeparcewski/wicked-estate" target="_blank" rel="noreferrer" className="btn-primary"><GitHubIcon /> GitHub</a>
+        <a href="https://github.com/mikeparcewski/wicked-estate/tree/main/docs" target="_blank" rel="noreferrer" className="btn-outline">Documentation</a>
       </div>
     </Section>
   )
 }
 
-// ── 5b · WHAT v0.15.0 SHIPS — the release the "Grounded to" stamp points at ─────
-// Grounded to v0.15.0 (tag = 8aa4554, all four in the release): CHANGELOG.md
-// [0.15.0], docs/adr/ADR-002 (scheme-3 amendment, #136), docs/adr/ADR-010
-// (plugin overrides, #135 — shipped code), docs/adr/ADR-009 (intent-routed LSP
-// — ACCEPTED DESIGN, implementation is the W3.6 lane; phase-0 lsp.rs fixes
-// landed with it), docs/MIGRATION-0.15.md (the re-index runbook).
-// EDITORIAL RULE: status tags below mirror the ADR Status lines — never promote
-// "accepted design" to shipped without the implementing commit in the release.
-const V0150: { name: string; status: 'shipped' | 'accepted design' | 'runbook'; body: React.ReactNode; href: string; link: string }[] = [
-  {
-    name: 'Scheme-3 symbol identity',
-    status: 'shipped',
-    href: 'https://github.com/mikeparcewski/wicked-estate/blob/main/docs/adr/ADR-002-stable-symbol-identity.md',
-    link: 'ADR-002 (amendment)',
-    body: (
-      <>Definitions now nest under their owning type — <span className="font-mono text-[0.75rem] text-ink">Repo#save().</span>,
-      not a module-flat <span className="font-mono text-[0.75rem] text-ink">save().</span> — so same-named definitions
-      in one module no longer collapse into a single node that calls then “resolved” into at 0.65. Rust impl methods,
-      Go receiver methods, Ruby singleton members, and C++ out-of-line members all move from module-flat to type-nested.</>
-    ),
-  },
-  {
-    name: 'Parser-plugin overrides',
-    status: 'shipped',
-    href: 'https://github.com/mikeparcewski/wicked-estate/blob/main/docs/adr/ADR-010-plugin-overrides.md',
-    link: 'ADR-010',
-    body: (
-      <>“Built-ins always win” is repealed. A drop-in plugin can now override a built-in language: query-only — a
-      manifest plus your <span className="font-mono text-[0.75rem] text-ink">.scm</span> on the shipped grammar, no
-      shared library — or a full grammar swap behind an explicit double opt-in
-      (<span className="font-mono text-[0.75rem] text-ink">override = true</span> +{' '}
-      <span className="font-mono text-[0.75rem] text-ink">WICKED_ESTATE_PLUGIN_OVERRIDE</span>). Patch a query gap
-      locally without waiting for a release.</>
-    ),
-  },
-  {
-    name: 'Intent-routed LSP',
-    status: 'accepted design',
-    href: 'https://github.com/mikeparcewski/wicked-estate/blob/main/docs/adr/ADR-009-intent-routed-lsp.md',
-    link: 'ADR-009',
-    body: (
-      <>The sanctioned consumer for the in-tree LSP client library, defined so bulk routing can’t happen by accident:
-      edit-plane queries (exactly one file · line · col) go <span className="text-ink">LSP-first</span>, and a missing
-      server warns and serves graph results — never a silent substitution; understand-plane queries (blast radius,
-      lineage, search) never consult LSP. Phase-0 fixes (transport timeout, didOpen) landed with the ADR;
-      implementation is the W3.6 lane.</>
-    ),
-  },
-  {
-    name: 'Migration: one re-index per repo',
-    status: 'runbook',
-    href: 'https://github.com/mikeparcewski/wicked-estate/blob/main/docs/MIGRATION-0.15.md',
-    link: 'docs/MIGRATION-0.15.md',
-    body: (
-      <>Scheme 3 re-mints definition ids, so each previously-indexed repo is fully re-extracted on its next{' '}
-      <span className="font-mono text-[0.75rem] text-ink">index</span> — two per-repo gates, loud on stderr,
-      crash-idempotent. No schema migration: the database file opens unchanged; rows rebuild. Re-run{' '}
-      <span className="font-mono text-[0.75rem] text-ink">scip</span> and{' '}
-      <span className="font-mono text-[0.75rem] text-ink">--embeddings</span>, and re-inject overlay edges after.</>
-    ),
-  },
-]
-
-function WhatShipped() {
-  return (
-    <Section id="v0150">
-      <div className="max-w-6xl mx-auto w-full">
-        <div className="mb-4 w-full text-left">
-          <span className="kicker">New in this release</span>
-          <h2 className="mt-1.5 font-display text-2xl sm:text-[1.95rem] font-black text-ink leading-[0.98]">
-            What <span style={{ color: 'var(--accent)' }}>v0.15.0</span> ships.
-          </h2>
-          <p className="mt-1.5 text-sm text-muted font-sans leading-tight max-w-3xl">
-            The release this page is grounded to. Two shipped changes to the record itself, the accepted
-            design for the next resolution consumer, and the runbook for bringing a 0.14.x graph across.
-            Full detail: the{' '}
-            <a className="underline text-ink" href="https://github.com/mikeparcewski/wicked-estate/blob/main/CHANGELOG.md" target="_blank" rel="noreferrer">CHANGELOG</a>.
-          </p>
-        </div>
-
-        <div className="grid sm:grid-cols-2 gap-2.5">
-          {V0150.map(item => (
-            <div key={item.name} className="rock-panel p-0">
-              <div className="flex items-center gap-2.5 px-4 py-2 border-b border-hairline-strong">
-                <span className="font-display font-black text-ink text-[0.95rem] flex-1" style={{ fontStretch: '108%' }}>{item.name}</span>
-                <span className={item.status === 'shipped' ? 'tag tag-accent' : 'tag'}>{item.status}</span>
-              </div>
-              <div className="px-4 py-3">
-                <p className="text-sm text-muted font-sans leading-snug">{item.body}</p>
-                <a className="depth underline mt-2 inline-block" href={item.href} target="_blank" rel="noreferrer">{item.link} →</a>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </Section>
-  )
-}
-
-// ── Content ──────────────────────────────────────────────────────────────────
-// The SameGarden four-plane map (shared wicked-web chrome, an Astro component)
-// renders between this island and the GetStarted island — see index.astro.
+// The SameGarden map (an Astro component) renders between this island and GetStarted.
 export default function Content() {
   return (
     <>
       <Hero />
-      <AgentIDE />
-      <FiveStrata />
-      <FullToolface />
-      <BinaryTail />
-      <ProvenanceSeam />
+      <Stores />
+      <Provenance />
+      <Toolface />
       <Storage />
-      <WhatShipped />
     </>
   )
 }
