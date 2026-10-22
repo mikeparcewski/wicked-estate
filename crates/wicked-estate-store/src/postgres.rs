@@ -138,6 +138,8 @@ fn split_ddl(sql: &str) -> Vec<String> {
         .collect()
 }
 
+const POSTGRES_SCHEMA_VERSION: &str = "1";
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS files (
   path    TEXT PRIMARY KEY,
@@ -450,6 +452,9 @@ impl PostgresStore {
     pub fn open(url: &str) -> Result<Self> {
         let pool = rt_block(sqlx::PgPool::connect(url)).map_err(st)?;
 
+        // Refuse a schema from a newer/incompatible initializer before modifying it.
+        Self::check_schema_version(&pool, true)?;
+
         // Run schema DDL statement by statement (see `split_ddl`).
         rt_block(async {
             for stmt in split_ddl(SCHEMA) {
@@ -468,6 +473,65 @@ impl PostgresStore {
         )
         .map_err(st)?;
 
+        rt_block(
+            sqlx::query(
+                "INSERT INTO meta(k,v) VALUES('postgres_schema_version',$1) ON CONFLICT DO NOTHING",
+            )
+            .bind(POSTGRES_SCHEMA_VERSION)
+            .execute(&pool),
+        )
+        .map_err(st)?;
+        Self::from_existing_pool(pool)
+    }
+
+    /// Connect to a graph schema previously initialized by [`Self::open`].
+    ///
+    /// Performs only reads: no DDL, migrations, metadata inserts, or privilege changes.
+    /// A deployment owner must initialize legacy/unversioned schemas explicitly first.
+    /// Configure the login's search_path to its dedicated, trusted graph schema. Database
+    /// privileges still govern which GraphStore operations this connection can perform.
+    pub fn connect_existing(url: &str) -> Result<Self> {
+        let pool = rt_block(sqlx::PgPool::connect(url)).map_err(st)?;
+        Self::check_schema_version(&pool, false)?;
+        Self::from_existing_pool(pool)
+    }
+
+    fn check_schema_version(pool: &sqlx::PgPool, allow_unversioned: bool) -> Result<()> {
+        let table: Option<String> =
+            rt_block(sqlx::query_scalar("SELECT to_regclass('meta')::text").fetch_one(pool))
+                .map_err(st)?;
+        let version: Option<String> = if table.is_some() {
+            rt_block(
+                sqlx::query_scalar("SELECT v FROM meta WHERE k='postgres_schema_version'")
+                    .fetch_optional(pool),
+            )
+            .map_err(st)?
+        } else {
+            None
+        };
+        match version.as_deref() {
+            Some(POSTGRES_SCHEMA_VERSION) => Ok(()),
+            None if allow_unversioned => Ok(()),
+            None => Err(Error::Storage("Postgres graph schema is not initialized; run PostgresStore::open with the deployment owner".into())),
+            Some(_) => Err(Error::Storage("unsupported Postgres graph schema version".into())),
+        }
+    }
+
+    fn from_existing_pool(pool: sqlx::PgPool) -> Result<Self> {
+        // The initial graph version is required, not silently manufactured by a reader.
+        let version: Option<String> = rt_block(
+            sqlx::query_scalar("SELECT v FROM meta WHERE k='graph_version'").fetch_optional(&pool),
+        )
+        .map_err(st)?;
+        if version
+            .as_deref()
+            .and_then(|v| v.parse::<u64>().ok())
+            .is_none()
+        {
+            return Err(Error::Storage(
+                "missing or invalid Postgres graph_version metadata".into(),
+            ));
+        }
         // Read history_enabled from meta (absent → OFF).
         let history_enabled = rt_block(async {
             let row: Option<sqlx::postgres::PgRow> =

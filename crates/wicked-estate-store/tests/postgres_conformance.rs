@@ -519,3 +519,51 @@ fn postgres_replacement_rolls_back_a_failure_inside_the_transaction() {
         store.replace_edge_supports(&owner, 3, &[]).unwrap();
     }
 }
+
+#[test]
+fn existing_connection_requires_explicit_compatible_initialization() {
+    let Ok(url) = std::env::var("TEST_POSTGRES_URL") else {
+        eprintln!("postgres_conformance: TEST_POSTGRES_URL not set — skipping");
+        return;
+    };
+    let _guard = PG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lease = PgTestLease::acquire(&url);
+    drop_all_tables(&url);
+    assert!(wicked_estate_store::PostgresStore::connect_existing(&url).is_err());
+    let initialized =
+        wicked_estate_store::PostgresStore::open(&url).expect("explicit initialization");
+    drop(initialized);
+    let reader =
+        wicked_estate_store::PostgresStore::connect_existing(&url).expect("existing schema");
+    drop(reader);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let pool = rt
+        .block_on(sqlx::PgPool::connect(&url))
+        .expect("admin connection");
+    rt.block_on(sqlx::query("DELETE FROM meta WHERE k='postgres_schema_version'").execute(&pool))
+        .expect("legacy metadata");
+    assert!(wicked_estate_store::PostgresStore::connect_existing(&url).is_err());
+    drop(wicked_estate_store::PostgresStore::open(&url).expect("explicit legacy upgrade"));
+    rt.block_on(
+        sqlx::query("UPDATE meta SET v='unsupported' WHERE k='postgres_schema_version'")
+            .execute(&pool),
+    )
+    .expect("future metadata");
+    assert!(wicked_estate_store::PostgresStore::connect_existing(&url).is_err());
+    assert!(wicked_estate_store::PostgresStore::open(&url).is_err());
+    let retained: String = rt
+        .block_on(
+            sqlx::query_scalar("SELECT v FROM meta WHERE k='postgres_schema_version'")
+                .fetch_one(&pool),
+        )
+        .expect("retained version");
+    assert_eq!(retained, "unsupported");
+    // Restore the supported metadata for other independently serialized tests.
+    rt.block_on(
+        sqlx::query("UPDATE meta SET v='1' WHERE k='postgres_schema_version'").execute(&pool),
+    )
+    .expect("restore metadata");
+    rt.block_on(pool.close());
+}
