@@ -1,0 +1,183 @@
+name: Binaries
+
+# Prebuilt release archives (wicked-estate#360): the two product binaries for five targets,
+# each smoke-tested on its own OS before it may be uploaded, plus a clean-container run of the
+# Linux archives on the distros the glibc-2.28 floor promises.
+#
+# Called by publish.yml for every `v*` tag (`ref` + `version`), which attaches the artifacts to
+# the GitHub Release. Also runs on a pull request that changes the packaging itself — the dry run:
+# every target is built, packaged and smoke-tested, nothing is released.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Tag to build (e.g. v0.31.0). Checked out as refs/tags/<ref>.'
+        required: true
+        type: string
+      version:
+        description: 'Version the binaries must report (no leading v).'
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - '.github/workflows/binaries.yml'
+      - '.github/workflows/publish.yml'
+      - 'scripts/smoke-binary.py'
+      - 'scripts/package-binary.py'
+      - 'scripts/smoke-fixture/**'
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build · package · smoke (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    strategy:
+      # A failing leg must not hide the others' results; the release job still requires ALL.
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+            py: python3
+          # The remaining x86_64 macOS image; when it is retired this leg moves to
+          # `--target x86_64-apple-darwin` on arm64, smoke-tested under Rosetta.
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            py: python3
+          # Built inside manylinux_2_28 so the binary needs glibc >= 2.28 (RHEL/Alma/Rocky 8+,
+          # Debian 10+, Ubuntu 20.04+); a build on the runner's own glibc would not start on RHEL 9.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            container: quay.io/pypa/manylinux_2_28_x86_64
+            py: /opt/python/cp312-cp312/bin/python3
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+            py: /opt/python/cp312-cp312/bin/python3
+          # Static CRT: no VC++ redistributable on the target machine.
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            py: python
+            rustflags: '-C target-feature=+crt-static'
+    steps:
+      # Event-gated checkouts (publish.yml's rule): a release build checks out exactly the tag and
+      # fails loudly if it does not exist; only the pull-request dry run uses the PR ref.
+      - name: check out the TAG (release)
+        if: inputs.ref != ''
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/tags/${{ inputs.ref }}
+      - name: check out the pull request (dry run)
+        if: inputs.ref == ''
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: version the binaries must report
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.version }}" ]; then
+            v="${{ inputs.version }}"
+          else
+            v=$(${{ matrix.py }} scripts/workspace-version.py)
+          fi
+          # A tag spells it `v0.31.0`; native Windows Python prints CRLF into bash's `$(…)`.
+          v=$(printf '%s' "$v" | tr -d '\r')
+          v=${v#v}
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: build release binaries
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: >
+          cargo build --release --locked --target ${{ matrix.target }}
+          -p wicked-estate -p wicked-estate-mcp --bin wicked-estate --bin wicked-estate-mcp
+      - name: package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=$(${{ matrix.py }} scripts/package-binary.py ${{ matrix.target }} ${{ steps.version.outputs.version }} dist | tr -d '\r')
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          # The checks below run on what SHIPS: the archive, extracted into a fresh directory —
+          # not the staging directory it was built from.
+          rm -rf check
+          ${{ matrix.py }} -c "import shutil, sys; shutil.unpack_archive(sys.argv[1], 'check')" "$archive"
+          echo "dir=check/wicked-estate-${{ steps.version.outputs.version }}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+      # The smoke test runs against the EXTRACTED archive, before anything is uploaded: a leg
+      # that fails it uploads nothing, and the release job then refuses to publish.
+      - name: install smoke test
+        shell: bash
+        run: ${{ matrix.py }} scripts/smoke-binary.py "${{ steps.package.outputs.dir }}" "${{ steps.version.outputs.version }}"
+      - name: static CRT (no VC++ redistributable dependency)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe |
+            Where-Object FullName -like '*Hostx64\x64*' | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe not found' }
+          foreach ($b in 'wicked-estate.exe', 'wicked-estate-mcp.exe') {
+            $deps = & $dumpbin.FullName /dependents "${{ steps.package.outputs.dir }}\$b" | Out-String
+            if ($LASTEXITCODE -ne 0) { throw "dumpbin failed on $b" }
+            Write-Output $deps
+            # A real dependency listing names KERNEL32; anything else is not a listing.
+            if ($deps -notmatch '(?i)kernel32\.dll') { throw "no dependency listing for $b" }
+            if ($deps -match '(?i)vcruntime|msvcp|ucrtbase|api-ms-win-crt') { throw "$b links the dynamic CRT" }
+          }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wicked-estate-${{ matrix.target }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+  # The glibc floor is a claim about machines the build never ran on: start each Linux archive
+  # inside clean distro containers with no Rust toolchain — the oldest the floor promises
+  # (Rocky 8 = glibc 2.28), a newer RHEL (Rocky 9) and Debian 12.
+  clean-linux:
+    name: clean ${{ matrix.image }} (${{ matrix.target }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+        image: ['rockylinux:8', 'rockylinux:9', 'debian:12']
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+    steps:
+      - name: check out the TAG (release)
+        if: inputs.ref != ''
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/tags/${{ inputs.ref }}
+      - name: check out the pull request (dry run)
+        if: inputs.ref == ''
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wicked-estate-${{ matrix.target }}
+          path: dist
+      - name: smoke test inside ${{ matrix.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xzf dist/*.tar.gz -C dist
+          dir=$(cd dist && pwd)/$(cd dist && ls -d wicked-estate-*/ | head -1)
+          dir=${dir%/}
+          v=${dir##*/wicked-estate-}
+          v=${v%-${{ matrix.target }}}
+          python3 scripts/smoke-binary.py "$dir" "$v" \
+            --exec-prefix "docker run --rm -i -v $dir:$dir -w $dir/smoke-work ${{ matrix.image }}"

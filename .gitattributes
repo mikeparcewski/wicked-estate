@@ -1,0 +1,4 @@
+# Check out text files with LF everywhere, Windows included (wicked-estate#360). Tests read
+# sources with include_str!, fixtures are hashed byte-for-byte, and the index stores digests of
+# file bytes: a CRLF working tree would change every one of them on Windows only.
+* text=auto eol=lf

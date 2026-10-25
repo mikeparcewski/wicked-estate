@@ -426,10 +426,10 @@ fn build_nginx_override(plugins_root: &Path) -> Option<PathBuf> {
     if Command::new("cc").arg("--version").output().is_err() {
         return None;
     }
-    let example = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/plugins/nginx")
-        .canonicalize()
-        .expect("example plugin dir exists");
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/nginx");
+    // NOT canonicalized: on Windows that yields a verbatim `\\?\D:\…` path, which MinGW's gcc
+    // cannot open (#360). The joined path is enough for the compiler.
+    assert!(example.is_dir(), "example plugin dir exists: {example:?}");
     let dir = plugins_root.join("tsov");
     fs::create_dir_all(&dir).unwrap();
     let lib_out = dir.join(format!("libnginx{}", std::env::consts::DLL_SUFFIX));

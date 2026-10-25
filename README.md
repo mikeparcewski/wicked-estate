@@ -65,9 +65,42 @@ facts.
 
 ## Install
 
-Two binaries, both on crates.io: the **`wicked-estate` CLI** (index / query / blast-radius /
-rank / drift / plugins / …) and the **`wicked-estate-mcp` server** your agent connects to.
-Install both:
+Two binaries: the **`wicked-estate` CLI** (index / query / blast-radius / rank / drift / plugins /
+…) and the **`wicked-estate-mcp` server** your agent connects to.
+
+### Prebuilt binaries (no Rust toolchain)
+
+Every release tagged after wicked-estate#360 attaches one archive per platform to its
+[GitHub Release](https://github.com/mikeparcewski/wicked-estate/releases), with both binaries plus
+`LICENSE`, `NOTICE` and this README, and a `SHA256SUMS` file:
+
+| Platform | Archive |
+|---|---|
+| macOS, Apple silicon | `wicked-estate-<version>-aarch64-apple-darwin.tar.gz` |
+| macOS, Intel | `wicked-estate-<version>-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64 (glibc ≥ 2.28) | `wicked-estate-<version>-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux arm64 (glibc ≥ 2.28) | `wicked-estate-<version>-aarch64-unknown-linux-gnu.tar.gz` |
+| Windows x64 | `wicked-estate-<version>-x86_64-pc-windows-msvc.zip` |
+
+```sh
+V=<version> T=x86_64-unknown-linux-gnu   # e.g. V=0.31.0; T from the table above
+curl -LO https://github.com/mikeparcewski/wicked-estate/releases/download/v$V/wicked-estate-$V-$T.tar.gz
+curl -LO https://github.com/mikeparcewski/wicked-estate/releases/download/v$V/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing      # macOS: shasum -a 256 -c SHA256SUMS --ignore-missing
+tar -xzf wicked-estate-$V-$T.tar.gz && cp wicked-estate-$V-$T/wicked-estate* ~/.local/bin/
+gh attestation verify wicked-estate-$V-$T.tar.gz --repo mikeparcewski/wicked-estate   # optional
+```
+
+- **Linux** binaries are built against glibc 2.28, so they start on RHEL/Alma/Rocky 8+, Debian 10+
+  and Ubuntu 20.04+. They are glibc builds and not static musl ones, because a musl binary cannot
+  `dlopen` the runtime grammar plugins (`PLUGIN.md`).
+- **macOS** binaries are not notarized yet. After downloading, clear the quarantine flag once:
+  `xattr -d com.apple.quarantine wicked-estate wicked-estate-mcp`.
+- **Windows** binaries link the C runtime statically, so no VC++ redistributable is needed.
+- The prebuilt binaries are the **default feature set**: offline, no ONNX. For semantic embedders,
+  use `cargo install … --features model2vec|fastembed` (below).
+
+### From crates.io or source
 
 ```sh
 # from crates.io:

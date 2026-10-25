@@ -19,6 +19,8 @@ name = "wicked-estate"
 path = "src/main.rs"
 
 [dependencies]
+# Drive-letter (not verbatim `\\?\`) canonical paths on Windows (#360).
+dunce = "1"
 wicked-estate-core.workspace = true
 wicked-estate-store.workspace = true
 wicked-estate-extract = { path = "../wicked-estate-extract", version = "0.30.0" }

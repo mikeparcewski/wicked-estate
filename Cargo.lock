@@ -9988,6 +9988,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "dirs",
+ "dunce",
  "ignore",
  "notify",
  "notify-debouncer-full",

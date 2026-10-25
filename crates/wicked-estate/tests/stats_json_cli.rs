@@ -97,7 +97,9 @@ fn stats_json_is_one_document_with_full_identity_and_freshness() {
     );
     assert_eq!(
         PathBuf::from(root),
-        fs::canonicalize(&repo).unwrap(),
+        // `dunce`: the drive-letter form the index records on Windows (#360), not the verbatim
+        // `\\?\` form `std::fs::canonicalize` returns there. Identical elsewhere.
+        dunce::canonicalize(&repo).unwrap(),
         "{doc}"
     );
     let at = prov["indexed_at"].as_str().expect("indexed_at");
@@ -176,7 +178,7 @@ fn stats_json_has_one_provenance_block_per_repo() {
     let (ra, rb) = (by_label("a"), by_label("b"));
     assert_eq!(
         PathBuf::from(ra["root"].as_str().unwrap()),
-        fs::canonicalize(&a).unwrap(),
+        dunce::canonicalize(&a).unwrap(),
         "the registry root is canonical, not 'a': {doc}"
     );
     assert_eq!(ra["commit"].as_str(), Some(head_a.as_str()));

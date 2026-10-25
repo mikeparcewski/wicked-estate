@@ -2705,7 +2705,10 @@ pub fn commits_behind_since(root: &Path, baseline: Option<&str>, db_path: &str) 
 /// `root` as [`index_path`] records it in `indexed_root` (#248): absolute with symlinks
 /// resolved, or as written when it cannot be resolved (a root that is gone is still recorded).
 fn canonical_root(root: &Path) -> String {
-    std::fs::canonicalize(root)
+    // `dunce`: on Windows a drive-letter path (`D:\repo`), not the verbatim `\\?\D:\repo` that
+    // `std::fs::canonicalize` returns and that other tools (git, MinGW, a user's shell) mishandle
+    // (#360). Identical to `std::fs::canonicalize` everywhere else.
+    dunce::canonicalize(root)
         .unwrap_or_else(|_| root.to_path_buf())
         .to_string_lossy()
         .into_owned()
@@ -3849,6 +3852,53 @@ mod tests {
         for d in [&a, &b, &dir] {
             let _ = std::fs::remove_dir_all(d);
         }
+    }
+
+    /// #248 on Windows (#360): `index <relative path>` records an ABSOLUTE root with a DRIVE
+    /// LETTER (`D:\…`) — the canonical form a user, git and the freshness check can all read —
+    /// never the relative spelling and never the verbatim `\\?\D:\…` form
+    /// `std::fs::canonicalize` returns on Windows. The repo sits under the current directory, so
+    /// the relative spelling is on the same drive.
+    #[cfg(windows)]
+    #[test]
+    fn indexed_root_is_an_absolute_drive_letter_path_after_index_relative() {
+        let cwd = std::env::current_dir().unwrap();
+        let name = format!("relroot-win-{}", std::process::id());
+        let root = cwd.join(&name);
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/index.ts"),
+            "export function w() { return 1; }\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["config", "user.email", "t@example.invalid"]);
+        git(&root, &["config", "user.name", "wicked-test"]);
+        git(&root, &["config", "commit.gpgsign", "false"]);
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-qm", "base"]);
+        let rel = PathBuf::from(&name);
+        assert!(rel.is_relative() && rel.is_dir(), "{}", rel.display());
+        let mut store = MemStore::new();
+        index_path(&mut store, &rel).unwrap();
+        let recorded = store.meta_get_key("indexed_root").unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            !recorded.starts_with(r"\\?\"),
+            "the recorded root is not a verbatim path: {recorded}"
+        );
+        let bytes = recorded.as_bytes();
+        assert!(
+            bytes.len() > 3 && bytes[0].is_ascii_alphabetic() && &bytes[1..3] == br":\",
+            "the recorded root starts with a drive letter: {recorded}"
+        );
+        assert!(Path::new(&recorded).is_absolute());
+        assert!(recorded.ends_with(&name), "{recorded}");
+        assert_eq!(
+            indexed_root_path(&store, ":memory:").unwrap(),
+            PathBuf::from(&recorded)
+        );
     }
 
     /// #248: `index <relative path>` records the ABSOLUTE, symlink-resolved root (and when it

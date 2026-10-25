@@ -17,10 +17,10 @@ use wicked_estate_extract::TreeSitterExtractor;
 #[test]
 fn nginx_plugin_loads_and_extracts() {
     // Locate the example plugin source (repo_root/examples/plugins/nginx).
-    let example = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/plugins/nginx")
-        .canonicalize()
-        .expect("example plugin dir exists");
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/nginx");
+    // NOT canonicalized: on Windows that yields a verbatim `\\?\D:\…` path, which MinGW's gcc
+    // cannot open (#360). The joined path is enough for the compiler.
+    assert!(example.is_dir(), "example plugin dir exists: {example:?}");
     let parser_c = example.join("src/parser.c");
     assert!(parser_c.is_file(), "generated parser missing: {parser_c:?}");
 
