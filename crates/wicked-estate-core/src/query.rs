@@ -38,6 +38,15 @@ pub struct TraversalSpec {
 }
 
 impl TraversalSpec {
+    /// Whether the walk may cross `e`: its kind is in [`Self::edge_kinds`] (empty = every kind)
+    /// and its confidence meets [`Self::min_confidence`]. A store applies the same rule to the
+    /// edges it RETURNS as to the edges it walks, so a filtered traversal never answers with an
+    /// edge of a kind the caller excluded (wicked-estate#361).
+    pub fn admits(&self, e: &Edge) -> bool {
+        (self.edge_kinds.is_empty() || self.edge_kinds.contains(&e.kind))
+            && e.confidence.get() >= self.min_confidence
+    }
+
     /// Blast-radius preset: walk `Dependents` along `Calls` edges up to `max_depth`.
     pub fn blast_radius(max_depth: u32) -> Self {
         Self {

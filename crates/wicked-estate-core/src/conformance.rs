@@ -362,6 +362,119 @@ pub fn traverse_reports_depth_horizon<S: GraphStore>(store: &mut S) {
 }
 
 /// Run the full contract against a fresh, empty store. Panics on the first violation.
+/// A `TraversalSpec.edge_kinds` filter applies to the EDGES a traversal returns, not only to the
+/// nodes it reaches (wicked-estate#361). SqliteStore and PostgresStore walked with the filter but
+/// returned every edge incident to a reached node, so `TraverseGraph edge_kinds:["flows_to"]`
+/// answered with `calls` edges as if they were value flow. The `ek_*` fixture reaches the same
+/// nodes over `calls` and `flows_to`, plus a `calls`-only neighbour, in both directions.
+pub fn traverse_edge_kinds_filter_the_returned_edges<S: GraphStore>(store: &mut S) {
+    let flows = |a: &str, b: &str| {
+        Edge::new(
+            sym(a),
+            sym(b),
+            EdgeKind::Other("flows_to".into()),
+            ResolutionTier::Scip,
+            "conformance",
+        )
+    };
+    store.begin_batch().expect("begin_batch");
+    store
+        .upsert_nodes(&[
+            func_node("ek_root"),
+            func_node("ek_mid"),
+            func_node("ek_leaf"),
+            func_node("ek_callee"),
+        ])
+        .expect("ek nodes");
+    store
+        .upsert_edges(&[
+            calls("ek_root", "ek_mid"),
+            calls("ek_root", "ek_callee"),
+            calls("ek_mid", "ek_leaf"),
+            flows("ek_root", "ek_mid"),
+            flows("ek_mid", "ek_leaf"),
+        ])
+        .expect("ek edges");
+    store.commit_batch().expect("commit_batch");
+
+    let flows_kind = EdgeKind::Other("flows_to".into());
+    for (start, direction) in [
+        ("ek_root", Direction::Dependencies),
+        ("ek_leaf", Direction::Dependents),
+        ("ek_mid", Direction::Both),
+    ] {
+        let spec = TraversalSpec {
+            direction,
+            edge_kinds: vec![flows_kind.clone()],
+            max_depth: 4,
+            max_nodes: 100,
+            min_confidence: 0.0,
+        };
+        let sub = store.traverse(&sym(start), &spec).expect("traverse");
+        assert!(
+            !sub.edges.is_empty(),
+            "{start} {direction:?}: the flows_to edges must be returned"
+        );
+        for e in &sub.edges {
+            assert_eq!(
+                e.kind, flows_kind,
+                "{start} {direction:?}: edge_kinds=[flows_to] returned a {:?} edge {} -> {}",
+                e.kind, e.source, e.target
+            );
+        }
+        assert!(
+            !sub.nodes.iter().any(|n| n.symbol == sym("ek_callee")),
+            "{start} {direction:?}: ek_callee is reachable only over calls"
+        );
+        let multi = store
+            .traverse_multi(&[sym(start)], &spec)
+            .expect("traverse_multi");
+        assert!(
+            !multi.edges.is_empty(),
+            "traverse_multi {start} {direction:?}: the flows_to edges must be returned"
+        );
+        for e in &multi.edges {
+            assert_eq!(e.kind, flows_kind, "traverse_multi {start} {direction:?}");
+        }
+        assert!(
+            !multi.nodes.iter().any(|n| n.symbol == sym("ek_callee")),
+            "traverse_multi {start} {direction:?}: ek_callee is reachable only over calls"
+        );
+    }
+
+    // The confidence floor is part of the same admission rule: a low-confidence flows_to edge
+    // between two nodes the walk reached over admitted edges is not part of the answer.
+    let mut weak = flows("ek_root", "ek_leaf");
+    weak.confidence = crate::edge::Confidence::new(0.2);
+    store.begin_batch().expect("begin_batch");
+    store.upsert_edges(&[weak]).expect("ek weak edge");
+    store.commit_batch().expect("commit_batch");
+    let spec = TraversalSpec {
+        direction: Direction::Dependencies,
+        edge_kinds: vec![flows_kind.clone()],
+        max_depth: 4,
+        max_nodes: 100,
+        min_confidence: 0.5,
+    };
+    for sub in [
+        store.traverse(&sym("ek_root"), &spec).expect("traverse"),
+        store
+            .traverse_multi(&[sym("ek_root")], &spec)
+            .expect("traverse_multi"),
+    ] {
+        assert_eq!(
+            sub.depths.get(sym("ek_leaf").as_str()),
+            Some(&2),
+            "ek_leaf is reached over the admitted two-hop path, not the weak edge"
+        );
+        assert!(
+            sub.edges.iter().all(|e| e.confidence.get() >= 0.5),
+            "an edge below min_confidence was returned: {:?}",
+            sub.edges
+        );
+    }
+}
+
 pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
     // Fixture: a → b → c  (a calls b, b calls c).
     let nodes = [func_node("a"), func_node("b"), func_node("c")];
@@ -1957,6 +2070,10 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
     // each backend's test file having to opt in. The `dh_*` fixture is symbol-disjoint from
     // everything above.
     traverse_reports_depth_horizon(store);
+
+    // --- EDGE-KIND FILTER COVERS THE RETURNED EDGES (wicked-estate#361) ---
+    // Inline for the same reason as the horizon case: every backend is gated without opting in.
+    traverse_edge_kinds_filter_the_returned_edges(store);
 
     // --- remove_file deletes BOTH predicate halves ---
     // The §4 contract: `remove_file(f)` removes an edge located in `f` AND a location-less edge

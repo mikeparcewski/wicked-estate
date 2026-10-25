@@ -210,7 +210,7 @@ Each `[[rule]]` block specifies:
 
 | Field | Required | Meaning |
 |-------|----------|---------|
-| `kind` | yes | `"other:<tag>"` or a built-in kind (`"calls"`, `"imports"`, …). |
+| `kind` | yes | `"other:<tag>"` or a built-in kind by its snake_case name (`"calls"`, `"defines"`, `"has_type"`, …). A case variant of a built-in (`"Calls"`) fails the load naming the rule. |
 | `target_id_template` | yes | Must expand to the same value as `emit_node.id_template` so both rules hit the same `SymbolId`. With `target_kind = "file"` it is the repo-relative path of the target file instead. |
 | `target_node_scheme` | no | Must match `emit_node.node_scheme`. Defaults to `rule.name`. Ignored when `target_kind = "file"`. |
 | `target_kind` | no | `"synthetic"` (default) or `"file"`. With `"file"`, the edge lands on the **literal file node** at the expanded path — if that file is not in the graph the edge is pruned as dangling (file-existence guard). |

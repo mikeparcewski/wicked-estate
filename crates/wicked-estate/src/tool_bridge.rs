@@ -109,10 +109,11 @@ pub struct BridgedCommand {
     pub render: Option<Renderer>,
 }
 
+/// `--edge-kinds` items go through the same core parser TraverseGraph uses (#361), so the CLI
+/// accepts tag kinds (`flows_to`, `other:di-wired`) exactly as MCP does and refuses the same
+/// entries (`Calls`) before the tool runs.
 fn edge_kind(s: &str) -> std::result::Result<(), String> {
-    serde_json::from_value::<wicked_estate_core::EdgeKind>(Value::String(s.to_string()))
-        .map(|_| ())
-        .map_err(|_| format!("unknown edge kind {s:?} (snake_case, e.g. calls,imports,references)"))
+    wicked_estate_core::EdgeKind::parse_user(s).map(|_| ())
 }
 
 /// `rank`'s human output: the `top N symbols by PageRank:` listing the bespoke arm printed.
@@ -874,8 +875,14 @@ mod tests {
             req(&["f", "--edge-kinds", "calls, imports,"])["edge_kinds"],
             json!(["calls", "imports"])
         );
-        // A typo must not degrade to "all kinds" (the tool's meaning of an empty filter).
-        assert!(err(&["f", "--edge-kinds", "calls,cals"]).contains("unknown edge kind \"cals\""));
+        // A case variant of a built-in must not degrade to "all kinds" (the tool's meaning of an
+        // empty filter) nor to a tag no store writes (#361).
+        assert!(err(&["f", "--edge-kinds", "calls,Calls"]).contains("did you mean \"calls\""));
+        // A tag kind is accepted as MCP accepts it.
+        assert_eq!(
+            req(&["f", "--edge-kinds", "flows_to,other:di-wired"])["edge_kinds"],
+            json!(["flows_to", "other:di-wired"])
+        );
         // Nor may an empty list: `[]` is the tool's "every kind".
         for empty in [
             &["f", "--edge-kinds", ","][..],

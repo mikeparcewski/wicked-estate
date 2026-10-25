@@ -687,7 +687,11 @@ impl RetrievalTool for RetrieveEntity {
 /// ```
 /// * `depth`      — optional, default 4, max 16.
 /// * `direction`  — `"dependencies"` (default) | `"dependents"` | `"both"`.
-/// * `edge_kinds` — optional array of edge-kind strings; empty = all kinds.
+/// * `edge_kinds` — optional array of edge kinds; absent or empty = all kinds. A built-in by its
+///   stored spelling (`calls`), a tag bare (`flows_to`), as `other:flows_to` or as
+///   `{"other":"flows_to"}`. A case variant of a built-in (`Calls`), an empty string or any other
+///   JSON shape is `Error::Invalid` naming the entry — never dropped (#361). The reply echoes the
+///   effective `edge_kinds`.
 /// * `max_nodes`  — optional, default 200, max 1 000.
 ///
 /// **Response `content` shape**
@@ -715,15 +719,24 @@ fn parse_direction(v: &Value) -> Direction {
     }
 }
 
-fn parse_edge_kinds(v: &Value) -> Vec<EdgeKind> {
-    let Some(arr) = v.get("edge_kinds").and_then(|a| a.as_array()) else {
-        return vec![];
+/// `edge_kinds`, parsed by the one core parser ([`EdgeKind::parse_user_value`]). An absent or
+/// `null` key, or an empty array, is "no filter". Every other input either parses entry-for-entry
+/// or is refused naming the bad entry — no entry is ever dropped, so a non-empty request can never
+/// collapse to the empty list every store reads as "all kinds" (#361).
+fn parse_edge_kinds(v: &Value) -> std::result::Result<Vec<EdgeKind>, String> {
+    let arr = match v.get("edge_kinds") {
+        None | Some(Value::Null) => return Ok(vec![]),
+        Some(Value::Array(arr)) => arr,
+        Some(other) => {
+            return Err(format!(
+                "TraverseGraph: edge_kinds must be an array of edge kinds, got {other}"
+            ));
+        }
     };
     arr.iter()
-        .filter_map(|item| {
-            let s = item.as_str()?;
-            // Deserialize from a quoted JSON string so serde_json handles the snake_case mapping.
-            serde_json::from_str::<EdgeKind>(&format!("\"{s}\"")).ok()
+        .map(|item| {
+            EdgeKind::parse_user_value(item)
+                .map_err(|e| format!("TraverseGraph: edge_kinds entry {item} refused — {e}"))
         })
         .collect()
 }
@@ -807,6 +820,11 @@ impl RetrievalTool for TraverseGraph {
     }
 
     fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
+        let edge_kinds = parse_edge_kinds(request).map_err(wicked_estate_core::Error::Invalid)?;
+        // The effective filter, echoed in every reply (#361, as #211 did for Lineage): a tag that
+        // matches no edge then reads as a labelled empty result, never as a silent widening.
+        // `[]` = every kind. Stored spelling, the form `export` / `path --json` print.
+        let edge_kinds_echo = serde_json::to_value(&edge_kinds).unwrap_or_else(|_| json!([]));
         let id_str = match request.get("symbol").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => {
@@ -814,6 +832,7 @@ impl RetrievalTool for TraverseGraph {
                     // (#227) The cause keys every other reply carries.
                     content: json!({
                         "nodes": [], "edges": [], "depths": {}, "truncated": false,
+                        "edge_kinds": edge_kinds_echo,
                         "depth_horizon_reached": false,
                         "node_cap_reached": false,
                         "searched_depth": opt_u64(request, "depth").unwrap_or(4).min(TRAVERSE_DEPTH_CEILING as u64),
@@ -830,7 +849,6 @@ impl RetrievalTool for TraverseGraph {
             .unwrap_or(200)
             .min(TRAVERSE_MAX_NODES_CEILING as u64) as usize;
         let direction = parse_direction(request);
-        let edge_kinds = parse_edge_kinds(request);
 
         let spec = TraversalSpec {
             direction,
@@ -917,6 +935,7 @@ impl RetrievalTool for TraverseGraph {
                 "depth_horizon_reached": subgraph.depth_horizon_reached,
                 "node_cap_reached": subgraph.node_cap_reached,
                 "searched_depth": max_depth,
+                "edge_kinds": edge_kinds_echo,
             }),
             diagnostics: diag,
         })
@@ -4488,6 +4507,125 @@ mod tests {
         let nodes = res.content["nodes"].as_array().unwrap();
         assert!(nodes.is_empty());
         assert!(!res.diagnostics.is_empty());
+    }
+
+    /// #361 fixture: `root` reaches `mid` and `leaf` over BOTH `calls` and `flows_to`, so a filter
+    /// that fails open to all kinds shows up as a `calls` edge in a `flows_to` answer.
+    fn mixed_kinds_fixture(store: &mut dyn wicked_estate_core::GraphStore) {
+        use wicked_estate_core::{ResolutionTier, edge_tags};
+        let e = |s: &str, t: &str, k: EdgeKind| {
+            Edge::new(
+                SymbolId(s.to_string()),
+                SymbolId(t.to_string()),
+                k,
+                ResolutionTier::Parsed,
+                "test-fixture",
+            )
+        };
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node("root", "root_fn", NodeKind::Function, "src/root.rs", 1),
+                make_node("mid", "mid_fn", NodeKind::Function, "src/mid.rs", 10),
+                make_node("leaf", "leaf_fn", NodeKind::Function, "src/leaf.rs", 20),
+                make_node(
+                    "callee",
+                    "callee_fn",
+                    NodeKind::Function,
+                    "src/callee.rs",
+                    30,
+                ),
+            ])
+            .unwrap();
+        store
+            .upsert_edges(&[
+                e("root", "mid", EdgeKind::Calls),
+                e("root", "callee", EdgeKind::Calls),
+                e("root", "mid", edge_tags::other(edge_tags::FLOWS_TO)),
+                e("mid", "leaf", edge_tags::other(edge_tags::FLOWS_TO)),
+            ])
+            .unwrap();
+        store.commit_batch().unwrap();
+    }
+
+    /// #361 falsifier: `edge_kinds:["flows_to"]` follows ONLY `flows_to` edges, in every input
+    /// form and on both the reference and the default store. Before the fix the bare tag was
+    /// dropped, the list went empty, and the store walked every kind — `callee` and the `calls`
+    /// edges came back as if they answered the question.
+    #[test]
+    fn traverse_graph_edge_kinds_filters_tag_kinds_and_never_widens() {
+        let mut mem = MemStore::new();
+        mixed_kinds_fixture(&mut mem);
+        let mut sqlite = wicked_estate_store::SqliteStore::in_memory().unwrap();
+        mixed_kinds_fixture(&mut sqlite);
+        let stores: [(&str, &dyn GraphRead); 2] = [("mem", &mem), ("sqlite", &sqlite)];
+        for (label, store) in stores {
+            for form in [
+                json!("flows_to"),
+                json!("other:flows_to"),
+                json!({"other": "flows_to"}),
+            ] {
+                let res = TraverseGraph
+                    .invoke(
+                        store,
+                        &json!({"symbol": "root", "depth": 4, "edge_kinds": [form]}),
+                    )
+                    .unwrap();
+                let edges = res.content["edges"].as_array().unwrap();
+                assert_eq!(edges.len(), 2, "{label} {form}: {}", res.content);
+                for edge in edges {
+                    assert_eq!(edge["kind"], json!({"other": "flows_to"}), "{label} {form}");
+                }
+                let names: Vec<&str> = res.content["nodes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|n| n["name"].as_str())
+                    .collect();
+                assert!(!names.contains(&"callee_fn"), "{label} {form}: {names:?}");
+                assert_eq!(
+                    res.content["edge_kinds"],
+                    json!([{"other": "flows_to"}]),
+                    "{label} {form}: the effective filter is echoed"
+                );
+            }
+
+            // A tag no edge carries: an honest, labelled empty walk — never all kinds.
+            let res = TraverseGraph
+                .invoke(store, &json!({"symbol": "root", "edge_kinds": ["emits"]}))
+                .unwrap();
+            assert_eq!(res.content["edges"], json!([]), "{label}: {}", res.content);
+            assert_eq!(res.content["edge_kinds"], json!([{"other": "emits"}]));
+
+            // Absent and empty both mean every kind, and say so.
+            for req in [
+                json!({"symbol": "root"}),
+                json!({"symbol": "root", "edge_kinds": []}),
+            ] {
+                let res = TraverseGraph.invoke(store, &req).unwrap();
+                assert_eq!(res.content["edge_kinds"], json!([]), "{label}");
+                assert_eq!(
+                    res.content["edges"].as_array().unwrap().len(),
+                    4,
+                    "{label} {req}"
+                );
+            }
+
+            // Refused, naming the entry: never dropped, never widened.
+            for (bad, named) in [
+                (json!(["Calls"]), "\"Calls\""),
+                (json!(["flows_to", ""]), "\"\""),
+                (json!([42]), "42"),
+                (json!("flows_to"), "array"),
+            ] {
+                match TraverseGraph.invoke(store, &json!({"symbol": "root", "edge_kinds": bad})) {
+                    Err(wicked_estate_core::Error::Invalid(msg)) => {
+                        assert!(msg.contains(named), "{label} {bad}: {msg}")
+                    }
+                    other => panic!("{label} {bad} must be Error::Invalid, got {other:?}"),
+                }
+            }
+        }
     }
 
     /// A request above a ceiling is clamped by the tool AND says so — the effective value in

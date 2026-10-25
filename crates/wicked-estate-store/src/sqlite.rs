@@ -3374,6 +3374,12 @@ impl GraphRead for SqliteStore {
         anchors.extend(depths.keys().map(|k| SymbolId(k.clone())));
         for a in &anchors {
             for e in self.neighbors(a, spec.direction)? {
+                // The walk's own admission rule (#361): an edge of a kind the spec did not ask
+                // for, or below its confidence floor, is not part of the answer even when both
+                // ends were reached over admitted edges.
+                if !spec.admits(&e) {
+                    continue;
+                }
                 if seen.insert(e.dedup_key()) {
                     edges.push(e);
                 }
@@ -3449,6 +3455,12 @@ impl GraphRead for SqliteStore {
         anchors.extend(depths.keys().map(|k| SymbolId(k.clone())));
         for a in &anchors {
             for e in self.neighbors(a, spec.direction)? {
+                // The walk's own admission rule (#361): an edge of a kind the spec did not ask
+                // for, or below its confidence floor, is not part of the answer even when both
+                // ends were reached over admitted edges.
+                if !spec.admits(&e) {
+                    continue;
+                }
                 if seen.insert(e.dedup_key()) {
                     edges.push(e);
                 }
