@@ -21,6 +21,36 @@ pub struct SymbolQuery {
     /// that scope and its descendants. `None` = all scopes. The predicate is pushed into the store
     /// SQL **before** any `LIMIT`, so top-k ranking never leaks across scopes (multi-tenant isolation).
     pub scope_prefix: Option<String>,
+    /// Case-folded PREFIX on `name` (wicked-estate#358): a node matches when
+    /// `name.to_ascii_lowercase()` starts with `name_prefix.to_ascii_lowercase()`. ASCII folding
+    /// only, identically on every store, so the same graph answers the same rows everywhere.
+    /// Results are ordered by folded name, then symbol, so a `limit` cut is deterministic. The
+    /// candidate source for did-you-mean suggestions; combine with `limit` to bound the pool.
+    pub name_prefix: Option<String>,
+}
+
+impl SymbolQuery {
+    /// Whether `name` satisfies [`Self::name_prefix`] (always true when unset): an ASCII
+    /// case-insensitive byte prefix, the one definition every store applies (wicked-estate#358).
+    pub fn matches_name_prefix(&self, name: &str) -> bool {
+        match &self.name_prefix {
+            None => true,
+            Some(p) => {
+                name.len() >= p.len()
+                    && name.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
+            }
+        }
+    }
+
+    /// The row order a `name_prefix` query returns: folded name, then exact name, then symbol id.
+    /// Stores sort by it before applying `limit`, so a capped pool is the same rows everywhere.
+    pub fn name_prefix_order(a: &Node, b: &Node) -> std::cmp::Ordering {
+        a.name
+            .to_ascii_lowercase()
+            .cmp(&b.name.to_ascii_lowercase())
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.symbol.0.cmp(&b.symbol.0))
+    }
 }
 
 /// A **bounded** traversal request. We deliberately support only bounded reverse-reachability /

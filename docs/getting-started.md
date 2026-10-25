@@ -143,8 +143,9 @@ wicked-estate blast-radius <name> [--depth N] [--json] [--db ...]
 Returns the set of symbols that transitively depend on `<name>` via resolved `calls`, `imports`,
 and `extends` edges, up to `--depth` hops (default 12, maximum 24, the same ceiling as the MCP
 `BlastRadius` tool). If the walk stopped at the depth horizon while more dependents exist, the
-coverage line ends with `CUT AT depth=N`; re-run with a larger `--depth` to follow them. Always prints a coverage line — do not interpret an empty result as "safe
-to change" without reading it.
+coverage line ends with `CUT AT depth=N`; re-run with a larger `--depth` to follow them. For a
+name that resolved, it always prints a coverage line; do not read an empty result as "safe to
+change" without reading it. A name that resolved to nothing is reported as a miss (below).
 
 ```
 $ wicked-estate blast-radius bark --db /tmp/demo.db
@@ -154,6 +155,36 @@ $ wicked-estate blast-radius bark --db /tmp/demo.db
   Function main (main.py:3)
 coverage: 3 resolved dependent(s) within depth 12; 0 unresolved call(s) reference 'bark' —
 best-effort static resolution, MAY be incomplete (precise tier pending)
+```
+
+### A name that resolves to nothing is a miss, not a leaf
+
+Names resolve exactly and case-sensitively. When `<name>` matches no symbol, `blast-radius` does
+not print an empty dependent list. It says the name did not resolve and ranks the closest
+indexed names: case-insensitive matches first, then qualified forms (`OrderService.create`),
+then prefixes, then near-spellings. It prints no coverage line, because there is no resolved
+symbol to cover. Re-run with the symbol you meant:
+
+```
+$ wicked-estate blast-radius Bark --db /tmp/demo.db
+no symbol named 'Bark' — did you mean:
+  Function  … example.py/bark().  (example.py:9)   [case-insensitive]
+```
+
+`--json` keeps every usual key and adds `resolved: false`, `query`, `suggestions` (`symbol`,
+`name`, `kind`, `file`, `line_1based`, `match_reason`, `distance`) and `suggestions_truncated`.
+A resolved symbol says `resolved: true`. The same miss handling applies to `query`, `source`,
+`annotations`, `annotate`, `fingerprint`, `path`, `graph-view --focus`, `cross-graph` and the
+bridged commands (`traverse`, `lineage`, …), and to the MCP `SearchEntity`, `BlastRadius`,
+`Path` and `ContextPack` tools (one `NAME-MISS:` diagnostic). A suggestion is only a candidate:
+nothing is computed from it.
+
+Every miss is logged to the graph's `search_misses` table (MCP misses carry the server's
+session id). A read-only open logs nothing. Read the log, grouped by name with today's best
+suggestion, to find names agents keep asking for under another spelling:
+
+```bash
+wicked-estate misses [--since <epoch-ms>] [--limit N] [--json] [--db ...]
 ```
 
 ### Coverage semantics — read this

@@ -346,6 +346,7 @@ impl KnowledgeEngine {
             language: None,
             limit: None,
             scope_prefix: None, // predicate applied below on the hydrated metadata scope
+            name_prefix: None,
         })?;
         Ok(nodes
             .iter()
@@ -385,6 +386,7 @@ impl KnowledgeEngine {
                 scope_prefix: scope_prefix
                     .filter(|p| !p.ends_with(':'))
                     .map(str::to_string),
+                name_prefix: None,
             })?
             .iter()
             .map(|n| n.symbol.clone())

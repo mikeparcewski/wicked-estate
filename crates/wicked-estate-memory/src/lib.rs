@@ -291,6 +291,7 @@ impl MemoryEngine {
             language: None,
             limit: None,
             scope_prefix: None,
+            name_prefix: None,
         })?;
         Ok(nodes.iter().filter_map(Memory::from_node).collect())
     }
@@ -359,6 +360,7 @@ impl MemoryEngine {
                 language: None,
                 limit: None,
                 scope_prefix: None,
+                name_prefix: None,
             })?
             .len())
     }
@@ -414,6 +416,7 @@ impl MemoryEngine {
                 language: None,
                 limit: Some(8),
                 scope_prefix: None,
+                name_prefix: None,
             })?
             .into_iter()
             .map(|n| n.symbol)
@@ -432,6 +435,7 @@ impl MemoryEngine {
                 language: None,
                 limit: Some(self.k),
                 scope_prefix: None,
+                name_prefix: None,
             })?
             .iter()
             .map(|n| n.symbol.clone())

@@ -324,6 +324,20 @@ pub trait GraphWrite {
     /// `docs/ENGINE-CONTRACT.md` §2.1). Keeping them is what lets blast-radius report its
     /// coverage instead of silently under-reporting (the soundness contract).
     fn upsert_unresolved_refs(&mut self, refs: &[UnresolvedRef]) -> Result<()>;
+    /// Log ONE symbol-name miss — a name-addressed query that resolved to no symbol
+    /// (wicked-estate#358): `query` as given, `searched_at` epoch millis, the MCP session id when
+    /// there is one. The log is how an operator finds naming gaps (`wicked-estate misses`).
+    ///
+    /// Best-effort by contract: a store with no miss log keeps this default no-op, and a store
+    /// opened read-only writes nothing and returns `Ok`. Callers must never fail a query on it.
+    fn record_search_miss(
+        &mut self,
+        _query: &str,
+        _searched_at: i64,
+        _session_id: Option<&str>,
+    ) -> Result<()> {
+        Ok(())
+    }
     /// Remove `file`'s contributions (its nodes, edges, unresolved refs) — used by incremental
     /// re-indexing to replace a changed file's contributions atomically. (Wave 2.6)
     ///

@@ -937,23 +937,6 @@ impl SqliteStore {
             .map_err(st)
     }
 
-    /// Record ONE search miss (empty / failed query — the synonym-suggestion input). `searched_at`
-    /// is epoch millis; `session_id` is optional.
-    pub fn record_search_miss(
-        &mut self,
-        query: &str,
-        searched_at: i64,
-        session_id: Option<&str>,
-    ) -> Result<()> {
-        self.conn
-            .execute(
-                "INSERT INTO search_misses(query, searched_at, session_id) VALUES(?1, ?2, ?3)",
-                params![query, searched_at, session_id],
-            )
-            .map_err(st)?;
-        Ok(())
-    }
-
     /// Bulk-import search-miss rows atomically (the migrator's write path). Returns rows written.
     pub fn import_search_misses(&mut self, rows: &[SearchMissRecord]) -> Result<usize> {
         self.conn.execute_batch("SAVEPOINT imp_miss").map_err(st)?;
@@ -2323,6 +2306,31 @@ impl SqliteStore {
 }
 
 impl GraphWrite for SqliteStore {
+    /// (#358) The trait's miss log, replacing the former inherent method. A read-only connection
+    /// (`open_readonly`, the MCP read-only mode) writes nothing: the miss is still reported to
+    /// the caller, only the log entry is skipped.
+    fn record_search_miss(
+        &mut self,
+        query: &str,
+        searched_at: i64,
+        session_id: Option<&str>,
+    ) -> Result<()> {
+        if self
+            .conn
+            .is_readonly(rusqlite::DatabaseName::Main)
+            .unwrap_or(true)
+        {
+            return Ok(());
+        }
+        self.conn
+            .execute(
+                "INSERT INTO search_misses(query, searched_at, session_id) VALUES(?1, ?2, ?3)",
+                params![query, searched_at, session_id],
+            )
+            .map_err(st)?;
+        Ok(())
+    }
+
     fn begin_batch(&mut self) -> Result<()> {
         if !self.in_batch {
             self.conn.execute_batch("BEGIN").map_err(st)?;
@@ -3193,6 +3201,39 @@ impl GraphRead for SqliteStore {
                 v.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
             }
             v
+        } else if let Some(prefix) = &query.name_prefix {
+            // (#358) Case-folded name prefix as an INDEXED range over `lower(name)`
+            // (`idx_nodes_name_folded`). SQLite's built-in `lower()` folds ASCII only — exactly
+            // `SymbolQuery::matches_name_prefix`. `LIMIT` is pushed into SQL only when no Rust
+            // filter below can drop a row; otherwise a cut here would undercount.
+            let lo = prefix.to_ascii_lowercase();
+            let hi = format!("{lo}\u{10FFFF}");
+            let sql_limit: i64 = match query.limit {
+                Some(l)
+                    if query.scope_prefix.is_none()
+                        && query.kinds.is_empty()
+                        && query.language.is_none() =>
+                {
+                    l as i64
+                }
+                _ => -1,
+            };
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT n.data FROM nodes n JOIN symbols s ON s.sid = n.symbol \
+                     WHERE lower(n.name) >= ?1 AND lower(n.name) < ?2 \
+                     ORDER BY lower(n.name), n.name, s.sym LIMIT ?3",
+                )
+                .map_err(st)?;
+            let rows = stmt
+                .query_map(params![lo, hi, sql_limit], |r| r.get::<_, String>(0))
+                .map_err(st)?;
+            let mut v = Vec::new();
+            for row in rows {
+                v.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
+            }
+            v
         } else if !query.kinds.is_empty() {
             // INDEXED by-kind retrieval: push `kinds` into SQL so `idx_nodes_kind` is used
             // (O(matches), NOT an O(table) full scan). `nodes.kind` stores the serialized NodeKind,
@@ -3255,8 +3296,11 @@ impl GraphRead for SqliteStore {
                     }
                 }
             }
-            true
+            query.matches_name_prefix(&n.name)
         });
+        if query.name_prefix.is_some() {
+            nodes.sort_by(SymbolQuery::name_prefix_order);
+        }
         if let Some(limit) = query.limit {
             nodes.truncate(limit);
         }
@@ -6907,6 +6951,24 @@ mod tests {
             "since=2000 (inclusive) excludes the ts=1000 miss"
         );
         assert!(recent.iter().all(|m| m.searched_at >= 2000));
+    }
+
+    /// #358: `record_search_miss` is the `GraphWrite` trait method, and a read-only open writes
+    /// nothing and does not fail — the miss is reported to the caller either way.
+    #[test]
+    fn record_search_miss_is_a_trait_write_and_read_only_opens_skip_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("graph.db");
+        {
+            let mut rw = SqliteStore::open(&db).expect("open");
+            GraphWrite::record_search_miss(&mut rw, "orderservice.create", 42, None).unwrap();
+        }
+        let mut ro = SqliteStore::open_readonly(&db).expect("readonly open");
+        GraphWrite::record_search_miss(&mut ro, "skipped", 43, Some("s")).unwrap();
+        let rows = ro.search_misses(10, None).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].query, "orderservice.create");
+        assert_eq!(rows[0].session_id, None);
     }
 
     // ── Shared-Import remove_file: sqlite-leg assertions (incr-integrity lane, D5) ──────────

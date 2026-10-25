@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+- **Did-you-mean suggestions on a symbol-name miss, and a miss log (#358).** Name-addressed
+  queries resolve exactly and case-sensitively. A miss used to come back empty, and
+  `blast-radius` printed `no resolved dependents … (symbol may not be indexed)`, which reads as
+  "nothing depends on this". Every name-addressed CLI command and the MCP `SearchEntity`,
+  `BlastRadius`, `Path` and `ContextPack` tools now mark a miss `resolved: false`. They also
+  return up to 5 ranked suggestions, in tier order: case-insensitive, qualified segment, prefix,
+  then Damerau-Levenshtein edit. The tools emit one `NAME-MISS:` diagnostic and never substitute a
+  suggestion. Each miss is logged to `search_misses`; `wicked-estate misses` reads it back,
+  grouped by name. New `SymbolQuery.name_prefix` (ASCII case-folded name prefix, with a
+  conformance case on every store). SQLite serves it from a new `lower(name)` index. New
+  `GraphWrite::record_search_miss` (default no-op; it replaces the inherent `SqliteStore`
+  method). Bench: on a 10 000-symbol probe set, top-3 hit rate and p95 latency are gated.
+  Spec by @eugenelim.
+
 ### Fixed
 - **`TraverseGraph` `edge_kinds` no longer fails open to every kind (#361).** A tag kind
   (`flows_to`, `di-wired`) was dropped by the parser, an all-dropped list became `[]`, and every

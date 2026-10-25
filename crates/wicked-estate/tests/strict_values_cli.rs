@@ -387,8 +387,9 @@ fn dash_negative_and_single_dash_tokens_keep_their_classes() {
     // `-` is an ordinary name; a cutoff may be the epoch itself.
     let out = run(&fx, &["query", "-", "--db", "graph.db"]);
     assert!(out.status.success(), "{}", stderr(&out));
+    // Searched as a name: no symbol is named `-`, so the answer is a labelled miss (#358).
     assert!(
-        stdout(&out).contains("match(es) for '-'"),
+        stdout(&out).contains("no symbol named '-'"),
         "{}",
         stdout(&out)
     );

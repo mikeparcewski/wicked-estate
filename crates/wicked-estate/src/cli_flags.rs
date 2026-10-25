@@ -503,6 +503,11 @@ pub const COMMANDS: &[Command] = &[
             }],
         ),
     },
+    // (#358) The symbol-name miss log, grouped by query with today's best suggestion.
+    Command {
+        name: "misses",
+        spec: owns(&[], &[DB, JSON, Flag::new("since", U64), count("limit")]),
+    },
     Command {
         name: "fingerprint",
         spec: owns(&[req("name")], &[DB, switch("content")]),

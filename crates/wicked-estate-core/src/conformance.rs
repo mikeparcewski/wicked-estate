@@ -361,7 +361,6 @@ pub fn traverse_reports_depth_horizon<S: GraphStore>(store: &mut S) {
     );
 }
 
-/// Run the full contract against a fresh, empty store. Panics on the first violation.
 /// A `TraversalSpec.edge_kinds` filter applies to the EDGES a traversal returns, not only to the
 /// nodes it reaches (wicked-estate#361). SqliteStore and PostgresStore walked with the filter but
 /// returned every edge incident to a reached node, so `TraverseGraph edge_kinds:["flows_to"]`
@@ -475,6 +474,84 @@ pub fn traverse_edge_kinds_filter_the_returned_edges<S: GraphStore>(store: &mut 
     }
 }
 
+/// `SymbolQuery::name_prefix` (wicked-estate#358): an ASCII case-folded prefix on `name`, ordered by
+/// folded name then name then symbol, with `limit` honoured AFTER every other filter, and LIKE
+/// metacharacters in the prefix taken literally.
+pub fn symbol_query_name_prefix<S: GraphStore>(store: &mut S) {
+    let class = |name: &str| {
+        let mut n = func_node(name);
+        n.kind = NodeKind::Class;
+        n
+    };
+    store.begin_batch().expect("begin_batch");
+    store
+        .upsert_nodes(&[
+            func_node("NpqAlpha"),
+            func_node("npqalphaBeta"),
+            func_node("NPQGamma"),
+            func_node("npq_delta"),
+            func_node("Xnpq"),
+            class("NpqZClass"),
+        ])
+        .expect("np nodes");
+    store.commit_batch().expect("commit_batch");
+
+    let names = |q: SymbolQuery| -> Vec<String> {
+        store
+            .find_symbols(&q)
+            .expect("find_symbols name_prefix")
+            .into_iter()
+            .map(|n| n.name)
+            .collect()
+    };
+    let prefix = |p: &str, limit: Option<usize>| SymbolQuery {
+        name_prefix: Some(p.to_string()),
+        limit,
+        ..Default::default()
+    };
+    assert_eq!(
+        names(prefix("npqALPHA", None)),
+        vec!["NpqAlpha", "npqalphaBeta"],
+        "name_prefix is case-folded and ordered by folded name"
+    );
+    assert_eq!(
+        names(prefix("NPQ", None)),
+        vec![
+            "npq_delta",
+            "NpqAlpha",
+            "npqalphaBeta",
+            "NPQGamma",
+            "NpqZClass"
+        ],
+        "a prefix never matches mid-name (Xnpq), order is folded-name byte order"
+    );
+    assert_eq!(
+        names(prefix("npq", Some(2))),
+        vec!["npq_delta", "NpqAlpha"],
+        "limit keeps the first rows in name_prefix order"
+    );
+    assert_eq!(
+        names(prefix("npq_", None)),
+        vec!["npq_delta"],
+        "`_` in the prefix is literal, not a LIKE wildcard"
+    );
+    assert!(
+        names(prefix("npq%", None)).is_empty(),
+        "`%` in the prefix is literal"
+    );
+    assert_eq!(
+        names(SymbolQuery {
+            name_prefix: Some("npq".into()),
+            kinds: vec![NodeKind::Class],
+            limit: Some(1),
+            ..Default::default()
+        }),
+        vec!["NpqZClass"],
+        "limit applies after the kind filter, never before it"
+    );
+}
+
+/// Run the full contract against a fresh, empty store. Panics on the first violation.
 pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
     // Fixture: a → b → c  (a calls b, b calls c).
     let nodes = [func_node("a"), func_node("b"), func_node("c")];
@@ -2074,6 +2151,10 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
     // --- EDGE-KIND FILTER COVERS THE RETURNED EDGES (wicked-estate#361) ---
     // Inline for the same reason as the horizon case: every backend is gated without opting in.
     traverse_edge_kinds_filter_the_returned_edges(store);
+
+    // --- NAME-PREFIX LOOKUP (wicked-estate#358) ---
+    // Inline so every backend is gated without opting in. `np*` names are symbol-disjoint.
+    symbol_query_name_prefix(store);
 
     // --- remove_file deletes BOTH predicate halves ---
     // The §4 contract: `remove_file(f)` removes an edge located in `f` AND a location-less edge
