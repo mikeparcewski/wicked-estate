@@ -490,7 +490,18 @@ impl RetrievalTool for SearchEntity {
         exact_hits.truncate(raw_limit);
 
         // (#358) A miss says so — `resolved: false` + ranked suggestions — never a bare empty.
-        let miss = if exact_hits.is_empty() {
+        // Resolution is decided independently of `limit`: `limit: 0` asks for no rows, it does
+        // not make an indexed name a miss (codex review of #367).
+        let resolves = !exact_hits.is_empty()
+            || (raw_limit == 0 && {
+                let any = |q: &SymbolQuery| -> Result<bool> {
+                    let mut one = q.clone();
+                    one.limit = Some(1);
+                    Ok(!find_seed_symbols(store, &one, 1)?.0.is_empty())
+                };
+                any(&exact_query)? || any(&text_query)?
+            });
+        let miss = if !resolves {
             let found =
                 suggest::suggest(store, &name_val, suggest::SUGGEST_K_DEFAULT).unwrap_or_default();
             diag.push(suggest::name_miss_diagnostic(&name_val, &found.0));
@@ -2579,7 +2590,8 @@ impl RetrievalTool for ContextPack {
         }
 
         if seeds.is_empty() {
-            let mut content = json!({ "context": "", "included": 0, "omitted": 0 });
+            let mut content =
+                json!({ "context": "", "included": 0, "omitted": 0, "resolved": false });
             match &name_miss {
                 Some((name, found, truncated)) => {
                     suggest::mark_miss(&mut content, name, found, *truncated);
@@ -2623,6 +2635,7 @@ impl RetrievalTool for ContextPack {
                 "context": context_text,
                 "included": included,
                 "omitted": omitted,
+                "resolved": true,
             }),
             diagnostics: diag,
         })
@@ -8158,5 +8171,43 @@ mod tests {
             .invoke(&store, &json!({"from": "caller_fn", "to": "leaf_fn"}))
             .unwrap();
         assert_eq!(r.content["resolved"], json!(true));
+        let r = ContextPack
+            .invoke(&store, &json!({"name": "caller_fn"}))
+            .unwrap();
+        assert_eq!(r.content["resolved"], json!(true), "{}", r.content);
+        let r = ContextBundle
+            .invoke(&store, &json!({"query": "caller_fn"}))
+            .unwrap();
+        assert_eq!(r.content["resolved"], json!(true), "{}", r.content);
+        // `limit: 0` asks for no rows; it does not make an indexed name a miss.
+        let r = SearchEntity
+            .invoke(&store, &json!({"name": "caller_fn", "limit": 0}))
+            .unwrap();
+        assert_eq!(r.content["resolved"], json!(true), "{}", r.content);
+        assert!(!r.diagnostics.iter().any(|d| d.starts_with("NAME-MISS")));
+    }
+
+    /// #358 (codex review of #367): ContextBundle is the context tool MCP exposes; a seed that
+    /// resolves to nothing is a labelled miss there too.
+    #[test]
+    fn context_bundle_miss_is_labelled_with_suggestions() {
+        let store = fixture_store();
+        for req in [json!({"query": "caler_fn"}), json!({"symbol": "caler_fn"})] {
+            let r = ContextBundle.invoke(&store, &req).unwrap();
+            assert_eq!(r.content["resolved"], json!(false), "{req}: {}", r.content);
+            assert_eq!(r.content["query"], json!("caler_fn"));
+            assert_eq!(
+                r.content["suggestions"][0]["name"],
+                json!("caller_fn"),
+                "{req}"
+            );
+            assert!(
+                r.diagnostics
+                    .iter()
+                    .any(|d| d.starts_with("NAME-MISS: 'caler_fn'")),
+                "{req}: {:?}",
+                r.diagnostics
+            );
+        }
     }
 }

@@ -103,18 +103,15 @@ pub fn suggest(store: &dyn GraphRead, probe: &str, k: usize) -> Result<(Vec<Sugg
     let last = segments.last().copied().unwrap_or(probe);
     let last_folded = last.to_ascii_lowercase();
 
-    let fetch = |prefix: &str| -> Result<Vec<Node>> {
-        let q = SymbolQuery {
-            name_prefix: Some(prefix.to_string()),
-            limit: Some(SUGGEST_POOL_MAX),
-            ..Default::default()
-        };
-        Ok(store
-            .find_symbols(&q)?
-            .into_iter()
-            .filter(is_structural_symbol)
-            .collect())
+    let query = |prefix: &str| SymbolQuery {
+        name_prefix: Some(prefix.to_string()),
+        limit: Some(SUGGEST_POOL_MAX),
+        ..Default::default()
     };
+    // Tiers 1–3 (a whole probe or segment as the prefix — a narrow set): value-flow slots are
+    // excluded BEFORE the cap, so slots can never crowd a real symbol out of the pool.
+    let fetch =
+        |prefix: &str| -> Result<Vec<Node>> { store.find_structural_symbols(&query(prefix)) };
 
     let mut ranked: Vec<Suggestion> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -142,7 +139,7 @@ pub fn suggest(store: &dyn GraphRead, probe: &str, k: usize) -> Result<(Vec<Sugg
             .map(|s| s.to_ascii_lowercase())
             .collect();
         for n in &fetch(last)? {
-            if n.name.eq_ignore_ascii_case(last) && segments_in_order(&n.symbol.0, &earlier) {
+            if n.name.eq_ignore_ascii_case(last) && segments_in_order(&n.symbol.0, last, &earlier) {
                 push(&mut ranked, n, MatchReason::QualifiedSegment, 0);
             }
         }
@@ -165,9 +162,11 @@ pub fn suggest(store: &dyn GraphRead, probe: &str, k: usize) -> Result<(Vec<Sugg
     let max_d = (target.chars().count() / 4).max(1) as u32;
     let mut pools: Vec<Vec<Node>> = Vec::new();
     if let Some(first) = target.chars().next() {
-        let one = fetch(&first.to_string())?;
-        let capped = one.len() >= SUGGEST_POOL_MAX;
-        pools.push(one);
+        // The one-character pool is the wide one: fetched capped, and whether the CAP bit is
+        // read from the raw rows (slots included) — filtering first would hide a full window.
+        let raw = store.find_symbols(&query(&first.to_string()))?;
+        let capped = raw.len() >= SUGGEST_POOL_MAX;
+        pools.push(raw.into_iter().filter(is_structural_symbol).collect());
         let two: String = target.chars().take(2).collect();
         if capped && segments.len() <= 1 && two.chars().count() == 2 {
             pools.push(fetch(&two)?);
@@ -203,9 +202,14 @@ fn split_qualified(probe: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Every earlier (case-folded) segment appears in `symbol_id`, case-folded and in order.
-fn segments_in_order(symbol_id: &str, earlier: &[String]) -> bool {
-    let hay = symbol_id.to_ascii_lowercase();
+/// Every earlier (case-folded) segment appears in `symbol_id`'s QUALIFIER — the text before the
+/// last occurrence of the leaf name — case-folded and in order. Searching the whole id would let
+/// `order` match inside `#cancelOrder().` and rank `InvoiceService#cancelOrder` for
+/// `Order.cancelOrder` (agy review of #367).
+fn segments_in_order(symbol_id: &str, leaf: &str, earlier: &[String]) -> bool {
+    let full = symbol_id.to_ascii_lowercase();
+    let cut = full.rfind(&leaf.to_ascii_lowercase()).unwrap_or(full.len());
+    let hay = &full[..cut];
     let mut from = 0usize;
     for seg in earlier {
         match hay[from..].find(seg.as_str()) {
@@ -303,8 +307,8 @@ pub fn name_miss_diagnostic(probe: &str, suggestions: &[Suggestion]) -> String {
             s.node.location.span.start_line + 1
         ),
         None => format!(
-            "NAME-MISS: '{probe}' resolved to no symbol and nothing close to it is indexed; this \
-             is an unresolved name, not an empty answer."
+            "NAME-MISS: '{probe}' resolved to no symbol and no close candidate was found; this is \
+             an unresolved name, not an empty answer."
         ),
     }
 }
@@ -314,7 +318,7 @@ pub fn miss_text(probe: &str, suggestions: &[Suggestion]) -> Vec<String> {
     let probe = echo(probe);
     if suggestions.is_empty() {
         return vec![format!(
-            "no symbol named '{probe}', and nothing close to it is indexed"
+            "no symbol named '{probe}', and no close candidate was found"
         )];
     }
     let mut lines = vec![format!("no symbol named '{probe}' — did you mean:")];
@@ -577,6 +581,64 @@ mod tests {
         assert!(d.contains("OrderService#create"), "{d}");
         let none = name_miss_diagnostic("zzz", &[]);
         assert!(none.contains("not an empty answer"), "{none}");
+    }
+
+    /// codex/agy review of #367: value-flow slots must not crowd a real symbol out of a capped
+    /// pool, and a full raw window still triggers the two-character fallback.
+    #[test]
+    fn value_flow_slots_cannot_exhaust_the_candidate_pool() {
+        let mut store = MemStore::new();
+        // Slots with the SAME name whose ids sort before the real symbol's: a raw capped window
+        // in name-prefix order holds only slots.
+        let mut nodes: Vec<Node> = (0..SUGGEST_POOL_MAX + 10)
+            .map(|i| {
+                let mut n = value_slot("create_orderz");
+                n.symbol = wicked_estate_core::SymbolId(format!("aaa slot {i:05}"));
+                n
+            })
+            .collect();
+        nodes.push(method("OrderService", "create_orderz", "src/order.ts"));
+        GraphWrite::begin_batch(&mut store).unwrap();
+        GraphWrite::upsert_nodes(&mut store, &nodes).unwrap();
+        GraphWrite::commit_batch(&mut store).unwrap();
+        let (found, _) = suggest(&store, "Create_Orderz", 5).unwrap();
+        assert_eq!(
+            found.first().map(|s| (s.node.name.as_str(), s.reason)),
+            Some(("create_orderz", MatchReason::CaseInsensitive)),
+            "{:?}",
+            names(&found)
+        );
+        let (found, _) = suggest(&store, "create_ordrz", 5).unwrap();
+        assert!(
+            found.iter().any(|s| s.node.name == "create_orderz"),
+            "edit tier must reach past a slot-filled window: {:?}",
+            names(&found)
+        );
+    }
+
+    /// agy review of #367: the qualifier is matched BEFORE the leaf name, so `order` inside
+    /// `#cancelOrder().` does not make `InvoiceService#cancelOrder` a qualified match.
+    #[test]
+    fn qualified_segments_match_the_qualifier_not_the_leaf() {
+        let mut store = MemStore::new();
+        GraphWrite::begin_batch(&mut store).unwrap();
+        GraphWrite::upsert_nodes(
+            &mut store,
+            &[
+                method("InvoiceService", "cancelOrder", "src/invoice.ts"),
+                method("OrderService", "cancelOrder", "src/order.ts"),
+            ],
+        )
+        .unwrap();
+        GraphWrite::commit_batch(&mut store).unwrap();
+        let (found, _) = suggest(&store, "Order.cancelOrder", 5).unwrap();
+        let qualified: Vec<&str> = found
+            .iter()
+            .filter(|s| s.reason == MatchReason::QualifiedSegment)
+            .map(|s| s.node.symbol.as_str())
+            .collect();
+        assert_eq!(qualified.len(), 1, "{qualified:?}");
+        assert!(qualified[0].contains("/OrderService#"), "{qualified:?}");
     }
 
     #[test]

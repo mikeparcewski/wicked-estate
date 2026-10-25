@@ -1903,6 +1903,24 @@ impl SqliteStore {
     }
 }
 
+/// The smallest string greater than every string that starts with `p` — `p` with its last
+/// incrementable code point incremented (surrogates skipped) — or `None` when no such string
+/// exists. The exclusive upper bound of an indexed prefix range (#358).
+fn prefix_successor(p: &str) -> Option<String> {
+    let mut chars: Vec<char> = p.chars().collect();
+    while let Some(c) = chars.pop() {
+        let mut next = c as u32 + 1;
+        if (0xD800..=0xDFFF).contains(&next) {
+            next = 0xE000;
+        }
+        if let Some(n) = char::from_u32(next) {
+            chars.push(n);
+            return Some(chars.into_iter().collect());
+        }
+    }
+    None
+}
+
 /// A public edge key in SQLite's on-disk form: interned `(source sid, target sid, kind JSON)`.
 type SidKey = (i64, i64, String);
 
@@ -3207,7 +3225,10 @@ impl GraphRead for SqliteStore {
             // `SymbolQuery::matches_name_prefix`. `LIMIT` is pushed into SQL only when no Rust
             // filter below can drop a row; otherwise a cut here would undercount.
             let lo = prefix.to_ascii_lowercase();
-            let hi = format!("{lo}\u{10FFFF}");
+            // The exclusive upper bound is the prefix's lexicographic successor (UTF-8 byte order
+            // = code-point order); `None` (a prefix of only U+10FFFF) leaves the range open.
+            // Appending U+10FFFF instead would drop `a\u{10FFFF}b` for prefix `a`.
+            let hi = prefix_successor(&lo);
             let sql_limit: i64 = match query.limit {
                 Some(l)
                     if query.scope_prefix.is_none()
@@ -3222,7 +3243,7 @@ impl GraphRead for SqliteStore {
                 .conn
                 .prepare(
                     "SELECT n.data FROM nodes n JOIN symbols s ON s.sid = n.symbol \
-                     WHERE lower(n.name) >= ?1 AND lower(n.name) < ?2 \
+                     WHERE lower(n.name) >= ?1 AND (?2 IS NULL OR lower(n.name) < ?2) \
                      ORDER BY lower(n.name), n.name, s.sym LIMIT ?3",
                 )
                 .map_err(st)?;
@@ -3311,7 +3332,9 @@ impl GraphRead for SqliteStore {
     /// `Node` materialised (only the `scope` column is read, for the segment-aware `scope_prefix`
     /// test). A `text` query keeps the BM25 path through the trait default.
     fn count_symbols(&self, query: &SymbolQuery) -> Result<usize> {
-        if query.text.is_some() {
+        // `name_prefix` (#358) takes the same path as `text`: count what `find_symbols` returns,
+        // so the two can never disagree (codex review of #367).
+        if query.text.is_some() || query.name_prefix.is_some() {
             let mut q = query.clone();
             q.limit = None;
             return Ok(self.find_symbols(&q)?.len());

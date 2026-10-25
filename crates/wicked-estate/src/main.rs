@@ -2152,6 +2152,7 @@ fn main() -> Result<()> {
                     |f| store.file_git_sha(f).ok().flatten(),
                     |n| store.annotations(&n.symbol).unwrap_or_default(),
                 );
+                bundle["resolved"] = serde_json::json!(name_miss_of.is_none());
                 if let Some((n, (found, truncated))) = &name_miss_of {
                     wicked_estate_retrieve::suggest::mark_miss(&mut bundle, n, found, *truncated);
                     eprintln!(
@@ -2858,11 +2859,12 @@ fn main() -> Result<()> {
                 let hits = wicked_estate::search(&store, name).map_err(to_any)?;
                 if hits.is_empty() {
                     // (#358) Annotating nothing because the name missed is said, with the
-                    // candidates — never a quiet "annotated 0 symbol(s)".
+                    // candidates — never a quiet "annotated 0 symbol(s)" (agy review of #367).
                     let (found, _) = name_miss(&mut store, name);
                     for line in wicked_estate_retrieve::suggest::miss_text(name, &found) {
-                        eprintln!("{line}");
+                        println!("{line}");
                     }
+                    return Ok(());
                 }
                 for n in &hits {
                     let sym = n.symbol.clone();
@@ -3077,7 +3079,7 @@ fn main() -> Result<()> {
                             s.node.location.file,
                             s.node.location.span.start_line + 1
                         ),
-                        None => "nothing close is indexed".to_string(),
+                        None => "no close candidate found".to_string(),
                     };
                     println!("  {n}x  '{q}'  last {last}  -> {hint}");
                 }

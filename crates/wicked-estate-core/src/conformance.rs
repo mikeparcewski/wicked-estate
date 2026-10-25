@@ -492,6 +492,7 @@ pub fn symbol_query_name_prefix<S: GraphStore>(store: &mut S) {
             func_node("npq_delta"),
             func_node("Xnpq"),
             class("NpqZClass"),
+            func_node("Nr\u{10FFFF}tail"),
         ])
         .expect("np nodes");
     store.commit_batch().expect("commit_batch");
@@ -549,6 +550,19 @@ pub fn symbol_query_name_prefix<S: GraphStore>(store: &mut S) {
         vec!["NpqZClass"],
         "limit applies after the kind filter, never before it"
     );
+    // A name continuing past U+10FFFF still starts with its prefix (a range bound of
+    // prefix + U+10FFFF would drop it).
+    assert_eq!(names(prefix("NR", None)), vec!["Nr\u{10FFFF}tail"]);
+    // `count_symbols` agrees with `find_symbols` for a prefix query.
+    for p in ["npq", "NPQALPHA", "nr", "zzz"] {
+        assert_eq!(
+            store
+                .count_symbols(&prefix(p, None))
+                .expect("count_symbols name_prefix"),
+            names(prefix(p, None)).len(),
+            "count_symbols vs find_symbols for name_prefix {p:?}"
+        );
+    }
 }
 
 /// Run the full contract against a fresh, empty store. Panics on the first violation.

@@ -195,6 +195,30 @@ fn every_name_addressed_command_offers_candidates_on_a_miss() {
             "{args:?}: {text}"
         );
     }
+    // annotate: a miss annotates nothing and says why — no "annotated 0 symbol(s)".
+    let out = run(
+        &s,
+        &with_db(&[
+            "annotate", typo, "--type", "note", "--key", "k", "--value", "v",
+        ]),
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("did you mean") && text.contains("create_order"),
+        "{text}"
+    );
+    assert!(!text.contains("annotated 0"), "{text}");
+    // source --json: `resolved` on the bundle, both ways.
+    let doc: Value =
+        serde_json::from_str(&stdout(&run(&s, &with_db(&["source", typo, "--json"])))).unwrap();
+    assert_eq!(doc["resolved"], json!(false), "{doc}");
+    let doc: Value = serde_json::from_str(&stdout(&run(
+        &s,
+        &with_db(&["source", "create_order", "--json"]),
+    )))
+    .unwrap();
+    assert_eq!(doc["resolved"], json!(true), "{doc}");
     // path: the unresolved operand is a miss, not "no route".
     let out = run(&s, &with_db(&["path", "cancel_order", typo]));
     let text = stdout(&out);
