@@ -722,13 +722,14 @@ pub fn run(
     let t_start = now_ns();
     let result = cmd.tool.invoke(&*store, &request).map_err(super::to_any)?;
     let t_end = now_ns();
-    // Real freshness, computed here as the MCP server does. The tool's own staleness line is a
-    // placeholder addressed to the transport — this is that transport, so it is REPLACED, and
-    // R5 still holds: freshness is always stated, as "N commits", "0 commits" or "unknown".
+    // (#351) Freshness is the shared transport-side probe, as on MCP: the tool's placeholder is
+    // REPLACED by the commits behind each root (measured now) and the drift of every file this
+    // answer touches — R5 always holds, as "N commits", "0 commits" or "unknown".
     let mut diagnostics = result.diagnostics;
-    diagnostics.retain(|d| d != wicked_estate_retrieve::STALENESS_PLACEHOLDER);
-    diagnostics.extend(super::staleness_report(store.as_ref(), &db).statements(&db));
+    let mut content = result.content;
     super::maybe_warn_version_mismatch(store.as_ref(), &db);
+    wicked_estate::freshness::FreshnessProbe::with_store(&db, Some(store))
+        .annotate(&mut content, &mut diagnostics);
 
     // The span counts the diagnostics the caller actually receives, not the tool's raw list.
     let mut attrs = vec![
@@ -741,7 +742,7 @@ pub fn run(
             request[op.key].as_str().unwrap_or_default(),
         ));
     }
-    if let Some(total) = result.content["total"].as_i64() {
+    if let Some(total) = content["total"].as_i64() {
         attrs.push(KeyValue::int("result.count", total));
     }
     span(
@@ -756,18 +757,24 @@ pub fn run(
     let write = || -> std::io::Result<()> {
         let mut out = std::io::stdout().lock();
         if inv.json {
-            writeln!(out, "{}", serde_json::to_string(&result.content)?)?;
+            writeln!(out, "{}", serde_json::to_string(&content)?)?;
             out.flush()?;
             let mut err = std::io::stderr().lock();
             for d in &diagnostics {
                 writeln!(err, "{d}")?;
             }
         } else {
+            // Text mode states freshness in the `STALENESS:` lines below; the machine block is
+            // `--json`'s.
+            let mut shown = content.clone();
+            if let Some(obj) = shown.as_object_mut() {
+                obj.remove("freshness");
+            }
             let lines = match cmd.render {
-                Some(row_render) => row_render(&result.content, &request),
+                Some(row_render) => row_render(&shown, &request),
                 None => {
                     let mut lines = Vec::new();
-                    render(&result.content, 0, &mut lines);
+                    render(&shown, 0, &mut lines);
                     lines
                 }
             };

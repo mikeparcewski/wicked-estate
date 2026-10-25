@@ -9,6 +9,7 @@
 
 pub mod capability;
 pub mod community_metrics;
+pub mod freshness_overhead;
 pub mod memory_recall;
 pub mod name_suggest;
 

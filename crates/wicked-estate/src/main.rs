@@ -93,42 +93,6 @@ fn maybe_print_staleness(store: &dyn wicked_estate_store::GraphStoreMutExt, db: 
     }
 }
 
-/// What can be said about a db's freshness, per indexed root.
-#[derive(Debug, Default)]
-struct StalenessReport {
-    /// One line per root with commits since its last index.
-    stale: Vec<String>,
-    /// Roots whose freshness could NOT be determined (no git history at the root, a db spec
-    /// with no file mtime, …), named by repo label or root path. The cause is not guessed.
-    unknown: Vec<String>,
-    /// Roots whose commits-behind count was read, stale or not.
-    checked: usize,
-    /// The worst count over every checked root — the one number machine output reports (R5).
-    worst: Option<u64>,
-}
-
-impl StalenessReport {
-    /// Exactly the freshness statements a caller should see (agent rule R5): a positive
-    /// "current" claim only when EVERY indexed root was checked and none is behind — partial
-    /// coverage presented as complete is the R3 failure.
-    fn statements(&self, db: &str) -> Vec<String> {
-        let mut out = self.stale.clone();
-        for what in &self.unknown {
-            out.push(format!(
-                "STALENESS: unknown for {what} — freshness could not be determined"
-            ));
-        }
-        if self.checked == 0 && self.unknown.is_empty() {
-            out.push(format!(
-                "STALENESS: unknown — {db} records no indexed root to check"
-            ));
-        } else if out.is_empty() {
-            out.push("STALENESS: 0 commits since last index".to_string());
-        }
-        out
-    }
-}
-
 /// Fail CLOSED on a graph that is not there, for every read-only frontend over a RetrievalTool
 /// (`supports`, and each `tool_bridge` command, `lineage` included): opening a missing SQLite path creates an empty
 /// one, and an empty graph answers every question with an honest-empty result — `rank` with an
@@ -163,61 +127,7 @@ fn require_existing_graph(db: &str, cmd: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Freshness of every indexed root in this db. Reads the indexed root(s) from store meta and
-/// measures each from the commit it was indexed at (#243; the db file's mtime only as the
-/// fallback for a graph that recorded no commit).
-fn staleness_report(
-    store: &dyn wicked_estate_store::GraphStoreMutExt,
-    db: &str,
-) -> StalenessReport {
-    let mut report = StalenessReport::default();
-    // A multi-repo graph has one root per repo — check each, and name the label in the fix so the
-    // operator re-indexes THAT repo and not whichever one happened to be indexed last.
-    let repos = wicked_estate::repo_scope::registry(store);
-    if !repos.is_empty() {
-        for rec in repos {
-            match wicked_estate::commits_behind_since(
-                &wicked_estate::recorded_root_path(&rec.root, db),
-                rec.info.commit.as_deref(),
-                db,
-            ) {
-                Some(n) => {
-                    report.checked += 1;
-                    report.worst = Some(report.worst.map_or(n, |w| w.max(n)));
-                    if n > 0 {
-                        report.stale.push(format!(
-                            "STALENESS: {n} commit(s) in '{label}' since last index — run \
-                             `wicked-estate index {root} --repo {label}` to refresh",
-                            label = rec.label,
-                            root = rec.root,
-                        ));
-                    }
-                }
-                None => report.unknown.push(format!("repo '{}'", rec.label)),
-            }
-        }
-        return report;
-    }
-    // Never indexed: no root to check (`statements` says so).
-    let Some(root) = wicked_estate::indexed_root_path(store, db) else {
-        return report;
-    };
-    let root_str = root.to_string_lossy().into_owned();
-    let baseline = store.repo_info().ok().flatten().and_then(|i| i.commit);
-    match wicked_estate::commits_behind_since(&root, baseline.as_deref(), db) {
-        Some(n) => {
-            report.checked += 1;
-            report.worst = Some(n);
-            if n > 0 {
-                report.stale.push(format!(
-                    "STALENESS: {n} commit(s) since last index — run `wicked-estate index {root_str}` to refresh"
-                ));
-            }
-        }
-        None => report.unknown.push(root_str),
-    }
-    report
-}
+use wicked_estate::freshness::staleness_report;
 
 /// `stats --json` (#201, #198): the graph's identity and freshness as ONE document — the counts,
 /// a `provenance` block (FULL commit SHA, branch, dirty, canonical `indexed_root`, `indexed_at`,
@@ -232,6 +142,7 @@ fn stats_json(
     s: &wicked_estate_core::GraphStats,
 ) -> serde_json::Value {
     let report = staleness_report(store, db);
+    let mut probe = wicked_estate::freshness::FreshnessProbe::open(db);
     let meta = |k: &str| store.meta_get_key(k);
     let indexed = store.indexed_files().unwrap_or_default();
     let repos: Vec<serde_json::Value> = wicked_estate::repo_scope::registry(store)
@@ -286,6 +197,10 @@ fn stats_json(
             "commits_behind": report.worst,
             "checked": report.checked,
             "unknown": report.unknown,
+            // (#351) Working-tree drift: indexed files whose bytes changed or vanished, and new
+            // source files the graph has never seen. `null` = could not be determined.
+            "dirty_indexed_files": probe.dirty_indexed_files(),
+            "unindexed_files": probe.unindexed_files(),
         },
     })
 }
@@ -1460,29 +1375,58 @@ fn main() -> Result<()> {
             let dropped = deps.len() - kept;
             let next_cursor =
                 (dropped > 0).then(|| wicked_estate_retrieve::paging::encode(&[from + kept], fp));
+            // The machine document, and (#351) the same per-answer freshness MCP states — built
+            // ONCE, before the output branches, so every path (a miss, an empty answer, rows)
+            // states it: a `freshness` block and `stale` rows in JSON, the drift lines in text.
+            let mut out = blast_radius_json(name, &deps[..kept], dropped, unresolved, &br, depth);
+            out["next_cursor"] = serde_json::json!(next_cursor);
+            out["page"] = serde_json::json!({ "from": from, "count": kept, "total": total });
+            out["resolved"] = serde_json::json!(miss.is_none());
+            if let Some((found, truncated)) = &miss {
+                wicked_estate_retrieve::suggest::mark_miss(&mut out, name, found, *truncated);
+            }
+            let mut fresh = Vec::new();
+            wicked_estate::freshness::FreshnessProbe::open(&db).annotate(&mut out, &mut fresh);
+            // Text mode printed the commit-level lines up front; these are this answer's own.
+            let answer_lines = || {
+                fresh.iter().filter(|d| {
+                    d.contains("differ from the index")
+                        || d.contains("not in the graph")
+                        || d.contains("drift unknown")
+                })
+            };
             if json_out {
                 // Machine consumers (wicked-crew studio) get the same honesty contract as the
                 // text path: dependents PLUS the unresolved count — absence of dependents must
-                // never silently read as "safe to change".
-                let mut out =
-                    blast_radius_json(name, &deps[..kept], dropped, unresolved, &br, depth);
-                out["next_cursor"] = serde_json::json!(next_cursor);
-                out["page"] = serde_json::json!({ "from": from, "count": kept, "total": total });
-                out["resolved"] = serde_json::json!(miss.is_none());
-                if let Some((found, truncated)) = &miss {
-                    wicked_estate_retrieve::suggest::mark_miss(&mut out, name, found, *truncated);
+                // never silently read as "safe to change". STALENESS lines go to stderr (stdout
+                // is one document).
+                for d in &fresh {
+                    eprintln!("{d}");
                 }
                 print_line(&serde_json::to_string(&out).map_err(|e| anyhow::anyhow!(e))?)?;
             } else if let Some((found, _)) = &miss {
                 for line in wicked_estate_retrieve::suggest::miss_text(name, found) {
                     print_line(&line)?;
                 }
+                for d in answer_lines() {
+                    print_line(d)?;
+                }
             } else if deps.is_empty() {
                 print_line(&format!("no resolved dependents for '{name}'"))?;
+                for d in answer_lines() {
+                    print_line(d)?;
+                }
             } else {
                 print_line(&format!("{total} symbol(s) depend on '{name}':"))?;
-                for n in deps.iter().take(kept) {
-                    print_line(&format!("  {:?} {} ({})", n.kind, n.name, loc(n)))?;
+                for (i, n) in deps.iter().take(kept).enumerate() {
+                    let stale = out["dependents"][i]["stale"]
+                        .as_str()
+                        .map(|m| format!("  [stale: {m}]"))
+                        .unwrap_or_default();
+                    print_line(&format!("  {:?} {} ({}){stale}", n.kind, n.name, loc(n)))?;
+                }
+                for d in answer_lines() {
+                    print_line(d)?;
                 }
                 if let Some(next) = &next_cursor {
                     print_line(&format!(
@@ -4271,9 +4215,11 @@ fn cap_blast_radius_rows(
     let envelope = blast_radius_json(name, &[], deps.len(), unresolved, br, depth);
     let envelope_len = serde_json::to_string(&envelope).map_or(usize::MAX, |s| s.len());
     // The empty `[]` already counted in the envelope is replaced by the rows' own `[...]`.
-    // #279: the paging keys (`next_cursor`, `page`) ride every page; reserve their room.
-    let row_budget =
-        (BLAST_RADIUS_CHAR_BUDGET + 2).saturating_sub(envelope_len + BLAST_RADIUS_PAGING_RESERVE);
+    // #279: the paging keys (`next_cursor`, `page`) ride every page; reserve their room. #351:
+    // so does the `freshness` block the transport adds after this cap.
+    let row_budget = (BLAST_RADIUS_CHAR_BUDGET + 2).saturating_sub(
+        envelope_len + BLAST_RADIUS_PAGING_RESERVE + wicked_estate_retrieve::TRANSPORT_RESERVE,
+    );
     let fits = |k: usize| -> bool {
         let rows: Vec<serde_json::Value> =
             deps[..k].iter().map(|n| blast_radius_row(n, br)).collect();

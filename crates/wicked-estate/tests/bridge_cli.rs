@@ -546,6 +546,17 @@ fn indexed_rules(tag: &str) -> Scratch {
     s
 }
 
+/// A bridged `--json` document with the transport's `freshness` block (#351) checked and
+/// removed: what is left is the tool's own content, comparable with [`direct`].
+fn tool_doc(mut doc: serde_json::Value) -> serde_json::Value {
+    let fresh = doc
+        .as_object_mut()
+        .and_then(|o| o.remove("freshness"))
+        .unwrap_or_else(|| panic!("the bridge states freshness on every answer: {doc}"));
+    assert!(fresh.get("commits_behind").is_some(), "{fresh}");
+    doc
+}
+
 /// The tool's own `content` for `request` against the fixture's graph — what MCP returns.
 fn direct(
     dir: &Path,
@@ -570,7 +581,7 @@ fn rules_inventory_json_is_the_tool_document_unchanged() {
     let fx = indexed_rules("rules_inv");
     let out = run(&fx, &["rules-inventory", "--json", "--db", "graph.db"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    let docs = documents(&out);
+    let docs: Vec<serde_json::Value> = documents(&out).into_iter().map(tool_doc).collect();
     assert_eq!(docs.len(), 1, "stdout: {}", stdout(&out));
     assert_eq!(
         docs[0],
@@ -597,7 +608,7 @@ fn rules_recall_json_is_the_tool_document_and_str_facets_reach_the_tool() {
         assert!(out.status.success(), "{args:?}: {}", stderr(&out));
         let mut docs = documents(&out);
         assert_eq!(docs.len(), 1, "{args:?} stdout: {}", stdout(&out));
-        docs.remove(0)
+        tool_doc(docs.remove(0))
     };
 
     let doc = recall(&["--severity", "error", "--language", "python"]);
@@ -643,7 +654,10 @@ fn rules_commands_on_a_graph_without_rules_are_empty_not_errors() {
     let out = run(&fx, &["rules-recall", "--json", "--db", "graph.db"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(
-        documents(&out),
+        documents(&out)
+            .into_iter()
+            .map(tool_doc)
+            .collect::<Vec<_>>(),
         [serde_json::json!({"returned": 0, "rules": [], "total": 0})]
     );
     assert!(stderr(&out).contains("no active conformance rules matched"));

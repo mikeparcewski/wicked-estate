@@ -229,16 +229,10 @@ async fn main() -> Result<()> {
         env!("CARGO_PKG_VERSION"),
     );
 
-    // W7.4: compute staleness once at startup. Best-effort — None on any failure.
-    let commits_behind: Option<u64> = {
-        // We need the indexed root(s) from meta. Open a second ext handle for meta access.
-        let store = if db_path != ":memory:" {
-            wicked_estate_store::open_store_ext(&db_path).ok()
-        } else {
-            None
-        };
-        store.and_then(|s| wicked_estate::graph_commits_behind(s.as_ref(), &db_path))
-    };
+    // (#351) Freshness is measured per call, after the response cache, by one probe that owns
+    // its own store handle (the dispatch path holds only `&dyn GraphRead`). Best-effort: a probe
+    // with no readable graph states "unknown".
+    let mut freshness = wicked_estate::freshness::FreshnessProbe::open(&db_path);
 
     // Dim-guard (DoD-A6a): read the store's recorded embedder identity + dim, and compute the
     // runtime embedder's. SemanticSearch is advertised/dispatched only when they match.
@@ -277,11 +271,11 @@ async fn main() -> Result<()> {
 
     // 3. Build McpContext with the dim-guard fields.
     let ctx = McpContext {
-        commits_behind,
         embedder_runtime_id,
         embedder_runtime_dim,
         embedder_meta_id,
         embedder_meta_dim,
+        ..Default::default()
     };
 
     // 3b. Open domain stores (fail-soft: if any fails, all domains = None).
@@ -404,6 +398,8 @@ async fn main() -> Result<()> {
     // knowledge.* responses must never enter them: a memory.capture / knowledge.ingest bumps
     // nothing the cache watches, and a cached recall would be served stale indefinitely.
     let mut request_cache: HashMap<String, serde_json::Value> = HashMap::new();
+    // The graph version the L1 entries were answered at.
+    let mut cache_graph_version: Option<String> = None;
     let mut cache_db_mtime: Option<std::time::SystemTime> = if db_path != ":memory:" {
         std::fs::metadata(&db_path)
             .ok()
@@ -453,6 +449,15 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        // ...and whenever the graph version moved (#351 review): a re-index committed through the
+        // WAL can leave the main file's mtime unchanged, and an L1 hit would then be annotated
+        // against the NEW graph's digests and certified fresh. L2 already keys on the version.
+        let version_now =
+            wicked_estate_store::GraphStoreMutExt::meta_get_key(&sync_store, "graph_version");
+        if version_now != cache_graph_version {
+            request_cache.clear();
+            cache_graph_version = version_now;
+        }
 
         // Build a cache key for tools/call requests — graph-domain read tools only (#102).
         // Memory/knowledge tools bypass both cache levels: their stores' writes never bump the
@@ -471,12 +476,21 @@ async fn main() -> Result<()> {
             None
         };
 
+        // (#351) The tool a `tools/call` names — its emitted response (cache hit or not) is
+        // annotated with freshness measured now; the cached copy never is.
+        let call_tool: Option<String> = (req.get("method").and_then(|m| m.as_str())
+            == Some("tools/call"))
+        .then(|| req["params"]["name"].as_str().unwrap_or("").to_string());
+
         // Cache hit: L1 (HashMap) then L2 (SQLite).
         if let Some(ref key) = cache_key {
             // L1 — fast in-memory hit.
             if let Some(cached) = request_cache.get(key) {
                 // Patch the id to match the current request before returning.
                 let mut hit = cached.clone();
+                if let Some(tool) = &call_tool {
+                    wicked_estate_mcp::annotate_tool_response(&mut hit, tool, &mut freshness);
+                }
                 emit_cache_counter(
                     std::sync::Arc::clone(&otel_sink),
                     otel_resource.clone(),
@@ -509,6 +523,9 @@ async fn main() -> Result<()> {
                     let mut hit = cached;
                     hit["id"] = req["id"].clone();
                     log_miss(&mut sync_store, &hit);
+                    if let Some(tool) = &call_tool {
+                        wicked_estate_mcp::annotate_tool_response(&mut hit, tool, &mut freshness);
+                    }
                     let bytes =
                         serde_json::to_vec(&hit).context("failed to serialise cached response")?;
                     let mut out = stdout.lock();
@@ -616,6 +633,10 @@ async fn main() -> Result<()> {
             continue;
         }
         log_miss(&mut sync_store, &resp);
+        let mut resp = resp;
+        if let Some(tool) = &call_tool {
+            wicked_estate_mcp::annotate_tool_response(&mut resp, tool, &mut freshness);
+        }
 
         let bytes = serde_json::to_vec(&resp).context("failed to serialise response")?;
         let mut out = stdout.lock();

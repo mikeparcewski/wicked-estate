@@ -1938,7 +1938,13 @@ fn flow_hop_row(edge: &wicked_estate_core::Edge) -> Value {
 /// chars). The graph-summary tools (`RankHotspots`, `Communities`) can return one row per node on a
 /// wide graph, so they cap the row count to keep the payload under this budget and emit a loud
 /// truncation diagnostic when the cap bites — an agent must never silently reason over a cut body.
-const R4_CHAR_BUDGET: usize = 25_000;
+pub const R4_CHAR_BUDGET: usize = 25_000;
+
+/// Room a reply sized to [`R4_CHAR_BUDGET`] leaves for what the TRANSPORT adds after the tool
+/// runs (wicked-estate#351): the `freshness` block in its compact form and its `STALENESS:` lines.
+/// Every capped tool reserves it (`cap_rows_to_budget`); a transport that sizes its own reply
+/// (the CLI's `blast-radius`) reserves it too.
+pub const TRANSPORT_RESERVE: usize = 700;
 
 /// Headroom for Lineage's non-array keys: `total`, `truncated`, the three #222 horizon keys,
 /// `confidence` (two f32s rendered at full precision plus `edge_count`), the `flows` key, and the
@@ -1956,7 +1962,9 @@ const DIAGNOSTICS_RESERVE: usize = 1_200;
 /// the number dropped. Binary-search on length keeps this O(log n · serialize), not O(n) re-serialize
 /// per drop, on a wide graph.
 fn cap_rows_to_budget(items: Vec<Value>, envelope_overhead: usize) -> (Vec<Value>, usize) {
-    let budget = R4_CHAR_BUDGET.saturating_sub(envelope_overhead);
+    // The transport adds to every reply after the tool runs (#351); reserve its room here, once,
+    // for every capped tool.
+    let budget = R4_CHAR_BUDGET.saturating_sub(envelope_overhead + TRANSPORT_RESERVE);
     let fits =
         |rows: &[Value]| -> bool { serde_json::to_string(rows).is_ok_and(|s| s.len() <= budget) };
     if fits(&items) {

@@ -29,8 +29,23 @@ Beyond ~25K characters the agent externalizes/ignores the output. Rank (PageRank
 complete dump.
 
 ## R5 — Always report staleness
-Embed `commits_behind` (git rev-list since DB mtime) in every response's `diagnostics`
-(prior art pattern). A silently-stale graph is a correctness hazard.
+A silently-stale graph is a correctness hazard. Every retrieval response, over MCP and CLI alike,
+states freshness measured at call time, after any response cache (wicked-estate#351,
+`crates/wicked-estate/src/freshness.rs`, the one implementation):
+- **Commits behind, per indexed root:** `git rev-list --count <indexed>..HEAD` from the commit
+  each root was indexed at (`meta.repo_commit`, or `repo:<label>:commit` in a multi-repo graph).
+  The db mtime is the fallback only when no commit was recorded. A `STALENESS:` line always says
+  `N`, `0` or `unknown`, and `freshness.commits_behind` is the worst root, or `null` when any root
+  is unknown.
+- **Drift of the files this answer touches:** every `file` in the answer is compared with the bytes
+  that were indexed (`files.digest`). `modified` or `deleted` files are listed in
+  `freshness.stale_files`, their rows carry `"stale"`, and a `STALENESS:` line names them. A dirty
+  file the answer does not touch never marks it.
+- **New source files the graph has never seen:** untracked or newly added files with an indexed
+  extension raise `freshness.unindexed_files` and a `STALENESS: … new source file(s) not in the
+  graph` line (R3: dependents may be missing).
+
+Probe failures degrade to `unknown`, never `isError` (R1). The probe never re-indexes.
 
 ## R6 — Loud fallback marker
 When the agent must read files because the graph couldn't answer, emit a visible `GRAPH-FALLBACK:`
