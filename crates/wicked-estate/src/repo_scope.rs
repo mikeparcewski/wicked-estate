@@ -183,7 +183,8 @@ pub fn write_record(store: &mut dyn GraphStoreMutExt, label: &str, root: &Path, 
 /// Absolute-and-symlink-resolved form of a root, falling back to the string as written when the
 /// path is gone (a stored root whose directory has since been deleted still has to compare).
 fn canon(root: &str) -> String {
-    std::fs::canonicalize(root)
+    // Same form as `canonical_root` writes (drive-letter on Windows, #360), so they compare.
+    dunce::canonicalize(root)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| root.to_string())
 }

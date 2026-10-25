@@ -7,6 +7,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# A newer push to the same pull request supersedes the running checks (#360: the macOS/Windows
+# legs are the long ones). Pushes to a branch are never cancelled.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # ── The non-negotiable gate (CLAUDE.md §9): 0 warnings · clippy · all tests
   #    (incl. GraphStore conformance + bench-type tests) · fmt. Runs on the DEFAULT
@@ -32,6 +38,57 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test (workspace + conformance + bench)
         run: cargo test --workspace
+
+  # ── #360: the same gate on macOS and Windows, plus the install smoke test of release binaries.
+  #    Grammar plugins load .so/.dylib/.dll, SQLite and 11 grammars are compiled from C, several
+  #    tests shell out to git, and paths are normalised for the evidence layer — none of it ran
+  #    outside Linux before. fmt and clippy stay on `gate` (platform-independent except cfg'd code,
+  #    which this build compiles under -D warnings). Failures are fixed, never skipped. ────────────
+  gate-os:
+    name: gate-os (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            py: python3
+            target: aarch64-apple-darwin
+            release_rustflags: ''
+          - os: windows-latest
+            py: python
+            target: x86_64-pc-windows-msvc
+            release_rustflags: '-C target-feature=+crt-static'
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: gate-os
+      - name: build (0 warnings, all targets)
+        run: cargo build --workspace --all-targets
+      # --no-fail-fast: one run reports every OS-specific failure, not just the first binary's.
+      - name: test (workspace + conformance + bench)
+        run: cargo test --workspace --no-fail-fast
+      # A packaging break shows up on the PR that causes it, not at tag time.
+      - name: release binaries
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ matrix.release_rustflags }}
+        run: >
+          cargo build --release --locked --target ${{ matrix.target }}
+          -p wicked-estate -p wicked-estate-mcp --bin wicked-estate --bin wicked-estate-mcp
+      - name: install smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          v=$(${{ matrix.py }} scripts/workspace-version.py | tr -d '\r')
+          archive=$(${{ matrix.py }} scripts/package-binary.py ${{ matrix.target }} "$v" dist | tr -d '\r')
+          rm -rf check
+          ${{ matrix.py }} -c "import shutil, sys; shutil.unpack_archive(sys.argv[1], 'check')" "$archive"
+          ${{ matrix.py }} scripts/smoke-binary.py "check/wicked-estate-$v-${{ matrix.target }}" "$v"
 
   # ── The Postgres backend is behind `--features postgres`, so NOTHING in the default
   #    `gate` job compiles it — `cargo build --workspace` does not enable optional

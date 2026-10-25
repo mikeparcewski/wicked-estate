@@ -16,10 +16,10 @@ pub fn build_nginx_plugin(plugin_dir: &Path, manifest: &str) -> bool {
     if Command::new("cc").arg("--version").output().is_err() {
         return false;
     }
-    let example = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/plugins/nginx")
-        .canonicalize()
-        .expect("example plugin dir exists");
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/nginx");
+    // NOT canonicalized: on Windows that yields a verbatim `\\?\D:\…` path, which MinGW's gcc
+    // cannot open (#360). The joined path is enough for the compiler.
+    assert!(example.is_dir(), "example plugin dir exists: {example:?}");
     let parser_c = example.join("src/parser.c");
     assert!(parser_c.is_file(), "generated parser missing: {parser_c:?}");
 

@@ -16,6 +16,16 @@
   every store). New `GraphWrite::record_search_miss` (default no-op; it replaces the inherent `SqliteStore`
   method). Bench: on a 10 000-symbol probe set, top-3 hit rate and p95 latency are gated.
   Spec by @eugenelim.
+- **Prebuilt binaries for five platforms on every GitHub Release, and a macOS/Windows CI gate
+  (#360).** A `v*` tag now builds `wicked-estate` and `wicked-estate-mcp` for macOS
+  (arm64, x64), Linux (x64, arm64; built in `manylinux_2_28`, glibc ≥ 2.28) and Windows x64
+  (static CRT). Each archive is smoke-tested on its own OS before upload
+  (`scripts/smoke-binary.py`: version, index, stats, blast-radius, and MCP `tools/list`). The
+  Linux archives are smoke-tested again in clean Rocky 8/9 and Debian 12 containers. The release
+  attaches the archives, `SHA256SUMS` and a provenance attestation per archive, and it is not
+  created unless all five pass. Every PR now also runs `gate-os`: the build and test gate on
+  `macos-14` and `windows-latest`, plus a release build and the smoke test. The README gains a
+  "Prebuilt binaries" install path. Spec by @eugenelim.
 
 ### Changed
 - **Freshness is measured per query, after the response cache, on MCP and CLI alike (#351).** The

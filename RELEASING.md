@@ -112,6 +112,44 @@ cargo install wicked-estate --features model2vec # + static semantic search
 cargo install wicked-estate-mcp                  # MCP server (separate binary)
 ```
 
+## 5. Prebuilt binaries (GitHub Release assets)
+
+A `v*` tag also produces prebuilt binaries (wicked-estate#360). `publish.yml` calls
+`.github/workflows/binaries.yml` in parallel with the crates.io publish:
+
+- **Five targets.** `aarch64-apple-darwin` (macos-14), `x86_64-apple-darwin` (macos-15-intel),
+  `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` (built inside `manylinux_2_28`, so
+  the glibc floor is 2.28), and `x86_64-pc-windows-msvc` (static CRT, checked with
+  `dumpbin /dependents`).
+- **Each leg** builds `wicked-estate` and `wicked-estate-mcp` with the default features
+  (`--release --locked`). It packages them with `scripts/package-binary.py` into
+  `wicked-estate-<version>-<target>.tar.gz` (`.zip` on Windows, with `LICENSE`, `NOTICE` and
+  `README.md`), extracts that archive into a fresh directory, and runs
+  `scripts/smoke-binary.py` against the extracted copy before uploading. The smoke test checks four things: `--version` is exact; `index` +
+  `stats --json` on `scripts/smoke-fixture` (Rust, TypeScript, Python, and VBScript from a
+  vendored C grammar) gives nodes and `calls` edges; `blast-radius` finds the known dependent;
+  and `wicked-estate-mcp` answers `initialize` + `tools/list` with the tool count `CLAUDE.md`
+  states. A leg that fails uploads nothing.
+- **The Linux archives** are smoke-tested again inside clean `rockylinux:8`, `rockylinux:9` and
+  `debian:12` containers with no Rust toolchain (the `clean-linux` job).
+- **`github-release`** needs `publish` *and* every binaries leg. It fails unless all five
+  archives are present, writes `SHA256SUMS`, records a build-provenance attestation per archive,
+  and uploads everything with `--clobber`.
+
+**Recovery.** A `workflow_dispatch` of `publish.yml` with an existing tag rebuilds the binaries
+and re-uploads any missing asset idempotently. `publish.sh` skips crates already on crates.io,
+so a dispatch never republishes. Run the dispatch **from the tag itself** ("Use workflow from:
+<tag>"). The provenance attestation names the ref the run started from, so `github-release`
+refuses a dispatch started on `main`. A crates-only recovery from `main` still works. Runs for
+one tag are serialized (`concurrency`, never cancelled), so overlapping dispatches cannot mix
+archives and `SHA256SUMS`. Each leg smoke-tests the archive extracted into a fresh directory,
+which is exactly what ships.
+
+**Dry run.** A pull request that changes `binaries.yml`, `publish.yml` or the packaging scripts
+runs the whole `binaries.yml` matrix, including the clean-container smoke, without releasing
+anything. Every PR also runs `gate-os` (`ci.yml`), which builds release binaries on macOS and
+Windows and smoke-tests them.
+
 ## Notes
 
 - The `fastembed` / `model2vec` features pull heavy optional deps (ONNX runtime, model downloads) and

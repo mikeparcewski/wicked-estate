@@ -41,6 +41,13 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# One run per tag at a time, never cancelled (#360): two overlapping runs for one tag would each
+# rebuild the archives and --clobber them one by one, and could leave run B's archive next to run
+# A's SHA256SUMS. A second dispatch waits for the first to finish.
+concurrency:
+  group: publish-${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   publish:
     name: publish to crates.io
@@ -80,19 +87,54 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: bash scripts/publish.sh
 
+  # Prebuilt archives for five targets (wicked-estate#360), built from the same tag in PARALLEL with
+  # the crates publish — they need nothing from crates.io, and the publish can run for hours. Each
+  # leg smoke-tests its archive on its own OS (and Linux in clean distro containers) before it may
+  # upload; a failed leg uploads nothing.
+  binaries:
+    name: prebuilt binaries
+    uses: ./.github/workflows/binaries.yml
+    permissions:
+      contents: read
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref_name }}
+      version: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref_name }}
+
   # Cut the GitHub Release once crates.io publish SUCCEEDS. This is the step estate lacked: the
   # crates were published every release, but nothing created a GitHub Release, so the Releases page
   # drifted (it sat at v0.14.1 while crates.io shipped through v0.16.6). `needs: publish` means a
   # release is advertised only for a version that actually published — never a tag whose publish
   # failed. Idempotent: an existing release (e.g. a hand-backfilled one) is updated in place, so a
   # re-run / dispatch never errors on "already exists".
+  #
+  # #360: it also needs EVERY binaries leg, attaches the five archives plus SHA256SUMS, and attests
+  # each archive's build provenance. A missing archive fails this job, so no release is created
+  # or edited with a partial asset set. Uploads use --clobber, so a workflow_dispatch re-run for an
+  # existing tag fills in whatever is missing, idempotently.
   github-release:
     name: create GitHub release
-    needs: publish
+    needs: [publish, binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create/update the GitHub Release against the pushed tag
+      id-token: write # sign the build-provenance attestations
+      attestations: write
     steps:
+      # The provenance attestation names the ref this RUN was started from. A recovery dispatch
+      # started on `main` would attest archives built from the tag as coming from `main`, so
+      # the release step refuses it (an empty ref is refused too): dispatch from the tag itself
+      # ("Use workflow from: <tag>"). The crates publish above does not need this, so a
+      # crates-only recovery from `main` still works.
+      - name: a recovery dispatch must run from the tag it releases
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          WANT: refs/tags/${{ inputs.ref }}
+          GOT: ${{ github.ref }}
+        run: |
+          if [ "$GOT" != "$WANT" ] || [ "$WANT" = "refs/tags/" ]; then
+            echo "::error::dispatched from $GOT; release assets are attested only when the workflow runs from $WANT"
+            exit 1
+          fi
       # Same event-gated checkout as the publish job (a dispatch resolves the TAG input; a push
       # uses the pushed tag). An empty dispatch input already fails the publish job above, and
       # `needs: publish` gates this one on it, so this job never runs against a bad ref.
@@ -104,6 +146,29 @@ jobs:
       - name: check out the pushed tag (normal path)
         if: github.event_name != 'workflow_dispatch'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: download every binaries leg
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wicked-estate-*
+          path: dist
+          merge-multiple: true
+      - name: require all five archives, write SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          for t in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu \
+                   aarch64-unknown-linux-gnu; do
+            ls wicked-estate-*-"$t".tar.gz >/dev/null || { echo "::error::missing archive for $t"; exit 1; }
+          done
+          ls wicked-estate-*-x86_64-pc-windows-msvc.zip >/dev/null \
+            || { echo "::error::missing archive for x86_64-pc-windows-msvc"; exit 1; }
+          [ "$(ls wicked-estate-* | wc -l)" -eq 5 ] || { echo "::error::expected exactly 5 archives"; ls; exit 1; }
+          sha256sum wicked-estate-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: 'dist/wicked-estate-*'
       - name: create or update the GitHub Release from CHANGELOG
         env:
           GH_TOKEN: ${{ github.token }}
@@ -130,3 +195,5 @@ jobs:
             gh release create "$TAG" --title "$TAG" --notes-file /tmp/relnotes.md --verify-tag
             echo "created GitHub Release $TAG"
           fi
+          gh release upload "$TAG" dist/wicked-estate-* dist/SHA256SUMS --clobber
+          echo "attached $(ls dist/wicked-estate-* | wc -l) archives + SHA256SUMS to $TAG"
