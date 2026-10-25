@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.31.0] — 2026-10-25
+
+Minor: freshness is measured per query on MCP and CLI alike (#351), a symbol-name miss suggests
+what you may have meant (#358), `TraverseGraph` `edge_kinds` fails closed (#361), and every
+GitHub Release carries prebuilt binaries for five platforms (#360). Removes the pre-#351
+freshness API that #372 deprecated.
+
 ### Added
 - **Did-you-mean suggestions on a symbol-name miss, and a miss log (#358).** Name-addressed
   queries resolve exactly and case-sensitively. A miss used to come back empty, and
@@ -40,9 +47,15 @@
   never-indexed source files are counted in `freshness.unindexed_files`. The cache stores
   un-annotated content. `blast-radius` (text and `--json`) and the bridged CLI commands carry the
   same block. `stats --json` gains `staleness.dirty_indexed_files` and
-  `staleness.unindexed_files`. Deprecated (kept so no public API breaks before the next minor release, then removed):
-  `McpContext.commits_behind` (ignored), `wicked_estate::graph_commits_behind` and
-  `wicked_estate::staleness_diagnostic`. `StalenessReport` moved to `wicked_estate::freshness`. Spec by @eugenelim.
+  `staleness.unindexed_files`. `StalenessReport` moved to `wicked_estate::freshness`. Spec by @eugenelim.
+
+### Removed
+- **The pre-#351 freshness API (#351).** `McpContext.commits_behind` (ignored since per-call
+  freshness), `wicked_estate::graph_commits_behind` (use
+  `freshness::staleness_report(store, db).worst`, or `FreshnessProbe` for per-call freshness) and
+  `wicked_estate::staleness_diagnostic` (`freshness::StalenessReport::statements` states every
+  case: N, 0 and unknown). They were deprecated on main by #372 and never shipped deprecated; this
+  minor release removes them, so code that builds an `McpContext` literal must drop the field.
 
 ### Fixed
 - **`TraverseGraph` `edge_kinds` no longer fails open to every kind (#361).** A tag kind
