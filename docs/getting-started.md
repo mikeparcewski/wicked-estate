@@ -268,7 +268,9 @@ adds only argv parsing, operand resolution and freshness.
   fails non-zero with `no symbol named …` (the MCP tool, handed an unknown id, returns an empty
   document instead).
 - `--direction` defaults to `dependencies` (what `<symbol>` uses); `--edge-kinds` takes
-  snake_case kinds (`calls,imports,references`, …) and rejects an unknown one. A `--depth` or
+  built-in kinds by their snake_case name (`calls,imports,references`, …) and tag kinds bare or
+  prefixed (`flows_to`, `other:di-wired`), exactly as MCP `edge_kinds` does. A case variant of a
+  built-in (`Calls`) is rejected, and the reply echoes the effective `edge_kinds`. A `--depth` or
   `--max-nodes` above the tool's ceiling is clamped by the tool **and reported** as a
   `CLAMPED: …` diagnostic — the same line MCP callers now get.
 - Flags are strict: an unknown, repeated, foreign or mistyped flag exits non-zero before any

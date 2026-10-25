@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Fixed
+- **`TraverseGraph` `edge_kinds` no longer fails open to every kind (#361).** A tag kind
+  (`flows_to`, `di-wired`) was dropped by the parser, an all-dropped list became `[]`, and every
+  store reads `[]` as "no filter" — so `edge_kinds:["flows_to"]` returned the whole subgraph with
+  no diagnostic. One core parser, `EdgeKind::parse_user`, now serves TraverseGraph, the CLI's
+  `--edge-kinds` and `supports edge --kind`, and the drop-in extractor configs (`extra_edge`,
+  `xml_rules`). Tags are accepted bare, as `other:<tag>` or as `{"other":"<tag>"}`; a case variant
+  of a built-in (`Calls`), an empty string or any other JSON shape is an error naming the entry.
+  The reply echoes the effective `edge_kinds`. Extractor configs that wrote `defines`,
+  `instantiates`, `overrides`, `has_type`, `returns` or `satisfied_by` now get the built-in kind
+  instead of a same-named tag. Spec by @eugenelim.
+- **A filtered traversal returns only edges of the asked-for kinds (#361).** SqliteStore and
+  PostgresStore walked with `TraversalSpec.edge_kinds` but returned every edge incident to a
+  reached node, so a `flows_to` traversal also answered with `calls` edges. Both now apply the
+  walk's admission rule (`TraversalSpec::admits`: kind and confidence floor) to the returned
+  edges, as MemStore and SurrealStore already did. A new conformance case gates every store.
+
 ## [0.30.0] — 2026-10-17
 
 Minor: operator memories land at an explicit cross-project scope (`operator:<id>`), and a derived

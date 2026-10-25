@@ -106,19 +106,6 @@ fn parse_node_kind(s: &str) -> NodeKind {
     }
 }
 
-fn parse_edge_kind(s: &str) -> EdgeKind {
-    match s {
-        "contains" => EdgeKind::Contains,
-        "governs" => EdgeKind::Governs,
-        "evaluates" => EdgeKind::Evaluates,
-        "produces" => EdgeKind::Produces,
-        "invoked_by" => EdgeKind::InvokedBy,
-        "calls" => EdgeKind::Calls,
-        "imports" => EdgeKind::Imports,
-        other => EdgeKind::Other(other.to_string()),
-    }
-}
-
 // ── Name resolution helper ────────────────────────────────────────────────────
 
 /// Resolve a node's display name from a mapping + element node.
@@ -299,7 +286,10 @@ impl Extractor for XmlRulesExtractor {
                     let edge = Edge::new(
                         parent_sym.clone(),
                         child_sym,
-                        parse_edge_kind(&edge_mapping.edge_kind),
+                        // The one core parser (#361): a case variant of a built-in fails the
+                        // extraction loudly instead of minting a tag no built-in query matches.
+                        EdgeKind::parse_user(&edge_mapping.edge_kind)
+                            .map_err(|e| Error::Extraction(format!("xml-rules edge_kind: {e}")))?,
                         ResolutionTier::Parsed,
                         "xml-rules",
                     );

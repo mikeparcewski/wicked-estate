@@ -163,10 +163,13 @@ struct RulesFile {
 
 // ── Compiled rule ─────────────────────────────────────────────────────────────
 
-/// A compiled rule: the raw config plus a pre-compiled `Regex`.
+/// A compiled rule: the raw config plus a pre-compiled `Regex` and the parsed edge kind.
 struct CompiledRule {
     cfg: EdgeRule,
     re: Regex,
+    /// `emit_edge.kind`, parsed once at load by the one core parser (#361) — a bad kind fails the
+    /// load naming the rule, instead of minting a tag no built-in query matches.
+    edge_kind: Option<EdgeKind>,
 }
 
 impl CompiledRule {
@@ -177,7 +180,15 @@ impl CompiledRule {
                 cfg.name, cfg.pattern
             )
         })?;
-        Ok(Self { cfg, re })
+        let edge_kind = cfg
+            .emit_edge
+            .as_ref()
+            .map(|et| {
+                EdgeKind::parse_user(&et.kind)
+                    .map_err(|e| format!("rule {:?}: emit_edge.kind: {e}", cfg.name))
+            })
+            .transpose()?;
+        Ok(Self { cfg, re, edge_kind })
     }
 }
 
@@ -308,7 +319,7 @@ impl ExtraEdgeExtractor {
                 }
 
                 // ── Emit edge ─────────────────────────────────────────────────
-                if let Some(ref et) = rule.cfg.emit_edge {
+                if let (Some(et), Some(ek)) = (&rule.cfg.emit_edge, &rule.edge_kind) {
                     let target_id = expand_template(&et.target_id_template, &bindings);
                     // Target: synthetic node (default) or — with target_kind = "file" — the
                     // literal file node at the expanded repo-relative path.
@@ -331,11 +342,10 @@ impl ExtraEdgeExtractor {
                         }
                         None => file_symbol.clone(),
                     };
-                    let ek = parse_edge_kind(&et.kind);
                     let mut edge = Edge::new(
                         source_symbol,
                         target_symbol,
-                        ek,
+                        ek.clone(),
                         ResolutionTier::Heuristic,
                         &rule.cfg.name,
                     );
@@ -436,32 +446,6 @@ fn parse_node_kind(s: &str) -> NodeKind {
     }
 }
 
-/// Parse an edge-kind string from the config.
-///
-/// `"other:<tag>"` → `EdgeKind::Other("<tag>")`
-/// Built-in names (`"calls"`, `"imports"`, …) map to the corresponding variant.
-/// W15 rules-engine names (`"governs"`, `"evaluates"`, `"produces"`, `"invoked_by"`)
-/// map to their first-class variants so TOML rules bridge configs can use them directly.
-fn parse_edge_kind(s: &str) -> EdgeKind {
-    if let Some(tag) = s.strip_prefix("other:") {
-        return EdgeKind::Other(tag.to_string());
-    }
-    match s {
-        "calls" => EdgeKind::Calls,
-        "imports" => EdgeKind::Imports,
-        "contains" => EdgeKind::Contains,
-        "references" => EdgeKind::References,
-        "extends" => EdgeKind::Extends,
-        "implements" => EdgeKind::Implements,
-        // W15 rules-engine EdgeKinds — used in cross-graph bridge TOML configs.
-        "governs" => EdgeKind::Governs,
-        "evaluates" => EdgeKind::Evaluates,
-        "produces" => EdgeKind::Produces,
-        "invoked_by" => EdgeKind::InvokedBy,
-        other => EdgeKind::Other(other.to_string()),
-    }
-}
-
 /// Minimal glob matcher: supports `**` (crosses path separators) and `*` (within a segment).
 /// Does **not** support `?`, character classes, or braces — callers needing those should pre-expand.
 fn glob_matches(glob: &str, path: &str) -> bool {
@@ -552,22 +536,39 @@ mod tests {
         );
     }
 
+    /// #361: `emit_edge.kind` goes through the one core parser — `other:<tag>` and bare tags are
+    /// tags, every built-in spelling (incl. `defines`, `has_type`, `satisfied_by`, which the old
+    /// hand-rolled match turned into tags) is its variant, and a case variant fails the load.
     #[test]
-    fn parse_edge_kind_other() {
-        assert_eq!(
-            parse_edge_kind("other:emits"),
-            EdgeKind::Other("emits".to_string())
+    fn emit_edge_kind_uses_the_core_parser() {
+        let kind_of = |kind: &str| -> Result<EdgeKind, String> {
+            let src = EMIT_RULE.replace(
+                "kind               = \"other:emits\"",
+                &format!("kind = {kind:?}"),
+            );
+            let ex = ExtraEdgeExtractor::from_toml(&src)?;
+            let sf = SourceFile {
+                path: "src/orders.js".into(),
+                language: Language::new("javascript"),
+                text: r#"bus.emit("orders.created", payload);"#.into(),
+            };
+            Ok(ex.extract_extra(&sf).edges[0].kind.clone())
+        };
+        assert_eq!(kind_of("other:emits"), Ok(EdgeKind::Other("emits".into())));
+        assert_eq!(kind_of("consumes"), Ok(EdgeKind::Other("consumes".into())));
+        for k in &EdgeKind::BUILTINS {
+            let spelling = serde_json::to_value(k)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert_eq!(kind_of(&spelling).as_ref(), Ok(k), "{spelling}");
+        }
+        let err = kind_of("Calls").unwrap_err();
+        assert!(
+            err.contains("event-bus-emit") && err.contains("did you mean \"calls\""),
+            "{err}"
         );
-        assert_eq!(
-            parse_edge_kind("other:consumes"),
-            EdgeKind::Other("consumes".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_edge_kind_builtin() {
-        assert_eq!(parse_edge_kind("calls"), EdgeKind::Calls);
-        assert_eq!(parse_edge_kind("imports"), EdgeKind::Imports);
     }
 
     // ── expand_template ───────────────────────────────────────────────────────
@@ -926,15 +927,6 @@ target_id_template = "skills/archetype/refs/{name}.md"
             err.contains("bad.toml"),
             "error must name the offending file, got: {err}"
         );
-    }
-
-    #[test]
-    fn parse_edge_kind_covers_all_w15_variants() {
-        use wicked_estate_core::EdgeKind;
-        assert_eq!(parse_edge_kind("governs"), EdgeKind::Governs);
-        assert_eq!(parse_edge_kind("evaluates"), EdgeKind::Evaluates);
-        assert_eq!(parse_edge_kind("produces"), EdgeKind::Produces);
-        assert_eq!(parse_edge_kind("invoked_by"), EdgeKind::InvokedBy);
     }
 
     #[test]

@@ -1031,3 +1031,94 @@ fn help_lists_lineage_as_static_semantic_lineage_not_taint() {
     assert!(own.contains("not taint"), "{own}");
     assert!(own.contains("clamps to its ceiling"), "{own}");
 }
+
+// ── TraverseGraph edge_kinds over tag kinds (#361) ──────────────────────────
+
+/// `traverse --edge-kinds flows_to` is accepted on the CLI, follows ONLY `flows_to` edges, and its
+/// `content` equals the MCP `TraverseGraph` answer for the same request. Before #361 the CLI
+/// refused the tag outright while MCP dropped it and walked every kind.
+#[test]
+fn traverse_edge_kinds_flows_to_matches_mcp_and_follows_only_the_tag() {
+    let s = indexed_angular("traverse_tag");
+    let store = open(&s);
+    let route = node_where(&store, |n| n.name == "RouteParam:id", "RouteParam:id");
+
+    let traverse = |extra: &[&str]| -> Value {
+        let mut argv = vec![
+            "traverse",
+            route.as_str(),
+            "--direction",
+            "both",
+            "--depth",
+            "8",
+        ];
+        argv.extend_from_slice(extra);
+        argv.extend_from_slice(&["--json", "--db", "graph.db"]);
+        let out = run(&s, &argv);
+        assert!(
+            out.status.success(),
+            "traverse {extra:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).expect("--json stdout must be JSON")
+    };
+    let mcp_traverse = |args: Value| -> Value {
+        let req = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "TraverseGraph", "arguments": args },
+        });
+        let resp = handle_request_unified(&store, &req, &McpContext::default(), None, None);
+        assert_eq!(resp["result"]["isError"], json!(false), "{resp}");
+        serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+
+    // The unfiltered walk from the same start crosses other kinds, so the filter has work to do.
+    let all = traverse(&[]);
+    assert!(
+        all["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] != json!({"other": "flows_to"})),
+        "fixture must reach non-flows_to edges: {all}"
+    );
+
+    let cli = traverse(&["--edge-kinds", "flows_to"]);
+    let edges = cli["edges"].as_array().unwrap();
+    assert!(!edges.is_empty(), "{cli}");
+    for e in edges {
+        assert_eq!(e["kind"], json!({"other": "flows_to"}), "{cli}");
+    }
+    assert_eq!(cli["edge_kinds"], json!([{"other": "flows_to"}]));
+    let mcp = mcp_traverse(json!({
+        "symbol": route, "direction": "both", "depth": 8, "edge_kinds": ["flows_to"],
+    }));
+    assert_eq!(
+        cli, mcp,
+        "CLI vs MCP TraverseGraph for edge_kinds=[flows_to]"
+    );
+
+    // A case variant of a built-in: refused on both transports, naming the entry.
+    let out = run(
+        &s,
+        &[
+            "traverse",
+            &route,
+            "--edge-kinds",
+            "Calls",
+            "--json",
+            "--db",
+            "graph.db",
+        ],
+    );
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("did you mean \"calls\""));
+    let req = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "TraverseGraph", "arguments": {"symbol": route, "edge_kinds": ["Calls"]} },
+    });
+    let resp = handle_request_unified(&store, &req, &McpContext::default(), None, None);
+    assert_eq!(resp["result"]["isError"], json!(true), "{resp}");
+    assert!(resp.to_string().contains("Calls"), "{resp}");
+}

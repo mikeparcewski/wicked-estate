@@ -200,8 +200,18 @@ fn traverse_graph_schema() -> Value {
             },
             "edge_kinds": {
                 "type": "array",
-                "items": { "type": "string" },
-                "description": "Edge kinds to follow (empty = all kinds)."
+                "items": {
+                    "anyOf": [
+                        { "type": "string" },
+                        {
+                            "type": "object",
+                            "properties": { "other": { "type": "string" } },
+                            "required": ["other"],
+                            "additionalProperties": false
+                        }
+                    ]
+                },
+                "description": "Edge kinds to follow (absent or empty = all kinds). Built-ins by their snake_case name (calls, imports, references, …). Tag kinds are accepted bare (flows_to, di-wired), as other:flows_to, or as {\"other\":\"flows_to\"}. A case variant of a built-in (Calls) or an empty string is an error naming the entry, never ignored. The reply echoes the effective edge_kinds."
             },
             "max_nodes": {
                 "type": "integer",

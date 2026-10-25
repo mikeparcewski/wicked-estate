@@ -172,7 +172,7 @@ fn unknown_and_foreign_flags_exit_non_zero_with_nothing_on_stdout() {
         &["f0", "--top", "5"][..],
         &["f0", "--depth", "four"][..],
         &["f0", "--direction", "sideways"][..],
-        &["f0", "--edge-kinds", "cals"][..],
+        &["f0", "--edge-kinds", "Calls"][..],
     ] {
         let out = traverse(&fx, bad);
         assert!(!out.status.success(), "{bad:?} exited 0");

@@ -4583,30 +4583,9 @@ fn parse_supports_args(raw: &[String]) -> Result<SupportsArgs> {
         },
     };
     if let SupportsMode::Edge { kind, .. } = &mode {
-        parse_edge_kind(kind).map_err(usage)?;
+        wicked_estate_core::EdgeKind::parse_user(kind).map_err(|e| usage(format!("--kind {e}")))?;
     }
     Ok(SupportsArgs { mode, json, db })
-}
-
-/// `--kind`: a built-in kind by its stored spelling (`calls`, `imports`, …), otherwise a tag
-/// stored as `EdgeKind::Other` (`flows_to`). The same spelling `export`/`path --json` print.
-/// A case variant of a built-in spelling (`Calls`) is refused rather than taken as the tag
-/// `{"other":"Calls"}`: no store writes that tag, so it would answer an honest-looking empty
-/// result for the kind the user meant (the accept-and-ignore class #197 closed for flags).
-fn parse_edge_kind(kind: &str) -> std::result::Result<wicked_estate_core::EdgeKind, String> {
-    let builtin = |s: &str| -> Option<wicked_estate_core::EdgeKind> {
-        serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
-    };
-    if let Some(k) = builtin(kind) {
-        return Ok(k);
-    }
-    let lower = kind.to_lowercase();
-    if lower != kind && builtin(&lower).is_some() {
-        return Err(format!(
-            "--kind {kind:?} is not a kind; did you mean {lower:?}?"
-        ));
-    }
-    Ok(wicked_estate_core::EdgeKind::Other(kind.to_string()))
 }
 
 /// Keep rows, in order, while the whole document stays under [`SUPPORTS_CHAR_BUDGET`].
@@ -4652,7 +4631,10 @@ fn run_supports(
             target,
             kind,
         } => {
-            let k = parse_edge_kind(kind).map_err(|e| anyhow::anyhow!(e))?;
+            // `--kind`: a built-in by its stored spelling, otherwise a tag stored as
+            // `EdgeKind::Other` — the one core parser (#361) refuses case variants of a built-in.
+            let k = wicked_estate_core::EdgeKind::parse_user(kind)
+                .map_err(|e| anyhow::anyhow!("--kind {e}"))?;
             if let wicked_estate_core::EdgeKind::Other(tag) = &k {
                 eprintln!(
                     "note: --kind {tag:?} is not a built-in kind; matching the tag {}",
