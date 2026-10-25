@@ -55,6 +55,7 @@ pub use context_bundle::ContextBundle;
 // arch-R2 — faceted conformance-rule recall over MCP (the wire twin of wicked-governance's
 // Rust-only `recall_rules`).
 pub mod rules_recall;
+pub mod suggest;
 pub use rules_recall::RulesRecall;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -488,11 +489,26 @@ impl RetrievalTool for SearchEntity {
         }
         exact_hits.truncate(raw_limit);
 
-        if exact_hits.is_empty() {
-            diag.push(format!(
-                "SearchEntity: no symbols found matching '{name_val}'"
-            ));
-        }
+        // (#358) A miss says so — `resolved: false` + ranked suggestions — never a bare empty.
+        // Resolution is decided independently of `limit`: `limit: 0` asks for no rows, it does
+        // not make an indexed name a miss (codex review of #367).
+        let resolves = !exact_hits.is_empty()
+            || (raw_limit == 0 && {
+                let any = |q: &SymbolQuery| -> Result<bool> {
+                    let mut one = q.clone();
+                    one.limit = Some(1);
+                    Ok(!find_seed_symbols(store, &one, 1)?.0.is_empty())
+                };
+                any(&exact_query)? || any(&text_query)?
+            });
+        let miss = if !resolves {
+            let found =
+                suggest::suggest(store, &name_val, suggest::SUGGEST_K_DEFAULT).unwrap_or_default();
+            diag.push(suggest::name_miss_diagnostic(&name_val, &found.0));
+            Some(found)
+        } else {
+            None
+        };
         if !store.capabilities().full_text_search {
             diag.push(
                 "COVERAGE: store does not support native FTS; using in-process substring filter"
@@ -539,8 +555,12 @@ impl RetrievalTool for SearchEntity {
         }
 
         let total = matches.len();
+        let mut content = json!({ "matches": matches, "total": total, "resolved": miss.is_none() });
+        if let Some((found, truncated)) = &miss {
+            suggest::mark_miss(&mut content, &name_val, found, *truncated);
+        }
         Ok(RetrievalResult {
-            content: json!({ "matches": matches, "total": total }),
+            content,
             diagnostics: diag,
         })
     }
@@ -1003,11 +1023,16 @@ impl RetrievalTool for Path {
         // `PathResult`'s own earned values. Round 1 fixed `depth: 0` emitting an unearned
         // proven absence; round 2 found the same class one branch over, which is what moving
         // the pre-resolution branches behind one constructor prevents (CLAUDE.md §11).
+        // Every Path reply carries the same key set (#358 adds the miss keys): an unusable
+        // operand did not resolve either, but it is not a name miss — no `query`, no
+        // suggestions; the diagnostic says what was wrong with the input.
         let no_route = |unresolved: Option<&str>, diag: Vec<String>| RetrievalResult {
             content: json!({
                 "hops": [], "found": false,
                 "depth_bounded": false, "node_bounded": false,
                 "unresolved": unresolved,
+                "resolved": false, "query": null, "suggestions": [],
+                "suggestions_truncated": false,
             }),
             diagnostics: diag,
         };
@@ -1066,17 +1091,25 @@ impl RetrievalTool for Path {
         diag.extend(clamp_note(request, "depth", PATH_DEPTH_CEILING));
         diag.extend(clamp_note(request, "max_nodes", PATH_MAX_NODES_CEILING));
 
+        // (#358) The unresolved operand is a NAME MISS: `resolved: false`, the operand as `query`,
+        // and ranked suggestions — the one `NAME-MISS:` line every name-addressed tool emits.
+        let mut miss: Option<(&str, Vec<suggest::Suggestion>, bool)> = None;
         if let Some(side) = result.unresolved {
+            let operand = if side == wicked_estate_core::Unresolved::From {
+                from
+            } else {
+                to
+            };
+            let (found, truncated) =
+                suggest::suggest(store, operand, suggest::SUGGEST_K_DEFAULT).unwrap_or_default();
             diag.push(format!(
                 "Path: the '{}' operand '{}' matched no symbol name and no live node id — \
                  this is an unresolved input, not a proven absence",
                 side.as_str(),
-                if side == wicked_estate_core::Unresolved::From {
-                    from
-                } else {
-                    to
-                }
+                echo_name(operand)
             ));
+            diag.push(suggest::name_miss_diagnostic(operand, &found));
+            miss = Some((operand, found, truncated));
         } else if !result.found {
             if result.depth_bounded || result.node_bounded {
                 // R3: the search was cut off, so absence here is not proof of absence.
@@ -1118,14 +1151,20 @@ impl RetrievalTool for Path {
             hops_json.push(edge_json(store, e, &mut node_cache)?);
         }
 
+        let mut content = json!({
+            "hops": hops_json,
+            "found": result.found,
+            "depth_bounded": result.depth_bounded,
+            "node_bounded": result.node_bounded,
+            "unresolved": result.unresolved.map(|u| u.as_str()),
+            "resolved": true, "query": null, "suggestions": [],
+            "suggestions_truncated": false,
+        });
+        if let Some((operand, found, truncated)) = &miss {
+            suggest::mark_miss(&mut content, operand, found, *truncated);
+        }
         Ok(RetrievalResult {
-            content: json!({
-                "hops": hops_json,
-                "found": result.found,
-                "depth_bounded": result.depth_bounded,
-                "node_bounded": result.node_bounded,
-                "unresolved": result.unresolved.map(|u| u.as_str()),
-            }),
+            content,
             diagnostics: diag,
         })
     }
@@ -1368,12 +1407,31 @@ impl RetrievalTool for BlastRadius {
         let dependents = page;
         let total = total_dependents;
 
-        // Coverage note — always emitted (even when unresolved_callers == 0) so callers always
-        // know the completeness posture of the result. Built before paging (above).
-        diag.push(coverage_note);
+        // (#358) A start that is no live node AND reaches nothing is a NAME MISS, not a leaf:
+        // "no dependents" for a symbol the graph does not hold reads as "safe to change". The
+        // reply says `resolved: false` with ranked suggestions, and the coverage note — a
+        // statement about a resolved symbol — is replaced by the `NAME-MISS:` line.
+        let miss = start_node.is_none() && total_dependents == 0;
+        let miss_suggestions = if miss {
+            let found =
+                suggest::suggest(store, &id_str, suggest::SUGGEST_K_DEFAULT).unwrap_or_default();
+            diag.push(suggest::name_miss_diagnostic(&id_str, &found.0));
+            // Calls to the name the resolver could not bind are potential dependents even when
+            // no symbol holds the name: the coverage note stays, or the miss would hide them.
+            if unresolved_callers > 0 {
+                diag.push(coverage_note);
+            }
+            Some(found)
+        } else {
+            // Coverage note — always emitted for a resolved start (even when
+            // unresolved_callers == 0) so callers always know the completeness posture of the
+            // result. Built before paging (above).
+            diag.push(coverage_note);
+            None
+        };
 
-        Ok(RetrievalResult {
-            content: json!({
+        let mut content = json!({
+                "resolved": !miss,
                 "dependents": dependents,
                 "total": total,
                 "truncated": subgraph.truncated || next_cursor.is_some(),
@@ -1388,7 +1446,12 @@ impl RetrievalTool for BlastRadius {
                 "unresolved_callers": unresolved_callers,
                 "confidence": conf_json,
                 "summary": summary,
-            }),
+        });
+        if let Some((found, truncated)) = &miss_suggestions {
+            suggest::mark_miss(&mut content, &id_str, found, *truncated);
+        }
+        Ok(RetrievalResult {
+            content,
             diagnostics: diag,
         })
     }
@@ -2487,6 +2550,8 @@ impl RetrievalTool for ContextPack {
         // ── parse seeds ──────────────────────────────────────────────────────
         let mut seeds: Vec<SymbolId> = Vec::new();
         let mut diag: Vec<String> = Vec::new();
+        // (#358) Set when `name` resolved to no symbol: the reply is a labelled miss.
+        let mut name_miss: Option<(String, Vec<suggest::Suggestion>, bool)> = None;
         diag.extend(clamp_note(request, "token_budget", MAX_TOKEN_BUDGET as u64));
 
         // Accept either explicit `seeds` array or a `name` to resolve.
@@ -2515,22 +2580,30 @@ impl RetrievalTool for ContextPack {
                         seeds.push(node.symbol.clone());
                     }
                     if seeds.is_empty() {
-                        diag.push(format!(
-                            "ContextPack: no symbols found matching name '{name}'"
-                        ));
+                        let found = suggest::suggest(store, name, suggest::SUGGEST_K_DEFAULT)
+                            .unwrap_or_default();
+                        diag.push(suggest::name_miss_diagnostic(name, &found.0));
+                        name_miss = Some((name.to_string(), found.0, found.1));
                     }
                 }
             }
         }
 
         if seeds.is_empty() {
-            diag.push(
-                "ContextPack: provide 'seeds' (array of symbol ids) or 'name' (symbol name)"
-                    .to_string(),
-            );
+            let mut content =
+                json!({ "context": "", "included": 0, "omitted": 0, "resolved": false });
+            match &name_miss {
+                Some((name, found, truncated)) => {
+                    suggest::mark_miss(&mut content, name, found, *truncated);
+                }
+                None => diag.push(
+                    "ContextPack: provide 'seeds' (array of symbol ids) or 'name' (symbol name)"
+                        .to_string(),
+                ),
+            }
             diag.push(staleness_note());
             return Ok(RetrievalResult {
-                content: json!({ "context": "", "included": 0, "omitted": 0 }),
+                content,
                 diagnostics: diag,
             });
         }
@@ -2562,6 +2635,7 @@ impl RetrievalTool for ContextPack {
                 "context": context_text,
                 "included": included,
                 "omitted": omitted,
+                "resolved": true,
             }),
             diagnostics: diag,
         })
@@ -4258,11 +4332,17 @@ mod tests {
         }
         assert_eq!(
             expected.unwrap(),
+            // (#358) `query`/`resolved`/`suggestions`/`suggestions_truncated`: the name-miss keys,
+            // on every reply so a parser never meets a key set it has not seen.
             vec![
                 "depth_bounded".to_string(),
                 "found".to_string(),
                 "hops".to_string(),
                 "node_bounded".to_string(),
+                "query".to_string(),
+                "resolved".to_string(),
+                "suggestions".to_string(),
+                "suggestions_truncated".to_string(),
                 "unresolved".to_string(),
             ]
         );
@@ -7966,5 +8046,168 @@ mod tests {
             vec![5, 30, 10],
             "advisory first, then ts desc — not insertion order"
         );
+    }
+
+    /// #358: a name miss on every name-addressed tool is `resolved: false` with ranked
+    /// suggestions and the one `NAME-MISS:` line — never a bare empty answer, never `Err` (R1),
+    /// and never an answer computed from a suggestion (R7).
+    #[test]
+    fn name_misses_are_labelled_with_suggestions_on_every_name_addressed_tool() {
+        let store = fixture_store();
+        let assert_miss = |tool: &str, res: &RetrievalResult, query: &str, want: &str| {
+            assert_eq!(
+                res.content["resolved"],
+                json!(false),
+                "{tool}: {}",
+                res.content
+            );
+            assert_eq!(res.content["query"], json!(query), "{tool}");
+            assert_eq!(
+                res.content["suggestions"][0]["name"],
+                json!(want),
+                "{tool}: {}",
+                res.content
+            );
+            assert!(
+                res.diagnostics
+                    .iter()
+                    .any(|d| d.starts_with(&format!("NAME-MISS: '{query}'"))),
+                "{tool}: {:?}",
+                res.diagnostics
+            );
+        };
+
+        let r = SearchEntity
+            .invoke(&store, &json!({"name": "caler_fn"}))
+            .unwrap();
+        assert_miss("SearchEntity", &r, "caler_fn", "caller_fn");
+        assert_eq!(
+            r.content["matches"],
+            json!([]),
+            "a suggestion is not a match"
+        );
+
+        let r = BlastRadius
+            .invoke(&store, &json!({"symbol": "caler_fn"}))
+            .unwrap();
+        assert_miss("BlastRadius", &r, "caler_fn", "caller_fn");
+        assert_eq!(r.content["dependents"], json!([]), "usual keys kept");
+        assert!(
+            !r.diagnostics.iter().any(|d| d.starts_with("coverage:")),
+            "no coverage statement for a symbol that does not exist: {:?}",
+            r.diagnostics
+        );
+
+        let r = Path
+            .invoke(&store, &json!({"from": "caller_fn", "to": "lef_fn"}))
+            .unwrap();
+        assert_miss("Path", &r, "lef_fn", "leaf_fn");
+        assert_eq!(r.content["unresolved"], json!("to"));
+
+        let r = ContextPack
+            .invoke(&store, &json!({"name": "midle_fn"}))
+            .unwrap();
+        assert_miss("ContextPack", &r, "midle_fn", "middle_fn");
+        assert!(
+            !r.diagnostics.iter().any(|d| d.contains("provide 'seeds'")),
+            "a miss is not a missing argument: {:?}",
+            r.diagnostics
+        );
+    }
+
+    /// #358: a name no symbol holds but something CALLS (an unresolved reference to it) is a
+    /// miss that keeps its coverage note — the unresolved caller is a potential dependent, and a
+    /// miss must not hide it.
+    #[test]
+    fn a_miss_with_unresolved_callers_keeps_the_coverage_note() {
+        use wicked_estate_core::{Location, Span, UnresolvedRef};
+        let mut store = fixture_store();
+        store.begin_batch().unwrap();
+        store
+            .upsert_unresolved_refs(&[UnresolvedRef::new(
+                SymbolId("caller".into()),
+                "external_fn",
+                EdgeKind::Calls,
+                Location::new("src/a.rs", Span::ZERO),
+            )])
+            .unwrap();
+        store.commit_batch().unwrap();
+        let r = BlastRadius
+            .invoke(&store, &json!({"symbol": "external_fn"}))
+            .unwrap();
+        assert_eq!(r.content["resolved"], json!(false), "{}", r.content);
+        assert_eq!(r.content["unresolved_callers"], json!(1));
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.starts_with("coverage:") && d.contains("1 unresolved call(s)")),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    /// #358: a RESOLVED symbol with no dependents says `resolved: true` and keeps its coverage
+    /// note — the distinction a miss used to erase.
+    #[test]
+    fn a_resolved_leaf_is_not_a_miss() {
+        let store = fixture_store();
+        let r = BlastRadius
+            .invoke(&store, &json!({"symbol": "caller"}))
+            .unwrap();
+        assert_eq!(r.content["resolved"], json!(true), "{}", r.content);
+        assert_eq!(r.content["dependents"], json!([]));
+        assert!(r.content.get("suggestions").is_none());
+        assert!(
+            r.diagnostics.iter().any(|d| d.starts_with("coverage:")),
+            "{:?}",
+            r.diagnostics
+        );
+        assert!(!r.diagnostics.iter().any(|d| d.starts_with("NAME-MISS")));
+        let r = SearchEntity
+            .invoke(&store, &json!({"name": "caller_fn"}))
+            .unwrap();
+        assert_eq!(r.content["resolved"], json!(true));
+        let r = Path
+            .invoke(&store, &json!({"from": "caller_fn", "to": "leaf_fn"}))
+            .unwrap();
+        assert_eq!(r.content["resolved"], json!(true));
+        let r = ContextPack
+            .invoke(&store, &json!({"name": "caller_fn"}))
+            .unwrap();
+        assert_eq!(r.content["resolved"], json!(true), "{}", r.content);
+        let r = ContextBundle
+            .invoke(&store, &json!({"query": "caller_fn"}))
+            .unwrap();
+        assert_eq!(r.content["resolved"], json!(true), "{}", r.content);
+        // `limit: 0` asks for no rows; it does not make an indexed name a miss.
+        let r = SearchEntity
+            .invoke(&store, &json!({"name": "caller_fn", "limit": 0}))
+            .unwrap();
+        assert_eq!(r.content["resolved"], json!(true), "{}", r.content);
+        assert!(!r.diagnostics.iter().any(|d| d.starts_with("NAME-MISS")));
+    }
+
+    /// #358 (codex review of #367): ContextBundle is the context tool MCP exposes; a seed that
+    /// resolves to nothing is a labelled miss there too.
+    #[test]
+    fn context_bundle_miss_is_labelled_with_suggestions() {
+        let store = fixture_store();
+        for req in [json!({"query": "caler_fn"}), json!({"symbol": "caler_fn"})] {
+            let r = ContextBundle.invoke(&store, &req).unwrap();
+            assert_eq!(r.content["resolved"], json!(false), "{req}: {}", r.content);
+            assert_eq!(r.content["query"], json!("caler_fn"));
+            assert_eq!(
+                r.content["suggestions"][0]["name"],
+                json!("caller_fn"),
+                "{req}"
+            );
+            assert!(
+                r.diagnostics
+                    .iter()
+                    .any(|d| d.starts_with("NAME-MISS: 'caler_fn'")),
+                "{req}: {:?}",
+                r.diagnostics
+            );
+        }
     }
 }

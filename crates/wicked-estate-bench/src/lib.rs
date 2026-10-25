@@ -10,6 +10,7 @@
 pub mod capability;
 pub mod community_metrics;
 pub mod memory_recall;
+pub mod name_suggest;
 
 pub use capability::{
     CapabilityReport, ConfidenceBands, LangMatrixRow, RepoMetrics, ResolverStats, run_benchmark,

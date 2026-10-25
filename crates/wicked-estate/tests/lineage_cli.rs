@@ -458,7 +458,12 @@ fn an_exact_value_slot_id_is_accepted_although_name_search_hides_it() {
     let q = run(&s, &["query", "routeId", "--db", "graph.db"]);
     assert!(q.status.success());
     let q = String::from_utf8(q.stdout).unwrap();
-    assert!(q.contains("0 match(es) for 'routeId'"), "{q}");
+    // (#358) A name miss is labelled, and its suggestions never offer a value slot either.
+    assert!(q.contains("no symbol named 'routeId'"), "{q}");
+    assert!(
+        !q.contains(":local:routeId:"),
+        "a value slot was suggested: {q}"
+    );
 }
 
 /// W8.5 (breaking): an unknown selector is an error, not an honest-empty answer with exit 0 —

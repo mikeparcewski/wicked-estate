@@ -2112,6 +2112,47 @@ impl GraphRead for PostgresStore {
         Ok(out)
     }
 
+    /// (#358) `translate` folds A-Z only — the exact ASCII fold `query::name_has_prefix` defines
+    /// (Postgres `lower()`/`ILIKE` fold Unicode too, which would admit rows the other stores do
+    /// not). The prefix is LIKE-escaped, so `_` and `%` are literal.
+    fn find_symbols_by_name_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<Node>> {
+        let mut h = self.conn()?;
+        let escaped = prefix
+            .to_ascii_lowercase()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("{escaped}%");
+        let sql_limit: Option<i64> = limit.map(|l| l as i64);
+        let mut nodes = rt_block(async {
+            let rows = sqlx::query(
+                "SELECT data FROM nodes \
+                 WHERE translate(name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', \
+                                 'abcdefghijklmnopqrstuvwxyz') LIKE $1 ESCAPE '\\' \
+                 ORDER BY translate(name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', \
+                                    'abcdefghijklmnopqrstuvwxyz') COLLATE \"C\", \
+                          name COLLATE \"C\", symbol COLLATE \"C\" \
+                 LIMIT $2",
+            )
+            .bind(&pattern)
+            .bind(sql_limit)
+            .fetch_all(h.as_conn())
+            .await?;
+            let mut v = Vec::new();
+            for row in rows {
+                let json: String = row.try_get("data")?;
+                if let Ok(n) = serde_json::from_str::<Node>(&json) {
+                    v.push(n);
+                }
+            }
+            Ok::<Vec<Node>, sqlx::Error>(v)
+        })
+        .map_err(st)?;
+        nodes.retain(|n| wicked_estate_core::query::name_has_prefix(&n.name, prefix));
+        nodes.sort_by(wicked_estate_core::query::name_prefix_order);
+        Ok(nodes)
+    }
+
     fn find_symbols(&self, query: &SymbolQuery) -> Result<Vec<Node>> {
         let mut h = self.conn()?;
         let mut nodes: Vec<Node> = if let Some(text) = &query.text {

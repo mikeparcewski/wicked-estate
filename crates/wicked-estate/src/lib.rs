@@ -2872,6 +2872,39 @@ pub fn cross_graph_search(db_paths: &[String], name: &str) -> FedResult {
     Ok((results, errors))
 }
 
+/// (#358) Did-you-mean suggestions for a name that [`cross_graph_search`] matched in NO database:
+/// each database ranks its own candidates ([`wicked_estate_retrieve::suggest::suggest`]), and the
+/// union is re-ranked by the same order (tier, distance, name, symbol) and cut to `k`. The
+/// databases are opened read-only, so no miss is logged. A database that fails to open or rank
+/// contributes nothing (its open error is already reported by `cross_graph_search`).
+pub fn cross_graph_suggest(
+    db_paths: &[String],
+    name: &str,
+    k: usize,
+) -> Vec<(String, wicked_estate_retrieve::suggest::Suggestion)> {
+    let mut all: Vec<(String, wicked_estate_retrieve::suggest::Suggestion)> = Vec::new();
+    for db_path in db_paths {
+        if let Ok(store) = open_read_store(db_path) {
+            if let Ok((found, _)) =
+                wicked_estate_retrieve::suggest::suggest(store.as_ref(), name, k)
+            {
+                all.extend(found.into_iter().map(|s| (db_path.clone(), s)));
+            }
+        }
+    }
+    all.sort_by(|(ra, a), (rb, b)| {
+        (a.reason, a.distance, &a.node.name, &a.node.symbol.0, ra).cmp(&(
+            b.reason,
+            b.distance,
+            &b.node.name,
+            &b.node.symbol.0,
+            rb,
+        ))
+    });
+    all.truncate(k);
+    all
+}
+
 /// **Federated blast-radius** across multiple per-repo databases.
 ///
 /// Opens each database in `db_paths`, runs [`blast_radius_by_name`] on each, and tags every

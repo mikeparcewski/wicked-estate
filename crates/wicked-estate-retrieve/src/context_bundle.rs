@@ -86,11 +86,21 @@ pub struct ContextBundle;
 impl ContextBundle {
     /// Resolve the seed [`SymbolId`] from either an explicit `symbol` id or a `query` to search.
     /// Returns the resolved seed node, or `None` (with a diagnostic pushed) when nothing matches.
+    /// (#358) A `symbol`/`query` that resolves to nothing is a name miss: `miss` gets the probe
+    /// and its ranked suggestions, and the one `NAME-MISS:` line is pushed.
     fn resolve_seed(
         store: &dyn GraphRead,
         request: &Value,
         diag: &mut Vec<String>,
+        miss: &mut Option<(String, Vec<crate::suggest::Suggestion>, bool)>,
     ) -> Result<Option<Node>> {
+        let mut name_miss = |probe: &str, diag: &mut Vec<String>| {
+            let (found, truncated) =
+                crate::suggest::suggest(store, probe, crate::suggest::SUGGEST_K_DEFAULT)
+                    .unwrap_or_default();
+            diag.push(crate::suggest::name_miss_diagnostic(probe, &found));
+            *miss = Some((probe.to_string(), found, truncated));
+        };
         // 1. Explicit symbol id.
         if let Some(s) = request.get("symbol").and_then(|v| v.as_str()) {
             if !s.is_empty() {
@@ -99,6 +109,7 @@ impl ContextBundle {
                     Some(node) => return Ok(Some(node)),
                     None => {
                         diag.push(format!("ContextBundle: symbol '{s}' not found in graph"));
+                        name_miss(s, diag);
                         return Ok(None);
                     }
                 }
@@ -121,6 +132,7 @@ impl ContextBundle {
                         diag.push(format!(
                             "ContextBundle: no symbols found matching query '{q}'"
                         ));
+                        name_miss(q, diag);
                         return Ok(None);
                     }
                 }
@@ -160,17 +172,23 @@ impl RetrievalTool for ContextBundle {
             .clamp(1, MAX_CHAR_BUDGET);
 
         // ── resolve the seed (R1: missing/unknown → empty content + diagnostic) ──
-        let seed = match Self::resolve_seed(store, request, &mut diag)? {
+        let mut miss = None;
+        let seed = match Self::resolve_seed(store, request, &mut diag, &mut miss)? {
             Some(node) => node,
             None => {
                 diag.push(crate::staleness_note());
+                let mut content = json!({
+                    "seed": Value::Null,
+                    "neighbors": [],
+                    "rendered": "",
+                    "truncated": false,
+                    "resolved": false,
+                });
+                if let Some((probe, found, truncated)) = &miss {
+                    crate::suggest::mark_miss(&mut content, probe, found, *truncated);
+                }
                 return Ok(RetrievalResult {
-                    content: json!({
-                        "seed": Value::Null,
-                        "neighbors": [],
-                        "rendered": "",
-                        "truncated": false,
-                    }),
+                    content,
                     diagnostics: diag,
                 });
             }
@@ -267,6 +285,7 @@ impl RetrievalTool for ContextBundle {
                 "neighbors": neighbors,
                 "rendered": rendered,
                 "truncated": truncated,
+                "resolved": true,
             }),
             diagnostics: diag,
         })

@@ -358,8 +358,37 @@ async fn main() -> Result<()> {
     };
 
     // 3c. Sync SqliteStore for the unified dispatch (estate read path for epoch lookups).
-    let sync_store = SqliteStore::open(&db_path)
+    let mut sync_store = SqliteStore::open(&db_path)
         .unwrap_or_else(|_| SqliteStore::in_memory().expect("in-memory fallback"));
+
+    // (#358) Name misses are logged to `search_misses` under this server's session id (one stdio
+    // process = one MCP session). Best-effort: a failed write never touches the response, and a
+    // read-only server logs nothing.
+    let mcp_session = format!(
+        "mcp-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    let log_miss = |store: &mut SqliteStore, resp: &serde_json::Value| {
+        if read_only {
+            return;
+        }
+        if let Some(query) = wicked_estate_mcp::name_miss_query(resp) {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let _ = wicked_estate_core::GraphWrite::record_search_miss(
+                store,
+                &query,
+                now_ms,
+                Some(&mcp_session),
+            );
+        }
+    };
 
     // 4. Async stdin loop.
     // Request cache: key = "tool_name/args_json", value = full MCP response.
@@ -456,6 +485,7 @@ async fn main() -> Result<()> {
                     true,
                 );
                 hit["id"] = req["id"].clone();
+                log_miss(&mut sync_store, &hit);
                 let bytes =
                     serde_json::to_vec(&hit).context("failed to serialise cached response")?;
                 let mut out = stdout.lock();
@@ -478,6 +508,7 @@ async fn main() -> Result<()> {
                     );
                     let mut hit = cached;
                     hit["id"] = req["id"].clone();
+                    log_miss(&mut sync_store, &hit);
                     let bytes =
                         serde_json::to_vec(&hit).context("failed to serialise cached response")?;
                     let mut out = stdout.lock();
@@ -584,6 +615,7 @@ async fn main() -> Result<()> {
         if resp.is_null() {
             continue;
         }
+        log_miss(&mut sync_store, &resp);
 
         let bytes = serde_json::to_vec(&resp).context("failed to serialise response")?;
         let mut out = stdout.lock();

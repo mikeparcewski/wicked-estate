@@ -989,6 +989,24 @@ pub fn handle_request_unified_ro(
     }
 }
 
+/// (#358) The missed name a `tools/call` response reports, if any: the first content block is
+/// the tool's JSON `content`, and a name-addressed tool marks a miss with `resolved: false` and
+/// the `query` it could not resolve. The host logs it to `search_misses`; `None` for a hit, an
+/// error, a non-tool response, or content that is not a miss.
+pub fn name_miss_query(resp: &Value) -> Option<String> {
+    let text = resp
+        .get("result")?
+        .get("content")?
+        .get(0)?
+        .get("text")?
+        .as_str()?;
+    let content: Value = serde_json::from_str(text).ok()?;
+    if content.get("resolved")? != &Value::Bool(false) {
+        return None;
+    }
+    content.get("query")?.as_str().map(str::to_string)
+}
+
 /// Should a `tools/call` response for `tool` be served from / stored in the MCP response cache?
 ///
 /// The response cache (L1 HashMap + L2 `cache` table in the GRAPH store) is versioned solely by

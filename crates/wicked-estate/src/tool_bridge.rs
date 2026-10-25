@@ -674,17 +674,22 @@ pub fn run(
     let db = inv.db.unwrap_or(default_db);
     // A read-only command never creates the graph it reads (see `require_existing_graph`).
     super::require_existing_graph(&db, cmd.name)?;
-    let store = wicked_estate_store::open_store_ext(&db).map_err(super::to_any)?;
+    let mut store = wicked_estate_store::open_store_ext(&db).map_err(super::to_any)?;
 
     let mut request = inv.request;
-    let resolve = |given: &str| -> Result<Value> {
+    let mut resolve = |given: &str| -> Result<Value> {
         let ids = wicked_estate_core::resolve_operand(&*store, given).map_err(super::to_any)?;
         match ids.as_slice() {
             [id] => Ok(Value::String(id.0.clone())),
-            [] => anyhow::bail!(
-                "{}: no symbol named {given:?} and no node with that id in {db}",
-                cmd.name
-            ),
+            // (#358) A name miss fails with the ranked candidates, and is logged.
+            [] => {
+                let (found, _) = super::name_miss(&mut *store, given);
+                anyhow::bail!(
+                    "{}: no symbol named {given:?} and no node with that id in {db}\n{}",
+                    cmd.name,
+                    wicked_estate_retrieve::suggest::miss_text(given, &found).join("\n")
+                )
+            }
             many => anyhow::bail!(
                 "{}: {given:?} names {} symbols — pass one SymbolId:\n  {}",
                 cmd.name,

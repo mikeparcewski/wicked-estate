@@ -937,23 +937,6 @@ impl SqliteStore {
             .map_err(st)
     }
 
-    /// Record ONE search miss (empty / failed query — the synonym-suggestion input). `searched_at`
-    /// is epoch millis; `session_id` is optional.
-    pub fn record_search_miss(
-        &mut self,
-        query: &str,
-        searched_at: i64,
-        session_id: Option<&str>,
-    ) -> Result<()> {
-        self.conn
-            .execute(
-                "INSERT INTO search_misses(query, searched_at, session_id) VALUES(?1, ?2, ?3)",
-                params![query, searched_at, session_id],
-            )
-            .map_err(st)?;
-        Ok(())
-    }
-
     /// Bulk-import search-miss rows atomically (the migrator's write path). Returns rows written.
     pub fn import_search_misses(&mut self, rows: &[SearchMissRecord]) -> Result<usize> {
         self.conn.execute_batch("SAVEPOINT imp_miss").map_err(st)?;
@@ -1920,6 +1903,24 @@ impl SqliteStore {
     }
 }
 
+/// The smallest string greater than every string that starts with `p` — `p` with its last
+/// incrementable code point incremented (surrogates skipped) — or `None` when no such string
+/// exists. The exclusive upper bound of an indexed prefix range (#358).
+fn prefix_successor(p: &str) -> Option<String> {
+    let mut chars: Vec<char> = p.chars().collect();
+    while let Some(c) = chars.pop() {
+        let mut next = c as u32 + 1;
+        if (0xD800..=0xDFFF).contains(&next) {
+            next = 0xE000;
+        }
+        if let Some(n) = char::from_u32(next) {
+            chars.push(n);
+            return Some(chars.into_iter().collect());
+        }
+    }
+    None
+}
+
 /// A public edge key in SQLite's on-disk form: interned `(source sid, target sid, kind JSON)`.
 type SidKey = (i64, i64, String);
 
@@ -2323,6 +2324,31 @@ impl SqliteStore {
 }
 
 impl GraphWrite for SqliteStore {
+    /// (#358) The trait's miss log, replacing the former inherent method. A read-only connection
+    /// (`open_readonly`, the MCP read-only mode) writes nothing: the miss is still reported to
+    /// the caller, only the log entry is skipped.
+    fn record_search_miss(
+        &mut self,
+        query: &str,
+        searched_at: i64,
+        session_id: Option<&str>,
+    ) -> Result<()> {
+        if self
+            .conn
+            .is_readonly(rusqlite::DatabaseName::Main)
+            .unwrap_or(true)
+        {
+            return Ok(());
+        }
+        self.conn
+            .execute(
+                "INSERT INTO search_misses(query, searched_at, session_id) VALUES(?1, ?2, ?3)",
+                params![query, searched_at, session_id],
+            )
+            .map_err(st)?;
+        Ok(())
+    }
+
     fn begin_batch(&mut self) -> Result<()> {
         if !self.in_batch {
             self.conn.execute_batch("BEGIN").map_err(st)?;
@@ -3150,6 +3176,37 @@ impl GraphRead for SqliteStore {
             Some(j) => Ok(Some(serde_json::from_str(&j)?)),
             None => Ok(None),
         }
+    }
+
+    /// (#358) An INDEXED range over `lower(name)` (`idx_nodes_name_folded`). SQLite's built-in
+    /// `lower()` folds ASCII only — exactly `query::name_has_prefix`. The exclusive upper bound is
+    /// the prefix's lexicographic successor (UTF-8 byte order = code-point order); appending
+    /// U+10FFFF instead would drop `a\u{10FFFF}b` for prefix `a`.
+    fn find_symbols_by_name_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<Node>> {
+        let lo = prefix.to_ascii_lowercase();
+        let hi = prefix_successor(&lo);
+        let sql_limit: i64 = limit.map_or(-1, |l| l as i64);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT n.data FROM nodes n JOIN symbols s ON s.sid = n.symbol \
+                 WHERE lower(n.name) >= ?1 AND (?2 IS NULL OR lower(n.name) < ?2) \
+                 ORDER BY lower(n.name), n.name, s.sym LIMIT ?3",
+            )
+            .map_err(st)?;
+        let rows = stmt
+            .query_map(params![lo, hi, sql_limit], |r| r.get::<_, String>(0))
+            .map_err(st)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let n = serde_json::from_str::<Node>(&row.map_err(st)?)?;
+            if wicked_estate_core::query::name_has_prefix(&n.name, prefix) {
+                out.push(n);
+            }
+        }
+        // Same order on every store, whatever SQLite's collation did with ties.
+        out.sort_by(wicked_estate_core::query::name_prefix_order);
+        Ok(out)
     }
 
     fn find_symbols(&self, query: &SymbolQuery) -> Result<Vec<Node>> {
@@ -6907,6 +6964,24 @@ mod tests {
             "since=2000 (inclusive) excludes the ts=1000 miss"
         );
         assert!(recent.iter().all(|m| m.searched_at >= 2000));
+    }
+
+    /// #358: `record_search_miss` is the `GraphWrite` trait method, and a read-only open writes
+    /// nothing and does not fail — the miss is reported to the caller either way.
+    #[test]
+    fn record_search_miss_is_a_trait_write_and_read_only_opens_skip_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("graph.db");
+        {
+            let mut rw = SqliteStore::open(&db).expect("open");
+            GraphWrite::record_search_miss(&mut rw, "orderservice.create", 42, None).unwrap();
+        }
+        let mut ro = SqliteStore::open_readonly(&db).expect("readonly open");
+        GraphWrite::record_search_miss(&mut ro, "skipped", 43, Some("s")).unwrap();
+        let rows = ro.search_misses(10, None).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].query, "orderservice.create");
+        assert_eq!(rows[0].session_id, None);
     }
 
     // ── Shared-Import remove_file: sqlite-leg assertions (incr-integrity lane, D5) ──────────

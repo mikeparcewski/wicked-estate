@@ -34,6 +34,7 @@
 //!   wicked-estate annotate --symbol <id> --key K --value V [same flags] [--db ...]
 //!   wicked-estate annotations <name>     [--type T] [--json] [--db ...]
 //!   wicked-estate annotations --symbol <id> [--type T] [--json] [--db ...]
+//!   wicked-estate misses [--since <epoch-ms>] [--limit N] [--json] [--db ...]
 //!   wicked-estate stale-annotations <cutoff-unix-seconds | YYYY-MM-DD> [--json] [--db ...]
 //!   wicked-estate stale-annotations --older-than <N>{s,m,h,d,w} [--json] [--db ...]
 //!   wicked-estate context <name>         [--budget <chars>] [--json] [--db ...]
@@ -1321,7 +1322,7 @@ fn main() -> Result<()> {
             // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
             // open that would otherwise create an empty one.
             require_existing_graph(&db, "query")?;
-            let store = open_store_ext(&db).map_err(to_any)?;
+            let mut store = open_store_ext(&db).map_err(to_any)?;
             maybe_print_staleness(store.as_ref(), &db);
             maybe_warn_version_mismatch(store.as_ref(), &db);
             let t_cmd_start = std::time::SystemTime::now()
@@ -1333,12 +1334,23 @@ fn main() -> Result<()> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos() as u64;
+            // (#358) A miss is labelled, never a bare `0 match(es)`.
+            let miss = hits.is_empty().then(|| name_miss(&mut *store, name));
             if args.switch("json") {
                 // (#199) The machine shape is `resolve --json`'s: one row per hit,
                 // `{symbol_id,name,kind,file,line}` — the same keys, so a parser written against
-                // either command reads the other.
+                // either command reads the other. The array stays an array on a miss (`[]`); the
+                // miss and its suggestions go to stderr as the one `NAME-MISS:` line plus the
+                // `{resolved:false, …}` document, so stdout parsers never break.
                 let rows: Vec<serde_json::Value> = hits.iter().map(resolve_row).collect();
                 print_line(&serde_json::to_string_pretty(&rows)?)?;
+                if let Some((found, truncated)) = &miss {
+                    eprint_miss_json(name, found, *truncated);
+                }
+            } else if let Some((found, _)) = &miss {
+                for line in wicked_estate_retrieve::suggest::miss_text(name, found) {
+                    print_line(&line)?;
+                }
             } else {
                 print_line(&format!("{} match(es) for '{name}':", hits.len()))?;
                 for n in &hits {
@@ -1374,7 +1386,7 @@ fn main() -> Result<()> {
             // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
             // open that would otherwise create an empty one.
             require_existing_graph(&db, "blast-radius")?;
-            let store = open_store_ext(&db).map_err(to_any)?;
+            let mut store = open_store_ext(&db).map_err(to_any)?;
             // Machine output must be exactly one JSON document — notices would corrupt it.
             if !json_out {
                 maybe_print_staleness(store.as_ref(), &db);
@@ -1387,6 +1399,16 @@ fn main() -> Result<()> {
             let mut br =
                 wicked_estate::blast_radius_by_name(&*store, name, depth).map_err(to_any)?;
             let unresolved = store.unresolved_refs_for_name(name).map_err(to_any)?.len();
+            // (#358) A name that resolves to no symbol is a MISS, not a leaf: "no dependents"
+            // for a symbol the graph does not hold reads as "safe to change".
+            let miss = if wicked_estate::search(&*store, name)
+                .map_err(to_any)?
+                .is_empty()
+            {
+                Some(name_miss(&mut *store, name))
+            } else {
+                None
+            };
             // #279: the 25K bound is per reply, not per answer. Rows are ordered (depth, id) so
             // pages from separate runs join exactly; `--cursor` resumes the same answer, and a
             // cursor from another query or a changed graph is refused.
@@ -1446,11 +1468,17 @@ fn main() -> Result<()> {
                     blast_radius_json(name, &deps[..kept], dropped, unresolved, &br, depth);
                 out["next_cursor"] = serde_json::json!(next_cursor);
                 out["page"] = serde_json::json!({ "from": from, "count": kept, "total": total });
+                out["resolved"] = serde_json::json!(miss.is_none());
+                if let Some((found, truncated)) = &miss {
+                    wicked_estate_retrieve::suggest::mark_miss(&mut out, name, found, *truncated);
+                }
                 print_line(&serde_json::to_string(&out).map_err(|e| anyhow::anyhow!(e))?)?;
+            } else if let Some((found, _)) = &miss {
+                for line in wicked_estate_retrieve::suggest::miss_text(name, found) {
+                    print_line(&line)?;
+                }
             } else if deps.is_empty() {
-                print_line(&format!(
-                    "no resolved dependents for '{name}' (symbol may not be indexed)"
-                ))?;
+                print_line(&format!("no resolved dependents for '{name}'"))?;
             } else {
                 print_line(&format!("{total} symbol(s) depend on '{name}':"))?;
                 for n in deps.iter().take(kept) {
@@ -1467,8 +1495,10 @@ fn main() -> Result<()> {
             // `unresolved` counts per-site unresolved references, defined once in
             // docs/ENGINE-CONTRACT.md §2.1. The depth/node cut is reported on the SAME line a
             // human reads for completeness (wicked-estate#190) — a cap the honesty line does not
-            // cover is worse than having no honesty line (agent rule R3).
-            if !json_out {
+            // cover is worse than having no honesty line (agent rule R3). A miss (#358) states
+            // coverage only when calls to the name went unresolved: no symbol holds the name,
+            // yet something calls it — a potential dependent that must not vanish with the miss.
+            if !json_out && (miss.is_none() || unresolved > 0) {
                 let cut = match (br.depth_horizon_reached, br.node_cap_reached) {
                     (true, true) => format!(
                         "; CUT AT depth={depth} AND by the traversal node budget — more \
@@ -1529,7 +1559,7 @@ fn main() -> Result<()> {
             // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
             // open that would otherwise create an empty one.
             require_existing_graph(&db, "path")?;
-            let store = open_store_ext(&db).map_err(to_any)?;
+            let mut store = open_store_ext(&db).map_err(to_any)?;
             // Machine output must be exactly one JSON document — notices would corrupt it.
             if !json_out {
                 maybe_print_staleness(store.as_ref(), &db);
@@ -1547,15 +1577,34 @@ fn main() -> Result<()> {
                 .unwrap_or_default()
                 .as_nanos() as u64;
 
+            // (#358) An unresolved operand is a name miss: suggestions + the miss log.
+            let miss = result.unresolved.map(|side| {
+                let operand = if side == wicked_estate_core::Unresolved::From {
+                    from
+                } else {
+                    to
+                };
+                (operand, name_miss(&mut *store, operand))
+            });
             if json_out {
-                let doc = path_json(from, to, &result);
+                let mut doc = path_json(from, to, &result);
+                doc["resolved"] = serde_json::json!(miss.is_none());
+                if let Some((operand, (found, truncated))) = &miss {
+                    wicked_estate_retrieve::suggest::mark_miss(
+                        &mut doc, operand, found, *truncated,
+                    );
+                }
                 println!(
                     "{}",
                     serde_json::to_string(&doc).map_err(|e| anyhow::anyhow!(e))?
                 );
             } else {
+                let found: &[wicked_estate_retrieve::suggest::Suggestion] = match &miss {
+                    Some((_, (found, _))) => found,
+                    None => &[],
+                };
                 let mut out = std::io::stdout().lock();
-                write_path_text(&mut out, from, to, &result, max_depth, CLI_MAX_NODES)
+                write_path_text(&mut out, from, to, &result, found, max_depth, CLI_MAX_NODES)
                     .map_err(|e| anyhow::anyhow!(e))?;
             }
             emit_cli_span(
@@ -1727,7 +1776,7 @@ fn main() -> Result<()> {
             // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
             // open that would otherwise create an empty one.
             require_existing_graph(&db, "graph-view")?;
-            let store = open_store_ext(&db).map_err(to_any)?;
+            let mut store = open_store_ext(&db).map_err(to_any)?;
             // Oversample PageRank candidates so filters don't under-deliver.
             // Fetch 4× the requested limit (at least limit+200) so that after
             // removing tests, trivials, external, and vendor nodes we still
@@ -1837,7 +1886,12 @@ fn main() -> Result<()> {
                     );
                 }
                 if seeds.is_empty() {
-                    anyhow::bail!("graph-view --focus: no symbol matches '{f}'");
+                    // (#358) The focus is a name miss: the error carries the candidates.
+                    let (found, _) = name_miss(&mut *store, f);
+                    anyhow::bail!(
+                        "graph-view --focus: {}",
+                        wicked_estate_retrieve::suggest::miss_text(f, &found).join("\n")
+                    );
                 }
                 for n in seeds.into_iter().take(limit) {
                     if sel_ids.insert(n.symbol.as_str().to_string()) {
@@ -1994,7 +2048,7 @@ fn main() -> Result<()> {
             // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
             // open that would otherwise create an empty one.
             require_existing_graph(&db, "source")?;
-            let store = open_store(&db).map_err(to_any)?;
+            let mut store = open_store(&db).map_err(to_any)?;
 
             // Resolve the selector — one rule for both output modes (#206: the text path used to
             // drop every selector but <name>). Precedence: --symbols > --cluster > --file > <name>.
@@ -2033,6 +2087,15 @@ fn main() -> Result<()> {
                     let hits = wicked_estate::search(&*store, name).map_err(to_any)?;
                     (hits, serde_json::json!({ "name": name }))
                 };
+            // (#358) Only the `<name>` selector is name-addressed: a miss there is labelled with
+            // suggestions. An empty --file / --cluster / --symbols selection is not a name miss.
+            let name_miss_of = match (&selector, nodes.is_empty()) {
+                (serde_json::Value::Object(o), true) => o
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|n| (n.to_string(), name_miss(&mut *store, n))),
+                _ => None,
+            };
 
             if !json_out {
                 // Text: one block per node, in selection order. `<name>`'s header is unchanged.
@@ -2052,7 +2115,11 @@ fn main() -> Result<()> {
                     },
                     _ => String::new(),
                 };
-                if nodes.is_empty() {
+                if let Some((n, (found, _))) = &name_miss_of {
+                    for line in wicked_estate_retrieve::suggest::miss_text(n, found) {
+                        println!("{line}");
+                    }
+                } else if nodes.is_empty() {
                     println!("no symbols found for {what}");
                 } else {
                     println!("{} match(es) for {what}:", nodes.len());
@@ -2077,7 +2144,7 @@ fn main() -> Result<()> {
                     max_node_chars: src_max_node,
                     signatures_only,
                 };
-                let bundle = source_bundle::build_bundle(
+                let mut bundle = source_bundle::build_bundle(
                     nodes,
                     selector,
                     opts,
@@ -2085,6 +2152,14 @@ fn main() -> Result<()> {
                     |f| store.file_git_sha(f).ok().flatten(),
                     |n| store.annotations(&n.symbol).unwrap_or_default(),
                 );
+                bundle["resolved"] = serde_json::json!(name_miss_of.is_none());
+                if let Some((n, (found, truncated))) = &name_miss_of {
+                    wicked_estate_retrieve::suggest::mark_miss(&mut bundle, n, found, *truncated);
+                    eprintln!(
+                        "{}",
+                        wicked_estate_retrieve::suggest::name_miss_diagnostic(n, found)
+                    );
+                }
                 println!("{}", serde_json::to_string_pretty(&bundle)?);
             }
         }
@@ -2180,7 +2255,32 @@ fn main() -> Result<()> {
                 wicked_estate::cross_graph_search(&db_paths, name).map_err(to_any)?;
 
             if search_results.is_empty() {
-                println!("no matches for '{name}' in any of the specified databases");
+                // (#358) A miss in every database is labelled, with candidates per repo.
+                let found = wicked_estate::cross_graph_suggest(
+                    &db_paths,
+                    name,
+                    wicked_estate_retrieve::suggest::SUGGEST_K_DEFAULT,
+                );
+                if found.is_empty() {
+                    println!(
+                        "no symbol named '{name}' in any of the specified databases, and nothing \
+                         close to it is indexed"
+                    );
+                } else {
+                    println!(
+                        "no symbol named '{name}' in any of the specified databases — did you mean:"
+                    );
+                    for (repo, s) in &found {
+                        println!(
+                            "  [repo: {repo}] {:?}  {}  ({}:{})   [{}]",
+                            s.node.kind,
+                            s.node.symbol.as_str(),
+                            s.node.location.file,
+                            s.node.location.span.start_line + 1,
+                            s.reason.as_str()
+                        );
+                    }
+                }
             } else {
                 println!("{} match(es) total:", search_results.len());
                 // Group by repo for cleaner output.
@@ -2204,7 +2304,12 @@ fn main() -> Result<()> {
                 wicked_estate::cross_graph_blast_radius(&db_paths, name, 12).map_err(to_any)?;
             let (br_results, br_errors) = (&fed.dependents, &fed.errors);
 
-            if br_results.is_empty() {
+            if search_results.is_empty() {
+                println!(
+                    "skipped: '{name}' resolved to no symbol in any database, so there is no \
+                     blast radius to compute (a miss, not a leaf)"
+                );
+            } else if br_results.is_empty() {
                 println!("no resolved dependents for '{name}' across the specified databases");
             } else {
                 println!(
@@ -2752,6 +2857,15 @@ fn main() -> Result<()> {
             } else {
                 let name = args.required(0);
                 let hits = wicked_estate::search(&store, name).map_err(to_any)?;
+                if hits.is_empty() {
+                    // (#358) Annotating nothing because the name missed is said, with the
+                    // candidates — never a quiet "annotated 0 symbol(s)" (agy review of #367).
+                    let (found, _) = name_miss(&mut store, name);
+                    for line in wicked_estate_retrieve::suggest::miss_text(name, &found) {
+                        println!("{line}");
+                    }
+                    return Ok(());
+                }
                 for n in &hits {
                     let sym = n.symbol.clone();
                     replaced += upsert(&mut store, &sym)?;
@@ -2799,10 +2913,13 @@ fn main() -> Result<()> {
             // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
             // open that would otherwise create an empty one.
             require_existing_graph(&db, "annotations")?;
-            let store = open_store(&db).map_err(to_any)?;
+            let mut store = open_store(&db).map_err(to_any)?;
 
             // Fetch + apply the optional type filter for one symbol.
-            let fetch = |sym: &wicked_estate_core::SymbolId| -> Result<Vec<wicked_estate_core::Annotation>> {
+            // The store is a parameter, not a capture: a name miss below needs it mutably (#358).
+            let fetch = |store: &dyn wicked_estate_core::GraphStore,
+                         sym: &wicked_estate_core::SymbolId|
+             -> Result<Vec<wicked_estate_core::Annotation>> {
                 let mut anns = store.annotations(sym).map_err(to_any)?;
                 if let Some(t) = type_filter {
                     anns.retain(|a| a.r#type == t);
@@ -2829,7 +2946,7 @@ fn main() -> Result<()> {
             // The row admits exactly one of `<name>` and `--symbol`.
             if let Some(sym_str) = args.str("symbol") {
                 let symbol = wicked_estate_core::symbol::SymbolId::from(sym_str);
-                let anns = fetch(&symbol)?;
+                let anns = fetch(&*store, &symbol)?;
                 if json_out {
                     println!(
                         "{}",
@@ -2845,18 +2962,29 @@ fn main() -> Result<()> {
             } else {
                 let name = args.required(0);
                 let hits = wicked_estate::search(&*store, name).map_err(to_any)?;
-                if json_out {
+                // (#358) A miss is labelled with suggestions; `--json` keeps its array on stdout.
+                let miss = if hits.is_empty() {
+                    Some(name_miss(&mut *store, name))
+                } else {
+                    None
+                };
+                if let (true, Some((found, truncated))) = (json_out, &miss) {
+                    println!("[]");
+                    eprint_miss_json(name, found, *truncated);
+                } else if let Some((found, _)) = &miss {
+                    for line in wicked_estate_retrieve::suggest::miss_text(name, found) {
+                        println!("{line}");
+                    }
+                } else if json_out {
                     let mut arr: Vec<serde_json::Value> = Vec::with_capacity(hits.len());
                     for n in &hits {
-                        let anns = fetch(&n.symbol)?;
+                        let anns = fetch(&*store, &n.symbol)?;
                         arr.push(sym_json(&n.symbol, &anns));
                     }
                     println!("{}", serde_json::to_string_pretty(&arr)?);
-                } else if hits.is_empty() {
-                    println!("no symbols found for '{name}'");
                 } else {
                     for n in &hits {
-                        let anns = fetch(&n.symbol)?;
+                        let anns = fetch(&*store, &n.symbol)?;
                         println!("  [{:?}] {} ({})", n.kind, n.name, loc(n));
                         if anns.is_empty() {
                             println!("    (no annotations)");
@@ -2875,6 +3003,91 @@ fn main() -> Result<()> {
         // over the `GraphRead::annotations_stale_since` seam (ordered symbol then ts).
         //
         // Usage:
+        // (#358) The symbol-name miss log — the first production reader of `search_misses`.
+        // Misses are grouped by query (most frequent first), each with today's best suggestion,
+        // so an operator can see the names agents keep asking for under another spelling.
+        //
+        // Usage:
+        //   wicked-estate misses [--since <epoch-ms>] [--limit N] [--json] [--db ...]
+        "misses" => {
+            const MISSES_READ_CAP: usize = 50_000;
+            let json_out = args.switch("json");
+            let limit = args.usize("limit").unwrap_or(50).clamp(1, 1_000);
+            let since = args.u64("since").map(|v| v.min(i64::MAX as u64) as i64);
+            require_existing_graph(&db, "misses")?;
+            // Read-only: reading the log never writes to the graph.
+            let store = SqliteStore::open_readonly(&db).map_err(to_any)?;
+            let rows = store
+                .search_misses(MISSES_READ_CAP, since)
+                .map_err(to_any)?;
+            let rows_capped = rows.len() >= MISSES_READ_CAP;
+            // query -> (count, last_seen); rows arrive most-recent-first.
+            let mut grouped: Vec<(String, usize, i64)> = Vec::new();
+            let mut index: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for r in &rows {
+                match index.get(&r.query) {
+                    Some(&i) => grouped[i].1 += 1,
+                    None => {
+                        index.insert(r.query.clone(), grouped.len());
+                        grouped.push((r.query.clone(), 1, r.searched_at));
+                    }
+                }
+            }
+            grouped.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)).then(a.0.cmp(&b.0)));
+            let total_queries = grouped.len();
+            grouped.truncate(limit);
+            let best = |q: &str| {
+                wicked_estate_retrieve::suggest::suggest(&store, q, 1)
+                    .ok()
+                    .and_then(|(found, _)| found.into_iter().next())
+            };
+            if json_out {
+                let misses: Vec<serde_json::Value> = grouped
+                    .iter()
+                    .map(|(q, n, last)| {
+                        let top = best(q).map(|s| {
+                            wicked_estate_retrieve::suggest::suggestions_json(&[s])[0].clone()
+                        });
+                        serde_json::json!({
+                            "query": q,
+                            "count": n,
+                            "last_seen": last,
+                            "best_suggestion": top,
+                        })
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "misses": misses,
+                        "total_queries": total_queries,
+                        "truncated": total_queries > limit,
+                        "rows_read": rows.len(),
+                        "rows_capped": rows_capped,
+                    })
+                );
+            } else if grouped.is_empty() {
+                println!("no symbol-name misses logged");
+            } else {
+                println!("{total_queries} missed name(s), most frequent first:");
+                for (q, n, last) in &grouped {
+                    let hint = match best(q) {
+                        Some(s) => format!(
+                            "did you mean {} ({}:{})",
+                            s.node.symbol.as_str(),
+                            s.node.location.file,
+                            s.node.location.span.start_line + 1
+                        ),
+                        None => "no close candidate found".to_string(),
+                    };
+                    println!("  {n}x  '{q}'  last {last}  -> {hint}");
+                }
+                if total_queries > limit {
+                    println!("  …and {} more (raise --limit)", total_queries - limit);
+                }
+            }
+        }
         //   wicked-estate stale-annotations <cutoff-unix-seconds | YYYY-MM-DD> [--json] [--db ...]
         //   wicked-estate stale-annotations --older-than <N>{s,m,h,d,w}       [--json] [--db ...]
         "stale-annotations" => {
@@ -2938,13 +3151,16 @@ fn main() -> Result<()> {
             // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
             // open that would otherwise create an empty one.
             require_existing_graph(&db, "fingerprint")?;
-            let store = open_store(&db).map_err(to_any)?;
+            let mut store = open_store(&db).map_err(to_any)?;
             let hits = wicked_estate::search(&*store, name).map_err(to_any)?;
-            drop(store);
             if hits.is_empty() {
-                println!("no symbol found matching '{name}'");
+                let (found, _) = name_miss(&mut *store, name);
+                for line in wicked_estate_retrieve::suggest::miss_text(name, &found) {
+                    println!("{line}");
+                }
                 return Ok(());
             }
+            drop(store);
             if args.switch("content") {
                 // Resolve paths against the stored index root so --content works
                 // regardless of CWD (the indexed path is root-relative, not CWD-relative).
@@ -3843,6 +4059,9 @@ fn main() -> Result<()> {
                 "    (one per matched symbol, possibly empty); --symbol <id> names exactly one and emits a single {{symbol, annotations:[...]}}."
             );
             println!(
+                "  wicked-estate misses [--since <epoch-ms>] [--limit N] [--json] [--db ...]  # symbol names that resolved to nothing, most frequent first, with a suggestion"
+            );
+            println!(
                 "  wicked-estate stale-annotations <cutoff-unix-seconds | YYYY-MM-DD> [--json] [--db ...]  # (symbol, annotation) pairs with last_verified < cutoff"
             );
             println!(
@@ -4376,19 +4595,26 @@ fn write_path_text(
     from: &str,
     to: &str,
     r: &wicked_estate_core::PathResult,
+    suggestions: &[wicked_estate_retrieve::suggest::Suggestion],
     max_depth: u32,
     max_nodes: usize,
 ) -> std::io::Result<()> {
     if let Some(side) = r.unresolved {
+        // (#358) The unresolved operand is a name miss: say so, with the candidates.
+        let operand = if side == wicked_estate_core::Unresolved::From {
+            from
+        } else {
+            to
+        };
         writeln!(
             out,
-            "no path: '{}' did not match any symbol name or SymbolId",
-            if side == wicked_estate_core::Unresolved::From {
-                from
-            } else {
-                to
-            }
+            "no path: the '{}' operand matched no symbol name or SymbolId (an unresolved input, \
+             not a proven absence)",
+            side.as_str()
         )?;
+        for line in wicked_estate_retrieve::suggest::miss_text(operand, suggestions) {
+            writeln!(out, "{line}")?;
+        }
         return Ok(());
     }
     if r.found {
@@ -4586,6 +4812,46 @@ fn parse_supports_args(raw: &[String]) -> Result<SupportsArgs> {
         wicked_estate_core::EdgeKind::parse_user(kind).map_err(|e| usage(format!("--kind {e}")))?;
     }
     Ok(SupportsArgs { mode, json, db })
+}
+
+/// (#358) One symbol-name miss: rank did-you-mean suggestions and log the miss to
+/// `search_misses` (CLI misses carry no session id). The log write is best-effort — a read-only
+/// or failing store never fails the command (R1) — and a suggestion is only ever a CANDIDATE:
+/// nothing is computed from it.
+fn name_miss(
+    store: &mut dyn wicked_estate_core::GraphStore,
+    name: &str,
+) -> (Vec<wicked_estate_retrieve::suggest::Suggestion>, bool) {
+    let found = wicked_estate_retrieve::suggest::suggest(
+        &*store,
+        name,
+        wicked_estate_retrieve::suggest::SUGGEST_K_DEFAULT,
+    )
+    .unwrap_or_default();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let _ = store.record_search_miss(name, now_ms, None);
+    found
+}
+
+/// (#358) A miss behind an array-shaped `--json` (whose stdout must stay the bare array): the
+/// `NAME-MISS:` line and the `{resolved:false, query, suggestions, suggestions_truncated}`
+/// document, both on stderr.
+fn eprint_miss_json(
+    name: &str,
+    found: &[wicked_estate_retrieve::suggest::Suggestion],
+    truncated: bool,
+) {
+    eprintln!(
+        "{}",
+        wicked_estate_retrieve::suggest::name_miss_diagnostic(name, found)
+    );
+    eprintln!(
+        "{}",
+        wicked_estate_retrieve::suggest::miss_fields(name, found, truncated)
+    );
 }
 
 /// Keep rows, in order, while the whole document stays under [`SUPPORTS_CHAR_BUDGET`].
@@ -4914,7 +5180,7 @@ mod path_render_tests {
 
     fn rendered(r: &PathResult, from: &str, to: &str, max_nodes: usize) -> String {
         let mut buf: Vec<u8> = Vec::new();
-        write_path_text(&mut buf, from, to, r, 12, max_nodes).expect("write to a Vec");
+        write_path_text(&mut buf, from, to, r, &[], 12, max_nodes).expect("write to a Vec");
         String::from_utf8(buf).expect("utf8")
     }
 

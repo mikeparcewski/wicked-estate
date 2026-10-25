@@ -23,6 +23,25 @@ pub struct SymbolQuery {
     pub scope_prefix: Option<String>,
 }
 
+/// Whether `name` starts with `prefix`, ASCII case-insensitively — the one definition of a
+/// name-prefix match every store applies in
+/// [`GraphRead::find_symbols_by_name_prefix`](crate::GraphRead::find_symbols_by_name_prefix)
+/// (wicked-estate#358). Byte-wise, so non-ASCII bytes compare exactly.
+pub fn name_has_prefix(name: &str, prefix: &str) -> bool {
+    name.len() >= prefix.len()
+        && name.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+}
+
+/// The row order of a name-prefix lookup: folded name, then exact name, then symbol id. Stores
+/// sort by it before applying a limit, so a capped pool is the same rows everywhere.
+pub fn name_prefix_order(a: &Node, b: &Node) -> std::cmp::Ordering {
+    a.name
+        .to_ascii_lowercase()
+        .cmp(&b.name.to_ascii_lowercase())
+        .then_with(|| a.name.cmp(&b.name))
+        .then_with(|| a.symbol.0.cmp(&b.symbol.0))
+}
+
 /// A **bounded** traversal request. We deliberately support only bounded reverse-reachability /
 /// k-hop (the actual agent workload; see the design notes).
 /// `max_depth` and `max_nodes` are required guard rails — unbounded whole-graph walks are out.
