@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@astrojs/react": "^6.0.0",
-    "astro": "^7.3.2",
+    "astro": "^7.4.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "wicked-web": "github:mikeparcewski/wicked-web#65d541a976fd406563da8a22c6f1f5936d443a14"
