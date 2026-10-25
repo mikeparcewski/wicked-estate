@@ -7,14 +7,14 @@
 //! suggestion is a CANDIDATE: no answer is ever computed from one (R7); the caller re-queries by
 //! symbol id.
 //!
-//! Candidates come only from [`GraphRead::find_symbols`] with [`SymbolQuery::name_prefix`] — at
-//! most three calls per miss, never one per candidate:
+//! Candidates come only from [`GraphRead::find_symbols_by_name_prefix`] — at most three calls per
+//! miss, never one per candidate:
 //!
-//! 1. `name_prefix = probe` — serves tier 1 (case-insensitive exact) and tier 3 (prefix).
-//! 2. `name_prefix = last segment` — tier 2, only for a qualified probe (`a.b`, `a::b`, `a#b`,
+//! 1. prefix = the probe — serves tier 1 (case-insensitive exact) and tier 3 (prefix).
+//! 2. prefix = the last segment — tier 2, only for a qualified probe (`a.b`, `a::b`, `a#b`,
 //!    `a/b`): the last segment matches the name case-insensitively and every earlier segment
 //!    appears, case-folded and in order, in the candidate's `SymbolId`.
-//! 3. `name_prefix = first char` (bounded by [`SUGGEST_POOL_MAX`]) — tier 4: Damerau-Levenshtein
+//! 3. prefix = the first character (bounded by [`SUGGEST_POOL_MAX`]) — tier 4: Damerau-Levenshtein
 //!    distance ≤ `max(1, len/4)`, case-folded.
 //!
 //! Tiers are ranked in that order (case-insensitive, qualified segment, prefix, edit): every hit
@@ -25,7 +25,7 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
-use wicked_estate_core::{GraphRead, Node, Result, SymbolQuery, is_structural_symbol};
+use wicked_estate_core::{GraphRead, Node, Result, is_structural_symbol};
 
 /// Default number of suggestions returned on a miss (R4: one row is ~200 chars).
 pub const SUGGEST_K_DEFAULT: usize = 5;
@@ -103,15 +103,18 @@ pub fn suggest(store: &dyn GraphRead, probe: &str, k: usize) -> Result<(Vec<Sugg
     let last = segments.last().copied().unwrap_or(probe);
     let last_folded = last.to_ascii_lowercase();
 
-    let query = |prefix: &str| SymbolQuery {
-        name_prefix: Some(prefix.to_string()),
-        limit: Some(SUGGEST_POOL_MAX),
-        ..Default::default()
+    // Tiers 1–3 (a whole probe or segment as the prefix — a narrow set) and the two-character
+    // fallback: fetched uncapped, value-flow slots dropped, THEN capped — slots can never crowd a
+    // real symbol out of the pool.
+    let fetch = |prefix: &str| -> Result<Vec<Node>> {
+        let mut nodes: Vec<Node> = store
+            .find_symbols_by_name_prefix(prefix, None)?
+            .into_iter()
+            .filter(is_structural_symbol)
+            .collect();
+        nodes.truncate(SUGGEST_POOL_MAX);
+        Ok(nodes)
     };
-    // Tiers 1–3 (a whole probe or segment as the prefix — a narrow set): value-flow slots are
-    // excluded BEFORE the cap, so slots can never crowd a real symbol out of the pool.
-    let fetch =
-        |prefix: &str| -> Result<Vec<Node>> { store.find_structural_symbols(&query(prefix)) };
 
     let mut ranked: Vec<Suggestion> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -164,7 +167,7 @@ pub fn suggest(store: &dyn GraphRead, probe: &str, k: usize) -> Result<(Vec<Sugg
     if let Some(first) = target.chars().next() {
         // The one-character pool is the wide one: fetched capped, and whether the CAP bit is
         // read from the raw rows (slots included) — filtering first would hide a full window.
-        let raw = store.find_symbols(&query(&first.to_string()))?;
+        let raw = store.find_symbols_by_name_prefix(&first.to_string(), Some(SUGGEST_POOL_MAX))?;
         let capped = raw.len() >= SUGGEST_POOL_MAX;
         pools.push(raw.into_iter().filter(is_structural_symbol).collect());
         let two: String = target.chars().take(2).collect();

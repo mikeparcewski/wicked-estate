@@ -3178,6 +3178,37 @@ impl GraphRead for SqliteStore {
         }
     }
 
+    /// (#358) An INDEXED range over `lower(name)` (`idx_nodes_name_folded`). SQLite's built-in
+    /// `lower()` folds ASCII only — exactly `query::name_has_prefix`. The exclusive upper bound is
+    /// the prefix's lexicographic successor (UTF-8 byte order = code-point order); appending
+    /// U+10FFFF instead would drop `a\u{10FFFF}b` for prefix `a`.
+    fn find_symbols_by_name_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<Node>> {
+        let lo = prefix.to_ascii_lowercase();
+        let hi = prefix_successor(&lo);
+        let sql_limit: i64 = limit.map_or(-1, |l| l as i64);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT n.data FROM nodes n JOIN symbols s ON s.sid = n.symbol \
+                 WHERE lower(n.name) >= ?1 AND (?2 IS NULL OR lower(n.name) < ?2) \
+                 ORDER BY lower(n.name), n.name, s.sym LIMIT ?3",
+            )
+            .map_err(st)?;
+        let rows = stmt
+            .query_map(params![lo, hi, sql_limit], |r| r.get::<_, String>(0))
+            .map_err(st)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let n = serde_json::from_str::<Node>(&row.map_err(st)?)?;
+            if wicked_estate_core::query::name_has_prefix(&n.name, prefix) {
+                out.push(n);
+            }
+        }
+        // Same order on every store, whatever SQLite's collation did with ties.
+        out.sort_by(wicked_estate_core::query::name_prefix_order);
+        Ok(out)
+    }
+
     fn find_symbols(&self, query: &SymbolQuery) -> Result<Vec<Node>> {
         // W5.1: when `text` is set, use FTS5 BM25 ranking to retrieve candidates in relevance
         // order, then apply the remaining filters (kinds / language / exact_name) + limit in Rust.
@@ -3213,42 +3244,6 @@ impl GraphRead for SqliteStore {
                 .map_err(st)?;
             let rows = stmt
                 .query_map(params![name], |r| r.get::<_, String>(0))
-                .map_err(st)?;
-            let mut v = Vec::new();
-            for row in rows {
-                v.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
-            }
-            v
-        } else if let Some(prefix) = &query.name_prefix {
-            // (#358) Case-folded name prefix as an INDEXED range over `lower(name)`
-            // (`idx_nodes_name_folded`). SQLite's built-in `lower()` folds ASCII only — exactly
-            // `SymbolQuery::matches_name_prefix`. `LIMIT` is pushed into SQL only when no Rust
-            // filter below can drop a row; otherwise a cut here would undercount.
-            let lo = prefix.to_ascii_lowercase();
-            // The exclusive upper bound is the prefix's lexicographic successor (UTF-8 byte order
-            // = code-point order); `None` (a prefix of only U+10FFFF) leaves the range open.
-            // Appending U+10FFFF instead would drop `a\u{10FFFF}b` for prefix `a`.
-            let hi = prefix_successor(&lo);
-            let sql_limit: i64 = match query.limit {
-                Some(l)
-                    if query.scope_prefix.is_none()
-                        && query.kinds.is_empty()
-                        && query.language.is_none() =>
-                {
-                    l as i64
-                }
-                _ => -1,
-            };
-            let mut stmt = self
-                .conn
-                .prepare(
-                    "SELECT n.data FROM nodes n JOIN symbols s ON s.sid = n.symbol \
-                     WHERE lower(n.name) >= ?1 AND (?2 IS NULL OR lower(n.name) < ?2) \
-                     ORDER BY lower(n.name), n.name, s.sym LIMIT ?3",
-                )
-                .map_err(st)?;
-            let rows = stmt
-                .query_map(params![lo, hi, sql_limit], |r| r.get::<_, String>(0))
                 .map_err(st)?;
             let mut v = Vec::new();
             for row in rows {
@@ -3317,11 +3312,8 @@ impl GraphRead for SqliteStore {
                     }
                 }
             }
-            query.matches_name_prefix(&n.name)
+            true
         });
-        if query.name_prefix.is_some() {
-            nodes.sort_by(SymbolQuery::name_prefix_order);
-        }
         if let Some(limit) = query.limit {
             nodes.truncate(limit);
         }
@@ -3332,9 +3324,7 @@ impl GraphRead for SqliteStore {
     /// `Node` materialised (only the `scope` column is read, for the segment-aware `scope_prefix`
     /// test). A `text` query keeps the BM25 path through the trait default.
     fn count_symbols(&self, query: &SymbolQuery) -> Result<usize> {
-        // `name_prefix` (#358) takes the same path as `text`: count what `find_symbols` returns,
-        // so the two can never disagree (codex review of #367).
-        if query.text.is_some() || query.name_prefix.is_some() {
+        if query.text.is_some() {
             let mut q = query.clone();
             q.limit = None;
             return Ok(self.find_symbols(&q)?.len());

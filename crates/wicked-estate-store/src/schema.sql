@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   scope                   TEXT NOT NULL DEFAULT ''  -- hierarchical ownership/partition path (root='')
 );
 CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
--- (#358) Case-folded name-prefix lookups (`SymbolQuery.name_prefix`, did-you-mean suggestions):
+-- (#358) Case-folded name-prefix lookups (`GraphRead::find_symbols_by_name_prefix`, did-you-mean suggestions):
 -- an indexed range over lower(name). Built-in lower() folds ASCII only, the store-wide definition.
 CREATE INDEX IF NOT EXISTS idx_nodes_name_folded ON nodes(lower(name));
 CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);

@@ -1419,13 +1419,9 @@ impl GraphRead for SurrealStore {
                     return false;
                 }
             }
-            query.matches_name_prefix(&n.name)
+            true
         });
-        if query.name_prefix.is_some() {
-            out.sort_by(SymbolQuery::name_prefix_order);
-        } else {
-            out.sort_by(|a, b| a.symbol.0.cmp(&b.symbol.0));
-        }
+        out.sort_by(|a, b| a.symbol.0.cmp(&b.symbol.0));
         if let Some(limit) = query.limit {
             out.truncate(limit);
         }

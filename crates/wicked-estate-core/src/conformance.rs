@@ -474,15 +474,10 @@ pub fn traverse_edge_kinds_filter_the_returned_edges<S: GraphStore>(store: &mut 
     }
 }
 
-/// `SymbolQuery::name_prefix` (wicked-estate#358): an ASCII case-folded prefix on `name`, ordered by
-/// folded name then name then symbol, with `limit` honoured AFTER every other filter, and LIKE
-/// metacharacters in the prefix taken literally.
+/// `GraphRead::find_symbols_by_name_prefix` (wicked-estate#358): an ASCII case-folded prefix on
+/// `name`, ordered by folded name then name then symbol, with `limit` honoured in that order, and
+/// LIKE metacharacters taken literally — identically on every store.
 pub fn symbol_query_name_prefix<S: GraphStore>(store: &mut S) {
-    let class = |name: &str| {
-        let mut n = func_node(name);
-        n.kind = NodeKind::Class;
-        n
-    };
     store.begin_batch().expect("begin_batch");
     store
         .upsert_nodes(&[
@@ -491,32 +486,27 @@ pub fn symbol_query_name_prefix<S: GraphStore>(store: &mut S) {
             func_node("NPQGamma"),
             func_node("npq_delta"),
             func_node("Xnpq"),
-            class("NpqZClass"),
+            func_node("NpqZClass"),
             func_node("Nr\u{10FFFF}tail"),
         ])
         .expect("np nodes");
     store.commit_batch().expect("commit_batch");
 
-    let names = |q: SymbolQuery| -> Vec<String> {
+    let names = |p: &str, limit: Option<usize>| -> Vec<String> {
         store
-            .find_symbols(&q)
-            .expect("find_symbols name_prefix")
+            .find_symbols_by_name_prefix(p, limit)
+            .expect("find_symbols_by_name_prefix")
             .into_iter()
             .map(|n| n.name)
             .collect()
     };
-    let prefix = |p: &str, limit: Option<usize>| SymbolQuery {
-        name_prefix: Some(p.to_string()),
-        limit,
-        ..Default::default()
-    };
     assert_eq!(
-        names(prefix("npqALPHA", None)),
+        names("npqALPHA", None),
         vec!["NpqAlpha", "npqalphaBeta"],
-        "name_prefix is case-folded and ordered by folded name"
+        "the prefix is case-folded and rows are ordered by folded name"
     );
     assert_eq!(
-        names(prefix("NPQ", None)),
+        names("NPQ", None),
         vec![
             "npq_delta",
             "NpqAlpha",
@@ -527,42 +517,22 @@ pub fn symbol_query_name_prefix<S: GraphStore>(store: &mut S) {
         "a prefix never matches mid-name (Xnpq), order is folded-name byte order"
     );
     assert_eq!(
-        names(prefix("npq", Some(2))),
+        names("npq", Some(2)),
         vec!["npq_delta", "NpqAlpha"],
-        "limit keeps the first rows in name_prefix order"
+        "limit keeps the first rows in prefix order"
     );
     assert_eq!(
-        names(prefix("npq_", None)),
+        names("npq_", None),
         vec!["npq_delta"],
         "`_` in the prefix is literal, not a LIKE wildcard"
     );
     assert!(
-        names(prefix("npq%", None)).is_empty(),
+        names("npq%", None).is_empty(),
         "`%` in the prefix is literal"
-    );
-    assert_eq!(
-        names(SymbolQuery {
-            name_prefix: Some("npq".into()),
-            kinds: vec![NodeKind::Class],
-            limit: Some(1),
-            ..Default::default()
-        }),
-        vec!["NpqZClass"],
-        "limit applies after the kind filter, never before it"
     );
     // A name continuing past U+10FFFF still starts with its prefix (a range bound of
     // prefix + U+10FFFF would drop it).
-    assert_eq!(names(prefix("NR", None)), vec!["Nr\u{10FFFF}tail"]);
-    // `count_symbols` agrees with `find_symbols` for a prefix query.
-    for p in ["npq", "NPQALPHA", "nr", "zzz"] {
-        assert_eq!(
-            store
-                .count_symbols(&prefix(p, None))
-                .expect("count_symbols name_prefix"),
-            names(prefix(p, None)).len(),
-            "count_symbols vs find_symbols for name_prefix {p:?}"
-        );
-    }
+    assert_eq!(names("NR", None), vec!["Nr\u{10FFFF}tail"]);
 }
 
 /// Run the full contract against a fresh, empty store. Panics on the first violation.

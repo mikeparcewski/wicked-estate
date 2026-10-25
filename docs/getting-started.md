@@ -176,7 +176,7 @@ no symbol named 'Bark' — did you mean:
 A resolved symbol says `resolved: true`. The same miss handling applies to `query`, `source`,
 `annotations`, `annotate`, `fingerprint`, `path`, `graph-view --focus`, `cross-graph` and the
 bridged commands (`traverse`, `lineage`, …), and to the MCP `SearchEntity`, `BlastRadius`,
-`Path` and `ContextPack` tools (one `NAME-MISS:` diagnostic). A suggestion is only a candidate:
+`Path`, `ContextBundle` and `ContextPack` tools (one `NAME-MISS:` diagnostic). A suggestion is only a candidate:
 nothing is computed from it.
 
 Every miss is logged to the graph's `search_misses` table (MCP misses carry the server's

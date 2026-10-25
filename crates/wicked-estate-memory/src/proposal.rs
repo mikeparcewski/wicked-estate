@@ -50,7 +50,6 @@ impl MemoryEngine {
             language: None,
             limit: None,
             scope_prefix: None,
-            name_prefix: None,
         })?;
         Ok(nodes
             .iter()

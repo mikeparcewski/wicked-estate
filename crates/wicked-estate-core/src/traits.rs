@@ -129,6 +129,24 @@ pub trait GraphRead: Send {
     /// Edges incident to `id` in the given direction. The edge-direction invariant is enforced
     /// here: `Direction::Dependents` returns edges where `target == id`.
     fn neighbors(&self, id: &SymbolId, dir: Direction) -> Result<Vec<Edge>>;
+    /// Nodes whose `name` starts with `prefix`, ASCII case-insensitively
+    /// ([`crate::query::name_has_prefix`]) — the candidate source for did-you-mean suggestions
+    /// on a symbol-name miss (wicked-estate#358). Rows are ordered by
+    /// [`crate::query::name_prefix_order`] BEFORE `limit` applies, so a capped pool is the same
+    /// rows on every store. The default scans [`find_symbols`](Self::find_symbols); a store with
+    /// a name index overrides it (SQLite: a `lower(name)` range; Postgres: an escaped `LIKE`).
+    fn find_symbols_by_name_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<Node>> {
+        let mut out: Vec<Node> = self
+            .find_symbols(&SymbolQuery::default())?
+            .into_iter()
+            .filter(|n| crate::query::name_has_prefix(&n.name, prefix))
+            .collect();
+        out.sort_by(crate::query::name_prefix_order);
+        if let Some(l) = limit {
+            out.truncate(l);
+        }
+        Ok(out)
+    }
     /// Bounded traversal (e.g. reverse-reachability for blast-radius). Push this server-side on
     /// backends where `capabilities().server_side_traversal` is true (one round-trip, not BFS).
     fn traverse(&self, start: &SymbolId, spec: &TraversalSpec) -> Result<Subgraph>;

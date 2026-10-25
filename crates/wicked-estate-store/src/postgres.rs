@@ -2112,6 +2112,47 @@ impl GraphRead for PostgresStore {
         Ok(out)
     }
 
+    /// (#358) `translate` folds A-Z only — the exact ASCII fold `query::name_has_prefix` defines
+    /// (Postgres `lower()`/`ILIKE` fold Unicode too, which would admit rows the other stores do
+    /// not). The prefix is LIKE-escaped, so `_` and `%` are literal.
+    fn find_symbols_by_name_prefix(&self, prefix: &str, limit: Option<usize>) -> Result<Vec<Node>> {
+        let mut h = self.conn()?;
+        let escaped = prefix
+            .to_ascii_lowercase()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("{escaped}%");
+        let sql_limit: Option<i64> = limit.map(|l| l as i64);
+        let mut nodes = rt_block(async {
+            let rows = sqlx::query(
+                "SELECT data FROM nodes \
+                 WHERE translate(name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', \
+                                 'abcdefghijklmnopqrstuvwxyz') LIKE $1 ESCAPE '\\' \
+                 ORDER BY translate(name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', \
+                                    'abcdefghijklmnopqrstuvwxyz') COLLATE \"C\", \
+                          name COLLATE \"C\", symbol COLLATE \"C\" \
+                 LIMIT $2",
+            )
+            .bind(&pattern)
+            .bind(sql_limit)
+            .fetch_all(h.as_conn())
+            .await?;
+            let mut v = Vec::new();
+            for row in rows {
+                let json: String = row.try_get("data")?;
+                if let Ok(n) = serde_json::from_str::<Node>(&json) {
+                    v.push(n);
+                }
+            }
+            Ok::<Vec<Node>, sqlx::Error>(v)
+        })
+        .map_err(st)?;
+        nodes.retain(|n| wicked_estate_core::query::name_has_prefix(&n.name, prefix));
+        nodes.sort_by(wicked_estate_core::query::name_prefix_order);
+        Ok(nodes)
+    }
+
     fn find_symbols(&self, query: &SymbolQuery) -> Result<Vec<Node>> {
         let mut h = self.conn()?;
         let mut nodes: Vec<Node> = if let Some(text) = &query.text {
@@ -2139,51 +2180,6 @@ impl GraphRead for PostgresStore {
                     .bind(name)
                     .fetch_all(h.as_conn())
                     .await?;
-                let mut v = Vec::new();
-                for row in rows {
-                    let json: String = row.try_get("data")?;
-                    if let Ok(n) = serde_json::from_str::<Node>(&json) {
-                        v.push(n);
-                    }
-                }
-                Ok::<Vec<Node>, sqlx::Error>(v)
-            })
-            .map_err(st)?
-        } else if let Some(prefix) = &query.name_prefix {
-            // (#358) Case-folded name prefix. `translate` folds A-Z only — the exact ASCII fold
-            // `SymbolQuery::matches_name_prefix` defines (Postgres `lower()`/`ILIKE` fold Unicode
-            // too, which would admit rows the other stores do not). The prefix is LIKE-escaped.
-            // `LIMIT` is pushed only when no Rust filter below can drop a row.
-            let lo = prefix.to_ascii_lowercase();
-            let escaped = lo
-                .replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_");
-            let pattern = format!("{escaped}%");
-            let sql_limit: Option<i64> = match query.limit {
-                Some(l)
-                    if query.scope_prefix.is_none()
-                        && query.kinds.is_empty()
-                        && query.language.is_none() =>
-                {
-                    Some(l as i64)
-                }
-                _ => None,
-            };
-            rt_block(async {
-                let rows = sqlx::query(
-                    "SELECT data FROM nodes \
-                     WHERE translate(name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', \
-                                     'abcdefghijklmnopqrstuvwxyz') LIKE $1 ESCAPE '\\' \
-                     ORDER BY translate(name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', \
-                                        'abcdefghijklmnopqrstuvwxyz') COLLATE \"C\", \
-                              name COLLATE \"C\", symbol COLLATE \"C\" \
-                     LIMIT $2",
-                )
-                .bind(&pattern)
-                .bind(sql_limit)
-                .fetch_all(h.as_conn())
-                .await?;
                 let mut v = Vec::new();
                 for row in rows {
                     let json: String = row.try_get("data")?;
@@ -2251,11 +2247,8 @@ impl GraphRead for PostgresStore {
                     return false;
                 }
             }
-            query.matches_name_prefix(&n.name)
+            true
         });
-        if query.name_prefix.is_some() {
-            nodes.sort_by(SymbolQuery::name_prefix_order);
-        }
 
         if let Some(limit) = query.limit {
             nodes.truncate(limit);
