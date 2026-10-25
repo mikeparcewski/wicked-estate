@@ -275,7 +275,6 @@ async fn main() -> Result<()> {
         embedder_runtime_dim,
         embedder_meta_id,
         embedder_meta_dim,
-        ..Default::default()
     };
 
     // 3b. Open domain stores (fail-soft: if any fails, all domains = None).

@@ -1355,7 +1355,6 @@ mod tests {
             embedder_runtime_dim: Some(64),
             embedder_meta_id: Some("hash:v1".into()),
             embedder_meta_dim: Some(64),
-            ..Default::default()
         };
         assert!(
             semantic_advert(&ctx).is_ok(),
@@ -2490,7 +2489,6 @@ mod tests {
             embedder_runtime_dim: rt_dim,
             embedder_meta_id: meta_id.map(str::to_string),
             embedder_meta_dim: meta_dim,
-            ..Default::default()
         }
     }
 
