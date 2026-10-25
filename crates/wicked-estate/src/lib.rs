@@ -81,6 +81,7 @@ macro_rules! eprintln {
     }};
 }
 
+pub mod freshness;
 pub mod repo_scope;
 
 use std::collections::{HashMap, HashSet};
@@ -111,7 +112,7 @@ use xxhash_rust::xxh3::xxh3_64;
 
 /// Extensions handled by the grammar-less line extractors (JCL job streams, HLASM assembler), whose
 /// dispatch lives in `index_path`'s per-file closure rather than the tree-sitter `ext_map`.
-fn is_grammarless_ext(ext: &str) -> bool {
+pub(crate) fn is_grammarless_ext(ext: &str) -> bool {
     matches!(
         ext,
         "jcl"
@@ -998,7 +999,7 @@ fn collect_extra_rule_files(root: &Path, rules: &ExtraEdgeExtractor) -> Vec<Path
 }
 
 /// Compute an xxh3 hex digest for a byte slice.
-fn file_digest(bytes: &[u8]) -> String {
+pub(crate) fn file_digest(bytes: &[u8]) -> String {
     format!("{:016x}", xxh3_64(bytes))
 }
 
@@ -2767,35 +2768,20 @@ pub fn rfc3339_utc(secs: u64) -> String {
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
-/// The whole graph's staleness: the worst [`commits_behind_since`] over every registered repo
-/// root, each measured from the commit IT was indexed at (#243).
-///
-/// A co-located graph has one root PER REPO, and `indexed_root` is only the last one indexed —
-/// reading it alone reports one arbitrary repo's staleness as the whole graph's, and answers
-/// "fresh" while every other repo is behind. A single-repo graph falls back to `indexed_root`
-/// ([`indexed_root_path`]) and the singular `repo_commit`. The MCP server and the CLI's machine
-/// output (`stats --json`) both report this one number (R5).
+/// The whole graph's staleness: the worst commits-behind over every indexed root.
+#[deprecated(
+    since = "0.30.1",
+    note = "use freshness::staleness_report(store, db).worst, or FreshnessProbe for per-call freshness (wicked-estate#351)"
+)]
 pub fn graph_commits_behind(store: &dyn GraphStoreMutExt, db_path: &str) -> Option<u64> {
-    let repos = repo_scope::registry(store);
-    if !repos.is_empty() {
-        return repos
-            .iter()
-            .filter_map(|r| {
-                commits_behind_since(
-                    &recorded_root_path(&r.root, db_path),
-                    r.info.commit.as_deref(),
-                    db_path,
-                )
-            })
-            .max();
-    }
-    let root = indexed_root_path(store, db_path)?;
-    let baseline = store.repo_info().ok().flatten().and_then(|i| i.commit);
-    commits_behind_since(&root, baseline.as_deref(), db_path)
+    freshness::staleness_report(store, db_path).worst
 }
 
-/// The R5 diagnostic a frontend appends to a retrieval result when the graph is `n > 0` commits
-/// behind its repo. One wording, so MCP and `wicked-estate lineage --json` cannot drift.
+/// The pre-#351 R5 diagnostic for a graph `n > 0` commits behind its repo.
+#[deprecated(
+    since = "0.30.1",
+    note = "freshness::StalenessReport::statements states every case (N, 0, unknown) (wicked-estate#351)"
+)]
 pub fn staleness_diagnostic(n: u64) -> String {
     format!("STALENESS: commits_behind={n} — re-run `wicked-estate index` to refresh")
 }
@@ -3777,7 +3763,8 @@ mod tests {
     }
 
     /// #245: a db indexed from two repos reports the WORST repo's staleness, each repo measured
-    /// from its own recorded commit — not whichever root happened to be indexed last.
+    /// from its own recorded commit — not whichever root happened to be indexed last. #351: the
+    /// measure lives in `freshness`, and a probe that outlives a commit sees it on the next call.
     #[test]
     fn graph_commits_behind_two_repos_returns_the_worst() {
         let (a, _) = committed_repo("two_a");
@@ -3791,16 +3778,74 @@ mod tests {
         index_path_as(&mut store, &a, Some("a")).unwrap();
         index_path_as(&mut store, &b, Some("b")).unwrap();
         let db_str = db.to_str().unwrap();
-        assert_eq!(graph_commits_behind(&store, db_str), Some(0));
+        let worst =
+            |s: &wicked_estate_store::SqliteStore| freshness::staleness_report(s, db_str).worst;
+        assert_eq!(worst(&store), Some(0));
+        // A long-lived probe (the MCP server's): measured per call, not at startup.
+        let mut probe = freshness::FreshnessProbe::open(db_str);
+        let behind = |probe: &mut freshness::FreshnessProbe| {
+            let mut content = serde_json::json!({});
+            probe.annotate(&mut content, &mut vec![]);
+            content["freshness"]["commits_behind"].clone()
+        };
+        assert_eq!(behind(&mut probe), serde_json::json!(0));
         commit_one(&a, "a1");
         commit_one(&b, "b1");
         commit_one(&b, "b2");
         // `b` (indexed LAST, so the old single-root read would have seen only it) is 2 behind;
         // `a` is 1 behind; the graph is as stale as its stalest repo.
-        assert_eq!(graph_commits_behind(&store, db_str), Some(2));
+        assert_eq!(worst(&store), Some(2));
+        assert_eq!(
+            behind(&mut probe),
+            serde_json::json!(2),
+            "no restart needed"
+        );
         // Re-index `b` alone: it is current, `a` is still 1 behind — the worst is now `a`'s.
         index_path_as(&mut store, &b, Some("b")).unwrap();
-        assert_eq!(graph_commits_behind(&store, db_str), Some(1));
+        assert_eq!(worst(&store), Some(1));
+        assert_eq!(behind(&mut probe), serde_json::json!(1));
+
+        // Drift is attributed to the repo the path belongs to: an uncommitted edit in `a`
+        // marks `a/src/index.ts` — and only rows naming it.
+        std::fs::write(
+            a.join("src/index.ts"),
+            "export function two_a() { return 2; }\n",
+        )
+        .unwrap();
+        let mut content = serde_json::json!({"rows": [
+            {"file": "a/src/index.ts"}, {"file": "b/src/index.ts"}
+        ]});
+        let mut diags = vec![];
+        probe.annotate(&mut content, &mut diags);
+        assert_eq!(
+            content["rows"][0]["stale"],
+            serde_json::json!("modified"),
+            "{content}"
+        );
+        assert!(content["rows"][1].get("stale").is_none(), "{content}");
+        assert_eq!(
+            content["freshness"]["stale_files"],
+            serde_json::json!([{"file": "a/src/index.ts", "status": "modified"}])
+        );
+        let roots = content["freshness"]["roots"].as_array().unwrap();
+        assert_eq!(roots.len(), 2, "per-root counts: {content}");
+        // A new, never-indexed source file in `b` is counted; a `.txt` is not.
+        std::fs::write(b.join("src/new.ts"), "export const y = 2;\n").unwrap();
+        std::fs::write(b.join("notes.txt"), "not source\n").unwrap();
+        let mut content = serde_json::json!({});
+        let mut diags = vec![];
+        probe.annotate(&mut content, &mut diags);
+        assert_eq!(
+            content["freshness"]["unindexed_files"],
+            serde_json::json!(1),
+            "{content}"
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.contains("1 new source file(s) not in the graph")),
+            "{diags:?}"
+        );
         for d in [&a, &b, &dir] {
             let _ = std::fs::remove_dir_all(d);
         }

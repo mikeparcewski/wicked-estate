@@ -17,6 +17,23 @@
   method). Bench: on a 10 000-symbol probe set, top-3 hit rate and p95 latency are gated.
   Spec by @eugenelim.
 
+### Changed
+- **Freshness is measured per query, after the response cache, on MCP and CLI alike (#351).** The
+  MCP server computed `commits_behind` once at startup, so a server up all day reported the
+  startup count. Its response cache (L1 and the persistent L2) also replayed the `STALENESS:` line
+  that was true when an entry was written. And MCP forwarded the retrieval layer's placeholder
+  while the CLI replaced it. Now one transport-side probe
+  (`wicked_estate::freshness::FreshnessProbe`) annotates every retrieval response, cache hit or
+  not. It reports commits behind per indexed root, measured now (HEAD per call; the count cached
+  on HEAD and graph version). Every `file` the answer touches is checked against the indexed bytes:
+  drifted rows carry `"stale": "modified" | "deleted"` and appear in `freshness.stale_files`. New
+  never-indexed source files are counted in `freshness.unindexed_files`. The cache stores
+  un-annotated content. `blast-radius` (text and `--json`) and the bridged CLI commands carry the
+  same block. `stats --json` gains `staleness.dirty_indexed_files` and
+  `staleness.unindexed_files`. Deprecated (kept so no public API breaks before the next minor release, then removed):
+  `McpContext.commits_behind` (ignored), `wicked_estate::graph_commits_behind` and
+  `wicked_estate::staleness_diagnostic`. `StalenessReport` moved to `wicked_estate::freshness`. Spec by @eugenelim.
+
 ### Fixed
 - **`TraverseGraph` `edge_kinds` no longer fails open to every kind (#361).** A tag kind
   (`flows_to`, `di-wired`) was dropped by the parser, an all-dropped list became `[]`, and every

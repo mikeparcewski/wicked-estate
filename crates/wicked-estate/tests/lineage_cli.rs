@@ -186,7 +186,14 @@ fn mcp_with(store: &SqliteStore, args: &Value, ctx: &McpContext) -> Value {
 /// diagnostic except the retrieval layer's staleness placeholder (it is the transport, and
 /// REPLACES that cue with the real per-root statement), and at least one `STALENESS:` line.
 fn assert_parity(dir: &Path, store: &SqliteStore, cli_args: &[&str], args: Value) -> Value {
-    let cli = cli_json(dir, cli_args);
+    let mut cli = cli_json(dir, cli_args);
+    // (#351) The transport adds `freshness` (the in-process tool and MCP handler do not —
+    // the server's request loop does); the tool's own content must still agree exactly.
+    let freshness = cli["content"]
+        .as_object_mut()
+        .and_then(|o| o.remove("freshness"))
+        .expect("the CLI states freshness on every answer");
+    assert!(freshness.get("commits_behind").is_some(), "{freshness}");
     let tool = direct(store, &args);
     assert_eq!(
         cli["content"], tool["content"],
@@ -361,7 +368,12 @@ fn default_dependency_lineage_is_the_unchanged_tool_result() {
         "load -> loadCustomer is a resolved Calls dependency: {doc}"
     );
     // The structural name resolves to the same symbol (an intentional bridge convenience).
-    assert_eq!(cli_json(&s, &["load"])["content"], doc["content"]);
+    let mut by_name = cli_json(&s, &["load"]);
+    by_name["content"]
+        .as_object_mut()
+        .unwrap()
+        .remove("freshness"); // (#351) transport-added
+    assert_eq!(by_name["content"], doc["content"]);
 }
 
 #[test]
@@ -1088,7 +1100,8 @@ fn traverse_edge_kinds_flows_to_matches_mcp_and_follows_only_the_tag() {
         "fixture must reach non-flows_to edges: {all}"
     );
 
-    let cli = traverse(&["--edge-kinds", "flows_to"]);
+    let mut cli = traverse(&["--edge-kinds", "flows_to"]);
+    cli.as_object_mut().unwrap().remove("freshness"); // (#351) transport-added
     let edges = cli["edges"].as_array().unwrap();
     assert!(!edges.is_empty(), "{cli}");
     for e in edges {

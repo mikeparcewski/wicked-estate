@@ -20,11 +20,14 @@
 //! | `tools/call`               | Dispatches to the matching tool; wraps result in MCP envelope. |
 //! | *(anything else)*          | JSON-RPC error `-32601` (Method Not Found). |
 //!
-//! # W7.4 Staleness
+//! # Staleness (R5, wicked-estate#351)
 //!
-//! Tool responses include a `STALENESS: commits_behind=N` diagnostic line when the
-//! server can determine that commits have landed since the last index. The server
-//! computes this once at startup via `wicked_estate::commits_behind`.
+//! A retrieval tool cannot see git, so it emits the retrieval layer's staleness placeholder.
+//! The server REPLACES it per call, after its response-cache lookup, with
+//! [`annotate_tool_response`] — commits behind each indexed root measured at call time, and the
+//! drift of every file the answer touches (`wicked_estate::freshness`). The cache stores the
+//! un-annotated response, so a cache hit is re-annotated, never replayed stale. An in-process
+//! embedder of [`handle_request_unified`] calls [`annotate_tool_response`] the same way.
 
 use serde_json::{Value, json};
 use wicked_estate_core::{GraphRead, RetrievalTool};
@@ -693,11 +696,6 @@ fn handle_tools_call_ctx(
                     "LEXICAL-FALLBACK: no semantic model loaded; results are lexical".to_string(),
                 );
             }
-            if let Some(n) = ctx.commits_behind {
-                if n > 0 {
-                    all_diags.push(wicked_estate::staleness_diagnostic(n));
-                }
-            }
 
             // Append diagnostics as a second text block if any are present.
             let mut content = vec![json!({ "type": "text", "text": content_text })];
@@ -738,9 +736,6 @@ fn handle_tools_call_ctx(
 
 /// Per-request context passed through the MCP handler.
 ///
-/// `commits_behind`: if known (computed once at server startup), this is injected
-/// as an R5 staleness diagnostic into every `tools/call` response.
-///
 /// The four `embedder_*` fields drive the **dim-guard** (DoD-A6a, §3.1): SemanticSearch is
 /// advertised (and dispatchable) **only** when the store's embedder identity + dim
 /// (`embedder_meta_*`, read from store meta at startup) match the runtime embedder
@@ -748,8 +743,14 @@ fn handle_tools_call_ctx(
 /// see [`semantic_advert`]. All-`None` (the `Default`) is the fail-closed state: no semantic.
 #[derive(Debug, Default, Clone)]
 pub struct McpContext {
-    /// How many commits have landed in the indexed repo since the last `index` run.
-    /// `None` = unknown (git absent, not a repo, first-run, etc.).
+    /// Ignored since wicked-estate#351. Freshness is no longer a startup number: the server's
+    /// request loop measures it per call with [`annotate_tool_response`]. The field stays only
+    /// so code that builds an `McpContext` literal keeps compiling; it is removed at the next
+    /// minor release.
+    #[deprecated(
+        since = "0.30.1",
+        note = "ignored: freshness is measured per call (wicked-estate#351); use annotate_tool_response"
+    )]
     pub commits_behind: Option<u64>,
     /// Identity of the runtime embedder (`default_embedder().id()`), e.g. `"hash:v1"`.
     /// `None` only if the server could not construct an embedder at all.
@@ -1005,6 +1006,57 @@ pub fn name_miss_query(resp: &Value) -> Option<String> {
         return None;
     }
     content.get("query")?.as_str().map(str::to_string)
+}
+
+/// (#351) State freshness on one `tools/call` response, in place: the first content block (the
+/// tool's JSON `content`) gains the `freshness` block and per-row `"stale"` marks, and the
+/// diagnostics block has the retrieval placeholder replaced by the real `STALENESS:` lines. A
+/// non-tool response, an `isError` result, or a domain (memory/knowledge/proposal) tool is left
+/// untouched. Call it on every emitted graph-tool response — a cache hit included — and never
+/// on the copy that is cached.
+pub fn annotate_tool_response(
+    resp: &mut Value,
+    tool_name: &str,
+    probe: &mut wicked_estate::freshness::FreshnessProbe,
+) {
+    if ["memory.", "knowledge.", "proposal."]
+        .iter()
+        .any(|p| tool_name.starts_with(p))
+    {
+        return;
+    }
+    let Some(result) = resp.get_mut("result") else {
+        return;
+    };
+    if result.get("isError").and_then(Value::as_bool) != Some(false) {
+        return;
+    }
+    let Some(blocks) = result.get_mut("content").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let Some(mut content) = blocks
+        .first()
+        .and_then(|b| b.get("text"))
+        .and_then(Value::as_str)
+        .and_then(|t| serde_json::from_str::<Value>(t).ok())
+    else {
+        return;
+    };
+    let mut diags: Vec<String> = blocks
+        .get(1)
+        .and_then(|b| b.get("text"))
+        .and_then(Value::as_str)
+        .map(|t| t.split('\n').map(str::to_string).collect())
+        .unwrap_or_default();
+    probe.annotate(&mut content, &mut diags);
+    let Ok(text) = serde_json::to_string(&content) else {
+        return;
+    };
+    let mut out = vec![json!({ "type": "text", "text": text })];
+    if !diags.is_empty() {
+        out.push(json!({ "type": "text", "text": diags.join("\n") }));
+    }
+    *blocks = out;
 }
 
 /// Should a `tools/call` response for `tool` be served from / stored in the MCP response cache?
@@ -2443,11 +2495,11 @@ mod tests {
         rt_dim: Option<usize>,
     ) -> McpContext {
         McpContext {
-            commits_behind: None,
             embedder_runtime_id: rt_id.map(str::to_string),
             embedder_runtime_dim: rt_dim,
             embedder_meta_id: meta_id.map(str::to_string),
             embedder_meta_dim: meta_dim,
+            ..Default::default()
         }
     }
 

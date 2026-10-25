@@ -1938,7 +1938,7 @@ fn flow_hop_row(edge: &wicked_estate_core::Edge) -> Value {
 /// chars). The graph-summary tools (`RankHotspots`, `Communities`) can return one row per node on a
 /// wide graph, so they cap the row count to keep the payload under this budget and emit a loud
 /// truncation diagnostic when the cap bites — an agent must never silently reason over a cut body.
-const R4_CHAR_BUDGET: usize = 25_000;
+pub const R4_CHAR_BUDGET: usize = 25_000;
 
 /// Headroom for Lineage's non-array keys: `total`, `truncated`, the three #222 horizon keys,
 /// `confidence` (two f32s rendered at full precision plus `edge_count`), the `flows` key, and the
