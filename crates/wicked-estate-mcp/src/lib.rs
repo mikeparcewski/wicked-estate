@@ -743,15 +743,6 @@ fn handle_tools_call_ctx(
 /// see [`semantic_advert`]. All-`None` (the `Default`) is the fail-closed state: no semantic.
 #[derive(Debug, Default, Clone)]
 pub struct McpContext {
-    /// Ignored since wicked-estate#351. Freshness is no longer a startup number: the server's
-    /// request loop measures it per call with [`annotate_tool_response`]. The field stays only
-    /// so code that builds an `McpContext` literal keeps compiling; it is removed at the next
-    /// minor release.
-    #[deprecated(
-        since = "0.30.1",
-        note = "ignored: freshness is measured per call (wicked-estate#351); use annotate_tool_response"
-    )]
-    pub commits_behind: Option<u64>,
     /// Identity of the runtime embedder (`default_embedder().id()`), e.g. `"hash:v1"`.
     /// `None` only if the server could not construct an embedder at all.
     pub embedder_runtime_id: Option<String>,
@@ -1364,7 +1355,6 @@ mod tests {
             embedder_runtime_dim: Some(64),
             embedder_meta_id: Some("hash:v1".into()),
             embedder_meta_dim: Some(64),
-            ..Default::default()
         };
         assert!(
             semantic_advert(&ctx).is_ok(),
@@ -2499,7 +2489,6 @@ mod tests {
             embedder_runtime_dim: rt_dim,
             embedder_meta_id: meta_id.map(str::to_string),
             embedder_meta_dim: meta_dim,
-            ..Default::default()
         }
     }
 

@@ -2771,24 +2771,6 @@ pub fn rfc3339_utc(secs: u64) -> String {
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
-/// The whole graph's staleness: the worst commits-behind over every indexed root.
-#[deprecated(
-    since = "0.30.1",
-    note = "use freshness::staleness_report(store, db).worst, or FreshnessProbe for per-call freshness (wicked-estate#351)"
-)]
-pub fn graph_commits_behind(store: &dyn GraphStoreMutExt, db_path: &str) -> Option<u64> {
-    freshness::staleness_report(store, db_path).worst
-}
-
-/// The pre-#351 R5 diagnostic for a graph `n > 0` commits behind its repo.
-#[deprecated(
-    since = "0.30.1",
-    note = "freshness::StalenessReport::statements states every case (N, 0, unknown) (wicked-estate#351)"
-)]
-pub fn staleness_diagnostic(n: u64) -> String {
-    format!("STALENESS: commits_behind={n} — re-run `wicked-estate index` to refresh")
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // W12 — Cross-graph / federated query API
 // ─────────────────────────────────────────────────────────────────────────────
