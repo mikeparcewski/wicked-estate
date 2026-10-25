@@ -429,9 +429,49 @@ pub fn traverse_edge_kinds_filter_the_returned_edges<S: GraphStore>(store: &mut 
         let multi = store
             .traverse_multi(&[sym(start)], &spec)
             .expect("traverse_multi");
+        assert!(
+            !multi.edges.is_empty(),
+            "traverse_multi {start} {direction:?}: the flows_to edges must be returned"
+        );
         for e in &multi.edges {
             assert_eq!(e.kind, flows_kind, "traverse_multi {start} {direction:?}");
         }
+        assert!(
+            !multi.nodes.iter().any(|n| n.symbol == sym("ek_callee")),
+            "traverse_multi {start} {direction:?}: ek_callee is reachable only over calls"
+        );
+    }
+
+    // The confidence floor is part of the same admission rule: a low-confidence flows_to edge
+    // between two nodes the walk reached over admitted edges is not part of the answer.
+    let mut weak = flows("ek_root", "ek_leaf");
+    weak.confidence = crate::edge::Confidence::new(0.2);
+    store.begin_batch().expect("begin_batch");
+    store.upsert_edges(&[weak]).expect("ek weak edge");
+    store.commit_batch().expect("commit_batch");
+    let spec = TraversalSpec {
+        direction: Direction::Dependencies,
+        edge_kinds: vec![flows_kind.clone()],
+        max_depth: 4,
+        max_nodes: 100,
+        min_confidence: 0.5,
+    };
+    for sub in [
+        store.traverse(&sym("ek_root"), &spec).expect("traverse"),
+        store
+            .traverse_multi(&[sym("ek_root")], &spec)
+            .expect("traverse_multi"),
+    ] {
+        assert_eq!(
+            sub.depths.get(sym("ek_leaf").as_str()),
+            Some(&2),
+            "ek_leaf is reached over the admitted two-hop path, not the weak edge"
+        );
+        assert!(
+            sub.edges.iter().all(|e| e.confidence.get() >= 0.5),
+            "an edge below min_confidence was returned: {:?}",
+            sub.edges
+        );
     }
 }
 

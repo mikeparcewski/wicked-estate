@@ -137,11 +137,28 @@ fn resolve_name(mapping: &NodeMapping, node: roxmltree::Node<'_, '_>, fallback: 
 /// ```
 pub struct XmlRulesExtractor {
     config: XmlRulesConfig,
+    /// `edge_mappings[i].edge_kind`, parsed ONCE at construction by the one core parser (#361).
+    /// `new` is infallible (public API), so a bad kind is kept as its error — naming the mapping —
+    /// and surfaced by `extract` the moment that mapping would emit, instead of minting a tag no
+    /// built-in query matches.
+    edge_kinds: Vec<std::result::Result<EdgeKind, String>>,
 }
 
 impl XmlRulesExtractor {
     pub fn new(config: XmlRulesConfig) -> Self {
-        Self { config }
+        let edge_kinds = config
+            .edge_mappings
+            .iter()
+            .map(|m| {
+                EdgeKind::parse_user(&m.edge_kind).map_err(|e| {
+                    format!(
+                        "xml-rules {}: edge_mapping {} -> {}: edge_kind: {e}",
+                        config.engine.name, m.parent_element, m.child_element
+                    )
+                })
+            })
+            .collect();
+        Self { config, edge_kinds }
     }
 
     /// Parse a TOML string into an `XmlRulesExtractor` directly.
@@ -216,7 +233,7 @@ impl Extractor for XmlRulesExtractor {
 
         // Emit edges for parent→child element pairs defined in edge_mappings.
         // We do a second pass over the document to find containment relationships.
-        for edge_mapping in &self.config.edge_mappings {
+        for (edge_mapping, edge_kind) in self.config.edge_mappings.iter().zip(&self.edge_kinds) {
             for parent_node in doc.descendants() {
                 if !parent_node.is_element() {
                     continue;
@@ -286,10 +303,8 @@ impl Extractor for XmlRulesExtractor {
                     let edge = Edge::new(
                         parent_sym.clone(),
                         child_sym,
-                        // The one core parser (#361): a case variant of a built-in fails the
-                        // extraction loudly instead of minting a tag no built-in query matches.
-                        EdgeKind::parse_user(&edge_mapping.edge_kind)
-                            .map_err(|e| Error::Extraction(format!("xml-rules edge_kind: {e}")))?,
+                        // Parsed at construction (#361); a refused kind fails here, loudly.
+                        edge_kind.clone().map_err(Error::Extraction)?,
                         ResolutionTier::Parsed,
                         "xml-rules",
                     );
@@ -411,6 +426,32 @@ edge_kind      = "governs"
             extraction.local_edges[0].kind,
             EdgeKind::Governs,
             "edge kind must be Governs"
+        );
+    }
+
+    /// #361: `edge_kind` goes through the one core parser at construction. A near-spelling of a
+    /// built-in (`Governs`) fails the extraction naming the mapping — before #361 it minted the
+    /// tag `Governs`, which no built-in query matches.
+    #[test]
+    fn a_near_spelled_edge_kind_fails_naming_the_mapping() {
+        let cfg = DMN_CONFIG.replace(
+            "edge_kind      = \"governs\"",
+            "edge_kind      = \"Governs\"",
+        );
+        assert_ne!(cfg, DMN_CONFIG, "fixture edit must apply");
+        let extractor = XmlRulesExtractor::from_toml(&cfg).expect("config must parse");
+        let file = SourceFile {
+            path: "rules/loan.dmn".to_string(),
+            language: Language::new("xml-rules:dmn"),
+            text: DMN_XML.to_string(),
+        };
+        let err = extractor
+            .extract(&file)
+            .expect_err("a near-spelled kind must not mint a tag")
+            .to_string();
+        assert!(
+            err.contains("dmn") && err.contains("did you mean \"governs\""),
+            "{err}"
         );
     }
 

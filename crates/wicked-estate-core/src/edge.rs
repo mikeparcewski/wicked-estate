@@ -163,9 +163,12 @@ impl EdgeKind {
     /// * A built-in's stored spelling (`calls`, `has_type`, `satisfied_by`, …) is that variant —
     ///   decided by serde, so no variant list is hand-maintained here.
     /// * `other:<tag>` is the tag `<tag>`, explicitly.
-    /// * A case variant of a built-in spelling (`Calls`) is REFUSED rather than taken as the tag
-    ///   `Calls`: no store writes that tag, so it would answer an honest-looking empty result for
-    ///   the kind the caller meant (the accept-and-ignore class #197 closed for flags).
+    /// * A near-spelling of a built-in — any case, `_`/`-` dropped or swapped (`Calls`,
+    ///   `HasType`, `invoked-by`) — is REFUSED naming the built-in, never taken as a tag: no store
+    ///   writes that tag, so it would answer an honest-looking empty result for the kind the
+    ///   caller meant (the accept-and-ignore class #197 closed for flags).
+    /// * A tag that is a built-in's spelling or near-spelling (`other:calls`, `{"other":"Calls"}`)
+    ///   and a nested prefix (`other:other:x`) are refused for the same reason.
     /// * The empty string, and an empty `other:` tag, are refused.
     /// * Anything else is the tag `Other(s)`. Tags are open data — drop-in rules mint their own
     ///   (`emits`, `consumes`) — so they are NOT checked against [`crate::edge_tags`].
@@ -177,23 +180,14 @@ impl EdgeKind {
             ));
         }
         if let Some(tag) = s.strip_prefix("other:") {
-            if tag.is_empty() {
-                return Err(format!(
-                    "{s:?} names no tag; write other:<tag> (e.g. other:flows_to)"
-                ));
-            }
-            return Ok(EdgeKind::Other(tag.to_string()));
+            return Self::parse_tag(tag, &format!("{s:?}"));
         }
-        let builtin = |s: &str| -> Option<EdgeKind> {
-            serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
-        };
-        if let Some(k) = builtin(s) {
+        if let Some(k) = Self::builtin_exact(s) {
             return Ok(k);
         }
-        let lower = s.to_lowercase();
-        if lower != s && builtin(&lower).is_some() {
+        if let Some(spelling) = Self::builtin_near(s) {
             return Err(format!(
-                "{s:?} is not an edge kind; did you mean {lower:?}? built-in kinds: {}",
+                "{s:?} is not an edge kind; did you mean {spelling:?}? built-in kinds: {}",
                 Self::builtin_spellings()
             ));
         }
@@ -212,10 +206,7 @@ impl EdgeKind {
             .and_then(|obj| obj.get("other"))
             .and_then(|t| t.as_str());
         if let Some(tag) = tag {
-            if tag.is_empty() {
-                return Err(format!("{v} names no tag"));
-            }
-            return Ok(EdgeKind::Other(tag.to_string()));
+            return Self::parse_tag(tag, &v.to_string());
         }
         Err(format!(
             "{v} is not an edge kind: give a string (calls, flows_to, other:flows_to) or \
@@ -224,14 +215,65 @@ impl EdgeKind {
         ))
     }
 
+    /// An explicit tag (`other:<tag>` / `{"other":tag}`); `shown` is the caller's spelling.
+    fn parse_tag(tag: &str, shown: &str) -> std::result::Result<EdgeKind, String> {
+        if tag.is_empty() {
+            return Err(format!(
+                "{shown} names no tag; write other:<tag> (e.g. other:flows_to)"
+            ));
+        }
+        if tag.starts_with("other:") {
+            return Err(format!(
+                "{shown} nests the other: prefix; write other:<tag> once"
+            ));
+        }
+        if let Some(spelling) = Self::builtin_near(tag) {
+            return Err(format!(
+                "{shown} names the built-in kind {spelling:?} as a tag, which no store writes; \
+                 write {spelling:?}"
+            ));
+        }
+        Ok(EdgeKind::Other(tag.to_string()))
+    }
+
+    /// The built-in whose stored spelling is exactly `s`.
+    fn builtin_exact(s: &str) -> Option<EdgeKind> {
+        match serde_json::from_value(serde_json::Value::String(s.to_string())) {
+            Ok(EdgeKind::Other(_)) | Err(_) => None,
+            Ok(k) => Some(k),
+        }
+    }
+
+    /// The stored spelling of the built-in that `s` spells, exactly or nearly: equal after ASCII
+    /// case folding with `_` and `-` removed (`calls`, `Calls`, `HasType`, `has-type`,
+    /// `INVOKED_BY`).
+    fn builtin_near(s: &str) -> Option<String> {
+        let norm = |x: &str| -> String {
+            x.chars()
+                .filter(|c| *c != '_' && *c != '-')
+                .map(|c| c.to_ascii_lowercase())
+                .collect()
+        };
+        let want = norm(s);
+        Self::BUILTINS
+            .iter()
+            .filter_map(Self::spelling)
+            .find(|spelling| norm(spelling) == want)
+    }
+
+    /// A built-in's stored (serde) spelling; `None` for `Other`.
+    fn spelling(k: &EdgeKind) -> Option<String> {
+        match serde_json::to_value(k) {
+            Ok(serde_json::Value::String(s)) => Some(s),
+            _ => None,
+        }
+    }
+
     /// The stored spelling of every built-in, comma-separated, for refusal messages.
     pub fn builtin_spellings() -> String {
         Self::BUILTINS
             .iter()
-            .filter_map(|k| match serde_json::to_value(k) {
-                Ok(serde_json::Value::String(s)) => Some(s),
-                _ => None,
-            })
+            .filter_map(Self::spelling)
             .collect::<Vec<_>>()
             .join(", ")
     }
@@ -341,6 +383,19 @@ mod tests {
         assert_eq!(ok(serde_json::json!("calls")), EdgeKind::Calls);
         for bad in [
             serde_json::json!("Calls"),
+            // Multi-word built-ins: case variants and separator variants are near-spellings too.
+            serde_json::json!("HasType"),
+            serde_json::json!("InvokedBy"),
+            serde_json::json!("satisfiedBy"),
+            serde_json::json!("has-type"),
+            serde_json::json!("INVOKED_BY"),
+            // A built-in named as a tag, and a nested prefix: tags no store writes.
+            serde_json::json!("other:calls"),
+            serde_json::json!("other:Calls"),
+            serde_json::json!({"other": "calls"}),
+            serde_json::json!({"other": "HasType"}),
+            serde_json::json!("other:other:flows_to"),
+            serde_json::json!({"other": "other:flows_to"}),
             serde_json::json!(""),
             serde_json::json!(42),
             serde_json::json!("other:"),
@@ -361,6 +416,13 @@ mod tests {
             err.contains("satisfied_by"),
             "refusal lists the built-ins: {err}"
         );
+        let err = EdgeKind::parse_user("HasType").unwrap_err();
+        assert!(err.contains("did you mean \"has_type\""), "{err}");
+        let err = EdgeKind::parse_user_value(&serde_json::json!({"other": "calls"})).unwrap_err();
+        assert!(err.contains("write \"calls\""), "{err}");
+        // Tags that merely CONTAIN a built-in spelling are still tags.
+        assert_eq!(ok(serde_json::json!("calls_out")), other("calls_out"));
+        assert_eq!(ok(serde_json::json!("event-emits")), other("event-emits"));
     }
 
     /// #361: every built-in round-trips through the one parser from its stored spelling — the
