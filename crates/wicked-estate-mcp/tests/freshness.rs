@@ -196,6 +196,30 @@ fn commits_are_seen_without_restart_and_the_placeholder_never_leaks() {
     mcp.finish();
 }
 
+/// #372 review: a re-index while the server runs must not leave an L1 entry from the OLD graph
+/// to be annotated against the NEW graph's digests and certified fresh (a WAL commit can leave
+/// the db file's mtime unchanged; the cache is keyed on the graph version too).
+#[test]
+fn a_reindex_under_a_running_server_never_replays_the_old_graph() {
+    let (_tmp, root) = repo("reindex");
+    let mut mcp = McpChild::spawn(&root);
+    let (c, _) = mcp.tool("SearchEntity", json!({"name": "leaf"}));
+    assert_eq!(c["resolved"], json!(true), "{c}");
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub fn renamed() {}\n\npub fn caller() {\n    renamed();\n}\n",
+    )
+    .unwrap();
+    reindex(&root);
+    let (c, _) = mcp.tool("SearchEntity", json!({"name": "leaf"}));
+    assert_eq!(
+        c["resolved"],
+        json!(false),
+        "the old graph's answer was replayed after a re-index: {c}"
+    );
+    mcp.finish();
+}
+
 #[test]
 fn drift_marks_rows_on_fresh_calls_and_on_both_cache_levels() {
     let (_tmp, root) = repo("drift");

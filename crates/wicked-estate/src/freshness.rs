@@ -41,11 +41,6 @@ use crate::{commits_behind_since, indexed_root_path, recorded_root_path, repo_sc
 /// At most this many entries in `freshness.stale_files` (the total is always reported).
 pub const STALE_FILES_CAP: usize = 20;
 
-/// Room a caller that sizes a reply to the R4 budget must leave for the `freshness` block in
-/// its compact form (counts kept, detail lists emptied) — what [`FreshnessProbe::annotate`]
-/// falls back to when the full block would not fit.
-pub const BLOCK_RESERVE: usize = 400;
-
 /// What can be said about a db's freshness, per indexed root — the commit-level half of R5.
 #[derive(Debug, Default, Clone)]
 pub struct StalenessReport {
@@ -264,6 +259,62 @@ impl Drift {
     }
 }
 
+/// What a cached digest is valid for: a file's size and mtime, plus — where the platform has
+/// them — its change time and inode. A same-size edit whose mtime was restored (a copy or sync
+/// that preserves timestamps) still moves the change time, so it is re-hashed (#372 review).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    mtime: SystemTime,
+    size: u64,
+    ctime_ns: i128,
+    inode: u64,
+}
+
+impl FileStamp {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        let (ctime_ns, inode) = {
+            use std::os::unix::fs::MetadataExt;
+            (
+                i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec()),
+                meta.ino(),
+            )
+        };
+        #[cfg(not(unix))]
+        let (ctime_ns, inode) = (0i128, 0u64);
+        Self {
+            mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            size: meta.len(),
+            ctime_ns,
+            inode,
+        }
+    }
+}
+
+/// The root a graph path belongs to: the repo whose `<label>/` prefixes it, else the single
+/// unlabelled root.
+fn owning_root<'a>(graph_path: &str, roots: &'a [Root]) -> Option<&'a Root> {
+    roots
+        .iter()
+        .find(|r| {
+            r.label
+                .as_deref()
+                .is_some_and(|l| graph_path.starts_with(&repo_scope::prefix(l)))
+        })
+        .or_else(|| roots.iter().find(|r| r.label.is_none()))
+}
+
+/// A graph path on disk: `<label>/rest` joins that repo's root, an un-prefixed path the single
+/// root — the rule [`repo_scope::resolve_indexed_path`] applies, with the roots resolved once.
+fn resolve_graph_path(graph_path: &str, roots: &[Root]) -> Option<PathBuf> {
+    let root = owning_root(graph_path, roots)?;
+    let rest = match root.label.as_deref() {
+        Some(l) => graph_path.strip_prefix(&repo_scope::prefix(l))?,
+        None => graph_path,
+    };
+    Some(root.path.join(rest))
+}
+
 /// The transport-side freshness probe. Holds its OWN store handle (the MCP handler holds only
 /// `&dyn GraphRead`, and the repo registry needs [`GraphStoreMutExt`]) and two caches.
 pub struct FreshnessProbe {
@@ -271,8 +322,8 @@ pub struct FreshnessProbe {
     store: Option<Box<dyn GraphStoreMutExt>>,
     /// root → (HEAD, graph_version, commits behind) of the last measurement.
     head_cache: HashMap<PathBuf, (String, String, Option<u64>)>,
-    /// absolute path → (mtime, size, xxh3) of the last read.
-    digest_cache: HashMap<PathBuf, (SystemTime, u64, String)>,
+    /// absolute path → (file identity at the last read, xxh3).
+    digest_cache: HashMap<PathBuf, (FileStamp, String)>,
     /// Lower-case extensions an extractor claims, built on first use.
     source_exts: Option<HashSet<String>>,
     /// root → its path inside the work tree (`git rev-parse --show-prefix`), asked once.
@@ -345,7 +396,11 @@ impl FreshnessProbe {
                 "--porcelain=v2",
                 "--branch",
                 "-z",
-                "--untracked-files=normal",
+                // `all`, not `normal`: `normal` reports a new directory as one `? dir/` entry and
+                // hides every file inside it (#372 review).
+                "--untracked-files=all",
+                // A staged rename/copy is then an added path (`1 A.`), not a `2 R` pair.
+                "--no-renames",
                 "--",
                 ".",
             ],
@@ -371,13 +426,14 @@ impl FreshnessProbe {
                 head = (oid != "(initial)").then(|| oid.to_string());
             } else if let Some(path) = rec.strip_prefix("? ") {
                 new_files.push(path.to_string());
-            } else if rec.starts_with("1 A") {
-                // `1 XY sub mH mI mW hH hI path`: X = A is staged-as-added.
+            } else if rec.starts_with("1 A") && !rec.starts_with("1 AD") {
+                // `1 XY sub mH mI mW hH hI path`: X = A is staged-as-added; Y = D means it was
+                // deleted again from the work tree, so there is no new file to count.
                 if let Some(path) = rec.splitn(9, ' ').nth(8) {
                     new_files.push(path.to_string());
                 }
             } else if rec.starts_with("2 ") {
-                // A rename carries its original path as the next record.
+                // Not produced with --no-renames; a rename carries its original path next.
                 records.next();
             }
         }
@@ -451,7 +507,11 @@ impl FreshnessProbe {
                 new_files: None,
             };
         };
-        let head = read_head(&gitdir);
+        // The file read is exact for every ordinary layout; a ref format it does not read (reftable,
+        // a multi-hop symref) falls back to git, so HEAD is never silently `null` (#372 review).
+        let head = read_head(&gitdir).or_else(|| {
+            git(root, &["rev-parse", "--verify", "HEAD"]).map(|s| s.trim().to_string())
+        });
         let key = StatusKey {
             head: head.clone(),
             index: stamp(&gitdir.join("index")),
@@ -489,10 +549,12 @@ impl FreshnessProbe {
             let mut by_root: HashMap<PathBuf, BTreeSet<PathBuf>> = HashMap::new();
             let all_roots = roots(store, &self.db);
             for f in store.indexed_files().unwrap_or_default() {
-                let Some(abs) = repo_scope::resolve_indexed_path(store, &f) else {
+                // The same resolution `drift` uses (label prefix, else the single root), so a
+                // db-relative root or a nested repo cannot leave a root's directory set empty.
+                let Some(r) = owning_root(&f, &all_roots) else {
                     continue;
                 };
-                let Some(r) = all_roots.iter().find(|r| abs.starts_with(&r.path)) else {
+                let Some(abs) = resolve_graph_path(&f, std::slice::from_ref(r)) else {
                     continue;
                 };
                 let set = by_root.entry(r.path.clone()).or_default();
@@ -550,20 +612,7 @@ impl FreshnessProbe {
             Ok(None) => return Drift::NotFileBacked,
             Err(_) => return Drift::Unknown,
         };
-        let by_label = roots.iter().find_map(|r| {
-            let label = r.label.as_deref()?;
-            graph_path
-                .strip_prefix(&repo_scope::prefix(label))
-                .map(|rest| r.path.join(rest))
-        });
-        let single = || {
-            roots
-                .iter()
-                .find(|r| r.label.is_none())
-                .map(|r| r.path.join(graph_path))
-        };
-        let Some(abs) = by_label
-            .or_else(single)
+        let Some(abs) = resolve_graph_path(graph_path, roots)
             .or_else(|| repo_scope::resolve_indexed_path(store, graph_path))
         else {
             return Drift::Unknown;
@@ -578,17 +627,13 @@ impl FreshnessProbe {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Drift::Deleted,
             Err(_) => return Drift::Unknown,
         };
-        let (mtime, size) = (
-            meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-            meta.len(),
-        );
+        let stamp = FileStamp::of(&meta);
         let digest = match self.digest_cache.get(&abs) {
-            Some((m, s, d)) if *m == mtime && *s == size => d.clone(),
+            Some((st, d)) if *st == stamp => d.clone(),
             _ => match std::fs::read(&abs) {
                 Ok(bytes) => {
                     let d = crate::file_digest(&bytes);
-                    self.digest_cache
-                        .insert(abs.clone(), (mtime, size, d.clone()));
+                    self.digest_cache.insert(abs.clone(), (stamp, d.clone()));
                     d
                 }
                 Err(_) => return Drift::Unknown,
@@ -626,8 +671,10 @@ impl FreshnessProbe {
         let mut count = 0usize;
         let mut asked = false;
         for (root, status) in statuses {
+            // One root that could not be asked makes the whole count unknown: a partial count
+            // presented as complete is the R3 failure (#372 review).
             let Some(files) = &status.new_files else {
-                continue;
+                return None;
             };
             asked = true;
             for rel in files {
@@ -637,9 +684,14 @@ impl FreshnessProbe {
                 if !ext.is_some_and(|e| exts.contains(&e) || crate::is_grammarless_ext(&e)) {
                     continue;
                 }
+                if !root.path.join(rel).is_file() {
+                    continue; // listed by a cached status, gone since
+                }
                 let graph_path = repo_scope::namespaced(root.label.as_deref(), rel);
-                if matches!(store.file_digest(&graph_path), Ok(None)) {
-                    count += 1;
+                match store.file_digest(&graph_path) {
+                    Ok(None) => count += 1,
+                    Ok(Some(_)) => {}
+                    Err(_) => return None,
                 }
             }
         }
@@ -652,12 +704,19 @@ impl FreshnessProbe {
         let store = self.store.as_deref()?;
         let files = store.indexed_files().ok()?;
         let roots = roots(store, &self.db);
-        Some(
-            files
-                .iter()
-                .filter(|f| matches!(self.drift(f, &roots), Drift::Modified | Drift::Deleted))
-                .count(),
-        )
+        if roots.is_empty() && !files.is_empty() {
+            return None;
+        }
+        let mut dirty = 0usize;
+        for f in &files {
+            match self.drift(f, &roots) {
+                Drift::Modified | Drift::Deleted => dirty += 1,
+                // An unreadable file is not a clean one: the count is unknown (#372 review).
+                Drift::Unknown => return None,
+                Drift::Fresh | Drift::NotFileBacked => {}
+            }
+        }
+        Some(dirty)
     }
 
     /// Annotate one retrieval response in place: replace the retrieval layer's placeholder with
@@ -766,9 +825,11 @@ impl FreshnessProbe {
                 b.insert("stale_files".to_string(), json!([]));
                 b.insert("roots".to_string(), json!([]));
             }
+            // One line for both cuts — the marks line pointed at the list just emptied.
+            diags.retain(|d| !d.starts_with("STALENESS: row marks omitted"));
             diags.push(
-                "STALENESS: freshness detail lists omitted to stay within the R4 budget; the \
-                 counts above are complete"
+                "STALENESS: row marks and freshness detail lists omitted to stay within the R4 \
+                 budget; the freshness counts are complete"
                     .to_string(),
             );
         }
@@ -787,6 +848,18 @@ fn collect_files(v: &Value, out: &mut BTreeSet<String>) {
                 match (k.as_str(), child) {
                     ("file", Value::String(f)) if !f.is_empty() => {
                         out.insert(f.clone());
+                    }
+                    // Path lists: `files`, `dominant_files`, … — `Communities` names its files
+                    // this way, not under `file` (#372 review).
+                    (key, Value::Array(items)) if key == "files" || key.ends_with("_files") => {
+                        for item in items {
+                            match item {
+                                Value::String(f) if !f.is_empty() => {
+                                    out.insert(f.clone());
+                                }
+                                other => collect_files(other, out),
+                            }
+                        }
                     }
                     _ => collect_files(child, out),
                 }
@@ -836,6 +909,49 @@ mod tests {
         assert_eq!(
             out.into_iter().collect::<Vec<_>>(),
             vec!["a.rs", "b.rs", "c.rs"]
+        );
+    }
+
+    #[test]
+    fn collect_files_reads_path_lists_too() {
+        let v = json!({
+            "communities": [{"dominant_files": ["src/a.rs", "src/b.rs"], "files": ["c.rs"]}],
+            "summary": {"top_files": [{"file": "d.rs", "members": 3}]},
+        });
+        let mut out = BTreeSet::new();
+        collect_files(&v, &mut out);
+        assert_eq!(
+            out.into_iter().collect::<Vec<_>>(),
+            vec!["c.rs", "d.rs", "src/a.rs", "src/b.rs"]
+        );
+    }
+
+    #[test]
+    fn graph_paths_resolve_by_label_then_the_single_root() {
+        let root = |label: Option<&str>, p: &str| Root {
+            label: label.map(str::to_string),
+            path: PathBuf::from(p),
+            recorded: p.to_string(),
+            indexed: None,
+        };
+        let multi = [
+            root(Some("ledger"), "/r/ledger"),
+            root(Some("led"), "/r/led"),
+        ];
+        assert_eq!(
+            resolve_graph_path("ledger/src/x.rs", &multi),
+            Some(PathBuf::from("/r/ledger/src/x.rs"))
+        );
+        assert_eq!(
+            resolve_graph_path("led/y.rs", &multi),
+            Some(PathBuf::from("/r/led/y.rs")),
+            "a label that prefixes another label's name is matched with its slash"
+        );
+        assert_eq!(resolve_graph_path("other/z.rs", &multi), None);
+        let single = [root(None, "/r/one")];
+        assert_eq!(
+            resolve_graph_path("src/x.rs", &single),
+            Some(PathBuf::from("/r/one/src/x.rs"))
         );
     }
 
@@ -924,6 +1040,47 @@ mod tests {
             "{}",
             content["freshness"]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #372 review: a same-size edit whose mtime is restored (a timestamp-preserving copy) is
+    /// still seen by a long-lived probe — the cached digest is keyed on change time and inode.
+    #[cfg(unix)]
+    #[test]
+    fn a_same_size_edit_with_its_mtime_restored_is_still_modified() {
+        let dir = std::env::temp_dir().join(format!("wicked-estate-ctime-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.rs");
+        std::fs::write(&file, "fn leaf() {}\n").unwrap();
+        let mut store = wicked_estate_store::SqliteStore::in_memory().unwrap();
+        store.meta_set_key("indexed_root", &dir.to_string_lossy());
+        wicked_estate_core::GraphWrite::set_file_digest(
+            &mut store,
+            "a.rs",
+            &crate::file_digest(b"fn leaf() {}\n"),
+        )
+        .unwrap();
+        let mut probe = FreshnessProbe::with_store(":memory:", Some(Box::new(store)));
+        let check = |probe: &mut FreshnessProbe| {
+            let mut content = json!({"rows": [{"file": "a.rs"}]});
+            probe.annotate(&mut content, &mut vec![]);
+            content["rows"][0]["stale"].clone()
+        };
+        assert_eq!(
+            check(&mut probe),
+            Value::Null,
+            "fresh, and the digest is now cached"
+        );
+        let mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+        std::fs::write(&file, "fn xxxx() {}\n").unwrap(); // same size
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        assert_eq!(check(&mut probe), json!("modified"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

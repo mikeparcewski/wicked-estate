@@ -20,12 +20,21 @@ measured now; drift of every file the answer touches; and new, never-indexed sou
 
 ## Result
 
-| Build / host | p50 | p95 | max |
-|---|---|---|---|
-| unoptimized test build, macOS arm64, host load ~25 | 0.62 ms | 0.67 ms | 0.72 ms |
+Five runs of the same unoptimized test build on one macOS arm64 host, shared with other
+builds (1-minute load average in the first column):
 
-The target in #351 is p95 ≤ 10 ms warm. The test keeps a 5× tripwire (50 ms), because the result
-depends on the host far more than on this code.
+| Host load | p50 | p95 | max |
+|---|---|---|---|
+| ~25 | 0.62 ms | 0.67 ms | 0.72 ms |
+| ~35 | 0.85 ms | 10.51 ms | 35.68 ms |
+| ~32 | 2.48 ms | 7.28 ms | 45.92 ms |
+| ~31 | 2.08 ms | 8.91 ms | 16.40 ms |
+| ~31 | 2.09 ms | 8.39 ms | 66.96 ms |
+
+The target in #351 is p95 ≤ 10 ms warm. Four runs meet it, and one is 0.5 ms over at the host's
+busiest. The spread follows host contention, not the code. A warm call spawns no process (one
+spawn costs >20 ms on this host), and the outliers are scheduling stalls. The test keeps a 5×
+tripwire (50 ms) for that reason. A release build, or an idle host, sits at the low end.
 
 ## Why the design is spawn-free in the steady state
 

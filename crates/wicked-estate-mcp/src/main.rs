@@ -398,6 +398,8 @@ async fn main() -> Result<()> {
     // knowledge.* responses must never enter them: a memory.capture / knowledge.ingest bumps
     // nothing the cache watches, and a cached recall would be served stale indefinitely.
     let mut request_cache: HashMap<String, serde_json::Value> = HashMap::new();
+    // The graph version the L1 entries were answered at.
+    let mut cache_graph_version: Option<String> = None;
     let mut cache_db_mtime: Option<std::time::SystemTime> = if db_path != ":memory:" {
         std::fs::metadata(&db_path)
             .ok()
@@ -446,6 +448,15 @@ async fn main() -> Result<()> {
                     *baseline = current;
                 }
             }
+        }
+        // ...and whenever the graph version moved (#351 review): a re-index committed through the
+        // WAL can leave the main file's mtime unchanged, and an L1 hit would then be annotated
+        // against the NEW graph's digests and certified fresh. L2 already keys on the version.
+        let version_now =
+            wicked_estate_store::GraphStoreMutExt::meta_get_key(&sync_store, "graph_version");
+        if version_now != cache_graph_version {
+            request_cache.clear();
+            cache_graph_version = version_now;
         }
 
         // Build a cache key for tools/call requests — graph-domain read tools only (#102).

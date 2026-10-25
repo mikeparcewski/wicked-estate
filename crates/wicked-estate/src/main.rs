@@ -1375,23 +1375,32 @@ fn main() -> Result<()> {
             let dropped = deps.len() - kept;
             let next_cursor =
                 (dropped > 0).then(|| wicked_estate_retrieve::paging::encode(&[from + kept], fp));
+            // The machine document, and (#351) the same per-answer freshness MCP states — built
+            // ONCE, before the output branches, so every path (a miss, an empty answer, rows)
+            // states it: a `freshness` block and `stale` rows in JSON, the drift lines in text.
+            let mut out = blast_radius_json(name, &deps[..kept], dropped, unresolved, &br, depth);
+            out["next_cursor"] = serde_json::json!(next_cursor);
+            out["page"] = serde_json::json!({ "from": from, "count": kept, "total": total });
+            out["resolved"] = serde_json::json!(miss.is_none());
+            if let Some((found, truncated)) = &miss {
+                wicked_estate_retrieve::suggest::mark_miss(&mut out, name, found, *truncated);
+            }
+            let mut fresh = Vec::new();
+            wicked_estate::freshness::FreshnessProbe::open(&db).annotate(&mut out, &mut fresh);
+            // Text mode printed the commit-level lines up front; these are this answer's own.
+            let answer_lines = || {
+                fresh.iter().filter(|d| {
+                    d.contains("differ from the index")
+                        || d.contains("not in the graph")
+                        || d.contains("drift unknown")
+                })
+            };
             if json_out {
                 // Machine consumers (wicked-crew studio) get the same honesty contract as the
                 // text path: dependents PLUS the unresolved count — absence of dependents must
-                // never silently read as "safe to change".
-                let mut out =
-                    blast_radius_json(name, &deps[..kept], dropped, unresolved, &br, depth);
-                out["next_cursor"] = serde_json::json!(next_cursor);
-                out["page"] = serde_json::json!({ "from": from, "count": kept, "total": total });
-                out["resolved"] = serde_json::json!(miss.is_none());
-                if let Some((found, truncated)) = &miss {
-                    wicked_estate_retrieve::suggest::mark_miss(&mut out, name, found, *truncated);
-                }
-                // (#351) The same per-answer freshness MCP states: a `freshness` block, `stale`
-                // rows; the `STALENESS:` lines go to stderr (stdout is one document).
-                let mut diags = Vec::new();
-                wicked_estate::freshness::FreshnessProbe::open(&db).annotate(&mut out, &mut diags);
-                for d in &diags {
+                // never silently read as "safe to change". STALENESS lines go to stderr (stdout
+                // is one document).
+                for d in &fresh {
                     eprintln!("{d}");
                 }
                 print_line(&serde_json::to_string(&out).map_err(|e| anyhow::anyhow!(e))?)?;
@@ -1399,28 +1408,24 @@ fn main() -> Result<()> {
                 for line in wicked_estate_retrieve::suggest::miss_text(name, found) {
                     print_line(&line)?;
                 }
+                for d in answer_lines() {
+                    print_line(d)?;
+                }
             } else if deps.is_empty() {
                 print_line(&format!("no resolved dependents for '{name}'"))?;
+                for d in answer_lines() {
+                    print_line(d)?;
+                }
             } else {
-                // (#351) Rows whose file drifted from the index say so; the drift lines follow.
-                let mut doc =
-                    blast_radius_json(name, &deps[..kept], dropped, unresolved, &br, depth);
-                let mut diags = Vec::new();
-                wicked_estate::freshness::FreshnessProbe::open(&db).annotate(&mut doc, &mut diags);
                 print_line(&format!("{total} symbol(s) depend on '{name}':"))?;
                 for (i, n) in deps.iter().take(kept).enumerate() {
-                    let stale = doc["dependents"][i]["stale"]
+                    let stale = out["dependents"][i]["stale"]
                         .as_str()
                         .map(|m| format!("  [stale: {m}]"))
                         .unwrap_or_default();
                     print_line(&format!("  {:?} {} ({}){stale}", n.kind, n.name, loc(n)))?;
                 }
-                // The commit-level lines were printed up front; these are this answer's.
-                for d in diags.iter().filter(|d| {
-                    d.contains("differ from the index")
-                        || d.contains("not in the graph")
-                        || d.contains("drift unknown")
-                }) {
+                for d in answer_lines() {
                     print_line(d)?;
                 }
                 if let Some(next) = &next_cursor {
@@ -4213,7 +4218,7 @@ fn cap_blast_radius_rows(
     // #279: the paging keys (`next_cursor`, `page`) ride every page; reserve their room. #351:
     // so does the `freshness` block the transport adds after this cap.
     let row_budget = (BLAST_RADIUS_CHAR_BUDGET + 2).saturating_sub(
-        envelope_len + BLAST_RADIUS_PAGING_RESERVE + wicked_estate::freshness::BLOCK_RESERVE,
+        envelope_len + BLAST_RADIUS_PAGING_RESERVE + wicked_estate_retrieve::TRANSPORT_RESERVE,
     );
     let fits = |k: usize| -> bool {
         let rows: Vec<serde_json::Value> =

@@ -195,7 +195,22 @@ fn stats_json_counts_dirty_and_unindexed_files() {
     fs::write(s.join("src/lib.rs"), format!("{LIB}// edited\n")).unwrap();
     fs::write(s.join("src/new.py"), "def f():\n    pass\n").unwrap();
     fs::write(s.join("notes.txt"), "not source\n").unwrap();
+    // A source file inside a NEW directory counts too (git reports `? newmod/` unless asked
+    // for every untracked file — #372 review).
+    fs::create_dir_all(s.join("newmod")).unwrap();
+    fs::write(s.join("newmod/caller.rs"), "pub fn c() { }\n").unwrap();
     let (doc, _) = json_out(&s, &["stats", "--json", "--db", "graph.db"]);
     assert_eq!(doc["staleness"]["dirty_indexed_files"], json!(1), "{doc}");
-    assert_eq!(doc["staleness"]["unindexed_files"], json!(1), "{doc}");
+    assert_eq!(doc["staleness"]["unindexed_files"], json!(2), "{doc}");
+    // Every text path states this answer's freshness — a name miss included (#372 review).
+    let out = run(
+        &s,
+        &["blast-radius", "no_such_symbol_xyz", "--db", "graph.db"],
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("no symbol named"), "{text}");
+    assert!(
+        text.contains("2 new source file(s) not in the graph"),
+        "{text}"
+    );
 }
