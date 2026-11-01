@@ -53,7 +53,7 @@ function Section({ id, solid = false, hero = false, children }: { id?: string; s
 function Head({ title, sub }: { title: React.ReactNode; sub?: React.ReactNode }) {
   return (
     <div className="mb-7 w-full text-left">
-      <h2 className="font-display text-3xl sm:text-[2.5rem] font-black text-ink leading-[0.98]">{title}</h2>
+      <h2 className="font-display text-3xl font-semibold tracking-[var(--tracking-title)] text-ink leading-[1.1]">{title}</h2>
       {sub && <p className="mt-3 text-base sm:text-lg text-muted font-sans max-w-3xl leading-snug">{sub}</p>}
     </div>
   )
@@ -245,7 +245,7 @@ function Hero() {
     <Section hero>
       <div className="hero-head text-left">
         <span className="kicker">wicked-estate · v{__WICKED_ESTATE_VERSION__}</span>
-        <h1 className="mt-3 font-display font-black text-ink leading-[0.95] text-[clamp(2rem,3.7vw,3rem)]" style={{ fontStretch: '112%' }}>
+        <h1 className="mt-3 font-display font-semibold text-ink leading-[1.05] text-[length:var(--text-display)] tracking-[var(--tracking-title)]">
           {HEADLINE}
         </h1>
         <p className="mt-2.5 text-base sm:text-lg text-muted font-sans max-w-3xl leading-snug">{SUBLINE}</p>
@@ -270,7 +270,7 @@ function Stores() {
         {STORES.map(s => (
           <div key={s.name} className="rock-panel p-5 flex flex-col gap-3">
             <div className="flex items-baseline justify-between gap-2">
-              <h3 className="font-display text-xl font-black text-ink">{s.name}</h3>
+              <h3 className="font-display text-xl font-semibold text-ink">{s.name}</h3>
               <span className="tag tag-accent">{s.kind}</span>
             </div>
             <p className="text-ink font-sans leading-snug">{s.holds}</p>
