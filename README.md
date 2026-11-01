@@ -41,7 +41,7 @@ default; no servers, no accounts, nothing leaves your machine.
 | Layer | Product | What it does | Stack |
 |---|---|---|---|
 | **Surface** | [`wicked-studio`](https://github.com/mikeparcewski/wicked-studio) | Where you direct your coding agents: start a job with a chat, watch sandboxed agents work, approve what matters with the evidence. | TS |
-| **Control plane** | [`wicked-crew`](https://github.com/mikeparcewski/wicked-crew) (engine: [`wicked-core`](https://github.com/mikeparcewski/wicked-core)) | Runs the jobs: agents in sandboxes, a different agent reviews the work, app changes pass acceptance testing before delivery (a waiver or skip is labelled). | npm · Rust |
+| **Control plane** | [`wicked-crew`](https://github.com/mikeparcewski/wicked-crew) (engine: [`wicked-core`](https://github.com/mikeparcewski/wicked-core)) | Runs the jobs: agents in sandboxes, a different agent reviews the work (unless you launch it as "reduced assurance", which is labelled), and feature, bug-fix, migration, MCP-server and editor-plugin jobs pass acceptance testing before delivery unless a labelled waiver or skip says otherwise. | npm · Rust |
 | **Catalog** | [`wicked-garden`](https://github.com/mikeparcewski/wicked-garden) | The skills your coding agent can't build alone — evidence-gated "done", graph-aware refactor, 40 QE specialists, review panels from other models. | JS/TS |
 | **Record** | **`wicked-estate`** (this repo) | What your agents know about your system — code graph, memory and knowledge with provenance. | Rust · crates.io |
 | Record | [`wicked-interactive`](https://github.com/mikeparcewski/wicked-interactive) | The document engine behind studio's docs, decks and captioned demo recordings. | TS |
