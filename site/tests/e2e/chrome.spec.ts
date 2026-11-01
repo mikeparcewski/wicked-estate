@@ -6,24 +6,26 @@ import { test, expect } from '@playwright/test';
 test('theme toggle flips data-theme on <html> and persists via localStorage', async ({ page }) => {
   await page.goto('/');
   const html = page.locator('html');
-  await expect(html).toHaveAttribute('data-theme', 'light'); // default
+  await expect(html).toHaveAttribute('data-theme', 'dark'); // default: Wicked Dark
+  // loading a page persists nothing: only a click writes the choice
+  expect(await page.evaluate(() => localStorage.getItem('wa-theme-v3'))).toBeNull();
 
-  await page.locator('#themeBtn').click();
-  await expect(html).toHaveAttribute('data-theme', 'dark');
-  await expect
-    .poll(() => page.evaluate(() => localStorage.getItem('wa-theme')))
-    .toBe('dark');
-
-  // persists across reload (no-flash init in Base.astro reads wa-theme)
-  await page.reload();
-  await expect(html).toHaveAttribute('data-theme', 'dark');
-
-  // and toggles back
   await page.locator('#themeBtn').click();
   await expect(html).toHaveAttribute('data-theme', 'light');
   await expect
-    .poll(() => page.evaluate(() => localStorage.getItem('wa-theme')))
+    .poll(() => page.evaluate(() => localStorage.getItem('wa-theme-v3')))
     .toBe('light');
+
+  // persists across reload (no-flash init in Base.astro reads wa-theme-v3)
+  await page.reload();
+  await expect(html).toHaveAttribute('data-theme', 'light');
+
+  // and toggles back
+  await page.locator('#themeBtn').click();
+  await expect(html).toHaveAttribute('data-theme', 'dark');
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem('wa-theme-v3')))
+    .toBe('dark');
 });
 
 test('ecosystem dropdown opens on click and closes on Escape', async ({ page }) => {
