@@ -117,7 +117,8 @@ cargo install wicked-estate-mcp                  # MCP server (separate binary)
 A `v*` tag also produces prebuilt binaries (wicked-estate#360). `publish.yml` calls
 `.github/workflows/binaries.yml` in parallel with the crates.io publish:
 
-- **Five targets.** `aarch64-apple-darwin` (macos-latest, arm64), `x86_64-apple-darwin` (macos-15-intel),
+- **Five targets.** `aarch64-apple-darwin` (macos-latest, arm64; `MACOSX_DEPLOYMENT_TARGET=11.0`, so the C code and
+  the binary both target macOS 11 whatever SDK the image ships), `x86_64-apple-darwin` (macos-15-intel),
   `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` (built inside `manylinux_2_28`, so
   the glibc floor is 2.28), and `x86_64-pc-windows-msvc` (static CRT, checked with
   `dumpbin /dependents`).
