@@ -51,7 +51,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          # arm64. The check is named after the label, so `-latest` keeps the required check
+          # `gate-os (macos-latest)` stable across image moves (macos-14 was retired, #379).
+          - os: macos-latest
             py: python3
             target: aarch64-apple-darwin
             release_rustflags: ''
