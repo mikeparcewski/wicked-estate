@@ -42,8 +42,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macos-latest is the arm64 image (macOS 26 as of 2026-11; macos-14 was retired on
+          # 2026-11-02, #379). The target triple, and so the archive name, does not change with it.
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-latest
             py: python3
           # The remaining x86_64 macOS image; when it is retired this leg moves to
           # `--target x86_64-apple-darwin` on arm64, smoke-tested under Rosetta.
