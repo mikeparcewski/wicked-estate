@@ -42,9 +42,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macos-latest is the arm64 image (macOS 26 as of 2026-11; macos-14 was retired on
+          # 2026-11-02, #379). The target triple, and so the archive name, does not change with it.
+          # macos_min pins the minimum macOS for the C code too (SQLite, the grammars): with
+          # MACOSX_DEPLOYMENT_TARGET unset, `cc` compiles C for the image's own SDK version (14.5 on
+          # macos-14, 26.x on macos-latest), so the floor would follow the runner. 11.0 is what
+          # rustc already stamps on the binary for this target.
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-latest
             py: python3
+            macos_min: '11.0'
           # The remaining x86_64 macOS image; when it is retired this leg moves to
           # `--target x86_64-apple-darwin` on arm64, smoke-tested under Rosetta.
           - target: x86_64-apple-darwin
@@ -93,6 +100,12 @@ jobs:
           v=$(printf '%s' "$v" | tr -d '\r')
           v=${v#v}
           echo "version=$v" >> "$GITHUB_OUTPUT"
+      # Via GITHUB_ENV, not a step `env:` entry: an empty MACOSX_DEPLOYMENT_TARGET on the other
+      # legs would reach `cc` as `-mmacosx-version-min=` on x86_64-apple-darwin.
+      - name: minimum macOS for Rust and C alike
+        if: matrix.macos_min
+        shell: bash
+        run: echo "MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos_min }}" >> "$GITHUB_ENV"
       - name: build release binaries
         shell: bash
         env:
