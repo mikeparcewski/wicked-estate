@@ -13,8 +13,9 @@ actually use: **blast-radius of change**, **requirements↔implementation**, **i
 relationships**, and **operational history**, across 114 languages. **Memory** is what happened and
 what you told it; **knowledge** is what it learned from your code and docs; the two stay separate
 and cited. Every edge carries `{confidence, provenance, resolved_by}`; a heuristic is never handed
-to an agent as a fact. **Portable by design** — one static binary, local-first on SQLite, or a
-shared concurrent team backend on Postgres.
+to an agent as a fact. **Portable by design** — a local CLI and MCP server using SQLite. An
+optional CLI build supports a shared PostgreSQL code graph; the MCP server, memory and knowledge
+stay on SQLite.
 
 <!-- historical -->
 > [`wicked-brain`](https://github.com/mikeparcewski/wicked-brain) (retired 2026-08) migrated its
@@ -34,15 +35,19 @@ shared concurrent team backend on Postgres.
 ## Where it sits in the platform
 
 *Your coding agents do the work. A different agent checks it against your rules. You get the
-evidence.* The wicked platform is four layers — one surface, one control plane, one catalog, one
+evidence.* By default a different agent reviews the work. When none can, the job stops unless you
+launch it as "reduced assurance", which is labelled on the job, every gate and the delivery. A
+saved workflow may require fewer checks; its requirements are listed in the receipts.
+
+The wicked platform is four layers — one surface, one control plane, one catalog, one
 record — and estate is **the record** the others read before they act and write after. SQLite by
 default; no servers, no accounts, nothing leaves your machine.
 
 | Layer | Product | What it does | Stack |
 |---|---|---|---|
-| **Surface** | [`wicked-studio`](https://github.com/mikeparcewski/wicked-studio) | Where you direct your coding agents: start a job with a chat, watch sandboxed agents work, approve what matters with the evidence. | TS |
+| **Surface** | [`wicked-studio`](https://github.com/mikeparcewski/wicked-studio) | The IDE for running a team of coding agents: start a job with a chat, watch sandboxed agents work, approve what matters with the evidence. | TS |
 | **Control plane** | [`wicked-crew`](https://github.com/mikeparcewski/wicked-crew) (engine: [`wicked-core`](https://github.com/mikeparcewski/wicked-core)) | Runs the jobs: agents in sandboxes, by default a different agent reviews the work (a workflow's own contract or a labelled "reduced assurance" launch can relax that), and feature, bug-fix, migration, MCP-server and editor-plugin jobs pass acceptance testing before delivery unless a labelled waiver or skip says otherwise. | npm · Rust |
-| **Catalog** | [`wicked-garden`](https://github.com/mikeparcewski/wicked-garden) | The skills your coding agent can't build alone — evidence-gated "done", graph-aware refactor, 40 QE specialists, review panels from other models. | JS/TS |
+| **Catalog** | [`wicked-garden`](https://github.com/mikeparcewski/wicked-garden) | The skills your coding agent can't build alone — evidence-gated "done", graph-aware refactor, 40 QE specialists, review panels of your other agents (a same-family fallback is labelled). | JS/TS |
 | **Record** | **`wicked-estate`** (this repo) | What your agents know about your system — code graph, memory and knowledge with provenance. | Rust · crates.io |
 | Record | [`wicked-interactive`](https://github.com/mikeparcewski/wicked-interactive) | The document engine behind studio's docs, decks and captioned demo recordings. | JS |
 | Infra | [`wicked-bus`](https://github.com/mikeparcewski/wicked-bus) | The durable local event bus beneath it all — at-least-once, replayable. | JS/ESM · npm |
@@ -202,7 +207,9 @@ wicked-estate watch ./my-project --db graph.db
   file, zero setup, perfect for a laptop or a CI job); point `--db` at **Postgres**
   (`--features postgres`, `--db postgres://…`) for a shared team graph with concurrent writers and
   server-side traversal. No re-index, no query changes — storage is a backend, not a rewrite. The DB
-  layer is swappable (the same seam SurrealDB will land behind).
+  layer is swappable (the same seam SurrealDB will land behind). Team mode is the CLI's code graph
+  only: the MCP server refuses it at startup, and memory and knowledge stay on local SQLite
+  ([`docs/team-runtime.md`](docs/team-runtime.md)).
 
 ## Architecture
 
