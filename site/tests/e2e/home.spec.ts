@@ -120,17 +120,21 @@ test.describe('the wheel pages scene by scene under the snap lock', () => {
 
   test('another way of moving drops a glide\'s target', async ({ page }) => {
     const t = await tops(page);
-    // keys jump at once here, so the whole exchange sits inside one glide's window
-    await page.addStyleTag({ content: 'html{scroll-behavior:auto!important}' });
-    const end = await page.evaluate(() => document.documentElement.scrollHeight - innerHeight);
-    await page.mouse.wheel(0, 100);
-    await page.waitForTimeout(60);
-    // the keyboard takes the page on (End), then the wheel goes back up: from where the page is, not from the
-    // glide's old target (that would land on the hero)
-    await page.keyboard.press('End');
-    await expect.poll(y(page)).toBe(end);
-    await page.mouse.wheel(0, -100);
-    await expect.poll(y(page)).toBeGreaterThan(t.tools);
+    // one browser-side sequence, all inside one glide's window: a notch starts a glide to the stores, the
+    // keyboard takes over and the page jumps to its end, then a notch goes back up. It must start from where
+    // the page is, not from the old glide target (which would ask for the hero)
+    const asked = await page.evaluate(() => {
+      const w = window as unknown as { __to: number[] };
+      const wheel = (dy: number) => window.dispatchEvent(new WheelEvent('wheel', { deltaY: dy, deltaMode: 0, cancelable: true }));
+      wheel(100);
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'End' }));
+      // the End key's own jump (an instant scroll; a scrollTop write would not cut into the running glide)
+      window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+      wheel(-100);
+      return w.__to.slice();
+    });
+    expect(asked[0]).toBe(t.stores);
+    expect(asked.at(-1), 'the notch went back from the old glide target').toBeGreaterThan(t.tools);
   });
 
   test('a small pixel step moves a scene; a dense stream (a swipe and its momentum) moves only one', async ({ page }) => {
