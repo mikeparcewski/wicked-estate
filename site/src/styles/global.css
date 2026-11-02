@@ -31,8 +31,8 @@
    Estate is the Foundation plane of the four-plane platform story. Under the
    Wicked Dark / Light look (2026-11-01) the accent stays the family's monochrome
    one (what you press); the foundation hue (--plane-foundation, per theme from the
-   design package) marks the section kickers, as crew's control hue does. */
-.kicker { color: color-mix(in oklab, var(--plane-foundation) 80%, var(--ink)); }
+   design package) marks the section kickers (.kicker, in @layer components below), as crew's control
+   hue does. */
 
 @theme inline {
   --color-canvas: var(--canvas);
@@ -154,7 +154,7 @@
     font-size: var(--text-caption);
     
     
-    color: var(--muted);
+    color: color-mix(in oklab, var(--plane-foundation) 80%, var(--ink));
     font-weight: var(--weight-strong);
     display: inline-block;
   }

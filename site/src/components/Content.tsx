@@ -500,7 +500,7 @@ function Storage() {
         <button className="seg" data-on={shared} onClick={() => setShared(true)}>PostgreSQL · team</button>
       </div>
       <div className="rock-panel p-0 max-w-3xl">
-        <div className="px-5 py-3 border-b border-hairline-strong font-mono text-sm text-ink" data-storage-cmd>
+        <div className="px-5 py-3 border-b border-hairline-strong font-mono text-[length:var(--text-code)] text-ink" data-storage-cmd>
           {shared ? 'WICKED_RUNTIME=team wicked-estate index .' : 'wicked-estate index . --db graph.db'}
         </div>
         <table className="store-t">
@@ -572,7 +572,7 @@ export function GetStarted() {
           </div>
           <div className="px-5 py-5">
             <div className="flex items-center gap-3">
-              <div className="font-mono text-sm text-ink flex-1 min-w-0"><span style={{ color: 'var(--accent)' }}>$ </span>{INSTALL_CMD}</div>
+              <div className="font-mono text-[length:var(--text-code)] text-ink flex-1 min-w-0"><span style={{ color: 'var(--accent)' }}>$ </span>{INSTALL_CMD}</div>
               <CopyBtn text={INSTALL_CMD} label={INSTALL_CMD} />
             </div>
             <p className="mt-3 text-sm text-muted font-sans leading-snug">Pick estate and any siblings, choose your agent CLIs, and it wires them up.</p>
@@ -583,7 +583,7 @@ export function GetStarted() {
             <span className="text-sm font-sans text-ink">Or just estate</span>
             <span className="depth">crates.io</span>
           </div>
-          <div className="px-5 py-5 font-mono text-xs leading-[1.9]">
+          <div className="px-5 py-5 font-mono text-[length:var(--text-code)] leading-[1.9]">
             {DIRECT_CMDS.map(c => (
               <div key={c.cmd} className="mb-2 last:mb-0">
                 <div className="text-faint">{c.comment}</div>
