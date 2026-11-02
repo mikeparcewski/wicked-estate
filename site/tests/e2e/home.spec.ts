@@ -67,24 +67,54 @@ for (const vp of [{ width: 1440, height: 700 }, { width: 1280, height: 660 }, { 
   });
 }
 
-test('one mouse-wheel notch moves one scene, both ways', async ({ page }) => {
-  // under mandatory snap, Chromium pulls a 100px wheel step back to the scene it left, so without the
-  // stepper (scenes.ts) a notched mouse could never leave the hero
-  await page.setViewportSize({ width: 1440, height: 700 });
-  await page.goto('/');
-  await expect(page.locator('html')).toHaveClass(/snap-lock/);
-  const sceneTop = (id: string) => page.locator(id).evaluate((el) => Math.round(el.getBoundingClientRect().top + scrollY - 64));
-  const stores = await sceneTop('#stores');
-  const prov = await sceneTop('#provenance');
-  await page.mouse.move(700, 400);
-  await page.mouse.wheel(0, 100);
-  await expect.poll(() => page.evaluate(() => Math.round(scrollY))).toBe(stores);
-  await page.waitForTimeout(650);
-  await page.mouse.wheel(0, 100);
-  await expect.poll(() => page.evaluate(() => Math.round(scrollY))).toBe(prov);
-  await page.waitForTimeout(650);
-  await page.mouse.wheel(0, -100);
-  await expect.poll(() => page.evaluate(() => Math.round(scrollY))).toBe(stores);
+test.describe('the wheel pages scene by scene under the snap lock', () => {
+  // under mandatory snap, Chromium pulls a small wheel step back to the scene it left, so without the
+  // stepper (scenes.ts) a mouse could never leave the hero
+  const tops = async (page: import('@playwright/test').Page) => {
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    await expect(page.locator('html')).toHaveClass(/snap-lock/);
+    await page.mouse.move(700, 400);
+    const top = (id: string) => page.locator(id).evaluate((el) => Math.round(el.getBoundingClientRect().top + scrollY - 64));
+    return { stores: await top('#stores'), prov: await top('#provenance'), tools: await top('#toolface') };
+  };
+  const y = (page: import('@playwright/test').Page) => () => page.evaluate(() => Math.round(scrollY));
+
+  test('one notch moves one scene, both ways', async ({ page }) => {
+    const t = await tops(page);
+    await page.mouse.wheel(0, 100);
+    await expect.poll(y(page)).toBe(t.stores);
+    await page.waitForTimeout(800);
+    await page.mouse.wheel(0, 100);
+    await expect.poll(y(page)).toBe(t.prov);
+    await page.waitForTimeout(800);
+    await page.mouse.wheel(0, -100);
+    await expect.poll(y(page)).toBe(t.stores);
+  });
+
+  test('notches during a glide still count, and a reversal comes back', async ({ page }) => {
+    const t = await tops(page);
+    await page.mouse.wheel(0, 100);
+    await page.waitForTimeout(200);
+    await page.mouse.wheel(0, 100);
+    await expect.poll(y(page)).toBe(t.prov);
+    await page.waitForTimeout(200);
+    await page.mouse.wheel(0, 100);
+    await page.waitForTimeout(200);
+    await page.mouse.wheel(0, -100);
+    await expect.poll(y(page)).toBe(t.prov);
+  });
+
+  test('a small pixel step moves a scene; a dense stream (a swipe and its momentum) moves only one', async ({ page }) => {
+    const t = await tops(page);
+    await page.mouse.wheel(0, 4);
+    await expect.poll(y(page)).toBe(t.stores);
+    await page.waitForTimeout(800);
+    for (let i = 0; i < 20; i++) await page.mouse.wheel(0, 60);
+    await expect.poll(y(page)).toBe(t.prov);
+    await page.waitForTimeout(400);
+    expect(await y(page)(), 'the stream ran on past one scene').toBe(t.prov);
+  });
 });
 
 test('the page never scrolls sideways', async ({ page }) => {

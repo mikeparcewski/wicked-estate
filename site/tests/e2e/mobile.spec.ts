@@ -164,6 +164,14 @@ test('the stores switch one store at a time, in one box', async ({ page }) => {
   await s.locator('.ph-opt').filter({ hasText: 'What’s new' }).click();
   await expect(s.locator('[data-news] li').first()).toBeVisible();
   expect(await box()).toBe(h0);
+  // an open preview stays with its store: switching away never leaves it painted over another view
+  await mem.click();
+  const memBtn = s.locator('.sc[data-store="memory"] .sc-btn');
+  await clickUntil(memBtn, async () => (await memBtn.getAttribute('aria-pressed')) === 'true');
+  await expect(s.locator('.sc[data-store="memory"] .sc-face--prev')).toBeVisible();
+  await s.locator('.ph-opt').filter({ hasText: 'Code graph' }).click();
+  await expect(s.locator('.sc[data-store="memory"] .sc-face--prev')).toBeHidden();
+  await expect(s.locator('.sc[data-store="graph"] .sc-face--about')).toBeVisible();
 });
 
 test('the tool explorer steps one group, or one page of matches, at a time', async ({ page }) => {
@@ -182,5 +190,14 @@ test('the tool explorer steps one group, or one page of matches, at a time', asy
   await expect(t.locator('.tl-hit:visible')).toHaveCount(3);
   await t.getByRole('button', { name: 'Next matches' }).click();
   await expect(t.locator('.tl-step-t')).toContainText(/^4–6 of \d+$/);
+  expect(await list()).toBe(h0);
+  // a few matches, and none, say so where the stepper stood
+  await t.getByLabel('Search tools').fill('erase');
+  await expect(t.locator('.tl-step-t')).toBeVisible();
+  await expect(t.locator('.tl-step-t')).toHaveText('1 tool matches');
+  await expect(t.getByRole('button', { name: 'Next matches' })).toBeHidden();
+  await t.getByLabel('Search tools').fill('zzz');
+  await expect(t.locator('.tl-step-t')).toBeVisible();
+  await expect(t.locator('.tl-step-t')).toHaveText('No tool matches “zzz”.');
   expect(await list()).toBe(h0);
 });

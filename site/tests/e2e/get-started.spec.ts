@@ -20,9 +20,16 @@ test('the terminal types its commands when it arrives, even in a short window', 
   // the hydrated pre-state first (off screen, the terminal waits empty), so only the entrance can fill it
   await page.waitForFunction(() => document.querySelector('#get-started .gs-step .cmd-type')?.textContent === '');
   const section = page.locator('#get-started');
-  await section.locator('.gs-term').scrollIntoViewIfNeeded();
-  await section.locator('.gs-term').evaluate((el) => window.scrollBy(0, el.getBoundingClientRect().top - 40));
+  const term = section.locator('.gs-term');
+  await term.evaluate((el) => { el.scrollIntoView({ block: 'start' }); window.scrollBy(0, el.getBoundingClientRect().top - 40); });
   const typed = () => section.locator('.gs-step .cmd-type').evaluateAll((els) => els.map((e) => (e.textContent ?? '').replace(/\\/g, ' ').replace(/\s+/g, ' ').trim()));
+  // a phone shows one install path at a time: the hidden terminal waits, and types once it is picked
+  await expect(term).toBeHidden();
+  await page.waitForTimeout(500);
+  expect(await typed(), 'the hidden terminal typed unseen').toEqual(['', '', '']);
+  const cargo = section.locator('.ph-opt').filter({ hasText: 'Or just estate' });
+  await clickUntil(cargo, async () => (await cargo.getAttribute('aria-pressed')) === 'true');
+  await expect(term).toBeVisible();
   await expect.poll(typed, { timeout: 6_000 }).toEqual(COMMANDS);
 });
 

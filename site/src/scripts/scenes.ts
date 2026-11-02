@@ -9,11 +9,15 @@
       viewport is a desktop one (>=1024 x >=640, motion allowed) AND every scene measures
       inside its frame. Otherwise the page stays on the chrome's proximity snap, so a scene
       that ever ran tall can never trap content.
-   4. One wheel notch = one scene, while snap-lock holds. Under mandatory snap Chromium pulls a
+   4. One wheel gesture = one scene, while snap-lock holds. Under mandatory snap Chromium pulls a
       small wheel step back to the scene it started from, so a notched mouse could never leave the hero.
-      A discrete notch (line/page mode, or a pixel delta of 50+) glides to the next scene top in its
-      direction; trackpads and momentum (small, dense deltas) stay native, a scroller inside a scene
-      keeps its own wheel until it reaches its end, and ctrl+wheel (zoom) is never touched.
+      The page is one frame per scene there, so nothing sits between two snap points: the wheel pages.
+      A gesture is a run of wheel events in one direction with no gap over GAP_MS: a mouse notch, a
+      trackpad swipe and its momentum. Its first event moves one scene in its direction, whatever the
+      device or the size of the delta; the rest of the gesture is absorbed. A gesture that starts while
+      a glide is still running chains from that glide's target, so two notches always move two scenes
+      and a reversal comes back. A scroller inside a scene keeps its own wheel until it reaches its end,
+      and ctrl+wheel (zoom) is never touched.
    Phones scroll freely (the family chrome's rule: snapping on a phone yanks the viewport); their
    frames are laid out to fit one screen each (global.css), with nothing to lock. */
 
@@ -95,23 +99,28 @@ function innerScrolls(target: EventTarget | null, dy: number) {
   }
   return false;
 }
-const STEP_MS = 560;
-let busyUntil = -Infinity;
-let fineAt = -Infinity;
+const GAP_MS = 140;   // a pause this long ends a gesture (mouse notches at a reading pace are further apart)
+const GLIDE_MS = 700; // how long a glide may run; a gesture starting inside it chains from its target
+let lastAt = -Infinity;
+let lastDir = 0;
+let glideTo: number | null = null;
+let glideUntil = -Infinity;
 window.addEventListener('wheel', (e) => {
   if (!html.classList.contains('snap-lock') || e.ctrlKey || e.defaultPrevented) return;
   if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
   if (innerScrolls(e.target, e.deltaY)) return;
-  const now = performance.now();
-  // while a step glides, the rest of that gesture (more notches, a momentum tail) is absorbed
-  if (now < busyUntil) { e.preventDefault(); return; }
-  const discrete = e.deltaMode !== 0 || Math.abs(e.deltaY) >= 50;
-  if (!discrete || now - fineAt < 160) { fineAt = now; return; } // a trackpad stream: native snap
   e.preventDefault();
-  const y = window.scrollY;
+  const now = performance.now();
+  const dir = e.deltaY > 0 ? 1 : -1;
+  const fresh = now - lastAt > GAP_MS || dir !== lastDir;
+  lastAt = now;
+  lastDir = dir;
+  if (!fresh) return; // the rest of a gesture: more of a swipe, its momentum, a notch's own repeats
+  const from = glideTo !== null && now < glideUntil ? glideTo : window.scrollY;
   const tops = sceneTops();
-  const to = e.deltaY > 0 ? tops.find((t) => t > y + 4) : [...tops].reverse().find((t) => t < y - 4);
+  const to = dir > 0 ? tops.find((t) => t > from + 4) : [...tops].reverse().find((t) => t < from - 4);
   if (to === undefined) return;
-  busyUntil = now + STEP_MS;
+  glideTo = to;
+  glideUntil = now + GLIDE_MS;
   window.scrollTo({ top: to, behavior: 'smooth' });
 }, { passive: false });

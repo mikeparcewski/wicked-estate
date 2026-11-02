@@ -958,6 +958,11 @@ html:not(.motion-ok) .sd, html:not(.motion-ok) .sd * { transition: none !importa
   .stores[data-view="memory"] :is(.ben--pair, .sc[data-store="memory"]),
   .stores[data-view="knowledge"] :is(.ben--pair, .sc[data-store="knowledge"]),
   .stores[data-view="news"] .news { visibility: visible; }
+  /* an open preview stays with its own store: it never paints over another store's view */
+  .stores[data-view="graph"] .sc:not([data-store="graph"]) .sc-face,
+  .stores[data-view="memory"] .sc:not([data-store="memory"]) .sc-face,
+  .stores[data-view="knowledge"] .sc:not([data-store="knowledge"]) .sc-face,
+  .stores[data-view="news"] .sc .sc-face { visibility: hidden; }
   .ben h3 { font-size: 18px; }
   .sc { padding: 12px 14px; }
   .sc-btn { min-height: 44px; padding: 4px 12px; }
@@ -992,7 +997,7 @@ html:not(.motion-ok) .sd, html:not(.motion-ok) .sd * { transition: none !importa
   .tools-search { width: 100%; min-height: 44px; }
   .tools-note { display: none; }
   .tl-step { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-bottom: 1px solid var(--row-line); }
-  .tl-step[data-hide] { visibility: hidden; }
+  .tl-step[data-few] .tl-step-b { visibility: hidden; }
   .tl-step-b { flex: none; width: 44px; height: 44px; display: grid; place-items: center; border: 1px solid var(--hairline-strong); border-radius: 9px; background: transparent; color: var(--ink); font-size: 20px; line-height: 1; cursor: pointer; transition: border-color .2s var(--ease), background-color .2s var(--ease); }
   .tl-step-b:hover { border-color: var(--fdn); background: color-mix(in oklab, var(--fdn) 8%, transparent); }
   .tl-step-b:focus-visible { outline: 2px solid var(--fdn); outline-offset: 0; }

@@ -827,10 +827,12 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
           {!f && set === 'graph' && <span className="tools-note-x"> · SemanticSearch is the “+1”, not one of the 30</span>}
         </p>
         {/* a phone shows one group (or one page of matches) at a time, stepped here, so the box never grows */}
-        <div className="tl-step" role="group" aria-label={f ? 'Pages of matches' : 'Tool groups in this set'} data-hide={f && hits.length <= PAGE ? 'true' : undefined}>
+        <div className="tl-step" role="group" aria-label={f ? 'Pages of matches' : 'Tool groups in this set'} data-few={f && hits.length <= PAGE ? 'true' : undefined}>
           <button type="button" className="tl-step-b" aria-label={f ? 'Previous matches' : 'Previous group'} onClick={() => (f ? setPage((pg - 1 + pages) % pages) : stepGroup(-1))}><span aria-hidden>‹</span></button>
           <p className="tl-step-t" aria-live="polite">
-            {f ? <><b>{hits.length ? `${pg * PAGE + 1}–${Math.min(hits.length, (pg + 1) * PAGE)}` : '0'}</b> of {hits.length}</>
+            {f ? (hits.length === 0 ? <>No tool matches “{filter.trim()}”.</>
+                  : hits.length <= PAGE ? <><b>{hits.length}</b> {hits.length === 1 ? 'tool matches' : 'tools match'}</>
+                  : <><b>{`${pg * PAGE + 1}–${Math.min(hits.length, (pg + 1) * PAGE)}`}</b> of {hits.length}</>)
                : <><b>{openGroup}</b> <span>{gi + 1} of {ng}</span></>}
           </p>
           <button type="button" className="tl-step-b" aria-label={f ? 'Next matches' : 'Next group'} onClick={() => (f ? setPage((pg + 1) % pages) : stepGroup(1))}><span aria-hidden>›</span></button>
@@ -1041,7 +1043,13 @@ export function GetStarted() {
     window.addEventListener('keydown', finish, { once: true })
     return () => { cancelAnimationFrame(raf.current); window.removeEventListener('keydown', finish) }
   }, [finish])
-  useEnterOnce(term, () => {
+  // types once, when the terminal is first seen: on arrival, or (a phone shows one install path at a time)
+  // when its path is picked
+  const played = useRef(false)
+  const entered = useRef(false)
+  const play = () => {
+    if (played.current) return
+    played.current = true
     if (!motionAllowed() || cancelled.current) { setTyped(total); return }
     const t0 = performance.now()
     const tick = (t: number) => {
@@ -1051,7 +1059,13 @@ export function GetStarted() {
       if (n < total) raf.current = requestAnimationFrame(tick)
     }
     raf.current = requestAnimationFrame(tick)
-  })
+  }
+  const termShown = () => {
+    const el = term.current?.querySelector<HTMLElement>('.gs-term')
+    return !!el && getComputedStyle(el).visibility !== 'hidden'
+  }
+  useEnterOnce(term, () => { entered.current = true; if (termShown()) play() })
+  useEffect(() => { if (path === 'cargo' && entered.current) play() }, [path])
   let before = 0
   return (
     <Section id="get-started" solid>
