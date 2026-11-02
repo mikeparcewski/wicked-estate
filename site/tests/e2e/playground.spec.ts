@@ -211,6 +211,26 @@ test.describe('scenes', () => {
     await expect.poll(() => panel.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
   });
 
+  test('the confidence slider\'s focus ring stays clear of its tick labels', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    const pv = page.locator('#provenance');
+    await pv.scrollIntoViewIfNeeded();
+    await page.locator('.pv-mode').last().focus();
+    const range = page.locator('#thr-range');
+    // keyboard focus (focus-visible): Tab on from the grep/estate switch to the slider
+    for (let i = 0; i < 4 && !(await range.evaluate((el) => el === document.activeElement)); i++) await page.keyboard.press('Tab');
+    await expect(range).toBeFocused();
+    const g = await range.evaluate((el) => {
+      const cs = getComputedStyle(el);
+      const ring = parseFloat(cs.outlineOffset) + parseFloat(cs.outlineWidth);
+      const ticks = el.parentElement!.querySelector('.thr-ticks')!.getBoundingClientRect();
+      return { style: cs.outlineStyle, ringBottom: el.getBoundingClientRect().bottom + ring, ticksTop: ticks.top };
+    });
+    expect(g.style).toBe('solid');
+    expect(g.ringBottom, 'the ring runs into the tick labels').toBeLessThanOrEqual(g.ticksTop);
+  });
+
   test('a store card enters even when the window is too short to show a share of the scene', async ({ page }) => {
     await page.setViewportSize({ width: 320, height: 320 });
     await page.goto('/');

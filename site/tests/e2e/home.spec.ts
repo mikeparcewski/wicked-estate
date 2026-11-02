@@ -67,6 +67,26 @@ for (const vp of [{ width: 1440, height: 700 }, { width: 1280, height: 660 }, { 
   });
 }
 
+test('one mouse-wheel notch moves one scene, both ways', async ({ page }) => {
+  // under mandatory snap, Chromium pulls a 100px wheel step back to the scene it left, so without the
+  // stepper (scenes.ts) a notched mouse could never leave the hero
+  await page.setViewportSize({ width: 1440, height: 700 });
+  await page.goto('/');
+  await expect(page.locator('html')).toHaveClass(/snap-lock/);
+  const sceneTop = (id: string) => page.locator(id).evaluate((el) => Math.round(el.getBoundingClientRect().top + scrollY - 64));
+  const stores = await sceneTop('#stores');
+  const prov = await sceneTop('#provenance');
+  await page.mouse.move(700, 400);
+  await page.mouse.wheel(0, 100);
+  await expect.poll(() => page.evaluate(() => Math.round(scrollY))).toBe(stores);
+  await page.waitForTimeout(650);
+  await page.mouse.wheel(0, 100);
+  await expect.poll(() => page.evaluate(() => Math.round(scrollY))).toBe(prov);
+  await page.waitForTimeout(650);
+  await page.mouse.wheel(0, -100);
+  await expect.poll(() => page.evaluate(() => Math.round(scrollY))).toBe(stores);
+});
+
 test('the page never scrolls sideways', async ({ page }) => {
   for (const vp of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
     await page.setViewportSize(vp);

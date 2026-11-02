@@ -66,6 +66,12 @@ function useEnterOnce(ref: React.RefObject<HTMLElement | null>, onEnter: () => v
   }, [ref])
 }
 
+/** The phone layout (global.css, max-width 760px): frames stack, and a few scenes trade a side-by-side
+    view for a switch. */
+function phoneLayout() {
+  return typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches
+}
+
 /** Is `el` on screen right now (any part)? */
 function onScreen(el: HTMLElement | null) {
   if (!el) return false
@@ -175,7 +181,7 @@ function confClass(c: number) { return c >= 0.8 ? 'q-conf q-conf--hi' : c >= 0.5
 type Anim = 'intro' | 'switch' | 'done'
 
 // ── 1 · Hook + the query playground ─────────────────────────────────────────
-function GraphView({ q, threshold }: { q: Question; threshold: Stop }) {
+function GraphView({ q, threshold, setThreshold }: { q: Question; threshold: Stop; setThreshold: (s: Stop) => void }) {
   // Confidence order (1.0 first) drives the draw order and the row order.
   const ordered = [...q.graph].sort((a, b) => b.conf - a.conf)
   const rank = new Map(ordered.map((e, i) => [e.from, i]))
@@ -214,7 +220,8 @@ function GraphView({ q, threshold }: { q: Question; threshold: Stop }) {
           <ul className="q-rows" aria-label="Edges">
             {rows.map(e => (
               <li key={e.from} className="q-row" data-inj={e.injected ? 'true' : undefined} style={vars({ '--i': rank.get(e.from) ?? 0 })}>
-                <span className="q-row-main"><b>{e.from}</b> <span className="q-via">{e.via}</span> {e.to}</span>
+                {/* a phone drops the target: it is always the symbol asked about, named just above */}
+                <span className="q-row-main"><b>{e.from}</b> <span className="q-via">{e.via}</span><span className="q-to"> {e.to}</span></span>
                 <span className="q-where">{e.where}</span>
                 <span className="q-chips">
                   {e.injected && <span className="q-chip q-chip--inj">injected</span>}
@@ -229,6 +236,11 @@ function GraphView({ q, threshold }: { q: Question; threshold: Stop }) {
               {held} {held === 1 ? (threshold === 0.5 ? 'guess' : 'edge') : 'edges'} below {threshold.toFixed(1)} held back. Lower the confidence to see {held === 1 ? 'it' : 'them'}, labelled.
             </p>
           )}
+          {/* a phone keeps the confidence control with the edges it filters, not in the crowded tab row */}
+          <div className="q-foot">
+            <span className="q-foot-n">{held > 0 ? `${held} held back` : 'all shown'}</span>
+            <ConfStops id="q-thr-ph" value={threshold} onChange={setThreshold} />
+          </div>
         </div>
     </div>
   )
@@ -291,23 +303,33 @@ function Playground({ st, pick, setTab, threshold, setThreshold }: {
   const q = QUESTIONS.find(x => x.id === st.qid)!
   const counts: Record<Store, number> = { graph: q.graph.length, memory: q.memory.length, knowledge: q.knowledge.length }
   const tab = st.tab
+  const answer = useRef<HTMLDivElement>(null)
+  // a tap on a question, on a phone, glides to the answer frame below the questions (keyboard picks stay put)
+  const toAnswer = () => {
+    const el = answer.current
+    if (!el || !phoneLayout() || el.getBoundingClientRect().top < window.innerHeight * 0.55) return
+    window.setTimeout(() => el.scrollIntoView({ block: 'start', behavior: motionAllowed() ? 'smooth' : 'auto' }), 20)
+  }
   return (
     <div className="q-window" id="query" data-q={st.qid} data-anim={st.anim}>
       <div className="q-bar">
         <span className="q-dots" aria-hidden><i /><i /><i /></span>
-        <span className="q-bar-t">wicked-estate-mcp · graph.db</span>
-        <span className="q-bar-r"><Follow /><span className="q-scripted">scripted demo · pick a question</span></span>
+        <span className="q-bar-t">wicked-estate-mcp<span className="q-bar-db"> · graph.db</span></span>
+        <span className="q-bar-r"><Follow /><span className="q-scripted">scripted demo<span className="q-scripted-x"> · pick a question</span></span></span>
       </div>
       <div className="q-body">
         <div className="q-asks" role="listbox" aria-label="Ask the record" onKeyDown={e => arrowNav(e, '.q-ask', true)}>
           <span className="q-k" aria-hidden>Ask</span>
           {QUESTIONS.map(x => (
-            <button key={x.id} type="button" role="option" aria-selected={x.id === st.qid} tabIndex={x.id === st.qid ? 0 : -1} className="q-ask" data-on={x.id === st.qid} onClick={() => pick(x.id)}>
+            <button key={x.id} type="button" role="option" aria-selected={x.id === st.qid} tabIndex={x.id === st.qid ? 0 : -1} className="q-ask" data-on={x.id === st.qid}
+              onClick={e => { pick(x.id); if (e.detail > 0) toAnswer() }}>
               {x.ask}
             </button>
           ))}
         </div>
-        <div className="q-answer">
+        {/* a phone stacks the questions in the first frame and gives the answer a frame of its own */}
+        <div className="q-answer ph-frame" ref={answer}>
+          <p className="q-asked" aria-hidden><span>›</span> {q.ask}</p>
           <div className="q-call" aria-label="MCP calls">
             {q.calls.map(c => <code key={c}>{c}</code>)}
           </div>
@@ -328,7 +350,7 @@ function Playground({ st, pick, setTab, threshold, setThreshold }: {
               {tab !== 'graph' && <p className="q-kind">{STORE_LABEL[tab].name}: {STORE_LABEL[tab].kind}</p>}
               {counts[tab] === 0
                 ? <p className="q-empty">Nothing from this store for this question. Try “Everything about applyDiscount”.</p>
-                : tab === 'graph' ? <GraphView q={q} threshold={threshold} />
+                : tab === 'graph' ? <GraphView q={q} threshold={threshold} setThreshold={setThreshold} />
                 : tab === 'memory' ? <MemoryView q={q} /> : <KnowledgeView q={q} />}
             </div>
           </div>
@@ -432,15 +454,37 @@ function StoreCard({ s, open, onToggle }: { s: (typeof STORES)[number]; open: bo
   )
 }
 
+/** A phone-only view switch: a desktop shows every view side by side and hides this control. */
+function PhoneSwitch<T extends string>({ label, value, options, onChange, cls = '' }: {
+  label: string; value: T; options: { id: T; name: ReactNode; store?: Store }[]; onChange: (v: T) => void; cls?: string
+}) {
+  return (
+    <div className={`ph-switch ${cls}`} role="group" aria-label={label}>
+      {options.map(o => (
+        <button key={o.id} type="button" className="ph-opt" aria-pressed={value === o.id} data-on={value === o.id} data-store={o.store} onClick={() => onChange(o.id)}>
+          {o.name}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+type StoreView = Store | 'news'
+
 function Stores() {
   const [open, setOpen] = useState<Store | null>(null)
+  const [view, setView] = useState<StoreView>('graph')
   const toggle = (id: Store) => setOpen(o => (o === id ? null : id))
   const card = (id: Store) => <StoreCard s={STORES.find(s => s.id === id)!} open={open === id} onToggle={() => toggle(id)} />
   return (
     <Section id="stores" solid>
       <Head n="01" label="Three stores, one record" follow title="Three stores. One record."
         sub="Each answer says which store it came from, so a guess never reads like a fact and a note never reads like a doc." />
-      <div id="why" className="stores" data-benefits>
+      <div id="why" className="stores" data-benefits data-view={view}>
+        <PhoneSwitch label="Show one store" value={view} onChange={setView} cls="st-views" options={[
+          { id: 'graph', name: 'Code graph', store: 'graph' }, { id: 'memory', name: 'Memory', store: 'memory' },
+          { id: 'knowledge', name: 'Knowledge', store: 'knowledge' }, { id: 'news', name: 'What’s new' },
+        ]} />
         <div className="thread" aria-hidden>
           <span className="thread-node"><code>{FOLLOW}</code></span>
           <svg className="thread-lines" viewBox="0 0 600 34" preserveAspectRatio="none">
@@ -449,23 +493,30 @@ function Stores() {
             <path className="tl tl--knowledge" d="M300 0 C300 22 500 12 500 34" />
           </svg>
         </div>
-        {/* one grid: benefit 1 heads the code graph; benefit 2 spans memory and knowledge */}
+        {/* one grid: benefit 1 heads the code graph; benefit 2 spans memory and knowledge. Each view's wrapper
+            is transparent to a desktop's grid; a phone stacks the views in one cell, sized to the largest. */}
         <div className="stores-grid">
-          <div className="ben ben--graph"><h3>{BENEFITS[0].h}</h3><p>{BENEFITS[0].p}</p></div>
-          {card('graph')}
-          <div className="ben ben--pair"><h3>{BENEFITS[1].h}</h3><p>{BENEFITS[1].p}</p></div>
-          {card('memory')}
-          {card('knowledge')}
-        </div>
-        <div className="news">
-          <h3 id="news-h">What’s new in 0.30–0.31</h3>
-          <ul aria-labelledby="news-h" data-news>
-            {NEWS.map(n => <li key={n.b}><b>{n.b}</b>{n.rest}</li>)}
-          </ul>
-          <ul className="news-facts">
-            <li>Agents propose memories and rules. A person approves them.</li>
-            <li>Erase a whole scope in one call: <code className="tag">memory.erase</code></li>
-          </ul>
+          <div className="st-v st-v--graph">
+            <div className="ben ben--graph"><h3>{BENEFITS[0].h}</h3><p>{BENEFITS[0].p}</p></div>
+            {card('graph')}
+          </div>
+          <div className="st-v st-v--pair">
+            <div className="ben ben--pair"><h3>{BENEFITS[1].h}</h3><p>{BENEFITS[1].p}</p></div>
+            <div className="st-pair">
+              {card('memory')}
+              {card('knowledge')}
+            </div>
+          </div>
+          <div className="news">
+            <h3 id="news-h">What’s new in 0.30–0.31</h3>
+            <ul aria-labelledby="news-h" data-news>
+              {NEWS.map(n => <li key={n.b}><b>{n.b}</b>{n.rest}</li>)}
+            </ul>
+            <ul className="news-facts">
+              <li>Agents propose memories and rules. A person approves them.</li>
+              <li>Erase a whole scope in one call: <code className="tag">memory.erase</code></li>
+            </ul>
+          </div>
         </div>
       </div>
     </Section>
@@ -488,9 +539,9 @@ type Mode = 'grep' | 'estate'
 function BusDiagram({ mode, vertical = false }: { mode: Mode; vertical?: boolean }) {
   // node centres; desktop is a left-to-right flow, the phone version stacks it
   const N = vertical
-    ? { price: [80, 24], checkout: [220, 24], apply: [150, 96], paid: [220, 168], receipt: [80, 244], ledger: [220, 244] }
+    ? { price: [80, 18], checkout: [220, 18], apply: [80, 88], paid: [220, 88], receipt: [80, 158], ledger: [220, 158] }
     : { price: [70, 26], checkout: [70, 124], apply: [260, 26], paid: [260, 124], receipt: [450, 96], ledger: [450, 152] }
-  const w = vertical ? 300 : 520, h = vertical ? 268 : 170
+  const w = vertical ? 300 : 520, h = vertical ? 176 : 170
   const nw = 124, nh = 28
   const node = (k: keyof typeof N, label: string, cls = '') => (
     <g className={`pv-n ${cls}`}>
@@ -575,7 +626,8 @@ function Provenance({ threshold, setThreshold }: { threshold: Stop; setThreshold
             <p className="pv-note">A new kind of edge is a rule block, not a code change. These land at 0.5, labelled with the rule’s name.</p>
           </div>
         </div>
-        <div className="rock-panel pv-panel">
+        {/* a phone gives the confidence ladder a frame of its own */}
+        <div className="rock-panel pv-panel ph-frame">
           <div className="pv-bar">
             <span className="pv-bar-t">How sure each edge is</span>
             <label htmlFor="thr-range" className="thr-l">Show edges ≥ <output htmlFor="thr-range" className="thr-v">{threshold.toFixed(1)}</output></label>
@@ -709,7 +761,8 @@ const SEE: Record<string, { q: string; tab?: Store; call: string }> = {
   'knowledge.recall_about_code': { q: 'all', tab: 'knowledge', call: QUESTIONS[4].calls[2] },
 }
 const DEFAULT_SEL: Record<string, string> = { graph: 'BlastRadius', memory: 'memory.recall', knowledge: 'knowledge.recall', cli: 'watch' }
-const SEARCH_CAP = 8
+/** A phone pages search results, three at a time, inside a fixed box (a desktop scrolls its fixed box). */
+const PAGE = 3
 
 function countOf(t: ToolSet) {
   const all = t.groups.flatMap(g => g.rows)
@@ -721,7 +774,7 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
   const [filter, setFilter] = useState('')
   const [sel, setSel] = useState('BlastRadius')
   const [openG, setOpenG] = useState<Record<string, string>>({})
-  const [showAll, setShowAll] = useState(false)
+  const [page, setPage] = useState(0)
   const f = filter.trim().toLowerCase()
   const hits = f
     ? TOOLSETS.flatMap(t => t.groups.flatMap(g => g.rows.filter(r => (r.name + ' ' + r.does).toLowerCase().includes(f)).map(r => ({ t, g, r }))))
@@ -733,7 +786,12 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
   }
   const picked = find(sel) ?? find(DEFAULT_SEL[set])!
   const openGroup = openG[set] ?? current.groups[0].label
-  const choose = (id: string) => { setSet(id); setFilter(''); setSel(DEFAULT_SEL[id]); setShowAll(false) }
+  const gi = Math.max(0, current.groups.findIndex(g => g.label === openGroup))
+  const ng = current.groups.length
+  const stepGroup = (d: number) => setOpenG(o => ({ ...o, [set]: current.groups[(gi + d + ng) % ng].label }))
+  const pages = Math.max(1, Math.ceil(hits.length / PAGE))
+  const pg = Math.min(page, pages - 1)
+  const choose = (id: string) => { setSet(id); setFilter(''); setSel(DEFAULT_SEL[id]); setPage(0) }
   const rowBtn = (r: Row) => (
     <button key={r.name} type="button" className="tl-row" aria-pressed={picked.r.name === r.name} data-on={picked.r.name === r.name} onClick={() => setSel(r.name)}>
       <code className="tl-name">{r.name}</code>
@@ -742,7 +800,6 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
       <span className="tl-does">{r.does}</span>
     </button>
   )
-  const capped = hits.length > SEARCH_CAP && !showAll
   return (
     <Section id="toolface" solid>
       <Head n="03" label="What agents can call" follow title="Everything an agent can call."
@@ -763,28 +820,33 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
             })}
           </div>
           <input className="tools-search" type="search" placeholder="Search tools, e.g. erase" aria-label="Search tools" value={filter}
-            onChange={e => { setFilter(e.target.value); setShowAll(false) }} />
+            onChange={e => { setFilter(e.target.value); setPage(0) }} />
         </div>
         <p className="tools-note" aria-live="polite">
           {f ? (hits.length ? `${hits.length} ${hits.length === 1 ? 'tool matches' : 'tools match'} “${filter.trim()}”` : `No tool matches “${filter.trim()}”.`) : current.note}
           {!f && set === 'graph' && <span className="tools-note-x"> · SemanticSearch is the “+1”, not one of the 30</span>}
         </p>
+        {/* a phone shows one group (or one page of matches) at a time, stepped here, so the box never grows */}
+        <div className="tl-step" role="group" aria-label={f ? 'Pages of matches' : 'Tool groups in this set'} data-hide={f && hits.length <= PAGE ? 'true' : undefined}>
+          <button type="button" className="tl-step-b" aria-label={f ? 'Previous matches' : 'Previous group'} onClick={() => (f ? setPage((pg - 1 + pages) % pages) : stepGroup(-1))}><span aria-hidden>‹</span></button>
+          <p className="tl-step-t" aria-live="polite">
+            {f ? <><b>{hits.length ? `${pg * PAGE + 1}–${Math.min(hits.length, (pg + 1) * PAGE)}` : '0'}</b> of {hits.length}</>
+               : <><b>{openGroup}</b> <span>{gi + 1} of {ng}</span></>}
+          </p>
+          <button type="button" className="tl-step-b" aria-label={f ? 'Next matches' : 'Next group'} onClick={() => (f ? setPage((pg + 1) % pages) : stepGroup(1))}><span aria-hidden>›</span></button>
+        </div>
         <div className="tools-body">
           <div className="tools-list" key={f ? 'search' : set} tabIndex={-1}>
             {f ? (
-              // every hit is laid out; a phone shows the first eight until "Show all" (CSS), a desktop scrolls the fixed box
-              <div className="tl-hits" data-all={showAll ? 'true' : undefined}>
-                {hits.map(({ t, g, r }) => (
-                  <div key={t.id + r.name} className="tl-hit"><span className="tl-hit-g">{t.name} · {g.label}</span>{rowBtn(r)}</div>
+              // every hit is laid out; a desktop scrolls the fixed box, a phone shows the current page of four
+              <div className="tl-hits">
+                {hits.map(({ t, g, r }, i) => (
+                  <div key={t.id + r.name} className="tl-hit" data-cur={Math.floor(i / PAGE) === pg ? 'true' : undefined}><span className="tl-hit-g">{t.name} · {g.label}</span>{rowBtn(r)}</div>
                 ))}
-                {capped && <button type="button" className="tl-more" onClick={() => setShowAll(true)}>Show all {hits.length}</button>}
               </div>
             ) : current.groups.map(g => (
               <div key={g.label} className="tl-group" data-open={openGroup === g.label}>
                 <h3 className="tl-gl">{g.label}</h3>
-                <button type="button" className="tl-acc" aria-expanded={openGroup === g.label} onClick={() => setOpenG(o => ({ ...o, [set]: g.label }))}>
-                  <span>{g.label}</span>{' '}<span className="tl-acc-n">{g.rows.length}</span>
-                </button>
                 <div className="tl-rows">{g.rows.map(rowBtn)}</div>
               </div>
             ))}
@@ -803,7 +865,8 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
                   </button>
                 </div>
               ) : (
-                <p className="td-x">The playground has a scripted answer for <code>BlastRadius</code>, <code>TraverseGraph</code>, <code>memory.recall</code>, <code>knowledge.recall</code> and <code>knowledge.recall_about_code</code> (marked with a dot).</p>
+                <p className="td-x"><span className="td-x-desk">The playground has a scripted answer for <code>BlastRadius</code>, <code>TraverseGraph</code>, <code>memory.recall</code>, <code>knowledge.recall</code> and <code>knowledge.recall_about_code</code> (marked with a dot).</span>
+                  <span className="td-x-ph">Tools marked with a dot have a scripted answer in the playground.</span></p>
               )}
             </div>
           </div>
@@ -827,7 +890,7 @@ function Storage() {
   return (
     <Section id="storage">
       <Head n="04" label="Where it lives" title="Local by default." wide
-        sub={<>The CLI and the MCP server keep the graph, memory and knowledge in local SQLite, with no database server to run: a catalog of 30 standard MCP tools, plus semantic search when enabled. A shared PostgreSQL code graph for a team is an optional CLI build; the MCP server, memory and knowledge do not use it yet.</>} />
+        sub={<>The CLI and the MCP server keep the graph, memory and knowledge in local SQLite, with no database server to run: a catalog of 30 standard MCP tools, plus semantic search when enabled. <span className="sub-fine">A shared PostgreSQL code graph for a team is an optional CLI build; the MCP server, memory and knowledge do not use it yet.</span></>} />
       <div className="seg-row" role="group" aria-label="Storage">
         <button type="button" className="seg" aria-pressed={!shared} data-on={!shared} onClick={() => setShared(false)}>SQLite · solo</button>
         <button type="button" className="seg" aria-pressed={shared} data-on={shared} onClick={() => setShared(true)}>PostgreSQL · team</button>
@@ -861,7 +924,11 @@ function Storage() {
             <p className="sd-foot">CLI build, <code>--features postgres</code></p>
           </div>
         </div>
-        <div className="rock-panel p-0">
+        {/* a phone gives the details a frame of their own, with the same switch at hand */}
+        <div className="rock-panel p-0 sd-detail ph-frame">
+          <PhoneSwitch label="Storage details" value={mode} onChange={m => setShared(m === 'team')} cls="sd-views" options={[
+            { id: 'solo', name: 'SQLite · solo' }, { id: 'team', name: 'PostgreSQL · team' },
+          ]} />
           <div className="store-cmd" data-storage-cmd>
             <span className="stk"><span data-off={shared ? 'true' : undefined}>wicked-estate index . --db graph.db</span><span data-off={!shared ? 'true' : undefined}>WICKED_RUNTIME=team wicked-estate index .</span></span>
           </div>
@@ -872,6 +939,8 @@ function Storage() {
               ))}
             </tbody>
           </table>
+          {/* a phone reads this line with the details (a desktop shows it beside the switch) */}
+          <p className="sd-fine">Read-only mode and unavailable stores reduce the set of tools offered.</p>
         </div>
       </div>
     </Section>
@@ -962,6 +1031,7 @@ export function GetStarted() {
   const total = STEPS.reduce((n, s) => n + (s.show ?? s.cmd).length, 0)
   const [typed, setTyped] = useState(total)
   const [done, setDone] = useState<Record<number, boolean>>({})
+  const [path, setPath] = useState<'npm' | 'cargo'>('npm')
   const raf = useRef(0)
   // input ends the typing for good: a cancel before the terminal arrives must also stop it from starting
   const cancelled = useRef(false)
@@ -987,8 +1057,11 @@ export function GetStarted() {
     <Section id="get-started" solid>
       <Head n="05" label="Get started" title="Index a repo and ask it something."
         sub="Works with Claude Code, Antigravity, Codex, OpenCode and Pi." />
-      <div className="gs" ref={term} onPointerDown={finish}>
-        <div className="rock-panel gs-panel">
+      <PhoneSwitch label="Install path" value={path} onChange={setPath} cls="gs-views" options={[
+        { id: 'npm', name: 'Recommended' }, { id: 'cargo', name: 'Or just estate' },
+      ]} />
+      <div className="gs" ref={term} onPointerDown={finish} data-view={path}>
+        <div className="rock-panel gs-panel gs-npm">
           <div className="gs-bar"><span className="gs-bar-t">Recommended: the whole family</span><span className="depth">npm</span></div>
           <div className="gs-body">
             <div className="gs-line">

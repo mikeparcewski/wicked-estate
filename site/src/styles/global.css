@@ -533,6 +533,7 @@ html.motion-ok.scenes-ready .strata:not([data-inview]) .sc { opacity: 0; }
 html.motion-ok .strata[data-inview] .sc { animation: es-rise .4s var(--ease) calc(.35s + var(--i) * .14s) both; }
 
 .stores-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 14px; }
+.st-v, .st-pair { display: contents; }
 .ben { padding: 0 2px 2px; }
 .ben h3 { font-size: var(--text-section); font-weight: var(--weight-strong); line-height: 1.2; color: var(--ink); }
 .ben p { margin: 6px 0 0; font-size: var(--text-body); line-height: 1.45; color: var(--muted); }
@@ -573,7 +574,7 @@ html.motion-ok .strata[data-inview] .sc { animation: es-rise .4s var(--ease) cal
 .sc-deps li { display: flex; align-items: center; gap: 6px; font-size: var(--text-caption); }
 .sc-deps code { font-family: var(--font-mono); font-size: var(--text-code); color: var(--ink); margin-right: auto; }
 
-.news { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--row-line); display: grid; grid-template-columns: 11.5rem minmax(0, 1fr); gap: 8px 18px; align-items: start; }
+.news { grid-column: 1 / -1; grid-row: 3; margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--row-line); display: grid; grid-template-columns: 11.5rem minmax(0, 1fr); gap: 8px 18px; align-items: start; }
 .news h3 { font-size: var(--text-caption); font-weight: var(--weight-strong); color: var(--fdn); line-height: 1.5; }
 .news ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 18px; font-size: var(--text-caption); line-height: 1.5; color: var(--muted); }
 .news ul b { color: var(--ink); font-weight: var(--weight-strong); }
@@ -622,12 +623,14 @@ html.motion-ok .pv-svg[data-mode="estate"] .pv-e--inj .q-dot { animation: es-run
 .thr { padding: 6px 18px 0; }
 .thr-l { display: flex; align-items: center; gap: 8px; font-size: var(--text-body); color: var(--muted); }
 .thr-v { font-family: var(--font-mono); font-size: var(--text-code); font-weight: var(--weight-strong); color: var(--fdn-ink); background: var(--fdn); border-radius: 5px; padding: 1px 7px; }
-.thr-range { -webkit-appearance: none; appearance: none; display: block; width: 100%; height: 26px; margin: 2px 0 0; background: transparent; cursor: pointer; }
+.thr-range { -webkit-appearance: none; appearance: none; display: block; width: 100%; height: 30px; margin: 0 0 4px; background: transparent; cursor: pointer; }
 .thr-range::-webkit-slider-runnable-track { height: 6px; border-radius: 3px; background: linear-gradient(to right, color-mix(in oklab, var(--ink) 16%, transparent) var(--p), var(--fdn) var(--p)); }
 .thr-range::-moz-range-track { height: 6px; border-radius: 3px; background: linear-gradient(to right, color-mix(in oklab, var(--ink) 16%, transparent) var(--p), var(--fdn) var(--p)); }
 .thr-range::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 20px; height: 20px; margin-top: -7px; border-radius: 50%; background: var(--canvas); border: 3px solid var(--fdn); }
 .thr-range::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: var(--canvas); border: 3px solid var(--fdn); }
-.thr-range:focus-visible { outline: 2px solid var(--fdn); outline-offset: 2px; border-radius: 6px; }
+/* the focus ring hugs the input's own box (offset 0, 2px wide) and the input keeps 4px below it, so the ring
+   never covers the tick labels */
+.thr-range:focus-visible { outline: 2px solid var(--fdn); outline-offset: 0; border-radius: 8px; }
 .thr-ticks { display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: var(--text-caption); color: var(--faint); }
 .tiers { width: 100%; border-collapse: collapse; font-family: var(--font-sans); margin-top: 6px; }
 .tiers tr { transition: opacity .3s var(--ease); }
@@ -658,7 +661,7 @@ html.motion-ok .pv-svg[data-mode="estate"] .pv-e--inj .q-dot { animation: es-run
 .tools-tab[data-on="true"] { color: var(--ink); border-color: var(--fdn); background: color-mix(in oklab, var(--fdn) 13%, transparent); }
 .tools-tab[data-on="true"] .q-count { color: var(--fdn-ink); background: var(--fdn); }
 .q-count-opt { font-weight: 400; opacity: .8; }
-.tools-tab:focus-visible, .tl-row:focus-visible, .tl-acc:focus-visible, .tl-more:focus-visible, .see-btn:focus-visible { outline: 2px solid var(--fdn); outline-offset: 0; }
+.tools-tab:focus-visible, .tl-row:focus-visible, .see-btn:focus-visible { outline: 2px solid var(--fdn); outline-offset: 0; }
 .tools-list:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--fdn); }
 .tools-search { font: inherit; font-size: var(--text-body); color: var(--ink); background: color-mix(in oklab, var(--canvas) 45%, transparent); border: 1px solid var(--hairline-strong); border-radius: 8px; padding: 7px 12px; min-height: 36px; min-width: 0; width: 250px; max-width: 100%; }
 .tools-search:focus { border-color: var(--fdn); }
@@ -674,7 +677,6 @@ html.motion-ok .pv-svg[data-mode="estate"] .pv-e--inj .q-dot { animation: es-run
 html.motion-ok .tools-list, html.motion-ok .td-in { animation: es-fade .15s ease both; }
 .tl-group { min-width: 0; }
 .tl-gl { font-size: var(--text-caption); font-weight: var(--weight-strong); color: var(--fdn); margin: 8px 0 4px; }
-.tl-acc { display: none; }
 .tl-rows { display: flex; flex-direction: column; gap: 2px; }
 .tl-row {
   display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; width: 100%; min-height: 30px; padding: 4px 8px; text-align: left;
@@ -690,7 +692,6 @@ html.motion-ok .tools-list, html.motion-ok .td-in { animation: es-fade .15s ease
 .tl-hits { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 4px 16px; padding-top: 6px; }
 .tl-hit { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .tl-hit-g { font-size: var(--text-caption); color: var(--faint); padding-left: 9px; }
-.tl-more { display: none; grid-column: 1 / -1; }
 .tools-detail { min-width: 0; min-height: 0; padding: 16px 18px; overflow: hidden; background: color-mix(in oklab, var(--canvas) 22%, transparent); }
 .td-in { display: flex; flex-direction: column; gap: 8px; }
 .td-path { margin: 0; font-size: var(--text-caption); color: var(--faint); }
@@ -778,6 +779,10 @@ html:not(.motion-ok) .sd, html:not(.motion-ok) .sd * { transition: none !importa
 .copy-btn .stk { justify-items: center; }
 .copy-btn:focus-visible, .btn-primary:focus-visible, .btn-outline:focus-visible { outline: 2px solid var(--fdn); outline-offset: 2px; }
 
+/* ── Phone-only controls: a view switch (stores, storage details, install path), the tools stepper,
+   the hero answer's question line, the short tools hint. Wider screens show every view side by side. ── */
+.ph-switch, .tl-step, .q-asked, .td-x-ph, .q-foot, .sd-fine { display: none; }
+
 /* ── The scene rail (desktop): one dot per scene, labels only where the gutter holds them ── */
 .scene-rail { position: fixed; right: 14px; top: 50%; transform: translateY(-50%); z-index: 150; display: none; flex-direction: column; gap: 2px; padding: 0; margin: 0; list-style: none; }
 .scene-rail a { position: relative; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; color: var(--faint); }
@@ -805,7 +810,7 @@ html:not(.motion-ok) .sd, html:not(.motion-ok) .sd * { transition: none !importa
   .tiers th, .tiers td { padding-top: 5px; padding-bottom: 5px; }
   .q-row { padding: 5px 10px; gap: 2px 10px; }
   .q-note { margin-bottom: 6px; }
-  .news { margin-top: 10px; padding-top: 10px; }
+  .news { margin-top: 2px; padding-top: 10px; }
   .sd { padding: 12px; }
   .store-t th, .store-t td { padding-top: 7px; padding-bottom: 7px; }
   .gs-step { padding: 8px 0; }
@@ -834,7 +839,7 @@ html:not(.motion-ok) .sd, html:not(.motion-ok) .sd * { transition: none !importa
   .sc { padding: 18px 20px; gap: 14px; }
   .sc-from { font-size: var(--text-body); }
   .stores-grid { gap: 14px 18px; }
-  .news { margin-top: 24px; padding-top: 18px; }
+  .news { margin-top: 10px; padding-top: 18px; }
   .news ul { font-size: var(--text-body); }
   .pv-svg { --pv-h: 260px; }
   .pv-body { padding: 18px 22px; gap: 14px; }
@@ -866,7 +871,7 @@ html:not(.motion-ok) .sd, html:not(.motion-ok) .sd * { transition: none !importa
   .sc[data-store="memory"] { grid-column: 1; grid-row: auto; }
   .sc[data-store="knowledge"] { grid-column: 2; grid-row: auto; }
   .thread { display: none; }
-  .news { grid-template-columns: minmax(0, 1fr); }
+  .news { grid-template-columns: minmax(0, 1fr); grid-row: auto; }
   .news ul { grid-template-columns: minmax(0, 1fr); }
   .news-facts { grid-column: 1; }
   .tools-body { grid-template-columns: minmax(0, 1fr); height: auto; }
@@ -874,86 +879,197 @@ html:not(.motion-ok) .sd, html:not(.motion-ok) .sd * { transition: none !importa
   .tools-detail { min-height: 210px; }
 }
 
+/* ══════════════════════════════════════════════════════════════════════════════
+   PHONES (≤760px): a deliberate phone layout, one frame per screen.
+   Every scene is one screen below the topbar, or two frames (the hero's answer, the confidence
+   ladder and the storage details start a second one), each sized to fit 360x740. Where a desktop
+   puts views side by side, the phone switches between them (stores, install path) in a box sized to
+   its largest view, so no switch, tab, question or search ever changes a frame's height. Phones
+   scroll freely, as the family chrome rules (snapping on a phone yanks the viewport).
+   ════════════════════════════════════════════════════════════════════════════ */
 @media (max-width: 760px) {
-  .hero-h { font-size: var(--text-title); line-height: 1.12; }
-  .facts { font-size: var(--text-caption); gap: 6px 10px; }
-  .facts-fact { gap: 10px; }
-  .q-bar { flex-wrap: wrap; row-gap: 4px; }
-  .q-bar-r { margin-left: 0; width: 100%; justify-content: space-between; }
-  .q-body { grid-template-columns: minmax(0, 1fr); height: auto; }
-  .q-asks { flex-direction: row; flex-wrap: wrap; overflow: visible; border-right: 0; border-bottom: 1px solid var(--hairline-strong); padding: 10px; gap: 6px; }
-  .q-k { width: 100%; }
-  .q-ask { min-height: 44px; flex: 1 1 auto; font-size: var(--text-body); }
-  /* the call row keeps room for its tallest state (two lines), so picking a question never moves the page */
-  .q-call { min-height: 86px; align-content: flex-start; }
-  .q-tabs { padding: 6px 8px; }
-  .q-tablist { width: 100%; }
-  .q-tab { min-height: 44px; flex: 1 1 auto; justify-content: center; padding: 6px 8px; }
-  .q-tabs-r { margin-left: 0; width: 100%; }
-  .q-stops { width: 100%; }
-  .q-stop { min-height: 40px; flex: 1 1 0; }
-  /* room for the tallest answer at the default confidence, so picking a question never moves the page;
-     only "0.3" (asking for the guess) adds its one row in flow */
-  .q-result { overflow: visible; min-height: 540px; }
-  .q-graph { max-width: 360px; margin: 0 auto; }
-  .q-row { grid-template-areas: "main" "where" "chips"; grid-template-columns: minmax(0, 1fr); }
-  .q-row .q-chips { justify-content: flex-start; }
+  .strata { min-height: calc(100vh - var(--topbar-h)); min-height: calc(100svh - var(--topbar-h)); padding-block: 16px; justify-content: safe center; }
+  .strata--hero { min-height: 100vh; min-height: 100svh; padding-top: calc(var(--topbar-h) + 14px); padding-bottom: 16px; justify-content: flex-start; }
+  .ph-frame { scroll-margin-top: 12px; }
+  .scene-head { margin-bottom: 12px; }
+  .scene-h { font-size: 26px; line-height: 1.1; margin-top: 6px; }
+  .scene-sub { font-size: var(--text-body); margin-top: 8px; }
   .scene-k .follow { display: none; }
-  .stores-grid { grid-template-columns: minmax(0, 1fr); }
-  .sc[data-store="memory"], .sc[data-store="knowledge"] { grid-column: 1; }
+  .sub-fine { display: block; margin-top: 6px; font-size: var(--text-caption); color: var(--faint); }
+
+  /* the view switch: a segmented control, every option a 44px target */
+  .ph-switch { display: grid; grid-auto-columns: minmax(0, 1fr); grid-auto-flow: column; gap: 3px; padding: 3px; margin-bottom: 12px; border: 1px solid var(--hairline-strong); border-radius: 10px; background: var(--rock); }
+  .ph-opt { min-height: 44px; padding: 4px 4px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-family: var(--font-sans); font-size: var(--text-caption); font-weight: var(--weight-strong); line-height: 1.2; cursor: pointer; transition: background-color .2s var(--ease), color .2s var(--ease); }
+  .ph-opt[data-on="true"] { color: var(--ink); background: color-mix(in oklab, var(--sc, var(--fdn)) 18%, transparent); box-shadow: inset 0 -2px 0 var(--sc, var(--fdn)); }
+  .ph-opt:focus-visible { outline: 2px solid var(--fdn); outline-offset: 0; }
+
+  /* ── 1 · hero: frame one = the hook and the five questions; frame two = the answer ── */
+  .hero-h { font-size: var(--text-title); line-height: 1.12; }
+  .hero-sub { font-size: var(--text-body); line-height: 1.5; margin-top: 8px; }
+  .facts { font-size: var(--text-caption); gap: 4px 10px; margin-top: 8px; }
+  .facts-fact { gap: 10px; }
+  .hero-play { margin-top: 12px; }
+  .q-window { border: 0; background: transparent; box-shadow: none; overflow: visible; border-radius: 0; }
+  .q-bar { flex-wrap: nowrap; min-height: 36px; padding: 6px 12px; border: 1px solid var(--hairline-strong); border-bottom: 1px solid var(--row-line); border-radius: 14px 14px 0 0; background: var(--rock); }
+  .q-dots { display: none; }
+  .q-bar-db, .q-scripted-x, .q-bar .follow { display: none; }
+  .q-bar-r { margin-left: auto; }
+  .q-body { display: block; height: auto; }
+  .q-asks { flex-direction: column; overflow: visible; padding: 10px; gap: 6px; border: 1px solid var(--hairline-strong); border-top: 0; border-radius: 0 0 14px 14px; background: var(--rock); }
+  .q-ask { min-height: 44px; font-size: var(--text-body); }
+  .q-answer { margin-top: 16px; border: 1px solid var(--hairline-strong); border-radius: 14px; background: var(--rock); overflow: hidden;
+    box-shadow: 0 20px 50px rgba(var(--shadow-rgb), 0.35), 0 0 0 1px color-mix(in oklab, var(--fdn) 10%, transparent); }
+  .q-asked { display: flex; align-items: center; gap: 8px; margin: 0; min-height: calc(2 * 1.35em + 18px); padding: 9px 14px; font-size: var(--text-body); line-height: 1.35; color: var(--ink); border-bottom: 1px solid var(--row-line); background: color-mix(in oklab, var(--fdn) 9%, transparent); }
+  .q-asked span { color: var(--fdn); font-weight: var(--weight-strong); }
+  /* the call row keeps room for its tallest state (two lines), so picking a question never moves the page */
+  .q-call { min-height: 76px; align-content: center; padding: 8px 12px; }
+  .q-tabs { padding: 6px 8px; gap: 4px; }
+  .q-tablist { width: 100%; flex-wrap: nowrap; gap: 2px; }
+  .q-tab { min-height: 44px; flex: 1 1 auto; justify-content: center; padding: 6px 4px; gap: 5px; white-space: nowrap; }
+  .q-tabs-r, .q-foot-n { display: none; }
+  .q-foot { display: flex; justify-content: flex-end; margin-top: 8px; }
+  .q-foot .q-stops-l { padding: 0 4px 0 8px; white-space: nowrap; }
+  .q-hidden { margin-top: 8px; }
+  .q-stop { min-height: 40px; min-width: 44px; }
+  /* room for the tallest answer (the graph at 0.3), so no question, tab or stop moves the page */
+  .q-result { overflow: visible; min-height: var(--ans-h, 520px); padding: 10px 12px; }
+  .q-graph { max-width: 320px; margin: 0 auto; }
+  .q-to { display: none; }
+  .q-row { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; padding: 5px 9px; }
+  .q-row-main { flex: 1 1 100%; }
+  .q-row .q-chips { margin-left: auto; }
+  .q-row .q-chip, .q-row .q-conf { font-size: 11px; padding: 0 5px; }
+  .q-row .q-where { font-size: 11px; }
+  /* the tier is the confidence scene's story; a phone row keeps the number, the injected mark and the source */
+  .q-row .q-chip:not(.q-chip--inj) { display: none; }
+  .q-card { padding: 8px 10px; gap: 6px; }
+
+  /* ── 2 · stores: one store at a time, in a deck sized to its largest view ── */
+  .st-views { display: grid; }
+  .stores-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .st-v, .news { grid-area: 1 / 1; }
+  .st-v { display: flex; flex-direction: column; gap: 10px; }
+  .st-pair { display: grid; }
+  .ben--graph, .ben--pair, .sc[data-store="graph"] { grid-column: auto; grid-row: auto; margin-top: 0; }
+  .st-pair > .sc[data-store] { grid-area: 1 / 1; }
+  .news { margin: 0; padding: 0; border: 0; gap: 10px; align-content: start; }
+  .stores[data-view] :is(.ben, .sc, .news) { visibility: hidden; }
+  .stores[data-view="graph"] :is(.ben--graph, .sc[data-store="graph"]),
+  .stores[data-view="memory"] :is(.ben--pair, .sc[data-store="memory"]),
+  .stores[data-view="knowledge"] :is(.ben--pair, .sc[data-store="knowledge"]),
+  .stores[data-view="news"] .news { visibility: visible; }
+  .ben h3 { font-size: 18px; }
+  .sc { padding: 12px 14px; }
   .sc-btn { min-height: 44px; padding: 4px 12px; }
+  .news h3 { font-size: var(--text-body); }
+  .news ul { gap: 8px; }
+
+  /* ── 3 · provenance: the event bus in one frame, the confidence ladder in the next ── */
   .pv-svg--h { display: none; }
-  .pv-svg--v { display: block; max-height: none; max-width: 340px; margin: 0 auto; }
-  .pv-bar { flex-wrap: wrap; padding: 8px 12px; }
-  .pv-mode { min-height: 40px; padding: 4px 18px; }
-  .toml code { white-space: pre-wrap; overflow-wrap: anywhere; }
-  .toml { overflow-x: visible; }
-  .pv-read { min-height: 88px; }
+  .pv-svg--v { display: block; max-height: none; max-width: 320px; margin: 0 auto; }
+  .pv-bar { padding: 6px 8px 6px 14px; min-height: 52px; }
+  .pv-bar-t { font-size: var(--text-caption); }
+  .pv-body { padding: 10px 14px 12px; gap: 8px; }
+  .pv-mode { min-height: 40px; padding: 4px 16px; }
+  .pv-read { min-height: 66px; }
+  .toml { padding: 6px 0; }
+  .toml code { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; }
+  .toml-l { padding: 0 10px; }
+  .thr { padding: 4px 14px 0; }
   .thr-range { height: 44px; }
-  .thr-range::-webkit-slider-thumb { width: 30px; height: 30px; margin-top: -12px; }
-  .tiers th { padding-left: 14px; }
+  .thr-range::-webkit-slider-thumb { width: 28px; height: 28px; margin-top: -11px; }
+  .thr-range::-moz-range-thumb { width: 22px; height: 22px; }
+  .tiers th { padding: 6px 8px 6px 14px; }
+  .tiers td { padding: 6px 6px; }
   .tiers-bar { width: 22%; }
   .tiers-n { padding-right: 14px !important; }
-  .tools-tabs { flex-wrap: nowrap; overflow-x: auto; width: 100%; padding: 3px; scroll-padding-inline: 3px; scrollbar-width: none;
-    -webkit-mask-image: linear-gradient(to right, #000 85%, transparent); mask-image: linear-gradient(to right, #000 85%, transparent); }
-  .tools-tab { min-height: 44px; flex: none; }
+  .thr-read { padding: 8px 14px 12px; }
+
+  /* ── 4 · tools: the four sets as one row, one group (or one page of matches) at a time ── */
+  .tools-bar { padding: 8px; gap: 8px; }
+  .tools-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); width: 100%; gap: 3px; }
+  .tools-tab { flex-direction: column; justify-content: center; gap: 3px; min-height: 52px; padding: 4px 2px; font-size: var(--text-caption); }
   .tools-search { width: 100%; min-height: 44px; }
-  /* every group's note gets the same two lines, so switching tabs never moves the page */
-  .tools-note { min-height: calc(2 * 1.5em + 16px); }
-  .tools-note-x { display: none; }
-  .tools-list { display: block; padding: 6px 10px 10px; min-height: 470px; }
+  .tools-note { display: none; }
+  .tl-step { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-bottom: 1px solid var(--row-line); }
+  .tl-step[data-hide] { visibility: hidden; }
+  .tl-step-b { flex: none; width: 44px; height: 44px; display: grid; place-items: center; border: 1px solid var(--hairline-strong); border-radius: 9px; background: transparent; color: var(--ink); font-size: 20px; line-height: 1; cursor: pointer; transition: border-color .2s var(--ease), background-color .2s var(--ease); }
+  .tl-step-b:hover { border-color: var(--fdn); background: color-mix(in oklab, var(--fdn) 8%, transparent); }
+  .tl-step-b:focus-visible { outline: 2px solid var(--fdn); outline-offset: 0; }
+  .tl-step-t { flex: 1; margin: 0; text-align: center; font-size: var(--text-body); color: var(--muted); }
+  .tl-step-t b { color: var(--fdn); font-weight: var(--weight-strong); }
+  .tools-body { grid-template-columns: minmax(0, 1fr); height: auto; }
+  /* four rows of a group, or three matches with their group line: the same box either way */
+  .tools-list { display: block; overflow: visible; min-height: 224px; padding: 4px 8px 6px; border-right: 0; border-bottom: 1px solid var(--row-line); }
   .tl-gl { display: none; }
-  .tl-acc { display: flex; width: 100%; align-items: center; justify-content: space-between; min-height: 44px; padding: 6px 8px; margin-top: 4px; font-size: var(--text-body); font-weight: var(--weight-strong); color: var(--fdn); background: transparent; border: 0; border-bottom: 1px solid var(--row-line); cursor: pointer; }
-  .tl-acc-n { font-family: var(--font-mono); font-size: var(--text-caption); color: var(--muted); }
-  .tl-group:not([data-open="true"]) .tl-rows { display: none; }
-  .tl-row { min-height: 44px; }
-  .tl-does { display: block; }
-  .tl-hits { grid-template-columns: minmax(0, 1fr); }
-  .tl-hits:not([data-all]) .tl-hit:nth-child(n + 9) { display: none; }
-  .tl-more { display: flex; justify-content: center; width: 100%; min-height: 44px; margin-top: 8px; align-items: center; font-size: var(--text-body); color: var(--ink); background: transparent; border: 1px solid var(--hairline-strong); border-radius: 8px; cursor: pointer; }
-  .tools-detail { min-height: 240px; }
+  .tl-group:not([data-open="true"]) { display: none; }
+  .tl-row { min-height: 48px; padding: 4px 8px; gap: 0 8px; flex-wrap: wrap; }
+  .tl-name { overflow-wrap: normal; white-space: nowrap; }
+  .tl-does { display: block; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tl-hits { grid-template-columns: minmax(0, 1fr); padding-top: 2px; gap: 2px; }
+  .tl-hits .tl-hit:not([data-cur]) { display: none; }
+  .tools-detail { min-height: 0; height: 92px; padding: 8px 14px; }
+  .td-in { gap: 6px; }
+  .td-path, .td-does { display: none; }
+  .td-name code { font-size: var(--text-lead); }
+  .td-call { display: none; }
+  .td-see { margin-top: 0; }
+  .td-x { font-size: var(--text-body); }
+  .td-x-desk { display: none; }
+  .td-x-ph { display: inline; }
+
+  /* ── 5 · storage: the picture in one frame, the details (with the same switch) in the next ── */
   .seg { min-height: 44px; }
-  .seg-fine { margin-left: 0; width: 100%; }
-  .sd { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 28px auto; padding: 12px; }
+  .seg-row { margin-bottom: 10px; }
+  .seg-row .seg-fine { display: none; }
+  .sd-fine { display: block; margin: 0; padding: 8px 14px 12px; font-size: var(--text-caption); color: var(--faint); border-top: 1px solid var(--row-line); }
+  .sd { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 20px auto; padding: 10px; }
+  .sd-box { padding: 9px 10px; gap: 8px; }
+  .sd-procs { flex-direction: row; gap: 6px; }
+  .sd-proc { flex: 1 1 0; min-width: 0; flex-direction: column; gap: 0; padding: 4px 7px; }
+  .sd-dbs { gap: 8px 18px; }
+  .sd-dbs--shared { justify-items: start; }
+  .cyl i { width: 32px; height: 30px; }
+  .sd-foot code { white-space: nowrap; }
   .sd-link { justify-content: center; }
   .sd-link span { width: 0; height: 100%; border-top: 0; border-left: 1.5px dashed var(--hairline-strong); }
   .sd[data-mode="team"] .sd-link span { border-left-style: solid; border-color: var(--fdn); }
-  .sd-shared-graph { transform: translateY(-18px); }
+  .sd-shared-graph { transform: translateY(-16px); }
   .sd[data-mode="team"] .sd-local-graph { transform: translateY(8px); }
-  .store-t th { width: 7.5rem; padding-left: 14px; }
+  .sd-detail { margin-top: 0; }
+  .sd-views { display: grid; margin: 10px 10px 0; }
+  .store-t th { width: 7rem; padding-left: 14px; }
   .store-t td { padding-right: 14px; }
-  .store-cmd { padding: 11px 14px; overflow-wrap: anywhere; }
+  .store-cmd { padding: 10px 14px; overflow-wrap: anywhere; }
+
+  /* ── 7 · get started: one install path at a time, in a box sized to the larger ── */
+  .gs-views { display: grid; }
+  .gs { grid-template-columns: minmax(0, 1fr); }
+  .gs { align-items: stretch; }
+  .gs > .gs-panel { grid-area: 1 / 1; }
+  .gs-npm { display: flex; flex-direction: column; justify-content: center; }
+  .gs[data-view="npm"] .gs-term, .gs[data-view="cargo"] .gs-npm { visibility: hidden; }
+  .gs-bar { display: none; }
   .gs-line { flex-wrap: nowrap; }
-}
-@media (max-width: 400px) {
-  .q-tab { font-size: var(--text-code); padding: 6px 6px; gap: 5px; }
-  .q-tablist { gap: 2px; }
-}
-@media (max-width: 760px) {
+  .gs-body, .gs-steps { padding-left: 14px; padding-right: 14px; }
+  .gs-steps { padding-top: 2px; padding-bottom: 8px; }
+  .gs-step { padding: 8px 0; gap: 10px; }
+  .gs-cmd { font-size: 12px; }
+  .copy-btn { min-height: 44px; min-width: 64px; }
+  .gs-cta { margin-top: 14px; }
+  .gs-cta > a { min-height: 44px; padding: 10px 20px; }
   /* a phone wraps a command between tokens instead of at the desktop's hand-made continuation */
   .cmd-line { display: inline; white-space: normal; }
   .cmd-line + .cmd-line::before { content: " "; }
   .tok-cont { display: none; }
-  .gs-body, .gs-steps { padding-left: 14px; padding-right: 14px; }
-  .copy-btn { min-height: 44px; min-width: 64px; }
+}
+@media (max-width: 400px) {
+  .q-tab { font-size: var(--text-code); padding: 6px 4px; gap: 4px; }
+}
+/* a shorter phone (under 800px tall) answers without the little graph (the rows carry it) and lets the
+   TOML block stand for the rule's note */
+@media (max-width: 760px) and (max-height: 799px) {
+  .q-figure .q-graph { display: none; }
+  .q-result { --ans-h: 392px; }
+  .pv-note { display: none; }
 }

@@ -73,6 +73,11 @@ test('a command never breaks inside a token on a phone', async ({ page }) => {
   await page.goto('/');
   const section = page.locator('#get-started');
   await section.scrollIntoViewIfNeeded();
+  // a phone shows one install path at a time: switch to the three cargo steps
+  const cargo = section.locator('.ph-opt').filter({ hasText: 'Or just estate' });
+  await clickUntil(cargo, async () => (await cargo.getAttribute('aria-pressed')) === 'true');
+  await expect(section.locator('.gs-step').first()).toBeVisible();
+  await expect(section.locator('.gs-npm')).toBeHidden();
   await expect(section.locator('.gs-step')).toHaveCount(3);
   // the three commands are there, exactly (the display continuation "\\" aside)
   expect(await section.locator('.gs-step .cmd-full').evaluateAll((els) =>
