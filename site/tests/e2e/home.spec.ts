@@ -181,3 +181,96 @@ test('the sub-line and benefits say a local CLI and MCP server, never one binary
   // the unqualified storage headline is retired
   await expect(page.locator('body')).not.toContainText('SQLite by default. Postgres for a team.');
 });
+
+// The snap guard never traps a reader. Locked: every scene fits (give or take its own bottom padding), across the
+// laptop heights that used to overshoot (776-864 tall, the hero's svh paddings against a fixed playground).
+// Unlocked: no snap at all (not the chrome's proximity, which pulls each notch back to a one-frame scene).
+for (const vp of [{ width: 1470, height: 840 }, { width: 1440, height: 789 }, { width: 1536, height: 864 }, { width: 1366, height: 820 }, { width: 1366, height: 648 }]) {
+  test(`the page locks in at ${vp.width}x${vp.height}, and a notch leaves the hero`, async ({ page }) => {
+    await page.setViewportSize(vp);
+    await page.goto('/');
+    await expect(page.locator('html')).toHaveClass(/snap-lock/);
+    const stores = await page.locator('#stores').evaluate((el) => Math.round(el.getBoundingClientRect().top + scrollY - 64));
+    await page.mouse.move(vp.width / 2, vp.height / 2);
+    await page.mouse.wheel(0, 100);
+    await expect.poll(() => page.evaluate(() => Math.round(scrollY))).toBe(stores);
+  });
+}
+
+test('where the lock cannot hold, the page does not snap, so a notch always scrolls', async ({ page }) => {
+  // 1280x600 is under the lock's 640px floor. The pointer rests over the playground's answer panel, a scroller:
+  // unlocked, it must hand the wheel on to the page once it is at its end
+  await page.setViewportSize({ width: 1280, height: 600 });
+  await page.goto('/');
+  await expect(page.locator('html')).not.toHaveClass(/snap-lock/);
+  expect(await page.evaluate(() => getComputedStyle(document.documentElement).scrollSnapType)).toBe('none');
+  await page.mouse.move(640, 300);
+  const ys: number[] = [];
+  for (let i = 0; i < 5; i++) {
+    await page.mouse.wheel(0, 100);
+    await page.waitForTimeout(400);
+    ys.push(await page.evaluate(() => Math.round(scrollY)));
+  }
+  // the panel may take a notch for its own spare scroll; every notch after that moves the page
+  expect(ys[4], `the page held still or snapped back: ${ys.join(',')}`).toBeGreaterThanOrEqual(300);
+});
+
+test('a swipe inside the tools list moves only the list, both ways', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 700 });
+  await page.goto('/');
+  await expect(page.locator('html')).toHaveClass(/snap-lock/);
+  const t = page.locator('#toolface');
+  const y0 = await t.evaluate((el) => Math.round(el.getBoundingClientRect().top + scrollY - 64));
+  await page.evaluate((y) => window.scrollTo({ top: y, behavior: 'instant' }), y0);
+  await t.getByLabel('Search tools').fill('e');
+  const list = t.locator('.tools-list');
+  expect(await list.evaluate((el) => el.scrollHeight > el.clientHeight + 40), 'the list must scroll for this check').toBe(true);
+  const b = await list.boundingBox();
+  await page.mouse.move(b!.x + 120, b!.y + 120);
+  // one continuous swipe: 40 small deltas, 16ms apart, longer than the list (it reaches its end mid-gesture)
+  for (let i = 0; i < 40; i++) { await page.mouse.wheel(0, 40); await page.waitForTimeout(16); }
+  await page.waitForTimeout(900);
+  expect(await list.evaluate((el) => el.scrollTop + el.clientHeight >= el.scrollHeight - 1), 'the list reached its end').toBe(true);
+  expect(await page.evaluate(() => Math.round(scrollY)), 'the page flipped a scene in the same gesture').toBe(y0);
+  for (let i = 0; i < 40; i++) { await page.mouse.wheel(0, -40); await page.waitForTimeout(16); }
+  await page.waitForTimeout(900);
+  expect(await list.evaluate((el) => el.scrollTop)).toBe(0);
+  expect(await page.evaluate(() => Math.round(scrollY)), 'the page flipped a scene upward in the same gesture').toBe(y0);
+});
+
+test('the calm loops run only in the scene on screen', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 700 });
+  await page.goto('/');
+  const loops = () => page.evaluate(() => {
+    const by: Record<string, number> = {};
+    for (const a of document.getAnimations()) {
+      const t = (a.effect as KeyframeEffect | null)?.target as Element | null;
+      if (!t || a.effect?.getComputedTiming().iterations !== Infinity) continue;
+      const sc = t.closest('[data-scene], .same-garden');
+      const k = sc ? sc.id || 'garden' : 'none';
+      by[k] = (by[k] ?? 0) + 1;
+    }
+    return by;
+  });
+  // the hero's pulse starts once its intro is over
+  await expect.poll(async () => Object.keys(await loops())).toEqual(['hero']);
+  await page.evaluate(() => window.scrollTo({ top: document.getElementById('provenance')!.getBoundingClientRect().top + scrollY - 64, behavior: 'instant' }));
+  await expect.poll(async () => Object.keys(await loops())).toEqual(['provenance']);
+});
+
+test('the copy names only what estate ships and returns', async ({ page }) => {
+  await page.goto('/');
+  const text = await page.locator('main').innerText();
+  // no LSP tier (its consumer is not wired), no memory fields recall does not return, jobs not runs
+  expect(text).not.toMatch(/\bLSP\b/);
+  expect(text).not.toMatch(/\b(told or witnessed|witnessed|kind: fact)\b/);
+  expect(text).not.toMatch(/\br-412\b/);
+  expect(text).not.toContain('sendReceipt');
+  // the follow pill says it is an example, and the hero says what the page follows
+  await expect(page.locator('#stores .follow')).toContainText('example: applyDiscount');
+  await expect(page.locator('#query .q-bar')).toContainText('This page follows one function, applyDiscount, through all three stores.');
+  // the first screen has a next step
+  await expect(page.locator('.facts-go a')).toHaveAttribute('href', '#get-started');
+  // What's new lists only the three released 0.30-0.31 items
+  await expect(page.locator('#stores .news li')).toHaveCount(3);
+});

@@ -5,10 +5,13 @@
       .scenes-ready is set only after the observer is attached, so a page whose script never
       runs shows every end state instead of hiding anything.
    2. The scene rail: aria-current on the dot of the scene under the middle of the viewport.
+   2b. Live marks: data-live on each scene while a good part of it is on screen. The calm idle loops
+      (global.css) key off it, so they run only in view and stop when the scene leaves.
    3. Guarded snap, desktop: html.snap-lock (scroll-snap-type: y mandatory, global.css) only while the
       viewport is a desktop one (>=1024 x >=640, motion allowed) AND every scene measures
-      inside its frame. Otherwise the page stays on the chrome's proximity snap, so a scene
-      that ever ran tall can never trap content.
+      inside its frame, give or take its own bottom padding (an overshoot smaller than the padding hides
+      no content). Otherwise the page does not snap at all (not the chrome's proximity: with scenes one
+      frame tall, proximity pulls each notch back to the scene it left), so nothing can trap the reader.
    4. One wheel gesture = one scene, while snap-lock holds. Under mandatory snap Chromium pulls a
       small wheel step back to the scene it started from, so a notched mouse could never leave the hero.
       The page is one frame per scene there, so nothing sits between two snap points: the wheel pages.
@@ -17,7 +20,8 @@
       device or the size of the delta; the rest of the gesture is absorbed. A gesture that starts while
       a glide is still running chains from that glide's target, so two notches always move two scenes
       and a reversal comes back. A scroller inside a scene keeps its own wheel until it reaches its end,
-      and ctrl+wheel (zoom) is never touched.
+      and the gesture that scrolled it stays its own: only a new gesture at the end pages the scene.
+      ctrl+wheel (zoom) is never touched.
    Phones scroll freely (the family chrome's rule: snapping on a phone yanks the viewport); their
    frames are laid out to fit one screen each (global.css), with nothing to lock. */
 
@@ -62,16 +66,37 @@ function markRail() {
 window.addEventListener('scroll', () => { if (!railFrame) railFrame = requestAnimationFrame(markRail); }, { passive: true });
 markRail();
 
+// 2b · live marks (the idle loops run only while a scene is on screen)
+if ('IntersectionObserver' in window) {
+  const live = new IntersectionObserver(
+    (entries) => {
+      for (const e of entries) {
+        const el = e.target as HTMLElement;
+        // "in view" = at least 40% of the viewport (or of the scene, when it is shorter than that) shows it
+        const need = Math.min(e.boundingClientRect.height, window.innerHeight) * 0.4;
+        if (e.isIntersecting && e.intersectionRect.height >= need) el.dataset.live = '1';
+        else delete el.dataset.live;
+      }
+    },
+    { threshold: [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1] },
+  );
+  for (const s of scenes) live.observe(s);
+}
+
 // 3 · guarded mandatory snap
 const desk = matchMedia('(min-width: 1024px) and (min-height: 640px) and (prefers-reduced-motion: no-preference)');
 const bar = () => parseFloat(getComputedStyle(html).getPropertyValue('--topbar-h')) || 64;
 function frameOf(el: HTMLElement) {
   return el.classList.contains('strata--hero') ? window.innerHeight : window.innerHeight - bar();
 }
+/** How far a scene may run past its frame without hiding content: its own bottom padding, less 2px. */
+function slack(el: HTMLElement) {
+  return Math.max(1, (parseFloat(getComputedStyle(el).paddingBottom) || 0) - 2);
+}
 let snapFrame = 0;
 function checkSnap() {
   snapFrame = 0;
-  html.classList.toggle('snap-lock', desk.matches && scenes.every((s) => s.getBoundingClientRect().height <= frameOf(s) + 1));
+  html.classList.toggle('snap-lock', desk.matches && scenes.every((s) => s.getBoundingClientRect().height <= frameOf(s) + slack(s)));
 }
 const queue = () => { if (!snapFrame) snapFrame = requestAnimationFrame(checkSnap); };
 if ('ResizeObserver' in window) {
@@ -112,13 +137,15 @@ for (const ev of ['scrollend', 'keydown', 'pointerdown', 'focusin', 'hashchange'
 window.addEventListener('wheel', (e) => {
   if (!html.classList.contains('snap-lock') || e.ctrlKey || e.defaultPrevented) return;
   if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
-  if (innerScrolls(e.target, e.deltaY)) return;
-  e.preventDefault();
   const now = performance.now();
   const dir = e.deltaY > 0 ? 1 : -1;
   const fresh = now - lastAt > GAP_MS || dir !== lastDir;
+  // the gesture is recorded before an inner scroller takes it: a swipe that scrolls the tools list to its
+  // end, and that swipe's momentum, stay one gesture, so the page never flips in the same gesture
   lastAt = now;
   lastDir = dir;
+  if (innerScrolls(e.target, e.deltaY)) return;
+  e.preventDefault();
   if (!fresh) return; // the rest of a gesture: more of a swipe, its momentum, a notch's own repeats
   const from = glideTo !== null && now < glideUntil ? glideTo : window.scrollY;
   const tops = sceneTops();

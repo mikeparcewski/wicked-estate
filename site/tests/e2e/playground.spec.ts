@@ -12,7 +12,15 @@ test.describe('query playground', () => {
     // Three edges at 0.5 or above; the 0.3 tag-scan guess is held back by default.
     await expect(q.locator('.q-row')).toHaveCount(3);
     await expect(q.locator('.q-hidden')).toContainText('1 guess below 0.5 held back');
-    await expect(q.locator('.q-row').filter({ hasText: 'sendReceipt()' })).toContainText('injected');
+    // the event is the second hop, as estate answers it: BlastRadius on the function, then on its event,
+    // which reaches the FILE that consumes it (a TOML rule attaches its edge to the matched file)
+    await expect(q.locator('.q-call code')).toHaveText(['BlastRadius { symbol: "applyDiscount" }', 'BlastRadius { symbol: "order.paid" }']);
+    const inj = q.locator('.q-row').filter({ hasText: 'src/notify/receipt.ts' });
+    await expect(inj).toContainText('consumes order.paid (checkout() emits it)');
+    await expect(inj).toContainText('injected');
+    await expect(inj).not.toContainText('applyDiscount');
+    await expect(q.locator('.q-graph .q-node--topic + text')).toHaveText('order.paid');
+    await expect(q.locator('.q-row').filter({ hasText: 'checkout() calls' })).toContainText('ImportMap');
     await expect(q.getByRole('radio', { name: '0.5' })).toHaveAttribute('aria-checked', 'true');
   });
 
@@ -31,12 +39,13 @@ test.describe('query playground', () => {
     const slider = pv.getByRole('slider');
     await expect(slider).toHaveValue('0');
     await expect(pv.locator('.thr-guess')).toBeVisible();
-    // and back the other way: the slider at 1.0 leaves only the two exact edges in the hero
+    // and back the other way: the slider at 1.0 leaves only the one exact edge in the hero (the SCIP call)
     await slider.scrollIntoViewIfNeeded();
     await slider.fill('2');
     await expect(pv.locator('.thr-v')).toHaveText('1.0');
     await expect(pv.locator('.tiers tr[data-off]')).toHaveCount(4);
-    await expect(q.locator('.q-row')).toHaveCount(2);
+    await expect(q.locator('.q-row')).toHaveCount(1);
+    await expect(q.locator('.q-row')).toContainText('POST /price');
     await expect(q.getByRole('radio', { name: '1.0' })).toHaveAttribute('aria-checked', 'true');
   });
 
@@ -62,8 +71,9 @@ test.describe('query playground', () => {
     await clickUntil(why, async () => (await q.getAttribute('data-q')) === 'why');
     await expect(q.locator('.q-call')).toContainText('memory.recall');
     await expect(q.locator('.q-tab[data-store="memory"]')).toHaveAttribute('aria-selected', 'true');
-    await expect(q.locator('.q-card').first()).toContainText('told');
-    await expect(q.locator('.q-card').first()).toContainText('project:shop');
+    // only fields memory.recall returns: the tier and the scope
+    await expect(q.locator('.q-card').first().locator('.q-chip')).toHaveText(['semantic', 'project:shop']);
+    await expect(q.locator('.q-card').nth(1).locator('.q-chip')).toHaveText(['episodic', 'project:shop']);
 
     await q.getByRole('option', { name: 'Can two coupons stack?' }).click();
     await expect(q.locator('.q-call')).toContainText('knowledge.recall');
@@ -73,6 +83,7 @@ test.describe('query playground', () => {
     await q.getByRole('option', { name: 'Who reacts when an order is paid?' }).click();
     await expect(q.locator('.q-row')).toHaveCount(3);
     await expect(q.locator('.q-chip--inj')).toHaveCount(3);
+    await expect(q.locator('.q-row b')).toHaveText(['src/checkout/checkout.ts', 'src/notify/receipt.ts', 'src/ledger/ledger.ts']);
     await expect(q.locator('.q-note')).toContainText('TOML rule');
   });
 
@@ -183,16 +194,20 @@ test.describe('scenes', () => {
     // real connectors: each edge draws a line of real length (a horizontal line has no height, so no toBeVisible)
     const lengths = (sel: string) => diagram.locator(sel).evaluateAll((els) => els.map((e) => Math.round((e as SVGLineElement).getTotalLength())));
     expect((await lengths('.pv-e--call line')).filter((n) => n > 10)).toHaveLength(2);
-    expect((await lengths('.pv-e--inj line')).filter((n) => n > 10)).toHaveLength(3);
+    expect((await lengths('.pv-e--inj line.q-edge')).filter((n) => n > 10)).toHaveLength(3);
     const inj = diagram.locator('.pv-e--inj');
     const opacities = () => inj.evaluateAll((els) => els.map((e) => getComputedStyle(e).opacity));
     await expect.poll(opacities).toEqual(['0', '0', '0']);
     await pv.getByRole('button', { name: 'estate', exact: true }).click();
-    await expect(pv.locator('.pv-read p:not([data-off])')).toContainText('The graph finds a third through an event.');
+    await expect(pv.locator('.pv-read p:not([data-off])')).toContainText('The graph follows the event.');
     await expect(pv.locator('.pv-read p:not([data-off])')).toContainText('rule: event-bus-consume');
     await expect(pv.locator('.toml')).toHaveAttribute('data-hot', 'true');
     await expect.poll(opacities).toEqual(['1', '1', '1']);
-    expect(await diagram.locator('.pv-e--inj line').evaluateAll((els) => els.map((e) => getComputedStyle(e).strokeDasharray !== 'none'))).toEqual([true, true, true]);
+    expect(await diagram.locator('.pv-e--inj line.q-edge').evaluateAll((els) => els.map((e) => getComputedStyle(e).strokeDasharray !== 'none'))).toEqual([true, true, true]);
+    // the rule shown is a whole consume rule: what it matches, and the edge it adds
+    await expect(pv.locator('.toml')).toContainText('file_glob = "**/*.ts"');
+    await expect(pv.locator('.toml')).toContainText('[rule.emit_edge]');
+    await expect(pv.locator('.toml')).toContainText('kind = "other:consumes"');
   });
 
   test('an answer that overflows its panel is reachable by keyboard', async ({ page }) => {

@@ -20,8 +20,13 @@ import type { CSSProperties, ReactNode, KeyboardEvent as ReactKeyboardEvent } fr
      crates/wicked-estate-core/src/edge.rs.
    - Injected edges: ExtraEdgeExtractor, plain-TOML rules, tier Heuristic (0.5),
      provenance = the rule name (crates/wicked-estate-extract/src/extra_edge.rs).
-   - Memory kinds working|episode|entity|fact|skill|archive, scoped, erasable by
-     subtree; operator memories apply across projects (0.30.0).
+     A rule attaches its edge to the matched FILE and points it at a topic node, so
+     the event is a second hop: BlastRadius on applyDiscount reaches checkout(), and
+     BlastRadius on order.paid reaches the files that emit and consume it (Dependents
+     = edges whose target is the symbol, crates/wicked-estate-store/src/sqlite.rs).
+   - Memory: memory.recall returns scope, content, tier and score; capture tiers are
+     working|episodic|semantic|procedural|archival; operator memories apply across
+     projects (0.30.0). No other memory field is shown.
    - Two executables, the CLI (wicked-estate) and the MCP server
      (wicked-estate-mcp): the [[bin]] entries in crates/wicked-estate/Cargo.toml
      and crates/wicked-estate-mcp/Cargo.toml, shipped by
@@ -33,10 +38,14 @@ import type { CSSProperties, ReactNode, KeyboardEvent as ReactKeyboardEvent } fr
      runs a query. Every datum below (BLAST, WHY, STACK, the order.paid edges,
      TIERS, TOOLSETS) is that scripted data; the scenes only re-show it.
 
-   MOTION: every animation is CSS (transform + opacity only), gated on
+   MOTION: every animation is CSS (transform, opacity and SVG dash offsets), gated on
    html.motion-ok (set before first paint in index.astro only when the visitor
-   allows motion) and on the scene's one-shot data-inview mark (src/scripts/scenes.ts).
-   No loops. Pointer or key input ends the hero's intro. Reduced motion = the end state.
+   allows motion). One-shot entrances key off the scene's data-inview mark; the calm
+   idle loops (a pulse along the injected edges, a pulse down the store threads, the
+   storage connector) key off data-live, which scenes.ts sets only while the scene is
+   on screen, so they stop off screen. Every loop stays inside its own box and never
+   changes layout. Pointer or key input ends the hero's intro. Reduced motion = the
+   end state, with no loops.
    ──────────────────────────────────────────────────────────────────────────── */
 
 // The hook. Two strings, so the operator can swap a variant in one place.
@@ -109,8 +118,9 @@ function Section({ id, solid = false, hero = false, children }: { id?: string; s
   )
 }
 
+const FOLLOW_LINE = `This page follows one function, ${FOLLOW}, through all three stores.`
 function Follow() {
-  return <span className="follow"><i aria-hidden />following <code>{FOLLOW}</code></span>
+  return <span className="follow" title={FOLLOW_LINE}><i aria-hidden />example: <code>{FOLLOW}</code></span>
 }
 
 function Head({ n, label, title, sub, follow = false, wide = false }: { n: string; label: string; title: ReactNode; sub?: ReactNode; follow?: boolean; wide?: boolean }) {
@@ -128,47 +138,60 @@ function Head({ n, label, title, sub, follow = false, wide = false }: { n: strin
 
 // ── Scripted data (the playground's record) ─────────────────────────────────
 type Store = 'graph' | 'memory' | 'knowledge'
-interface GEdge { from: string; to: string; via: string; tier: string; conf: number; where: string; injected?: boolean }
-interface Mem { text: string; kind: string; how: 'told' | 'witnessed'; scope: string; when: string; about?: string }
+/** One edge of a scripted answer. `at` places its node in the answer's picture (viewBox FIG_W wide); `label`
+    is the node's short name when `from` is a path. A rule's edge attaches to the matched file and points at a
+    topic node, so an event is a second hop: `hop` names that topic, where it sits, and the node that emits it. */
+interface GEdge {
+  from: string; label?: string; to: string; via: string; tier: string; conf: number; where: string; injected?: boolean
+  at: [number, number]; hop?: { label: string; at: [number, number]; via: string }
+}
+interface Mem { text: string; tier: 'semantic' | 'episodic'; scope: string }
 interface Know { text: string; source: string; linked?: string }
-interface Question { id: string; ask: string; calls: string[]; first: Store; center: string; graph: GEdge[]; memory: Mem[]; knowledge: Know[]; grep?: string }
+interface Question { id: string; ask: string; calls: string[]; first: Store; center: string; fig: { h: number; at: [number, number] }; graph: GEdge[]; memory: Mem[]; knowledge: Know[]; grep?: string }
+const FIG_W = 380
 
+// BlastRadius on applyDiscount: its callers; checkout() emits order.paid, and BlastRadius on order.paid adds the
+// file that consumes it (the second call), at Heuristic 0.5 with the rule's name as its provenance.
 const BLAST: GEdge[] = [
-  { from: 'checkout()', to: 'applyDiscount', via: 'calls', tier: 'Parsed', conf: 1.0, where: 'src/checkout/checkout.ts:41' },
-  { from: 'POST /price', to: 'applyDiscount', via: 'calls', tier: 'SCIP', conf: 1.0, where: 'src/routes/price.ts:18' },
-  { from: 'sendReceipt()', to: 'applyDiscount', via: 'consumes order.paid', tier: 'Heuristic', conf: 0.5, where: 'rule: event-bus-consume', injected: true },
-  { from: 'referralFlow()', to: 'applyDiscount', via: 'calls?', tier: 'Tags', conf: 0.3, where: 'tag-scan guess, unverified' },
+  { from: 'checkout()', to: 'applyDiscount', via: 'calls', tier: 'ImportMap', conf: 0.6, where: 'src/checkout/checkout.ts:41', at: [200, 80] },
+  { from: 'POST /price', to: 'applyDiscount', via: 'calls', tier: 'SCIP', conf: 1.0, where: 'src/routes/price.ts:18', at: [200, 22] },
+  { from: 'src/notify/receipt.ts', label: 'receipt.ts', to: '', via: 'consumes order.paid (checkout() emits it)', tier: 'Heuristic', conf: 0.5, where: 'rule: event-bus-consume', injected: true,
+    at: [322, 138], hop: { label: 'order.paid', at: [322, 80], via: 'checkout()' } },
+  { from: 'referralFlow()', to: 'applyDiscount', via: 'calls?', tier: 'Tags', conf: 0.3, where: 'tag-scan guess, unverified', at: [200, 138] },
 ]
+// memory.recall answers with scope, content, tier and score: the chips show the tier and the scope
 const WHY: Mem[] = [
-  { text: 'A discount never takes a total below zero. Two stacked coupons produced a negative total in March and refunded the customer.', kind: 'fact', how: 'told', scope: 'project:shop', when: '2026-03-14', about: 'applyDiscount' },
-  { text: 'Run r-412 added the clamp and a test for it after the incident.', kind: 'episode', how: 'witnessed', scope: 'project:shop', when: '2026-03-15', about: 'applyDiscount' },
+  { text: 'A discount never takes a total below zero. Two stacked coupons produced a negative total in March and refunded the customer.', tier: 'semantic', scope: 'project:shop' },
+  { text: 'Job 412 added the clamp and a test for it after the incident.', tier: 'episodic', scope: 'project:shop' },
 ]
 const STACK: Know[] = [
   { text: 'Only one percentage coupon applies per cart. Fixed-amount coupons stack, up to the cart total.', source: 'docs/pricing.md › Coupons › Stacking', linked: 'applyDiscount' },
   { text: 'Coupon rules live in one function so the price route and checkout cannot disagree.', source: 'docs/adr/ADR-014-discounts.md › Decision', linked: 'applyDiscount' },
 ]
+// TOML rules attach their edges to the matched files: the emitter and the consumers are files
 const PAID: GEdge[] = [
-  { from: 'checkout()', to: 'order.paid', via: 'emits', tier: 'Heuristic', conf: 0.5, where: 'rule: event-bus-emit', injected: true },
-  { from: 'sendReceipt()', to: 'order.paid', via: 'consumes', tier: 'Heuristic', conf: 0.5, where: 'rule: event-bus-consume', injected: true },
-  { from: 'updateLedger()', to: 'order.paid', via: 'consumes', tier: 'Heuristic', conf: 0.5, where: 'rule: event-bus-consume', injected: true },
+  { from: 'src/checkout/checkout.ts', label: 'checkout.ts', to: 'order.paid', via: 'emits', tier: 'Heuristic', conf: 0.5, where: 'rule: event-bus-emit', injected: true, at: [64, 75] },
+  { from: 'src/notify/receipt.ts', label: 'receipt.ts', to: 'order.paid', via: 'consumes', tier: 'Heuristic', conf: 0.5, where: 'rule: event-bus-consume', injected: true, at: [318, 30] },
+  { from: 'src/ledger/ledger.ts', label: 'ledger.ts', to: 'order.paid', via: 'consumes', tier: 'Heuristic', conf: 0.5, where: 'rule: event-bus-consume', injected: true, at: [318, 120] },
 ]
 
+const BLAST_FIG = { h: 160, at: [62, 80] as [number, number] }
 const QUESTIONS: Question[] = [
-  { id: 'blast', ask: 'What breaks if I change applyDiscount?', calls: ['BlastRadius { symbol: "applyDiscount" }'], first: 'graph', center: 'applyDiscount',
-    graph: BLAST, memory: [], knowledge: [], grep: 'grep finds 2 call sites. The graph finds a third through an event.' },
-  { id: 'event', ask: 'Who reacts when an order is paid?', calls: ['TraverseGraph { symbol: "topic:order.paid" }'], first: 'graph', center: 'order.paid',
+  { id: 'blast', ask: 'What breaks if I change applyDiscount?', calls: ['BlastRadius { symbol: "applyDiscount" }', 'BlastRadius { symbol: "order.paid" }'], first: 'graph', center: 'applyDiscount', fig: BLAST_FIG,
+    graph: BLAST, memory: [], knowledge: [], grep: 'grep finds 2 call sites. The graph also follows the event checkout() emits.' },
+  { id: 'event', ask: 'Who reacts when an order is paid?', calls: ['BlastRadius { symbol: "order.paid" }'], first: 'graph', center: 'order.paid', fig: { h: 150, at: [190, 75] },
     graph: PAID, memory: [], knowledge: [], grep: 'No function calls another here. A TOML rule adds these edges at index time.' },
-  { id: 'why', ask: 'Why can a discount never go below zero?', calls: ['memory.recall { query: "discount below zero", scope: "project:shop" }'], first: 'memory', center: 'applyDiscount',
+  { id: 'why', ask: 'Why can a discount never go below zero?', calls: ['memory.recall { query: "discount below zero", scope: "project:shop" }'], first: 'memory', center: 'applyDiscount', fig: BLAST_FIG,
     graph: [], memory: WHY, knowledge: [] },
-  { id: 'stack', ask: 'Can two coupons stack?', calls: ['knowledge.recall { query: "coupon stacking" }'], first: 'knowledge', center: 'applyDiscount',
+  { id: 'stack', ask: 'Can two coupons stack?', calls: ['knowledge.recall { query: "coupon stacking" }'], first: 'knowledge', center: 'applyDiscount', fig: BLAST_FIG,
     graph: [], memory: [], knowledge: STACK },
-  { id: 'all', ask: 'Everything about applyDiscount', calls: ['BlastRadius', 'memory.recall', 'knowledge.recall_about_code'], first: 'graph', center: 'applyDiscount',
+  { id: 'all', ask: 'Everything about applyDiscount', calls: ['BlastRadius', 'memory.recall', 'knowledge.recall_about_code'], first: 'graph', center: 'applyDiscount', fig: BLAST_FIG,
     graph: BLAST, memory: WHY, knowledge: STACK },
 ]
 
 const STORE_LABEL: Record<Store, { name: string; kind: string }> = {
   graph: { name: 'Code graph', kind: 'structured' },
-  memory: { name: 'Memory', kind: 'told or witnessed' },
+  memory: { name: 'Memory', kind: 'what happened, what you told it' },
   knowledge: { name: 'Knowledge', kind: 'read from your docs' },
 }
 
@@ -181,17 +204,49 @@ function confClass(c: number) { return c >= 0.8 ? 'q-conf q-conf--hi' : c >= 0.5
 type Anim = 'intro' | 'switch' | 'done'
 
 // ── 1 · Hook + the query playground ─────────────────────────────────────────
+/** A node box's half width for its label (mono 11px) */
+const halfW = (label: string, bold = false) => Math.max(42, label.length * (bold ? 3.6 : 3.4) + 8)
+/** A line between two node boxes, from border to border along their centre line, drawing out from `a`. */
+function Seg({ a, b, aw, bw, cls, i, inj, hop = 0 }: { a: [number, number]; b: [number, number]; aw: number; bw: number; cls: string; i: number; inj?: boolean; hop?: number }) {
+  const [x1, y1] = a, [x2, y2] = b
+  const dx = x2 - x1, dy = y2 - y1, hh = 13
+  const cut = (hw: number) => Math.min(Math.abs(dx) > 0.01 ? hw / Math.abs(dx) : 1, Math.abs(dy) > 0.01 ? hh / Math.abs(dy) : 1)
+  const s1 = cut(aw + 2), s2 = cut(bw + 2)
+  const sx = x1 + dx * s1, sy = y1 + dy * s1, ex = x2 - dx * s2, ey = y2 - dy * s2
+  return (
+    <g className="q-seg" style={vars({ '--i': i, '--hop': hop, '--ox': `${sx}px`, '--oy': `${sy}px` })}>
+      {inj && <line x1={sx} y1={sy} x2={ex} y2={ey} className="q-halo" />}
+      <line x1={sx} y1={sy} x2={ex} y2={ey} className={cls} />
+      {inj && <circle className="q-dot" cx={sx} cy={sy} r="3.5" style={vars({ '--dx': `${ex - sx}px`, '--dy': `${ey - sy}px` })} />}
+    </g>
+  )
+}
+
+/** An edge's relation; a parenthetical ("(checkout() emits it)") wraps as a unit, never leaving a word behind. */
+function Via({ via }: { via: string }) {
+  const at = via.indexOf(' (')
+  if (at < 0) return <span className="q-via">{via}</span>
+  return <span className="q-via">{via.slice(0, at)} <span className="q-via-x">{via.slice(at + 1)}</span></span>
+}
+
 function GraphView({ q, threshold, setThreshold }: { q: Question; threshold: Stop; setThreshold: (s: Stop) => void }) {
   // Confidence order (1.0 first) drives the draw order and the row order.
   const ordered = [...q.graph].sort((a, b) => b.conf - a.conf)
   const rank = new Map(ordered.map((e, i) => [e.from, i]))
   const rows = ordered.filter(e => e.conf >= threshold)
   const held = q.graph.length - rows.length
-  const W = 360, H = 150, cx = 180, cy = 75
-  const pts = q.graph.map((_, i) => {
-    const a = (Math.PI * 2 * i) / q.graph.length - Math.PI / 2
-    return { x: cx + Math.cos(a) * 124, y: cy + Math.sin(a) * 54 }
-  })
+  const W = FIG_W, H = q.fig.h, C = q.fig.at, cw = halfW(q.center, true)
+  const byFrom = new Map(q.graph.map(e => [e.from, e]))
+  const emitter = q.graph.some(x => x.via === 'emits')
+  const node = (at: [number, number], label: string, cls: string, bold = false) => {
+    const hw = halfW(label, bold)
+    return (
+      <g className="q-en">
+        <rect x={at[0] - hw} y={at[1] - 11} width={hw * 2} height="22" rx="6" className={cls} />
+        <text x={at[0]} y={at[1] + 4} textAnchor="middle" className={bold ? 'q-node-t q-node-t--center' : 'q-node-t'}>{label}</text>
+      </g>
+    )
+  }
   return (
     <div className="q-graphview">
       {/* the proof line leads the answer: first in reading order, above the picture it describes */}
@@ -201,19 +256,29 @@ function GraphView({ q, threshold, setThreshold }: { q: Question; threshold: Sto
           {q.graph.map((e, i) => {
             const on = e.conf >= threshold
             const r = rank.get(e.from) ?? i
+            const label = e.label ?? e.from
+            const cls = e.injected ? 'q-edge q-edge--inj' : e.conf < 0.5 ? 'q-edge q-edge--lo' : 'q-edge'
+            const via = e.hop ? byFrom.get(e.hop.via) : undefined
             return (
               <g key={e.from} className="q-eg" data-on={on} style={vars({ '--i': r })}>
-                <line x1={cx} y1={cy} x2={pts[i].x} y2={pts[i].y} className={e.injected ? 'q-edge q-edge--inj' : e.conf < 0.5 ? 'q-edge q-edge--lo' : 'q-edge'} />
-                <g className="q-en">
-                  <rect x={pts[i].x - 52} y={pts[i].y - 11} width="104" height="22" rx="6" className={e.injected ? 'q-node q-node--inj' : 'q-node'} />
-                  <text x={pts[i].x} y={pts[i].y + 4} textAnchor="middle" className="q-node-t">{e.from}</text>
-                </g>
-                {e.injected && <circle className="q-dot" cx={cx} cy={cy} r="3.5" style={vars({ '--dx': `${pts[i].x - cx}px`, '--dy': `${pts[i].y - cy}px` })} />}
+                {e.hop && via ? (
+                  <>
+                    {/* the event is the second hop: the emitter's node, the topic, then the file that consumes it */}
+                    <Seg a={via.at} b={e.hop.at} aw={halfW(via.label ?? via.from)} bw={halfW(e.hop.label)} cls={cls} i={r} inj />
+                    <Seg a={e.hop.at} b={e.at} aw={halfW(e.hop.label)} bw={halfW(label)} cls={cls} i={r + 0.45} inj hop={1} />
+                    {node(e.hop.at, e.hop.label, 'q-node q-node--topic')}
+                  </>
+                ) : e.via === 'emits' ? (
+                  // the emitter's edge runs into the topic, so a pulse travels emitter → topic → consumers
+                  <Seg a={e.at} b={C} aw={halfW(label)} bw={cw} cls={cls} i={r} inj={e.injected} />
+                ) : (
+                  <Seg a={C} b={e.at} aw={cw} bw={halfW(label)} cls={cls} i={r + (emitter ? 0.45 : 0)} inj={e.injected} hop={emitter ? 1 : 0} />
+                )}
+                {node(e.at, label, e.injected ? 'q-node q-node--inj' : 'q-node')}
               </g>
             )
           })}
-          <rect x={cx - 54} y={cy - 12} width="108" height="24" rx="7" className="q-node q-node--center" />
-          <text x={cx} y={cy + 4} textAnchor="middle" className="q-node-t q-node-t--center">{q.center}</text>
+          {node(C, q.center, 'q-node q-node--center', true)}
         </svg>
       </div>
         <div className="q-rowwrap">
@@ -221,7 +286,7 @@ function GraphView({ q, threshold, setThreshold }: { q: Question; threshold: Sto
             {rows.map(e => (
               <li key={e.from} className="q-row" data-inj={e.injected ? 'true' : undefined} style={vars({ '--i': rank.get(e.from) ?? 0 })}>
                 {/* a phone drops the target: it is always the symbol asked about, named just above */}
-                <span className="q-row-main"><b>{e.from}</b> <span className="q-via">{e.via}</span><span className="q-to"> {e.to}</span></span>
+                <span className="q-row-main"><b>{e.from}</b> <Via via={e.via} />{e.to && <span className="q-to"> {e.to}</span>}</span>
                 <span className="q-where">{e.where}</span>
                 <span className="q-chips">
                   {e.injected && <span className="q-chip q-chip--inj">injected</span>}
@@ -253,11 +318,8 @@ function MemoryView({ q }: { q: Question }) {
         <li key={m.text} className="q-card q-card--mem" style={vars({ '--i': i })}>
           <p>{m.text}</p>
           <span className="q-chips">
-            <span className="q-chip q-chip--mem">{m.how}</span>
-            <span className="q-chip">kind: {m.kind}</span>
-            <span className="q-chip">{m.scope}</span>
-            {m.about && <span className="q-chip">about: {m.about}</span>}
-            <span className="q-where">{m.when}</span>
+            <span className="q-chip q-chip--mem" title="tier">{m.tier}</span>
+            <span className="q-chip" title="scope">{m.scope}</span>
           </span>
         </li>
       ))}
@@ -315,7 +377,7 @@ function Playground({ st, pick, setTab, threshold, setThreshold }: {
       <div className="q-bar">
         <span className="q-dots" aria-hidden><i /><i /><i /></span>
         <span className="q-bar-t">wicked-estate-mcp<span className="q-bar-db"> · graph.db</span></span>
-        <span className="q-bar-r"><Follow /><span className="q-scripted">scripted demo<span className="q-scripted-x"> · pick a question</span></span></span>
+        <span className="q-bar-r"><span className="follow follow--line"><i aria-hidden />This page follows one function, <code>{FOLLOW}</code>, through all three stores.</span><Follow /><span className="q-scripted">scripted demo<span className="q-scripted-x"> · pick a question</span></span></span>
       </div>
       <div className="q-body">
         <div className="q-asks" role="listbox" aria-label="Ask the record" onKeyDown={e => arrowNav(e, '.q-ask', true)}>
@@ -378,6 +440,7 @@ function Hero(props: Parameters<typeof Playground>[0]) {
           <li className="facts-fact">Local CLI + MCP server</li>
           <li className="facts-fact">30 standard MCP tools</li>
           <li className="facts-fact">114 languages</li>
+          <li className="facts-go"><a href="#get-started">Get started <span aria-hidden>↓</span></a></li>
         </ul>
       </div>
       <div className="hero-play"><Playground {...props} /></div>
@@ -388,7 +451,7 @@ function Hero(props: Parameters<typeof Playground>[0]) {
 // ── 2 · Three stores, one record (the benefits, on the stores they come from) ─
 const STORES: { id: Store; name: string; kind: string; holds: string; from: string; ask: string[] }[] = [
   { id: 'graph', name: 'Code graph', kind: 'structured', holds: 'Symbols, calls, imports, and the edges grep never sees.', from: 'Indexing your repos, in 114 languages.', ask: ['BlastRadius', 'Path', 'ContextBundle'] },
-  { id: 'memory', name: 'Memory', kind: 'told or witnessed', holds: 'What happened, and what you told it.', from: 'Agents and people capture it; reflection distills it.', ask: ['memory.recall', 'memory.capture'] },
+  { id: 'memory', name: 'Memory', kind: 'scoped', holds: 'What happened, and what you told it.', from: 'Agents and people capture it; reflection distills it.', ask: ['memory.recall', 'memory.capture'] },
   { id: 'knowledge', name: 'Knowledge', kind: 'read, then cited', holds: 'What your docs and wiki say, linked to the code.', from: 'Ingesting documents; hybrid keyword + vector recall.', ask: ['knowledge.recall', 'knowledge.ingest'] },
 ]
 const BENEFITS: { h: string; p: string }[] = [
@@ -405,9 +468,9 @@ function StorePreview({ id }: { id: Store }) {
   if (id === 'graph') {
     return (
       <div className="sc-prev">
-        <p className="sc-prev-h">What depends on <code>{FOLLOW}</code></p>
+        <p className="sc-prev-h">Around <code>{FOLLOW}</code></p>
         <ul className="sc-deps">
-          {BLAST.filter(e => e.conf >= 0.5).map(e => (
+          {[...BLAST].sort((a, b) => b.conf - a.conf).filter(e => e.conf >= 0.5).map(e => (
             <li key={e.from}><code>{e.from}</code>{e.injected && <span className="q-chip q-chip--inj">injected</span>}<span className={confClass(e.conf)}>{e.conf.toFixed(1)}</span></li>
           ))}
         </ul>
@@ -419,7 +482,7 @@ function StorePreview({ id }: { id: Store }) {
     return (
       <div className="sc-prev">
         <p className="sc-prev-q">{m.text.split('. ')[0]}.</p>
-        <span className="q-chips"><span className="q-chip q-chip--mem">{m.how}</span><span className="q-chip">kind: {m.kind}</span><span className="q-where">{m.when}</span></span>
+        <span className="q-chips"><span className="q-chip q-chip--mem" title="tier">{m.tier}</span><span className="q-chip" title="scope">{m.scope}</span></span>
       </div>
     )
   }
@@ -481,21 +544,33 @@ function Stores() {
       <Head n="01" label="Three stores, one record" follow title="Three stores. One record."
         sub="Each answer says which store it came from, so a guess never reads like a fact and a note never reads like a doc." />
       <div id="why" className="stores" data-benefits data-view={view}>
+        {/* a phone keeps both benefits in sight above its switch; the switch then picks the card */}
+        <div className="ben-heads">
+          <h3 data-store="graph">{BENEFITS[0].h}</h3>
+          <h3 data-store="memory">{BENEFITS[1].h}</h3>
+        </div>
         <PhoneSwitch label="Show one store" value={view} onChange={setView} cls="st-views" options={[
           { id: 'graph', name: 'Code graph', store: 'graph' }, { id: 'memory', name: 'Memory', store: 'memory' },
           { id: 'knowledge', name: 'Knowledge', store: 'knowledge' }, { id: 'news', name: 'What’s new' },
         ]} />
-        <div className="thread" aria-hidden>
-          <span className="thread-node"><code>{FOLLOW}</code></span>
-          <svg className="thread-lines" viewBox="0 0 600 34" preserveAspectRatio="none">
-            <path className="tl tl--graph" d="M300 0 C300 22 100 12 100 34" />
-            <path className="tl tl--memory" d="M300 0 C300 22 300 12 300 34" />
-            <path className="tl tl--knowledge" d="M300 0 C300 22 500 12 500 34" />
-          </svg>
-        </div>
-        {/* one grid: benefit 1 heads the code graph; benefit 2 spans memory and knowledge. Each view's wrapper
-            is transparent to a desktop's grid; a phone stacks the views in one cell, sized to the largest. */}
+        {/* one grid: the benefits head their columns (benefit 1 the code graph, benefit 2 memory and knowledge),
+            then the followed symbol threads down into each store's card. Each view's wrapper is transparent to a
+            desktop's grid; a phone stacks the views in one cell, sized to the largest. */}
         <div className="stores-grid">
+          <div className="thread" aria-hidden>
+            <span className="thread-node"><code>{FOLLOW}</code></span>
+            <svg className="thread-lines" viewBox="0 0 600 34" preserveAspectRatio="none">
+              {(['graph', 'memory', 'knowledge'] as Store[]).map((id, i) => {
+                const d = `M300 0 C300 20 ${100 + i * 200} 14 ${100 + i * 200} 34`
+                return (
+                  <g key={id}>
+                    <path className={`tl tl--${id}`} d={d} />
+                    <path className={`tl-pulse tl--${id}`} d={d} pathLength={100} />
+                  </g>
+                )
+              })}
+            </svg>
+          </div>
           <div className="st-v st-v--graph">
             <div className="ben ben--graph"><h3>{BENEFITS[0].h}</h3><p>{BENEFITS[0].p}</p></div>
             {card('graph')}
@@ -512,10 +587,6 @@ function Stores() {
             <ul aria-labelledby="news-h" data-news>
               {NEWS.map(n => <li key={n.b}><b>{n.b}</b>{n.rest}</li>)}
             </ul>
-            <ul className="news-facts">
-              <li>Agents propose memories and rules. A person approves them.</li>
-              <li>Erase a whole scope in one call: <code className="tag">memory.erase</code></li>
-            </ul>
           </div>
         </div>
       </div>
@@ -524,9 +595,10 @@ function Stores() {
 }
 
 // ── 3 · Edges grep never sees, and how sure each is ─────────────────────────
-// ResolutionTier::default_confidence, crates/wicked-estate-core/src/edge.rs
+// ResolutionTier::default_confidence, crates/wicked-estate-core/src/edge.rs (defaults: a resolver may score an
+// edge below its tier's default, as the import-map call above shows). No shipping path produces LSP-tier edges.
 const TIERS: { tier: string; conf: number; who: string }[] = [
-  { tier: 'Parsed · SCIP · LSP · Compiler', conf: 1.0, who: 'read straight from the code or a precise indexer' },
+  { tier: 'Parsed · SCIP · Compiler', conf: 1.0, who: 'read straight from the code, a SCIP index or a compiler catalog' },
   { tier: 'TSG', conf: 0.8, who: 'graph rules over the syntax tree' },
   { tier: 'ImportMap', conf: 0.6, who: 'followed through imports' },
   { tier: 'Heuristic', conf: 0.5, who: 'synthesizers and your TOML rules' },
@@ -535,13 +607,14 @@ const TIERS: { tier: string; conf: number; who: string }[] = [
 
 type Mode = 'grep' | 'estate'
 
-/** The event bus, made visible: grep sees the two call sites; estate adds the order.paid edges a TOML rule injects. */
+/** The event bus, made visible: grep sees the two call sites; estate adds the order.paid edges TOML rules inject,
+    from the emitting code to the topic and from the topic to the files that consume it. */
 function BusDiagram({ mode, vertical = false }: { mode: Mode; vertical?: boolean }) {
   // node centres; desktop is a left-to-right flow, the phone version stacks it
   const N = vertical
-    ? { price: [80, 18], checkout: [220, 18], apply: [80, 88], paid: [220, 88], receipt: [80, 158], ledger: [220, 158] }
+    ? { price: [80, 16], checkout: [220, 16], apply: [80, 75], paid: [220, 75], receipt: [80, 134], ledger: [220, 134] }
     : { price: [70, 26], checkout: [70, 124], apply: [260, 26], paid: [260, 124], receipt: [450, 96], ledger: [450, 152] }
-  const w = vertical ? 300 : 520, h = vertical ? 176 : 170
+  const w = vertical ? 300 : 520, h = vertical ? 150 : 170
   const nw = 124, nh = 28
   const node = (k: keyof typeof N, label: string, cls = '') => (
     <g className={`pv-n ${cls}`}>
@@ -558,6 +631,7 @@ function BusDiagram({ mode, vertical = false }: { mode: Mode; vertical?: boolean
     const sx = x1 + dx * s, sy = y1 + dy * s, ex = x2 - dx * s, ey = y2 - dy * s
     return (
       <g key={`${a}-${b}`} className={`pv-e ${cls}`} style={vars({ '--i': i, '--ox': `${sx}px`, '--oy': `${sy}px` })}>
+        {cls === 'pv-e--inj' && <line x1={sx} y1={sy} x2={ex} y2={ey} className="q-halo" />}
         <line x1={sx} y1={sy} x2={ex} y2={ey} className={cls === 'pv-e--inj' ? 'q-edge q-edge--inj' : 'q-edge q-edge--call'} />
         {cls === 'pv-e--inj' && <circle className="q-dot" cx={sx} cy={sy} r="3.5" style={vars({ '--dx': `${ex - sx}px`, '--dy': `${ey - sy}px` })} />}
       </g>
@@ -566,8 +640,8 @@ function BusDiagram({ mode, vertical = false }: { mode: Mode; vertical?: boolean
   return (
     <svg viewBox={`0 0 ${w} ${h}`} className={`pv-svg${vertical ? ' pv-svg--v' : ' pv-svg--h'}`} data-mode={mode} role="img"
       aria-label={mode === 'grep'
-        ? 'grep: POST /price and checkout() call applyDiscount; nothing links checkout() to sendReceipt() or updateLedger()'
-        : 'estate: the two calls, plus checkout() emits order.paid, which sendReceipt() and updateLedger() consume (injected, Heuristic 0.5)'}>
+        ? 'grep: POST /price and checkout() call applyDiscount; nothing links checkout() to the files that consume its event'
+        : 'estate: the two calls, plus checkout() emits order.paid, which receipt.ts and ledger.ts consume (injected, Heuristic 0.5)'}>
       {edge('price', 'apply', 'pv-e--call', 0)}
       {edge('checkout', 'apply', 'pv-e--call', 0)}
       {edge('checkout', 'paid', 'pv-e--inj', 0)}
@@ -577,8 +651,8 @@ function BusDiagram({ mode, vertical = false }: { mode: Mode; vertical?: boolean
       {node('checkout', 'checkout()')}
       {node('apply', FOLLOW, 'center')}
       {node('paid', 'order.paid', 'topic pv-x')}
-      {node('receipt', 'sendReceipt()', 'pv-x')}
-      {node('ledger', 'updateLedger()', 'pv-x')}
+      {node('receipt', 'receipt.ts', 'pv-x')}
+      {node('ledger', 'ledger.ts', 'pv-x')}
     </svg>
   )
 }
@@ -617,19 +691,26 @@ function Provenance({ threshold, setThreshold }: { threshold: Stop; setThreshold
             <BusDiagram mode={mode} vertical />
             <div className="pv-read" aria-live="polite">
               <p data-off={mode !== 'grep' ? 'true' : undefined}><b>grep finds 2 call sites.</b> Nothing links <code>checkout()</code> to the code that reacts to its event.</p>
-              <p data-off={mode !== 'estate' ? 'true' : undefined}><b>The graph finds a third through an event.</b> <span className="q-chips"><span className="q-chip q-chip--inj">injected</span><span className="q-chip">Heuristic</span><span className="q-conf q-conf--mid">0.5</span><span className="q-where">rule: event-bus-consume</span></span></p>
+              <p data-off={mode !== 'estate' ? 'true' : undefined}><b>The graph follows the event.</b> <code>checkout()</code> emits <code>order.paid</code>; a TOML rule links the files that consume it. <span className="q-chips"><span className="q-chip q-chip--inj">injected</span><span className="q-chip">Heuristic</span><span className="q-conf q-conf--mid">0.5</span><span className="q-where">rule: event-bus-consume</span></span></p>
             </div>
-            <pre className="toml" data-hot={mode === 'estate' ? 'true' : undefined}><code><span className="toml-l">[[rule]]</span>
-<span className="toml-l">name      = "event-bus-consume"</span>
-<span className="toml-l">file_glob = "**/*.js"</span>
-<span className="toml-l toml-l--hot">{`pattern   = "subscribe\\\\([\\"'](?P<topic>[\\\\w.]+)"`}</span></code></pre>
-            <p className="pv-note">A new kind of edge is a rule block, not a code change. These land at 0.5, labelled with the rule’s name.</p>
+            {/* both halves of a consume rule: what it matches, and the edge it adds (the topic node's block is named) */}
+            <div className="toml" data-hot={mode === 'estate' ? 'true' : undefined}>
+              <pre className="toml-t"><code><span className="toml-l">[[rule]]</span>
+<span className="toml-l">name = "event-bus-consume"</span>
+<span className="toml-l">file_glob = "**/*.ts"</span>
+<span className="toml-l toml-l--hot">{`pattern = "subscribe\\\\([\\"'](?P<topic>[\\\\w.]+)"`}</span></code></pre>
+              <pre className="toml-t"><code><span className="toml-l toml-l--hot">[rule.emit_edge]</span>
+<span className="toml-l">kind = "other:consumes"</span>
+<span className="toml-l">target_id_template = "topic:{'{topic}'}"</span>
+<span className="toml-l toml-c"># + [rule.emit_node] (the topic)</span></code></pre>
+            </div>
+            <p className="pv-note">An excerpt (docs/extractor-sdk.md): a new kind of edge is a rule block, not a code change. These land at 0.5, labelled with the rule’s name.</p>
           </div>
         </div>
         {/* a phone gives the confidence ladder a frame of its own */}
         <div className="rock-panel pv-panel ph-frame">
           <div className="pv-bar">
-            <span className="pv-bar-t">How sure each edge is</span>
+            <span className="pv-bar-t">Default confidence by tier</span>
             <label htmlFor="thr-range" className="thr-l">Show edges ≥ <output htmlFor="thr-range" className="thr-v">{threshold.toFixed(1)}</output></label>
           </div>
           <div className="thr">
@@ -651,7 +732,7 @@ function Provenance({ threshold, setThreshold }: { threshold: Stop; setThreshold
             </tbody>
           </table>
           <div className="thr-read" aria-live="polite">
-            <p><b>{reach.length} of {BLAST.length}</b> edges about <code>{FOLLOW}</code> shown.{' '}
+            <p><b>{reach.length} of {BLAST.length}</b> edges in the <code>{FOLLOW}</code> answer shown.{' '}
               <span data-off={threshold !== 0.3 ? 'true' : undefined} className="thr-guess"><code>referralFlow()</code> appears as a tag-scan guess, unverified.</span>
             </p>
             <p className="thr-cap">When two tiers report the same edge, the higher one wins. A 0.3 guess is never handed to an agent as a 1.0 fact.</p>
@@ -752,14 +833,21 @@ const TOOLSETS: ToolSet[] = [
     ] },
   ] },
 ]
-/** Tools the playground has a scripted answer for: "see it" plays that question. Calls come from QUESTIONS. */
-const SEE: Record<string, { q: string; tab?: Store; call: string }> = {
-  BlastRadius: { q: 'blast', call: QUESTIONS[0].calls[0] },
-  TraverseGraph: { q: 'event', call: QUESTIONS[1].calls[0] },
-  'memory.recall': { q: 'why', call: QUESTIONS[2].calls[0] },
-  'knowledge.recall': { q: 'stack', call: QUESTIONS[3].calls[0] },
-  'knowledge.recall_about_code': { q: 'all', tab: 'knowledge', call: QUESTIONS[4].calls[2] },
+/** Tools the playground has a scripted answer for: "see it" plays that question, and the detail pane previews
+    the answer's first lines. Calls and lines come from the scripted data above. */
+type PrevLine = { k: string; v?: string; tag?: 'inj' | 'mem' | 'know'; conf?: number; sans?: boolean }
+const byConf = (es: GEdge[]) => [...es].sort((a, b) => b.conf - a.conf).filter(e => e.conf >= 0.5)
+const SEE: Record<string, { q: string; tab?: Store; call: string; lines: PrevLine[] }> = {
+  BlastRadius: { q: 'blast', call: QUESTIONS[0].calls[0],
+    lines: byConf(BLAST).map(e => ({ k: e.label ?? e.from, v: e.via.split(' (')[0], tag: e.injected ? 'inj' : undefined, conf: e.conf })) },
+  'memory.recall': { q: 'why', call: QUESTIONS[2].calls[0],
+    lines: WHY.slice(0, 1).map(m => ({ k: m.text.split('. ')[0].replace(/\.$/, '') + '.', v: `${m.tier} · ${m.scope}`, tag: 'mem', sans: true })) },
+  'knowledge.recall': { q: 'stack', call: QUESTIONS[3].calls[0],
+    lines: STACK.slice(0, 1).map(k => ({ k: k.text.split('. ')[0].replace(/\.$/, '') + '.', v: k.source, tag: 'know', sans: true })) },
+  'knowledge.recall_about_code': { q: 'all', tab: 'knowledge', call: QUESTIONS[4].calls[2],
+    lines: STACK.map(k => ({ k: k.source, v: `linked to ${k.linked}`, tag: 'know' })) },
 }
+const SEE_NAMES = Object.keys(SEE)
 const DEFAULT_SEL: Record<string, string> = { graph: 'BlastRadius', memory: 'memory.recall', knowledge: 'knowledge.recall', cli: 'watch' }
 /** A phone pages search results, three at a time, inside a fixed box (a desktop scrolls its fixed box). */
 const PAGE = 3
@@ -785,10 +873,18 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
     return null
   }
   const picked = find(sel) ?? find(DEFAULT_SEL[set])!
-  const openGroup = openG[set] ?? current.groups[0].label
+  // a phone shows one group at a time: by default the one that holds the selection, so list and detail agree
+  const openGroup = openG[set] ?? (picked.t.id === set ? picked.g.label : current.groups[0].label)
   const gi = Math.max(0, current.groups.findIndex(g => g.label === openGroup))
   const ng = current.groups.length
-  const stepGroup = (d: number) => setOpenG(o => ({ ...o, [set]: current.groups[(gi + d + ng) % ng].label }))
+  // stepping to another group selects its first tool, so the detail below always names a tool in view
+  const stepGroup = (d: number) => {
+    const g = current.groups[(gi + d + ng) % ng]
+    setOpenG(o => ({ ...o, [set]: g.label }))
+    setSel(g.rows[0].name)
+  }
+  const see = SEE[picked.r.name]
+  const others = picked.g.rows.filter(r => r.name !== picked.r.name)
   const pages = Math.max(1, Math.ceil(hits.length / PAGE))
   const pg = Math.min(page, pages - 1)
   const choose = (id: string) => { setSet(id); setFilter(''); setSel(DEFAULT_SEL[id]); setPage(0) }
@@ -803,7 +899,7 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
   return (
     <Section id="toolface" solid>
       <Head n="03" label="What agents can call" follow title="Everything an agent can call."
-        sub="30 MCP tools in three groups, and a CLI over the same record. Pick a group, or search them all." />
+        sub="A catalog of 30 standard MCP tools in three groups, plus semantic search when enabled, and a CLI over the same record." />
       <div className="tools" data-set={f ? 'search' : set}>
         <div className="tools-bar">
           <div className="tools-tabs" role="tablist" aria-label="Tool groups" onKeyDown={e => arrowNav(e, '.tools-tab')}>
@@ -859,16 +955,42 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
               <p className="td-name"><code>{picked.r.name}</code>{picked.r.optional && <span className="tl-opt">when enabled</span>}</p>
               <p className="td-does">{picked.r.does}.</p>
               {picked.r.optional && <p className="td-x">Listed only when embeddings are wired, so it is the “+1” and not one of the 30.</p>}
-              {SEE[picked.r.name] ? (
+              {see ? (
                 <div className="td-see">
-                  <code className="td-call">{SEE[picked.r.name].call}</code>
-                  <button type="button" className="see-btn" onClick={() => onSee(SEE[picked.r.name].q, SEE[picked.r.name].tab)}>
+                  {/* the scripted answer's first lines, so the pane shows what "see it answer" plays */}
+                  <div className="td-prev" aria-label="Scripted answer, first lines">
+                    <code className="td-call">{see.call}</code>
+                    <ul className="td-lines">
+                      {see.lines.map((l, i) => (
+                        <li key={l.k} style={vars({ '--i': i })} data-tag={l.tag} data-sans={l.sans ? 'true' : undefined}>
+                          <span className="td-k">{l.k}</span>
+                          {l.v && <span className="td-v">{l.v}</span>}
+                          {l.tag === 'inj' && <span className="q-chip q-chip--inj">injected</span>}
+                          {l.conf !== undefined && <span className={confClass(l.conf)}>{l.conf.toFixed(1)}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <button type="button" className="see-btn" onClick={() => onSee(see.q, see.tab)}>
                     See it answer <span aria-hidden>↑</span>
                   </button>
                 </div>
-              ) : (
-                <p className="td-x"><span className="td-x-desk">The playground has a scripted answer for <code>BlastRadius</code>, <code>TraverseGraph</code>, <code>memory.recall</code>, <code>knowledge.recall</code> and <code>knowledge.recall_about_code</code> (marked with a dot).</span>
-                  <span className="td-x-ph">Tools marked with a dot have a scripted answer in the playground.</span></p>
+              ) : !picked.r.optional && (
+                <>
+                  <p className="td-x td-x-desk">The playground has a scripted answer for {SEE_NAMES.map((n, i) => (
+                    <span key={n}>{i > 0 && (i === SEE_NAMES.length - 1 ? ' and ' : ', ')}<code>{n}</code></span>
+                  ))} (marked with a dot).</p>
+                  {others.length > 0 && (
+                    <div className="td-more">
+                      <span className="td-more-l">More in {picked.g.label}</span>
+                      {others.map(r => (
+                        <button key={r.name} type="button" className="td-more-b" onClick={() => setSel(r.name)}>
+                          <code>{r.name}</code>{SEE[r.name] && <span className="tl-see-dot" aria-label="has a scripted answer" />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </div>
@@ -882,17 +1004,17 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
 function Storage() {
   const [shared, setShared] = useState(false)
   const rows: [string, string, string][] = [
-    ['Store', 'one graph.db file per repo', 'a Postgres you host'],
+    ['Store', 'a local graph.db (one repo, or several with --repo)', 'a Postgres you host'],
     ['Writers', 'one writer, no daemon', 'the whole team, concurrently'],
     ['Setup', 'nothing to run', 'WICKED_RUNTIME=team and WICKED_STORE_URL, on a --features postgres build'],
-    ['MCP server', 'yes', 'not yet; it refuses to start rather than fall back'],
+    ['MCP server', 'serves it', 'not yet; it refuses team mode rather than fall back'],
     ['Memory and knowledge', 'local SQLite', 'still local SQLite; not shared yet'],
   ]
   const mode = shared ? 'team' : 'solo'
   return (
     <Section id="storage">
       <Head n="04" label="Where it lives" title="Local by default." wide
-        sub={<>The CLI and the MCP server keep the graph, memory and knowledge in local SQLite, with no database server to run: a catalog of 30 standard MCP tools, plus semantic search when enabled. <span className="sub-fine">A shared PostgreSQL code graph for a team is an optional CLI build; the MCP server, memory and knowledge do not use it yet.</span></>} />
+        sub={<>The CLI and the MCP server keep the graph, memory and knowledge in local SQLite, with no database server to run. <span className="sub-fine">A shared PostgreSQL code graph for a team is an optional CLI build; the MCP server, memory and knowledge do not use it yet.</span></>} />
       <div className="seg-row" role="group" aria-label="Storage">
         <button type="button" className="seg" aria-pressed={!shared} data-on={!shared} onClick={() => setShared(false)}>SQLite · solo</button>
         <button type="button" className="seg" aria-pressed={shared} data-on={shared} onClick={() => setShared(true)}>PostgreSQL · team</button>
@@ -916,12 +1038,14 @@ function Storage() {
             </div>
             <p className="sd-foot">SQLite · nothing to run</p>
           </div>
-          <div className="sd-link" aria-hidden><span /></div>
+          {/* the code graph travels the connector to the shared Postgres; in team mode its writes keep flowing */}
+          <div className="sd-link" aria-hidden><span><b className="sd-trip" key={mode} /><b className="sd-flow" /></span></div>
           <div className="sd-box sd-box--shared">
             <p className="sd-label">Shared PostgreSQL</p>
             <div className="sd-dbs sd-dbs--shared">
+              {/* solo shows the team picture as a dimmed outline */}
               <span className="cyl cyl--graph sd-shared-graph"><i />code graph</span>
-              <span className="sd-empty">not used solo</span>
+              <span className="sd-empty"><span className="stk"><span data-off={shared ? 'true' : undefined}>not used solo</span><span data-off={!shared ? 'true' : undefined}>the whole team, concurrently</span></span></span>
             </div>
             <p className="sd-foot">CLI build, <code>--features postgres</code></p>
           </div>
@@ -986,8 +1110,9 @@ function CopyBtn({ text, label, onCopied }: { text: string; label: string; onCop
   )
 }
 
-/** A command, broken only between tokens (never inside a flag), typed once when the terminal enters. */
-function Cmd({ show, typed }: { show: string; typed: number }) {
+/** A command, broken only between tokens (never inside a flag), typed once when the terminal enters. The last
+    command keeps a caret at its end once typed (it blinks while the scene is on screen). */
+function Cmd({ show, typed, last = false }: { show: string; typed: number; last?: boolean }) {
   const lines = show.split('\n')
   // a flag keeps its value on its line ("-s project", "--db graph.db"); breaks fall only between tokens
   const words = (s: string) => {
@@ -1010,7 +1135,8 @@ function Cmd({ show, typed }: { show: string; typed: number }) {
         {lines.map((l, i) => {
           const n = Math.max(0, Math.min(l.length, left))
           left -= l.length + 1
-          return <span key={i} className="cmd-line">{tok(l.slice(0, n), `t${i}`)}{n > 0 && n < l.length && <i className="caret" />}</span>
+          const end = last && i === lines.length - 1 && n === l.length
+          return <span key={i} className="cmd-line">{tok(l.slice(0, n), `t${i}`)}{n > 0 && n < l.length && <i className="caret" />}{end && <i className="caret caret--idle" />}</span>
         })}
       </span>
     </span>
@@ -1089,7 +1215,12 @@ export function GetStarted() {
               <span className="gs-cmd"><span className="gs-prompt" aria-hidden>$ </span><span className="cmd"><span className="cmd-line"><span className="tok">npx</span> <span className="tok">wicked-installer</span></span></span></span>
               <CopyBtn text={INSTALL_CMD} label={INSTALL_CMD} />
             </div>
-            <p className="gs-p">Pick estate and any siblings, choose your agent CLIs, and it wires them up.</p>
+            {/* the approved line, as the three beats the installer walks through */}
+            <ol className="gs-beats" aria-label="Pick estate and any siblings, choose your agent CLIs, and it wires them up.">
+              <li><span className="gs-beat-n" aria-hidden>1</span>Pick estate and any siblings</li>
+              <li><span className="gs-beat-n" aria-hidden>2</span>Choose your agent CLIs</li>
+              <li><span className="gs-beat-n" aria-hidden>3</span>It wires them up</li>
+            </ol>
           </div>
         </div>
         <div className="rock-panel gs-panel gs-term">
@@ -1105,7 +1236,7 @@ export function GetStarted() {
                   <div className="gs-step-in">
                     <p className="gs-step-l">{s.label}</p>
                     <div className="gs-line">
-                      <span className="gs-cmd"><span className="gs-prompt" aria-hidden>$ </span><Cmd show={show} typed={mine} /></span>
+                      <span className="gs-cmd"><span className="gs-prompt" aria-hidden>$ </span><Cmd show={show} typed={mine} last={s.n === STEPS.length} /></span>
                       <CopyBtn text={s.cmd} label={s.cmd} onCopied={() => setDone(d => ({ ...d, [s.n]: true }))} />
                     </div>
                     {s.tip && <p className="gs-tip">{s.tip}</p>}
@@ -1115,10 +1246,11 @@ export function GetStarted() {
             })}
           </ol>
         </div>
-      </div>
-      <div className="gs-cta">
-        <a href="https://github.com/mikeparcewski/wicked-estate" target="_blank" rel="noreferrer" className="btn-primary"><GitHubIcon /> GitHub</a>
-        <a href="https://github.com/mikeparcewski/wicked-estate/tree/main/docs" target="_blank" rel="noreferrer" className="btn-outline">Documentation</a>
+        {/* a desktop keeps the links in the left column, under the recommended path */}
+        <div className="gs-cta">
+          <a href="https://github.com/mikeparcewski/wicked-estate" target="_blank" rel="noreferrer" className="btn-primary"><GitHubIcon /> GitHub</a>
+          <a href="https://github.com/mikeparcewski/wicked-estate/tree/main/docs" target="_blank" rel="noreferrer" className="btn-outline">Documentation</a>
+        </div>
       </div>
     </Section>
   )

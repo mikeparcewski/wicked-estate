@@ -181,12 +181,16 @@ test('the tool explorer steps one group, or one page of matches, at a time', asy
   const t = page.locator('#toolface');
   await t.scrollIntoViewIfNeeded();
   const list = () => t.locator('.tools-list').evaluate((el) => Math.round(el.getBoundingClientRect().height));
-  await expect(t.locator('.tl-step-t')).toContainText('Find 1 of 4');
-  await expect(t.locator('.tl-row:visible')).toHaveCount(4);
-  const h0 = await list();
-  const next = t.getByRole('button', { name: 'Next group' });
-  await clickUntil(next, async () => /Follow 2 of 4/.test(await t.locator('.tl-step-t').innerText()));
+  // it opens on the group that holds the selected tool, so the list and the detail agree
+  await expect(t.locator('.tl-step-t')).toContainText('Follow 2 of 4');
   await expect(t.locator('.tl-row:visible .tl-name')).toHaveText(['BlastRadius', 'Lineage', 'Path', 'TraverseGraph']);
+  await expect(t.locator('.td-name code')).toHaveText('BlastRadius');
+  const h0 = await list();
+  // stepping to another group selects its first tool
+  const next = t.getByRole('button', { name: 'Next group' });
+  await clickUntil(next, async () => /Summarize 3 of 4/.test(await t.locator('.tl-step-t').innerText()));
+  await expect(t.locator('.tl-row:visible .tl-name')).toHaveText(['ContextBundle', 'RankHotspots', 'Communities']);
+  await expect(t.locator('.td-name code')).toHaveText('ContextBundle');
   await t.getByLabel('Search tools').fill('e');
   await expect(t.locator('.tl-step-t')).toContainText(/^1–3 of \d+$/);
   await expect(t.locator('.tl-hit:visible')).toHaveCount(3);
@@ -203,3 +207,31 @@ test('the tool explorer steps one group, or one page of matches, at a time', asy
   await expect(t.locator('.tl-step-t')).toHaveText('No tool matches “zzz”.');
   expect(await list()).toBe(h0);
 });
+
+// Every tool's detail fits its fixed phone box at 360 and 390 wide (a clipped note was the bug: the optional
+// tool showed its own note plus the scripted-answer hint).
+for (const vp of [{ width: 360, height: 740 }, { width: 390, height: 844 }]) {
+  test(`every tool's detail fits its box at ${vp.width}x${vp.height}`, async ({ page }) => {
+    await page.setViewportSize(vp);
+    await page.goto('/');
+    const t = page.locator('#toolface');
+    await t.scrollIntoViewIfNeeded();
+    const over: string[] = [];
+    for (let s = 0; s < 4; s++) {
+      const tab = t.locator('.tools-tab').nth(s);
+      await clickUntil(tab, async () => (await tab.getAttribute('aria-selected')) === 'true');
+      const n = await t.locator('.tl-row').count();
+      for (let r = 0; r < n; r++) {
+        await t.locator('.tl-row').nth(r).evaluate((e) => (e as HTMLElement).click());
+        const m = await t.locator('.tools-detail').evaluate((d) => {
+          const cs = getComputedStyle(d);
+          const bottom = d.getBoundingClientRect().bottom - parseFloat(cs.paddingBottom);
+          const kids = [...d.querySelectorAll('.td-in *')].filter((k) => k.getBoundingClientRect().height > 0);
+          return { name: d.querySelector('.td-name code')?.textContent ?? '?', over: Math.max(0, ...kids.map((k) => k.getBoundingClientRect().bottom - bottom)) };
+        });
+        if (m.over > 0.5) over.push(`${m.name} +${m.over.toFixed(1)}`);
+      }
+    }
+    expect(over).toEqual([]);
+  });
+}
