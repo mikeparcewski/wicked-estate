@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
 
 /* ────────────────────────────────────────────────────────────────────────────
-   wicked-estate (we.wickedagile.com): memory and knowledge for coding agents,
-   structured and unstructured.
+   wicked-estate (we.wickedagile.com): what your agents know about your system:
+   the code graph, memory and knowledge, structured and unstructured.
 
-   Shape: hook + a working query playground → three stores → injected edges and
+   Shape: hook + a working query playground → three benefits and what's new
+   (0.30–0.31) → three stores → injected edges and
    confidence → everything an agent can call (an explorer, not a wall) → solo or
    shared storage → (SameGarden, in index.astro) → get started.
 
@@ -18,13 +19,20 @@ import { useState, useEffect, useRef } from 'react'
      provenance = the rule name (crates/wicked-estate-extract/src/extra_edge.rs).
    - Memory kinds working|episode|entity|fact|skill|archive, scoped, erasable by
      subtree; operator memories apply across projects (0.30.0).
+   - Two executables, the CLI (wicked-estate) and the MCP server
+     (wicked-estate-mcp): the [[bin]] entries in crates/wicked-estate/Cargo.toml
+     and crates/wicked-estate-mcp/Cargo.toml, shipped by
+     .github/workflows/binaries.yml. Never "one binary".
+   - Storage: the MCP server, memory and knowledge use local SQLite; a shared
+     PostgreSQL code graph is an optional CLI build (--features postgres), and
+     the MCP server refuses team mode (docs/team-runtime.md).
    - The playground is scripted: it shows the shape of real answers, it never
      runs a query.
    ──────────────────────────────────────────────────────────────────────────── */
 
 // The hook. Two strings, so the operator can swap a variant in one place.
-const HEADLINE = 'Memory and knowledge for your coding agents.'
-const SUBLINE = 'Your code as a graph, what happened and what you told it, and what your docs say: one local binary your agents query over MCP.'
+const HEADLINE = 'What your agents know about your system.'
+const SUBLINE = 'Your code as a graph, what happened and what you told it, and what your docs say: a local CLI and MCP server your agents can query.'
 
 function GitHubIcon({ size = 16 }: { size?: number }) {
   return (
@@ -482,6 +490,7 @@ function Storage() {
     ['Writers', 'one writer, no daemon', 'the whole team, concurrently'],
     ['Setup', 'nothing to run', 'WICKED_RUNTIME=team and WICKED_STORE_URL, on a --features postgres build'],
     ['MCP server', 'yes', 'not yet; it refuses to start rather than fall back'],
+    ['Memory and knowledge', 'local SQLite', 'still local SQLite; not shared yet'],
   ]
   return (
     <Section id="storage">
@@ -595,11 +604,44 @@ export function GetStarted() {
   )
 }
 
+// ── 1b · Three benefits, and what's new (released) ──────────────────────────
+const BENEFITS: { h: string; p: string }[] = [
+  { h: 'Know what breaks before you change it.', p: 'A code graph over 114 languages (depth varies by language), with the event and command links grep never sees.' },
+  { h: 'Memory you can read, kept apart from knowledge.', p: 'What happened and what you told it, separate from what it learned from your code and docs. Every link in the graph carries its confidence and where it came from. Memories about how you work can apply across projects; project memories stay with their project.' },
+  { h: 'Local by default.', p: 'The CLI and the MCP server keep the graph, memory and knowledge in local SQLite, with no database server to run: a catalog of 30 standard MCP tools, plus semantic search when enabled (read-only mode and unavailable stores reduce the set offered). A shared PostgreSQL code graph for a team is an optional CLI build; the MCP server, memory and knowledge do not use it yet.' },
+]
+const NEWS: { b: string; rest: string }[] = [
+  { b: 'Memories about how you work can apply across projects,', rest: ' using an explicit operator scope.' },
+  { b: 'Did you mean…?', rest: ' A missed symbol name gets suggestions.' },
+  { b: 'Prebuilt binaries for five platforms', rest: ' on every GitHub release.' },
+]
+
+function Benefits() {
+  return (
+    <Section id="why" solid>
+      <h2 className="sr-only">What estate does for your agents</h2>
+      <div className="grid md:grid-cols-3 gap-3" data-benefits>
+        {BENEFITS.map(b => (
+          <div key={b.h} className="rock-panel p-5 flex flex-col gap-2">
+            <h3 className="font-display text-xl font-semibold text-ink leading-tight">{b.h}</h3>
+            <p className="text-muted font-sans leading-snug">{b.p}</p>
+          </div>
+        ))}
+      </div>
+      <h3 className="mt-6 mb-2 font-display text-lg font-semibold text-ink" id="news-h">What’s new in 0.30–0.31</h3>
+      <ul className="grid md:grid-cols-3 gap-3 text-sm text-muted font-sans" aria-labelledby="news-h" data-news>
+        {NEWS.map(n => <li key={n.b} className="fact-line"><b className="text-ink">{n.b}</b>{n.rest}</li>)}
+      </ul>
+    </Section>
+  )
+}
+
 // The SameGarden map (an Astro component) renders between this island and GetStarted.
 export default function Content() {
   return (
     <>
       <Hero />
+      <Benefits />
       <Stores />
       <Provenance />
       <Toolface />
