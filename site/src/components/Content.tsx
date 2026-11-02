@@ -1066,6 +1066,13 @@ export function GetStarted() {
   }
   useEnterOnce(term, () => { entered.current = true; if (termShown()) play() })
   useEffect(() => { if (path === 'cargo' && entered.current) play() }, [path])
+  // widening a phone past its layout shows both paths: a terminal it hid types then
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 760px)')
+    const on = () => requestAnimationFrame(() => { if (entered.current && termShown()) play() })
+    mq.addEventListener?.('change', on)
+    return () => mq.removeEventListener?.('change', on)
+  }, [])
   let before = 0
   return (
     <Section id="get-started" solid>

@@ -21,15 +21,32 @@ test('the terminal types its commands when it arrives, even in a short window', 
   await page.waitForFunction(() => document.querySelector('#get-started .gs-step .cmd-type')?.textContent === '');
   const section = page.locator('#get-started');
   const term = section.locator('.gs-term');
-  await term.evaluate((el) => { el.scrollIntoView({ block: 'start' }); window.scrollBy(0, el.getBoundingClientRect().top - 40); });
+  // land on it instantly (no smooth scroll), so the entrance has really fired before the check below
+  await page.addStyleTag({ content: 'html{scroll-behavior:auto!important}' });
+  await term.evaluate((el) => { el.scrollIntoView({ block: 'start', behavior: 'instant' }); window.scrollBy({ top: el.getBoundingClientRect().top - 40, behavior: 'instant' }); });
+  await expect.poll(() => term.evaluate((el) => Math.round(el.getBoundingClientRect().top))).toBeLessThan(100);
   const typed = () => section.locator('.gs-step .cmd-type').evaluateAll((els) => els.map((e) => (e.textContent ?? '').replace(/\\/g, ' ').replace(/\s+/g, ' ').trim()));
   // a phone shows one install path at a time: the hidden terminal waits, and types once it is picked
   await expect(term).toBeHidden();
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(900);
   expect(await typed(), 'the hidden terminal typed unseen').toEqual(['', '', '']);
   const cargo = section.locator('.ph-opt').filter({ hasText: 'Or just estate' });
   await clickUntil(cargo, async () => (await cargo.getAttribute('aria-pressed')) === 'true');
   await expect(term).toBeVisible();
+  await expect.poll(typed, { timeout: 6_000 }).toEqual(COMMANDS);
+});
+
+test('a terminal a phone hid types when the window widens', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  await page.waitForFunction(() => document.querySelector('#get-started .gs-step .cmd-type')?.textContent === '');
+  await page.addStyleTag({ content: 'html{scroll-behavior:auto!important}' });
+  const section = page.locator('#get-started');
+  await section.evaluate((el) => el.scrollIntoView({ block: 'start', behavior: 'instant' }));
+  await page.waitForTimeout(600);
+  await page.setViewportSize({ width: 900, height: 900 });
+  await expect(section.locator('.gs-term')).toBeVisible();
+  const typed = () => section.locator('.gs-step .cmd-type').evaluateAll((els) => els.map((e) => (e.textContent ?? '').replace(/\\/g, ' ').replace(/\s+/g, ' ').trim()));
   await expect.poll(typed, { timeout: 6_000 }).toEqual(COMMANDS);
 });
 

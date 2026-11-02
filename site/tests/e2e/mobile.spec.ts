@@ -170,6 +170,8 @@ test('the stores switch one store at a time, in one box', async ({ page }) => {
   await clickUntil(memBtn, async () => (await memBtn.getAttribute('aria-pressed')) === 'true');
   await expect(s.locator('.sc[data-store="memory"] .sc-face--prev')).toBeVisible();
   await s.locator('.ph-opt').filter({ hasText: 'Code graph' }).click();
+  // at once, not after a fade: read the outgoing face in the same frame as the switch
+  expect(await s.locator('.sc[data-store="memory"] .sc-face--prev').evaluate((el) => getComputedStyle(el).visibility)).toBe('hidden');
   await expect(s.locator('.sc[data-store="memory"] .sc-face--prev')).toBeHidden();
   await expect(s.locator('.sc[data-store="graph"] .sc-face--about')).toBeVisible();
 });

@@ -105,6 +105,10 @@ let lastAt = -Infinity;
 let lastDir = 0;
 let glideTo: number | null = null;
 let glideUntil = -Infinity;
+// a glide's target counts only while that glide runs: its end, or any other way of moving (keys, a click or
+// tap, focus moving, an anchor) drops it, and the next notch starts from where the page really is
+const dropGlide = () => { glideTo = null; };
+for (const ev of ['scrollend', 'keydown', 'pointerdown', 'focusin', 'hashchange']) window.addEventListener(ev, dropGlide, { passive: true });
 window.addEventListener('wheel', (e) => {
   if (!html.classList.contains('snap-lock') || e.ctrlKey || e.defaultPrevented) return;
   if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;

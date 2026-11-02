@@ -72,6 +72,16 @@ test.describe('the wheel pages scene by scene under the snap lock', () => {
   // stepper (scenes.ts) a mouse could never leave the hero
   const tops = async (page: import('@playwright/test').Page) => {
     await page.setViewportSize({ width: 1440, height: 700 });
+    // record every scroll the stepper asks for, so a dropped or stale request shows even when the page lands
+    await page.addInitScript(() => {
+      const w = window as unknown as { __to: number[] };
+      w.__to = [];
+      const orig = window.scrollTo.bind(window);
+      window.scrollTo = ((a?: ScrollToOptions | number, b?: number) => {
+        if (typeof a === 'object' && a && typeof a.top === 'number') w.__to.push(Math.round(a.top));
+        return typeof a === 'number' ? orig(a, b ?? 0) : orig(a);
+      }) as typeof window.scrollTo;
+    });
     await page.goto('/');
     await expect(page.locator('html')).toHaveClass(/snap-lock/);
     await page.mouse.move(700, 400);
@@ -94,15 +104,33 @@ test.describe('the wheel pages scene by scene under the snap lock', () => {
 
   test('notches during a glide still count, and a reversal comes back', async ({ page }) => {
     const t = await tops(page);
+    const asked = () => page.evaluate(() => (window as unknown as { __to: number[] }).__to);
     await page.mouse.wheel(0, 100);
     await page.waitForTimeout(200);
     await page.mouse.wheel(0, 100);
     await expect.poll(y(page)).toBe(t.prov);
-    await page.waitForTimeout(200);
+    await page.waitForTimeout(150);
     await page.mouse.wheel(0, 100);
-    await page.waitForTimeout(200);
+    await page.waitForTimeout(150);
     await page.mouse.wheel(0, -100);
+    // each notch asked for its own scene: down, down, down to the tools, then back from the tools' glide
+    await expect.poll(asked).toEqual([t.stores, t.prov, t.tools, t.prov]);
     await expect.poll(y(page)).toBe(t.prov);
+  });
+
+  test('another way of moving drops a glide\'s target', async ({ page }) => {
+    const t = await tops(page);
+    // keys jump at once here, so the whole exchange sits inside one glide's window
+    await page.addStyleTag({ content: 'html{scroll-behavior:auto!important}' });
+    const end = await page.evaluate(() => document.documentElement.scrollHeight - innerHeight);
+    await page.mouse.wheel(0, 100);
+    await page.waitForTimeout(60);
+    // the keyboard takes the page on (End), then the wheel goes back up: from where the page is, not from the
+    // glide's old target (that would land on the hero)
+    await page.keyboard.press('End');
+    await expect.poll(y(page)).toBe(end);
+    await page.mouse.wheel(0, -100);
+    await expect.poll(y(page)).toBeGreaterThan(t.tools);
   });
 
   test('a small pixel step moves a scene; a dense stream (a swipe and its momentum) moves only one', async ({ page }) => {

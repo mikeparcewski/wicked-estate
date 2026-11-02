@@ -962,7 +962,7 @@ html:not(.motion-ok) .sd, html:not(.motion-ok) .sd * { transition: none !importa
   .stores[data-view="graph"] .sc:not([data-store="graph"]) .sc-face,
   .stores[data-view="memory"] .sc:not([data-store="memory"]) .sc-face,
   .stores[data-view="knowledge"] .sc:not([data-store="knowledge"]) .sc-face,
-  .stores[data-view="news"] .sc .sc-face { visibility: hidden; }
+  .stores[data-view="news"] .sc .sc-face { visibility: hidden; transition: none; }
   .ben h3 { font-size: 18px; }
   .sc { padding: 12px 14px; }
   .sc-btn { min-height: 44px; padding: 4px 12px; }
