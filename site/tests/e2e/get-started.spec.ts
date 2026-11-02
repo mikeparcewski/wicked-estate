@@ -17,6 +17,8 @@ test('the terminal types its commands when it arrives, even in a short window', 
   // 320x320: the terminal is far taller than the window, so no visible share of it can ever reach one half
   await page.setViewportSize({ width: 320, height: 320 });
   await page.goto('/');
+  // the hydrated pre-state first (off screen, the terminal waits empty), so only the entrance can fill it
+  await page.waitForFunction(() => document.querySelector('#get-started .gs-step .cmd-type')?.textContent === '');
   const section = page.locator('#get-started');
   await section.locator('.gs-term').scrollIntoViewIfNeeded();
   await section.locator('.gs-term').evaluate((el) => window.scrollBy(0, el.getBoundingClientRect().top - 40));

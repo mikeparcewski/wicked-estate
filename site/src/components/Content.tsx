@@ -323,7 +323,7 @@ function Playground({ st, pick, setTab, threshold, setThreshold }: {
               <ConfStops id="q-thr" value={threshold} onChange={setThreshold} />
             </div>
           </div>
-          <div className="q-result" id="q-panel" role="tabpanel" tabIndex={-1} aria-labelledby={`q-tab-${tab}`} data-store={tab}>
+          <div className="q-result" id="q-panel" role="tabpanel" tabIndex={0} aria-labelledby={`q-tab-${tab}`} data-store={tab}>
             <div className="q-anim" key={`${st.qid}-${tab}-${st.nonce}`}>
               {tab !== 'graph' && <p className="q-kind">{STORE_LABEL[tab].name}: {STORE_LABEL[tab].kind}</p>}
               {counts[tab] === 0
@@ -1052,10 +1052,11 @@ export default function Content() {
   const see = useCallback((id: string, tab?: Store) => {
     pick(id, tab)
     // after the pick renders: a desktop frame holds the whole hero (scroll to it, focus the question);
-    // a phone stacks the questions above the answer, so it lands on the answer and focuses that
+    // a phone stacks the questions and the controls above the answer, so it lands on the answer itself
+    // (below the topbar) and focuses it
     window.setTimeout(() => {
       const behavior: ScrollBehavior = motionAllowed() ? 'smooth' : 'auto'
-      const answer = document.querySelector<HTMLElement>('#query .q-answer')
+      const answer = document.querySelector<HTMLElement>('#q-panel')
       const desk = window.matchMedia('(min-width: 1024px)').matches
       if (desk || !answer) {
         window.scrollTo({ top: 0, behavior })

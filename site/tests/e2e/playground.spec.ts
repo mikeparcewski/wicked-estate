@@ -180,9 +180,11 @@ test.describe('scenes', () => {
     // the diagram: two call edges always; the three injected order.paid edges only in estate mode
     const diagram = pv.locator('.pv-svg--h');
     await expect(diagram).toBeVisible();
-    await expect(diagram.locator('.pv-e--call')).toHaveCount(2);
+    // real connectors: each edge draws a line of real length (a horizontal line has no height, so no toBeVisible)
+    const lengths = (sel: string) => diagram.locator(sel).evaluateAll((els) => els.map((e) => Math.round((e as SVGLineElement).getTotalLength())));
+    expect((await lengths('.pv-e--call line')).filter((n) => n > 10)).toHaveLength(2);
+    expect((await lengths('.pv-e--inj line')).filter((n) => n > 10)).toHaveLength(3);
     const inj = diagram.locator('.pv-e--inj');
-    await expect(inj).toHaveCount(3);
     const opacities = () => inj.evaluateAll((els) => els.map((e) => getComputedStyle(e).opacity));
     await expect.poll(opacities).toEqual(['0', '0', '0']);
     await pv.getByRole('button', { name: 'estate', exact: true }).click();
@@ -190,6 +192,23 @@ test.describe('scenes', () => {
     await expect(pv.locator('.pv-read p:not([data-off])')).toContainText('rule: event-bus-consume');
     await expect(pv.locator('.toml')).toHaveAttribute('data-hot', 'true');
     await expect.poll(opacities).toEqual(['1', '1', '1']);
+    expect(await diagram.locator('.pv-e--inj line').evaluateAll((els) => els.map((e) => getComputedStyle(e).strokeDasharray !== 'none'))).toEqual([true, true, true]);
+  });
+
+  test('an answer that overflows its panel is reachable by keyboard', async ({ page }) => {
+    // 1024 wide: the graph stacks above its rows, so "Everything" scrolls inside the fixed panel
+    await page.setViewportSize({ width: 1024, height: 700 });
+    await page.goto('/');
+    const q = page.locator('#query');
+    const all = q.getByRole('option', { name: 'Everything about applyDiscount' });
+    await clickUntil(all, async () => (await q.getAttribute('data-q')) === 'all');
+    const panel = page.locator('#q-panel');
+    expect(await panel.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+    await q.getByRole('radio', { name: '0.5' }).focus();
+    await page.keyboard.press('Tab');
+    await expect(panel).toBeFocused();
+    await page.keyboard.press('End');
+    await expect.poll(() => panel.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
   });
 
   test('a store card enters even when the window is too short to show a share of the scene', async ({ page }) => {

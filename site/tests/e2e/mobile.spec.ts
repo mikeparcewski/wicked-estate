@@ -8,6 +8,20 @@ import { clickUntil } from './helpers';
 const { defaultBrowserType: _ignored, ...iphone12 } = devices['iPhone 12'];
 test.use(iphone12);
 
+test('"See it answer" lands on the answer, even in a short window', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 320 });
+  await page.goto('/');
+  const t = page.locator('#toolface');
+  await t.scrollIntoViewIfNeeded();
+  const mem = t.locator('.tools-tab').filter({ hasText: 'Memory' });
+  await clickUntil(mem, async () => (await mem.getAttribute('aria-selected')) === 'true');
+  await t.getByRole('button', { name: /See it answer/ }).click();
+  const q = page.locator('#query');
+  await expect(q).toHaveAttribute('data-q', 'why');
+  await expect(q.locator('.q-card').first()).toBeInViewport();
+  await expect(page.locator('#q-panel')).toBeFocused();
+});
+
 test('mobile: the playground and the tool explorer work, no horizontal overflow', async ({ page }) => {
   const pageErrors: Error[] = [];
   page.on('pageerror', (e) => pageErrors.push(e));
