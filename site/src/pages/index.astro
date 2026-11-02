@@ -23,9 +23,15 @@ const SCENES = [
   description="What your agents know about your system. Your code as a graph, including the edges grep never sees; memory of what happened and what you told it; and knowledge read from your docs, cited. A local CLI and MCP server with a catalog of 30 standard MCP tools. Every edge carries its confidence and provenance. Local SQLite by default; a shared PostgreSQL code graph for a team is an optional CLI build."
 >
   <!-- Motion is opt-in by the visitor's setting, decided before first paint so the hero's
-       one-shot intro never flashes its end state first. Reduced motion: no class, end states only. -->
+       one-shot intro never flashes its end state first, and kept in step with that setting if it
+       changes during the visit. Reduced motion: no class, end states only. -->
   <script is:inline>
-    try { if (!matchMedia('(prefers-reduced-motion: reduce)').matches) document.documentElement.classList.add('motion-ok'); } catch (e) {}
+    try {
+      var rm = matchMedia('(prefers-reduced-motion: reduce)');
+      var sync = function () { document.documentElement.classList.toggle('motion-ok', !rm.matches); };
+      sync();
+      if (rm.addEventListener) rm.addEventListener('change', sync);
+    } catch (e) {}
   </script>
   <Topbar pkg="wicked-estate" repo="https://github.com/mikeparcewski/wicked-estate" />
   <main class="font-sans">

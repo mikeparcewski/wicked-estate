@@ -214,6 +214,14 @@ test.describe('tool detail', () => {
     await page.keyboard.press('Enter');
     await expect(t.locator('.td-name code')).toHaveText('RetrieveEntity');
     await expect(t.locator('.tl-row[data-name="RetrieveEntity"]')).toBeFocused();
+    // a search that hides the destination row is cleared, so the row exists to take focus
+    await t.getByLabel('Search tools').fill('SearchEntity');
+    await t.locator('.tl-row[data-name="SearchEntity"]').click();
+    await t.locator('.td-more-b').filter({ hasText: 'FetchContent' }).focus();
+    await page.keyboard.press('Enter');
+    await expect(t.locator('.td-name code')).toHaveText('FetchContent');
+    await expect(t.getByLabel('Search tools')).toHaveValue('');
+    await expect(t.locator('.tl-row[data-name="FetchContent"]')).toBeFocused();
   });
 });
 

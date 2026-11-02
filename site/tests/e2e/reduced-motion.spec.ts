@@ -42,3 +42,37 @@ test('reduced motion: no scroll snapping at desktop width', async ({ page }) => 
   expect(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches)).toBe(true);
   expect(await page.evaluate(() => getComputedStyle(document.documentElement).scrollSnapType)).toBe('none');
 });
+
+test.describe('reduced motion switched on during the visit', () => {
+  test.use({ contextOptions: { reducedMotion: 'no-preference' } });
+  test('motion stops at once: no loops, the typing ends whole, "See it answer" jumps', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    await expect(page.locator('html')).toHaveClass(/motion-ok/);
+    // start the terminal typing (it takes ~1.35s), then switch the setting mid-way
+    await page.evaluate(() => window.scrollTo({ top: document.getElementById('get-started')!.getBoundingClientRect().top + scrollY - 64, behavior: 'instant' }));
+    await page.waitForTimeout(350);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await expect(page.locator('html')).not.toHaveClass(/motion-ok/);
+    const gs = page.locator('#get-started');
+    await expect.poll(() => gs.evaluate((el) => [...el.querySelectorAll('.gs-step .cmd-type')].map((t) => t.textContent).join('|')))
+      .toBe(await gs.evaluate((el) => [...el.querySelectorAll('.gs-step .cmd-full')].map((t) => t.textContent).join('|')));
+    await expect.poll(() => page.evaluate(() => document.getAnimations().filter((a) => a.playState === 'running' && a.effect?.getComputedTiming().iterations === Infinity).length)).toBe(0);
+    // "See it answer" asks for an instant jump, not a smooth scroll
+    const behaviors = await page.evaluate(async () => {
+      const seen: string[] = [];
+      const orig = window.scrollTo.bind(window);
+      window.scrollTo = ((a?: ScrollToOptions | number, b?: number) => {
+        if (typeof a === 'object' && a) seen.push(String(a.behavior));
+        return typeof a === 'number' ? orig(a, b ?? 0) : orig(a);
+      }) as typeof window.scrollTo;
+      const t = document.getElementById('toolface')!;
+      window.scrollTo({ top: t.getBoundingClientRect().top + scrollY - 64, behavior: 'instant' });
+      seen.length = 0;
+      (t.querySelector('.see-btn') as HTMLElement).click();
+      await new Promise((r) => setTimeout(r, 120));
+      return seen;
+    });
+    expect(behaviors).toEqual(['auto']);
+  });
+});

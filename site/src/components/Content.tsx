@@ -211,14 +211,14 @@ type Anim = 'intro' | 'switch' | 'done'
 /** A node box's half width for its label (mono 11px) */
 const halfW = (label: string, bold = false) => Math.max(42, label.length * (bold ? 3.6 : 3.4) + 8)
 /** A line between two node boxes, from border to border along their centre line, drawing out from `a`. */
-function Seg({ a, b, aw, bw, cls, i, inj, hop = 0 }: { a: [number, number]; b: [number, number]; aw: number; bw: number; cls: string; i: number; inj?: boolean; hop?: number }) {
+function Seg({ a, b, aw, bw, cls, i, inj, hop = 0, from, to }: { a: [number, number]; b: [number, number]; aw: number; bw: number; cls: string; i: number; inj?: boolean; hop?: number; from: string; to: string }) {
   const [x1, y1] = a, [x2, y2] = b
   const dx = x2 - x1, dy = y2 - y1, hh = 13
   const cut = (hw: number) => Math.min(Math.abs(dx) > 0.01 ? hw / Math.abs(dx) : 1, Math.abs(dy) > 0.01 ? hh / Math.abs(dy) : 1)
   const s1 = cut(aw + 2), s2 = cut(bw + 2)
   const sx = x1 + dx * s1, sy = y1 + dy * s1, ex = x2 - dx * s2, ey = y2 - dy * s2
   return (
-    <g className="q-seg" style={vars({ '--i': i, '--hop': hop, '--ox': `${sx}px`, '--oy': `${sy}px` })}>
+    <g className="q-seg" data-from={from} data-to={to} style={vars({ '--i': i, '--hop': hop, '--ox': `${sx}px`, '--oy': `${sy}px` })}>
       {inj && <line x1={sx} y1={sy} x2={ex} y2={ey} className="q-halo" />}
       <line x1={sx} y1={sy} x2={ex} y2={ey} className={cls} />
       {inj && <circle className="q-dot" cx={sx} cy={sy} r="3.5" style={vars({ '--dx': `${ex - sx}px`, '--dy': `${ey - sy}px` })} />}
@@ -273,17 +273,17 @@ function GraphView({ q, threshold, setThreshold }: { q: Question; threshold: Sto
                   <>
                     {/* the event is the second hop: the file that holds the caller (a parsed "contains" edge), the
                         topic it emits, then the file that consumes it */}
-                    {ctx && holder && <Seg a={holder.at} b={ctx.at} aw={halfW(holder.label)} bw={halfW(ctx.label)} cls="q-edge q-edge--struct" i={r} />}
+                    {ctx && holder && <Seg a={holder.at} b={ctx.at} aw={halfW(holder.label)} bw={halfW(ctx.label)} cls="q-edge q-edge--struct" i={r} from={holder.label} to={ctx.label} />}
                     {ctx && node(ctx.at, ctx.label, 'q-node q-node--file')}
-                    <Seg a={via.at} b={e.hop.at} aw={halfW(via.label)} bw={halfW(e.hop.label)} cls={cls} i={r} inj />
-                    <Seg a={e.hop.at} b={e.at} aw={halfW(e.hop.label)} bw={halfW(label)} cls={cls} i={r + 0.45} inj hop={1} />
+                    <Seg a={via.at} b={e.hop.at} aw={halfW(via.label)} bw={halfW(e.hop.label)} cls={cls} i={r} inj from={via.label} to={e.hop.label} />
+                    <Seg a={e.hop.at} b={e.at} aw={halfW(e.hop.label)} bw={halfW(label)} cls={cls} i={r + 0.45} inj hop={1} from={e.hop.label} to={label} />
                     {node(e.hop.at, e.hop.label, 'q-node q-node--topic')}
                   </>
                 ) : e.via === 'emits' ? (
                   // the emitter's edge runs into the topic, so a pulse travels emitter → topic → consumers
-                  <Seg a={e.at} b={C} aw={halfW(label)} bw={cw} cls={cls} i={r} inj={e.injected} />
+                  <Seg a={e.at} b={C} aw={halfW(label)} bw={cw} cls={cls} i={r} inj={e.injected} from={label} to={q.center} />
                 ) : (
-                  <Seg a={C} b={e.at} aw={cw} bw={halfW(label)} cls={cls} i={r + (emitter ? 0.45 : 0)} inj={e.injected} hop={emitter ? 1 : 0} />
+                  <Seg a={C} b={e.at} aw={cw} bw={halfW(label)} cls={cls} i={r + (emitter ? 0.45 : 0)} inj={e.injected} hop={emitter ? 1 : 0} from={q.center} to={label} />
                 )}
                 {node(e.at, label, e.injected ? 'q-node q-node--inj' : 'q-node')}
               </g>
@@ -919,6 +919,8 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
   }
   // a related tool's button goes away with the detail it sits in: focus moves to that tool's row in the list
   const selectAndFocus = (name: string) => {
+    // a search may hide the destination row: clear it, so the tool's set and group show with the row in them
+    setFilter(''); setPage(0)
     select(name)
     requestAnimationFrame(() => document.querySelector<HTMLElement>(`#toolface .tl-row[data-name="${name}"]`)?.focus())
   }
@@ -1229,6 +1231,13 @@ export function GetStarted() {
   }
   useEnterOnce(term, () => { entered.current = true; if (termShown()) play() })
   useEffect(() => { if (path === 'cargo' && entered.current) play() }, [path])
+  // reduced motion switched on during the visit: any typing stops, and every command shows whole
+  useEffect(() => {
+    const rm = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const on = () => { if (rm.matches) finish() }
+    rm.addEventListener?.('change', on)
+    return () => rm.removeEventListener?.('change', on)
+  }, [finish])
   // widening a phone past its layout shows both paths: a terminal it hid types then
   useEffect(() => {
     const mq = window.matchMedia('(max-width: 760px)')

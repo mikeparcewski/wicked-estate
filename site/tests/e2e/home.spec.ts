@@ -276,6 +276,21 @@ test('the copy names only what estate ships and returns', async ({ page }) => {
   await expect(page.locator('.facts-go a')).toHaveAttribute('href', '#get-started');
   // the emit edge leaves the FILE (a TOML rule attaches it there), in the hero and in the event-bus picture
   await expect(page.locator('#query .q-graph .q-node--file + text')).toHaveText('checkout.ts');
+  // geometry, not labels: the injected emit segment starts on the file node's box and ends on the topic's
+  const g = await page.locator('#query .q-graph').evaluate((svg) => {
+    const seg = svg.querySelector('.q-seg[data-from="checkout.ts"][data-to="order.paid"] line.q-edge') as SVGLineElement | null;
+    const box = (cls: string, label: string) => {
+      const t = [...svg.querySelectorAll(`.${cls} + text`)].find((x) => x.textContent === label);
+      const r = t?.previousElementSibling as SVGRectElement | null;
+      return r ? { x: r.x.baseVal.value, y: r.y.baseVal.value, w: r.width.baseVal.value, h: r.height.baseVal.value } : null;
+    };
+    const near = (px: number, py: number, b: { x: number; y: number; w: number; h: number } | null) =>
+      !!b && px >= b.x - 4 && px <= b.x + b.w + 4 && py >= b.y - 4 && py <= b.y + b.h + 4;
+    if (!seg) return { seg: false, starts: false, ends: false, dashed: false };
+    const [x1, y1, x2, y2] = ['x1', 'y1', 'x2', 'y2'].map((k) => (seg as unknown as Record<string, SVGAnimatedLength>)[k].baseVal.value);
+    return { seg: true, starts: near(x1, y1, box('q-node--file', 'checkout.ts')), ends: near(x2, y2, box('q-node--topic', 'order.paid')), dashed: seg.classList.contains('q-edge--inj') };
+  });
+  expect(g).toEqual({ seg: true, starts: true, ends: true, dashed: true });
   await expect(page.locator('#provenance .pv-svg--h .q-node-t')).toContainText(['price.ts', 'checkout.ts', 'applyDiscount', 'order.paid', 'receipt.ts', 'ledger.ts']);
   // What's new lists only the three released 0.30-0.31 items
   await expect(page.locator('#stores .news li')).toHaveCount(3);
