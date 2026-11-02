@@ -14,6 +14,22 @@ test('reduced motion: zero page errors, every section visible, the playground an
   expect(pageErrors).toEqual([]);
 });
 
+test('reduced motion: every scene shows its end state, nothing plays', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('html')).not.toHaveClass(/motion-ok/);
+  const pv = page.locator('#provenance');
+  await pv.scrollIntoViewIfNeeded();
+  await expect(pv.locator('.pv-panel').first()).toHaveAttribute('data-mode', 'estate');
+  const gs = page.locator('#get-started');
+  await gs.scrollIntoViewIfNeeded();
+  // the terminal shows every command whole (no typing)
+  const typed = await gs.evaluate((el) => [...el.querySelectorAll('.gs-step .cmd-type')].map((t) => t.textContent));
+  const full = await gs.evaluate((el) => [...el.querySelectorAll('.gs-step .cmd-full')].map((t) => t.textContent));
+  expect(typed).toEqual(full);
+  const running = await page.evaluate(() => document.getAnimations().filter((a) => a.playState === 'running').length);
+  expect(running).toBe(0);
+});
+
 // wicked-web#31: global.css re-declares `scroll-snap-type` on html, so it carries the chrome's guard.
 test('reduced motion: no scroll snapping at desktop width', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 700 });

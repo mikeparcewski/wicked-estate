@@ -16,6 +16,15 @@ test('code tags are mono at 13px; provenance chips are the text face', async ({ 
   await expect(chip).toHaveCSS('font-size', '12px');
 });
 
+test('code surfaces are mono: the MCP window, paths, node labels, confidence numbers, tool names', async ({ page }) => {
+  await page.goto('/');
+  for (const sel of ['#query .q-bar-t', '#query .q-where', '#query .q-node-t', '#query .q-conf', '#toolface .tl-name', '#query .q-call code']) {
+    await expect(page.locator(sel).first(), sel).toHaveCSS('font-family', /JetBrains Mono/);
+  }
+  // prose stays the text face
+  await expect(page.locator('.hero-sub')).toHaveCSS('font-family', /^"?Wicked Sans/);
+});
+
 test('command lines are code at 13px; the kicker carries the foundation hue', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('[data-storage-cmd]')).toHaveCSS('font-size', '13px');

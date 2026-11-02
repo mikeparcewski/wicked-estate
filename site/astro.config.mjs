@@ -24,6 +24,9 @@ const SITE = process.env.SITE_URL ?? 'https://we.wickedagile.com';
 const BASE = process.env.BASE_PATH ?? '/';
 
 export default defineConfig({
+  // Astro's default HTML compression deletes the space before an inline tag (<b>, <code>), fusing
+  // words on screen ("callsapplyDiscount"); the family's standing rule is to keep it off.
+  compressHTML: false,
   site: SITE,
   base: BASE,
   trailingSlash: 'ignore',
