@@ -16,6 +16,8 @@ test('storage toggle switches SQLite and PostgreSQL views', async ({ page }) => 
   await expect(pgBtn).toHaveAttribute('data-on', 'true');
   await expect(section).toContainText('the whole team, concurrently');
   await expect(section).toContainText('refuses to start rather than fall back');
+  // Team mode shares the code graph only: memory and knowledge stay on local SQLite.
+  await expect(section).toContainText('still local SQLite; not shared yet');
 
   await section.locator('button.seg').filter({ hasText: 'SQLite' }).click();
   await expect(cmd).toHaveText(/graph\.db/);

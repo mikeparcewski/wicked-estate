@@ -9,11 +9,11 @@ test('home page renders the hook, the playground, every section, and the footer'
   await page.goto('/');
   await expect(page).toHaveTitle(/wicked-estate/);
 
-  // The hook leads with memory and knowledge, and the playground sits in the hero.
-  await expect(page.locator('h1')).toHaveText('Memory and knowledge for your coding agents.');
+  // The hook says what your agents know (N10), and the playground sits in the hero.
+  await expect(page.locator('h1')).toHaveText('What your agents know about your system.');
   await expect(page.locator('#query')).toBeVisible();
 
-  for (const id of ['#stores', '#provenance', '#toolface', '#storage', '#foundation', '#get-started']) {
+  for (const id of ['#why', '#stores', '#provenance', '#toolface', '#storage', '#foundation', '#get-started']) {
     await expect(page.locator(id)).toBeVisible();
   }
 
@@ -51,4 +51,23 @@ test('the page never scrolls sideways', async ({ page }) => {
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     expect(overflow, `horizontal overflow at ${vp.width}`).toBeLessThanOrEqual(1);
   }
+});
+
+test('the sub-line and benefits say a local CLI and MCP server, never one binary', async ({ page }) => {
+  await page.goto('/');
+  // Two executables ship (wicked-estate, wicked-estate-mcp); team Postgres is an optional CLI build.
+  await expect(page.locator('.hero-head p')).toContainText('a local CLI and MCP server');
+  // This page's own sections only: the shared family map (#foundation) takes its blurbs from the
+  // pinned wicked-web, which carries the same fix in its own PR and arrives with a re-pin.
+  const own = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('main section'))
+      .filter((s) => !s.closest('#foundation'))
+      .map((s) => (s as HTMLElement).innerText)
+      .join(' '),
+  );
+  expect(own).not.toMatch(/one (local |static )?binary/i);
+  const why = page.locator('#why');
+  await expect(why.locator('[data-benefits] > div')).toHaveCount(3);
+  await expect(why).toContainText('the MCP server, memory and knowledge do not use it yet');
+  await expect(why.locator('[data-news] li')).toHaveCount(3);
 });
