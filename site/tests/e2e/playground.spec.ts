@@ -16,7 +16,7 @@ test.describe('query playground', () => {
     // which reaches the FILE that consumes it (a TOML rule attaches its edge to the matched file)
     await expect(q.locator('.q-call code')).toHaveText(['BlastRadius { symbol: "applyDiscount" }', 'BlastRadius { symbol: "order.paid" }']);
     const inj = q.locator('.q-row').filter({ hasText: 'src/notify/receipt.ts' });
-    await expect(inj).toContainText('consumes order.paid (checkout() emits it)');
+    await expect(inj).toContainText('consumes order.paid (checkout.ts emits it)');
     await expect(inj).toContainText('injected');
     await expect(inj).not.toContainText('applyDiscount');
     await expect(q.locator('.q-graph .q-node--topic + text')).toHaveText('order.paid');
@@ -162,6 +162,58 @@ test.describe('tool explorer', () => {
     await expect(q).toHaveAttribute('data-q', 'why');
     await expect(q.locator('.q-tab[data-store="memory"]')).toHaveAttribute('aria-selected', 'true');
     await expect(q).toBeInViewport();
+  });
+});
+
+test.describe('tool detail', () => {
+  test('the BlastRadius preview lists each call with its own results', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    const t = page.locator('#toolface');
+    await t.scrollIntoViewIfNeeded();
+    const sets = t.locator('.td-callset');
+    await expect(sets).toHaveCount(2);
+    await expect(sets.nth(0).locator('.td-call')).toHaveText('BlastRadius { symbol: "applyDiscount" }');
+    await expect(sets.nth(0).locator('.td-k')).toHaveText(['POST /price', 'checkout()']);
+    await expect(sets.nth(1).locator('.td-call')).toHaveText('BlastRadius { symbol: "order.paid" }');
+    await expect(sets.nth(1).locator('.td-k')).toHaveText(['checkout.ts', 'receipt.ts']);
+  });
+
+  for (const vp of [{ width: 1024, height: 600 }, { width: 1024, height: 640 }, { width: 1280, height: 660 }, { width: 1440, height: 700 }, { width: 1920, height: 1080 }]) {
+    test(`every tool's detail fits its pane at ${vp.width}x${vp.height}`, async ({ page }) => {
+      await page.setViewportSize(vp);
+      await page.goto('/');
+      const t = page.locator('#toolface');
+      await t.scrollIntoViewIfNeeded();
+      const over: string[] = [];
+      for (let s = 0; s < 4; s++) {
+        const tab = t.locator('.tools-tab').nth(s);
+        await clickUntil(tab, async () => (await tab.getAttribute('aria-selected')) === 'true');
+        const n = await t.locator('.tl-row').count();
+        for (let r = 0; r < n; r++) {
+          await t.locator('.tl-row').nth(r).evaluate((e) => (e as HTMLElement).click());
+          const m = await t.locator('.tools-detail').evaluate((d) => ({
+            name: d.querySelector('.td-name code')?.textContent ?? '?', over: d.scrollHeight - d.clientHeight,
+          }));
+          if (m.over > 0) over.push(`${m.name} +${m.over}`);
+        }
+      }
+      expect(over).toEqual([]);
+    });
+  }
+
+  test('a related tool takes focus to its row in the list', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    const t = page.locator('#toolface');
+    await t.scrollIntoViewIfNeeded();
+    const row = t.locator('.tl-row[data-name="SearchEntity"]');
+    await clickUntil(row, async () => (await row.getAttribute('aria-pressed')) === 'true');
+    const more = t.locator('.td-more-b').filter({ hasText: 'RetrieveEntity' });
+    await more.focus();
+    await page.keyboard.press('Enter');
+    await expect(t.locator('.td-name code')).toHaveText('RetrieveEntity');
+    await expect(t.locator('.tl-row[data-name="RetrieveEntity"]')).toBeFocused();
   });
 });
 

@@ -47,6 +47,8 @@ for (const vp of [{ width: 1440, height: 700 }, { width: 1280, height: 660 }, { 
       return { l: Math.round(r.left), r: Math.round(r.right), t: Math.round(r.top) };
     }));
     const solo = await boxes();
+    // solo shows the shared graph as a dimmed outline (read at load: no transition is running)
+    expect(Number(await section.locator('.sd-shared-graph').evaluate((el) => getComputedStyle(el).opacity))).toBeCloseTo(0.34, 2);
     const pgBtn = section.locator('button.seg').filter({ hasText: 'PostgreSQL' });
     await clickUntil(pgBtn, async () => (await section.locator('.sd').getAttribute('data-mode')) === 'team');
     // let the 0.3s fade finish
@@ -56,9 +58,5 @@ for (const vp of [{ width: 1440, height: 700 }, { width: 1280, height: 660 }, { 
     for (const set of [solo, team]) {
       for (let i = 1; i < set.length; i++) expect(set[i].l - set[i - 1].r, 'labels closer than 10px').toBeGreaterThanOrEqual(10);
     }
-    // solo shows the shared graph as an outline, not an empty panel
-    await section.locator('button.seg').filter({ hasText: 'SQLite' }).click();
-    await expect(section.locator('.sd-shared-graph')).toBeVisible();
-    expect(Number(await section.locator('.sd-shared-graph').evaluate((el) => getComputedStyle(el).opacity))).toBeGreaterThan(0.2);
   });
 }

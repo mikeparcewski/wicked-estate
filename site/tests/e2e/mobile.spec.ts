@@ -235,3 +235,24 @@ for (const vp of [{ width: 360, height: 740 }, { width: 390, height: 844 }]) {
     expect(over).toEqual([]);
   });
 }
+
+test('leaving a set and coming back reopens the group that holds the selected tool', async ({ page }) => {
+  await page.goto('/');
+  const t = page.locator('#toolface');
+  await t.scrollIntoViewIfNeeded();
+  const next = t.getByRole('button', { name: 'Next group' });
+  await clickUntil(next, async () => /Summarize 3 of 4/.test(await t.locator('.tl-step-t').innerText()));
+  const mem = t.locator('.tools-tab').filter({ hasText: 'Memory' });
+  await clickUntil(mem, async () => (await mem.getAttribute('aria-selected')) === 'true');
+  const graph = t.locator('.tools-tab').filter({ hasText: 'Graph' });
+  await clickUntil(graph, async () => (await graph.getAttribute('aria-selected')) === 'true');
+  await expect(t.locator('.td-name code')).toHaveText('BlastRadius');
+  await expect(t.locator('.tl-step-t')).toContainText('Follow 2 of 4');
+  await expect(t.locator('.tl-row:visible[aria-pressed="true"] .tl-name')).toHaveText('BlastRadius');
+  // a search hit from another set opens that set and group once the search is cleared
+  await t.getByLabel('Search tools').fill('erase');
+  await t.locator('.tl-row:visible').first().click();
+  await t.getByLabel('Search tools').fill('');
+  await expect(t.locator('.td-name code')).toHaveText('memory.erase');
+  await expect(t.locator('.tl-row:visible[aria-pressed="true"] .tl-name')).toHaveText('memory.erase');
+});

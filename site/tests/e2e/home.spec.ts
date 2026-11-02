@@ -190,6 +190,9 @@ for (const vp of [{ width: 1470, height: 840 }, { width: 1440, height: 789 }, { 
     await page.setViewportSize(vp);
     await page.goto('/');
     await expect(page.locator('html')).toHaveClass(/snap-lock/);
+    // the hero itself fits, independent of the guard's slack (its playground subtracts the hero's own paddings)
+    const hero = await page.locator('#hero').evaluate((el) => el.getBoundingClientRect().height - innerHeight);
+    expect(hero, 'the hero runs past its frame').toBeLessThanOrEqual(0.5);
     const stores = await page.locator('#stores').evaluate((el) => Math.round(el.getBoundingClientRect().top + scrollY - 64));
     await page.mouse.move(vp.width / 2, vp.height / 2);
     await page.mouse.wheel(0, 100);
@@ -271,6 +274,9 @@ test('the copy names only what estate ships and returns', async ({ page }) => {
   await expect(page.locator('#query .q-bar')).toContainText('This page follows one function, applyDiscount, through all three stores.');
   // the first screen has a next step
   await expect(page.locator('.facts-go a')).toHaveAttribute('href', '#get-started');
+  // the emit edge leaves the FILE (a TOML rule attaches it there), in the hero and in the event-bus picture
+  await expect(page.locator('#query .q-graph .q-node--file + text')).toHaveText('checkout.ts');
+  await expect(page.locator('#provenance .pv-svg--h .q-node-t')).toContainText(['price.ts', 'checkout.ts', 'applyDiscount', 'order.paid', 'receipt.ts', 'ledger.ts']);
   // What's new lists only the three released 0.30-0.31 items
   await expect(page.locator('#stores .news li')).toHaveCount(3);
 });

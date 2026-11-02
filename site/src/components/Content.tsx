@@ -147,17 +147,21 @@ interface GEdge {
 }
 interface Mem { text: string; tier: 'semantic' | 'episodic'; scope: string }
 interface Know { text: string; source: string; linked?: string }
-interface Question { id: string; ask: string; calls: string[]; first: Store; center: string; fig: { h: number; at: [number, number] }; graph: GEdge[]; memory: Mem[]; knowledge: Know[]; grep?: string }
+/** The answer's picture: its height, the asked symbol's place, and context nodes that are not answer rows (the file
+    that holds a function; `link` names the node it contains, a parsed structural edge). */
+interface Fig { h: number; at: [number, number]; extra?: { label: string; at: [number, number]; link: string }[] }
+interface Question { id: string; ask: string; calls: string[]; first: Store; center: string; fig: Fig; graph: GEdge[]; memory: Mem[]; knowledge: Know[]; grep?: string }
 const FIG_W = 380
 
-// BlastRadius on applyDiscount: its callers; checkout() emits order.paid, and BlastRadius on order.paid adds the
-// file that consumes it (the second call), at Heuristic 0.5 with the rule's name as its provenance.
+// BlastRadius on applyDiscount: its callers (checkout() lives in src/checkout/checkout.ts). A TOML rule attaches
+// the emit edge to that FILE, pointing at the order.paid topic node; BlastRadius on order.paid (the second call)
+// reaches the file that consumes it, at Heuristic 0.5 with the rule's name as its provenance.
 const BLAST: GEdge[] = [
-  { from: 'checkout()', to: 'applyDiscount', via: 'calls', tier: 'ImportMap', conf: 0.6, where: 'src/checkout/checkout.ts:41', at: [200, 80] },
+  { from: 'checkout()', to: 'applyDiscount', via: 'calls', tier: 'ImportMap', conf: 0.6, where: 'src/checkout/checkout.ts:41', at: [200, 90] },
   { from: 'POST /price', to: 'applyDiscount', via: 'calls', tier: 'SCIP', conf: 1.0, where: 'src/routes/price.ts:18', at: [200, 22] },
-  { from: 'src/notify/receipt.ts', label: 'receipt.ts', to: '', via: 'consumes order.paid (checkout() emits it)', tier: 'Heuristic', conf: 0.5, where: 'rule: event-bus-consume', injected: true,
-    at: [322, 138], hop: { label: 'order.paid', at: [322, 80], via: 'checkout()' } },
-  { from: 'referralFlow()', to: 'applyDiscount', via: 'calls?', tier: 'Tags', conf: 0.3, where: 'tag-scan guess, unverified', at: [200, 138] },
+  { from: 'src/notify/receipt.ts', label: 'receipt.ts', to: '', via: 'consumes order.paid (checkout.ts emits it)', tier: 'Heuristic', conf: 0.5, where: 'rule: event-bus-consume', injected: true,
+    at: [322, 160], hop: { label: 'order.paid', at: [322, 95], via: 'checkout.ts' } },
+  { from: 'referralFlow()', to: 'applyDiscount', via: 'calls?', tier: 'Tags', conf: 0.3, where: 'tag-scan guess, unverified', at: [200, 158] },
 ]
 // memory.recall answers with scope, content, tier and score: the chips show the tier and the scope
 const WHY: Mem[] = [
@@ -175,10 +179,10 @@ const PAID: GEdge[] = [
   { from: 'src/ledger/ledger.ts', label: 'ledger.ts', to: 'order.paid', via: 'consumes', tier: 'Heuristic', conf: 0.5, where: 'rule: event-bus-consume', injected: true, at: [318, 120] },
 ]
 
-const BLAST_FIG = { h: 160, at: [62, 80] as [number, number] }
+const BLAST_FIG: Fig = { h: 180, at: [62, 90], extra: [{ label: 'checkout.ts', at: [322, 30], link: 'checkout()' }] }
 const QUESTIONS: Question[] = [
   { id: 'blast', ask: 'What breaks if I change applyDiscount?', calls: ['BlastRadius { symbol: "applyDiscount" }', 'BlastRadius { symbol: "order.paid" }'], first: 'graph', center: 'applyDiscount', fig: BLAST_FIG,
-    graph: BLAST, memory: [], knowledge: [], grep: 'grep finds 2 call sites. The graph also follows the event checkout() emits.' },
+    graph: BLAST, memory: [], knowledge: [], grep: 'grep finds 2 call sites. The graph also follows the event checkout.ts emits.' },
   { id: 'event', ask: 'Who reacts when an order is paid?', calls: ['BlastRadius { symbol: "order.paid" }'], first: 'graph', center: 'order.paid', fig: { h: 150, at: [190, 75] },
     graph: PAID, memory: [], knowledge: [], grep: 'No function calls another here. A TOML rule adds these edges at index time.' },
   { id: 'why', ask: 'Why can a discount never go below zero?', calls: ['memory.recall { query: "discount below zero", scope: "project:shop" }'], first: 'memory', center: 'applyDiscount', fig: BLAST_FIG,
@@ -236,7 +240,9 @@ function GraphView({ q, threshold, setThreshold }: { q: Question; threshold: Sto
   const rows = ordered.filter(e => e.conf >= threshold)
   const held = q.graph.length - rows.length
   const W = FIG_W, H = q.fig.h, C = q.fig.at, cw = halfW(q.center, true)
-  const byFrom = new Map(q.graph.map(e => [e.from, e]))
+  // every node's place and label: the answer's edges, then the picture's context nodes
+  const place = new Map<string, { at: [number, number]; label: string }>(q.graph.map(e => [e.from, { at: e.at, label: e.label ?? e.from }]))
+  for (const x of q.fig.extra ?? []) place.set(x.label, { at: x.at, label: x.label })
   const emitter = q.graph.some(x => x.via === 'emits')
   const node = (at: [number, number], label: string, cls: string, bold = false) => {
     const hw = halfW(label, bold)
@@ -258,13 +264,18 @@ function GraphView({ q, threshold, setThreshold }: { q: Question; threshold: Sto
             const r = rank.get(e.from) ?? i
             const label = e.label ?? e.from
             const cls = e.injected ? 'q-edge q-edge--inj' : e.conf < 0.5 ? 'q-edge q-edge--lo' : 'q-edge'
-            const via = e.hop ? byFrom.get(e.hop.via) : undefined
+            const via = e.hop ? place.get(e.hop.via) : undefined
+            const ctx = e.hop ? q.fig.extra?.find(x => x.label === e.hop!.via) : undefined
+            const holder = ctx ? place.get(ctx.link) : undefined
             return (
               <g key={e.from} className="q-eg" data-on={on} style={vars({ '--i': r })}>
                 {e.hop && via ? (
                   <>
-                    {/* the event is the second hop: the emitter's node, the topic, then the file that consumes it */}
-                    <Seg a={via.at} b={e.hop.at} aw={halfW(via.label ?? via.from)} bw={halfW(e.hop.label)} cls={cls} i={r} inj />
+                    {/* the event is the second hop: the file that holds the caller (a parsed "contains" edge), the
+                        topic it emits, then the file that consumes it */}
+                    {ctx && holder && <Seg a={holder.at} b={ctx.at} aw={halfW(holder.label)} bw={halfW(ctx.label)} cls="q-edge q-edge--struct" i={r} />}
+                    {ctx && node(ctx.at, ctx.label, 'q-node q-node--file')}
+                    <Seg a={via.at} b={e.hop.at} aw={halfW(via.label)} bw={halfW(e.hop.label)} cls={cls} i={r} inj />
                     <Seg a={e.hop.at} b={e.at} aw={halfW(e.hop.label)} bw={halfW(label)} cls={cls} i={r + 0.45} inj hop={1} />
                     {node(e.hop.at, e.hop.label, 'q-node q-node--topic')}
                   </>
@@ -377,7 +388,7 @@ function Playground({ st, pick, setTab, threshold, setThreshold }: {
       <div className="q-bar">
         <span className="q-dots" aria-hidden><i /><i /><i /></span>
         <span className="q-bar-t">wicked-estate-mcp<span className="q-bar-db"> · graph.db</span></span>
-        <span className="q-bar-r"><span className="follow follow--line"><i aria-hidden />This page follows one function, <code>{FOLLOW}</code>, through all three stores.</span><Follow /><span className="q-scripted">scripted demo<span className="q-scripted-x"> · pick a question</span></span></span>
+        <span className="q-bar-r"><span className="follow follow--line"><i aria-hidden /><span>This page follows one function, <code>{FOLLOW}</code>, through all three stores.</span></span><Follow /><span className="q-scripted">scripted demo<span className="q-scripted-x"> · pick a question</span></span></span>
       </div>
       <div className="q-body">
         <div className="q-asks" role="listbox" aria-label="Ask the record" onKeyDown={e => arrowNav(e, '.q-ask', true)}>
@@ -640,15 +651,15 @@ function BusDiagram({ mode, vertical = false }: { mode: Mode; vertical?: boolean
   return (
     <svg viewBox={`0 0 ${w} ${h}`} className={`pv-svg${vertical ? ' pv-svg--v' : ' pv-svg--h'}`} data-mode={mode} role="img"
       aria-label={mode === 'grep'
-        ? 'grep: POST /price and checkout() call applyDiscount; nothing links checkout() to the files that consume its event'
-        : 'estate: the two calls, plus checkout() emits order.paid, which receipt.ts and ledger.ts consume (injected, Heuristic 0.5)'}>
+        ? 'grep: price.ts and checkout.ts call applyDiscount; nothing links checkout.ts to the files that consume its event'
+        : 'estate: the two call sites, plus checkout.ts emits order.paid, which receipt.ts and ledger.ts consume (injected, Heuristic 0.5)'}>
       {edge('price', 'apply', 'pv-e--call', 0)}
       {edge('checkout', 'apply', 'pv-e--call', 0)}
       {edge('checkout', 'paid', 'pv-e--inj', 0)}
       {edge('paid', 'receipt', 'pv-e--inj', 1)}
       {edge('paid', 'ledger', 'pv-e--inj', 1)}
-      {node('price', 'POST /price')}
-      {node('checkout', 'checkout()')}
+      {node('price', 'price.ts')}
+      {node('checkout', 'checkout.ts')}
       {node('apply', FOLLOW, 'center')}
       {node('paid', 'order.paid', 'topic pv-x')}
       {node('receipt', 'receipt.ts', 'pv-x')}
@@ -690,8 +701,8 @@ function Provenance({ threshold, setThreshold }: { threshold: Stop; setThreshold
             <BusDiagram mode={mode} />
             <BusDiagram mode={mode} vertical />
             <div className="pv-read" aria-live="polite">
-              <p data-off={mode !== 'grep' ? 'true' : undefined}><b>grep finds 2 call sites.</b> Nothing links <code>checkout()</code> to the code that reacts to its event.</p>
-              <p data-off={mode !== 'estate' ? 'true' : undefined}><b>The graph follows the event.</b> <code>checkout()</code> emits <code>order.paid</code>; a TOML rule links the files that consume it. <span className="q-chips"><span className="q-chip q-chip--inj">injected</span><span className="q-chip">Heuristic</span><span className="q-conf q-conf--mid">0.5</span><span className="q-where">rule: event-bus-consume</span></span></p>
+              <p data-off={mode !== 'grep' ? 'true' : undefined}><b>grep finds 2 call sites.</b> Nothing links <code>checkout.ts</code> to the code that reacts to its event.</p>
+              <p data-off={mode !== 'estate' ? 'true' : undefined}><b>The graph follows the event.</b> <code>checkout.ts</code> emits <code>order.paid</code>; a TOML rule links the files that consume it. <span className="q-chips"><span className="q-chip q-chip--inj">injected</span><span className="q-chip">Heuristic</span><span className="q-conf q-conf--mid">0.5</span><span className="q-where">rule: event-bus-consume</span></span></p>
             </div>
             {/* both halves of a consume rule: what it matches, and the edge it adds (the topic node's block is named) */}
             <div className="toml" data-hot={mode === 'estate' ? 'true' : undefined}>
@@ -834,18 +845,24 @@ const TOOLSETS: ToolSet[] = [
   ] },
 ]
 /** Tools the playground has a scripted answer for: "see it" plays that question, and the detail pane previews
-    the answer's first lines. Calls and lines come from the scripted data above. */
+    the answer: each call it makes, with that call's own first results (so no result is shown under a call that
+    does not return it). Calls and results come from the scripted data above. */
 type PrevLine = { k: string; v?: string; tag?: 'inj' | 'mem' | 'know'; conf?: number; sans?: boolean }
-const byConf = (es: GEdge[]) => [...es].sort((a, b) => b.conf - a.conf).filter(e => e.conf >= 0.5)
-const SEE: Record<string, { q: string; tab?: Store; call: string; lines: PrevLine[] }> = {
-  BlastRadius: { q: 'blast', call: QUESTIONS[0].calls[0],
-    lines: byConf(BLAST).map(e => ({ k: e.label ?? e.from, v: e.via.split(' (')[0], tag: e.injected ? 'inj' : undefined, conf: e.conf })) },
-  'memory.recall': { q: 'why', call: QUESTIONS[2].calls[0],
-    lines: WHY.slice(0, 1).map(m => ({ k: m.text.split('. ')[0].replace(/\.$/, '') + '.', v: `${m.tier} · ${m.scope}`, tag: 'mem', sans: true })) },
-  'knowledge.recall': { q: 'stack', call: QUESTIONS[3].calls[0],
-    lines: STACK.slice(0, 1).map(k => ({ k: k.text.split('. ')[0].replace(/\.$/, '') + '.', v: k.source, tag: 'know', sans: true })) },
-  'knowledge.recall_about_code': { q: 'all', tab: 'knowledge', call: QUESTIONS[4].calls[2],
-    lines: STACK.map(k => ({ k: k.source, v: `linked to ${k.linked}`, tag: 'know' })) },
+type PrevCall = { call: string; lines: PrevLine[]; row?: boolean }
+const firstSentence = (t: string) => t.split('. ')[0].replace(/\.$/, '') + '.'
+const SEE: Record<string, { q: string; tab?: Store; calls: PrevCall[] }> = {
+  BlastRadius: { q: 'blast', calls: [
+    // BlastRadius on the function: its callers
+    { call: QUESTIONS[0].calls[0], row: true, lines: [...BLAST].sort((a, b) => b.conf - a.conf).filter(e => e.conf >= 0.5 && !e.injected).map(e => ({ k: e.from, conf: e.conf })) },
+    // BlastRadius on its event: the files that emit and consume it
+    { call: QUESTIONS[0].calls[1], row: true, lines: PAID.slice(0, 2).map(e => ({ k: e.label ?? e.from, v: e.via, tag: 'inj', conf: e.conf })) },
+  ] },
+  'memory.recall': { q: 'why', calls: [{ call: QUESTIONS[2].calls[0],
+    lines: WHY.slice(0, 1).map(m => ({ k: firstSentence(m.text), v: `${m.tier} · ${m.scope}`, tag: 'mem', sans: true })) }] },
+  'knowledge.recall': { q: 'stack', calls: [{ call: QUESTIONS[3].calls[0],
+    lines: STACK.slice(0, 1).map(k => ({ k: firstSentence(k.text), v: k.source, tag: 'know', sans: true })) }] },
+  'knowledge.recall_about_code': { q: 'all', tab: 'knowledge', calls: [{ call: QUESTIONS[4].calls[2],
+    lines: STACK.map(k => ({ k: k.source, v: `linked to ${k.linked}`, tag: 'know' })) }] },
 }
 const SEE_NAMES = Object.keys(SEE)
 const DEFAULT_SEL: Record<string, string> = { graph: 'BlastRadius', memory: 'memory.recall', knowledge: 'knowledge.recall', cli: 'watch' }
@@ -887,9 +904,26 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
   const others = picked.g.rows.filter(r => r.name !== picked.r.name)
   const pages = Math.max(1, Math.ceil(hits.length / PAGE))
   const pg = Math.min(page, pages - 1)
-  const choose = (id: string) => { setSet(id); setFilter(''); setSel(DEFAULT_SEL[id]); setPage(0) }
+  // the selection, its set and its open group always move together, so the list in view holds the tool the
+  // detail names: picking a set opens its default tool's group; picking a tool (a search hit, a related tool)
+  // opens that tool's set and group
+  const select = (name: string) => {
+    const hit = find(name)
+    setSel(name)
+    if (hit) { setSet(hit.t.id); setOpenG(o => ({ ...o, [hit.t.id]: hit.g.label })) }
+  }
+  const choose = (id: string) => {
+    const def = find(DEFAULT_SEL[id])!
+    setSet(id); setFilter(''); setSel(def.r.name); setPage(0)
+    setOpenG(o => ({ ...o, [id]: def.g.label }))
+  }
+  // a related tool's button goes away with the detail it sits in: focus moves to that tool's row in the list
+  const selectAndFocus = (name: string) => {
+    select(name)
+    requestAnimationFrame(() => document.querySelector<HTMLElement>(`#toolface .tl-row[data-name="${name}"]`)?.focus())
+  }
   const rowBtn = (r: Row) => (
-    <button key={r.name} type="button" className="tl-row" aria-pressed={picked.r.name === r.name} data-on={picked.r.name === r.name} onClick={() => setSel(r.name)}>
+    <button key={r.name} type="button" className="tl-row" data-name={r.name} aria-pressed={picked.r.name === r.name} data-on={picked.r.name === r.name} onClick={() => select(r.name)}>
       <code className="tl-name">{r.name}</code>
       {r.optional && <span className="tl-opt">when enabled</span>}
       {SEE[r.name] && <span className="tl-see-dot" aria-label="has a scripted answer" />}
@@ -959,17 +993,20 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
                 <div className="td-see">
                   {/* the scripted answer's first lines, so the pane shows what "see it answer" plays */}
                   <div className="td-prev" aria-label="Scripted answer, first lines">
-                    <code className="td-call">{see.call}</code>
-                    <ul className="td-lines">
-                      {see.lines.map((l, i) => (
-                        <li key={l.k} style={vars({ '--i': i })} data-tag={l.tag} data-sans={l.sans ? 'true' : undefined}>
-                          <span className="td-k">{l.k}</span>
-                          {l.v && <span className="td-v">{l.v}</span>}
-                          {l.tag === 'inj' && <span className="q-chip q-chip--inj">injected</span>}
-                          {l.conf !== undefined && <span className={confClass(l.conf)}>{l.conf.toFixed(1)}</span>}
-                        </li>
-                      ))}
-                    </ul>
+                    {see.calls.map(c => (
+                      <div key={c.call} className="td-callset">
+                        <code className="td-call">{c.call}</code>
+                        <ul className="td-lines" data-row={c.row ? 'true' : undefined}>
+                          {c.lines.map((l, i) => (
+                            <li key={l.k} style={vars({ '--i': i })} data-tag={l.tag} data-sans={l.sans ? 'true' : undefined}>
+                              <span className="td-k">{l.k}</span>
+                              {l.v && <span className="td-v">{l.v}</span>}
+                              {l.conf !== undefined && <span className={confClass(l.conf)}>{l.conf.toFixed(1)}</span>}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
                   </div>
                   <button type="button" className="see-btn" onClick={() => onSee(see.q, see.tab)}>
                     See it answer <span aria-hidden>↑</span>
@@ -984,7 +1021,7 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
                     <div className="td-more">
                       <span className="td-more-l">More in {picked.g.label}</span>
                       {others.map(r => (
-                        <button key={r.name} type="button" className="td-more-b" onClick={() => setSel(r.name)}>
+                        <button key={r.name} type="button" className="td-more-b" onClick={() => selectAndFocus(r.name)}>
                           <code>{r.name}</code>{SEE[r.name] && <span className="tl-see-dot" aria-label="has a scripted answer" />}
                         </button>
                       ))}
