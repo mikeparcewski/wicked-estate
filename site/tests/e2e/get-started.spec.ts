@@ -7,6 +7,34 @@ import { clickUntil } from './helpers';
 
 test.use({ permissions: ['clipboard-read', 'clipboard-write'] });
 
+const COMMANDS = [
+  'cargo install wicked-estate wicked-estate-mcp',
+  'wicked-estate index . --db graph.db',
+  'claude mcp add wicked-estate -s project -- wicked-estate-mcp --db "$PWD/graph.db"',
+];
+
+test('the terminal types its commands when it arrives, even in a short window', async ({ page }) => {
+  // 320x320: the terminal is far taller than the window, so no visible share of it can ever reach one half
+  await page.setViewportSize({ width: 320, height: 320 });
+  await page.goto('/');
+  const section = page.locator('#get-started');
+  await section.locator('.gs-term').scrollIntoViewIfNeeded();
+  await section.locator('.gs-term').evaluate((el) => window.scrollBy(0, el.getBoundingClientRect().top - 40));
+  const typed = () => section.locator('.gs-step .cmd-type').evaluateAll((els) => els.map((e) => (e.textContent ?? '').replace(/\\/g, ' ').replace(/\s+/g, ' ').trim()));
+  await expect.poll(typed, { timeout: 6_000 }).toEqual(COMMANDS);
+});
+
+test('a key pressed before the terminal arrives keeps the commands whole', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForFunction(() => document.querySelector('#get-started .gs-step .cmd-type')?.textContent === '');
+  await page.keyboard.press('Shift');
+  const section = page.locator('#get-started');
+  await section.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(400);
+  const typed = await section.locator('.gs-step .cmd-type').evaluateAll((els) => els.map((e) => (e.textContent ?? '').replace(/\\/g, ' ').replace(/\s+/g, ' ').trim()));
+  expect(typed).toEqual(COMMANDS);
+});
+
 test('copy buttons copy the exact command and show the copied state', async ({ page }) => {
   await page.goto('/');
   const section = page.locator('#get-started');
@@ -44,7 +72,11 @@ test('a command never breaks inside a token on a phone', async ({ page }) => {
   const section = page.locator('#get-started');
   await section.scrollIntoViewIfNeeded();
   await expect(section.locator('.gs-step')).toHaveCount(3);
-  // every token (a word, a flag such as -s) sits on one line
+  // the three commands are there, exactly (the display continuation "\\" aside)
+  expect(await section.locator('.gs-step .cmd-full').evaluateAll((els) =>
+    els.map((e) => (e.textContent ?? '').replace(/\\/g, ' ').replace(/\s+/g, ' ').trim()),
+  )).toEqual(COMMANDS);
+  // every token (a word, a flag with its value such as "-s project") sits on one line
   const split = await section.evaluate((el) =>
     [...el.querySelectorAll('.cmd-full .tok')].filter((t) => t.getClientRects().length > 1).map((t) => t.textContent),
   );

@@ -1,7 +1,7 @@
 /* Scene behaviour for the estate page (site-scoped; the chrome is untouched).
 
-   1. In-view marks: each scene gets data-inview the first time a fair share of it is on
-      screen, once. Scene CSS keys its one-shot entrance off it (html.motion-ok only), and
+   1. In-view marks: each scene gets data-inview the first time it rises into the upper two
+      thirds of the viewport, once. Scene CSS keys its one-shot entrance off it (html.motion-ok only), and
       .scenes-ready is set only after the observer is attached, so a page whose script never
       runs shows every end state instead of hiding anything.
    2. The scene rail: aria-current on the dot of the scene under the middle of the viewport.
@@ -24,7 +24,9 @@ if ('IntersectionObserver' in window) {
         }
       }
     },
-    { threshold: 0.3 },
+    // a line (the scene's top rising past two thirds of the viewport), not a visible share: a share can be
+    // unreachable for a scene taller than a short or zoomed window, which would leave its pre-state showing
+    { threshold: 0, rootMargin: '0px 0px -33% 0px' },
   );
   for (const s of scenes) io.observe(s);
   html.classList.add('scenes-ready');

@@ -43,12 +43,15 @@ test.describe('query playground', () => {
   test('arrow keys move between the questions', async ({ page }) => {
     await page.goto('/');
     const q = page.locator('#query');
-    const first = q.getByRole('option', { name: 'What breaks if I change applyDiscount?' });
-    await clickUntil(first, async () => (await first.getAttribute('aria-selected')) === 'true');
-    await first.focus();
+    // a verified selection change first, so the keys land on a hydrated island
+    const stack = q.getByRole('option', { name: 'Can two coupons stack?' });
+    await clickUntil(stack, async () => (await q.getAttribute('data-q')) === 'stack');
+    await stack.focus();
     await page.keyboard.press('ArrowDown');
-    await expect(q).toHaveAttribute('data-q', 'event');
-    await expect(q.getByRole('option', { name: 'Who reacts when an order is paid?' })).toBeFocused();
+    await expect(q).toHaveAttribute('data-q', 'all');
+    await expect(q.getByRole('option', { name: 'Everything about applyDiscount' })).toBeFocused();
+    await page.keyboard.press('ArrowUp');
+    await expect(q).toHaveAttribute('data-q', 'stack');
   });
 
   test('each question routes to the store that answers it', async ({ page }) => {
@@ -174,9 +177,26 @@ test.describe('scenes', () => {
     await clickUntil(grep, async () => (await grep.getAttribute('aria-pressed')) === 'true');
     await expect(pv.locator('.pv-read p:not([data-off])')).toContainText('grep finds 2 call sites.');
     await expect(pv.locator('.toml')).not.toHaveAttribute('data-hot', 'true');
+    // the diagram: two call edges always; the three injected order.paid edges only in estate mode
+    const diagram = pv.locator('.pv-svg--h');
+    await expect(diagram).toBeVisible();
+    await expect(diagram.locator('.pv-e--call')).toHaveCount(2);
+    const inj = diagram.locator('.pv-e--inj');
+    await expect(inj).toHaveCount(3);
+    const opacities = () => inj.evaluateAll((els) => els.map((e) => getComputedStyle(e).opacity));
+    await expect.poll(opacities).toEqual(['0', '0', '0']);
     await pv.getByRole('button', { name: 'estate', exact: true }).click();
     await expect(pv.locator('.pv-read p:not([data-off])')).toContainText('The graph finds a third through an event.');
     await expect(pv.locator('.pv-read p:not([data-off])')).toContainText('rule: event-bus-consume');
     await expect(pv.locator('.toml')).toHaveAttribute('data-hot', 'true');
+    await expect.poll(opacities).toEqual(['1', '1', '1']);
+  });
+
+  test('a store card enters even when the window is too short to show a share of the scene', async ({ page }) => {
+    await page.setViewportSize({ width: 320, height: 320 });
+    await page.goto('/');
+    const card = page.locator('#stores .sc[data-store="knowledge"]');
+    await card.scrollIntoViewIfNeeded();
+    await expect.poll(() => card.evaluate((el) => getComputedStyle(el).opacity), { timeout: 6_000 }).toBe('1');
   });
 });

@@ -546,7 +546,7 @@ html.motion-ok .strata[data-inview] .sc { animation: es-rise .4s var(--ease) cal
   background: var(--rock); border: 1px solid var(--hairline-strong); border-top: 2px solid var(--sc); border-radius: 12px;
   transition: border-color .2s var(--ease), box-shadow .2s var(--ease);
 }
-.sc:hover { border-color: color-mix(in oklab, var(--sc) 45%, var(--hairline-strong)); border-top-color: var(--sc); box-shadow: 0 10px 30px -18px color-mix(in oklab, var(--sc) 60%, transparent); }
+.sc:hover { border-color: color-mix(in oklab, var(--sc) 45%, var(--hairline-strong)); border-top-color: var(--sc); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--sc) 22%, transparent); }
 .sc-top { display: flex; align-items: center; gap: 8px; }
 .sc-name { font-size: var(--text-lead); font-weight: var(--weight-strong); color: var(--ink); }
 .sc-kind { font-size: var(--text-caption); color: var(--sc); }

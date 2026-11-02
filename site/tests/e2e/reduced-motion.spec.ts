@@ -26,6 +26,11 @@ test('reduced motion: every scene shows its end state, nothing plays', async ({ 
   const typed = await gs.evaluate((el) => [...el.querySelectorAll('.gs-step .cmd-type')].map((t) => t.textContent));
   const full = await gs.evaluate((el) => [...el.querySelectorAll('.gs-step .cmd-full')].map((t) => t.textContent));
   expect(typed).toEqual(full);
+  expect(full.map((t) => (t ?? '').replace(/\\/g, ' ').replace(/\s+/g, ' ').trim())).toEqual([
+    'cargo install wicked-estate wicked-estate-mcp',
+    'wicked-estate index . --db graph.db',
+    'claude mcp add wicked-estate -s project -- wicked-estate-mcp --db "$PWD/graph.db"',
+  ]);
   const running = await page.evaluate(() => document.getAnimations().filter((a) => a.playState === 'running').length);
   expect(running).toBe(0);
 });

@@ -49,19 +49,21 @@ function motionAllowed() {
   return typeof document !== 'undefined' && document.documentElement.classList.contains('motion-ok')
 }
 
-/** Calls `onEnter` once, the first time `ref` is at least `ratio` visible. */
-function useEnterOnce(ref: React.RefObject<HTMLElement | null>, onEnter: () => void, ratio = 0.45) {
+/** Calls `onEnter` once, the first time any part of `ref` rises above the lower third of the viewport.
+    A line, not a visible share: a share can be unreachable (an element taller than the viewport, a short
+    or zoomed window), and an entrance that never fires would leave its pre-state on screen. */
+function useEnterOnce(ref: React.RefObject<HTMLElement | null>, onEnter: () => void) {
   const cb = useRef(onEnter)
   cb.current = onEnter
   useEffect(() => {
     const el = ref.current
     if (!el || typeof IntersectionObserver === 'undefined') return
     const io = new IntersectionObserver(es => {
-      if (es.some(e => e.isIntersecting && e.intersectionRatio >= ratio)) { io.disconnect(); cb.current() }
-    }, { threshold: [ratio] })
+      if (es.some(e => e.isIntersecting)) { io.disconnect(); cb.current() }
+    }, { threshold: 0, rootMargin: '0px 0px -33% 0px' })
     io.observe(el)
     return () => io.disconnect()
-  }, [ref, ratio])
+  }, [ref])
 }
 
 /** Is `el` on screen right now (any part)? */
@@ -321,7 +323,7 @@ function Playground({ st, pick, setTab, threshold, setThreshold }: {
               <ConfStops id="q-thr" value={threshold} onChange={setThreshold} />
             </div>
           </div>
-          <div className="q-result" id="q-panel" role="tabpanel" aria-labelledby={`q-tab-${tab}`} data-store={tab}>
+          <div className="q-result" id="q-panel" role="tabpanel" tabIndex={-1} aria-labelledby={`q-tab-${tab}`} data-store={tab}>
             <div className="q-anim" key={`${st.qid}-${tab}-${st.nonce}`}>
               {tab !== 'graph' && <p className="q-kind">{STORE_LABEL[tab].name}: {STORE_LABEL[tab].kind}</p>}
               {counts[tab] === 0
@@ -961,28 +963,31 @@ export function GetStarted() {
   const [typed, setTyped] = useState(total)
   const [done, setDone] = useState<Record<number, boolean>>({})
   const raf = useRef(0)
+  // input ends the typing for good: a cancel before the terminal arrives must also stop it from starting
+  const cancelled = useRef(false)
+  const finish = useCallback(() => { cancelled.current = true; cancelAnimationFrame(raf.current); setTyped(total) }, [total])
   useEffect(() => {
     if (motionAllowed() && !onScreen(term.current)) setTyped(0)
-    const stop = () => { cancelAnimationFrame(raf.current); setTyped(total) }
-    window.addEventListener('keydown', stop, { once: true })
-    return () => { cancelAnimationFrame(raf.current); window.removeEventListener('keydown', stop) }
-  }, [total])
+    window.addEventListener('keydown', finish, { once: true })
+    return () => { cancelAnimationFrame(raf.current); window.removeEventListener('keydown', finish) }
+  }, [finish])
   useEnterOnce(term, () => {
-    if (!motionAllowed()) { setTyped(total); return }
+    if (!motionAllowed() || cancelled.current) { setTyped(total); return }
     const t0 = performance.now()
     const tick = (t: number) => {
+      if (cancelled.current) return
       const n = Math.min(total, Math.round(((t - t0) / TYPE_MS) * total))
       setTyped(n)
       if (n < total) raf.current = requestAnimationFrame(tick)
     }
     raf.current = requestAnimationFrame(tick)
-  }, 0.5)
+  })
   let before = 0
   return (
     <Section id="get-started" solid>
       <Head n="05" label="Get started" title="Index a repo and ask it something."
         sub="Works with Claude Code, Antigravity, Codex, OpenCode and Pi." />
-      <div className="gs" ref={term} onPointerDown={() => { cancelAnimationFrame(raf.current); setTyped(total) }}>
+      <div className="gs" ref={term} onPointerDown={finish}>
         <div className="rock-panel gs-panel">
           <div className="gs-bar"><span className="gs-bar-t">Recommended: the whole family</span><span className="depth">npm</span></div>
           <div className="gs-body">
@@ -1046,8 +1051,21 @@ export default function Content() {
   const changeThreshold = useCallback((t: Stop) => { setThreshold(t); setSt(s => (s.anim === 'intro' ? { ...s, anim: 'done' } : s)) }, [])
   const see = useCallback((id: string, tab?: Store) => {
     pick(id, tab)
-    window.scrollTo({ top: 0, behavior: motionAllowed() ? 'smooth' : 'auto' })
-    window.setTimeout(() => document.querySelector<HTMLElement>('#query .q-ask[data-on="true"]')?.focus({ preventScroll: true }), 50)
+    // after the pick renders: a desktop frame holds the whole hero (scroll to it, focus the question);
+    // a phone stacks the questions above the answer, so it lands on the answer and focuses that
+    window.setTimeout(() => {
+      const behavior: ScrollBehavior = motionAllowed() ? 'smooth' : 'auto'
+      const answer = document.querySelector<HTMLElement>('#query .q-answer')
+      const desk = window.matchMedia('(min-width: 1024px)').matches
+      if (desk || !answer) {
+        window.scrollTo({ top: 0, behavior })
+        document.querySelector<HTMLElement>('#query .q-ask[data-on="true"]')?.focus({ preventScroll: true })
+      } else {
+        const bar = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--topbar-h')) || 64
+        window.scrollTo({ top: answer.getBoundingClientRect().top + window.scrollY - bar - 8, behavior })
+        document.querySelector<HTMLElement>('#q-panel')?.focus({ preventScroll: true })
+      }
+    }, 30)
   }, [pick])
   return (
     <>

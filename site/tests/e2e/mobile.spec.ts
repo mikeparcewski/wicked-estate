@@ -45,6 +45,14 @@ test('mobile: the playground and the tool explorer work, no horizontal overflow'
     await page.locator(id).scrollIntoViewIfNeeded();
     await expect(page.locator(id)).toBeVisible();
   }
+  // "See it answer" lands on the answer, not on the questions stacked above it
+  const mem = t.locator('.tools-tab').filter({ hasText: 'Memory' });
+  await t.getByLabel('Search tools').fill('');
+  await clickUntil(mem, async () => (await mem.getAttribute('aria-selected')) === 'true');
+  await t.getByRole('button', { name: /See it answer/ }).click();
+  await expect(q).toHaveAttribute('data-q', 'why');
+  await expect(q.locator('.q-card').first()).toBeInViewport();
+
   const copy = await page.locator('#get-started .copy-btn').first().boundingBox();
   expect(copy && copy.height >= 44).toBe(true);
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
