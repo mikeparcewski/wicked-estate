@@ -9,6 +9,9 @@ const { defaultBrowserType: _ignored, ...iphone12 } = devices['iPhone 12'];
 test.use(iphone12);
 
 test('"See it answer" lands on the answer, even in a short window', async ({ page }) => {
+  // reduced motion: the landing is an instant jump, so the check reads where it settles, not a smooth
+  // scroll passing through the viewport
+  await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.setViewportSize({ width: 320, height: 320 });
   await page.goto('/');
   const t = page.locator('#toolface');
@@ -18,8 +21,10 @@ test('"See it answer" lands on the answer, even in a short window', async ({ pag
   await t.getByRole('button', { name: /See it answer/ }).click();
   const q = page.locator('#query');
   await expect(q).toHaveAttribute('data-q', 'why');
-  await expect(q.locator('.q-card').first()).toBeInViewport();
   await expect(page.locator('#q-panel')).toBeFocused();
+  const top = await q.locator('.q-card').first().evaluate((el) => Math.round(el.getBoundingClientRect().top));
+  expect(top, 'the first answer card sits below the 64px topbar').toBeGreaterThanOrEqual(64);
+  expect(top, 'the first answer card is on screen').toBeLessThan(320);
 });
 
 test('mobile: the playground and the tool explorer work, no horizontal overflow', async ({ page }) => {
