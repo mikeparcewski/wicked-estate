@@ -159,7 +159,7 @@
     display: inline-block;
   }
 
-  /* ── Mono geological sample tag (depth markers, chips) ──────────────────── */
+  /* ── Geological sample tag (depth markers, chips): the text face; a tag that holds code stays mono ── */
   .tag {
     font-family: var(--font-sans);
     font-size: var(--text-caption);
@@ -171,6 +171,7 @@
     border: 1px solid var(--hairline-strong);
     white-space: nowrap;
   }
+  code.tag { font-family: var(--font-mono); font-size: var(--text-code); }
   .tag-accent {
     color: var(--accent);
     border-color: color-mix(in oklab, var(--accent) 45%, var(--hairline));
@@ -416,7 +417,7 @@ html body::after {
   .q-where { font-family: var(--font-sans); font-size: var(--text-caption); color: var(--faint); }
   .q-row .q-where { grid-column: 1 / -1; }
   .q-chips { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 5px; }
-  .q-chip { font-family: var(--font-mono); font-size: var(--text-code); padding: 1px 7px; border-radius: 5px; border: 1px solid var(--hairline-strong); color: var(--muted); }
+  .q-chip { font-family: var(--font-sans); font-size: var(--text-caption); padding: 1px 7px; border-radius: 5px; border: 1px solid var(--hairline-strong); color: var(--muted); }
   .q-chip--inj { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 50%, transparent); }
   .q-chip--mem { color: var(--plane-experience); border-color: color-mix(in oklab, var(--plane-experience) 50%, transparent); }
   .q-chip--know { color: var(--plane-capability); border-color: color-mix(in oklab, var(--plane-capability) 50%, transparent); }
