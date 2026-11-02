@@ -207,9 +207,9 @@ wicked-estate watch ./my-project --db graph.db
   file, zero setup, perfect for a laptop or a CI job); point `--db` at **Postgres**
   (`--features postgres`, `--db postgres://…`) for a shared team graph with concurrent writers and
   server-side traversal. No re-index, no query changes — storage is a backend, not a rewrite. The DB
-  layer is swappable (the same seam SurrealDB will land behind). Team mode is the CLI's code graph
-  only: the MCP server refuses it at startup, and memory and knowledge stay on local SQLite
-  ([`docs/team-runtime.md`](docs/team-runtime.md)).
+  layer is swappable (the same seam SurrealDB will land behind). Team mode (`WICKED_RUNTIME=team`)
+  covers the CLI's code graph only: the MCP server will not start in team mode, and memory and
+  knowledge stay on local SQLite ([`docs/team-runtime.md`](docs/team-runtime.md)).
 
 ## Architecture
 
