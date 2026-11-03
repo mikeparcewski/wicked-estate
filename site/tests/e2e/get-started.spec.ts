@@ -7,6 +7,60 @@ import { clickUntil } from './helpers';
 
 test.use({ permissions: ['clipboard-read', 'clipboard-write'] });
 
+const COMMANDS = [
+  'cargo install wicked-estate wicked-estate-mcp',
+  'wicked-estate index . --db graph.db',
+  'claude mcp add wicked-estate -s project -- wicked-estate-mcp --db "$PWD/graph.db"',
+];
+
+test('the terminal types its commands when it arrives, even in a short window', async ({ page }) => {
+  // 320x320: the terminal is far taller than the window, so no visible share of it can ever reach one half
+  await page.setViewportSize({ width: 320, height: 320 });
+  await page.goto('/');
+  // the hydrated pre-state first (off screen, the terminal waits empty), so only the entrance can fill it
+  await page.waitForFunction(() => document.querySelector('#get-started .gs-step .cmd-type')?.textContent === '');
+  const section = page.locator('#get-started');
+  const term = section.locator('.gs-term');
+  // land on it instantly (no smooth scroll), so the entrance has really fired before the check below
+  await page.addStyleTag({ content: 'html{scroll-behavior:auto!important}' });
+  await term.evaluate((el) => { el.scrollIntoView({ block: 'start', behavior: 'instant' }); window.scrollBy({ top: el.getBoundingClientRect().top - 40, behavior: 'instant' }); });
+  await expect.poll(() => term.evaluate((el) => Math.round(el.getBoundingClientRect().top))).toBeLessThan(100);
+  const typed = () => section.locator('.gs-step .cmd-type').evaluateAll((els) => els.map((e) => (e.textContent ?? '').replace(/\\/g, ' ').replace(/\s+/g, ' ').trim()));
+  // a phone shows one install path at a time: the hidden terminal waits, and types once it is picked
+  await expect(term).toBeHidden();
+  await page.waitForTimeout(900);
+  expect(await typed(), 'the hidden terminal typed unseen').toEqual(['', '', '']);
+  const cargo = section.locator('.ph-opt').filter({ hasText: 'Or just estate' });
+  await clickUntil(cargo, async () => (await cargo.getAttribute('aria-pressed')) === 'true');
+  await expect(term).toBeVisible();
+  await expect.poll(typed, { timeout: 6_000 }).toEqual(COMMANDS);
+});
+
+test('a terminal a phone hid types when the window widens', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  await page.waitForFunction(() => document.querySelector('#get-started .gs-step .cmd-type')?.textContent === '');
+  await page.addStyleTag({ content: 'html{scroll-behavior:auto!important}' });
+  const section = page.locator('#get-started');
+  await section.evaluate((el) => el.scrollIntoView({ block: 'start', behavior: 'instant' }));
+  await page.waitForTimeout(600);
+  await page.setViewportSize({ width: 900, height: 900 });
+  await expect(section.locator('.gs-term')).toBeVisible();
+  const typed = () => section.locator('.gs-step .cmd-type').evaluateAll((els) => els.map((e) => (e.textContent ?? '').replace(/\\/g, ' ').replace(/\s+/g, ' ').trim()));
+  await expect.poll(typed, { timeout: 6_000 }).toEqual(COMMANDS);
+});
+
+test('a key pressed before the terminal arrives keeps the commands whole', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForFunction(() => document.querySelector('#get-started .gs-step .cmd-type')?.textContent === '');
+  await page.keyboard.press('Shift');
+  const section = page.locator('#get-started');
+  await section.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(400);
+  const typed = await section.locator('.gs-step .cmd-type').evaluateAll((els) => els.map((e) => (e.textContent ?? '').replace(/\\/g, ' ').replace(/\s+/g, ' ').trim()));
+  expect(typed).toEqual(COMMANDS);
+});
+
 test('copy buttons copy the exact command and show the copied state', async ({ page }) => {
   await page.goto('/');
   const section = page.locator('#get-started');
@@ -17,8 +71,11 @@ test('copy buttons copy the exact command and show the copied state', async ({ p
 
   // the primary installer command
   const installerBtn = section.locator('.copy-btn').first();
+  const w0 = (await installerBtn.boundingBox())?.width;
   await clickUntil(installerBtn, async () => (await installerBtn.getAttribute('data-copied')) === 'true');
-  await expect(installerBtn).toHaveText(/copied/);
+  await expect(installerBtn).toHaveText(/copied/, { useInnerText: true });
+  // the label swap never resizes the button (it would squeeze the command beside it)
+  expect((await installerBtn.boundingBox())?.width).toBe(w0);
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('npx wicked-installer');
 
   // a multi-line display command still copies as ONE shell-ready line
@@ -28,6 +85,31 @@ test('copy buttons copy the exact command and show the copied state', async ({ p
     'claude mcp add wicked-estate -s project -- wicked-estate-mcp --db "$PWD/graph.db"',
   );
 
+  // copying a step marks its number
+  await expect(section.locator('.gs-step').last()).toHaveAttribute('data-done', 'true');
+
   // the copied state resets so the button is reusable
-  await expect(mcpBtn).toHaveText('copy', { timeout: 5_000 });
+  await expect(mcpBtn).toHaveText('copy', { timeout: 5_000, useInnerText: true });
+});
+
+test('a command never breaks inside a token on a phone', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto('/');
+  const section = page.locator('#get-started');
+  await section.scrollIntoViewIfNeeded();
+  // a phone shows one install path at a time: switch to the three cargo steps
+  const cargo = section.locator('.ph-opt').filter({ hasText: 'Or just estate' });
+  await clickUntil(cargo, async () => (await cargo.getAttribute('aria-pressed')) === 'true');
+  await expect(section.locator('.gs-step').first()).toBeVisible();
+  await expect(section.locator('.gs-npm')).toBeHidden();
+  await expect(section.locator('.gs-step')).toHaveCount(3);
+  // the three commands are there, exactly (the display continuation "\\" aside)
+  expect(await section.locator('.gs-step .cmd-full').evaluateAll((els) =>
+    els.map((e) => (e.textContent ?? '').replace(/\\/g, ' ').replace(/\s+/g, ' ').trim()),
+  )).toEqual(COMMANDS);
+  // every token (a word, a flag with its value such as "-s project") sits on one line
+  const split = await section.evaluate((el) =>
+    [...el.querySelectorAll('.cmd-full .tok')].filter((t) => t.getClientRects().length > 1).map((t) => t.textContent),
+  );
+  expect(split).toEqual([]);
 });

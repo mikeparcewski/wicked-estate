@@ -1,11 +1,33 @@
 import { test, expect, devices } from '@playwright/test';
 import { clickUntil } from './helpers';
 
-// Mobile (iPhone 12, 390x844): the playground stacks (questions become a scrolling row) and
-// still answers; the tool explorer still searches; nothing scrolls sideways.
+// Mobile (iPhone 12, 390x844): a deliberate phone layout. The five questions wrap (no hidden
+// side-scroller), the demo stays labelled as scripted, picking a question never moves the page,
+// the explorer still searches, tap targets are at least 44px, nothing scrolls sideways. Every frame
+// fits one screen (360x740 too): the hero's answer, the confidence ladder and the storage details
+// start a second frame; the stores, the tool groups and the install paths switch in place.
 
 const { defaultBrowserType: _ignored, ...iphone12 } = devices['iPhone 12'];
 test.use(iphone12);
+
+test('"See it answer" lands on the answer, even in a short window', async ({ page }) => {
+  // reduced motion: the landing is an instant jump, so the check reads where it settles, not a smooth
+  // scroll passing through the viewport
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.setViewportSize({ width: 320, height: 320 });
+  await page.goto('/');
+  const t = page.locator('#toolface');
+  await t.scrollIntoViewIfNeeded();
+  const mem = t.locator('.tools-tab').filter({ hasText: 'Memory' });
+  await clickUntil(mem, async () => (await mem.getAttribute('aria-selected')) === 'true');
+  await t.getByRole('button', { name: /See it answer/ }).click();
+  const q = page.locator('#query');
+  await expect(q).toHaveAttribute('data-q', 'why');
+  await expect(page.locator('#q-panel')).toBeFocused();
+  const top = await q.locator('.q-card').first().evaluate((el) => Math.round(el.getBoundingClientRect().top));
+  expect(top, 'the first answer card sits below the 64px topbar').toBeGreaterThanOrEqual(64);
+  expect(top, 'the first answer card is on screen').toBeLessThan(320);
+});
 
 test('mobile: the playground and the tool explorer work, no horizontal overflow', async ({ page }) => {
   const pageErrors: Error[] = [];
@@ -15,20 +37,350 @@ test('mobile: the playground and the tool explorer work, no horizontal overflow'
   await expect(page.locator('#menuBtn')).toBeVisible();
 
   const q = page.locator('#query');
+  await expect(q.locator('.q-scripted')).toBeVisible();
+  // all five questions are fully on screen horizontally: wrapped, not a side-scroller
+  for (let i = 0; i < 5; i++) {
+    const b = await q.locator('.q-ask').nth(i).boundingBox();
+    expect(b && b.x >= 0 && b.x + b.width <= 390).toBe(true);
+    expect(b && b.height >= 44).toBe(true);
+  }
+  const next = () => page.locator('#stores').evaluate((el) => Math.round(el.getBoundingClientRect().top + scrollY));
+  const n0 = await next();
   const stack = q.getByRole('option', { name: 'Can two coupons stack?' });
   await clickUntil(stack, async () => (await q.getAttribute('data-q')) === 'stack');
   await expect(q.locator('.q-card').first()).toContainText('docs/pricing.md');
+  await q.getByRole('option', { name: 'Everything about applyDiscount' }).click();
+  await q.getByRole('option', { name: 'Who reacts when an order is paid?' }).click();
+  expect(await next(), 'picking a question moved the page').toBe(n0);
+  for (const sel of ['.q-tab', '.q-stop:visible']) {
+    const b = await q.locator(sel).first().boundingBox();
+    expect(b && b.height >= 40, `${sel} tap target`).toBe(true);
+  }
 
   const t = page.locator('#toolface');
   await t.scrollIntoViewIfNeeded();
   await t.getByLabel('Search tools').fill('blast');
-  await expect(t.locator('.tools-row')).toContainText('BlastRadius');
+  await expect(t.locator('.tl-row')).toContainText('BlastRadius');
 
   for (const id of ['#stores', '#provenance', '#storage', '#foundation', '#get-started']) {
     await page.locator(id).scrollIntoViewIfNeeded();
     await expect(page.locator(id)).toBeVisible();
   }
+  // "See it answer" lands on the answer, not on the questions stacked above it
+  const mem = t.locator('.tools-tab').filter({ hasText: 'Memory' });
+  await t.getByLabel('Search tools').fill('');
+  await clickUntil(mem, async () => (await mem.getAttribute('aria-selected')) === 'true');
+  await t.getByRole('button', { name: /See it answer/ }).click();
+  await expect(q).toHaveAttribute('data-q', 'why');
+  await expect(q.locator('.q-card').first()).toBeInViewport();
+
+  const copy = await page.locator('#get-started .copy-btn').first().boundingBox();
+  expect(copy && copy.height >= 44).toBe(true);
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(1);
   expect(pageErrors).toEqual([]);
 });
+
+/** Frame heights (each piece from one landing point to the next) and the tops of every scene. */
+async function frames(page: import('@playwright/test').Page) {
+  return page.evaluate(() => {
+    const bar = 64, Y = scrollY;
+    const top = (s: string) => document.querySelector(s)!.getBoundingClientRect().top + Y;
+    const h = (s: string) => document.querySelector(s)!.getBoundingClientRect().height;
+    const inner = (s: string) => h(`${s} .scene-in`) + 32;
+    const pieces: [string, number][] = [
+      ['hero, first frame', top('#query .q-answer') - bar],
+      ['hero, the answer', top('#hero') + h('#hero') - top('#query .q-answer') + 12],
+      ['stores', inner('#stores')],
+      ['provenance, first frame', top('#provenance .ph-frame') - top('#provenance')],
+      ['provenance, confidence', top('#provenance') + h('#provenance') - top('#provenance .ph-frame') + 12],
+      ['tools', inner('#toolface')],
+      ['storage, first frame', top('#storage .ph-frame') - top('#storage')],
+      ['storage, details', top('#storage') + h('#storage') - top('#storage .ph-frame') + 12],
+      ['get started', inner('#get-started')],
+    ];
+    const tops = ['#stores', '#provenance', '#toolface', '#storage', '#get-started'].map((s) => Math.round(top(s)));
+    return { frame: innerHeight - bar, pieces: pieces.map(([n, v]) => [n, Math.round(v)] as [string, number]), tops };
+  });
+}
+
+for (const vp of [{ width: 390, height: 844 }, { width: 360, height: 740 }]) {
+  test(`every phone frame fits one screen at ${vp.width}x${vp.height}, and no control moves the page`, async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.setViewportSize(vp);
+    await page.goto('/');
+    await page.evaluate(async () => { await document.fonts.ready; });
+    const f0 = await frames(page);
+    for (const [name, h] of f0.pieces) expect(h, `${name} is taller than the screen`).toBeLessThanOrEqual(f0.frame);
+    const still = async (what: string) => {
+      const f = await frames(page);
+      expect(f.tops, `${what} moved the scenes below it`).toEqual(f0.tops);
+      for (const [name, h] of f.pieces) expect(h, `${what}: ${name}`).toBeLessThanOrEqual(f.frame);
+    };
+    const q = page.locator('#query');
+    // the tallest answers: every edge shown (the lowest stop), the fewest (1.0), and "Everything" in every store
+    await clickUntil(q.locator('.q-stop:visible').first(), async () => (await q.locator('.q-row').count()) === 1);
+    await still('the 1.0 stop');
+    await clickUntil(q.locator('.q-stop:visible').last(), async () => (await q.locator('.q-row').count()) === 4);
+    await still('the 0.5 stop');
+    await q.getByRole('option', { name: 'Everything about applyDiscount' }).click();
+    for (const tab of ['memory', 'knowledge', 'graph']) { await q.locator(`#q-tab-${tab}`).click(); await still(`Everything, ${tab}`); }
+    const stores = page.locator('#stores');
+    for (const v of ['Memory', 'Knowledge', 'What’s new', 'Code graph']) {
+      await stores.locator('.ph-opt').filter({ hasText: v }).click(); await still(`stores: ${v}`);
+    }
+    const t = page.locator('#toolface');
+    for (const tab of ['CLI', 'Memory', 'Graph']) {
+      await t.locator('.tools-tab').filter({ hasText: tab }).click();
+      for (let i = 0; i < 4; i++) { await t.getByRole('button', { name: 'Next group' }).click(); await still(`tools ${tab} group ${i}`); }
+    }
+    for (const term of ['e', 'zzz']) { await t.getByLabel('Search tools').fill(term); await still(`search "${term}"`); }
+    await page.locator('#storage .seg').filter({ hasText: 'PostgreSQL' }).click(); await still('storage: team');
+    await page.locator('#get-started .ph-opt').filter({ hasText: 'Or just estate' }).click(); await still('install: cargo');
+  });
+}
+
+test('a tapped question glides to its answer frame', async ({ page }) => {
+  await page.goto('/');
+  const q = page.locator('#query');
+  const stack = q.getByRole('option', { name: 'Can two coupons stack?' });
+  await clickUntil(stack, async () => (await q.getAttribute('data-q')) === 'stack');
+  await expect.poll(() => page.evaluate(() => scrollY), { message: 'the page stayed on the questions' }).toBeGreaterThan(300);
+  await expect(q.locator('.q-asked')).toContainText('Can two coupons stack?');
+  await expect(q.locator('.q-card').first()).toBeInViewport({ ratio: 1 });
+});
+
+test('the stores switch one store at a time, in one box', async ({ page }) => {
+  await page.goto('/');
+  const s = page.locator('#stores');
+  await s.scrollIntoViewIfNeeded();
+  const box = () => s.locator('.stores-grid').evaluate((el) => Math.round(el.getBoundingClientRect().height));
+  const h0 = await box();
+  await expect(s.locator('.sc[data-store="graph"]')).toBeVisible();
+  await expect(s.locator('.sc[data-store="memory"]')).toBeHidden();
+  const mem = s.locator('.ph-opt').filter({ hasText: 'Memory' });
+  await clickUntil(mem, async () => (await mem.getAttribute('aria-pressed')) === 'true');
+  await expect(s.locator('.sc[data-store="memory"]')).toBeVisible();
+  await expect(s.locator('.ben--pair')).toBeVisible();
+  await expect(s.locator('.sc[data-store="graph"]')).toBeHidden();
+  await s.locator('.ph-opt').filter({ hasText: 'What’s new' }).click();
+  await expect(s.locator('[data-news] li').first()).toBeVisible();
+  expect(await box()).toBe(h0);
+  // an open preview stays with its store: switching away never leaves it painted over another view
+  await mem.click();
+  const memBtn = s.locator('.sc[data-store="memory"] .sc-btn');
+  await clickUntil(memBtn, async () => (await memBtn.getAttribute('aria-pressed')) === 'true');
+  await expect(s.locator('.sc[data-store="memory"] .sc-face--prev')).toBeVisible();
+  await s.locator('.ph-opt').filter({ hasText: 'Code graph' }).click();
+  // at once, not after a fade: read the outgoing face in the same frame as the switch
+  expect(await s.locator('.sc[data-store="memory"] .sc-face--prev').evaluate((el) => getComputedStyle(el).visibility)).toBe('hidden');
+  await expect(s.locator('.sc[data-store="memory"] .sc-face--prev')).toBeHidden();
+  await expect(s.locator('.sc[data-store="graph"] .sc-face--about')).toBeVisible();
+});
+
+test('the tool explorer steps one group, or one page of matches, at a time', async ({ page }) => {
+  await page.goto('/');
+  const t = page.locator('#toolface');
+  await t.scrollIntoViewIfNeeded();
+  const list = () => t.locator('.tools-list').evaluate((el) => Math.round(el.getBoundingClientRect().height));
+  // it opens on the group that holds the selected tool, so the list and the detail agree
+  await expect(t.locator('.tl-step-t')).toContainText('Follow 2 of 4');
+  await expect(t.locator('.tl-row:visible .tl-name')).toHaveText(['BlastRadius', 'Lineage', 'Path', 'TraverseGraph']);
+  await expect(t.locator('.td-name code')).toHaveText('BlastRadius');
+  const h0 = await list();
+  // stepping to another group selects its first tool
+  const next = t.getByRole('button', { name: 'Next group' });
+  await clickUntil(next, async () => /Summarize 3 of 4/.test(await t.locator('.tl-step-t').innerText()));
+  await expect(t.locator('.tl-row:visible .tl-name')).toHaveText(['ContextBundle', 'RankHotspots', 'Communities']);
+  await expect(t.locator('.td-name code')).toHaveText('ContextBundle');
+  await t.getByLabel('Search tools').fill('e');
+  await expect(t.locator('.tl-step-t')).toContainText(/^1–3 of \d+$/);
+  await expect(t.locator('.tl-hit:visible')).toHaveCount(3);
+  await t.getByRole('button', { name: 'Next matches' }).click();
+  await expect(t.locator('.tl-step-t')).toContainText(/^4–6 of \d+$/);
+  expect(await list()).toBe(h0);
+  // a few matches, and none, say so where the stepper stood
+  await t.getByLabel('Search tools').fill('erase');
+  await expect(t.locator('.tl-step-t')).toBeVisible();
+  await expect(t.locator('.tl-step-t')).toHaveText('1 tool matches');
+  await expect(t.getByRole('button', { name: 'Next matches' })).toBeHidden();
+  await t.getByLabel('Search tools').fill('zzz');
+  await expect(t.locator('.tl-step-t')).toBeVisible();
+  await expect(t.locator('.tl-step-t')).toHaveText('No tool matches “zzz”.');
+  expect(await list()).toBe(h0);
+});
+
+// Every tool's detail fits its fixed phone box at 360 and 390 wide (a clipped note was the bug: the optional
+// tool showed its own note plus the scripted-answer hint).
+for (const vp of [{ width: 360, height: 740 }, { width: 390, height: 844 }]) {
+  test(`every tool's detail fits its box at ${vp.width}x${vp.height}`, async ({ page }) => {
+    await page.setViewportSize(vp);
+    await page.goto('/');
+    const t = page.locator('#toolface');
+    await t.scrollIntoViewIfNeeded();
+    const over: string[] = [];
+    for (let s = 0; s < 4; s++) {
+      const tab = t.locator('.tools-tab').nth(s);
+      await clickUntil(tab, async () => (await tab.getAttribute('aria-selected')) === 'true');
+      const n = await t.locator('.tl-row').count();
+      for (let r = 0; r < n; r++) {
+        await t.locator('.tl-row').nth(r).evaluate((e) => (e as HTMLElement).click());
+        const m = await t.locator('.tools-detail').evaluate((d) => {
+          const cs = getComputedStyle(d);
+          const bottom = d.getBoundingClientRect().bottom - parseFloat(cs.paddingBottom);
+          const kids = [...d.querySelectorAll('.td-in *')].filter((k) => k.getBoundingClientRect().height > 0);
+          return { name: d.querySelector('.td-name code')?.textContent ?? '?', over: Math.max(0, ...kids.map((k) => k.getBoundingClientRect().bottom - bottom)) };
+        });
+        if (m.over > 0.5) over.push(`${m.name} +${m.over.toFixed(1)}`);
+      }
+    }
+    expect(over).toEqual([]);
+  });
+}
+
+test('leaving a set and coming back reopens the group that holds the selected tool', async ({ page }) => {
+  await page.goto('/');
+  const t = page.locator('#toolface');
+  await t.scrollIntoViewIfNeeded();
+  const next = t.getByRole('button', { name: 'Next group' });
+  await clickUntil(next, async () => /Summarize 3 of 4/.test(await t.locator('.tl-step-t').innerText()));
+  const mem = t.locator('.tools-tab').filter({ hasText: 'Memory' });
+  await clickUntil(mem, async () => (await mem.getAttribute('aria-selected')) === 'true');
+  const graph = t.locator('.tools-tab').filter({ hasText: 'Graph' });
+  await clickUntil(graph, async () => (await graph.getAttribute('aria-selected')) === 'true');
+  await expect(t.locator('.td-name code')).toHaveText('BlastRadius');
+  await expect(t.locator('.tl-step-t')).toContainText('Follow 2 of 4');
+  await expect(t.locator('.tl-row:visible[aria-pressed="true"] .tl-name')).toHaveText('BlastRadius');
+  // a search hit from another set opens that set and group once the search is cleared
+  await t.getByLabel('Search tools').fill('erase');
+  await t.locator('.tl-row:visible').first().click();
+  await t.getByLabel('Search tools').fill('');
+  await expect(t.locator('.td-name code')).toHaveText('memory.erase');
+  await expect(t.locator('.tl-row:visible[aria-pressed="true"] .tl-name')).toHaveText('memory.erase');
+});
+
+// every control a finger can reach is at least 44x44, the family chrome's included (the topbar, the family
+// map's links and the footer), measured on the element's own box
+for (const vp of [{ width: 390, height: 844 }, { width: 360, height: 740 }]) {
+  test(`every control is a 44px target at ${vp.width}x${vp.height}`, async ({ page }) => {
+    await page.setViewportSize(vp);
+    await page.goto('/');
+    await page.evaluate(async () => { await document.fonts.ready; });
+    const small = await page.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>(
+      'a[href], button, input, select, textarea, label, [role="tab"], [role="option"], [role="radio"], [tabindex]:not([tabindex="-1"])'))
+      .filter((el) => {
+        const cs = getComputedStyle(el), r = el.getBoundingClientRect();
+        return cs.visibility !== 'hidden' && r.width > 0 && r.height > 0 && !el.closest('[hidden]');
+      })
+      .map((el) => {
+        const r = el.getBoundingClientRect();
+        return { el: `${el.tagName.toLowerCase()}.${el.className} "${(el.getAttribute('aria-label') || el.textContent || '').trim().slice(0, 30)}"`, w: Math.round(r.width), h: Math.round(r.height) };
+      })
+      .filter((t) => t.w < 44 || t.h < 44));
+    expect(small).toEqual([]);
+  });
+}
+
+// a phone shows one page of matches at a time: the detail names a match on that page, the one pressed there
+test('under a search the detail names a match on the page in view, and paging follows it', async ({ page }) => {
+  await page.goto('/');
+  const t = page.locator('#toolface');
+  await t.scrollIntoViewIfNeeded();
+  const agree = async (what: string) => {
+    const pressed = t.locator('.tl-hit:visible .tl-row[aria-pressed="true"]');
+    await expect(pressed, `${what}: no visible match is pressed`).toHaveCount(1);
+    const name = await pressed.getAttribute('data-name');
+    await expect(t.locator('.td-name code'), `${what}: the detail names a match out of view`).toHaveText(name!);
+  };
+  // the selection (BlastRadius) matches "e" but sits past the first page of three
+  const search = t.getByLabel('Search tools');
+  await clickUntil(search, async () => (await search.evaluate((el) => el === document.activeElement)));
+  await search.fill('e');
+  await expect(t.locator('.tl-step-t')).toContainText(/^1–3 of \d+$/);
+  await agree('page 1');
+  await t.getByRole('button', { name: 'Next matches' }).click();
+  await expect(t.locator('.tl-step-t')).toContainText(/^4–6 of \d+$/);
+  await agree('page 2');
+  await t.getByRole('button', { name: 'Previous matches' }).click();
+  await agree('back on page 1');
+});
+
+// the family map's links fill their card's foot on a phone; their keyboard focus ring must stay inside the card,
+// which clips anything outside it
+for (const vp of [{ width: 390, height: 844 }, { width: 360, height: 740 }]) {
+  test(`a family link's focus ring shows whole inside its card at ${vp.width}x${vp.height}`, async ({ page }) => {
+    await page.setViewportSize(vp);
+    await page.goto('/');
+    const links = page.locator('#foundation .sg-card-foot a');
+    expect(await links.count()).toBeGreaterThan(0);
+    for (let i = 0; i < await links.count(); i++) {
+      const link = links.nth(i);
+      await link.scrollIntoViewIfNeeded();
+      await page.keyboard.press('Escape'); // keyboard modality, so programmatic focus shows the ring
+      await link.focus();
+      const m = await link.evaluate((el) => {
+        const cs = getComputedStyle(el), r = el.getBoundingClientRect();
+        const card = el.closest('.sg-card')!, cc = getComputedStyle(card), c = card.getBoundingClientRect();
+        const ring = cs.outlineStyle !== 'none' ? parseFloat(cs.outlineWidth) + parseFloat(cs.outlineOffset) : 0;
+        const out = Math.max(0, ring);
+        return {
+          visible: el.matches(':focus-visible') && cs.outlineStyle !== 'none' && parseFloat(cs.outlineWidth) > 0,
+          over: Math.max(
+            c.left + parseFloat(cc.borderLeftWidth) - (r.left - out), (r.right + out) - (c.right - parseFloat(cc.borderRightWidth)),
+            c.top + parseFloat(cc.borderTopWidth) - (r.top - out), (r.bottom + out) - (c.bottom - parseFloat(cc.borderBottomWidth))),
+        };
+      });
+      expect(m.visible, `link ${i}: no focus ring`).toBe(true);
+      expect(m.over, `link ${i}: the card clips its focus ring`).toBeLessThanOrEqual(0);
+    }
+  });
+}
+
+// a phone's answer rows read whole: the subject (a path hides its directory from view), the relation and the
+// target, each direct edge on one line, so no row reads "POST /price calls" with no object; a screen reader
+// still gets the full path, and no confidence stop grows the answer (320 and 323 are the tightest widths)
+for (const vp of [{ width: 390, height: 844 }, { width: 360, height: 740 }, { width: 323, height: 844 }, { width: 320, height: 740 }]) {
+  test(`the answer rows read whole, and no stop grows the answer, at ${vp.width}x${vp.height}`, async ({ page }) => {
+    await page.setViewportSize(vp);
+    await page.goto('/');
+    await page.evaluate(async () => { await document.fonts.ready; });
+    const q = page.locator('#query');
+    // what a sighted visitor reads: the row's rendered text (a hidden target would drop out), without its
+    // visually hidden directory
+    const read = () => q.locator('.q-row-main').evaluateAll((els) => els.map((el) => {
+      const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      let text = '', n: Node | null;
+      while ((n = w.nextNode())) {
+        const p = n.parentElement!;
+        if (p.closest('.q-dir') || !p.checkVisibility()) continue;
+        text += n.textContent;
+      }
+      const lh = parseFloat(getComputedStyle(el).lineHeight);
+      const dir = el.querySelector('.q-dir');
+      return { text: text.replace(/\s+/g, ' ').trim(), lines: Math.round(el.getBoundingClientRect().height / lh),
+               dirShown: dir ? dir.getBoundingClientRect().width > 1 : false };
+    }));
+    const answerH = () => q.locator('.q-result').evaluate((el) => el.getBoundingClientRect().height);
+    await clickUntil(q.locator('.q-stop:visible').first(), async () => (await q.locator('.q-row').count()) === 1);
+    const h0 = await answerH();
+    await clickUntil(q.locator('.q-stop:visible').last(), async () => (await q.locator('.q-row').count()) === 4);
+    expect(await answerH(), 'the 0.5 stop grew the answer').toBe(h0);
+    const blast = await read();
+    expect(blast.map((r) => r.text)).toEqual([
+      'discount.ts contains applyDiscount', 'POST /price calls applyDiscount', 'checkout() calls applyDiscount',
+      'receipt.ts consumes order.paid (checkout.ts emits it)']);
+    // one line each where there is room to spare; at 320-340px Linux's rounded mono advances may wrap the
+    // longest target (the row still reads whole, and the answer keeps a line in reserve for it)
+    const roomy = vp.width >= 360;
+    if (roomy) for (const r of blast.slice(0, 3)) expect(r.lines, r.text).toBe(1);
+    for (const r of blast) expect(r.dirShown, r.text).toBe(false);
+    await q.getByRole('option', { name: 'Who reacts when an order is paid?' }).click();
+    await expect(q.locator('.q-row')).toHaveCount(3);
+    const paid = await read();
+    expect(paid.map((r) => r.text)).toEqual(['checkout.ts emits order.paid', 'receipt.ts consumes order.paid', 'ledger.ts consumes order.paid']);
+    if (roomy) for (const r of paid) expect(r.lines, r.text).toBe(1);
+    // a screen reader still reads the full path (the hidden directory is its own text run: "src/checkout/ checkout.ts")
+    const tree = (await q.locator('.q-rows').ariaSnapshot()).replace(/\/ /g, '/');
+    for (const path of ['src/checkout/checkout.ts', 'src/notify/receipt.ts', 'src/ledger/ledger.ts']) expect(tree).toContain(path);
+  });
+}
