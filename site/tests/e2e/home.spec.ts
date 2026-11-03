@@ -48,6 +48,20 @@ test('the hero, playground included, fits a 1440x700 laptop window', async ({ pa
   for (let i = 0; i < 3; i++) await expect(page.locator('#query .q-row').nth(i)).toBeInViewport({ ratio: 1 });
 });
 
+// the hook stays on the first screen: every edge of the opening answer shows, the injected one included, with no
+// scrolling inside the answer panel
+for (const vp of [{ width: 1280, height: 660 }, { width: 1366, height: 640 }, { width: 1440, height: 700 }, { width: 1920, height: 1080 }]) {
+  test(`the opening answer shows all four edges without scrolling at ${vp.width}x${vp.height}`, async ({ page }) => {
+    await page.setViewportSize(vp);
+    await page.goto('/');
+    await page.evaluate(async () => { await document.fonts.ready; });
+    const panel = page.locator('#q-panel');
+    expect(await panel.evaluate((el) => el.scrollHeight - el.clientHeight), 'the answer panel scrolls').toBeLessThanOrEqual(0);
+    await expect(page.locator('#query .q-row')).toHaveCount(4);
+    await expect(page.locator('#query .q-row[data-inj]')).toBeInViewport({ ratio: 1 });
+  });
+}
+
 for (const vp of [{ width: 1440, height: 700 }, { width: 1280, height: 660 }, { width: 1920, height: 1080 }]) {
   test(`every scene fits its frame at ${vp.width}x${vp.height}, so the page locks in scene by scene`, async ({ page }) => {
     await page.setViewportSize(vp);
