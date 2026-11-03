@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { Fragment, useState, useEffect, useRef, useCallback } from 'react'
 import type { CSSProperties, ReactNode, KeyboardEvent as ReactKeyboardEvent } from 'react'
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -90,6 +90,12 @@ function onScreen(el: HTMLElement | null) {
   if (!el) return false
   const r = el.getBoundingClientRect()
   return r.bottom > 0 && r.top < window.innerHeight
+}
+
+/** A tool name that wraps only after a dot (never mid-word: recall_about_c / ode was the bug). */
+function breakable(name: string) {
+  const parts = name.split(/(?<=\.)/)
+  return parts.map((p, i) => <Fragment key={i}>{p}{i < parts.length - 1 && <wbr />}</Fragment>)
 }
 
 /** Arrow keys move along a row of tabs/options (roving focus, selection follows focus). */
@@ -728,10 +734,10 @@ function Provenance({ threshold, setThreshold }: { threshold: Stop; setThreshold
         <div className="rock-panel pv-panel ph-frame">
           <div className="pv-bar">
             <span className="pv-bar-t">Default confidence by tier</span>
-            <label htmlFor="thr-range" className="thr-l">Show edges ≥ <output htmlFor="thr-range" className="thr-v">{threshold.toFixed(1)}</output></label>
+            <span id="thr-l" className="thr-l">Show edges ≥ <output htmlFor="thr-range" className="thr-v">{threshold.toFixed(1)}</output></span>
           </div>
           <div className="thr">
-            <input id="thr-range" className="thr-range" type="range" min={0} max={2} step={1} value={idx}
+            <input id="thr-range" className="thr-range" type="range" min={0} max={2} step={1} value={idx} aria-labelledby="thr-l"
               aria-valuetext={`${threshold.toFixed(1)}: ${threshold === 1 ? 'exact edges only' : threshold === 0.6 ? 'resolved and above' : 'rules too, labelled'}`}
               onChange={e => setThreshold(([0.5, 0.6, 1.0] as Stop[])[Number(e.target.value)])}
               style={vars({ '--p': `${idx * 50}%` })} />
@@ -741,7 +747,7 @@ function Provenance({ threshold, setThreshold }: { threshold: Stop; setThreshold
             <tbody>
               {TIERS.map(t => (
                 <tr key={t.tier} data-off={t.conf < threshold ? 'true' : undefined}>
-                  <th scope="row"><span className="tiers-t">{t.tier}</span><span className="tiers-who">{t.who}</span></th>
+                  <th scope="row"><span className="tiers-t">{t.tier}</span>{' '}<span className="tiers-who">{t.who}</span></th>
                   <td className="tiers-bar"><span style={vars({ '--w': t.conf })} /></td>
                   <td className="tiers-n">{t.conf.toFixed(1)}</td>
                 </tr>
@@ -906,8 +912,11 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
     setOpenG(o => ({ ...o, [set]: g.label }))
     setSel(g.rows[0].name)
   }
-  const see = SEE[picked.r.name]
-  const others = picked.g.rows.filter(r => r.name !== picked.r.name)
+  // the detail follows the list in view: under a search it names the selected tool if it matches, else the
+  // first match, and with no match it names none
+  const shown = f ? (hits.find(h => h.r.name === picked.r.name) ?? hits[0] ?? null) : picked
+  const see = shown ? SEE[shown.r.name] : undefined
+  const others = shown ? shown.g.rows.filter(r => r.name !== shown.r.name) : []
   const pages = Math.max(1, Math.ceil(hits.length / PAGE))
   const pg = Math.min(page, pages - 1)
   // the selection, its set and its open group always move together, so the list in view holds the tool the
@@ -931,10 +940,10 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
     requestAnimationFrame(() => document.querySelector<HTMLElement>(`#toolface .tl-row[data-name="${name}"]`)?.focus())
   }
   const rowBtn = (r: Row) => (
-    <button key={r.name} type="button" className="tl-row" data-name={r.name} aria-pressed={picked.r.name === r.name} data-on={picked.r.name === r.name} onClick={() => select(r.name)}>
-      <code className="tl-name">{r.name}</code>
+    <button key={r.name} type="button" className="tl-row" data-name={r.name} aria-pressed={shown?.r.name === r.name} data-on={shown?.r.name === r.name} onClick={() => select(r.name)}>
+      {/* the dot rides the name's last line, so a wrapped name never pushes it onto a line of its own */}
+      <code className="tl-name">{breakable(r.name)}{SEE[r.name] && <span className="tl-see-dot" aria-label="has a scripted answer" />}</code>
       {r.optional && <span className="tl-opt">when enabled</span>}
-      {SEE[r.name] && <span className="tl-see-dot" aria-label="has a scripted answer" />}
       <span className="tl-does">{r.does}</span>
     </button>
   )
@@ -949,8 +958,7 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
               const c = countOf(t)
               const on = !f && set === t.id
               return (
-                <button key={t.id} type="button" role="tab" aria-selected={on} tabIndex={on || (f && t.id === set) ? 0 : -1} data-on={on} className="tools-tab" onClick={() => choose(t.id)}
-                  onFocus={e => e.currentTarget.scrollIntoView({ block: 'nearest', inline: 'nearest' })}>
+                <button key={t.id} type="button" role="tab" aria-selected={on} tabIndex={on || (f && t.id === set) ? 0 : -1} data-on={on} className="tools-tab" onClick={() => choose(t.id)}>
                   {t.name}
                   {t.mcp && <span className="q-count">{c.core}{c.optional > 0 && <span className="q-count-opt"> +{c.optional}</span>}</span>}
                 </button>
@@ -992,11 +1000,17 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
             ))}
           </div>
           <div className="tools-detail" aria-live="polite">
-            <div className="td-in" key={picked.r.name}>
-              <p className="td-path">{picked.t.mcp ? 'MCP tool' : 'CLI command'} · {picked.t.name} · {picked.g.label}</p>
-              <p className="td-name"><code>{picked.r.name}</code>{picked.r.optional && <span className="tl-opt">when enabled</span>}</p>
-              <p className="td-does">{picked.r.does}.</p>
-              {picked.r.optional && <p className="td-x">Listed only when embeddings are wired, so it is the “+1” and not one of the 30.</p>}
+            {!shown ? (
+              <div className="td-in td-none" key="none">
+                <p className="td-none-t">No tool matches “{filter.trim()}”.</p>
+                <p className="td-x">Try a name or a word from what it does: erase, recall, blast or drift.</p>
+              </div>
+            ) : (
+            <div className="td-in" key={shown.r.name}>
+              <p className="td-path">{shown.t.mcp ? 'MCP tool' : 'CLI command'} · {shown.t.name} · {shown.g.label}</p>
+              <p className="td-name"><code>{breakable(shown.r.name)}</code>{shown.r.optional && <span className="tl-opt">when enabled</span>}</p>
+              <p className="td-does">{shown.r.does}.</p>
+              {shown.r.optional && <p className="td-x">Listed only when embeddings are wired, so it is the “+1” and not one of the 30.</p>}
               {see ? (
                 <div className="td-see">
                   {/* the scripted answer's first lines, so the pane shows what "see it answer" plays */}
@@ -1020,14 +1034,14 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
                     See it answer <span aria-hidden>↑</span>
                   </button>
                 </div>
-              ) : !picked.r.optional && (
+              ) : !shown.r.optional && (
                 <>
                   <p className="td-x td-x-desk">The playground has a scripted answer for {SEE_NAMES.map((n, i) => (
                     <span key={n}>{i > 0 && (i === SEE_NAMES.length - 1 ? ' and ' : ', ')}<code>{n}</code></span>
                   ))} (marked with a dot).</p>
                   {others.length > 0 && (
                     <div className="td-more">
-                      <span className="td-more-l">More in {picked.g.label}</span>
+                      <span className="td-more-l">More in {shown.g.label}</span>
                       {others.map(r => (
                         <button key={r.name} type="button" className="td-more-b" onClick={() => selectAndFocus(r.name)}>
                           <code>{r.name}</code>{SEE[r.name] && <span className="tl-see-dot" aria-label="has a scripted answer" />}
@@ -1038,6 +1052,7 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
                 </>
               )}
             </div>
+            )}
           </div>
         </div>
       </div>

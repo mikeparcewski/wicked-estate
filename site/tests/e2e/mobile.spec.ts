@@ -258,3 +258,25 @@ test('leaving a set and coming back reopens the group that holds the selected to
   await expect(t.locator('.td-name code')).toHaveText('memory.erase');
   await expect(t.locator('.tl-row:visible[aria-pressed="true"] .tl-name')).toHaveText('memory.erase');
 });
+
+// every control a finger can reach is at least 44x44, the family chrome's included (the topbar, the family
+// map's links and the footer), measured on the element's own box
+for (const vp of [{ width: 390, height: 844 }, { width: 360, height: 740 }]) {
+  test(`every control is a 44px target at ${vp.width}x${vp.height}`, async ({ page }) => {
+    await page.setViewportSize(vp);
+    await page.goto('/');
+    await page.evaluate(async () => { await document.fonts.ready; });
+    const small = await page.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>(
+      'a[href], button, input, select, textarea, label, [role="tab"], [role="option"], [role="radio"], [tabindex]:not([tabindex="-1"])'))
+      .filter((el) => {
+        const cs = getComputedStyle(el), r = el.getBoundingClientRect();
+        return cs.visibility !== 'hidden' && r.width > 0 && r.height > 0 && !el.closest('[hidden]');
+      })
+      .map((el) => {
+        const r = el.getBoundingClientRect();
+        return { el: `${el.tagName.toLowerCase()}.${el.className} "${(el.getAttribute('aria-label') || el.textContent || '').trim().slice(0, 30)}"`, w: Math.round(r.width), h: Math.round(r.height) };
+      })
+      .filter((t) => t.w < 44 || t.h < 44));
+    expect(small).toEqual([]);
+  });
+}

@@ -22,8 +22,9 @@
       and a reversal comes back. A scroller inside a scene keeps its own wheel until it reaches its end,
       and the gesture that scrolled it stays its own: only a new gesture at the end pages the scene.
       ctrl+wheel (zoom) is never touched.
-   Phones scroll freely (the family chrome's rule: snapping on a phone yanks the viewport); their
-   frames are laid out to fit one screen each (global.css), with nothing to lock. */
+   Phones scroll freely (the family chrome's rule: snapping on a phone yanks the viewport). A scene there may
+   run to two or three screens (the hero, the confidence ladder, storage, the family map); each of its
+   frames (.ph-frame, global.css) fits one screen, and nothing locks, so a tall scene never traps. */
 
 const html = document.documentElement;
 const scenes = Array.from(document.querySelectorAll<HTMLElement>('main [data-scene], main .same-garden'));
