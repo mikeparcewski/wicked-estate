@@ -118,9 +118,11 @@ for (const vp of [{ width: 390, height: 844 }, { width: 360, height: 740 }]) {
       for (const [name, h] of f.pieces) expect(h, `${what}: ${name}`).toBeLessThanOrEqual(f.frame);
     };
     const q = page.locator('#query');
-    // the tallest answers: the guess shown, and "Everything" in every store
+    // the tallest answers: every edge shown (the lowest stop), the fewest (1.0), and "Everything" in every store
+    await clickUntil(q.locator('.q-stop:visible').first(), async () => (await q.locator('.q-row').count()) === 1);
+    await still('the 1.0 stop');
     await clickUntil(q.locator('.q-stop:visible').last(), async () => (await q.locator('.q-row').count()) === 4);
-    await still('the 0.3 stop');
+    await still('the 0.5 stop');
     await q.getByRole('option', { name: 'Everything about applyDiscount' }).click();
     for (const tab of ['memory', 'knowledge', 'graph']) { await q.locator(`#q-tab-${tab}`).click(); await still(`Everything, ${tab}`); }
     const stores = page.locator('#stores');

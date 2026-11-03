@@ -4,14 +4,17 @@ import { clickUntil } from './helpers';
 // The query playground (#query): pick a question, see which store answers, with provenance.
 
 test.describe('query playground', () => {
-  test('opens on a blast-radius answer from the code graph, with the guess held back', async ({ page }) => {
+  test('opens on a blast-radius answer from the code graph, every edge labelled with its tier', async ({ page }) => {
     await page.goto('/');
     const q = page.locator('#query');
     await expect(q.locator('.q-call')).toContainText('BlastRadius');
     await expect(q.locator('.q-tab[data-store="graph"]')).toHaveAttribute('aria-selected', 'true');
-    // Three edges at 0.5 or above; the 0.3 tag-scan guess is held back by default.
-    await expect(q.locator('.q-row')).toHaveCount(3);
-    await expect(q.locator('.q-hidden')).toContainText('1 guess below 0.5 held back');
+    // Four edges at 0.5 or above, only tiers that run on index: the defining file (Parsed 1.0), two callers
+    // resolved through names and imports (ImportMap 0.6), and the rule-injected consumer (Heuristic 0.5)
+    await expect(q.locator('.q-row')).toHaveCount(4);
+    await expect(q.locator('.q-hidden')).toHaveCount(0);
+    await expect(q.locator('.q-row .q-chip:not(.q-chip--inj)')).toHaveText(['Parsed', 'ImportMap', 'ImportMap', 'Heuristic']);
+    await expect(q.locator('.q-row').first()).toContainText('src/pricing/discount.ts contains applyDiscount');
     // the event is the second hop, as estate answers it: BlastRadius on the function, then on its event,
     // which reaches the FILE that consumes it (a TOML rule attaches its edge to the matched file)
     await expect(q.locator('.q-call code')).toHaveText(['BlastRadius { symbol: "applyDiscount" }', 'BlastRadius { symbol: "order.paid" }']);
@@ -27,25 +30,22 @@ test.describe('query playground', () => {
   test('the confidence control is one value: the hero and the confidence scene move together', async ({ page }) => {
     await page.goto('/');
     const q = page.locator('#query');
-    const low = q.getByRole('radio', { name: '0.3' });
-    await clickUntil(low, async () => (await q.locator('.q-row').count()) === 4);
-    const guess = q.locator('.q-row').filter({ hasText: 'referralFlow()' });
-    await expect(guess).toContainText('Tags');
-    await expect(guess).toContainText('0.3');
-    await expect(guess).toContainText('tag-scan guess, unverified');
-    await expect(q.locator('.q-hidden')).toHaveCount(0);
-    // the slider in the confidence scene shows the same value, and the guess is named there
+    const mid = q.getByRole('radio', { name: '0.6' });
+    await clickUntil(mid, async () => (await q.locator('.q-row').count()) === 3);
+    await expect(q.locator('.q-hidden')).toContainText('1 edge below 0.6 held back');
+    await expect(q.locator('.q-row').filter({ hasText: 'receipt.ts' })).toHaveCount(0);
+    // the slider in the confidence scene shows the same value; the rule's edge is named only at 0.5
     const pv = page.locator('#provenance');
     const slider = pv.getByRole('slider');
-    await expect(slider).toHaveValue('0');
-    await expect(pv.locator('.thr-guess')).toBeVisible();
-    // and back the other way: the slider at 1.0 leaves only the one exact edge in the hero (the SCIP call)
+    await expect(slider).toHaveValue('1');
+    await expect(pv.locator('.thr-guess')).toBeHidden();
+    // and back the other way: the slider at 1.0 leaves only the parsed fact in the hero
     await slider.scrollIntoViewIfNeeded();
     await slider.fill('2');
     await expect(pv.locator('.thr-v')).toHaveText('1.0');
-    await expect(pv.locator('.tiers tr[data-off]')).toHaveCount(4);
+    await expect(pv.locator('.tiers tr[data-off]')).toHaveCount(2);
     await expect(q.locator('.q-row')).toHaveCount(1);
-    await expect(q.locator('.q-row')).toContainText('POST /price');
+    await expect(q.locator('.q-row')).toContainText('src/pricing/discount.ts');
     await expect(q.getByRole('radio', { name: '1.0' })).toHaveAttribute('aria-checked', 'true');
   });
 
@@ -174,7 +174,7 @@ test.describe('tool detail', () => {
     const sets = t.locator('.td-callset');
     await expect(sets).toHaveCount(2);
     await expect(sets.nth(0).locator('.td-call')).toHaveText('BlastRadius { symbol: "applyDiscount" }');
-    await expect(sets.nth(0).locator('.td-k')).toHaveText(['POST /price', 'checkout()']);
+    await expect(sets.nth(0).locator('.td-k')).toHaveText(['discount.ts', 'POST /price', 'checkout()']);
     await expect(sets.nth(1).locator('.td-call')).toHaveText('BlastRadius { symbol: "order.paid" }');
     await expect(sets.nth(1).locator('.td-k')).toHaveText(['checkout.ts', 'receipt.ts']);
   });

@@ -17,7 +17,11 @@ import type { CSSProperties, ReactNode, KeyboardEvent as ReactKeyboardEvent } fr
      wired; 7 memory + 4 proposal tools; 7 knowledge tools = 30
      (crates/wicked-estate-mcp/src/lib.rs, src/tools/*.rs).
    - Tier confidences: ResolutionTier::default_confidence,
-     crates/wicked-estate-core/src/edge.rs.
+     crates/wicked-estate-core/src/edge.rs; which tiers actually run on `index`:
+     docs/ENGINE-CONTRACT.md §3.1 (Parsed 1.0 contains/defines; name, scoped and
+     import-map resolvers at ImportMap ~0.6 for calls; rules at Heuristic 0.5). SCIP
+     (a separate `scip` command) emits references only, never calls; TSG and Tags
+     have no production producer, so the page shows neither.
    - Injected edges: ExtraEdgeExtractor, plain-TOML rules, tier Heuristic (0.5),
      provenance = the rule name (crates/wicked-estate-extract/src/extra_edge.rs).
      A rule attaches its edge to the matched FILE and points it at a topic node, so
@@ -153,15 +157,16 @@ interface Fig { h: number; at: [number, number]; extra?: { label: string; at: [n
 interface Question { id: string; ask: string; calls: string[]; first: Store; center: string; fig: Fig; graph: GEdge[]; memory: Mem[]; knowledge: Know[]; grep?: string }
 const FIG_W = 380
 
-// BlastRadius on applyDiscount: its callers (checkout() lives in src/checkout/checkout.ts). A TOML rule attaches
-// the emit edge to that FILE, pointing at the order.paid topic node; BlastRadius on order.paid (the second call)
-// reaches the file that consumes it, at Heuristic 0.5 with the rule's name as its provenance.
+// BlastRadius on applyDiscount: the file that defines it (a parsed fact) and its two callers (resolved through
+// names and imports; checkout() lives in src/checkout/checkout.ts). A TOML rule attaches the emit edge to that FILE,
+// pointing at the order.paid topic node; BlastRadius on order.paid (the second call) reaches the file that
+// consumes it, at Heuristic 0.5 with the rule's name as its provenance.
 const BLAST: GEdge[] = [
+  { from: 'src/pricing/discount.ts', label: 'discount.ts', to: 'applyDiscount', via: 'contains', tier: 'Parsed', conf: 1.0, where: 'src/pricing/discount.ts:12', at: [62, 30] },
+  { from: 'POST /price', to: 'applyDiscount', via: 'calls', tier: 'ImportMap', conf: 0.6, where: 'src/routes/price.ts:18', at: [200, 22] },
   { from: 'checkout()', to: 'applyDiscount', via: 'calls', tier: 'ImportMap', conf: 0.6, where: 'src/checkout/checkout.ts:41', at: [200, 90] },
-  { from: 'POST /price', to: 'applyDiscount', via: 'calls', tier: 'SCIP', conf: 1.0, where: 'src/routes/price.ts:18', at: [200, 22] },
   { from: 'src/notify/receipt.ts', label: 'receipt.ts', to: '', via: 'consumes order.paid (checkout.ts emits it)', tier: 'Heuristic', conf: 0.5, where: 'rule: event-bus-consume', injected: true,
     at: [322, 160], hop: { label: 'order.paid', at: [322, 95], via: 'checkout.ts' } },
-  { from: 'referralFlow()', to: 'applyDiscount', via: 'calls?', tier: 'Tags', conf: 0.3, where: 'tag-scan guess, unverified', at: [200, 158] },
 ]
 // memory.recall answers with scope, content, tier and score: the chips show the tier and the scope
 const WHY: Mem[] = [
@@ -200,10 +205,10 @@ const STORE_LABEL: Record<Store, { name: string; kind: string }> = {
 }
 
 /** The demo's confidence filter: one value, shared by the hero and the confidence scene. */
-const STOPS = [1.0, 0.5, 0.3] as const
+const STOPS = [1.0, 0.6, 0.5] as const
 type Stop = (typeof STOPS)[number]
 
-function confClass(c: number) { return c >= 0.8 ? 'q-conf q-conf--hi' : c >= 0.5 ? 'q-conf q-conf--mid' : 'q-conf q-conf--lo' }
+function confClass(c: number) { return c >= 0.8 ? 'q-conf q-conf--hi' : 'q-conf q-conf--mid' }
 
 type Anim = 'intro' | 'switch' | 'done'
 
@@ -309,7 +314,7 @@ function GraphView({ q, threshold, setThreshold }: { q: Question; threshold: Sto
           </ul>
           {held > 0 && (
             <p className="q-hidden" data-hidden={held}>
-              {held} {held === 1 ? (threshold === 0.5 ? 'guess' : 'edge') : 'edges'} below {threshold.toFixed(1)} held back. Lower the confidence to see {held === 1 ? 'it' : 'them'}, labelled.
+              {held} {held === 1 ? 'edge' : 'edges'} below {threshold.toFixed(1)} held back. Lower the confidence to see {held === 1 ? 'it' : 'them'}, labelled.
             </p>
           )}
           {/* a phone keeps the confidence control with the edges it filters, not in the crowded tab row */}
@@ -481,7 +486,7 @@ function StorePreview({ id }: { id: Store }) {
       <div className="sc-prev">
         <p className="sc-prev-h">Around <code>{FOLLOW}</code></p>
         <ul className="sc-deps">
-          {[...BLAST].sort((a, b) => b.conf - a.conf).filter(e => e.conf >= 0.5).map(e => (
+          {[...BLAST].sort((a, b) => b.conf - a.conf).filter(e => e.via !== 'contains').map(e => (
             <li key={e.from}><code>{e.from}</code>{e.injected && <span className="q-chip q-chip--inj">injected</span>}<span className={confClass(e.conf)}>{e.conf.toFixed(1)}</span></li>
           ))}
         </ul>
@@ -609,11 +614,10 @@ function Stores() {
 // ResolutionTier::default_confidence, crates/wicked-estate-core/src/edge.rs (defaults: a resolver may score an
 // edge below its tier's default, as the import-map call above shows). No shipping path produces LSP-tier edges.
 const TIERS: { tier: string; conf: number; who: string }[] = [
-  { tier: 'Parsed · SCIP · Compiler', conf: 1.0, who: 'read straight from the code, a SCIP index or a compiler catalog' },
-  { tier: 'TSG', conf: 0.8, who: 'graph rules over the syntax tree' },
-  { tier: 'ImportMap', conf: 0.6, who: 'followed through imports' },
+  { tier: 'Parsed', conf: 1.0, who: 'read straight from the code' },
+  { tier: 'SCIP · Compiler', conf: 1.0, who: 'a SCIP index or compiler catalog you load' },
+  { tier: 'ImportMap', conf: 0.6, who: 'resolved through names and imports' },
   { tier: 'Heuristic', conf: 0.5, who: 'synthesizers and your TOML rules' },
-  { tier: 'Tags', conf: 0.3, who: 'a tag-scan guess' },
 ]
 
 type Mode = 'grep' | 'estate'
@@ -677,11 +681,13 @@ function Provenance({ threshold, setThreshold }: { threshold: Stop; setThreshold
     if (motionAllowed() && !onScreen(panel.current)) setMode('grep')
   }, [])
   useEnterOnce(panel, () => {
-    if (!motionAllowed() || touched.current) return
+    if (touched.current) return
+    // motion turned off since load: no flip to watch, show the end state now
+    if (!motionAllowed()) { setMode('estate'); return }
     window.setTimeout(() => { if (!touched.current) setMode('estate') }, 650)
   })
   const choose = (m: Mode) => { touched.current = true; setMode(m) }
-  const idx = [0.3, 0.5, 1.0].indexOf(threshold)
+  const idx = [0.5, 0.6, 1.0].indexOf(threshold)
   const reach = BLAST.filter(e => e.conf >= threshold)
   return (
     <Section id="provenance">
@@ -726,10 +732,10 @@ function Provenance({ threshold, setThreshold }: { threshold: Stop; setThreshold
           </div>
           <div className="thr">
             <input id="thr-range" className="thr-range" type="range" min={0} max={2} step={1} value={idx}
-              aria-valuetext={`${threshold.toFixed(1)}: ${threshold === 1 ? 'exact edges only' : threshold === 0.5 ? 'rules and above' : 'guesses too, labelled'}`}
-              onChange={e => setThreshold(([0.3, 0.5, 1.0] as Stop[])[Number(e.target.value)])}
+              aria-valuetext={`${threshold.toFixed(1)}: ${threshold === 1 ? 'exact edges only' : threshold === 0.6 ? 'resolved and above' : 'rules too, labelled'}`}
+              onChange={e => setThreshold(([0.5, 0.6, 1.0] as Stop[])[Number(e.target.value)])}
               style={vars({ '--p': `${idx * 50}%` })} />
-            <div className="thr-ticks" aria-hidden><span>0.3 · guesses</span><span>0.5 · rules</span><span>1.0 · exact</span></div>
+            <div className="thr-ticks" aria-hidden><span>0.5 · rules</span><span>0.6 · resolved</span><span>1.0 · exact</span></div>
           </div>
           <table className="tiers">
             <tbody>
@@ -744,9 +750,9 @@ function Provenance({ threshold, setThreshold }: { threshold: Stop; setThreshold
           </table>
           <div className="thr-read" aria-live="polite">
             <p><b>{reach.length} of {BLAST.length}</b> edges in the <code>{FOLLOW}</code> answer shown.{' '}
-              <span data-off={threshold !== 0.3 ? 'true' : undefined} className="thr-guess"><code>referralFlow()</code> appears as a tag-scan guess, unverified.</span>
+              <span data-off={threshold !== 0.5 ? 'true' : undefined} className="thr-guess"><code>receipt.ts</code> comes through a rule, labelled Heuristic.</span>
             </p>
-            <p className="thr-cap">When two tiers report the same edge, the higher one wins. A 0.3 guess is never handed to an agent as a 1.0 fact.</p>
+            <p className="thr-cap">When two tiers report the same edge, the higher one wins. A 0.5 rule edge is never handed to an agent as a 1.0 fact.</p>
           </div>
         </div>
       </div>
@@ -823,7 +829,7 @@ const TOOLSETS: ToolSet[] = [
       { name: 'subscribe', does: 'Follow the change log as JSON lines' },
     ] },
     { label: 'Sharpen it', rows: [
-      { name: 'scip', does: 'Load a SCIP index for exact edges' },
+      { name: 'scip', does: 'Load a SCIP index for exact references' },
       { name: 'index --embeddings', does: 'Add vectors for search by meaning' },
       { name: 'clusters', does: 'Group the graph into communities' },
     ] },
@@ -853,7 +859,7 @@ const firstSentence = (t: string) => t.split('. ')[0].replace(/\.$/, '') + '.'
 const SEE: Record<string, { q: string; tab?: Store; calls: PrevCall[] }> = {
   BlastRadius: { q: 'blast', calls: [
     // BlastRadius on the function: its callers
-    { call: QUESTIONS[0].calls[0], row: true, lines: [...BLAST].sort((a, b) => b.conf - a.conf).filter(e => e.conf >= 0.5 && !e.injected).map(e => ({ k: e.from, conf: e.conf })) },
+    { call: QUESTIONS[0].calls[0], row: true, lines: [...BLAST].sort((a, b) => b.conf - a.conf).filter(e => !e.injected).map(e => ({ k: e.label ?? e.from, conf: e.conf })) },
     // BlastRadius on its event: the files that emit and consume it
     { call: QUESTIONS[0].calls[1], row: true, lines: PAID.slice(0, 2).map(e => ({ k: e.label ?? e.from, v: e.via, tag: 'inj', conf: e.conf })) },
   ] },

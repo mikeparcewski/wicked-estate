@@ -134,6 +134,18 @@ let glideUntil = -Infinity;
 // tap, focus moving, an anchor) drops it, and the next notch starts from where the page really is
 const dropGlide = () => { glideTo = null; };
 for (const ev of ['scrollend', 'keydown', 'pointerdown', 'focusin', 'hashchange']) window.addEventListener(ev, dropGlide, { passive: true });
+// reduced motion switched on mid-glide: the browser's smooth scroll would run on, so stop it where it is
+const reduce = matchMedia('(prefers-reduced-motion: reduce)');
+reduce.addEventListener?.('change', () => {
+  if (!reduce.matches) return;
+  dropGlide();
+  // the lock goes now, not on the guard's next frame, so the stop below is not snapped somewhere else
+  html.classList.remove('snap-lock');
+  // a real move cancels the browser's running smooth scroll (a scroll to where it already is may not)
+  const y = window.scrollY;
+  window.scrollTo({ top: y + 1, behavior: 'instant' });
+  window.scrollTo({ top: y, behavior: 'instant' });
+});
 window.addEventListener('wheel', (e) => {
   if (!html.classList.contains('snap-lock') || e.ctrlKey || e.defaultPrevented) return;
   if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;

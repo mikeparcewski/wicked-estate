@@ -10,7 +10,7 @@ test('reduced motion: zero page errors, every section visible, the playground an
     await page.locator(id).scrollIntoViewIfNeeded();
     await expect(page.locator(id)).toBeVisible();
   }
-  await expect(page.locator('#query .q-row')).toHaveCount(3);
+  await expect(page.locator('#query .q-row')).toHaveCount(4);
   expect(pageErrors).toEqual([]);
 });
 
@@ -51,12 +51,16 @@ test.describe('reduced motion switched on during the visit', () => {
     await expect(page.locator('html')).toHaveClass(/motion-ok/);
     // start the terminal typing (it takes ~1.35s), then switch the setting mid-way
     await page.evaluate(() => window.scrollTo({ top: document.getElementById('get-started')!.getBoundingClientRect().top + scrollY - 64, behavior: 'instant' }));
-    await page.waitForTimeout(350);
+    const gs = page.locator('#get-started');
+    const typed = () => gs.evaluate((el) => [...el.querySelectorAll('.gs-step .cmd-type')].map((t) => t.textContent ?? '').join('').length);
+    const full = await gs.evaluate((el) => [...el.querySelectorAll('.gs-step .cmd-full')].map((t) => t.textContent ?? '').join('').length);
+    // typing has started and is not done
+    await expect.poll(typed, { timeout: 3000 }).toBeGreaterThan(0);
+    expect(await typed()).toBeLessThan(full);
     await page.emulateMedia({ reducedMotion: 'reduce' });
     await expect(page.locator('html')).not.toHaveClass(/motion-ok/);
-    const gs = page.locator('#get-started');
-    await expect.poll(() => gs.evaluate((el) => [...el.querySelectorAll('.gs-step .cmd-type')].map((t) => t.textContent).join('|')))
-      .toBe(await gs.evaluate((el) => [...el.querySelectorAll('.gs-step .cmd-full')].map((t) => t.textContent).join('|')));
+    // every command shows whole at once: well inside the second-plus the typing would still take
+    await expect.poll(typed, { timeout: 250, intervals: [25] }).toBe(full);
     await expect.poll(() => page.evaluate(() => document.getAnimations().filter((a) => a.playState === 'running' && a.effect?.getComputedTiming().iterations === Infinity).length)).toBe(0);
     // "See it answer" asks for an instant jump, not a smooth scroll
     const behaviors = await page.evaluate(async () => {
@@ -74,5 +78,35 @@ test.describe('reduced motion switched on during the visit', () => {
       return seen;
     });
     expect(behaviors).toEqual(['auto']);
+  });
+});
+
+test.describe('reduced motion switched on mid-way', () => {
+  test.use({ contextOptions: { reducedMotion: 'no-preference' } });
+  test('a running glide stops where it is', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    await expect(page.locator('html')).toHaveClass(/snap-lock/);
+    await page.mouse.move(700, 400);
+    await page.mouse.wheel(0, 100);
+    await expect.poll(() => page.evaluate(() => scrollY)).toBeGreaterThan(20);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    // once the page has seen the change (the lock is gone), the viewport holds still
+    await expect(page.locator('html')).not.toHaveClass(/snap-lock|motion-ok/);
+    const y0 = await page.evaluate(() => Math.round(scrollY));
+    await page.waitForTimeout(400);
+    const y1 = await page.evaluate(() => Math.round(scrollY));
+    expect(Math.abs(y1 - y0), `the glide ran on (${y0} -> ${y1})`).toBeLessThanOrEqual(2);
+  });
+
+  test('the event-bus picture shows its end state when it is first seen', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/');
+    const pv = page.locator('#provenance .pv-panel').first();
+    // off screen at load with motion on, it waits in its grep pre-state
+    await expect(pv).toHaveAttribute('data-mode', 'grep');
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.evaluate(() => window.scrollTo({ top: document.getElementById('provenance')!.getBoundingClientRect().top + scrollY - 64, behavior: 'instant' }));
+    await expect(pv).toHaveAttribute('data-mode', 'estate');
   });
 });
