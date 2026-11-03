@@ -336,30 +336,42 @@ for (const vp of [{ width: 390, height: 844 }, { width: 360, height: 740 }]) {
   });
 }
 
-// a phone's answer rows read whole: the subject (a path drops its directory), the relation and the target,
-// each on one line, so no row reads "POST /price calls" with no object
-for (const vp of [{ width: 390, height: 844 }, { width: 360, height: 740 }]) {
+// a phone's answer rows read whole: the subject (a path hides its directory from view), the relation and the
+// target, each direct edge on one line, so no row reads "POST /price calls" with no object; a screen reader
+// still gets the full path, and no confidence stop grows the answer (320 and 323 are the tightest widths)
+for (const vp of [{ width: 390, height: 844 }, { width: 360, height: 740 }, { width: 323, height: 844 }, { width: 320, height: 740 }]) {
   test(`the answer rows read whole on one line at ${vp.width}x${vp.height}`, async ({ page }) => {
     await page.setViewportSize(vp);
     await page.goto('/');
     await page.evaluate(async () => { await document.fonts.ready; });
     const q = page.locator('#query');
+    // what a sighted visitor reads: the row without its visually hidden directory
     const read = () => q.locator('.q-row-main').evaluateAll((els) => els.map((el) => {
+      const c = el.cloneNode(true) as HTMLElement;
+      c.querySelectorAll('.q-dir').forEach((d) => d.remove());
       const lh = parseFloat(getComputedStyle(el).lineHeight);
-      return { text: (el as HTMLElement).innerText.replace(/\s+/g, ' ').trim(), lines: Math.round(el.getBoundingClientRect().height / lh) };
+      const dir = el.querySelector('.q-dir');
+      return { text: c.textContent!.replace(/\s+/g, ' ').trim(), lines: Math.round(el.getBoundingClientRect().height / lh),
+               dirShown: dir ? dir.getBoundingClientRect().width > 1 : false };
     }));
+    const answerH = () => q.locator('.q-result').evaluate((el) => el.getBoundingClientRect().height);
+    await clickUntil(q.locator('.q-stop:visible').first(), async () => (await q.locator('.q-row').count()) === 1);
+    const h0 = await answerH();
     await clickUntil(q.locator('.q-stop:visible').last(), async () => (await q.locator('.q-row').count()) === 4);
+    expect(await answerH(), 'the 0.5 stop grew the answer').toBe(h0);
     const blast = await read();
     expect(blast.map((r) => r.text)).toEqual([
       'discount.ts contains applyDiscount', 'POST /price calls applyDiscount', 'checkout() calls applyDiscount',
       'receipt.ts consumes order.paid (checkout.ts emits it)']);
     for (const r of blast.slice(0, 3)) expect(r.lines, r.text).toBe(1);
+    for (const r of blast) expect(r.dirShown, r.text).toBe(false);
     await q.getByRole('option', { name: 'Who reacts when an order is paid?' }).click();
     await expect(q.locator('.q-row')).toHaveCount(3);
     const paid = await read();
     expect(paid.map((r) => r.text)).toEqual(['checkout.ts emits order.paid', 'receipt.ts consumes order.paid', 'ledger.ts consumes order.paid']);
     for (const r of paid) expect(r.lines, r.text).toBe(1);
-    // the full path is still the row's text (the directory is only hidden)
-    await expect(q.locator('.q-row b').first()).toHaveText('src/checkout/checkout.ts');
+    // a screen reader still reads the full path (the hidden directory is its own text run: "src/checkout/ checkout.ts")
+    const tree = (await q.locator('.q-rows').ariaSnapshot()).replace(/\/ /g, '/');
+    for (const path of ['src/checkout/checkout.ts', 'src/notify/receipt.ts', 'src/ledger/ledger.ts']) expect(tree).toContain(path);
   });
 }

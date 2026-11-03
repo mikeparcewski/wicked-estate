@@ -258,7 +258,8 @@ function Via({ via }: { via: string }) {
 }
 
 /** An edge's subject. A path (one with a short label) splits into its directory and its file name, so a phone
-    can drop the directory and keep the row on one line; the text is the full path either way. */
+    can hide the directory from view and keep the row on one line. The text, and what a screen reader reads, is
+    the full path either way. */
 function From({ e }: { e: GEdge }) {
   const dir = e.label && e.from.endsWith(`/${e.label}`) ? e.from.slice(0, -e.label.length) : ''
   if (!dir) return <>{e.from}</>
@@ -328,7 +329,7 @@ function GraphView({ q, threshold, setThreshold }: { q: Question; threshold: Sto
           <ul className="q-rows" aria-label="Edges">
             {rows.map(e => (
               <li key={e.from} className="q-row" data-inj={e.injected ? 'true' : undefined} style={vars({ '--i': rank.get(e.from) ?? 0 })}>
-                {/* a phone drops a path's directory (.q-dir), never the target, so the row still reads whole */}
+                {/* a phone hides a path's directory from view (.q-dir), never the target, so the row reads whole */}
                 <span className="q-row-main"><b><From e={e} /></b> <Via via={e.via} />{e.to && <span className="q-to"> {e.to}</span>}</span>
                 <span className="q-where">{e.where}</span>
                 <span className="q-chips">

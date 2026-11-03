@@ -44,19 +44,27 @@ test('the product path reads Wicked Agile / labs / wicked-estate, and the flask 
   await expect(page.locator('#projectsBtn, #projectsMenu, .dropdown-menu')).toHaveCount(0);
 });
 
-// a phone shows the mark (clipped from the lockup), "labs" and the product, and the path never pushes the icons
-for (const width of [390, 360]) {
+// a phone shows the mark (clipped from the lockup), "labs" and the product, and the path never pushes the icons;
+// where the product name does not fit (320px) it keeps the chrome's ellipsis
+for (const width of [390, 360, 320]) {
   test(`at ${width}px the product path keeps its mark and ends before the icons; the menu's first row is Wicked Labs`, async ({ page }) => {
     await page.setViewportSize({ width, height: 740 });
     await page.goto('/');
     await page.evaluate(async () => { await document.fonts.ready; });
     const g = await page.evaluate(() => {
       const box = (s: string) => { const r = document.querySelector(s)!.getBoundingClientRect(); return { l: r.left, r: r.right }; };
-      return { mark: box('.crumbs .wordmark'), path: box('.crumbs'), nav: box('.topbar .nav'), vw: innerWidth,
+      const name = document.querySelector<HTMLElement>('.crumbs li:last-child .crumb')!, ns = getComputedStyle(name);
+      return { mark: box('.crumbs .wordmark'), art: box('.crumbs .wordmark .wordmark-lockup'), path: box('.crumbs'), nav: box('.topbar .nav'), vw: innerWidth,
                clip: getComputedStyle(document.querySelector('.crumbs .wordmark .wordmark-lockup')!).clipPath,
-               name: document.querySelector('.crumbs li:last-child .crumb')!.textContent };
+               name: name.textContent!.trim(), cut: name.scrollWidth > name.clientWidth + 1,
+               ellipsis: ns.textOverflow === 'ellipsis' && ns.overflowX === 'hidden' && !/flex|grid/.test(ns.display) };
     });
+    // the mark is painted inside the window and inside its own link
     expect(g.mark.l).toBeGreaterThanOrEqual(0);
+    expect(g.art.l).toBeGreaterThanOrEqual(0);
+    expect(g.art.l).toBeGreaterThanOrEqual(g.mark.l);
+    // a cut name ends in an ellipsis (a flex box would hard-cut it)
+    if (g.cut) expect(g.ellipsis, 'the product name is cut without an ellipsis').toBe(true);
     expect(g.path.r).toBeLessThanOrEqual(g.nav.l);
     expect(g.nav.r).toBeLessThanOrEqual(g.vw);
     expect(g.name).toBe('wicked-estate');
