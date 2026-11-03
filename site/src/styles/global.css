@@ -1249,9 +1249,11 @@ html.motion-ok [data-live] .caret--idle { animation: es-blink 1.1s steps(1) infi
   .q-tab { font-size: var(--text-code); padding: 6px 4px; gap: 4px; }
 }
 /* the narrowest phones (320-340px): the answer and its rows give up a little side padding, so the longest direct
-   edge ("discount.ts contains applyDiscount") still keeps one line and no stop grows the answer */
+   edge ("discount.ts contains applyDiscount") keeps one line where the text renders as on macOS. Linux rounds
+   each mono glyph's advance and can still wrap its target onto a second line, so the answer also keeps one row
+   line in reserve: no confidence stop grows it, on either */
 @media (max-width: 340px) {
-  .q-result { padding-inline: 8px; }
+  .q-result { padding-inline: 8px; min-height: calc(var(--ans-h, 536px) + 8px); }
   .q-row { padding-inline: 4px; }
 }
 /* a shorter phone (under 800px tall) answers without the little graph (the rows carry it) and lets the
