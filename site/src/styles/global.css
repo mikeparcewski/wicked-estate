@@ -1314,7 +1314,8 @@ html.motion-ok [data-live] .sd[data-mode="solo"] .sd-box--local .cyl:nth-child(3
   .topbar .icon-btn { width: 44px; height: 44px; }
   .topbar .wordmark, .footer-wordmark { display: inline-flex; align-items: center; min-height: 44px; }
   .footer-cta a { display: inline-flex; align-items: center; min-height: 44px; }
-  .footer-links a { min-height: 44px; align-items: center; }
+  /* min-width too: "bits ↗" is 42px wide in Linux fonts */
+  .footer-links a { min-height: 44px; min-width: 44px; align-items: center; }
   /* the foot keeps 4px under its links: room for their 2px focus ring, which the card would clip */
   #foundation .same-garden .sg-card-foot { padding-block: 2px 4px; }
   #foundation .same-garden .sg-card-foot a { min-height: 44px; min-width: 44px; justify-content: center; }
