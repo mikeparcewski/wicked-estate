@@ -7,11 +7,11 @@ import { test, expect, type Page } from '@playwright/test';
  * own scene rail.
  */
 const BEATS: [string, string][] = [
-  ['hero', 'What it is'],
+  ['hero', 'Estate'],
   ['stores', 'Stores'],
   ['provenance', 'Edges'],
-  ['toolface', 'Tools'],
-  ['storage', 'Storage'],
+  ['toolface', 'Call'],
+  ['storage', 'Local'],
 ];
 const LINKS = 5;
 const HUE = '--plane-foundation';
@@ -89,9 +89,31 @@ test.describe('the thread and the beat track', () => {
     await page.setViewportSize({ width: 1920, height: 1080 });
     await page.goto('/');
     await goTo(page, BEATS[2][0]);
-    const th = await page.evaluate(() => { const r = document.querySelector('[data-beat-thread]')!.getBoundingClientRect(); return [r.left, r.right]; });
-    expect(th).toEqual([260, 1660]);
+    // centred like the topbar (both are fixed to the same box; a classic scrollbar, as on Linux CI, takes
+    // its width off the window)
+    const [l, r, bl, br] = await page.evaluate(() => {
+      const t = document.querySelector('[data-beat-thread]')!.getBoundingClientRect(), b = document.querySelector('.topbar')!.getBoundingClientRect();
+      return [t.left, t.right, b.left, b.right];
+    });
+    expect(r - l).toBe(1400);
+    expect(Math.abs((l + r) / 2 - (bl + br) / 2)).toBeLessThan(1);
     await expect(page.locator('[data-beats]')).toBeVisible();
+  });
+
+  test('each beat is named from its own frame: the name is in that frame\'s kicker or heading', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    const names = await page.locator('[data-beats] .beats-l').evaluateAll((ls) => ls.map((l) => l.textContent || ''));
+    const firsts = BEATS.filter(([id, n], i) => BEATS.findIndex(([, m]) => m === n) === i);
+    expect(names).toEqual(firsts.map(([, n]) => n));
+    for (const [id, name] of firsts) {
+      const head = await page.evaluate((id) => {
+        const s = document.getElementById(id)!;
+        const k = s.querySelector('.kicker, [class*="kicker"]'), h = s.querySelector('h1, h2');
+        return [k, h].filter(Boolean).map((e) => (e as HTMLElement).textContent).join(' ');
+      }, id);
+      expect(head.toLowerCase(), `#${id}'s own kicker or heading names "${name}"`).toContain(name.replace(/^the /i, '').toLowerCase());
+    }
   });
 
   test('a beat on the track is a link to its frame; hover and keyboard focus show its name', async ({ page }) => {
@@ -99,7 +121,7 @@ test.describe('the thread and the beat track', () => {
     await page.goto('/');
     await goTo(page, 'stores');
     const track = page.getByRole('navigation', { name: 'Estate, beat by beat' });
-    const review = track.getByRole('link', { name: /^Tools\b.*beat 4 of 5/ });
+    const review = track.getByRole('link', { name: /^Call\b.*beat 4 of 5/ });
     await expect(review.locator('.beats-l')).toHaveCSS('opacity', '0');
     await review.hover();
     await expect(review.locator('.beats-l')).toHaveCSS('opacity', '1');
@@ -114,7 +136,7 @@ test.describe('the thread and the beat track', () => {
     await expect(page).toHaveURL(/#toolface$/);
     // a scene after the hero starts under the bar (estate glides there when motion is allowed)
     await expect.poll(() => page.evaluate(() => Math.round(document.getElementById('toolface')!.getBoundingClientRect().top))).toBe(64);
-    await expect(track.locator('[aria-current="step"] .beats-l')).toHaveText('Tools');
+    await expect(track.locator('[aria-current="step"] .beats-l')).toHaveText('Call');
   });
 
   test('below 1400px the track is hidden and below 1024px the thread too; past the last beat both fade', async ({ page }) => {
@@ -124,10 +146,13 @@ test.describe('the thread and the beat track', () => {
     await expect(page.locator('[data-beat-thread]')).not.toHaveClass(/is-on/);
     await expect(page.locator('[data-beats]')).toBeHidden();
     await expect(page.locator('[data-beat-thread]')).toHaveCSS('opacity', '0');
-    // at 1440x900 estate's stage is 1280px wide: the gutter cannot hold the track, so it stays hidden
+    // at 1440x900 the stage stays in the family grid (its right edge where crew's content ends), so the
+    // track shows there, as on crew
     await goTo(page, 'stores');
     await expect(page.locator('[data-beat-thread]')).toHaveCSS('opacity', '1');
-    await expect(page.locator('[data-beats]')).toBeHidden();
+    await expect(page.locator('[data-beats]')).toBeVisible();
+    const right = await page.evaluate(() => Math.max(...[...document.querySelectorAll('.scene-in')].map((e) => Math.round(e.getBoundingClientRect().right))));
+    expect(right).toBeLessThanOrEqual(1312);
     await page.setViewportSize({ width: 1024, height: 768 });
     await goTo(page, 'provenance');
     await expect(page.locator('[data-beat-thread]')).toBeVisible();
