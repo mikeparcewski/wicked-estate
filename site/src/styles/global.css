@@ -1266,10 +1266,8 @@ html.motion-ok [data-live] .caret--idle { animation: es-blink 1.1s steps(1) infi
 html body .topbar { backdrop-filter: blur(14px) saturate(1.2); }
 
 /* ── Topbar tooltips (wicked-web), site-scoped: the chrome hangs each icon's tooltip above the icon, inside a
-   64px bar fixed to the top of the window, so only a sliver of it ever showed. Here it hangs below the icon.
-   While the ecosystem menu is open its own tooltip stays hidden, so it never covers the menu's first row. ── */
+   64px bar fixed to the top of the window, so only a sliver of it ever showed. Here it hangs below the icon. ── */
 .topbar [data-tip]::after { bottom: auto; top: calc(100% + 8px); }
-.topbar .dropdown-wrap:has(> [aria-expanded="true"])::after { display: none; }
 
 /* ── Family map (wicked-web's SameGarden), site-scoped: a lit plane glows INSIDE its own box. The chrome's
    outer glow (0 24px 56px) painted under the seam text below the plane and, for Foundation, past the bottom
@@ -1315,6 +1313,9 @@ html.motion-ok [data-live] .sd[data-mode="solo"] .sd-box--local .cyl:nth-child(3
 @media (max-width: 760px) {
   .topbar .icon-btn { width: 44px; height: 44px; }
   .topbar .wordmark, .footer-wordmark { display: inline-flex; align-items: center; min-height: 44px; }
+  /* the product path's links: 44px tall, and "labs" 44px wide (the clipped mark's link: the <= 560px rule) */
+  .topbar .crumb { display: inline-flex; align-items: center; min-height: 44px; }
+  .topbar .crumbs li:not(:last-child) .crumb { min-width: 44px; justify-content: center; }
   .footer-cta a { display: inline-flex; align-items: center; min-height: 44px; }
   /* min-width too: "bits ↗" is 42px wide in Linux fonts */
   .footer-links a { min-height: 44px; min-width: 44px; align-items: center; }
@@ -1322,6 +1323,12 @@ html.motion-ok [data-live] .sd[data-mode="solo"] .sd-box--local .cyl:nth-child(3
   #foundation .same-garden .sg-card-foot { padding-block: 2px 4px; }
   #foundation .same-garden .sg-card-foot a { min-height: 44px; min-width: 44px; justify-content: center; }
   #foundation .same-garden .sg-card-foot a:focus-visible { outline-offset: 0; }
+}
+/* at <= 560px the chrome clips the lockup to its mark (a 22px link); the link grows to 44px, reaching 11px into
+   the bar's side padding so the mark stays where the chrome draws it, and the artwork keeps the clip */
+@media (max-width: 560px) {
+  .topbar .crumbs .wordmark { width: 44px; margin-left: -11px; padding-left: 11px; }
+  .topbar .crumbs .wordmark .wordmark-lockup { clip-path: inset(0 calc(100% - 22px) 0 0); }
 }
 /* the footer's phone list (one row per product): a 44px row is its own spacing */
 @media (max-width: 600px) {

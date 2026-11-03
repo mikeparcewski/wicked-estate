@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 
-// Universal chrome (wicked-web Topbar): theme toggle + ecosystem dropdown.
-// Both are inline scripts (no React hydration involved).
+// Universal chrome (wicked-web Topbar): theme toggle, the product path ("Wicked Agile / labs / wicked-estate")
+// and the flask that links Wicked Labs. The theme toggle is an inline script (no React hydration involved).
 
 test('theme toggle flips data-theme on <html> and persists via localStorage', async ({ page }) => {
   await page.goto('/');
@@ -28,25 +28,42 @@ test('theme toggle flips data-theme on <html> and persists via localStorage', as
     .toBe('dark');
 });
 
-test('ecosystem dropdown opens on click and closes on Escape', async ({ page }) => {
+test('the product path reads Wicked Agile / labs / wicked-estate, and the flask links Wicked Labs', async ({ page }) => {
   await page.goto('/');
-  const btn = page.locator('#projectsBtn');
-  const menu = page.locator('#projectsMenu');
-
-  await expect(menu).toBeHidden();
-  await btn.click();
-  await expect(menu).toBeVisible();
-  await expect(btn).toHaveAttribute('aria-expanded', 'true');
-
-  // The four-plane roster is intact: 4 marketed items — studio · crew · garden · estate.
-  // 4, not 5: the ecosystem dropdown no longer carries a wicked-interactive row. Its builder UI
-  // moved into wicked-studio and the service answers a direct visitor with "it serves the API, not
-  // the UI", so a nav row there would spend the click telling you that. The product is not gone —
-  // SameGarden lists it under Foundation as the document engine, repo link and no "Visit" link.
-  await expect(menu.locator('a.dropdown-item')).toHaveCount(4);
-  await expect(menu.locator('a.dropdown-item').filter({ hasText: 'estate' })).toBeVisible();
-
-  await page.keyboard.press('Escape');
-  await expect(menu).toBeHidden();
-  await expect(btn).toHaveAttribute('aria-expanded', 'false');
+  const path = page.getByRole('navigation', { name: 'Breadcrumb' });
+  await expect(path.getByRole('link')).toHaveCount(3);
+  await expect(path.getByRole('link', { name: 'Wicked Agile' })).toHaveAttribute('href', 'https://wickedagile.com/');
+  await expect(path.getByRole('link', { name: 'labs' })).toHaveAttribute('href', 'https://wickedlabs.ai/');
+  const here = path.getByRole('link', { name: 'wicked-estate' });
+  await expect(here).toHaveAttribute('href', 'https://we.wickedagile.com');
+  await expect(here).toHaveAttribute('aria-current', 'page');
+  // the flask is a plain link now: no Experiments menu, no button that opens one
+  const lab = page.locator('.topbar .nav').getByRole('link', { name: 'Wicked Labs' });
+  await expect(lab).toHaveAttribute('href', 'https://wickedlabs.ai/');
+  await expect(lab).toBeVisible();
+  await expect(page.locator('#projectsBtn, #projectsMenu, .dropdown-menu')).toHaveCount(0);
 });
+
+// a phone shows the mark (clipped from the lockup), "labs" and the product, and the path never pushes the icons
+for (const width of [390, 360]) {
+  test(`at ${width}px the product path keeps its mark and ends before the icons; the menu's first row is Wicked Labs`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 740 });
+    await page.goto('/');
+    await page.evaluate(async () => { await document.fonts.ready; });
+    const g = await page.evaluate(() => {
+      const box = (s: string) => { const r = document.querySelector(s)!.getBoundingClientRect(); return { l: r.left, r: r.right }; };
+      return { mark: box('.crumbs .wordmark'), path: box('.crumbs'), nav: box('.topbar .nav'), vw: innerWidth,
+               clip: getComputedStyle(document.querySelector('.crumbs .wordmark .wordmark-lockup')!).clipPath,
+               name: document.querySelector('.crumbs li:last-child .crumb')!.textContent };
+    });
+    expect(g.mark.l).toBeGreaterThanOrEqual(0);
+    expect(g.path.r).toBeLessThanOrEqual(g.nav.l);
+    expect(g.nav.r).toBeLessThanOrEqual(g.vw);
+    expect(g.name).toBe('wicked-estate');
+    expect(g.clip).toMatch(/^inset\(.*22px/);
+    await page.locator('#menuBtn').click();
+    const first = page.locator('#mobileMenu a').first();
+    await expect(first).toContainText('Wicked Labs');
+    await expect(first).toHaveAttribute('href', 'https://wickedlabs.ai/');
+  });
+}
