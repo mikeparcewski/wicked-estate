@@ -1317,6 +1317,8 @@ html.motion-ok [data-live] .sd[data-mode="solo"] .sd-box--local .cyl:nth-child(3
   .footer-links a { min-height: 44px; align-items: center; }
   #foundation .same-garden .sg-card-foot { padding-block: 0; }
   #foundation .same-garden .sg-card-foot a { min-height: 44px; min-width: 44px; justify-content: center; }
+  /* the link now fills the foot, so its focus ring sits inside it (the card clips anything outside) */
+  #foundation .same-garden .sg-card-foot a:focus-visible { outline-offset: -2px; }
 }
 /* the footer's phone list (one row per product): a 44px row is its own spacing */
 @media (max-width: 600px) {

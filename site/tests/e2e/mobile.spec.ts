@@ -280,3 +280,27 @@ for (const vp of [{ width: 390, height: 844 }, { width: 360, height: 740 }]) {
     expect(small).toEqual([]);
   });
 }
+
+// a phone shows one page of matches at a time: the detail names a match on that page, the one pressed there
+test('under a search the detail names a match on the page in view, and paging follows it', async ({ page }) => {
+  await page.goto('/');
+  const t = page.locator('#toolface');
+  await t.scrollIntoViewIfNeeded();
+  const agree = async (what: string) => {
+    const pressed = t.locator('.tl-hit:visible .tl-row[aria-pressed="true"]');
+    await expect(pressed, `${what}: no visible match is pressed`).toHaveCount(1);
+    const name = await pressed.getAttribute('data-name');
+    await expect(t.locator('.td-name code'), `${what}: the detail names a match out of view`).toHaveText(name!);
+  };
+  // the selection (BlastRadius) matches "e" but sits past the first page of three
+  const search = t.getByLabel('Search tools');
+  await clickUntil(search, async () => (await search.evaluate((el) => el === document.activeElement)));
+  await search.fill('e');
+  await expect(t.locator('.tl-step-t')).toContainText(/^1–3 of \d+$/);
+  await agree('page 1');
+  await t.getByRole('button', { name: 'Next matches' }).click();
+  await expect(t.locator('.tl-step-t')).toContainText(/^4–6 of \d+$/);
+  await agree('page 2');
+  await t.getByRole('button', { name: 'Previous matches' }).click();
+  await agree('back on page 1');
+});

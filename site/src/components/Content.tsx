@@ -85,6 +85,19 @@ function phoneLayout() {
   return typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches
 }
 
+/** Is the phone layout on, kept in step with the window (false until hydrated, as the server renders it). */
+function usePhoneLayout() {
+  const [on, setOn] = useState(false)
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 760px)')
+    const sync = () => setOn(mq.matches)
+    sync()
+    mq.addEventListener?.('change', sync)
+    return () => mq.removeEventListener?.('change', sync)
+  }, [])
+  return on
+}
+
 /** Is `el` on screen right now (any part)? */
 function onScreen(el: HTMLElement | null) {
   if (!el) return false
@@ -892,6 +905,7 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
   const [sel, setSel] = useState('BlastRadius')
   const [openG, setOpenG] = useState<Record<string, string>>({})
   const [page, setPage] = useState(0)
+  const phone = usePhoneLayout()
   const f = filter.trim().toLowerCase()
   const hits = f
     ? TOOLSETS.flatMap(t => t.groups.flatMap(g => g.rows.filter(r => (r.name + ' ' + r.does).toLowerCase().includes(f)).map(r => ({ t, g, r }))))
@@ -912,13 +926,15 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
     setOpenG(o => ({ ...o, [set]: g.label }))
     setSel(g.rows[0].name)
   }
-  // the detail follows the list in view: under a search it names the selected tool if it matches, else the
-  // first match, and with no match it names none
-  const shown = f ? (hits.find(h => h.r.name === picked.r.name) ?? hits[0] ?? null) : picked
-  const see = shown ? SEE[shown.r.name] : undefined
-  const others = shown ? shown.g.rows.filter(r => r.name !== shown.r.name) : []
   const pages = Math.max(1, Math.ceil(hits.length / PAGE))
   const pg = Math.min(page, pages - 1)
+  // the detail follows the list in view: under a search it names the selected tool if it is in view, else the
+  // first match in view, and with no match it names none (a desktop lays out every match; a phone shows the
+  // current page of them)
+  const inView = phone ? hits.slice(pg * PAGE, (pg + 1) * PAGE) : hits
+  const shown = f ? (inView.find(h => h.r.name === picked.r.name) ?? inView[0] ?? null) : picked
+  const see = shown ? SEE[shown.r.name] : undefined
+  const others = shown ? shown.g.rows.filter(r => r.name !== shown.r.name) : []
   // the selection, its set and its open group always move together, so the list in view holds the tool the
   // detail names: picking a set opens its default tool's group; picking a tool (a search hit, a related tool)
   // opens that tool's set and group
