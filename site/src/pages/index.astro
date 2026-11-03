@@ -6,15 +6,14 @@ import SameGarden from "wicked-web/components/SameGarden.astro";
 import "../styles/global.css";
 import Content, { GetStarted } from "../components/Content.tsx";
 
-// The scene rail: one dot per frame, in page order (scenes.ts marks the current one).
-const SCENES = [
-  { id: "hero", label: "What it is" },
-  { id: "stores", label: "Three stores" },
-  { id: "provenance", label: "Edges and confidence" },
-  { id: "toolface", label: "What agents can call" },
-  { id: "storage", label: "Local by default" },
-  { id: "foundation", label: "The family" },
-  { id: "get-started", label: "Get started" },
+// The page's spine (the same thread and beat track as wicked-crew's): what estate is, then the frames
+// that show it. The family map and Get started are not beats.
+const BEATS = [
+  { id: "hero", name: "What it is" },
+  { id: "stores", name: "Stores" },
+  { id: "provenance", name: "Edges" },
+  { id: "toolface", name: "Tools" },
+  { id: "storage", name: "Storage" },
 ];
 ---
 
@@ -34,6 +33,17 @@ const SCENES = [
     } catch (e) {}
   </script>
   <Topbar pkg="wicked-estate" repo="https://github.com/mikeparcewski/wicked-estate" />
+  <!-- The spine, at 1024px wide and up: the page's beats as one thread under the topbar, filling as
+       each beat arrives (decoration; the beat track says it in words). -->
+  <div class="beat-thread" data-beat-thread aria-hidden="true">{BEATS.map((b) => <i data-beat-thread-seg={b.id}><b></b></i>)}</div>
+  <!-- The spine: the page's beats, in the right gutter (1400px wide and up, where the gutter holds it). -->
+  <nav class="beats" data-beats data-beats-content=".scene-in" aria-label="Estate, beat by beat">
+    <ol>
+      {BEATS.map((b, i) => (
+        <li><a href={`#${b.id}`} data-beat-link={b.id}><span class="beats-l">{b.name}</span><span class="beats-dot" aria-hidden="true"></span><span class="sr-only">{`, beat ${i + 1} of ${BEATS.length}`}</span></a></li>
+      ))}
+    </ol>
+  </nav>
   <main class="font-sans">
     <Content client:load />
     <div id="foundation">
@@ -41,16 +51,9 @@ const SCENES = [
     </div>
     <GetStarted client:load />
   </main>
-  <nav class="scene-rail" aria-label="Scenes">
-    {SCENES.map((s) => (
-      <a href={`#${s.id}`} data-rail={s.id} aria-label={s.label} title={s.label}>
-        <span class="rail-dot" aria-hidden="true"></span>
-        <span class="rail-label" aria-hidden="true">{s.label}</span>
-      </a>
-    ))}
-  </nav>
   <Footer repo="https://github.com/mikeparcewski/wicked-estate" />
   <script>
     import "../scripts/scenes.ts";
+    import "../scripts/beats.js";
   </script>
 </Base>
