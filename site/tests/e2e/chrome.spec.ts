@@ -57,8 +57,11 @@ for (const width of [390, 360, 320]) {
       return { mark: box('.crumbs .wordmark'), art: box('.crumbs .wordmark .wordmark-lockup'), path: box('.crumbs'), nav: box('.topbar .nav'), vw: innerWidth,
                clip: getComputedStyle(document.querySelector('.crumbs .wordmark .wordmark-lockup')!).clipPath,
                name: name.textContent!.trim(), cut: name.scrollWidth > name.clientWidth + 1,
-               ellipsis: ns.textOverflow === 'ellipsis' && ns.overflowX === 'hidden' && !/flex|grid/.test(ns.display) };
+               ellipsis: ns.textOverflow === 'ellipsis' && ns.overflowX === 'hidden' && !/flex|grid/.test(ns.display),
+               sep: box('.crumbs li:nth-child(2) .crumb-sep') };
     });
+    // the 44px targets keep the chrome's spacing: the first slash 8px after the clipped mark (22px of artwork)
+    expect(Math.abs(g.sep.l - (g.art.l + 22 + 8))).toBeLessThanOrEqual(1.5);
     // the mark is painted inside the window and inside its own link
     expect(g.mark.l).toBeGreaterThanOrEqual(0);
     expect(g.art.l).toBeGreaterThanOrEqual(0);
@@ -73,5 +76,13 @@ for (const width of [390, 360, 320]) {
     const first = page.locator('#mobileMenu a').first();
     await expect(first).toContainText('Wicked Labs');
     await expect(first).toHaveAttribute('href', 'https://wickedlabs.ai/');
+    // every row's glyph sits on its label's line, not above it
+    const off = await page.locator('#mobileMenu .mm-label').evaluateAll((labels) => labels.map((l) => {
+      const gl = l.querySelector('.mm-glyph')!.getBoundingClientRect();
+      const r = document.createRange(); r.selectNodeContents(l); const t = Array.from(r.getClientRects()).filter((q) => q.width > 0);
+      const text = t[t.length - 1], mid = (gl.top + gl.bottom) / 2;
+      return mid >= text.top && mid <= text.bottom ? null : `${l.textContent!.trim()}: glyph ${Math.round(gl.top)}-${Math.round(gl.bottom)}, text ${Math.round(text.top)}-${Math.round(text.bottom)}`;
+    }).filter(Boolean));
+    expect(off).toEqual([]);
   });
 }
