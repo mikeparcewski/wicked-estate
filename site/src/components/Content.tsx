@@ -257,6 +257,14 @@ function Via({ via }: { via: string }) {
   return <span className="q-via">{via.slice(0, at)} <span className="q-via-x">{via.slice(at + 1)}</span></span>
 }
 
+/** An edge's subject. A path (one with a short label) splits into its directory and its file name, so a phone
+    can drop the directory and keep the row on one line; the text is the full path either way. */
+function From({ e }: { e: GEdge }) {
+  const dir = e.label && e.from.endsWith(`/${e.label}`) ? e.from.slice(0, -e.label.length) : ''
+  if (!dir) return <>{e.from}</>
+  return <><span className="q-dir">{dir}</span>{e.label}</>
+}
+
 function GraphView({ q, threshold, setThreshold }: { q: Question; threshold: Stop; setThreshold: (s: Stop) => void }) {
   // Confidence order (1.0 first) drives the draw order and the row order.
   const ordered = [...q.graph].sort((a, b) => b.conf - a.conf)
@@ -320,8 +328,8 @@ function GraphView({ q, threshold, setThreshold }: { q: Question; threshold: Sto
           <ul className="q-rows" aria-label="Edges">
             {rows.map(e => (
               <li key={e.from} className="q-row" data-inj={e.injected ? 'true' : undefined} style={vars({ '--i': rank.get(e.from) ?? 0 })}>
-                {/* a phone drops the target: it is always the symbol asked about, named just above */}
-                <span className="q-row-main"><b>{e.from}</b> <Via via={e.via} />{e.to && <span className="q-to"> {e.to}</span>}</span>
+                {/* a phone drops a path's directory (.q-dir), never the target, so the row still reads whole */}
+                <span className="q-row-main"><b><From e={e} /></b> <Via via={e.via} />{e.to && <span className="q-to"> {e.to}</span>}</span>
                 <span className="q-where">{e.where}</span>
                 <span className="q-chips">
                   {e.injected && <span className="q-chip q-chip--inj">injected</span>}

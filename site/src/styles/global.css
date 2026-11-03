@@ -1101,7 +1101,9 @@ html.motion-ok [data-live] .caret--idle { animation: es-blink 1.1s steps(1) infi
   /* room for the tallest answer (the graph at 0.3), so no question, tab or stop moves the page */
   .q-result { overflow: visible; min-height: var(--ans-h, 536px); padding: 10px 12px; }
   .q-graph { max-width: 320px; margin: 0 auto; }
-  .q-to { display: none; }
+  /* a row reads whole (subject, relation, target): the subject drops its directory instead (the row's source
+     line and the picture above name the file), so every edge keeps one line and the answer keeps its height */
+  .q-dir { display: none; }
   .q-row { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; padding: 5px 9px; }
   .q-row-main { flex: 1 1 100%; }
   .q-row .q-chips { margin-left: auto; }

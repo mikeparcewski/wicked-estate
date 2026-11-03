@@ -335,3 +335,31 @@ for (const vp of [{ width: 390, height: 844 }, { width: 360, height: 740 }]) {
     }
   });
 }
+
+// a phone's answer rows read whole: the subject (a path drops its directory), the relation and the target,
+// each on one line, so no row reads "POST /price calls" with no object
+for (const vp of [{ width: 390, height: 844 }, { width: 360, height: 740 }]) {
+  test(`the answer rows read whole on one line at ${vp.width}x${vp.height}`, async ({ page }) => {
+    await page.setViewportSize(vp);
+    await page.goto('/');
+    await page.evaluate(async () => { await document.fonts.ready; });
+    const q = page.locator('#query');
+    const read = () => q.locator('.q-row-main').evaluateAll((els) => els.map((el) => {
+      const lh = parseFloat(getComputedStyle(el).lineHeight);
+      return { text: (el as HTMLElement).innerText.replace(/\s+/g, ' ').trim(), lines: Math.round(el.getBoundingClientRect().height / lh) };
+    }));
+    await clickUntil(q.locator('.q-stop:visible').last(), async () => (await q.locator('.q-row').count()) === 4);
+    const blast = await read();
+    expect(blast.map((r) => r.text)).toEqual([
+      'discount.ts contains applyDiscount', 'POST /price calls applyDiscount', 'checkout() calls applyDiscount',
+      'receipt.ts consumes order.paid (checkout.ts emits it)']);
+    for (const r of blast.slice(0, 3)) expect(r.lines, r.text).toBe(1);
+    await q.getByRole('option', { name: 'Who reacts when an order is paid?' }).click();
+    await expect(q.locator('.q-row')).toHaveCount(3);
+    const paid = await read();
+    expect(paid.map((r) => r.text)).toEqual(['checkout.ts emits order.paid', 'receipt.ts consumes order.paid', 'ledger.ts consumes order.paid']);
+    for (const r of paid) expect(r.lines, r.text).toBe(1);
+    // the full path is still the row's text (the directory is only hidden)
+    await expect(q.locator('.q-row b').first()).toHaveText('src/checkout/checkout.ts');
+  });
+}
