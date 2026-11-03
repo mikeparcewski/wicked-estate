@@ -345,13 +345,19 @@ for (const vp of [{ width: 390, height: 844 }, { width: 360, height: 740 }, { wi
     await page.goto('/');
     await page.evaluate(async () => { await document.fonts.ready; });
     const q = page.locator('#query');
-    // what a sighted visitor reads: the row without its visually hidden directory
+    // what a sighted visitor reads: the row's rendered text (a hidden target would drop out), without its
+    // visually hidden directory
     const read = () => q.locator('.q-row-main').evaluateAll((els) => els.map((el) => {
-      const c = el.cloneNode(true) as HTMLElement;
-      c.querySelectorAll('.q-dir').forEach((d) => d.remove());
+      const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      let text = '', n: Node | null;
+      while ((n = w.nextNode())) {
+        const p = n.parentElement!;
+        if (p.closest('.q-dir') || !p.checkVisibility()) continue;
+        text += n.textContent;
+      }
       const lh = parseFloat(getComputedStyle(el).lineHeight);
       const dir = el.querySelector('.q-dir');
-      return { text: c.textContent!.replace(/\s+/g, ' ').trim(), lines: Math.round(el.getBoundingClientRect().height / lh),
+      return { text: text.replace(/\s+/g, ' ').trim(), lines: Math.round(el.getBoundingClientRect().height / lh),
                dirShown: dir ? dir.getBoundingClientRect().width > 1 : false };
     }));
     const answerH = () => q.locator('.q-result').evaluate((el) => el.getBoundingClientRect().height);
