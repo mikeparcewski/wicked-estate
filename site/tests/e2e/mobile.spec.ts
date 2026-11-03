@@ -304,3 +304,34 @@ test('under a search the detail names a match on the page in view, and paging fo
   await t.getByRole('button', { name: 'Previous matches' }).click();
   await agree('back on page 1');
 });
+
+// the family map's links fill their card's foot on a phone; their keyboard focus ring must stay inside the card,
+// which clips anything outside it
+for (const vp of [{ width: 390, height: 844 }, { width: 360, height: 740 }]) {
+  test(`a family link's focus ring shows whole inside its card at ${vp.width}x${vp.height}`, async ({ page }) => {
+    await page.setViewportSize(vp);
+    await page.goto('/');
+    const links = page.locator('#foundation .sg-card-foot a');
+    expect(await links.count()).toBeGreaterThan(0);
+    for (let i = 0; i < await links.count(); i++) {
+      const link = links.nth(i);
+      await link.scrollIntoViewIfNeeded();
+      await page.keyboard.press('Escape'); // keyboard modality, so programmatic focus shows the ring
+      await link.focus();
+      const m = await link.evaluate((el) => {
+        const cs = getComputedStyle(el), r = el.getBoundingClientRect();
+        const card = el.closest('.sg-card')!, cc = getComputedStyle(card), c = card.getBoundingClientRect();
+        const ring = cs.outlineStyle !== 'none' ? parseFloat(cs.outlineWidth) + parseFloat(cs.outlineOffset) : 0;
+        const out = Math.max(0, ring);
+        return {
+          visible: el.matches(':focus-visible') && cs.outlineStyle !== 'none' && parseFloat(cs.outlineWidth) > 0,
+          over: Math.max(
+            c.left + parseFloat(cc.borderLeftWidth) - (r.left - out), (r.right + out) - (c.right - parseFloat(cc.borderRightWidth)),
+            c.top + parseFloat(cc.borderTopWidth) - (r.top - out), (r.bottom + out) - (c.bottom - parseFloat(cc.borderBottomWidth))),
+        };
+      });
+      expect(m.visible, `link ${i}: no focus ring`).toBe(true);
+      expect(m.over, `link ${i}: the card clips its focus ring`).toBeLessThanOrEqual(0);
+    }
+  });
+}
