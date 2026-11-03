@@ -4,7 +4,7 @@
       thirds of the viewport, once. Scene CSS keys its one-shot entrance off it (html.motion-ok only), and
       .scenes-ready is set only after the observer is attached, so a page whose script never
       runs shows every end state instead of hiding anything.
-   2. The scene rail: aria-current on the dot of the scene under the middle of the viewport.
+   2. (The beat track and the thread under the topbar are src/scripts/beats.js, the same as wicked-crew's.)
    2b. Live marks: data-live on each scene while a good part of it is on screen. The calm idle loops
       (global.css) key off it, so they run only in view and stop when the scene leaves.
    3. Guarded snap, desktop: html.snap-lock (scroll-snap-type: y mandatory, global.css) only while the
@@ -47,25 +47,6 @@ if ('IntersectionObserver' in window) {
   for (const s of scenes) io.observe(s);
   html.classList.add('scenes-ready');
 }
-
-// 2 · the rail
-const rail = Array.from(document.querySelectorAll<HTMLAnchorElement>('.scene-rail a[data-rail]'));
-const targets = rail.map((a) => document.getElementById(a.dataset.rail ?? '')).filter((t): t is HTMLElement => !!t);
-let railFrame = 0;
-function markRail() {
-  railFrame = 0;
-  const mid = window.innerHeight * 0.5;
-  let current = targets[0];
-  for (const t of targets) {
-    if (t.getBoundingClientRect().top <= mid) current = t;
-  }
-  for (const a of rail) {
-    if (a.dataset.rail === current?.id) a.setAttribute('aria-current', 'true');
-    else a.removeAttribute('aria-current');
-  }
-}
-window.addEventListener('scroll', () => { if (!railFrame) railFrame = requestAnimationFrame(markRail); }, { passive: true });
-markRail();
 
 // 2b · live marks (the idle loops run only while a scene is on screen)
 if ('IntersectionObserver' in window) {
