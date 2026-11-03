@@ -225,9 +225,11 @@ test('a swipe inside the tools list moves only the list, both ways', async ({ pa
   const t = page.locator('#toolface');
   const y0 = await t.evaluate((el) => Math.round(el.getBoundingClientRect().top + scrollY - 64));
   await page.evaluate((y) => window.scrollTo({ top: y, behavior: 'instant' }), y0);
-  await t.getByLabel('Search tools').fill('e');
+  // the island must be hydrated for the search to filter: retry the fill until the explorer is in search mode
+  const search = t.getByLabel('Search tools');
+  await expect.poll(async () => { await search.fill('e'); return t.locator('.tools').getAttribute('data-set'); }).toBe('search');
   const list = t.locator('.tools-list');
-  expect(await list.evaluate((el) => el.scrollHeight > el.clientHeight + 40), 'the list must scroll for this check').toBe(true);
+  await expect.poll(() => list.evaluate((el) => el.scrollHeight > el.clientHeight + 40), { message: 'the list must scroll for this check' }).toBe(true);
   const b = await list.boundingBox();
   await page.mouse.move(b!.x + 120, b!.y + 120);
   // one continuous swipe: 40 small deltas, 16ms apart, longer than the list (it reaches its end mid-gesture)

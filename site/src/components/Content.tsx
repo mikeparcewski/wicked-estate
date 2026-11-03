@@ -858,8 +858,8 @@ type PrevCall = { call: string; lines: PrevLine[]; row?: boolean }
 const firstSentence = (t: string) => t.split('. ')[0].replace(/\.$/, '') + '.'
 const SEE: Record<string, { q: string; tab?: Store; calls: PrevCall[] }> = {
   BlastRadius: { q: 'blast', calls: [
-    // BlastRadius on the function: its callers
-    { call: QUESTIONS[0].calls[0], row: true, lines: [...BLAST].sort((a, b) => b.conf - a.conf).filter(e => !e.injected).map(e => ({ k: e.label ?? e.from, conf: e.conf })) },
+    // BlastRadius on the function: its callers (a preview: the defining file is in the full answer)
+    { call: QUESTIONS[0].calls[0], row: true, lines: BLAST.filter(e => e.via === 'calls').map(e => ({ k: e.label ?? e.from, conf: e.conf })) },
     // BlastRadius on its event: the files that emit and consume it
     { call: QUESTIONS[0].calls[1], row: true, lines: PAID.slice(0, 2).map(e => ({ k: e.label ?? e.from, v: e.via, tag: 'inj', conf: e.conf })) },
   ] },

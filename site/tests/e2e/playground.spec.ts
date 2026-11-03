@@ -174,7 +174,7 @@ test.describe('tool detail', () => {
     const sets = t.locator('.td-callset');
     await expect(sets).toHaveCount(2);
     await expect(sets.nth(0).locator('.td-call')).toHaveText('BlastRadius { symbol: "applyDiscount" }');
-    await expect(sets.nth(0).locator('.td-k')).toHaveText(['discount.ts', 'POST /price', 'checkout()']);
+    await expect(sets.nth(0).locator('.td-k')).toHaveText(['POST /price', 'checkout()']);
     await expect(sets.nth(1).locator('.td-call')).toHaveText('BlastRadius { symbol: "order.paid" }');
     await expect(sets.nth(1).locator('.td-k')).toHaveText(['checkout.ts', 'receipt.ts']);
   });
