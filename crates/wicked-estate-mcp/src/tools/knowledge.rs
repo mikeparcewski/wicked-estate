@@ -1,13 +1,19 @@
 //! MCP dispatch for the 10 `knowledge.*` tools: the 7 document tools plus the knowledge plane's
 //! `knowledge.replace_source`, `knowledge.source_catalog` and `knowledge.neighbors`
-//! (DES-KNOWLEDGE-DATA-001 §4, §10.1).
+//! (DES-KNOWLEDGE-DATA-001 §4, §10.1), with the document-owned links and `control` endpoints of
+//! DES-PM-001 §3.4.
 
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use wicked_estate_core::{GraphRead, SymbolId};
-use wicked_estate_knowledge::shape::{ESTATE_STORE, KNOWLEDGE_STORE, MAX_NEIGHBOR_DEPTH};
+use wicked_estate_knowledge::links::validate_links;
+use wicked_estate_knowledge::plane::{RUN_KIND, control_deps, shown, valid_project_id};
+use wicked_estate_knowledge::shape::{
+    CONTROL_STORE, ESTATE_STORE, KNOWLEDGE_STORE, MAX_NEIGHBOR_DEPTH,
+};
 use wicked_estate_knowledge::{
-    KnowledgeApi, NeighborsQuery, SourceDoc, SourceGeneration, SourceSection, Visible,
+    DocLink, KnowledgeApi, LinkDir, LinkEnd, NeighborsQuery, SourceDoc, SourceGeneration,
+    SourceSection, Visible,
 };
 use wicked_estate_overlay::{TYPED_RELS, is_typed_rel};
 
@@ -61,7 +67,8 @@ fn tool_error(id: &Value, text: String) -> Value {
     )
 }
 
-/// `visible` (DES-KNOWLEDGE-DATA-001 §4.3): the `source:<id>` / `repo:<id>` the caller may see.
+/// `visible` (DES-KNOWLEDGE-DATA-001 §4.3): the `source:<id>` / `repo:<id>` / `project:<id>` the
+/// caller may see.
 /// Omitted or null = the empty set (only dep-free knowledge). A present value must be an array of
 /// well-formed deps — a malformed one is invalid params, never a silently smaller set.
 pub(crate) fn parse_visible(id: &Value, args: &Value) -> Result<Visible, Value> {
@@ -76,7 +83,7 @@ pub(crate) fn parse_visible(id: &Value, args: &Value) -> Result<Visible, Value> 
                         return Err(json_rpc_error(
                             id,
                             -32602,
-                            "invalid visible: every entry must be a source:<id> or repo:<id> string",
+                            "invalid visible: every entry must be a source:<id>, repo:<id> or project:<id> string",
                         ));
                     }
                 }
@@ -86,7 +93,10 @@ pub(crate) fn parse_visible(id: &Value, args: &Value) -> Result<Visible, Value> 
         Some(other) => Err(json_rpc_error(
             id,
             -32602,
-            &format!("invalid visible: expected an array of source:<id> / repo:<id>, got {other}"),
+            &format!(
+                "invalid visible: expected an array of source:<id> / repo:<id> / project:<id>, got {}",
+                shown(&other.to_string())
+            ),
         )),
     }
 }
@@ -327,9 +337,80 @@ fn opt_object(id: &Value, v: Option<&Value>, at: &str) -> Result<Option<Value>, 
     }
 }
 
-/// Parse a `knowledge.replace_source` request into a generation (wire types only; the engine's
-/// `SourceGeneration::validate` checks the rest before anything is written).
-fn parse_generation(id: &Value, args: &Value) -> Result<SourceGeneration, Value> {
+/// The links one document owns (`docs[i].links`, DES-PM-001 §3.4), wire types only; the engine's
+/// `validate_links` checks the rest before anything is read or written.
+fn parse_doc_links(id: &Value, raw: Option<&Value>, at: &str) -> Result<Vec<DocLink>, Value> {
+    let xs = match raw {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(xs)) => xs,
+        Some(_) => {
+            return Err(json_rpc_error(
+                id,
+                -32602,
+                &format!("{at}.links must be an array"),
+            ));
+        }
+    };
+    let mut out = Vec::with_capacity(xs.len());
+    for (k, l) in xs.iter().enumerate() {
+        let at = format!("{at}.links[{k}]");
+        let field = |name: &str| l.get(name).and_then(Value::as_str);
+        let shape = || {
+            json_rpc_error(
+                id,
+                -32602,
+                &format!(
+                    "{at} must be {{rel, dir: \"out\"|\"in\", end: {{store: \"control\"|\"knowledge\", id}}, deps?}}"
+                ),
+            )
+        };
+        let (Some(rel), Some(dir), Some(end)) = (
+            field("rel"),
+            field("dir").and_then(LinkDir::parse),
+            l.get("end"),
+        ) else {
+            return Err(shape());
+        };
+        let (Some(store), Some(end_id)) = (
+            end.get("store").and_then(Value::as_str),
+            end.get("id").and_then(Value::as_str),
+        ) else {
+            return Err(shape());
+        };
+        let deps = match l.get("deps") {
+            None | Some(Value::Null) => None,
+            Some(Value::Array(ds)) => {
+                let mut v = Vec::with_capacity(ds.len());
+                for d in ds {
+                    match d.as_str() {
+                        Some(d) => v.push(d.to_string()),
+                        None => return Err(shape()),
+                    }
+                }
+                Some(v)
+            }
+            Some(_) => return Err(shape()),
+        };
+        out.push(DocLink {
+            rel: rel.to_string(),
+            dir,
+            end: LinkEnd {
+                store: store.to_string(),
+                id: end_id.to_string(),
+            },
+            deps,
+        });
+    }
+    Ok(out)
+}
+
+/// Parse a `knowledge.replace_source` request into a generation and each document's `links`, by
+/// document key (wire types only; the engine's `SourceGeneration::validate` and `validate_links`
+/// check the rest before anything is written).
+fn parse_linked_generation(
+    id: &Value,
+    args: &Value,
+) -> Result<(SourceGeneration, BTreeMap<String, Vec<DocLink>>), Value> {
     let source_id = match args.get("sourceId").and_then(Value::as_str) {
         Some(s) => s.to_string(),
         None => return Err(json_rpc_error(id, -32602, "sourceId (string) required")),
@@ -354,6 +435,7 @@ fn parse_generation(id: &Value, args: &Value) -> Result<SourceGeneration, Value>
         ));
     };
     let mut docs = Vec::with_capacity(raw_docs.len());
+    let mut links: BTreeMap<String, Vec<DocLink>> = BTreeMap::new();
     for (i, d) in raw_docs.iter().enumerate() {
         let at = format!("docs[{i}]");
         if !d.is_object() {
@@ -396,6 +478,11 @@ fn parse_generation(id: &Value, args: &Value) -> Result<SourceGeneration, Value>
                 }
             }
         }
+        let doc_links = parse_doc_links(id, d.get("links"), &at)?;
+        if !doc_links.is_empty() {
+            // A duplicate doc key is refused by validate(); its links never merge.
+            links.entry(key.to_string()).or_default().extend(doc_links);
+        }
         docs.push(SourceDoc {
             key: key.to_string(),
             title: opt_string(id, d.get("title"), &format!("{at}.title"))?,
@@ -403,13 +490,16 @@ fn parse_generation(id: &Value, args: &Value) -> Result<SourceGeneration, Value>
             sections,
         });
     }
-    Ok(SourceGeneration {
-        source_id,
-        generation,
-        label,
-        catalog,
-        docs,
-    })
+    Ok((
+        SourceGeneration {
+            source_id,
+            generation,
+            label,
+            catalog,
+            docs,
+        },
+        links,
+    ))
 }
 
 fn dispatch_replace_source(
@@ -418,39 +508,53 @@ fn dispatch_replace_source(
     knowledge: &mut dyn KnowledgeApi,
     now: i64,
 ) -> Value {
-    let generation = match parse_generation(id, args) {
+    let (generation, links) = match parse_linked_generation(id, args) {
         Ok(g) => g,
         Err(e) => return e,
     };
-    // Validate the WHOLE generation before anything is written: a malformed one is a client
-    // error and writes nothing, tombstones nothing.
+    // Validate the WHOLE generation and its links before anything is written: a malformed one is
+    // a client error and writes nothing, tombstones nothing.
     if let Err(e) = generation.validate() {
         return json_rpc_error(id, -32602, &e.to_string());
     }
-    match knowledge.replace_source(&generation, now) {
-        Ok(r) => mcp_result(
-            id,
-            json!({
-                "sourceId": r.source_id,
-                "generation": r.generation,
-                "docs": r.docs,
-                "sections": r.sections,
-                "tombstoned": {
-                    "nodes": r.tombstoned_nodes,
-                    "doc_count": r.tombstoned_doc_count,
-                    "docs": r.tombstoned_docs,
-                },
-                "orphaned_edges": {
-                    "count": r.orphaned_edge_count,
-                    "edges": r.orphaned_edges.iter().map(|e| json!({
-                        "rel": e.rel, "from": e.from, "to": e.to, "owner": e.owner,
-                    })).collect::<Vec<_>>(),
-                },
-            }),
-        ),
+    if let Err(e) = validate_links(&generation, &links) {
+        return json_rpc_error(id, -32602, &e);
+    }
+    match knowledge.replace_source_linked(&generation, &links, now) {
+        Ok(linked) => {
+            let r = &linked.report;
+            mcp_result(
+                id,
+                json!({
+                    "sourceId": r.source_id,
+                    "generation": r.generation,
+                    "docs": r.docs,
+                    "sections": r.sections,
+                    "tombstoned": {
+                        "nodes": r.tombstoned_nodes,
+                        "doc_count": r.tombstoned_doc_count,
+                        "docs": r.tombstoned_docs,
+                    },
+                    "orphaned_edges": {
+                        "count": r.orphaned_edge_count,
+                        "edges": r.orphaned_edges.iter().map(|e| json!({
+                            "rel": e.rel, "from": e.from, "to": e.to, "owner": e.owner,
+                        })).collect::<Vec<_>>(),
+                    },
+                    "links": {
+                        "written": linked.links,
+                        "stale_removed": linked.stale_removed,
+                        "cleanup": linked.cleanup_error,
+                    },
+                }),
+            )
+        }
         Err(e) => tool_error(
             id,
-            format!("replace_source wrote nothing and tombstoned nothing: {e}"),
+            format!(
+                "replace_source committed nothing and tombstoned nothing (any link rows it staged \
+                 stay hidden, and the source's next generation deletes them): {e}"
+            ),
         ),
     }
 }
@@ -489,7 +593,8 @@ fn dispatch_source_catalog(id: &Value, args: &Value, knowledge: &dyn KnowledgeAp
         Ok(None) => tool_error(
             id,
             format!(
-                "no visible catalog for source {source_id:?} (pass visible with source:{source_id} to read one)"
+                "no visible catalog for source {:?} (pass visible with source:<that id> to read one)",
+                shown(source_id)
             ),
         ),
         Err(e) => tool_error(id, format!("source_catalog: {e}")),
@@ -507,9 +612,34 @@ fn dispatch_neighbors(
     };
     let start_store = match args.get("store") {
         None | Some(Value::Null) => KNOWLEDGE_STORE.to_string(),
-        Some(Value::String(s)) if s == KNOWLEDGE_STORE || s == ESTATE_STORE => s.clone(),
-        Some(_) => return json_rpc_error(id, -32602, "store must be \"knowledge\" or \"estate\""),
+        Some(Value::String(s))
+            if s == KNOWLEDGE_STORE || s == ESTATE_STORE || s == CONTROL_STORE =>
+        {
+            s.clone()
+        }
+        Some(_) => {
+            return json_rpc_error(
+                id,
+                -32602,
+                "store must be \"knowledge\", \"estate\" or \"control\"",
+            );
+        }
     };
+    // A control id is syntax the caller wrote: a malformed one is invalid params (it reveals
+    // nothing); a hidden or unknown well-formed one answers as an unknown node.
+    if start_store == CONTROL_STORE {
+        let well_formed = match start.split_once(':') {
+            Some((RUN_KIND, run)) => valid_project_id(run),
+            _ => control_deps(start, None).is_ok(),
+        };
+        if !well_formed {
+            return json_rpc_error(
+                id,
+                -32602,
+                "a control id is project:<id>, repo:<id>, pr:<repo id>#<n> or run:<id>",
+            );
+        }
+    }
     let rels: Vec<String> = match args.get("kinds") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(xs)) => {
@@ -557,7 +687,18 @@ fn dispatch_neighbors(
                 "truncated": n.truncated,
             }),
         ),
-        Ok(None) => tool_error(id, format!("no visible knowledge node {start:?}")),
+        Ok(None) => tool_error(
+            id,
+            format!(
+                "no visible {} node {:?}",
+                if q.store == CONTROL_STORE {
+                    "control"
+                } else {
+                    "knowledge"
+                },
+                shown(start)
+            ),
+        ),
         Err(e) => tool_error(id, format!("neighbors: {e}")),
     }
 }

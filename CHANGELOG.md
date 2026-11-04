@@ -3,6 +3,34 @@
 ## [Unreleased]
 
 ### Added
+- **Trackers, crew's control endpoints, and generation-stamped links (DES-PM-001 §3.4, PM-1).**
+  No new tool (33 stays); every change is additive on the wire and in the Rust API.
+  - A project-management tracker is a catalog of its own: `knowledge.replace_source` takes a
+    tracker id (`trk_…`, derived by crew) as `sourceId`, and everything about it carries the one
+    dep `source:<tracker id>`.
+  - `project:<id>` is a third dep kind: `visible` accepts it on every read.
+  - The `control` store names crew's projects, repos, PRs and runs as link endpoints:
+    `project:<id>` and `repo:<id>` (each its own dep), `pr:<repo id>#<n>` (dep `repo:<repo id>`),
+    and `run:<id>` (its filing, given with the link: `project:<id>`, or `repo:<id>` for an
+    unfiled run). `knowledge.neighbors` accepts `store: "control"` as a start and walks control
+    ends; a hidden start answers like an unknown one, and a control end is admitted only when its
+    own deps are visible.
+  - A document in `replace_source` may own typed `links[]` (`{rel, dir: out|in, end: {store:
+    control|knowledge, id}, deps?}`). Each is written as a typed edge owned by the document AT its
+    generation (`<doc id>@<generation>`); its `meta.deps` holds the document's deps plus the far
+    end's. A reader keeps a link only while its document is live at that generation. The new rows
+    are written before the flip and the old ones deleted after it (an interrupted attempt's rows
+    first), so a crash at any step leaves only hidden rows, which the source's next generation
+    deletes. The content fingerprint covers the links (a link-free generation hashes as before),
+    so the same generation number with other links is refused, and a retry of the committed
+    generation rewrites no row. A generation without links drops the source's links; an empty one
+    tombstones the tracker and its links. `tracked_in` points out to a `project:`/`repo:`;
+    `addresses` (from a `run:`) and `closes` (from a `pr:`) point in.
+  - `knowledge.neighbors` is read again when another connection commits to either store during
+    the walk (`PRAGMA data_version`), up to 3 times, and is never returned mixed. A run's deps are
+    the union of all its live filings; it is hidden when that union is over 32 or its rows are
+    over the read bounds (then the answer is `truncated`). Errors show at most 64 characters of
+    any input.
 - **The knowledge plane: live-source structure, deps-filtered recall, typed edges and data
   shapes (DES-KNOWLEDGE-DATA-001 §4, §10.1).** Three new knowledge tools (33 in all):
   - `knowledge.replace_source {sourceId, generation, label?, catalog?, docs[]}` writes one

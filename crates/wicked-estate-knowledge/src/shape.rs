@@ -27,7 +27,10 @@
 //! the grace period ([`KnowledgeEngine::rollback_proposal`]: node, then edges, then the journal
 //! last), and only the attempt the sweep inspected.
 //!
-//! [`KnowledgeEngine::neighbors`] walks the typed edges, filtered by the reader's `visible` set.
+//! [`KnowledgeEngine::neighbors`] walks the typed edges, filtered by the reader's `visible` set,
+//! including the links a source's documents own (DES-PM-001 §3.4, [`crate::links`]): a link is kept
+//! only while its owner document is live at the link's generation, and its `control` end (a crew
+//! project, repo, PR or run) only when the end's own deps are visible.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -39,8 +42,10 @@ use wicked_estate_memory_core::Proposal;
 use wicked_estate_overlay::{Endpoint, TYPED_RELS, TypedXEdge, is_typed_rel};
 
 use crate::engine::{KClass, KNode, KnowledgeEngine};
+use crate::links::parse_link_owner;
 use crate::plane::{
-    Visible, effective_deps, is_untrusted, normalize_deps, scope_deps, valid_dep, valid_repo_id,
+    RUN_KIND, Visible, control_deps, effective_deps, is_untrusted, normalize_deps, scope_deps,
+    valid_dep, valid_repo_id,
 };
 
 /// The approval journal's node kind (never a knowledge kind, so never read as knowledge).
@@ -48,6 +53,10 @@ pub const APPLY_JOURNAL_KIND: &str = "kapply";
 /// The store names typed edges use for their endpoints.
 pub const KNOWLEDGE_STORE: &str = "knowledge";
 pub const ESTATE_STORE: &str = "estate";
+/// Crew's control-plane endpoints (DES-PM-001 §3.4): `project:<id>`, `repo:<id>`,
+/// `pr:<repo id>#<n>`, `run:<id>`. Never hydrated and never epoch-checked; their deps are derived
+/// ([`crate::plane::control_deps`]).
+pub const CONTROL_STORE: &str = "control";
 
 /// At most this many `relate[]` + `relate_code[]` entries per proposal.
 pub const MAX_LINKS: usize = 200;
@@ -62,7 +71,7 @@ const MAX_ID_BYTES: usize = 4096;
 pub const MAX_NEIGHBOR_DEPTH: usize = 3;
 pub const MAX_NEIGHBOR_NODES: usize = 100;
 pub const MAX_NEIGHBOR_EDGES: usize = 200;
-const ADJACENCY_LIMIT: usize = 5_000;
+pub(crate) const ADJACENCY_LIMIT: usize = 5_000;
 const NEIGHBOR_OUTPUT_BYTES: usize = 22_000;
 /// An approval journal younger than this is in flight in another process and is never rolled
 /// back by a sweep (an approve takes milliseconds; crew's estate call deadline is 30 s).
@@ -341,7 +350,10 @@ impl KnowledgeEngine {
 
     /// A live, complete knowledge node by its full id (`kchunk synthetic …:` as recall returns
     /// it). An approval in flight is not live.
-    fn live_knowledge(&self, id: &str) -> wicked_estate_core::Result<Option<(Node, KNode)>> {
+    pub(crate) fn live_knowledge(
+        &self,
+        id: &str,
+    ) -> wicked_estate_core::Result<Option<(Node, KNode)>> {
         let sym = SymbolId(id.to_string());
         if self.applying(&sym) {
             return Ok(None);
@@ -784,7 +796,8 @@ impl KnowledgeEngine {
 /// A `knowledge.neighbors` request.
 #[derive(Debug, Clone)]
 pub struct NeighborsQuery {
-    /// `"knowledge"` (a knowledge node id) or `"estate"` (a code symbol id).
+    /// `"knowledge"` (a knowledge node id), `"estate"` (a code symbol id) or `"control"` (a crew
+    /// project, repo, PR or run).
     pub store: String,
     pub id: String,
     /// Typed rels to follow (empty = all of them).
@@ -853,6 +866,33 @@ pub struct Neighbors {
 }
 
 const LABEL_CHARS: usize = 120;
+
+/// How often `neighbors` reads again when a writer committed during the walk (review r2).
+const NEIGHBOR_ATTEMPTS: usize = 3;
+/// At most this many adjacency rows are read to resolve runs' filings in one walk, including runs
+/// that end up hidden (review r2, r3); a run past the budget, or past the per-run bound, is hidden
+/// and the answer `truncated`.
+pub(crate) const RUN_RESOLVE_ROWS: usize = 20_000;
+
+/// One walk's observations (review r1): each link document's generation as first seen, and each
+/// run's resolved deps, so every edge and endpoint of one answer is judged against the same view.
+struct WalkPins {
+    doc_gens: HashMap<String, Option<u64>>,
+    runs: HashMap<String, Option<Vec<String>>>,
+    run_rows_left: usize,
+    run_budget_hit: bool,
+}
+
+impl WalkPins {
+    fn new() -> Self {
+        Self {
+            doc_gens: HashMap::new(),
+            runs: HashMap::new(),
+            run_rows_left: RUN_RESOLVE_ROWS,
+            run_budget_hit: false,
+        }
+    }
+}
 /// A neighbourhood node's citation is cut to this many characters (an approved node's `source` is
 /// free text), so one node can never take the output budget.
 const SOURCE_CHARS: usize = 300;
@@ -930,10 +970,164 @@ impl KnowledgeEngine {
         }
     }
 
-    /// Is the endpoint's stamped epoch its live one? An owner endpoint is checked by the owner's
-    /// liveness instead (its own epoch is not known before the flip).
+    /// A document's live generation as THIS walk first observed it (`None`: not live). Every link
+    /// of that document is judged against the one observation, so an answer read while the
+    /// document's next generation commits never holds links of two generations (review r1).
+    fn pinned_generation(&self, doc: &str, pins: &mut WalkPins) -> anyhow::Result<Option<u64>> {
+        if let Some(g) = pins.doc_gens.get(doc) {
+            return Ok(*g);
+        }
+        let g = self.live_knowledge(doc)?.and_then(|(node, _)| {
+            node.metadata
+                .get(crate::source::meta::GENERATION)
+                .and_then(Value::as_u64)
+        });
+        pins.doc_gens.insert(doc.to_string(), g);
+        Ok(g)
+    }
+
+    /// Is `owner` a link owner whose document is live AT the owner's generation (as pinned)?
+    fn link_live(&self, owner: &str, pins: &mut WalkPins) -> anyhow::Result<bool> {
+        let Some((doc, generation)) = parse_link_owner(owner) else {
+            return Ok(false);
+        };
+        Ok(self.pinned_generation(&doc.0, pins)? == Some(generation))
+    }
+
+    /// A run's deps: the union of the filings its live links record (the narrowest set), the same
+    /// for a start and for a far end, resolved once per walk. `None` (hidden) when it has no live
+    /// link, when a live link's filing cannot be read, or when its adjacency is over the read bound
+    /// (an incomplete union is never an authorisation).
+    fn run_deps(
+        &self,
+        id: &str,
+        reader: &wicked_estate_overlay::XedgeReader,
+        pins: &mut WalkPins,
+    ) -> anyhow::Result<Option<Vec<String>>> {
+        if let Some(d) = pins.runs.get(id) {
+            return Ok(d.clone());
+        }
+        if pins.run_rows_left == 0 {
+            pins.run_budget_hit = true;
+            return Ok(None);
+        }
+        let resolved = (|| -> anyhow::Result<Option<Vec<String>>> {
+            // Every row read is charged to the walk's budget, and no read asks for more than the
+            // budget has left (review r3). A side that fills its cap (the per-run bound or the
+            // budget) has no complete filing set: the run is hidden and the answer is `truncated`.
+            let mut rows = Vec::new();
+            for outgoing in [true, false] {
+                let cap = ADJACENCY_LIMIT.min(pins.run_rows_left);
+                let got = if outgoing {
+                    reader.typed_out(CONTROL_STORE, id, &[], cap)?
+                } else {
+                    reader.typed_in(CONTROL_STORE, id, &[], cap)?
+                };
+                pins.run_rows_left -= got.len();
+                if got.len() >= cap {
+                    pins.run_budget_hit = true;
+                    return Ok(None);
+                }
+                rows.extend(got);
+            }
+            self.walk_hook("run_rows");
+            let mut union: BTreeSet<String> = BTreeSet::new();
+            let mut live = false;
+            for e in rows {
+                if !self.link_live(&e.owner, pins)? {
+                    continue;
+                }
+                let meta: Value = serde_json::from_str(&e.meta).unwrap_or_else(|_| json!({}));
+                let given: Option<Vec<String>> = meta
+                    .get("run_deps")
+                    .and_then(Value::as_array)
+                    .and_then(|xs| xs.iter().map(|x| x.as_str().map(str::to_string)).collect());
+                let Some(deps) = given.and_then(|g| control_deps(id, Some(&g)).ok()) else {
+                    return Ok(None); // a live link whose filing cannot be read: fail closed
+                };
+                live = true;
+                union.extend(deps);
+            }
+            // A run filed under more projects and repos than an item may carry is hidden: its
+            // deps are never cut (they authorise), and the record stays inside R4.
+            if union.len() > crate::plane::MAX_DEPS {
+                return Ok(None);
+            }
+            Ok(live.then(|| union.into_iter().collect()))
+        })()?;
+        pins.runs.insert(id.to_string(), resolved.clone());
+        Ok(resolved)
+    }
+
+    /// A `control` endpoint as a neighbourhood node, or `None` when it is malformed or (a run) has
+    /// no resolvable filing. Its deps are derived from the id, or for a run by [`Self::run_deps`];
+    /// never from one row's `meta`.
+    fn control_node(
+        &self,
+        id: &str,
+        reader: &wicked_estate_overlay::XedgeReader,
+        pins: &mut WalkPins,
+    ) -> anyhow::Result<Option<NeighborNode>> {
+        let Some((kind, _)) = id.split_once(':') else {
+            return Ok(None);
+        };
+        let deps = if kind == RUN_KIND {
+            match self.run_deps(id, reader, pins)? {
+                Some(d) => d,
+                None => return Ok(None),
+            }
+        } else {
+            match control_deps(id, None) {
+                Ok(d) => d,
+                Err(_) => return Ok(None),
+            }
+        };
+        Ok(Some(NeighborNode {
+            store: CONTROL_STORE.into(),
+            id: id.to_string(),
+            class: Some(kind.to_string()),
+            label: cut(id, LABEL_CHARS),
+            scope: String::new(),
+            deps,
+            untrusted: false,
+            source: String::new(),
+            hydrated: false,
+        }))
+    }
+
+    /// May the reader keep an edge `owner` asserted? A link owner (`<doc>@<generation>`) needs its
+    /// document live, visible, and AT that generation (as this walk pinned it); any other owner (a
+    /// data shape) must be a live, visible knowledge node.
+    ///
+    /// Crew's relay re-checks every released node and edge by its deps, but it does not read
+    /// `owner`: the generation barrier (no stale or uncommitted link) is enforced here alone, and
+    /// the `iv_*` tests are what guard it.
+    fn owner_visible(
+        &self,
+        owner: &str,
+        visible: &Visible,
+        pins: &mut WalkPins,
+    ) -> anyhow::Result<bool> {
+        match parse_link_owner(owner) {
+            Some((doc, _)) => {
+                Ok(self.link_live(owner, pins)?
+                    && self.knowledge_neighbor(&doc.0, visible)?.is_some())
+            }
+            None => Ok(self.knowledge_neighbor(owner, visible)?.is_some()),
+        }
+    }
+
+    /// Is the endpoint's stamped epoch its live one? An owner endpoint (a shape's node, or the
+    /// document that owns a link) is checked by the owner's liveness instead (its own epoch is not
+    /// known before the flip). A `control` endpoint has no epoch in estate.
     fn epoch_ok(&self, ep: &Endpoint, owner: &str, graph: &dyn GraphRead) -> bool {
-        if ep.engine == KNOWLEDGE_STORE && ep.stable_id == owner {
+        if ep.engine == CONTROL_STORE {
+            return true;
+        }
+        if ep.engine == KNOWLEDGE_STORE
+            && (ep.stable_id == owner
+                || parse_link_owner(owner).is_some_and(|(doc, _)| doc.0 == ep.stable_id))
+        {
             return true;
         }
         let sym = SymbolId(ep.stable_id.clone());
@@ -963,6 +1157,30 @@ impl KnowledgeEngine {
             anyhow::bail!("xedge store not available");
         };
         let reader = xedge.reader();
+        // A walk reads rows and documents at different moments. If another connection commits to
+        // either store meanwhile (crew's projector flipping a tracker's generation), the answer
+        // could mix two states, so it is read again (review r2); a walk that never settles is
+        // refused rather than returned mixed.
+        for _ in 0..NEIGHBOR_ATTEMPTS {
+            let before = (self.store.data_version()?, reader.data_version()?);
+            let answer = self.neighbors_once(q, graph, &reader)?;
+            if (self.store.data_version()?, reader.data_version()?) == before {
+                return Ok(answer);
+            }
+        }
+        anyhow::bail!(
+            "the knowledge changed while it was being read, {NEIGHBOR_ATTEMPTS} times: read it again"
+        )
+    }
+
+    /// One attempt of [`Self::neighbors`].
+    fn neighbors_once(
+        &self,
+        q: &NeighborsQuery,
+        graph: &dyn GraphRead,
+        reader: &wicked_estate_overlay::XedgeReader,
+    ) -> anyhow::Result<Option<Neighbors>> {
+        let mut pins = WalkPins::new();
         let start = match q.store.as_str() {
             KNOWLEDGE_STORE => match self.knowledge_neighbor(&q.id, &q.visible)? {
                 Some(n) => n,
@@ -979,7 +1197,13 @@ impl KnowledgeEngine {
                 source: String::new(),
                 hydrated: false,
             },
-            other => anyhow::bail!("unknown store {other:?}: expected knowledge or estate"),
+            CONTROL_STORE => match self.control_node(&q.id, reader, &mut pins)? {
+                Some(n) if q.visible.allows(&n.deps) => n,
+                _ => return Ok(None), // malformed, hidden, or a run with no live link: unknown
+            },
+            other => {
+                anyhow::bail!("unknown store {other:?}: expected knowledge, estate or control")
+            }
         };
         let rels: Vec<&str> = q.rels.iter().map(String::as_str).collect();
         let depth = q.depth.clamp(1, MAX_NEIGHBOR_DEPTH);
@@ -1012,7 +1236,8 @@ impl KnowledgeEngine {
                     let owner_ok = match owners.get(&e.owner) {
                         Some(ok) => *ok,
                         None => {
-                            let ok = self.knowledge_neighbor(&e.owner, &q.visible)?.is_some();
+                            let ok = self.owner_visible(&e.owner, &q.visible, &mut pins)?;
+                            self.walk_hook("owner");
                             owners.insert(e.owner.clone(), ok);
                             ok
                         }
@@ -1043,6 +1268,11 @@ impl KnowledgeEngine {
                     if !index.contains(&other) {
                         let node = if other.0 == KNOWLEDGE_STORE {
                             self.knowledge_neighbor(&other.1, &q.visible)?
+                        } else if other.0 == CONTROL_STORE {
+                            // The far end's own deps (from its id, or a run's resolved filing),
+                            // never from this row's `deps` alone.
+                            self.control_node(&other.1, reader, &mut pins)?
+                                .filter(|n| q.visible.allows(&n.deps))
                         } else {
                             let repo = meta.get("repo").and_then(Value::as_str);
                             let n = self.code_neighbor(&other.1, repo, graph);
@@ -1099,9 +1329,20 @@ impl KnowledgeEngine {
         Ok(Some(Neighbors {
             nodes,
             edges,
-            truncated,
+            truncated: truncated || pins.run_budget_hit,
         }))
     }
+
+    /// Test hook: lets a test commit from another connection at a named point of a walk.
+    #[cfg(test)]
+    fn walk_hook(&self, point: &str) {
+        if let Some(h) = self.walk_hook.borrow_mut().as_mut() {
+            h(point);
+        }
+    }
+
+    #[cfg(not(test))]
+    fn walk_hook(&self, _point: &str) {}
 }
 
 #[cfg(test)]
@@ -1713,5 +1954,291 @@ mod r2_tests {
         assert!(e.check_about_link_target(&sym).is_err(), "in flight");
         e.finish_proposal("p6").unwrap();
         e.check_about_link_target(&sym).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod pm_r1_tests {
+    use super::*;
+    use crate::links::{DocLink, LinkDir, LinkEnd, link_owner};
+    use crate::source::{SourceDoc, SourceGeneration, SourceSection, doc_symbol};
+    use std::sync::Arc;
+    use wicked_estate_overlay::XedgeStore;
+    use wicked_estate_store::SqliteStore;
+
+    fn generation(n: u64) -> SourceGeneration {
+        SourceGeneration {
+            source_id: "trk_A".into(),
+            generation: n,
+            label: None,
+            catalog: None,
+            docs: vec![SourceDoc {
+                key: "tracker".into(),
+                title: None,
+                entry: None,
+                sections: vec![SourceSection {
+                    key: "workflow".into(),
+                    text: "PROJA workflow".into(),
+                }],
+            }],
+        }
+    }
+
+    fn to(id: &str) -> BTreeMap<String, Vec<DocLink>> {
+        BTreeMap::from([(
+            "tracker".to_string(),
+            vec![DocLink {
+                rel: "tracked_in".into(),
+                dir: LinkDir::Out,
+                end: LinkEnd {
+                    store: CONTROL_STORE.into(),
+                    id: id.into(),
+                },
+                deps: None,
+            }],
+        )])
+    }
+
+    /// r1 (codex 3): one walk judges every link of a document against the generation it first
+    /// observed, so an answer read across the flip never mixes two generations' links.
+    /// NEGATIVE CONTROL: the pin not kept (each owner re-reads the live generation).
+    #[test]
+    fn a_walk_pins_each_documents_generation() {
+        let mut e = KnowledgeEngine::in_memory()
+            .unwrap()
+            .with_xedge_store(Arc::new(XedgeStore::in_memory().unwrap()));
+        e.replace_source_linked(&generation(1), &to("project:proj_P"), 1)
+            .unwrap();
+        let doc = doc_symbol("trk_A", "tracker");
+        let v = Visible::from_deps(["source:trk_A", "project:proj_P", "project:proj_Q"]).unwrap();
+        let mut pins = WalkPins::new();
+        assert!(
+            e.owner_visible(&link_owner(&doc, 1), &v, &mut pins)
+                .unwrap()
+        );
+        // The next generation commits while the walk is in flight (its cleanup not yet run).
+        e.fail_links_after_flip = true;
+        assert!(
+            e.replace_source_linked(&generation(2), &to("project:proj_Q"), 2)
+                .is_err()
+        );
+        e.fail_links_after_flip = false;
+        assert!(
+            !e.owner_visible(&link_owner(&doc, 2), &v, &mut pins)
+                .unwrap(),
+            "the same walk keeps judging by generation 1"
+        );
+        assert!(
+            e.owner_visible(&link_owner(&doc, 1), &v, &mut pins)
+                .unwrap()
+        );
+        // A fresh walk sees generation 2 only.
+        let mut fresh = WalkPins::new();
+        assert!(
+            e.owner_visible(&link_owner(&doc, 2), &v, &mut fresh)
+                .unwrap()
+        );
+        assert!(
+            !e.owner_visible(&link_owner(&doc, 1), &v, &mut fresh)
+                .unwrap()
+        );
+    }
+
+    /// Two engines on one pair of files: a writer and a reader, as crew's projector and a
+    /// per-call reader process are.
+    fn on_disk() -> (tempfile::TempDir, impl Fn() -> KnowledgeEngine) {
+        let dir = tempfile::tempdir().unwrap();
+        let k = dir
+            .path()
+            .join("knowledge.db")
+            .to_string_lossy()
+            .to_string();
+        let x = dir.path().join("xedge.db").to_string_lossy().to_string();
+        let open = move || {
+            KnowledgeEngine::open(&k)
+                .unwrap()
+                .with_xedge_store(Arc::new(XedgeStore::open(&x).unwrap()))
+        };
+        (dir, open)
+    }
+
+    fn two_docs(sid: &str, n: u64, docs: &[&str]) -> SourceGeneration {
+        SourceGeneration {
+            source_id: sid.into(),
+            generation: n,
+            label: None,
+            catalog: None,
+            docs: docs
+                .iter()
+                .map(|k| SourceDoc {
+                    key: (*k).into(),
+                    title: None,
+                    entry: None,
+                    sections: vec![SourceSection {
+                        key: "s".into(),
+                        text: format!("{k} text"),
+                    }],
+                })
+                .collect(),
+        }
+    }
+
+    fn links(xs: &[(&str, &str, &str, Option<&[&str]>)]) -> BTreeMap<String, Vec<DocLink>> {
+        let mut out: BTreeMap<String, Vec<DocLink>> = BTreeMap::new();
+        for (key, rel, end, deps) in xs {
+            out.entry((*key).to_string()).or_default().push(DocLink {
+                rel: (*rel).into(),
+                dir: if *rel == "tracked_in" {
+                    LinkDir::Out
+                } else {
+                    LinkDir::In
+                },
+                end: LinkEnd {
+                    store: CONTROL_STORE.into(),
+                    id: (*end).into(),
+                },
+                deps: deps.map(|d| d.iter().map(|x| x.to_string()).collect()),
+            });
+        }
+        out
+    }
+
+    fn q(store: &str, id: &str, visible: &[&str]) -> NeighborsQuery {
+        NeighborsQuery {
+            store: store.into(),
+            id: id.into(),
+            rels: vec![],
+            depth: 1,
+            visible: Visible::from_deps(visible).unwrap(),
+        }
+    }
+
+    /// r2 (codex 1): generation 2 moves r's link from document a to document b. A reader that
+    /// judged a@1 before the flip and b@2 after it would hold both; the walk is read again when a
+    /// writer committed meanwhile, so the answer is generation 2's alone.
+    /// NEGATIVE CONTROL: the answer returned without the change check.
+    #[test]
+    fn r2_a_walk_across_a_flip_is_read_again_never_returned_mixed() {
+        let (_dir, open) = on_disk();
+        let w = std::rc::Rc::new(std::cell::RefCell::new(open()));
+        let g = |n| two_docs("trk_A", n, &["a", "b"]);
+        w.borrow_mut()
+            .replace_source_linked(&g(1), &links(&[("a", "tracked_in", "repo:r", None)]), 1)
+            .unwrap();
+        // Generation 2's rows are staged (a crash before its flip), then it lands mid-walk.
+        w.borrow_mut().fail_links_before_flip = true;
+        let to_b = links(&[("b", "tracked_in", "repo:r", None)]);
+        assert!(
+            w.borrow_mut()
+                .replace_source_linked(&g(2), &to_b, 2)
+                .is_err()
+        );
+        w.borrow_mut().fail_links_before_flip = false;
+        let r = open();
+        let (writer, mut fired) = (std::rc::Rc::clone(&w), false);
+        *r.walk_hook.borrow_mut() = Some(Box::new(move |point: &str| {
+            if point == "owner" && !fired {
+                fired = true;
+                writer
+                    .borrow_mut()
+                    .replace_source_linked(&g(2), &to_b, 3)
+                    .unwrap();
+            }
+        }));
+        let n = r
+            .neighbors(
+                &q(CONTROL_STORE, "repo:r", &["source:trk_A", "repo:r"]),
+                &SqliteStore::in_memory().unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        let docs: Vec<&str> = n
+            .nodes
+            .iter()
+            .filter(|x| x.store == KNOWLEDGE_STORE)
+            .map(|x| x.id.as_str())
+            .collect();
+        assert_eq!(docs, vec![doc_symbol("trk_A", "b").0.as_str()], "{n:?}");
+    }
+
+    /// r2 (codex 2): a run's filings are read across a flip of one of its trackers. Tracker A files
+    /// run:x under project P, tracker B under repo r; a reader holding B and r (not P) must not see
+    /// the run, even when A re-commits the same link while the run is being resolved.
+    /// NEGATIVE CONTROL: the answer returned without the change check.
+    #[test]
+    fn r2_a_run_resolved_across_a_flip_never_drops_a_live_filing() {
+        let (_dir, open) = on_disk();
+        let w = std::rc::Rc::new(std::cell::RefCell::new(open()));
+        let a = |n| two_docs("trk_A", n, &["PROJA-1"]);
+        let a_links = links(&[("PROJA-1", "addresses", "run:x", Some(&["project:proj_P"]))]);
+        w.borrow_mut()
+            .replace_source_linked(&a(1), &a_links, 1)
+            .unwrap();
+        w.borrow_mut()
+            .replace_source_linked(
+                &two_docs("trk_B", 1, &["PROJB-1"]),
+                &links(&[("PROJB-1", "addresses", "run:x", Some(&["repo:r"]))]),
+                1,
+            )
+            .unwrap();
+        let r = open();
+        let (writer, mut fired) = (std::rc::Rc::clone(&w), false);
+        *r.walk_hook.borrow_mut() = Some(Box::new(move |point: &str| {
+            if point == "run_rows" && !fired {
+                fired = true;
+                writer
+                    .borrow_mut()
+                    .replace_source_linked(&a(2), &a_links, 2)
+                    .unwrap();
+            }
+        }));
+        let graph = SqliteStore::in_memory().unwrap();
+        assert!(
+            r.neighbors(
+                &q(CONTROL_STORE, "run:x", &["source:trk_B", "repo:r"]),
+                &graph
+            )
+            .unwrap()
+            .is_none(),
+            "the run's live filing under P is never dropped"
+        );
+        assert!(
+            r.neighbors(
+                &q(
+                    CONTROL_STORE,
+                    "run:x",
+                    &["source:trk_B", "repo:r", "project:proj_P"]
+                ),
+                &graph
+            )
+            .unwrap()
+            .is_some()
+        );
+    }
+
+    /// pi r2: a proposal can never name a control endpoint (relate[] resolves knowledge nodes only).
+    #[test]
+    fn a_proposal_cannot_name_a_control_endpoint() {
+        use std::collections::BTreeMap as Map;
+        use wicked_estate_memory_core::{Facets, ProposalState};
+        let mut e = KnowledgeEngine::in_memory()
+            .unwrap()
+            .with_xedge_store(Arc::new(XedgeStore::in_memory().unwrap()));
+        let p = Proposal {
+            id: "p1".into(),
+            kind_type: "knowledge".into(),
+            payload: json!({"content": "a shape", "source": "s", "class": "concept",
+                "relate": [{"rel": "tracked_in", "to": "project:proj_P"}]}),
+            facets: Facets::default(),
+            provenance: Map::new(),
+            state: ProposalState::Pending,
+            created_at: 1,
+        };
+        let err = e
+            .apply_proposal(&p, &HashMap::new(), 1)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a live knowledge node"), "{err}");
+        assert_eq!(e.xedge.as_ref().unwrap().typed_len().unwrap(), 0);
     }
 }
