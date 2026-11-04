@@ -346,10 +346,70 @@ TraverseGraph, Path, BlastRadius, FetchContent, ContextBundle, RulesInventory, `
 RankHotspots, Communities, Lineage), 7 `memory.*` tools plus the 4 `proposal.*` queue tools, and 10
 `knowledge.*` tools. `SemanticSearch` is a 34th, listed only when embeddings are present
 (`live_semantic_search` → `handle_request_with_semantic`). Estate-only mode (no memory/knowledge
-domains) lists the 12 estate tools (13 with `SemanticSearch`). `--readonly` omits the write tools
-(`memory.capture`/`erase`/`learn`/`reflect`, `knowledge.ingest`/`write`/`relate`/`relate_code`/`replace_source`) from
-`tools/list` and rejects them in `tools/call`. Rule authorship flows only through human-merged doc
+domains) lists the 12 estate tools (13 with `SemanticSearch`). `--readonly` omits the 11 write tools
+(`memory.capture`/`erase`/`learn`/`reflect`, `knowledge.ingest`/`write`/`relate`/`relate_code`/`replace_source`,
+`proposal.approve`/`reject`) from `tools/list` and rejects them in `tools/call`; `proposal.submit` stays (it only queues). Rule authorship flows only through human-merged doc
 PRs (ADR-012). Implements the R1–R7 behavior contract.
+
+---
+
+## 9a. Memory and knowledge ✅
+Two stores beside the code graph, each its own SQLite file (`memory.db`, `knowledge.db`), joined to code by the
+cross-engine edge store (`xedge.db`, `wicked-estate-overlay`). Memory is what happened and what you told it;
+knowledge is what estate read (docs, and the structure of live data sources). Results always say which store
+they came from.
+
+### Memory ✅ (`wicked-estate-memory`, 7 tools)
+- **Scoped capture and recall** ✅ — hierarchical scopes (`org:acme/agent:claude`); tiers
+  `working|episodic|semantic|procedural|archival`. `memory.recall` is token-budgeted and inherits from ancestor
+  scopes (`scope_prefix` flips it to the subtree); each item carries `memory_id`, `scope`, `content`, `tier`, `score`.
+- **Operator memories** ✅ — an explicit operator scope applies across projects; project memories stay in their project.
+- **Facts linked to code** ✅ — `memory.learn` stores a fact and links it to code symbols in one step.
+- **Reflection** ✅ — `memory.reflect` distils episodes into facts, promotes reinforced facts to skills, and archives
+  aged memories and working memories older than 24 h (nothing is deleted).
+- **Browse and erase** ✅ — `memory.list` (the whole in-scope set with facets, for a management surface),
+  `memory.coverage` (counts by tier and kind), `memory.erase` (one id, or everything under a scope prefix).
+- **Propose, then approve** ✅ — `proposal.submit` queues an inert `memory`, `knowledge` or `policy:<type>`
+  proposal (safe under `--readonly`; provenance is stamped by the server, never taken from args);
+  `proposal.list`; `proposal.approve` promotes it (a `policy:*` proposal is handed back for steering);
+  `proposal.reject`.
+
+### Knowledge ✅ (`wicked-estate-knowledge`, 10 tools)
+- **Documents** ✅ — `knowledge.ingest` (a document as doc + chunk nodes), `knowledge.write` (one doc, section,
+  chunk or concept), `knowledge.relate` (typed relation with confidence and provenance), `knowledge.relate_code`
+  (a link to code symbols), `knowledge.coverage` (counts by class).
+- **Hybrid recall** ✅ — `knowledge.recall` fuses FTS and vector hits (RRF); `knowledge.recall_about_code` returns
+  knowledge linked to given code symbols. Items carry `class` (`doc|section|chunk|concept`), `source`, `scope`,
+  `deps` and `untrusted`.
+- **Live-source structure** ✅ — `knowledge.replace_source` writes one COMPLETE generation of a live source's
+  structure (one doc per relation or tool, with sections: names, types, keys, declared enum literals; never rows)
+  under scope `source:<id>`. The generation is one transaction: absent docs are tombstoned, a failed generation
+  writes nothing, an older generation is refused, and the same number must carry the same content (fingerprint).
+  A write tool (refused under `--readonly`).
+- **The source catalog** ✅ — `knowledge.source_catalog`: one source's complete typed catalog, paged (byte-bounded,
+  fixed per generation); a pinned generation that moved is an error, never a mixed page. Its text is marked
+  untrusted (data, never instructions).
+- **Visible-filtered reads** ✅ — every knowledge read but `coverage` takes `visible` (the `source:<id>`, `repo:<id>`
+  and `project:<id>` deps a caller may see). An item is returned only when all its deps are visible, checked inside
+  each candidate list before the `k` cut, RRF and the token budget, so hidden knowledge never crowds visible
+  knowledge out. A hidden source answers like an unknown one. Knowledge with no deps (everything written before
+  the knowledge plane) is returned as before.
+- **Typed edges and `knowledge.neighbors`** ✅ — typed edges `describes`, `joins`, `governed_by`, `measures`,
+  `tracked_in`, `addresses`, `closes`, `derived_from` between knowledge nodes, code symbols and control endpoints;
+  `knowledge.neighbors` walks them (depth 1-3, at most 100 nodes and 200 edges, `truncated` when a bound bites),
+  leaving out any node or edge whose deps are not all visible.
+- **Data shapes through the proposal queue** ✅ — a `knowledge` proposal may carry `relate[]` (links to knowledge
+  nodes) and `relate_code[]` (links to one repo's code). Approval derives the node's deps from its endpoints and
+  refuses a declared `deps` that differs; it is journalled, so a half-done approval is never visible and a
+  write-mode server's start-up sweep completes or rolls it back.
+- **Trackers and the `control` store** ✅ (DES-PM-001 PM-1) — a project-management tracker (crew registers GitHub
+  Issues or Jira) is a catalog of its own: `replace_source` takes a tracker id (`trk_…`) and everything about it
+  carries the dep `source:<tracker id>`. The `control` store names crew's endpoints as link ends: `project:<id>`,
+  `repo:<id>`, `pr:<repo id>#<n>` and `run:<id>`. A document may own typed `links[]` (`tracked_in`, `addresses`,
+  `closes`, …) to control or knowledge ends; each link is stamped with its document's generation, so a reader
+  keeps it only while that generation is live, and an interrupted write leaves only hidden rows.
+  `knowledge.neighbors` accepts `store: "control"` as a start; a control end is shown only when its own deps are
+  visible. No new tool (the count stays 33).
 
 ---
 
