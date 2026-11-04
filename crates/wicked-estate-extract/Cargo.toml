@@ -183,6 +183,8 @@ roxmltree  = { workspace = true, optional = true }
 
 # Pull in calamine only when the excel-rules feature is enabled.
 calamine = { workspace = true, optional = true }
+# Not used directly: a version floor for calamine's zip (see the workspace Cargo.toml).
+zip = { workspace = true, optional = true }
 
 [features]
 # Enable the real AWS cloud collector (aws-config + Resource Explorer v2 + EC2 + IAM).
@@ -197,4 +199,4 @@ cloud-all   = ["cloud-aws", "cloud-azure", "cloud-gcp"]
 # W15.2 XML rules extractor — TOML path-config + roxmltree DOM traversal.
 xml-rules   = ["dep:quick-xml", "dep:roxmltree"]
 # W15.3 Excel/XLSX decision table extractor — calamine-backed.
-excel-rules = ["dep:calamine"]
+excel-rules = ["dep:calamine", "dep:zip"]
