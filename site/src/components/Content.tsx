@@ -520,7 +520,7 @@ const BENEFITS: { h: string; p: string }[] = [
 ]
 const NEWS: { b: string; rest: string }[] = [
   { b: 'Connected data sources become knowledge:', rest: ' their tables, columns and keys, never their rows.' },
-  { b: 'Recall shows only what the caller may see.', rest: ' Each answer names the sources and repos it came from.' },
+  { b: 'Recall shows only what the caller may see:', rest: ' knowledge from a data source or repo is checked before ranking.' },
   { b: 'Typed links across docs, data, code and issue trackers,', rest: ' walked with knowledge.neighbors.' },
 ]
 

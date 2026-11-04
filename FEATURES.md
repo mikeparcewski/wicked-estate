@@ -365,8 +365,9 @@ they came from.
   scopes (`scope_prefix` flips it to the subtree); each item carries `memory_id`, `scope`, `content`, `tier`, `score`.
 - **Operator memories** ✅ — an explicit operator scope applies across projects; project memories stay in their project.
 - **Facts linked to code** ✅ — `memory.learn` stores a fact and links it to code symbols in one step.
-- **Reflection** ✅ — `memory.reflect` distils episodes into facts, promotes reinforced facts to skills, and archives
-  aged memories and working memories older than 24 h (nothing is deleted).
+- **Reflection** ✅ — `memory.reflect` deletes working memories older than 24 h first (a summary built over one is
+  removed, then rebuilt from its surviving durable sources), distils episodes into facts, promotes reinforced facts
+  to skills, and archives aged low-salience memories.
 - **Browse and erase** ✅ — `memory.list` (the whole in-scope set with facets, for a management surface),
   `memory.coverage` (counts by tier and kind), `memory.erase` (one id, or everything under a scope prefix).
 - **Propose, then approve** ✅ — `proposal.submit` queues an inert `memory`, `knowledge` or `policy:<type>`
@@ -399,7 +400,8 @@ they came from.
   `knowledge.neighbors` walks them (depth 1-3, at most 100 nodes and 200 edges, `truncated` when a bound bites),
   leaving out any node or edge whose deps are not all visible.
 - **Data shapes through the proposal queue** ✅ — a `knowledge` proposal may carry `relate[]` (links to knowledge
-  nodes) and `relate_code[]` (links to one repo's code). Approval derives the node's deps from its endpoints and
+  nodes) and `relate_code[]` (links to code symbols, each naming its repo; a proposal filed under a `repo` facet may
+  link only that repo's code). Approval derives the node's deps from its endpoints and
   refuses a declared `deps` that differs; it is journalled, so a half-done approval is never visible and a
   write-mode server's start-up sweep completes or rolls it back.
 - **Trackers and the `control` store** ✅ (DES-PM-001 PM-1) — a project-management tracker (crew registers GitHub
