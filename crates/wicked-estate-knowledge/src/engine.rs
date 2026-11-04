@@ -96,11 +96,6 @@ pub struct KNode {
     pub scope: String,
     pub source: String,
     pub created_at: i64,
-    /// Stored dependency set (sorted, unique). Read visibility through
-    /// [`crate::plane::effective_deps`], which also adds the `source:` scope's dep.
-    pub deps: Vec<String>,
-    /// Stored untrusted flag. Read it through [`crate::plane::is_untrusted`].
-    pub untrusted: bool,
 }
 
 impl KNode {
@@ -119,8 +114,6 @@ impl KNode {
             scope: scope.into(),
             source: source.into(),
             created_at: now,
-            deps: Vec::new(),
-            untrusted: false,
         }
     }
 
@@ -151,12 +144,6 @@ impl KNode {
         m.insert(meta_keys::SCOPE.into(), self.scope.clone().into());
         m.insert(meta_keys::SOURCE.into(), self.source.clone().into());
         m.insert(meta_keys::CREATED_AT.into(), self.created_at.into());
-        if !self.deps.is_empty() {
-            m.insert(meta_keys::DEPS.into(), self.deps.clone().into());
-        }
-        if self.untrusted {
-            m.insert(meta_keys::UNTRUSTED.into(), true.into());
-        }
         node
     }
 
@@ -186,23 +173,6 @@ impl KNode {
                 .get(meta_keys::CREATED_AT)
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0),
-            // A malformed stored dep is kept as a dep no reader holds (fail-closed), never dropped.
-            deps: match m.get(meta_keys::DEPS) {
-                None => Vec::new(),
-                Some(serde_json::Value::Array(xs)) => xs
-                    .iter()
-                    .map(|x| {
-                        x.as_str()
-                            .map(str::to_string)
-                            .unwrap_or_else(|| format!("invalid:{x}"))
-                    })
-                    .collect(),
-                Some(other) => vec![format!("invalid:{other}")],
-            },
-            untrusted: m
-                .get(meta_keys::UNTRUSTED)
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
         })
     }
 }
@@ -210,6 +180,16 @@ impl KNode {
 /// A recalled knowledge slice.
 #[derive(Debug, Clone)]
 pub struct KRecalled {
+    pub id: SymbolId,
+    pub content: String,
+    pub score: f64,
+    pub source: String,
+}
+
+/// A recalled knowledge slice with its place in the knowledge plane (DES-KNOWLEDGE-DATA-001 §4.3):
+/// what [`KnowledgeEngine::recall_visible`] returns.
+#[derive(Debug, Clone)]
+pub struct KHit {
     pub id: SymbolId,
     pub content: String,
     pub score: f64,
@@ -352,6 +332,23 @@ impl KnowledgeEngine {
     /// The engine's embedding of `text` (the vector `write` stores).
     pub(crate) fn embed(&self, text: &str) -> Vec<f32> {
         self.embedder.embed(text)
+    }
+
+    /// Write ONE knowledge node carrying `deps` and the untrusted flag (DES-KNOWLEDGE-DATA-001
+    /// §4.3): the plane's write path for nodes derived from sources and repos.
+    pub fn write_with_deps(
+        &mut self,
+        k: &KNode,
+        deps: &[String],
+        untrusted: bool,
+    ) -> Result<SymbolId> {
+        let sym = k.symbol();
+        let mut node = k.to_node();
+        crate::plane::stamp(&mut node, deps, untrusted);
+        self.store.upsert_nodes(&[node])?;
+        let vec = self.embedder.embed(&k.content);
+        self.store.set_embedding(&sym, &vec)?;
+        Ok(sym)
     }
 
     /// Write ONE knowledge node (the single-writer path). Node-before-edge ordering (G3) is the
@@ -576,7 +573,16 @@ impl KnowledgeEngine {
         scope_prefix: Option<&str>,
         now: i64,
     ) -> Result<Vec<KRecalled>> {
-        self.recall_visible(query, token_budget, scope_prefix, &Visible::none(), now)
+        Ok(self
+            .recall_visible(query, token_budget, scope_prefix, &Visible::none(), now)?
+            .into_iter()
+            .map(|h| KRecalled {
+                id: h.id,
+                content: h.content,
+                score: h.score,
+                source: h.source,
+            })
+            .collect())
     }
 
     /// Knowledge recall. **REUSES** the `-core` pipeline: keyword (FTS OR-terms) ∪ vector (ANN),
@@ -614,7 +620,7 @@ impl KnowledgeEngine {
         scope_prefix: Option<&str>,
         visible: &Visible,
         now: i64,
-    ) -> Result<Vec<KRecalled>> {
+    ) -> Result<Vec<KHit>> {
         let kw = self.keyword_candidates(query, scope_prefix, visible)?;
 
         // Vector (ANN) candidates — only when the embedder carries real semantic signal. The
@@ -651,7 +657,7 @@ impl KnowledgeEngine {
         let fused = rrf_fuse(&[kw, sem], 60.0);
         let mut seen_docs = std::collections::BTreeSet::new();
         let mut cands = Vec::new();
-        let mut hydrated: std::collections::HashMap<SymbolId, KNode> =
+        let mut hydrated: std::collections::HashMap<SymbolId, (KNode, Vec<String>, bool)> =
             std::collections::HashMap::new();
         for (id, rrf) in fused {
             let Some(node) = self.store.get_node(&id)? else {
@@ -685,18 +691,20 @@ impl KnowledgeEngine {
                 salience: 1.0,
                 facet_specificity: 0,
             });
-            hydrated.insert(id, kn);
+            let deps = effective_deps(&node);
+            let untrusted = is_untrusted(&node);
+            hydrated.insert(id, (kn, deps, untrusted));
         }
         let packed = budget_pack(cands, token_budget, 0.5);
 
-        let out: Vec<KRecalled> = packed
+        let out: Vec<KHit> = packed
             .into_iter()
             .filter_map(|c| {
                 let score = c.final_score(0.5);
-                let kn = hydrated.remove(&c.id)?;
-                Some(KRecalled {
-                    deps: effective_deps(&kn),
-                    untrusted: is_untrusted(&kn),
+                let (kn, deps, untrusted) = hydrated.remove(&c.id)?;
+                Some(KHit {
+                    deps,
+                    untrusted,
                     id: c.id,
                     content: c.content,
                     score,
@@ -1229,10 +1237,10 @@ mod tests {
         assert_eq!(back.created_at, 7);
     }
 
-    fn dep_node(content: &str, scope: &str, deps: &[&str]) -> KNode {
-        let mut kn = KNode::new(KClass::Chunk, content, scope, format!("{content}.md"), 1);
-        kn.deps = deps.iter().map(|d| d.to_string()).collect();
-        kn
+    fn write_dep(e: &mut KnowledgeEngine, content: &str, scope: &str, deps: &[&str]) {
+        let kn = KNode::new(KClass::Chunk, content, scope, format!("{content}.md"), 1);
+        let deps: Vec<String> = deps.iter().map(|d| d.to_string()).collect();
+        e.write_with_deps(&kn, &deps, false).unwrap();
     }
 
     /// NEGATIVE CONTROL (DES-KNOWLEDGE-DATA-001 §19 B3a): a hidden dep removes an item BEFORE the
@@ -1245,8 +1253,8 @@ mod tests {
         let strong = "open tickets per region open tickets per region";
         let weak = "open tickets per region and then some padding..";
         assert_eq!(strong.len(), weak.len());
-        e.write(&dep_node(strong, "", &["source:hidden"])).unwrap();
-        e.write(&dep_node(weak, "", &["source:seen"])).unwrap();
+        write_dep(&mut e, strong, "", &["source:hidden"]);
+        write_dep(&mut e, weak, "", &["source:seen"]);
         // One item's worth of tokens (each costs len/4 = 11).
         let budget = 15;
         let all = Visible::from_deps(["source:hidden", "source:seen"]).unwrap();
@@ -1276,15 +1284,14 @@ mod tests {
     fn hidden_items_cannot_crowd_the_candidate_list() {
         let mut e = KnowledgeEngine::in_memory().unwrap();
         for i in 0..40 {
-            e.write(&dep_node(
+            write_dep(
+                &mut e,
                 &format!("escalation escalation escalation note {i}"),
                 "",
                 &["source:hidden"],
-            ))
-            .unwrap();
+            );
         }
-        e.write(&dep_node("one escalation policy", "", &[]))
-            .unwrap();
+        write_dep(&mut e, "one escalation policy", "", &[]);
         let hits = e
             .recall_visible("escalation", 4000, None, &Visible::none(), 2)
             .unwrap();
@@ -1316,7 +1323,9 @@ mod tests {
             1,
         ))
         .unwrap();
-        let plain = e.recall("refunds approvals", 4000, None, 2).unwrap();
+        let plain = e
+            .recall_visible("refunds approvals", 4000, None, &Visible::none(), 2)
+            .unwrap();
         assert_eq!(
             plain.len(),
             1,
@@ -1353,8 +1362,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        let back = KNode::from_node(&node).unwrap();
-        assert_eq!(back.deps, vec!["invalid:42".to_string()]);
-        assert!(!Visible::none().allows(&effective_deps(&back)));
+        assert!(effective_deps(&node).contains(&"invalid:42".to_string()));
+        assert!(!Visible::none().allows(&effective_deps(&node)));
     }
 }

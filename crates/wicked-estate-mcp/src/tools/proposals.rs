@@ -27,8 +27,22 @@ pub fn dispatch(
 }
 
 /// The proposal tools with the knowledge domain, so approving a `knowledge` proposal writes it.
-/// `graph` is the attached code graph: a `relate_code[]` endpoint it holds is epoch-stamped.
+/// No code graph is attached: every `relate_code[]` endpoint is stamped unverified (epoch 0). The
+/// MCP router uses [`dispatch_with_knowledge_and_graph`].
 pub fn dispatch_with_knowledge(
+    tool: &str,
+    id: &Value,
+    params: &Value,
+    memory: &mut dyn MemoryApi<Error = anyhow::Error>,
+    knowledge: &mut dyn KnowledgeApi,
+) -> Value {
+    let no_graph = wicked_estate_store::MemStore::new();
+    dispatch_inner(tool, id, params, memory, Some((knowledge, &no_graph)))
+}
+
+/// The proposal tools with the knowledge domain and the attached code graph: a `relate_code[]`
+/// endpoint the graph holds is epoch-stamped (DES-KNOWLEDGE-DATA-001 §10.1).
+pub fn dispatch_with_knowledge_and_graph(
     tool: &str,
     id: &Value,
     params: &Value,
@@ -396,7 +410,7 @@ fn dispatch_approve(
                         .unwrap_or_default();
                     let epochs = super::knowledge::fetch_epochs(graph, &code_ids);
                     unverified_code = code_ids.iter().filter(|c| !epochs.contains_key(*c)).count();
-                    knowledge.write_proposal(proposal, &epochs, now)
+                    knowledge.write_proposal_with_epochs(proposal, &epochs, now)
                 });
             match &approved {
                 _ if !wrote_knowledge => {}

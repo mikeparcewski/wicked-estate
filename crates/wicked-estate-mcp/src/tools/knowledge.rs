@@ -211,7 +211,7 @@ fn dispatch_recall(id: &Value, args: &Value, knowledge: &mut dyn KnowledgeApi, n
         Ok(v) => v,
         Err(e) => return e,
     };
-    match knowledge.recall(&query, token_budget, scope_prefix.as_deref(), &visible, now) {
+    match knowledge.recall_hits(&query, token_budget, scope_prefix.as_deref(), &visible, now) {
         Ok(items) => {
             let wire: Vec<Value> = items
                 .into_iter()
@@ -272,7 +272,7 @@ fn dispatch_recall_about_code(id: &Value, args: &Value, knowledge: &dyn Knowledg
         Ok(v) => v,
         Err(e) => return e,
     };
-    match knowledge.recall_about_code(&code_ids, &visible) {
+    match knowledge.recall_about_code_hits(&code_ids, &visible) {
         Ok(items) => {
             let wire: Vec<Value> = items
                 .into_iter()

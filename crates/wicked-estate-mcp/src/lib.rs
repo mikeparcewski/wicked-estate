@@ -950,7 +950,7 @@ pub fn handle_request_unified_ro(
                 // `proposal.submit`/`proposal.list` fall through here even in read-only mode.
                 "proposal.submit" | "proposal.list" | "proposal.approve" | "proposal.reject" => {
                     match domains {
-                        Some(d) => tools::proposals::dispatch_with_knowledge(
+                        Some(d) => tools::proposals::dispatch_with_knowledge_and_graph(
                             tool,
                             &id,
                             &params,
@@ -2825,7 +2825,6 @@ mod tests {
             _: &str,
             _: usize,
             _: Option<&str>,
-            _: &wicked_estate_knowledge::Visible,
             _: i64,
         ) -> anyhow::Result<Vec<wicked_estate_knowledge::KnowledgeItem>> {
             Ok(vec![])
@@ -2852,7 +2851,6 @@ mod tests {
         fn recall_about_code(
             &self,
             _: &[String],
-            _: &wicked_estate_knowledge::Visible,
         ) -> anyhow::Result<Vec<wicked_estate_knowledge::KnowledgeItem>> {
             Ok(vec![])
         }

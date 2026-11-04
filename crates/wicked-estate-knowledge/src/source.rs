@@ -438,10 +438,9 @@ impl KnowledgeEngine {
                 now,
             );
             kn.id = doc_id(sid, &doc.key);
-            kn.deps = deps.clone();
-            kn.untrusted = true;
             let doc_sym = kn.symbol();
             let mut node = kn.to_node();
+            crate::plane::stamp(&mut node, &deps, true);
             let m = &mut node.metadata;
             m.insert(meta::SOURCE_ID.into(), sid.into());
             m.insert(meta::SOURCE_KEY.into(), doc.key.clone().into());
@@ -466,10 +465,9 @@ impl KnowledgeEngine {
                     now,
                 );
                 skn.id = section_id(sid, &doc.key, &sec.key);
-                skn.deps = deps.clone();
-                skn.untrusted = true;
                 let sym = skn.symbol();
                 let mut snode = skn.to_node();
+                crate::plane::stamp(&mut snode, &deps, true);
                 let m = &mut snode.metadata;
                 m.insert(meta::SOURCE_ID.into(), sid.into());
                 m.insert(meta::SOURCE_KEY.into(), doc.key.clone().into());

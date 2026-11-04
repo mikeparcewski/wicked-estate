@@ -9,7 +9,7 @@
 
 use serde_json::{Value, json};
 use wicked_estate_core::RetrievalTool;
-use wicked_estate_knowledge::{KnowledgeApi, KnowledgeEngine, Visible};
+use wicked_estate_knowledge::{KnowledgeApi, KnowledgeEngine};
 use wicked_estate_mcp::{DomainHandles, McpContext, handle_request_unified_ro};
 use wicked_estate_memory::MemoryEngine;
 use wicked_estate_memory_core::{MemoryApi, ProposalState};
@@ -84,7 +84,7 @@ fn knowledge_proposal_submit_readonly_preserves_payload_and_facets() {
     assert_eq!(know.count(None, None).unwrap(), 0);
     assert_eq!(mem.count().unwrap(), 0);
     assert!(
-        KnowledgeApi::recall(&mut know, "ledger", 500, None, &Visible::none(), 1)
+        KnowledgeApi::recall(&mut know, "ledger", 500, None, 1)
             .unwrap()
             .is_empty()
     );
@@ -189,7 +189,6 @@ fn knowledge_proposal_approve_writes_recallable_node_with_source() {
         "reconciliation ledger",
         500,
         Some("project:ledger"),
-        &Visible::none(),
         1,
     )
     .unwrap();
@@ -230,7 +229,7 @@ fn knowledge_proposal_retry_after_write_keeps_one_node() {
         .unwrap();
     // Inject a failure after writing the node but before the queue can mark it Approved.
     let failed = mem.approve_proposal_with_knowledge(&pid, 2, &mut |proposal, now| {
-        KnowledgeApi::write_proposal(&mut know, proposal, &std::collections::HashMap::new(), now)?;
+        KnowledgeApi::write_proposal(&mut know, proposal, now)?;
         anyhow::bail!("injected failure after knowledge write")
     });
     assert!(failed.is_err());
@@ -295,16 +294,9 @@ fn knowledge_proposal_reject_writes_nothing() {
     assert_eq!(know.count(None, None).unwrap(), 0);
     assert_eq!(mem.count().unwrap(), 0);
     assert!(
-        KnowledgeApi::recall(
-            &mut know,
-            "discarded ledger",
-            500,
-            None,
-            &Visible::none(),
-            1
-        )
-        .unwrap()
-        .is_empty()
+        KnowledgeApi::recall(&mut know, "discarded ledger", 500, None, 1)
+            .unwrap()
+            .is_empty()
     );
     let rejected_queue = mem
         .list_proposals(Some("knowledge"), Some(ProposalState::Rejected))

@@ -95,8 +95,7 @@ fn readonly_hides_an_interrupted_approval_and_the_write_mode_startup_sweep_rolls
             .list_proposals(Some("knowledge"), Some(ProposalState::Pending))
             .unwrap()
             .remove(0);
-        know.write_proposal(&proposal, &Default::default(), 1)
-            .unwrap();
+        know.write_proposal(&proposal, 1).unwrap();
         assert_eq!(know.applying_proposals().unwrap().len(), 1);
         pid
     };
@@ -129,9 +128,8 @@ fn readonly_hides_an_interrupted_approval_and_the_write_mode_startup_sweep_rolls
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].id, pid);
     // And it approves cleanly afterwards.
-    let mut writer = |p: &wicked_estate_memory_core::Proposal, now: i64| {
-        know.write_proposal(p, &Default::default(), now)
-    };
+    let mut writer =
+        |p: &wicked_estate_memory_core::Proposal, now: i64| know.write_proposal(p, now);
     mem.approve_proposal_with_knowledge(&pid, 5, &mut writer)
         .unwrap();
     know.finish_proposal(&pid).unwrap();

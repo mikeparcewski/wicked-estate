@@ -326,7 +326,7 @@ impl KnowledgeEngine {
     /// epoch-stamped edges (an `about` row carries no knowledge epoch, so a re-added key would
     /// inherit it).
     pub fn check_about_link_target(&self, node: &SymbolId) -> anyhow::Result<()> {
-        let Some(kn) = self.live_knowledge(&node.0)? else {
+        let Some((_, kn)) = self.live_knowledge(&node.0)? else {
             anyhow::bail!("no live knowledge node {}", node.0);
         };
         if !scope_deps(&kn.scope).is_empty() {
@@ -341,7 +341,7 @@ impl KnowledgeEngine {
 
     /// A live, complete knowledge node by its full id (`kchunk synthetic …:` as recall returns
     /// it). An approval in flight is not live.
-    fn live_knowledge(&self, id: &str) -> wicked_estate_core::Result<Option<KNode>> {
+    fn live_knowledge(&self, id: &str) -> wicked_estate_core::Result<Option<(Node, KNode)>> {
         let sym = SymbolId(id.to_string());
         if self.applying(&sym) {
             return Ok(None);
@@ -349,8 +349,7 @@ impl KnowledgeEngine {
         Ok(self
             .store
             .get_node(&sym)?
-            .as_ref()
-            .and_then(KNode::from_node))
+            .and_then(|n| KNode::from_node(&n).map(|kn| (n, kn))))
     }
 
     /// Plan an approval: resolve every endpoint, derive the deps, refuse a mismatch. Pure (reads only).
@@ -396,7 +395,7 @@ impl KnowledgeEngine {
                 return Ok(self_id.clone());
             }
             if !epochs.contains_key(id) {
-                let Some(node) = self.live_knowledge(id)? else {
+                let Some((node, _)) = self.live_knowledge(id)? else {
                     anyhow::bail!(
                         "relate endpoint {id:?} is not a live knowledge node (use the node_id recall returns)"
                     );
@@ -441,7 +440,6 @@ impl KnowledgeEngine {
                 );
             }
         }
-        kn.deps = deps.clone();
 
         let epoch_of = |id: &str| epochs.get(id).copied().unwrap_or(0);
         let meta = |extra: Value| -> String {
@@ -560,6 +558,7 @@ impl KnowledgeEngine {
         }
 
         let mut node = kn.to_node();
+        crate::plane::stamp(&mut node, &deps, false);
         if !proposal.facets.is_empty() {
             node.metadata.insert(
                 wicked_estate_memory_core::meta_keys::FACETS.into(),
@@ -875,10 +874,10 @@ impl KnowledgeEngine {
         id: &str,
         visible: &Visible,
     ) -> wicked_estate_core::Result<Option<NeighborNode>> {
-        let Some(kn) = self.live_knowledge(id)? else {
+        let Some((node, kn)) = self.live_knowledge(id)? else {
             return Ok(None);
         };
-        let deps = effective_deps(&kn);
+        let deps = effective_deps(&node);
         if !visible.allows(&deps) {
             return Ok(None);
         }
@@ -888,7 +887,7 @@ impl KnowledgeEngine {
             class: Some(kn.class.as_kind().to_string()),
             label: kn.content.chars().take(LABEL_CHARS).collect(),
             scope: kn.scope.clone(),
-            untrusted: is_untrusted(&kn),
+            untrusted: is_untrusted(&node),
             deps,
             source: cut(&kn.source, SOURCE_CHARS),
             hydrated: true,
@@ -1240,11 +1239,11 @@ mod tests {
             "derived: both catalogs' sources and the code's repo"
         );
         assert_eq!(plan.unverified_code, 0);
-        let kn = e
+        let (node, _) = e
             .live_knowledge(&id)
             .unwrap()
             .expect("visible after approve");
-        assert_eq!(kn.deps, plan.deps);
+        assert_eq!(crate::plane::stored_deps(&node), plan.deps);
         // joins + describes + hub derived_from to customers... tickets and customers are linked
         // by `joins` (not from the shape), so the shape hubs to both, and to the code.
         let rels: Vec<&str> = plan.edges.iter().map(|e| e.rel.as_str()).collect();

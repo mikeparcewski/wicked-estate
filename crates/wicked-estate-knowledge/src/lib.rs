@@ -17,7 +17,7 @@ pub mod engine;
 pub mod plane;
 pub mod shape;
 pub mod source;
-pub use engine::{KClass, KNode, KRecalled, KnowledgeEngine};
+pub use engine::{KClass, KHit, KNode, KRecalled, KnowledgeEngine};
 pub use plane::Visible;
 pub use shape::{
     ApplyJournal, NeighborEdge, NeighborNode, Neighbors, NeighborsQuery, ShapeLinks,
@@ -452,7 +452,7 @@ fn handle_call(
                             // This standalone surface declares no visibility, so only dep-free
                             // knowledge is returned, and never an approval still in flight.
                             if let Some(kn) = KNode::from_node(&node)
-                                .filter(|kn| Visible::none().allows(&plane::effective_deps(kn)))
+                                .filter(|_| Visible::none().allows(&plane::effective_deps(&node)))
                                 .filter(|_| !engine.applying(&node.symbol))
                             {
                                 if kn.source.is_empty() {
@@ -964,7 +964,21 @@ pub struct KnowledgeItem {
     /// predate this field deserialize to `""` rather than erroring.
     #[serde(default)]
     pub source: String,
-    /// The item's own scope (DES-KNOWLEDGE-DATA-001 §4.3). `""` = root.
+}
+
+/// A recalled knowledge item with its place in the knowledge plane (DES-KNOWLEDGE-DATA-001 §4.3):
+/// the wire item of `knowledge.recall` / `knowledge.recall_about_code` — [`KnowledgeItem`]'s fields
+/// plus the item's `scope`, `deps` and `untrusted`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct KnowledgeHit {
+    pub node_id: String,
+    pub class: String,
+    pub label: String,
+    pub body_snippet: String,
+    pub score: f64,
+    #[serde(default)]
+    pub source: String,
+    /// The item's own scope. `""` = root.
     #[serde(default)]
     pub scope: String,
     /// The item's effective dependency set (`source:<id>` / `repo:<id>`), every one of which was
@@ -977,18 +991,31 @@ pub struct KnowledgeItem {
     pub untrusted: bool,
 }
 
-impl KnowledgeItem {
-    fn from_knode(node_id: String, kn: KNode, score: f64) -> Self {
+impl KnowledgeHit {
+    /// A plain item as a hit with no deps (what an implementer without the plane returns).
+    pub fn from_item(i: KnowledgeItem) -> Self {
+        KnowledgeHit {
+            node_id: i.node_id,
+            class: i.class,
+            label: i.label,
+            body_snippet: i.body_snippet,
+            score: i.score,
+            source: i.source,
+            scope: String::new(),
+            deps: Vec::new(),
+            untrusted: false,
+        }
+    }
+
+    /// The plain item (the pre-plane wire shape).
+    pub fn into_item(self) -> KnowledgeItem {
         KnowledgeItem {
-            node_id,
-            class: kn.class.as_kind().to_string(),
-            label: kn.content.chars().take(60).collect(),
-            deps: plane::effective_deps(&kn),
-            untrusted: plane::is_untrusted(&kn),
-            scope: kn.scope,
-            body_snippet: kn.content,
-            score,
-            source: kn.source,
+            node_id: self.node_id,
+            class: self.class,
+            label: self.label,
+            body_snippet: self.body_snippet,
+            score: self.score,
+            source: self.source,
         }
     }
 }
@@ -1019,10 +1046,19 @@ pub trait KnowledgeApi {
     fn write_proposal(
         &mut self,
         _proposal: &wicked_estate_memory_core::Proposal,
-        _code_epochs: &HashMap<String, u64>,
         _now: i64,
     ) -> anyhow::Result<String> {
         anyhow::bail!("knowledge proposal writer not available")
+    }
+    /// [`KnowledgeApi::write_proposal`] with the live epoch of each code endpoint the attached
+    /// graph holds (a `relate_code[]` endpoint it does not hold is stamped epoch 0, unverified).
+    fn write_proposal_with_epochs(
+        &mut self,
+        proposal: &wicked_estate_memory_core::Proposal,
+        _code_epochs: &HashMap<String, u64>,
+        now: i64,
+    ) -> anyhow::Result<String> {
+        self.write_proposal(proposal, now)
     }
     /// The approval is complete (its proposal is marked approved): drop its journal.
     fn finish_proposal(&mut self, _proposal_id: &str) -> anyhow::Result<()> {
@@ -1091,16 +1127,32 @@ pub trait KnowledgeApi {
     /// Recall the most relevant token-budgeted knowledge slice for `query`. `scope_prefix`
     /// (arch-R5, mirroring `memory.recall`'s wire contract): `Some(prefix)` restricts recall to
     /// knowledge whose scope equals the prefix or descends from it (`Some("")` = root subtree =
-    /// everything); `None` = no scope filtering. `visible` (DES-KNOWLEDGE-DATA-001 §4.3): only
-    /// knowledge whose every dep is in it is a candidate, filtered before ranking.
+    /// everything); `None` = no scope filtering. Declares no visibility: only dep-free knowledge.
     fn recall(
         &mut self,
         query: &str,
         token_budget: usize,
         scope_prefix: Option<&str>,
-        visible: &Visible,
         now: i64,
     ) -> anyhow::Result<Vec<KnowledgeItem>>;
+    /// Recall with a declared `visible` set (DES-KNOWLEDGE-DATA-001 §4.3): only knowledge whose
+    /// every dep is in it is a candidate, filtered before ranking; each hit carries its `scope`,
+    /// `deps` and `untrusted`. The provided default serves an implementer without the plane (no
+    /// deps anywhere): its plain recall, as hits with no deps.
+    fn recall_hits(
+        &mut self,
+        query: &str,
+        token_budget: usize,
+        scope_prefix: Option<&str>,
+        _visible: &Visible,
+        now: i64,
+    ) -> anyhow::Result<Vec<KnowledgeHit>> {
+        Ok(self
+            .recall(query, token_budget, scope_prefix, now)?
+            .into_iter()
+            .map(KnowledgeHit::from_item)
+            .collect())
+    }
     /// Node counts, optionally per class and/or within a scope subtree (`scope_prefix`, same
     /// predicate as [`KnowledgeApi::recall`] — mirrors `memory.coverage`).
     fn coverage(
@@ -1114,11 +1166,20 @@ pub trait KnowledgeApi {
         symbol_ids: &[String],
         symbol_epochs: &HashMap<String, u64>,
     ) -> anyhow::Result<u32>;
-    fn recall_about_code(
+    fn recall_about_code(&self, symbol_ids: &[String]) -> anyhow::Result<Vec<KnowledgeItem>>;
+    /// [`KnowledgeApi::recall_about_code`] with a declared `visible` set (the same rule as
+    /// [`KnowledgeApi::recall_hits`]). The provided default serves an implementer without the plane.
+    fn recall_about_code_hits(
         &self,
         symbol_ids: &[String],
-        visible: &Visible,
-    ) -> anyhow::Result<Vec<KnowledgeItem>>;
+        _visible: &Visible,
+    ) -> anyhow::Result<Vec<KnowledgeHit>> {
+        Ok(self
+            .recall_about_code(symbol_ids)?
+            .into_iter()
+            .map(KnowledgeHit::from_item)
+            .collect())
+    }
 }
 
 impl KnowledgeApi for KnowledgeEngine {
@@ -1148,6 +1209,14 @@ impl KnowledgeApi for KnowledgeEngine {
     }
 
     fn write_proposal(
+        &mut self,
+        proposal: &wicked_estate_memory_core::Proposal,
+        now: i64,
+    ) -> anyhow::Result<String> {
+        self.write_proposal_with_epochs(proposal, &HashMap::new(), now)
+    }
+
+    fn write_proposal_with_epochs(
         &mut self,
         proposal: &wicked_estate_memory_core::Proposal,
         code_epochs: &HashMap<String, u64>,
@@ -1235,14 +1304,28 @@ impl KnowledgeApi for KnowledgeEngine {
         query: &str,
         token_budget: usize,
         scope_prefix: Option<&str>,
-        visible: &Visible,
         now: i64,
     ) -> anyhow::Result<Vec<KnowledgeItem>> {
+        Ok(self
+            .recall_hits(query, token_budget, scope_prefix, &Visible::none(), now)?
+            .into_iter()
+            .map(KnowledgeHit::into_item)
+            .collect())
+    }
+
+    fn recall_hits(
+        &mut self,
+        query: &str,
+        token_budget: usize,
+        scope_prefix: Option<&str>,
+        visible: &Visible,
+        now: i64,
+    ) -> anyhow::Result<Vec<KnowledgeHit>> {
         let hits =
             KnowledgeEngine::recall_visible(self, query, token_budget, scope_prefix, visible, now)?;
         Ok(hits
             .into_iter()
-            .map(|h| KnowledgeItem {
+            .map(|h| KnowledgeHit {
                 node_id: h.id.0,
                 class: h.class.as_class().to_string(),
                 label: h.content.chars().take(60).collect(),
@@ -1295,11 +1378,19 @@ impl KnowledgeApi for KnowledgeEngine {
         Ok(n)
     }
 
-    fn recall_about_code(
+    fn recall_about_code(&self, symbol_ids: &[String]) -> anyhow::Result<Vec<KnowledgeItem>> {
+        Ok(self
+            .recall_about_code_hits(symbol_ids, &Visible::none())?
+            .into_iter()
+            .map(KnowledgeHit::into_item)
+            .collect())
+    }
+
+    fn recall_about_code_hits(
         &self,
         symbol_ids: &[String],
         visible: &Visible,
-    ) -> anyhow::Result<Vec<KnowledgeItem>> {
+    ) -> anyhow::Result<Vec<KnowledgeHit>> {
         let xedge = self
             .xedge
             .as_ref()
@@ -1314,14 +1405,21 @@ impl KnowledgeApi for KnowledgeEngine {
                     if let Some(kn) = KNode::from_node(&node) {
                         // The same visibility rule as recall (§4.3): every dep must be visible, and
                         // an approval in flight is invisible until complete.
-                        if !visible.allows(&plane::effective_deps(&kn)) || self.applying(&kid) {
+                        let deps = plane::effective_deps(&node);
+                        if !visible.allows(&deps) || self.applying(&kid) {
                             continue;
                         }
-                        items.push(KnowledgeItem::from_knode(
-                            edge.source.stable_id.clone(),
-                            kn,
-                            edge.confidence as f64,
-                        ));
+                        items.push(KnowledgeHit {
+                            node_id: edge.source.stable_id.clone(),
+                            class: kn.class.as_kind().to_string(),
+                            label: kn.content.chars().take(60).collect(),
+                            untrusted: plane::is_untrusted(&node),
+                            deps,
+                            scope: kn.scope,
+                            body_snippet: kn.content,
+                            score: edge.confidence as f64,
+                            source: kn.source,
+                        });
                     }
                 }
             }

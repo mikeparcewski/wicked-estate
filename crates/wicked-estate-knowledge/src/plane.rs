@@ -14,7 +14,9 @@ use std::collections::BTreeSet;
 
 use wicked_estate_core::Scope;
 
-use crate::engine::KNode;
+use wicked_estate_core::Node;
+
+use crate::engine::meta_keys;
 
 /// The scope kind (and dep kind) of a live source's catalog: `source:<sourceId>`.
 pub const SOURCE_KIND: &str = "source";
@@ -68,17 +70,63 @@ pub fn scope_deps(scope: &str) -> Vec<String> {
         .collect()
 }
 
+/// The node's scope as written (the knowledge metadata field `KNode::from_node` hydrates).
+fn meta_scope(node: &Node) -> &str {
+    node.metadata
+        .get(meta_keys::SCOPE)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+}
+
+/// A node's STORED deps (the `deps` metadata array). A malformed entry is kept as a dep no reader
+/// holds (fail closed), never dropped.
+pub fn stored_deps(node: &Node) -> Vec<String> {
+    match node.metadata.get(meta_keys::DEPS) {
+        None => Vec::new(),
+        Some(serde_json::Value::Array(xs)) => xs
+            .iter()
+            .map(|x| {
+                x.as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("invalid:{x}"))
+            })
+            .collect(),
+        Some(other) => vec![format!("invalid:{other}")],
+    }
+}
+
 /// A node's effective deps: its stored deps plus the deps its scope implies, sorted and unique.
-pub fn effective_deps(kn: &KNode) -> Vec<String> {
-    let mut set: BTreeSet<String> = kn.deps.iter().cloned().collect();
-    set.extend(scope_deps(&kn.scope));
+pub fn effective_deps(node: &Node) -> Vec<String> {
+    let mut set: BTreeSet<String> = stored_deps(node).into_iter().collect();
+    set.extend(scope_deps(meta_scope(node)));
     set.into_iter().collect()
 }
 
 /// Does the node's text come from a source the person does not control? True for anything in a
 /// `source:` scope and for a node written with the flag. Consumers fence it as data.
-pub fn is_untrusted(kn: &KNode) -> bool {
-    kn.untrusted || !scope_deps(&kn.scope).is_empty()
+pub fn is_untrusted(node: &Node) -> bool {
+    node.metadata
+        .get(meta_keys::UNTRUSTED)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        || !scope_deps(meta_scope(node)).is_empty()
+}
+
+/// Stamp `deps` (sorted, unique) and the untrusted flag onto a knowledge node's metadata — the
+/// plane's write side of [`stored_deps`] / [`is_untrusted`].
+pub fn stamp(node: &mut Node, deps: &[String], untrusted: bool) {
+    let deps = normalize_deps(deps.iter().cloned());
+    if deps.is_empty() {
+        node.metadata.remove(meta_keys::DEPS);
+    } else {
+        node.metadata.insert(meta_keys::DEPS.into(), deps.into());
+    }
+    if untrusted {
+        node.metadata
+            .insert(meta_keys::UNTRUSTED.into(), true.into());
+    } else {
+        node.metadata.remove(meta_keys::UNTRUSTED);
+    }
 }
 
 /// The set of sources and repos a reader may see (`source:<id>` / `repo:<id>`).
@@ -138,7 +186,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::KClass;
+    use crate::engine::{KClass, KNode};
 
     #[test]
     fn dep_grammar() {
@@ -153,16 +201,19 @@ mod tests {
 
     #[test]
     fn effective_deps_add_the_source_scope_and_untrusted_follows_it() {
-        let mut kn = KNode::new(KClass::Section, "t", "source:s1", "x", 1);
-        assert_eq!(effective_deps(&kn), vec!["source:s1".to_string()]);
-        assert!(is_untrusted(&kn));
-        kn.scope = "wiki:arch".into();
-        kn.deps = vec!["repo:r1".into(), "source:s2".into()];
+        let node = KNode::new(KClass::Section, "t", "source:s1", "x", 1).to_node();
+        assert_eq!(effective_deps(&node), vec!["source:s1".to_string()]);
+        assert!(is_untrusted(&node));
+        let mut node = KNode::new(KClass::Section, "t", "wiki:arch", "x", 1).to_node();
+        stamp(&mut node, &["source:s2".into(), "repo:r1".into()], false);
         assert_eq!(
-            effective_deps(&kn),
+            effective_deps(&node),
             vec!["repo:r1".to_string(), "source:s2".to_string()]
         );
-        assert!(!is_untrusted(&kn));
+        assert!(!is_untrusted(&node));
+        node.metadata
+            .insert(meta_keys::DEPS.into(), serde_json::json!([42]));
+        assert_eq!(stored_deps(&node), vec!["invalid:42".to_string()]);
     }
 
     #[test]

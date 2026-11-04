@@ -350,10 +350,7 @@ fn the_start_up_sweep_rolls_back_a_half_done_approval() {
         .into_iter()
         .find(|p| p.id == pid)
         .unwrap();
-    let shape_id = r
-        .know
-        .write_proposal(&proposal, &Default::default(), 2)
-        .unwrap();
+    let shape_id = r.know.write_proposal(&proposal, 2).unwrap();
     assert!(r.xedge.typed_len().unwrap() > 0);
 
     // A young journal may be another process's approval in progress: the sweep leaves it (hidden).
@@ -402,9 +399,8 @@ fn the_sweep_completes_an_approved_proposal() {
         .unwrap()
         .to_string();
     // Approve through the queue but keep the journal (as if the process died before step 5).
-    let mut writer = |p: &wicked_estate_memory_core::Proposal, now: i64| {
-        r.know.write_proposal(p, &Default::default(), now)
-    };
+    let mut writer =
+        |p: &wicked_estate_memory_core::Proposal, now: i64| r.know.write_proposal(p, now);
     r.mem
         .approve_proposal_with_knowledge(&pid, 2, &mut writer)
         .unwrap();

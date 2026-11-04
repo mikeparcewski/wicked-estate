@@ -48,12 +48,14 @@
 - `SqliteStore::rollback_batch`, which discards an open `begin_batch` transaction.
 
 ### Changed
-- **Rust API (breaking for library consumers):** `KnowledgeApi::recall` and
-  `KnowledgeApi::recall_about_code` take a `&Visible`; `KnowledgeApi::write_proposal` takes the
-  code endpoints' epochs; `KnowledgeItem` and `KNode` gain fields; and
-  `tools::proposals::dispatch_with_knowledge` takes the attached graph. `KnowledgeEngine::recall`
-  keeps its signature and recalls with an empty `visible` (`recall_visible` takes one). The MCP
-  wire stays backward compatible: every new argument is optional.
+- **Rust API (additive, semver-compatible):** `KnowledgeApi` gains provided methods
+  `recall_hits` / `recall_about_code_hits` (a `&Visible`, items as `KnowledgeHit` with `scope`,
+  `deps`, `untrusted`), `write_proposal_with_epochs`, and the approval-journal and source-plane
+  operations; `KnowledgeEngine` gains `recall_visible` (`KHit`), `write_with_deps`,
+  `replace_source`, `source_catalog`, `neighbors`; `tools::proposals` gains
+  `dispatch_with_knowledge_and_graph` and `sweep_knowledge_approvals`. Existing signatures are
+  unchanged; `KnowledgeApi::recall` / `recall_about_code` declare no visibility, so they return
+  dep-free knowledge only (all knowledge written before this release).
 
 ## [0.31.0] — 2026-10-25
 
