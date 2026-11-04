@@ -384,9 +384,10 @@ knowledge is what estate read (docs, and the structure of live data sources). Ea
   `deps` and `untrusted`.
 - **Live-source structure** ✅ — `knowledge.replace_source` writes one COMPLETE generation of a live source's
   structure (one doc per relation or tool, with sections: names, types, keys, declared enum literals; never rows)
-  under scope `source:<id>`. The generation is one transaction: absent docs are tombstoned, a failed generation
-  writes nothing, an older generation is refused, and the same number must carry the same content (fingerprint).
-  A write tool (refused under `--readonly`).
+  under scope `source:<id>`. The knowledge side of a generation is one transaction: absent docs are tombstoned,
+  and a failed generation commits no knowledge change and no tombstone (a document's links, below, are staged
+  before it as hidden rows, which the source's next generation cleans up). An older generation is refused, and
+  the same number must carry the same content (fingerprint). A write tool (refused under `--readonly`).
 - **The source catalog** ✅ — `knowledge.source_catalog`: one source's complete typed catalog, paged (byte-bounded,
   fixed per generation); a pinned generation that moved is an error, never a mixed page. Its text is marked
   untrusted (data, never instructions).
@@ -402,8 +403,9 @@ knowledge is what estate read (docs, and the structure of live data sources). Ea
 - **Data shapes through the proposal queue** ✅ — a `knowledge` proposal may carry `relate[]` (links to knowledge
   nodes) and `relate_code[]` (links to code symbols, each naming its repo; a proposal filed under a `repo` facet may
   link only that repo's code). Approval derives the node's deps from its endpoints and
-  refuses a declared `deps` that differs; it is journalled, so a half-done approval is never visible and a
-  write-mode server's start-up sweep completes or rolls it back.
+  refuses a declared `deps` that differs; it is journalled, so a half-done approval is never visible. A
+  write-mode server's start-up sweep completes an interrupted approval whose proposal is approved, and rolls back
+  any other once its journal is older than 120 s (a younger one stays hidden until a later sweep or a retry).
 - **Trackers and the `control` store** ✅ (DES-PM-001 PM-1) — a project-management tracker (crew registers GitHub
   Issues or Jira) is a catalog of its own: `replace_source` takes a tracker id (`trk_…`) and everything about it
   carries the dep `source:<tracker id>`. The `control` store names crew's endpoints as link ends: `project:<id>`,
