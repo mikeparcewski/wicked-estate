@@ -14,10 +14,12 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 
 pub mod engine;
+pub mod links;
 pub mod plane;
 pub mod shape;
 pub mod source;
 pub use engine::{KClass, KHit, KNode, KRecalled, KnowledgeEngine};
+pub use links::{DocLink, LinkDir, LinkEnd, LinkedReplaceReport};
 pub use plane::Visible;
 pub use shape::{
     ApplyJournal, NeighborEdge, NeighborNode, Neighbors, NeighborsQuery, ShapeLinks,
@@ -1089,6 +1091,22 @@ pub trait KnowledgeApi {
     ) -> anyhow::Result<ReplaceReport> {
         anyhow::bail!("knowledge.replace_source not available")
     }
+    /// [`KnowledgeApi::replace_source`] whose documents own typed links, by document key
+    /// (DES-PM-001 §3.4). The provided default serves an implementer without links: a link-free
+    /// generation is a plain `replace_source`; one with links is refused, and nothing is written.
+    fn replace_source_linked(
+        &mut self,
+        generation: &SourceGeneration,
+        links: &std::collections::BTreeMap<String, Vec<DocLink>>,
+        now: i64,
+    ) -> anyhow::Result<LinkedReplaceReport> {
+        if links.values().any(|l| !l.is_empty()) {
+            anyhow::bail!("knowledge.replace_source links not available");
+        }
+        Ok(LinkedReplaceReport::without_links(
+            self.replace_source(generation, now)?,
+        ))
+    }
     /// One page of a source's typed catalog; `None` when unknown or not in `visible`.
     fn source_catalog(
         &self,
@@ -1253,6 +1271,17 @@ impl KnowledgeApi for KnowledgeEngine {
         now: i64,
     ) -> anyhow::Result<ReplaceReport> {
         Ok(KnowledgeEngine::replace_source(self, generation, now)?)
+    }
+
+    fn replace_source_linked(
+        &mut self,
+        generation: &SourceGeneration,
+        links: &std::collections::BTreeMap<String, Vec<DocLink>>,
+        now: i64,
+    ) -> anyhow::Result<LinkedReplaceReport> {
+        Ok(KnowledgeEngine::replace_source_linked(
+            self, generation, links, now,
+        )?)
     }
 
     fn source_catalog(

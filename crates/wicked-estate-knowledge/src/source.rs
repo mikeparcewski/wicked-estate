@@ -14,8 +14,15 @@
 //!   they stay hidden) and reported.
 //!
 //! [`KnowledgeEngine::source_catalog`] reads the complete, paged, versioned structure back.
+//!
+//! A generation's documents may also own typed **links** to crew projects, repos, PRs and runs
+//! ([`KnowledgeEngine::replace_source_linked`], DES-PM-001 §3.4; see [`crate::links`]). A source id
+//! is the registry entry's immutable id, or a tracker id crew derives from one.
+
+use std::collections::BTreeMap;
 
 use crate::engine::{KClass, KNode, KnowledgeEngine};
+use crate::links::{DocLink, LinkedReplaceReport, canonical_links, source_owner_prefix};
 use crate::plane::{SOURCE_KIND, Visible, valid_source_id};
 use serde_json::{Value, json};
 use wicked_estate_core::{
@@ -46,7 +53,7 @@ pub const PAGE_BYTES: usize = 18_000;
 const REPORT_LIST_BYTES: usize = 8_000;
 
 /// Metadata keys on source nodes (beside the knowledge keys).
-mod meta {
+pub(crate) mod meta {
     pub const SOURCE_ID: &str = "source_id";
     pub const SOURCE_KEY: &str = "source_key";
     pub const SECTION_KEY: &str = "section_key";
@@ -366,23 +373,65 @@ fn doc_record(doc: &SourceDoc) -> Value {
 }
 
 /// A stable fingerprint of a generation's content (FNV-1a 64 over its canonical JSON, documents in
-/// key order). Two submissions of one generation number must carry the same content.
-fn fingerprint(g: &SourceGeneration, docs: &[&SourceDoc]) -> String {
-    let canonical = json!({
+/// key order, and its links when it has any). Two submissions of one generation number must carry
+/// the same content. A generation without links hashes exactly as it did before links existed.
+fn fingerprint(g: &SourceGeneration, docs: &[&SourceDoc], links: Option<&Value>) -> String {
+    let mut canonical = json!({
         "label": g.label,
         "catalog": g.catalog,
         "docs": docs.iter().map(|d| json!({
             "key": d.key, "title": d.title, "entry": d.entry,
             "sections": d.sections.iter().map(|s| json!([s.key, s.text])).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
-    })
-    .to_string();
+    });
+    if let Some(links) = links {
+        canonical["links"] = links.clone();
+    }
+    let canonical = canonical.to_string();
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in canonical.bytes() {
         h ^= u64::from(b);
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!("{h:016x}")
+}
+
+/// The generation order rule: refuse a generation older than the stored one, or the stored one with
+/// different content (a pinned reader of generation N would otherwise read two structures as one).
+/// Returns the committed generation (0 when the source has none).
+fn check_order(
+    stored: Option<&Node>,
+    g: &SourceGeneration,
+    manifest: &Node,
+) -> wicked_estate_core::Result<u64> {
+    let Some(stored) = stored else {
+        return Ok(0);
+    };
+    let sid = g.source_id.as_str();
+    let current = stored
+        .metadata
+        .get(meta::GENERATION)
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if g.generation < current {
+        return Err(bad(format!(
+            "generation {} is older than the stored generation {current} for source {sid}",
+            g.generation
+        )));
+    }
+    let fp = |n: &Node| {
+        n.metadata
+            .get(meta::FINGERPRINT)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    if g.generation == current && fp(stored) != fp(manifest) {
+        return Err(bad(format!(
+            "generation {current} of source {sid} is already stored with different content: \
+             a changed structure needs a new generation"
+        )));
+    }
+    Ok(current)
 }
 
 /// Byte-bounded page boundaries over documents in key order: `[start, end)` pairs.
@@ -408,13 +457,35 @@ impl KnowledgeEngine {
         self.store.get_node(&manifest_symbol(source_id))
     }
 
-    /// Replace a source's structure with one complete generation (see the module docs).
+    /// Replace a source's structure with one complete generation (see the module docs). The
+    /// generation owns no links, so any links the source's documents held are dropped with it.
     pub fn replace_source(
         &mut self,
         g: &SourceGeneration,
         now: i64,
     ) -> wicked_estate_core::Result<ReplaceReport> {
+        Ok(self.replace_source_linked(g, &BTreeMap::new(), now)?.report)
+    }
+
+    /// [`Self::replace_source`] whose documents own typed links (`links`, by document key):
+    /// DES-PM-001 §3.4, in the write order [`crate::links`] describes. A link is visible only once
+    /// its generation is the source's committed one, and a crash at any step leaves only hidden
+    /// rows, which the source's next generation deletes.
+    pub fn replace_source_linked(
+        &mut self,
+        g: &SourceGeneration,
+        links: &BTreeMap<String, Vec<DocLink>>,
+        now: i64,
+    ) -> wicked_estate_core::Result<LinkedReplaceReport> {
+        // 1. Validate the whole generation and its links (pure).
         g.validate()?;
+        crate::links::validate_links(g, links).map_err(bad)?;
+        let link_count: usize = links.values().map(Vec::len).sum();
+        if link_count > 0 && self.xedge.is_none() {
+            return Err(bad(
+                "xedge store not available: a generation with links cannot be written".into(),
+            ));
+        }
         let sid = g.source_id.as_str();
         let scope = source_scope(sid);
         let deps = vec![scope.clone()];
@@ -507,11 +578,33 @@ impl KnowledgeEngine {
             );
             m.insert(meta::PAGES.into(), Value::Array(pages));
             m.insert(meta::UPDATED_AT.into(), now.into());
-            m.insert(meta::FINGERPRINT.into(), fingerprint(g, &docs).into());
+            m.insert(
+                meta::FINGERPRINT.into(),
+                fingerprint(g, &docs, canonical_links(links).as_ref()).into(),
+            );
             m.insert(crate::engine::meta_keys::DEPS.into(), json!(deps));
         }
 
-        // Everything below is ONE transaction: all of it lands, or none of it does.
+        // 1b. Resolve the links (reads only). 2. Refuse an older generation, or the same one with
+        // other content, before any link row is touched.
+        let edges = self.plan_links(g, links)?;
+        let committed = check_order(self.manifest(sid)?.as_ref(), g, &manifest)?;
+        let mut stale_removed = 0u64;
+        if self.xedge.is_some() {
+            // 3. An interrupted attempt's rows above the committed generation can never be live:
+            // delete them, so that generation number commits only its own links.
+            stale_removed += self.delete_link_owners(sid, |n| n > committed)?;
+            // 4. The new rows, hidden until the flip (their owner is still at the old generation).
+            if let Some(xedge) = self.xedge.as_ref() {
+                xedge.put_typed_batch(&edges)?;
+            }
+        }
+        #[cfg(test)]
+        if self.fail_links_before_flip {
+            return Err(bad("injected crash before the flip".into()));
+        }
+
+        // 5. The flip. Everything below is ONE transaction: all of it lands, or none of it does.
         self.store.begin_batch()?;
         let written =
             self.replace_source_in_batch(g, &scope, &to_write, &derived, &new_ids, &manifest);
@@ -519,17 +612,35 @@ impl KnowledgeEngine {
             Ok(report) => self.store.commit_batch().map(|_| report),
             Err(e) => Err(e),
         };
-        match outcome {
-            Ok(mut report) => {
-                report.docs = docs.len();
-                report.sections = section_count;
-                Ok(report)
-            }
+        let mut report = match outcome {
+            Ok(report) => report,
             Err(e) => {
                 self.store.rollback_batch()?;
-                Err(e)
+                return Err(e);
+            }
+        };
+        report.docs = docs.len();
+        report.sections = section_count;
+        #[cfg(test)]
+        if self.fail_links_after_flip {
+            return Err(bad("injected crash after the flip".into()));
+        }
+
+        // 6. Every other generation's rows are hidden now; delete them. The generation is
+        // committed whatever happens here, so a failure is reported, never returned as one.
+        let mut cleanup_error = None;
+        if self.xedge.is_some() {
+            match self.delete_link_owners(sid, |n| n != g.generation) {
+                Ok(n) => stale_removed += n,
+                Err(e) => cleanup_error = Some(e.to_string()),
             }
         }
+        Ok(LinkedReplaceReport {
+            report,
+            links: edges.len(),
+            stale_removed,
+            cleanup_error,
+        })
     }
 
     fn replace_source_in_batch(
@@ -542,36 +653,8 @@ impl KnowledgeEngine {
         manifest: &Node,
     ) -> wicked_estate_core::Result<ReplaceReport> {
         let sid = g.source_id.as_str();
-        // Generation order, read inside the transaction.
-        if let Some(stored) = self.manifest(sid)? {
-            let current = stored
-                .metadata
-                .get(meta::GENERATION)
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            if g.generation < current {
-                return Err(bad(format!(
-                    "generation {} is older than the stored generation {current} for source {sid}",
-                    g.generation
-                )));
-            }
-            // The same generation again is a retry, and must be the same content: a pinned
-            // reader of generation N would otherwise read two different structures as one.
-            let same = stored
-                .metadata
-                .get(meta::FINGERPRINT)
-                .and_then(Value::as_str)
-                == manifest
-                    .metadata
-                    .get(meta::FINGERPRINT)
-                    .and_then(Value::as_str);
-            if g.generation == current && !same {
-                return Err(bad(format!(
-                    "generation {current} of source {sid} is already stored with different content: \
-                     a changed structure needs a new generation"
-                )));
-            }
-        }
+        // Generation order, read again inside the transaction.
+        check_order(self.manifest(sid)?.as_ref(), g, manifest)?;
 
         // What this source holds now (by scope, not by the manifest, so nothing can be orphaned).
         let existing = self.store.find_symbols(&SymbolQuery {
@@ -597,11 +680,17 @@ impl KnowledgeEngine {
         let mut orphaned_bytes = 0usize;
         if let Some(xedge) = self.xedge.as_ref() {
             let reader = xedge.reader();
+            let link_prefix = source_owner_prefix(sid);
             for n in &absent {
                 let id = n.symbol.0.as_str();
                 let mut edges = reader.typed_out("knowledge", id, &[], usize::MAX)?;
                 edges.extend(reader.typed_in("knowledge", id, &[], usize::MAX)?);
                 for e in edges {
+                    // Links this source's documents own are this writer's own: the cleanup after
+                    // the flip deletes them, so they are not reported as kept.
+                    if e.owner.starts_with(&link_prefix) {
+                        continue;
+                    }
                     let key = (
                         e.rel.clone(),
                         e.source.engine.clone(),

@@ -27,7 +27,10 @@
 //! the grace period ([`KnowledgeEngine::rollback_proposal`]: node, then edges, then the journal
 //! last), and only the attempt the sweep inspected.
 //!
-//! [`KnowledgeEngine::neighbors`] walks the typed edges, filtered by the reader's `visible` set.
+//! [`KnowledgeEngine::neighbors`] walks the typed edges, filtered by the reader's `visible` set,
+//! including the links a source's documents own (DES-PM-001 §3.4, [`crate::links`]): a link is kept
+//! only while its owner document is live at the link's generation, and its `control` end (a crew
+//! project, repo, PR or run) only when the end's own deps are visible.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -39,8 +42,10 @@ use wicked_estate_memory_core::Proposal;
 use wicked_estate_overlay::{Endpoint, TYPED_RELS, TypedXEdge, is_typed_rel};
 
 use crate::engine::{KClass, KNode, KnowledgeEngine};
+use crate::links::parse_link_owner;
 use crate::plane::{
-    Visible, effective_deps, is_untrusted, normalize_deps, scope_deps, valid_dep, valid_repo_id,
+    RUN_KIND, Visible, control_deps, effective_deps, is_untrusted, normalize_deps, scope_deps,
+    valid_dep, valid_repo_id,
 };
 
 /// The approval journal's node kind (never a knowledge kind, so never read as knowledge).
@@ -48,6 +53,10 @@ pub const APPLY_JOURNAL_KIND: &str = "kapply";
 /// The store names typed edges use for their endpoints.
 pub const KNOWLEDGE_STORE: &str = "knowledge";
 pub const ESTATE_STORE: &str = "estate";
+/// Crew's control-plane endpoints (DES-PM-001 §3.4): `project:<id>`, `repo:<id>`,
+/// `pr:<repo id>#<n>`, `run:<id>`. Never hydrated and never epoch-checked; their deps are derived
+/// ([`crate::plane::control_deps`]).
+pub const CONTROL_STORE: &str = "control";
 
 /// At most this many `relate[]` + `relate_code[]` entries per proposal.
 pub const MAX_LINKS: usize = 200;
@@ -341,7 +350,10 @@ impl KnowledgeEngine {
 
     /// A live, complete knowledge node by its full id (`kchunk synthetic …:` as recall returns
     /// it). An approval in flight is not live.
-    fn live_knowledge(&self, id: &str) -> wicked_estate_core::Result<Option<(Node, KNode)>> {
+    pub(crate) fn live_knowledge(
+        &self,
+        id: &str,
+    ) -> wicked_estate_core::Result<Option<(Node, KNode)>> {
         let sym = SymbolId(id.to_string());
         if self.applying(&sym) {
             return Ok(None);
@@ -784,7 +796,8 @@ impl KnowledgeEngine {
 /// A `knowledge.neighbors` request.
 #[derive(Debug, Clone)]
 pub struct NeighborsQuery {
-    /// `"knowledge"` (a knowledge node id) or `"estate"` (a code symbol id).
+    /// `"knowledge"` (a knowledge node id), `"estate"` (a code symbol id) or `"control"` (a crew
+    /// project, repo, PR or run).
     pub store: String,
     pub id: String,
     /// Typed rels to follow (empty = all of them).
@@ -930,10 +943,93 @@ impl KnowledgeEngine {
         }
     }
 
-    /// Is the endpoint's stamped epoch its live one? An owner endpoint is checked by the owner's
-    /// liveness instead (its own epoch is not known before the flip).
+    /// A `control` endpoint as a neighbourhood node, or `None` when its id is malformed. Its deps
+    /// are derived from the id; a run's come from the link row (`run_deps`), since its id does not
+    /// say where it is filed.
+    fn control_neighbor(id: &str, run_deps: Option<&Value>) -> Option<NeighborNode> {
+        let kind = id.split_once(':')?.0;
+        let deps = if kind == RUN_KIND {
+            let given: Vec<String> = run_deps?
+                .as_array()?
+                .iter()
+                .map(|x| x.as_str().map(str::to_string))
+                .collect::<Option<_>>()?;
+            control_deps(id, Some(&given)).ok()?
+        } else {
+            control_deps(id, None).ok()?
+        };
+        Some(NeighborNode {
+            store: CONTROL_STORE.into(),
+            id: id.to_string(),
+            class: Some(kind.to_string()),
+            label: cut(id, LABEL_CHARS),
+            scope: String::new(),
+            deps,
+            untrusted: false,
+            source: String::new(),
+            hydrated: false,
+        })
+    }
+
+    /// A `control` start node, or `None` when it is malformed, hidden, or (a run) has no live link.
+    /// A run's deps are the union of the filings its live links record (the narrowest set).
+    fn control_start(
+        &self,
+        id: &str,
+        reader: &wicked_estate_overlay::XedgeReader,
+        visible: &Visible,
+    ) -> anyhow::Result<Option<NeighborNode>> {
+        let node = if id.starts_with(&format!("{RUN_KIND}:")) {
+            let mut union: BTreeSet<String> = BTreeSet::new();
+            let mut live = false;
+            let mut rows = reader.typed_out(CONTROL_STORE, id, &[], ADJACENCY_LIMIT)?;
+            rows.extend(reader.typed_in(CONTROL_STORE, id, &[], ADJACENCY_LIMIT)?);
+            for e in rows {
+                if !self.link_owner_live(&e.owner)? {
+                    continue;
+                }
+                let meta: Value = serde_json::from_str(&e.meta).unwrap_or_else(|_| json!({}));
+                let Some(n) = Self::control_neighbor(id, meta.get("run_deps")) else {
+                    return Ok(None); // a live row whose filing cannot be read: fail closed
+                };
+                live = true;
+                union.extend(n.deps);
+            }
+            if !live {
+                return Ok(None);
+            }
+            let deps: Vec<String> = union.into_iter().collect();
+            Self::control_neighbor(id, Some(&json!(deps)))
+        } else {
+            Self::control_neighbor(id, None)
+        };
+        Ok(node.filter(|n| visible.allows(&n.deps)))
+    }
+
+    /// May the reader keep an edge `owner` asserted? A link owner (`<doc>@<generation>`) needs its
+    /// document live, visible, and AT that generation; any other owner (a data shape) must be a
+    /// live, visible knowledge node.
+    fn owner_visible(&self, owner: &str, visible: &Visible) -> anyhow::Result<bool> {
+        match parse_link_owner(owner) {
+            Some((doc, _)) => {
+                Ok(self.link_owner_live(owner)?
+                    && self.knowledge_neighbor(&doc.0, visible)?.is_some())
+            }
+            None => Ok(self.knowledge_neighbor(owner, visible)?.is_some()),
+        }
+    }
+
+    /// Is the endpoint's stamped epoch its live one? An owner endpoint (a shape's node, or the
+    /// document that owns a link) is checked by the owner's liveness instead (its own epoch is not
+    /// known before the flip). A `control` endpoint has no epoch in estate.
     fn epoch_ok(&self, ep: &Endpoint, owner: &str, graph: &dyn GraphRead) -> bool {
-        if ep.engine == KNOWLEDGE_STORE && ep.stable_id == owner {
+        if ep.engine == CONTROL_STORE {
+            return true;
+        }
+        if ep.engine == KNOWLEDGE_STORE
+            && (ep.stable_id == owner
+                || parse_link_owner(owner).is_some_and(|(doc, _)| doc.0 == ep.stable_id))
+        {
             return true;
         }
         let sym = SymbolId(ep.stable_id.clone());
@@ -979,7 +1075,13 @@ impl KnowledgeEngine {
                 source: String::new(),
                 hydrated: false,
             },
-            other => anyhow::bail!("unknown store {other:?}: expected knowledge or estate"),
+            CONTROL_STORE => match self.control_start(&q.id, &reader, &q.visible)? {
+                Some(n) => n,
+                None => return Ok(None),
+            },
+            other => {
+                anyhow::bail!("unknown store {other:?}: expected knowledge, estate or control")
+            }
         };
         let rels: Vec<&str> = q.rels.iter().map(String::as_str).collect();
         let depth = q.depth.clamp(1, MAX_NEIGHBOR_DEPTH);
@@ -1012,7 +1114,7 @@ impl KnowledgeEngine {
                     let owner_ok = match owners.get(&e.owner) {
                         Some(ok) => *ok,
                         None => {
-                            let ok = self.knowledge_neighbor(&e.owner, &q.visible)?.is_some();
+                            let ok = self.owner_visible(&e.owner, &q.visible)?;
                             owners.insert(e.owner.clone(), ok);
                             ok
                         }
@@ -1043,6 +1145,11 @@ impl KnowledgeEngine {
                     if !index.contains(&other) {
                         let node = if other.0 == KNOWLEDGE_STORE {
                             self.knowledge_neighbor(&other.1, &q.visible)?
+                        } else if other.0 == CONTROL_STORE {
+                            // The far end's own deps, from its id (or the row's run filing), never
+                            // from the row's `deps` alone.
+                            Self::control_neighbor(&other.1, meta.get("run_deps"))
+                                .filter(|n| q.visible.allows(&n.deps))
                         } else {
                             let repo = meta.get("repo").and_then(Value::as_str);
                             let n = self.code_neighbor(&other.1, repo, graph);

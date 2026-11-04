@@ -419,3 +419,127 @@ fn the_sweep_completes_an_approved_proposal() {
     let hits = r.ok("knowledge.recall", json!({"query": "refunds manager"}));
     assert_eq!(hits["items"].as_array().unwrap().len(), 1, "{hits}");
 }
+
+const TRK: &str = "trk_0123456789abcdef";
+
+fn tracker(n: u64, targets: &[&str]) -> Value {
+    json!({
+        "sourceId": TRK,
+        "generation": n,
+        "label": "PROJA",
+        "catalog": {"system": "jira", "tenant": "site-1"},
+        "docs": [{
+            "key": "tracker",
+            "title": "PROJA tracker",
+            "entry": {"kind": "tracker"},
+            "sections": [{"key": "workflow", "text": "PROJA workflow states: To Do todo, In Progress doing, Done done"}],
+            "links": targets.iter().map(|t| json!({
+                "rel": "tracked_in", "dir": "out", "end": {"store": "control", "id": t},
+            })).collect::<Vec<_>>(),
+        }],
+    })
+}
+
+/// DES-PM-001 §3.4 over JSON-RPC: a tracker generation with links; `project:` in `visible`;
+/// `knowledge.neighbors` from a `control` start; hidden and malformed starts; links refused under
+/// `--readonly` and when malformed; a later generation drops a link.
+#[test]
+fn tracker_links_over_jsonrpc() {
+    let mut r = rig();
+    let out = r.ok(
+        "knowledge.replace_source",
+        tracker(1, &["project:proj_P", "repo:r"]),
+    );
+    assert_eq!(
+        out["links"],
+        json!({"written": 2, "stale_removed": 0, "cleanup": null})
+    );
+    assert_eq!(out["orphaned_edges"]["count"], 0);
+    let see = json!([format!("source:{TRK}"), "project:proj_P", "repo:r"]);
+
+    let items = r.ok(
+        "knowledge.recall",
+        json!({"query": "PROJA workflow states", "visible": see}),
+    )["items"]
+        .clone();
+    assert!(
+        items.as_array().unwrap().iter().any(|i| i["source"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("source:{TRK}/"))),
+        "{items}"
+    );
+
+    let n = r.ok(
+        "knowledge.neighbors",
+        json!({"store": "control", "id": "project:proj_P", "visible": see}),
+    );
+    let nodes = n["nodes"].as_array().unwrap();
+    assert_eq!(nodes[0]["store"], "control");
+    assert_eq!(nodes[0]["deps"], json!(["project:proj_P"]));
+    assert_eq!(nodes[0]["hydrated"], false);
+    assert!(nodes.iter().any(|x| x["store"] == "knowledge"));
+    let edge = &n["edges"][0];
+    assert_eq!(edge["rel"], "tracked_in");
+    assert_eq!(
+        edge["to"],
+        json!({"store": "control", "id": "project:proj_P"})
+    );
+    assert_eq!(
+        edge["meta"]["deps"],
+        json!(["project:proj_P", format!("source:{TRK}")])
+    );
+    assert_eq!(edge["meta"]["generation"], 1);
+
+    // A hidden start answers like an unknown one; a malformed control id is invalid params.
+    let hidden = r.call(
+        "knowledge.neighbors",
+        json!({"store": "control", "id": "project:proj_P", "visible": [format!("source:{TRK}")]}),
+    );
+    assert_eq!(hidden["result"]["isError"], true, "{hidden}");
+    for bad in ["project:a/b", "issue:x", "pr:r#0", "run:"] {
+        let resp = r.call(
+            "knowledge.neighbors",
+            json!({"store": "control", "id": bad}),
+        );
+        assert_eq!(resp["error"]["code"], -32602, "{bad}: {resp}");
+    }
+    let resp = r.call("knowledge.neighbors", json!({"store": "nope", "id": "x"}));
+    assert_eq!(resp["error"]["code"], -32602);
+
+    // Malformed links are invalid params and write nothing.
+    let mut bad = tracker(2, &["project:proj_P"]);
+    bad["docs"][0]["links"][0]["deps"] = json!(["project:proj_P"]);
+    let resp = r.call("knowledge.replace_source", bad);
+    assert_eq!(resp["error"]["code"], -32602, "{resp}");
+    let mut bad = tracker(2, &["run:run_1"]);
+    bad["docs"][0]["links"][0]["rel"] = json!("addresses");
+    assert_eq!(
+        r.call("knowledge.replace_source", bad)["error"]["code"],
+        -32602,
+        "a run end needs its filing"
+    );
+    let mut bad = tracker(2, &["project:proj_P"]);
+    bad["docs"][0]["links"][0]["dir"] = json!("sideways");
+    assert_eq!(
+        r.call("knowledge.replace_source", bad)["error"]["code"],
+        -32602
+    );
+    assert_eq!(r.xedge.typed_len().unwrap(), 2, "nothing written");
+
+    // A writer surface: refused under --readonly.
+    let resp = r.call_ro("knowledge.replace_source", tracker(2, &["repo:r"]), true);
+    assert!(resp.get("error").is_some(), "{resp}");
+
+    // Generation 2 drops the link to P: P's start then shows no tracker.
+    let out = r.ok("knowledge.replace_source", tracker(2, &["repo:r"]));
+    assert_eq!(out["links"]["written"], 1);
+    assert_eq!(out["links"]["stale_removed"], 2);
+    let n = r.ok(
+        "knowledge.neighbors",
+        json!({"store": "control", "id": "project:proj_P", "visible": see}),
+    );
+    assert_eq!(n["nodes"].as_array().unwrap().len(), 1);
+    assert!(n["edges"].as_array().unwrap().is_empty());
+    assert_eq!(r.xedge.typed_len().unwrap(), 1);
+}

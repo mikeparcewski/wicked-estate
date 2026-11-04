@@ -88,50 +88,111 @@ fn typed_table_exists(conn: &rusqlite::Connection) -> Result<bool> {
     Ok(n > 0)
 }
 
+/// The checks every typed write runs: a closed rel, an owner, no self-loop.
+fn check_typed(e: &TypedXEdge) -> Result<()> {
+    if !is_typed_rel(&e.rel) {
+        return Err(Error::Invalid(format!(
+            "typed xedge: unknown rel {:?} (expected one of {})",
+            e.rel,
+            TYPED_RELS.join("|")
+        )));
+    }
+    if e.owner.is_empty() {
+        return Err(Error::Invalid("typed xedge: owner required".into()));
+    }
+    if e.source.engine == e.target.engine && e.source.stable_id == e.target.stable_id {
+        return Err(Error::Invalid(
+            "typed xedge: an edge cannot loop to itself".into(),
+        ));
+    }
+    Ok(())
+}
+
+const UPSERT_TYPED: &str = "INSERT INTO typed_xedges
+                (src_store, src_id, src_epoch, tgt_store, tgt_id, tgt_epoch, rel, owner, confidence, meta)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT (src_store, src_id, tgt_store, tgt_id, rel, owner)
+             DO UPDATE SET src_epoch = excluded.src_epoch, tgt_epoch = excluded.tgt_epoch,
+                           confidence = excluded.confidence, meta = excluded.meta";
+
+fn upsert_typed(conn: &rusqlite::Connection, e: &TypedXEdge) -> Result<()> {
+    conn.execute(
+        UPSERT_TYPED,
+        params![
+            e.source.engine,
+            e.source.stable_id,
+            e.source.epoch as i64,
+            e.target.engine,
+            e.target.stable_id,
+            e.target.epoch as i64,
+            e.rel,
+            e.owner,
+            e.confidence as f64,
+            e.meta,
+        ],
+    )
+    .map_err(map_err)?;
+    Ok(())
+}
+
+/// The exclusive upper bound of the owners that start with `prefix` (its last byte plus one), so a
+/// prefix read is an index range. `None` for a prefix that is empty, or does not end in ASCII
+/// below DEL.
+fn prefix_upper(prefix: &str) -> Option<String> {
+    let last = *prefix.as_bytes().last()?;
+    if !(0x20..0x7f).contains(&last) {
+        return None;
+    }
+    let mut upper = prefix[..prefix.len() - 1].to_string();
+    upper.push(char::from(last + 1));
+    Some(upper)
+}
+
 impl XedgeStore {
     /// Insert or update one typed edge (keyed on both endpoints, `rel` and `owner`; a re-put
     /// refreshes the epochs, confidence and meta). Refuses a relation outside [`TYPED_RELS`], an
     /// empty owner and a self-loop.
     pub fn put_typed(&self, e: &TypedXEdge) -> Result<()> {
-        if !is_typed_rel(&e.rel) {
-            return Err(Error::Invalid(format!(
-                "typed xedge: unknown rel {:?} (expected one of {})",
-                e.rel,
-                TYPED_RELS.join("|")
-            )));
-        }
-        if e.owner.is_empty() {
-            return Err(Error::Invalid("typed xedge: owner required".into()));
-        }
-        if e.source.engine == e.target.engine && e.source.stable_id == e.target.stable_id {
-            return Err(Error::Invalid(
-                "typed xedge: an edge cannot loop to itself".into(),
-            ));
-        }
+        check_typed(e)?;
         let conn = self.conn.lock().expect("xedge mutex poisoned");
         conn.execute_batch(TYPED_SCHEMA).map_err(map_err)?;
-        conn.execute(
-            "INSERT INTO typed_xedges
-                (src_store, src_id, src_epoch, tgt_store, tgt_id, tgt_epoch, rel, owner, confidence, meta)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-             ON CONFLICT (src_store, src_id, tgt_store, tgt_id, rel, owner)
-             DO UPDATE SET src_epoch = excluded.src_epoch, tgt_epoch = excluded.tgt_epoch,
-                           confidence = excluded.confidence, meta = excluded.meta",
-            params![
-                e.source.engine,
-                e.source.stable_id,
-                e.source.epoch as i64,
-                e.target.engine,
-                e.target.stable_id,
-                e.target.epoch as i64,
-                e.rel,
-                e.owner,
-                e.confidence as f64,
-                e.meta,
-            ],
-        )
-        .map_err(map_err)?;
-        Ok(())
+        upsert_typed(&conn, e)
+    }
+
+    /// [`Self::put_typed`] for many edges in ONE transaction: every edge is checked first, and
+    /// then all of them land or none does.
+    pub fn put_typed_batch(&self, edges: &[TypedXEdge]) -> Result<()> {
+        for e in edges {
+            check_typed(e)?;
+        }
+        if edges.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().expect("xedge mutex poisoned");
+        conn.execute_batch(TYPED_SCHEMA).map_err(map_err)?;
+        let tx = conn.transaction().map_err(map_err)?;
+        for e in edges {
+            upsert_typed(&tx, e)?;
+        }
+        tx.commit().map_err(map_err)
+    }
+
+    /// Delete every typed edge any of `owners` asserted, in ONE transaction. Returns the number of
+    /// rows removed.
+    pub fn delete_typed_by_owners(&self, owners: &[String]) -> Result<u64> {
+        let mut conn = self.conn.lock().expect("xedge mutex poisoned");
+        if owners.is_empty() || !typed_table_exists(&conn)? {
+            return Ok(0);
+        }
+        let tx = conn.transaction().map_err(map_err)?;
+        let mut n = 0u64;
+        for owner in owners {
+            n += tx
+                .execute("DELETE FROM typed_xedges WHERE owner = ?1", params![owner])
+                .map_err(map_err)? as u64;
+        }
+        tx.commit().map_err(map_err)?;
+        Ok(n)
     }
 
     /// Delete every typed edge `owner` asserted. Returns the number of rows removed.
@@ -182,6 +243,31 @@ impl XedgeReader {
         limit: usize,
     ) -> Result<Vec<TypedXEdge>> {
         self.typed_query("tgt_store", "tgt_id", store, id, rels, limit)
+    }
+
+    /// The distinct owners that start with `prefix`, in order, at most `limit` (an index range read;
+    /// `prefix` must end in printable ASCII, else this is an error).
+    pub fn typed_owners_with_prefix(&self, prefix: &str, limit: usize) -> Result<Vec<String>> {
+        let upper = prefix_upper(prefix).ok_or_else(|| {
+            Error::Invalid(format!(
+                "typed xedge: owner prefix {prefix:?} must end in printable ASCII"
+            ))
+        })?;
+        let conn = self.conn.lock().expect("xedge mutex poisoned");
+        if !typed_table_exists(&conn)? {
+            return Ok(Vec::new());
+        }
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT DISTINCT owner FROM typed_xedges WHERE owner >= ?1 AND owner < ?2 \
+                 ORDER BY owner LIMIT {}",
+                limit.min(i64::MAX as usize)
+            ))
+            .map_err(map_err)?;
+        let rows = stmt
+            .query_map(params![prefix, upper], |r| r.get::<_, String>(0))
+            .map_err(map_err)?;
+        rows.map(|r| r.map_err(map_err)).collect()
     }
 
     /// Every typed edge owned by `owner`.
@@ -369,6 +455,88 @@ mod tests {
             .put_typed(&edge("doc:tickets", "Ticket", "describes", "shape:a"))
             .unwrap();
         assert_eq!(store.typed_len().unwrap(), 1);
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+
+    fn edge(tgt: &str, owner: &str) -> TypedXEdge {
+        TypedXEdge {
+            source: Endpoint::new("knowledge", "doc", 0),
+            target: Endpoint::new("control", tgt, 0),
+            rel: "tracked_in".into(),
+            owner: owner.into(),
+            confidence: 1.0,
+            meta: "{}".into(),
+        }
+    }
+
+    #[test]
+    fn a_batch_lands_whole_or_not_at_all() {
+        let store = XedgeStore::in_memory().unwrap();
+        store
+            .put_typed_batch(&[edge("project:a", "o@1"), edge("repo:r", "o@1")])
+            .unwrap();
+        assert_eq!(store.typed_len().unwrap(), 2);
+        // One bad edge refuses the whole batch before anything is written.
+        let mut bad = edge("project:b", "o@2");
+        bad.rel = "about".into();
+        assert!(
+            store
+                .put_typed_batch(&[edge("project:c", "o@2"), bad])
+                .is_err()
+        );
+        assert_eq!(store.typed_len().unwrap(), 2);
+        assert!(store.put_typed_batch(&[]).is_ok());
+    }
+
+    #[test]
+    fn owners_are_listed_by_prefix_and_deleted_together() {
+        let store = XedgeStore::in_memory().unwrap();
+        assert!(
+            store
+                .reader()
+                .typed_owners_with_prefix("kdoc synthetic source:t1/", 10)
+                .unwrap()
+                .is_empty(),
+            "no table yet"
+        );
+        store
+            .put_typed_batch(&[
+                edge("project:a", "kdoc synthetic source:t1/x:@1"),
+                edge("repo:r", "kdoc synthetic source:t1/x:@1"),
+                edge("project:a", "kdoc synthetic source:t1/y:@2"),
+                edge("project:a", "kdoc synthetic source:t10/x:@1"),
+                edge("project:a", "kdoc synthetic source:t1:@1"),
+            ])
+            .unwrap();
+        let r = store.reader();
+        assert_eq!(
+            r.typed_owners_with_prefix("kdoc synthetic source:t1/", 10)
+                .unwrap(),
+            vec![
+                "kdoc synthetic source:t1/x:@1".to_string(),
+                "kdoc synthetic source:t1/y:@2".to_string()
+            ],
+            "distinct, ordered, and t10 is another source"
+        );
+        assert_eq!(
+            r.typed_owners_with_prefix("kdoc synthetic source:t1/", 1)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(r.typed_owners_with_prefix("", 10).is_err());
+        assert_eq!(
+            store
+                .delete_typed_by_owners(&["kdoc synthetic source:t1/x:@1".to_string()])
+                .unwrap(),
+            2
+        );
+        assert_eq!(store.typed_len().unwrap(), 3);
+        assert_eq!(store.delete_typed_by_owners(&[]).unwrap(), 0);
     }
 }
 

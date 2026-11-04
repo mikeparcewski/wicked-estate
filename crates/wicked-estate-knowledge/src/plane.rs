@@ -5,6 +5,11 @@
 //! approved data shape has every source and repo it connects. Estate DERIVES deps — no proposer
 //! supplies them — and deps never narrow.
 //!
+//! A third dep kind, **`project:<id>`** (a crew project, DES-PM-001 §3.4), is carried by the typed
+//! links a tracker's catalog owns (`tracked_in project:P`), never by a node. The **`control`** store
+//! names crew's projects, repos, PRs and runs as link endpoints; [`control_deps`] derives each id's
+//! deps.
+//!
 //! A reader declares what it may see with a [`Visible`] set in the same spelling. An item is
 //! returned only when **every** one of its effective deps is in that set; a node with no deps (all
 //! knowledge written before this plane) is visible to every reader, and a reader that declares
@@ -22,6 +27,12 @@ use crate::engine::meta_keys;
 pub const SOURCE_KIND: &str = "source";
 /// The dep kind of a code repository: `repo:<repoId>`.
 pub const REPO_KIND: &str = "repo";
+/// The dep kind of a crew project: `project:<projectId>` (DES-PM-001 §3.4).
+pub const PROJECT_KIND: &str = "project";
+/// The `control` store's id kind for a pull request: `pr:<repo id>#<n>`.
+pub const PR_KIND: &str = "pr";
+/// The `control` store's id kind for a run: `run:<run id>`.
+pub const RUN_KIND: &str = "run";
 
 /// Longest id a dep may carry (a registry uuid is 36; a repo id is a short slug).
 const MAX_DEP_ID: usize = 128;
@@ -46,12 +57,82 @@ pub fn valid_repo_id(id: &str) -> bool {
         && id.bytes().all(|b| b.is_ascii_graphic() && b != b',')
 }
 
-/// Is `dep` a well-formed dependency: `source:<source id>` or `repo:<repo id>`?
+/// Is `id` a valid crew project (or run) id? 1-128 of `[A-Za-z0-9._-]` (crew's `proj_…`).
+pub fn valid_project_id(id: &str) -> bool {
+    valid_source_id(id)
+}
+
+/// Is `dep` a well-formed dependency: `source:<source id>`, `repo:<repo id>` or
+/// `project:<project id>`?
 pub fn valid_dep(dep: &str) -> bool {
     match dep.split_once(':') {
         Some((SOURCE_KIND, id)) => valid_source_id(id),
         Some((REPO_KIND, id)) => valid_repo_id(id),
+        Some((PROJECT_KIND, id)) => valid_project_id(id),
         _ => false,
+    }
+}
+
+/// The deps of a `control` endpoint (DES-PM-001 §3.4), derived by estate from the id:
+///
+/// | id | deps |
+/// |---|---|
+/// | `project:<id>` | itself |
+/// | `repo:<id>` | itself |
+/// | `pr:<repo id>#<n>` | `repo:<repo id>` |
+/// | `run:<id>` | `given`: the run's filing from crew, 1-[`MAX_DEPS`] `project:` / `repo:` deps |
+///
+/// `given` is only for a `run:` (whose filing the id does not say); for any other id it is refused,
+/// because estate derives those. A malformed id or dep is an error, never a narrower set.
+pub fn control_deps(id: &str, given: Option<&[String]>) -> Result<Vec<String>, String> {
+    let (kind, rest) = id
+        .split_once(':')
+        .ok_or_else(|| format!("control id {id:?}: expected project:, repo:, pr: or run:"))?;
+    if kind != RUN_KIND && given.is_some() {
+        return Err(format!(
+            "control id {id:?}: deps are given only for a run: end (estate derives a {kind}: end's deps)"
+        ));
+    }
+    match kind {
+        PROJECT_KIND if valid_project_id(rest) => Ok(vec![id.to_string()]),
+        REPO_KIND if valid_repo_id(rest) => Ok(vec![id.to_string()]),
+        PR_KIND => match rest.rsplit_once('#') {
+            Some((repo, n))
+                if valid_repo_id(repo)
+                    && !n.is_empty()
+                    && n.len() <= 20
+                    && n.bytes().all(|b| b.is_ascii_digit())
+                    && n.parse::<u64>().is_ok_and(|v| v > 0) =>
+            {
+                Ok(vec![format!("{REPO_KIND}:{repo}")])
+            }
+            _ => Err(format!("control id {id:?}: expected pr:<repo id>#<number>")),
+        },
+        RUN_KIND if valid_project_id(rest) => {
+            let given = given.ok_or_else(|| {
+                format!(
+                    "control id {id:?}: a run: end needs deps (its project:<id>, or repo:<id> for an unfiled run)"
+                )
+            })?;
+            if given.is_empty() || given.len() > MAX_DEPS {
+                return Err(format!(
+                    "control id {id:?}: a run: end needs 1-{MAX_DEPS} deps"
+                ));
+            }
+            for d in given {
+                let ok = matches!(d.split_once(':'), Some((PROJECT_KIND | REPO_KIND, _)))
+                    && valid_dep(d);
+                if !ok {
+                    return Err(format!(
+                        "control id {id:?}: run dep {d:?} must be project:<id> or repo:<id>"
+                    ));
+                }
+            }
+            Ok(normalize_deps(given.iter().cloned()))
+        }
+        _ => Err(format!(
+            "control id {id:?}: expected project:<id>, repo:<id>, pr:<repo id>#<n> or run:<id>"
+        )),
     }
 }
 
@@ -129,7 +210,8 @@ pub fn stamp(node: &mut Node, deps: &[String], untrusted: bool) {
     }
 }
 
-/// The set of sources and repos a reader may see (`source:<id>` / `repo:<id>`).
+/// The set of sources, repos and projects a reader may see (`source:<id>` / `repo:<id>` /
+/// `project:<id>`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Visible(BTreeSet<String>);
 
@@ -151,7 +233,7 @@ impl Visible {
             let d = d.as_ref();
             if !valid_dep(d) {
                 return Err(format!(
-                    "invalid visible entry {d:?}: expected source:<id> or repo:<id>"
+                    "invalid visible entry {d:?}: expected source:<id>, repo:<id> or project:<id>"
                 ));
             }
             set.insert(d.to_string());
@@ -225,5 +307,65 @@ mod tests {
         assert!(!v.allows(&["source:s1", "source:s2"]));
         assert!(!Visible::none().allows(&["source:s1"]));
         assert!(Visible::from_deps(["bogus"]).is_err());
+    }
+
+    /// DES-PM-001 §3.4: `project:` is a dep kind a reader may declare.
+    #[test]
+    fn project_is_a_dep_kind() {
+        assert!(valid_dep("project:proj_01HX.a-b"));
+        assert!(!valid_dep("project:"));
+        assert!(!valid_dep("project:a/b"), "one id segment");
+        assert!(!valid_dep("run:r1"), "a run is an endpoint, never a dep");
+        let v = Visible::from_deps(["source:trk_1", "project:proj_P"]).unwrap();
+        assert!(v.allows(&["project:proj_P", "source:trk_1"]));
+        assert!(!v.allows(&["project:proj_Q"]));
+    }
+
+    /// The control store's ids and their derived deps; a run's deps come from crew and are checked.
+    #[test]
+    fn control_ids_derive_their_deps() {
+        let run_deps = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            control_deps("project:proj_P", None).unwrap(),
+            vec!["project:proj_P"]
+        );
+        assert_eq!(
+            control_deps("repo:billing-api", None).unwrap(),
+            vec!["repo:billing-api"]
+        );
+        assert_eq!(
+            control_deps("pr:billing-api#42", None).unwrap(),
+            vec!["repo:billing-api"]
+        );
+        assert_eq!(
+            control_deps("run:r1", Some(&run_deps(&["project:proj_P"]))).unwrap(),
+            vec!["project:proj_P"]
+        );
+        assert_eq!(
+            control_deps("run:r1", Some(&run_deps(&["repo:r", "repo:r"]))).unwrap(),
+            vec!["repo:r"],
+            "normalized"
+        );
+        for bad in [
+            "project:",
+            "project:a/b",
+            "pr:r#0",
+            "pr:r#x",
+            "pr:r",
+            "pr:#4",
+            "issue:x",
+            "x",
+        ] {
+            assert!(control_deps(bad, None).is_err(), "must refuse {bad}");
+        }
+        // A run needs its filing; only project:/repo: deps; nothing else is given deps.
+        assert!(control_deps("run:r1", None).is_err());
+        assert!(control_deps("run:r1", Some(&[])).is_err());
+        assert!(control_deps("run:r1", Some(&run_deps(&["source:s1"]))).is_err());
+        assert!(control_deps("run:r1", Some(&run_deps(&["project:"]))).is_err());
+        assert!(control_deps("run:r1", Some(&run_deps(&["run:r2"]))).is_err());
+        assert!(control_deps("project:proj_P", Some(&run_deps(&["project:proj_P"]))).is_err());
+        let many: Vec<String> = (0..=MAX_DEPS).map(|i| format!("repo:r{i}")).collect();
+        assert!(control_deps("run:r1", Some(&many)).is_err());
     }
 }

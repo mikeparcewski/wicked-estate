@@ -80,7 +80,8 @@ pub mod meta_keys {
     /// Dedup: the canonical node carries `canonical = true`.
     pub const CANONICAL: &str = "canonical";
     /// DES-KNOWLEDGE-DATA-001 §4.3: the sources and repos (`source:<id>` / `repo:<id>`) a node was
-    /// derived from. A JSON array; absent = none. See [`crate::plane`].
+    /// derived from. A JSON array; absent = none. See [`crate::plane`]. (A `project:<id>` dep is
+    /// carried only by link edges, never stored on a node.)
     pub const DEPS: &str = "deps";
     /// `true` when the node's text came from a source the person does not control (catalog
     /// comments, vendor descriptions): consumers fence it as data, never instructions.
@@ -254,6 +255,14 @@ pub struct KnowledgeEngine {
     /// Test failpoint: an approval stops after its journal and edges, before its node (a crash).
     #[cfg(test)]
     pub(crate) fail_apply_before_node: bool,
+    /// Test failpoint: a linked `replace_source` stops after writing its new link rows, before
+    /// the knowledge generation commits (a crash before the flip; DES-PM-001 §3.4).
+    #[cfg(test)]
+    pub(crate) fail_links_before_flip: bool,
+    /// Test failpoint: a linked `replace_source` stops after the flip, before it deletes the old
+    /// generation's link rows (a crash after the flip).
+    #[cfg(test)]
+    pub(crate) fail_links_after_flip: bool,
 }
 
 fn default_embedder() -> Box<dyn Embedder> {
@@ -298,6 +307,10 @@ impl KnowledgeEngine {
             fail_replace_before_manifest: false,
             #[cfg(test)]
             fail_apply_before_node: false,
+            #[cfg(test)]
+            fail_links_before_flip: false,
+            #[cfg(test)]
+            fail_links_after_flip: false,
         }
     }
 
