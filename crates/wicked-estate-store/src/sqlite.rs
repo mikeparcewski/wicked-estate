@@ -1228,6 +1228,17 @@ impl SqliteStore {
         self.conn.execute_batch("ROLLBACK").map_err(st)
     }
 
+    /// SQLite's `PRAGMA data_version` on this connection: it changes whenever ANOTHER connection
+    /// (another process, or another handle on the same file) commits to the database. A reader
+    /// that reads it before and after a multi-step read knows whether a writer committed in
+    /// between (the knowledge plane's `neighbors` retries then; DES-PM-001 §3.4).
+    pub fn data_version(&self) -> Result<u64> {
+        self.conn
+            .query_row("PRAGMA data_version", [], |r| r.get::<_, i64>(0))
+            .map(|v| v as u64)
+            .map_err(st)
+    }
+
     /// Hard-delete nodes by id, plus their FTS rows, embeddings, and incident edges (both
     /// directions). Returns the number of node rows removed. Used for right-to-erasure (the memory
     /// layer computes the in-scope, memory-kind ids and calls this — see `wicked-memory` `erase`).

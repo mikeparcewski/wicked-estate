@@ -963,6 +963,44 @@ mod tests {
             .collect()
     }
 
+    /// r2 (codex 6): a link-free generation's fingerprint is exactly B3a's (e6b1f9a), so a
+    /// same-number retry against a manifest an older estate wrote is still accepted after the
+    /// upgrade. NEGATIVE CONTROL: links folded into every fingerprint (even an empty set).
+    #[test]
+    fn a_link_free_fingerprint_is_the_b3a_fingerprint() {
+        // B3a's formula, verbatim (`fingerprint` in this file at e6b1f9a).
+        fn b3a(g: &SourceGeneration) -> String {
+            let mut docs: Vec<&SourceDoc> = g.docs.iter().collect();
+            docs.sort_by(|a, b| a.key.cmp(&b.key));
+            let canonical = json!({
+                "label": g.label,
+                "catalog": g.catalog,
+                "docs": docs.iter().map(|d| json!({
+                    "key": d.key, "title": d.title, "entry": d.entry,
+                    "sections": d.sections.iter().map(|s| json!([s.key, s.text])).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            })
+            .to_string();
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            for b in canonical.bytes() {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            format!("{h:016x}")
+        }
+        let mut e = engine();
+        let g = generation(1, vec![doc("support.tickets", "id int8, status text")]);
+        e.replace_source(&g, 10).unwrap();
+        let stored = e.manifest("s1").unwrap().unwrap();
+        assert_eq!(
+            stored.metadata[meta::FINGERPRINT].as_str(),
+            Some(b3a(&g).as_str())
+        );
+        // A linked call with no links is the same retry.
+        let none = BTreeMap::from([("support.tickets".to_string(), Vec::new())]);
+        e.replace_source_linked(&g, &none, 11).unwrap();
+    }
+
     #[test]
     fn a_generation_is_recallable_cataloged_and_gated() {
         let mut e = engine();

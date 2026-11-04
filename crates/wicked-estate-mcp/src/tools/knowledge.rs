@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use wicked_estate_core::{GraphRead, SymbolId};
 use wicked_estate_knowledge::links::validate_links;
-use wicked_estate_knowledge::plane::{RUN_KIND, control_deps, valid_project_id};
+use wicked_estate_knowledge::plane::{RUN_KIND, control_deps, shown, valid_project_id};
 use wicked_estate_knowledge::shape::{
     CONTROL_STORE, ESTATE_STORE, KNOWLEDGE_STORE, MAX_NEIGHBOR_DEPTH,
 };
@@ -94,7 +94,8 @@ pub(crate) fn parse_visible(id: &Value, args: &Value) -> Result<Visible, Value> 
             id,
             -32602,
             &format!(
-                "invalid visible: expected an array of source:<id> / repo:<id> / project:<id>, got {other}"
+                "invalid visible: expected an array of source:<id> / repo:<id> / project:<id>, got {}",
+                shown(&other.to_string())
             ),
         )),
     }
@@ -592,7 +593,8 @@ fn dispatch_source_catalog(id: &Value, args: &Value, knowledge: &dyn KnowledgeAp
         Ok(None) => tool_error(
             id,
             format!(
-                "no visible catalog for source {source_id:?} (pass visible with source:{source_id} to read one)"
+                "no visible catalog for source {:?} (pass visible with source:<that id> to read one)",
+                shown(source_id)
             ),
         ),
         Err(e) => tool_error(id, format!("source_catalog: {e}")),
@@ -688,8 +690,13 @@ fn dispatch_neighbors(
         Ok(None) => tool_error(
             id,
             format!(
-                "no visible knowledge node {:?}",
-                wicked_estate_knowledge::plane::shown(start)
+                "no visible {} node {:?}",
+                if q.store == CONTROL_STORE {
+                    "control"
+                } else {
+                    "knowledge"
+                },
+                shown(start)
             ),
         ),
         Err(e) => tool_error(id, format!("neighbors: {e}")),

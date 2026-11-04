@@ -15,8 +15,10 @@
 //!
 //! The write order (each step's crash leaves only hidden rows):
 //!
-//! 1. validate and resolve every link (no writes);
-//! 2. refuse an older generation, or the same one with different content, before any row is touched;
+//! 1. validate every link (no reads);
+//! 2. refuse an older generation, or the same one with different content, before any row is
+//!    touched; the committed generation again (same content) is a retry that rewrites no row, and
+//!    a newer one resolves its links (reads only);
 //! 3. delete this source's rows of a generation above the committed one (an interrupted attempt's
 //!    leftovers, so they can never surface when that generation number later commits);
 //! 4. write the new rows in one xedge transaction, hidden because the owner is still at the old
@@ -1174,5 +1176,123 @@ mod pm_tests {
         assert_eq!(n.nodes[0].deps, vec![R.to_string()]);
         assert!(n.nodes.iter().any(|x| x.id == doc_symbol(A, "PROJA-1").0));
         assert!(walk(&e, CONTROL_STORE, "pr:r#42", &visible(&[&dep(A)]), 1).is_none());
+    }
+
+    fn issues(n: usize) -> SourceGeneration {
+        let mut g = generation(A, 1);
+        for i in 0..n {
+            g.docs.push(SourceDoc {
+                key: format!("PROJA-{i}"),
+                title: None,
+                entry: None,
+                sections: vec![SourceSection {
+                    key: "ref".into(),
+                    text: format!("issue_ref PROJA-{i}"),
+                }],
+            });
+        }
+        g
+    }
+
+    /// r2 (codex 3): a run filed under more projects and repos than an item may carry is hidden
+    /// (its deps are never cut), so its record stays inside R4. NEGATIVE CONTROL: no cap.
+    #[test]
+    fn r2_a_run_filed_too_widely_is_hidden() {
+        let repos: Vec<String> = (0..=MAX_DEPS).map(|i| format!("repo:r{i:02}")).collect();
+        let run_links = |n: usize| {
+            let mut l = BTreeMap::new();
+            for (i, repo) in repos.iter().take(n).enumerate() {
+                l.insert(
+                    format!("PROJA-{i}"),
+                    vec![control(
+                        "addresses",
+                        LinkDir::In,
+                        "run:x",
+                        Some(&[repo.as_str()]),
+                    )],
+                );
+            }
+            l
+        };
+        let mut all: Vec<&str> = repos.iter().map(String::as_str).collect();
+        let a = dep(A);
+        all.push(&a);
+        let v = visible(&all);
+        let mut e = engine();
+        e.replace_source_linked(&issues(MAX_DEPS), &run_links(MAX_DEPS), 1)
+            .unwrap();
+        assert!(
+            walk(&e, CONTROL_STORE, "run:x", &v, 1).is_some(),
+            "32 filings fit"
+        );
+        let mut e = engine();
+        e.replace_source_linked(&issues(MAX_DEPS + 1), &run_links(MAX_DEPS + 1), 1)
+            .unwrap();
+        assert!(
+            walk(&e, CONTROL_STORE, "run:x", &v, 1).is_none(),
+            "33 do not"
+        );
+    }
+
+    /// r2 (codex 4): resolving runs' filings shares one row budget per walk, hidden runs included;
+    /// a run past it is hidden and the answer says `truncated`. NEGATIVE CONTROL: no budget.
+    #[test]
+    fn r2_run_resolution_has_one_budget_per_walk() {
+        let mut e = engine();
+        let runs = 5;
+        let mut l = BTreeMap::new();
+        l.insert(
+            "PROJA-0".to_string(),
+            (0..runs)
+                .map(|i| control("addresses", LinkDir::In, &format!("run:x{i}"), Some(&[P])))
+                .collect(),
+        );
+        e.replace_source_linked(&issues(1), &l, 1).unwrap();
+        let per_run = crate::shape::RUN_RESOLVE_ROWS / (runs - 1) - 500;
+        let filler: Vec<TypedXEdge> = (0..runs)
+            .flat_map(|r| {
+                (0..per_run).map(move |i| TypedXEdge {
+                    source: Endpoint::new(CONTROL_STORE, format!("run:x{r}"), 0),
+                    target: Endpoint::new(KNOWLEDGE_STORE, format!("n{i:05}"), 0),
+                    rel: "addresses".into(),
+                    owner: "dead-owner".into(),
+                    confidence: 1.0,
+                    meta: "{}".into(),
+                })
+            })
+            .collect();
+        e.xedge.as_ref().unwrap().put_typed_batch(&filler).unwrap();
+        let n = walk(
+            &e,
+            KNOWLEDGE_STORE,
+            &doc_symbol(A, "PROJA-0").0,
+            &visible(&[&dep(A), P]),
+            1,
+        )
+        .unwrap();
+        let shown_runs = n.nodes.iter().filter(|x| x.store == CONTROL_STORE).count();
+        assert_eq!(shown_runs, runs - 1, "the run past the budget is hidden");
+        assert!(n.truncated, "and the answer says so");
+    }
+
+    /// pi r2: a tracker's documents never take an `about` link, so `recall_about_code` can never
+    /// surface one (another project's tracker included).
+    #[test]
+    fn r2_tracker_documents_take_no_about_link() {
+        let mut e = engine();
+        link(&mut e, A, 1, &[P]);
+        assert!(
+            e.check_about_link_target(&doc_symbol(A, "tracker"))
+                .is_err()
+        );
+        assert!(
+            crate::KnowledgeApi::recall_about_code_hits(
+                &e,
+                &["rust::app::Thing".to_string()],
+                &visible(&[&dep(A), Q])
+            )
+            .unwrap()
+            .is_empty()
+        );
     }
 }

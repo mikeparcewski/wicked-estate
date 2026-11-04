@@ -112,8 +112,10 @@ pub fn control_deps(id: &str, given: Option<&[String]>) -> Result<Vec<String>, S
         PROJECT_KIND if valid_project_id(rest) => Ok(vec![id.to_string()]),
         REPO_KIND if valid_repo_id(rest) => Ok(vec![id.to_string()]),
         PR_KIND => match rest.rsplit_once('#') {
+            // The repo part holds no `#`, so `pr:<repo>#<n>` parses one way only.
             Some((repo, n))
                 if valid_repo_id(repo)
+                    && !repo.contains('#')
                     && !n.is_empty()
                     && n.len() <= 20
                     && n.bytes().all(|b| b.is_ascii_digit())
@@ -251,7 +253,8 @@ impl Visible {
             let d = d.as_ref();
             if !valid_dep(d) {
                 return Err(format!(
-                    "invalid visible entry {d:?}: expected source:<id>, repo:<id> or project:<id>"
+                    "invalid visible entry {:?}: expected source:<id>, repo:<id> or project:<id>",
+                    shown(d)
                 ));
             }
             set.insert(d.to_string());
@@ -371,6 +374,7 @@ mod tests {
             "pr:r#x",
             "pr:r",
             "pr:#4",
+            "pr:a#b#4",
             "issue:x",
             "x",
         ] {
@@ -395,5 +399,7 @@ mod tests {
         let huge_dep = vec![format!("source:{}", "y".repeat(30_000))];
         assert!(control_deps("run:r1", Some(&huge_dep)).unwrap_err().len() < 300);
         assert!(control_deps(&"z".repeat(30_000), None).unwrap_err().len() < 300);
+        let huge_visible = format!("project:{}", "x".repeat(30_000));
+        assert!(Visible::from_deps([huge_visible]).unwrap_err().len() < 300);
     }
 }

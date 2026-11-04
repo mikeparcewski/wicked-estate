@@ -507,6 +507,32 @@ fn tracker_links_over_jsonrpc() {
     let resp = r.call("knowledge.neighbors", json!({"store": "nope", "id": "x"}));
     assert_eq!(resp["error"]["code"], -32602);
 
+    // R4: no refusal or miss echoes an oversized input back.
+    let huge = "x".repeat(30_000);
+    for (tool, args) in [
+        (
+            "knowledge.recall",
+            json!({"query": "q", "visible": [format!("project:{huge}")]}),
+        ),
+        (
+            "knowledge.recall",
+            json!({"query": "q", "visible": {"k": huge}}),
+        ),
+        ("knowledge.source_catalog", json!({"sourceId": huge})),
+        (
+            "knowledge.neighbors",
+            json!({"store": "control", "id": format!("project:{huge}")}),
+        ),
+        ("knowledge.neighbors", json!({"id": huge})),
+    ] {
+        let resp = r.call(tool, args);
+        assert!(
+            resp.to_string().len() < 1_000,
+            "{tool}: {} chars",
+            resp.to_string().len()
+        );
+    }
+
     // Malformed links are invalid params and write nothing.
     let mut bad = tracker(2, &["project:proj_P"]);
     bad["docs"][0]["links"][0]["deps"] = json!(["project:proj_P"]);

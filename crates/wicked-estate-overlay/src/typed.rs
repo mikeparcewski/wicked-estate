@@ -8,15 +8,21 @@
 //!   (column ↔ column), `governed_by` (table → rule), `measures` (column → metric), `tracked_in`,
 //!   `addresses`, `closes` (project-management links) and `derived_from` (a node to what it was
 //!   built from);
-//! - **an owner**: the knowledge node (an approved data shape) that asserted the edge. The owner is
-//!   part of the key, so two shapes asserting the same edge keep two rows, and removing one shape's
-//!   edges ([`XedgeStore::delete_typed_by_owner`]) never removes another's;
+//! - **an owner**: the knowledge node (an approved data shape) that asserted the edge, or, for a
+//!   link a source's document owns (DES-PM-001 §3.4), `<doc node id>@<generation>`: the document AT
+//!   the generation that asserted it, so two generations' rows never share a key and a reader
+//!   keeps a link only while its document is at that generation. The owner is part of the key, so
+//!   two shapes asserting the same edge keep two rows, and removing one owner's edges
+//!   ([`XedgeStore::delete_typed_by_owner`]) never removes another's;
 //! - **`meta`**: a JSON object the knowledge engine writes (the owner's `deps`, a code endpoint's
 //!   `repo`, the proposer's `evidence`). This crate stores it as text and never reads it.
 //!
-//! Endpoints are store-qualified ([`Endpoint::engine`] is `"knowledge"` or `"estate"`) and
-//! epoch-stamped like every cross-edge: a reader drops an edge whose stamped epoch differs from the
-//! endpoint's live one (DEC-X6), so a deleted-then-re-added node never inherits old edges.
+//! Endpoints are store-qualified ([`Endpoint::engine`] is `"knowledge"`, `"estate"` or `"control"`)
+//! and epoch-stamped like every cross-edge: a reader drops an edge whose stamped epoch differs from
+//! the endpoint's live one (DEC-X6), so a deleted-then-re-added node never inherits old edges. A
+//! `"control"` endpoint (a crew `project:`, `repo:`, `pr:` or `run:`) has no epoch in estate: it is
+//! stamped 0 and never epoch-checked, and its visibility comes from the deps the knowledge engine
+//! derives from its id (a run's from its links' filings).
 //!
 //! [`OverlayReader`](crate::OverlayReader) never reads this table: memory's cross recall crosses only
 //! the rels it names in `xedges`, so a typed edge cannot leak into it.
@@ -243,6 +249,15 @@ impl XedgeReader {
         limit: usize,
     ) -> Result<Vec<TypedXEdge>> {
         self.typed_query("tgt_store", "tgt_id", store, id, rels, limit)
+    }
+
+    /// SQLite's `PRAGMA data_version` on this reader's connection: it changes whenever another
+    /// connection commits to `xedge.db` (a reader compares it before and after a multi-step read).
+    pub fn data_version(&self) -> Result<u64> {
+        let conn = self.conn.lock().expect("xedge mutex poisoned");
+        conn.query_row("PRAGMA data_version", [], |r| r.get::<_, i64>(0))
+            .map(|v| v as u64)
+            .map_err(map_err)
     }
 
     /// The distinct owners that start with `prefix`, in order, at most `limit` (an index range read;
@@ -514,6 +529,24 @@ mod batch_tests {
         );
         assert_eq!(store.typed_len().unwrap(), 1, "project:b was rolled back");
         assert!(store.reader().typed_by_owner("o@2").unwrap().is_empty());
+    }
+
+    /// Another connection's commit changes `data_version`; this connection's own write does not.
+    #[test]
+    fn data_version_moves_on_another_connections_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xedge.db");
+        let a = XedgeStore::open(path.to_str().unwrap()).unwrap();
+        let b = XedgeStore::open(path.to_str().unwrap()).unwrap();
+        let v0 = a.reader().data_version().unwrap();
+        a.put_typed(&edge("project:own", "o@1")).unwrap();
+        assert_eq!(a.reader().data_version().unwrap(), v0, "its own write");
+        b.put_typed(&edge("project:other", "o@1")).unwrap();
+        assert_ne!(
+            a.reader().data_version().unwrap(),
+            v0,
+            "another connection's commit"
+        );
     }
 
     #[test]

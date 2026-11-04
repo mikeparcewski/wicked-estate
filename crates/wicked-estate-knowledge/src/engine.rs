@@ -231,6 +231,10 @@ fn scope_in_prefix(scope: &str, prefix: &str) -> bool {
     canonical.path_in_prefix(prefix)
 }
 
+/// A test's hook into a `neighbors` walk (see `KnowledgeEngine::walk_hook`).
+#[cfg(test)]
+pub(crate) type WalkHook = Box<dyn FnMut(&str)>;
+
 /// The knowledge engine: its OWN single-writer SqliteStore (own file → own FTS, DEC-1).
 pub struct KnowledgeEngine {
     pub(crate) store: SqliteStore,
@@ -266,6 +270,10 @@ pub struct KnowledgeEngine {
     /// Test failpoint: the cleanup after the flip fails (the generation stays committed).
     #[cfg(test)]
     pub(crate) fail_links_cleanup: bool,
+    /// Test hook: called at named points of a `neighbors` walk (a test commits from another
+    /// connection there, to make a read/flip interleaving deterministic).
+    #[cfg(test)]
+    pub(crate) walk_hook: std::cell::RefCell<Option<WalkHook>>,
 }
 
 fn default_embedder() -> Box<dyn Embedder> {
@@ -316,6 +324,8 @@ impl KnowledgeEngine {
             fail_links_after_flip: false,
             #[cfg(test)]
             fail_links_cleanup: false,
+            #[cfg(test)]
+            walk_hook: std::cell::RefCell::new(None),
         }
     }
 
