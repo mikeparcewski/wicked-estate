@@ -870,7 +870,8 @@ const LABEL_CHARS: usize = 120;
 /// How often `neighbors` reads again when a writer committed during the walk (review r2).
 const NEIGHBOR_ATTEMPTS: usize = 3;
 /// At most this many adjacency rows are read to resolve runs' filings in one walk, including runs
-/// that end up hidden (review r2); a run past the budget is hidden and the answer `truncated`.
+/// that end up hidden (review r2, r3); a run past the budget, or past the per-run bound, is hidden
+/// and the answer `truncated`.
 pub(crate) const RUN_RESOLVE_ROWS: usize = 20_000;
 
 /// One walk's observations (review r1): each link document's generation as first seen, and each
@@ -1011,22 +1012,28 @@ impl KnowledgeEngine {
             return Ok(None);
         }
         let resolved = (|| -> anyhow::Result<Option<Vec<String>>> {
-            let out = reader.typed_out(CONTROL_STORE, id, &[], ADJACENCY_LIMIT)?;
-            let inn = reader.typed_in(CONTROL_STORE, id, &[], ADJACENCY_LIMIT)?;
+            // Every row read is charged to the walk's budget, and no read asks for more than the
+            // budget has left (review r3). A side that fills its cap (the per-run bound or the
+            // budget) has no complete filing set: the run is hidden and the answer is `truncated`.
+            let mut rows = Vec::new();
+            for outgoing in [true, false] {
+                let cap = ADJACENCY_LIMIT.min(pins.run_rows_left);
+                let got = if outgoing {
+                    reader.typed_out(CONTROL_STORE, id, &[], cap)?
+                } else {
+                    reader.typed_in(CONTROL_STORE, id, &[], cap)?
+                };
+                pins.run_rows_left -= got.len();
+                if got.len() >= cap {
+                    pins.run_budget_hit = true;
+                    return Ok(None);
+                }
+                rows.extend(got);
+            }
             self.walk_hook("run_rows");
-            if out.len() >= ADJACENCY_LIMIT || inn.len() >= ADJACENCY_LIMIT {
-                return Ok(None);
-            }
-            let read = out.len() + inn.len();
-            if read > pins.run_rows_left {
-                pins.run_rows_left = 0;
-                pins.run_budget_hit = true;
-                return Ok(None);
-            }
-            pins.run_rows_left -= read;
             let mut union: BTreeSet<String> = BTreeSet::new();
             let mut live = false;
-            for e in out.into_iter().chain(inn) {
+            for e in rows {
                 if !self.link_live(&e.owner, pins)? {
                     continue;
                 }
@@ -1091,6 +1098,10 @@ impl KnowledgeEngine {
     /// May the reader keep an edge `owner` asserted? A link owner (`<doc>@<generation>`) needs its
     /// document live, visible, and AT that generation (as this walk pinned it); any other owner (a
     /// data shape) must be a live, visible knowledge node.
+    ///
+    /// Crew's relay re-checks every released node and edge by its deps, but it does not read
+    /// `owner`: the generation barrier (no stale or uncommitted link) is enforced here alone, and
+    /// the `iv_*` tests are what guard it.
     fn owner_visible(
         &self,
         owner: &str,

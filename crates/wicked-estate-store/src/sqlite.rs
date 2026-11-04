@@ -7164,6 +7164,31 @@ mod tests {
         assert_eq!(fts_rows_for(&store, "fo"), 1, "owner File node rebuilt");
     }
 
+    /// `data_version` moves when ANOTHER connection commits to the file, never for this
+    /// connection's own writes (the knowledge plane's read-again check, DES-PM-001 §3.4).
+    #[test]
+    fn data_version_moves_on_another_connections_commit() {
+        use wicked_estate_core::{Language, Location, Span};
+        let node = |name: &str| {
+            Node::new(
+                sym(name),
+                NodeKind::Function,
+                name,
+                Language::new("rust"),
+                Location::new("src/lib.rs", Span::ZERO),
+            )
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g.db");
+        let mut a = SqliteStore::open(path.to_str().unwrap()).unwrap();
+        let mut b = SqliteStore::open(path.to_str().unwrap()).unwrap();
+        let v0 = a.data_version().unwrap();
+        a.upsert_nodes(&[node("own")]).unwrap();
+        assert_eq!(a.data_version().unwrap(), v0, "its own write");
+        b.upsert_nodes(&[node("other")]).unwrap();
+        assert_ne!(a.data_version().unwrap(), v0, "another connection's commit");
+    }
+
     /// `rollback_batch` discards every write since `begin_batch` (nodes and their FTS rows), so a
     /// later `commit_batch` cannot commit half of a logical unit; it is a no-op outside a batch.
     #[test]

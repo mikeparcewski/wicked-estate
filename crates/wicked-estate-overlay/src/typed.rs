@@ -13,7 +13,8 @@
 //!   the generation that asserted it, so two generations' rows never share a key and a reader
 //!   keeps a link only while its document is at that generation. The owner is part of the key, so
 //!   two shapes asserting the same edge keep two rows, and removing one owner's edges
-//!   ([`XedgeStore::delete_typed_by_owner`]) never removes another's;
+//!   ([`XedgeStore::delete_typed_by_owner`], or several owners' at once with
+//!   [`XedgeStore::delete_typed_by_owners`]) never removes another's;
 //! - **`meta`**: a JSON object the knowledge engine writes (the owner's `deps`, a code endpoint's
 //!   `repo`, the proposer's `evidence`). This crate stores it as text and never reads it.
 //!
@@ -466,6 +467,23 @@ mod tests {
         assert!(r.typed_in("estate", "Ticket", &[], 10).unwrap().is_empty());
         assert_eq!(store.typed_len().unwrap(), 0);
         assert_eq!(store.delete_typed_by_owner("shape:a").unwrap(), 0);
+        // The link writer's reads and deletes (DES-PM-001) also see an empty table and create none.
+        assert!(
+            r.typed_owners_with_prefix("kdoc synthetic source:t/", 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .delete_typed_by_owners(&["kdoc synthetic source:t/x:@1".to_string()])
+                .unwrap(),
+            0
+        );
+        r.data_version().unwrap();
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            assert!(!typed_table_exists(&conn).unwrap(), "still no table");
+        }
         store
             .put_typed(&edge("doc:tickets", "Ticket", "describes", "shape:a"))
             .unwrap();

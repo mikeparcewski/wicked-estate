@@ -206,6 +206,30 @@ pub fn validate_links(
                     TYPED_RELS.join("|")
                 ));
             }
+            // The project-management relations have one shape each (DES-PM-001 §3.4, review r3):
+            // a tracker is `tracked_in` a project or repo; an issue_ref is `addresses`-ed by a run
+            // and `closes`-d by a PR, both pointing in. Other typed relations are unconstrained.
+            let end_kind = l.end.id.split_once(':').map(|(k, _)| k).unwrap_or("");
+            let control = l.end.store == CONTROL_STORE;
+            let coherent = match l.rel.as_str() {
+                "tracked_in" => {
+                    l.dir == LinkDir::Out
+                        && (!control
+                            || matches!(
+                                end_kind,
+                                crate::plane::PROJECT_KIND | crate::plane::REPO_KIND
+                            ))
+                }
+                "addresses" => l.dir == LinkDir::In && control && end_kind == RUN_KIND,
+                "closes" => l.dir == LinkDir::In && control && end_kind == crate::plane::PR_KIND,
+                _ => true,
+            };
+            if !coherent {
+                return Err(format!(
+                    "{at}: expected tracked_in (out, to project:/repo:), addresses (in, from run:) \
+                     or closes (in, from pr:)"
+                ));
+            }
             match l.end.store.as_str() {
                 CONTROL_STORE => {
                     control_deps(&l.end.id, l.deps.as_deref()).map_err(|e| format!("{at}: {e}"))?;
@@ -961,6 +985,18 @@ mod pm_tests {
         for bad in [about, other_store, deps_on_project, malformed] {
             assert!(validate_links(&g, &one(bad.clone())).is_err(), "{bad:?}");
         }
+        // Each project-management relation has one shape (review r3).
+        for incoherent in [
+            control("tracked_in", LinkDir::In, P, None),
+            control("tracked_in", LinkDir::Out, "run:r1", Some(&[P])),
+            control("addresses", LinkDir::Out, "run:r1", Some(&[P])),
+            control("addresses", LinkDir::In, P, None),
+            control("closes", LinkDir::In, "run:r1", Some(&[P])),
+        ] {
+            let err = validate_links(&g, &one(incoherent.clone())).unwrap_err();
+            assert!(err.contains("expected tracked_in"), "{incoherent:?}: {err}");
+        }
+        assert!(validate_links(&g, &one(control("closes", LinkDir::In, "pr:r#7", None))).is_ok());
         let dup = BTreeMap::from([("tracker".to_string(), vec![ok.clone(), ok.clone()])]);
         assert!(validate_links(&g, &dup).unwrap_err().contains("duplicate"));
         let stray = BTreeMap::from([("nope".to_string(), vec![ok.clone()])]);
@@ -1129,6 +1165,10 @@ mod pm_tests {
             .collect();
         e.xedge.as_ref().unwrap().put_typed_batch(&filler).unwrap();
         assert!(walk(&e, CONTROL_STORE, "run:run_big", &v, 1).is_none());
+        // Reached as a far end, it is left out, and the answer says a bound bit (review r3).
+        let n = walk(&e, KNOWLEDGE_STORE, &doc_symbol(A, "PROJA-1").0, &v, 1).unwrap();
+        assert!(n.nodes.iter().all(|x| x.id != "run:run_big"));
+        assert!(n.truncated);
     }
 
     /// r1 (pi): a cleanup that fails after the flip is reported, never returned as a failure: the
@@ -1275,24 +1315,86 @@ mod pm_tests {
         assert!(n.truncated, "and the answer says so");
     }
 
-    /// pi r2: a tracker's documents never take an `about` link, so `recall_about_code` can never
-    /// surface one (another project's tracker included).
+    /// pi r2, codex r3: a tracker's documents never take an `about` link; knowledge DERIVED from a
+    /// tracker (a shape whose dep is `source:trk_A`) reaches code through `recall_about_code` only
+    /// for a reader holding that tracker. NEGATIVE CONTROL: the read-side visibility check removed.
     #[test]
-    fn r2_tracker_documents_take_no_about_link() {
+    fn r2_tracker_knowledge_reaches_code_only_where_its_tracker_is_visible() {
         let mut e = engine();
         link(&mut e, A, 1, &[P]);
         assert!(
             e.check_about_link_target(&doc_symbol(A, "tracker"))
                 .is_err()
         );
+        let mut node = KNode::new(
+            KClass::Concept,
+            "PROJA bugs live in Thing",
+            "wiki:pm",
+            "t.md",
+            1,
+        )
+        .to_node();
+        crate::plane::stamp(&mut node, &[dep(A)], false);
+        let id = node.symbol.0.clone();
+        e.store.upsert_nodes(std::slice::from_ref(&node)).unwrap();
+        let code = vec!["rust::app::Thing".to_string()];
+        crate::KnowledgeApi::relate_code(
+            &mut e,
+            &id,
+            &code,
+            &std::collections::HashMap::from([(code[0].clone(), 0)]),
+        )
+        .unwrap();
+        let hits = |v: &Visible| crate::KnowledgeApi::recall_about_code_hits(&e, &code, v).unwrap();
+        let seen = hits(&visible(&[&dep(A), P]));
+        assert_eq!(seen.len(), 1, "P's unit reaches it");
+        assert_eq!(seen[0].deps, vec![dep(A)]);
         assert!(
-            crate::KnowledgeApi::recall_about_code_hits(
-                &e,
-                &["rust::app::Thing".to_string()],
-                &visible(&[&dep(A), Q])
-            )
-            .unwrap()
-            .is_empty()
+            hits(&visible(&[&dep(B), Q])).is_empty(),
+            "Q's unit never does"
         );
+    }
+
+    /// codex r3: a run over the per-run bound is charged to the walk's budget like any other, and
+    /// hiding it marks the answer `truncated`. Four overfull runs spend the budget, so a fifth,
+    /// small run is hidden too. NEGATIVE CONTROL: rows of an overfull run not charged.
+    #[test]
+    fn r3_overfull_runs_spend_the_budget_and_mark_the_answer() {
+        let mut e = engine();
+        let names = ["run:a", "run:b", "run:c", "run:d", "run:z"];
+        let l = BTreeMap::from([(
+            "PROJA-0".to_string(),
+            names
+                .iter()
+                .map(|r| control("addresses", LinkDir::In, r, Some(&[P])))
+                .collect(),
+        )]);
+        e.replace_source_linked(&issues(1), &l, 1).unwrap();
+        let filler: Vec<TypedXEdge> = names[..4]
+            .iter()
+            .flat_map(|r| {
+                (0..crate::shape::ADJACENCY_LIMIT).map(move |i| TypedXEdge {
+                    source: Endpoint::new(CONTROL_STORE, *r, 0),
+                    target: Endpoint::new(KNOWLEDGE_STORE, format!("n{i:05}"), 0),
+                    rel: "addresses".into(),
+                    owner: "dead-owner".into(),
+                    confidence: 1.0,
+                    meta: "{}".into(),
+                })
+            })
+            .collect();
+        e.xedge.as_ref().unwrap().put_typed_batch(&filler).unwrap();
+        let v = visible(&[&dep(A), P]);
+        assert!(
+            walk(&e, CONTROL_STORE, "run:z", &v, 1).is_some(),
+            "alone, run:z resolves"
+        );
+        let n = walk(&e, KNOWLEDGE_STORE, &doc_symbol(A, "PROJA-0").0, &v, 1).unwrap();
+        assert!(
+            n.nodes.iter().all(|x| x.store != CONTROL_STORE),
+            "{:?}",
+            n.nodes
+        );
+        assert!(n.truncated);
     }
 }

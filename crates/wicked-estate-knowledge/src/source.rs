@@ -7,11 +7,14 @@
 //!
 //! - ids are stable, derived from the source id, the document key and the section key, so edges to
 //!   a relation survive a re-describe;
-//! - the whole generation is written in ONE store transaction, and every document and section of
-//!   the source that is absent from it is tombstoned (hard-deleted) in that same transaction. A
-//!   generation that fails validation or fails mid-write writes nothing and tombstones nothing;
-//! - typed edges that touch a tombstoned node are kept (a re-added key gets a new store epoch, so
-//!   they stay hidden) and reported.
+//! - the whole generation's knowledge is written in ONE store transaction, and every document and
+//!   section of the source that is absent from it is tombstoned (hard-deleted) in that same
+//!   transaction. A generation that fails validation or fails mid-write commits no knowledge and
+//!   tombstones nothing (a linked generation may leave hidden staged link rows, which the source's
+//!   next generation deletes: [`crate::links`]);
+//! - typed edges another owner (a data shape) put on a tombstoned node are kept (a re-added key
+//!   gets a new store epoch, so they stay hidden) and reported. The links the source's own
+//!   documents own are not reported: the generation's cleanup deletes them.
 //!
 //! [`KnowledgeEngine::source_catalog`] reads the complete, paged, versioned structure back.
 //!

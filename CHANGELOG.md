@@ -22,8 +22,15 @@
     are written before the flip and the old ones deleted after it (an interrupted attempt's rows
     first), so a crash at any step leaves only hidden rows, which the source's next generation
     deletes. The content fingerprint covers the links (a link-free generation hashes as before),
-    so the same generation number with other links is refused. A generation without links drops
-    the source's links; an empty one tombstones the tracker and its links.
+    so the same generation number with other links is refused, and a retry of the committed
+    generation rewrites no row. A generation without links drops the source's links; an empty one
+    tombstones the tracker and its links. `tracked_in` points out to a `project:`/`repo:`;
+    `addresses` (from a `run:`) and `closes` (from a `pr:`) point in.
+  - `knowledge.neighbors` is read again when another connection commits to either store during
+    the walk (`PRAGMA data_version`), up to 3 times, and is never returned mixed. A run's deps are
+    the union of all its live filings; it is hidden when that union is over 32 or its rows are
+    over the read bounds (then the answer is `truncated`). Errors show at most 64 characters of
+    any input.
 - **The knowledge plane: live-source structure, deps-filtered recall, typed edges and data
   shapes (DES-KNOWLEDGE-DATA-001 §4, §10.1).** Three new knowledge tools (33 in all):
   - `knowledge.replace_source {sourceId, generation, label?, catalog?, docs[]}` writes one
