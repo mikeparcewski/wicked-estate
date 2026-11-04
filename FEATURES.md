@@ -356,8 +356,8 @@ PRs (ADR-012). Implements the R1–R7 behavior contract.
 ## 9a. Memory and knowledge ✅
 Two stores beside the code graph, each its own SQLite file (`memory.db`, `knowledge.db`), joined to code by the
 cross-engine edge store (`xedge.db`, `wicked-estate-overlay`). Memory is what happened and what you told it;
-knowledge is what estate read (docs, and the structure of live data sources). Results always say which store
-they came from.
+knowledge is what estate read (docs, and the structure of live data sources). Each store has its own tools
+(`memory.*`, `knowledge.*`), so a result's store is the tool that returned it.
 
 ### Memory ✅ (`wicked-estate-memory`, 7 tools)
 - **Scoped capture and recall** ✅ — hierarchical scopes (`org:acme/agent:claude`); tiers
