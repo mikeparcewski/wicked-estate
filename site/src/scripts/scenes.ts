@@ -5,8 +5,10 @@
       .scenes-ready is set only after the observer is attached, so a page whose script never
       runs shows every end state instead of hiding anything.
    2. (The beat track and the thread under the topbar are src/scripts/beats.js, the same as wicked-crew's.)
-   2b. Live marks: data-live on each scene while a good part of it is on screen. The calm idle loops
-      (global.css) key off it, so they run only in view and stop when the scene leaves.
+   2b. Live marks: data-live on each scene while a good part of it is on screen and the tab is visible.
+      The calm idle loops (global.css) key off it, so they run only in view and stop when the scene
+      leaves or the tab is hidden; the get-started typing and the provenance flip wait for it too
+      (Content.tsx). Nothing here moves the page on its own: html { overflow-anchor: none } (global.css).
    3. Guarded snap, desktop: html.snap-lock (scroll-snap-type: y mandatory, global.css) only while the
       viewport is a desktop one (>=1024 x >=640, motion allowed) AND every scene measures
       inside its frame, give or take its own bottom padding (an overshoot smaller than the padding hides
@@ -27,6 +29,14 @@
    frames (.ph-frame, global.css) fits one screen, and nothing locks, so a tall scene never traps. */
 
 const html = document.documentElement;
+/** A scene's one-shot animations (an entrance, the hero's intro, a switch) land on their end at once, so nothing is
+    left half-drawn where nobody is watching; its idle loops stop with data-live. */
+function settle(el: HTMLElement) {
+  for (const a of el.getAnimations?.({ subtree: true }) ?? []) {
+    const end = a.effect?.getComputedTiming().endTime;
+    if (end !== undefined && end !== Infinity && a.playState === 'running') { try { a.finish(); } catch { /* not finishable */ } }
+  }
+}
 const scenes = Array.from(document.querySelectorAll<HTMLElement>('main [data-scene], main .same-garden'));
 
 // 1 · one-shot entrance marks
@@ -35,8 +45,12 @@ if ('IntersectionObserver' in window) {
     (entries) => {
       for (const e of entries) {
         if (e.isIntersecting) {
-          (e.target as HTMLElement).dataset.inview = '1';
+          const el = e.target as HTMLElement;
+          el.dataset.inview = '1';
           io.unobserve(e.target);
+          // a scene the page jumped past (its top above the window, only its end showing) and not live: its
+          // entrance lands at once instead of playing where nobody is looking (next frame, once it exists)
+          if (e.boundingClientRect.top < 0) requestAnimationFrame(() => { if (el.dataset.live === undefined) settle(el); });
         }
       }
     },
@@ -48,21 +62,34 @@ if ('IntersectionObserver' in window) {
   html.classList.add('scenes-ready');
 }
 
-// 2b · live marks (the idle loops run only while a scene is on screen)
+// 2b · live marks (the idle loops run only while a scene is on screen and the tab is visible)
 if ('IntersectionObserver' in window) {
+  const seen = new Set<HTMLElement>();
+  const mark = (el: HTMLElement) => {
+    if (seen.has(el) && !document.hidden) el.dataset.live = '1';
+    else if (el.dataset.live !== undefined) {
+      delete el.dataset.live;
+      settle(el);
+      // again on the next frame, for a transition another observer started on the way out
+      requestAnimationFrame(() => { if (el.dataset.live === undefined) settle(el); });
+    }
+  };
   const live = new IntersectionObserver(
     (entries) => {
       for (const e of entries) {
         const el = e.target as HTMLElement;
         // "in view" = at least 40% of the viewport (or of the scene, when it is shorter than that) shows it
         const need = Math.min(e.boundingClientRect.height, window.innerHeight) * 0.4;
-        if (e.isIntersecting && e.intersectionRect.height >= need) el.dataset.live = '1';
-        else delete el.dataset.live;
+        if (e.isIntersecting && e.intersectionRect.height >= need) seen.add(el);
+        else seen.delete(el);
+        mark(el);
       }
     },
-    { threshold: [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1] },
+    // every hundredth: a scene taller than the window crosses 40% of the window between coarser steps
+    { threshold: Array.from({ length: 101 }, (_, i) => i / 100) },
   );
   for (const s of scenes) live.observe(s);
+  document.addEventListener('visibilitychange', () => { for (const s of scenes) mark(s); });
 }
 
 // 3 · guarded mandatory snap

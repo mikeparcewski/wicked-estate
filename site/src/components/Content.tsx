@@ -98,6 +98,16 @@ function usePhoneLayout() {
   return on
 }
 
+/** Run `cb` once the scene around `el` is live (data-live: on screen and the tab visible, scenes.ts),
+    now if it already is. Returns a cancel. Without a scene or an observer, it runs now. */
+function whenLive(el: HTMLElement | null, cb: () => void): () => void {
+  const scene = el?.closest<HTMLElement>('[data-scene]')
+  if (!scene || typeof MutationObserver === 'undefined' || typeof IntersectionObserver === 'undefined' || scene.hasAttribute('data-live')) { cb(); return () => {} }
+  const mo = new MutationObserver(() => { if (scene.hasAttribute('data-live')) { mo.disconnect(); cb() } })
+  mo.observe(scene, { attributes: true, attributeFilter: ['data-live'] })
+  return () => mo.disconnect()
+}
+
 /** Is `el` on screen right now (any part)? */
 function onScreen(el: HTMLElement | null) {
   if (!el) return false
@@ -712,7 +722,8 @@ function Provenance({ threshold, setThreshold }: { threshold: Stop; setThreshold
     if (touched.current) return
     // motion turned off since load: no flip to watch, show the end state now
     if (!motionAllowed()) { setMode('estate'); return }
-    window.setTimeout(() => { if (!touched.current) setMode('estate') }, 650)
+    // the flip plays where it can be seen: a scene that is already off screen again waits for its return
+    window.setTimeout(() => whenLive(panel.current, () => { if (!touched.current) setMode('estate') }), 650)
   })
   const choose = (m: Mode) => { touched.current = true; setMode(m) }
   const idx = [0.5, 0.6, 1.0].indexOf(threshold)
@@ -1258,18 +1269,47 @@ export function GetStarted() {
   // when its path is picked
   const played = useRef(false)
   const entered = useRef(false)
+  // the typing runs only while the terminal itself is live (a quarter of it, or of the window, on screen and
+  // the tab visible): off screen it holds on the letter it reached and carries on from there when it is back
+  const termLive = useRef(typeof IntersectionObserver === 'undefined')
+  const resume = useRef<(() => void) | null>(null)
+  useEffect(() => {
+    const el = term.current?.querySelector<HTMLElement>('.gs-term')
+    if (!el || typeof IntersectionObserver === 'undefined') return
+    let seen = false
+    const sync = () => {
+      termLive.current = seen && !document.hidden
+      if (termLive.current && resume.current) { const r = resume.current; resume.current = null; r() }
+    }
+    const io = new IntersectionObserver(es => {
+      const e = es[es.length - 1]
+      seen = e.isIntersecting && Math.max(e.intersectionRatio, e.intersectionRect.height / Math.max(1, window.innerHeight)) >= 0.25
+      sync()
+    }, { threshold: Array.from({ length: 101 }, (_, i) => i / 100) })
+    io.observe(el)
+    document.addEventListener('visibilitychange', sync)
+    return () => { io.disconnect(); document.removeEventListener('visibilitychange', sync) }
+  }, [])
   const play = () => {
     if (played.current) return
     played.current = true
     if (!motionAllowed() || cancelled.current) { setTyped(total); return }
-    const t0 = performance.now()
-    const tick = (t: number) => {
-      if (cancelled.current) return
-      const n = Math.min(total, Math.round(((t - t0) / TYPE_MS) * total))
-      setTyped(n)
-      if (n < total) raf.current = requestAnimationFrame(tick)
+    let spent = 0
+    const run = () => {
+      let last = -1
+      const tick = (t: number) => {
+        if (cancelled.current) return
+        if (!termLive.current) { resume.current = run; return }
+        // a frame after a long gap (a hidden tab whose frames were suspended) counts as one frame, never the gap
+        if (last >= 0) spent += Math.min(t - last, 50)
+        last = t
+        const n = Math.min(total, Math.round((spent / TYPE_MS) * total))
+        setTyped(n)
+        if (n < total) raf.current = requestAnimationFrame(tick)
+      }
+      raf.current = requestAnimationFrame(tick)
     }
-    raf.current = requestAnimationFrame(tick)
+    run()
   }
   const termShown = () => {
     const el = term.current?.querySelector<HTMLElement>('.gs-term')
@@ -1352,14 +1392,16 @@ export function GetStarted() {
 export default function Content() {
   const [st, setSt] = useState<PlayState>({ qid: 'blast', tab: 'graph', anim: 'intro', nonce: 0 })
   const [threshold, setThreshold] = useState<Stop>(0.5)
-  // The hero's one-shot intro (CSS, from first paint) ends on any pointer or key input, or by itself.
+  // The hero's one-shot intro (CSS, from first paint) ends on any pointer or key input, or by itself; ending
+  // by itself waits for the hero to be live (scenes.ts), so nothing in it changes while it is off screen.
   useEffect(() => {
     if (st.anim !== 'intro') return
     const end = () => setSt(s => (s.anim === 'intro' ? { ...s, anim: 'done' } : s))
-    const t = window.setTimeout(end, 1900)
+    let unwait = () => {}
+    const t = window.setTimeout(() => { unwait = whenLive(document.getElementById('query'), end) }, 1900)
     window.addEventListener('pointerdown', end, { once: true })
     window.addEventListener('keydown', end, { once: true })
-    return () => { window.clearTimeout(t); window.removeEventListener('pointerdown', end); window.removeEventListener('keydown', end) }
+    return () => { window.clearTimeout(t); unwait(); window.removeEventListener('pointerdown', end); window.removeEventListener('keydown', end) }
   }, [st.anim])
   const pick = useCallback((id: string, tab?: Store) => {
     const q = QUESTIONS.find(x => x.id === id)!
