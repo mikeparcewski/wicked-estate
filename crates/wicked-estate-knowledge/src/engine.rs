@@ -263,6 +263,9 @@ pub struct KnowledgeEngine {
     /// generation's link rows (a crash after the flip).
     #[cfg(test)]
     pub(crate) fail_links_after_flip: bool,
+    /// Test failpoint: the cleanup after the flip fails (the generation stays committed).
+    #[cfg(test)]
+    pub(crate) fail_links_cleanup: bool,
 }
 
 fn default_embedder() -> Box<dyn Embedder> {
@@ -311,6 +314,8 @@ impl KnowledgeEngine {
             fail_links_before_flip: false,
             #[cfg(test)]
             fail_links_after_flip: false,
+            #[cfg(test)]
+            fail_links_cleanup: false,
         }
     }
 

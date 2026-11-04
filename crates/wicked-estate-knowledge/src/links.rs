@@ -23,6 +23,15 @@
 //!    generation;
 //! 5. commit the knowledge generation: the flip;
 //! 6. delete this source's rows of every other generation.
+//!
+//! The knowledge generation and the link rows live in two files, so steps 3-6 are separate
+//! transactions: a failed call commits no knowledge generation, but may leave hidden link rows,
+//! which the next generation of the source deletes.
+//!
+//! **One writer per source.** The sequence assumes one writer of a given source at a time (crew's
+//! projector is the only one). Two concurrent writers of the same tracker could interleave a
+//! pre-clean with the other's staged rows; if a second writer ever appears, serialize the whole
+//! sequence per source (an interprocess lock or one writer service).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -31,7 +40,9 @@ use wicked_estate_core::{GraphRead, SymbolId};
 use wicked_estate_overlay::{Endpoint, TYPED_RELS, TypedXEdge, is_typed_rel};
 
 use crate::engine::KnowledgeEngine;
-use crate::plane::{MAX_DEPS, RUN_KIND, SOURCE_KIND, control_deps, effective_deps, normalize_deps};
+use crate::plane::{
+    MAX_DEPS, RUN_KIND, SOURCE_KIND, control_deps, effective_deps, normalize_deps, shown,
+};
 use crate::shape::{CONTROL_STORE, KNOWLEDGE_STORE};
 use crate::source::{ReplaceReport, SourceGeneration, doc_symbol};
 
@@ -168,7 +179,8 @@ pub fn validate_links(
         }
         if !keys.contains(key.as_str()) {
             return Err(format!(
-                "links for doc {key:?}, which this generation does not hold"
+                "links for doc {:?}, which this generation does not hold",
+                shown(key)
             ));
         }
         if doc_links.len() > MAX_LINKS_PER_DOC {
@@ -185,7 +197,7 @@ pub fn validate_links(
         }
         let mut seen = BTreeSet::new();
         for (i, l) in doc_links.iter().enumerate() {
-            let at = format!("doc {key:?} links[{i}]");
+            let at = format!("doc {:?} links[{i}]", shown(key));
             if !is_typed_rel(&l.rel) {
                 return Err(format!(
                     "{at}.rel must be EXACTLY one of {}",
@@ -210,7 +222,8 @@ pub fn validate_links(
                 }
                 other => {
                     return Err(format!(
-                        "{at}.end.store {other:?}: expected control or knowledge"
+                        "{at}.end.store {:?}: expected control or knowledge",
+                        shown(other)
                     ));
                 }
             }
@@ -225,7 +238,7 @@ pub fn validate_links(
                     l.rel,
                     l.dir.as_str(),
                     l.end.store,
-                    l.end.id
+                    shown(&l.end.id)
                 ));
             }
         }
@@ -275,7 +288,7 @@ impl KnowledgeEngine {
             let doc = doc_symbol(sid, key);
             let owner = link_owner(&doc, g.generation);
             for (i, l) in doc_links.iter().enumerate() {
-                let at = format!("doc {key:?} links[{i}]");
+                let at = format!("doc {:?} links[{i}]", shown(key));
                 let (end, end_deps, run_deps) = if l.end.store == CONTROL_STORE {
                     let deps = control_deps(&l.end.id, l.deps.as_deref())
                         .map_err(|e| bad(format!("{at}: {e}")))?;
@@ -286,23 +299,26 @@ impl KnowledgeEngine {
                         run.then_some(deps),
                     )
                 } else {
-                    let Some((node, _)) = self
+                    let Some((node, kn)) = self
                         .live_knowledge(&l.end.id)
                         .map_err(|e| bad(format!("{at}: {e}")))?
                     else {
                         return Err(bad(format!(
                             "{at}: end {:?} is not a live knowledge node",
-                            l.end.id
+                            shown(&l.end.id)
                         )));
                     };
-                    let deps = effective_deps(&node);
-                    if deps.contains(&own_dep) {
+                    // A node in this source's own scope is one this generation rewrites (it has no
+                    // epoch to stamp yet). A node elsewhere that merely DEPENDS on this source (a
+                    // data shape built from it) is a fine end; its deps join the edge's.
+                    if kn.scope == own_dep || kn.scope.starts_with(&format!("{own_dep}/")) {
                         return Err(bad(format!(
                             "{at}: end {:?} belongs to this source; a link joins a document to a \
                              crew endpoint or to another source's knowledge",
-                            l.end.id
+                            shown(&l.end.id)
                         )));
                     }
+                    let deps = effective_deps(&node);
                     let epoch = self
                         .store
                         .symbol_epoch(&SymbolId(l.end.id.clone()))?
@@ -360,22 +376,6 @@ impl KnowledgeEngine {
             .collect();
         xedge.delete_typed_by_owners(&doomed)
     }
-
-    /// Is `owner` a link owner whose document is live at the owner's generation? Visibility is not
-    /// checked here.
-    pub(crate) fn link_owner_live(&self, owner: &str) -> wicked_estate_core::Result<bool> {
-        let Some((doc, generation)) = parse_link_owner(owner) else {
-            return Ok(false);
-        };
-        let Some((node, _)) = self.live_knowledge(&doc.0)? else {
-            return Ok(false);
-        };
-        Ok(node
-            .metadata
-            .get(crate::source::meta::GENERATION)
-            .and_then(Value::as_u64)
-            == Some(generation))
-    }
 }
 
 #[cfg(test)]
@@ -413,6 +413,7 @@ mod pm_tests {
     use crate::shape::{Neighbors, NeighborsQuery};
     use crate::source::{SourceDoc, SourceSection};
     use std::sync::Arc;
+    use wicked_estate_core::GraphWrite;
     use wicked_estate_overlay::XedgeStore;
     use wicked_estate_store::SqliteStore;
 
@@ -964,5 +965,214 @@ mod pm_tests {
         assert!(validate_links(&g, &stray).is_err());
         let many = BTreeMap::from([("tracker".to_string(), vec![ok; MAX_LINKS_PER_DOC + 1])]);
         assert!(validate_links(&g, &many).is_err());
+    }
+
+    fn to_doc_of(sid: &str) -> BTreeMap<String, Vec<DocLink>> {
+        BTreeMap::from([(
+            "tracker".to_string(),
+            vec![DocLink {
+                rel: "derived_from".into(),
+                dir: LinkDir::Out,
+                end: LinkEnd {
+                    store: KNOWLEDGE_STORE.into(),
+                    id: doc(sid),
+                },
+                deps: None,
+            }],
+        )])
+    }
+
+    /// r1 (codex 1): the committed generation again is a retry that rewrites no link row, so a
+    /// knowledge end deleted and re-added since stays unlinked (DEC-X6); a NEW generation rebinds.
+    /// NEGATIVE CONTROL: a retry that re-resolves and rewrites its rows.
+    #[test]
+    fn r1_a_retry_never_rebinds_a_link_to_a_re_added_end() {
+        let mut e = engine();
+        link(&mut e, B, 1, &[]);
+        e.replace_source_linked(&generation(A, 1), &to_doc_of(B), 1)
+            .unwrap();
+        let v = visible(&[&dep(A), &dep(B)]);
+        let linked = |e: &KnowledgeEngine| {
+            walk(e, KNOWLEDGE_STORE, &doc(A), &v, 1)
+                .unwrap()
+                .edges
+                .len()
+        };
+        assert_eq!(linked(&e), 1);
+        let empty_b = SourceGeneration {
+            docs: vec![],
+            ..generation(B, 2)
+        };
+        e.replace_source(&empty_b, 2).unwrap();
+        e.replace_source(&generation(B, 3), 3).unwrap();
+        assert_eq!(linked(&e), 0, "the re-added end does not inherit the link");
+        let r = e
+            .replace_source_linked(&generation(A, 1), &to_doc_of(B), 4)
+            .unwrap();
+        assert_eq!(r.links, 1);
+        assert_eq!(linked(&e), 0, "a retry of generation 1 does not rebind it");
+        e.replace_source_linked(&generation(A, 2), &to_doc_of(B), 5)
+            .unwrap();
+        assert_eq!(
+            linked(&e),
+            1,
+            "generation 2 re-asserts it against the live end"
+        );
+    }
+
+    /// r1 (codex 2): a node outside this source's scope that merely DEPENDS on it (a data shape
+    /// built from the tracker) is a fine knowledge end. NEGATIVE CONTROL: ownership judged by deps.
+    #[test]
+    fn r1_a_node_that_depends_on_this_source_is_a_fine_end() {
+        let mut e = engine();
+        link(&mut e, A, 1, &[]);
+        let mut node =
+            KNode::new(KClass::Concept, "a shape over PROJA", "wiki:pm", "t.md", 1).to_node();
+        crate::plane::stamp(&mut node, &[dep(A)], false);
+        let id = node.symbol.0.clone();
+        e.store.upsert_nodes(std::slice::from_ref(&node)).unwrap();
+        let mut links = to_doc_of(A);
+        links.get_mut("tracker").unwrap()[0].end.id = id.clone();
+        e.replace_source_linked(&generation(A, 2), &links, 2)
+            .unwrap();
+        let n = walk(&e, KNOWLEDGE_STORE, &doc(A), &visible(&[&dep(A)]), 1).unwrap();
+        assert!(n.nodes.iter().any(|x| x.id == id), "{n:?}");
+    }
+
+    /// r1 (codex 5): a run's deps are the same whether it is the start or a far end: the union of
+    /// its live filings. A reader holding only the repo never reaches a run one of whose links is
+    /// filed in a project it cannot see. NEGATIVE CONTROL: the first live filing taken as the run's.
+    #[test]
+    fn r1_a_run_is_judged_by_all_its_filings_as_a_start_and_as_a_far_end() {
+        let mut e = engine();
+        let mut g = generation(A, 1);
+        let issue = |key: &str| SourceDoc {
+            key: key.into(),
+            title: None,
+            entry: None,
+            sections: vec![SourceSection {
+                key: "ref".into(),
+                text: format!("issue_ref {key}"),
+            }],
+        };
+        g.docs.push(issue("PROJA-1"));
+        g.docs.push(issue("PROJA-2"));
+        let links = BTreeMap::from([
+            // Sorts first: the run's repo filing (it was unfiled when PROJA-1 was projected).
+            (
+                "PROJA-1".to_string(),
+                vec![control("addresses", LinkDir::In, "run:run_1", Some(&[R]))],
+            ),
+            (
+                "PROJA-2".to_string(),
+                vec![control("addresses", LinkDir::In, "run:run_1", Some(&[P]))],
+            ),
+        ]);
+        e.replace_source_linked(&g, &links, 1).unwrap();
+        let repo_only = visible(&[&dep(A), R]);
+        let from_issue = walk(
+            &e,
+            KNOWLEDGE_STORE,
+            &doc_symbol(A, "PROJA-1").0,
+            &repo_only,
+            3,
+        )
+        .unwrap();
+        assert!(
+            from_issue.nodes.iter().all(|x| x.id != "run:run_1"),
+            "{from_issue:?}"
+        );
+        assert!(walk(&e, CONTROL_STORE, "run:run_1", &repo_only, 1).is_none());
+        let both = visible(&[&dep(A), R, P]);
+        let from_issue = walk(&e, KNOWLEDGE_STORE, &doc_symbol(A, "PROJA-1").0, &both, 1).unwrap();
+        let run = from_issue
+            .nodes
+            .iter()
+            .find(|x| x.id == "run:run_1")
+            .unwrap();
+        assert_eq!(run.deps, vec![P.to_string(), R.to_string()]);
+    }
+
+    /// r1 (codex 6): a run whose adjacency is over the read bound has no complete filing, so it is
+    /// hidden. NEGATIVE CONTROL: the bound not checked (a partial union authorises it).
+    #[test]
+    fn r1_a_run_over_the_adjacency_bound_is_hidden() {
+        let mut e = engine();
+        let mut g = generation(A, 1);
+        g.docs.push(SourceDoc {
+            key: "PROJA-1".into(),
+            title: None,
+            entry: None,
+            sections: vec![SourceSection {
+                key: "ref".into(),
+                text: "issue_ref PROJA-1".into(),
+            }],
+        });
+        let links = BTreeMap::from([(
+            "PROJA-1".to_string(),
+            vec![control("addresses", LinkDir::In, "run:run_big", Some(&[P]))],
+        )]);
+        e.replace_source_linked(&g, &links, 1).unwrap();
+        let v = visible(&[&dep(A), P]);
+        assert!(walk(&e, CONTROL_STORE, "run:run_big", &v, 1).is_some());
+        let filler: Vec<TypedXEdge> = (0..crate::shape::ADJACENCY_LIMIT)
+            .map(|i| TypedXEdge {
+                source: Endpoint::new(CONTROL_STORE, "run:run_big", 0),
+                target: Endpoint::new(KNOWLEDGE_STORE, format!("n{i:05}"), 0),
+                rel: "addresses".into(),
+                owner: "dead-owner".into(),
+                confidence: 1.0,
+                meta: "{}".into(),
+            })
+            .collect();
+        e.xedge.as_ref().unwrap().put_typed_batch(&filler).unwrap();
+        assert!(walk(&e, CONTROL_STORE, "run:run_big", &v, 1).is_none());
+    }
+
+    /// r1 (pi): a cleanup that fails after the flip is reported, never returned as a failure: the
+    /// generation is committed and its links are live; the next generation deletes the old rows.
+    #[test]
+    fn r1_a_failed_cleanup_is_reported_and_the_next_generation_finishes_it() {
+        let mut e = engine();
+        link(&mut e, A, 1, &[P]);
+        e.fail_links_cleanup = true;
+        let r = e
+            .replace_source_linked(&generation(A, 2), &tracked_in(&[Q]), 2)
+            .unwrap();
+        e.fail_links_cleanup = false;
+        assert!(r.cleanup_error.is_some(), "{r:?}");
+        let v = visible(&[&dep(A), P, Q]);
+        assert_eq!(tracked(&e, A, &v), set(&[Q]));
+        assert_eq!(owners(&e, A).len(), 2);
+        link(&mut e, A, 3, &[Q]);
+        assert_eq!(
+            owners(&e, A),
+            vec![link_owner(&doc_symbol(A, "tracker"), 3)]
+        );
+    }
+
+    /// r1 (pi): a `pr:` start is visible only with its repo.
+    #[test]
+    fn r1_a_pr_start_needs_its_repo() {
+        let mut e = engine();
+        let mut g = generation(A, 1);
+        g.docs.push(SourceDoc {
+            key: "PROJA-1".into(),
+            title: None,
+            entry: None,
+            sections: vec![SourceSection {
+                key: "ref".into(),
+                text: "issue_ref PROJA-1".into(),
+            }],
+        });
+        let links = BTreeMap::from([(
+            "PROJA-1".to_string(),
+            vec![control("closes", LinkDir::In, "pr:r#42", None)],
+        )]);
+        e.replace_source_linked(&g, &links, 1).unwrap();
+        let n = walk(&e, CONTROL_STORE, "pr:r#42", &visible(&[&dep(A), R]), 1).unwrap();
+        assert_eq!(n.nodes[0].deps, vec![R.to_string()]);
+        assert!(n.nodes.iter().any(|x| x.id == doc_symbol(A, "PROJA-1").0));
+        assert!(walk(&e, CONTROL_STORE, "pr:r#42", &visible(&[&dep(A)]), 1).is_none());
     }
 }

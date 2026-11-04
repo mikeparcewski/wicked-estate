@@ -57,6 +57,19 @@ pub fn valid_repo_id(id: &str) -> bool {
         && id.bytes().all(|b| b.is_ascii_graphic() && b != b',')
 }
 
+/// A caller-supplied value as an error message shows it: at most 64 characters, so a diagnostic
+/// never carries an oversized input back (R4).
+pub fn shown(s: &str) -> String {
+    const SHOWN_CHARS: usize = 64;
+    if s.chars().count() <= SHOWN_CHARS {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(SHOWN_CHARS).collect();
+        out.push('…');
+        out
+    }
+}
+
 /// Is `id` a valid crew project (or run) id? 1-128 of `[A-Za-z0-9._-]` (crew's `proj_…`).
 pub fn valid_project_id(id: &str) -> bool {
     valid_source_id(id)
@@ -85,12 +98,14 @@ pub fn valid_dep(dep: &str) -> bool {
 /// `given` is only for a `run:` (whose filing the id does not say); for any other id it is refused,
 /// because estate derives those. A malformed id or dep is an error, never a narrower set.
 pub fn control_deps(id: &str, given: Option<&[String]>) -> Result<Vec<String>, String> {
+    let sid = shown(id);
     let (kind, rest) = id
         .split_once(':')
-        .ok_or_else(|| format!("control id {id:?}: expected project:, repo:, pr: or run:"))?;
+        .ok_or_else(|| format!("control id {sid:?}: expected project:, repo:, pr: or run:"))?;
     if kind != RUN_KIND && given.is_some() {
         return Err(format!(
-            "control id {id:?}: deps are given only for a run: end (estate derives a {kind}: end's deps)"
+            "control id {sid:?}: deps are given only for a run: end (estate derives a {}: end's deps)",
+            shown(kind)
         ));
     }
     match kind {
@@ -106,17 +121,19 @@ pub fn control_deps(id: &str, given: Option<&[String]>) -> Result<Vec<String>, S
             {
                 Ok(vec![format!("{REPO_KIND}:{repo}")])
             }
-            _ => Err(format!("control id {id:?}: expected pr:<repo id>#<number>")),
+            _ => Err(format!(
+                "control id {sid:?}: expected pr:<repo id>#<number>"
+            )),
         },
         RUN_KIND if valid_project_id(rest) => {
             let given = given.ok_or_else(|| {
                 format!(
-                    "control id {id:?}: a run: end needs deps (its project:<id>, or repo:<id> for an unfiled run)"
+                    "control id {sid:?}: a run: end needs deps (its project:<id>, or repo:<id> for an unfiled run)"
                 )
             })?;
             if given.is_empty() || given.len() > MAX_DEPS {
                 return Err(format!(
-                    "control id {id:?}: a run: end needs 1-{MAX_DEPS} deps"
+                    "control id {sid:?}: a run: end needs 1-{MAX_DEPS} deps"
                 ));
             }
             for d in given {
@@ -124,14 +141,15 @@ pub fn control_deps(id: &str, given: Option<&[String]>) -> Result<Vec<String>, S
                     && valid_dep(d);
                 if !ok {
                     return Err(format!(
-                        "control id {id:?}: run dep {d:?} must be project:<id> or repo:<id>"
+                        "control id {sid:?}: run dep {:?} must be project:<id> or repo:<id>",
+                        shown(d)
                     ));
                 }
             }
             Ok(normalize_deps(given.iter().cloned()))
         }
         _ => Err(format!(
-            "control id {id:?}: expected project:<id>, repo:<id>, pr:<repo id>#<n> or run:<id>"
+            "control id {sid:?}: expected project:<id>, repo:<id>, pr:<repo id>#<n> or run:<id>"
         )),
     }
 }
@@ -367,5 +385,15 @@ mod tests {
         assert!(control_deps("project:proj_P", Some(&run_deps(&["project:proj_P"]))).is_err());
         let many: Vec<String> = (0..=MAX_DEPS).map(|i| format!("repo:r{i}")).collect();
         assert!(control_deps("run:r1", Some(&many)).is_err());
+    }
+
+    /// r1 (codex 7): an error never carries an oversized input back (R4).
+    #[test]
+    fn errors_show_a_bounded_excerpt() {
+        let huge = format!("project:{}", "x".repeat(30_000));
+        assert!(control_deps(&huge, None).unwrap_err().len() < 300);
+        let huge_dep = vec![format!("source:{}", "y".repeat(30_000))];
+        assert!(control_deps("run:r1", Some(&huge_dep)).unwrap_err().len() < 300);
+        assert!(control_deps(&"z".repeat(30_000), None).unwrap_err().len() < 300);
     }
 }

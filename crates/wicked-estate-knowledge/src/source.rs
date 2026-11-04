@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 
 use crate::engine::{KClass, KNode, KnowledgeEngine};
 use crate::links::{DocLink, LinkedReplaceReport, canonical_links, source_owner_prefix};
-use crate::plane::{SOURCE_KIND, Visible, valid_source_id};
+use crate::plane::{SOURCE_KIND, Visible, shown, valid_source_id};
 use serde_json::{Value, json};
 use wicked_estate_core::{
     GraphRead, GraphWrite, Language, Location, Node, NodeKind, Scope, Span, Symbol, SymbolId,
@@ -192,7 +192,7 @@ impl SourceGeneration {
         if !valid_source_id(&self.source_id) {
             return Err(bad(format!(
                 "invalid sourceId {:?}: expected the registry id, 1-128 of [A-Za-z0-9._-]",
-                self.source_id
+                shown(&self.source_id)
             )));
         }
         if self.generation == 0 {
@@ -222,7 +222,7 @@ impl SourceGeneration {
             if !key_ok(&doc.key, MAX_KEY_BYTES) {
                 return Err(bad(format!(
                     "doc key {:?} must be 1-{MAX_KEY_BYTES} bytes with no control characters",
-                    doc.key
+                    shown(&doc.key)
                 )));
             }
             if !keys.insert(doc.key.as_str()) {
@@ -237,26 +237,26 @@ impl SourceGeneration {
                 if !entry.is_object() {
                     return Err(bad(format!(
                         "doc {:?}: entry must be a JSON object",
-                        doc.key
+                        shown(&doc.key)
                     )));
                 }
                 if entry.to_string().len() > MAX_ENTRY_BYTES {
                     return Err(bad(format!(
                         "doc {:?}: entry is over {MAX_ENTRY_BYTES} bytes",
-                        doc.key
+                        shown(&doc.key)
                     )));
                 }
             }
             if doc.sections.is_empty() {
                 return Err(bad(format!(
                     "doc {:?}: at least one section is required",
-                    doc.key
+                    shown(&doc.key)
                 )));
             }
             if doc.sections.len() > MAX_SECTIONS_PER_DOC {
                 return Err(bad(format!(
                     "doc {:?}: {} sections is over {MAX_SECTIONS_PER_DOC}",
-                    doc.key,
+                    shown(&doc.key),
                     doc.sections.len()
                 )));
             }
@@ -271,7 +271,7 @@ impl SourceGeneration {
                 return Err(bad(format!(
                     "doc {:?}: its catalog record is {record} bytes, over the {PAGE_BYTES}-byte page \
                      (shorten its sections or split the relation's structure across documents)",
-                    doc.key
+                    shown(&doc.key)
                 )));
             }
             let mut skeys = std::collections::BTreeSet::new();
@@ -279,19 +279,22 @@ impl SourceGeneration {
                 if !key_ok(&sec.key, MAX_KEY_BYTES) {
                     return Err(bad(format!(
                         "doc {:?}: section key {:?} must be 1-{MAX_KEY_BYTES} bytes",
-                        doc.key, sec.key
+                        shown(&doc.key),
+                        shown(&sec.key)
                     )));
                 }
                 if !skeys.insert(sec.key.as_str()) {
                     return Err(bad(format!(
                         "doc {:?}: duplicate section key {:?}",
-                        doc.key, sec.key
+                        shown(&doc.key),
+                        shown(&sec.key)
                     )));
                 }
                 if sec.text.trim().is_empty() || sec.text.len() > MAX_SECTION_TEXT_BYTES {
                     return Err(bad(format!(
                         "doc {:?} section {:?}: text must be 1-{MAX_SECTION_TEXT_BYTES} bytes",
-                        doc.key, sec.key
+                        shown(&doc.key),
+                        shown(&sec.key)
                     )));
                 }
             }
@@ -585,12 +588,21 @@ impl KnowledgeEngine {
             m.insert(crate::engine::meta_keys::DEPS.into(), json!(deps));
         }
 
-        // 1b. Resolve the links (reads only). 2. Refuse an older generation, or the same one with
-        // other content, before any link row is touched.
-        let edges = self.plan_links(g, links)?;
+        // 2. Refuse an older generation, or the same one with other content, before any link row
+        // is touched.
         let committed = check_order(self.manifest(sid)?.as_ref(), g, &manifest)?;
+        // The committed generation again (same content, links included) is a retry: its rows are
+        // already the live ones, so they are neither re-resolved nor rewritten (a re-stamp would
+        // rebind a link to a knowledge end deleted and re-added since; review r1).
+        let restage = g.generation > committed;
+        // 1b. Resolve the links (reads only).
+        let edges = if restage {
+            self.plan_links(g, links)?
+        } else {
+            Vec::new()
+        };
         let mut stale_removed = 0u64;
-        if self.xedge.is_some() {
+        if restage && self.xedge.is_some() {
             // 3. An interrupted attempt's rows above the committed generation can never be live:
             // delete them, so that generation number commits only its own links.
             stale_removed += self.delete_link_owners(sid, |n| n > committed)?;
@@ -630,14 +642,23 @@ impl KnowledgeEngine {
         // committed whatever happens here, so a failure is reported, never returned as one.
         let mut cleanup_error = None;
         if self.xedge.is_some() {
-            match self.delete_link_owners(sid, |n| n != g.generation) {
+            #[cfg(test)]
+            let injected = self.fail_links_cleanup;
+            #[cfg(not(test))]
+            let injected = false;
+            let cleaned = if injected {
+                Err(bad("injected cleanup failure".into()))
+            } else {
+                self.delete_link_owners(sid, |n| n != g.generation)
+            };
+            match cleaned {
                 Ok(n) => stale_removed += n,
                 Err(e) => cleanup_error = Some(e.to_string()),
             }
         }
         Ok(LinkedReplaceReport {
             report,
-            links: edges.len(),
+            links: link_count,
             stale_removed,
             cleanup_error,
         })

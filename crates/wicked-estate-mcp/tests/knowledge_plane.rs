@@ -525,6 +525,14 @@ fn tracker_links_over_jsonrpc() {
         r.call("knowledge.replace_source", bad)["error"]["code"],
         -32602
     );
+    let mut bad = tracker(2, &["project:proj_P"]);
+    bad["docs"][0]["links"][0]["end"]["id"] = json!(format!("project:{}", "x".repeat(30_000)));
+    let resp = r.call("knowledge.replace_source", bad);
+    assert_eq!(resp["error"]["code"], -32602);
+    assert!(
+        resp.to_string().len() < 1_000,
+        "R4: a refusal never echoes an oversized input back"
+    );
     assert_eq!(r.xedge.typed_len().unwrap(), 2, "nothing written");
 
     // A writer surface: refused under --readonly.

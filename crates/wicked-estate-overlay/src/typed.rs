@@ -492,6 +492,30 @@ mod batch_tests {
         assert!(store.put_typed_batch(&[]).is_ok());
     }
 
+    /// A store error on the second of two valid rows rolls the first back (review r1: the check
+    /// above refuses before any SQL; this one fails inside the transaction).
+    #[test]
+    fn a_store_error_mid_batch_rolls_the_batch_back() {
+        let store = XedgeStore::in_memory().unwrap();
+        store.put_typed(&edge("project:a", "o@1")).unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER refuse_doomed BEFORE INSERT ON typed_xedges
+                 WHEN NEW.tgt_id = 'project:doomed' BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+        assert!(
+            store
+                .put_typed_batch(&[edge("project:b", "o@2"), edge("project:doomed", "o@2")])
+                .is_err()
+        );
+        assert_eq!(store.typed_len().unwrap(), 1, "project:b was rolled back");
+        assert!(store.reader().typed_by_owner("o@2").unwrap().is_empty());
+    }
+
     #[test]
     fn owners_are_listed_by_prefix_and_deleted_together() {
         let store = XedgeStore::in_memory().unwrap();

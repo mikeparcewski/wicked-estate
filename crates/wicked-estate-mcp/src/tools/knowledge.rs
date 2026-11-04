@@ -550,7 +550,10 @@ fn dispatch_replace_source(
         }
         Err(e) => tool_error(
             id,
-            format!("replace_source wrote nothing and tombstoned nothing: {e}"),
+            format!(
+                "replace_source committed nothing and tombstoned nothing (any link rows it staged \
+                 stay hidden, and the source's next generation deletes them): {e}"
+            ),
         ),
     }
 }
@@ -682,7 +685,13 @@ fn dispatch_neighbors(
                 "truncated": n.truncated,
             }),
         ),
-        Ok(None) => tool_error(id, format!("no visible knowledge node {start:?}")),
+        Ok(None) => tool_error(
+            id,
+            format!(
+                "no visible knowledge node {:?}",
+                wicked_estate_knowledge::plane::shown(start)
+            ),
+        ),
         Err(e) => tool_error(id, format!("neighbors: {e}")),
     }
 }
