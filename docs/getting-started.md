@@ -567,7 +567,7 @@ wicked-estate-mcp --db /path/to/graph.db
 # or: WICKED_ESTATE_DB=:memory: wicked-estate-mcp
 ```
 
-### The 30 tools (12 estate + 7 memory + 7 knowledge + 4 proposal)
+### The 33 tools (12 estate + 7 memory + 10 knowledge + 4 proposal)
 
 #### Estate tools
 
@@ -658,16 +658,19 @@ development binary needs `wicked-estate index <path> --force` once.
 | `knowledge.ingest` | Ingest a document or chunk into the knowledge store. |
 | `knowledge.write` | Write a curated knowledge node with typed relations. |
 | `knowledge.relate` | Add a typed relation between two knowledge nodes. |
-| `knowledge.recall` | Retrieve knowledge nodes matching a query. |
+| `knowledge.recall` | Retrieve knowledge nodes matching a query. Items carry `scope`, `deps` and `untrusted`; pass `visible` (`source:<id>` / `repo:<id>`) to see knowledge derived from sources and repos — an item is returned only when every dep is visible, filtered before ranking. |
 | `knowledge.coverage` | Report knowledge store statistics (node count, relation types). |
 | `knowledge.relate_code` | Link a knowledge node to a code symbol in the estate graph. |
-| `knowledge.recall_about_code` | Recall knowledge nodes related to a given code symbol. |
+| `knowledge.recall_about_code` | Recall knowledge nodes related to a given code symbol (same `visible` rule). |
+| `knowledge.replace_source` | Replace a live source's structure (never its rows) with one complete generation: stable ids, absent docs tombstoned, all-or-nothing. Write tool. |
+| `knowledge.source_catalog` | The complete, paged, versioned typed catalog of one source; needs `source:<id>` in `visible`. |
+| `knowledge.neighbors` | The typed neighbourhood (`describes`, `joins`, `governed_by`, `measures`, `tracked_in`, `addresses`, `closes`, `derived_from`) of a knowledge node or code symbol, filtered by `visible`. |
 
 #### Proposal-queue tools (memory-domain, DES-MEM-FACETED-001)
 
 | Tool | Description |
 |------|-------------|
-| `proposal.submit` | Submit a governed proposal (`memory`, `knowledge`, or `policy:<type>`). Knowledge requires non-empty `content` and `source`; optional `class` defaults to `chunk`, with `scope`, ISO-8601 `observed_at`, and `source_rev` carried in the payload. A SAFE write — lands `Pending`, inert until approved (allowed under `--readonly`). |
+| `proposal.submit` | Submit a governed proposal (`memory`, `knowledge`, or `policy:<type>`). Knowledge requires non-empty `content` and `source`; optional `class` defaults to `chunk`, with `scope`, ISO-8601 `observed_at`, and `source_rev` carried in the payload. A data shape adds `relate[]` / `relate_code[]` (typed links; approve derives its `deps` and refuses a declared `deps` that differs). A SAFE write — lands `Pending`, inert until approved (allowed under `--readonly`). |
 | `proposal.list` | List queued proposals, optionally by exact kind_type (`memory`, `knowledge`, or `policy:<type>`) / state. |
 | `proposal.approve` | Approve a proposal → promote it to the active memory or knowledge store, or hand it off (policy). |
 | `proposal.reject` | Reject a proposal. |

@@ -105,7 +105,7 @@ impl XEdge {
 pub struct XedgeStore {
     /// `Arc<Mutex<..>>` so a `reader()` shares the same underlying DB (in-memory or file) — a
     /// second `Connection::open` on `:memory:` would get a DISTINCT empty database.
-    conn: Arc<Mutex<Connection>>,
+    pub(crate) conn: Arc<Mutex<Connection>>,
 }
 
 impl XedgeStore {
@@ -239,7 +239,7 @@ impl XedgeStore {
 /// against the live `symbol_epoch` before folding it in — T-X-EPOCHVAL read-time backstop).
 #[derive(Clone)]
 pub struct XedgeReader {
-    conn: Arc<Mutex<Connection>>,
+    pub(crate) conn: Arc<Mutex<Connection>>,
 }
 
 impl XedgeReader {
@@ -317,7 +317,7 @@ enum EndpointSide {
     Target,
 }
 
-fn map_err(e: rusqlite::Error) -> wicked_estate_core::Error {
+pub(crate) fn map_err(e: rusqlite::Error) -> wicked_estate_core::Error {
     wicked_estate_core::Error::Invalid(format!("xedge: {e}"))
 }
 

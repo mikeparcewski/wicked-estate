@@ -1,0 +1,34 @@
+{
+  "captured_from": "wicked-estate-mcp-0.31.x (DES-KNOWLEDGE-DATA-001 B3a, additive tool)",
+  "description": "The typed, visibility-filtered neighbourhood of a knowledge node or code symbol.",
+  "inputSchema": {
+    "properties": {
+      "depth": {
+        "type": "integer"
+      },
+      "id": {
+        "type": "string"
+      },
+      "kinds": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "store": {
+        "type": "string"
+      },
+      "visible": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "id"
+    ],
+    "type": "object"
+  },
+  "name": "knowledge.neighbors"
+}

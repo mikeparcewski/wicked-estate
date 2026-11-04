@@ -1,0 +1,28 @@
+{
+  "captured_from": "wicked-estate-mcp-0.31.x (DES-KNOWLEDGE-DATA-001 B3a, additive tool)",
+  "description": "The complete, paged, versioned typed catalog of one live source.",
+  "inputSchema": {
+    "properties": {
+      "generation": {
+        "type": "integer"
+      },
+      "page": {
+        "type": "integer"
+      },
+      "sourceId": {
+        "type": "string"
+      },
+      "visible": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "sourceId"
+    ],
+    "type": "object"
+  },
+  "name": "knowledge.source_catalog"
+}
