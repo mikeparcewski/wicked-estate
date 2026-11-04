@@ -1,0 +1,30 @@
+{
+  "captured_from": "wicked-estate-mcp-0.31.x (DES-KNOWLEDGE-DATA-001 B3a, additive tool)",
+  "description": "Replace a live source's STRUCTURE (never its rows) with one COMPLETE generation.",
+  "inputSchema": {
+    "properties": {
+      "catalog": {
+        "type": "object"
+      },
+      "docs": {
+        "type": "array"
+      },
+      "generation": {
+        "type": "integer"
+      },
+      "label": {
+        "type": "string"
+      },
+      "sourceId": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "sourceId",
+      "generation",
+      "docs"
+    ],
+    "type": "object"
+  },
+  "name": "knowledge.replace_source"
+}

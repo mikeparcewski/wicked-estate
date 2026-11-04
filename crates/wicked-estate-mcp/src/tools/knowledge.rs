@@ -1,9 +1,15 @@
-//! MCP dispatch for the 7 `knowledge.*` tools.
+//! MCP dispatch for the 10 `knowledge.*` tools: the 7 document tools plus the knowledge plane's
+//! `knowledge.replace_source`, `knowledge.source_catalog` and `knowledge.neighbors`
+//! (DES-KNOWLEDGE-DATA-001 §4, §10.1).
 
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use wicked_estate_core::{GraphRead, SymbolId};
-use wicked_estate_knowledge::KnowledgeApi;
+use wicked_estate_knowledge::shape::{ESTATE_STORE, KNOWLEDGE_STORE, MAX_NEIGHBOR_DEPTH};
+use wicked_estate_knowledge::{
+    KnowledgeApi, NeighborsQuery, SourceDoc, SourceGeneration, SourceSection, Visible,
+};
+use wicked_estate_overlay::{TYPED_RELS, is_typed_rel};
 
 pub fn dispatch(
     tool: &str,
@@ -25,6 +31,9 @@ pub fn dispatch(
         "knowledge.coverage" => dispatch_coverage(id, &args, knowledge),
         "knowledge.relate_code" => dispatch_relate_code(id, &args, store, knowledge),
         "knowledge.recall_about_code" => dispatch_recall_about_code(id, &args, knowledge),
+        "knowledge.replace_source" => dispatch_replace_source(id, &args, knowledge, now),
+        "knowledge.source_catalog" => dispatch_source_catalog(id, &args, knowledge),
+        "knowledge.neighbors" => dispatch_neighbors(id, &args, store, knowledge),
         _ => json_rpc_error(id, -32602, "unknown knowledge tool"),
     }
 }
@@ -44,7 +53,45 @@ fn mcp_result(id: &Value, content: Value) -> Value {
     )
 }
 
-fn fetch_epochs(store: &dyn GraphRead, ids: &[String]) -> HashMap<String, u64> {
+/// A tool-execution failure (MCP `isError:true`), distinct from a JSON-RPC protocol error.
+fn tool_error(id: &Value, text: String) -> Value {
+    ok_resp(
+        id,
+        json!({"content":[{"type":"text","text":text}],"isError":true}),
+    )
+}
+
+/// `visible` (DES-KNOWLEDGE-DATA-001 §4.3): the `source:<id>` / `repo:<id>` the caller may see.
+/// Omitted or null = the empty set (only dep-free knowledge). A present value must be an array of
+/// well-formed deps — a malformed one is invalid params, never a silently smaller set.
+pub(crate) fn parse_visible(id: &Value, args: &Value) -> Result<Visible, Value> {
+    match args.get("visible") {
+        None | Some(Value::Null) => Ok(Visible::none()),
+        Some(Value::Array(xs)) => {
+            let mut deps = Vec::with_capacity(xs.len());
+            for x in xs {
+                match x.as_str() {
+                    Some(d) => deps.push(d),
+                    None => {
+                        return Err(json_rpc_error(
+                            id,
+                            -32602,
+                            "invalid visible: every entry must be a source:<id> or repo:<id> string",
+                        ));
+                    }
+                }
+            }
+            Visible::from_deps(deps).map_err(|e| json_rpc_error(id, -32602, &e))
+        }
+        Some(other) => Err(json_rpc_error(
+            id,
+            -32602,
+            &format!("invalid visible: expected an array of source:<id> / repo:<id>, got {other}"),
+        )),
+    }
+}
+
+pub(crate) fn fetch_epochs(store: &dyn GraphRead, ids: &[String]) -> HashMap<String, u64> {
     let mut epochs = HashMap::new();
     for sym_id in ids {
         if let Ok(Some(epoch)) = store.symbol_epoch(&SymbolId(sym_id.clone())) {
@@ -160,7 +207,11 @@ fn dispatch_recall(id: &Value, args: &Value, knowledge: &mut dyn KnowledgeApi, n
             );
         }
     };
-    match knowledge.recall(&query, token_budget, scope_prefix.as_deref(), now) {
+    let visible = match parse_visible(id, args) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match knowledge.recall(&query, token_budget, scope_prefix.as_deref(), &visible, now) {
         Ok(items) => {
             let wire: Vec<Value> = items
                 .into_iter()
@@ -217,7 +268,11 @@ fn dispatch_recall_about_code(id: &Value, args: &Value, knowledge: &dyn Knowledg
             .collect(),
         _ => return json_rpc_error(id, -32602, "code_ids required (non-empty)"),
     };
-    match knowledge.recall_about_code(&code_ids) {
+    let visible = match parse_visible(id, args) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match knowledge.recall_about_code(&code_ids, &visible) {
         Ok(items) => {
             let wire: Vec<Value> = items
                 .into_iter()
@@ -226,5 +281,288 @@ fn dispatch_recall_about_code(id: &Value, args: &Value, knowledge: &dyn Knowledg
             mcp_result(id, json!({"items": wire}))
         }
         Err(e) => json_rpc_error(id, -32603, &e.to_string()),
+    }
+}
+
+/// A non-negative integer argument, or `default` when absent/null; anything else is invalid params.
+fn opt_u64(
+    id: &Value,
+    args: &Value,
+    field: &str,
+    default: Option<u64>,
+) -> Result<Option<u64>, Value> {
+    match args.get(field) {
+        None | Some(Value::Null) => Ok(default),
+        Some(v) => v.as_u64().map(Some).ok_or_else(|| {
+            json_rpc_error(
+                id,
+                -32602,
+                &format!("{field} must be a non-negative integer"),
+            )
+        }),
+    }
+}
+
+fn opt_string(id: &Value, v: Option<&Value>, at: &str) -> Result<Option<String>, Value> {
+    match v {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(json_rpc_error(
+            id,
+            -32602,
+            &format!("{at} must be a string"),
+        )),
+    }
+}
+
+fn opt_object(id: &Value, v: Option<&Value>, at: &str) -> Result<Option<Value>, Value> {
+    match v {
+        None | Some(Value::Null) => Ok(None),
+        Some(o @ Value::Object(_)) => Ok(Some(o.clone())),
+        Some(_) => Err(json_rpc_error(
+            id,
+            -32602,
+            &format!("{at} must be a JSON object"),
+        )),
+    }
+}
+
+/// Parse a `knowledge.replace_source` request into a generation (wire types only; the engine's
+/// `SourceGeneration::validate` checks the rest before anything is written).
+fn parse_generation(id: &Value, args: &Value) -> Result<SourceGeneration, Value> {
+    let source_id = match args.get("sourceId").and_then(Value::as_str) {
+        Some(s) => s.to_string(),
+        None => return Err(json_rpc_error(id, -32602, "sourceId (string) required")),
+    };
+    let generation = match opt_u64(id, args, "generation", None)? {
+        Some(g) => g,
+        None => {
+            return Err(json_rpc_error(
+                id,
+                -32602,
+                "generation (integer >= 1) required",
+            ));
+        }
+    };
+    let label = opt_string(id, args.get("label"), "label")?;
+    let catalog = opt_object(id, args.get("catalog"), "catalog")?;
+    let Some(raw_docs) = args.get("docs").and_then(Value::as_array) else {
+        return Err(json_rpc_error(
+            id,
+            -32602,
+            "docs (array, the COMPLETE generation; [] = the source has no relations) required",
+        ));
+    };
+    let mut docs = Vec::with_capacity(raw_docs.len());
+    for (i, d) in raw_docs.iter().enumerate() {
+        let at = format!("docs[{i}]");
+        if !d.is_object() {
+            return Err(json_rpc_error(
+                id,
+                -32602,
+                &format!("{at} must be an object"),
+            ));
+        }
+        let Some(key) = d.get("key").and_then(Value::as_str) else {
+            return Err(json_rpc_error(
+                id,
+                -32602,
+                &format!("{at}.key (string) required"),
+            ));
+        };
+        let Some(raw_sections) = d.get("sections").and_then(Value::as_array) else {
+            return Err(json_rpc_error(
+                id,
+                -32602,
+                &format!("{at}.sections (array of {{key, text}}) required"),
+            ));
+        };
+        let mut sections = Vec::with_capacity(raw_sections.len());
+        for (j, sec) in raw_sections.iter().enumerate() {
+            match (
+                sec.get("key").and_then(Value::as_str),
+                sec.get("text").and_then(Value::as_str),
+            ) {
+                (Some(k), Some(t)) => sections.push(SourceSection {
+                    key: k.to_string(),
+                    text: t.to_string(),
+                }),
+                _ => {
+                    return Err(json_rpc_error(
+                        id,
+                        -32602,
+                        &format!("{at}.sections[{j}] must be {{key: string, text: string}}"),
+                    ));
+                }
+            }
+        }
+        docs.push(SourceDoc {
+            key: key.to_string(),
+            title: opt_string(id, d.get("title"), &format!("{at}.title"))?,
+            entry: opt_object(id, d.get("entry"), &format!("{at}.entry"))?,
+            sections,
+        });
+    }
+    Ok(SourceGeneration {
+        source_id,
+        generation,
+        label,
+        catalog,
+        docs,
+    })
+}
+
+fn dispatch_replace_source(
+    id: &Value,
+    args: &Value,
+    knowledge: &mut dyn KnowledgeApi,
+    now: i64,
+) -> Value {
+    let generation = match parse_generation(id, args) {
+        Ok(g) => g,
+        Err(e) => return e,
+    };
+    // Validate the WHOLE generation before anything is written: a malformed one is a client
+    // error and writes nothing, tombstones nothing.
+    if let Err(e) = generation.validate() {
+        return json_rpc_error(id, -32602, &e.to_string());
+    }
+    match knowledge.replace_source(&generation, now) {
+        Ok(r) => mcp_result(
+            id,
+            json!({
+                "sourceId": r.source_id,
+                "generation": r.generation,
+                "docs": r.docs,
+                "sections": r.sections,
+                "tombstoned": {"nodes": r.tombstoned_nodes, "docs": r.tombstoned_docs},
+                "orphaned_edges": {
+                    "count": r.orphaned_edge_count,
+                    "edges": r.orphaned_edges.iter().map(|e| json!({
+                        "rel": e.rel, "from": e.from, "to": e.to, "owner": e.owner,
+                    })).collect::<Vec<_>>(),
+                },
+            }),
+        ),
+        Err(e) => tool_error(
+            id,
+            format!("replace_source wrote nothing and tombstoned nothing: {e}"),
+        ),
+    }
+}
+
+fn dispatch_source_catalog(id: &Value, args: &Value, knowledge: &dyn KnowledgeApi) -> Value {
+    let Some(source_id) = args.get("sourceId").and_then(Value::as_str) else {
+        return json_rpc_error(id, -32602, "sourceId (string) required");
+    };
+    let page = match opt_u64(id, args, "page", Some(0)) {
+        Ok(p) => p.unwrap_or(0) as usize,
+        Err(e) => return e,
+    };
+    let pinned = match opt_u64(id, args, "generation", None) {
+        Ok(g) => g,
+        Err(e) => return e,
+    };
+    let visible = match parse_visible(id, args) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match knowledge.source_catalog(source_id, page, pinned, &visible) {
+        Ok(Some(c)) => mcp_result(
+            id,
+            json!({
+                "sourceId": c.source_id,
+                "label": c.label,
+                "generation": c.generation,
+                "page": c.page,
+                "pages": c.pages,
+                "total_docs": c.total_docs,
+                "untrusted": true,
+                "catalog": c.catalog,
+                "docs": c.docs,
+            }),
+        ),
+        Ok(None) => tool_error(
+            id,
+            format!(
+                "no visible catalog for source {source_id:?} (pass visible with source:{source_id} to read one)"
+            ),
+        ),
+        Err(e) => tool_error(id, format!("source_catalog: {e}")),
+    }
+}
+
+fn dispatch_neighbors(
+    id: &Value,
+    args: &Value,
+    store: &dyn GraphRead,
+    knowledge: &dyn KnowledgeApi,
+) -> Value {
+    let Some(start) = args.get("id").and_then(Value::as_str) else {
+        return json_rpc_error(id, -32602, "id (string) required");
+    };
+    let start_store = match args.get("store") {
+        None | Some(Value::Null) => KNOWLEDGE_STORE.to_string(),
+        Some(Value::String(s)) if s == KNOWLEDGE_STORE || s == ESTATE_STORE => s.clone(),
+        Some(_) => return json_rpc_error(id, -32602, "store must be \"knowledge\" or \"estate\""),
+    };
+    let rels: Vec<String> = match args.get("kinds") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(xs)) => {
+            let mut out = Vec::with_capacity(xs.len());
+            for x in xs {
+                match x.as_str() {
+                    Some(r) if is_typed_rel(r) => out.push(r.to_string()),
+                    _ => {
+                        return json_rpc_error(
+                            id,
+                            -32602,
+                            &format!("kinds entries must be one of {}", TYPED_RELS.join("|")),
+                        );
+                    }
+                }
+            }
+            out
+        }
+        Some(_) => return json_rpc_error(id, -32602, "kinds must be an array of typed rels"),
+    };
+    let depth = match opt_u64(id, args, "depth", Some(1)) {
+        Ok(Some(d)) if (1..=MAX_NEIGHBOR_DEPTH as u64).contains(&d) => d as usize,
+        Ok(_) => {
+            return json_rpc_error(id, -32602, &format!("depth must be 1-{MAX_NEIGHBOR_DEPTH}"));
+        }
+        Err(e) => return e,
+    };
+    let visible = match parse_visible(id, args) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let q = NeighborsQuery {
+        store: start_store,
+        id: start.to_string(),
+        rels,
+        depth,
+        visible,
+    };
+    match knowledge.neighbors(&q, store) {
+        Ok(Some(n)) => mcp_result(
+            id,
+            json!({
+                "nodes": n.nodes.iter().map(|x| json!({
+                    "store": x.store, "id": x.id, "class": x.class, "label": x.label,
+                    "scope": x.scope, "deps": x.deps, "untrusted": x.untrusted,
+                    "source": x.source, "hydrated": x.hydrated,
+                })).collect::<Vec<_>>(),
+                "edges": n.edges.iter().map(|e| json!({
+                    "rel": e.rel,
+                    "from": {"store": e.from.0, "id": e.from.1},
+                    "to": {"store": e.to.0, "id": e.to.1},
+                    "owner": e.owner, "confidence": e.confidence, "meta": e.meta,
+                })).collect::<Vec<_>>(),
+                "truncated": n.truncated,
+            }),
+        ),
+        Ok(None) => tool_error(id, format!("no visible knowledge node {start:?}")),
+        Err(e) => tool_error(id, format!("neighbors: {e}")),
     }
 }

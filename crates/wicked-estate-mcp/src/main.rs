@@ -350,6 +350,22 @@ async fn main() -> Result<()> {
         }
     };
 
+    // 3b'. DES-KNOWLEDGE-DATA-001 §10.1: finish or roll back any knowledge approval a crash left
+    // half-done, before serving a single read. Write mode only: a `--readonly` server writes
+    // nothing, and its reads already hide a half-done approval (its edges' owner is not live).
+    if !read_only {
+        if let Some((mem, know)) = domain_engines.as_mut() {
+            match wicked_estate_mcp::tools::proposals::sweep_knowledge_approvals(mem, know) {
+                Ok(lines) => {
+                    for line in lines {
+                        eprintln!("[wicked-estate] knowledge sweep: {line}");
+                    }
+                }
+                Err(e) => eprintln!("[wicked-estate] WARN: knowledge approval sweep failed: {e}"),
+            }
+        }
+    }
+
     // 3c. Sync SqliteStore for the unified dispatch (estate read path for epoch lookups).
     let mut sync_store = SqliteStore::open(&db_path)
         .unwrap_or_else(|_| SqliteStore::in_memory().expect("in-memory fallback"));

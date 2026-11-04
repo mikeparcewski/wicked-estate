@@ -1212,6 +1212,22 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Abort the batch [`begin_batch`](GraphWrite::begin_batch) opened: every write since then is
+    /// discarded. A no-op when no batch is open, or when SQLite already rolled the transaction back
+    /// itself (some errors, e.g. `SQLITE_FULL`, end it). A caller that writes one logical unit
+    /// inside a batch calls this on any error, so a later `commit_batch` never commits half of it
+    /// (the knowledge store's whole-generation `replace_source`).
+    pub fn rollback_batch(&mut self) -> Result<()> {
+        if !self.in_batch {
+            return Ok(());
+        }
+        self.in_batch = false;
+        if self.conn.is_autocommit() {
+            return Ok(());
+        }
+        self.conn.execute_batch("ROLLBACK").map_err(st)
+    }
+
     /// Hard-delete nodes by id, plus their FTS rows, embeddings, and incident edges (both
     /// directions). Returns the number of node rows removed. Used for right-to-erasure (the memory
     /// layer computes the in-scope, memory-kind ids and calls this — see `wicked-memory` `erase`).
@@ -7135,5 +7151,45 @@ mod tests {
              re-inserted instead of skipping; 0 = the keep dropped search visibility)"
         );
         assert_eq!(fts_rows_for(&store, "fo"), 1, "owner File node rebuilt");
+    }
+
+    /// `rollback_batch` discards every write since `begin_batch` (nodes and their FTS rows), so a
+    /// later `commit_batch` cannot commit half of a logical unit; it is a no-op outside a batch.
+    #[test]
+    fn rollback_batch_discards_the_open_batch() {
+        use wicked_estate_core::{Language, Location, Span};
+        let node = |name: &str| {
+            Node::new(
+                sym(name),
+                NodeKind::Function,
+                name,
+                Language::new("rust"),
+                Location::new("src/lib.rs", Span::ZERO),
+            )
+        };
+        let mut store = open();
+        store.upsert_nodes(&[node("kept")]).unwrap();
+        store.rollback_batch().unwrap(); // no batch open: a no-op
+
+        store.begin_batch().unwrap();
+        store.upsert_nodes(&[node("discarded")]).unwrap();
+        store.rollback_batch().unwrap();
+        store.begin_batch().unwrap();
+        store.upsert_nodes(&[node("later")]).unwrap();
+        store.commit_batch().unwrap();
+
+        assert!(store.get_node(&sym("kept")).unwrap().is_some());
+        assert!(store.get_node(&sym("later")).unwrap().is_some());
+        assert!(
+            store.get_node(&sym("discarded")).unwrap().is_none(),
+            "a rolled-back write must not be committed by a later batch"
+        );
+        let fts = store
+            .find_symbols(&SymbolQuery {
+                text: Some("discarded".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(fts.is_empty(), "the rolled-back FTS row is gone too");
     }
 }

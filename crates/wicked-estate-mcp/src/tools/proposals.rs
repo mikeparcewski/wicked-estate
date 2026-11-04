@@ -7,7 +7,8 @@
 
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use wicked_estate_knowledge::KnowledgeApi;
+use wicked_estate_core::GraphRead;
+use wicked_estate_knowledge::{KnowledgeApi, parse_shape_links};
 use wicked_estate_memory_core::{
     ApproveOutcome, Facets, MemoryApi, Proposal, ProposalState, valid_kind_type,
 };
@@ -25,14 +26,16 @@ pub fn dispatch(
 }
 
 /// The proposal tools with the knowledge domain, so approving a `knowledge` proposal writes it.
+/// `graph` is the attached code graph: a `relate_code[]` endpoint it holds is epoch-stamped.
 pub fn dispatch_with_knowledge(
     tool: &str,
     id: &Value,
     params: &Value,
     memory: &mut dyn MemoryApi<Error = anyhow::Error>,
     knowledge: &mut dyn KnowledgeApi,
+    graph: &dyn GraphRead,
 ) -> Value {
-    dispatch_inner(tool, id, params, memory, Some(knowledge))
+    dispatch_inner(tool, id, params, memory, Some((knowledge, graph)))
 }
 
 fn dispatch_inner(
@@ -40,7 +43,7 @@ fn dispatch_inner(
     id: &Value,
     params: &Value,
     memory: &mut dyn MemoryApi<Error = anyhow::Error>,
-    knowledge: Option<&mut dyn KnowledgeApi>,
+    knowledge: Option<(&mut dyn KnowledgeApi, &dyn GraphRead)>,
 ) -> Value {
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
     let now = std::time::SystemTime::now()
@@ -238,6 +241,11 @@ fn dispatch_submit(
                 );
             }
         }
+        // A data shape's links and declared deps (DES-KNOWLEDGE-DATA-001 §4.3): shape-checked here
+        // so the proposer hears a mistake; endpoints are resolved and deps derived at approve.
+        if let Err(e) = parse_shape_links(&payload) {
+            return json_rpc_error(id, -32602, &format!("invalid knowledge proposal: {e}"));
+        }
         for field in ["scope", "observed_at", "source_rev"] {
             if payload.get(field).is_some_and(|v| !v.is_string()) {
                 return json_rpc_error(
@@ -358,29 +366,82 @@ fn dispatch_approve(
     id: &Value,
     args: &Value,
     memory: &mut dyn MemoryApi<Error = anyhow::Error>,
-    knowledge: Option<&mut dyn KnowledgeApi>,
+    knowledge: Option<(&mut dyn KnowledgeApi, &dyn GraphRead)>,
     now: i64,
 ) -> Value {
     let proposal_id = match args.get("id").and_then(|v| v.as_str()) {
         Some(i) => i.to_string(),
         None => return json_rpc_error(id, -32602, "id (string) required"),
     };
+    let mut unverified_code = 0usize;
+    // What happened to the approval journal, when it is worth telling the caller (never stderr:
+    // this library also runs inside hosts whose stderr is not a terminal).
+    let mut note: Option<String> = None;
+    // Did the queue hand this approval to the knowledge writer (a `knowledge` proposal)?
+    let mut wrote_knowledge = false;
     let approved = match knowledge {
-        Some(knowledge) => {
-            memory.approve_proposal_with_knowledge(&proposal_id, now, &mut |proposal, now| {
-                knowledge.write_proposal(proposal, now)
-            })
+        Some((knowledge, graph)) => {
+            let approved =
+                memory.approve_proposal_with_knowledge(&proposal_id, now, &mut |proposal, now| {
+                    wrote_knowledge = true;
+                    // Epoch-stamp every code endpoint the attached graph holds (DEC-X6).
+                    let code_ids: Vec<String> = parse_shape_links(&proposal.payload)
+                        .map(|l| l.relate_code.into_iter().map(|c| c.code_id).collect())
+                        .unwrap_or_default();
+                    let epochs = super::knowledge::fetch_epochs(graph, &code_ids);
+                    unverified_code = code_ids.iter().filter(|c| !epochs.contains_key(*c)).count();
+                    knowledge.write_proposal(proposal, &epochs, now)
+                });
+            match &approved {
+                _ if !wrote_knowledge => {}
+                // Invisible until complete, step 5: the proposal is approved; drop the journal.
+                // Best effort — a journal left behind is completed by the next start-up sweep.
+                Ok(_) => {
+                    if let Err(e) = knowledge.finish_proposal(&proposal_id) {
+                        note = Some(format!(
+                            "approved; its journal stays until the next start-up sweep completes it ({e})"
+                        ));
+                    }
+                }
+                // A failed approve leaves nothing half-done: roll back whatever it wrote, but only
+                // while the proposal is still pending (an approved one is never undone).
+                Err(_) => {
+                    let pending = memory
+                        .list_proposals(Some("knowledge"), Some(ProposalState::Pending))
+                        .map(|ps| ps.iter().any(|p| p.id == proposal_id))
+                        .unwrap_or(false);
+                    if pending {
+                        if let Err(e) = knowledge.rollback_proposal(&proposal_id) {
+                            note = Some(format!(
+                                "the partial approval could not be rolled back now; the next start-up sweep will ({e})"
+                            ));
+                        }
+                    }
+                }
+            }
+            approved
         }
         None => memory.approve_proposal(&proposal_id, now),
     };
     match approved {
         Ok(ApproveOutcome::Promoted { active_id }) => {
-            mcp_result(id, json!({"outcome": "promoted", "active_id": active_id}))
+            let mut out = json!({"outcome": "promoted", "active_id": active_id});
+            if unverified_code > 0 {
+                // The attached graph could not confirm these code endpoints (epoch 0): say so.
+                out["unverified_code_endpoints"] = json!(unverified_code);
+            }
+            if let Some(note) = &note {
+                out["warning"] = json!(note);
+            }
+            mcp_result(id, out)
         }
         Ok(ApproveOutcome::HandedOff { payload }) => {
             mcp_result(id, json!({"outcome": "handed_off", "payload": payload}))
         }
-        Err(e) => json_rpc_error(id, -32603, &e.to_string()),
+        Err(e) => match &note {
+            Some(note) => json_rpc_error(id, -32603, &format!("{e}; {note}")),
+            None => json_rpc_error(id, -32603, &e.to_string()),
+        },
     }
 }
 
@@ -398,4 +459,41 @@ fn dispatch_reject(
         Ok(()) => mcp_result(id, json!({"ok": true})),
         Err(e) => json_rpc_error(id, -32603, &e.to_string()),
     }
+}
+
+/// The start-up sweep of the invisible-until-complete protocol (DES-KNOWLEDGE-DATA-001 §10.1):
+/// every knowledge approval with a journal was interrupted. An approved proposal is completed; a
+/// pending, rejected or missing one is rolled back (its edges, its node, its journal), so nothing
+/// half-done stays visible. Write mode only (a `--readonly` server writes nothing). Returns one
+/// line per journal handled, for the server's log.
+pub fn sweep_knowledge_approvals(
+    memory: &mut dyn MemoryApi<Error = anyhow::Error>,
+    knowledge: &mut dyn KnowledgeApi,
+) -> anyhow::Result<Vec<String>> {
+    let in_flight = knowledge.applying_proposals()?;
+    if in_flight.is_empty() {
+        return Ok(Vec::new());
+    }
+    let states: BTreeMap<String, ProposalState> = memory
+        .list_proposals(Some("knowledge"), None)?
+        .into_iter()
+        .map(|p| (p.id, p.state))
+        .collect();
+    let mut log = Vec::new();
+    for pid in in_flight {
+        match states.get(&pid) {
+            Some(ProposalState::Approved) => {
+                knowledge.complete_proposal(&pid)?;
+                log.push(format!("completed interrupted approval {pid}"));
+            }
+            other => {
+                knowledge.rollback_proposal(&pid)?;
+                let state = other.map(|s| s.as_str()).unwrap_or("missing");
+                log.push(format!(
+                    "rolled back interrupted approval {pid} (proposal {state})"
+                ));
+            }
+        }
+    }
+    Ok(log)
 }

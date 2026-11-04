@@ -37,7 +37,9 @@ macro_rules! eprintln {
 }
 
 pub mod overlay;
+pub mod typed;
 pub mod xedge;
 
 pub use overlay::{CrossBudget, ESTATE_ENGINE, ForeignEngine, ForeignPools, OverlayReader};
+pub use typed::{TYPED_RELS, TypedXEdge, is_typed_rel};
 pub use xedge::{Endpoint, MEMORY_EPOCH, XEDGE_SCHEMA_VERSION, XEdge, XedgeReader, XedgeStore};

@@ -19,6 +19,12 @@ use wicked_estate_overlay::XedgeStore;
 use wicked_estate_retrieve::{Embedder, HashEmbedder, VectorStore};
 use wicked_estate_store::SqliteStore;
 
+use crate::plane::{Visible, effective_deps, is_untrusted};
+
+/// The vector lane walks at most this many nearest neighbours to take its `k` recallable ones
+/// (bounded traversal: a store where almost everything is hidden from the caller stops here).
+const VECTOR_WALK_CAP: usize = 2048;
+
 /// The four knowledge node classes (D1.1). Ride `NodeKind::Other("k*")` so estate stores them
 /// generically and they NEVER collide with code (`function`/`class`/…) or memory (`Other("memory")`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +74,12 @@ pub mod meta_keys {
     pub const ALSO_FOUND_IN: &str = "also_found_in";
     /// Dedup: the canonical node carries `canonical = true`.
     pub const CANONICAL: &str = "canonical";
+    /// DES-KNOWLEDGE-DATA-001 §4.3: the sources and repos (`source:<id>` / `repo:<id>`) a node was
+    /// derived from. A JSON array; absent = none. See [`crate::plane`].
+    pub const DEPS: &str = "deps";
+    /// `true` when the node's text came from a source the person does not control (catalog
+    /// comments, vendor descriptions): consumers fence it as data, never instructions.
+    pub const UNTRUSTED: &str = "untrusted";
 }
 
 /// A knowledge node before it is written as an estate `Node`.
@@ -79,6 +91,11 @@ pub struct KNode {
     pub scope: String,
     pub source: String,
     pub created_at: i64,
+    /// Stored dependency set (sorted, unique). Read visibility through
+    /// [`crate::plane::effective_deps`], which also adds the `source:` scope's dep.
+    pub deps: Vec<String>,
+    /// Stored untrusted flag. Read it through [`crate::plane::is_untrusted`].
+    pub untrusted: bool,
 }
 
 impl KNode {
@@ -97,6 +114,8 @@ impl KNode {
             scope: scope.into(),
             source: source.into(),
             created_at: now,
+            deps: Vec::new(),
+            untrusted: false,
         }
     }
 
@@ -127,6 +146,12 @@ impl KNode {
         m.insert(meta_keys::SCOPE.into(), self.scope.clone().into());
         m.insert(meta_keys::SOURCE.into(), self.source.clone().into());
         m.insert(meta_keys::CREATED_AT.into(), self.created_at.into());
+        if !self.deps.is_empty() {
+            m.insert(meta_keys::DEPS.into(), self.deps.clone().into());
+        }
+        if self.untrusted {
+            m.insert(meta_keys::UNTRUSTED.into(), true.into());
+        }
         node
     }
 
@@ -156,6 +181,19 @@ impl KNode {
                 .get(meta_keys::CREATED_AT)
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0),
+            deps: m
+                .get(meta_keys::DEPS)
+                .and_then(|v| v.as_array())
+                .map(|xs| {
+                    xs.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            untrusted: m
+                .get(meta_keys::UNTRUSTED)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         })
     }
 }
@@ -167,6 +205,13 @@ pub struct KRecalled {
     pub content: String,
     pub score: f64,
     pub source: String,
+    pub class: KClass,
+    /// The node's own scope (verbatim, as written).
+    pub scope: String,
+    /// The node's effective dependency set (§4.3), every one of which the caller's `visible` held.
+    pub deps: Vec<String>,
+    /// Text from a source the person does not control: fence it as data.
+    pub untrusted: bool,
 }
 
 /// One recall-miss sidecar row (T-B-MISSLOG seeds this; the foundation scaffolds the shape).
@@ -207,6 +252,13 @@ pub struct KnowledgeEngine {
     /// in-process recall-miss log (the `memext` sidecar pattern; persisted form lands at T-B-MISSLOG).
     misses: Vec<RecallMiss>,
     pub(crate) xedge: Option<std::sync::Arc<XedgeStore>>,
+    /// Test failpoint: `replace_source` writes this many more nodes, then fails (proves a failed
+    /// generation writes and tombstones nothing).
+    #[cfg(test)]
+    pub(crate) fail_replace_after: Option<usize>,
+    /// Test failpoint: an approval stops after its journal and edges, before its node (a crash).
+    #[cfg(test)]
+    pub(crate) fail_apply_before_node: bool,
 }
 
 fn default_embedder() -> Box<dyn Embedder> {
@@ -244,6 +296,10 @@ impl KnowledgeEngine {
             recall_floor: 0.0,
             misses: Vec::new(),
             xedge: None,
+            #[cfg(test)]
+            fail_replace_after: None,
+            #[cfg(test)]
+            fail_apply_before_node: false,
         }
     }
 
@@ -273,6 +329,11 @@ impl KnowledgeEngine {
     /// defers to a later call).
     pub fn checkpoint_truncate(&mut self) -> Result<wicked_estate_store::WalCheckpointStats> {
         self.store.checkpoint_truncate()
+    }
+
+    /// The engine's embedding of `text` (the vector `write` stores).
+    pub(crate) fn embed(&self, text: &str) -> Vec<f32> {
+        self.embedder.embed(text)
     }
 
     /// Write ONE knowledge node (the single-writer path). Node-before-edge ordering (G3) is the
@@ -357,19 +418,40 @@ impl KnowledgeEngine {
             .collect())
     }
 
+    /// Is `node` a recall candidate for this caller? A live knowledge node, inside the scope
+    /// subtree (when one is asked for), whose every effective dep the caller can see
+    /// (DES-KNOWLEDGE-DATA-001 §4.3). The ONE predicate every candidate list applies before its
+    /// `k` cut, so a hidden or out-of-scope node never takes a candidate slot, an RRF rank or a
+    /// share of the token budget.
+    fn recallable(node: &Node, scope_prefix: Option<&str>, visible: &Visible) -> bool {
+        let Some(kn) = KNode::from_node(node) else {
+            return false;
+        };
+        if let Some(prefix) = scope_prefix {
+            if !scope_in_prefix(&kn.scope, prefix) {
+                return false;
+            }
+        }
+        visible.allows(&effective_deps(&kn))
+    }
+
     /// One BM25-ordered FTS candidate list, scoped to the given knowledge kinds. `text` is
     /// phrase-quoted by the store, so a multi-token string requires ADJACENT tokens.
     ///
     /// A canonical `scope_prefix` (arch-R5) is pushed into the store predicate, which filters
-    /// BEFORE the `limit` truncation — so a scoped query's top-k is never crowded out by other
-    /// scopes' BM25 hits (the `SymbolQuery::scope_prefix` isolation contract). A kind-wildcard
-    /// prefix (trailing `:`, e.g. `"wiki:"`) is NOT pushed down (the store predicate is strict);
-    /// [`scope_in_prefix`] filters those post-hydration in the caller.
+    /// BEFORE any truncation — so a scoped query's top-k is never crowded out by other scopes'
+    /// BM25 hits (the `SymbolQuery::scope_prefix` isolation contract). A kind-wildcard prefix
+    /// (trailing `:`, e.g. `"wiki:"`) is NOT pushed down (the store predicate is strict).
+    ///
+    /// The store returns every match in BM25 order (the SQLite FTS path hydrates all of them and
+    /// truncates in Rust), so [`Self::recallable`] runs on that full ordered list and the `k` cut
+    /// comes after it — the visibility filter costs no extra store work.
     fn fts_list(
         &self,
         text: &str,
         kinds: &[NodeKind],
         scope_prefix: Option<&str>,
+        visible: &Visible,
     ) -> Result<Vec<SymbolId>> {
         Ok(self
             .store
@@ -378,15 +460,17 @@ impl KnowledgeEngine {
                 exact_name: None,
                 kinds: kinds.to_vec(),
                 language: None,
-                limit: Some(self.k),
+                limit: None,
                 // Store-side pushdown only for canonical prefixes — the store predicate is the
                 // strict segment-aware one and would match NOTHING for a kind-wildcard ("wiki:")
-                // prefix; those are filtered post-hydration by `scope_in_prefix` instead.
+                // prefix; `recallable` applies the knowledge predicate to every row either way.
                 scope_prefix: scope_prefix
                     .filter(|p| !p.ends_with(':'))
                     .map(str::to_string),
             })?
             .iter()
+            .filter(|n| Self::recallable(n, scope_prefix, visible))
+            .take(self.k)
             .map(|n| n.symbol.clone())
             .collect())
     }
@@ -401,7 +485,12 @@ impl KnowledgeEngine {
     /// its unigrams. The per-term lists alone lose that adjacency — measured on the S3 parity
     /// bench as estate's one outright class loss vs wicked-brain FTS (symbolish r@10 0.494 vs
     /// 0.786). Skipped when the query is already a single bare term (identical list, no signal).
-    fn keyword_candidates(&self, query: &str, scope_prefix: Option<&str>) -> Result<Vec<SymbolId>> {
+    fn keyword_candidates(
+        &self,
+        query: &str,
+        scope_prefix: Option<&str>,
+        visible: &Visible,
+    ) -> Result<Vec<SymbolId>> {
         let mut terms: Vec<String> = query
             .split(|c: char| !c.is_alphanumeric())
             .filter(|w| w.len() >= 2)
@@ -421,13 +510,13 @@ impl KnowledgeEngine {
         let phrase = query.trim();
         let single_bare_term = terms.len() == 1 && terms[0] == phrase.to_lowercase();
         if !phrase.is_empty() && !single_bare_term {
-            let l = self.fts_list(phrase, &recall_kinds, scope_prefix)?;
+            let l = self.fts_list(phrase, &recall_kinds, scope_prefix, visible)?;
             if !l.is_empty() {
                 lists.push(l);
             }
         }
         for term in terms {
-            let l = self.fts_list(&term, &recall_kinds, scope_prefix)?;
+            let l = self.fts_list(&term, &recall_kinds, scope_prefix, visible)?;
             if !l.is_empty() {
                 lists.push(l);
             }
@@ -439,20 +528,37 @@ impl KnowledgeEngine {
             .collect())
     }
 
-    /// Standalone knowledge recall. **REUSES** the `-core` pipeline: keyword (FTS OR-terms) ∪ vector
-    /// (ANN), fused by `rrf_fuse`, packed by `budget_pack` — the SAME fusion/budget math memory uses
+    /// Standalone knowledge recall with no declared visibility: only dep-free knowledge (every
+    /// node written before DES-KNOWLEDGE-DATA-001) is returned — see [`Self::recall_visible`].
+    pub fn recall(
+        &mut self,
+        query: &str,
+        token_budget: usize,
+        scope_prefix: Option<&str>,
+        now: i64,
+    ) -> Result<Vec<KRecalled>> {
+        self.recall_visible(query, token_budget, scope_prefix, &Visible::none(), now)
+    }
+
+    /// Knowledge recall. **REUSES** the `-core` pipeline: keyword (FTS OR-terms) ∪ vector (ANN),
+    /// fused by `rrf_fuse`, packed by `budget_pack` — the SAME fusion/budget math memory uses
     /// (R3: no second `recall_impl`). Logs a miss when the top score falls at/below the floor.
+    ///
+    /// `visible` (DES-KNOWLEDGE-DATA-001 §4.3) is the set of `source:<id>` / `repo:<id>` the caller
+    /// may see. A node is a candidate only when EVERY one of its effective deps is in it; a
+    /// dep-free node always is. The check runs inside each candidate list, before its `k` cut,
+    /// before RRF and before the budget is packed, so hidden knowledge can neither surface nor
+    /// crowd visible knowledge out.
     ///
     /// `scope_prefix` (arch-R5, mirroring `memory.recall`'s wire contract): when present, only
     /// knowledge whose scope equals the prefix or descends from it is recalled (`""` = root
     /// subtree = everything; `None` = no scope filtering — the pre-0.16 behavior exactly). The
-    /// predicate is applied twice: pushed into the FTS candidate query (store-side, pre-`limit` —
-    /// top-k isolation for nodes written ≥ 0.16, which stamp `Node.scope`) and re-checked on every
-    /// hydrated candidate's metadata scope — the authoritative filter, which also covers the
-    /// vector (ANN) lane and legacy nodes whose scope predates `Node.scope` stamping (under a
-    /// canonical-prefix scoped recall those can only surface via the vector lane — a kind-wildcard
-    /// prefix skips the pushdown, so FTS still sees them; re-ingest to give them full scoped-FTS
-    /// visibility either way).
+    /// predicate is pushed into the FTS candidate query (store-side, pre-truncation — top-k
+    /// isolation for nodes written ≥ 0.16, which stamp `Node.scope`) and checked on every
+    /// candidate's metadata scope — the authoritative filter, which also covers the vector (ANN)
+    /// lane and legacy nodes whose scope predates `Node.scope` stamping (under a canonical-prefix
+    /// scoped recall those can only surface via the vector lane — a kind-wildcard prefix skips the
+    /// pushdown, so FTS still sees them; re-ingest to give them full scoped-FTS visibility).
     ///
     /// A prefix ending in `:` is a kind wildcard (`"wiki:"` = every `wiki:<area>` subtree) — see
     /// [`scope_in_prefix`]; such prefixes are filtered engine-side only (no store pushdown).
@@ -462,29 +568,35 @@ impl KnowledgeEngine {
     /// doc path or `wiki://<page>#<anchor>`), and chunks embed their enforceable twin's
     /// `PAT-`/`POL-` rule id in the chunk TEXT — so one recall surfaces the guidance, its citation,
     /// and the id `rules.recall` enforces deterministically.
-    pub fn recall(
+    pub fn recall_visible(
         &mut self,
         query: &str,
         token_budget: usize,
         scope_prefix: Option<&str>,
+        visible: &Visible,
         now: i64,
     ) -> Result<Vec<KRecalled>> {
-        let kw = self.keyword_candidates(query, scope_prefix)?;
+        let kw = self.keyword_candidates(query, scope_prefix, visible)?;
 
         // Vector (ANN) candidates — only when the embedder carries real semantic signal. The
         // dependency-free HashEmbedder fallback is a lexical hash: fusing its neighbours as a
         // peer retriever injects rank noise that degrades every query class (S3 parity bench,
         // keyword-only vs hash-fused). Model-backed embedders (`semantic`/`semantic-bge`) keep
-        // contributing exactly as before.
+        // contributing exactly as before. The list is walked in similarity order until `k`
+        // recallable nodes are taken (bounded: `VECTOR_WALK_CAP` nearest at most), so hidden
+        // neighbours cannot take the vector lane's slots either.
         let mut sem = Vec::new();
         if self.embedder.is_semantic() {
             let qvec = self.embedder.embed(query);
-            for (id, _) in <SqliteStore as VectorStore>::nearest(&self.store, &qvec, self.k)? {
+            for (id, _) in
+                <SqliteStore as VectorStore>::nearest(&self.store, &qvec, VECTOR_WALK_CAP)?
+            {
+                if sem.len() >= self.k {
+                    break;
+                }
                 if let Some(node) = self.store.get_node(&id)? {
-                    if let NodeKind::Other(k) = &node.kind {
-                        if KClass::is_knowledge_kind(k) {
-                            sem.push(id);
-                        }
+                    if Self::recallable(&node, scope_prefix, visible) {
+                        sem.push(id);
                     }
                 }
             }
@@ -502,21 +614,19 @@ impl KnowledgeEngine {
         let fused = rrf_fuse(&[kw, sem], 60.0);
         let mut seen_docs = std::collections::BTreeSet::new();
         let mut cands = Vec::new();
+        let mut hydrated: std::collections::HashMap<SymbolId, KNode> =
+            std::collections::HashMap::new();
         for (id, rrf) in fused {
             let Some(node) = self.store.get_node(&id)? else {
                 continue;
             };
+            // The same predicate the lists applied (authoritative re-check on the hydrated node).
+            if !Self::recallable(&node, scope_prefix, visible) {
+                continue;
+            }
             let Some(kn) = KNode::from_node(&node) else {
                 continue;
             };
-            // Authoritative scope check (arch-R5): the hydrated metadata scope, canonically
-            // parsed, must fall within the requested subtree. Covers the vector lane (which has
-            // no store-side predicate) and agrees with the FTS pushdown for ≥0.16 nodes.
-            if let Some(prefix) = scope_prefix {
-                if !scope_in_prefix(&kn.scope, prefix) {
-                    continue;
-                }
-            }
             let doc_group = self
                 .store
                 .neighbors(&id, Direction::Dependencies)?
@@ -530,34 +640,33 @@ impl KnowledgeEngine {
             // Knowledge is NOT tiered: neutral recency/salience so the RRF rank drives ordering.
             // Knowledge has no facets ⇒ specificity 0 (no boost; identical ranking to before).
             cands.push(Candidate {
-                id,
-                content: kn.content,
+                id: id.clone(),
+                content: kn.content.clone(),
                 tier: Tier::Semantic,
                 rrf,
                 recency: 1.0,
                 salience: 1.0,
                 facet_specificity: 0,
             });
+            hydrated.insert(id, kn);
         }
         let packed = budget_pack(cands, token_budget, 0.5);
 
         let out: Vec<KRecalled> = packed
             .into_iter()
-            .map(|c| {
+            .filter_map(|c| {
                 let score = c.final_score(0.5);
-                let source = self
-                    .node(&c.id)
-                    .ok()
-                    .flatten()
-                    .and_then(|n| KNode::from_node(&n))
-                    .map(|kn| kn.source)
-                    .unwrap_or_default();
-                KRecalled {
+                let kn = hydrated.remove(&c.id)?;
+                Some(KRecalled {
+                    deps: effective_deps(&kn),
+                    untrusted: is_untrusted(&kn),
                     id: c.id,
                     content: c.content,
                     score,
-                    source,
-                }
+                    source: kn.source,
+                    class: kn.class,
+                    scope: kn.scope,
+                })
             })
             .collect();
 
@@ -578,6 +687,11 @@ impl KnowledgeEngine {
     pub fn misses(&self) -> &[RecallMiss] {
         &self.misses
     }
+}
+
+/// The `derived_from` edge a piece writes to its document (the recall diversity group).
+pub(crate) fn derived_from_edge(src: &SymbolId, tgt: &SymbolId) -> Edge {
+    edge(src, tgt, "derived_from")
 }
 
 /// One typed `Other(<rel>)` edge with confidence + provenance riding free (DEC-2 — even `governs` is
@@ -1076,5 +1190,114 @@ mod tests {
         assert_eq!(back.content, "a chunk of knowledge");
         assert_eq!(back.source, "src.md");
         assert_eq!(back.created_at, 7);
+    }
+
+    fn dep_node(content: &str, scope: &str, deps: &[&str]) -> KNode {
+        let mut kn = KNode::new(KClass::Chunk, content, scope, format!("{content}.md"), 1);
+        kn.deps = deps.iter().map(|d| d.to_string()).collect();
+        kn
+    }
+
+    /// NEGATIVE CONTROL (DES-KNOWLEDGE-DATA-001 §19 B3a): a hidden dep removes an item BEFORE the
+    /// budget is packed. The hidden item ranks first and the budget fits one item, so a filter that
+    /// ran after packing would return nothing; filtering before ranking returns the visible one.
+    #[test]
+    fn hidden_dep_is_removed_before_the_budget_is_packed() {
+        let mut e = KnowledgeEngine::in_memory().unwrap();
+        // Same length (same token cost); the hidden one holds every query term twice.
+        let strong = "open tickets per region open tickets per region";
+        let weak = "open tickets per region and then some padding..";
+        assert_eq!(strong.len(), weak.len());
+        e.write(&dep_node(strong, "", &["source:hidden"])).unwrap();
+        e.write(&dep_node(weak, "", &["source:seen"])).unwrap();
+        // One item's worth of tokens (each costs len/4 = 11).
+        let budget = 15;
+        let all = Visible::from_deps(["source:hidden", "source:seen"]).unwrap();
+        let both = e
+            .recall_visible("open tickets per region", budget, None, &all, 2)
+            .unwrap();
+        assert_eq!(both.len(), 1, "the budget fits exactly one item: {both:?}");
+        assert!(
+            both[0].deps.contains(&"source:hidden".to_string()),
+            "with both visible, the hidden-dep item ranks first: {both:?}"
+        );
+        let seen = Visible::from_deps(["source:seen"]).unwrap();
+        let hits = e
+            .recall_visible("open tickets per region", budget, None, &seen, 2)
+            .unwrap();
+        assert_eq!(
+            hits.iter().map(|h| h.content.as_str()).collect::<Vec<_>>(),
+            vec![weak],
+            "the hidden item must leave before packing, so the visible one takes the budget"
+        );
+        assert_eq!(hits[0].deps, vec!["source:seen".to_string()]);
+    }
+
+    /// Hidden candidates never take the FTS list's `k` slots: 40 hidden chunks outrank one visible
+    /// chunk on BM25, and the visible chunk is still recalled.
+    #[test]
+    fn hidden_items_cannot_crowd_the_candidate_list() {
+        let mut e = KnowledgeEngine::in_memory().unwrap();
+        for i in 0..40 {
+            e.write(&dep_node(
+                &format!("escalation escalation escalation note {i}"),
+                "",
+                &["source:hidden"],
+            ))
+            .unwrap();
+        }
+        e.write(&dep_node("one escalation policy", "", &[]))
+            .unwrap();
+        let hits = e
+            .recall_visible("escalation", 4000, None, &Visible::none(), 2)
+            .unwrap();
+        assert_eq!(
+            hits.iter().map(|h| h.content.as_str()).collect::<Vec<_>>(),
+            vec!["one escalation policy"]
+        );
+    }
+
+    /// Omitted visibility = the empty set: dep-free knowledge is unchanged, a source scope is
+    /// hidden even without stored deps, and every item carries scope, deps, untrusted and class.
+    #[test]
+    fn items_carry_scope_deps_untrusted_and_source_scopes_gate() {
+        let mut e = KnowledgeEngine::in_memory().unwrap();
+        e.write(&KNode::new(
+            KClass::Concept,
+            "refund approvals need a manager",
+            "wiki:apps",
+            "wiki://apps#refunds",
+            1,
+        ))
+        .unwrap();
+        // Written straight into a source scope, with no stored deps: the scope still gates it.
+        e.write(&KNode::new(
+            KClass::Section,
+            "support.refunds: id int8, approved_by text",
+            "source:s1",
+            "source:s1/support.refunds",
+            1,
+        ))
+        .unwrap();
+        let plain = e.recall("refunds approvals", 4000, None, 2).unwrap();
+        assert_eq!(
+            plain.len(),
+            1,
+            "only dep-free knowledge without visible: {plain:?}"
+        );
+        assert_eq!(plain[0].scope, "wiki:apps");
+        assert!(plain[0].deps.is_empty() && !plain[0].untrusted);
+        assert_eq!(plain[0].class, KClass::Concept);
+        let v = Visible::from_deps(["source:s1"]).unwrap();
+        let hits = e
+            .recall_visible("refunds approvals", 4000, None, &v, 2)
+            .unwrap();
+        let src = hits
+            .iter()
+            .find(|h| h.scope == "source:s1")
+            .expect("the source section is visible with its dep");
+        assert_eq!(src.deps, vec!["source:s1".to_string()]);
+        assert!(src.untrusted, "source structure is untrusted");
+        assert_eq!(src.class, KClass::Section);
     }
 }

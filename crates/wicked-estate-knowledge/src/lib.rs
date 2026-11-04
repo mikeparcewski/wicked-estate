@@ -14,7 +14,17 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 
 pub mod engine;
+pub mod plane;
+pub mod shape;
+pub mod source;
 pub use engine::{KClass, KNode, KRecalled, KnowledgeEngine};
+pub use plane::Visible;
+pub use shape::{
+    NeighborEdge, NeighborNode, Neighbors, NeighborsQuery, ShapeLinks, parse_shape_links,
+};
+pub use source::{
+    CatalogError, CatalogPage, ReplaceReport, SourceDoc, SourceGeneration, SourceSection,
+};
 pub use wicked_estate_overlay::{XEdge, XedgeStore};
 
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -437,7 +447,11 @@ fn handle_call(
                     }
                     match engine.node(&wicked_estate_core::SymbolId(kid)) {
                         Ok(Some(node)) => {
-                            if let Some(kn) = KNode::from_node(&node) {
+                            // This standalone surface declares no visibility: dep-bearing
+                            // knowledge (source catalogs, shapes) is never returned here.
+                            if let Some(kn) = KNode::from_node(&node)
+                                .filter(|kn| Visible::none().allows(&plane::effective_deps(kn)))
+                            {
                                 if kn.source.is_empty() {
                                     lines.push(kn.content);
                                 } else {
@@ -947,6 +961,33 @@ pub struct KnowledgeItem {
     /// predate this field deserialize to `""` rather than erroring.
     #[serde(default)]
     pub source: String,
+    /// The item's own scope (DES-KNOWLEDGE-DATA-001 §4.3). `""` = root.
+    #[serde(default)]
+    pub scope: String,
+    /// The item's effective dependency set (`source:<id>` / `repo:<id>`), every one of which was
+    /// in the caller's `visible` set. Empty = visible to everyone.
+    #[serde(default)]
+    pub deps: Vec<String>,
+    /// The text comes from a source the person does not control (a live source's catalog):
+    /// render it inside the untrusted fence, as data, never as instructions.
+    #[serde(default)]
+    pub untrusted: bool,
+}
+
+impl KnowledgeItem {
+    fn from_knode(node_id: String, kn: KNode, score: f64) -> Self {
+        KnowledgeItem {
+            node_id,
+            class: kn.class.as_kind().to_string(),
+            label: kn.content.chars().take(60).collect(),
+            deps: plane::effective_deps(&kn),
+            untrusted: plane::is_untrusted(&kn),
+            scope: kn.scope,
+            body_snippet: kn.content,
+            score,
+            source: kn.source,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -967,13 +1008,60 @@ pub trait KnowledgeApi {
         source: &str,
         now: i64,
     ) -> anyhow::Result<String>;
-    /// Promote a knowledge proposal using a stable id so retries upsert the same node.
+    /// Promote a knowledge proposal using a stable id so retries upsert the same node: derive its
+    /// deps from its `relate[]` / `relate_code[]` endpoints, refuse a declared-deps mismatch, and
+    /// apply it invisible-until-complete (journal, edges, node). `code_epochs` holds the live epoch
+    /// of each code endpoint the attached graph has. The caller marks the proposal approved and
+    /// then calls [`KnowledgeApi::finish_proposal`].
     fn write_proposal(
         &mut self,
         _proposal: &wicked_estate_memory_core::Proposal,
+        _code_epochs: &HashMap<String, u64>,
         _now: i64,
     ) -> anyhow::Result<String> {
         anyhow::bail!("knowledge proposal writer not available")
+    }
+    /// The approval is complete (its proposal is marked approved): drop its journal.
+    fn finish_proposal(&mut self, _proposal_id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Roll back a half-done approval (edges, node, journal); `false` when none was in flight.
+    fn rollback_proposal(&mut self, _proposal_id: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+    /// Complete an interrupted approval whose proposal is already approved.
+    fn complete_proposal(&mut self, _proposal_id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Proposal ids with an approval journal (the start-up sweep's input).
+    fn applying_proposals(&self) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+    /// Replace a live source's structure with one complete generation (§4.1).
+    fn replace_source(
+        &mut self,
+        _generation: &SourceGeneration,
+        _now: i64,
+    ) -> anyhow::Result<ReplaceReport> {
+        anyhow::bail!("knowledge.replace_source not available")
+    }
+    /// One page of a source's typed catalog; `None` when unknown or not in `visible`.
+    fn source_catalog(
+        &self,
+        _source_id: &str,
+        _page: usize,
+        _pinned_generation: Option<u64>,
+        _visible: &Visible,
+    ) -> anyhow::Result<Option<CatalogPage>> {
+        anyhow::bail!("knowledge.source_catalog not available")
+    }
+    /// The typed, visibility-filtered neighbourhood of a node; `None` when unknown or hidden.
+    fn neighbors(
+        &self,
+        _query: &NeighborsQuery,
+        _graph: &dyn wicked_estate_core::GraphRead,
+    ) -> anyhow::Result<Option<Neighbors>> {
+        anyhow::bail!("knowledge.neighbors not available")
     }
     fn write_node(
         &mut self,
@@ -995,12 +1083,14 @@ pub trait KnowledgeApi {
     /// Recall the most relevant token-budgeted knowledge slice for `query`. `scope_prefix`
     /// (arch-R5, mirroring `memory.recall`'s wire contract): `Some(prefix)` restricts recall to
     /// knowledge whose scope equals the prefix or descends from it (`Some("")` = root subtree =
-    /// everything); `None` = no scope filtering.
+    /// everything); `None` = no scope filtering. `visible` (DES-KNOWLEDGE-DATA-001 §4.3): only
+    /// knowledge whose every dep is in it is a candidate, filtered before ranking.
     fn recall(
         &mut self,
         query: &str,
         token_budget: usize,
         scope_prefix: Option<&str>,
+        visible: &Visible,
         now: i64,
     ) -> anyhow::Result<Vec<KnowledgeItem>>;
     /// Node counts, optionally per class and/or within a scope subtree (`scope_prefix`, same
@@ -1016,7 +1106,11 @@ pub trait KnowledgeApi {
         symbol_ids: &[String],
         symbol_epochs: &HashMap<String, u64>,
     ) -> anyhow::Result<u32>;
-    fn recall_about_code(&self, symbol_ids: &[String]) -> anyhow::Result<Vec<KnowledgeItem>>;
+    fn recall_about_code(
+        &self,
+        symbol_ids: &[String],
+        visible: &Visible,
+    ) -> anyhow::Result<Vec<KnowledgeItem>>;
 }
 
 impl KnowledgeApi for KnowledgeEngine {
@@ -1048,50 +1142,54 @@ impl KnowledgeApi for KnowledgeEngine {
     fn write_proposal(
         &mut self,
         proposal: &wicked_estate_memory_core::Proposal,
+        code_epochs: &HashMap<String, u64>,
         now: i64,
     ) -> anyhow::Result<String> {
-        let payload = &proposal.payload;
-        let required = |field: &str| -> anyhow::Result<&str> {
-            payload
-                .get(field)
-                .and_then(serde_json::Value::as_str)
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("knowledge payload.{field} (non-empty string) required")
-                })
-        };
-        let class = match payload.get("class") {
-            None => KClass::Chunk,
-            Some(v) => match v.as_str() {
-                Some("doc") => KClass::Doc,
-                Some("section") => KClass::Section,
-                Some("chunk") => KClass::Chunk,
-                Some("concept") => KClass::Concept,
-                _ => anyhow::bail!("invalid knowledge class: use doc|section|chunk|concept"),
-            },
-        };
-        let mut kn = KNode::new(
-            class,
-            required("content")?,
-            payload
-                .get("scope")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or(""),
-            required("source")?,
-            now,
-        );
-        kn.id = format!("proposal:{}", proposal.id);
         // TODO(K3, DES-memory-vs-knowledge): pass payload.observed_at/source_rev when KNode gains those fields.
-        let sym = KnowledgeEngine::write(self, &kn)?;
-        if !proposal.facets.is_empty() {
-            let mut node = kn.to_node();
-            node.metadata.insert(
-                wicked_estate_memory_core::meta_keys::FACETS.into(),
-                serde_json::to_value(&proposal.facets)?,
-            );
-            wicked_estate_core::GraphWrite::upsert_nodes(&mut self.store, &[node])?;
-        }
-        Ok(sym.0)
+        let (id, _plan) = KnowledgeEngine::apply_proposal(self, proposal, code_epochs, now)?;
+        Ok(id)
+    }
+
+    fn finish_proposal(&mut self, proposal_id: &str) -> anyhow::Result<()> {
+        KnowledgeEngine::finish_proposal(self, proposal_id)
+    }
+
+    fn rollback_proposal(&mut self, proposal_id: &str) -> anyhow::Result<bool> {
+        KnowledgeEngine::rollback_proposal(self, proposal_id)
+    }
+
+    fn complete_proposal(&mut self, proposal_id: &str) -> anyhow::Result<()> {
+        KnowledgeEngine::complete_proposal(self, proposal_id)
+    }
+
+    fn applying_proposals(&self) -> anyhow::Result<Vec<String>> {
+        KnowledgeEngine::applying_proposals(self)
+    }
+
+    fn replace_source(
+        &mut self,
+        generation: &SourceGeneration,
+        now: i64,
+    ) -> anyhow::Result<ReplaceReport> {
+        Ok(KnowledgeEngine::replace_source(self, generation, now)?)
+    }
+
+    fn source_catalog(
+        &self,
+        source_id: &str,
+        page: usize,
+        pinned_generation: Option<u64>,
+        visible: &Visible,
+    ) -> anyhow::Result<Option<CatalogPage>> {
+        KnowledgeEngine::source_catalog(self, source_id, page, pinned_generation, visible)
+    }
+
+    fn neighbors(
+        &self,
+        query: &NeighborsQuery,
+        graph: &dyn wicked_estate_core::GraphRead,
+    ) -> anyhow::Result<Option<Neighbors>> {
+        KnowledgeEngine::neighbors(self, query, graph)
     }
 
     fn relate(
@@ -1125,18 +1223,23 @@ impl KnowledgeApi for KnowledgeEngine {
         query: &str,
         token_budget: usize,
         scope_prefix: Option<&str>,
+        visible: &Visible,
         now: i64,
     ) -> anyhow::Result<Vec<KnowledgeItem>> {
-        let hits = KnowledgeEngine::recall(self, query, token_budget, scope_prefix, now)?;
+        let hits =
+            KnowledgeEngine::recall_visible(self, query, token_budget, scope_prefix, visible, now)?;
         Ok(hits
             .into_iter()
             .map(|h| KnowledgeItem {
                 node_id: h.id.0,
-                class: "chunk".to_string(),
+                class: h.class.as_kind().to_string(),
                 label: h.content.chars().take(60).collect(),
                 body_snippet: h.content,
                 score: h.score,
                 source: h.source,
+                scope: h.scope,
+                deps: h.deps,
+                untrusted: h.untrusted,
             })
             .collect())
     }
@@ -1182,7 +1285,11 @@ impl KnowledgeApi for KnowledgeEngine {
         Ok(n)
     }
 
-    fn recall_about_code(&self, symbol_ids: &[String]) -> anyhow::Result<Vec<KnowledgeItem>> {
+    fn recall_about_code(
+        &self,
+        symbol_ids: &[String],
+        visible: &Visible,
+    ) -> anyhow::Result<Vec<KnowledgeItem>> {
         let xedge = self
             .xedge
             .as_ref()
@@ -1195,15 +1302,15 @@ impl KnowledgeApi for KnowledgeEngine {
                 let kid = wicked_estate_core::SymbolId(edge.source.stable_id.clone());
                 if let Some(node) = KnowledgeEngine::node(self, &kid)? {
                     if let Some(kn) = KNode::from_node(&node) {
-                        let label: String = kn.content.chars().take(60).collect();
-                        items.push(KnowledgeItem {
-                            node_id: edge.source.stable_id.clone(),
-                            class: kn.class.as_kind().to_string(),
-                            label,
-                            body_snippet: kn.content,
-                            score: edge.confidence as f64,
-                            source: kn.source,
-                        });
+                        // The same visibility rule as recall (§4.3): every dep must be visible.
+                        if !visible.allows(&plane::effective_deps(&kn)) {
+                            continue;
+                        }
+                        items.push(KnowledgeItem::from_knode(
+                            edge.source.stable_id.clone(),
+                            kn,
+                            edge.confidence as f64,
+                        ));
                     }
                 }
             }

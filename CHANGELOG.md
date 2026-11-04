@@ -2,6 +2,47 @@
 
 ## [Unreleased]
 
+### Added
+- **The knowledge plane: live-source structure, deps-filtered recall, typed edges and data
+  shapes (DES-KNOWLEDGE-DATA-001 §4, §10.1).** Three new knowledge tools (33 in all):
+  - `knowledge.replace_source {sourceId, generation, label?, catalog?, docs[]}` writes one
+    COMPLETE generation of a live source's structure (one doc per relation or tool, with
+    sections; never rows) under scope `source:<sourceId>`. Ids are stable (source id, doc key,
+    section key). The whole generation is one store transaction: every doc of the source absent
+    from it is tombstoned, and a generation that fails validation or fails mid-write writes and
+    tombstones nothing. An older generation is refused. Typed edges left on a tombstoned node are
+    kept (a re-added key gets a new epoch, so they stay hidden) and reported. A write tool.
+  - `knowledge.source_catalog {sourceId, page?, generation?, visible}`: the complete, paged
+    (byte-bounded, fixed per generation), versioned typed catalog. A pinned generation that moved
+    is an error; a hidden source answers like an unknown one.
+  - `knowledge.neighbors {id, store?, kinds?, depth?, visible}`: a bounded walk (depth 1-3, 100
+    nodes) over the new typed edges `describes`, `joins`, `governed_by`, `measures`,
+    `tracked_in`, `addresses`, `closes`, `derived_from`, between knowledge nodes and code symbols.
+- **`visible` on `knowledge.recall` and `knowledge.recall_about_code`, and `scope`, `deps` and
+  `untrusted` on every item.** A node's deps are the sources and repos (`source:<id>` /
+  `repo:<id>`) it was derived from, plus the dep a `source:` scope implies. An item is returned
+  only when every dep is in `visible`; the check runs inside each candidate list, before the `k`
+  cut, RRF and the token budget, so hidden knowledge never crowds visible knowledge out.
+  Omitted `visible` is the empty set: knowledge with no deps (everything written before this
+  release) is returned exactly as before. Items now carry their real `class` (it was always
+  `chunk`).
+- **Data shapes through the proposal queue.** A `knowledge` proposal may carry `relate[]`
+  (typed links to knowledge nodes) and `relate_code[]` (typed links to code symbols, each naming
+  its `repo`). Approve DERIVES the node's deps from the endpoints and refuses a declared `deps`
+  that differs. It is invisible until complete: a journal, then the edges (hidden until their
+  owner exists), then the node, then the queue marks it approved, then the journal goes. A write-
+  mode server's start-up sweep completes an interrupted approval whose proposal is approved and
+  rolls back any other; a failed approve rolls itself back while the proposal is pending.
+- `SqliteStore::rollback_batch`, which discards an open `begin_batch` transaction.
+
+### Changed
+- **Rust API (breaking for library consumers):** `KnowledgeApi::recall` and
+  `KnowledgeApi::recall_about_code` take a `&Visible`; `KnowledgeApi::write_proposal` takes the
+  code endpoints' epochs; `KnowledgeItem` and `KNode` gain fields; and
+  `tools::proposals::dispatch_with_knowledge` takes the attached graph. `KnowledgeEngine::recall`
+  keeps its signature and recalls with an empty `visible` (`recall_visible` takes one). The MCP
+  wire stays backward compatible: every new argument is optional.
+
 ## [0.31.0] — 2026-10-25
 
 Minor: freshness is measured per query on MCP and CLI alike (#351), a symbol-name miss suggests
