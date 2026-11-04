@@ -33,7 +33,9 @@ wicked-estate-core = { path = "crates/wicked-estate-core", version = "0.31.0" }
 wicked-estate-store = { path = "crates/wicked-estate-store", version = "0.31.0" }
 quick-xml = { version = "0.40", features = ["serialize"] }
 roxmltree = "0.21"
-calamine = "0.25"
+calamine = "0.38"
+# Floor only: calamine 0.38 accepts zip 9.0.0-9.0.4 (GHSA-m665-v7pm-7grj); this keeps excel-rules builds off them.
+zip = { version = "9.0.5", default-features = false }
 
 [profile.release]
 strip = true

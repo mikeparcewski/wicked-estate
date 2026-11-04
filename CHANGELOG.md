@@ -57,6 +57,16 @@
   unchanged; `KnowledgeApi::recall` / `recall_about_code` declare no visibility, so they return
   dep-free knowledge only (all knowledge written before this release).
 
+### Security
+- **`zip` 1.1.4 -> 9.3.0 (GHSA-m665-v7pm-7grj, critical; GHSA-8hxf-qr8p-62x4, medium), via
+  `calamine` 0.25 -> 0.38.** Both reach estate only through the opt-in `excel-rules` feature
+  (the Excel/XLSX decision-table extractor), which the release binaries do not enable. calamine
+  reads a workbook with the random-access `ZipArchive` and extracts nothing to disk, so the
+  critical (a parser differential against the streaming reader) has no path here; the medium
+  needs AES-encrypted entries. The fix still changes the published crate's dependency, so
+  `--features excel-rules` builds stop resolving the vulnerable `zip`. With the feature on,
+  the toolchain floor is Rust 1.88 (calamine 0.38 and zip 9 declare it); default builds keep 1.85.
+
 ## [0.31.0] — 2026-10-25
 
 Minor: freshness is measured per query on MCP and CLI alike (#351), a symbol-name miss suggests
