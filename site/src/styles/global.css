@@ -343,6 +343,10 @@ html body::after {
 /* No snap unless locked: this unlayered rule outranks the chrome's `html { proximity }` (see the base note),
    at every size and under reduced motion. */
 html:not(.snap-lock) { scroll-snap-type: none; }
+/* The page never follows content that swaps on its own: Chromium's scroll anchoring would pick a part of a
+   playing scene as its anchor and scroll the page whenever it moved. Every swapping region here is as tall
+   as its tallest state, so anchoring has nothing to correct; snapping is unaffected. */
+html { overflow-anchor: none; }
 /* The answer panel and the tools list keep their own scroll from chaining into the page only under the lock,
    where scenes.ts pages the wheel (a scroller at its end hands the next gesture to the pager). Unlocked, the
    page scrolls freely, so a scroller at its end must chain: `contain` there would hold the page still for as
