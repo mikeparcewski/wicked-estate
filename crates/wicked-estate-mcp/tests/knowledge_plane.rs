@@ -119,7 +119,7 @@ fn replace_source_then_recall_catalog_and_tombstone_over_jsonrpc() {
     assert_eq!(item["scope"], "source:3f0c-support");
     assert_eq!(item["deps"], json!([SEE]));
     assert_eq!(item["untrusted"], true);
-    assert_eq!(item["class"], "ksection");
+    assert_eq!(item["class"], "section");
     // A malformed visible entry is invalid params, never a silently smaller set.
     let resp = r.call(
         "knowledge.recall",
@@ -212,6 +212,20 @@ fn shape_proposal_derives_deps_and_is_visible_only_where_all_deps_are() {
     bad["payload"]["relate"][0]["rel"] = json!("about");
     let resp = r.call("proposal.submit", bad);
     assert_eq!(resp["error"]["code"], -32602, "{resp}");
+
+    // A proposal filed under a repo facet (the relay stamps the unit's own) may only link that
+    // repo's code: naming another is refused at submit.
+    let mut other_repo = shape(&tickets, None);
+    other_repo["facets"] = json!({"repo": "billing-app"});
+    let resp = r.call("proposal.submit", other_repo);
+    assert_eq!(resp["error"]["code"], -32602, "{resp}");
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("is not this proposal's repo"),
+        "{resp}"
+    );
 
     // NEGATIVE CONTROL: declaring fewer deps than the endpoints derive is refused at approve.
     let pid = r.ok("proposal.submit", shape(&tickets, Some(json!([SEE]))))["id"]
@@ -342,7 +356,14 @@ fn the_start_up_sweep_rolls_back_a_half_done_approval() {
         .unwrap();
     assert!(r.xedge.typed_len().unwrap() > 0);
 
-    let log = sweep_knowledge_approvals(&mut r.mem, &mut r.know).unwrap();
+    // A young journal may be another process's approval in progress: the sweep leaves it (hidden).
+    assert!(
+        sweep_knowledge_approvals(&mut r.mem, &mut r.know, 3)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(r.xedge.typed_len().unwrap() > 0);
+    let log = sweep_knowledge_approvals(&mut r.mem, &mut r.know, 10_000).unwrap();
     assert_eq!(log.len(), 1, "{log:?}");
     assert!(log[0].contains("rolled back"), "{log:?}");
     assert_eq!(r.xedge.typed_len().unwrap(), 0);
@@ -363,7 +384,7 @@ fn the_start_up_sweep_rolls_back_a_half_done_approval() {
     let approved = r.ok("proposal.approve", json!({"id": pid}));
     assert_eq!(approved["active_id"], shape_id.as_str());
     assert!(
-        sweep_knowledge_approvals(&mut r.mem, &mut r.know)
+        sweep_knowledge_approvals(&mut r.mem, &mut r.know, 20_000)
             .unwrap()
             .is_empty()
     );
@@ -387,8 +408,12 @@ fn the_sweep_completes_an_approved_proposal() {
     r.mem
         .approve_proposal_with_knowledge(&pid, 2, &mut writer)
         .unwrap();
-    assert_eq!(r.know.applying_proposals().unwrap(), vec![pid.clone()]);
-    let log = sweep_knowledge_approvals(&mut r.mem, &mut r.know).unwrap();
+    assert_eq!(r.know.applying_proposals().unwrap(), vec![(pid.clone(), 2)]);
+    // Hidden while its journal exists, even though the queue already approved it.
+    let hits = r.ok("knowledge.recall", json!({"query": "refunds manager"}));
+    assert!(hits["items"].as_array().unwrap().is_empty(), "{hits}");
+    // An approved one is completed at any age.
+    let log = sweep_knowledge_approvals(&mut r.mem, &mut r.know, 3).unwrap();
     assert!(log[0].contains("completed"), "{log:?}");
     assert!(r.know.applying_proposals().unwrap().is_empty());
     let hits = r.ok("knowledge.recall", json!({"query": "refunds manager"}));

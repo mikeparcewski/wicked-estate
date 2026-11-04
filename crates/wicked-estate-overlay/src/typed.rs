@@ -42,8 +42,9 @@ pub fn is_typed_rel(rel: &str) -> bool {
     TYPED_RELS.contains(&rel)
 }
 
-/// The `typed_xedges` DDL, applied by `XedgeStore::open` (idempotent).
-pub(crate) const TYPED_SCHEMA: &str = "
+/// The `typed_xedges` DDL. Applied on the FIRST typed write, never on open, so a `--readonly`
+/// server opening an older `xedge.db` writes nothing; readers treat a missing table as empty.
+const TYPED_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS typed_xedges (
         src_store  TEXT    NOT NULL,
         src_id     TEXT    NOT NULL,
@@ -75,6 +76,18 @@ pub struct TypedXEdge {
     pub meta: String,
 }
 
+/// Does the `typed_xedges` table exist yet?
+fn typed_table_exists(conn: &rusqlite::Connection) -> Result<bool> {
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'typed_xedges'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(map_err)?;
+    Ok(n > 0)
+}
+
 impl XedgeStore {
     /// Insert or update one typed edge (keyed on both endpoints, `rel` and `owner`; a re-put
     /// refreshes the epochs, confidence and meta). Refuses a relation outside [`TYPED_RELS`], an
@@ -96,6 +109,7 @@ impl XedgeStore {
             ));
         }
         let conn = self.conn.lock().expect("xedge mutex poisoned");
+        conn.execute_batch(TYPED_SCHEMA).map_err(map_err)?;
         conn.execute(
             "INSERT INTO typed_xedges
                 (src_store, src_id, src_epoch, tgt_store, tgt_id, tgt_epoch, rel, owner, confidence, meta)
@@ -123,6 +137,9 @@ impl XedgeStore {
     /// Delete every typed edge `owner` asserted. Returns the number of rows removed.
     pub fn delete_typed_by_owner(&self, owner: &str) -> Result<u64> {
         let conn = self.conn.lock().expect("xedge mutex poisoned");
+        if !typed_table_exists(&conn)? {
+            return Ok(0);
+        }
         let n = conn
             .execute("DELETE FROM typed_xedges WHERE owner = ?1", params![owner])
             .map_err(map_err)?;
@@ -132,6 +149,9 @@ impl XedgeStore {
     /// Total typed-edge row count (health / test assertion).
     pub fn typed_len(&self) -> Result<u64> {
         let conn = self.conn.lock().expect("xedge mutex poisoned");
+        if !typed_table_exists(&conn)? {
+            return Ok(0);
+        }
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM typed_xedges", [], |r| r.get(0))
             .map_err(map_err)?;
@@ -140,19 +160,36 @@ impl XedgeStore {
 }
 
 impl XedgeReader {
-    /// Typed edges whose SOURCE is `(store, id)`, filtered to `rels` (empty = every typed rel).
-    pub fn typed_out(&self, store: &str, id: &str, rels: &[&str]) -> Result<Vec<TypedXEdge>> {
-        self.typed_query("src_store", "src_id", store, id, rels)
+    /// Typed edges whose SOURCE is `(store, id)`, filtered to `rels` (empty = every typed rel), at
+    /// most `limit` rows in a stable order.
+    pub fn typed_out(
+        &self,
+        store: &str,
+        id: &str,
+        rels: &[&str],
+        limit: usize,
+    ) -> Result<Vec<TypedXEdge>> {
+        self.typed_query("src_store", "src_id", store, id, rels, limit)
     }
 
-    /// Typed edges whose TARGET is `(store, id)`, filtered to `rels` (empty = every typed rel).
-    pub fn typed_in(&self, store: &str, id: &str, rels: &[&str]) -> Result<Vec<TypedXEdge>> {
-        self.typed_query("tgt_store", "tgt_id", store, id, rels)
+    /// Typed edges whose TARGET is `(store, id)`, filtered to `rels` (empty = every typed rel), at
+    /// most `limit` rows in a stable order.
+    pub fn typed_in(
+        &self,
+        store: &str,
+        id: &str,
+        rels: &[&str],
+        limit: usize,
+    ) -> Result<Vec<TypedXEdge>> {
+        self.typed_query("tgt_store", "tgt_id", store, id, rels, limit)
     }
 
     /// Every typed edge owned by `owner`.
     pub fn typed_by_owner(&self, owner: &str) -> Result<Vec<TypedXEdge>> {
         let conn = self.conn.lock().expect("xedge mutex poisoned");
+        if !typed_table_exists(&conn)? {
+            return Ok(Vec::new());
+        }
         let mut stmt = conn
             .prepare(&format!("{SELECT_TYPED} WHERE owner = ?1 {ORDER_TYPED}"))
             .map_err(map_err)?;
@@ -169,8 +206,12 @@ impl XedgeReader {
         store: &str,
         id: &str,
         rels: &[&str],
+        limit: usize,
     ) -> Result<Vec<TypedXEdge>> {
         let conn = self.conn.lock().expect("xedge mutex poisoned");
+        if !typed_table_exists(&conn)? {
+            return Ok(Vec::new());
+        }
         let mut sql = format!("{SELECT_TYPED} WHERE {store_col} = ?1 AND {id_col} = ?2");
         let mut bound: Vec<String> = vec![store.to_string(), id.to_string()];
         if !rels.is_empty() {
@@ -181,6 +222,7 @@ impl XedgeReader {
         }
         sql.push(' ');
         sql.push_str(ORDER_TYPED);
+        sql.push_str(&format!(" LIMIT {}", limit.min(i64::MAX as usize)));
         let mut stmt = conn.prepare(&sql).map_err(map_err)?;
         let rows = stmt
             .query_map(rusqlite::params_from_iter(bound.iter()), row_to_typed)
@@ -238,15 +280,15 @@ mod tests {
             .put_typed(&edge("doc:tickets", "sla_rule", "governed_by", "shape:a"))
             .unwrap();
         let r = store.reader();
-        let out = r.typed_out("knowledge", "doc:tickets", &[]).unwrap();
+        let out = r.typed_out("knowledge", "doc:tickets", &[], 100).unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(
-            r.typed_out("knowledge", "doc:tickets", &["describes"])
+            r.typed_out("knowledge", "doc:tickets", &["describes"], 100)
                 .unwrap()
                 .len(),
             1
         );
-        let inbound = r.typed_in("estate", "Ticket", &[]).unwrap();
+        let inbound = r.typed_in("estate", "Ticket", &[], 100).unwrap();
         assert_eq!(inbound.len(), 1);
         assert_eq!(inbound[0].target.epoch, 2, "epochs round-trip");
         assert_eq!(inbound[0].meta, r#"{"deps":["source:s1"]}"#);
@@ -294,7 +336,7 @@ mod tests {
     /// An `xedge.db` written before typed edges existed (schema v1, `xedges` + `meta` only) opens
     /// and gains the table; its `about` rows are untouched.
     #[test]
-    fn an_older_xedge_db_gains_the_typed_table_on_open() {
+    fn an_older_xedge_db_opens_untouched_and_gains_the_table_on_first_write() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("xedge.db");
         {
@@ -312,9 +354,46 @@ mod tests {
         }
         let store = XedgeStore::open(path.to_str().unwrap()).unwrap();
         assert_eq!(store.len().unwrap(), 1, "the about row survives");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            assert!(
+                !typed_table_exists(&conn).unwrap(),
+                "opening writes nothing: a --readonly server must not migrate the file"
+            );
+        }
+        let r = store.reader();
+        assert!(r.typed_in("estate", "Ticket", &[], 10).unwrap().is_empty());
+        assert_eq!(store.typed_len().unwrap(), 0);
+        assert_eq!(store.delete_typed_by_owner("shape:a").unwrap(), 0);
         store
             .put_typed(&edge("doc:tickets", "Ticket", "describes", "shape:a"))
             .unwrap();
         assert_eq!(store.typed_len().unwrap(), 1);
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    #[test]
+    fn adjacency_reads_are_bounded() {
+        let store = XedgeStore::in_memory().unwrap();
+        for i in 0..30 {
+            store
+                .put_typed(&TypedXEdge {
+                    source: Endpoint::new("knowledge", "hub", 0),
+                    target: Endpoint::new("knowledge", format!("n{i:02}"), 0),
+                    rel: "joins".into(),
+                    owner: "shape:a".into(),
+                    confidence: 1.0,
+                    meta: "{}".into(),
+                })
+                .unwrap();
+        }
+        let r = store.reader();
+        let some = r.typed_out("knowledge", "hub", &[], 10).unwrap();
+        assert_eq!(some.len(), 10);
+        assert_eq!(some[0].target.stable_id, "n00", "a stable order");
     }
 }

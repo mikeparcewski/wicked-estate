@@ -10,12 +10,18 @@
         "type": "string"
       },
       "kinds": {
+        "items": {
+          "type": "string"
+        },
         "type": "array"
       },
       "store": {
         "type": "string"
       },
       "visible": {
+        "items": {
+          "type": "string"
+        },
         "type": "array"
       }
     },

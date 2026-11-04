@@ -19,11 +19,7 @@ use wicked_estate_overlay::XedgeStore;
 use wicked_estate_retrieve::{Embedder, HashEmbedder, VectorStore};
 use wicked_estate_store::SqliteStore;
 
-use crate::plane::{Visible, effective_deps, is_untrusted};
-
-/// The vector lane walks at most this many nearest neighbours to take its `k` recallable ones
-/// (bounded traversal: a store where almost everything is hidden from the caller stops here).
-const VECTOR_WALK_CAP: usize = 2048;
+use crate::plane::{Visible, effective_deps, is_untrusted, scope_deps};
 
 /// The four knowledge node classes (D1.1). Ride `NodeKind::Other("k*")` so estate stores them
 /// generically and they NEVER collide with code (`function`/`class`/…) or memory (`Other("memory")`).
@@ -46,6 +42,15 @@ impl KClass {
             KClass::Section => "ksection",
             KClass::Chunk => "kchunk",
             KClass::Concept => "kconcept",
+        }
+    }
+    /// The class name the tools take and recall reports (`doc|section|chunk|concept`).
+    pub fn as_class(self) -> &'static str {
+        match self {
+            KClass::Doc => "doc",
+            KClass::Section => "section",
+            KClass::Chunk => "chunk",
+            KClass::Concept => "concept",
         }
     }
     pub fn from_kind(k: &str) -> Option<Self> {
@@ -181,15 +186,19 @@ impl KNode {
                 .get(meta_keys::CREATED_AT)
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0),
-            deps: m
-                .get(meta_keys::DEPS)
-                .and_then(|v| v.as_array())
-                .map(|xs| {
-                    xs.iter()
-                        .filter_map(|x| x.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default(),
+            // A malformed stored dep is kept as a dep no reader holds (fail-closed), never dropped.
+            deps: match m.get(meta_keys::DEPS) {
+                None => Vec::new(),
+                Some(serde_json::Value::Array(xs)) => xs
+                    .iter()
+                    .map(|x| {
+                        x.as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("invalid:{x}"))
+                    })
+                    .collect(),
+                Some(other) => vec![format!("invalid:{other}")],
+            },
             untrusted: m
                 .get(meta_keys::UNTRUSTED)
                 .and_then(|v| v.as_bool())
@@ -256,6 +265,9 @@ pub struct KnowledgeEngine {
     /// generation writes and tombstones nothing).
     #[cfg(test)]
     pub(crate) fail_replace_after: Option<usize>,
+    /// Test failpoint: `replace_source` fails after its tombstones, before its manifest.
+    #[cfg(test)]
+    pub(crate) fail_replace_before_manifest: bool,
     /// Test failpoint: an approval stops after its journal and edges, before its node (a crash).
     #[cfg(test)]
     pub(crate) fail_apply_before_node: bool,
@@ -298,6 +310,8 @@ impl KnowledgeEngine {
             xedge: None,
             #[cfg(test)]
             fail_replace_after: None,
+            #[cfg(test)]
+            fail_replace_before_manifest: false,
             #[cfg(test)]
             fail_apply_before_node: false,
         }
@@ -423,16 +437,37 @@ impl KnowledgeEngine {
     /// (DES-KNOWLEDGE-DATA-001 §4.3). The ONE predicate every candidate list applies before its
     /// `k` cut, so a hidden or out-of-scope node never takes a candidate slot, an RRF rank or a
     /// share of the token budget.
-    fn recallable(node: &Node, scope_prefix: Option<&str>, visible: &Visible) -> bool {
-        let Some(kn) = KNode::from_node(node) else {
+    ///
+    /// Reads the node's metadata in place (no content copy): it runs on every FTS match.
+    fn recallable(&self, node: &Node, scope_prefix: Option<&str>, visible: &Visible) -> bool {
+        let NodeKind::Other(k) = &node.kind else {
             return false;
         };
+        if !KClass::is_knowledge_kind(k) {
+            return false;
+        }
+        let m = &node.metadata;
+        let scope = m
+            .get(meta_keys::SCOPE)
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if let Some(prefix) = scope_prefix {
-            if !scope_in_prefix(&kn.scope, prefix) {
+            if !scope_in_prefix(scope, prefix) {
                 return false;
             }
         }
-        visible.allows(&effective_deps(&kn))
+        // Stored deps: every one must be visible; a malformed entry is never visible.
+        let stored_ok = match m.get(meta_keys::DEPS) {
+            None => true,
+            Some(v) => v.as_array().is_some_and(|xs| {
+                xs.iter()
+                    .all(|x| x.as_str().is_some_and(|d| visible.contains(d)))
+            }),
+        };
+        stored_ok
+            && scope_deps(scope).iter().all(|d| visible.contains(d))
+            // An approval still in flight (its journal exists) is invisible until complete.
+            && !self.applying(&node.symbol)
     }
 
     /// One BM25-ordered FTS candidate list, scoped to the given knowledge kinds. `text` is
@@ -469,7 +504,7 @@ impl KnowledgeEngine {
                     .map(str::to_string),
             })?
             .iter()
-            .filter(|n| Self::recallable(n, scope_prefix, visible))
+            .filter(|n| self.recallable(n, scope_prefix, visible))
             .take(self.k)
             .map(|n| n.symbol.clone())
             .collect())
@@ -582,20 +617,18 @@ impl KnowledgeEngine {
         // dependency-free HashEmbedder fallback is a lexical hash: fusing its neighbours as a
         // peer retriever injects rank noise that degrades every query class (S3 parity bench,
         // keyword-only vs hash-fused). Model-backed embedders (`semantic`/`semantic-bge`) keep
-        // contributing exactly as before. The list is walked in similarity order until `k`
-        // recallable nodes are taken (bounded: `VECTOR_WALK_CAP` nearest at most), so hidden
-        // neighbours cannot take the vector lane's slots either.
+        // contributing exactly as before. `nearest` scores every stored vector; the sorted list is
+        // walked until `k` recallable nodes are taken, so hidden neighbours cannot take the vector
+        // lane's slots (the walk is bounded by the store, like the FTS lane's full match list).
         let mut sem = Vec::new();
         if self.embedder.is_semantic() {
             let qvec = self.embedder.embed(query);
-            for (id, _) in
-                <SqliteStore as VectorStore>::nearest(&self.store, &qvec, VECTOR_WALK_CAP)?
-            {
+            for (id, _) in <SqliteStore as VectorStore>::nearest(&self.store, &qvec, usize::MAX)? {
                 if sem.len() >= self.k {
                     break;
                 }
                 if let Some(node) = self.store.get_node(&id)? {
-                    if Self::recallable(&node, scope_prefix, visible) {
+                    if self.recallable(&node, scope_prefix, visible) {
                         sem.push(id);
                     }
                 }
@@ -621,7 +654,7 @@ impl KnowledgeEngine {
                 continue;
             };
             // The same predicate the lists applied (authoritative re-check on the hydrated node).
-            if !Self::recallable(&node, scope_prefix, visible) {
+            if !self.recallable(&node, scope_prefix, visible) {
                 continue;
             }
             let Some(kn) = KNode::from_node(&node) else {
@@ -1299,5 +1332,25 @@ mod tests {
         assert_eq!(src.deps, vec!["source:s1".to_string()]);
         assert!(src.untrusted, "source structure is untrusted");
         assert_eq!(src.class, KClass::Section);
+    }
+
+    /// A malformed stored dep is never visible (fail-closed), on the recall path and on the
+    /// hydrated `KNode` every other read path uses.
+    #[test]
+    fn a_malformed_stored_dep_hides_the_node() {
+        let mut e = KnowledgeEngine::in_memory().unwrap();
+        let kn = KNode::new(KClass::Chunk, "malformed dep chunk", "", "m.md", 1);
+        let mut node = kn.to_node();
+        node.metadata
+            .insert(meta_keys::DEPS.into(), serde_json::json!([42]));
+        e.store.upsert_nodes(&[node.clone()]).unwrap();
+        assert!(
+            e.recall("malformed dep chunk", 4000, None, 2)
+                .unwrap()
+                .is_empty()
+        );
+        let back = KNode::from_node(&node).unwrap();
+        assert_eq!(back.deps, vec!["invalid:42".to_string()]);
+        assert!(!Visible::none().allows(&effective_deps(&back)));
     }
 }

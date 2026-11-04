@@ -1033,8 +1033,8 @@ pub trait KnowledgeApi {
     fn complete_proposal(&mut self, _proposal_id: &str) -> anyhow::Result<()> {
         Ok(())
     }
-    /// Proposal ids with an approval journal (the start-up sweep's input).
-    fn applying_proposals(&self) -> anyhow::Result<Vec<String>> {
+    /// Approvals with a journal, `(proposal id, journal written at)` (the start-up sweep's input).
+    fn applying_proposals(&self) -> anyhow::Result<Vec<(String, i64)>> {
         Ok(Vec::new())
     }
     /// Replace a live source's structure with one complete generation (§4.1).
@@ -1162,7 +1162,7 @@ impl KnowledgeApi for KnowledgeEngine {
         KnowledgeEngine::complete_proposal(self, proposal_id)
     }
 
-    fn applying_proposals(&self) -> anyhow::Result<Vec<String>> {
+    fn applying_proposals(&self) -> anyhow::Result<Vec<(String, i64)>> {
         KnowledgeEngine::applying_proposals(self)
     }
 
@@ -1232,7 +1232,7 @@ impl KnowledgeApi for KnowledgeEngine {
             .into_iter()
             .map(|h| KnowledgeItem {
                 node_id: h.id.0,
-                class: h.class.as_kind().to_string(),
+                class: h.class.as_class().to_string(),
                 label: h.content.chars().take(60).collect(),
                 body_snippet: h.content,
                 score: h.score,
@@ -1302,8 +1302,9 @@ impl KnowledgeApi for KnowledgeEngine {
                 let kid = wicked_estate_core::SymbolId(edge.source.stable_id.clone());
                 if let Some(node) = KnowledgeEngine::node(self, &kid)? {
                     if let Some(kn) = KNode::from_node(&node) {
-                        // The same visibility rule as recall (§4.3): every dep must be visible.
-                        if !visible.allows(&plane::effective_deps(&kn)) {
+                        // The same visibility rule as recall (§4.3): every dep must be visible, and
+                        // an approval in flight is invisible until complete.
+                        if !visible.allows(&plane::effective_deps(&kn)) || self.applying(&kid) {
                             continue;
                         }
                         items.push(KnowledgeItem::from_knode(

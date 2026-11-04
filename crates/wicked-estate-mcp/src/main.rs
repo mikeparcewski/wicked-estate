@@ -355,7 +355,11 @@ async fn main() -> Result<()> {
     // nothing, and its reads already hide a half-done approval (its edges' owner is not live).
     if !read_only {
         if let Some((mem, know)) = domain_engines.as_mut() {
-            match wicked_estate_mcp::tools::proposals::sweep_knowledge_approvals(mem, know) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            match wicked_estate_mcp::tools::proposals::sweep_knowledge_approvals(mem, know, now) {
                 Ok(lines) => {
                     for line in lines {
                         eprintln!("[wicked-estate] knowledge sweep: {line}");

@@ -54,6 +54,9 @@ pub fn valid_dep(dep: &str) -> bool {
 /// into a source's scope is gated by that source, whoever wrote it (a segment that is not a valid
 /// source id still gates: its literal dep is in no reader's set).
 pub fn scope_deps(scope: &str) -> Vec<String> {
+    if !scope.contains("source:") {
+        return Vec::new(); // the common case: no parse, no allocation
+    }
     Scope::parse(scope)
         .0
         .iter()

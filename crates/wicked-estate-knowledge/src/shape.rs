@@ -51,11 +51,21 @@ pub const ESTATE_STORE: &str = "estate";
 /// At most this many `relate[]` + `relate_code[]` entries per proposal.
 pub const MAX_LINKS: usize = 200;
 /// An entry's `evidence` object is at most this many bytes of JSON.
-pub const MAX_EVIDENCE_BYTES: usize = 4096;
-const MAX_ID_BYTES: usize = 1024;
-/// `knowledge.neighbors` bounds: depth 1-3, at most this many nodes.
+pub const MAX_EVIDENCE_BYTES: usize = 1024;
+/// Longest endpoint id: a source section id with two 512-byte keys percent-encoded (×3) plus its
+/// prefix fits.
+const MAX_ID_BYTES: usize = 4096;
+/// `knowledge.neighbors` bounds: depth 1-3, at most this many nodes and edges, at most this many
+/// adjacency rows read per node and side, and an output budget that keeps the answer inside an
+/// agent's tool-output limit (R4, < 25K chars). Any bound that bites sets `truncated`.
 pub const MAX_NEIGHBOR_DEPTH: usize = 3;
 pub const MAX_NEIGHBOR_NODES: usize = 100;
+pub const MAX_NEIGHBOR_EDGES: usize = 200;
+const ADJACENCY_LIMIT: usize = 400;
+const NEIGHBOR_OUTPUT_BYTES: usize = 22_000;
+/// An approval journal younger than this is in flight in another process and is never rolled
+/// back by a sweep (an approve takes milliseconds; crew's estate call deadline is 30 s).
+pub const APPLY_GRACE_SECS: i64 = 120;
 const DEFAULT_CONFIDENCE: f32 = 0.8;
 
 /// A typed link between two knowledge nodes; `from: None` is the proposed node itself.
@@ -214,6 +224,23 @@ pub fn parse_shape_links(payload: &Value) -> Result<ShapeLinks, String> {
     Ok(out)
 }
 
+/// A proposal filed with a `repo` facet (crew's relay sets it to the unit's own repo and strips any
+/// other, `mcp/estate-relay.ts`) may only link code in THAT repo: an agent proposer cannot name
+/// another repo's symbols as its own to widen who sees the shape. An operator proposal with no
+/// repo facet is trusted as written (estate holds no symbol-to-repo map; the reviewer sees it).
+pub fn check_repo_facet(links: &ShapeLinks, repo_facet: Option<&str>) -> Result<(), String> {
+    let Some(repo) = repo_facet else {
+        return Ok(());
+    };
+    match links.relate_code.iter().find(|l| l.repo != repo) {
+        Some(l) => Err(format!(
+            "relate_code repo {:?} is not this proposal's repo {repo:?}: a proposal links only its own repo's code",
+            l.repo
+        )),
+        None => Ok(()),
+    }
+}
+
 /// The full plan of one approval (what the journal holds).
 #[derive(Debug, Clone)]
 pub struct ApprovalPlan {
@@ -227,7 +254,7 @@ pub struct ApprovalPlan {
     pub unverified_code: usize,
 }
 
-fn journal_symbol(proposal_id: &str) -> SymbolId {
+pub(crate) fn journal_symbol(proposal_id: &str) -> SymbolId {
     Symbol::synthetic(APPLY_JOURNAL_KIND, proposal_id).id()
 }
 
@@ -267,11 +294,33 @@ fn proposal_class(payload: &Value) -> anyhow::Result<KClass> {
 }
 
 impl KnowledgeEngine {
-    /// A live knowledge node by its full id (`kchunk synthetic …:` as recall returns it).
+    /// Is this node an approval still in flight (a proposal-derived node whose `kapply` journal
+    /// exists)? Such a node is invisible on every read path until its journal is dropped, which
+    /// happens only after the queue marked the proposal approved. A store error answers `true`
+    /// (hidden): fail closed.
+    pub(crate) fn applying(&self, node: &SymbolId) -> bool {
+        let id = node
+            .as_str()
+            .rsplit(' ')
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(':');
+        let Some(pid) = id.strip_prefix("proposal:") else {
+            return false;
+        };
+        !matches!(self.store.get_node(&journal_symbol(pid)), Ok(None))
+    }
+
+    /// A live, complete knowledge node by its full id (`kchunk synthetic …:` as recall returns
+    /// it). An approval in flight is not live.
     fn live_knowledge(&self, id: &str) -> wicked_estate_core::Result<Option<KNode>> {
+        let sym = SymbolId(id.to_string());
+        if self.applying(&sym) {
+            return Ok(None);
+        }
         Ok(self
             .store
-            .get_node(&SymbolId(id.to_string()))?
+            .get_node(&sym)?
             .as_ref()
             .and_then(KNode::from_node))
     }
@@ -294,6 +343,7 @@ impl KnowledgeEngine {
                 })
         };
         let links = parse_shape_links(payload).map_err(|e| anyhow::anyhow!(e))?;
+        check_repo_facet(&links, proposal.facets.get("repo")).map_err(|e| anyhow::anyhow!(e))?;
         let mut kn = KNode::new(
             proposal_class(payload)?,
             required("content")?,
@@ -579,11 +629,13 @@ impl KnowledgeEngine {
                     .id()
                     .0
             });
+        // Hide first (the node), then the edges, then the journal last: a rollback that fails part
+        // way leaves the journal, so the node stays hidden and the next sweep finishes the job.
+        self.store.remove_nodes(&[SymbolId(owner.clone())])?;
         if let Some(xedge) = self.xedge.as_ref() {
             xedge.delete_typed_by_owner(&owner)?;
         }
-        self.store
-            .remove_nodes(&[SymbolId(owner), journal_symbol(proposal_id)])?;
+        self.store.remove_nodes(&[journal_symbol(proposal_id)])?;
         Ok(true)
     }
 
@@ -622,8 +674,8 @@ impl KnowledgeEngine {
         self.finish_proposal(proposal_id)
     }
 
-    /// The proposal ids with an approval journal (in flight, or interrupted).
-    pub fn applying_proposals(&self) -> anyhow::Result<Vec<String>> {
+    /// The approvals with a journal (in flight, or interrupted): `(proposal id, journal written at)`.
+    pub fn applying_proposals(&self) -> anyhow::Result<Vec<(String, i64)>> {
         Ok(self
             .store
             .find_symbols(&SymbolQuery {
@@ -636,10 +688,13 @@ impl KnowledgeEngine {
             })?
             .iter()
             .filter_map(|n| {
-                n.metadata
-                    .get("proposal_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
+                let pid = n.metadata.get("proposal_id").and_then(Value::as_str)?;
+                let at = n
+                    .metadata
+                    .get("created_at")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                Some((pid.to_string(), at))
             })
             .collect())
     }
@@ -725,10 +780,11 @@ impl KnowledgeEngine {
     }
 
     fn code_neighbor(&self, id: &str, repo: Option<&str>, graph: &dyn GraphRead) -> NeighborNode {
-        let deps: Vec<String> = repo
-            .filter(|r| !r.is_empty())
-            .map(|r| vec![format!("repo:{r}")])
-            .unwrap_or_default();
+        // A code endpoint always names its repo; one that does not is never visible (fail closed).
+        let deps: Vec<String> = match repo.filter(|r| !r.is_empty()) {
+            Some(r) => vec![format!("repo:{r}")],
+            None => vec!["invalid:no-repo".to_string()],
+        };
         match graph.get_node(&SymbolId(id.to_string())).ok().flatten() {
             Some(n) => NeighborNode {
                 store: ESTATE_STORE.into(),
@@ -779,7 +835,10 @@ impl KnowledgeEngine {
     }
 
     /// The typed neighbourhood of a node, filtered by `q.visible`, or `None` when the start node is
-    /// unknown or hidden (alike). Bounded: depth ≤ 3, at most [`MAX_NEIGHBOR_NODES`] nodes.
+    /// unknown or hidden (alike). Bounded: depth ≤ 3, at most [`MAX_NEIGHBOR_NODES`] nodes and
+    /// [`MAX_NEIGHBOR_EDGES`] edges, a bounded adjacency read per node, and an output budget;
+    /// `truncated` says a bound bit. A code seed is echoed back as its id only: the walk returns
+    /// nothing about it that the caller did not send.
     pub fn neighbors(
         &self,
         q: &NeighborsQuery,
@@ -794,15 +853,33 @@ impl KnowledgeEngine {
                 Some(n) => n,
                 None => return Ok(None),
             },
-            ESTATE_STORE => self.code_neighbor(&q.id, None, graph),
+            ESTATE_STORE => NeighborNode {
+                store: ESTATE_STORE.into(),
+                id: q.id.clone(),
+                class: None,
+                label: String::new(),
+                scope: String::new(),
+                deps: Vec::new(),
+                untrusted: false,
+                source: String::new(),
+                hydrated: false,
+            },
             other => anyhow::bail!("unknown store {other:?}: expected knowledge or estate"),
         };
         let rels: Vec<&str> = q.rels.iter().map(String::as_str).collect();
         let depth = q.depth.clamp(1, MAX_NEIGHBOR_DEPTH);
 
+        let node_bytes = |n: &NeighborNode| {
+            96 + n.id.len()
+                + n.label.len()
+                + n.scope.len()
+                + n.source.len()
+                + n.deps.iter().map(|d| d.len() + 3).sum::<usize>()
+        };
+        let mut used = node_bytes(&start);
         let mut nodes: Vec<NeighborNode> = vec![start];
-        let mut index: BTreeMap<(String, String), usize> = BTreeMap::new();
-        index.insert((q.store.clone(), q.id.clone()), 0);
+        let mut index: BTreeSet<(String, String)> = BTreeSet::new();
+        index.insert((q.store.clone(), q.id.clone()));
         let mut edges: Vec<NeighborEdge> = Vec::new();
         let mut edge_keys: BTreeSet<(String, String, String, String, String, String)> =
             BTreeSet::new();
@@ -813,11 +890,15 @@ impl KnowledgeEngine {
         'walk: for _ in 0..depth {
             let mut next = Vec::new();
             for (store, id) in &frontier {
-                let mut incident = reader.typed_out(store, id, &rels)?;
-                incident.extend(reader.typed_in(store, id, &rels)?);
-                for e in incident {
+                let out = reader.typed_out(store, id, &rels, ADJACENCY_LIMIT)?;
+                let inn = reader.typed_in(store, id, &rels, ADJACENCY_LIMIT)?;
+                if out.len() >= ADJACENCY_LIMIT || inn.len() >= ADJACENCY_LIMIT {
+                    truncated = true;
+                }
+                for e in out.into_iter().chain(inn) {
                     let meta: Value = serde_json::from_str(&e.meta).unwrap_or_else(|_| json!({}));
-                    // The owner must be live (an approval mid-flight is hidden) and visible.
+                    // The owner must be live (an approval in flight is hidden) and visible, and
+                    // so must every dep the edge carries (a malformed one never is).
                     let owner_ok = match owners.get(&e.owner) {
                         Some(ok) => *ok,
                         None => {
@@ -826,16 +907,14 @@ impl KnowledgeEngine {
                             ok
                         }
                     };
-                    let owner_deps: Vec<String> = meta
-                        .get("deps")
-                        .and_then(Value::as_array)
-                        .map(|xs| {
+                    let deps_ok = match meta.get("deps") {
+                        None => true,
+                        Some(v) => v.as_array().is_some_and(|xs| {
                             xs.iter()
-                                .filter_map(|x| x.as_str().map(str::to_string))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    if !owner_ok || !q.visible.allows(&owner_deps) {
+                                .all(|x| x.as_str().is_some_and(|d| q.visible.contains(d)))
+                        }),
+                    };
+                    if !owner_ok || !deps_ok {
                         continue;
                     }
                     if !self.epoch_ok(&e.source, &e.owner, graph)
@@ -851,7 +930,7 @@ impl KnowledgeEngine {
                     } else {
                         src.clone()
                     };
-                    if !index.contains_key(&other) {
+                    if !index.contains(&other) {
                         let node = if other.0 == KNOWLEDGE_STORE {
                             self.knowledge_neighbor(&other.1, &q.visible)?
                         } else {
@@ -862,11 +941,14 @@ impl KnowledgeEngine {
                         let Some(node) = node else {
                             continue; // hidden or gone: the walk never passes through it
                         };
-                        if nodes.len() >= MAX_NEIGHBOR_NODES {
+                        let cost = node_bytes(&node);
+                        if nodes.len() >= MAX_NEIGHBOR_NODES || used + cost > NEIGHBOR_OUTPUT_BYTES
+                        {
                             truncated = true;
                             break 'walk;
                         }
-                        index.insert(other.clone(), nodes.len());
+                        used += cost;
+                        index.insert(other.clone());
                         nodes.push(node);
                         next.push(other.clone());
                     }
@@ -878,16 +960,29 @@ impl KnowledgeEngine {
                         tgt.1.clone(),
                         e.owner.clone(),
                     );
-                    if edge_keys.insert(key) {
-                        edges.push(NeighborEdge {
-                            rel: e.rel,
-                            from: src,
-                            to: tgt,
-                            owner: e.owner,
-                            confidence: e.confidence,
-                            meta,
-                        });
+                    if edge_keys.contains(&key) {
+                        continue;
                     }
+                    let cost = 96
+                        + e.rel.len()
+                        + src.1.len()
+                        + tgt.1.len()
+                        + e.owner.len()
+                        + meta.to_string().len();
+                    if edges.len() >= MAX_NEIGHBOR_EDGES || used + cost > NEIGHBOR_OUTPUT_BYTES {
+                        truncated = true;
+                        break 'walk;
+                    }
+                    used += cost;
+                    edge_keys.insert(key);
+                    edges.push(NeighborEdge {
+                        rel: e.rel,
+                        from: src,
+                        to: tgt,
+                        owner: e.owner,
+                        confidence: e.confidence,
+                        meta,
+                    });
                 }
             }
             if next.is_empty() {
@@ -1121,7 +1216,7 @@ mod tests {
         assert!(e.apply_proposal(&p, &HashMap::new(), 2).is_err());
         e.fail_apply_before_node = false;
         // Mid-flight state: the journal and the edges exist, the node does not.
-        assert_eq!(e.applying_proposals().unwrap(), vec!["p1".to_string()]);
+        assert_eq!(e.applying_proposals().unwrap(), vec![("p1".to_string(), 2)]);
         assert!(e.xedge.as_ref().unwrap().typed_len().unwrap() > 0);
         let graph = SqliteStore::in_memory().unwrap();
         let q = NeighborsQuery {
@@ -1158,10 +1253,32 @@ mod tests {
         let mut e = engine_with_catalog();
         let p = proposal(shape_payload(None));
         e.apply_proposal(&p, &HashMap::new(), 2).unwrap();
-        // Not finished: the journal says it is in flight. Pending ⇒ rollback removes the node.
-        assert!(e.live_knowledge(&shape_id()).unwrap().is_some());
-        assert!(e.rollback_proposal("p1").unwrap());
+        // Not finished: the node is written but its journal is still there, so every read path
+        // hides it (a --readonly server, which never sweeps, sees nothing half-done).
+        let sym = SymbolId(shape_id());
+        assert!(e.store.get_node(&sym).unwrap().is_some());
         assert!(e.live_knowledge(&shape_id()).unwrap().is_none());
+        assert!(
+            e.recall_visible("customer_id joins", 4000, None, &all_visible(), 3)
+                .unwrap()
+                .iter()
+                .all(|h| h.id.0 != shape_id()),
+            "recall hides an approval in flight"
+        );
+        let graph = SqliteStore::in_memory().unwrap();
+        let q = NeighborsQuery {
+            store: KNOWLEDGE_STORE.into(),
+            id: tickets(),
+            rels: vec![],
+            depth: 2,
+            visible: all_visible(),
+        };
+        assert_eq!(e.neighbors(&q, &graph).unwrap().unwrap().nodes.len(), 1);
+        // Pending ⇒ the rollback removes the node, the edges and (last) the journal.
+        assert!(e.rollback_proposal("p1").unwrap());
+        assert!(e.store.get_node(&sym).unwrap().is_none());
+        assert_eq!(e.xedge.as_ref().unwrap().typed_len().unwrap(), 0);
+        assert!(e.applying_proposals().unwrap().is_empty());
 
         // Approved but the node never landed (journal + edges only) ⇒ complete re-puts it.
         e.fail_apply_before_node = true;
@@ -1208,5 +1325,148 @@ mod tests {
         assert_eq!(ok.relate.len(), 1);
         assert_eq!(ok.relate_code[0].repo, "support-app");
         assert_eq!(ok.declared_deps, Some(vec!["source:s1".to_string()]));
+    }
+}
+
+#[cfg(test)]
+mod r1_tests {
+    use super::*;
+    use std::collections::BTreeMap as Map;
+    use std::sync::Arc;
+    use wicked_estate_memory_core::{Facets, ProposalState};
+    use wicked_estate_overlay::XedgeStore;
+    use wicked_estate_store::SqliteStore;
+
+    fn engine() -> KnowledgeEngine {
+        KnowledgeEngine::in_memory()
+            .unwrap()
+            .with_xedge_store(Arc::new(XedgeStore::in_memory().unwrap()))
+    }
+
+    fn concept(e: &mut KnowledgeEngine, text: &str) -> String {
+        e.write(&KNode::new(KClass::Concept, text, "", "t.md", 1))
+            .unwrap()
+            .0
+    }
+
+    /// C8: a proposal filed with a repo facet (crew's relay stamps the unit's own repo) may link
+    /// only that repo's code; another repo is refused at approve (and at submit, in the MCP).
+    #[test]
+    fn a_repo_facet_binds_every_code_endpoint() {
+        let mut e = engine();
+        let facets = Facets::try_from_map([("repo", "support-app")]).unwrap();
+        let mut p = Proposal {
+            id: "p9".into(),
+            kind_type: "knowledge".into(),
+            payload: json!({
+                "content": "a ticket is a Ticket", "source": "shapes", "class": "concept",
+                "relate_code": [{"rel": "describes", "code_id": "rust::secret::Thing", "repo": "public-app"}],
+            }),
+            facets,
+            provenance: Map::new(),
+            state: ProposalState::Pending,
+            created_at: 1,
+        };
+        let err = e
+            .apply_proposal(&p, &HashMap::new(), 2)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is not this proposal's repo"), "{err}");
+        assert!(e.applying_proposals().unwrap().is_empty());
+        p.payload["relate_code"][0]["repo"] = json!("support-app");
+        e.apply_proposal(&p, &HashMap::new(), 2).unwrap();
+    }
+
+    /// C13: neighbors is bounded in nodes, edges and output, and says so.
+    #[test]
+    fn neighbors_is_bounded_and_says_so() {
+        let mut e = engine();
+        let hub = concept(&mut e, "hub concept");
+        let xedge = Arc::clone(e.xedge.as_ref().unwrap());
+        // The owner must be live and visible: one dep-free shape owns every edge.
+        let owner = concept(&mut e, "the owning shape");
+        for i in 0..150 {
+            let leaf = concept(
+                &mut e,
+                &format!("leaf concept number {i:03} with some label text"),
+            );
+            xedge
+                .put_typed(&TypedXEdge {
+                    source: Endpoint::new(KNOWLEDGE_STORE, hub.clone(), 0),
+                    target: Endpoint::new(KNOWLEDGE_STORE, leaf, 0),
+                    rel: "joins".into(),
+                    owner: owner.clone(),
+                    confidence: 1.0,
+                    meta: json!({"deps": [], "evidence": {"kind": "fk", "note": "x".repeat(200)}})
+                        .to_string(),
+                })
+                .unwrap();
+        }
+        let graph = SqliteStore::in_memory().unwrap();
+        let n = e
+            .neighbors(
+                &NeighborsQuery {
+                    store: KNOWLEDGE_STORE.into(),
+                    id: hub,
+                    rels: vec![],
+                    depth: 1,
+                    visible: Visible::none(),
+                },
+                &graph,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(n.truncated, "a bound bit");
+        assert!(n.nodes.len() <= MAX_NEIGHBOR_NODES);
+        assert!(n.edges.len() <= MAX_NEIGHBOR_EDGES);
+        let wire = json!({
+            "nodes": n.nodes.iter().map(|x| json!({"store": x.store, "id": x.id, "class": x.class,
+                "label": x.label, "scope": x.scope, "deps": x.deps, "untrusted": x.untrusted,
+                "source": x.source, "hydrated": x.hydrated})).collect::<Vec<_>>(),
+            "edges": n.edges.iter().map(|x| json!({"rel": x.rel, "from": {"store": x.from.0, "id": x.from.1},
+                "to": {"store": x.to.0, "id": x.to.1}, "owner": x.owner, "confidence": x.confidence,
+                "meta": x.meta})).collect::<Vec<_>>(),
+            "truncated": n.truncated,
+        })
+        .to_string();
+        assert!(
+            wire.len() < 25_000,
+            "R4: the answer is {} chars",
+            wire.len()
+        );
+    }
+
+    /// C7: a code seed is echoed back as its id only, never hydrated from the graph.
+    #[test]
+    fn a_code_seed_is_echoed_not_hydrated() {
+        use wicked_estate_core::{GraphWrite, Language, Location, Span};
+        let e = engine();
+        let mut graph = SqliteStore::in_memory().unwrap();
+        let sym = SymbolId("rust . . . app/Secret#".into());
+        graph
+            .upsert_nodes(&[Node::new(
+                sym.clone(),
+                NodeKind::Function,
+                "secret_fn",
+                Language::new("rust"),
+                Location::new("src/secret.rs", Span::ZERO),
+            )])
+            .unwrap();
+        let n = e
+            .neighbors(
+                &NeighborsQuery {
+                    store: ESTATE_STORE.into(),
+                    id: sym.0.clone(),
+                    rels: vec![],
+                    depth: 1,
+                    visible: Visible::none(),
+                },
+                &graph,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(n.nodes.len(), 1);
+        assert!(!n.nodes[0].hydrated);
+        assert!(n.nodes[0].label.is_empty() && n.nodes[0].source.is_empty());
     }
 }

@@ -8,6 +8,7 @@
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use wicked_estate_core::GraphRead;
+use wicked_estate_knowledge::shape::{APPLY_GRACE_SECS, check_repo_facet};
 use wicked_estate_knowledge::{KnowledgeApi, parse_shape_links};
 use wicked_estate_memory_core::{
     ApproveOutcome, Facets, MemoryApi, Proposal, ProposalState, valid_kind_type,
@@ -243,8 +244,13 @@ fn dispatch_submit(
         }
         // A data shape's links and declared deps (DES-KNOWLEDGE-DATA-001 §4.3): shape-checked here
         // so the proposer hears a mistake; endpoints are resolved and deps derived at approve.
-        if let Err(e) = parse_shape_links(&payload) {
-            return json_rpc_error(id, -32602, &format!("invalid knowledge proposal: {e}"));
+        match parse_shape_links(&payload)
+            .and_then(|links| check_repo_facet(&links, facets.get("repo")))
+        {
+            Ok(()) => {}
+            Err(e) => {
+                return json_rpc_error(id, -32602, &format!("invalid knowledge proposal: {e}"));
+            }
         }
         for field in ["scope", "observed_at", "source_rev"] {
             if payload.get(field).is_some_and(|v| !v.is_string()) {
@@ -461,14 +467,17 @@ fn dispatch_reject(
     }
 }
 
-/// The start-up sweep of the invisible-until-complete protocol (DES-KNOWLEDGE-DATA-001 §10.1):
-/// every knowledge approval with a journal was interrupted. An approved proposal is completed; a
-/// pending, rejected or missing one is rolled back (its edges, its node, its journal), so nothing
-/// half-done stays visible. Write mode only (a `--readonly` server writes nothing). Returns one
-/// line per journal handled, for the server's log.
+/// The start-up sweep of the invisible-until-complete protocol (DES-KNOWLEDGE-DATA-001 §10.1).
+/// A knowledge approval with a journal is in flight or was interrupted; its node is hidden on every
+/// read path either way. An approved proposal is completed (any age: every step is idempotent). A
+/// pending, rejected or missing one is rolled back (node, edges, journal) once its journal is older
+/// than [`APPLY_GRACE_SECS`]: a younger one may be another process's approval in progress. Write
+/// mode only (a `--readonly` server writes nothing). `now` is unix seconds. Returns one line per
+/// journal handled, for the server's log.
 pub fn sweep_knowledge_approvals(
     memory: &mut dyn MemoryApi<Error = anyhow::Error>,
     knowledge: &mut dyn KnowledgeApi,
+    now: i64,
 ) -> anyhow::Result<Vec<String>> {
     let in_flight = knowledge.applying_proposals()?;
     if in_flight.is_empty() {
@@ -480,12 +489,14 @@ pub fn sweep_knowledge_approvals(
         .map(|p| (p.id, p.state))
         .collect();
     let mut log = Vec::new();
-    for pid in in_flight {
+    for (pid, written_at) in in_flight {
         match states.get(&pid) {
             Some(ProposalState::Approved) => {
                 knowledge.complete_proposal(&pid)?;
                 log.push(format!("completed interrupted approval {pid}"));
             }
+            // Possibly another process's approval in progress: leave it (it stays hidden).
+            _ if now - written_at < APPLY_GRACE_SECS => {}
             other => {
                 knowledge.rollback_proposal(&pid)?;
                 let state = other.map(|s| s.as_str()).unwrap_or("missing");

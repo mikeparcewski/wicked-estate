@@ -32,14 +32,16 @@ pub const MAX_SECTIONS_PER_DOC: usize = 256;
 pub const MAX_KEY_BYTES: usize = 512;
 pub const MAX_TITLE_BYTES: usize = 512;
 pub const MAX_LABEL_BYTES: usize = 200;
-pub const MAX_SECTION_TEXT_BYTES: usize = 32 * 1024;
-pub const MAX_ENTRY_BYTES: usize = 64 * 1024;
-pub const MAX_CATALOG_BYTES: usize = 256 * 1024;
-/// A catalog page holds documents up to about this many bytes of JSON (at least one document), so
-/// a page stays inside an agent's tool-output budget (R4, < 25K chars) for ordinary relations.
-pub const PAGE_BYTES: usize = 20_000;
-/// At most this many tombstoned keys / orphaned edges are listed (the counts are always exact).
-const REPORT_LIST_CAP: usize = 50;
+pub const MAX_SECTION_TEXT_BYTES: usize = 16 * 1024;
+pub const MAX_ENTRY_BYTES: usize = 16 * 1024;
+pub const MAX_CATALOG_BYTES: usize = 4 * 1024;
+/// A catalog page holds at most this many bytes of document records (JSON), and one document's
+/// record may not exceed it, so a page (documents, the source catalog of at most 4 KiB, and the
+/// envelope) always stays inside an agent's tool-output budget (R4, < 25K chars).
+pub const PAGE_BYTES: usize = 18_000;
+/// At most this many tombstoned keys and orphaned edges are listed (the counts are always exact).
+const REPORT_TOMBSTONED_CAP: usize = 20;
+const REPORT_ORPHANED_CAP: usize = 10;
 
 /// Metadata keys on source nodes (beside the knowledge keys).
 mod meta {
@@ -55,6 +57,7 @@ mod meta {
     pub const DOC_KEYS: &str = "doc_keys";
     pub const PAGES: &str = "pages";
     pub const UPDATED_AT: &str = "updated_at";
+    pub const FINGERPRINT: &str = "fingerprint";
 }
 
 /// One section of a source document (a relation's columns, keys, enum literals; a tool's inputs).
@@ -135,6 +138,10 @@ pub enum CatalogError {
         pinned: u64,
         current: u64,
     },
+    /// A new generation landed while this page was being read: restart the read.
+    ChangedDuringRead {
+        generation: u64,
+    },
     PageOutOfRange {
         page: usize,
         pages: usize,
@@ -147,6 +154,10 @@ impl std::fmt::Display for CatalogError {
             CatalogError::GenerationChanged { pinned, current } => write!(
                 f,
                 "the source moved from generation {pinned} to {current}: restart the read at page 0"
+            ),
+            CatalogError::ChangedDuringRead { generation } => write!(
+                f,
+                "the source changed while generation {generation} was being read: restart the read at page 0"
             ),
             CatalogError::PageOutOfRange { page, pages } => {
                 write!(f, "page {page} is out of range (the catalog has {pages})")
@@ -236,6 +247,14 @@ impl SourceGeneration {
                     "doc {:?}: {} sections is over {MAX_SECTIONS_PER_DOC}",
                     doc.key,
                     doc.sections.len()
+                )));
+            }
+            let record = doc_record(doc).to_string().len();
+            if record > PAGE_BYTES {
+                return Err(bad(format!(
+                    "doc {:?}: its catalog record is {record} bytes, over the {PAGE_BYTES}-byte page \
+                     (shorten its sections or split the relation's structure across documents)",
+                    doc.key
                 )));
             }
             let mut skeys = std::collections::BTreeSet::new();
@@ -334,6 +353,26 @@ fn doc_record(doc: &SourceDoc) -> Value {
             "text": section_content(&doc.key, &s.text),
         })).collect::<Vec<_>>(),
     })
+}
+
+/// A stable fingerprint of a generation's content (FNV-1a 64 over its canonical JSON, documents in
+/// key order). Two submissions of one generation number must carry the same content.
+fn fingerprint(g: &SourceGeneration, docs: &[&SourceDoc]) -> String {
+    let canonical = json!({
+        "label": g.label,
+        "catalog": g.catalog,
+        "docs": docs.iter().map(|d| json!({
+            "key": d.key, "title": d.title, "entry": d.entry,
+            "sections": d.sections.iter().map(|s| json!([s.key, s.text])).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    })
+    .to_string();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in canonical.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
 }
 
 /// Byte-bounded page boundaries over documents in key order: `[start, end)` pairs.
@@ -460,6 +499,7 @@ impl KnowledgeEngine {
             );
             m.insert(meta::PAGES.into(), Value::Array(pages));
             m.insert(meta::UPDATED_AT.into(), now.into());
+            m.insert(meta::FINGERPRINT.into(), fingerprint(g, &docs).into());
             m.insert(crate::engine::meta_keys::DEPS.into(), json!(deps));
         }
 
@@ -507,6 +547,22 @@ impl KnowledgeEngine {
                     g.generation
                 )));
             }
+            // The same generation again is a retry, and must be the same content: a pinned
+            // reader of generation N would otherwise read two different structures as one.
+            let same = stored
+                .metadata
+                .get(meta::FINGERPRINT)
+                .and_then(Value::as_str)
+                == manifest
+                    .metadata
+                    .get(meta::FINGERPRINT)
+                    .and_then(Value::as_str);
+            if g.generation == current && !same {
+                return Err(bad(format!(
+                    "generation {current} of source {sid} is already stored with different content: \
+                     a changed structure needs a new generation"
+                )));
+            }
         }
 
         // What this source holds now (by scope, not by the manifest, so nothing can be orphaned).
@@ -527,17 +583,25 @@ impl KnowledgeEngine {
             .collect();
 
         // Report the typed edges that touch what is about to be tombstoned (they are kept).
+        // Each edge once, however many of its ends are tombstoned.
         let mut orphaned = Vec::new();
-        let mut orphaned_count = 0usize;
+        let mut orphaned_seen = std::collections::BTreeSet::new();
         if let Some(xedge) = self.xedge.as_ref() {
             let reader = xedge.reader();
             for n in &absent {
                 let id = n.symbol.0.as_str();
-                let mut edges = reader.typed_out("knowledge", id, &[])?;
-                edges.extend(reader.typed_in("knowledge", id, &[])?);
-                orphaned_count += edges.len();
+                let mut edges = reader.typed_out("knowledge", id, &[], usize::MAX)?;
+                edges.extend(reader.typed_in("knowledge", id, &[], usize::MAX)?);
                 for e in edges {
-                    if orphaned.len() < REPORT_LIST_CAP {
+                    let key = (
+                        e.rel.clone(),
+                        e.source.engine.clone(),
+                        e.source.stable_id.clone(),
+                        e.target.engine.clone(),
+                        e.target.stable_id.clone(),
+                        e.owner.clone(),
+                    );
+                    if orphaned_seen.insert(key) && orphaned.len() < REPORT_ORPHANED_CAP {
                         orphaned.push(OrphanedEdge {
                             rel: e.rel,
                             from: e.source.stable_id,
@@ -548,6 +612,7 @@ impl KnowledgeEngine {
                 }
             }
         }
+        let orphaned_count = orphaned_seen.len();
         let tombstoned_docs: Vec<String> = absent
             .iter()
             .filter(|n| matches!(&n.kind, NodeKind::Other(k) if k == KClass::Doc.as_kind()))
@@ -557,7 +622,7 @@ impl KnowledgeEngine {
                     .and_then(Value::as_str)
                     .map(str::to_string)
             })
-            .take(REPORT_LIST_CAP)
+            .take(REPORT_TOMBSTONED_CAP)
             .collect();
 
         for (node, text) in to_write {
@@ -576,6 +641,10 @@ impl KnowledgeEngine {
         let absent_ids: Vec<SymbolId> = absent.iter().map(|n| n.symbol.clone()).collect();
         if !absent_ids.is_empty() {
             self.store.remove_nodes(&absent_ids)?;
+        }
+        #[cfg(test)]
+        if self.fail_replace_before_manifest {
+            return Err(bad("injected failure after the tombstones".into()));
         }
         self.store.upsert_nodes(std::slice::from_ref(manifest))?;
 
@@ -645,11 +714,19 @@ impl KnowledgeEngine {
             None if pages == 0 && page == 0 => (0, 0),
             None => return Err(CatalogError::PageOutOfRange { page, pages }.into()),
         };
+        // Every record of the page must exist and carry the manifest's generation (each generation
+        // rewrites all of them), so a page read while a new generation commits is detected, never
+        // returned mixed or short.
+        let changed = || -> anyhow::Error { CatalogError::ChangedDuringRead { generation }.into() };
+        let gen_of = |n: &Node| n.metadata.get(meta::GENERATION).and_then(Value::as_u64);
         let mut docs = Vec::new();
         for key in &keys[range.0..range.1] {
             let Some(doc) = self.store.get_node(&doc_symbol(source_id, key))? else {
-                continue;
+                return Err(changed());
             };
+            if gen_of(&doc) != Some(generation) {
+                return Err(changed());
+            }
             let dm = &doc.metadata;
             let section_keys: Vec<String> = dm
                 .get(meta::SECTION_KEYS)
@@ -662,14 +739,16 @@ impl KnowledgeEngine {
                 .unwrap_or_default();
             let mut sections = Vec::new();
             for sk in &section_keys {
-                if let Some(sec) = self
-                    .store
-                    .get_node(&section_symbol(source_id, key, sk))?
-                    .as_ref()
-                    .and_then(KNode::from_node)
-                {
-                    sections.push(json!({"key": sk, "text": sec.content}));
+                let Some(node) = self.store.get_node(&section_symbol(source_id, key, sk))? else {
+                    return Err(changed());
+                };
+                if gen_of(&node) != Some(generation) {
+                    return Err(changed());
                 }
+                let Some(sec) = KNode::from_node(&node) else {
+                    return Err(changed());
+                };
+                sections.push(json!({"key": sk, "text": sec.content}));
             }
             docs.push(json!({
                 "key": key,
@@ -677,6 +756,12 @@ impl KnowledgeEngine {
                 "entry": dm.get(meta::ENTRY).cloned().unwrap_or_else(|| json!({})),
                 "sections": sections,
             }));
+        }
+        let now_gen = self
+            .manifest(source_id)?
+            .and_then(|m| m.metadata.get(meta::GENERATION).and_then(Value::as_u64));
+        if now_gen != Some(generation) {
+            return Err(changed());
         }
         Ok(Some(CatalogPage {
             source_id: source_id.to_string(),
@@ -1050,5 +1135,265 @@ mod tests {
         g.docs = vec![doc("t", "id")];
         g.docs[0].entry = Some(json!([1]));
         assert!(g.validate().is_err(), "entry must be an object");
+    }
+}
+
+#[cfg(test)]
+mod r1_tests {
+    use super::*;
+    use std::sync::Arc;
+    use wicked_estate_overlay::{Endpoint, TypedXEdge, XedgeStore};
+
+    fn doc(key: &str, columns: &str) -> SourceDoc {
+        SourceDoc {
+            key: key.into(),
+            title: None,
+            entry: Some(json!({"kind": "table"})),
+            sections: vec![
+                SourceSection {
+                    key: "columns".into(),
+                    text: columns.into(),
+                },
+                SourceSection {
+                    key: "keys".into(),
+                    text: "primary key id".into(),
+                },
+            ],
+        }
+    }
+
+    fn generation(n: u64, docs: Vec<SourceDoc>) -> SourceGeneration {
+        SourceGeneration {
+            source_id: "s1".into(),
+            generation: n,
+            label: Some("support-pg".into()),
+            catalog: Some(json!({"dialect": "postgres"})),
+            docs,
+        }
+    }
+
+    fn visible() -> Visible {
+        Visible::from_deps(["source:s1"]).unwrap()
+    }
+
+    fn open(path: &std::path::Path) -> KnowledgeEngine {
+        KnowledgeEngine::open(path.to_str().unwrap()).unwrap()
+    }
+
+    /// C3: the same generation number with different content is refused; the same content is an
+    /// idempotent retry.
+    #[test]
+    fn the_same_generation_must_be_the_same_content() {
+        let mut e = KnowledgeEngine::in_memory().unwrap();
+        e.replace_source(&generation(3, vec![doc("t", "id int8")]), 1)
+            .unwrap();
+        let err = e
+            .replace_source(&generation(3, vec![doc("t", "id int8, x text")]), 2)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("already stored with different content"),
+            "{err}"
+        );
+        e.replace_source(&generation(3, vec![doc("t", "id int8")]), 3)
+            .unwrap();
+        let page = e
+            .source_catalog("s1", 0, None, &visible())
+            .unwrap()
+            .unwrap();
+        assert!(
+            page.docs[0]["sections"][0]["text"]
+                .as_str()
+                .unwrap()
+                .ends_with("id int8")
+        );
+    }
+
+    /// C4 + pi-5: an edge between two tombstoned nodes is reported once; a re-added key gets a new
+    /// epoch, so the old edge stays hidden in neighbors.
+    #[test]
+    fn orphaned_edges_count_once_and_a_re_added_key_does_not_inherit_them() {
+        let mut e = KnowledgeEngine::in_memory()
+            .unwrap()
+            .with_xedge_store(Arc::new(XedgeStore::in_memory().unwrap()));
+        e.replace_source(
+            &generation(1, vec![doc("a", "id int8"), doc("b", "id int8")]),
+            1,
+        )
+        .unwrap();
+        let owner = e
+            .write(&KNode::new(KClass::Concept, "a joins b", "", "shapes", 1))
+            .unwrap()
+            .0;
+        let (a, b) = (doc_symbol("s1", "a").0, doc_symbol("s1", "b").0);
+        let xedge = Arc::clone(e.xedge.as_ref().unwrap());
+        xedge
+            .put_typed(&TypedXEdge {
+                source: Endpoint::new("knowledge", a.clone(), 0),
+                target: Endpoint::new("knowledge", b.clone(), 0),
+                rel: "joins".into(),
+                owner: owner.clone(),
+                confidence: 1.0,
+                meta: json!({"deps": ["source:s1"]}).to_string(),
+            })
+            .unwrap();
+        let graph = wicked_estate_store::SqliteStore::in_memory().unwrap();
+        let q = crate::NeighborsQuery {
+            store: "knowledge".into(),
+            id: a.clone(),
+            rels: vec![],
+            depth: 1,
+            visible: visible(),
+        };
+        assert_eq!(e.neighbors(&q, &graph).unwrap().unwrap().edges.len(), 1);
+
+        let r = e.replace_source(&generation(2, vec![]), 2).unwrap();
+        assert_eq!(
+            r.orphaned_edge_count, 1,
+            "one edge, though both its ends went"
+        );
+        assert_eq!(r.orphaned_edges.len(), 1);
+
+        e.replace_source(
+            &generation(3, vec![doc("a", "id int8"), doc("b", "id int8")]),
+            3,
+        )
+        .unwrap();
+        let n = e.neighbors(&q, &graph).unwrap().unwrap();
+        assert!(
+            n.edges.is_empty(),
+            "a re-added key never inherits the old edge: {n:?}"
+        );
+        assert_eq!(xedge.typed_len().unwrap(), 1, "the edge is still kept");
+    }
+
+    /// C6: a page whose records do not all carry the manifest's generation (a new generation
+    /// committing mid-read) is an error, never a mixed page.
+    #[test]
+    fn a_page_read_across_a_commit_is_refused() {
+        let mut e = KnowledgeEngine::in_memory().unwrap();
+        e.replace_source(&generation(1, vec![doc("t", "id int8")]), 1)
+            .unwrap();
+        // Simulate the interleaving: a section already rewritten by generation 2.
+        let sym = section_symbol("s1", "t", "keys");
+        let mut node = e.store.get_node(&sym).unwrap().unwrap();
+        node.metadata.insert(meta::GENERATION.into(), 2.into());
+        e.store.upsert_nodes(&[node]).unwrap();
+        let err = e
+            .source_catalog("s1", 0, None, &visible())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("changed while generation 1"), "{err}");
+    }
+
+    /// C12 + pi-6: a doc whose record would not fit a page is refused, and a full page of the
+    /// largest accepted docs stays inside R4.
+    #[test]
+    fn pages_stay_inside_r4() {
+        let mut e = KnowledgeEngine::in_memory().unwrap();
+        let huge = doc("wide", &"c text, ".repeat(2_000)); // 16 KB of columns
+        let mut too_big = huge.clone();
+        too_big.sections[1].text = "k ".repeat(2_000);
+        assert!(
+            generation(1, vec![too_big]).validate().is_err(),
+            "over the page"
+        );
+        let docs: Vec<SourceDoc> = (0..6)
+            .map(|i| doc(&format!("w{i}"), &"c text, ".repeat(2_000)))
+            .collect();
+        let mut g = generation(1, docs);
+        g.catalog = Some(json!({"schemas": "x".repeat(3_500)}));
+        e.replace_source(&g, 1).unwrap();
+        let pages = e
+            .source_catalog("s1", 0, None, &visible())
+            .unwrap()
+            .unwrap()
+            .pages;
+        for p in 0..pages {
+            let page = e
+                .source_catalog("s1", p, None, &visible())
+                .unwrap()
+                .unwrap();
+            let wire = json!({
+                "sourceId": page.source_id, "label": page.label, "generation": page.generation,
+                "page": page.page, "pages": page.pages, "total_docs": page.total_docs,
+                "untrusted": true, "catalog": page.catalog, "docs": page.docs,
+            })
+            .to_string();
+            assert!(wire.len() < 25_000, "page {p} is {} chars", wire.len());
+        }
+    }
+
+    /// C16: a generation that fails AFTER updating an existing doc, or AFTER its tombstones, rolls
+    /// all of it back — content, FTS, generation and the tombstoned doc — durably (reopened).
+    #[test]
+    fn a_failure_after_an_update_or_a_tombstone_rolls_everything_back_durably() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("knowledge.db");
+        {
+            let mut e = open(&path);
+            e.replace_source(
+                &generation(
+                    1,
+                    vec![
+                        doc("support.refunds", "id int8"),
+                        doc("support.tickets", "id int8"),
+                    ],
+                ),
+                1,
+            )
+            .unwrap();
+        }
+        let next = generation(
+            2,
+            vec![
+                doc("crm.accounts", "id int8"),
+                doc("support.tickets", "id int8, zanzibar text"),
+            ],
+        );
+        // Node order: crm.accounts (doc + 2 sections), then support.tickets (doc...). Fail after
+        // the 4th write: the EXISTING support.tickets doc has been rewritten.
+        {
+            let mut e = open(&path);
+            e.fail_replace_after = Some(4);
+            assert!(e.replace_source(&next, 2).is_err());
+        }
+        // Fail after the tombstones (support.refunds is gone inside the transaction).
+        {
+            let mut e = open(&path);
+            e.fail_replace_before_manifest = true;
+            assert!(e.replace_source(&next, 2).is_err());
+        }
+        let mut e = open(&path);
+        let tickets = e
+            .store
+            .get_node(&doc_symbol("s1", "support.tickets"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(tickets.metadata[meta::GENERATION], 1);
+        assert!(
+            e.store
+                .get_node(&doc_symbol("s1", "support.refunds"))
+                .unwrap()
+                .is_some(),
+            "the tombstone was rolled back"
+        );
+        assert!(
+            e.store
+                .get_node(&doc_symbol("s1", "crm.accounts"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            e.recall_visible("zanzibar", 4000, None, &visible(), 3)
+                .unwrap()
+                .is_empty(),
+            "the rolled-back text is not in FTS"
+        );
+        let page = e
+            .source_catalog("s1", 0, None, &visible())
+            .unwrap()
+            .unwrap();
+        assert_eq!((page.generation, page.total_docs), (1, 2));
     }
 }
