@@ -411,7 +411,9 @@ knowledge is what estate read (docs, and the structure of live data sources). Ea
   carries the dep `source:<tracker id>`. The `control` store names crew's endpoints as link ends: `project:<id>`,
   `repo:<id>`, `pr:<repo id>#<n>` and `run:<id>`. A document may own typed `links[]` (`tracked_in`, `addresses`,
   `closes`, …) to control or knowledge ends; each link is stamped with its document's generation, so a reader
-  keeps it only while that generation is live, and an interrupted write leaves only hidden rows.
+  keeps it only while that generation is live: a write interrupted before the knowledge transaction commits
+  leaves only hidden rows, and one interrupted after it leaves the new generation visible (stale rows stay hidden
+  until the next generation cleans them up).
   `knowledge.neighbors` accepts `store: "control"` as a start; a control end is shown only when its own deps are
   visible. No new tool (the count stays 33).
 
