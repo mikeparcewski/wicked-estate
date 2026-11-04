@@ -408,7 +408,11 @@ fn the_sweep_completes_an_approved_proposal() {
     r.mem
         .approve_proposal_with_knowledge(&pid, 2, &mut writer)
         .unwrap();
-    assert_eq!(r.know.applying_proposals().unwrap(), vec![(pid.clone(), 2)]);
+    let journals = r.know.applying_proposals().unwrap();
+    assert_eq!(
+        (journals.len(), journals[0].proposal_id.as_str()),
+        (1, pid.as_str())
+    );
     // Hidden while its journal exists, even though the queue already approved it.
     let hits = r.ok("knowledge.recall", json!({"query": "refunds manager"}));
     assert!(hits["items"].as_array().unwrap().is_empty(), "{hits}");

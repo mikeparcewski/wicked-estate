@@ -261,6 +261,9 @@ pub struct KnowledgeEngine {
     /// in-process recall-miss log (the `memext` sidecar pattern; persisted form lands at T-B-MISSLOG).
     misses: Vec<RecallMiss>,
     pub(crate) xedge: Option<std::sync::Arc<XedgeStore>>,
+    /// This engine's latest approval attempt per proposal id (DES-KNOWLEDGE-DATA-001 §10.1): its
+    /// own failure path rolls back exactly that attempt and no other process's.
+    pub(crate) attempts: std::collections::HashMap<String, String>,
     /// Test failpoint: `replace_source` writes this many more nodes, then fails (proves a failed
     /// generation writes and tombstones nothing).
     #[cfg(test)]
@@ -308,6 +311,7 @@ impl KnowledgeEngine {
             recall_floor: 0.0,
             misses: Vec::new(),
             xedge: None,
+            attempts: std::collections::HashMap::new(),
             #[cfg(test)]
             fail_replace_after: None,
             #[cfg(test)]

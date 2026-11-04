@@ -22,7 +22,10 @@ pub const SOURCE_KIND: &str = "source";
 pub const REPO_KIND: &str = "repo";
 
 /// Longest id a dep may carry (a registry uuid is 36; a repo id is a short slug).
-const MAX_DEP_ID: usize = 256;
+const MAX_DEP_ID: usize = 128;
+/// A node may carry at most this many deps (a data shape connecting more sources and repos than
+/// this is refused at approve), so an item's `deps` always fits beside its content (R4).
+pub const MAX_DEPS: usize = 32;
 
 /// Is `id` a valid source id? The registry's immutable id: 1-128 of `[A-Za-z0-9._-]`. Strict,
 /// because it becomes a scope segment and part of every catalog node id.
@@ -34,7 +37,7 @@ pub fn valid_source_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-/// Is `id` a valid repo id? Any 1-256 printable ASCII characters except whitespace and `,`.
+/// Is `id` a valid repo id? Any 1-128 printable ASCII characters except whitespace and `,`.
 pub fn valid_repo_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_DEP_ID

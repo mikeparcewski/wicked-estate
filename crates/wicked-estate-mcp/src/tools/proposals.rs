@@ -416,8 +416,10 @@ fn dispatch_approve(
                         .list_proposals(Some("knowledge"), Some(ProposalState::Pending))
                         .map(|ps| ps.iter().any(|p| p.id == proposal_id))
                         .unwrap_or(false);
-                    if pending {
-                        if let Err(e) = knowledge.rollback_proposal(&proposal_id) {
+                    // Only THIS process's attempt: a concurrent retry's journal is never undone.
+                    let own = knowledge.own_attempt(&proposal_id);
+                    if let (true, Some(attempt)) = (pending, own) {
+                        if let Err(e) = knowledge.rollback_proposal(&proposal_id, &attempt) {
                             note = Some(format!(
                                 "the partial approval could not be rolled back now; the next start-up sweep will ({e})"
                             ));
@@ -489,16 +491,20 @@ pub fn sweep_knowledge_approvals(
         .map(|p| (p.id, p.state))
         .collect();
     let mut log = Vec::new();
-    for (pid, written_at) in in_flight {
+    for journal in in_flight {
+        let pid = journal.proposal_id;
         match states.get(&pid) {
             Some(ProposalState::Approved) => {
                 knowledge.complete_proposal(&pid)?;
                 log.push(format!("completed interrupted approval {pid}"));
             }
             // Possibly another process's approval in progress: leave it (it stays hidden).
-            _ if now - written_at < APPLY_GRACE_SECS => {}
+            _ if now - journal.written_at < APPLY_GRACE_SECS => {}
             other => {
-                knowledge.rollback_proposal(&pid)?;
+                // Exactly the attempt inspected: a retry that overwrote it since is left alone.
+                if !knowledge.rollback_proposal(&pid, &journal.attempt)? {
+                    continue;
+                }
                 let state = other.map(|s| s.as_str()).unwrap_or("missing");
                 log.push(format!(
                     "rolled back interrupted approval {pid} (proposal {state})"

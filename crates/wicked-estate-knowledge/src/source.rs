@@ -27,7 +27,9 @@ use wicked_estate_core::{
 pub const SOURCE_MANIFEST_KIND: &str = "ksource";
 
 /// Limits on one generation (refused beyond, never truncated: a cut catalog is a wrong catalog).
-pub const MAX_DOCS: usize = 20_000;
+pub const MAX_DOCS: usize = 5_000;
+/// The whole generation's document records together (one describe, one transaction, in memory).
+pub const MAX_GENERATION_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_SECTIONS_PER_DOC: usize = 256;
 pub const MAX_KEY_BYTES: usize = 512;
 pub const MAX_TITLE_BYTES: usize = 512;
@@ -39,9 +41,9 @@ pub const MAX_CATALOG_BYTES: usize = 4 * 1024;
 /// record may not exceed it, so a page (documents, the source catalog of at most 4 KiB, and the
 /// envelope) always stays inside an agent's tool-output budget (R4, < 25K chars).
 pub const PAGE_BYTES: usize = 18_000;
-/// At most this many tombstoned keys and orphaned edges are listed (the counts are always exact).
-const REPORT_TOMBSTONED_CAP: usize = 20;
-const REPORT_ORPHANED_CAP: usize = 10;
+/// The tombstoned keys and orphaned edges a report lists are cut to this many bytes each (R4); the
+/// counts are always exact.
+const REPORT_LIST_BYTES: usize = 8_000;
 
 /// Metadata keys on source nodes (beside the knowledge keys).
 mod meta {
@@ -108,9 +110,10 @@ pub struct ReplaceReport {
     pub generation: u64,
     pub docs: usize,
     pub sections: usize,
-    /// Keys of tombstoned documents (capped list) and the exact count of tombstoned nodes
-    /// (documents and sections).
+    /// Keys of tombstoned documents (a byte-capped list), the exact count of tombstoned documents,
+    /// and the exact count of tombstoned nodes (documents and sections).
     pub tombstoned_docs: Vec<String>,
+    pub tombstoned_doc_count: usize,
     pub tombstoned_nodes: usize,
     pub orphaned_edges: Vec<OrphanedEdge>,
     pub orphaned_edge_count: usize,
@@ -207,6 +210,7 @@ impl SourceGeneration {
             return Err(bad(format!("{} docs is over {MAX_DOCS}", self.docs.len())));
         }
         let mut keys = std::collections::BTreeSet::new();
+        let mut total = 0usize;
         for doc in &self.docs {
             if !key_ok(&doc.key, MAX_KEY_BYTES) {
                 return Err(bad(format!(
@@ -250,6 +254,12 @@ impl SourceGeneration {
                 )));
             }
             let record = doc_record(doc).to_string().len();
+            total += record;
+            if total > MAX_GENERATION_BYTES {
+                return Err(bad(format!(
+                    "the generation's documents are over {MAX_GENERATION_BYTES} bytes"
+                )));
+            }
             if record > PAGE_BYTES {
                 return Err(bad(format!(
                     "doc {:?}: its catalog record is {record} bytes, over the {PAGE_BYTES}-byte page \
@@ -586,6 +596,7 @@ impl KnowledgeEngine {
         // Each edge once, however many of its ends are tombstoned.
         let mut orphaned = Vec::new();
         let mut orphaned_seen = std::collections::BTreeSet::new();
+        let mut orphaned_bytes = 0usize;
         if let Some(xedge) = self.xedge.as_ref() {
             let reader = xedge.reader();
             for n in &absent {
@@ -601,7 +612,13 @@ impl KnowledgeEngine {
                         e.target.stable_id.clone(),
                         e.owner.clone(),
                     );
-                    if orphaned_seen.insert(key) && orphaned.len() < REPORT_ORPHANED_CAP {
+                    let cost = 64
+                        + e.rel.len()
+                        + e.source.stable_id.len()
+                        + e.target.stable_id.len()
+                        + e.owner.len();
+                    if orphaned_seen.insert(key) && orphaned_bytes + cost <= REPORT_LIST_BYTES {
+                        orphaned_bytes += cost;
                         orphaned.push(OrphanedEdge {
                             rel: e.rel,
                             from: e.source.stable_id,
@@ -613,7 +630,7 @@ impl KnowledgeEngine {
             }
         }
         let orphaned_count = orphaned_seen.len();
-        let tombstoned_docs: Vec<String> = absent
+        let all_tombstoned: Vec<String> = absent
             .iter()
             .filter(|n| matches!(&n.kind, NodeKind::Other(k) if k == KClass::Doc.as_kind()))
             .filter_map(|n| {
@@ -622,7 +639,15 @@ impl KnowledgeEngine {
                     .and_then(Value::as_str)
                     .map(str::to_string)
             })
-            .take(REPORT_TOMBSTONED_CAP)
+            .collect();
+        let tombstoned_doc_count = all_tombstoned.len();
+        let mut tombstoned_bytes = 0usize;
+        let tombstoned_docs: Vec<String> = all_tombstoned
+            .into_iter()
+            .take_while(|k| {
+                tombstoned_bytes += k.len() * 2 + 4; // JSON-escaped worst case
+                tombstoned_bytes <= REPORT_LIST_BYTES
+            })
             .collect();
 
         for (node, text) in to_write {
@@ -654,6 +679,7 @@ impl KnowledgeEngine {
             docs: 0,
             sections: 0,
             tombstoned_docs,
+            tombstoned_doc_count,
             tombstoned_nodes: absent_ids.len(),
             orphaned_edges: orphaned,
             orphaned_edge_count: orphaned_count,
@@ -1246,8 +1272,26 @@ mod r1_tests {
             visible: visible(),
         };
         assert_eq!(e.neighbors(&q, &graph).unwrap().unwrap().edges.len(), 1);
+        // A routine re-describe that keeps both tables (content changed) keeps the edge: an
+        // in-place upsert does not bump the epoch.
+        e.replace_source(
+            &generation(
+                2,
+                vec![
+                    doc("a", "id int8, note text"),
+                    doc("b", "id int8, note text"),
+                ],
+            ),
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            e.neighbors(&q, &graph).unwrap().unwrap().edges.len(),
+            1,
+            "a kept relation keeps its shape edges across re-describes"
+        );
 
-        let r = e.replace_source(&generation(2, vec![]), 2).unwrap();
+        let r = e.replace_source(&generation(3, vec![]), 3).unwrap();
         assert_eq!(
             r.orphaned_edge_count, 1,
             "one edge, though both its ends went"
@@ -1255,8 +1299,8 @@ mod r1_tests {
         assert_eq!(r.orphaned_edges.len(), 1);
 
         e.replace_source(
-            &generation(3, vec![doc("a", "id int8"), doc("b", "id int8")]),
-            3,
+            &generation(4, vec![doc("a", "id int8"), doc("b", "id int8")]),
+            4,
         )
         .unwrap();
         let n = e.neighbors(&q, &graph).unwrap().unwrap();

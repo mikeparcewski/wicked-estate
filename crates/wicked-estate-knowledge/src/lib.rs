@@ -20,7 +20,8 @@ pub mod source;
 pub use engine::{KClass, KNode, KRecalled, KnowledgeEngine};
 pub use plane::Visible;
 pub use shape::{
-    NeighborEdge, NeighborNode, Neighbors, NeighborsQuery, ShapeLinks, parse_shape_links,
+    ApplyJournal, NeighborEdge, NeighborNode, Neighbors, NeighborsQuery, ShapeLinks,
+    parse_shape_links,
 };
 pub use source::{
     CatalogError, CatalogPage, ReplaceReport, SourceDoc, SourceGeneration, SourceSection,
@@ -411,11 +412,12 @@ fn handle_call(
             if codes.is_empty() {
                 return err(id, -32602, "code_ids required (non-empty)");
             }
-            // The knowledge node must be live, else we'd write a dangling about-edge (R1: tool error).
-            match engine.node(&wicked_estate_core::SymbolId(kid.clone())) {
-                Ok(Some(_)) => {}
-                Ok(None) => return ok(id, tool_error(format!("no live knowledge node {kid}"))),
-                Err(e) => return err(id, -32603, &format!("node lookup failed: {e}")),
+            // The knowledge node must be live, complete and not a source's catalog structure, else we'd
+            // write a dangling (or epoch-less) about-edge (R1: tool error).
+            if let Err(e) =
+                engine.check_about_link_target(&wicked_estate_core::SymbolId(kid.clone()))
+            {
+                return ok(id, tool_error(e.to_string()));
             }
             for code in &codes {
                 if let Err(e) = xedge.put_edge(&XEdge::about(kid.clone(), code.clone(), 0)) {
@@ -447,10 +449,11 @@ fn handle_call(
                     }
                     match engine.node(&wicked_estate_core::SymbolId(kid)) {
                         Ok(Some(node)) => {
-                            // This standalone surface declares no visibility: dep-bearing
-                            // knowledge (source catalogs, shapes) is never returned here.
+                            // This standalone surface declares no visibility, so only dep-free
+                            // knowledge is returned, and never an approval still in flight.
                             if let Some(kn) = KNode::from_node(&node)
                                 .filter(|kn| Visible::none().allows(&plane::effective_deps(kn)))
+                                .filter(|_| !engine.applying(&node.symbol))
                             {
                                 if kn.source.is_empty() {
                                     lines.push(kn.content);
@@ -1026,15 +1029,20 @@ pub trait KnowledgeApi {
         Ok(())
     }
     /// Roll back a half-done approval (edges, node, journal); `false` when none was in flight.
-    fn rollback_proposal(&mut self, _proposal_id: &str) -> anyhow::Result<bool> {
+    /// Roll back exactly `attempt` of a half-done approval; `false` when it is not the journal's.
+    fn rollback_proposal(&mut self, _proposal_id: &str, _attempt: &str) -> anyhow::Result<bool> {
         Ok(false)
+    }
+    /// This engine's latest approval attempt for a proposal (what its own failure path undoes).
+    fn own_attempt(&self, _proposal_id: &str) -> Option<String> {
+        None
     }
     /// Complete an interrupted approval whose proposal is already approved.
     fn complete_proposal(&mut self, _proposal_id: &str) -> anyhow::Result<()> {
         Ok(())
     }
-    /// Approvals with a journal, `(proposal id, journal written at)` (the start-up sweep's input).
-    fn applying_proposals(&self) -> anyhow::Result<Vec<(String, i64)>> {
+    /// Approvals with a journal (the start-up sweep's input).
+    fn applying_proposals(&self) -> anyhow::Result<Vec<shape::ApplyJournal>> {
         Ok(Vec::new())
     }
     /// Replace a live source's structure with one complete generation (§4.1).
@@ -1154,15 +1162,19 @@ impl KnowledgeApi for KnowledgeEngine {
         KnowledgeEngine::finish_proposal(self, proposal_id)
     }
 
-    fn rollback_proposal(&mut self, proposal_id: &str) -> anyhow::Result<bool> {
-        KnowledgeEngine::rollback_proposal(self, proposal_id)
+    fn rollback_proposal(&mut self, proposal_id: &str, attempt: &str) -> anyhow::Result<bool> {
+        KnowledgeEngine::rollback_proposal(self, proposal_id, attempt)
+    }
+
+    fn own_attempt(&self, proposal_id: &str) -> Option<String> {
+        KnowledgeEngine::own_attempt(self, proposal_id)
     }
 
     fn complete_proposal(&mut self, proposal_id: &str) -> anyhow::Result<()> {
         KnowledgeEngine::complete_proposal(self, proposal_id)
     }
 
-    fn applying_proposals(&self) -> anyhow::Result<Vec<(String, i64)>> {
+    fn applying_proposals(&self) -> anyhow::Result<Vec<shape::ApplyJournal>> {
         KnowledgeEngine::applying_proposals(self)
     }
 
@@ -1270,9 +1282,7 @@ impl KnowledgeApi for KnowledgeEngine {
         symbol_epochs: &HashMap<String, u64>,
     ) -> anyhow::Result<u32> {
         let kid_sym = wicked_estate_core::SymbolId(knowledge_id.to_string());
-        if KnowledgeEngine::node(self, &kid_sym)?.is_none() {
-            anyhow::bail!("no live knowledge node {knowledge_id}");
-        }
+        self.check_about_link_target(&kid_sym)?;
         let xedge = self
             .xedge
             .as_ref()

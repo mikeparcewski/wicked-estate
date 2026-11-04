@@ -13,18 +13,19 @@
 //! **Invisible until complete.** An approve crosses three stores (knowledge, the xedge overlay,
 //! and memory's proposal queue), so it is ordered so that nothing is visible half-done:
 //!
-//! 1. a `kapply` journal records the full plan (the node and every edge row). No read path reads
-//!    that kind: it is the invisible record of the approval;
-//! 2. the typed edges are written, owned by the node's id. A reader keeps an edge only when its
-//!    owner is a live knowledge node, so these are hidden until step 3;
-//! 3. the knowledge node is written (node and vector in one transaction): the flip to visible;
+//! 1. a `kapply` journal records the full plan (the node and every edge row) and its attempt id;
+//! 2. the typed edges are written, owned by the node's id;
+//! 3. the knowledge node is written (node and vector in one transaction);
 //! 4. the caller marks the proposal approved;
-//! 5. the journal is deleted ([`KnowledgeEngine::finish_proposal`]).
+//! 5. the journal is deleted ([`KnowledgeEngine::finish_proposal`]): **the flip to visible**.
 //!
-//! Ids derive from the proposal id, so every step is an idempotent upsert. A start-up sweep reads
-//! every journal: an approved proposal is completed ([`KnowledgeEngine::complete_proposal`]),
-//! anything else is rolled back ([`KnowledgeEngine::rollback_proposal`]: its edges, its node, its
-//! journal).
+//! Every read path hides a proposal-derived node while its journal exists, and keeps an edge only
+//! when its owner is a live, complete node, so nothing of steps 1-4 is visible, even to a
+//! `--readonly` server that never sweeps. Ids derive from the proposal id, so every step is an
+//! idempotent upsert. A start-up sweep reads every journal: an approved proposal is completed
+//! ([`KnowledgeEngine::complete_proposal`]); anything else is rolled back once its journal is past
+//! the grace period ([`KnowledgeEngine::rollback_proposal`]: node, then edges, then the journal
+//! last), and only the attempt the sweep inspected.
 //!
 //! [`KnowledgeEngine::neighbors`] walks the typed edges, filtered by the reader's `visible` set.
 
@@ -61,7 +62,7 @@ const MAX_ID_BYTES: usize = 4096;
 pub const MAX_NEIGHBOR_DEPTH: usize = 3;
 pub const MAX_NEIGHBOR_NODES: usize = 100;
 pub const MAX_NEIGHBOR_EDGES: usize = 200;
-const ADJACENCY_LIMIT: usize = 400;
+const ADJACENCY_LIMIT: usize = 5_000;
 const NEIGHBOR_OUTPUT_BYTES: usize = 22_000;
 /// An approval journal younger than this is in flight in another process and is never rolled
 /// back by a sweep (an approve takes milliseconds; crew's estate call deadline is 30 s).
@@ -241,6 +242,14 @@ pub fn check_repo_facet(links: &ShapeLinks, repo_facet: Option<&str>) -> Result<
     }
 }
 
+/// One approval journal: the proposal, the attempt that wrote it, and when (unix seconds).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyJournal {
+    pub proposal_id: String,
+    pub attempt: String,
+    pub written_at: i64,
+}
+
 /// The full plan of one approval (what the journal holds).
 #[derive(Debug, Clone)]
 pub struct ApprovalPlan {
@@ -309,6 +318,25 @@ impl KnowledgeEngine {
             return false;
         };
         !matches!(self.store.get_node(&journal_symbol(pid)), Ok(None))
+    }
+
+    /// May `node` be the knowledge end of an `about` link (`knowledge.relate_code`)? It must be a
+    /// live, complete knowledge node, and not a source's catalog structure: those are tombstoned and
+    /// re-added by `replace_source` and link to code only through a data-shape proposal's typed,
+    /// epoch-stamped edges (an `about` row carries no knowledge epoch, so a re-added key would
+    /// inherit it).
+    pub fn check_about_link_target(&self, node: &SymbolId) -> anyhow::Result<()> {
+        let Some(kn) = self.live_knowledge(&node.0)? else {
+            anyhow::bail!("no live knowledge node {}", node.0);
+        };
+        if !scope_deps(&kn.scope).is_empty() {
+            anyhow::bail!(
+                "{} is a source's catalog structure: link it to code through a data-shape proposal \
+                 (relate_code[]), not knowledge.relate_code",
+                node.0
+            );
+        }
+        Ok(())
     }
 
     /// A live, complete knowledge node by its full id (`kchunk synthetic …:` as recall returns
@@ -395,6 +423,14 @@ impl KnowledgeEngine {
             resolved_code.push((l, from));
         }
         let deps: Vec<String> = derived.into_iter().collect();
+        if deps.len() > crate::plane::MAX_DEPS {
+            anyhow::bail!(
+                "knowledge proposal {}: it connects {} sources and repos; a shape may connect at most {}",
+                proposal.id,
+                deps.len(),
+                crate::plane::MAX_DEPS
+            );
+        }
         if let Some(declared) = &links.declared_deps {
             let declared = normalize_deps(declared.iter().cloned());
             if declared != deps {
@@ -601,7 +637,12 @@ impl KnowledgeEngine {
             Value::Array(plan.edges.iter().map(edge_to_json).collect()),
         );
         m.insert("created_at".into(), now.into());
+        // Each attempt is its own: a rollback names the attempt it inspected, so it can never undo
+        // a fresh retry that overwrote the journal in between.
+        let attempt = uuid::Uuid::now_v7().to_string();
+        m.insert("attempt".into(), attempt.clone().into());
         self.store.upsert_nodes(std::slice::from_ref(&journal))?;
+        self.attempts.insert(proposal.id.clone(), attempt);
         // 2-3. Edges (hidden: their owner is not live yet), then the node.
         self.put_plan(&plan)?;
         Ok((plan.node.symbol.0.clone(), plan))
@@ -613,14 +654,52 @@ impl KnowledgeEngine {
         Ok(())
     }
 
-    /// Roll back a half-done approval: its typed edges, its node, its journal. `false` when there
-    /// is no journal (nothing in flight, so nothing is touched — an approved node is never undone).
-    pub fn rollback_proposal(&mut self, proposal_id: &str) -> anyhow::Result<bool> {
+    /// This engine's latest approval attempt for `proposal_id` (what its own failure path rolls back).
+    pub fn own_attempt(&self, proposal_id: &str) -> Option<String> {
+        self.attempts.get(proposal_id).cloned()
+    }
+
+    /// Roll back a half-done approval — its node, its typed edges, then its journal — but only the
+    /// `attempt` the caller inspected: `false` when there is no journal or a newer attempt has
+    /// overwritten it (an approved node is never undone; a fresh retry is never undone).
+    ///
+    /// The check and the knowledge-store deletes run in one transaction: if another process commits
+    /// a new attempt after the check, this transaction's first write fails (a stale WAL snapshot)
+    /// and nothing is rolled back. The node goes first (hidden), the journal last, so a rollback
+    /// that fails part way leaves the journal and the next sweep finishes it.
+    pub fn rollback_proposal(&mut self, proposal_id: &str, attempt: &str) -> anyhow::Result<bool> {
+        self.store.begin_batch()?;
+        match self.rollback_in_batch(proposal_id, attempt) {
+            Ok(true) => match self.store.commit_batch() {
+                Ok(()) => {
+                    self.attempts.remove(proposal_id);
+                    Ok(true)
+                }
+                Err(e) => {
+                    self.store.rollback_batch()?;
+                    Err(e.into())
+                }
+            },
+            Ok(false) => {
+                self.store.rollback_batch()?;
+                Ok(false)
+            }
+            Err(e) => {
+                self.store.rollback_batch()?;
+                Err(e)
+            }
+        }
+    }
+
+    fn rollback_in_batch(&mut self, proposal_id: &str, attempt: &str) -> anyhow::Result<bool> {
         let Some(journal) = self.store.get_node(&journal_symbol(proposal_id))? else {
             return Ok(false);
         };
-        let owner = journal
-            .metadata
+        let m = &journal.metadata;
+        if m.get("attempt").and_then(Value::as_str) != Some(attempt) {
+            return Ok(false);
+        }
+        let owner = m
             .get("owner")
             .and_then(Value::as_str)
             .map(str::to_string)
@@ -629,8 +708,6 @@ impl KnowledgeEngine {
                     .id()
                     .0
             });
-        // Hide first (the node), then the edges, then the journal last: a rollback that fails part
-        // way leaves the journal, so the node stays hidden and the next sweep finishes the job.
         self.store.remove_nodes(&[SymbolId(owner.clone())])?;
         if let Some(xedge) = self.xedge.as_ref() {
             xedge.delete_typed_by_owner(&owner)?;
@@ -674,8 +751,8 @@ impl KnowledgeEngine {
         self.finish_proposal(proposal_id)
     }
 
-    /// The approvals with a journal (in flight, or interrupted): `(proposal id, journal written at)`.
-    pub fn applying_proposals(&self) -> anyhow::Result<Vec<(String, i64)>> {
+    /// The approvals with a journal (in flight, or interrupted).
+    pub fn applying_proposals(&self) -> anyhow::Result<Vec<ApplyJournal>> {
         Ok(self
             .store
             .find_symbols(&SymbolQuery {
@@ -688,13 +765,16 @@ impl KnowledgeEngine {
             })?
             .iter()
             .filter_map(|n| {
-                let pid = n.metadata.get("proposal_id").and_then(Value::as_str)?;
-                let at = n
-                    .metadata
-                    .get("created_at")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0);
-                Some((pid.to_string(), at))
+                let m = &n.metadata;
+                Some(ApplyJournal {
+                    proposal_id: m.get("proposal_id").and_then(Value::as_str)?.to_string(),
+                    attempt: m
+                        .get("attempt")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    written_at: m.get("created_at").and_then(Value::as_i64).unwrap_or(0),
+                })
             })
             .collect())
     }
@@ -714,7 +794,7 @@ pub struct NeighborsQuery {
     pub visible: Visible,
 }
 
-/// One node of a neighbourhood.
+/// One node of a neighbourhood (its wire form is [`NeighborNode::to_json`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NeighborNode {
     pub store: String,
@@ -730,7 +810,7 @@ pub struct NeighborNode {
     pub hydrated: bool,
 }
 
-/// One edge of a neighbourhood.
+/// One edge of a neighbourhood (its wire form is [`NeighborEdge::to_json`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NeighborEdge {
     pub rel: String,
@@ -739,6 +819,29 @@ pub struct NeighborEdge {
     pub owner: String,
     pub confidence: f32,
     pub meta: Value,
+}
+
+impl NeighborNode {
+    /// The wire record (what `knowledge.neighbors` returns, and what its output budget measures).
+    pub fn to_json(&self) -> Value {
+        json!({
+            "store": self.store, "id": self.id, "class": self.class, "label": self.label,
+            "scope": self.scope, "deps": self.deps, "untrusted": self.untrusted,
+            "source": self.source, "hydrated": self.hydrated,
+        })
+    }
+}
+
+impl NeighborEdge {
+    /// The wire record (what `knowledge.neighbors` returns, and what its output budget measures).
+    pub fn to_json(&self) -> Value {
+        json!({
+            "rel": self.rel,
+            "from": {"store": self.from.0, "id": self.from.1},
+            "to": {"store": self.to.0, "id": self.to.1},
+            "owner": self.owner, "confidence": self.confidence, "meta": self.meta,
+        })
+    }
 }
 
 /// A bounded, visibility-filtered neighbourhood.
@@ -751,6 +854,19 @@ pub struct Neighbors {
 }
 
 const LABEL_CHARS: usize = 120;
+/// A neighbourhood node's citation is cut to this many characters (an approved node's `source` is
+/// free text), so one node can never take the output budget.
+const SOURCE_CHARS: usize = 300;
+
+fn cut(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(n).collect();
+        out.push('…');
+        out
+    }
+}
 
 impl KnowledgeEngine {
     /// A visible knowledge node as a neighbourhood node, else `None`.
@@ -774,7 +890,7 @@ impl KnowledgeEngine {
             scope: kn.scope.clone(),
             untrusted: is_untrusted(&kn),
             deps,
-            source: kn.source,
+            source: cut(&kn.source, SOURCE_CHARS),
             hydrated: true,
         }))
     }
@@ -798,14 +914,14 @@ impl KnowledgeEngine {
                 scope: n.scope.as_path(),
                 deps,
                 untrusted: false,
-                source: n.location.file.clone(),
+                source: cut(&n.location.file, SOURCE_CHARS),
                 hydrated: true,
             },
             None => NeighborNode {
                 store: ESTATE_STORE.into(),
                 id: id.to_string(),
                 class: None,
-                label: id.chars().take(LABEL_CHARS).collect(),
+                label: cut(id, LABEL_CHARS),
                 scope: String::new(),
                 deps,
                 untrusted: false,
@@ -869,13 +985,8 @@ impl KnowledgeEngine {
         let rels: Vec<&str> = q.rels.iter().map(String::as_str).collect();
         let depth = q.depth.clamp(1, MAX_NEIGHBOR_DEPTH);
 
-        let node_bytes = |n: &NeighborNode| {
-            96 + n.id.len()
-                + n.label.len()
-                + n.scope.len()
-                + n.source.len()
-                + n.deps.iter().map(|d| d.len() + 3).sum::<usize>()
-        };
+        // The budget measures the exact wire records (escaping included), plus a separator each.
+        let node_bytes = |n: &NeighborNode| n.to_json().to_string().len() + 1;
         let mut used = node_bytes(&start);
         let mut nodes: Vec<NeighborNode> = vec![start];
         let mut index: BTreeSet<(String, String)> = BTreeSet::new();
@@ -963,26 +1074,22 @@ impl KnowledgeEngine {
                     if edge_keys.contains(&key) {
                         continue;
                     }
-                    let cost = 96
-                        + e.rel.len()
-                        + src.1.len()
-                        + tgt.1.len()
-                        + e.owner.len()
-                        + meta.to_string().len();
-                    if edges.len() >= MAX_NEIGHBOR_EDGES || used + cost > NEIGHBOR_OUTPUT_BYTES {
-                        truncated = true;
-                        break 'walk;
-                    }
-                    used += cost;
-                    edge_keys.insert(key);
-                    edges.push(NeighborEdge {
+                    let edge = NeighborEdge {
                         rel: e.rel,
                         from: src,
                         to: tgt,
                         owner: e.owner,
                         confidence: e.confidence,
                         meta,
-                    });
+                    };
+                    let cost = edge.to_json().to_string().len() + 1;
+                    if edges.len() >= MAX_NEIGHBOR_EDGES || used + cost > NEIGHBOR_OUTPUT_BYTES {
+                        truncated = true;
+                        break 'walk;
+                    }
+                    used += cost;
+                    edge_keys.insert(key);
+                    edges.push(edge);
                 }
             }
             if next.is_empty() {
@@ -1216,7 +1323,12 @@ mod tests {
         assert!(e.apply_proposal(&p, &HashMap::new(), 2).is_err());
         e.fail_apply_before_node = false;
         // Mid-flight state: the journal and the edges exist, the node does not.
-        assert_eq!(e.applying_proposals().unwrap(), vec![("p1".to_string(), 2)]);
+        let journals = e.applying_proposals().unwrap();
+        assert_eq!(journals.len(), 1);
+        assert_eq!(
+            (journals[0].proposal_id.as_str(), journals[0].written_at),
+            ("p1", 2)
+        );
         assert!(e.xedge.as_ref().unwrap().typed_len().unwrap() > 0);
         let graph = SqliteStore::in_memory().unwrap();
         let q = NeighborsQuery {
@@ -1239,11 +1351,14 @@ mod tests {
                 .all(|h| h.id.0 != shape_id())
         );
         // The sweep (proposal still pending) rolls it back.
-        assert!(e.rollback_proposal("p1").unwrap());
+        assert!(
+            e.rollback_proposal("p1", &e.own_attempt("p1").unwrap())
+                .unwrap()
+        );
         assert!(e.applying_proposals().unwrap().is_empty());
         assert_eq!(e.xedge.as_ref().unwrap().typed_len().unwrap(), 0);
         assert!(
-            !e.rollback_proposal("p1").unwrap(),
+            !e.rollback_proposal("p1", "any").unwrap(),
             "nothing left in flight"
         );
     }
@@ -1275,7 +1390,10 @@ mod tests {
         };
         assert_eq!(e.neighbors(&q, &graph).unwrap().unwrap().nodes.len(), 1);
         // Pending ⇒ the rollback removes the node, the edges and (last) the journal.
-        assert!(e.rollback_proposal("p1").unwrap());
+        assert!(
+            e.rollback_proposal("p1", &e.own_attempt("p1").unwrap())
+                .unwrap()
+        );
         assert!(e.store.get_node(&sym).unwrap().is_none());
         assert_eq!(e.xedge.as_ref().unwrap().typed_len().unwrap(), 0);
         assert!(e.applying_proposals().unwrap().is_empty());
@@ -1288,7 +1406,7 @@ mod tests {
         assert!(e.live_knowledge(&shape_id()).unwrap().is_some());
         assert!(e.applying_proposals().unwrap().is_empty());
         // A completed approval is never rolled back (no journal).
-        assert!(!e.rollback_proposal("p1").unwrap());
+        assert!(!e.rollback_proposal("p1", "any").unwrap());
         assert!(e.live_knowledge(&shape_id()).unwrap().is_some());
     }
 
@@ -1468,5 +1586,133 @@ mod r1_tests {
         assert_eq!(n.nodes.len(), 1);
         assert!(!n.nodes[0].hydrated);
         assert!(n.nodes[0].label.is_empty() && n.nodes[0].source.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod r2_tests {
+    use super::*;
+    use std::collections::BTreeMap as Map;
+    use std::sync::Arc;
+    use wicked_estate_memory_core::{Facets, ProposalState};
+    use wicked_estate_overlay::XedgeStore;
+
+    /// r2 C2: a rollback names the attempt it inspected; a retry that overwrote the journal in
+    /// between is never undone (the sweep-versus-retry interleaving, made deterministic).
+    #[test]
+    fn a_stale_attempt_never_rolls_back_a_fresh_retry() {
+        let mut e = KnowledgeEngine::in_memory()
+            .unwrap()
+            .with_xedge_store(Arc::new(XedgeStore::in_memory().unwrap()));
+        let target = e
+            .write(&KNode::new(
+                KClass::Concept,
+                "a target concept",
+                "",
+                "t.md",
+                1,
+            ))
+            .unwrap()
+            .0;
+        let p = Proposal {
+            id: "p7".into(),
+            kind_type: "knowledge".into(),
+            payload: json!({"content": "a shape", "source": "s", "class": "concept",
+                "relate": [{"rel": "derived_from", "to": target}]}),
+            facets: Facets::default(),
+            provenance: Map::new(),
+            state: ProposalState::Pending,
+            created_at: 1,
+        };
+        // Attempt A crashes between its edges and its node; a sweeper inspects it.
+        e.fail_apply_before_node = true;
+        assert!(e.apply_proposal(&p, &HashMap::new(), 1).is_err());
+        e.fail_apply_before_node = false;
+        let seen = e.applying_proposals().unwrap().remove(0);
+        // Attempt B (a retry) overwrites the journal and lands the node and edges.
+        e.apply_proposal(&p, &HashMap::new(), 500).unwrap();
+        // The sweeper now acts on what it saw: attempt A. Nothing of B is touched.
+        assert!(!e.rollback_proposal("p7", &seen.attempt).unwrap());
+        let node = Symbol::synthetic("kconcept", "proposal:p7").id();
+        assert!(e.store.get_node(&node).unwrap().is_some());
+        assert_eq!(e.xedge.as_ref().unwrap().typed_len().unwrap(), 1);
+        assert_eq!(
+            e.applying_proposals().unwrap().len(),
+            1,
+            "B's journal stays"
+        );
+    }
+
+    /// r2 C8: a shape connecting more sources and repos than an item can carry is refused.
+    #[test]
+    fn a_shape_with_too_many_deps_is_refused() {
+        let mut e = KnowledgeEngine::in_memory()
+            .unwrap()
+            .with_xedge_store(Arc::new(XedgeStore::in_memory().unwrap()));
+        let links: Vec<Value> = (0..40)
+            .map(|i| json!({"rel": "describes", "code_id": format!("c{i}"), "repo": format!("r{i}")}))
+            .collect();
+        let p = Proposal {
+            id: "p8".into(),
+            kind_type: "knowledge".into(),
+            payload: json!({"content": "wide", "source": "s", "relate_code": links}),
+            facets: Facets::default(),
+            provenance: Map::new(),
+            state: ProposalState::Pending,
+            created_at: 1,
+        };
+        let err = e
+            .apply_proposal(&p, &HashMap::new(), 1)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("at most 32"), "{err}");
+    }
+
+    /// r2 C1/C5: a source's catalog structure, and an approval in flight, cannot take an `about`
+    /// link (it would carry no knowledge epoch, or surface a half-done approval).
+    #[test]
+    fn about_links_refuse_catalog_structure_and_approvals_in_flight() {
+        use crate::source::{SourceDoc, SourceGeneration, SourceSection, doc_symbol};
+        let mut e = KnowledgeEngine::in_memory()
+            .unwrap()
+            .with_xedge_store(Arc::new(XedgeStore::in_memory().unwrap()));
+        e.replace_source(
+            &SourceGeneration {
+                source_id: "s1".into(),
+                generation: 1,
+                label: None,
+                catalog: None,
+                docs: vec![SourceDoc {
+                    key: "t".into(),
+                    title: None,
+                    entry: None,
+                    sections: vec![SourceSection {
+                        key: "c".into(),
+                        text: "id int8".into(),
+                    }],
+                }],
+            },
+            1,
+        )
+        .unwrap();
+        let err = e
+            .check_about_link_target(&doc_symbol("s1", "t"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("catalog structure"), "{err}");
+        let p = Proposal {
+            id: "p6".into(),
+            kind_type: "knowledge".into(),
+            payload: json!({"content": "x", "source": "s"}),
+            facets: Facets::default(),
+            provenance: Map::new(),
+            state: ProposalState::Pending,
+            created_at: 1,
+        };
+        e.apply_proposal(&p, &HashMap::new(), 1).unwrap(); // node written, journal kept
+        let sym = Symbol::synthetic("kchunk", "proposal:p6").id();
+        assert!(e.check_about_link_target(&sym).is_err(), "in flight");
+        e.finish_proposal("p6").unwrap();
+        e.check_about_link_target(&sym).unwrap();
     }
 }

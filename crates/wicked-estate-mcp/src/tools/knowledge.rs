@@ -435,7 +435,11 @@ fn dispatch_replace_source(
                 "generation": r.generation,
                 "docs": r.docs,
                 "sections": r.sections,
-                "tombstoned": {"nodes": r.tombstoned_nodes, "docs": r.tombstoned_docs},
+                "tombstoned": {
+                    "nodes": r.tombstoned_nodes,
+                    "doc_count": r.tombstoned_doc_count,
+                    "docs": r.tombstoned_docs,
+                },
                 "orphaned_edges": {
                     "count": r.orphaned_edge_count,
                     "edges": r.orphaned_edges.iter().map(|e| json!({
@@ -548,17 +552,8 @@ fn dispatch_neighbors(
         Ok(Some(n)) => mcp_result(
             id,
             json!({
-                "nodes": n.nodes.iter().map(|x| json!({
-                    "store": x.store, "id": x.id, "class": x.class, "label": x.label,
-                    "scope": x.scope, "deps": x.deps, "untrusted": x.untrusted,
-                    "source": x.source, "hydrated": x.hydrated,
-                })).collect::<Vec<_>>(),
-                "edges": n.edges.iter().map(|e| json!({
-                    "rel": e.rel,
-                    "from": {"store": e.from.0, "id": e.from.1},
-                    "to": {"store": e.to.0, "id": e.to.1},
-                    "owner": e.owner, "confidence": e.confidence, "meta": e.meta,
-                })).collect::<Vec<_>>(),
+                "nodes": n.nodes.iter().map(|x| x.to_json()).collect::<Vec<_>>(),
+                "edges": n.edges.iter().map(|e| e.to_json()).collect::<Vec<_>>(),
                 "truncated": n.truncated,
             }),
         ),
