@@ -308,6 +308,8 @@ test('the copy names only what estate ships and returns', async ({ page }) => {
   });
   expect(g).toEqual({ seg: true, starts: true, ends: true, dashed: true });
   await expect(page.locator('#provenance .pv-svg--h .q-node-t')).toContainText(['price.ts', 'checkout.ts', 'applyDiscount', 'order.paid', 'receipt.ts', 'ledger.ts']);
-  // What's new lists only the three released 0.30-0.31 items
+  // What's new lists the release's three items (0.32: the knowledge plane)
+  await expect(page.locator('#news-h')).toHaveText('What’s new in 0.32');
   await expect(page.locator('#stores .news li')).toHaveCount(3);
+  await expect(page.locator('#stores .news')).toContainText('never their rows');
 });

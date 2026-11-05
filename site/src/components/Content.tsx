@@ -12,10 +12,16 @@ import type { CSSProperties, ReactNode, KeyboardEvent as ReactKeyboardEvent } fr
      everything an agent can call → local by default → (SameGarden, index.astro)
      → get started.
 
-   ACCURACY (estate 0.31.0), each grounded in the repo:
+   ACCURACY (estate 0.32.0), each grounded in the repo:
    - MCP tools: 12 graph tools always listed + SemanticSearch when embeddings are
-     wired; 7 memory + 4 proposal tools; 7 knowledge tools = 30
-     (crates/wicked-estate-mcp/src/lib.rs, src/tools/*.rs).
+     wired; 7 memory + 4 proposal tools; 10 knowledge tools = 33
+     (crates/wicked-estate-mcp/src/lib.rs, src/tools/*.rs; README "MCP").
+   - Knowledge plane (CHANGELOG 0.32.0): knowledge.replace_source writes a live
+     source's structure, never its rows; recall and neighbors return only items
+     whose deps (source:/repo:/project:) are all in the caller's `visible`, checked
+     before ranking; typed edges incl. tracked_in/addresses/closes link tracker
+     docs to crew's projects, repos, PRs and runs (the `control` store); a data
+     shape joins the record only through proposal.approve.
    - Tier confidences: ResolutionTier::default_confidence,
      crates/wicked-estate-core/src/edge.rs; which tiers actually run on `index`:
      docs/ENGINE-CONTRACT.md §3.1 (Parsed 1.0 contains/defines; name, scoped and
@@ -492,7 +498,7 @@ function Hero(props: Parameters<typeof Playground>[0]) {
           <li className="facts-store"><i className="sw sw--memory" aria-hidden />Memory</li>
           <li className="facts-store"><i className="sw sw--knowledge" aria-hidden />Knowledge</li>
           <li className="facts-fact">Local CLI + MCP server</li>
-          <li className="facts-fact">30 standard MCP tools</li>
+          <li className="facts-fact">33 standard MCP tools</li>
           <li className="facts-fact">114 languages</li>
           <li className="facts-go"><a href="#get-started">Get started <span aria-hidden>↓</span></a></li>
         </ul>
@@ -506,16 +512,16 @@ function Hero(props: Parameters<typeof Playground>[0]) {
 const STORES: { id: Store; name: string; kind: string; holds: string; from: string; ask: string[] }[] = [
   { id: 'graph', name: 'Code graph', kind: 'structured', holds: 'Symbols, calls, imports, and the edges grep never sees.', from: 'Indexing your repos, in 114 languages.', ask: ['BlastRadius', 'Path', 'ContextBundle'] },
   { id: 'memory', name: 'Memory', kind: 'scoped', holds: 'What happened, and what you told it.', from: 'Agents and people capture it; reflection distills it.', ask: ['memory.recall', 'memory.capture'] },
-  { id: 'knowledge', name: 'Knowledge', kind: 'read, then cited', holds: 'What your docs and wiki say, linked to the code.', from: 'Ingesting documents; hybrid keyword + vector recall.', ask: ['knowledge.recall', 'knowledge.ingest'] },
+  { id: 'knowledge', name: 'Knowledge', kind: 'read, then cited', holds: 'What your docs and wiki say, linked to the code.', from: 'Your documents, and the structure of connected data sources (never rows); hybrid recall.', ask: ['knowledge.recall', 'knowledge.ingest'] },
 ]
 const BENEFITS: { h: string; p: string }[] = [
   { h: 'Know what breaks before you change it.', p: 'A code graph over 114 languages (depth varies by language), with the event and command links grep never sees.' },
   { h: 'Memory you can read, kept apart from knowledge.', p: 'What happened and what you told it, separate from what it learned from your code and docs. Memories about how you work can apply across projects; project memories stay with their project.' },
 ]
 const NEWS: { b: string; rest: string }[] = [
-  { b: 'Memories about how you work can apply across projects,', rest: ' using an explicit operator scope.' },
-  { b: 'Did you mean…?', rest: ' A missed symbol name gets suggestions.' },
-  { b: 'Prebuilt binaries for five platforms', rest: ' on every GitHub release.' },
+  { b: 'Connected data sources become knowledge:', rest: ' their tables, columns and keys, never their rows.' },
+  { b: 'Recall shows only what the caller may see:', rest: ' knowledge from a data source or repo is checked before ranking.' },
+  { b: 'Typed links across docs, data, code and issue trackers,', rest: ' walked with knowledge.neighbors.' },
 ]
 
 function StorePreview({ id }: { id: Store }) {
@@ -637,7 +643,7 @@ function Stores() {
             </div>
           </div>
           <div className="news">
-            <h3 id="news-h">What’s new in 0.30–0.31</h3>
+            <h3 id="news-h">What’s new in 0.32</h3>
             <ul aria-labelledby="news-h" data-news>
               {NEWS.map(n => <li key={n.b}><b>{n.b}</b>{n.rest}</li>)}
             </ul>
@@ -848,7 +854,7 @@ const TOOLSETS: ToolSet[] = [
       { name: 'proposal.reject', does: 'A person declines it' },
     ] },
   ] },
-  { id: 'knowledge', name: 'Knowledge', note: '7 tools', mcp: true, groups: [
+  { id: 'knowledge', name: 'Knowledge', note: '10 tools', mcp: true, groups: [
     { label: 'Add', rows: [
       { name: 'knowledge.ingest', does: 'A document, split into searchable chunks' },
       { name: 'knowledge.write', does: 'One doc, section, chunk or concept' },
@@ -859,6 +865,11 @@ const TOOLSETS: ToolSet[] = [
       { name: 'knowledge.recall', does: 'Keyword + vector search, fused' },
       { name: 'knowledge.recall_about_code', does: 'Docs linked to given code' },
       { name: 'knowledge.coverage', does: 'Counts by class' },
+    ] },
+    { label: 'Live sources', rows: [
+      { name: 'knowledge.replace_source', does: 'A data source’s structure, never its rows' },
+      { name: 'knowledge.source_catalog', does: 'One source’s whole catalog, paged' },
+      { name: 'knowledge.neighbors', does: 'The typed links around a node' },
     ] },
   ] },
   { id: 'cli', name: 'CLI', note: 'the same record, from your shell', mcp: false, groups: [
@@ -986,7 +997,7 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
   return (
     <Section id="toolface" solid>
       <Head n="03" label="What agents can call" follow title="Everything an agent can call."
-        sub="A catalog of 30 standard MCP tools in three groups, plus semantic search when enabled, and a CLI over the same record." />
+        sub="A catalog of 33 standard MCP tools in three groups, plus semantic search when enabled, and a CLI over the same record." />
       <div className="tools" data-set={f ? 'search' : set}>
         <div className="tools-bar">
           <div className="tools-tabs" role="tablist" aria-label="Tool groups" onKeyDown={e => arrowNav(e, '.tools-tab')}>
@@ -1006,7 +1017,7 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
         </div>
         <p className="tools-note" aria-live="polite">
           {f ? (hits.length ? `${hits.length} ${hits.length === 1 ? 'tool matches' : 'tools match'} “${filter.trim()}”` : `No tool matches “${filter.trim()}”.`) : current.note}
-          {!f && set === 'graph' && <span className="tools-note-x"> · SemanticSearch is the “+1”, not one of the 30</span>}
+          {!f && set === 'graph' && <span className="tools-note-x"> · SemanticSearch is the “+1”, not one of the 33</span>}
         </p>
         {/* a phone shows one group (or one page of matches) at a time, stepped here, so the box never grows */}
         <div className="tl-step" role="group" aria-label={f ? 'Pages of matches' : 'Tool groups in this set'} data-few={f && hits.length <= PAGE ? 'true' : undefined}>
@@ -1046,7 +1057,7 @@ function Toolface({ onSee }: { onSee: (q: string, tab?: Store) => void }) {
               <p className="td-path">{shown.t.mcp ? 'MCP tool' : 'CLI command'} · {shown.t.name} · {shown.g.label}</p>
               <p className="td-name"><code>{breakable(shown.r.name)}</code>{shown.r.optional && <span className="tl-opt">when enabled</span>}</p>
               <p className="td-does">{shown.r.does}.</p>
-              {shown.r.optional && <p className="td-x">Listed only when embeddings are wired, so it is the “+1” and not one of the 30.</p>}
+              {shown.r.optional && <p className="td-x">Listed only when embeddings are wired, so it is the “+1” and not one of the 33.</p>}
               {see ? (
                 <div className="td-see">
                   {/* the scripted answer's first lines, so the pane shows what "see it answer" plays */}

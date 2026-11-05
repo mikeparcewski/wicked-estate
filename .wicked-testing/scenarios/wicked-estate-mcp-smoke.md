@@ -1,9 +1,9 @@
 ---
 name: wicked-estate-mcp-smoke
 description: |
-  Smoke tests for the unified wicked-estate-mcp binary (v0.13.0).
+  Smoke tests for the unified wicked-estate-mcp binary.
   Verifies the MCP stdio server starts, responds to initialize, exposes
-  the expected 23 tools across estate/memory/knowledge domains, and
+  the expected 33 tools across estate/memory/knowledge domains, and
   handles unknown methods gracefully. Uses the fixture databases from
   the pre-build gate to exercise all three domains in a single invocation.
 version: "1.0"
@@ -16,7 +16,7 @@ assertions:
   - id: A1
     description: Binary starts and responds to MCP initialize with protocolVersion, capabilities (tools, resources, prompts), and serverInfo
   - id: A2
-    description: tools/list returns exactly 23 tools in the default build (10 estate + 6 memory + 7 knowledge)
+    description: tools/list returns exactly 33 tools with all stores open and no embeddings (12 estate + 7 memory + 4 proposal + 10 knowledge)
   - id: A3
     description: tools/list with domains active (all 4 fixture stores open) includes memory.capture and knowledge.ingest
   - id: A4
@@ -107,7 +107,7 @@ print("A1 PASS: initialize OK — protocolVersion, tools/resources/prompts capab
 PYEOF
 ```
 
-### Step 2 — tools/list: 23 tools in default build
+### Step 2 — tools/list: 33 tools with all stores open
 
 ```bash
 python3 - <<'PYEOF'
@@ -143,25 +143,28 @@ assert "error" not in tools_resp, f"tools/list error: {tools_resp}"
 tools = tools_resp["result"]["tools"]
 names = sorted(t["name"] for t in tools)
 
-EXPECTED_ESTATE = ["BlastRadius","Communities","ContextBundle","FetchContent","Lineage","RankHotspots","RetrieveEntity","RulesInventory","SearchEntity","TraverseGraph"]
-EXPECTED_MEMORY = ["memory.capture","memory.coverage","memory.erase","memory.learn","memory.recall","memory.reflect"]
-EXPECTED_KNOWLEDGE = ["knowledge.coverage","knowledge.ingest","knowledge.recall","knowledge.recall_about_code","knowledge.relate","knowledge.relate_code","knowledge.write"]
+EXPECTED_ESTATE = ["BlastRadius","Communities","ContextBundle","FetchContent","Lineage","Path","RankHotspots","RetrieveEntity","RulesInventory","SearchEntity","TraverseGraph","rules.recall"]
+EXPECTED_MEMORY = ["memory.capture","memory.coverage","memory.erase","memory.learn","memory.list","memory.recall","memory.reflect"]
+EXPECTED_PROPOSAL = ["proposal.approve","proposal.list","proposal.reject","proposal.submit"]
+EXPECTED_KNOWLEDGE = ["knowledge.coverage","knowledge.ingest","knowledge.neighbors","knowledge.recall","knowledge.recall_about_code","knowledge.relate","knowledge.relate_code","knowledge.replace_source","knowledge.source_catalog","knowledge.write"]
 
-assert len(tools) == 23, f"Expected 23 tools, got {len(tools)}: {names}"
+assert len(tools) == 33, f"Expected 33 tools, got {len(tools)}: {names}"
 
 present = set(names)
-for tool in EXPECTED_ESTATE + EXPECTED_MEMORY + EXPECTED_KNOWLEDGE:
+for tool in EXPECTED_ESTATE + EXPECTED_MEMORY + EXPECTED_PROPOSAL + EXPECTED_KNOWLEDGE:
     assert tool in present, f"Missing tool: {tool}"
 
-estate_count = sum(1 for n in names if n not in [t for t in EXPECTED_MEMORY+EXPECTED_KNOWLEDGE])
 memory_count = sum(1 for n in names if n.startswith("memory."))
+proposal_count = sum(1 for n in names if n.startswith("proposal."))
 knowledge_count = sum(1 for n in names if n.startswith("knowledge."))
+estate_count = len(names) - memory_count - proposal_count - knowledge_count
 
-assert estate_count == 10, f"Expected 10 estate tools, got {estate_count}"
-assert memory_count == 6, f"Expected 6 memory tools, got {memory_count}"
-assert knowledge_count == 7, f"Expected 7 knowledge tools, got {knowledge_count}"
+assert estate_count == 12, f"Expected 12 estate tools, got {estate_count}"
+assert memory_count == 7, f"Expected 7 memory tools, got {memory_count}"
+assert proposal_count == 4, f"Expected 4 proposal tools, got {proposal_count}"
+assert knowledge_count == 10, f"Expected 10 knowledge tools, got {knowledge_count}"
 
-print(f"A2 PASS: 23 tools (estate={estate_count}, memory={memory_count}, knowledge={knowledge_count})")
+print(f"A2 PASS: 33 tools (estate={estate_count}, memory={memory_count}, proposal={proposal_count}, knowledge={knowledge_count})")
 print(f"A3 PASS: memory.capture and knowledge.ingest present in tools list")
 PYEOF
 ```
@@ -334,7 +337,7 @@ tools_resp = rpc(proc, 3, "tools/list", {})
 proc.kill(); proc.wait()
 
 assert "error" not in tools_resp, f"Server stopped after unknown method: {tools_resp}"
-assert len(tools_resp["result"]["tools"]) == 23, f"tools/list broken after unknown method"
+assert len(tools_resp["result"]["tools"]) == 33, f"tools/list broken after unknown method"
 
 print("A7 PASS: Unknown method returned -32601, server continued serving")
 PYEOF

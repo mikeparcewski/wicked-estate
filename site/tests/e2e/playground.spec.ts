@@ -105,15 +105,15 @@ test.describe('query playground', () => {
 });
 
 test.describe('tool explorer', () => {
-  test('groups switch, counts add to 30 MCP tools, and search spans every group', async ({ page }) => {
+  test('groups switch, counts add to 33 MCP tools, and search spans every group', async ({ page }) => {
     await page.goto('/');
     const t = page.locator('#toolface');
     await t.scrollIntoViewIfNeeded();
     const count = (name: string) => t.locator('.tools-tab').filter({ hasText: name }).locator('.q-count');
-    // 12 graph tools + SemanticSearch (listed only with embeddings, badged "+1"); 11 memory; 7 knowledge: 30.
+    // 12 graph tools + SemanticSearch (listed only with embeddings, badged "+1"); 11 memory; 10 knowledge: 33.
     await expect(count('Graph')).toHaveText('12 +1');
     await expect(count('Memory')).toHaveText('11');
-    await expect(count('Knowledge')).toHaveText('7');
+    await expect(count('Knowledge')).toHaveText('10');
     await expect(t.locator('.tl-row')).toHaveCount(13);
     await expect(t.locator('.tl-row').filter({ hasText: 'SemanticSearch' })).toContainText('when enabled');
 
@@ -124,6 +124,12 @@ test.describe('tool explorer', () => {
     await t.getByLabel('Search tools').fill('erase');
     await expect(t.locator('.tl-row')).toHaveCount(1);
     await expect(t.locator('.tl-row')).toContainText('memory.erase');
+    // the knowledge plane's three tools are listed with the rest (DES-KNOWLEDGE-DATA-001)
+    for (const name of ['knowledge.replace_source', 'knowledge.source_catalog', 'knowledge.neighbors']) {
+      await t.getByLabel('Search tools').fill(name);
+      await expect(t.locator('.tl-row')).toHaveCount(1);
+      await expect(t.locator('.tl-row')).toContainText(name);
+    }
     await t.getByLabel('Search tools').fill('drift');
     await expect(t.locator('.tl-row')).toContainText('drift');
     await t.getByLabel('Search tools').fill('zzzz');

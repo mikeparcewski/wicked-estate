@@ -8,22 +8,36 @@
     {
       "name": "wicked-estate",
       "source": "./plugins/wicked-estate",
-      "description": "Unified code + memory + knowledge estate graph tools for LLM agents. Single binary (wicked-estate-mcp v0.13.0) serves 23 tools across three domains: estate (code graph), memory, and knowledge.",
+      "description": "Code graph, memory and knowledge for LLM agents. Registers the wicked-estate-mcp server, which lists 33 tools across three domains (estate code graph, memory with its proposal queue, and knowledge), plus SemanticSearch when the graph holds matching embeddings.",
       "tool_surface": {
-        "total": 23,
-        "default_build": 23,
-        "with_embedder": 24,
+        "total": 33,
+        "with_semantic_search": 34,
+        "readonly_omits": [
+          "memory.capture",
+          "memory.erase",
+          "memory.learn",
+          "memory.reflect",
+          "knowledge.ingest",
+          "knowledge.write",
+          "knowledge.relate",
+          "knowledge.relate_code",
+          "knowledge.replace_source",
+          "proposal.approve",
+          "proposal.reject"
+        ],
         "domains": {
           "estate": {
-            "count": 10,
+            "count": 12,
             "tools": [
               "SearchEntity",
               "RetrieveEntity",
               "TraverseGraph",
+              "Path",
               "BlastRadius",
               "FetchContent",
               "ContextBundle",
               "RulesInventory",
+              "rules.recall",
               "RankHotspots",
               "Communities",
               "Lineage"
@@ -31,22 +45,32 @@
           },
           "estate_optional": {
             "count": 1,
-            "condition": "fastembed or model2vec feature",
+            "condition": "listed when the graph's recorded embedder (index --embeddings) matches the server's embedder",
             "tools": ["SemanticSearch"]
           },
           "memory": {
-            "count": 6,
+            "count": 7,
             "tools": [
               "memory.capture",
               "memory.recall",
               "memory.reflect",
               "memory.erase",
               "memory.learn",
-              "memory.coverage"
+              "memory.coverage",
+              "memory.list"
+            ]
+          },
+          "proposal": {
+            "count": 4,
+            "tools": [
+              "proposal.submit",
+              "proposal.list",
+              "proposal.approve",
+              "proposal.reject"
             ]
           },
           "knowledge": {
-            "count": 7,
+            "count": 10,
             "tools": [
               "knowledge.ingest",
               "knowledge.write",
@@ -54,20 +78,14 @@
               "knowledge.recall",
               "knowledge.coverage",
               "knowledge.relate_code",
-              "knowledge.recall_about_code"
+              "knowledge.recall_about_code",
+              "knowledge.replace_source",
+              "knowledge.source_catalog",
+              "knowledge.neighbors"
             ]
           }
         }
       },
-      "skills": [
-        "codebase-expedition",
-        "knowledge-ingest",
-        "ontology-expedition",
-        "knowledge-curation",
-        "cited-answer",
-        "gap-hunting"
-      ],
-      "prompts": ["expedition"],
       "config": {
         "env_vars": {
           "WICKED_ESTATE_DB": "Path to estate graph SQLite database (default: $HOME/.wicked/estate.db)",
