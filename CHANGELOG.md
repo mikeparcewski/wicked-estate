@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.32.0] — 2026-11-04
+
+Minor: the knowledge plane (#389, DES-KNOWLEDGE-DATA-001 B3a): three new knowledge tools
+(`knowledge.replace_source`, `knowledge.source_catalog`, `knowledge.neighbors`; 33 MCP tools in
+all), `visible` on knowledge recall, typed edges, and data shapes through the proposal queue;
+and trackers with crew's control endpoints and generation-stamped links (#394, DES-PM-001 PM-1;
+no new tool). wicked-crew's knowledge package, Knowledge map and project trackers call them. The
+Rust API change is additive (cargo-semver-checks against 0.31.0 passes). Security: dependency
+fixes for the opt-in `excel-rules`, `cloud-aws` and `cloud-gcp` features (#391, #392); the
+release binaries enable none of them.
+
 ### Added
 - **Trackers, crew's control endpoints, and generation-stamped links (DES-PM-001 §3.4, PM-1).**
   No new tool (33 stays); every change is additive on the wire and in the Rust API.
@@ -86,6 +97,11 @@
   dep-free knowledge only (all knowledge written before this release).
 
 ### Security
+- **`aws-smithy-json` 0.61.7 -> 0.65.0 (GHSA-8ffr-xgwf-xj56, high) via the AWS SDK, and `serde_with`
+  3.17.0 -> 3.22.0 (GHSA-7gcf-g7xr-8hxj, medium) (#392).** Both reach estate only through the opt-in
+  cloud collectors (`cloud-aws`, `cloud-gcp`), which the release binaries do not enable. With
+  `cloud-aws` on, the toolchain floor rises (the AWS SDK releases declare Rust 1.94.1); default
+  builds keep 1.85.
 - **`zip` 1.1.4 -> 9.3.0 (GHSA-m665-v7pm-7grj, critical; GHSA-8hxf-qr8p-62x4, medium), via
   `calamine` 0.25 -> 0.38.** Both reach estate only through the opt-in `excel-rules` feature
   (the Excel/XLSX decision-table extractor), which the release binaries do not enable. calamine
