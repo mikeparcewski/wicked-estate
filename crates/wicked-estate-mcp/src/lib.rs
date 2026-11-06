@@ -988,12 +988,20 @@ pub fn handle_request_unified_status(
             // direct call cannot slip through and mutate the operator's memory/knowledge stores. We
             // return BEFORE the domain dispatch below, so the write is never executed.
             if read_only && is_write_tool(tool) {
+                // A store that failed to open is named here too: the refusal of a domain tool
+                // always carries the store failure when there is one.
+                let degraded = match (&status.domains_unavailable, domains.is_some()) {
+                    (Some(reason), false) => {
+                        format!("; its domain is also not available: {reason}")
+                    }
+                    _ => String::new(),
+                };
                 return err_response(
                     &id,
                     -32601,
                     &format!(
                         "tool '{tool}' is disabled: wicked-estate-mcp is running in --readonly \
-                         mode (write/destructive tools are not available)"
+                         mode (write/destructive tools are not available){degraded}"
                     ),
                 );
             }
@@ -3109,6 +3117,85 @@ mod tests {
         "proposal.submit",
         "proposal.list",
     ];
+
+    /// estate#375: a server whose domain stores failed to open names the cause on every surface
+    /// an agent reads, in write mode and in read-only mode alike — including the read-only
+    /// refusal of a write tool, which returns before the domain dispatch.
+    #[test]
+    fn degraded_status_is_reported_on_every_surface() {
+        let store = fixture();
+        let reason = "memory store unavailable (/h/.wicked/memory.db): unable to open";
+        let status = ServerStatus::domains_unavailable(reason);
+        let call = |tool: &str, read_only: bool| {
+            let req = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                             "params": {"name": tool, "arguments": {"query": "x"}}});
+            handle_request_unified_status(
+                &store,
+                &req,
+                &McpContext::default(),
+                None,
+                None,
+                read_only,
+                &status,
+            )
+        };
+        for read_only in [false, true] {
+            for tool in [
+                "memory.capture",
+                "memory.recall",
+                "knowledge.write",
+                "knowledge.recall",
+                "proposal.approve",
+                "proposal.list",
+            ] {
+                let resp = call(tool, read_only);
+                let msg = resp["error"]["message"].as_str().unwrap_or_default();
+                assert!(
+                    msg.contains(reason),
+                    "{tool} (read_only={read_only}) must carry the store failure: {resp}"
+                );
+            }
+            let init = handle_request_unified_status(
+                &store,
+                &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+                &McpContext::default(),
+                None,
+                None,
+                read_only,
+                &status,
+            );
+            assert!(
+                init["result"]["instructions"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("DISABLED") && t.contains(reason)),
+                "{init}"
+            );
+            let list = handle_request_unified_status(
+                &store,
+                &tools_list_req(),
+                &McpContext::default(),
+                None,
+                None,
+                read_only,
+                &status,
+            );
+            assert_eq!(
+                list["result"]["_meta"]["wicked-estate/domains"]["reason"],
+                json!(reason),
+                "{list}"
+            );
+        }
+        // A healthy server says nothing extra, and the read-only refusal is unchanged.
+        let healthy = handle_request_unified_ro(
+            &store,
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+            &McpContext::default(),
+            None,
+            None,
+            true,
+        );
+        assert!(healthy["result"].get("instructions").is_none(), "{healthy}");
+    }
 
     /// DES-GROUNDING-001 §3.0 safety keystone: in `--readonly` mode `tools/list` OMITS every
     /// write/destructive tool while keeping all read/query tools, and a write tool called anyway is

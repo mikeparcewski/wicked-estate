@@ -720,3 +720,54 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_store_dir_creates_only_a_real_missing_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A nested missing parent is created, private on unix.
+        let nested = tmp.path().join("a/b/memory.db");
+        ensure_store_dir(nested.to_str().unwrap()).unwrap();
+        assert!(tmp.path().join("a/b").is_dir());
+        assert!(
+            !nested.exists(),
+            "the store file itself is the opener's job"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for d in ["a", "a/b"] {
+                let mode = std::fs::metadata(tmp.path().join(d))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777;
+                assert_eq!(mode, 0o700, "{d}");
+            }
+        }
+        // `:memory:`, a `scheme:` spec and a bare file name name no directory to create.
+        for spec in [
+            ":memory:",
+            "sqlite:nope-dir/x.db",
+            "postgres://h/db",
+            "memory.db",
+        ] {
+            ensure_store_dir(spec).unwrap();
+        }
+        assert!(!std::path::Path::new("sqlite:nope-dir").exists());
+        // A parent that is a regular file is an error the caller reports, never a panic.
+        let file = tmp.path().join("f");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(ensure_store_dir(file.join("memory.db").to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn a_windows_drive_letter_is_a_path_not_a_scheme() {
+        assert!(!is_scheme_spec("C:\\Users\\x\\memory.db"));
+        assert!(is_scheme_spec("sqlite:x.db"));
+        assert!(is_scheme_spec("postgres://h/db"));
+    }
+}

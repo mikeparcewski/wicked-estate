@@ -37,6 +37,10 @@ impl McpChild {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         for (k, v) in env {
+            if *k == "--readonly" {
+                cmd.arg("--readonly");
+                continue;
+            }
             cmd.env(k, v);
         }
         let mut child = cmd.spawn().expect("spawn wicked-estate-mcp");
@@ -263,4 +267,25 @@ fn unopenable_store_is_reported_loudly() {
             "{tool} refusal must carry the cause: {reply}"
         );
     }
+}
+
+/// crew#931 still holds on a fresh home: a `--readonly` server creates no store directory (its
+/// missing stores are served empty in memory), while its read tools still answer.
+#[test]
+fn fresh_home_readonly_creates_no_store_dir() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let mut mcp = McpChild::spawn(home.path(), cwd.path(), &[("--readonly", String::new())]);
+    let init = mcp.request(1, "initialize", json!({"protocolVersion": "2024-11-05"}));
+    assert!(init["result"].get("instructions").is_none(), "{init}");
+    let recall = mcp.call(2, "memory.recall", json!({"query": "x"}));
+    assert!(
+        recall.get("error").is_none() && recall["result"]["isError"] != json!(true),
+        "read-only memory.recall must answer (empty): {recall}"
+    );
+    drop(mcp);
+    assert!(
+        !home.path().join(".wicked").exists(),
+        "a read-only server created ~/.wicked"
+    );
 }

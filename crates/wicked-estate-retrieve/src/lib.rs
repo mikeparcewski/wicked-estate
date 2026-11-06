@@ -1305,15 +1305,18 @@ impl RetrievalTool for BlastRadius {
             ));
         }
 
-        // One walk per start, folded into one union subgraph: nodes and edges deduped, every
-        // cut ORed (a cut on any walk makes the union a floor), and each dependent's depth the
-        // smallest across walks.
+        // One walk per start, folded into one union: reached nodes deduped, every cut ORed (a
+        // cut on any walk makes the union a floor), and each dependent's depth the smallest
+        // across walks.
         let mut subgraph = wicked_estate_core::Subgraph::default();
         let mut start_nodes: Vec<Node> = Vec::new();
         let mut dependent_nodes: Vec<Node> = Vec::new();
         let mut dependent_depths: HashMap<String, u32> = HashMap::new();
         let mut seen_nodes: HashSet<SymbolId> = HashSet::new();
-        let mut seen_edges: HashSet<(SymbolId, SymbolId, EdgeKind)> = HashSet::new();
+        // The dependency evidence behind the answer, deduped across walks (two same-named
+        // starts can share a caller) — the CLI's `blast_radius_by_name` rule, so both surfaces
+        // state one confidence for one answer.
+        let mut evidence: HashMap<(SymbolId, SymbolId, EdgeKind), f32> = HashMap::new();
         for start in &starts {
             let mut sub = store.traverse(start, &spec)?;
             let start_node = store.get_node(start)?;
@@ -1326,7 +1329,31 @@ impl RetrievalTool for BlastRadius {
             // rule (Subgraph::code_dependents): a symbol start keeps only Files that Contain a
             // reached non-File node (exact pre-File→File-edge parity); a File start keeps every
             // importer.
-            for n in sub.code_dependents(start, start_node.as_ref().map(|n| &n.kind)) {
+            let answer = sub.code_dependents(start, start_node.as_ref().map(|n| &n.kind));
+            // Admission evidence: an edge `row → x` is WHY `row` is in the answer, so count
+            // dependency edges whose source is a returned row and whose target is the start or
+            // any node this walk reached (an import-transit File dropped as a row included).
+            // Structural `Contains` / `Defines` say where a symbol lives, not that it depends
+            // on the target: counted, a file's 1.0 containment edges made a name-guess impact
+            // set look compiler-verified.
+            let rows: HashSet<&SymbolId> = answer.iter().map(|n| &n.symbol).collect();
+            let reached: HashSet<&SymbolId> = sub
+                .nodes
+                .iter()
+                .map(|n| &n.symbol)
+                .chain(std::iter::once(start))
+                .collect();
+            for e in &sub.edges {
+                if !matches!(e.kind, EdgeKind::Contains | EdgeKind::Defines)
+                    && rows.contains(&e.source)
+                    && reached.contains(&e.target)
+                {
+                    evidence
+                        .entry((e.source.clone(), e.target.clone(), e.kind.clone()))
+                        .or_insert(e.confidence.get());
+                }
+            }
+            for n in answer {
                 let depth = sub.depths.get(n.symbol.as_str()).copied().unwrap_or(0);
                 match dependent_depths.get_mut(n.symbol.as_str()) {
                     Some(d) => *d = (*d).min(depth),
@@ -1340,11 +1367,6 @@ impl RetrievalTool for BlastRadius {
             for n in sub.nodes {
                 if seen_nodes.insert(n.symbol.clone()) {
                     subgraph.nodes.push(n);
-                }
-            }
-            for e in sub.edges {
-                if seen_edges.insert((e.source.clone(), e.target.clone(), e.kind.clone())) {
-                    subgraph.edges.push(e);
                 }
             }
             if let Some(n) = start_node {
@@ -1415,14 +1437,16 @@ impl RetrievalTool for BlastRadius {
         let dependent_refs: Vec<&Node> = dependent_nodes.iter().collect();
         let summary = blast_summary(store, &starts, &dependent_refs)?;
 
-        // Confidence stats over the traversal's edges (edges entering the blast-radius set).
+        // Confidence stats over the dependency evidence (above): min, and an average summed in
+        // f64, exactly as the CLI's `EdgeConfidence` states it.
         let (conf_min, conf_avg, edge_count) = {
-            let confs: Vec<f32> = subgraph.edges.iter().map(|e| e.confidence.get()).collect();
+            let confs: Vec<f32> = evidence.into_values().collect();
             if confs.is_empty() {
                 (None, None, 0usize)
             } else {
                 let min = confs.iter().cloned().fold(f32::INFINITY, f32::min);
-                let avg = confs.iter().sum::<f32>() / confs.len() as f32;
+                let sum: f64 = confs.iter().map(|c| f64::from(*c)).sum();
+                let avg = (sum / confs.len() as f64) as f32;
                 (Some(min), Some(avg), confs.len())
             }
         };

@@ -26,6 +26,11 @@
   reaches nothing answers `resolved: false` with ranked `suggestions` on all three (`Lineage`
   and `TraverseGraph` gain the `resolved` key; additive). The tool and input-schema descriptions
   say so.
+- **MCP `BlastRadius` states the CLI's confidence.** Its `confidence` envelope summarized every
+  edge the walk touched, structural `Contains` / `Defines` included, so a file's 1.0 containment
+  edges raised the average of a name-guess impact set. It now counts only the dependency
+  evidence that admitted each dependent, deduped across same-named starts, exactly as the CLI's
+  `blast-radius` does.
 
 ## [0.32.0] — 2026-11-04
 

@@ -140,15 +140,22 @@ fn blast_radius_by_name_path_and_id_matches_cli() {
     let dir = indexed("blast", false);
     let store = open(&dir.0);
     let tax_id = id_of(&store, "tax", "src/pricing.py");
-    let by_name = ids(
-        &cli(&dir.0, &["blast-radius", "tax", "--depth", "8"])["dependents"],
-        "id",
+    // (dependent ids, confidence envelope) as the CLI states them.
+    let cli_answer = |target: &str| {
+        let doc = cli(&dir.0, &["blast-radius", target, "--depth", "8"]);
+        (ids(&doc["dependents"], "id"), doc["confidence"].clone())
+    };
+    let by_name = cli_answer("tax");
+    assert!(
+        !by_name.0.is_empty(),
+        "the fixture must give tax dependents"
     );
-    assert!(!by_name.is_empty(), "the fixture must give tax dependents");
-    let by_path = ids(
-        &cli(&dir.0, &["blast-radius", "src/pricing.py", "--depth", "8"])["dependents"],
-        "id",
+    assert!(
+        by_name.1["edge_count"].as_u64().unwrap_or(0) > 0,
+        "the fixture must give tax dependency evidence: {}",
+        by_name.1
     );
+    let by_path = cli_answer("src/pricing.py");
     for (target, want) in [
         ("tax", &by_name),
         ("src/pricing.py", &by_path),
@@ -157,11 +164,17 @@ fn blast_radius_by_name_path_and_id_matches_cli() {
         let got = mcp(&store, "BlastRadius", json!({"symbol": target, "depth": 8})).unwrap();
         assert_eq!(got["resolved"], json!(true), "{target}: {got}");
         assert_eq!(
-            &ids(&got["dependents"], "symbol"),
-            want,
+            ids(&got["dependents"], "symbol"),
+            want.0,
             "MCP vs CLI BlastRadius for {target}"
         );
-        assert_eq!(got["total"].as_u64(), Some(want.len() as u64), "{got}");
+        assert_eq!(got["total"].as_u64(), Some(want.0.len() as u64), "{got}");
+        // One answer, one confidence: dependency evidence only (no Contains/Defines), as the
+        // CLI counts it.
+        assert_eq!(
+            got["confidence"], want.1,
+            "MCP vs CLI BlastRadius confidence for {target}"
+        );
     }
 }
 
@@ -174,6 +187,7 @@ fn blast_radius_shared_name_is_the_cli_union() {
     let want = ids(&cli_doc["dependents"], "id");
     let got = mcp(&store, "BlastRadius", json!({"symbol": "tax", "depth": 8})).unwrap();
     assert_eq!(got["resolved"], json!(true), "{got}");
+    assert_eq!(got["confidence"], cli_doc["confidence"], "{got}");
     assert_eq!(ids(&got["dependents"], "symbol"), want);
     let legacy_caller = id_of(&store, "old_total", "src/legacy.py");
     assert!(
