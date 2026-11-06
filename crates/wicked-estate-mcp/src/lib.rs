@@ -187,7 +187,7 @@ fn traverse_graph_schema() -> Value {
         "properties": {
             "symbol": {
                 "type": "string",
-                "description": "Start symbol ID for the traversal."
+                "description": "The start: a SymbolId, an exact symbol name, or a file path. A name several symbols share is an error listing their ids. `resolved: false` in the reply means the start is not in the graph."
             },
             "depth": {
                 "type": "integer",
@@ -234,7 +234,7 @@ fn blast_radius_schema() -> Value {
         "properties": {
             "symbol": {
                 "type": "string",
-                "description": "Symbol ID whose transitive dependents to enumerate."
+                "description": "The target: a SymbolId, an exact symbol name, or a file path (a file returns its importers). A name several symbols share is the union of their dependents. `resolved: false` in the reply means the target is not in the graph."
             },
             "depth": {
                 "type": "integer",
@@ -373,7 +373,7 @@ fn lineage_schema() -> Value {
         "properties": {
             "symbol": {
                 "type": "string",
-                "description": "Symbol ID whose transitive dependencies to enumerate."
+                "description": "The start: a SymbolId, an exact symbol name, or a file path. A name several symbols share is an error listing their ids. `resolved: false` in the reply means the start is not in the graph."
             },
             "depth": {
                 "type": "integer",
@@ -755,6 +755,50 @@ pub struct McpContext {
     pub embedder_meta_dim: Option<usize>,
 }
 
+/// What the server knows about its own health, reported by the dispatch
+/// ([`handle_request_unified_status`]). Separate from [`McpContext`], whose fields are all public
+/// (a struct literal outside this crate would break on a new field). Build it with
+/// [`ServerStatus::default`] (healthy) or [`ServerStatus::domains_unavailable`].
+#[derive(Debug, Default, Clone)]
+#[non_exhaustive]
+pub struct ServerStatus {
+    /// Why the memory / knowledge / proposal domains are not served, when a store failed to
+    /// open: the store, its path and the error. `None` = no failure to report. A dead store is
+    /// never a silent gap in `tools/list`: this reason rides the `initialize` `instructions`,
+    /// the `tools/list` `_meta`, and every refused domain call.
+    pub domains_unavailable: Option<String>,
+}
+
+impl ServerStatus {
+    /// A server whose memory / knowledge / proposal domains are down, for `reason`.
+    pub fn domains_unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            domains_unavailable: Some(reason.into()),
+        }
+    }
+}
+
+/// The refusal a domain tool answers when its domain is not served: the reason the store did not
+/// open, when the server knows it.
+fn domain_unavailable(id: &Value, domain: &str, status: &ServerStatus) -> Value {
+    let msg = match &status.domains_unavailable {
+        Some(reason) => format!("{domain} domain not available: {reason}"),
+        None => format!("{domain} domain not available"),
+    };
+    err_response(id, -32601, &msg)
+}
+
+/// The degraded-domains notice an agent reads: the `initialize` `instructions` and the
+/// `tools/list` `_meta` carry it, so a missing memory or knowledge tool is explained, not silent.
+fn domains_unavailable_notice(reason: &str) -> String {
+    format!(
+        "wicked-estate: the memory, knowledge and proposal tools are DISABLED on this server \
+         because a store failed to open ({reason}). Only the code-graph tools are served. \
+         memory.* / knowledge.* / proposal.* calls are refused with this reason; fix the store \
+         path or its permissions and restart the server."
+    )
+}
+
 /// Decide whether SemanticSearch may be advertised / dispatched for this store + runtime.
 ///
 /// Returns `Ok(())` when the store's recorded embedder identity **and** dimension match the
@@ -891,16 +935,40 @@ pub fn handle_request_unified_ro(
     semantic: Option<&dyn RetrievalTool>,
     read_only: bool,
 ) -> Value {
+    handle_request_unified_status(
+        store,
+        req,
+        ctx,
+        domains,
+        semantic,
+        read_only,
+        &ServerStatus::default(),
+    )
+}
+
+/// [`handle_request_unified_ro`] that also reports the server's [`ServerStatus`]: a domain store
+/// that failed to open is named in `initialize` `instructions`, in `tools/list`
+/// `_meta["wicked-estate/domains"]`, and in every refused `memory.*` / `knowledge.*` /
+/// `proposal.*` call (estate#375). The `wicked-estate-mcp` binary dispatches through this.
+pub fn handle_request_unified_status(
+    store: &dyn GraphRead,
+    req: &Value,
+    ctx: &McpContext,
+    domains: Option<&mut DomainHandles<'_>>,
+    semantic: Option<&dyn RetrievalTool>,
+    read_only: bool,
+    status: &ServerStatus,
+) -> Value {
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = req.get("params").cloned().unwrap_or(json!({}));
 
     match method {
-        "initialize" => handle_initialize_unified(&id),
+        "initialize" => handle_initialize_unified(&id, status),
 
         "notifications/initialized" => Value::Null,
 
-        "tools/list" => tools_list_unified(&id, ctx, domains.is_some(), read_only),
+        "tools/list" => tools_list_unified(&id, ctx, domains.is_some(), read_only, status),
 
         "resources/list" => resources::resources_list(&id),
         "resources/read" => {
@@ -941,7 +1009,7 @@ pub fn handle_request_unified_ro(
                 "memory.capture" | "memory.recall" | "memory.reflect" | "memory.erase"
                 | "memory.learn" | "memory.coverage" | "memory.list" => match domains {
                     Some(d) => tools::memory::dispatch(tool, &id, &params, store, d.memory),
-                    None => err_response(&id, -32601, "memory domain not available"),
+                    None => domain_unavailable(&id, "memory", status),
                 },
 
                 // Proposal queue (DES-MEM-FACETED-001 §5.0). The memory engine owns the queue;
@@ -958,7 +1026,7 @@ pub fn handle_request_unified_ro(
                             d.knowledge,
                             store,
                         ),
-                        None => err_response(&id, -32601, "proposal domain not available"),
+                        None => domain_unavailable(&id, "proposal", status),
                     }
                 }
 
@@ -973,7 +1041,7 @@ pub fn handle_request_unified_ro(
                 | "knowledge.source_catalog"
                 | "knowledge.neighbors" => match domains {
                     Some(d) => tools::knowledge::dispatch(tool, &id, &params, store, d.knowledge),
-                    None => err_response(&id, -32601, "knowledge domain not available"),
+                    None => domain_unavailable(&id, "knowledge", status),
                 },
 
                 _ => err_response(&id, -32602, &format!("unknown tool: {tool}")),
@@ -1137,15 +1205,19 @@ pub fn is_write_tool(tool: &str) -> bool {
     )
 }
 
-fn handle_initialize_unified(id: &Value) -> Value {
-    json!({
+fn handle_initialize_unified(id: &Value, status: &ServerStatus) -> Value {
+    let mut resp = json!({
         "jsonrpc": "2.0", "id": id,
         "result": {
             "protocolVersion": "2024-11-05",
             "capabilities": { "tools": {}, "resources": {}, "prompts": {} },
             "serverInfo": { "name": "wicked-estate", "version": SERVER_VERSION }
         }
-    })
+    });
+    if let Some(reason) = &status.domains_unavailable {
+        resp["result"]["instructions"] = json!(domains_unavailable_notice(reason));
+    }
+    resp
 }
 
 fn tools_list_unified(
@@ -1153,6 +1225,7 @@ fn tools_list_unified(
     ctx: &McpContext,
     domains_available: bool,
     read_only: bool,
+    status: &ServerStatus,
 ) -> Value {
     let base_tools = all_tools();
     let mut tools: Vec<Value> = base_tools
@@ -1192,7 +1265,20 @@ fn tools_list_unified(
         tools.extend(prop);
     }
 
-    ok_response(id, json!({"tools": tools}))
+    let mut result = json!({"tools": tools});
+    if !domains_available {
+        if let Some(reason) = &status.domains_unavailable {
+            result["_meta"] = json!({
+                "wicked-estate/domains": {
+                    "available": false,
+                    "disabled": ["memory", "knowledge", "proposal"],
+                    "reason": reason,
+                    "notice": domains_unavailable_notice(reason),
+                }
+            });
+        }
+    }
+    ok_response(id, result)
 }
 
 fn memory_tool_schemas() -> Vec<Value> {
