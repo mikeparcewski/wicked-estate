@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.32.1] — 2026-11-06
+
+Patch: two defects the e2e pass found on the released 0.32.0 (#399). On a fresh home the MCP
+server served 12 tools instead of 33, and MCP `BlastRadius`, `Lineage` and `TraverseGraph`
+answered a symbol name or a file path with a confident empty result. The Rust API change is
+additive (`ServerStatus`, `handle_request_unified_status`).
+
 ### Fixed
 - **A fresh home serves all 33 MCP tools (estate#375).** `wicked-estate-mcp` opened its memory,
   knowledge and xedge stores under `~/.wicked` (or the `WICKED_*_DB` paths) without creating the
