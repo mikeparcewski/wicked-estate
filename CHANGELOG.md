@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### Fixed
+- **A fresh home serves all 33 MCP tools (estate#375).** `wicked-estate-mcp` opened its memory,
+  knowledge and xedge stores under `~/.wicked` (or the `WICKED_*_DB` paths) without creating the
+  directory, so on a machine where `~/.wicked` did not exist yet every domain store failed with
+  "unable to open database file" and the server came up with only the 12 graph tools. A
+  write-mode server now creates a missing store directory first (0700 on unix; an existing
+  directory keeps its mode). `--readonly` still creates nothing (crew#931).
+- **A store that fails to open is reported on the wire, not only on stderr.** The memory,
+  knowledge and proposal tools stay disabled, and the cause (store, path, error) is in the
+  `initialize` result's `instructions`, in `tools/list` `_meta["wicked-estate/domains"]`, and in
+  the refusal text of every `memory.*` / `knowledge.*` / `proposal.*` call. Rust API, additive:
+  `wicked_estate_mcp::ServerStatus` and `handle_request_unified_status` (the binary's dispatch;
+  `handle_request_unified_ro` is unchanged and reports a healthy server).
+- **`BlastRadius`, `Lineage` and `TraverseGraph` resolve a name or a file path, as the CLI does.**
+  The MCP tools walked `symbol` as a raw `SymbolId`, so `BlastRadius {"symbol": "tax"}` or
+  `{"symbol": "src/pricing.py"}` answered `resolved: false` with zero dependents while
+  `wicked-estate blast-radius tax` found them. `symbol` now resolves through the same rule as
+  `Path` and the CLI (`resolve_operand`: an exact `SymbolId` first, else the exact name; a file
+  is named by its path). `BlastRadius` answers the union of every symbol with that name (the
+  CLI's `blast-radius`); `Lineage` and `TraverseGraph` refuse a name several symbols share,
+  listing their ids (the CLI's `lineage` / `traverse`). A target that resolves to nothing and
+  reaches nothing answers `resolved: false` with ranked `suggestions` on all three (`Lineage`
+  and `TraverseGraph` gain the `resolved` key; additive). The tool and input-schema descriptions
+  say so.
+- **MCP `BlastRadius` states the CLI's confidence.** Its `confidence` envelope summarized every
+  edge the walk touched, structural `Contains` / `Defines` included, so a file's 1.0 containment
+  edges raised the average of a name-guess impact set. It now counts only the dependency
+  evidence that admitted each dependent, deduped across same-named starts, exactly as the CLI's
+  `blast-radius` does.
+
 ## [0.32.0] — 2026-11-04
 
 Minor: the knowledge plane (#389, DES-KNOWLEDGE-DATA-001 B3a): three new knowledge tools

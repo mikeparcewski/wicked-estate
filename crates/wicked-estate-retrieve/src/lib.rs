@@ -702,9 +702,13 @@ impl RetrievalTool for RetrieveEntity {
 ///
 /// **Request shape**
 /// ```json
-/// { "symbol": "<id>", "depth": 4, "direction": "dependencies",
+/// { "symbol": "<id-name-or-path>", "depth": 4, "direction": "dependencies",
 ///   "edge_kinds": ["calls", "imports"], "max_nodes": 200 }
 /// ```
+/// * `symbol`     — required; a `SymbolId`, an exact symbol name, or a file path (resolved like
+///   the CLI's `traverse` operand). A name several symbols share is refused with the candidate
+///   ids; a start that resolves to nothing and reaches nothing answers `resolved: false` with
+///   ranked `suggestions` (#358), never a bare empty subgraph.
 /// * `depth`      — optional, default 4, max 16.
 /// * `direction`  — `"dependencies"` (default) | `"dependents"` | `"both"`.
 /// * `edge_kinds` — optional array of edge kinds; absent or empty = all kinds. A built-in by its
@@ -836,7 +840,10 @@ impl RetrievalTool for TraverseGraph {
          reachable within the given depth and node caps. Supports forward (dependencies), \
          reverse (dependents), and bidirectional traversal. \
          For rules engine connections: use edge_kinds=[\"invoked_by\"] to trace code→rules, \
-         [\"governs\"] for ruleset→rule structure, [\"evaluates\"] for rule→condition."
+         [\"governs\"] for ruleset→rule structure, [\"evaluates\"] for rule→condition. \
+         `symbol` takes a SymbolId, an exact symbol name, or a file path; a name several \
+         symbols share is an error listing their ids. `resolved: false` means the start is not \
+         in the graph: the empty subgraph is a miss, not an answer (read `suggestions`)."
     }
 
     fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
@@ -878,7 +885,7 @@ impl RetrievalTool for TraverseGraph {
             min_confidence: 0.0,
         };
 
-        let start = SymbolId(id_str.clone());
+        let (start, start_resolved) = resolve_single_start(store, self.name(), &id_str)?;
         let mut diag = vec![staleness_note()];
         // A clamp the caller cannot see is worse than the clamp (the #190 lesson): asking for
         // depth 99 and silently getting 16 reads as "searched everything". `searched_depth` in
@@ -892,11 +899,24 @@ impl RetrievalTool for TraverseGraph {
 
         let subgraph = store.traverse(&start, &spec)?;
 
-        if subgraph.nodes.is_empty() {
-            diag.push(format!(
-                "TraverseGraph: no nodes reachable from '{id_str}' under given spec"
-            ));
-        }
+        // A start that is no symbol and reaches nothing is a NAME MISS, not an isolated node
+        // (#358): an empty subgraph for a name the graph does not hold reads as "nothing
+        // connects to it". The reply says `resolved: false` with ranked suggestions.
+        let miss = !start_resolved && subgraph.nodes.is_empty() && subgraph.edges.is_empty();
+        let miss_suggestions = if miss {
+            let found =
+                suggest::suggest(store, &id_str, suggest::SUGGEST_K_DEFAULT).unwrap_or_default();
+            diag.push(suggest::name_miss_diagnostic(&id_str, &found.0));
+            Some(found)
+        } else {
+            if subgraph.nodes.is_empty() {
+                diag.push(format!(
+                    "TraverseGraph: no nodes reachable from '{}' under given spec",
+                    echo_name(&id_str)
+                ));
+            }
+            None
+        };
         if let Some(cause) =
             truncation_cause(&subgraph, max_depth, TRAVERSE_DEPTH_CEILING, max_nodes)
         {
@@ -944,19 +964,24 @@ impl RetrievalTool for TraverseGraph {
             edges_json.push(edge_json(store, e, &mut node_cache)?);
         }
 
+        let mut content = json!({
+            "resolved": !miss,
+            "nodes": nodes_json,
+            "edges": edges_json,
+            "depths": subgraph.depths,
+            "truncated": subgraph.truncated,
+            // WHICH cap bit, in the payload and not only the diagnostic — an agent that
+            // branches on completeness reads `content`, not prose (wicked-estate#190).
+            "depth_horizon_reached": subgraph.depth_horizon_reached,
+            "node_cap_reached": subgraph.node_cap_reached,
+            "searched_depth": max_depth,
+            "edge_kinds": edge_kinds_echo,
+        });
+        if let Some((found, truncated)) = &miss_suggestions {
+            suggest::mark_miss(&mut content, &id_str, found, *truncated);
+        }
         Ok(RetrievalResult {
-            content: json!({
-                "nodes": nodes_json,
-                "edges": edges_json,
-                "depths": subgraph.depths,
-                "truncated": subgraph.truncated,
-                // WHICH cap bit, in the payload and not only the diagnostic — an agent that
-                // branches on completeness reads `content`, not prose (wicked-estate#190).
-                "depth_horizon_reached": subgraph.depth_horizon_reached,
-                "node_cap_reached": subgraph.node_cap_reached,
-                "searched_depth": max_depth,
-                "edge_kinds": edge_kinds_echo,
-            }),
+            content,
             diagnostics: diag,
         })
     }
@@ -1178,8 +1203,12 @@ impl RetrievalTool for Path {
 ///
 /// **Request shape**
 /// ```json
-/// { "symbol": "<id>", "depth": 8, "cursor": "<next_cursor>" }
+/// { "symbol": "<id-name-or-path>", "depth": 8, "cursor": "<next_cursor>" }
 /// ```
+/// * `symbol` — required; a `SymbolId`, an exact symbol name, or a file path, resolved like the
+///   CLI's `blast-radius`: every symbol with that name is a start, and the answer is the union
+///   of their dependents. A start that resolves to nothing and reaches nothing answers
+///   `resolved: false` with ranked `suggestions` (#358).
 /// * `depth` — optional, default 8, max 24.
 /// * `cursor` — optional, a previous page's `next_cursor`, for the next dependents (#279).
 ///
@@ -1217,7 +1246,11 @@ impl RetrievalTool for BlastRadius {
          Answers 'what breaks if I change this symbol?' \
          Reports coverage: resolved dependents plus the count of unresolved call-site \
          references that could not be bound (potential missing dependents). The answer is \
-         paged: while `next_cursor` is non-null, call again with `cursor` set to it."
+         paged: while `next_cursor` is non-null, call again with `cursor` set to it. \
+         `symbol` takes a SymbolId, an exact symbol name, or a file path (a file returns its \
+         importers); a name several symbols share answers the union of their dependents. \
+         `resolved: false` means the target is not in the graph: zero dependents is then a \
+         miss, not a leaf (read `suggestions`)."
     }
 
     fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
@@ -1247,26 +1280,105 @@ impl RetrievalTool for BlastRadius {
             .min(BLAST_DEPTH_CEILING as u64) as u32;
 
         let spec = TraversalSpec::blast_radius(max_depth);
-        let start = SymbolId(id_str.clone());
         let mut diag = vec![staleness_note()];
         diag.extend(clamp_note(request, "depth", BLAST_DEPTH_CEILING as u64));
 
-        let mut subgraph = store.traverse(&start, &spec)?;
+        // `symbol` is a SymbolId, a symbol name, or a file path (a File node is named by its
+        // path), resolved the way the CLI's `blast-radius` resolves it: an exact id first, else
+        // every symbol with that exact name, and the answer is the union of their dependents
+        // (`wicked_estate::blast_radius_by_name`). Walking the raw string as an id answered a
+        // name or a path with `resolved: false` and zero dependents while the CLI found them.
+        // Nothing resolved: the raw string is walked as an id exactly as before, so an id that
+        // only edges name still reports what reaches it.
+        let resolved_ids = wicked_estate_core::resolve_operand(store, &id_str)?;
+        let starts: Vec<SymbolId> = if resolved_ids.is_empty() {
+            vec![SymbolId(id_str.clone())]
+        } else {
+            resolved_ids
+        };
+        if starts.len() > 1 {
+            diag.push(format!(
+                "BlastRadius: '{}' names {} symbols; dependents are the union of all of them \
+                 (pass one SymbolId to scope the answer to one)",
+                echo_name(&id_str),
+                starts.len()
+            ));
+        }
+
+        // One walk per start, folded into one union: reached nodes deduped, every cut ORed (a
+        // cut on any walk makes the union a floor), and each dependent's depth the smallest
+        // across walks.
+        let mut subgraph = wicked_estate_core::Subgraph::default();
+        let mut start_nodes: Vec<Node> = Vec::new();
+        let mut dependent_nodes: Vec<Node> = Vec::new();
+        let mut dependent_depths: HashMap<String, u32> = HashMap::new();
+        let mut seen_nodes: HashSet<SymbolId> = HashSet::new();
+        // The dependency evidence behind the answer, deduped across walks (two same-named
+        // starts can share a caller) — the CLI's `blast_radius_by_name` rule, so both surfaces
+        // state one confidence for one answer.
+        let mut evidence: HashMap<(SymbolId, SymbolId, EdgeKind), f32> = HashMap::new();
+        for start in &starts {
+            let mut sub = store.traverse(start, &spec)?;
+            let start_node = store.get_node(start)?;
+            // The store probed the horizon on the raw walk; re-derive it for the
+            // code_dependents projection returned below, so import-transit Files past the
+            // horizon (which that projection drops) do not raise a false "more dependents
+            // exist" flag.
+            sub.refine_code_dependents_horizon(store, start_node.as_ref().map(|n| &n.kind), &spec)?;
+            // Dependent nodes (start excluded), classified through the contains-aware transit
+            // rule (Subgraph::code_dependents): a symbol start keeps only Files that Contain a
+            // reached non-File node (exact pre-File→File-edge parity); a File start keeps every
+            // importer.
+            let answer = sub.code_dependents(start, start_node.as_ref().map(|n| &n.kind));
+            // Admission evidence: an edge `row → x` is WHY `row` is in the answer, so count
+            // dependency edges whose source is a returned row and whose target is the start or
+            // any node this walk reached (an import-transit File dropped as a row included).
+            // Structural `Contains` / `Defines` say where a symbol lives, not that it depends
+            // on the target: counted, a file's 1.0 containment edges made a name-guess impact
+            // set look compiler-verified.
+            let rows: HashSet<&SymbolId> = answer.iter().map(|n| &n.symbol).collect();
+            let reached: HashSet<&SymbolId> = sub
+                .nodes
+                .iter()
+                .map(|n| &n.symbol)
+                .chain(std::iter::once(start))
+                .collect();
+            for e in &sub.edges {
+                if !matches!(e.kind, EdgeKind::Contains | EdgeKind::Defines)
+                    && rows.contains(&e.source)
+                    && reached.contains(&e.target)
+                {
+                    evidence
+                        .entry((e.source.clone(), e.target.clone(), e.kind.clone()))
+                        .or_insert(e.confidence.get());
+                }
+            }
+            for n in answer {
+                let depth = sub.depths.get(n.symbol.as_str()).copied().unwrap_or(0);
+                match dependent_depths.get_mut(n.symbol.as_str()) {
+                    Some(d) => *d = (*d).min(depth),
+                    None => {
+                        dependent_depths.insert(n.symbol.as_str().to_string(), depth);
+                        dependent_nodes.push(n.clone());
+                    }
+                }
+            }
+            subgraph.absorb_truncation(&sub);
+            for n in sub.nodes {
+                if seen_nodes.insert(n.symbol.clone()) {
+                    subgraph.nodes.push(n);
+                }
+            }
+            if let Some(n) = start_node {
+                start_nodes.push(n);
+            }
+        }
 
         // Resolve the symbol's simple name (for unresolved-ref lookup).  If the symbol is in
         // the graph, use its recorded name; otherwise fall back to the last segment of the id.
-        let start_node = store.get_node(&start)?;
-        // The store probed the horizon on the raw walk; re-derive it for the code_dependents
-        // projection returned below, so import-transit Files past the horizon (which that
-        // projection drops) do not raise a false "more dependents exist" flag.
-        subgraph.refine_code_dependents_horizon(
-            store,
-            start_node.as_ref().map(|n| &n.kind),
-            &spec,
-        )?;
         let symbol_name: String =
-            start_node
-                .as_ref()
+            start_nodes
+                .first()
                 .map(|n| n.name.clone())
                 .unwrap_or_else(|| {
                     // Best-effort: strip package prefix and use the last "."-delimited segment.
@@ -1280,18 +1392,15 @@ impl RetrievalTool for BlastRadius {
         // Unresolved-ref coverage: calls/imports to `symbol_name` the resolver could not bind.
         let unresolved_callers = store.unresolved_refs_for_name(&symbol_name)?.len();
 
-        // Dependent nodes (start excluded), classified through the contains-aware transit rule
-        // (Subgraph::code_dependents): a symbol start keeps only Files that Contain a reached
-        // non-File node (exact pre-File→File-edge parity); a File start keeps every importer.
-        let dependent_nodes: Vec<&wicked_estate_core::Node> =
-            subgraph.code_dependents(&start, start_node.as_ref().map(|n| &n.kind));
-        // Files cut by the rule (import transit) — surfaced loudly, never silently (R7/R3).
-        let reached_minus_start = subgraph
+        // Files cut by the rule (import transit) — surfaced loudly, never silently (R7/R3):
+        // every reached node that is neither a start nor a dependent row.
+        let transit_files_cut = subgraph
             .nodes
             .iter()
-            .filter(|n| n.symbol.as_str() != id_str)
+            .filter(|n| {
+                !starts.contains(&n.symbol) && !dependent_depths.contains_key(n.symbol.as_str())
+            })
             .count();
-        let transit_files_cut = reached_minus_start.saturating_sub(dependent_nodes.len());
         if transit_files_cut > 0 {
             diag.push(format!(
                 "blast-radius: {transit_files_cut} importing file(s) excluded from dependents \
@@ -1302,7 +1411,10 @@ impl RetrievalTool for BlastRadius {
         let mut dependents: Vec<Value> = dependent_nodes
             .iter()
             .map(|n| {
-                let depth = subgraph.depths.get(n.symbol.as_str()).copied().unwrap_or(0);
+                let depth = dependent_depths
+                    .get(n.symbol.as_str())
+                    .copied()
+                    .unwrap_or(0);
                 json!({
                     "symbol": n.symbol.as_str(),
                     "name": n.name,
@@ -1322,16 +1434,19 @@ impl RetrievalTool for BlastRadius {
 
         // Compact summary (Deliverable 4): counts by kind, top files by member count, and
         // (best-effort) top members by personalized PageRank seeded on the start symbol.
-        let summary = blast_summary(store, &start, &dependent_nodes)?;
+        let dependent_refs: Vec<&Node> = dependent_nodes.iter().collect();
+        let summary = blast_summary(store, &starts, &dependent_refs)?;
 
-        // Confidence stats over the traversal's edges (edges entering the blast-radius set).
+        // Confidence stats over the dependency evidence (above): min, and an average summed in
+        // f64, exactly as the CLI's `EdgeConfidence` states it.
         let (conf_min, conf_avg, edge_count) = {
-            let confs: Vec<f32> = subgraph.edges.iter().map(|e| e.confidence.get()).collect();
+            let confs: Vec<f32> = evidence.into_values().collect();
             if confs.is_empty() {
                 (None, None, 0usize)
             } else {
                 let min = confs.iter().cloned().fold(f32::INFINITY, f32::min);
-                let avg = confs.iter().sum::<f32>() / confs.len() as f32;
+                let sum: f64 = confs.iter().map(|c| f64::from(*c)).sum();
+                let avg = (sum / confs.len() as f64) as f32;
                 (Some(min), Some(avg), confs.len())
             }
         };
@@ -1411,7 +1526,7 @@ impl RetrievalTool for BlastRadius {
         // "no dependents" for a symbol the graph does not hold reads as "safe to change". The
         // reply says `resolved: false` with ranked suggestions, and the coverage note — a
         // statement about a resolved symbol — is replaced by the `NAME-MISS:` line.
-        let miss = start_node.is_none() && total_dependents == 0;
+        let miss = start_nodes.is_empty() && total_dependents == 0;
         let miss_suggestions = if miss {
             let found =
                 suggest::suggest(store, &id_str, suggest::SUGGEST_K_DEFAULT).unwrap_or_default();
@@ -1473,7 +1588,7 @@ const BLAST_SUMMARY_TOP_N: usize = 10;
 /// yields an empty array. Counts are exact over the resolved dependents.
 fn blast_summary(
     store: &dyn GraphRead,
-    start: &SymbolId,
+    starts: &[SymbolId],
     dependents: &[&wicked_estate_core::Node],
 ) -> Result<Value> {
     use std::collections::BTreeMap;
@@ -1506,27 +1621,27 @@ fn blast_summary(
         .iter()
         .map(|n| (n.symbol.as_str(), n.name.as_str()))
         .collect();
-    let top_by_pagerank: Value =
-        match wicked_estate_rank::ranked_symbols(store, std::slice::from_ref(start), usize::MAX) {
-            Ok(ranked) => {
-                let list: Vec<Value> = ranked
-                    .into_iter()
-                    .filter(|(id, _)| dependent_ids.contains(id.as_str()))
-                    .take(BLAST_SUMMARY_TOP_N)
-                    .map(|(id, score)| {
-                        json!({
-                            "symbol": id.as_str(),
-                            "name": name_by_id.get(id.as_str()).copied().unwrap_or(""),
-                            "score": score,
-                        })
+    let top_by_pagerank: Value = match wicked_estate_rank::ranked_symbols(store, starts, usize::MAX)
+    {
+        Ok(ranked) => {
+            let list: Vec<Value> = ranked
+                .into_iter()
+                .filter(|(id, _)| dependent_ids.contains(id.as_str()))
+                .take(BLAST_SUMMARY_TOP_N)
+                .map(|(id, score)| {
+                    json!({
+                        "symbol": id.as_str(),
+                        "name": name_by_id.get(id.as_str()).copied().unwrap_or(""),
+                        "score": score,
                     })
-                    .collect();
-                Value::Array(list)
-            }
-            // Ranking is an enrichment, not load-bearing: degrade to absent rather than failing the
-            // whole tool (R1) if PageRank errors.
-            Err(_) => Value::Null,
-        };
+                })
+                .collect();
+            Value::Array(list)
+        }
+        // Ranking is an enrichment, not load-bearing: degrade to absent rather than failing the
+        // whole tool (R1) if PageRank errors.
+        Err(_) => Value::Null,
+    };
 
     let mut summary = serde_json::Map::new();
     summary.insert("total".to_string(), json!(dependents.len()));
@@ -1556,7 +1671,10 @@ fn blast_summary(
 /// ```json
 /// { "symbol": "<id>", "depth": <n>, "relation": "flows_to", "cursor": "<next_cursor>" }
 /// ```
-/// * `symbol` (required) — stable [`SymbolId`] of the start symbol.
+/// * `symbol` (required) — a [`SymbolId`], an exact symbol name, or a file path, resolved like
+///   the CLI's `lineage` operand. A name several symbols share is refused with the candidate ids;
+///   a start that resolves to nothing and reaches nothing answers `resolved: false` with ranked
+///   `suggestions` (#358).
 /// * `depth`  (optional, default 24 = max) — maximum traversal hops (#279: the default answer is
 ///   the deepest walk the tool accepts).
 /// * `cursor` (optional) — a previous page's `next_cursor`, for the next rows of the same answer.
@@ -1594,7 +1712,10 @@ impl RetrievalTool for Lineage {
          Use to understand the full dependency chain before a refactor or to build a \
          change-impact picture from the dependency side. The answer is paged: while \
          `next_cursor` is non-null, call again with `cursor` set to it to get the rest; \
-         the answer is complete only when `next_cursor` is null."
+         the answer is complete only when `next_cursor` is null. `symbol` takes a SymbolId, \
+         an exact symbol name, or a file path; a name several symbols share is an error \
+         listing their ids. `resolved: false` means the start is not in the graph: zero \
+         dependencies is then a miss, not a leaf (read `suggestions`)."
     }
 
     fn invoke(&self, store: &dyn GraphRead, request: &Value) -> Result<RetrievalResult> {
@@ -1679,7 +1800,7 @@ impl RetrievalTool for Lineage {
             min_confidence: 0.0,
         };
 
-        let start = SymbolId(id_str.clone());
+        let (start, start_resolved) = resolve_single_start(store, self.name(), &id_str)?;
         let mut diag = vec![staleness_note()];
 
         let subgraph = store.traverse(&start, &spec)?;
@@ -1689,7 +1810,7 @@ impl RetrievalTool for Lineage {
         let mut dependencies: Vec<Value> = subgraph
             .nodes
             .iter()
-            .filter(|n| n.symbol.as_str() != id_str)
+            .filter(|n| n.symbol != start)
             .map(|n| {
                 let depth = subgraph.depths.get(n.symbol.as_str()).copied().unwrap_or(0);
                 json!({
@@ -1747,13 +1868,24 @@ impl RetrievalTool for Lineage {
             "edge_count": edge_count,
         });
 
-        if dependencies.is_empty() {
-            diag.push(format!(
-                "Lineage: no {empty_label} found for '{}' \
-                 (it may be a leaf or not yet indexed)",
-                echo_name(&id_str)
-            ));
-        }
+        // A start that is no symbol and reaches nothing is a NAME MISS, not a leaf (#358): "no
+        // dependencies" for a name the graph does not hold reads as "depends on nothing".
+        let miss = !start_resolved && dependencies.is_empty();
+        let miss_suggestions = if miss {
+            let found =
+                suggest::suggest(store, &id_str, suggest::SUGGEST_K_DEFAULT).unwrap_or_default();
+            diag.push(suggest::name_miss_diagnostic(&id_str, &found.0));
+            Some(found)
+        } else {
+            if dependencies.is_empty() {
+                diag.push(format!(
+                    "Lineage: no {empty_label} found for '{}' \
+                     (it may be a leaf or not yet indexed)",
+                    echo_name(&id_str)
+                ));
+            }
+            None
+        };
         let node_truncated = subgraph.truncated;
         if let Some(cause) =
             truncation_cause(&subgraph, max_depth, BLAST_DEPTH_CEILING, spec.max_nodes)
@@ -1856,6 +1988,7 @@ impl RetrievalTool for Lineage {
         let total = total_deps;
 
         let mut content = json!({
+            "resolved": !miss,
             "relation": relation_echo,
             "dependencies": dependencies,
             "total": total,
@@ -1872,6 +2005,9 @@ impl RetrievalTool for Lineage {
         });
         if let Some(rows) = flow_rows {
             content["flows"] = Value::Array(rows);
+        }
+        if let Some((found, truncated)) = &miss_suggestions {
+            suggest::mark_miss(&mut content, &id_str, found, *truncated);
         }
 
         // W8.5: the tool owns its depth ceiling and says when it applied it, like every other
@@ -1892,6 +2028,46 @@ fn echo_name(name: &str) -> String {
         format!("{}…", name.chars().take(200).collect::<String>())
     } else {
         name.to_string()
+    }
+}
+
+/// The start a single-root graph tool (`TraverseGraph`, `Lineage`) walks, resolved the way the
+/// CLI's bridged `traverse` / `lineage` resolve their operand: an exact `SymbolId` first, else
+/// the one symbol with that exact name (a File node is named by its path), by
+/// [`wicked_estate_core::resolve_operand`]. A name several symbols share is refused naming the
+/// candidates, as the CLI refuses it, rather than walked from one of them silently.
+///
+/// Returns the start and whether it resolved. Nothing resolved: the raw string is walked as an
+/// id exactly as before (an id only edges name still reports what it reaches), and the caller
+/// reports a NAME MISS when that walk reaches nothing.
+fn resolve_single_start(
+    store: &dyn GraphRead,
+    tool: &str,
+    given: &str,
+) -> Result<(SymbolId, bool)> {
+    let mut ids = wicked_estate_core::resolve_operand(store, given)?;
+    match ids.len() {
+        0 => Ok((SymbolId(given.to_string()), false)),
+        1 => Ok((ids.remove(0), true)),
+        n => {
+            const SHOWN: usize = 20;
+            let joined = ids
+                .iter()
+                .take(SHOWN)
+                .map(|id| id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let more = n.saturating_sub(SHOWN);
+            let tail = if more > 0 {
+                format!(" (+{more} more)")
+            } else {
+                String::new()
+            };
+            Err(wicked_estate_core::Error::Invalid(format!(
+                "{tool}: '{}' names {n} symbols — pass one SymbolId: {joined}{tail}",
+                echo_name(given)
+            )))
+        }
     }
 }
 
@@ -5364,13 +5540,22 @@ mod tests {
             .invoke(&store, &json!({"symbol": "ghost_xyz"}))
             .unwrap();
 
-        // R1: must be Ok, never Err.
+        // R1: must be Ok, never Err. A symbol the graph does not hold is a labelled NAME MISS
+        // (#358), not a leaf with "no dependencies".
         assert_eq!(res.content["total"].as_u64().unwrap(), 0);
+        assert_eq!(res.content["resolved"], json!(false), "{}", res.content);
+        assert_eq!(res.content["query"], json!("ghost_xyz"), "{}", res.content);
         assert!(
+            res.diagnostics.iter().any(|d| d.starts_with("NAME-MISS:")),
+            "a NAME-MISS diagnostic must be present for a missing symbol: {:?}",
             res.diagnostics
+        );
+        assert!(
+            !res.diagnostics
                 .iter()
                 .any(|d| d.contains("no dependencies")),
-            "diagnostic must be present for missing symbol"
+            "a miss must not read as a leaf: {:?}",
+            res.diagnostics
         );
     }
 

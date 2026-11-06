@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use tokio::io::AsyncBufReadExt;
 use wicked_estate_knowledge::{KnowledgeApi, KnowledgeEngine};
-use wicked_estate_mcp::{DomainHandles, McpContext, handle_request_unified_ro};
+use wicked_estate_mcp::{DomainHandles, McpContext, ServerStatus, handle_request_unified_status};
 use wicked_estate_memory::MemoryEngine;
 use wicked_estate_memory_core::MemoryApi;
 use wicked_estate_overlay::XedgeStore;
@@ -86,15 +86,11 @@ fn resolve_read_only() -> bool {
 /// Write mode is unchanged (it still creates its stores), and only a plain filesystem path is
 /// judged: a `scheme:` spec is left to the opener exactly as before.
 fn read_only_store(spec: String, read_only: bool, store: &str) -> String {
-    // `scheme:` = two or more scheme chars before the colon (`sqlite:`, `postgres://`), so a
-    // Windows drive letter (`C:\…`) is still a path.
-    let scheme = spec.split_once(':').is_some_and(|(head, _)| {
-        head.len() > 1
-            && head
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
-    });
-    if !read_only || spec == ":memory:" || scheme || std::path::Path::new(&spec).exists() {
+    if !read_only
+        || spec == ":memory:"
+        || is_scheme_spec(&spec)
+        || std::path::Path::new(&spec).exists()
+    {
         return spec;
     }
     eprintln!(
@@ -102,6 +98,47 @@ fn read_only_store(spec: String, read_only: bool, store: &str) -> String {
          (a read-only server creates no file)"
     );
     ":memory:".to_string()
+}
+
+/// A write-mode server creates the directory a store lives in before it opens the store.
+///
+/// SQLite creates a missing database FILE but not its directory, so on a fresh home (no
+/// `~/.wicked` yet) every domain store failed with "unable to open database file", and the
+/// server came up serving the 12 graph tools with no memory or knowledge tools at all (e2e
+/// MAJOR-1, estate#375). A directory this creates is private to the user (0700 on unix): it holds
+/// the user's memories. An existing directory is left exactly as it is. Read-only mode never
+/// reaches here (crew#931: it creates nothing), and `:memory:` or a `scheme:` spec names no
+/// directory. An error is returned for the caller to report; the open that follows then fails
+/// with the real cause.
+fn ensure_store_dir(spec: &str) -> std::io::Result<()> {
+    if spec == ":memory:" || is_scheme_spec(spec) {
+        return Ok(());
+    }
+    let Some(parent) = std::path::Path::new(spec).parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() || parent.is_dir() {
+        return Ok(());
+    }
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(parent)
+}
+
+/// `scheme:` = two or more scheme chars before the colon (`sqlite:`, `postgres://`), so a
+/// Windows drive letter (`C:\…`) is still a path.
+fn is_scheme_spec(spec: &str) -> bool {
+    spec.split_once(':').is_some_and(|(head, _)| {
+        head.len() > 1
+            && head
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+    })
 }
 
 fn wicked_home() -> String {
@@ -276,6 +313,8 @@ async fn main() -> Result<()> {
         embedder_meta_id,
         embedder_meta_dim,
     };
+    // What the dispatch reports about this server's own health (estate#375).
+    let mut status = ServerStatus::default();
 
     // 3b. Open domain stores (fail-soft: if any fails, all domains = None).
     let home = wicked_home();
@@ -328,6 +367,18 @@ async fn main() -> Result<()> {
     }
 
     let domains_result: anyhow::Result<(MemoryEngine, KnowledgeEngine)> = (|| {
+        // e2e MAJOR-1: a fresh home has no store directory yet. Write mode creates it first.
+        if !read_only {
+            for (store, path) in [
+                ("xedge", &xedge_path),
+                ("memory", &memory_path),
+                ("knowledge", &knowledge_path),
+            ] {
+                ensure_store_dir(path).map_err(|e| {
+                    anyhow::anyhow!("{store} store directory could not be created ({path}): {e}")
+                })?;
+            }
+        }
         let xedge = std::sync::Arc::new(
             XedgeStore::open(&xedge_path)
                 .map_err(|e| anyhow::anyhow!("xedge store unavailable ({xedge_path}): {e}"))?,
@@ -346,6 +397,8 @@ async fn main() -> Result<()> {
         Err(e) => {
             eprintln!("[wicked-estate] WARN: {e}");
             eprintln!("[wicked-estate] WARN: memory and knowledge tools disabled (domains=None)");
+            // Loud on the wire as well as stderr: an agent never reads the server's stderr.
+            status = ServerStatus::domains_unavailable(e.to_string());
             None
         }
     };
@@ -579,13 +632,14 @@ async fn main() -> Result<()> {
                 memory: m as &mut dyn MemoryApi<Error = anyhow::Error>,
                 knowledge: k as &mut dyn KnowledgeApi,
             });
-            handle_request_unified_ro(
+            handle_request_unified_status(
                 &sync_store,
                 &req,
                 &ctx_clone,
                 domains.as_mut(),
                 semantic_ref,
                 read_only,
+                &status,
             )
         });
         emit_tool_duration(
@@ -665,4 +719,55 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_store_dir_creates_only_a_real_missing_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A nested missing parent is created, private on unix.
+        let nested = tmp.path().join("a/b/memory.db");
+        ensure_store_dir(nested.to_str().unwrap()).unwrap();
+        assert!(tmp.path().join("a/b").is_dir());
+        assert!(
+            !nested.exists(),
+            "the store file itself is the opener's job"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for d in ["a", "a/b"] {
+                let mode = std::fs::metadata(tmp.path().join(d))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777;
+                assert_eq!(mode, 0o700, "{d}");
+            }
+        }
+        // `:memory:`, a `scheme:` spec and a bare file name name no directory to create.
+        for spec in [
+            ":memory:",
+            "sqlite:nope-dir/x.db",
+            "postgres://h/db",
+            "memory.db",
+        ] {
+            ensure_store_dir(spec).unwrap();
+        }
+        assert!(!std::path::Path::new("sqlite:nope-dir").exists());
+        // A parent that is a regular file is an error the caller reports, never a panic.
+        let file = tmp.path().join("f");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(ensure_store_dir(file.join("memory.db").to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn a_windows_drive_letter_is_a_path_not_a_scheme() {
+        assert!(!is_scheme_spec("C:\\Users\\x\\memory.db"));
+        assert!(is_scheme_spec("sqlite:x.db"));
+        assert!(is_scheme_spec("postgres://h/db"));
+    }
 }
