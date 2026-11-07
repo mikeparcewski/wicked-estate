@@ -270,11 +270,16 @@ pub fn git_subpath(root: &Path) -> Option<String> {
     Some(git_line(&raw).trim_matches('/').to_string())
 }
 
-/// One line of git's output without its terminator (`\n`, or `\r\n` on Windows), every other
-/// character kept.
+/// One line of git's output without its terminator (`\n`; `\r\n` only on Windows, where a name
+/// cannot end in `\r`), every other character kept: on unix `meta\r` is a directory of its own
+/// (codex r2 on #401).
 fn git_line(raw: &str) -> &str {
     let line = raw.strip_suffix('\n').unwrap_or(raw);
-    line.strip_suffix('\r').unwrap_or(line)
+    if cfg!(windows) {
+        line.strip_suffix('\r').unwrap_or(line)
+    } else {
+        line
+    }
 }
 
 /// The repository's shared git directory (`git rev-parse --git-common-dir`), canonical: the same
@@ -705,6 +710,19 @@ mod tests {
             remote,
             subpath: sub,
             common_dir: None,
+        }
+    }
+
+    /// estate#401 review: only git's terminator is cut; a name's own whitespace (and, on unix, a
+    /// trailing carriage return) is kept.
+    #[test]
+    fn a_git_line_keeps_everything_but_its_terminator() {
+        assert_eq!(git_line(" pkg/\n"), " pkg/");
+        assert_eq!(git_line("/tmp/meta \n"), "/tmp/meta ");
+        if cfg!(windows) {
+            assert_eq!(git_line("/tmp/meta\r\n"), "/tmp/meta");
+        } else {
+            assert_eq!(git_line("/tmp/meta\r\n"), "/tmp/meta\r");
         }
     }
 
