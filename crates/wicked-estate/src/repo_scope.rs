@@ -264,13 +264,17 @@ pub fn git_subpath(root: &Path) -> Option<String> {
     if !out.status.success() {
         return None;
     }
-    Some(
-        String::from_utf8(out.stdout)
-            .ok()?
-            .trim()
-            .trim_matches('/')
-            .to_string(),
-    )
+    // Only git's line terminator goes: whitespace is part of a directory name (` pkg` is not
+    // `pkg`, codex on #401).
+    let raw = String::from_utf8(out.stdout).ok()?;
+    Some(git_line(&raw).trim_matches('/').to_string())
+}
+
+/// One line of git's output without its terminator (`\n`, or `\r\n` on Windows), every other
+/// character kept.
+fn git_line(raw: &str) -> &str {
+    let line = raw.strip_suffix('\n').unwrap_or(raw);
+    line.strip_suffix('\r').unwrap_or(line)
 }
 
 /// The repository's shared git directory (`git rev-parse --git-common-dir`), canonical: the same
@@ -282,14 +286,20 @@ pub fn git_subpath(root: &Path) -> Option<String> {
 /// run's worktree was refused as a REPO COLLISION and the run could not start.
 pub fn git_common_dir(root: &Path) -> Option<String> {
     let out = std::process::Command::new("git")
-        .args(["-C", &root.to_string_lossy(), "rev-parse", "--git-common-dir"])
+        .args([
+            "-C",
+            &root.to_string_lossy(),
+            "rev-parse",
+            "--git-common-dir",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
     let raw = String::from_utf8(out.stdout).ok()?;
-    let raw = raw.trim();
+    // Only the terminator goes (codex on #401): `/tmp/meta ` and `/tmp/meta` are two directories.
+    let raw = git_line(&raw);
     if raw.is_empty() {
         return None;
     }
@@ -300,7 +310,9 @@ pub fn git_common_dir(root: &Path) -> Option<String> {
     } else {
         root.join(path)
     };
-    Some(std::fs::canonicalize(abs).ok()?.to_string_lossy().into_owned())
+    // A canonical path that is not valid UTF-8 is unknown, never a lossy spelling that could equal
+    // another repository's (codex on #401).
+    Some(std::fs::canonicalize(abs).ok()?.to_str()?.to_string())
 }
 
 /// One side of an identity comparison.
@@ -705,9 +717,18 @@ mod tests {
             ..ident(root, None, sub)
         };
         let checkout = tree("/r/tm", Some("/r/tm/.git"), Some(""));
-        assert!(same_repo(checkout, tree("/w/run-1", Some("/r/tm/.git"), Some(""))));
-        assert!(!same_repo(checkout, tree("/w/other", Some("/r/other/.git"), Some(""))));
-        assert!(!same_repo(checkout, tree("/w/run-1", Some("/r/tm/.git"), Some("pkg"))));
+        assert!(same_repo(
+            checkout,
+            tree("/w/run-1", Some("/r/tm/.git"), Some(""))
+        ));
+        assert!(!same_repo(
+            checkout,
+            tree("/w/other", Some("/r/other/.git"), Some(""))
+        ));
+        assert!(!same_repo(
+            checkout,
+            tree("/w/run-1", Some("/r/tm/.git"), Some("pkg"))
+        ));
         assert!(!same_repo(checkout, tree("/w/run-1", None, Some(""))));
     }
 

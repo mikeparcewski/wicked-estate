@@ -811,3 +811,51 @@ fn a_linked_worktree_of_a_no_remote_repo_is_the_same_repo() {
         .expect_err("another repository with no remote is still refused");
     assert!(err.to_string().contains("REPO COLLISION"), "{err}");
 }
+
+/// estate#401 review: whitespace is part of a name. Two no-remote repositories whose git
+/// directories differ only by a trailing space, and two packages of one no-remote repository whose
+/// names differ only by a leading space, are different trees.
+#[cfg(unix)]
+#[test]
+fn whitespace_in_a_git_directory_or_a_package_name_is_never_trimmed_away() {
+    let root = fresh_dir("ws401");
+    let one = root.join("one");
+    let two = root.join("two");
+    make_repo(&one, "alpha");
+    make_repo(&two, "beta");
+    git(
+        &root,
+        &[
+            "init",
+            "-q",
+            "--separate-git-dir",
+            root.join("meta").to_str().unwrap(),
+            one.to_str().unwrap(),
+        ],
+    );
+    git(
+        &root,
+        &[
+            "init",
+            "-q",
+            "--separate-git-dir",
+            root.join("meta ").to_str().unwrap(),
+            two.to_str().unwrap(),
+        ],
+    );
+    let mut store = SqliteStore::open(root.join("ws.db")).unwrap();
+    wicked_estate::index_path(&mut store, &one).unwrap();
+    let err = wicked_estate::index_path(&mut store, &two)
+        .expect_err("`meta ` is not `meta`: another repository");
+    assert!(err.to_string().contains("REPO COLLISION"), "{err}");
+
+    let mono = root.join("mono");
+    make_repo(&mono.join("pkg"), "gamma");
+    make_repo(&mono.join(" pkg"), "delta");
+    git(&mono, &["init", "-q"]);
+    let mut store = SqliteStore::open(root.join("mono.db")).unwrap();
+    wicked_estate::index_path(&mut store, &mono.join("pkg")).unwrap();
+    let err = wicked_estate::index_path(&mut store, &mono.join(" pkg"))
+        .expect_err("` pkg` is not `pkg`: another position in the work tree");
+    assert!(err.to_string().contains("REPO COLLISION"), "{err}");
+}
