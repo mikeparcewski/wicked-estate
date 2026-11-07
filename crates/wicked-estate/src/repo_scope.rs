@@ -273,6 +273,36 @@ pub fn git_subpath(root: &Path) -> Option<String> {
     )
 }
 
+/// The repository's shared git directory (`git rev-parse --git-common-dir`), canonical: the same
+/// for a checkout and every linked worktree of it (`git worktree add`), different for any other
+/// repository. `None` when git cannot answer (no git, not a work tree, path gone).
+///
+/// The third half of identity (wicked-estate#401): a local repository with no remote has nothing
+/// else that ties a linked worktree of it to its checkout, so wicked-core's D8 base index of a
+/// run's worktree was refused as a REPO COLLISION and the run could not start.
+pub fn git_common_dir(root: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["-C", &root.to_string_lossy(), "rev-parse", "--git-common-dir"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(out.stdout).ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    // Relative to `root` when git prints it so (a checkout's own `.git`).
+    let path = Path::new(raw);
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    Some(std::fs::canonicalize(abs).ok()?.to_string_lossy().into_owned())
+}
+
 /// One side of an identity comparison.
 #[derive(Clone, Copy)]
 struct Ident<'a> {
@@ -280,6 +310,8 @@ struct Ident<'a> {
     remote: Option<&'a str>,
     /// `root`'s path inside its git work tree; see [`git_subpath`]. `None` = unknown.
     subpath: Option<&'a str>,
+    /// `root`'s shared git directory; see [`git_common_dir`]. `None` = unknown (not asked).
+    common_dir: Option<&'a str>,
 }
 
 /// Are these two index runs the SAME TREE?
@@ -294,9 +326,11 @@ struct Ident<'a> {
 /// A position is compared only when both sides know theirs. Unknown on either side ⇒ remote alone,
 /// which is what keeps a moved or re-cloned checkout reading as one repo.
 ///
-/// With no remote on one side there is no evidence but the root path, so paths are compared
-/// canonically. That fallback errs toward "different" — a non-git tree that MOVED reads as a new
-/// repo and gets refused. Refusal is recoverable; the silent overwrite it replaces is not.
+/// With no remote on one side, the root paths are compared canonically, and two roots that share
+/// one git directory at the same position are one repository: a linked worktree of a local
+/// repository with no remote (wicked-estate#401). That fallback still errs toward "different" — a
+/// non-git tree that MOVED reads as a new repo and gets refused. Refusal is recoverable; the
+/// silent overwrite it replaces is not.
 fn same_repo(a: Ident<'_>, b: Ident<'_>) -> bool {
     match (canon_remote(a.remote), canon_remote(b.remote)) {
         (Some(x), Some(y)) => {
@@ -306,7 +340,15 @@ fn same_repo(a: Ident<'_>, b: Ident<'_>) -> bool {
                     _ => true,
                 }
         }
-        _ => canon(a.root) == canon(b.root),
+        _ => {
+            canon(a.root) == canon(b.root)
+                || match (a.common_dir, b.common_dir, a.subpath, b.subpath) {
+                    (Some(x), Some(y), Some(p), Some(q)) => {
+                        x == y && p.trim_matches('/') == q.trim_matches('/')
+                    }
+                    _ => false,
+                }
+        }
     }
 }
 
@@ -316,6 +358,7 @@ fn ident_of(rec: &RepoRecord) -> Ident<'_> {
         root: &rec.root,
         remote: rec.info.remote.as_deref(),
         subpath: rec.subpath.as_deref(),
+        common_dir: None,
     }
 }
 
@@ -361,6 +404,7 @@ pub fn guard(
         root: &root_str,
         remote: info.remote.as_deref(),
         subpath: this_subpath.as_deref(),
+        common_dir: None,
     };
 
     match label {
@@ -411,10 +455,25 @@ pub fn guard(
             // since gone answers `None`, and the comparison falls back to the remote alone, which
             // is what keeps a moved checkout reading as one repo.
             let prev_subpath = git_subpath(Path::new(&prev_root));
+            // Both roots' git directories: the evidence that ties a linked worktree to its
+            // checkout when neither has a remote (wicked-estate#401). Asked only here, where it
+            // can change the answer.
+            let (prev_common, this_common) = if canon_remote(prev_remote.as_deref()).is_none()
+                || canon_remote(this.remote).is_none()
+            {
+                (git_common_dir(Path::new(&prev_root)), git_common_dir(root))
+            } else {
+                (None, None)
+            };
             let prev = Ident {
                 root: &prev_root,
                 remote: prev_remote.as_deref(),
                 subpath: prev_subpath.as_deref(),
+                common_dir: prev_common.as_deref(),
+            };
+            let this = Ident {
+                common_dir: this_common.as_deref(),
+                ..this
             };
             if same_repo(prev, this) {
                 return Ok(()); // same repo, re-indexed — today's behaviour, untouched.
@@ -633,7 +692,23 @@ mod tests {
             root,
             remote,
             subpath: sub,
+            common_dir: None,
         }
+    }
+
+    /// wicked-estate#401: with no remote, one git directory at one position is one repository
+    /// (a linked worktree and its checkout); another git directory, or another position, is not.
+    #[test]
+    fn no_remote_identity_is_the_shared_git_directory_at_one_position() {
+        let tree = |root, common, sub| Ident {
+            common_dir: common,
+            ..ident(root, None, sub)
+        };
+        let checkout = tree("/r/tm", Some("/r/tm/.git"), Some(""));
+        assert!(same_repo(checkout, tree("/w/run-1", Some("/r/tm/.git"), Some(""))));
+        assert!(!same_repo(checkout, tree("/w/other", Some("/r/other/.git"), Some(""))));
+        assert!(!same_repo(checkout, tree("/w/run-1", Some("/r/tm/.git"), Some("pkg"))));
+        assert!(!same_repo(checkout, tree("/w/run-1", None, Some(""))));
     }
 
     /// The monorepo hole. One `origin`, two packages, both with `src/index.ts`: identical on the

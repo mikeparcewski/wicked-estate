@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+- **A linked worktree of a local repository with no remote is the same repository (estate#401).**
+  The same-repo guard compared roots by path when neither side had an `origin`. So wicked-core's
+  D8 base index of a run's worktree (`git worktree add` of the registered checkout) was refused as
+  a REPO COLLISION, and every run on such a repository failed at start once its HEAD moved past
+  the indexed commit. With no remote, the guard now also compares the two roots' shared git
+  directory (`git rev-parse --git-common-dir`, canonical) and their position inside the work
+  tree. One git directory at one position is one repository. A different repository with no
+  remote is still refused.
+
 ## [0.32.1] — 2026-11-06
 
 Patch: two defects the e2e pass found on the released 0.32.0 (#399). On a fresh home the MCP

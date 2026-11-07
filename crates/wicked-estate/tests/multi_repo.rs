@@ -758,3 +758,56 @@ fn cross_repo_shared_import_survives_owner_repo_deletion() {
         );
     }
 }
+
+fn git(dir: &Path, args: &[&str]) {
+    let ok = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "core.fsmonitor=false",
+        ])
+        .args(args)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "git {args:?} failed");
+}
+
+/// wicked-estate#401: a local repository with no remote, indexed from its checkout, then
+/// re-indexed (un-labelled) from a linked worktree of it, as wicked-core's D8 base index does for
+/// every run. The worktree is the same repository: no REPO COLLISION. A different repository with
+/// no remote is still refused.
+#[test]
+fn a_linked_worktree_of_a_no_remote_repo_is_the_same_repo() {
+    let root = fresh_dir("worktree401");
+    let repo = root.join("tm");
+    make_repo(&repo, "alpha");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "one"]);
+    let wt = root.join("wt-run");
+    git(
+        &repo,
+        &["worktree", "add", "-q", "--detach", wt.to_str().unwrap()],
+    );
+    let mut store = SqliteStore::open(root.join("shared.db")).unwrap();
+    wicked_estate::index_path(&mut store, &repo).unwrap();
+
+    wicked_estate::index_path(&mut store, &wt)
+        .expect("a linked worktree of the indexed repository is the same repository");
+    assert_eq!(names(&store, "alpha"), vec!["src/index.ts"]);
+
+    let other = root.join("other");
+    make_repo(&other, "beta");
+    git(&other, &["init", "-q"]);
+    git(&other, &["add", "-A"]);
+    git(&other, &["commit", "-q", "-m", "one"]);
+    let err = wicked_estate::index_path(&mut store, &other)
+        .expect_err("another repository with no remote is still refused");
+    assert!(err.to_string().contains("REPO COLLISION"), "{err}");
+}
