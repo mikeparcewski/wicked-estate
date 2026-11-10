@@ -78,6 +78,7 @@ const STARLARK_QUERY: &str = include_str!("queries/starlark.scm");
 const CUDA_QUERY: &str = include_str!("queries/cuda.scm");
 const ARDUINO_QUERY: &str = include_str!("queries/arduino.scm");
 const APEX_QUERY: &str = include_str!("queries/apex.scm");
+const APEXLANG_QUERY: &str = include_str!("queries/apexlang.scm");
 const RACKET_QUERY: &str = include_str!("queries/racket.scm");
 const KOTLIN_QUERY: &str = include_str!("queries/kotlin.scm");
 const TOML_QUERY: &str = include_str!("queries/toml.scm");
@@ -272,6 +273,12 @@ fn lang_arduino() -> tree_sitter::Language {
 }
 fn lang_apex() -> tree_sitter::Language {
     tree_sitter_sfapex::apex::LANGUAGE.into()
+}
+/// Oracle APEXlang (`.apx`) — the vendored in-house grammar (`vendor/tree-sitter-apexlang`), built
+/// by this crate's `build.rs`. Extracted by [`crate::apexlang::ApexlangExtractor`], not by the
+/// generic `@code_*` pass.
+fn lang_apexlang() -> tree_sitter::Language {
+    crate::apexlang::GRAMMAR.into()
 }
 fn lang_racket() -> tree_sitter::Language {
     tree_sitter_racket::LANGUAGE.into()
@@ -745,6 +752,12 @@ static LANG_TABLE: &[LangEntry] = &[
         query_src: APEX_QUERY,
     },
     LangEntry {
+        name: "apexlang",
+        ext: &["apx"],
+        make_language: lang_apexlang,
+        query_src: APEXLANG_QUERY,
+    },
+    LangEntry {
         name: "racket",
         ext: &["rkt"],
         make_language: lang_racket,
@@ -1211,6 +1224,15 @@ pub(crate) fn builtin_language(name: &str) -> Option<tree_sitter::Language> {
         .iter()
         .find(|e| e.name == name)
         .map(|e| (e.make_language)())
+}
+
+/// The built-in query source of a [`LANG_TABLE`] language (no override applied).
+pub(crate) fn builtin_query(name: &str) -> &'static str {
+    LANG_TABLE
+        .iter()
+        .find(|e| e.name == name)
+        .map(|e| e.query_src)
+        .unwrap_or("")
 }
 
 /// The [`LANG_TABLE`] entry name owning a file extension (no dot, lowercase), if any. Drives the

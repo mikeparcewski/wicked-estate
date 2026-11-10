@@ -23,6 +23,8 @@ macro_rules! eprintln {
     }};
 }
 
+pub mod apexlang;
+pub use apexlang::ApexlangExtractor;
 pub mod redact;
 pub mod treesitter;
 pub use treesitter::{IaCExtractor, LOGICAL_LANGUAGES, SYMBOL_ID_SCHEME, TreeSitterExtractor};

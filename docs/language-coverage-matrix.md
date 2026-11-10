@@ -32,7 +32,7 @@ Note: `extends`/`implements` in the manifest reflect what the `.scm` query captu
 (tree-sitter, intra-file). Cross-file resolution of heritage requires the `precise` tier
 (SCIP/TSG/LSP — Waves W2.2/W3.2/W3.3).
 
-**114 languages in manifest · 103 wired (extractor present) · 11 aspirational (manifest row, extractor pending)**
+**115 languages in manifest · 104 wired (extractor present) · 11 aspirational (manifest row, extractor pending)**
 
 ## Full matrix
 
@@ -40,6 +40,7 @@ Note: `extends`/`implements` in the manifest reflect what the `.scm` query captu
 |----------|:------:|------|:------------:|------------|
 | `abl` | yes | `structural` | S·C | `.p`, `.w`, `.i` |
 | `ada` | yes | `structural` | S | `.adb`, `.ads` |
+| `apexlang` | yes | `structural` | S | `.apx` |
 | `arm` | yes | `structural` | S·I | `.arm.json` |
 | `awk` | yes | `structural` | S·C | `.awk` |
 | `bicep` | yes | `structural` | S·C·I | `.bicep` |
@@ -181,6 +182,7 @@ Languages with an active extractor (tree-sitter grammar compiled in, `.scm` embe
 |----------|------|:------------:|------------|
 | `abl` | `structural` | S·C | `.p`, `.w`, `.i` |
 | `ada` | `structural` | S | `.adb`, `.ads` |
+| `apexlang` | `structural` | S | `.apx` |
 | `arm` | `structural` | S·I | `.arm.json` |
 | `awk` | `structural` | S·C | `.awk` |
 | `bicep` | `structural` | S·C·I | `.bicep` |

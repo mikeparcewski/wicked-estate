@@ -22,6 +22,16 @@ tier = "tags"
 caps = ["symbols"]
 
 [[language]]
+# Oracle APEX's APEXlang (`.apx`), unrelated to Salesforce `apex` above. In-house grammar
+# (vendor/tree-sitter-apexlang); components, contains edges and `@references` come from
+# src/apexlang.rs + apexlang.toml, not the generic @code_* pass.
+name = "apexlang"
+ext = ["apx"]
+grammar = "tree-sitter-apexlang"
+tier = "structural"
+caps = ["symbols"]
+
+[[language]]
 name = "arduino"
 ext = ["ino"]
 grammar = "tree-sitter-arduino"

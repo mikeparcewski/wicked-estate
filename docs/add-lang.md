@@ -51,12 +51,12 @@ caps = ["symbols", "calls", "imports", "extends"]
 your `.scm` file actually captures — they feed the generated matrix, not the extractor itself.
 
 The `≥73` parity test in `crates/wicked-estate-extract/src/lib.rs::covers_language_parity`
-asserts `registry().len() >= 73` (a floor — the manifest holds 114 languages today). Adding a row keeps it green; removing one will fail it.
+asserts `registry().len() >= 73` (a floor — the manifest holds 115 languages today). Adding a row keeps it green; removing one will fail it.
 
 ### Step 2 — Write `crates/wicked-estate-extract/src/queries/<name>.scm`
 
 The query file uses the [prior art capture convention][cqconv] — the same `.scm` format
-prior art ships. One format drives all 114 manifest languages (103 wired for tree-sitter
+prior art ships. One format drives all 115 manifest languages (104 wired for tree-sitter
 extraction); the extractor is generic.
 
 **Capture families and what they produce:**

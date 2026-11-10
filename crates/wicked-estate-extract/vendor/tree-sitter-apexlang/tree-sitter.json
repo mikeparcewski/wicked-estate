@@ -1,0 +1,19 @@
+{
+  "grammars": [
+    {
+      "name": "apexlang",
+      "camelcase": "Apexlang",
+      "scope": "source.apexlang",
+      "path": ".",
+      "file-types": ["apx"]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "UPL-1.0",
+    "description": "Oracle APEXlang core syntax for tree-sitter (wicked-estate)",
+    "links": {
+      "repository": "https://github.com/mikeparcewski/wicked-estate"
+    }
+  }
+}

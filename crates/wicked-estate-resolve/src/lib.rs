@@ -47,6 +47,9 @@ pub use relative_import::RelativeImportResolver;
 pub mod mainframe;
 pub use mainframe::DynamicCallResolver;
 
+pub mod apexlang;
+pub use apexlang::ApexlangRefResolver;
+
 pub mod scip;
 pub use scip::{ScipEvidence, scip_evidence};
 

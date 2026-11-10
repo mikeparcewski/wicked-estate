@@ -1,0 +1,395 @@
+========================================
+component with id and properties
+========================================
+
+page 4 (
+    name: Customer
+    alias: CUSTOMER
+)
+
+----------------------------------------
+
+(source_file
+  (component
+    (identifier)
+    (component_id)
+    (property
+      (identifier)
+      (text))
+    (property
+      (identifier)
+      (text))))
+
+========================================
+component without id
+========================================
+
+displayColumn (
+    column: @ENAME
+)
+
+----------------------------------------
+
+(source_file
+  (component
+    (identifier)
+    (property
+      (identifier)
+      (reference))))
+
+========================================
+quoted and numeric ids
+========================================
+
+region "My Region" (
+)
+
+page 10 (
+)
+
+entry '#A01#' (
+)
+
+----------------------------------------
+
+(source_file
+  (component
+    (identifier)
+    (string))
+  (component
+    (identifier)
+    (component_id))
+  (component
+    (identifier)
+    (component_id)))
+
+========================================
+nested components and groups
+========================================
+
+page 4 (
+    security {
+        authorizationScheme: @contribution-rights
+        pageAccessProtection: argumentsMustHaveChecksum
+    }
+
+    region customer (
+        name: Customer
+        layout {
+            inner {
+                sequence: 10
+            }
+        }
+    )
+)
+
+----------------------------------------
+
+(source_file
+  (component
+    (identifier)
+    (component_id)
+    (group
+      (identifier)
+      (property
+        (identifier)
+        (reference))
+      (property
+        (identifier)
+        (text)))
+    (component
+      (identifier)
+      (component_id)
+      (property
+        (identifier)
+        (text))
+      (group
+        (identifier)
+        (group
+          (identifier)
+          (property
+            (identifier)
+            (text)))))))
+
+========================================
+value kinds
+========================================
+
+button b (
+    template: @/text
+    group: @region/accent
+    label: "Save"
+    whereClause: "ID" = :P1_ID
+    staticValue: "
+    nullDisplayValue: - Select -
+    url: //cdn.example.com/x.js
+    empty:
+)
+
+----------------------------------------
+
+(source_file
+  (component
+    (identifier)
+    (component_id)
+    (property
+      (identifier)
+      (reference))
+    (property
+      (identifier)
+      (reference))
+    (property
+      (identifier)
+      (string))
+    (property
+      (identifier)
+      (text))
+    (property
+      (identifier)
+      (text))
+    (property
+      (identifier)
+      (text))
+    (property
+      (identifier)
+      (text))
+    (property
+      (identifier))))
+
+========================================
+multi-line array
+========================================
+
+region r (
+    templateOptions: [
+        #DEFAULT#
+        t-Region--hideHeader js-addHiddenHeadingRoleDesc
+        @ref-in-array "quoted item"
+    ]
+)
+
+----------------------------------------
+
+(source_file
+  (component
+    (identifier)
+    (component_id)
+    (property
+      (identifier)
+      (array
+        (word)
+        (word)
+        (word)
+        (reference)
+        (string)))))
+
+========================================
+inline array
+========================================
+
+region r (
+    templateOptions: [ #DEFAULT# @a "b c" ]
+    empty: []
+)
+
+----------------------------------------
+
+(source_file
+  (component
+    (identifier)
+    (component_id)
+    (property
+      (identifier)
+      (array
+        (word)
+        (reference)
+        (string)))
+    (property
+      (identifier)
+      (array))))
+
+========================================
+object value with quoted keys
+========================================
+
+button b (
+    target: {
+        page: 59
+        "P#EDIT_PAGE#_ID": #ID#
+    }
+)
+
+----------------------------------------
+
+(source_file
+  (component
+    (identifier)
+    (component_id)
+    (property
+      (identifier)
+      (object
+        (property
+          (identifier)
+          (text))
+        (property
+          (string)
+          (text))))))
+
+========================================
+fenced block with tag
+========================================
+
+process p (
+    source {
+        plsqlCode:
+            ```plsql
+            :P9999_USERNAME := apex_authentication.get_login_username_cookie;
+            ```
+    }
+)
+
+----------------------------------------
+
+(source_file
+  (component
+    (identifier)
+    (component_id)
+    (group
+      (identifier)
+      (property
+        (identifier)
+        (fenced_block
+          (fence_language)
+          (fence_body))))))
+
+========================================
+fenced block without tag
+========================================
+
+region r (
+    html:
+        ```
+        <b>x</b>
+        ```
+)
+
+----------------------------------------
+
+(source_file
+  (component
+    (identifier)
+    (component_id)
+    (property
+      (identifier)
+      (fenced_block
+        (fence_body)))))
+
+========================================
+empty fenced block
+========================================
+
+region r (
+    html:
+        ```html
+        ```
+)
+
+----------------------------------------
+
+(source_file
+  (component
+    (identifier)
+    (component_id)
+    (property
+      (identifier)
+      (fenced_block
+        (fence_language)))))
+
+========================================
+fenced body keeps backticks and parens
+========================================
+
+region r (
+    js:
+        ```javascript-browser
+        const s = `a ${b}`; f(")");
+        ``` not a fence
+        ```
+)
+
+----------------------------------------
+
+(source_file
+  (component
+    (identifier)
+    (component_id)
+    (property
+      (identifier)
+      (fenced_block
+        (fence_language)
+        (fence_body)))))
+
+========================================
+comments
+========================================
+
+// a line comment
+/* a block
+   comment */
+page 1 (
+    // inside
+    name: x
+)
+
+----------------------------------------
+
+(source_file
+  (comment)
+  (comment)
+  (component
+    (identifier)
+    (component_id)
+    (comment)
+    (property
+      (identifier)
+      (text))))
+
+========================================
+blank lines and no final newline
+========================================
+
+
+
+app X (
+
+    name: X
+
+)
+
+----------------------------------------
+
+(source_file
+  (component
+    (identifier)
+    (component_id)
+    (property
+      (identifier)
+      (text))))
+
+========================================
+crlf line endings
+========================================
+
+page 1 (
+    name: x
+)
+
+----------------------------------------
+
+(source_file
+  (component
+    (identifier)
+    (component_id)
+    (property
+      (identifier)
+      (text))))

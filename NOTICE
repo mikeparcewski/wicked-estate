@@ -22,6 +22,21 @@ Free-format RPG IV (ILE RPG) tree-sitter grammar
   not a full-language grammar. No third-party grammar source was copied into
   it; the structural patterning carries no upstream copyright obligation.
 -------------------------------------------------------------------------------
+Oracle APEXlang tree-sitter grammar and test fixtures
+  Path:      crates/wicked-estate-extract/vendor/tree-sitter-apexlang/
+             crates/wicked-estate-extract/tests/fixtures/apexlang/
+  Origin:    The grammar is authored in this repository, derived from the core
+             syntax of Oracle's apexlang.ebnf (https://github.com/oracle/skills,
+             commit 014cdb29f12dfa6a689bbe8a80ee1c5f0bf15be1). The fixtures are
+             unmodified files from Oracle's example applications in the same
+             repository and commit (listed in the fixture MANIFEST.tsv).
+  License:   Universal Permissive License (UPL), Version 1.0
+             Copyright (c) 2025 Oracle and/or its affiliates.
+             The license text ships with each directory (LICENSE, LICENSE-UPL).
+  The full pinned APEXlang corpus (oracle/apex, oracle/skills; UPL-1.0) is not
+  vendored: oracle/apexlang/corpus.tsv lists it and
+  scripts/apexlang-corpus.py fetches and verifies it.
+-------------------------------------------------------------------------------
 
 Full per-component provenance (source, commit/origin, import date, license) is
 recorded in crates/wicked-estate-extract/vendor/PROVENANCE.md.

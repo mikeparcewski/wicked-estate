@@ -36,7 +36,7 @@ test asserts `registry().len() >= 73` — this is the regression gate that preve
 
 ### Language count as of this writing
 
-**114 languages** in `languages.toml` (the canonical count — the manifest is the source of
+**115 languages** in `languages.toml` (the canonical count — the manifest is the source of
 truth), of which **103 are wired in `LANG_TABLE`** (verified by counting `LangEntry` items);
 the remaining rows are document-tier or aspirational (manifest row, extractor pending). The
 generated `docs/language-coverage-matrix.md` carries the per-language breakdown.
@@ -352,7 +352,7 @@ for edges) makes the result idempotent across re-runs.
 
 - `crates/wicked-estate-extract/src/extra_edge.rs` — `ExtraEdgeExtractor` source + inline doc
 - `crates/wicked-estate-extract/src/treesitter.rs` — `LANG_TABLE`, `LangEntry`, language fns
-- `crates/wicked-estate-extract/languages.toml` — language manifest (114 rows; 103 wired as of this writing)
+- `crates/wicked-estate-extract/languages.toml` — language manifest (115 rows; 104 wired as of this writing)
 - `docs/add-lang.md` — full add-language checklist + ABI constraint table
 - `docs/language-coverage-matrix.md` — auto-generated matrix
 - the design notes — rules-as-data rationale

@@ -1,0 +1,758 @@
+# APEXlang extraction data (estate#312, #313). Rules as data: the extractor in src/apexlang.rs
+# reads this table; adding a row here needs no Rust change.
+#
+# Oracle does not publish what an `@reference` points to (the EBNF types every reference-taking
+# property only as `COMPONENT`). The [[ref]] rows below were curated from the properties that occur
+# in Oracle's generated applications (oracle/apex@fbe095e, oracle/skills@014cdb2) and checked against
+# Oracle's own legacy SQL exports of the same applications (oracle/apexlang/ in the repo root).
+
+# ── Application layout ───────────────────────────────────────────────────────────────────────────
+# An application is a directory. A file's application root is the path before the LEFT-most
+# segment listed in `root_dirs`, or before a `pages_dir` segment that is the file's own parent.
+# Any other `.apx` file is rooted at its own directory.
+[layout]
+root_dirs = ["shared-components", "supporting-objects", "workspace-components", "deployments"]
+pages_dir = "pages"
+
+# Directories that scope the components declared in them. `path` is matched against the segments
+# after the application root; `{id}` is the container's id (absent = a singleton), `*` matches any
+# one segment. The
+# container's own declaration (`theme universal-theme (` in theme.apx) IS the container node.
+[[layout.container]]
+path = ["shared-components", "themes", "{id}"]
+kind = "theme"
+
+[[layout.container]]
+path = ["shared-components", "plugins", "*", "{id}"]
+kind = "plugin"
+
+# Supporting objects (install scripts, install-time substitutions) belong to the application's
+# single `supportingObject`, which keeps `substitution APP_NAME` apart from the application's own.
+[[layout.container]]
+path = ["supporting-objects"]
+kind = "supportingObject"
+
+# ── Node kinds ───────────────────────────────────────────────────────────────────────────────────
+# APEXlang kind -> wicked NodeKind (snake_case). Unlisted kinds become `Other(<kind>)`. Every node
+# also carries `apexlang_kind` metadata.
+[node_kind]
+app = "module"
+
+# ── Identity ─────────────────────────────────────────────────────────────────────────────────────
+# A component's key is its declared id. Kinds listed under `qualifier` prefix it with a property
+# value (`<value>/<id>`): two `templateOptionGroup display-mode` differ only by `templateType`, and
+# references spell them `@region/display-mode`.
+[identity.qualifier]
+templateOptionGroup = "templateType"
+customAttribute = "scope"
+
+# Kinds declared without an id take their key from these properties (dotted paths, values joined
+# with `/`, a leading `@` dropped). A sibling collision that remains gets `~2`, `~3` in document
+# order and is flagged `apexlang_identity = "positional"`.
+[identity.keyless]
+displayColumn = ["column"]
+sort = ["column"]
+controlBreak = ["column"]
+aggregate = ["column", "function"]
+groupByColumn = ["column"]
+groupBySort = ["column"]
+groupByAggregate = ["aggregate.column"]
+pivotColumn = ["column"]
+pivotRowColumn = ["column"]
+componentSetting = ["name"]
+branch = ["name"]
+databaseObject = ["owner", "type", "name"]
+parameter = ["name"]
+connection = ["name"]
+participant = ["name"]
+standardAttributeConfig = ["name"]
+
+# ── References ───────────────────────────────────────────────────────────────────────────────────
+# (owner kind, property path) -> target kind + scope. `owner = "*"` matches any owner; an exact
+# owner row wins. The property path is the group/key chain inside the owning component
+# (`layout.region`). `target = "-"` marks a reference that must never bind (its target lives
+# outside the export or needs context this table cannot express).
+#
+# scope: "app"     anywhere in the application
+#        "self"    under the owning component itself
+#        "parent"  under the owning component's parent
+#        "<kind>"  under the nearest enclosing component of that kind (page, region, ...)
+#
+# A property not listed here binds only if its slug names exactly one component in the application;
+# a theme-relative `@/x` binds only through a row here.
+
+# Shared components (application scope).
+[[ref]]
+owner = "*"
+property = "security.authorizationScheme"
+target = "authorization"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "link.authorizationScheme"
+target = "authorization"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "actionsMenu.savePublicReportAuthorization"
+target = "authorization"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "editAuthorization.add"
+target = "authorization"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "editAuthorization.update"
+target = "authorization"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "editAuthorization.delete"
+target = "authorization"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "download.authorization"
+target = "authorization"
+scope = "app"
+
+[[ref]]
+owner = "app"
+property = "authorization.scheme"
+target = "authorization"
+scope = "app"
+
+[[ref]]
+owner = "app"
+property = "authentication.scheme"
+target = "authentication"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "config.buildOption"
+target = "buildOption"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "lov.lov"
+target = "lov"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "columnFilter.namedLov"
+target = "lov"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "advanced.columnAliasesLov"
+target = "lov"
+scope = "app"
+
+[[ref]]
+owner = "page"
+property = "pageGroup"
+target = "pageGroup"
+scope = "app"
+
+[[ref]]
+owner = "region"
+property = "source.breadcrumb"
+target = "breadcrumb"
+scope = "app"
+
+[[ref]]
+owner = "region"
+property = "source.list"
+target = "list"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "navigationBar.list"
+target = "list"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "navigationMenu.list"
+target = "list"
+scope = "app"
+
+[[ref]]
+owner = "entry"
+property = "layout.subentriesList"
+target = "list"
+scope = "app"
+
+[[ref]]
+owner = "app"
+property = "userInterface.currentTheme"
+target = "theme"
+scope = "app"
+
+[[ref]]
+owner = "plugin"
+property = "theme"
+target = "theme"
+scope = "app"
+
+[[ref]]
+owner = "app"
+property = "group"
+target = "appGroup"
+scope = "app"
+
+[[ref]]
+owner = "searchSource"
+property = "searchConfig"
+target = "searchConfig"
+scope = "app"
+
+[[ref]]
+owner = "restDataSource"
+property = "source.remoteServer"
+target = "restDataSourceServer"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "source.restSource"
+target = "restDataSource"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "invoke.restSource"
+target = "restDataSource"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "invoke.operation"
+target = "operation"
+scope = "app"
+
+[[ref]]
+owner = "parameter"
+property = "operation"
+target = "operation"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "source.jsonSource"
+target = "jsonSource"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "source.jsonDualityView"
+target = "jsonDualityView"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "authentication.credentials"
+target = "webCredential"
+scope = "app"
+
+[[ref]]
+owner = "app"
+property = "progressiveWebApp.pushNotificationsCredentials"
+target = "webCredential"
+scope = "app"
+
+[[ref]]
+owner = "customAttribute"
+property = "appearance.attributeGroup"
+target = "attributeGroup"
+scope = "plugin"
+
+[[ref]]
+owner = "searchConfig"
+property = "vectorAttributes.provider"
+target = "vectorProvider"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "humanTask.definition"
+target = "taskDefinition"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "workflow.definition"
+target = "workflow"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "emailTemplate.emailTemplate"
+target = "emailTemplate"
+scope = "app"
+
+[[ref]]
+owner = "aiAgent"
+property = "genAI.service"
+target = "genAIService"
+scope = "app"
+
+[[ref]]
+owner = "action"
+property = "genAI.agent"
+target = "aiAgent"
+scope = "app"
+
+[[ref]]
+owner = "process"
+property = "dataLoading.dataLoadDefinition"
+target = "dataLoadDefinition"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "dataProfile.nestedRows"
+target = "dataProfileColumn"
+scope = "app"
+
+[[ref]]
+owner = "templateOption"
+property = "group"
+target = "templateOptionGroup"
+scope = "app"
+
+[[ref]]
+owner = "globalTemplateOption"
+property = "group"
+target = "templateOptionGroup"
+scope = "app"
+
+# Theme templates. `@/standard` names a template of the application's theme by identifier; Oracle's
+# generated applications rarely export the built-in ones, so most of these stay unresolved.
+[[ref]]
+owner = "region"
+property = "appearance.template"
+target = "regionTemplate"
+scope = "app"
+
+[[ref]]
+owner = "button"
+property = "appearance.buttonTemplate"
+target = "buttonTemplate"
+scope = "app"
+
+[[ref]]
+owner = "pageItem"
+property = "appearance.template"
+target = "fieldTemplate"
+scope = "app"
+
+[[ref]]
+owner = "page"
+property = "appearance.pageTemplate"
+target = "pageTemplate"
+scope = "app"
+
+[[ref]]
+owner = "page"
+property = "appearance.dialogTemplate"
+target = "pageTemplate"
+scope = "app"
+
+[[ref]]
+owner = "region"
+property = "componentAppearance.breadcrumbTemplate"
+target = "breadcrumbTemplate"
+scope = "app"
+
+[[ref]]
+owner = "region"
+property = "componentAppearance.listTemplate"
+target = "listTemplate"
+scope = "app"
+
+[[ref]]
+owner = "region"
+property = "componentAppearance.template"
+target = "classicReportTemplate"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "navigationMenu.listTemplate"
+target = "listTemplate"
+scope = "app"
+
+[[ref]]
+owner = "*"
+property = "navigationBar.listTemplate"
+target = "listTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "style.currentThemeStyle"
+target = "style"
+scope = "self"
+
+[[ref]]
+owner = "theme"
+property = "componentDefaults.page"
+target = "pageTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "componentDefaults.printerFriendlyPage"
+target = "pageTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "componentDefaults.loginPage"
+target = "pageTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "componentDefaults.errorPage"
+target = "pageTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "componentDefaults.navigationBarList"
+target = "listTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "componentDefaults.navigationMenuListTop"
+target = "listTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "componentDefaults.navigationMenuListSide"
+target = "listTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "componentDefaults.list"
+target = "listTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "componentDefaults.breadcrumb"
+target = "breadcrumbTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "componentDefaults.button"
+target = "buttonTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "componentDefaults.defaultLabel"
+target = "fieldTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "componentDefaults.optionalLabel"
+target = "fieldTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "componentDefaults.requiredLabel"
+target = "fieldTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "componentDefaults.region"
+target = "regionTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "componentDefaults.classicReport"
+target = "classicReportTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "regionDefaults.breadcrumbs"
+target = "regionTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "regionDefaults.charts"
+target = "regionTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "regionDefaults.forms"
+target = "regionTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "regionDefaults.lists"
+target = "regionTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "regionDefaults.reports"
+target = "regionTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "regionDefaults.wizards"
+target = "regionTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "regionDefaults.interactiveReports"
+target = "regionTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "dialogDefaults.dialogContentRegion"
+target = "regionTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "dialogDefaults.dialogButtonRegion"
+target = "regionTemplate"
+scope = "app"
+
+[[ref]]
+owner = "theme"
+property = "dialogDefaults.dialogPage"
+target = "pageTemplate"
+scope = "app"
+
+# A template subscribed from a master application names the master's copy, which is not part of
+# this export.
+[[ref]]
+owner = "*"
+property = "subscription.master"
+target = "-"
+scope = "app"
+
+# Page components (page scope). Regions, items and buttons are children of their page; the region
+# a component sits in is a reference, not nesting.
+[[ref]]
+owner = "*"
+property = "layout.region"
+target = "region"
+scope = "page"
+
+[[ref]]
+owner = "region"
+property = "layout.parentRegion"
+target = "region"
+scope = "page"
+
+[[ref]]
+owner = "action"
+property = "affectedElements.region"
+target = "region"
+scope = "page"
+
+[[ref]]
+owner = "action"
+property = "affectedElements.button"
+target = "button"
+scope = "page"
+
+[[ref]]
+owner = "pageItem"
+property = "source.formRegion"
+target = "region"
+scope = "page"
+
+[[ref]]
+owner = "process"
+property = "formRegion"
+target = "region"
+scope = "page"
+
+[[ref]]
+owner = "process"
+property = "editableRegion"
+target = "region"
+scope = "page"
+
+[[ref]]
+owner = "validation"
+property = "validation.editableRegion"
+target = "region"
+scope = "page"
+
+[[ref]]
+owner = "region"
+property = "source.filteredRegion"
+target = "region"
+scope = "page"
+
+[[ref]]
+owner = "region"
+property = "masterDetail.masterRegion"
+target = "region"
+scope = "page"
+
+[[ref]]
+owner = "dynamicAction"
+property = "when.region"
+target = "region"
+scope = "page"
+
+[[ref]]
+owner = "dynamicAction"
+property = "when.interactiveGrid"
+target = "region"
+scope = "page"
+
+[[ref]]
+owner = "dynamicAction"
+property = "when.button"
+target = "button"
+scope = "page"
+
+[[ref]]
+owner = "*"
+property = "serverSideCondition.whenButtonPressed"
+target = "button"
+scope = "page"
+
+[[ref]]
+owner = "validation"
+property = "error.associatedItem"
+target = "pageItem"
+scope = "page"
+
+[[ref]]
+owner = "process"
+property = "executionChain"
+target = "process"
+scope = "page"
+
+[[ref]]
+owner = "column"
+property = "masterDetail.masterColumn"
+target = "column"
+scope = "page"
+
+# Region internals (region scope): saved-report columns name the region's own columns.
+[[ref]]
+owner = "column"
+property = "layout.group"
+target = "columnGroup"
+scope = "region"
+
+[[ref]]
+owner = "displayColumn"
+property = "column"
+target = "column"
+scope = "region"
+
+[[ref]]
+owner = "sort"
+property = "column"
+target = "column"
+scope = "region"
+
+[[ref]]
+owner = "controlBreak"
+property = "column"
+target = "column"
+scope = "region"
+
+[[ref]]
+owner = "aggregate"
+property = "column"
+target = "column"
+scope = "region"
+
+[[ref]]
+owner = "savedReport"
+property = "chart.label"
+target = "column"
+scope = "region"
+
+[[ref]]
+owner = "savedReport"
+property = "chart.value"
+target = "column"
+scope = "region"
+
+[[ref]]
+owner = "savedReport"
+property = "chart.series"
+target = "column"
+scope = "region"
+
+# Siblings.
+[[ref]]
+owner = "entry"
+property = "appearance.parentEntry"
+target = "entry"
+scope = "parent"
+
+[[ref]]
+owner = "entry"
+property = "layout.parentEntry"
+target = "entry"
+scope = "parent"
+
+[[ref]]
+owner = "dataProfileColumn"
+property = "source.parentColumn"
+target = "dataProfileColumn"
+scope = "parent"
+
+[[ref]]
+owner = "connection"
+property = "activity.to"
+target = "activity"
+scope = "version"
+
+# Names an API or task parameter whose owner is given by another property; not expressible here.
+[[ref]]
+owner = "parameter"
+property = "name"
+target = "-"
+scope = "app"
+
+[[ref]]
+owner = "customAttribute"
+property = "dependingOn.attribute"
+target = "-"
+scope = "app"

@@ -24,7 +24,7 @@ swappable impl behind a seam. This is why the work fanned out safely in parallel
 | Crate | Role |
 |---|---|
 | `wicked-estate-core` | Types + the five traits + the GraphStore **conformance kit** (the spine) |
-| `wicked-estate-extract` | `Extractor` impls — tree-sitter (103 wired of the 114 manifest languages) + grammar-less line/macro extractors |
+| `wicked-estate-extract` | `Extractor` impls — tree-sitter (104 wired of the 115 manifest languages) + grammar-less line/macro extractors |
 | `wicked-estate-resolve` | `Resolver` impls — name / scoped / import-map / relative-import / infra / rules-bridge / SCIP / estate; LSP client library (consumer designed, ADR-009) |
 | `wicked-estate-store` | `GraphStore` impls — `MemStore` (reference) + `SqliteStore` (default) |
 | `wicked-estate-rank` | `Ranker` — personalized PageRank over CALLS/IMPORTS |
@@ -63,8 +63,8 @@ Both `MemStore` and `SqliteStore` pass it.
 
 ## 2. Language extraction
 
-**Coverage: 114 languages in the manifest** (79 structural / 18 tags / 17 document — the manifest,
-`languages.toml`, is the canonical count), **103 wired** for tree-sitter extraction + **6
+**Coverage: 115 languages in the manifest** (80 structural / 18 tags / 17 document — the manifest,
+`languages.toml`, is the canonical count), **104 wired** for tree-sitter extraction + **6
 grammar-less mainframe extractors**.
 
 ### Rules-as-data (the core design) ✅

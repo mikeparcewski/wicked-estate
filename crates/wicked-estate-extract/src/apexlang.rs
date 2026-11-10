@@ -1,0 +1,665 @@
+//! Oracle APEXlang (`.apx`) extractor (estate#312, #313).
+//!
+//! An APEX application is a directory of `.apx` files (`application.apx`, `pages/p00004-x.apx`,
+//! `shared-components/...`). The vendored tree-sitter grammar (`vendor/tree-sitter-apexlang`)
+//! parses the core syntax; this module turns a parse into nodes, `contains` edges and references,
+//! driven by the data in `apexlang.toml` (layout, identity, the property -> target table).
+//!
+//! **Identity (ADR-002).** A component's `SymbolId` is the path of `(kind, key)` pairs from its
+//! application root: `apexlang . . . <root>/app#page:4#region:customer#`. The root is derived from
+//! the file's path, so extraction stays a pure function of (path, text) and a page's ids never
+//! depend on another file. Never a line, a generated number or a content hash.
+//!
+//! **References.** Each `@slug` property value becomes one [`UnresolvedRef`] from the owning
+//! component, at the token's exact site, whose `raw_name` carries the target kind and scope (see
+//! [`wicked_estate_core::refs::apexlang_ref`]). The APEXlang resolver in `wicked-estate-resolve`
+//! binds them; no name-based tier ever sees them.
+
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
+use serde::Deserialize;
+use streaming_iterator::StreamingIterator;
+use tree_sitter::{Parser, Query, QueryCursor};
+use wicked_estate_core::refs::apexlang_ref;
+use wicked_estate_core::{
+    Descriptor, Edge, EdgeKind, Error, Extraction, Extractor, Language, Location, Node, NodeKind,
+    ResolutionTier, Result, SourceFile, Span, Suffix, Symbol, SymbolId, UnresolvedRef,
+};
+
+/// Language name (the `languages.toml` row and `LANG_TABLE` entry).
+pub const LANGUAGE: &str = "apexlang";
+/// SymbolId scheme of every APEXlang node.
+pub const SCHEME: &str = "apexlang";
+/// Metadata key holding the APEXlang component kind (`region`, `pageItem`, ...).
+pub const KIND_METADATA_KEY: &str = "apexlang_kind";
+/// Metadata key saying how a node's key was formed: `declared`, `properties` or `positional`.
+pub const IDENTITY_METADATA_KEY: &str = "apexlang_identity";
+
+const DATA_TOML: &str = include_str!("../apexlang.toml");
+
+unsafe extern "C" {
+    fn tree_sitter_apexlang() -> *const ();
+}
+
+/// The vendored APEXlang grammar (`vendor/tree-sitter-apexlang`, compiled by `build.rs`).
+pub const GRAMMAR: tree_sitter_language::LanguageFn =
+    unsafe { tree_sitter_language::LanguageFn::from_raw(tree_sitter_apexlang) };
+
+/// The extractor's data (`apexlang.toml`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApexlangData {
+    layout: Layout,
+    #[serde(default)]
+    node_kind: HashMap<String, String>,
+    #[serde(default)]
+    identity: Identity,
+    #[serde(rename = "ref", default)]
+    refs: Vec<RefRule>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct Layout {
+    root_dirs: Vec<String>,
+    pages_dir: String,
+    #[serde(default)]
+    container: Vec<Container>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct Container {
+    path: Vec<String>,
+    kind: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct Identity {
+    #[serde(default)]
+    qualifier: HashMap<String, String>,
+    #[serde(default)]
+    keyless: HashMap<String, Vec<String>>,
+}
+
+/// One row of the property -> target table.
+#[derive(Debug, Clone, Deserialize)]
+struct RefRule {
+    owner: String,
+    property: String,
+    target: String,
+    scope: String,
+}
+
+impl ApexlangData {
+    /// Parse a data table (the built-in one is `apexlang.toml`).
+    pub fn parse(toml_src: &str) -> Result<Self> {
+        toml::from_str(toml_src).map_err(|e| Error::Extraction(format!("apexlang.toml: {e}")))
+    }
+
+    /// The table compiled into the binary.
+    pub fn builtin() -> &'static ApexlangData {
+        static DATA: LazyLock<ApexlangData> = LazyLock::new(|| {
+            ApexlangData::parse(DATA_TOML).expect("built-in apexlang.toml must parse")
+        });
+        &DATA
+    }
+
+    /// The row for `(owner, property)`: an exact owner wins over `*`.
+    fn rule(&self, owner: &str, property: &str) -> Option<&RefRule> {
+        self.refs
+            .iter()
+            .find(|r| r.owner == owner && r.property == property)
+            .or_else(|| {
+                self.refs
+                    .iter()
+                    .find(|r| r.owner == "*" && r.property == property)
+            })
+    }
+
+    fn node_kind(&self, kind: &str) -> NodeKind {
+        self.node_kind
+            .get(kind)
+            .and_then(|k| serde_json::from_value(serde_json::Value::String(k.clone())).ok())
+            .unwrap_or_else(|| NodeKind::Other(kind.to_string()))
+    }
+}
+
+/// Where a file sits in its application: the root directory and the container directories
+/// (theme, plugin) between the root and the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppLayout {
+    /// Repo-relative application root (`"."` for the repo root).
+    pub root: String,
+    /// `(kind, id)` of each container directory, outermost first.
+    pub containers: Vec<(String, String)>,
+}
+
+/// The application layout of a repo-relative `.apx` path.
+pub fn app_layout(path: &str, data: &ApexlangData) -> AppLayout {
+    let norm = path.replace('\\', "/");
+    let segs: Vec<&str> = norm.split('/').filter(|s| !s.is_empty()).collect();
+    let dirs = &segs[..segs.len().saturating_sub(1)];
+    let mut root_len = dirs.len();
+    for (i, seg) in dirs.iter().enumerate() {
+        let is_root_dir = data.layout.root_dirs.iter().any(|d| d == seg);
+        let is_pages = *seg == data.layout.pages_dir && i + 1 == dirs.len();
+        if is_root_dir || is_pages {
+            root_len = i;
+            break;
+        }
+    }
+    let root = if root_len == 0 {
+        ".".to_string()
+    } else {
+        dirs[..root_len].join("/")
+    };
+    let rel = &dirs[root_len..];
+    let mut containers = Vec::new();
+    for c in &data.layout.container {
+        if rel.len() < c.path.len() {
+            continue;
+        }
+        let mut id = None;
+        let matched = c
+            .path
+            .iter()
+            .zip(rel.iter())
+            .all(|(pat, seg)| match pat.as_str() {
+                "*" => true,
+                "{id}" => {
+                    id = Some((*seg).to_string());
+                    true
+                }
+                lit => lit == *seg,
+            });
+        // A pattern without `{id}` names a singleton container (id "").
+        if matched {
+            containers.push((c.kind.clone(), id.unwrap_or_default()));
+        }
+    }
+    AppLayout { root, containers }
+}
+
+/// Extracts APEXlang components, `contains` edges and references.
+pub struct ApexlangExtractor {
+    language: tree_sitter::Language,
+    query: Query,
+    data: ApexlangData,
+}
+
+impl ApexlangExtractor {
+    /// The extractor with the built-in grammar, query and data.
+    pub fn new() -> Self {
+        Self::with_data(ApexlangData::builtin().clone())
+    }
+
+    /// One process-wide extractor with the built-in data: the query is compiled once, not per file.
+    pub fn shared() -> &'static ApexlangExtractor {
+        static SHARED: LazyLock<ApexlangExtractor> = LazyLock::new(ApexlangExtractor::new);
+        &SHARED
+    }
+
+    /// The extractor with a caller-supplied data table (same grammar and query).
+    pub fn with_data(data: ApexlangData) -> Self {
+        let language =
+            crate::treesitter::builtin_language(LANGUAGE).expect("apexlang is wired in LANG_TABLE");
+        let query = Query::new(&language, crate::treesitter::builtin_query(LANGUAGE))
+            .expect("queries/apexlang.scm must compile");
+        Self {
+            language,
+            query,
+            data,
+        }
+    }
+}
+
+impl Default for ApexlangExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One component during extraction.
+struct Comp {
+    kind: String,
+    /// Index of the enclosing component, `None` at top level.
+    parent: Option<usize>,
+    symbol: SymbolId,
+}
+
+fn text<'a>(n: tree_sitter::Node, src: &'a [u8]) -> &'a str {
+    n.utf8_text(src).unwrap_or("")
+}
+
+/// The content of a `"quoted"` token, with `\"` and `\\` unescaped.
+fn unquote(raw: &str) -> String {
+    let inner = raw
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(raw);
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(n) = chars.next() {
+                out.push(n);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// A property key or a component id as written: strings unquoted.
+fn name_of(n: tree_sitter::Node, src: &[u8]) -> String {
+    if n.kind() == "string" {
+        unquote(text(n, src))
+    } else {
+        text(n, src).to_string()
+    }
+}
+
+/// A scalar property value as a key part: references lose `@`, strings their quotes.
+fn scalar_value(v: tree_sitter::Node, src: &[u8]) -> Option<String> {
+    match v.kind() {
+        "reference" => Some(text(v, src).trim_start_matches('@').to_string()),
+        "string" => Some(unquote(text(v, src))),
+        "text" => Some(text(v, src).to_string()),
+        _ => None,
+    }
+}
+
+/// The component's own scalar properties by dotted path (groups and object values included,
+/// nested components excluded).
+fn own_properties(comp: tree_sitter::Node, src: &[u8]) -> HashMap<String, String> {
+    fn walk(n: tree_sitter::Node, prefix: &str, src: &[u8], out: &mut HashMap<String, String>) {
+        let mut cur = n.walk();
+        for child in n.named_children(&mut cur) {
+            match child.kind() {
+                "property" => {
+                    let Some(key) = child.child_by_field_name("key") else {
+                        continue;
+                    };
+                    let path = join(prefix, &name_of(key, src));
+                    if let Some(v) = child.child_by_field_name("value") {
+                        if v.kind() == "object" {
+                            walk(v, &path, src, out);
+                        } else if let Some(s) = scalar_value(v, src) {
+                            out.entry(path).or_insert(s);
+                        }
+                    }
+                }
+                "group" => {
+                    if let Some(name) = child.child_by_field_name("name") {
+                        walk(child, &join(prefix, text(name, src)), src, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    walk(comp, "", src, &mut out);
+    out
+}
+
+fn join(prefix: &str, key: &str) -> String {
+    if prefix.is_empty() {
+        key.to_string()
+    } else {
+        format!("{prefix}.{key}")
+    }
+}
+
+/// The property path of a reference inside its owning component, and the owner's tree node.
+fn reference_site<'t>(
+    r: tree_sitter::Node<'t>,
+    src: &[u8],
+) -> Option<(String, tree_sitter::Node<'t>)> {
+    let mut parts = Vec::new();
+    let mut cur = r.parent();
+    while let Some(n) = cur {
+        match n.kind() {
+            "component" => {
+                parts.reverse();
+                return Some((parts.join("."), n));
+            }
+            "property" => {
+                if let Some(k) = n.child_by_field_name("key") {
+                    parts.push(name_of(k, src));
+                }
+            }
+            "group" => {
+                if let Some(k) = n.child_by_field_name("name") {
+                    parts.push(text(k, src).to_string());
+                }
+            }
+            _ => {}
+        }
+        cur = n.parent();
+    }
+    None
+}
+
+fn span_of(n: tree_sitter::Node) -> Span {
+    let s = n.start_position();
+    let e = n.end_position();
+    Span {
+        start_byte: n.start_byte() as u32,
+        end_byte: n.end_byte() as u32,
+        start_line: s.row as u32,
+        start_col: s.column as u32,
+        end_line: e.row as u32,
+        end_col: e.column as u32,
+    }
+}
+
+fn global(descriptors: Vec<Descriptor>) -> SymbolId {
+    Symbol::global(SCHEME, None, descriptors).id()
+}
+
+fn ty(name: String) -> Descriptor {
+    Descriptor::new(name, Suffix::Type)
+}
+
+/// The descriptor of one `(kind, key)` pair; `ordinal` >= 2 marks a positional duplicate.
+fn element(kind: &str, key: &str, ordinal: usize) -> String {
+    let mut e = apexlang_ref::encode(kind);
+    if !key.is_empty() {
+        e.push(':');
+        e.push_str(&apexlang_ref::encode(key));
+    }
+    if ordinal >= 2 {
+        e.push('~');
+        e.push_str(&ordinal.to_string());
+    }
+    e
+}
+
+impl Extractor for ApexlangExtractor {
+    fn languages(&self) -> Vec<Language> {
+        vec![Language::new(LANGUAGE)]
+    }
+
+    fn extract(&self, file: &SourceFile) -> Result<Extraction> {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&self.language)
+            .map_err(|e| Error::Extraction(e.to_string()))?;
+        let tree = parser
+            .parse(file.text.as_bytes(), None)
+            .ok_or_else(|| Error::Extraction(format!("parse failed for {}", file.path)))?;
+        let src = file.text.as_bytes();
+        let language = Language::new(LANGUAGE);
+        let data = &self.data;
+
+        // The application this file belongs to: `<root>/app#` plus any container directories.
+        let layout = app_layout(&file.path, data);
+        let mut base = vec![
+            Descriptor::new(layout.root.clone(), Suffix::Namespace),
+            ty("app".to_string()),
+        ];
+        let app_symbol = global(base.clone());
+        // Virtual ancestors (kind, symbol) of every top-level component, outermost first.
+        let mut virtual_ancestors = vec![("app".to_string(), app_symbol.clone())];
+        for (kind, id) in &layout.containers {
+            base.push(ty(element(kind, id, 1)));
+            virtual_ancestors.push((kind.clone(), global(base.clone())));
+        }
+
+        // ── Collect components, references and fences in document order ──────────────────────
+        let names = self.query.capture_names();
+        let mut comp_nodes: Vec<tree_sitter::Node> = Vec::new();
+        let mut ref_nodes: Vec<tree_sitter::Node> = Vec::new();
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&self.query, tree.root_node(), src);
+        while let Some(m) = matches.next() {
+            for c in m.captures {
+                match names[c.index as usize] {
+                    "apexlang.component" => comp_nodes.push(c.node),
+                    "apexlang.reference" => ref_nodes.push(c.node),
+                    _ => {}
+                }
+            }
+        }
+        comp_nodes.sort_by_key(|n| n.start_byte());
+        comp_nodes.dedup_by_key(|n| n.id());
+        ref_nodes.sort_by_key(|n| n.start_byte());
+        ref_nodes.dedup_by_key(|n| n.id());
+
+        // ── Mint identities top-down ─────────────────────────────────────────────────────────
+        let index_of: HashMap<usize, usize> = comp_nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.id(), i))
+            .collect();
+        let mut comps: Vec<Comp> = Vec::with_capacity(comp_nodes.len());
+        let mut descriptors_of: Vec<Vec<Descriptor>> = Vec::with_capacity(comp_nodes.len());
+        let mut seen: HashMap<(String, String), usize> = HashMap::new();
+        let mut nodes = Vec::with_capacity(comp_nodes.len() + 1);
+        let mut local_edges = Vec::new();
+        let file_symbol = Symbol::file(&file.path).id();
+        let floc = Location::new(&file.path, Span::ZERO);
+
+        for &cn in &comp_nodes {
+            let kind = cn
+                .child_by_field_name("kind")
+                .map(|k| text(k, src).to_string())
+                .unwrap_or_default();
+            let parent = {
+                let mut cur = cn.parent();
+                let mut found = None;
+                while let Some(p) = cur {
+                    if p.kind() == "component" {
+                        found = index_of.get(&p.id()).copied();
+                        break;
+                    }
+                    cur = p.parent();
+                }
+                found
+            };
+            let props = own_properties(cn, src);
+            let declared = cn.child_by_field_name("id").map(|n| name_of(n, src));
+            let (key, identity) = match &declared {
+                Some(id) => {
+                    let key = match data
+                        .identity
+                        .qualifier
+                        .get(&kind)
+                        .and_then(|q| props.get(q))
+                    {
+                        Some(q) => format!("{q}/{id}"),
+                        None => id.clone(),
+                    };
+                    (key, "declared")
+                }
+                None => {
+                    let parts: Vec<&str> = data
+                        .identity
+                        .keyless
+                        .get(&kind)
+                        .map(|ps| {
+                            ps.iter()
+                                .filter_map(|p| props.get(p).map(String::as_str))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    (parts.join("/"), "properties")
+                }
+            };
+
+            let parent_desc: Vec<Descriptor> = match parent {
+                Some(p) => descriptors_of[p].clone(),
+                None => base.clone(),
+            };
+            let is_app = parent.is_none() && kind == "app";
+            let is_container = parent.is_none()
+                && layout
+                    .containers
+                    .last()
+                    .is_some_and(|(ck, cid)| *ck == kind && *cid == key);
+            let (descs, identity) = if is_app {
+                (base[..2].to_vec(), identity)
+            } else if is_container {
+                (base.clone(), identity)
+            } else {
+                let parent_id = global(parent_desc.clone()).0;
+                let count = seen
+                    .entry((parent_id, element(&kind, &key, 1)))
+                    .and_modify(|c| *c += 1)
+                    .or_insert(1);
+                let ordinal = *count;
+                let mut d = parent_desc.clone();
+                d.push(ty(element(&kind, &key, ordinal)));
+                let identity = if ordinal >= 2 || (key.is_empty() && identity == "properties") {
+                    "positional"
+                } else {
+                    identity
+                };
+                (d, identity)
+            };
+            let symbol = global(descs.clone());
+
+            let name = if key.is_empty() { kind.clone() } else { key };
+            let mut node = Node::new(
+                symbol.clone(),
+                data.node_kind(&kind),
+                name,
+                language.clone(),
+                Location::new(&file.path, span_of(cn)),
+            );
+            let decl_line = text(cn, src).lines().next().unwrap_or("");
+            node.signature = Some(decl_line.trim_end_matches('(').trim().to_string());
+            node.metadata
+                .insert(KIND_METADATA_KEY.into(), kind.clone().into());
+            node.metadata
+                .insert(IDENTITY_METADATA_KEY.into(), identity.into());
+            if let Some(label) = props.get("name") {
+                node.metadata
+                    .insert("apexlang_label".into(), label.clone().into());
+            }
+            nodes.push(node);
+
+            // Contains: the file holds every component; a parent component holds its children.
+            local_edges.push(
+                Edge::new(
+                    file_symbol.clone(),
+                    symbol.clone(),
+                    EdgeKind::Contains,
+                    ResolutionTier::Parsed,
+                    "apexlang",
+                )
+                .with_location(floc.clone()),
+            );
+            if let Some(p) = parent {
+                local_edges.push(
+                    Edge::new(
+                        comps[p].symbol.clone(),
+                        symbol.clone(),
+                        EdgeKind::Contains,
+                        ResolutionTier::Parsed,
+                        "apexlang",
+                    )
+                    .with_location(Location::new(&file.path, span_of(cn))),
+                );
+            }
+            comps.push(Comp {
+                kind,
+                parent,
+                symbol,
+            });
+            descriptors_of.push(descs);
+        }
+
+        // ── References ───────────────────────────────────────────────────────────────────────
+        let mut refs = Vec::with_capacity(ref_nodes.len());
+        for rn in ref_nodes {
+            let Some((property, owner_node)) = reference_site(rn, src) else {
+                continue;
+            };
+            let Some(&owner) = index_of.get(&owner_node.id()) else {
+                continue;
+            };
+            let raw = text(rn, src).trim_start_matches('@');
+            let theme_relative = raw.starts_with('/');
+            let slug = raw.trim_start_matches('/');
+            let owner_kind = comps[owner].kind.as_str();
+            let (target, scope) = match data.rule(owner_kind, &property) {
+                Some(rule) if rule.target == apexlang_ref::NO_BIND => {
+                    (apexlang_ref::NO_BIND.to_string(), Some(app_symbol.clone()))
+                }
+                Some(rule) => (
+                    rule.target.clone(),
+                    scope_symbol(&rule.scope, owner, &comps, &virtual_ancestors),
+                ),
+                None if theme_relative => {
+                    (apexlang_ref::NO_BIND.to_string(), Some(app_symbol.clone()))
+                }
+                None => (apexlang_ref::ANY_KIND.to_string(), Some(app_symbol.clone())),
+            };
+            // A scope that does not exist here (a `page`-scoped property outside any page) must
+            // never widen to the application: the ref stays unresolved.
+            let (target, scope) = match scope {
+                Some(s) => (target, s),
+                None => (apexlang_ref::NO_BIND.to_string(), app_symbol.clone()),
+            };
+            let mut r = UnresolvedRef::new(
+                comps[owner].symbol.clone(),
+                apexlang_ref::format(&target, slug, scope.as_str()),
+                EdgeKind::References,
+                Location::new(&file.path, span_of(rn)),
+            );
+            r.hints
+                .insert("apexlang_property".into(), property.clone().into());
+            refs.push(r);
+        }
+
+        nodes.insert(
+            0,
+            Node::new(
+                file_symbol,
+                NodeKind::File,
+                file.path.clone(),
+                language,
+                floc,
+            ),
+        );
+        Ok(Extraction {
+            nodes,
+            local_edges,
+            refs,
+        })
+    }
+}
+
+/// The symbol a reference's target must sit under, per the rule's `scope`; `None` when the scope
+/// does not exist for this owner.
+fn scope_symbol(
+    scope: &str,
+    owner: usize,
+    comps: &[Comp],
+    virtual_ancestors: &[(String, SymbolId)],
+) -> Option<SymbolId> {
+    match scope {
+        "app" => Some(virtual_ancestors[0].1.clone()),
+        "self" => Some(comps[owner].symbol.clone()),
+        "parent" => Some(match comps[owner].parent {
+            Some(p) => comps[p].symbol.clone(),
+            None => virtual_ancestors.last()?.1.clone(),
+        }),
+        kind => {
+            let mut cur = comps[owner].parent;
+            while let Some(i) = cur {
+                if comps[i].kind == kind {
+                    return Some(comps[i].symbol.clone());
+                }
+                cur = comps[i].parent;
+            }
+            virtual_ancestors
+                .iter()
+                .rev()
+                .find(|(k, _)| k == kind)
+                .map(|(_, s)| s.clone())
+        }
+    }
+}
