@@ -226,6 +226,14 @@ fn attach_source(
                 (src, false)
             };
             *total_budget_remaining = total_budget_remaining.saturating_sub(slice.chars().count());
+            // Once per answer that returns stored source text: what redaction does and does not
+            // cover (#405, D1 residuals).
+            if !diag
+                .iter()
+                .any(|d| d == wicked_estate_core::redact::PRIVACY_NOTE)
+            {
+                diag.push(wicked_estate_core::redact::PRIVACY_NOTE.to_string());
+            }
             obj.insert("source".to_string(), json!(slice));
             obj.insert("byte_range".to_string(), byte_range);
             if truncated {
@@ -2921,6 +2929,9 @@ impl RetrievalTool for FetchContent {
                 "FetchContent: source not available for '{id_str}' \
                  (file content not stored or span is zero — re-run 'index' to populate)"
             ));
+        } else {
+            // #405, D1 residuals: what redaction of the returned text does and does not cover.
+            diag.push(wicked_estate_core::redact::PRIVACY_NOTE.to_string());
         }
 
         Ok(RetrievalResult {

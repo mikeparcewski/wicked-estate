@@ -519,3 +519,24 @@ fn postgres_replacement_rolls_back_a_failure_inside_the_transaction() {
         store.replace_edge_supports(&owner, 3, &[]).unwrap();
     }
 }
+
+/// #405: the secret backstop on a live Postgres — the same shared suite every backend runs.
+#[test]
+fn postgres_store_satisfies_secret_backstop_contract() {
+    let url = match std::env::var("TEST_POSTGRES_URL") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("postgres_conformance: TEST_POSTGRES_URL not set — skipping");
+            return;
+        }
+    };
+    let _guard = PG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lease = PgTestLease::acquire(&url);
+
+    drop_all_tables(&url);
+
+    let mut store = wicked_estate_store::PostgresStore::open(&url).expect("open postgres store");
+    wicked_estate_core::conformance::secret_backstop_suite(&mut store);
+}

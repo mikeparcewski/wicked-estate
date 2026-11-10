@@ -188,6 +188,7 @@ where
 
     json!({
         "nodes": out_nodes,
+        "privacy": wicked_estate_core::redact::PRIVACY_NOTE,
         "summary": {
             "selector": selector,
             "requested": requested,

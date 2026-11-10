@@ -374,6 +374,27 @@ fn write_canonical(value: &serde_json::Value, out: &mut String) {
 /// De-duplicate a submitted fact list. The result is sorted by `(key, fact_id)`, so it is a pure
 /// function of the input *set*. One `fact_id` on one key carrying two different contents is
 /// rejected: the producer asserted two things under one name.
+/// The secret backstop (#405) for a support set: the fact id and the edge metadata of each fact
+/// pass [`crate::redact::scrub`]. Deterministic, so a replayed set scrubs to the same ids and the
+/// generation rules still hold. Borrows when nothing changed.
+pub fn scrub_facts(facts: &[SupportFact]) -> Result<std::borrow::Cow<'_, [SupportFact]>> {
+    let mut out: Option<Vec<SupportFact>> = None;
+    for (i, f) in facts.iter().enumerate() {
+        let id = crate::redact::scrub(&f.fact_id);
+        let edge = crate::redact::scrub_edge(&f.edge);
+        if matches!(id, std::borrow::Cow::Owned(_)) || edge.is_some() {
+            let fact = SupportFact::new(id.into_owned(), edge.unwrap_or_else(|| f.edge.clone()))?;
+            out.get_or_insert_with(|| facts[..i].to_vec()).push(fact);
+        } else if let Some(o) = out.as_mut() {
+            o.push(f.clone());
+        }
+    }
+    Ok(match out {
+        Some(v) => std::borrow::Cow::Owned(v),
+        None => std::borrow::Cow::Borrowed(facts),
+    })
+}
+
 pub fn normalize_facts(facts: &[SupportFact]) -> Result<Vec<SupportFact>> {
     let mut by_id: BTreeMap<(EdgeKey, String), SupportFact> = BTreeMap::new();
     for submitted in facts {

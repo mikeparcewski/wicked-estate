@@ -290,6 +290,11 @@ Per the project's "every done needs a still-not-done" rule:
   `semantic-embedders` lane, not the default suite.
 - Niche mainframe modeling gaps (VSAM AIX, RECFM, COMP-3 usage metadata) and a few deferred languages
   (nim, pony, asm, odin).
+- **Secret redaction** ([docs/secret-redaction.md](./docs/secret-redaction.md)): committed config
+  values are default-deny and code literals are masked where a secret is detected. Not detected: a
+  secret under an innocent name in code, or one placed inside a hostname or repository owner. A
+  masked value's length is visible. Memory and knowledge stores are not redacted yet (#406).
+  Stores written before 0.33.0 are cleaned on their next `index` or by `wicked-estate redact-store`.
 
 ## Docs
 
@@ -299,7 +304,7 @@ mandatory re-index runbook)** · [docs/ENGINE-CONTRACT.md](./docs/ENGINE-CONTRAC
 (invariants) · [docs/agent-behavior-rules.md](./docs/agent-behavior-rules.md) (the runtime contract)
 · [docs/adr/](./docs/adr/) (decisions; [ADR-009](./docs/adr/ADR-009-intent-routed-lsp.md) defines
 the intent-routed LSP edit plane) · [docs/plan/WAVE-PLAN.md](./docs/plan/WAVE-PLAN.md) (tracker)
-· [RELEASING.md](./RELEASING.md) (publishing to crates.io) · [docs/DESIGN-NOTES.md](./docs/DESIGN-NOTES.md)
+· [docs/secret-redaction.md](./docs/secret-redaction.md) (what is stored, migrating old stores, residuals) · [RELEASING.md](./RELEASING.md) (publishing to crates.io) · [docs/DESIGN-NOTES.md](./docs/DESIGN-NOTES.md)
 (the design principles behind the engine).
 
 ## License

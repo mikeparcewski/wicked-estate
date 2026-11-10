@@ -57,6 +57,9 @@ excel-rules = ["wicked-estate-extract/excel-rules"] # Excel/XLSX decision tables
 
 [dev-dependencies]
 tempfile = "3"
+# #405 BUILD-GATE: scan every table / blob of the store (same rusqlite as the store crate).
+rusqlite = { version = "0.32", features = ["bundled"] }
+zstd = "0.13"
 # tests/lineage_cli.rs pins `wicked-estate lineage --json` to the MCP `Lineage` response, so the
 # test needs both the binary (only this crate gets CARGO_BIN_EXE_wicked-estate) and the MCP handler.
 # Path-only on purpose: wicked-estate-mcp depends on this crate, so a versioned pin could never be

@@ -203,3 +203,16 @@ fn factory_opens_sqlite_and_rejects_unbuilt_backends() {
         "surreal is not built yet"
     );
 }
+
+/// #405: the secret backstop on every in-tree backend.
+#[test]
+fn sqlite_secret_backstop() {
+    let mut store = wicked_estate_store::SqliteStore::in_memory().expect("in-memory sqlite");
+    conformance::secret_backstop_suite(&mut store);
+}
+
+#[test]
+fn memstore_secret_backstop() {
+    let mut store = MemStore::new();
+    conformance::secret_backstop_suite(&mut store);
+}

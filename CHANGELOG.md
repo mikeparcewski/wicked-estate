@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Security
+- **Committed secret values are no longer stored (estate#405).** `index` stored the full text of
+  every committed file in `content`, the first line of each definition as its signature, and
+  those signatures in the full-text index, so a compose password, a Helm `values.yaml` password, a
+  Kubernetes `Secret` value or a credential in a code literal could be returned by search, source
+  and MCP answers. Each file's text is now redacted BEFORE it is parsed, with same-length masks
+  (spans stay valid), so the stored text, signatures, the full-text index and unresolved names all
+  come from redacted text. Config formats (JSON, YAML, TOML, HCL/tfvars, INI, Dockerfile) are
+  default-deny: only booleans, references and trusted schema fields are kept, with C2 shape rules
+  for env-style URL/host/port values. In code, literals with a token shape or bound to a
+  secret-named variable are masked. Credential files (`.env`, `.npmrc`, private keys, kubeconfigs,
+  `credentials*`) are never indexed. Every store write also scrubs known token shapes from every
+  free-text column (annotations, telemetry imports, tfstate ids, support facts, meta). Reads of
+  rule files and evidence documents are confined to the repository root. Rules:
+  `crates/wicked-estate-extract/secret-rules.toml`; guide: `docs/secret-redaction.md`.
+- **Existing stores are cleaned.** A store written before this release is migrated in place on
+  its next `index`, or now with the new `wicked-estate redact-store --db <path>`. Until then,
+  reads withhold its source text, signatures and docs and print `REDACTION-PENDING:`. The
+  migration re-redacts stored texts, re-slices signatures, scrubs every other text column, drops
+  the query cache, rebuilds the full-text index, then truncates the WAL and `VACUUM`s. Backups
+  made before it are outside its reach.
+- **Residuals, stated in every answer that returns stored source text:** a secret under an
+  innocent name in code, and a secret inside a hostname or repository owner, are not detected. A
+  masked value's length is visible. Memory and knowledge stores are not redacted yet (estate#406).
+
 ### Fixed
 - **A linked worktree of a local repository with no remote is the same repository (estate#401).**
   The same-repo guard compared roots by path when neither side had an `origin`. So wicked-core's
