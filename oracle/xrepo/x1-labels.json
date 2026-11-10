@@ -1,0 +1,3791 @@
+[
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/bin/npm-prefix.js",
+  "to_file": "npm-cli/workspaces/config/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/config",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/access.js",
+  "to_file": "npm-cli/workspaces/libnpmaccess/lib/index.js",
+  "identity": "path",
+  "package": "libnpmaccess",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/audit.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/cache.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/ci.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/dedupe.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/deprecate.js",
+  "to_file": "npm-cli/workspaces/libnpmaccess/lib/index.js",
+  "identity": "path",
+  "package": "libnpmaccess",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/diff.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/diff.js",
+  "to_file": "npm-cli/workspaces/libnpmdiff/lib/index.js",
+  "identity": "path",
+  "package": "libnpmdiff",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/exec.js",
+  "to_file": "npm-cli/workspaces/libnpmexec/lib/index.js",
+  "identity": "path",
+  "package": "libnpmexec",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/explain.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/fund.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/fund.js",
+  "to_file": "npm-cli/workspaces/libnpmfund/lib/index.js",
+  "identity": "path",
+  "package": "libnpmfund",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/init.js",
+  "to_file": "npm-cli/workspaces/libnpmexec/lib/index.js",
+  "identity": "path",
+  "package": "libnpmexec",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/install.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/link.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/ls.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/org.js",
+  "to_file": "npm-cli/workspaces/libnpmorg/lib/index.js",
+  "identity": "path",
+  "package": "libnpmorg",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/outdated.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/pack.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/pack.js",
+  "to_file": "npm-cli/workspaces/libnpmpack/lib/index.js",
+  "identity": "path",
+  "package": "libnpmpack",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/patch.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/prune.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/publish.js",
+  "to_file": "npm-cli/workspaces/libnpmpack/lib/index.js",
+  "identity": "path",
+  "package": "libnpmpack",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/publish.js",
+  "to_file": "npm-cli/workspaces/libnpmpublish/lib/index.js",
+  "identity": "path",
+  "package": "libnpmpublish",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/query.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/rebuild.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/sbom.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/search.js",
+  "to_file": "npm-cli/workspaces/libnpmsearch/lib/index.js",
+  "identity": "path",
+  "package": "libnpmsearch",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/team.js",
+  "to_file": "npm-cli/workspaces/libnpmteam/lib/index.js",
+  "identity": "path",
+  "package": "libnpmteam",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/uninstall.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/unpublish.js",
+  "to_file": "npm-cli/workspaces/libnpmaccess/lib/index.js",
+  "identity": "path",
+  "package": "libnpmaccess",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/unpublish.js",
+  "to_file": "npm-cli/workspaces/libnpmpublish/lib/index.js",
+  "identity": "path",
+  "package": "libnpmpublish",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/update.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/commands/version.js",
+  "to_file": "npm-cli/workspaces/libnpmversion/lib/index.js",
+  "identity": "path",
+  "package": "libnpmversion",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/npm.js",
+  "to_file": "npm-cli/workspaces/config/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/config",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/utils/allow-scripts-cmd.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/utils/installed-deep.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/utils/oidc.js",
+  "to_file": "npm-cli/workspaces/libnpmaccess/lib/index.js",
+  "identity": "path",
+  "package": "libnpmaccess",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/utils/reify-output.js",
+  "to_file": "npm-cli/workspaces/libnpmfund/lib/index.js",
+  "identity": "path",
+  "package": "libnpmfund",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/utils/update-workspaces.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/lib/utils/validate-lockfile.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/mock-registry/lib/index.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/scripts/bundle-and-gitignore-deps.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/scripts/dependency-graph.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/smoke-tests/test/fixtures/setup.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/bin/npx-cli.js",
+  "to_file": "npm-cli/mock-globals/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-globals",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/fixtures/mock-npm.js",
+  "to_file": "npm-cli/mock-globals/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-globals",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/fixtures/mock-npm.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/fixtures/mock-oidc.js",
+  "to_file": "npm-cli/mock-globals/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-globals",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/cli/exit-handler.js",
+  "to_file": "npm-cli/mock-globals/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-globals",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/cli/update-notifier.js",
+  "to_file": "npm-cli/mock-globals/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-globals",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/cli/update-notifier.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/cli/validate-engines.js",
+  "to_file": "npm-cli/mock-globals/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-globals",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/access.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/approve-scripts.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/audit.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/cache.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/dedupe.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/deprecate.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/diff.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/doctor.js",
+  "to_file": "npm-cli/mock-globals/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-globals",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/exec.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/find-dupes.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/link.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/login.js",
+  "to_file": "npm-cli/mock-globals/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-globals",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/login.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/logout.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/outdated.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/owner.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/pack.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/patch.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/ping.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/publish.js",
+  "to_file": "npm-cli/mock-globals/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-globals",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/publish.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/search.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/stage/approve.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/stage/download.js",
+  "to_file": "npm-cli/mock-globals/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-globals",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/stage/download.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/stage/download.js",
+  "to_file": "npm-cli/workspaces/libnpmpack/lib/index.js",
+  "identity": "path",
+  "package": "libnpmpack",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/stage/index.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/stage/list.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/stage/reject.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/stage/view.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/token.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/trust/circleci.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/trust/github.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/trust/gitlab.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/trust/list.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/trust/revoke.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/undeprecate.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/unpublish.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/version.js",
+  "to_file": "npm-cli/mock-globals/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-globals",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/commands/whoami.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/docs.js",
+  "to_file": "npm-cli/docs/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/docs",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/npm.js",
+  "to_file": "npm-cli/mock-globals/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-globals",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/trust-cmd.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/utils/display.js",
+  "to_file": "npm-cli/mock-globals/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-globals",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/utils/error-message.js",
+  "to_file": "npm-cli/mock-globals/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-globals",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/utils/oidc.js",
+  "to_file": "npm-cli/mock-globals/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-globals",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/utils/strict-allow-scripts-preflight.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/test/lib/utils/tar.js",
+  "to_file": "npm-cli/workspaces/libnpmpack/lib/index.js",
+  "identity": "path",
+  "package": "libnpmpack",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/arborist/test/arborist/audit.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/arborist/test/arborist/build-ideal-tree.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/arborist/test/arborist/deduper.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/arborist/test/arborist/package-extensions.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/arborist/test/arborist/pruner.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/arborist/test/arborist/rebuild.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/arborist/test/arborist/reify-npm-extension.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/arborist/test/arborist/reify-package-extensions.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/arborist/test/arborist/reify-patch.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/arborist/test/arborist/reify.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/arborist/test/audit-report.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/config/test/definitions/definitions.js",
+  "to_file": "npm-cli/mock-globals/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-globals",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/config/test/set-envs.js",
+  "to_file": "npm-cli/mock-globals/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-globals",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/libnpmaccess/test/index.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/libnpmdiff/lib/tarball.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/libnpmexec/lib/index.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/libnpmexec/test/fixtures/setup.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/libnpmexec/test/local.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/libnpmfund/lib/index.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/libnpmpack/lib/index.js",
+  "to_file": "npm-cli/workspaces/arborist/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/arborist",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/libnpmpublish/test/publish.js",
+  "to_file": "npm-cli/mock-globals/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-globals",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/libnpmpublish/test/publish.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "npm-cli",
+  "from_file": "npm-cli/workspaces/libnpmpublish/test/unpublish.js",
+  "to_file": "npm-cli/mock-registry/lib/index.js",
+  "identity": "path",
+  "package": "@npmcli/mock-registry",
+  "label": "true",
+  "reason": "node entry"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/benches/fs.rs",
+  "to_file": "tokio/tokio-stream/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-stream",
+  "label": "true",
+  "reason": "cargo resolves benches -> tokio-stream (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/benches/fs.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves benches -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/benches/rt_multi_threaded.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves benches -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/benches/signal.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves benches -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/benches/spawn_blocking.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves benches -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/benches/sync_mpsc.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves benches -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/benches/sync_notify.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves benches -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/benches/sync_semaphore.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves benches -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/chat.rs",
+  "to_file": "tokio/tokio-stream/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-stream",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio-stream (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/connect-tcp.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/connect-udp.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/custom-executor-tokio-context.rs",
+  "to_file": "tokio/tokio-util/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-util",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio-util (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/custom-executor-tokio-context.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/custom-executor.rs",
+  "to_file": "tokio/tokio-util/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-util",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio-util (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/custom-executor.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/dump.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/echo-tcp.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/echo-udp.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/graceful-shutdown.rs",
+  "to_file": "tokio/tokio-util/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-util",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio-util (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/hello_world.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/named-pipe-multi-client.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/named-pipe-ready.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/named-pipe.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/print_each_packet.rs",
+  "to_file": "tokio/tokio-stream/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-stream",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio-stream (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/print_each_packet.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/proxy.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/tinydb.rs",
+  "to_file": "tokio/tokio-stream/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-stream",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio-stream (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/tinydb.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/tinyhttp.rs",
+  "to_file": "tokio/tokio-stream/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-stream",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio-stream (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/udp-client.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/udp-codec.rs",
+  "to_file": "tokio/tokio-stream/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-stream",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio-stream (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/udp-codec.rs",
+  "to_file": "tokio/tokio-util/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-util",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio-util (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/examples/udp-codec.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves examples -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tests-build/src/lib.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tests-build -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tests-build/tests/pass/use_builder_outer.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tests-build -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tests-integration/tests/process_stdio.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tests-integration -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tests-integration/tests/process_stdio.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tests-integration -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tests-integration/tests/rt_yield.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tests-integration -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/src/empty.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/src/iter.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/src/once.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/src/stream_ext/timeout_repeating.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/src/wrappers/broadcast.rs",
+  "to_file": "tokio/tokio-util/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-util",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio-util (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/src/wrappers/broadcast.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/src/wrappers/mpsc_bounded.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/src/wrappers/mpsc_unbounded.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/src/wrappers/signal_unix.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/src/wrappers/watch.rs",
+  "to_file": "tokio/tokio-util/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-util",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio-util (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/src/wrappers/watch.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/tests/chunks_timeout.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/tests/chunks_timeout.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/tests/join_set_stream.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/tests/mpsc_bounded_stream.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/tests/mpsc_unbounded_stream.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/tests/stream_chunks_timeout.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/tests/stream_chunks_timeout.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/tests/stream_fused.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/tests/stream_merge.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/tests/stream_panic.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/tests/time_throttle.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/tests/watch.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-stream/tests/watch.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-stream -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-test/src/io.rs",
+  "to_file": "tokio/tokio-stream/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-stream",
+  "label": "true",
+  "reason": "cargo resolves tokio-test -> tokio-stream (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-test/src/io.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-test -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-test/src/lib.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-test -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-test/src/task.rs",
+  "to_file": "tokio/tokio-stream/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-stream",
+  "label": "true",
+  "reason": "cargo resolves tokio-test -> tokio-stream (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-test/tests/task.rs",
+  "to_file": "tokio/tokio-stream/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-stream",
+  "label": "true",
+  "reason": "cargo resolves tokio-test -> tokio-stream (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/src/codec/framed_read.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/src/codec/framed_write.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/src/io/read_buf.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/src/io/reader_stream.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/src/io/write_all_vectored.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/src/sync/mpsc.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/src/sync/tests/loom_cancellation_token.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/src/task/join_map.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/src/task/spawn_pinned.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/compat.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/context.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/framed.rs",
+  "to_file": "tokio/tokio-stream/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-stream",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio-stream (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/framed.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/framed_read.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/framed_write.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/future.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/io_reader_stream.rs",
+  "to_file": "tokio/tokio-stream/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-stream",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio-stream (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/io_simplex.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/io_sink_writer.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/io_stream_reader.rs",
+  "to_file": "tokio/tokio-stream/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-stream",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio-stream (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/io_stream_reader.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/io_write_all_vectored.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/length_delimited.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/mpsc.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/mpsc.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/panic.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/panic.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/spawn_pinned.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/sync_cancellation_token.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/task_join_map.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/task_join_queue.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/task_tracker.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/tracing_task.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/udp.rs",
+  "to_file": "tokio/tokio-stream/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-stream",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio-stream (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio-util/tests/udp.rs",
+  "to_file": "tokio/tokio/src/lib.rs",
+  "identity": "path",
+  "package": "tokio",
+  "label": "true",
+  "reason": "cargo resolves tokio-util -> tokio (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/src/runtime/tests/loom_multi_thread.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/src/sync/tests/atomic_waker.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/src/sync/tests/loom_mpsc.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/buffered.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/fs.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/fs_file.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/fs_uring_cancel_open.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/fs_uring_completed_then_dropped_before_repoll.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/fs_uring_read.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/fs_uring_rename.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/fs_uring_runtime_shutdown.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/fs_uring_statx.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/fs_uring_statx_fd_leak_test.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/io_buf_reader.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/io_buf_writer.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/io_chain.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/io_copy.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/io_fill_buf.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/io_lines.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/io_poll_aio.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/io_read.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/io_read_buf.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/io_read_exact.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/io_read_to_end.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/io_read_to_string.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/io_take.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/io_write.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/io_write_all.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/io_write_all_buf.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/io_write_buf.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/macros_select.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/macros_test.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/net_lookup_host.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/net_unix_pipe.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/process_issue_2174.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/process_kill_on_drop.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/process_smoke.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/signal_ctrl_c.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/signal_realtime.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/signal_usr1.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/support/mpsc_stream.rs",
+  "to_file": "tokio/tokio-stream/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-stream",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-stream (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/sync_barrier.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/sync_broadcast.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/sync_mpsc.rs",
+  "to_file": "tokio/tokio-stream/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-stream",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-stream (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/sync_mutex.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/sync_mutex_owned.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/sync_notify.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/sync_notify_owned.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/sync_rwlock.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/sync_watch.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/task_blocking.rs",
+  "to_file": "tokio/tokio-stream/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-stream",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-stream (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/task_blocking.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/task_yield_now.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/tcp_accept.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/tcp_connect.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/tcp_echo.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/tcp_peek.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/tcp_shutdown.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/tcp_socket.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/tcp_stream.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/time_alt.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/time_pause.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/time_rt.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/tracing_time.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/udp.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "tokio",
+  "from_file": "tokio/tokio/tests/unix_shutdown.rs",
+  "to_file": "tokio/tokio-test/src/lib.rs",
+  "identity": "path",
+  "package": "tokio-test",
+  "label": "true",
+  "reason": "cargo resolves tokio -> tokio-test (local)"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/api/chat-workflow.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/api/delivery-index.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/api/discovery-source.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/api/recording.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/api/routes.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/api/seat-container-login.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/api/seat-work-default.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/api/watch-routes.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/campaign/boot-resume.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/core/adapter.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/core/builtin-catalog.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/core/inventory-claim.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/core/qe-acceptance-setting.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/core/types.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/core/vault-bin.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/decisions/derive.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/decisions/types.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/evals/types.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/insights/review-service.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/insights/routes.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/insights/run-facts.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/interactive/chat-events.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/interactive/doc-checks-routes.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/interactive/landing-record.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/interactive/protected-edits.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/interactive/proxy-routes.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/learn/schedule-store.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/learn/scheduler.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/learn/topics.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/learnings/extract.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/learnings/service.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/projects/repo-watch.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/qe/acceptance.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/qe/walkthrough-acceptance.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/schedules/scheduler.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/setup/known.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/skills/base-skill.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/watch/emit.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/watch/loader.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/watch/registry.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/watch/ring.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/watch/router.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/src/watch/types.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/audit-since-route.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/c6-launch-seams.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/chat-artifacts-route.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/chat-job-opt-in-seats.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/chat-job-power.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/chat-proposals-route.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/chat-seed-open.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/chat-system-routes.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/chat-workflow.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/demo-export.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/diagnostics-floor-cache.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/diagnostics-route.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/doc-landing-record.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/fixtures/team-events.fixtures.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/gate-amend-intent.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/gate-arms.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/gate-escalation-actions.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/gate-history.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/gate-operator-judgment.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/gate-ord-route.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/governance-mkdir-expectation.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/governance-store-e2e.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/integration/watch-routes.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/interactive-review-events.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/needs-rule.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/nerve-tone.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/no-eligible-seat-route.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/plan-refusal-wire-types.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/repo-watch-routes.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/resolve-route.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/resume-terminal-refusal.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/run-learnings.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/standing-orders-journey.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/state-home-routes.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/system-route.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/system-snapshot.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/team-events.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/walkthrough-acceptance.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/walkthrough-routes.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/walkthrough-storyline.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/watch-checks-ask-c3.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/watch-checks-w5b.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/watch-checks-w7.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/watch-checks-w8.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/watch-registry.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/watch-wire-types.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "crew/packages/crew/tests/wire-contract.test.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "path",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "declared types entry"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/capture.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/chat-wire.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/chatHistory-wire.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/client.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/considered.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/decisions.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/deliveryFreeze.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/demo.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/docChecks.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/editors.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/gateHistory.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/governanceReplay.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/mcp-wire.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/mcpInspect.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/memory.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/product.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/proposals.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/seatRecord.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/skills-wire.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/sourceAgents-wire.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/sources.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/standingOrders.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/steering.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/teamPlan.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/types.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/walkthrough.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/watch-wire.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/wave6-wire.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/api/wiki.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/board/slashCatalog.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/board/understandModel.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/components/session/Composer.tsx",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/store/catalogV2.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/src/store/inlineStart.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/tests/RowWriteDialog.test.tsx",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/tests/commandList.e2.test.tsx",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/tests/sourcesFixtures.ts",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ },
+ {
+  "case": "c6",
+  "from_file": "studio/tests/understandPage.test.tsx",
+  "to_file": "crew/packages/crew-api-types/index.d.ts",
+  "identity": "registry-source",
+  "package": "wicked-crew-api-types",
+  "label": "true",
+  "reason": "registry copy of the provider package"
+ }
+]

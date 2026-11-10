@@ -1,0 +1,48 @@
+# Package ecosystems the project linker reads (DES-S1 §2.1, slice X1). Rules as data: the linker in
+# src/link.rs is generic; manifest names, dependency tables, entry pointers and the languages that
+# may import an ecosystem's packages live here. Go waits for X4b (go.mod text is not stored yet).
+#
+# Provider identity is decided per declared dependency, in this order, and recorded on every link:
+#   path            a `file:` / `link:` / `workspace:` spec, a cargo `path =`, a uv / poetry `path`
+#   git-source      the lockfile's (or the spec's) git URL equals the provider label's recorded remote
+#   registry-source (npm only) the INSTALLED package.json names the provider's repository and is bound
+#                   to the lockfile entry (version, and resolved + integrity when the installed-tree
+#                   record exists; otherwise `registry-source(version-only)`)
+# No provenance -> boundary `dep:provider-unverified` (a "possible" item, never an edge). An undeclared
+# import -> `dep:undeclared` with the provider as candidate, never linked (operator decision D5).
+
+[[ecosystem]]
+name = "npm"
+languages = ["typescript", "tsx", "javascript"]
+file_ext = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]
+manifest = "package.json"
+dep_tables = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]
+lockfile = "package-lock.json"
+installed_tree = "node_modules/.package-lock.json"
+# Entry pointers, most specific first.
+entries = ["types", "typings", "module", "main"]
+path_protocols = ["file:", "link:", "workspace:"]
+alias_protocol = "npm:"
+git_protocols = ["git+", "git:", "github:", "gitlab:", "bitbucket:"]
+# Specifiers that are never packages.
+builtin_prefixes = ["node:", "bun:", "http:", "https:", "data:", "virtual:"]
+
+[[ecosystem]]
+name = "cargo"
+languages = ["rust"]
+file_ext = ["rs"]
+manifest = "Cargo.toml"
+dep_tables = ["dependencies", "dev-dependencies", "build-dependencies"]
+# First path segments of a `use` that are never external crates.
+local_roots = ["crate", "self", "super", "std", "core", "alloc", "proc_macro", "test"]
+
+[[ecosystem]]
+name = "python"
+languages = ["python"]
+file_ext = ["py", "pyi"]
+manifest = "pyproject.toml"
+
+# Repository-URL identity: hosts whose repositories are exactly `owner/repo`. Every other host keeps
+# the whole repository path (GitLab subgroups: `group/sub/a` and `group/sub/b` are different repos).
+[identity]
+two_level_hosts = ["github.com", "bitbucket.org"]

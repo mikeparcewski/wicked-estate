@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+### Added
+- **Cross-repo package links: `wicked-estate link` (slice X1 of the cross-repo design).** In a
+  project database of `--repo`-labelled repos, `link --project <id> --labels a,b,...` writes
+  file-level `imports` links from a file in one repo to the entry file of a package another member
+  repo provides (npm, cargo, python). Links come from package IDENTITY (`path`, `git-source`, or
+  `registry-source` through the installed `node_modules/<pkg>/package.json` bound to the lockfile),
+  never from names. Everything else is a reported "possible" item with a one-line reason
+  (`dep:provider-unverified`, `dep:undeclared`, `dep:override`, `dep:patched`,
+  `link:entry-unmapped`, ...). The links and their validation record publish in one transaction;
+  an unchanged input replays; a member mid-index makes the run publish nothing. One project per
+  database. `link --status` reports the generation and staleness.
+- **Crossings in answers.** `blast-radius` (CLI `--json` and MCP) carries `crossings` (capped at 20,
+  with `crossings_total`), each with the link's evidence and rank `package-manifest`, plus
+  `via_crossing` per dependent; `path` carries the crossings on its route. The CLI blast radius also
+  carries the per-project `link` state with a member-wide coverage summary. Text mode prints
+  `crossing:` and `LINK-STALE:` lines.
+- **One writer per database.** Every write command (including each `watch` index pass) takes
+  `<db>.writer.lock`, keyed by the canonical database path; a second writer waits, then refuses
+  with `WRITER-BUSY` instead of interleaving. `index` publishes a per-label `graph_gen` and leaves
+  an `indexing` marker on a failed run, so link answers say `incomplete`.
+- Guide: `docs/cross-repo-links.md`.
+
+### Fixed
+- **Secret redaction no longer breaks empty containers (0.33.0, #405).** An empty object or array
+  in an untrusted position (`"": {}` in a lockfile, `"scripts": {}`, `a: {}` in YAML) was masked
+  like a value (`"": RE`), so the stored JSON no longer parsed: the linker could not read such a
+  manifest or lockfile. Nothing leaked (it over-masked). The first index under this version
+  re-extracts every file (the binary version changed), which repairs stored text.
+
+### Deprecated
+- `cross-graph` (name matching across separate databases). It prints a notice and keeps working
+  until the governed read fences drop it.
+
 ## [0.33.0] — 2026-11-10
 
 Minor: committed secret values are no longer stored (#405), and mainframe links that were dropped or
