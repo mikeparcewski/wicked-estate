@@ -38,16 +38,22 @@ impl Resolver for DynamicCallResolver {
             let Some(name) = r.raw_name.strip_prefix(COBOL_DYNAMIC_CALL_PREFIX) else {
                 continue;
             };
+            // A program is a Module of a language that compiles to a load module. A JCL JOB or
+            // PROC is a Module too, but nothing CALLs it.
             let candidates: Vec<_> = index
                 .by_name(name)
                 .into_iter()
-                .filter(|n| n.kind == NodeKind::Module)
+                .filter(|n| n.kind == NodeKind::Module && n.language.as_str() != "jcl")
                 .filter(wicked_estate_core::is_structural_symbol)
-                .filter(|n| n.symbol != r.from)
                 .collect();
+            // Uniqueness first, self second: two programs of that name are ambiguous even when one
+            // of them is the caller.
             let [only] = candidates.as_slice() else {
                 continue;
             };
+            if only.symbol == r.from {
+                continue;
+            }
             let mut edge = Edge::new(
                 r.from.clone(),
                 only.symbol.clone(),
@@ -143,6 +149,24 @@ mod tests {
                 .is_empty()
         );
         let only_field = Idx(vec![field]);
+        let jcl_job = Idx(vec![module("jcl", "PRICEPGM", "jcl")]);
+        assert!(
+            DynamicCallResolver
+                .resolve(&[dyn_ref("PRICEPGM")], &jcl_job)
+                .unwrap()
+                .is_empty()
+        );
+        // The caller and another program share the name: ambiguous, not "the other one".
+        let mut caller = module("t", "ORDPGM", "cobol");
+        caller.name = "PRICEPGM".into();
+        caller.symbol = Symbol::synthetic("t", "ORDPGM").id();
+        let with_self = Idx(vec![caller, module("b", "PRICEPGM", "hlasm")]);
+        assert!(
+            DynamicCallResolver
+                .resolve(&[dyn_ref("PRICEPGM")], &with_self)
+                .unwrap()
+                .is_empty()
+        );
         assert!(
             DynamicCallResolver
                 .resolve(&[dyn_ref("PRICEPGM")], &only_field)

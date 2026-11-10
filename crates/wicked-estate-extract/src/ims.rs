@@ -87,14 +87,21 @@ impl Extractor for ImsExtractor {
 
         // The PSB node: named by PSBGEN PSBNAME= (the macro ends the PSB source, so look ahead),
         // else the file stem; emitted on the first PCB/SENSEG.
-        let psb_name = file
-            .text
-            .lines()
-            .filter(|l| !l.starts_with('*'))
-            .find_map(|l| {
-                let toks: Vec<&str> = l.split_whitespace().collect();
+        let cards: Vec<&str> = file.text.lines().filter(|l| !l.starts_with('*')).collect();
+        let psb_name = (0..cards.len())
+            .find_map(|k| {
+                // PSBGEN's operands may continue on the next cards (`PSBGEN LANG=COBOL,` then
+                // `PSBNAME=ORDPSB`), so read the macro card and up to three continuations.
+                let toks: Vec<&str> = cards[k].split_whitespace().collect();
                 let i = toks.iter().position(|t| t.eq_ignore_ascii_case("PSBGEN"))?;
-                kw_value(toks.get(i + 1)?, "PSBNAME")
+                let mut ops = toks.get(i + 1).copied().unwrap_or("").to_string();
+                for cont in cards.iter().skip(k + 1).take(3) {
+                    if !ops.ends_with(',') {
+                        break;
+                    }
+                    ops.push_str(cont.split_whitespace().next().unwrap_or(""));
+                }
+                kw_value(&ops, "PSBNAME")
             })
             .unwrap_or_else(|| {
                 let base = file.path.rsplit(['/', '\\']).next().unwrap_or(&file.path);
@@ -476,6 +483,20 @@ mod tests {
             .expect("the PSB is a node");
         assert_eq!(acc.from, psb.symbol);
         assert!(ex.refs.iter().all(|r| r.from == psb.symbol));
+    }
+
+    #[test]
+    fn psbgen_psbname_on_a_continuation_card() {
+        let ex = extract_psb(
+            "         PCB   TYPE=DB,DBDNAME=CUSTDB\n\
+                      PSBGEN LANG=COBOL,\n\
+                            PSBNAME=CONTPSB\n",
+        );
+        assert!(
+            ex.nodes
+                .iter()
+                .any(|n| n.kind == NodeKind::Other("ims_psb".to_string()) && n.name == "CONTPSB")
+        );
     }
 
     #[test]

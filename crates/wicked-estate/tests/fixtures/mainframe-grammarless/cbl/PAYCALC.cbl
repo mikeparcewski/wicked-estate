@@ -7,6 +7,8 @@
        DATA DIVISION.
        WORKING-STORAGE SECTION.
        COPY PAYREC.
+      * A copybook named like a program must not hide the program from LINK.
+       COPY STUB.
        01 WS-RATEPGM PIC X(8) VALUE 'RATEPGM'.
        PROCEDURE DIVISION.
        MAIN-PARA.

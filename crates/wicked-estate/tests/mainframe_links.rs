@@ -216,14 +216,20 @@ fn dynamic_call_binds_at_heuristic_and_backfills_when_the_program_appears() {
         .into_iter()
         .map(|n| (n.symbol.clone(), n))
         .collect();
-    let edge = store
+    let to_price: Vec<_> = store
         .all_edges()
         .unwrap()
         .into_iter()
-        .find(|e| {
-            e.kind == EdgeKind::Calls && nodes.get(&e.target).is_some_and(|n| n.name == "PRICEPGM")
-        })
-        .expect("ORDPGM -calls-> PRICEPGM after the back-fill");
+        .filter(|e| e.kind != EdgeKind::Contains)
+        .filter(|e| nodes.get(&e.target).is_some_and(|n| n.name == "PRICEPGM"))
+        .collect();
+    assert_eq!(
+        to_price.len(),
+        1,
+        "only the dynamic-call resolver binds PRICEPGM: {to_price:?}"
+    );
+    let edge = to_price[0].clone();
+    assert_eq!(edge.kind, EdgeKind::Calls);
     assert_eq!(nodes[&edge.source].name, "ORDPGM");
     assert_eq!(edge.resolved_by, "cobol-dynamic-call");
     assert!((edge.confidence.get() - 0.5).abs() < 1e-6, "Heuristic tier");
@@ -235,40 +241,46 @@ fn dynamic_call_binds_at_heuristic_and_backfills_when_the_program_appears() {
     );
 }
 
-/// (source file prefix, edge kind) pairs every grammar-less extractor documents, and the COBOL
-/// supplement's. The guard: each must be stored after indexing the fixture.
-fn documented_edges() -> Vec<(&'static str, EdgeKind)> {
+/// (source file prefix, source node kind, edge kind) triples every grammar-less extractor
+/// documents, and the COBOL supplement's. The guard: each must be stored after indexing the
+/// fixture, from a source of that kind. File-node sources never count: the pipeline adds
+/// File→node `Contains` edges for every grammar-less file, which would mask a dropped
+/// extractor edge.
+fn documented_edges() -> Vec<(&'static str, NodeKind, EdgeKind)> {
     let o = |t: &str| EdgeKind::Other(t.to_string());
+    let k = |t: &str| NodeKind::Other(t.to_string());
     vec![
-        // jcl.rs
-        ("jcl/", EdgeKind::Contains),
-        ("jcl/", EdgeKind::Calls),
-        ("jcl/", o("uses")),
-        // hlasm.rs (CSECT CALL, a CALL before the first CSECT, BMS mapset → map)
-        ("asm/", EdgeKind::Calls),
-        ("bms/", EdgeKind::Contains),
+        // jcl.rs: JOB/PROC → step, step → program/PROC, step / DD binding → dataset
+        ("jcl/", NodeKind::Module, EdgeKind::Contains),
+        ("jcl/", k("step"), EdgeKind::Calls),
+        ("jcl/", k("step"), o("uses")),
+        ("jcl/", k("dd_binding"), o("uses")),
+        // hlasm.rs (CSECT CALL; BMS mapset → map)
+        ("asm/", NodeKind::Module, EdgeKind::Calls),
+        ("bms/", k("bms_mapset"), EdgeKind::Contains),
         // racf.rs + the estate RACF join
-        ("racf/", o("permits")),
-        ("racf/", o("member_of")),
-        ("racf/", o("protects")),
+        ("racf/", k("racf_group"), o("permits")),
+        ("racf/", k("racf_identity"), o("permits")),
+        ("racf/", k("racf_user"), o("member_of")),
+        ("racf/", k("racf_dataset_profile"), o("protects")),
         // ims.rs (DBD and PSB)
-        ("ims/CUSTDBD", EdgeKind::Contains),
-        ("ims/CUSTDBD", o("parent")),
-        ("ims/ORDPSB", o("accesses")),
-        ("ims/ORDPSB", o("sensitive_to")),
+        ("ims/CUSTDBD", k("ims_database"), EdgeKind::Contains),
+        ("ims/CUSTDBD", k("ims_segment"), o("parent")),
+        ("ims/ORDPSB", k("ims_psb"), o("accesses")),
+        ("ims/ORDPSB", k("ims_psb"), o("sensitive_to")),
         // mq.rs
-        ("mq/", o("resolves_to")),
+        ("mq/", k("mq_queue"), o("resolves_to")),
         // cobol_links.rs (+ the tree-sitter COBOL extractor)
-        ("cbl/", EdgeKind::Calls),
-        ("cbl/", EdgeKind::Imports),
-        ("cbl/", EdgeKind::References),
-        ("cbl/", o("reads")),
-        ("cbl/", o("writes")),
-        ("cbl/", o("uses")),
-        ("cpy/", EdgeKind::Contains),
+        ("cbl/", NodeKind::Module, EdgeKind::Calls),
+        ("cbl/", NodeKind::Module, EdgeKind::Imports),
+        ("cbl/", NodeKind::Module, EdgeKind::References),
+        ("cbl/", NodeKind::Module, o("reads")),
+        ("cbl/", NodeKind::Module, o("writes")),
+        ("cbl/", NodeKind::Module, o("uses")),
+        ("cpy/", k("copybook"), EdgeKind::Contains),
         // drl.rs, blaze_brl.rs
-        ("rules/lending.drl", EdgeKind::Contains),
-        ("rules/account.brl", EdgeKind::Contains),
+        ("rules/lending.drl", NodeKind::RuleSet, EdgeKind::Contains),
+        ("rules/account.brl", NodeKind::RuleSet, EdgeKind::Contains),
     ]
 }
 
@@ -287,23 +299,25 @@ fn grammarless_extractors_drop_no_edges_and_store_every_documented_kind() {
         .map(|n| (n.symbol.clone(), n))
         .collect();
     let edges = store.all_edges().unwrap();
-    let stored: BTreeSet<(String, String)> = edges
+    let stored: BTreeSet<(String, String, String)> = edges
         .iter()
         .map(|e| {
+            let src = &nodes[&e.source];
             (
-                nodes[&e.source].location.file.clone(),
+                src.location.file.clone(),
+                format!("{:?}", src.kind),
                 format!("{:?}", e.kind),
             )
         })
         .collect();
     let mut missing = Vec::new();
-    for (prefix, kind) in documented_edges() {
-        let k = format!("{kind:?}");
+    for (prefix, src_kind, kind) in documented_edges() {
+        let (sk, ek) = (format!("{src_kind:?}"), format!("{kind:?}"));
         if !stored
             .iter()
-            .any(|(f, sk)| f.starts_with(prefix) && *sk == k)
+            .any(|(f, s, e)| f.starts_with(prefix) && *s == sk && *e == ek)
         {
-            missing.push(format!("{prefix} {k}"));
+            missing.push(format!("{prefix} {sk} {ek}"));
         }
     }
     assert!(
@@ -357,4 +371,89 @@ fn grammarless_extractors_drop_no_edges_and_store_every_documented_kind() {
     // Copybook field use → the copybook's field; copybook → program.
     assert!(has("PAYCALC", &EdgeKind::References, "PAY-ID"));
     assert!(dependent_names(&db, "PAYREC").contains("PAYCALC"));
+}
+
+/// Shared ids across incremental runs: remove the defining file and the node falls back to the
+/// referencing file's boundary record (the program's edges stay); the defining file's own edges
+/// go with it. Restore it and the definition wins again.
+#[test]
+fn shared_ids_fall_back_to_the_boundary_when_the_definition_is_removed() {
+    let tmp = scratch("life");
+    let root = tmp.0.join("repo");
+    fs::create_dir_all(&root).unwrap();
+    copy_tree(&fixture("mainframe-grammarless"), &root);
+    let db = tmp.0.join("graph.db");
+    index(&root, &db);
+
+    let bms = fs::read_to_string(root.join("bms/PAYSET.bms")).unwrap();
+    let jcl = fs::read_to_string(root.join("jcl/PAYJOB.jcl")).unwrap();
+    fs::remove_file(root.join("bms/PAYSET.bms")).unwrap();
+    fs::remove_file(root.join("jcl/PAYJOB.jcl")).unwrap();
+    assert_nothing_pruned(&index(&root, &db));
+
+    let snapshot = |db: &Path| {
+        let store = SqliteStore::open(db).unwrap();
+        let nodes: HashMap<_, Node> = store
+            .all_nodes()
+            .unwrap()
+            .into_iter()
+            .map(|n| (n.symbol.clone(), n))
+            .collect();
+        let name = |id: &wicked_estate_core::SymbolId| {
+            nodes
+                .get(id)
+                .map_or_else(|| format!("<missing {id}>"), |n| n.name.clone())
+        };
+        let edges: Vec<(String, String, String)> = store
+            .all_edges()
+            .unwrap()
+            .into_iter()
+            .map(|e| (name(&e.source), format!("{:?}", e.kind), name(&e.target)))
+            .collect();
+        (nodes, edges)
+    };
+    let (nodes, edges) = snapshot(&db);
+    let dangling: Vec<_> = edges
+        .iter()
+        .filter(|(a, _, b)| a.starts_with("<missing") || b.starts_with("<missing"))
+        // Pre-existing (0.32.1 too): the estate RACF `protects` join edge carries no file, and a
+        // deletion-only run skips the dangling prune, so it outlives the deleted dataset until
+        // the next changed run. Tracked in the mainframe residuals issue.
+        .filter(|(_, k, _)| !k.contains("protects"))
+        .collect();
+    assert!(
+        dangling.is_empty(),
+        "dangling after the deletion-only run: {dangling:?}"
+    );
+    let map = nodes
+        .values()
+        .find(|n| n.name == "PAYMAP")
+        .expect("the map node survives");
+    assert!(
+        map.is_declaration() && map.location.file.starts_with("cbl/"),
+        "{map:?}"
+    );
+    let bind = nodes.values().find(|n| n.name == "PAYCALC.PAYIN").unwrap();
+    assert!(bind.is_declaration(), "{bind:?}");
+    let has = |f: &str, t: &str| edges.iter().any(|(a, _, b)| a == f && b == t);
+    assert!(has("PAYCALC", "PAYMAP") && has("PAYCALC", "PAYCALC.PAYIN"));
+    assert!(
+        !has("PAYCALC.PAYIN", "PROD.PAY.INPUT"),
+        "the JCL's binding → dataset edge left with the JCL: {edges:?}"
+    );
+
+    fs::write(root.join("bms/PAYSET.bms"), bms).unwrap();
+    fs::write(root.join("jcl/PAYJOB.jcl"), jcl).unwrap();
+    assert_nothing_pruned(&index(&root, &db));
+    let (nodes, edges) = snapshot(&db);
+    let map = nodes.values().find(|n| n.name == "PAYMAP").unwrap();
+    assert!(
+        !map.is_declaration() && map.location.file.starts_with("bms/"),
+        "{map:?}"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|(a, _, b)| a == "PAYCALC.PAYIN" && b == "PROD.PAY.INPUT")
+    );
 }

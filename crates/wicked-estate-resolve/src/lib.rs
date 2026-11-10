@@ -156,6 +156,14 @@ fn admissible_target(ref_kind: &EdgeKind, cand: &wicked_estate_core::Node) -> bo
     if *ref_kind != EdgeKind::Calls {
         return true;
     }
+    // Shared-id DATA nodes of the mainframe extractors (a copybook, a Db2 table, a CICS/BMS map,
+    // a JCL DD binding or dataset) are never call targets. Admitting them made a copybook or a
+    // table named like a program ambiguous with that program, so a CICS LINK / static CALL parked.
+    if let NodeKind::Other(tag) = cand_kind {
+        if NOT_CALL_TARGET_TAGS.contains(&tag.as_str()) {
+            return false;
+        }
+    }
     !matches!(
         cand_kind,
         NodeKind::Interface
@@ -173,6 +181,18 @@ fn admissible_target(ref_kind: &EdgeKind, cand: &wicked_estate_core::Node) -> bo
             | NodeKind::Fact
     )
 }
+
+/// `NodeKind::Other` tags that are data, never the target of a `Calls` ref (see
+/// [`admissible_target`]).
+const NOT_CALL_TARGET_TAGS: &[&str] = &[
+    "copybook",
+    "db2_table",
+    "cics_map",
+    "bms_map",
+    "bms_mapset",
+    "dd_binding",
+    "dataset",
+];
 
 /// Language family of the ref's source node, when both the node and a manifest family exist.
 fn from_family(index: &dyn SymbolIndex, from: &wicked_estate_core::SymbolId) -> Option<String> {
@@ -1146,6 +1166,39 @@ mod tests {
     /// target. The node is a `Variable` (a kind `Calls` deliberately keeps for `const f = () =>
     /// …`) named with the bare source identifier, so without the `value_role` guard a local named
     /// `map` becomes the unique candidate for every `map(...)` call in the repo.
+    #[test]
+    fn mainframe_data_homonyms_are_not_call_targets() {
+        // `COPY SHIPPGM` + `EXEC CICS LINK PROGRAM('SHIPPGM')`: the copybook node must not make the
+        // program name ambiguous (it did with the old `cics_program` node, and would again here).
+        let program = node_kind_lang(
+            "hlasm",
+            "SHIPPGM",
+            "asm/SHIPPGM.asm",
+            "hlasm",
+            NodeKind::Module,
+        );
+        let copybook = node_kind_lang(
+            "cobol-copybook",
+            "SHIPPGM",
+            "cpy/SHIPPGM.cpy",
+            "cobol",
+            NodeKind::Other("copybook".into()),
+        );
+        let table = node_kind_lang(
+            "db2",
+            "SHIPPGM",
+            "cbl/A.cbl",
+            "cobol",
+            NodeKind::Other("db2_table".into()),
+        );
+        let idx = VecIndex::plain(vec![program.clone(), copybook, table]);
+        let edges = NameResolver
+            .resolve(&[call_ref("ORDPGM", "SHIPPGM")], &idx)
+            .unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target, program.symbol);
+    }
+
     #[test]
     fn value_flow_slots_are_never_resolution_targets() {
         let local = node_kind_lang(

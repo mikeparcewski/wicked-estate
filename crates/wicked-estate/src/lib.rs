@@ -2037,19 +2037,23 @@ pub fn index_path_as(
         let mut candidates: Vec<wicked_estate_core::UnresolvedRef> = Vec::new();
         // Name lane: one exact indexed lookup per distinct extracted name.
         let mut probed: HashSet<&str> = HashSet::new();
+        // Probed apart from `probed`: a field named PRICEPGM must not hide the program PRICEPGM.
+        let mut probed_programs: HashSet<&str> = HashSet::new();
         for (_, extraction, _) in &extractions {
             for n in &extraction.nodes {
-                if n.name.is_empty() || !probed.insert(n.name.as_str()) {
+                if n.name.is_empty() {
                     continue;
                 }
-                for r in store.unresolved_refs_for_name(&n.name)? {
-                    if admissible(&r) && seen.insert(site_key(&r)) {
-                        candidates.push(r);
+                if probed.insert(n.name.as_str()) {
+                    for r in store.unresolved_refs_for_name(&n.name)? {
+                        if admissible(&r) && seen.insert(site_key(&r)) {
+                            candidates.push(r);
+                        }
                     }
                 }
                 // A new program can also bind a parked COBOL dynamic call to it, whose raw name
                 // carries the `cobol-dynamic-call:` prefix (`DynamicCallResolver`).
-                if n.kind == NodeKind::Module {
+                if n.kind == NodeKind::Module && probed_programs.insert(n.name.as_str()) {
                     let prefixed = format!(
                         "{}{}",
                         wicked_estate_core::refs::COBOL_DYNAMIC_CALL_PREFIX,
