@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+## [0.34.0] — 2026-11-10
+
+Minor: cross-repo package links (slice X1: `wicked-estate link`, crossings in `blast-radius` and
+`path`, one writer per database) and a redaction fix for empty containers (a 0.33.0 defect).
+
+**Upgrade note (0.32.x or 0.33.0 -> 0.34.0).**
+1. Stop the daemon and any MCP server attached to the store.
+2. Install 0.34.0 on every path the daemon resolves, and check `wicked-estate --version` from each.
+3. Run `wicked-estate redact-store --db <path>` for each store, with no reader attached.
+   - A 0.32.x store is cleaned here, with the fixed redactor: one transaction, then a WAL truncate
+     and VACUUM. VACUUM needs free disk about the size of the store.
+   - A store already cleaned by 0.33.0 reports that it is current.
+4. Restart. The first `index` of each repo under 0.34.0 re-reads every file, because the binary
+   version changed. That pass also repairs config text that 0.33.0 stored with empty containers
+   masked. Expect one slow refresh per repo.
+
+Linking is opt-in. Index each repo into one project database with `--repo <label>`, then run
+`wicked-estate link --db <db> --project <id> --labels a,b,...`. A database that was never linked
+answers exactly as before, with `crossings: []`. Guide: `docs/cross-repo-links.md`.
+
+Acceptance, run on a debug build of the release branch before the release:
+- **Package-link precision:** 421 predicted links, each labelled by the package manager's own
+  resolution (`oracle/xrepo/label.py`): npm/cli 125, tokio 168, wicked crew/studio 128.
+  - 421 of 421 correct; Wilson 95% lower bound 0.9910, against a floor of 0.97.
+  - Frozen in `oracle/xrepo/x1-labels.json`.
+- **crew `crew-api-types` -> studio:** the blast radius of `index.d.ts` reaches all 38 studio files
+  that import it. Each is reached through a `registry-source` crossing with rank
+  `package-manifest` and skew 0.197.0 vs 0.201.0, and every page stays under 25K characters.
+  Without `node_modules` there are no links, only a `dep:provider-unverified` possible item.
+- **Negative control:** an unrelated repo added to the project gets no links.
+
 ### Added
 - **Cross-repo package links: `wicked-estate link` (slice X1 of the cross-repo design).** In a
   project database of `--repo`-labelled repos, `link --project <id> --labels a,b,...` writes
