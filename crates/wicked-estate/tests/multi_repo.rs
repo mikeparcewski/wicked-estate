@@ -885,15 +885,24 @@ fn forced_reextract_of_one_label_keeps_fts_exact_420() {
     let q = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
     let nodes = q("SELECT COUNT(*) FROM nodes");
     assert!(nodes > 0);
-    assert_eq!(q("SELECT COUNT(*) FROM nodes_fts"), nodes, "one FTS row per node");
     assert_eq!(
-        q("SELECT COUNT(*) FROM nodes_fts f JOIN nodes n ON n.symbol = f.rowid \
-           JOIN symbols s ON s.sid = n.symbol AND s.sym = f.symbol"),
+        q("SELECT COUNT(*) FROM nodes_fts"),
+        nodes,
+        "one FTS row per node"
+    );
+    assert_eq!(
+        q(
+            "SELECT COUNT(*) FROM nodes_fts f JOIN nodes n ON n.symbol = f.rowid \
+           JOIN symbols s ON s.sid = n.symbol AND s.sym = f.symbol"
+        ),
         nodes,
         "every FTS row is keyed by its node's sid"
     );
     let store = SqliteStore::open(&db).unwrap();
-    for (name, file) in [("alpha", "repoa/src/index.ts"), ("beta", "repob/src/index.ts")] {
+    for (name, file) in [
+        ("alpha", "repoa/src/index.ts"),
+        ("beta", "repob/src/index.ts"),
+    ] {
         let hits: Vec<String> = store
             .find_symbols(&wicked_estate_core::SymbolQuery {
                 text: Some(name.to_string()),

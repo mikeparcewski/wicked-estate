@@ -89,6 +89,20 @@ fn stamp_fresh_redaction_epoch(conn: &Connection) -> Result<()> {
 pub const FTS_ROWID_KEY: &str = "fts_rowid";
 /// The only value of [`FTS_ROWID_KEY`]: FTS rowid = the node's interned sid.
 const FTS_ROWID_SID: &str = "sid";
+/// Name of the guard trigger [`rebuild_fts_all`] installs on the FTS content shadow table.
+const FTS_ROWID_GUARD: &str = "nodes_fts_rowid_guard";
+/// The guard: an FTS row inserted with a rowid that is NOT its symbol's sid clears the marker, so
+/// the next writer open rebuilds. Only a writer that predates #420 inserts such a row (an older
+/// binary on the same store: it inserts with an automatic rowid). Its own reads and writes stay
+/// correct (it deletes by symbol text), but this build's rowid-keyed deletes would miss the row,
+/// leaving a duplicate or, after an erasure, an orphan holding the erased text. The trigger lives
+/// in the database, so it fires for every SQLite writer, old binaries and already-open
+/// connections included; it is dropped with the table, and [`rebuild_fts_all`] re-creates it.
+/// `nodes_fts_content(id, c0, …)` is FTS5's content table: `id` = rowid, `c0` = `symbol`.
+const FTS_ROWID_GUARD_DDL: &str = "CREATE TRIGGER IF NOT EXISTS nodes_fts_rowid_guard \
+     AFTER INSERT ON nodes_fts_content \
+     WHEN NEW.id IS NOT (SELECT sid FROM symbols WHERE sym = NEW.c0) \
+     BEGIN DELETE FROM meta WHERE k = 'fts_rowid'; END";
 
 /// Rebuild `nodes_fts` from `nodes`, one row per node with `rowid = nodes.symbol` (#420).
 ///
@@ -97,7 +111,8 @@ const FTS_ROWID_SID: &str = "sid";
 /// row by the sid (the `nodes` primary key, never reused: `symbols.sid` is AUTOINCREMENT) makes
 /// every maintenance delete a rowid lookup. The table is dropped and re-created from its own stored
 /// definition, so no old segment (and no old term) survives, and the new segments are written in
-/// one pass. Callers run this inside their own transaction.
+/// one pass. The guard trigger ([`FTS_ROWID_GUARD_DDL`]) is installed after the bulk insert (every
+/// row of which is sid-keyed by construction). Callers run this inside their own transaction.
 fn rebuild_fts_all(conn: &Connection) -> Result<()> {
     let ddl: String = conn
         .query_row(
@@ -116,6 +131,7 @@ fn rebuild_fts_all(conn: &Connection) -> Result<()> {
            FROM nodes n JOIN symbols s ON s.sid = n.symbol",
     )
     .map_err(st)?;
+    conn.execute_batch(FTS_ROWID_GUARD_DDL).map_err(st)?;
     conn.execute(
         "INSERT OR REPLACE INTO meta(k, v) VALUES(?1, ?2)",
         params![FTS_ROWID_KEY, FTS_ROWID_SID],
@@ -124,17 +140,20 @@ fn rebuild_fts_all(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Migrated = the marker is set AND the guard trigger exists (either missing means rebuild).
 fn fts_rowid_migrated(conn: &Connection) -> Result<bool> {
     conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM meta WHERE k=?1 AND v=?2)",
-        params![FTS_ROWID_KEY, FTS_ROWID_SID],
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE k=?1 AND v=?2) \
+            AND EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?3)",
+        params![FTS_ROWID_KEY, FTS_ROWID_SID, FTS_ROWID_GUARD],
         |r| r.get::<_, i64>(0),
     )
     .map(|v| v != 0)
     .map_err(st)
 }
 
-/// One-time migration of a store written before #420, whose FTS rows carry arbitrary rowids:
+/// One-time migration of a store written before #420, whose FTS rows carry arbitrary rowids
+/// (or one an older binary wrote to since, which the guard trigger flags by clearing the marker):
 /// rebuild them keyed by sid, in ONE `BEGIN IMMEDIATE` transaction. A crash rolls back to the old
 /// rows with no marker, so the next writer open re-runs it. Re-checked inside the transaction, so
 /// two first opens never both rebuild. Writer opens only ([`SqliteStore::open`] / `in_memory`):
@@ -8142,58 +8161,79 @@ mod tests {
         store.migrate_redaction(&|_, t| t.to_string(), "t").unwrap();
         assert_fts_keyed_by_sid(&store);
         assert_eq!(fts_hits(&store, "docb2"), vec!["b2".to_string()]);
-        assert_eq!(
-            store.meta_value(FTS_ROWID_KEY).as_deref(),
-            Some(FTS_ROWID_SID)
+        assert!(
+            fts_rowid_migrated(&store.conn).unwrap(),
+            "marker set and guard trigger installed after the redaction rebuild"
         );
     }
 
-    /// A store written before #420 (FTS rows with arbitrary rowids, plus a duplicate row from old
-    /// drift) is rebuilt once on the first writer open: keyed by sid, duplicate gone, search
-    /// unchanged. A read-only open never migrates (and still answers); a second open is a no-op.
+    /// A store written before #420 (FTS rows with automatic rowids, plus a duplicate row from old
+    /// drift, no guard trigger, no marker) is rebuilt once on the first writer open: keyed by sid,
+    /// duplicate gone, search unchanged. The live sids have a gap (an edge-only symbol between the
+    /// two nodes), so automatic rowids cannot pass for sids. A read-only open never migrates (and
+    /// still answers); a second open is a no-op.
     #[test]
     fn legacy_fts_rowids_migrate_once_on_writer_open_420() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy.db");
         {
             let mut store = SqliteStore::open(&path).unwrap();
-            store
-                .upsert_nodes(&[fts_node("l1", "l.rs"), fts_node("l2", "l.rs")])
-                .unwrap();
+            store.upsert_nodes(&[fts_node("l1", "l.rs")]).unwrap();
+            store.intern("gap_edge_only").unwrap();
+            store.upsert_nodes(&[fts_node("l2", "l.rs")]).unwrap();
         }
         {
-            // Rewrite the FTS table the way a pre-#420 build left it: auto rowids that do not
-            // match the sids, one duplicate row, and no marker.
+            // Rewrite the FTS table the way a pre-#420 build left it.
             let conn = Connection::open(&path).unwrap();
+            let sid_l2: i64 = conn
+                .query_row("SELECT sid FROM symbols WHERE sym='l2'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(sid_l2, 3, "fixture: the live sids are 1 and 3");
             conn.execute_batch(
-                "DELETE FROM nodes_fts; \
-                 INSERT INTO nodes_fts(rowid, symbol, name, signature, doc) \
-                   SELECT n.symbol + 1000, s.sym, n.name, '', 'doc' || n.name \
-                   FROM nodes n JOIN symbols s ON s.sid = n.symbol; \
-                 INSERT INTO nodes_fts(symbol, name, signature, doc) VALUES('l1','l1','','docl1'); \
-                 DELETE FROM meta WHERE k = 'fts_rowid';",
+                "DROP TRIGGER nodes_fts_rowid_guard; \
+                 DELETE FROM meta WHERE k = 'fts_rowid'; \
+                 DROP TABLE nodes_fts; \
+                 CREATE VIRTUAL TABLE nodes_fts USING fts5(symbol UNINDEXED, name, signature, doc); \
+                 INSERT INTO nodes_fts(symbol, name, signature, doc) \
+                   SELECT s.sym, n.name, '', 'doc' || n.name \
+                   FROM nodes n JOIN symbols s ON s.sid = n.symbol ORDER BY n.symbol; \
+                 INSERT INTO nodes_fts(symbol, name, signature, doc) VALUES('l1','l1','','docl1');",
             )
             .unwrap();
+            let rowid_l2: i64 = conn
+                .query_row("SELECT rowid FROM nodes_fts WHERE symbol='l2'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_ne!(rowid_l2, sid_l2, "fixture: legacy rowids are not sids");
         }
         {
             let ro = SqliteStore::open_readonly(&path).unwrap();
-            assert_eq!(ro.meta_value(FTS_ROWID_KEY), None, "read-only open never migrates");
+            assert_eq!(
+                ro.meta_value(FTS_ROWID_KEY),
+                None,
+                "read-only open never migrates"
+            );
             assert_eq!(fts_hits(&ro, "docl2"), vec!["l2".to_string()]);
         }
         {
-            let store = SqliteStore::open(&path).unwrap();
+            let mut store = SqliteStore::open(&path).unwrap();
             assert_fts_keyed_by_sid(&store);
             assert_eq!(fts_hits(&store, "docl1"), vec!["l1".to_string()]);
             assert_eq!(
                 store.meta_value(FTS_ROWID_KEY).as_deref(),
                 Some(FTS_ROWID_SID)
             );
-            // Plant a marker-visible change: a second open must not rebuild again.
+            // Sid-keyed maintenance after the migration finds the migrated rows.
+            store.remove_nodes(&[sym("l2")]).unwrap();
+            assert_fts_keyed_by_sid(&store);
+            assert_eq!(fts_hits(&store, "docl2"), Vec::<String>::new());
+            // Plant a change only a rebuild would pick up: a second open must not rebuild.
             store
                 .conn
                 .execute(
                     "UPDATE nodes SET name = 'renamed' WHERE symbol = \
-                     (SELECT sid FROM symbols WHERE sym = 'l2')",
+                     (SELECT sid FROM symbols WHERE sym = 'l1')",
                     [],
                 )
                 .unwrap();
@@ -8201,13 +8241,62 @@ mod tests {
         let store = SqliteStore::open(&path).unwrap();
         let fts_name: String = store
             .conn
+            .query_row("SELECT name FROM nodes_fts WHERE symbol = 'l1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(fts_name, "l1", "second open did not rebuild");
+    }
+
+    /// An OLDER binary writing a migrated store (delete by symbol text, insert with an automatic
+    /// rowid) breaks the sid key for that row. The guard trigger notices (it clears the marker),
+    /// the next writer open rebuilds, and an erasure afterwards leaves no row holding the text.
+    #[test]
+    fn older_writer_after_migration_is_healed_on_next_open_420() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed.db");
+        {
+            let mut store = SqliteStore::open(&path).unwrap();
+            store.intern("gap_edge_only").unwrap();
+            store
+                .upsert_nodes(&[fts_node("a", "a.rs"), fts_node("b", "b.rs")])
+                .unwrap();
+        }
+        {
+            // What a pre-#420 binary's per-node FTS upsert of `a` does.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "DELETE FROM nodes_fts WHERE symbol = 'a'; \
+                 INSERT INTO nodes_fts(symbol, name, signature, doc) \
+                   VALUES('a', 'a', '', 'oldbinarytoken');",
+            )
+            .unwrap();
+            let marker: i64 = conn
+                .query_row("SELECT COUNT(*) FROM meta WHERE k = 'fts_rowid'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(marker, 0, "the guard cleared the marker");
+        }
+        let mut store = SqliteStore::open(&path).unwrap();
+        assert_fts_keyed_by_sid(&store);
+        assert!(
+            fts_rowid_migrated(&store.conn).unwrap(),
+            "rebuilt, guarded again"
+        );
+        store.upsert_nodes(&[fts_node("a", "a.rs")]).unwrap();
+        assert_fts_keyed_by_sid(&store);
+        store.remove_nodes(&[sym("a")]).unwrap();
+        let left: i64 = store
+            .conn
             .query_row(
-                "SELECT name FROM nodes_fts WHERE symbol = 'l2'",
+                "SELECT COUNT(*) FROM nodes_fts WHERE symbol = 'a'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(fts_name, "l2", "second open did not rebuild");
+        assert_eq!(left, 0, "no FTS row of the erased node survives");
+        assert_eq!(fts_hits(&store, "oldbinarytoken"), Vec::<String>::new());
     }
 
     /// The regression gate for #420: the VM cost of re-extracting one file (remove_file +
@@ -8231,7 +8320,9 @@ mod tests {
             store
                 .rebuild_fts_for_files(&files.iter().map(String::as_str).collect::<Vec<_>>())
                 .unwrap();
-            let mine: Vec<Node> = (0..50).map(|i| fts_node(&format!("m{i}"), "mine.rs")).collect();
+            let mine: Vec<Node> = (0..50)
+                .map(|i| fts_node(&format!("m{i}"), "mine.rs"))
+                .collect();
             store.upsert_nodes(&mine).unwrap();
             store.commit_batch().unwrap();
 
