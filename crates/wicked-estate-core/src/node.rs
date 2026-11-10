@@ -105,6 +105,13 @@ pub type Metadata = serde_json::Map<String, serde_json::Value>;
 /// Extractors set it on prototype/forward-declaration captures; absent means definition.
 pub const DECLARATION_METADATA_KEY: &str = "is_declaration";
 
+/// Metadata key on a BOUNDARY contribution: a node that a referencing file mints under a shared id
+/// (a Db2 table, a CICS map, a copybook, a JCL DD binding, an undefined RACF id) when the file that
+/// would define it may not be indexed. The value says why it is a boundary. A boundary record is
+/// always a [`DECLARATION_METADATA_KEY`] contribution, so the store surfaces the defining file's
+/// record instead whenever that file is indexed, and falls back to the boundary when it is removed.
+pub const BOUNDARY_REASON_METADATA_KEY: &str = "boundary_reason";
+
 /// Metadata key marking a node as a **synthetic value-flow slot** (a callable's parameter, local,
 /// return value, field or property read) minted for semantic value lineage rather than parsed from
 /// a definition site. The value is the role name (`"Local"`, `"Parameter"`, `"Return"`, …).
@@ -175,6 +182,17 @@ impl Node {
             serde_json::Value::Bool(true),
         );
         self
+    }
+
+    /// Mark this node record as a BOUNDARY contribution with `reason` (builder): a declaration
+    /// carrying [`BOUNDARY_REASON_METADATA_KEY`]. See that constant.
+    pub fn as_boundary(self, reason: impl Into<String>) -> Self {
+        let mut n = self.as_declaration();
+        n.metadata.insert(
+            BOUNDARY_REASON_METADATA_KEY.to_string(),
+            serde_json::Value::String(reason.into()),
+        );
+        n
     }
 
     /// Whether this node record is a DECLARATION contribution (`metadata["is_declaration"]`

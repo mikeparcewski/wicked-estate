@@ -14,8 +14,13 @@
 //!   program?" / blast-radius across the estate).
 //! - `//STEP EXEC PROCNAME`      → step + a `Calls` ref to the invoked PROC.
 //!
-//! DD/DSN dataset references are intentionally out of scope here (the program call graph is the
-//! value); they are a clean follow-up on the same seam.
+//! - `//NAME PROC` (in-stream, ended by `// PEND`, or a cataloged PROC member) → a
+//!   [`NodeKind::Module`] named NAME that `Contains` its steps, so `EXEC NAME` resolves to it.
+//! - `//DD DD DSN=…` → a shared `dataset` node + a step→dataset `other:uses` edge.
+//! - `//DD DD …` in a step that runs `PGM=P` → the DEFINITION record of the shared DD binding
+//!   `ddname:P.DD` (kind `dd_binding`, step `Contains` it, it `uses` the dataset). A COBOL
+//!   `SELECT f ASSIGN TO DD` in program P links to the same id (`cobol_links`), so blast radius on
+//!   a dataset reaches the program that reads it through its DD name.
 
 use wicked_estate_core::{
     Edge, EdgeKind, Extraction, Extractor, Language, Location, Node, NodeKind, ResolutionTier,
@@ -48,7 +53,9 @@ impl Extractor for JclExtractor {
         let mut refs: Vec<UnresolvedRef> = Vec::new();
 
         let mut current_job: Option<SymbolId> = None;
+        let mut current_proc: Option<SymbolId> = None;
         let mut current_step: Option<SymbolId> = None;
+        let mut current_pgm: Option<String> = None;
 
         for (i, raw) in file.text.lines().enumerate() {
             // JCL statements begin in columns 1-2 with `//`. `//*` is a comment; `//` alone is a
@@ -63,7 +70,15 @@ impl Extractor for JclExtractor {
             // Card form: NAME OPERATION OPERANDS  (whitespace-separated).
             let mut toks = body.split_whitespace();
             let Some(name) = toks.next() else { continue };
-            let Some(op) = toks.next() else { continue };
+            let Some(op) = toks.next() else {
+                // `//         PEND` — the end of an in-stream PROC.
+                if name == "PEND" {
+                    current_proc = None;
+                    current_step = None;
+                    current_pgm = None;
+                }
+                continue;
+            };
             let operands = toks.next().unwrap_or("");
             let loc = Location::new(&file.path, line_span(i));
 
@@ -80,6 +95,39 @@ impl Extractor for JclExtractor {
                     node.signature = Some("JOB".to_string());
                     nodes.push(node);
                     current_job = Some(sym);
+                    current_proc = None;
+                    current_step = None;
+                    current_pgm = None;
+                }
+                "PROC" => {
+                    let sym =
+                        Symbol::synthetic("jcl", format!("{}::PROC::{}", file.path, name)).id();
+                    let mut node = Node::new(
+                        sym.clone(),
+                        NodeKind::Module,
+                        name.to_string(),
+                        Language::new("jcl"),
+                        loc,
+                    );
+                    node.signature = Some("PROC".to_string());
+                    nodes.push(node);
+                    if let Some(job) = &current_job {
+                        local_edges.push(Edge::new(
+                            job.clone(),
+                            sym.clone(),
+                            EdgeKind::Contains,
+                            ResolutionTier::Parsed,
+                            "jcl",
+                        ));
+                    }
+                    current_proc = Some(sym);
+                    current_step = None;
+                    current_pgm = None;
+                }
+                "PEND" => {
+                    current_proc = None;
+                    current_step = None;
+                    current_pgm = None;
                 }
                 "EXEC" => {
                     let step_sym =
@@ -94,11 +142,18 @@ impl Extractor for JclExtractor {
                     node.signature = Some(format!("EXEC {operands}"));
                     nodes.push(node);
                     current_step = Some(step_sym.clone());
+                    current_pgm = operands
+                        .split(',')
+                        .next()
+                        .and_then(|f| f.trim().strip_prefix("PGM="))
+                        .map(str::trim)
+                        .filter(|p| !p.is_empty() && !p.contains(['*', '.', '&']))
+                        .map(str::to_ascii_uppercase);
 
-                    // job → step (Contains): blast-radius/containment.
-                    if let Some(job) = &current_job {
+                    // job/PROC → step (Contains): blast-radius/containment.
+                    if let Some(owner) = current_proc.as_ref().or(current_job.as_ref()) {
                         local_edges.push(Edge::new(
-                            job.clone(),
+                            owner.clone(),
                             step_sym.clone(),
                             EdgeKind::Contains,
                             ResolutionTier::Parsed,
@@ -121,8 +176,47 @@ impl Extractor for JclExtractor {
                     // (including a GDG `(+1)` or PDS `(MEMBER)` suffix) becomes a SHARED dataset
                     // node, with a step→dataset edge (source = dependent step, target = dependency
                     // dataset) so blast-radius on a dataset finds every job/step that touches it.
-                    if let Some(dsn) = parse_dsn(operands) {
-                        let ds_sym = Symbol::synthetic("jcl-dataset", dsn.as_str()).id();
+                    let dsn = parse_dsn(operands);
+                    let ds_sym = dsn
+                        .as_deref()
+                        .map(|d| Symbol::synthetic("jcl-dataset", d).id());
+                    // The DD binding of the step's program (`ddname:<PGM>.<DD>`).
+                    let dd = name.to_ascii_uppercase();
+                    if let (Some(pgm), Some(step)) = (&current_pgm, &current_step) {
+                        if is_ddname(&dd) {
+                            let bind = crate::cobol_links::dd_binding_symbol(pgm, &dd);
+                            let mut node = Node::new(
+                                bind.clone(),
+                                NodeKind::Other("dd_binding".to_string()),
+                                format!("{pgm}.{dd}"),
+                                Language::new("jcl"),
+                                loc.clone(),
+                            );
+                            node.signature = Some(format!("DD {operands}"));
+                            node.metadata
+                                .insert("program".into(), serde_json::Value::String(pgm.clone()));
+                            node.metadata
+                                .insert("ddname".into(), serde_json::Value::String(dd.clone()));
+                            nodes.push(node);
+                            local_edges.push(Edge::new(
+                                step.clone(),
+                                bind.clone(),
+                                EdgeKind::Contains,
+                                ResolutionTier::Parsed,
+                                "jcl",
+                            ));
+                            if let Some(ds) = &ds_sym {
+                                local_edges.push(Edge::new(
+                                    bind,
+                                    ds.clone(),
+                                    EdgeKind::Other("uses".to_string()),
+                                    ResolutionTier::Parsed,
+                                    "jcl",
+                                ));
+                            }
+                        }
+                    }
+                    if let (Some(dsn), Some(ds_sym)) = (dsn, ds_sym) {
                         if let Some(from) = current_step.clone().or_else(|| current_job.clone()) {
                             local_edges.push(Edge::new(
                                 from,
@@ -166,6 +260,16 @@ fn line_span(line: usize) -> Span {
         end_line: l,
         end_col: 0,
     }
+}
+
+/// A DD statement name that a program can `ASSIGN TO`: 1–8 alphanumeric/national characters
+/// (`STEP.DD` overrides and concatenation continuations are not bindings).
+fn is_ddname(dd: &str) -> bool {
+    let b = dd.as_bytes();
+    (1..=8).contains(&b.len())
+        && (b[0].is_ascii_alphabetic() || matches!(b[0], b'#' | b'$' | b'@'))
+        && b.iter()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'#' | b'$' | b'@'))
 }
 
 /// From an `EXEC` operand string, return the invoked program or PROC name.
@@ -331,6 +435,72 @@ mod tests {
                 .iter()
                 .any(|e| e.kind == EdgeKind::Other("uses".to_string())),
             "expected a step→dataset uses edge",
+        );
+    }
+
+    #[test]
+    fn instream_proc_is_a_module_that_contains_its_steps() {
+        // Fails on main: `//PAYPROC PROC` emitted nothing, so `EXEC PAYPROC` had no target.
+        let ex = extract(
+            "//PAYJOB JOB (A)\n//PAYPROC PROC\n//PSTEP EXEC PGM=STUB\n//         PEND\n//STEP2 EXEC PAYPROC\n",
+        );
+        let proc_node = ex
+            .nodes
+            .iter()
+            .find(|n| n.name == "PAYPROC" && n.kind == NodeKind::Module)
+            .expect("PROC module");
+        let pstep = ex.nodes.iter().find(|n| n.name == "PSTEP").unwrap();
+        let step2 = ex.nodes.iter().find(|n| n.name == "STEP2").unwrap();
+        let contains = |from: &SymbolId, to: &SymbolId| {
+            ex.local_edges
+                .iter()
+                .any(|e| &e.source == from && &e.target == to && e.kind == EdgeKind::Contains)
+        };
+        assert!(
+            contains(&proc_node.symbol, &pstep.symbol),
+            "PROC contains its step"
+        );
+        let job = ex.nodes.iter().find(|n| n.name == "PAYJOB").unwrap();
+        assert!(
+            contains(&job.symbol, &step2.symbol),
+            "after PEND, steps belong to the job"
+        );
+        assert!(
+            ex.refs
+                .iter()
+                .any(|r| r.from == step2.symbol && r.raw_name == "PAYPROC")
+        );
+    }
+
+    #[test]
+    fn dd_in_a_pgm_step_defines_the_shared_dd_binding() {
+        let ex = extract(
+            "//J JOB\n//S1 EXEC PGM=PAYCALC\n//PAYIN DD DSN=PROD.PAY.INPUT,DISP=SHR\n//SYSOUT DD SYSOUT=*\n//S2 EXEC MYPROC\n//X DD DSN=A.B\n",
+        );
+        let bind = crate::cobol_links::dd_binding_symbol("PAYCALC", "PAYIN");
+        let node = ex
+            .nodes
+            .iter()
+            .find(|n| n.symbol == bind)
+            .expect("dd binding");
+        assert!(!node.is_declaration());
+        assert_eq!(node.name, "PAYCALC.PAYIN");
+        let ds = Symbol::synthetic("jcl-dataset", "PROD.PAY.INPUT").id();
+        assert!(ex.local_edges.iter().any(|e| e.source == bind
+            && e.target == ds
+            && e.kind == EdgeKind::Other("uses".into())));
+        assert!(
+            ex.nodes
+                .iter()
+                .any(|n| n.symbol == crate::cobol_links::dd_binding_symbol("PAYCALC", "SYSOUT"))
+        );
+        assert_eq!(
+            ex.nodes
+                .iter()
+                .filter(|n| n.kind == NodeKind::Other("dd_binding".into()))
+                .count(),
+            2,
+            "a PROC-invocation step has no program to bind"
         );
     }
 }

@@ -1,0 +1,6 @@
+ruleset AccountRules {
+  rule HighBalance {
+    if customer.balance > 10000 then
+      set customer.tier to "gold" ;
+  }
+}

@@ -97,14 +97,14 @@ use wicked_estate_core::{
     TraversalSpec, edge_tags, is_flow_edge, is_structural_symbol, merge_flow_edges,
 };
 use wicked_estate_extract::{
-    BlazeBrlExtractor, CicsSqlExtractor, DrlExtractor, ExtraEdgeExtractor, HlasmExtractor,
-    IaCExtractor, ImsExtractor, JclExtractor, MqExtractor, RacfExtractor, RegoRulesExtractor,
-    SYMBOL_ID_SCHEME, TfstateCollector,
+    BlazeBrlExtractor, DrlExtractor, ExtraEdgeExtractor, HlasmExtractor, IaCExtractor,
+    ImsExtractor, JclExtractor, MqExtractor, RacfExtractor, RegoRulesExtractor, SYMBOL_ID_SCHEME,
+    TfstateCollector,
     treesitter::{ExtractorCache, is_minified_or_huge},
 };
 use wicked_estate_resolve::{
-    ImportMapResolver, InfraResolver, NameResolver, RulesBridgeResolver, ScopedNameResolver,
-    resolve_all_with_coverage,
+    DynamicCallResolver, ImportMapResolver, InfraResolver, NameResolver, RulesBridgeResolver,
+    ScopedNameResolver, resolve_all_with_coverage,
 };
 use wicked_estate_retrieve::Embedder;
 use wicked_estate_store::GraphStoreMutExt;
@@ -122,6 +122,7 @@ pub(crate) fn is_grammarless_ext(ext: &str) -> bool {
             | "hlasm"
             | "asm"
             | "mlc"
+            | "bms"
             | "racf"
             | "dbd"
             | "psb"
@@ -138,7 +139,7 @@ pub(crate) fn is_grammarless_ext(ext: &str) -> bool {
 fn grammarless_extractor(ext: &str) -> Option<Box<dyn Extractor>> {
     match ext {
         "jcl" | "job" | "cntl" => Some(Box::new(JclExtractor::new())),
-        "hlasm" | "asm" | "mlc" => Some(Box::new(HlasmExtractor::new())),
+        "hlasm" | "asm" | "mlc" | "bms" => Some(Box::new(HlasmExtractor::new())),
         "racf" => Some(Box::new(RacfExtractor::new())),
         "dbd" | "psb" => Some(Box::new(ImsExtractor::new())),
         "mqsc" => Some(Box::new(MqExtractor::new())),
@@ -270,15 +271,12 @@ fn base_extraction(
         text: text.to_string(),
     };
     let mut extraction = extractor.extract(&sf).ok()?;
-    // COBOL: supplement the structural extraction with embedded EXEC CICS / EXEC SQL
-    // commands (CICS LINK/XCTL programs + maps, Db2 tables). The COBOL grammar parses EXEC
-    // blocks opaquely, so these come from a regex pass over the same source.
+    // COBOL: add what the grammar cannot see (EXEC CICS / EXEC SQL are opaque nodes, COPY is a
+    // compiler directive): program → program / map / table / copybook / DD-binding links, field
+    // uses, dynamic CALL literals. Every link starts from this extraction's program Module (or
+    // copybook) node — see `cobol_links`.
     if matches!(ext, "cbl" | "cob" | "cobol" | "cpy") {
-        if let Ok(emb) = CicsSqlExtractor::new().extract(&sf) {
-            extraction.nodes.extend(emb.nodes);
-            extraction.local_edges.extend(emb.local_edges);
-            extraction.refs.extend(emb.refs);
-        }
+        wicked_estate_extract::cobol_links::supplement(&sf, &mut extraction);
     }
     // Rego: supplement the tree-sitter code parse (rules-as-functions) with the W15 rules
     // graph (RuleSet/Rule/Condition/Action/Fact), so policies surface in RulesInventory.
@@ -1935,6 +1933,7 @@ pub fn index_path_as(
         &relative,
         &InfraResolver,
         &RulesBridgeResolver,
+        &DynamicCallResolver,
     ];
     let resolution = resolve_all_with_coverage(resolvers, &all_refs, &index)?;
     let call_ref_hints = call_value_ref_hints(&all_refs);
@@ -2046,6 +2045,20 @@ pub fn index_path_as(
                 for r in store.unresolved_refs_for_name(&n.name)? {
                     if admissible(&r) && seen.insert(site_key(&r)) {
                         candidates.push(r);
+                    }
+                }
+                // A new program can also bind a parked COBOL dynamic call to it, whose raw name
+                // carries the `cobol-dynamic-call:` prefix (`DynamicCallResolver`).
+                if n.kind == NodeKind::Module {
+                    let prefixed = format!(
+                        "{}{}",
+                        wicked_estate_core::refs::COBOL_DYNAMIC_CALL_PREFIX,
+                        n.name
+                    );
+                    for r in store.unresolved_refs_for_name(&prefixed)? {
+                        if admissible(&r) && seen.insert(site_key(&r)) {
+                            candidates.push(r);
+                        }
                     }
                 }
             }
@@ -4956,6 +4969,7 @@ pattern = "(?P<k>\\{)"
                     "ImportMapResolver" => ImportMapResolver.id(),
                     "InfraResolver" => InfraResolver.id(),
                     "RulesBridgeResolver" => RulesBridgeResolver.id(),
+                    "DynamicCallResolver" => DynamicCallResolver.id(),
                     // let-bound in the slice (needs the repo scope at construction time)
                     "relative" => {
                         return wicked_estate_resolve::RelativeImportResolver::new(None)

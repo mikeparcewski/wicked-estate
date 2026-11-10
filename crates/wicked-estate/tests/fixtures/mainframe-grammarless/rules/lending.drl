@@ -1,0 +1,12 @@
+package com.example.lending
+
+declare Applicant
+    score : int
+end
+
+rule "Approve high score"
+when
+    $a : Applicant( score >= 700 )
+then
+    $a.setApproved(true);
+end

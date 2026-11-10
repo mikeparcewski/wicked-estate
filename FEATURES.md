@@ -94,17 +94,27 @@ grammar-less mainframe extractors**.
 ### Grammar-less mainframe extractors (`wicked-estate-extract/src/*.rs`) ✅
 The `Extractor` trait is generic — tree-sitter is just one impl. Card/line formats with no grammar
 get hand-written line/macro extractors:
-- **JCL** (`jcl.rs`) — JOB→Module, `EXEC PGM=`→step + cross-language Calls ref, `DD DSN=`→dataset
-  node + `uses` edge (handles GDG `(+1)` / PDS `(MEMBER)` suffixes).
-- **HLASM assembler** (`hlasm.rs`) — CSECT/START/RSECT→Module, DSECT, CALL/EXTRN/WXTRN→Calls refs.
+- **JCL** (`jcl.rs`) — JOB→Module, in-stream/cataloged `PROC`→Module that contains its steps,
+  `EXEC PGM=`/`EXEC proc`→step + cross-language Calls ref, `DD DSN=`→dataset node + `uses` edge
+  (handles GDG `(+1)` / PDS `(MEMBER)` suffixes), and a `dd_binding` `<PGM>.<DD>` per DD of a
+  program step, which the COBOL `SELECT … ASSIGN TO <DD>` of that program links to.
+- **HLASM assembler** (`hlasm.rs`) — CSECT/START/RSECT→Module, DSECT, CALL/EXTRN/WXTRN→Calls refs
+  (before the first CSECT: from the File node). BMS map source (`.bms`): DFHMSD→`bms_mapset`,
+  DFHMDI→`bms_map`, the definition of the map a CICS `SEND/RECEIVE MAP` links to.
 - **RACF security** (`racf.rs`) — RDEFINE→profile, ADDSD→dataset profile, ADDGROUP/ADDUSER,
-  PERMIT→`permits`, CONNECT→`member_of`. (security estate)
-- **IMS DB** (`ims.rs`) — DBD→database, SEGM→segment (+ `Contains` + `parent`), PCB→`accesses`,
-  SENSEG→`sensitive_to`. Macro detection is **keyword-based** (robust to indentation). (data estate)
+  PERMIT→`permits`, CONNECT→`member_of`; a PERMIT/CONNECT id with no ADDUSER/ADDGROUP keeps its edge
+  through a boundary node with a reason. (security estate)
+- **IMS DB** (`ims.rs`) — DBD→database, SEGM→segment (+ `Contains` + `parent`), PSB→`ims_psb` node
+  (named by `PSBGEN PSBNAME=`) with PCB→`accesses` and SENSEG→`sensitive_to`. Macro detection is **keyword-based** (robust to indentation). (data estate)
 - **MQ MQSC** (`mq.rs`) — DEFINE/ALTER QLOCAL/QREMOTE/QALIAS/QMODEL→queue, CHANNEL, TOPIC;
   QREMOTE RNAME / QALIAS TARGET→`resolves_to`; continuation-line joining; names de-quoted. (messaging estate)
-- **CICS / EXEC SQL** (`cics_sql.rs`) — regex supplement over COBOL: `EXEC CICS LINK/XCTL`→program,
-  `SEND/RECEIVE MAP`→map, `EXEC SQL`→`db2_table`.
+- **COBOL text supplement** (`cobol_links.rs`) — what the grammar can't see, every link from the real
+  program Module: `EXEC CICS LINK/XCTL`→`Calls` the program (any language), `SEND`/`RECEIVE MAP`→
+  `writes`/`reads` the map, `EXEC SQL`→`reads`/`writes` the `db2_table` (SELECT/cursor/subselect vs
+  INSERT/UPDATE/DELETE/MERGE), `COPY`/`EXEC SQL INCLUDE`→`Imports` the copybook (a copybook file
+  defines it and `Contains` its fields), `SELECT … ASSIGN TO`→`uses` the JCL DD binding, field uses
+  →`References`, and a dynamic `CALL VAR` whose variable holds one literal→`Calls` at Heuristic 0.5.
+  A shared target with no defining source indexed is a boundary node with a `boundary_reason`.
 
 ### Advanced COBOL / copybook ✅ (via `cobol.scm`)
 - PROGRAM-ID → named Module (so JCL/HLASM cross-program refs resolve to it).

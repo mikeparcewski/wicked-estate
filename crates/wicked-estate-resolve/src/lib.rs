@@ -43,6 +43,9 @@ pub use estate::estate_edges;
 pub mod relative_import;
 pub use relative_import::RelativeImportResolver;
 
+pub mod mainframe;
+pub use mainframe::DynamicCallResolver;
+
 pub mod scip;
 pub use scip::{ScipEvidence, scip_evidence};
 
