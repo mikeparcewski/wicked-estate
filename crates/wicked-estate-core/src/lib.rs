@@ -24,6 +24,7 @@ pub mod node;
 pub mod observability;
 pub mod path;
 pub mod query;
+pub mod redact;
 pub mod refs;
 pub mod repo;
 pub mod scope;

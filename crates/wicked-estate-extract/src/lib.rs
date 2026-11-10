@@ -23,6 +23,7 @@ macro_rules! eprintln {
     }};
 }
 
+pub mod redact;
 pub mod treesitter;
 pub use treesitter::{IaCExtractor, LOGICAL_LANGUAGES, SYMBOL_ID_SCHEME, TreeSitterExtractor};
 

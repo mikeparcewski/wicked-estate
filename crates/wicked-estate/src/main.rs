@@ -123,6 +123,19 @@ fn require_existing_graph(db: &str, cmd: &str) -> anyhow::Result<()> {
                  `wicked-estate index <path> --db {db}` first, or pass the right --db"
             );
         }
+        // #405 (R6 loud marker): a store written before secret redaction is served with its
+        // source text, signatures and docs withheld until it is cleaned.
+        if path != ":memory:" && cmd != "redact-store" {
+            if let Ok(s) = SqliteStore::open_readonly(&path) {
+                if s.redaction_pending() {
+                    eprintln!(
+                        "REDACTION-PENDING: {db} was written before secret redaction (#405); \
+                         source text, signatures and docs are withheld until it is cleaned — run \
+                         `wicked-estate redact-store --db {db}` (or any `index`)"
+                    );
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -985,6 +998,8 @@ fn main() -> Result<()> {
             if let Some(explicit) = args.str("scip-file") {
                 let scip_path = Path::new(explicit);
                 let mut store = open_store_ext(&db).map_err(to_any)?;
+                // #405: a store written before secret redaction is cleaned before this write.
+                wicked_estate::ensure_redacted(&mut *store).map_err(to_any)?;
                 let count = wicked_estate::ingest_scip_as(store.as_mut(), root, scip_path, as_repo)
                     .map_err(to_any)?;
                 println!(
@@ -1051,6 +1066,8 @@ fn main() -> Result<()> {
             envelope.validate().map_err(to_any)?;
             let as_repo = args.str("repo");
             let mut store = open_store_ext(&db).map_err(to_any)?;
+            // #405: a store written before secret redaction is cleaned before this write.
+            wicked_estate::ensure_redacted(&mut *store).map_err(to_any)?;
             {
                 // Same rule as `scip`: a labelled graph needs to be told which repo this is.
                 let known = wicked_estate::repo_scope::labels(store.as_ref());
@@ -1119,6 +1136,8 @@ fn main() -> Result<()> {
                 .with_context(|| format!("cannot read tfstate file '{file_path}'"))?;
             ensure_db_dir(&db)?;
             let mut store = open_store_ext(&db).map_err(to_any)?;
+            // #405: a store written before secret redaction is cleaned before this write.
+            wicked_estate::ensure_redacted(&mut *store).map_err(to_any)?;
             let n = wicked_estate::ingest_tfstate(store.as_mut(), &json).map_err(to_any)?;
             println!("tfstate: upserted {n} live resource node(s) from '{file_path}' into {db}");
         }
@@ -1147,6 +1166,8 @@ fn main() -> Result<()> {
             };
             ensure_db_dir(&sqlite_path)?;
             let mut store = SqliteStore::open(&sqlite_path).map_err(to_any)?;
+            // #405: a store written before secret redaction is cleaned before this write.
+            wicked_estate::ensure_redacted(&mut store).map_err(to_any)?;
             let a = store
                 .import_access_log(&payload.access_log)
                 .map_err(to_any)?;
@@ -2081,6 +2102,8 @@ fn main() -> Result<()> {
                         }
                         println!();
                     }
+                    // #405, D1 residuals: what redaction of the text above does and does not cover.
+                    println!("{}", wicked_estate_core::redact::PRIVACY_NOTE);
                 }
             } else {
                 let opts = source_bundle::BudgetOpts {
@@ -2301,6 +2324,8 @@ fn main() -> Result<()> {
             }
             ensure_db_dir(&db)?;
             let mut store = SqliteStore::open(&db).map_err(to_any)?;
+            // #405: a store written before secret redaction is cleaned before this write.
+            wicked_estate::ensure_redacted(&mut store).map_err(to_any)?;
             let stats = store.compact().map_err(to_any)?;
             println!("compact({db}):");
             println!("  dangling edges pruned:   {}", stats.dangling_edges);
@@ -2308,6 +2333,54 @@ fn main() -> Result<()> {
             println!("  orphan embeddings pruned:{}", stats.orphan_embeddings);
             println!("  orphan content rows pruned:{}", stats.orphan_content);
             println!("WAL checkpointed and VACUUM complete.");
+        }
+        // #405: redact-store — clean a store written before secret redaction, now, instead of on
+        // the next `index`. Idempotent: a store already at the current policy is left as it is.
+        //
+        // Usage:
+        //   wicked-estate redact-store [--db <file>]
+        "redact-store" => {
+            if db == ":memory:" {
+                anyhow::bail!("redact-store does not apply to an in-memory store");
+            }
+            require_existing_graph(&db, "redact-store")?;
+            let mut store = open_store_ext(&db).map_err(to_any)?;
+            use wicked_estate::RedactionOutcome as O;
+            let epoch = wicked_estate_core::redact::REDACTION_EPOCH;
+            match wicked_estate::ensure_redacted(&mut *store).map_err(to_any)? {
+                O::Migrated(rep) => {
+                    println!("redact-store({db}):");
+                    println!("  file texts re-masked:     {}", rep.files_rewritten);
+                    println!("  old content blobs dropped:{}", rep.blobs_dropped);
+                    println!("  node rows rewritten:      {}", rep.nodes_rewritten);
+                    println!("  other rows rewritten:     {}", rep.rows_scrubbed);
+                    println!("  files marked to re-index: {}", rep.files_marked);
+                    println!(
+                        "  WAL truncated:            {}",
+                        if rep.wal_truncated {
+                            "yes"
+                        } else {
+                            "no (a reader is attached; re-run when idle)"
+                        }
+                    );
+                    println!("Re-index each repo to re-derive signatures from the masked text.");
+                }
+                O::CleanupRetried(true) => println!(
+                    "redact-store({db}): finished the cleanup of an earlier migration (WAL truncated, VACUUM done)"
+                ),
+                O::CleanupRetried(false) => {
+                    anyhow::bail!(
+                        "redact-store({db}): a reader is attached, so the WAL still holds pages written before \
+                         redaction; re-run when no reader is attached"
+                    )
+                }
+                O::Current => println!(
+                    "redact-store({db}): already at the current redaction policy (epoch {epoch})"
+                ),
+                O::Fresh => println!(
+                    "redact-store({db}): no indexed code in this store; recorded redaction policy epoch {epoch}"
+                ),
+            }
         }
         // W7.1: watch — initial full index then reactive re-index on any file change.
         //
@@ -2458,6 +2531,8 @@ fn main() -> Result<()> {
             let sem_validated = args.bool("validated");
             let sem_validated_by = args.str("validated-by");
             let mut store = open_store_ext(&db).map_err(to_any)?;
+            // #405: a store written before secret redaction is cleaned before this write.
+            wicked_estate::ensure_redacted(&mut *store).map_err(to_any)?;
             let setting =
                 sem_description.is_some() || sem_requirement.is_some() || sem_validated.is_some();
             if setting {
@@ -2762,6 +2837,8 @@ fn main() -> Result<()> {
             let last_verified = args.i64("last-verified").unwrap_or(0);
             ensure_db_dir(&db)?;
             let mut store = SqliteStore::open(&db).map_err(to_any)?;
+            // #405: a store written before secret redaction is cleaned before this write.
+            wicked_estate::ensure_redacted(&mut store).map_err(to_any)?;
             // Build the typed annotation once; clone per target. ts=0 → store stamps it.
             let make = |sym_present_value: &str| {
                 let mut a = Annotation::new(ty, key, sym_present_value)
@@ -3944,6 +4021,9 @@ fn main() -> Result<()> {
                 "    (or --dbs a.db,b.db)  # federated search + blast-radius across repos (W12)"
             );
             println!("  wicked-estate compact              [--db <file>]  # prune cruft + VACUUM");
+            println!(
+                "  wicked-estate redact-store         [--db <file>]  # clean a store written before secret redaction (#405)"
+            );
             println!("  wicked-estate watch <path>         [--db ...] [--repo <name>] [--history]");
             println!(
                 "    Initial full index then reactive re-index on file changes (Ctrl-C to stop)."

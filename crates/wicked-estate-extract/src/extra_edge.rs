@@ -174,11 +174,14 @@ struct CompiledRule {
 
 impl CompiledRule {
     fn try_from(cfg: EdgeRule) -> Result<Self, String> {
+        // #405: name the rule and the error class, never the pattern text (committed text).
         let re = Regex::new(&cfg.pattern).map_err(|e| {
-            format!(
-                "rule {:?}: invalid pattern {:?}: {e}",
-                cfg.name, cfg.pattern
-            )
+            let class = match e {
+                regex::Error::Syntax(_) => "syntax error",
+                regex::Error::CompiledTooBig(_) => "compiled pattern too big",
+                _ => "error",
+            };
+            format!("rule {:?}: invalid pattern ({class})", cfg.name)
         })?;
         let edge_kind = cfg
             .emit_edge
@@ -241,7 +244,17 @@ impl ExtraEdgeExtractor {
         let mut rules: Vec<EdgeRule> = Vec::new();
         for (label, src) in files {
             let file: RulesFile = toml::from_str(src)
-                .map_err(|e| format!("extra-edge config parse error in {label}: {e}"))?;
+                // #405: the file and byte span only. The parser's message (and its Display) can
+                // quote the offending value, and a rule file is committed text.
+                .map_err(|e| {
+                    let at = e
+                        .span()
+                        .map(|r| format!(" at bytes {}..{}", r.start, r.end))
+                        .unwrap_or_default();
+                    format!(
+                        "extra-edge config parse error in {label}{at} (detail withheld: it can quote file values)"
+                    )
+                })?;
             rules.extend(file.rules);
         }
         let rules = rules
@@ -937,5 +950,23 @@ target_id_template = "skills/archetype/refs/{name}.md"
         assert_eq!(parse_node_kind("condition"), NodeKind::Condition);
         assert_eq!(parse_node_kind("action"), NodeKind::Action);
         assert_eq!(parse_node_kind("fact"), NodeKind::Fact);
+    }
+
+    /// #405: a rule file that fails to load never has its values or patterns printed.
+    #[test]
+    fn load_errors_quote_no_file_value() {
+        let bad = [
+            ("bad.toml".to_string(), "[[rule]]\nname = \"r\"\nfile_glob = \"*.js\"\npattern = \".\"\nemit_node = \"rosebud7\"\n".to_string()),
+        ];
+        let e = ExtraEdgeExtractor::from_toml_named(&bad)
+            .err()
+            .expect("rejected");
+        assert!(!e.contains("rosebud7"), "{e}");
+        let bad_re = [
+            ("re.toml".to_string(), "[[rule]]\nname = \"r\"\nfile_glob = \"*.js\"\npattern = \"rosebud7(\"\n[rule.emit_node]\nid_template = \"x\"\n".to_string()),
+        ];
+        if let Err(e) = ExtraEdgeExtractor::from_toml_named(&bad_re) {
+            assert!(!e.contains("rosebud7"), "{e}");
+        }
     }
 }

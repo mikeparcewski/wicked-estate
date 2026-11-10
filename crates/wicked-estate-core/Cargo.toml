@@ -12,6 +12,7 @@ categories = ["development-tools", "data-structures"]
 
 [dependencies]
 async-trait = "0.1.92"
+regex = "1"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

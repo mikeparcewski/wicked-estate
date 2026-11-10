@@ -65,6 +65,8 @@ tree-sitter-swift = "0.7"                 # ABI 15 — wired now that the runtim
 # (queries/swift.scm). Other ABI-15 grammars can follow the same path.
 streaming-iterator = "0.1"
 regex = "1"
+# Registrable-domain (eTLD+1) lookup for the secret-redaction URL rule (DES-S7 §5 C2).
+psl = "2"
 # arborium grammar family (ABI-15, tree-sitter 0.25, uniform `language()` API) — W2.1 toward 73.
 arborium-cobol = "2.18.0"
 arborium-ada = "2.18"

@@ -68,6 +68,23 @@ pub struct TelemetryImport {
 /// The same presence-guarded pattern backfills the evidence-envelope columns (`source_type`,
 /// `extraction_method`, `last_verified`) onto DBs created before they existed — each ALTER runs at
 /// most once and the column DEFAULT backfills every pre-existing row on read (no data rewrite).
+/// A store with no stored text (no file, content or node rows) holds nothing written before the
+/// current redaction policy: record the policy epoch so it is never served as pending (#405).
+/// A store an older build wrote has file rows and is left for the migration.
+fn stamp_fresh_redaction_epoch(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO meta(k, v) \
+         SELECT ?1, ?2 WHERE NOT EXISTS (SELECT 1 FROM files) \
+           AND NOT EXISTS (SELECT 1 FROM content) AND NOT EXISTS (SELECT 1 FROM nodes)",
+        params![
+            wicked_estate_core::redact::REDACTION_EPOCH_KEY,
+            wicked_estate_core::redact::REDACTION_EPOCH.to_string()
+        ],
+    )
+    .map_err(st)?;
+    Ok(())
+}
+
 fn migrate_schema(conn: &Connection) -> Result<()> {
     // Snapshot the current annotations columns once; the presence check IS the version gate.
     let mut stmt = conn.prepare("PRAGMA table_info(annotations)").map_err(st)?;
@@ -344,6 +361,23 @@ pub struct CompactStats {
     /// Edge-history rows removed by the retention window (keep newest 20 per file).
     pub history_rows_pruned: usize,
 }
+/// Counts from [`SqliteStore::migrate_redaction`]; never values (#405).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RedactionReport {
+    /// Stored file texts (current or archived) whose masked form differed and was re-keyed.
+    pub files_rewritten: usize,
+    /// Content blobs deleted (the pre-redaction texts and orphans).
+    pub blobs_dropped: usize,
+    /// Node / contribution rows whose signature was re-sliced or scrubbed.
+    pub nodes_rewritten: usize,
+    /// Other free-text rows changed by the token-shape scrub.
+    pub rows_scrubbed: usize,
+    /// Files marked for re-extraction (every indexed file).
+    pub files_marked: usize,
+    /// False when a live reader kept the WAL from being truncated; the old pages then stay in
+    /// the WAL until the next checkpoint (re-run `wicked-estate redact-store` when idle).
+    pub wal_truncated: bool,
+}
 
 /// Outcome of a [`SqliteStore::checkpoint_truncate`] call — the row `PRAGMA
 /// wal_checkpoint(TRUNCATE)` returns, decoded.
@@ -387,9 +421,135 @@ pub struct SqliteStore {
     /// Enable with [`set_history_enabled`](SqliteStore::set_history_enabled) or pass `--history`
     /// on the CLI when edge provenance archival is desired.
     history_enabled: bool,
+    /// Serve-time secret guard (#405): `(checked_at_ms, pending)`. `pending` is true for a code
+    /// graph (`indexed_root` set) whose `redaction_epoch` is older than this build's policy, i.e.
+    /// a store written before redaction that has not been migrated yet. While pending, reads
+    /// withhold stored source text, signatures and docs, and bypass the query cache. Re-checked at
+    /// most every [`GUARD_RECHECK`], so a long-lived reader sees a migration another process
+    /// ran.
+    guard: std::cell::Cell<Option<(std::time::Instant, bool)>>,
 }
 
+/// How often a reader re-reads the redaction epoch (see [`SqliteStore::redaction_pending`]).
+const GUARD_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Meta key set while the physical cleanup after a redaction migration (WAL truncate + VACUUM)
+/// has not completed; `wicked-estate redact-store` retries it (#405).
+pub const REDACTION_CLEANUP_KEY: &str = "redaction_cleanup_pending";
+
 impl SqliteStore {
+    /// True while this store holds text written before the current redaction policy (#405).
+    pub fn redaction_pending(&self) -> bool {
+        if let Some((at, pending)) = self.guard.get() {
+            if at.elapsed() < GUARD_RECHECK {
+                return pending;
+            }
+        }
+        let pending = self.holds_code_graph()
+            && self
+                .meta_value(wicked_estate_core::redact::REDACTION_EPOCH_KEY)
+                .and_then(|v| v.parse::<u32>().ok())
+                .is_none_or(|e| e < wicked_estate_core::redact::REDACTION_EPOCH);
+        self.guard.set(Some((std::time::Instant::now(), pending)));
+        pending
+    }
+
+    /// A code graph: an indexed root is recorded, or any file was indexed (graphs written before
+    /// `indexed_root` existed have file rows only). Memory and knowledge stores have neither.
+    pub fn holds_code_graph(&self) -> bool {
+        self.meta_value("indexed_root").is_some()
+            || self
+                .conn
+                .query_row("SELECT EXISTS(SELECT 1 FROM files)", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap_or(0)
+                != 0
+    }
+
+    fn meta_value(&self, k: &str) -> Option<String> {
+        self.conn
+            .query_row("SELECT v FROM meta WHERE k=?1", params![k], |r| r.get(0))
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    /// Forget the cached guard decision (after a migration or an index in this process).
+    pub fn reset_redaction_guard(&self) {
+        self.guard.set(None);
+    }
+
+    /// A node as served to readers: while [`redaction_pending`](Self::redaction_pending), its
+    /// signature and doc (text copied from the source) are withheld and its metadata scrubbed.
+    fn serve_node(&self, n: Node) -> Node {
+        let pending = self.redaction_pending();
+        self.serve_node_as(n, pending)
+    }
+
+    /// [`serve_node`](Self::serve_node) with the guard decision captured BEFORE the row was read,
+    /// so a migration committed by another process between the read and the serve cannot make a
+    /// pre-migration row look clean.
+    fn serve_node_as(&self, mut n: Node, pending: bool) -> Node {
+        if pending {
+            n.signature = None;
+            n.doc = None;
+            wicked_estate_core::redact::scrub_string(&mut n.name);
+            wicked_estate_core::redact::scrub_string(&mut n.symbol.0);
+            for v in n.metadata.values_mut() {
+                wicked_estate_core::redact::scrub_json(v);
+            }
+        }
+        n
+    }
+
+    /// An edge as served to readers: while pending, its endpoint ids and metadata pass the
+    /// token-shape scrub (an id minted from a committed literal may carry a credential shape).
+    /// Free text as served: scrubbed while pending.
+    fn serve_text(&self, mut t: String) -> String {
+        if self.redaction_pending() {
+            wicked_estate_core::redact::scrub_string(&mut t);
+        }
+        t
+    }
+
+    /// `(symbol, annotation)` rows as served: scrubbed while pending.
+    fn serve_pairs(&self, mut rows: Vec<(SymbolId, Annotation)>) -> Vec<(SymbolId, Annotation)> {
+        if self.redaction_pending() {
+            for (s, a) in &mut rows {
+                wicked_estate_core::redact::scrub_string(&mut s.0);
+                wicked_estate_core::redact::scrub_annotation(a);
+            }
+        }
+        rows
+    }
+
+    /// A traversal as served: its depth keys are symbol ids, scrubbed while pending (nodes and
+    /// edges already went through `serve_node` / `serve_edge`).
+    fn serve_subgraph(&self, mut g: Subgraph) -> Subgraph {
+        if self.redaction_pending() {
+            g.depths = std::mem::take(&mut g.depths)
+                .into_iter()
+                .map(|(mut k, v)| {
+                    wicked_estate_core::redact::scrub_string(&mut k);
+                    (k, v)
+                })
+                .collect();
+        }
+        g
+    }
+
+    fn serve_edge(&self, mut e: Edge) -> Edge {
+        if self.redaction_pending() {
+            wicked_estate_core::redact::scrub_string(&mut e.source.0);
+            wicked_estate_core::redact::scrub_string(&mut e.target.0);
+            if let Some(clean) = wicked_estate_core::redact::scrub_edge(&e) {
+                e = clean;
+            }
+        }
+        e
+    }
+
     // -----------------------------------------------------------------------
     // Symbol-string intern helpers (internal only; callers always pass/receive
     // SymbolId(String); interning is an on-disk representation detail).
@@ -444,6 +604,10 @@ impl SqliteStore {
     /// `symbols`/`nodes` split in schema.sql), so it survives process restarts and a multi-run
     /// reindex. The bump therefore fires iff the sid HAD a node before and has none now — a true reuse.
     fn upsert_nodes_inner(&mut self, nodes: &[Node], with_fts: bool) -> Result<()> {
+        // Secret backstop (#405): token shapes in signatures/docs/metadata never reach the row,
+        // the contribution record or the FTS index (both derive from this slice).
+        let nodes =
+            &*wicked_estate_core::redact::scrub_all(nodes, wicked_estate_core::redact::scrub_node);
         // Intern all symbols first, before prepare_cached borrows conn.
         // `prepare_cached` reuses ONE prepared statement across the loop (no per-row re-prepare —
         // the difference between ~300k VM compiles and ~3 on a large repo). §9: slow is a defect.
@@ -722,6 +886,7 @@ impl SqliteStore {
         // Idempotent in-place migrations for DBs created by an older build (e.g. adds the
         // annotations.type column when missing). No-op on fresh DBs.
         migrate_schema(&conn)?;
+        stamp_fresh_redaction_epoch(&conn)?;
         // Read history_enabled flag from meta (absent → OFF, the new default).
         // Old databases that never set this key default to OFF (no history) rather than ON.
         // Callers that want history must pass `--history` (or call set_history_enabled(true)).
@@ -739,6 +904,7 @@ impl SqliteStore {
             conn,
             in_batch: false,
             history_enabled,
+            guard: std::cell::Cell::new(None),
         })
     }
 
@@ -785,6 +951,7 @@ impl SqliteStore {
             conn,
             in_batch: false,
             history_enabled,
+            guard: std::cell::Cell::new(None),
         })
     }
 
@@ -794,10 +961,12 @@ impl SqliteStore {
         let conn = Connection::open_in_memory().map_err(st)?;
         conn.execute_batch(SCHEMA).map_err(st)?;
         migrate_schema(&conn)?;
+        stamp_fresh_redaction_epoch(&conn)?;
         Ok(Self {
             conn,
             in_batch: false,
             history_enabled: false,
+            guard: std::cell::Cell::new(None),
         })
     }
 
@@ -883,6 +1052,7 @@ impl SqliteStore {
         session_id: &str,
         accessed_at: i64,
     ) -> Result<()> {
+        let item_id = &*wicked_estate_core::redact::scrub(item_id);
         self.conn
             .execute(
                 "INSERT INTO access_log(item_id, session_id, accessed_at) VALUES(?1, ?2, ?3)",
@@ -906,7 +1076,8 @@ impl SqliteStore {
                 )
                 .map_err(st)?;
             for r in rows {
-                stmt.execute(params![r.item_id, r.session_id, r.accessed_at])
+                let item_id = wicked_estate_core::redact::scrub(&r.item_id);
+                stmt.execute(params![&*item_id, r.session_id, r.accessed_at])
                     .map_err(st)?;
             }
             Ok(())
@@ -948,7 +1119,8 @@ impl SqliteStore {
                 )
                 .map_err(st)?;
             for r in rows {
-                stmt.execute(params![r.query, r.searched_at, r.session_id])
+                let query = wicked_estate_core::redact::scrub(&r.query);
+                stmt.execute(params![&*query, r.searched_at, r.session_id])
                     .map_err(st)?;
             }
             Ok(())
@@ -970,9 +1142,15 @@ impl SqliteStore {
     /// Read logged search misses, most-recent-first. `since` (epoch millis, inclusive) and `limit`
     /// bound the result. Mirrors wicked-brain's `search_misses` read.
     pub fn search_misses(&self, limit: usize, since: Option<i64>) -> Result<Vec<SearchMissRecord>> {
+        // #405: queries logged by an unmigrated store pass the token-shape scrub when served.
+        let pending = self.redaction_pending();
         let to_row = |r: &rusqlite::Row<'_>| {
+            let mut query = r.get::<_, String>(0)?;
+            if pending {
+                wicked_estate_core::redact::scrub_string(&mut query);
+            }
             Ok(SearchMissRecord {
-                query: r.get::<_, String>(0)?,
+                query,
                 searched_at: r.get::<_, i64>(1)?,
                 session_id: r.get::<_, Option<String>>(2)?,
             })
@@ -1029,6 +1207,10 @@ impl SqliteStore {
     /// Return the cached value for `key` only if it was stored at the current graph version.
     /// Returns `None` when the key is absent or was stored at a prior version.
     pub fn cache_get(&self, key: &str) -> Result<Option<String>> {
+        // #405: a cached answer of an unmigrated store may carry secret text.
+        if self.redaction_pending() {
+            return Ok(None);
+        }
         let ver = self.graph_version()?;
         let value: Option<String> = self
             .conn
@@ -1044,6 +1226,7 @@ impl SqliteStore {
 
     /// Store `value` for `key` at the current graph version.
     pub fn cache_put(&mut self, key: &str, value: &str) -> Result<()> {
+        let value = &*wicked_estate_core::redact::scrub(value);
         let ver = self.graph_version()?;
         self.conn
             .execute(
@@ -1080,6 +1263,7 @@ impl SqliteStore {
 
     /// Write an arbitrary string value to the `meta` table (insert or replace).
     pub fn meta_set(&mut self, key: &str, value: &str) -> Result<()> {
+        let value = &*wicked_estate_core::redact::scrub(value);
         self.conn
             .execute(
                 "INSERT INTO meta(k, v) VALUES(?1, ?2) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
@@ -1130,6 +1314,7 @@ impl SqliteStore {
             .map_err(st)?
             .filter_map(|r| r.ok())
             .filter_map(|json| serde_json::from_str::<wicked_estate_core::Node>(&json).ok())
+            .map(|n| self.serve_node(n))
             .collect();
         Ok(rows)
     }
@@ -1172,7 +1357,7 @@ impl SqliteStore {
         for row in rows {
             let data = row.map_err(st)?;
             if let Ok(node) = serde_json::from_str::<wicked_estate_core::Node>(&data) {
-                nodes.push(node);
+                nodes.push(self.serve_node(node));
             }
         }
         Ok(nodes)
@@ -1524,6 +1709,417 @@ impl SqliteStore {
             orphan_content,
             history_rows_pruned,
         })
+    }
+
+    /// Clean a code-graph store written before the current secret-redaction policy (#405,
+    /// DES-S7 §5 "Existing databases"). In ONE write transaction:
+    ///
+    /// 1. every stored file text (current and `edge_history` versions) is re-redacted with
+    ///    `redact_file(path, text)` (the same pure function the indexer applies before parsing)
+    ///    and re-keyed by the blob sha of the masked text; the old blobs are deleted;
+    /// 2. each node of a rewritten file gets the masked slice of its signature, and every node,
+    ///    edge, support fact, unresolved ref, annotation, semantic note, telemetry row and meta
+    ///    value passes the token-shape scrub;
+    /// 3. the query cache and the per-file call-ref records are dropped and every file digest is
+    ///    cleared, so the next `index` re-extracts every file from masked text;
+    /// 4. the full-text index is rebuilt from the cleaned nodes and optimized (merging away the
+    ///    old segments), and the redaction epoch + rules digest are recorded.
+    ///
+    /// Then (outside the transaction) the WAL is checkpointed with TRUNCATE and the file is
+    /// `VACUUM`ed, so freed pages that held old text are not left in the database file. The
+    /// report carries counts only, never values. Copies and backups of the file made before are
+    /// outside its reach.
+    pub fn migrate_redaction(
+        &mut self,
+        redact_file: &dyn Fn(&str, &str) -> String,
+        rules_digest: &str,
+    ) -> Result<RedactionReport> {
+        use wicked_estate_core::redact as r;
+        if self.in_batch {
+            return Err(Error::Invalid(
+                "migrate_redaction inside an open batch".into(),
+            ));
+        }
+        let mut rep = RedactionReport::default();
+        self.conn.execute_batch("BEGIN IMMEDIATE").map_err(st)?;
+        let res = (|| -> Result<()> {
+            // (1) current file texts.
+            let files: Vec<(String, String)> = {
+                let mut q = self
+                    .conn
+                    .prepare("SELECT path, git_sha FROM files WHERE git_sha IS NOT NULL AND git_sha != ''")
+                    .map_err(st)?;
+                q.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .map_err(st)?
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(st)?
+            };
+            let mut with_text: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for (path, sha) in &files {
+                let Some(text) = self.raw_content(sha)? else {
+                    continue;
+                };
+                with_text.insert(path.clone());
+                let red = redact_file(path, &text);
+                rep.nodes_rewritten += self.migrate_file_nodes(path, &text, &red)?;
+                if red != text {
+                    let new_sha = self.put_raw_content(&red)?;
+                    self.conn
+                        .execute(
+                            "UPDATE files SET git_sha=?2 WHERE path=?1",
+                            params![path, new_sha],
+                        )
+                        .map_err(st)?;
+                    rep.files_rewritten += 1;
+                }
+            }
+            // (1b) archived versions referenced by edge history.
+            let hist: Vec<(String, String)> = {
+                let mut q = self
+                    .conn
+                    .prepare("SELECT DISTINCT git_sha, file FROM edge_history WHERE git_sha != ''")
+                    .map_err(st)?;
+                q.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .map_err(st)?
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(st)?
+            };
+            for (sha, file) in &hist {
+                let Some(text) = self.raw_content(sha)? else {
+                    continue;
+                };
+                let red = redact_file(file, &text);
+                if red != text {
+                    let new_sha = self.put_raw_content(&red)?;
+                    self.conn
+                        .execute(
+                            "UPDATE edge_history SET git_sha=?3 WHERE git_sha=?1 AND file=?2",
+                            params![sha, file, new_sha],
+                        )
+                        .map_err(st)?;
+                    rep.files_rewritten += 1;
+                }
+            }
+            // Blobs no file or history row references any more (the pre-redaction texts, and any
+            // orphan an older build left behind).
+            rep.blobs_dropped = self
+                .conn
+                .execute(
+                    "DELETE FROM content WHERE git_sha NOT IN \
+                       (SELECT git_sha FROM files WHERE git_sha IS NOT NULL) \
+                     AND git_sha NOT IN (SELECT git_sha FROM edge_history)",
+                    [],
+                )
+                .map_err(st)?;
+            // (1c) nodes of an indexed file whose text is missing or not decodable: their
+            // signature and doc cannot be re-sliced from masked text, so they are dropped (the
+            // next index re-derives them).
+            let all_files: std::collections::HashSet<String> = {
+                let mut q = self.conn.prepare("SELECT path FROM files").map_err(st)?;
+                q.query_map([], |row| row.get(0))
+                    .map_err(st)?
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(st)?
+            };
+            for path in all_files.difference(&with_text) {
+                rep.nodes_rewritten += self.drop_node_text(path)?;
+            }
+            // (2) token-shape scrub over every other free-text column, identity strings included
+            // (`symbols.sym`, `nodes.name`): the scrub is deterministic, so every copy of an id
+            // (the symbols row, serialized ids in node/edge JSON, embeddings) masks identically.
+            for (table, col) in [
+                ("symbols", "sym"),
+                ("nodes", "name"),
+                ("embeddings", "symbol"),
+                ("nodes", "requirement_validated_by"),
+                ("annotations", "type"),
+                ("annotations", "source_type"),
+                ("annotations", "extraction_method"),
+                ("search_misses", "session_id"),
+                ("access_log", "session_id"),
+                ("nodes", "data"),
+                ("nodes", "description"),
+                ("nodes", "requirement"),
+                ("node_files", "data"),
+                ("edges", "data"),
+                ("edge_base", "data"),
+                ("edge_supports", "data"),
+                ("edge_supports", "fact_id"),
+                ("edge_history", "edge_json"),
+                ("unresolved_refs", "raw_name"),
+                ("annotations", "key"),
+                ("annotations", "value"),
+                ("annotations", "provenance"),
+                ("annotations", "author"),
+                ("search_misses", "query"),
+                ("access_log", "item_id"),
+                ("changes", "target"),
+                ("meta", "v"),
+            ] {
+                rep.rows_scrubbed += self.scrub_column(table, col, &r::scrub)?;
+            }
+            // (3) derived records re-derive from masked text on the next index.
+            self.conn
+                .execute_batch(
+                    "DELETE FROM cache; DELETE FROM file_call_refs; UPDATE files SET digest = '';",
+                )
+                .map_err(st)?;
+            rep.files_marked = files.len();
+            // (4) the full-text index, rebuilt from the cleaned nodes; `optimize` merges every
+            // segment so no deleted entry keeps an old term.
+            self.conn
+                .execute_batch(
+                    "DELETE FROM nodes_fts; \
+                     INSERT INTO nodes_fts(symbol, name, signature, doc) \
+                       SELECT s.sym, n.name, \
+                              COALESCE(json_extract(n.data, '$.signature'), ''), \
+                              COALESCE(json_extract(n.data, '$.doc'), '') \
+                       FROM nodes n JOIN symbols s ON s.sid = n.symbol; \
+                     INSERT INTO nodes_fts(nodes_fts) VALUES('optimize');",
+                )
+                .map_err(st)?;
+            self.meta_set(r::REDACTION_EPOCH_KEY, &r::REDACTION_EPOCH.to_string())?;
+            self.meta_set("redaction_rules", rules_digest)?;
+            // Cleared only when the physical cleanup below completes.
+            self.meta_set(REDACTION_CLEANUP_KEY, "1")?;
+            Ok(())
+        })();
+        match res {
+            Ok(()) => self.conn.execute_batch("COMMIT").map_err(st)?,
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        }
+        self.reset_redaction_guard();
+        rep.wal_truncated = self.finish_redaction_cleanup()?;
+        Ok(rep)
+    }
+
+    /// The physical half of a redaction migration: fold the WAL into the main file, rebuild the
+    /// file (`VACUUM`, so freed pages that held old text are gone), fold again. Clears
+    /// [`REDACTION_CLEANUP_KEY`] only when both checkpoints truncated the WAL; returns whether
+    /// they did. A live reader blocks truncation: run it again when the store is idle.
+    pub fn finish_redaction_cleanup(&mut self) -> Result<bool> {
+        let first = self.checkpoint_truncate()?;
+        self.conn.execute_batch("VACUUM").map_err(st)?;
+        let last = self.checkpoint_truncate()?;
+        if first.busy || last.busy {
+            return Ok(false);
+        }
+        self.conn
+            .execute(
+                "DELETE FROM meta WHERE k=?1",
+                params![REDACTION_CLEANUP_KEY],
+            )
+            .map_err(st)?;
+        Ok(!self.checkpoint_truncate()?.busy)
+    }
+
+    /// True when a redaction migration committed but its physical cleanup has not completed.
+    pub fn redaction_cleanup_pending(&self) -> bool {
+        self.meta_value(REDACTION_CLEANUP_KEY).is_some()
+    }
+
+    /// Drop the signature and doc of every node and contribution record of `path` (their text
+    /// cannot be re-derived from masked content). Returns rows rewritten.
+    fn drop_node_text(&mut self, path: &str) -> Result<usize> {
+        let mut n = 0;
+        for (table, key) in [("nodes", "symbol"), ("node_files", "rowid")] {
+            let rows: Vec<(i64, String)> = {
+                let mut q = self
+                    .conn
+                    .prepare(&format!("SELECT {key}, data FROM {table} WHERE file=?1"))
+                    .map_err(st)?;
+                q.query_map(params![path], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .map_err(st)?
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(st)?
+            };
+            for (id, data) in rows {
+                let Ok(mut node) = serde_json::from_str::<Node>(&data) else {
+                    continue;
+                };
+                if node.signature.is_none() && node.doc.is_none() {
+                    continue;
+                }
+                node.signature = None;
+                node.doc = None;
+                let json = serde_json::to_string(&node)?;
+                self.conn
+                    .execute(
+                        &format!("UPDATE {table} SET data=?2 WHERE {key}=?1"),
+                        params![id, json],
+                    )
+                    .map_err(st)?;
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// Decompressed text of one content blob, `None` when absent or not UTF-8.
+    fn raw_content(&self, sha: &str) -> Result<Option<String>> {
+        let blob: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT blob FROM content WHERE git_sha=?1",
+                params![sha],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(st)?;
+        Ok(blob
+            .and_then(|b| zstd::decode_all(&b[..]).ok())
+            .and_then(|b| String::from_utf8(b).ok()))
+    }
+
+    /// Store `text` as a content blob keyed by its blob sha; returns the sha.
+    fn put_raw_content(&mut self, text: &str) -> Result<String> {
+        let sha = git_blob_sha(text);
+        let compressed = zstd::encode_all(text.as_bytes(), 3)
+            .map_err(|e| Error::Storage(format!("zstd encode: {e}")))?;
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO content(git_sha, blob) VALUES(?1, ?2)",
+                params![sha, compressed],
+            )
+            .map_err(st)?;
+        Ok(sha)
+    }
+
+    /// Rewrite the nodes (and contribution records) of `path` for the masked text: a signature
+    /// that is the slice of the original text at the node's start gets the same slice of the
+    /// masked text; one that cannot be located is dropped when the file had masks (the next
+    /// index re-derives it). Returns the number of rows rewritten.
+    fn migrate_file_nodes(&mut self, path: &str, orig: &str, red: &str) -> Result<usize> {
+        let mut n = 0;
+        for (table, key) in [("nodes", "symbol"), ("node_files", "rowid")] {
+            let rows: Vec<(i64, String)> = {
+                let mut q = self
+                    .conn
+                    .prepare(&format!("SELECT {key}, data FROM {table} WHERE file=?1"))
+                    .map_err(st)?;
+                q.query_map(params![path], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .map_err(st)?
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(st)?
+            };
+            for (id, data) in rows {
+                let Ok(mut node) = serde_json::from_str::<Node>(&data) else {
+                    continue;
+                };
+                let mut changed = false;
+                if let Some(sig) = node.signature.clone() {
+                    let start = node.location.span.start_byte as usize;
+                    let end = start + sig.len();
+                    let located = orig.get(start..end) == Some(sig.as_str());
+                    let new_sig = match (located, red.get(start..end)) {
+                        (true, Some(masked)) => Some(masked.to_string()),
+                        _ if red == orig => Some(sig.clone()),
+                        _ => None,
+                    };
+                    if new_sig.as_deref() != Some(sig.as_str()) {
+                        node.signature = new_sig;
+                        changed = true;
+                    }
+                }
+                if let Some(s) = wicked_estate_core::redact::scrub_node(&node) {
+                    node = s;
+                    changed = true;
+                }
+                if changed {
+                    let json = serde_json::to_string(&node)?;
+                    self.conn
+                        .execute(
+                            &format!("UPDATE {table} SET data=?2 WHERE {key}=?1"),
+                            params![id, json],
+                        )
+                        .map_err(st)?;
+                    n += 1;
+                }
+            }
+        }
+        Ok(n)
+    }
+
+    /// Apply `f` to every value of `table.col`, writing back the rows it changed.
+    fn scrub_column(
+        &mut self,
+        table: &str,
+        col: &str,
+        f: &dyn Fn(&str) -> std::borrow::Cow<'_, str>,
+    ) -> Result<usize> {
+        // Columns added by later schema versions may be absent from an old file.
+        let has_col = self
+            .conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name=?1"),
+                params![col],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(st)?
+            > 0;
+        if !has_col {
+            return Ok(0);
+        }
+        let rows: Vec<(i64, String)> = {
+            let mut q = self
+                .conn
+                .prepare(&format!(
+                    "SELECT rowid, {col} FROM {table} WHERE {col} IS NOT NULL"
+                ))
+                .map_err(st)?;
+            q.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(st)?
+                .collect::<std::result::Result<_, _>>()
+                .map_err(st)?
+        };
+        let mut n = 0;
+        for (rowid, v) in rows {
+            let std::borrow::Cow::Owned(new) = f(&v) else {
+                continue;
+            };
+            let update = format!("UPDATE {table} SET {col}=?2 WHERE rowid=?1");
+            match self.conn.execute(&update, params![rowid, new]) {
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(e, _))
+                    if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    if table == "symbols" {
+                        // Two ids that differ only inside a masked credential. This one is
+                        // dropped with every row that references it (never `OR REPLACE`, which
+                        // would orphan them, and never a suffix that serialized copies of the id
+                        // would not carry). Every file is re-extracted on the next index, which
+                        // mints the one masked id a fresh index of this text has.
+                        for sql in [
+                            "DELETE FROM nodes WHERE symbol=?1",
+                            "DELETE FROM node_files WHERE symbol=?1",
+                            "DELETE FROM edges WHERE source=?1 OR target=?1",
+                            "DELETE FROM edge_base WHERE source=?1 OR target=?1",
+                            "DELETE FROM edge_supports WHERE source=?1 OR target=?1",
+                            "DELETE FROM unresolved_refs WHERE from_sym=?1",
+                            "DELETE FROM annotations WHERE node_sym=?1",
+                            "DELETE FROM symbols WHERE sid=?1",
+                        ] {
+                            self.conn.execute(sql, params![rowid]).map_err(st)?;
+                        }
+                    } else {
+                        // The scrubbed twin of this row already exists, so this row is a duplicate
+                        // that only differs by the credential: drop it.
+                        self.conn
+                            .execute(
+                                &format!("DELETE FROM {table} WHERE rowid=?1"),
+                                params![rowid],
+                            )
+                            .map_err(st)?;
+                    }
+                }
+                Err(e) => return Err(st(e)),
+            }
+            n += 1;
+        }
+        Ok(n)
     }
 
     /// TRUNCATE-checkpoint the WAL — a strict subset of [`compact`](Self::compact) step (6):
@@ -2360,6 +2956,7 @@ impl GraphWrite for SqliteStore {
         searched_at: i64,
         session_id: Option<&str>,
     ) -> Result<()> {
+        let query = &*wicked_estate_core::redact::scrub(query);
         if self
             .conn
             .is_readonly(rusqlite::DatabaseName::Main)
@@ -2435,6 +3032,8 @@ impl GraphWrite for SqliteStore {
     }
 
     fn upsert_edges(&mut self, edges: &[Edge]) -> Result<()> {
+        let edges =
+            &*wicked_estate_core::redact::scrub_all(edges, wicked_estate_core::redact::scrub_edge);
         // Intern all source/target symbol strings first, before prepare_cached borrows conn.
         let sids: Vec<(i64, i64)> = edges
             .iter()
@@ -2504,6 +3103,8 @@ impl GraphWrite for SqliteStore {
     }
 
     fn upsert_unresolved_refs(&mut self, refs: &[UnresolvedRef]) -> Result<()> {
+        let refs =
+            &*wicked_estate_core::redact::scrub_all(refs, wicked_estate_core::redact::scrub_ref);
         // Intern all from_sym strings first, before prepare_cached borrows conn.
         // Persist COVERAGE + exact-site fidelity: from_sym, raw_name, kind, file, line,
         // start_byte, end_byte (admissibility F-B — byte-exact site identity). Hints and the
@@ -2892,6 +3493,7 @@ impl GraphWrite for SqliteStore {
     }
 
     fn set_file_call_refs(&mut self, file: &str, refs_json: &str) -> Result<()> {
+        let refs_json = &*wicked_estate_core::redact::scrub(refs_json);
         self.conn
             .execute(
                 "INSERT INTO file_call_refs(path, refs) VALUES(?1, ?2)
@@ -2903,6 +3505,10 @@ impl GraphWrite for SqliteStore {
     }
 
     fn set_file_content(&mut self, file: &str, text: &str) -> Result<()> {
+        // Secret backstop (#405). The indexer already stores format-redacted text; this catches
+        // every other caller. The key is the blob sha of the text STORED, so a masked file's key
+        // is not its git blob id.
+        let text = &*wicked_estate_core::redact::scrub(text);
         // Compute the git blob SHA for this content version.
         let sha = git_blob_sha(text);
         // Compress at level 3 (fast, ~4× ratio for source code).
@@ -2978,6 +3584,9 @@ impl GraphWrite for SqliteStore {
         requirement: Option<&str>,
         validation: Option<&wicked_estate_core::ValidationClaim>,
     ) -> Result<()> {
+        let description = wicked_estate_core::redact::scrub_opt(description);
+        let requirement = wicked_estate_core::redact::scrub_opt(requirement);
+        let (description, requirement) = (description.as_deref(), requirement.as_deref());
         // No fields to set → no-op (nothing to write).
         if description.is_none() && requirement.is_none() && validation.is_none() {
             return Ok(());
@@ -3034,7 +3643,8 @@ impl GraphWrite for SqliteStore {
         Ok(())
     }
 
-    fn annotate(&mut self, symbol: &SymbolId, annotation: Annotation) -> Result<()> {
+    fn annotate(&mut self, symbol: &SymbolId, mut annotation: Annotation) -> Result<()> {
+        wicked_estate_core::redact::scrub_annotation(&mut annotation);
         // Look up the sid WITHOUT interning: an un-interned symbol is not a node → no-op.
         let sid: Option<i64> = self
             .conn
@@ -3132,7 +3742,8 @@ impl GraphWrite for SqliteStore {
         generation: u64,
         facts: &[SupportFact],
     ) -> Result<SupportReplacement> {
-        let incoming = normalize_facts(facts)?;
+        let facts = wicked_estate_core::support::scrub_facts(facts)?;
+        let incoming = normalize_facts(&facts)?;
         // A SAVEPOINT nests inside an open batch (BEGIN) and stands alone outside one, so the
         // replacement is all-or-nothing in both modes without committing the caller's batch.
         self.conn
@@ -3178,6 +3789,8 @@ impl GraphRead for SqliteStore {
     }
 
     fn get_node(&self, id: &SymbolId) -> Result<Option<Node>> {
+        // #405: decide the guard before the row is read (see `serve_node_as`).
+        let pending = self.redaction_pending();
         // Resolve string → sid; if not interned, the node cannot exist.
         let sid: Option<i64> = self
             .conn
@@ -3200,7 +3813,7 @@ impl GraphRead for SqliteStore {
             .optional()
             .map_err(st)?;
         match json {
-            Some(j) => Ok(Some(serde_json::from_str(&j)?)),
+            Some(j) => Ok(Some(self.serve_node_as(serde_json::from_str(&j)?, pending))),
             None => Ok(None),
         }
     }
@@ -3226,7 +3839,7 @@ impl GraphRead for SqliteStore {
             .map_err(st)?;
         let mut out = Vec::new();
         for row in rows {
-            let n = serde_json::from_str::<Node>(&row.map_err(st)?)?;
+            let n = self.serve_node(serde_json::from_str::<Node>(&row.map_err(st)?)?);
             if wicked_estate_core::query::name_has_prefix(&n.name, prefix) {
                 out.push(n);
             }
@@ -3261,7 +3874,7 @@ impl GraphRead for SqliteStore {
                 .map_err(st)?;
             let mut v = Vec::new();
             for row in rows {
-                v.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
+                v.push(self.serve_node(serde_json::from_str::<Node>(&row.map_err(st)?)?));
             }
             v
         } else if let Some(name) = &query.exact_name {
@@ -3274,7 +3887,7 @@ impl GraphRead for SqliteStore {
                 .map_err(st)?;
             let mut v = Vec::new();
             for row in rows {
-                v.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
+                v.push(self.serve_node(serde_json::from_str::<Node>(&row.map_err(st)?)?));
             }
             v
         } else if !query.kinds.is_empty() {
@@ -3297,7 +3910,7 @@ impl GraphRead for SqliteStore {
                 .map_err(st)?;
             let mut v = Vec::new();
             for row in rows {
-                v.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
+                v.push(self.serve_node(serde_json::from_str::<Node>(&row.map_err(st)?)?));
             }
             v
         } else {
@@ -3308,7 +3921,7 @@ impl GraphRead for SqliteStore {
             let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(st)?;
             let mut v = Vec::new();
             for row in rows {
-                v.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
+                v.push(self.serve_node(serde_json::from_str::<Node>(&row.map_err(st)?)?));
             }
             v
         };
@@ -3418,7 +4031,7 @@ impl GraphRead for SqliteStore {
             .map_err(st)?;
         let mut out = Vec::new();
         for row in rows {
-            out.push(serde_json::from_str::<Edge>(&row.map_err(st)?)?);
+            out.push(self.serve_edge(serde_json::from_str::<Edge>(&row.map_err(st)?)?));
         }
         Ok(out)
     }
@@ -3470,13 +4083,15 @@ impl GraphRead for SqliteStore {
             }
         }
 
-        Ok(Subgraph {
-            nodes,
-            edges,
-            depths,
-            ..Default::default()
-        }
-        .with_caps(node_cap, depth_horizon))
+        Ok(self.serve_subgraph(
+            Subgraph {
+                nodes,
+                edges,
+                depths,
+                ..Default::default()
+            }
+            .with_caps(node_cap, depth_horizon),
+        ))
     }
 
     fn traverse_multi(&self, starts: &[SymbolId], spec: &TraversalSpec) -> Result<Subgraph> {
@@ -3551,13 +4166,15 @@ impl GraphRead for SqliteStore {
             }
         }
 
-        Ok(Subgraph {
-            nodes,
-            edges,
-            depths,
-            ..Default::default()
-        }
-        .with_caps(node_cap, depth_horizon))
+        Ok(self.serve_subgraph(
+            Subgraph {
+                nodes,
+                edges,
+                depths,
+                ..Default::default()
+            }
+            .with_caps(node_cap, depth_horizon),
+        ))
     }
 
     fn all_nodes(&self) -> Result<Vec<Node>> {
@@ -3565,7 +4182,7 @@ impl GraphRead for SqliteStore {
         let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(st)?;
         let mut out = Vec::new();
         for row in rows {
-            out.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
+            out.push(self.serve_node(serde_json::from_str::<Node>(&row.map_err(st)?)?));
         }
         Ok(out)
     }
@@ -3575,7 +4192,7 @@ impl GraphRead for SqliteStore {
         let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(st)?;
         let mut out = Vec::new();
         for row in rows {
-            out.push(serde_json::from_str::<Edge>(&row.map_err(st)?)?);
+            out.push(self.serve_edge(serde_json::from_str::<Edge>(&row.map_err(st)?)?));
         }
         Ok(out)
     }
@@ -3744,7 +4361,7 @@ impl GraphRead for SqliteStore {
             out.push(HistoricalEdge {
                 git_sha,
                 archived_seq: archived_seq as u64,
-                edge,
+                edge: self.serve_edge(edge),
             });
         }
         Ok(out)
@@ -3762,6 +4379,10 @@ impl GraphRead for SqliteStore {
     }
 
     fn file_content(&self, file: &str) -> Result<Option<String>> {
+        // #405 serve-time guard: an unmigrated store's text may hold secret values.
+        if self.redaction_pending() {
+            return Ok(None);
+        }
         // Resolve via the content-addressed join: files.git_sha → content.blob.
         let blob: Option<Vec<u8>> = self
             .conn
@@ -3860,8 +4481,8 @@ impl GraphRead for SqliteStore {
         match row {
             None => Ok(None), // node row exists but no semantic annotation has been set
             Some((description, requirement, validated_int, by, at)) => Ok(Some(NodeSemantics {
-                description,
-                requirement,
+                description: description.map(|d| self.serve_text(d)),
+                requirement: requirement.map(|r| self.serve_text(r)),
                 requirement_validated: validated_int != 0,
                 // NULL on a row written before authorship existed: a claim nobody signed. Surfaced
                 // rather than defaulted to a plausible-looking actor.
@@ -3887,12 +4508,14 @@ impl GraphRead for SqliteStore {
             .map_err(st)?;
         let mut out = Vec::new();
         for row in rows {
-            out.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
+            out.push(self.serve_node(serde_json::from_str::<Node>(&row.map_err(st)?)?));
         }
         Ok(out)
     }
 
     fn annotations(&self, symbol: &SymbolId) -> Result<Vec<Annotation>> {
+        // #405: annotations of an unmigrated store pass the token-shape scrub when served.
+        let pending = self.redaction_pending();
         let sid: Option<i64> = self
             .conn
             .query_row(
@@ -3931,6 +4554,12 @@ impl GraphRead for SqliteStore {
             })
             .map_err(st)?
             .filter_map(|r| r.ok())
+            .map(|mut a: Annotation| {
+                if pending {
+                    wicked_estate_core::redact::scrub_annotation(&mut a);
+                }
+                a
+            })
             .collect();
         Ok(rows)
     }
@@ -3969,7 +4598,7 @@ impl GraphRead for SqliteStore {
             .map_err(st)?
             .filter_map(|r| r.ok())
             .collect();
-        Ok(rows)
+        Ok(self.serve_pairs(rows))
     }
 
     fn annotations_stale_since(&self, cutoff: i64) -> Result<Vec<(SymbolId, Annotation)>> {
@@ -4007,7 +4636,7 @@ impl GraphRead for SqliteStore {
             .map_err(st)?
             .filter_map(|r| r.ok())
             .collect();
-        Ok(rows)
+        Ok(self.serve_pairs(rows))
     }
 
     fn symbol_epoch(&self, id: &SymbolId) -> Result<Option<u64>> {
@@ -4068,7 +4697,7 @@ impl GraphRead for SqliteStore {
                 SupportOwner::new(producer, snapshot)?,
                 generation as u64,
                 fact_id,
-                serde_json::from_str(&data)?,
+                self.serve_edge(serde_json::from_str(&data)?),
             ));
         }
         Ok(out)
@@ -4237,7 +4866,7 @@ impl SqliteStore {
             })
             .map_err(st)?;
         for row in rows {
-            let node = serde_json::from_str::<Node>(&row.map_err(st)?)?;
+            let node = self.serve_node(serde_json::from_str::<Node>(&row.map_err(st)?)?);
             // TS-S1: a synthetic value-flow slot has NO `Calls`/`Imports` edge in either
             // direction by construction, so it matches every one of these three shape queries —
             // 100% of them. `dead-code` on a TypeScript repo became mostly synthetic locals.
@@ -4273,7 +4902,7 @@ impl SqliteStore {
             })
             .map_err(st)?;
         for row in rows {
-            let node = serde_json::from_str::<Node>(&row.map_err(st)?)?;
+            let node = self.serve_node(serde_json::from_str::<Node>(&row.map_err(st)?)?);
             // TS-S1: a synthetic value-flow slot has NO `Calls`/`Imports` edge in either
             // direction by construction, so it matches every one of these three shape queries —
             // 100% of them. `dead-code` on a TypeScript repo became mostly synthetic locals.
@@ -4312,7 +4941,7 @@ impl SqliteStore {
             })
             .map_err(st)?;
         for row in rows {
-            let node = serde_json::from_str::<Node>(&row.map_err(st)?)?;
+            let node = self.serve_node(serde_json::from_str::<Node>(&row.map_err(st)?)?);
             // TS-S1: a synthetic value-flow slot has NO `Calls`/`Imports` edge in either
             // direction by construction, so it matches every one of these three shape queries —
             // 100% of them. `dead-code` on a TypeScript repo became mostly synthetic locals.
@@ -4341,7 +4970,7 @@ impl SqliteStore {
                 .query_map(params![file_kind], |r| r.get::<_, String>(0))
                 .map_err(st)?;
             for row in rows {
-                out.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
+                out.push(self.serve_node(serde_json::from_str::<Node>(&row.map_err(st)?)?));
             }
             Ok(out)
         } else {
@@ -4355,7 +4984,7 @@ impl SqliteStore {
                 .query_map(params![kind_json], |r| r.get::<_, String>(0))
                 .map_err(st)?;
             for row in rows {
-                out.push(serde_json::from_str::<Node>(&row.map_err(st)?)?);
+                out.push(self.serve_node(serde_json::from_str::<Node>(&row.map_err(st)?)?));
             }
             Ok(out)
         }
@@ -4604,6 +5233,88 @@ mod tests {
     /// node with `is_def` derived from the stored JSON's `metadata.is_declaration`, and (c) have
     /// those seeded rows participate fully in the survivor logic. The seed is single-shot
     /// (emptiness-gated), so a later open never duplicates or resurrects contributions.
+    #[test]
+    fn redaction_migration_drops_a_symbol_that_collides_after_scrubbing() {
+        // Review x0-r2/r3: two symbol ids that differ only inside a token-shaped literal scrub to
+        // the same string. No row is orphaned and no copy of an id is left inconsistent: one
+        // identity survives (masked), the other is dropped with everything referencing it.
+        let mut s = SqliteStore::in_memory().unwrap();
+        let a = format!("route synthetic /r/ghp_{}:", "A".repeat(36));
+        let b = format!("route synthetic /r/ghp_{}:", "B".repeat(36));
+        let na = Node::new(
+            wicked_estate_core::SymbolId(a.clone()),
+            wicked_estate_core::NodeKind::Other("route".into()),
+            "a",
+            wicked_estate_core::Language::new("java"),
+            wicked_estate_core::Location::new("x.java", wicked_estate_core::Span::ZERO),
+        );
+        let nb = Node::new(
+            wicked_estate_core::SymbolId(b.clone()),
+            wicked_estate_core::NodeKind::Other("route".into()),
+            "b",
+            wicked_estate_core::Language::new("java"),
+            wicked_estate_core::Location::new("x.java", wicked_estate_core::Span::ZERO),
+        );
+        // Insert raw (the write backstop would mask them): symbols, nodes and an edge each.
+        s.conn
+            .execute("INSERT INTO symbols(sym) VALUES(?1), (?2)", params![a, b])
+            .unwrap();
+        for (sid, n) in [(1i64, &na), (2i64, &nb)] {
+            s.conn
+                .execute(
+                    "INSERT INTO nodes(symbol,name,kind,language,file,data,scope) VALUES(?1,?2,'route','java','x.java',?3,'')",
+                    params![sid, n.name, serde_json::to_string(n).unwrap()],
+                )
+                .unwrap();
+        }
+        s.conn
+            .execute(
+                "INSERT INTO edges(source,target,kind,confidence,file,data) VALUES(2,1,'\"calls\"',1.0,'x.java','{}')",
+                [],
+            )
+            .unwrap();
+        s.conn
+            .execute("INSERT INTO files(path, digest) VALUES('x.java', 'd')", [])
+            .unwrap();
+        s.conn
+            .execute("DELETE FROM meta WHERE k='redaction_epoch'", [])
+            .unwrap();
+        s.migrate_redaction(&|_, t| t.to_string(), "test").unwrap();
+        let syms: Vec<(i64, String)> = s
+            .conn
+            .prepare("SELECT sid, sym FROM symbols")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(syms.len(), 1, "one masked identity survives: {syms:?}");
+        assert!(
+            !syms[0].1.contains("ghp_AAAA") && !syms[0].1.contains("ghp_BBBB"),
+            "{syms:?}"
+        );
+        let orphans: i64 = s
+            .conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM nodes WHERE symbol NOT IN (SELECT sid FROM symbols)) \
+                      + (SELECT COUNT(*) FROM edges WHERE source NOT IN (SELECT sid FROM symbols) \
+                                                        OR target NOT IN (SELECT sid FROM symbols))",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0, "no node or edge references a dropped identity");
+        let json: String = s
+            .conn
+            .query_row("SELECT data FROM nodes", [], |r| r.get(0))
+            .unwrap();
+        let n: Node = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            n.symbol.0, syms[0].1,
+            "the serialized id equals the interned id"
+        );
+    }
+
     #[test]
     fn sqlite_pre_contribution_db_migrates_on_open() {
         use wicked_estate_core::{Language, Location, Span};

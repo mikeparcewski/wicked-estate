@@ -21,7 +21,8 @@ macro_rules! eprintln {
 
 pub mod sqlite;
 pub use sqlite::{
-    AccessRecord, CompactStats, SearchMissRecord, SqliteStore, TelemetryImport, WalCheckpointStats,
+    AccessRecord, CompactStats, RedactionReport, SearchMissRecord, SqliteStore, TelemetryImport,
+    WalCheckpointStats,
 };
 // `Annotation` now lives in the core spine (the typed-annotations seam); re-export it here so
 // existing callers of `wicked_estate_store::Annotation` keep compiling.
@@ -215,6 +216,7 @@ impl MemStore {
 
     /// Store `value` for `key` at the current graph version.
     pub fn cache_put(&mut self, key: &str, value: &str) -> Result<()> {
+        let value = &*wicked_estate_core::redact::scrub(value);
         self.cache
             .insert(key.to_string(), (self.graph_version, value.to_string()));
         Ok(())
@@ -460,6 +462,8 @@ impl GraphWrite for MemStore {
     }
 
     fn upsert_nodes(&mut self, nodes: &[Node]) -> Result<()> {
+        let nodes =
+            &*wicked_estate_core::redact::scrub_all(nodes, wicked_estate_core::redact::scrub_node);
         for n in nodes {
             // Epoch bump (M8/DoD-XA4), mirroring the SQLite shared seam: bump iff this symbol HAD a
             // node before (`had_node`) but has none now (reuse-after-delete). A first-ever node — or
@@ -484,6 +488,8 @@ impl GraphWrite for MemStore {
     }
 
     fn upsert_edges(&mut self, edges: &[Edge]) -> Result<()> {
+        let edges =
+            &*wicked_estate_core::redact::scrub_all(edges, wicked_estate_core::redact::scrub_edge);
         for e in edges {
             let key = e.dedup_key();
             // A supported key (TS-S2A): the base rule applies to the kept-aside base contribution,
@@ -519,7 +525,11 @@ impl GraphWrite for MemStore {
     }
 
     fn upsert_unresolved_refs(&mut self, refs: &[UnresolvedRef]) -> Result<()> {
-        self.unresolved.extend_from_slice(refs);
+        self.unresolved
+            .extend_from_slice(&wicked_estate_core::redact::scrub_all(
+                refs,
+                wicked_estate_core::redact::scrub_ref,
+            ));
         Ok(())
     }
 
@@ -693,12 +703,15 @@ impl GraphWrite for MemStore {
     }
 
     fn set_file_call_refs(&mut self, file: &str, refs_json: &str) -> Result<()> {
-        self.file_call_refs
-            .insert(file.to_string(), refs_json.to_string());
+        self.file_call_refs.insert(
+            file.to_string(),
+            wicked_estate_core::redact::scrub(refs_json).into_owned(),
+        );
         Ok(())
     }
 
     fn set_file_content(&mut self, file: &str, text: &str) -> Result<()> {
+        let text = &*wicked_estate_core::redact::scrub(text);
         let sha = crate::sqlite::git_blob_sha(text);
         // Dedup: INSERT OR IGNORE semantics — only store if sha not already present.
         self.content
@@ -766,6 +779,9 @@ impl GraphWrite for MemStore {
         requirement: Option<&str>,
         validation: Option<&wicked_estate_core::ValidationClaim>,
     ) -> Result<()> {
+        let description = wicked_estate_core::redact::scrub_opt(description);
+        let requirement = wicked_estate_core::redact::scrub_opt(requirement);
+        let (description, requirement) = (description.as_deref(), requirement.as_deref());
         // No-op if the symbol is not a node.
         if !self.nodes.contains_key(symbol) {
             return Ok(());
@@ -797,6 +813,7 @@ impl GraphWrite for MemStore {
     }
 
     fn annotate(&mut self, symbol: &SymbolId, mut annotation: Annotation) -> Result<()> {
+        wicked_estate_core::redact::scrub_annotation(&mut annotation);
         // No-op if the symbol is not a node (mirrors the SQLite sid-lookup no-op).
         if !self.nodes.contains_key(symbol) {
             return Ok(());
@@ -835,7 +852,8 @@ impl GraphWrite for MemStore {
         facts: &[SupportFact],
     ) -> Result<SupportReplacement> {
         // Validate and decide before touching anything: every error leaves the store as it was.
-        let incoming = normalize_facts(facts)?;
+        let facts = wicked_estate_core::support::scrub_facts(facts)?;
+        let incoming = normalize_facts(&facts)?;
         let stored: StoredFacts = self
             .owner_facts
             .get(owner)
@@ -1514,6 +1532,35 @@ pub trait GraphStoreMutExt: GraphStore {
         Ok(())
     }
 
+    /// Clean text written before the current secret-redaction policy (#405): re-redact stored
+    /// file texts with `redact_file`, scrub every other free-text column, rebuild the full-text
+    /// index and record the policy epoch. `Ok(None)` = this backend has no migration; callers
+    /// must say so (a store it cannot clean must be re-created to be clean).
+    fn migrate_redaction(
+        &mut self,
+        _redact_file: &dyn Fn(&str, &str) -> String,
+        _rules_digest: &str,
+    ) -> wicked_estate_core::Result<Option<RedactionReport>> {
+        Ok(None)
+    }
+
+    /// True while the store holds text written before the current redaction policy and reads
+    /// therefore withhold stored source text, signatures and docs (#405).
+    fn redaction_pending(&self) -> bool {
+        false
+    }
+
+    /// True when a redaction migration committed but its physical cleanup (WAL truncate and
+    /// `VACUUM`) has not completed yet.
+    fn redaction_cleanup_pending(&self) -> bool {
+        false
+    }
+
+    /// Retry the physical cleanup of a redaction migration; true when it completed.
+    fn finish_redaction_cleanup(&mut self) -> wicked_estate_core::Result<bool> {
+        Ok(true)
+    }
+
     /// Every currently-parked `Imports` reference whose written specifier is RELATIVE
     /// (`./…` / `../…`, possibly quoted) — the candidate set for the indexer's back-fill pass
     /// (lane importer-backfill, wicked-estate#141). One kind-scoped pass over `unresolved_refs`;
@@ -1570,6 +1617,22 @@ pub(crate) fn unresolved_site_key(
 }
 
 impl GraphStoreMutExt for SqliteStore {
+    fn migrate_redaction(
+        &mut self,
+        redact_file: &dyn Fn(&str, &str) -> String,
+        rules_digest: &str,
+    ) -> wicked_estate_core::Result<Option<RedactionReport>> {
+        SqliteStore::migrate_redaction(self, redact_file, rules_digest).map(Some)
+    }
+    fn redaction_pending(&self) -> bool {
+        SqliteStore::redaction_pending(self)
+    }
+    fn redaction_cleanup_pending(&self) -> bool {
+        SqliteStore::redaction_cleanup_pending(self)
+    }
+    fn finish_redaction_cleanup(&mut self) -> wicked_estate_core::Result<bool> {
+        SqliteStore::finish_redaction_cleanup(self)
+    }
     fn version_bump(&mut self) {
         let _ = self.bump_version();
     }
@@ -1618,7 +1681,10 @@ impl GraphStoreMutExt for MemStore {
         let _ = self.bump_version();
     }
     fn meta_set_key(&mut self, key: &str, value: &str) {
-        self.meta.insert(key.to_string(), value.to_string());
+        self.meta.insert(
+            key.to_string(),
+            wicked_estate_core::redact::scrub(value).into_owned(),
+        );
     }
     fn meta_get_key(&self, key: &str) -> Option<String> {
         self.meta.get(key).cloned()

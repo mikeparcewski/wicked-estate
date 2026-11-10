@@ -81,6 +81,7 @@ macro_rules! eprintln {
     }};
 }
 
+pub mod confined;
 pub mod freshness;
 pub mod repo_scope;
 
@@ -917,6 +918,88 @@ fn rel(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
+/// What [`ensure_redacted`] did to a store (wicked-estate#405).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedactionOutcome {
+    /// Already at the current policy, physical cleanup complete. Nothing done.
+    Current,
+    /// A store with no code graph yet: the policy epoch was recorded.
+    Fresh,
+    /// Text written before the policy was cleaned in place.
+    Migrated(wicked_estate_store::RedactionReport),
+    /// Already migrated; the leftover physical cleanup (WAL truncate + VACUUM) was retried.
+    /// `true` when it completed.
+    CleanupRetried(bool),
+}
+
+/// Make `store` safe to serve under the current secret-redaction policy (wicked-estate#405).
+///
+/// A code graph (any indexed file, or a recorded `indexed_root`) whose `redaction_epoch` is older
+/// than this build's is migrated in place ([`GraphStoreMutExt::migrate_redaction`]); a fresh store
+/// only records the epoch; a migrated store whose physical cleanup did not complete gets it
+/// retried. A backend with no migration is an ERROR, never reported as clean. Progress goes to
+/// stderr as counts, never values.
+pub fn ensure_redacted(store: &mut dyn GraphStoreMutExt) -> Result<RedactionOutcome> {
+    use wicked_estate_core::redact::{REDACTION_EPOCH, REDACTION_EPOCH_KEY};
+    let epoch = store
+        .meta_get_key(REDACTION_EPOCH_KEY)
+        .and_then(|v| v.parse::<u32>().ok());
+    if epoch.is_some_and(|e| e >= REDACTION_EPOCH) {
+        if store.redaction_cleanup_pending() {
+            let done = store.finish_redaction_cleanup()?;
+            if !done {
+                eprintln!(
+                    "REDACTION: the WAL could not be truncated (a reader is attached); old pages \
+                     stay in it until `wicked-estate redact-store` runs with no reader attached"
+                );
+            }
+            return Ok(RedactionOutcome::CleanupRetried(done));
+        }
+        return Ok(RedactionOutcome::Current);
+    }
+    let digest = wicked_estate_extract::redact::rules_digest();
+    let code_graph =
+        store.meta_get_key("indexed_root").is_some() || !store.indexed_files()?.is_empty();
+    if !code_graph {
+        store.meta_set_key(REDACTION_EPOCH_KEY, &REDACTION_EPOCH.to_string());
+        store.meta_set_key("redaction_rules", &digest);
+        return Ok(RedactionOutcome::Fresh);
+    }
+    // Credential files are never indexed now; text an older build stored for one is masked whole
+    // (the next index sweeps the file, since the walk no longer admits it).
+    let redact = |path: &str, text: &str| -> String {
+        if wicked_estate_extract::redact::is_excluded(path) {
+            wicked_estate_extract::redact::mask_all(text)
+        } else {
+            wicked_estate_extract::redact::redact_source(path, text)
+        }
+    };
+    let Some(rep) = store.migrate_redaction(&redact, &digest)? else {
+        return Err(wicked_estate_core::Error::Invalid(
+            "this store backend cannot clean text written before secret redaction (#405); \
+             re-create the store to clean it"
+                .into(),
+        ));
+    };
+    eprintln!(
+        "REDACTION: cleaned a store written before secret redaction (#405): {} file texts \
+         re-masked, {} old blobs dropped, {} node rows and {} other rows rewritten, {} files \
+         marked for re-extraction{}",
+        rep.files_rewritten,
+        rep.blobs_dropped,
+        rep.nodes_rewritten,
+        rep.rows_scrubbed,
+        rep.files_marked,
+        if rep.wal_truncated {
+            ""
+        } else {
+            "; a live reader kept the WAL from being truncated: re-run `wicked-estate \
+             redact-store` when no reader is attached"
+        }
+    );
+    Ok(RedactionOutcome::Migrated(rep))
+}
+
 /// Load every drop-in extra-edge rule file (`.wicked-estate-extractors/*.toml`) under `root`.
 ///
 /// Returns the compiled extractor (`None` when the dir is absent, has no rules, or the rules fail
@@ -929,10 +1012,13 @@ fn load_extra_edge_rules(root: &Path) -> (Option<ExtraEdgeExtractor>, String) {
     let Ok(rd) = std::fs::read_dir(&dir) else {
         return (None, String::new());
     };
+    // #405: a rule file that resolves outside the repository (a symlink out) is never read.
+    let confined = confined::ConfinedRoot::new(root);
     let mut paths: Vec<PathBuf> = rd
         .filter_map(std::result::Result::ok)
         .map(|e| e.path())
-        .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("toml"))
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("toml"))
+        .filter_map(|p| confined.as_ref()?.resolve(&p).filter(|c| c.is_file()))
         .collect();
     paths.sort();
 
@@ -1121,6 +1207,10 @@ pub fn index_path_as(
         None => all_indexed,
     };
 
+    // #405: a store written before secret redaction is cleaned before this run writes anything;
+    // a fresh store records the policy epoch so readers serve it.
+    ensure_redacted(store)?;
+
     // W11.3: bump the graph version so any prior cache entries become stale.
     store.version_bump();
 
@@ -1300,6 +1390,11 @@ pub fn index_path_as(
                 .unwrap_or("")
                 .to_ascii_lowercase();
             let rel_path = rel(root, &p);
+            // #405: credential files (`.env`, private keys, kubeconfigs, `credentials*`, ...) are
+            // never indexed, even when committed.
+            if wicked_estate_extract::redact::is_excluded(&rel_path) {
+                return None;
+            }
             // Admit tree-sitter languages AND the grammar-less line extractors (JCL / HLASM), whose
             // dispatch lives in the per-file closure below — they are NOT in `ext_map`. Files
             // matched by a drop-in extra-edge rule are admitted too (they may have no language
@@ -1318,10 +1413,12 @@ pub fn index_path_as(
         .map(|(_, r)| repo_scope::namespaced(repo, r))
         .collect();
 
+    let confined_root = confined::ConfinedRoot::new(root);
     let work: Vec<FileWork> = supported
         .into_par_iter()
         .filter_map(|(abs, rel_path)| {
-            let bytes = std::fs::read(&abs).ok()?;
+            // #405: confined — a path that resolves outside the root is never read.
+            let bytes = confined_root.as_ref()?.read(&abs)?;
             let digest = file_digest(&bytes);
             Some(FileWork {
                 abs,
@@ -1489,6 +1586,9 @@ pub fn index_path_as(
                     if is_minified_or_huge(text) {
                         return None;
                     }
+                    // #405: the replay signature must come from the same masked text the write
+                    // below extracts from.
+                    let text = &wicked_estate_extract::redact::redact_source(&fw.raw, text);
                     let ext = fw
                         .abs
                         .extension()
@@ -1620,7 +1720,11 @@ pub fn index_path_as(
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            let text = String::from_utf8(fw.bytes.clone()).ok()?;
+            // #405: mask secret values BEFORE parsing, so nodes, signatures, the full-text index,
+            // unresolved-ref names and the stored content all derive from masked text (same byte
+            // length, so every span stays valid). The digest stays the file's own.
+            let committed = std::str::from_utf8(&fw.bytes).ok()?;
+            let text = wicked_estate_extract::redact::redact_source(&fw.raw, committed);
             let extra_rules = extra.as_ref().filter(|x| x.matches_path(&fw.raw));
 
             // Skip minified or huge files before any parsing — they generate noise, not signal.
@@ -1644,10 +1748,15 @@ pub fn index_path_as(
             if let Some(x) = extra_rules {
                 // Rules glob against the RAW repo-relative path; the ids they mint are then
                 // rewritten into the repo's namespace (no-op when un-labelled).
+                // A drop-in rule is a user-declared identity extractor over a file the user chose
+                // (a catalog's names, a command table): it reads the file as committed, so its
+                // captures are not masked by the default-deny config policy. What it captures is
+                // stored as names/ids and still passes the store's token-shape backstop (#405;
+                // stated in docs/secret-redaction.md).
                 let sf = SourceFile {
                     path: fw.raw.clone(),
                     language: Language::new("text"),
-                    text: text.clone(),
+                    text: wicked_estate_core::redact::scrub(committed).into_owned(),
                 };
                 let mut ee = x.extract_extra(&sf);
                 if let Some(label) = repo {
@@ -2441,7 +2550,10 @@ pub fn ingest_semantic_evidence(
             }
         })
         .collect();
-    let read = |doc: &str| -> Option<String> { std::fs::read_to_string(root?.join(doc)).ok() };
+    // #405: evidence documents are read only inside the repository root.
+    let confined = root.and_then(confined::ConfinedRoot::new);
+    let read =
+        |doc: &str| -> Option<String> { confined.as_ref()?.read_rel_to_string(Path::new(doc)) };
     let mut projection = wicked_estate_core::evidence::project_evidence(evidence, &nodes, &read)?;
     if let Some(p) = &prefix {
         projection.facts = projection

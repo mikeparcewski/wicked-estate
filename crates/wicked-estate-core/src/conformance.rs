@@ -4008,3 +4008,167 @@ pub fn semantic_evidence_suite<S: GraphStore>(store: &mut S) {
             .is_empty()
     );
 }
+
+// ── Secret backstop (wicked-estate#405) ───────────────────────────────────────────────────────
+
+/// Every free-text column a store writes passes [`crate::redact::scrub`]: a planted, token-shaped
+/// FAKE credential written through each `GraphWrite` ingress never reads back, and the text around
+/// it survives (same-length masking). Planted values are fake shapes, never real credentials.
+pub fn secret_backstop_suite<S: GraphStore>(store: &mut S) {
+    use crate::support::{SupportFact, SupportOwner};
+    const GH: &str = "ghp_PLANTEDfakeTokenForTests0123456789ab";
+    const AWS: &str = "AKIAPLANTEDFAKE00001";
+    let planted = [GH, AWS];
+    let leaks = |s: &str| planted.iter().any(|p| s.contains(p));
+
+    let mut n = Node::new(
+        sym("secret_backstop_f"),
+        NodeKind::Function,
+        "secret_backstop_f",
+        Language::new("rust"),
+        Location::new("sb/lib.rs", Span::ZERO),
+    );
+    n.signature = Some(format!("fn f() -> &str {{ \"{GH}\" }}"));
+    n.doc = Some(format!("uses {AWS}"));
+    n.metadata
+        .insert("note".into(), serde_json::json!({ "v": [GH] }));
+    let g = Node::new(
+        sym("secret_backstop_g"),
+        NodeKind::Function,
+        "secret_backstop_g",
+        Language::new("rust"),
+        Location::new("sb/lib.rs", Span::ZERO),
+    );
+    store.upsert_nodes(&[n.clone(), g.clone()]).expect("nodes");
+    let got = store
+        .get_node(&n.symbol)
+        .expect("get")
+        .expect("node present");
+    assert_eq!(got.name, "secret_backstop_f", "identity untouched");
+    let sig = got.signature.expect("signature kept");
+    assert!(
+        !leaks(&sig) && sig.starts_with("fn f() -> &str { \""),
+        "signature scrubbed: {sig}"
+    );
+    assert_eq!(
+        sig.len(),
+        n.signature.as_ref().unwrap().len(),
+        "same-length mask"
+    );
+    assert!(!leaks(got.doc.as_deref().unwrap_or("")), "doc scrubbed");
+    assert!(
+        !leaks(&serde_json::to_string(&got.metadata).unwrap()),
+        "metadata scrubbed"
+    );
+
+    let mut e = Edge::new(
+        g.symbol.clone(),
+        n.symbol.clone(),
+        EdgeKind::Calls,
+        ResolutionTier::Parsed,
+        "t",
+    );
+    e.metadata.insert("arg".into(), serde_json::json!(AWS));
+    store.upsert_edges(std::slice::from_ref(&e)).expect("edge");
+    let out = store
+        .neighbors(&g.symbol, Direction::Dependencies)
+        .expect("neighbors");
+    assert!(
+        !out.is_empty()
+            && out
+                .iter()
+                .all(|x| !leaks(&serde_json::to_string(&x.metadata).unwrap())),
+        "edge metadata scrubbed"
+    );
+
+    let r = UnresolvedRef::new(
+        n.symbol.clone(),
+        format!("call_{GH}"),
+        EdgeKind::Calls,
+        Location::new("sb/lib.rs", Span::ZERO),
+    );
+    store.upsert_unresolved_refs(&[r]).expect("refs");
+    let rows = store
+        .unresolved_refs_for_name(&format!("call_{GH}"))
+        .expect("refs read");
+    assert!(rows.is_empty(), "the unscrubbed name is not stored");
+
+    store
+        .set_file_content("sb/lib.rs", &format!("let k = \"{AWS}\";\n"))
+        .expect("content");
+    let text = store
+        .file_content("sb/lib.rs")
+        .expect("read")
+        .expect("content stored");
+    assert!(
+        !leaks(&text) && text.starts_with("let k = \"") && text.ends_with("\";\n"),
+        "content scrubbed: {text}"
+    );
+
+    let mut a = Annotation::new("note", "k", format!("pasted {GH}"));
+    a.provenance = format!("from {AWS}");
+    store.annotate(&n.symbol, a).expect("annotate");
+    let anns = store.annotations(&n.symbol).expect("annotations");
+    assert!(
+        !anns.is_empty()
+            && anns
+                .iter()
+                .all(|x| !leaks(&x.value) && !leaks(&x.provenance)),
+        "annotations scrubbed"
+    );
+
+    store
+        .set_node_semantics(
+            &n.symbol,
+            Some(&format!("desc {GH}")),
+            Some(&format!("REQ {AWS}")),
+            None,
+        )
+        .expect("semantics");
+    let sem = store
+        .node_semantics(&n.symbol)
+        .expect("sem")
+        .expect("sem present");
+    assert!(
+        !leaks(sem.description.as_deref().unwrap_or(""))
+            && !leaks(sem.requirement.as_deref().unwrap_or("")),
+        "semantics scrubbed"
+    );
+
+    let owner = SupportOwner::new("secret-backstop", "s1").expect("owner");
+    let mut fe = Edge::new(
+        g.symbol.clone(),
+        n.symbol.clone(),
+        EdgeKind::References,
+        ResolutionTier::Scip,
+        "scip-t",
+    );
+    fe.metadata.insert(
+        "scip_symbol".into(),
+        serde_json::json!(format!("npm pkg 1.0 `{GH}`.")),
+    );
+    let fact = SupportFact::new(format!("occ {AWS}"), fe.clone()).expect("fact");
+    store
+        .replace_edge_supports(&owner, 1, std::slice::from_ref(&fact))
+        .expect("supports");
+    let sup = store
+        .edge_supports(&fe.source, &fe.target, &fe.kind)
+        .expect("supports read");
+    assert!(
+        !sup.is_empty()
+            && sup
+                .iter()
+                .all(|s| !leaks(&s.fact_id)
+                    && !leaks(&serde_json::to_string(&s.fact.metadata).unwrap())),
+        "support facts scrubbed"
+    );
+    // Deterministic: the same set replays at the same generation.
+    let replay = store
+        .replace_edge_supports(&owner, 1, &[fact])
+        .expect("replay");
+    assert!(replay.replayed, "a scrubbed set replays idempotently");
+
+    store
+        .record_search_miss(&format!("where is {AWS}"), 1, None)
+        .expect("miss is best-effort");
+}

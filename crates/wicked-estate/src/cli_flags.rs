@@ -378,6 +378,10 @@ pub const COMMANDS: &[Command] = &[
         spec: owns(&[], &[DB]),
     },
     Command {
+        name: "redact-store",
+        spec: owns(&[], &[DB]),
+    },
+    Command {
         name: "watch",
         spec: ruled(
             &[opt("path")],

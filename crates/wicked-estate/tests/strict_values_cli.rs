@@ -291,6 +291,7 @@ fn zero_operand_commands_reject_extras() {
         "stats",
         "drift",
         "compact",
+        "redact-store",
         "subscribe",
         "entrypoints",
         "leaves",

@@ -523,6 +523,7 @@ impl PostgresStore {
 
     /// Write an arbitrary string value to the `meta` table (insert or replace).
     pub fn meta_set(&mut self, key: &str, value: &str) -> Result<()> {
+        let value = &*wicked_estate_core::redact::scrub(value);
         let mut h = self.conn()?;
         rt_block(
             sqlx::query(
@@ -577,6 +578,7 @@ impl PostgresStore {
 
     /// Store `value` for `key` at the current graph version.
     pub fn cache_put(&mut self, key: &str, value: &str) -> Result<()> {
+        let value = &*wicked_estate_core::redact::scrub(value);
         // graph_version acquires (and releases) its own handle — must complete before ours.
         let ver = self.graph_version()?;
         let mut h = self.conn()?;
@@ -1247,6 +1249,8 @@ impl GraphWrite for PostgresStore {
     }
 
     fn upsert_nodes(&mut self, nodes: &[Node]) -> Result<()> {
+        let nodes =
+            &*wicked_estate_core::redact::scrub_all(nodes, wicked_estate_core::redact::scrub_node);
         let mut h = self.conn()?;
         for n in nodes {
             let data = serde_json::to_string(n)?;
@@ -1350,6 +1354,8 @@ impl GraphWrite for PostgresStore {
     }
 
     fn upsert_edges(&mut self, edges: &[Edge]) -> Result<()> {
+        let edges =
+            &*wicked_estate_core::redact::scrub_all(edges, wicked_estate_core::redact::scrub_edge);
         if !self.batch_open() {
             return self.in_implicit_batch(|s| s.upsert_edges(edges));
         }
@@ -1417,6 +1423,8 @@ impl GraphWrite for PostgresStore {
     }
 
     fn upsert_unresolved_refs(&mut self, refs: &[UnresolvedRef]) -> Result<()> {
+        let refs =
+            &*wicked_estate_core::redact::scrub_all(refs, wicked_estate_core::redact::scrub_ref);
         let mut h = self.conn()?;
         for r in refs {
             let kind = serde_json::to_string(&r.kind)?;
@@ -1717,6 +1725,7 @@ impl GraphWrite for PostgresStore {
     }
 
     fn set_file_content(&mut self, file: &str, text: &str) -> Result<()> {
+        let text = &*wicked_estate_core::redact::scrub(text);
         let sha = git_blob_sha(text);
         let mut h = self.conn()?;
         // Dedup: INSERT … ON CONFLICT DO NOTHING — identical content shares one content row.
@@ -1797,6 +1806,9 @@ impl GraphWrite for PostgresStore {
         requirement: Option<&str>,
         validation: Option<&wicked_estate_core::ValidationClaim>,
     ) -> Result<()> {
+        let description = wicked_estate_core::redact::scrub_opt(description);
+        let requirement = wicked_estate_core::redact::scrub_opt(requirement);
+        let (description, requirement) = (description.as_deref(), requirement.as_deref());
         if description.is_none() && requirement.is_none() && validation.is_none() {
             return Ok(());
         }
@@ -1858,7 +1870,8 @@ impl GraphWrite for PostgresStore {
         Ok(())
     }
 
-    fn annotate(&mut self, symbol: &SymbolId, annotation: Annotation) -> Result<()> {
+    fn annotate(&mut self, symbol: &SymbolId, mut annotation: Annotation) -> Result<()> {
+        wicked_estate_core::redact::scrub_annotation(&mut annotation);
         let mut h = self.conn()?;
         rt_block(async {
             // An un-interned symbol is not a node → no-op (mirrors SqliteStore).
@@ -1945,7 +1958,8 @@ impl GraphWrite for PostgresStore {
         generation: u64,
         facts: &[SupportFact],
     ) -> Result<SupportReplacement> {
-        let incoming = normalize_facts(facts)?;
+        let facts = wicked_estate_core::support::scrub_facts(facts)?;
+        let incoming = normalize_facts(&facts)?;
         let mut h = self.conn()?;
         rt_block(async {
             // `Connection::begin` on the handle's connection: a real transaction when no batch is
