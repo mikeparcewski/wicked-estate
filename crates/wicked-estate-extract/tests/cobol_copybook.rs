@@ -67,10 +67,12 @@ fn cobol_data_items_become_nodes() {
 #[test]
 fn cobol_redefines_and_occurs_depending_emit_refs() {
     let ex = extract();
+    // `References`, not `Calls`: a data item is never a call target, and the resolvers never bind a
+    // `Calls` ref to a `Field`, so the old Calls refs could not resolve at all.
     let refs: Vec<&str> = ex
         .refs
         .iter()
-        .filter(|r| r.kind == EdgeKind::Calls)
+        .filter(|r| r.kind == EdgeKind::References)
         .map(|r| r.raw_name.as_str())
         .collect();
     // REDEFINES CUST-FLAGS → a reference to CUST-FLAGS.
