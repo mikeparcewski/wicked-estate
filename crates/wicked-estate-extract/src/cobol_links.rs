@@ -58,7 +58,7 @@ pub const COBOL_DYNAMIC_VAR_PREFIX: &str = "cobol-dynamic-var:";
 static RE_SOURCE_FREE: LazyLock<Regex> = LazyLock::new(|| {
     // The directive starts its line (after an optional sequence area); one inside a comment or a
     // literal does not switch the format.
-    Regex::new(r"(?im)^[0-9 ]{0,7}>>\s*SOURCE\s+(?:FORMAT\s+)?(?:IS\s+)?FREE\b")
+    Regex::new(r"(?im)^[0-9 ]*>>\s*SOURCE\s+(?:FORMAT\s+)?(?:IS\s+)?FREE\b")
         .expect("RE_SOURCE_FREE")
 });
 static RE_EXEC_CICS: LazyLock<Regex> =
@@ -124,7 +124,9 @@ static RE_VALUE: LazyLock<Regex> = LazyLock::new(|| {
 static RE_MOVE: LazyLock<Regex> = LazyLock::new(|| {
     // Group 1 is the whole sending operand (any expression: `ALL 'X'`, `FUNCTION TRIM(A)`,
     // `CORRESPONDING A`); only a lone literal records a value, anything else invalidates.
-    Regex::new(r"(?is)\bMOVE\s+([^.]*?)\s+TO\s+").expect("RE_MOVE")
+    // `MOVE` as a whole COBOL word (not the tail of `WS-MOVE`); a `.` inside the operand is only a
+    // decimal point when a digit follows it.
+    Regex::new(r"(?is)(?:^|[^A-Za-z0-9-])MOVE\s+((?:[^.]|\.[0-9])*?)\s+TO\s+").expect("RE_MOVE")
 });
 static RE_SET_ENTRY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -247,11 +249,12 @@ const SQL_STOP: &[&str] = &[
 pub fn supplement(file: &SourceFile, ex: &mut Extraction) {
     let free = RE_SOURCE_FREE.is_match(&file.text);
     let (clean, code) = lexical_views(&file.text, free);
-    let code_no_exec = RE_EXEC_ANY
+    // COPY … REPLACING / REPLACE pseudo-text is replacement text, never source, for every pass.
+    let code = RE_PSEUDO_TEXT
         .replace_all(&code, |c: &regex::Captures| blank(&c[0]))
         .into_owned();
-    let code_no_exec = RE_PSEUDO_TEXT
-        .replace_all(&code_no_exec, |c: &regex::Captures| blank(&c[0]))
+    let code_no_exec = RE_EXEC_ANY
+        .replace_all(&code, |c: &regex::Captures| blank(&c[0]))
         .into_owned();
     let lines = LineIndex::new(&code);
     let mut anchors = Anchors::of(file, ex, &code);
@@ -586,8 +589,8 @@ impl Literals {
         // constant, a number) records that the variable can hold something else.
         for c in RE_MOVE.captures_iter(code) {
             let whole = c.get(0).unwrap();
-            let line = line_of(whole.start());
             let op = c.get(1).unwrap();
+            let line = line_of(op.start()); // `whole` may start on the previous line's newline
             let lead = op.as_str().len() - op.as_str().trim_start().len();
             let t = op.as_str().trim();
             let quoted = |q: char| t.len() >= 2 && t.starts_with(q) && t.ends_with(q);
@@ -1789,6 +1792,26 @@ mod tests {
             c.contains(&"cobol-dynamic-var:WS-PGM".to_string()),
             "MOVE ALL 'X' changes WS-PGM: {c:?}"
         );
+        let l = lit(
+            "       01 A PIC X(8) VALUE 'AAA'.\n       01 WS-MOVE PIC X.\n       01 B PIC X(8).\n",
+            "           MOVE 1.5 TO A.\n           DISPLAY WS-MOVE\n           MOVE 'BBB' TO B\n",
+        );
+        assert!(
+            matches!(l.decide("A"), Decision::Unresolved { .. }),
+            "a decimal MOVE changes A"
+        );
+        assert!(
+            matches!(l.decide("B"), Decision::Resolved { ref value, .. } if value == "BBB"),
+            "WS-MOVE is not a MOVE statement"
+        );
+        let sql_in_pseudo = run(
+            "cbl/Q.cbl",
+            &program(
+                "",
+                "           COPY REAL2 REPLACING\n             == EXEC SQL SELECT * FROM GHOSTT END-EXEC ==\n             BY == X ==.\n",
+            ),
+        );
+        assert!(!sql_in_pseudo.nodes.iter().any(|n| n.name == "GHOSTT"));
         let targets: BTreeSet<(String, String)> = ex
             .local_edges
             .iter()
