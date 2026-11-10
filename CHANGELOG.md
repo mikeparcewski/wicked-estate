@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.34.1] — 2026-11-10
+
+Patch: re-indexing a label on a large project database is no longer quadratic (#420).
+
+**Upgrade note (0.34.0 -> 0.34.1).** Install 0.34.1 on every path the daemon resolves, then
+restart. The first writer open of each store rebuilds its full-text index once, keyed by node id,
+in one transaction (78,583 rows took about 10 s on a loaded laptop; budget about 2 min per million
+nodes). `wicked-estate redact-store --db <path>` with no reader attached does it as part of its
+run. The first `index` of each repo under 0.34.1 re-reads every file, because the binary version
+changed. That forced re-extract is now about as fast as a full index. Do not write a store with
+0.34.0 or older after 0.34.1 has opened it; if that happens, the next 0.34.1 writer open notices and
+rebuilds the index again.
+
+**Known, not changed here (#422).** A full index or forced re-extract of a very large TypeScript
+repo can need many GB of memory during extraction (about 1.5 KB of RSS per source byte of a large
+file, with one file per core in flight). The whole vscode repo (21k files) went past 8 GB with
+both 0.34.0 and 0.34.1.
+
 ### Fixed
 - **Re-indexing a label on a large project database is no longer quadratic (#420).** The
   full-text index (`nodes_fts`) could find a row only by scanning the whole table, because its
