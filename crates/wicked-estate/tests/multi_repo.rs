@@ -859,3 +859,59 @@ fn whitespace_in_a_git_directory_or_a_package_name_is_never_trimmed_away() {
         .expect_err("` pkg` is not `pkg`: another position in the work tree");
     assert!(err.to_string().contains("REPO COLLISION"), "{err}");
 }
+
+/// #420: a forced full re-extract of ONE label (`--force`, or a binary-version / id-scheme
+/// change) on a co-located db keeps the full-text index exact: one `nodes_fts` row per node,
+/// keyed by the node's sid, and both repos still answer a BM25 text query. Before #420 every
+/// per-node FTS delete scanned the whole table (every co-located repo's rows), so this path was
+/// O(nodes x all FTS rows); the store-level op-count gate pins the cost, this pins the result.
+#[test]
+fn forced_reextract_of_one_label_keeps_fts_exact_420() {
+    let root = fresh_dir("force420");
+    make_repo(&root.join("repoA"), "alpha");
+    make_repo(&root.join("repoB"), "beta");
+    let db = root.join("shared.db");
+    let mut store = SqliteStore::open(&db).unwrap();
+    wicked_estate::index_path_as(&mut store, &root.join("repoA"), Some("repoa")).unwrap();
+    wicked_estate::index_path_as(&mut store, &root.join("repoB"), Some("repob")).unwrap();
+    // What `index --force --repo repoa` does before indexing.
+    store
+        .clear_file_digests_under(Some(&repo_scope::prefix("repoa")))
+        .unwrap();
+    wicked_estate::index_path_as(&mut store, &root.join("repoA"), Some("repoa")).unwrap();
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let q = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+    let nodes = q("SELECT COUNT(*) FROM nodes");
+    assert!(nodes > 0);
+    assert_eq!(
+        q("SELECT COUNT(*) FROM nodes_fts"),
+        nodes,
+        "one FTS row per node"
+    );
+    assert_eq!(
+        q(
+            "SELECT COUNT(*) FROM nodes_fts f JOIN nodes n ON n.symbol = f.rowid \
+           JOIN symbols s ON s.sid = n.symbol AND s.sym = f.symbol"
+        ),
+        nodes,
+        "every FTS row is keyed by its node's sid"
+    );
+    let store = SqliteStore::open(&db).unwrap();
+    for (name, file) in [
+        ("alpha", "repoa/src/index.ts"),
+        ("beta", "repob/src/index.ts"),
+    ] {
+        let hits: Vec<String> = store
+            .find_symbols(&wicked_estate_core::SymbolQuery {
+                text: Some(name.to_string()),
+                ..Default::default()
+            })
+            .unwrap()
+            .into_iter()
+            .map(|n| n.location.file)
+            .collect();
+        assert!(hits.iter().any(|f| f == file), "{name}: {hits:?}");
+    }
+}
