@@ -105,8 +105,8 @@ use wicked_estate_extract::{
     treesitter::{ExtractorCache, is_minified_or_huge},
 };
 use wicked_estate_resolve::{
-    DynamicCallResolver, ImportMapResolver, InfraResolver, NameResolver, RulesBridgeResolver,
-    ScopedNameResolver, resolve_all_with_coverage,
+    ApexlangRefResolver, DynamicCallResolver, ImportMapResolver, InfraResolver, NameResolver,
+    RulesBridgeResolver, ScopedNameResolver, resolve_all_with_coverage,
 };
 use wicked_estate_retrieve::Embedder;
 use wicked_estate_store::GraphStoreMutExt;
@@ -1968,6 +1968,7 @@ fn index_path_inner(
         &InfraResolver,
         &RulesBridgeResolver,
         &DynamicCallResolver,
+        &ApexlangRefResolver,
     ];
     let resolution = resolve_all_with_coverage(resolvers, &all_refs, &index)?;
     let call_ref_hints = call_value_ref_hints(&all_refs);
@@ -2080,6 +2081,15 @@ fn index_path_inner(
                 }
                 if probed.insert(n.name.as_str()) {
                     for r in store.unresolved_refs_for_name(&n.name)? {
+                        if admissible(&r) && seen.insert(site_key(&r)) {
+                            candidates.push(r);
+                        }
+                    }
+                }
+                // A new APEXlang component can bind a parked `apexlang-ref:` of its kind (or an
+                // untyped one) under any of its enclosing scopes (estate#313).
+                for probe in wicked_estate_resolve::apexlang::backfill_probes(n) {
+                    for r in store.unresolved_refs_for_name(&probe)? {
                         if admissible(&r) && seen.insert(site_key(&r)) {
                             candidates.push(r);
                         }
@@ -5022,6 +5032,7 @@ pattern = "(?P<k>\\{)"
                     "InfraResolver" => InfraResolver.id(),
                     "RulesBridgeResolver" => RulesBridgeResolver.id(),
                     "DynamicCallResolver" => DynamicCallResolver.id(),
+                    "ApexlangRefResolver" => ApexlangRefResolver.id(),
                     // let-bound in the slice (needs the repo scope at construction time)
                     "relative" => {
                         return wicked_estate_resolve::RelativeImportResolver::new(None)

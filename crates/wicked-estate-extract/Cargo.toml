@@ -188,6 +188,10 @@ calamine = { workspace = true, optional = true }
 # Not used directly: a version floor for calamine's zip (see the workspace Cargo.toml).
 zip = { workspace = true, optional = true }
 
+[build-dependencies]
+# Compiles the vendored APEXlang grammar (vendor/tree-sitter-apexlang); see build.rs.
+cc = "1"
+
 [features]
 # Enable the real AWS cloud collector (aws-config + Resource Explorer v2 + EC2 + IAM).
 cloud-aws   = ["dep:aws-config", "dep:aws-sdk-resourceexplorer2", "dep:aws-sdk-ec2",

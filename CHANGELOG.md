@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+### Added
+- **Oracle APEXlang (`.apx`) is a built-in language (#310 to #313).** An APEX application's
+  components, their containment and their `@references` are now part of the graph.
+  - **Grammar:** an in-house tree-sitter grammar for APEXlang's core syntax, derived from
+    Oracle's `apexlang.ebnf` (UPL-1.0) and vendored under
+    `crates/wicked-estate-extract/vendor/tree-sitter-apexlang`. It parses all 3,160 files of the
+    pinned corpus (Oracle's 33 sample/starter applications plus 3 skill examples) with zero ERROR
+    and zero MISSING nodes, and CI checks both that and that `parser.c` regenerates byte-identical.
+  - **Corpus:** `oracle/apexlang/corpus.tsv` pins every corpus file by commit and sha256;
+    `scripts/apexlang-corpus.py fetch <dir>` fetches it and fails on any mismatch. A 25-file slice
+    is checked in as test fixtures, with Oracle's UPL-1.0 licence.
+  - **Identity:** one node per component, keyed by the path of `(kind, key)` pairs from the
+    application root (`apexlang . . . <app dir>/app#page:4#region:customer#`). Reformatting,
+    reordering properties, generated numbers and page-file renames never change an id. `contains`
+    edges link each component to its parent.
+  - **References:** each `@slug` binds to the component it names, at the reference's site, through a
+    data table of property to target kind and scope (`crates/wicked-estate-extract/apexlang.toml`).
+    A slug never resolves across applications, to another kind, or outside its page, region or
+    theme. An ambiguous slug stays unresolved. Over the pinned corpus, 20,932 of the 37,236
+    references resolve. 10 are ambiguous and 1 has a property the table does not know. 16,293
+    name built-in theme templates (`@/x`), which the exports do not contain, or point outside the
+    export by design, so they never bind. Every resolved reference that Oracle's own SQL exports
+    could check was correct: 15,980 of 19,967 edges, Wilson 95% lower bound 0.9998
+    (`oracle/apexlang/`).
+  - **Containment:** a top-level component links to the application, theme, plugin or supporting
+    objects that hold it, through a `contains` edge (all 6,086 in the corpus resolve).
+
 ## [0.34.1] — 2026-11-10
 
 Patch: re-indexing a label on a large project database is no longer quadratic (#420).

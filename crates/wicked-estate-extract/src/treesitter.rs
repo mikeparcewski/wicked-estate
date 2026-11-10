@@ -78,6 +78,7 @@ const STARLARK_QUERY: &str = include_str!("queries/starlark.scm");
 const CUDA_QUERY: &str = include_str!("queries/cuda.scm");
 const ARDUINO_QUERY: &str = include_str!("queries/arduino.scm");
 const APEX_QUERY: &str = include_str!("queries/apex.scm");
+const APEXLANG_QUERY: &str = include_str!("queries/apexlang.scm");
 const RACKET_QUERY: &str = include_str!("queries/racket.scm");
 const KOTLIN_QUERY: &str = include_str!("queries/kotlin.scm");
 const TOML_QUERY: &str = include_str!("queries/toml.scm");
@@ -272,6 +273,12 @@ fn lang_arduino() -> tree_sitter::Language {
 }
 fn lang_apex() -> tree_sitter::Language {
     tree_sitter_sfapex::apex::LANGUAGE.into()
+}
+/// Oracle APEXlang (`.apx`) — the vendored in-house grammar (`vendor/tree-sitter-apexlang`), built
+/// by this crate's `build.rs`. Extracted by [`crate::apexlang::ApexlangExtractor`], not by the
+/// generic `@code_*` pass.
+fn lang_apexlang() -> tree_sitter::Language {
+    crate::apexlang::GRAMMAR.into()
 }
 fn lang_racket() -> tree_sitter::Language {
     tree_sitter_racket::LANGUAGE.into()
@@ -745,6 +752,12 @@ static LANG_TABLE: &[LangEntry] = &[
         query_src: APEX_QUERY,
     },
     LangEntry {
+        name: "apexlang",
+        ext: &["apx"],
+        make_language: lang_apexlang,
+        query_src: APEXLANG_QUERY,
+    },
+    LangEntry {
         name: "racket",
         ext: &["rkt"],
         make_language: lang_racket,
@@ -1213,6 +1226,15 @@ pub(crate) fn builtin_language(name: &str) -> Option<tree_sitter::Language> {
         .map(|e| (e.make_language)())
 }
 
+/// The built-in query source of a [`LANG_TABLE`] language (no override applied).
+pub(crate) fn builtin_query(name: &str) -> &'static str {
+    LANG_TABLE
+        .iter()
+        .find(|e| e.name == name)
+        .map(|e| e.query_src)
+        .unwrap_or("")
+}
+
 /// The [`LANG_TABLE`] entry name owning a file extension (no dot, lowercase), if any. Drives the
 /// cross-language extension-capture rule for grammar overrides (ADR-010).
 pub(crate) fn builtin_owner_of_ext(ext: &str) -> Option<&'static str> {
@@ -1248,6 +1270,22 @@ pub struct TreeSitterExtractor {
     language: tree_sitter::Language,
     /// Query compiled once at construction time so we never pay `Query::new` per file.
     query: Query,
+    /// A language whose identity the generic `@code_*` pass cannot express extracts through its
+    /// own routine, on the same (possibly overridden) grammar and query. See [`STRUCTURED`].
+    structured: Option<StructuredFn>,
+}
+
+/// A dedicated extraction routine over a language's effective grammar and compiled query.
+pub(crate) type StructuredFn =
+    fn(&tree_sitter::Language, &Query, &SourceFile) -> Result<Extraction>;
+
+/// Languages extracted by a dedicated routine instead of the generic capture pass — data, keyed
+/// by `LANG_TABLE` name, so every entry point (`for_language`, `extractor_for_extension`, the
+/// indexer's cache, grammar and query overrides) reaches the same extraction.
+static STRUCTURED: &[(&str, StructuredFn)] = &[("apexlang", crate::apexlang::extract_structured)];
+
+fn structured_for(name: &str) -> Option<StructuredFn> {
+    STRUCTURED.iter().find(|(n, _)| *n == name).map(|(_, f)| *f)
 }
 
 impl TreeSitterExtractor {
@@ -1263,7 +1301,11 @@ impl TreeSitterExtractor {
             // override never reaches this arm, so `from_grammar`'s silent `.ok()?` never sees a
             // user query for a built-in language.
             if let Some(g) = crate::plugin::grammar_override_for_name(entry.name) {
-                return Self::from_grammar(&g.lang, g.plugin.language.clone(), &g.plugin.query_src);
+                return Self::from_grammar(&g.lang, g.plugin.language.clone(), &g.plugin.query_src)
+                    .map(|mut x| {
+                        x.structured = structured_for(entry.name);
+                        x
+                    });
             }
             let language = (entry.make_language)();
             // ADR-010 tier 2: a compiled-ok query-only override replaces the built-in query on
@@ -1277,6 +1319,7 @@ impl TreeSitterExtractor {
                 lang_name: entry.name.to_string(),
                 language,
                 query,
+                structured: structured_for(entry.name),
             });
         }
         // Not built in — fall back to a runtime-loaded plugin grammar (see [`crate::plugin`]).
@@ -1296,6 +1339,7 @@ impl TreeSitterExtractor {
             lang_name: name.to_string(),
             language,
             query,
+            structured: None,
         })
     }
 
@@ -3060,6 +3104,10 @@ impl Extractor for TreeSitterExtractor {
                 local_edges: Vec::new(),
                 refs: Vec::new(),
             });
+        }
+
+        if let Some(structured) = self.structured {
+            return structured(&self.language, &self.query, file);
         }
 
         // Parser is not Sync, so we create one per call (cheap — no grammar compilation).

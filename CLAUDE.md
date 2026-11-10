@@ -185,7 +185,7 @@ See the ADRs / contract for rationale; reopen only with new evidence.
   (TSG superseded, `docs/adr/ADR-007`). The LSP client (`lsp.rs`) is a built library whose only
   sanctioned consumer is the intent-routed edit plane (`docs/adr/ADR-009`, W3.6 — designed, not
   yet wired). **LSP is on-demand only, never bulk.**
-- **Language coverage:** parity with the set (**114 in the manifest today** — `languages.toml` is
+- **Language coverage:** parity with the set (**115 in the manifest today** — `languages.toml` is
   the canonical count; the parity test gates a `≥73` floor) **and add-more-without-surgery**
   — languages are *data* (`crates/wicked-estate-extract/languages.toml`): a row + a `<name>.scm` file, no core
   change. The capability matrix is **generated** from that data (the thing prior art

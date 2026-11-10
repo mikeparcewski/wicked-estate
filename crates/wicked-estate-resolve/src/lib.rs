@@ -47,6 +47,9 @@ pub use relative_import::RelativeImportResolver;
 pub mod mainframe;
 pub use mainframe::DynamicCallResolver;
 
+pub mod apexlang;
+pub use apexlang::ApexlangRefResolver;
+
 pub mod scip;
 pub use scip::{ScipEvidence, scip_evidence};
 
@@ -71,6 +74,9 @@ impl Resolver for NameResolver {
     fn resolve(&self, refs: &[UnresolvedRef], index: &dyn SymbolIndex) -> Result<Vec<Edge>> {
         let mut out = Vec::new();
         for r in refs {
+            if routed_elsewhere(r) {
+                continue;
+            }
             let mut candidates = index.by_name(&r.raw_name);
             // Kind admissibility (D1) runs PRE-uniqueness — deliberately recall-widening:
             // dropping a deny-listed homonym (e.g. an html type_alias) can make a legitimate
@@ -102,6 +108,15 @@ impl Resolver for NameResolver {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+/// Refs whose `raw_name` is a reserved encoding owned by a dedicated resolver (APEXlang
+/// `apexlang-ref:` / `apexlang-in:`). The name tiers skip them outright: an encoded name is not a
+/// written name, and a quoted APEXlang id can spell anything, so "no node is named that" is not
+/// isolation.
+fn routed_elsewhere(r: &UnresolvedRef) -> bool {
+    use wicked_estate_core::refs::apexlang_ref::{CONTAINER_PREFIX, PREFIX};
+    r.raw_name.starts_with(PREFIX) || r.raw_name.starts_with(CONTAINER_PREFIX)
+}
 
 /// Parent directory of a file path, or `""` when the path has no separator (a root-level file).
 ///
@@ -282,6 +297,9 @@ impl Resolver for ScopedNameResolver {
         let mut out = Vec::new();
 
         for r in refs {
+            if routed_elsewhere(r) {
+                continue;
+            }
             let mut candidates = index.by_name(&r.raw_name);
 
             // Kind admissibility (D1): Import nodes are never targets, for any ref kind.

@@ -10,7 +10,7 @@ __      ___  ___| | _____  __| |______ ___  ___| |_ __ _| |_ ___
 **What your agents know about your system.** wicked-estate turns a repo, and the infrastructure,
 policy, and mainframe estate around it, into a code graph, memory and knowledge an LLM agent can
 actually use: **blast-radius of change**, **requirements↔implementation**, **infra + policy
-relationships**, and **operational history**, across 114 languages. **Memory** is what happened and
+relationships**, and **operational history**, across 115 languages. **Memory** is what happened and
 what you told it; **knowledge** is what it learned from your code and docs; the two stay separate
 and cited. Every edge carries `{confidence, provenance, resolved_by}`; a heuristic is never handed
 to an agent as a fact. **Portable by design** — one static binary, local-first on SQLite, or a
@@ -55,7 +55,7 @@ default; no servers, no accounts, nothing leaves your machine.
 
 LLM coding agents waste turns grepping and re-reading files. wicked-estate gives them a precise,
 ranked, **bounded** answer instead — "who calls this?", "what breaks if I change it?", "give me just
-the context for this symbol" — across **114 languages** (103 wired tree-sitter grammars + 6
+the context for this symbol" — across **115 languages** (104 wired tree-sitter grammars + 6
 grammar-less mainframe extractors; including legacy enterprise stacks:
 VB6/VBA/VBScript/VB.NET, RPG, Delphi, ColdFusion, Progress ABL, PowerBuilder, Visual FoxPro,
 LotusScript, Informix 4GL, Crystal Reports) and a mainframe/IaC **estate** layer
@@ -162,9 +162,9 @@ wicked-estate watch ./my-project --db graph.db
   estate *is* — the environment around your code **and** the memory + knowledge layer (absorbed
   2026-08; agent surface: wicked-garden's `mem`/`search` domains); estate maps what a change
   touches, what protects it, and what it was.
-- **Extraction engine — 114 languages (tree-sitter + grammar-less)** — symbols, calls, imports,
+- **Extraction engine — 115 languages (tree-sitter + grammar-less)** — symbols, calls, imports,
   heritage feed the environment above. Languages are **data** (a manifest row + a `.scm` query) —
-  adding one is zero core change; 103 of the 114 manifest rows have wired tree-sitter grammars
+  adding one is zero core change; 104 of the 115 manifest rows have wired tree-sitter grammars
   (see the generated [coverage matrix](./docs/language-coverage-matrix.md)).
 - **Runtime language plugins** — drop a compiled tree-sitter grammar + `.scm` query + manifest into
   the plugins dir and it loads at startup, no recompile. The grammar is a separate artifact, never

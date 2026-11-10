@@ -10227,6 +10227,7 @@ dependencies = [
  "azure_identity",
  "azure_mgmt_resources",
  "calamine",
+ "cc",
  "google-cloud-asset-v1",
  "google-cloud-auth",
  "libloading",
