@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## [0.33.0] — 2026-11-10
+
+Minor: committed secret values are no longer stored (#405), and mainframe links that were dropped or
+never made now start from the real program node (#409).
+
+**Upgrade note.** A store written by an earlier version still holds the old text. It is cleaned on
+the first write command that opens it (`index`, `watch`, ...), or now with `wicked-estate redact-store
+--db <path>`. Until then, reads withhold its source text, signatures and docs and print
+`REDACTION-PENDING:`. Run `redact-store` while no reader (MCP server, daemon) is attached so the WAL
+is truncated too; if a reader was attached, run it again when idle. Backups made before the
+migration are outside its reach. Guide: `docs/secret-redaction.md`.
+
+Mainframe fixture (`crates/wicked-estate/tests/fixtures/mainframe/`), 0.32.1 -> 0.33.0:
+
+| Query (CLI) | 0.32.1 | 0.33.0 |
+|---|---|---|
+| `blast-radius ORDERS` (who touches table ORDERS) | no resolved dependents | ORDPGM (+ STEP1, ORDJOB) |
+| `blast-radius SHIPPGM` (who LINKs to SHIPPGM) | its File node only | ORDPGM (+ STEP1, ORDJOB) |
+| `blast-radius ORDREC` (what uses copybook ORDREC) | "no symbol named 'ORDREC'" | ORDPGM |
+| `path STEP1 SHIPPGM` | no path found | STEP1 -> ORDPGM -> SHIPPGM |
+| grammar-less guard fixture | 7 dangling edges pruned | 0 pruned |
+
+Removed node kind: `cics_program` (wicked-core#1372 tracks the coverage config). Follow-ups: #406
+(memory/knowledge redaction), #407 (PL/I, REXX, Natural, Easytrieve), #408, #410.
+
 ### Security
 - **Committed secret values are no longer stored (estate#405).** `index` stored the full text of
   every committed file in `content`, the first line of each definition as its signature, and
