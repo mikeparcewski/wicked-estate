@@ -85,6 +85,80 @@ fn stamp_fresh_redaction_epoch(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Meta key recording that every `nodes_fts` row is keyed by `rowid = nodes.symbol` (#420).
+pub const FTS_ROWID_KEY: &str = "fts_rowid";
+/// The only value of [`FTS_ROWID_KEY`]: FTS rowid = the node's interned sid.
+const FTS_ROWID_SID: &str = "sid";
+
+/// Rebuild `nodes_fts` from `nodes`, one row per node with `rowid = nodes.symbol` (#420).
+///
+/// FTS5 looks a row up only by `rowid` (or MATCH): `nodes_fts.symbol` is UNINDEXED, so a
+/// `DELETE … WHERE symbol = ?` scans the WHOLE table, every co-located repo included. Keying the
+/// row by the sid (the `nodes` primary key, never reused: `symbols.sid` is AUTOINCREMENT) makes
+/// every maintenance delete a rowid lookup. The table is dropped and re-created from its own stored
+/// definition, so no old segment (and no old term) survives, and the new segments are written in
+/// one pass. Callers run this inside their own transaction.
+fn rebuild_fts_all(conn: &Connection) -> Result<()> {
+    let ddl: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='nodes_fts'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(st)?;
+    conn.execute_batch("DROP TABLE nodes_fts").map_err(st)?;
+    conn.execute_batch(&ddl).map_err(st)?;
+    conn.execute_batch(
+        "INSERT INTO nodes_fts(rowid, symbol, name, signature, doc) \
+           SELECT n.symbol, s.sym, n.name, \
+                  COALESCE(json_extract(n.data, '$.signature'), ''), \
+                  COALESCE(json_extract(n.data, '$.doc'), '') \
+           FROM nodes n JOIN symbols s ON s.sid = n.symbol",
+    )
+    .map_err(st)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(k, v) VALUES(?1, ?2)",
+        params![FTS_ROWID_KEY, FTS_ROWID_SID],
+    )
+    .map_err(st)?;
+    Ok(())
+}
+
+fn fts_rowid_migrated(conn: &Connection) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE k=?1 AND v=?2)",
+        params![FTS_ROWID_KEY, FTS_ROWID_SID],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|v| v != 0)
+    .map_err(st)
+}
+
+/// One-time migration of a store written before #420, whose FTS rows carry arbitrary rowids:
+/// rebuild them keyed by sid, in ONE `BEGIN IMMEDIATE` transaction. A crash rolls back to the old
+/// rows with no marker, so the next writer open re-runs it. Re-checked inside the transaction, so
+/// two first opens never both rebuild. Writer opens only ([`SqliteStore::open`] / `in_memory`):
+/// reads join on `symbol` text, so a read-only opener of an unmigrated store still answers right.
+fn migrate_fts_rowids(conn: &Connection) -> Result<()> {
+    if fts_rowid_migrated(conn)? {
+        return Ok(());
+    }
+    conn.execute_batch("BEGIN IMMEDIATE").map_err(st)?;
+    let res = (|| -> Result<()> {
+        if fts_rowid_migrated(conn)? {
+            return Ok(());
+        }
+        rebuild_fts_all(conn)
+    })();
+    match res {
+        Ok(()) => conn.execute_batch("COMMIT").map_err(st),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
 fn migrate_schema(conn: &Connection) -> Result<()> {
     // Snapshot the current annotations columns once; the presence check IS the version gate.
     let mut stmt = conn.prepare("PRAGMA table_info(annotations)").map_err(st)?;
@@ -692,18 +766,20 @@ impl SqliteStore {
             )
             .map_err(st)?;
         // W5.1: keep the FTS table in sync ONLY on the FTS path. DELETE + INSERT (no `ON CONFLICT`
-        // for virtual tables). nodes_fts.symbol is TEXT (the string sym), so we use the original
-        // string directly. On the skip-FTS path these statements are not prepared at all — the caller
+        // for virtual tables), both keyed by `rowid = sid` (#420): `nodes_fts.symbol` is
+        // UNINDEXED, so a delete by symbol text would scan the whole FTS table once per node. On
+        // the skip-FTS path these statements are not prepared at all — the caller
         // (`bulk_rebuild_fts_for_files`) rebuilds FTS once after all node rows exist.
         let mut fts = if with_fts {
             let del = self
                 .conn
-                .prepare_cached("DELETE FROM nodes_fts WHERE symbol = ?1")
+                .prepare_cached("DELETE FROM nodes_fts WHERE rowid = ?1")
                 .map_err(st)?;
             let ins = self
                 .conn
                 .prepare_cached(
-                    "INSERT INTO nodes_fts(symbol, name, signature, doc) VALUES(?1, ?2, ?3, ?4)",
+                    "INSERT INTO nodes_fts(rowid, symbol, name, signature, doc) \
+                     VALUES(?1, ?2, ?3, ?4, ?5)",
                 )
                 .map_err(st)?;
             Some((del, ins))
@@ -742,11 +818,12 @@ impl SqliteStore {
             ])
             .map_err(st)?;
             if let Some((fts_del, fts_ins)) = fts.as_mut() {
-                // FTS uses the string symbol directly (nodes_fts.symbol is TEXT) and mirrors the
-                // PRIMARY record (name/signature/doc), matching the derived `nodes` row.
-                fts_del.execute(params![n.symbol.0]).map_err(st)?;
+                // The row is keyed by the sid, carries the string symbol for the join-back and
+                // mirrors the PRIMARY record (name/signature/doc), matching the derived `nodes` row.
+                fts_del.execute(params![sid]).map_err(st)?;
                 fts_ins
                     .execute(params![
+                        sid,
                         n.symbol.0,
                         p.name,
                         p.signature.as_deref().unwrap_or(""),
@@ -788,15 +865,13 @@ impl SqliteStore {
                 .collect::<Vec<_>>()
                 .join(", ");
 
-            // Step 1: delete stale FTS rows for this chunk's files in one statement.
-            // nodes.symbol is now INTEGER (sid); nodes_fts.symbol is TEXT (the string sym).
-            // We join through the symbols table to resolve sid → sym for the FTS delete.
+            // Step 1: delete stale FTS rows for this chunk's files in one statement. FTS rows are
+            // keyed by `rowid = nodes.symbol` (#420), so this is one rowid lookup per node of the
+            // chunk's files, not a scan of the whole FTS table (every co-located repo included).
             // `prepare` (not `prepare_cached`) because the SQL length varies with the chunk size.
             let del_sql = format!(
-                "DELETE FROM nodes_fts WHERE symbol IN \
-                 (SELECT s.sym FROM nodes n \
-                  JOIN symbols s ON s.sid = n.symbol \
-                  WHERE n.file IN ({placeholders}))"
+                "DELETE FROM nodes_fts WHERE rowid IN \
+                 (SELECT n.symbol FROM nodes n WHERE n.file IN ({placeholders}))"
             );
             let mut del_stmt = self.conn.prepare(&del_sql).map_err(st)?;
             for (i, f) in chunk.iter().enumerate() {
@@ -808,8 +883,8 @@ impl SqliteStore {
             // signature and doc may be NULL in the JSON; COALESCE to empty string for FTS.
             // nodes.symbol is INTEGER; join symbols to get the string sym for FTS.symbol.
             let ins_sql = format!(
-                "INSERT INTO nodes_fts(symbol, name, signature, doc) \
-                 SELECT s.sym, n.name, \
+                "INSERT INTO nodes_fts(rowid, symbol, name, signature, doc) \
+                 SELECT n.symbol, s.sym, n.name, \
                         COALESCE(json_extract(n.data, '$.signature'), ''), \
                         COALESCE(json_extract(n.data, '$.doc'), '') \
                  FROM nodes n \
@@ -887,6 +962,7 @@ impl SqliteStore {
         // annotations.type column when missing). No-op on fresh DBs.
         migrate_schema(&conn)?;
         stamp_fresh_redaction_epoch(&conn)?;
+        migrate_fts_rowids(&conn)?;
         // Read history_enabled flag from meta (absent → OFF, the new default).
         // Old databases that never set this key default to OFF (no history) rather than ON.
         // Callers that want history must pass `--history` (or call set_history_enabled(true)).
@@ -962,6 +1038,7 @@ impl SqliteStore {
         conn.execute_batch(SCHEMA).map_err(st)?;
         migrate_schema(&conn)?;
         stamp_fresh_redaction_epoch(&conn)?;
+        migrate_fts_rowids(&conn)?;
         Ok(Self {
             conn,
             in_batch: false,
@@ -1465,8 +1542,12 @@ impl SqliteStore {
                     params![s],
                 )
                 .map_err(st)?;
+            // Keyed by rowid = sid (#420): a lookup, not a scan of the whole FTS table.
             self.conn
-                .execute("DELETE FROM nodes_fts WHERE symbol=?1", params![s])
+                .execute(
+                    "DELETE FROM nodes_fts WHERE rowid IN (SELECT sid FROM symbols WHERE sym=?1)",
+                    params![s],
+                )
                 .map_err(st)?;
             self.conn
                 .execute("DELETE FROM embeddings WHERE symbol=?1", params![s])
@@ -1722,8 +1803,8 @@ impl SqliteStore {
     ///    value passes the token-shape scrub;
     /// 3. the query cache and the per-file call-ref records are dropped and every file digest is
     ///    cleared, so the next `index` re-extracts every file from masked text;
-    /// 4. the full-text index is rebuilt from the cleaned nodes and optimized (merging away the
-    ///    old segments), and the redaction epoch + rules digest are recorded.
+    /// 4. the full-text index is dropped and rebuilt from the cleaned nodes (no old segment
+    ///    survives; rows keyed by sid, #420), and the redaction epoch + rules digest are recorded.
     ///
     /// Then (outside the transaction) the WAL is checkpointed with TRUNCATE and the file is
     /// `VACUUM`ed, so freed pages that held old text are not left in the database file. The
@@ -1865,19 +1946,9 @@ impl SqliteStore {
                 )
                 .map_err(st)?;
             rep.files_marked = files.len();
-            // (4) the full-text index, rebuilt from the cleaned nodes; `optimize` merges every
-            // segment so no deleted entry keeps an old term.
-            self.conn
-                .execute_batch(
-                    "DELETE FROM nodes_fts; \
-                     INSERT INTO nodes_fts(symbol, name, signature, doc) \
-                       SELECT s.sym, n.name, \
-                              COALESCE(json_extract(n.data, '$.signature'), ''), \
-                              COALESCE(json_extract(n.data, '$.doc'), '') \
-                       FROM nodes n JOIN symbols s ON s.sid = n.symbol; \
-                     INSERT INTO nodes_fts(nodes_fts) VALUES('optimize');",
-                )
-                .map_err(st)?;
+            // (4) the full-text index, rebuilt from the cleaned nodes, keyed by sid (#420). The
+            // table is dropped and re-created, so no old segment keeps an old term.
+            rebuild_fts_all(&self.conn)?;
             self.meta_set(r::REDACTION_EPOCH_KEY, &r::REDACTION_EPOCH.to_string())?;
             self.meta_set("redaction_rules", rules_digest)?;
             // Cleared only when the physical cleanup below completes.
@@ -3256,12 +3327,14 @@ impl GraphWrite for SqliteStore {
                 )
                 .map_err(st)?;
             self.conn
-                .execute("DELETE FROM nodes_fts WHERE symbol=?1", params![sym])
+                .execute("DELETE FROM nodes_fts WHERE rowid=?1", params![k.sid])
                 .map_err(st)?;
             self.conn
                 .execute(
-                    "INSERT INTO nodes_fts(symbol, name, signature, doc) VALUES(?1, ?2, ?3, ?4)",
+                    "INSERT INTO nodes_fts(rowid, symbol, name, signature, doc) \
+                     VALUES(?1, ?2, ?3, ?4, ?5)",
                     params![
+                        k.sid,
                         sym,
                         k.node.name,
                         k.node.signature.as_deref().unwrap_or(""),
@@ -3414,13 +3487,14 @@ impl GraphWrite for SqliteStore {
         }
 
         // Step 3: delete FTS rows and embeddings for nodes that belong to this file.
-        // nodes.symbol is now INTEGER (sid); resolve to string via symbols table for FTS
-        // (nodes_fts.symbol is TEXT) and embeddings (embeddings.symbol is TEXT).
+        // FTS rows are keyed by `rowid = sid` (#420): one rowid lookup per node, never a scan of
+        // the whole FTS table (which would make a re-extract O(nodes x every co-located repo's
+        // FTS rows)). Embeddings are keyed by the string symbol (`embeddings.symbol` TEXT PK).
         // KEPT Import nodes are skipped (D5): a kept node must keep its FTS/embedding rows or it
         // survives the graph but vanishes from search. Skip-not-reinsert — re-inserting would
         // duplicate the FTS row when the owner is edited-and-still-imports (the incremental path
         // re-upserts via upsert_nodes_skip_fts + bulk rebuild keyed by CURRENT nodes.file).
-        let syms: Vec<String> = {
+        let syms: Vec<(i64, String)> = {
             let mut stmt = self
                 .conn
                 .prepare(
@@ -3438,18 +3512,24 @@ impl GraphWrite for SqliteStore {
             for row in rows {
                 let (sid, sym) = row.map_err(st)?;
                 if !kept_sids.contains(&sid) {
-                    v.push(sym);
+                    v.push((sid, sym));
                 }
             }
             v
         };
-        for sym in &syms {
-            self.conn
-                .execute("DELETE FROM nodes_fts WHERE symbol=?1", params![sym])
+        {
+            let mut fts_del = self
+                .conn
+                .prepare_cached("DELETE FROM nodes_fts WHERE rowid=?1")
                 .map_err(st)?;
-            self.conn
-                .execute("DELETE FROM embeddings WHERE symbol=?1", params![sym])
+            let mut emb_del = self
+                .conn
+                .prepare_cached("DELETE FROM embeddings WHERE symbol=?1")
                 .map_err(st)?;
+            for (sid, sym) in &syms {
+                fts_del.execute(params![sid]).map_err(st)?;
+                emb_del.execute(params![sym]).map_err(st)?;
+            }
         }
 
         // Step 4: delete nodes, edges, unresolved_refs, and the files row.
@@ -7974,5 +8054,213 @@ mod tests {
             })
             .unwrap();
         assert!(fts.is_empty(), "the rolled-back FTS row is gone too");
+    }
+
+    // ── #420: nodes_fts keyed by rowid = sid ─────────────────────────────────
+
+    /// A node in `file` whose doc carries a searchable token.
+    fn fts_node(name: &str, file: &str) -> Node {
+        let mut n = make_node(name, file);
+        n.doc = Some(format!("doc{name}"));
+        n
+    }
+
+    /// The #420 invariant: exactly one FTS row per node, keyed by the node's sid, carrying the
+    /// node's string symbol. Any drift (an orphan row, a missing row, a duplicate, a row whose
+    /// rowid is not its sid) fails it.
+    fn assert_fts_keyed_by_sid(store: &SqliteStore) {
+        let q = |sql: &str| -> i64 { store.conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        let nodes = q("SELECT COUNT(*) FROM nodes");
+        let fts = q("SELECT COUNT(*) FROM nodes_fts");
+        let keyed = q("SELECT COUNT(*) FROM nodes_fts f \
+                       JOIN nodes n ON n.symbol = f.rowid \
+                       JOIN symbols s ON s.sid = n.symbol AND s.sym = f.symbol");
+        assert_eq!(fts, nodes, "one FTS row per node");
+        assert_eq!(keyed, nodes, "every FTS row is keyed by its node's sid");
+    }
+
+    fn fts_hits(store: &SqliteStore, text: &str) -> Vec<String> {
+        let q = SymbolQuery {
+            text: Some(text.to_string()),
+            ..Default::default()
+        };
+        let mut v: Vec<String> = store
+            .find_symbols(&q)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.symbol.0)
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Every FTS write path keeps the invariant: per-node upsert, skip-FTS + bulk rebuild,
+    /// remove_file, a multi-file re-home, erasure, and the redaction rebuild (#405).
+    #[test]
+    fn fts_rows_stay_keyed_by_sid_across_every_write_path_420() {
+        let mut store = open();
+        // Per-node FTS path.
+        store
+            .upsert_nodes(&[fts_node("a1", "a.rs"), fts_node("a2", "a.rs")])
+            .unwrap();
+        assert_fts_keyed_by_sid(&store);
+        // Re-upserting the same nodes replaces their rows (no duplicate).
+        store.upsert_nodes(&[fts_node("a1", "a.rs")]).unwrap();
+        assert_fts_keyed_by_sid(&store);
+        // Skip-FTS + bulk rebuild (the index hot path), including a re-extract of a.rs.
+        store.begin_batch().unwrap();
+        store.remove_file("a.rs").unwrap();
+        store
+            .upsert_nodes_no_fts(&[
+                fts_node("a1", "a.rs"),
+                fts_node("b1", "b.rs"),
+                fts_node("b2", "b.rs"),
+            ])
+            .unwrap();
+        store.rebuild_fts_for_files(&["a.rs", "b.rs"]).unwrap();
+        store.commit_batch().unwrap();
+        assert_fts_keyed_by_sid(&store);
+        assert_eq!(fts_hits(&store, "doca2"), Vec::<String>::new());
+        assert_eq!(fts_hits(&store, "docb2"), vec!["b2".to_string()]);
+        // Multi-file re-home: a declaration in m.h and the definition in m.cpp; removing m.cpp
+        // re-homes the node onto m.h and refreshes its FTS row in place.
+        let mut decl = fts_node("m", "m.h").as_declaration();
+        decl.doc = Some("protodoc".into());
+        let mut def = fts_node("m", "m.cpp");
+        def.doc = Some("impldoc".into());
+        store.upsert_nodes(&[decl, def]).unwrap();
+        assert_eq!(fts_hits(&store, "impldoc"), vec!["m".to_string()]);
+        store.remove_file("m.cpp").unwrap();
+        assert_fts_keyed_by_sid(&store);
+        assert_eq!(fts_hits(&store, "impldoc"), Vec::<String>::new());
+        assert_eq!(fts_hits(&store, "protodoc"), vec!["m".to_string()]);
+        // Erasure.
+        store.remove_nodes(&[sym("b1")]).unwrap();
+        assert_fts_keyed_by_sid(&store);
+        assert_eq!(fts_hits(&store, "docb1"), Vec::<String>::new());
+        // Redaction rebuild keeps the key and the marker.
+        store.migrate_redaction(&|_, t| t.to_string(), "t").unwrap();
+        assert_fts_keyed_by_sid(&store);
+        assert_eq!(fts_hits(&store, "docb2"), vec!["b2".to_string()]);
+        assert_eq!(
+            store.meta_value(FTS_ROWID_KEY).as_deref(),
+            Some(FTS_ROWID_SID)
+        );
+    }
+
+    /// A store written before #420 (FTS rows with arbitrary rowids, plus a duplicate row from old
+    /// drift) is rebuilt once on the first writer open: keyed by sid, duplicate gone, search
+    /// unchanged. A read-only open never migrates (and still answers); a second open is a no-op.
+    #[test]
+    fn legacy_fts_rowids_migrate_once_on_writer_open_420() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
+        {
+            let mut store = SqliteStore::open(&path).unwrap();
+            store
+                .upsert_nodes(&[fts_node("l1", "l.rs"), fts_node("l2", "l.rs")])
+                .unwrap();
+        }
+        {
+            // Rewrite the FTS table the way a pre-#420 build left it: auto rowids that do not
+            // match the sids, one duplicate row, and no marker.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "DELETE FROM nodes_fts; \
+                 INSERT INTO nodes_fts(rowid, symbol, name, signature, doc) \
+                   SELECT n.symbol + 1000, s.sym, n.name, '', 'doc' || n.name \
+                   FROM nodes n JOIN symbols s ON s.sid = n.symbol; \
+                 INSERT INTO nodes_fts(symbol, name, signature, doc) VALUES('l1','l1','','docl1'); \
+                 DELETE FROM meta WHERE k = 'fts_rowid';",
+            )
+            .unwrap();
+        }
+        {
+            let ro = SqliteStore::open_readonly(&path).unwrap();
+            assert_eq!(ro.meta_value(FTS_ROWID_KEY), None, "read-only open never migrates");
+            assert_eq!(fts_hits(&ro, "docl2"), vec!["l2".to_string()]);
+        }
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            assert_fts_keyed_by_sid(&store);
+            assert_eq!(fts_hits(&store, "docl1"), vec!["l1".to_string()]);
+            assert_eq!(
+                store.meta_value(FTS_ROWID_KEY).as_deref(),
+                Some(FTS_ROWID_SID)
+            );
+            // Plant a marker-visible change: a second open must not rebuild again.
+            store
+                .conn
+                .execute(
+                    "UPDATE nodes SET name = 'renamed' WHERE symbol = \
+                     (SELECT sid FROM symbols WHERE sym = 'l2')",
+                    [],
+                )
+                .unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        let fts_name: String = store
+            .conn
+            .query_row(
+                "SELECT name FROM nodes_fts WHERE symbol = 'l2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_name, "l2", "second open did not rebuild");
+    }
+
+    /// The regression gate for #420: the VM cost of re-extracting one file (remove_file +
+    /// per-node FTS upsert + erasure of a few ids) must not grow with the number of FTS rows OTHER
+    /// repos hold in the same database. With per-symbol FTS deletes every delete scanned the whole
+    /// table, so 10x the co-located rows cost ~10x the ops; keyed by rowid it stays flat.
+    #[test]
+    fn fts_maintenance_cost_is_independent_of_colocated_rows_420() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        fn ops_for(colocated: usize) -> u64 {
+            let mut store = open();
+            let other: Vec<Node> = (0..colocated)
+                .map(|i| fts_node(&format!("o{i}"), &format!("other/{}.rs", i / 100)))
+                .collect();
+            let files: Vec<String> = (0..colocated.div_ceil(100))
+                .map(|f| format!("other/{f}.rs"))
+                .collect();
+            store.begin_batch().unwrap();
+            store.upsert_nodes_no_fts(&other).unwrap();
+            store
+                .rebuild_fts_for_files(&files.iter().map(String::as_str).collect::<Vec<_>>())
+                .unwrap();
+            let mine: Vec<Node> = (0..50).map(|i| fts_node(&format!("m{i}"), "mine.rs")).collect();
+            store.upsert_nodes(&mine).unwrap();
+            store.commit_batch().unwrap();
+
+            let ops = Arc::new(AtomicU64::new(0));
+            let counter = Arc::clone(&ops);
+            store.conn.progress_handler(
+                1,
+                Some(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            );
+            store.begin_batch().unwrap();
+            store.remove_file("mine.rs").unwrap();
+            store.upsert_nodes(&mine).unwrap();
+            store
+                .remove_nodes(&(0..10).map(|i| sym(&format!("m{i}"))).collect::<Vec<_>>())
+                .unwrap();
+            store.commit_batch().unwrap();
+            store.conn.progress_handler(0, None::<fn() -> bool>);
+            assert_fts_keyed_by_sid(&store);
+            ops.load(Ordering::Relaxed)
+        }
+        let small = ops_for(1_000);
+        let large = ops_for(10_000);
+        assert!(
+            large < small * 2,
+            "re-extracting one file cost {large} op-ticks next to 10k co-located FTS rows vs \
+             {small} next to 1k: FTS maintenance scales with other repos' rows (#420)"
+        );
     }
 }

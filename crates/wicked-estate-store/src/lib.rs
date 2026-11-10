@@ -1521,9 +1521,10 @@ pub trait GraphStoreMutExt: GraphStore {
     /// Bulk-rebuild the FTS index for every node that belongs to any of the given `files`.
     ///
     /// For `SqliteStore`: executes
-    ///   `DELETE FROM nodes_fts WHERE symbol IN (SELECT symbol FROM nodes WHERE file IN (...))`
+    ///   `DELETE FROM nodes_fts WHERE rowid IN (SELECT symbol FROM nodes WHERE file IN (...))`
     ///   followed by
-    ///   `INSERT INTO nodes_fts(symbol,name,signature,doc) SELECT symbol,name,...`
+    ///   `INSERT INTO nodes_fts(rowid,symbol,name,signature,doc) SELECT symbol,sym,name,...`
+    ///   (FTS rows are keyed by `rowid = sid`, #420, so the delete is per-row lookups)
     /// — two statements regardless of the number of nodes, replacing the old O(2 × nodes)
     /// per-node loop.
     ///

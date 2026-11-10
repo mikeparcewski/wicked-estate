@@ -45,6 +45,7 @@ postgres = ["dep:sqlx", "dep:tokio"]
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 # `trace` (test-only): the traverse_multi perf gate counts the ACTUAL recursive CTEs SQLite runs
-# via Connection::trace — ungameable by the impl's own accounting. Feature-unifies with the main
+# via Connection::trace — ungameable by the impl's own accounting. `hooks` (test-only): the #420
+# FTS gate counts VM ops via Connection::progress_handler. Feature-unifies with the main
 # rusqlite for `cargo test`/`--all-targets`; the published lib stays on `bundled` only.
-rusqlite = { version = "0.32", features = ["bundled", "trace"] }
+rusqlite = { version = "0.32", features = ["bundled", "trace", "hooks"] }
