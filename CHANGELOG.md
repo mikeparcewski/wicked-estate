@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Re-indexing a label on a large project database is no longer quadratic (#420).** The
+  full-text index (`nodes_fts`) could find a row only by scanning the whole table, because its
+  `symbol` column is not indexed. Every per-node delete scanned every co-located repo's rows, and
+  `remove_file` ran one per node of every changed file. So a forced full re-extract (`--force`, a
+  new binary version, a symbol-id scheme change) of one label cost O(nodes x all FTS rows). Call
+  flow nodes, erasure and the multi-file re-home paid the same per node.
+  - Every FTS row is now keyed by `rowid = sid` (the node's interned id), so deletes are lookups.
+  - A store written before this is rebuilt once, on the first writer open, in one transaction
+    (meta `fts_rowid = sid`). Read-only opens never migrate and still answer correctly.
+  - A trigger on the FTS content table clears that marker if an older binary later writes the
+    store (it inserts rows that are not sid-keyed), so the next writer open rebuilds again.
+  - Measured on vscode `src/vs/editor` (1,319 files) co-located with vite (2,935 files), 78,583
+    nodes in one database: `--force` of the vscode label went from over 300 s (killed) to 27.8 s,
+    `--force` of vite from 197.3 s to 12.7 s, and a full index of the vscode label from 103.3 s to
+    25.4 s. Peak RSS is unchanged (about 2.6 GB).
+
 ## [0.34.0] — 2026-11-10
 
 Minor: cross-repo package links (slice X1: `wicked-estate link`, crossings in `blast-radius` and
