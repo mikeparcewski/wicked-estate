@@ -37,7 +37,7 @@ test asserts `registry().len() >= 73` — this is the regression gate that preve
 ### Language count as of this writing
 
 **115 languages** in `languages.toml` (the canonical count — the manifest is the source of
-truth), of which **103 are wired in `LANG_TABLE`** (verified by counting `LangEntry` items);
+truth), of which **104 are wired in `LANG_TABLE`** (verified by counting `LangEntry` items);
 the remaining rows are document-tier or aspirational (manifest row, extractor pending). The
 generated `docs/language-coverage-matrix.md` carries the per-language breakdown.
 

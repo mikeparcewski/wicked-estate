@@ -6,15 +6,17 @@
 //! fetched by `scripts/apexlang-corpus.py fetch` (CI's gate job sets it with
 //! `APEXLANG_CORPUS_REQUIRED=1`, so a missing corpus fails there instead of skipping).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use wicked_estate_core::refs::apexlang_ref;
 use wicked_estate_core::{
-    Edge, EdgeKind, Extractor, GraphRead, Language, Provenance, SourceFile, TraversalSpec,
+    Edge, EdgeKind, Extractor, GraphRead, Language, Node, Provenance, Resolver, SourceFile,
+    SymbolId, SymbolIndex, TraversalSpec,
 };
 use wicked_estate_extract::ApexlangExtractor;
+use wicked_estate_resolve::ApexlangRefResolver;
 use wicked_estate_store::SqliteStore;
 
 const FIXTURES: &str = concat!(
@@ -95,7 +97,7 @@ fn fixture_slice_resolves_references_inside_their_own_application() {
             app_of(e.target.as_str()),
             "{e:?}"
         );
-        assert_eq!(e.kind, EdgeKind::References);
+        assert!(matches!(e.kind, EdgeKind::References | EdgeKind::Contains));
         assert!(matches!(
             e.provenance,
             Provenance::Parsed | Provenance::Heuristic
@@ -233,6 +235,33 @@ fn stored_refs_re_resolve_to_the_same_edges_after_reopen() {
     let _ = fs::remove_dir_all(&full_dir);
 }
 
+/// The indexed graph as a resolver index (by name and by id).
+struct NodeIndex {
+    by_name: HashMap<String, Vec<Node>>,
+    by_id: HashMap<SymbolId, Node>,
+}
+
+impl NodeIndex {
+    fn new(nodes: Vec<Node>) -> Self {
+        let mut by_name: HashMap<String, Vec<Node>> = HashMap::new();
+        let mut by_id = HashMap::new();
+        for n in nodes {
+            by_name.entry(n.name.clone()).or_default().push(n.clone());
+            by_id.insert(n.symbol.clone(), n);
+        }
+        Self { by_name, by_id }
+    }
+}
+
+impl SymbolIndex for NodeIndex {
+    fn by_name(&self, name: &str) -> Vec<Node> {
+        self.by_name.get(name).cloned().unwrap_or_default()
+    }
+    fn get(&self, id: &SymbolId) -> Option<Node> {
+        self.by_id.get(id).cloned()
+    }
+}
+
 /// Resolution report for one corpus root: resolved / unresolved by class, every unresolved site.
 fn resolution_report(
     root: &Path,
@@ -257,6 +286,7 @@ fn resolution_report(
         assert_eq!(t.language.as_str(), "apexlang");
         assert_eq!(app_of(e.source.as_str()), app_of(e.target.as_str()));
     }
+    let index = NodeIndex::new(GraphRead::all_nodes(&store).unwrap());
     let mut classes: BTreeMap<String, usize> = BTreeMap::new();
     let mut unresolved = Vec::new();
     // raw name -> parked (file, start byte) sites, one store query per distinct name.
@@ -290,6 +320,7 @@ fn resolution_report(
                     text: text.clone(),
                 })
                 .unwrap();
+            assert!(store.file_digest(&rel).unwrap().is_some(), "{rel} indexed");
             for r in ex.refs {
                 total += 1;
                 sites.insert(
@@ -305,13 +336,16 @@ fn resolution_report(
                             .to_string(),
                     ),
                 );
-                let parsed = apexlang_ref::parse(&r.raw_name).unwrap();
                 let theme = text[r.location.span.start_byte as usize..].starts_with("@/");
-                let class = match (parsed.kind.as_str(), theme) {
-                    ("-", _) => "never-bind",
-                    ("*", _) => "untyped",
-                    (_, true) => "typed theme-relative (@/)",
-                    _ => "typed",
+                let class = match apexlang_ref::parse(&r.raw_name) {
+                    None => {
+                        assert!(apexlang_ref::parse_container(&r.raw_name).is_some());
+                        "holder (contains)"
+                    }
+                    Some(p) if p.kind == "-" => "never-bind",
+                    Some(p) if p.kind == "*" => "untyped",
+                    Some(_) if theme => "typed theme-relative (@/)",
+                    Some(_) => "typed",
                 };
                 // Unresolved = still parked in the store at this exact site (two sites that bind the
                 // same source -> target pair share one deduplicated edge, so edges alone undercount).
@@ -323,7 +357,24 @@ fn resolution_report(
                         .map(|p| (p.location.file, p.location.span.start_byte))
                         .collect()
                 });
-                let ok = !parked_sites.contains(&(rel.clone(), r.location.span.start_byte));
+                let is_parked = parked_sites.contains(&(rel.clone(), r.location.span.start_byte));
+                // Positive evidence too: the production resolver, run on this one ref against the
+                // indexed graph, binds it exactly when the store did not park it. A site the
+                // indexer lost (neither bound nor parked) fails here instead of counting as
+                // resolved.
+                let binds = ApexlangRefResolver
+                    .resolve(std::slice::from_ref(&r), &index)
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.kind == r.kind && e.location.as_ref() == Some(&r.location));
+                assert_ne!(
+                    binds,
+                    is_parked,
+                    "{rel}:{} {}: bound={binds} parked={is_parked}",
+                    r.location.span.start_line + 1,
+                    r.raw_name
+                );
+                let ok = binds;
                 *classes
                     .entry(format!(
                         "{class} {}",
@@ -367,7 +418,11 @@ fn resolution_report(
             })
         };
         let mut rows = vec!["file\tline\tproperty\twritten\tvia\tsource\tsource_kind\tsource_key\tsource_label\ttarget\ttarget_kind\ttarget_key\ttarget_label".to_string()];
-        for e in edges.iter().filter(|e| e.resolved_by == "apexlang-ref") {
+        // `@reference` edges only: holder links (`Contains`) are layout, not references.
+        for e in edges
+            .iter()
+            .filter(|e| e.resolved_by == "apexlang-ref" && e.kind == EdgeKind::References)
+        {
             let loc = e.location.as_ref().unwrap();
             let (prop, written) = sites
                 .get(&(loc.file.clone(), loc.span.start_byte))

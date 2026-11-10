@@ -447,7 +447,7 @@
     },
     "reference": {
       "type": "PATTERN",
-      "value": "@[^\\s]+"
+      "value": "@([^\\s\\]\\/]|\\/[^\\s\\]\\/*])*"
     },
     "string": {
       "type": "PATTERN",
@@ -455,7 +455,7 @@
     },
     "text": {
       "type": "PATTERN",
-      "value": "[^\\s@\\[]([^\\r\\n]*[^\\s])?"
+      "value": "[^\\s@\\[{]([^\\r\\n]*[^\\s])?"
     },
     "word": {
       "type": "PATTERN",

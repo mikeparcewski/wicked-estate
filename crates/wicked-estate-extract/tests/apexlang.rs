@@ -97,6 +97,14 @@ fn count_kind(tree: &tree_sitter::Tree, kind: &str) -> usize {
     n
 }
 
+/// The `@reference` refs of an extraction (holder links are `Contains` refs).
+fn reference_refs(ex: &Extraction) -> Vec<&wicked_estate_core::UnresolvedRef> {
+    ex.refs
+        .iter()
+        .filter(|r| r.kind == EdgeKind::References)
+        .collect()
+}
+
 fn kind_of(n: &wicked_estate_core::Node) -> &str {
     n.metadata
         .get(KIND_METADATA_KEY)
@@ -115,6 +123,20 @@ fn apx_dispatches_to_apexlang_and_salesforce_apex_keeps_cls_and_trigger() {
     assert_eq!(lang("apx"), vec![Language::new("apexlang")]);
     assert_eq!(lang("cls"), vec![Language::new("apex")]);
     assert_eq!(lang("trigger"), vec![Language::new("apex")]);
+    // Every entry point reaches the APEXlang extraction, not a bare File node.
+    let ex = extractor_for_extension("apx")
+        .unwrap()
+        .extract(&SourceFile {
+            path: "app/pages/p00004-customer.apx".into(),
+            language: Language::new("apexlang"),
+            text: PAGE.into(),
+        })
+        .unwrap();
+    assert_eq!(
+        ids(&ex),
+        ids(&extract("app/pages/p00004-customer.apx", PAGE))
+    );
+    assert_eq!(reference_refs(&ex).len(), 3);
     let reg = wicked_estate_extract::registry();
     let row = reg
         .iter()
@@ -149,6 +171,26 @@ fn fence_body_is_exactly_the_text_between_the_fences() {
         stack.extend(n.children(&mut cursor));
     }
     assert_eq!(seen, 1);
+}
+
+/// CRLF input parses too, and a value never swallows the `\r` (kept here, not in the tree-sitter
+/// corpus file, because the repo normalises text files to LF).
+#[test]
+fn crlf_line_endings_parse_and_values_stop_before_the_carriage_return() {
+    let src = "page 1 (\r\n    name: Home\r\n    pageGroup: @admin\r\n)\r\n";
+    assert!(parse_problems(&parse(src)).is_empty());
+    let ex = extract("app/pages/p00001-home.apx", src);
+    let page = ex.nodes.iter().find(|n| n.kind != NodeKind::File).unwrap();
+    assert_eq!(
+        page.metadata.get("apexlang_label").and_then(|v| v.as_str()),
+        Some("Home")
+    );
+    assert_eq!(
+        apexlang_ref::parse(&reference_refs(&ex)[0].raw_name)
+            .unwrap()
+            .slug,
+        "admin"
+    );
 }
 
 #[test]
@@ -289,6 +331,12 @@ fn app_root_comes_from_the_layout() {
     assert_eq!(app_layout("application.apx", d).root, ".");
     // A `pages` directory that is not the file's parent is not the app's pages dir.
     assert_eq!(app_layout("pages/app1/pages/p1.apx", d).root, "pages/app1");
+    // An ancestor merely named like an application directory is not a boundary.
+    assert_eq!(
+        app_layout("deployments/prod/app-a/pages/p1.apx", d).root,
+        "deployments/prod/app-a"
+    );
+    assert_eq!(app_layout("x/app/deployments/default.apx", d).root, "x/app");
 }
 
 const PAGE: &str = r#"page 4 (
@@ -422,8 +470,8 @@ savedReport primary (
         ex.nodes.iter().map(|n| (n.symbol.as_str(), n)).collect();
     let base = "apexlang . . . app/app#theme:ut#";
     for id in [
-        format!("{base}templateOptionGroup:page%2Fdisplay-mode#"),
-        format!("{base}templateOptionGroup:region%2Fdisplay-mode#"),
+        format!("{base}templateOptionGroup:page/display-mode#"),
+        format!("{base}templateOptionGroup:region/display-mode#"),
         format!("{base}savedReport:primary#sort:ENAME#"),
         format!("{base}savedReport:primary#sort:SAL#"),
         format!("{base}savedReport:primary#branch#"),
@@ -435,7 +483,7 @@ savedReport primary (
             by_id.keys()
         );
     }
-    let n = by_id[format!("{base}templateOptionGroup:region%2Fdisplay-mode#").as_str()];
+    let n = by_id[format!("{base}templateOptionGroup:region/display-mode#").as_str()];
     assert_eq!(
         n.name, "region/display-mode",
         "the key is what `@region/...` refs spell"
@@ -454,9 +502,8 @@ savedReport primary (
 #[test]
 fn references_carry_target_kind_and_scope_and_come_only_from_reference_tokens() {
     let ex = extract("app/pages/p00004-customer.apx", PAGE);
-    let decoded: Vec<_> = ex
-        .refs
-        .iter()
+    let decoded: Vec<_> = reference_refs(&ex)
+        .into_iter()
         .map(|r| {
             let p = apexlang_ref::parse(&r.raw_name).expect("apexlang-ref name");
             (r.from.0.clone(), p.kind, p.slug, p.scope)
@@ -488,8 +535,7 @@ fn references_carry_target_kind_and_scope_and_come_only_from_reference_tokens() 
         ],
         "the `@admin` in help text is text, not a reference"
     );
-    for r in &ex.refs {
-        assert_eq!(r.kind, EdgeKind::References);
+    for r in reference_refs(&ex) {
         assert_eq!(
             &PAGE[r.location.span.start_byte as usize..r.location.span.end_byte as usize]
                 .chars()
@@ -503,19 +549,25 @@ fn references_carry_target_kind_and_scope_and_come_only_from_reference_tokens() 
 fn theme_relative_and_unknown_properties() {
     let src = "region r (\n    appearance {\n        template: @/standard\n    }\n    misc {\n        foo: @/bar\n        baz: @qux\n    }\n)\n";
     let ex = extract("app/pages/p00001-x.apx", src);
-    let kinds: Vec<String> = ex
-        .refs
-        .iter()
+    let kinds: Vec<String> = reference_refs(&ex)
+        .into_iter()
         .map(|r| apexlang_ref::parse(&r.raw_name).unwrap().kind)
         .collect();
-    assert_eq!(kinds, vec!["regionTemplate", "-", "*"]);
+    // A page does not know which theme it uses (application.apx says), so its `@/x` never binds;
+    // inside a theme the same reference is scoped to that theme.
+    assert_eq!(kinds, vec!["-", "-", "*"]);
+    let theme = "theme ut (\n    componentDefaults {\n        page: @/standard\n    }\n)\n";
+    let ex = extract("app/shared-components/themes/ut/theme.apx", theme);
+    let p = apexlang_ref::parse(&reference_refs(&ex)[0].raw_name).unwrap();
+    assert_eq!(p.kind, "pageTemplate");
+    assert_eq!(p.scope, "apexlang . . . app/app#theme:ut#");
 }
 
 #[test]
 fn a_page_scoped_property_outside_a_page_never_widens_to_the_app() {
     let src = "list l (\n    entry e (\n        layout {\n            region: @main\n        }\n    )\n)\n";
     let ex = extract("app/shared-components/lists/l.apx", src);
-    let p = apexlang_ref::parse(&ex.refs[0].raw_name).unwrap();
+    let p = apexlang_ref::parse(&reference_refs(&ex)[0].raw_name).unwrap();
     assert_eq!(p.kind, apexlang_ref::NO_BIND);
 }
 
@@ -525,7 +577,9 @@ fn property_table_rows_are_data() {
     let src = "region r (\n    custom {\n        target: @thing\n    }\n)\n";
     let builtin = extract("app/pages/p00001-x.apx", src);
     assert_eq!(
-        apexlang_ref::parse(&builtin.refs[0].raw_name).unwrap().kind,
+        apexlang_ref::parse(&reference_refs(&builtin)[0].raw_name)
+            .unwrap()
+            .kind,
         "*"
     );
     let toml = format!(
@@ -535,7 +589,9 @@ fn property_table_rows_are_data() {
     let ex = ApexlangExtractor::with_data(ApexlangData::parse(&toml).unwrap());
     let added = extract_with(&ex, "app/pages/p00001-x.apx", src);
     assert_eq!(
-        apexlang_ref::parse(&added.refs[0].raw_name).unwrap().kind,
+        apexlang_ref::parse(&reference_refs(&added)[0].raw_name)
+            .unwrap()
+            .kind,
         "lov"
     );
 }
@@ -586,4 +642,95 @@ fn full_pinned_corpus_parses_cleanly_and_mints_distinct_ids() {
         failures.len()
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A directory name cannot fake a descriptor boundary: `a/app#b` is not inside application `a`.
+#[test]
+fn application_roots_are_escaped_in_ids() {
+    let inner = ids(&extract("a/app#b/pages/p00001-x.apx", "page 1 (\n)\n"));
+    assert_eq!(
+        inner,
+        vec!["apexlang . . . a/app%23b/app#page:1#".to_string()]
+    );
+    assert!(!inner[0].starts_with("apexlang . . . a/app#"));
+}
+
+/// Key parts are encoded one by one: a `/` inside a part never fakes a part boundary.
+#[test]
+fn compound_keys_are_injective() {
+    let src = "installScript s (\n    databaseObject (\n        owner: \"A/table\"\n        type: view\n        name: B\n    )\n    databaseObject (\n        owner: A\n        type: table\n        name: \"view/B\"\n    )\n)\n";
+    let got = ids(&extract("app/supporting-objects/install-scripts.apx", src));
+    let base = "apexlang . . . app/app#supportingObject#installScript:s#";
+    assert!(
+        got.contains(&format!("{base}databaseObject:A%2Ftable/view/B#")),
+        "{got:?}"
+    );
+    assert!(
+        got.contains(&format!("{base}databaseObject:A/table/view%2FB#")),
+        "{got:?}"
+    );
+}
+
+/// A top-level component links to the application or container directory that holds it, through
+/// a `Contains` ref the resolver binds once that holder is indexed.
+#[test]
+fn top_level_components_link_to_their_holder() {
+    let holder = |path: &str, src: &str| -> Vec<String> {
+        extract(path, src)
+            .refs
+            .iter()
+            .filter(|r| r.kind == EdgeKind::Contains)
+            .map(|r| {
+                apexlang_ref::parse_container(&r.raw_name)
+                    .expect("holder ref")
+                    .to_string()
+            })
+            .collect()
+    };
+    let app = "apexlang . . . app/app#".to_string();
+    let theme = format!("{app}theme:ut#");
+    assert_eq!(
+        holder("app/pages/p00001-x.apx", "page 1 (\n)\n"),
+        vec![app.clone()]
+    );
+    assert_eq!(
+        holder(
+            "app/shared-components/themes/ut/theme.apx",
+            "theme ut (\n)\n"
+        ),
+        vec![app.clone()],
+        "the container's own declaration sits in the application"
+    );
+    assert_eq!(
+        holder(
+            "app/shared-components/themes/ut/list-templates/x.apx",
+            "listTemplate x (\n)\n"
+        ),
+        vec![theme]
+    );
+    assert!(holder("app/application.apx", "app APP (\n)\n").is_empty());
+    // A plugin whose id differs from its directory is still that directory's container.
+    let ex = extract(
+        "app/shared-components/plugins/template-component/row-theme-ut/plugin.apx",
+        "plugin row (\n)\n",
+    );
+    assert_eq!(
+        ids(&ex),
+        vec!["apexlang . . . app/app#plugin:row-theme-ut#".to_string()]
+    );
+}
+
+/// An inline object is not supported syntax: it is an ERROR, never a scalar hiding a reference.
+/// References stop at a compact array's `]` and at an adjacent comment.
+#[test]
+fn inline_objects_are_errors_and_references_stop_at_delimiters() {
+    assert!(!parse_problems(&parse("page 1 (\n    x: {y: @a}\n)\n")).is_empty());
+    let src = "page 1 (\n    x: [@a]\n    y: @b/*c*/\n)\n";
+    assert!(parse_problems(&parse(src)).is_empty());
+    let ex = extract("app/pages/p00001-x.apx", src);
+    let slugs: Vec<String> = reference_refs(&ex)
+        .into_iter()
+        .map(|r| apexlang_ref::parse(&r.raw_name).unwrap().slug)
+        .collect();
+    assert_eq!(slugs, vec!["a", "b"]);
 }

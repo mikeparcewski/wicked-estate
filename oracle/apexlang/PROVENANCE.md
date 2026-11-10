@@ -44,20 +44,27 @@ python3 oracle/apexlang/score.py labels.tsv        # -> census.txt
 ```
 
 Result, a census of every resolved edge rather than a sample (`census.txt`):
-- 19,971 resolved reference edges. The oracle checked 15,020 of them: **15,020 correct, 0 wrong**.
-  Wilson 95% lower bound **0.9997** (floor 0.97 with n >= 200): **ships**.
-- 4,951 edges were unlabelled, with reasons in the labels file. 1,660 of them are oracle/skills
+- 19,967 resolved reference edges. The oracle checked 15,980 of them: **15,980 correct, 0 wrong**.
+  Wilson 95% lower bound **0.9998** (floor 0.97 with n >= 200): **ships**.
+- 3,987 edges were unlabelled, with reasons in the labels file. 1,660 of them are oracle/skills
   edges, which have no SQL export.
-- Mutant check that the oracle can fail: each oracle/apex edge was given a different target of the
-  same kind in the same application. Of the mutants the oracle could check, it labelled 14,125
-  wrong and 7 correct. Those 7 are same-key coincidences. So the oracle discriminates.
+- Mutant checks that the oracle can fail:
+  - wrong target: each oracle/apex edge was given a different target of the same kind in the same
+    application. All 15,083 mutants the oracle could check were labelled wrong;
+  - wrong parent: each list or breadcrumb entry target was moved under another list of the same
+    application. All 1,090 were labelled wrong.
 
 `labels-sample.tsv` holds 400 of the census rows, drawn with `random.seed(20261110)`:
-`score.py labels-sample.tsv` gives 299 correct, 0 wrong, 101 unlabelled, and a lower bound of
-0.9873.
+`score.py labels-sample.tsv` gives 313 correct, 0 wrong, 87 unlabelled, and a lower bound of
+0.9879.
 
-Resolution over the whole corpus (37,236 references; the `full_pinned_corpus_resolution` test):
-20,936 typed and resolved; 40 typed but ambiguous (`masterColumn @ID` with several `ID` columns on
-a page, `operation @put` across REST sources, legacy data-load definitions); 251 never-bind by the
-table; 1 with an unknown property; 16,008 theme-relative `@/x` references to built-in theme
-templates, which the exports do not contain.
+Resolution over the whole corpus (43,322 refs; the `full_pinned_corpus_resolution` test):
+- all 6,086 holder links (a top-level component -> its application or container) resolve;
+- of the 37,236 `@` references:
+  - 20,932 are typed and resolved;
+  - 10 are typed but ambiguous (data-load definitions named in two kinds of definition);
+  - 1 has an unknown property;
+  - 904 are theme-relative `@/x` inside a theme, naming built-in templates the exports do not contain;
+  - 15,389 are never-bind by design: 15,104 theme-relative `@/x` on pages, which do not know their
+    theme, plus template subscriptions, API parameter names, plugin attribute dependencies, master
+    columns and REST operations.

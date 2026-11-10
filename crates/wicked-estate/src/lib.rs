@@ -99,9 +99,9 @@ use wicked_estate_core::{
     TraversalSpec, edge_tags, is_flow_edge, is_structural_symbol, merge_flow_edges,
 };
 use wicked_estate_extract::{
-    ApexlangExtractor, BlazeBrlExtractor, DrlExtractor, ExtraEdgeExtractor, HlasmExtractor,
-    IaCExtractor, ImsExtractor, JclExtractor, MqExtractor, RacfExtractor, RegoRulesExtractor,
-    SYMBOL_ID_SCHEME, TfstateCollector,
+    BlazeBrlExtractor, DrlExtractor, ExtraEdgeExtractor, HlasmExtractor, IaCExtractor,
+    ImsExtractor, JclExtractor, MqExtractor, RacfExtractor, RegoRulesExtractor, SYMBOL_ID_SCHEME,
+    TfstateCollector,
     treesitter::{ExtractorCache, is_minified_or_huge},
 };
 use wicked_estate_resolve::{
@@ -259,19 +259,6 @@ fn base_extraction(
             return extractor.extract(&sf).ok();
         }
         // Non-IaC YAML/JSON — fall through to normal extractor below.
-    }
-
-    // Oracle APEXlang: component identity is the (kind, key) path from the application root and
-    // `@references` carry their target kind, so `.apx` gets its own extractor over the same
-    // vendored grammar the generic map would load (estate#312).
-    if ext == "apx" {
-        let extractor = ApexlangExtractor::shared();
-        let sf = SourceFile {
-            path: rel_path.to_string(),
-            language: Language::new(wicked_estate_extract::apexlang::LANGUAGE),
-            text: text.to_string(),
-        };
-        return extractor.extract(&sf).ok();
     }
 
     let extractor = ext_map.get(ext)?;

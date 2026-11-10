@@ -377,11 +377,11 @@ app X (
       (text))))
 
 ========================================
-crlf line endings
+compact array of references
 ========================================
 
-page 1 (
-    name: x
+region r (
+    items: [@a @b]
 )
 
 ----------------------------------------
@@ -392,4 +392,30 @@ page 1 (
     (component_id)
     (property
       (identifier)
-      (text))))
+      (array
+        (reference)
+        (reference)))))
+
+========================================
+comment after a reference
+========================================
+
+region r (
+    template: @/std/*built-in*/
+    group: @region/accent // qualified
+)
+
+----------------------------------------
+
+(source_file
+  (component
+    (identifier)
+    (component_id)
+    (property
+      (identifier)
+      (reference))
+    (comment)
+    (property
+      (identifier)
+      (reference))
+    (comment)))

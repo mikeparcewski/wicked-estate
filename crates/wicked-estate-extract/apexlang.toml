@@ -8,11 +8,17 @@
 
 # ── Application layout ───────────────────────────────────────────────────────────────────────────
 # An application is a directory. A file's application root is the path before the LEFT-most
-# segment listed in `root_dirs`, or before a `pages_dir` segment that is the file's own parent.
-# Any other `.apx` file is rooted at its own directory.
+# directory whose remaining directories have one of these shapes (`*` = any one directory, a final
+# `**` = any depth). An ancestor that only shares a name (`deployments/prod/app-a/pages/p1.apx`)
+# does not fit a shape and is skipped. Any other `.apx` file is rooted at its own directory.
 [layout]
-root_dirs = ["shared-components", "supporting-objects", "workspace-components", "deployments"]
-pages_dir = "pages"
+boundary = [
+    ["pages"],
+    ["shared-components", "**"],
+    ["supporting-objects", "**"],
+    ["workspace-components", "*"],
+    ["deployments"],
+]
 
 # Directories that scope the components declared in them. `path` is matched against the segments
 # after the application root; `{id}` is the container's id (absent = a singleton), `*` matches any
@@ -79,7 +85,8 @@ standardAttributeConfig = ["name"]
 #        "<kind>"  under the nearest enclosing component of that kind (page, region, ...)
 #
 # A property not listed here binds only if its slug names exactly one component in the application;
-# a theme-relative `@/x` binds only through a row here.
+# a theme-relative `@/x` binds only through a row here, and only from inside a theme (the theme in
+# use by a page is declared in another file, so a page's `@/x` never binds).
 
 # Shared components (application scope).
 [[ref]]
@@ -238,16 +245,18 @@ property = "invoke.restSource"
 target = "restDataSource"
 scope = "app"
 
+# An operation belongs to the REST source named by a sibling property (`restSource: @svc`), which
+# a scope here cannot express: binding app-wide could take another source's `put`.
 [[ref]]
 owner = "*"
 property = "invoke.operation"
-target = "operation"
+target = "-"
 scope = "app"
 
 [[ref]]
 owner = "parameter"
 property = "operation"
-target = "operation"
+target = "-"
 scope = "app"
 
 [[ref]]
@@ -664,10 +673,12 @@ property = "executionChain"
 target = "process"
 scope = "page"
 
+# The master column lives in the region named by `masterDetail.masterRegion`, not anywhere on the
+# page; a page-wide match could take an unrelated region's `ID`.
 [[ref]]
 owner = "column"
 property = "masterDetail.masterColumn"
-target = "column"
+target = "-"
 scope = "page"
 
 # Region internals (region scope): saved-report columns name the region's own columns.

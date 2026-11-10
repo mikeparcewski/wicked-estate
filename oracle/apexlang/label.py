@@ -11,8 +11,10 @@ and checks that the component Oracle points at is the component the resolver cho
   param   = the SQL parameter that stores the property (MAPPING below; written from the APEX
             export API, not from the resolver's table)
   truth   = the SQL record whose p_id is that parameter's id (or, for p_named_lov, whose name)
-  correct = truth's component kind and static id equal the edge target's kind and key, and a
-            page-level truth is on the edge target's page
+  correct = truth's component kind and static id equal the edge target's kind and key, a
+            page-level truth is on the edge target's page, and a list entry's truth is in the
+            edge target's list (the export file is per application, and the test asserts every
+            edge stays inside its application)
 
 An edge whose property has no SQL parameter here, or whose owner/target cannot be found in the
 export, is `unlabelled` with the reason; it is counted, never dropped.
@@ -51,12 +53,12 @@ PROCS = {
 PAGE_KINDS = {
     "region", "pageItem", "button", "process", "validation", "dynamicAction", "computation", "action",
 }
-# Kinds whose static ids repeat across parents: the SQL parameter naming the parent record, whose
-# static id must equal the APEXlang parent's key (list entries per list, DA actions per event).
-PARENT_PARAMS = {
-    "entry": ("p_list_id", "p_menu_id"),
-    "action": ("p_event_id",),
-}
+# Kinds whose static ids repeat across parents, and how the export names the parent: a parameter
+# holding the parent's id (a DA action's p_event_id), or the enclosing call the record follows (a
+# list's items follow its create_list, a breadcrumb's options its create_menu).
+PARENT_PARAMS = {"action": ("p_event_id",)}
+PARENT_CALLS = {"create_list_item": "create_list", "create_menu_option": "create_menu"}
+PARENT_KINDS = {"entry", "action"}
 
 # (owner kind, APEXlang property) -> SQL parameter of the owner's record holding the reference.
 MAPPING = {
@@ -139,12 +141,20 @@ class Export:
         self.by_id = {}
         self.by_key = {}
         self.lov_by_name = {}
+        self.parent = {}  # id(rec) -> parent static id
+        enclosing = {}
+        records = []
         for proc, params, page in parse_export(path):
             if proc not in PROCS:
                 continue
             kind, keyp = PROCS[proc]
             key = params.get(keyp, (None, None))[1]
             rec = (kind, key, page if kind in PAGE_KINDS else None, params)
+            records.append((proc, rec))
+            if proc in PARENT_CALLS.values():
+                enclosing[proc] = key
+            if proc in PARENT_CALLS:
+                self.parent[id(rec)] = enclosing.get(PARENT_CALLS[proc])
             pid = params.get("p_id")
             if pid and pid[0] in ("id", "num"):
                 self.by_id[pid[1]] = rec
@@ -152,6 +162,14 @@ class Export:
                 self.by_key.setdefault((kind, rec[2], key), []).append(rec)
             if proc == "create_list_of_values" and "p_lov_name" in params:
                 self.lov_by_name.setdefault(params["p_lov_name"][1], []).append(rec)
+        for proc, rec in records:
+            for p in PARENT_PARAMS.get(rec[0], ()):
+                v = rec[3].get(p)
+                if v and v[0] in ("id", "num") and v[1] in self.by_id:
+                    self.parent[id(rec)] = self.by_id[v[1]][1]
+
+    def parent_of(self, rec):
+        return self.parent.get(id(rec))
 
 
 def page_of(symbol):
@@ -181,18 +199,9 @@ def label(edge, export):
     owners = export.by_key.get((sk, spage if sk in PAGE_KINDS else None, skey), [])
     if sk == "page":
         owners = export.by_key.get(("page", None, skey), [])
-    if sk in PARENT_PARAMS and len(owners) > 1:
+    if sk in PARENT_KINDS and len(owners) > 1:
         want = parent_key(edge["source"])
-
-        def parent_ok(rec):
-            for p in PARENT_PARAMS[sk]:
-                v = rec[3].get(p)
-                if v and v[0] in ("id", "num"):
-                    parent = export.by_id.get(v[1])
-                    return parent is not None and parent[1] == want
-            return False
-
-        owners = [o for o in owners if parent_ok(o)]
+        owners = [o for o in owners if export.parent_of(o) == want]
     if len(owners) != 1:
         return "unlabelled", f"owner {sk} {skey} on page {spage}: {len(owners)} SQL records"
     params = owners[0][3]
@@ -218,6 +227,12 @@ def label(edge, export):
         return "wrong", f"Oracle target {tkey_sql!r}, resolver {tkey!r}"
     if tpage is not None and tpage != page_of(edge["target"]):
         return "wrong", f"Oracle target on page {tpage}, resolver page {page_of(edge['target'])}"
+    # A target whose static id repeats across parents (a list entry) must sit under the parent
+    # Oracle names: `list:a#entry:x#` is not `list:b#entry:x#`.
+    if tkind in PARENT_KINDS:
+        sql_parent = export.parent_of(truth)
+        if sql_parent is None or sql_parent != parent_key(edge["target"]):
+            return "wrong", f"Oracle target parent {sql_parent!r}, resolver {parent_key(edge['target'])!r}"
     return "correct", f"{names[0]} -> {tkind} {tkey_sql}"
 
 

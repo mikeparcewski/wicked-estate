@@ -39,6 +39,20 @@ pub mod apexlang_ref {
     pub const ANY_KIND: &str = "*";
     /// Target kind of a reference that must stay unresolved.
     pub const NO_BIND: &str = "-";
+    /// `raw_name` prefix of a top-level component's link to the application or container
+    /// directory that holds it: `apexlang-in:<holder SymbolId>`. Bound to a `Contains` edge from
+    /// the holder once the holder exists, so a holder declared in another file never dangles.
+    pub const CONTAINER_PREFIX: &str = "apexlang-in:";
+
+    /// The `raw_name` linking a component to its holder.
+    pub fn container(holder: &str) -> String {
+        format!("{CONTAINER_PREFIX}{holder}")
+    }
+
+    /// The holder `SymbolId` of a name written by [`container`].
+    pub fn parse_container(raw_name: &str) -> Option<&str> {
+        raw_name.strip_prefix(CONTAINER_PREFIX)
+    }
 
     /// A decoded APEXlang reference name.
     #[derive(Debug, Clone, PartialEq, Eq)]

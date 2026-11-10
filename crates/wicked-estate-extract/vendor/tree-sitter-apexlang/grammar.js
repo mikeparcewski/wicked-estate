@@ -98,16 +98,18 @@ module.exports = grammar({
     component_id: _ => /[^\s(){}:"\[\]][^\s()]*/,
 
     // `@` never starts `text` or `word`, so a malformed reference is an ERROR, not a silently
-    // dropped edge.
-    reference: _ => /@[^\s]+/,
+    // dropped edge. A reference stops before whitespace, `]` (a compact `[@a]`) and a comment
+    // opener (`@a/*x*/`, `@a//x`); a single `/` stays inside it (`@/standard`, `@region/accent`).
+    reference: _ => /@([^\s\]\/]|\/[^\s\]\/*])*/,
 
     // `string` and `text` share a precedence so the LONGER match wins (`"ID" = :P1_ID` is text);
     // on a tie (`"ID"`), `string` wins because it is declared first.
     string: _ => /"([^"\\\r\n]|\\.)*"/,
 
-    // Rest-of-line value without trailing blanks. Never starts with `@` (a reference) or `[` (an
-    // array), so neither can degrade into text.
-    text: _ => /[^\s@\[]([^\r\n]*[^\s])?/,
+    // Rest-of-line value without trailing blanks. Never starts with `@` (a reference), `[` (an
+    // array) or `{` (an object), so none of them can degrade into text: an unsupported inline
+    // object `{y: @a}` is an ERROR, never a scalar that hides its reference.
+    text: _ => /[^\s@\[{]([^\r\n]*[^\s])?/,
 
     // One whitespace-separated array value.
     word: _ => /[^\s@"\[\]][^\s\]]*/,

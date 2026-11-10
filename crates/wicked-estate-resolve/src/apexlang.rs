@@ -41,6 +41,28 @@ impl Resolver for ApexlangRefResolver {
     fn resolve(&self, refs: &[UnresolvedRef], index: &dyn SymbolIndex) -> Result<Vec<Edge>> {
         let mut out = Vec::new();
         for r in refs {
+            // A top-level component's link to its holder (application / container directory):
+            // `Contains` from the holder, once the holder is indexed.
+            if let Some(holder) = apexlang_ref::parse_container(&r.raw_name) {
+                let holder = wicked_estate_core::SymbolId(holder.to_string());
+                if index
+                    .get(&holder)
+                    .is_some_and(|n| n.language.as_str() == LANGUAGE)
+                    && holder != r.from
+                {
+                    let mut edge = Edge::new(
+                        holder,
+                        r.from.clone(),
+                        r.kind.clone(),
+                        ResolutionTier::Parsed,
+                        self.id(),
+                    )
+                    .with_location(r.location.clone());
+                    edge.metadata.insert("via".into(), "layout".into());
+                    out.push(edge);
+                }
+                continue;
+            }
             let Some(parsed) = apexlang_ref::parse(&r.raw_name) else {
                 continue;
             };
@@ -116,7 +138,9 @@ pub fn backfill_probes(node: &wicked_estate_core::Node) -> Vec<String> {
             scopes.push(prefix);
         }
     }
-    let mut out = Vec::with_capacity(scopes.len() * 2);
+    let mut out = Vec::with_capacity(scopes.len() * 2 + 1);
+    // Components parked waiting for this node as their holder.
+    out.push(apexlang_ref::container(sym));
     for scope in scopes {
         for k in [kind, ANY_KIND] {
             out.push(apexlang_ref::format(k, &node.name, scope));
@@ -209,6 +233,49 @@ mod tests {
     }
 
     #[test]
+    fn a_holder_contains_its_component_only_once_it_exists() {
+        let page = format!("{APP1}page:1#");
+        let r = UnresolvedRef::new(
+            SymbolId(page.clone()),
+            apexlang_ref::container(APP1),
+            EdgeKind::Contains,
+            Location::new("app/pages/p1.apx", Span::ZERO),
+        );
+        let without = Idx(vec![comp(&page, "page", "1")]);
+        assert!(
+            ApexlangRefResolver
+                .resolve(std::slice::from_ref(&r), &without)
+                .unwrap()
+                .is_empty()
+        );
+        let with = Idx(vec![comp(&page, "page", "1"), comp(APP1, "app", "ONE")]);
+        let edges = ApexlangRefResolver.resolve(&[r], &with).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(
+            (edges[0].source.as_str(), edges[0].target.as_str()),
+            (APP1, page.as_str())
+        );
+        assert_eq!(edges[0].kind, EdgeKind::Contains);
+    }
+
+    /// A quoted APEXlang id can spell an encoded ref name; the name tiers must still skip it.
+    #[test]
+    fn name_tiers_never_bind_reserved_names_even_when_a_node_spells_them() {
+        use crate::{NameResolver, ScopedNameResolver};
+        let raw = apexlang_ref::format("authorization", "admin", APP1);
+        let trap = comp(&format!("{APP1}installScript:x#"), "installScript", &raw);
+        let idx = Idx(vec![trap]);
+        let refs = vec![UnresolvedRef::new(
+            SymbolId(format!("{APP1}page:1#")),
+            raw,
+            EdgeKind::References,
+            Location::new("p.apx", Span::ZERO),
+        )];
+        assert!(NameResolver.resolve(&refs, &idx).unwrap().is_empty());
+        assert!(ScopedNameResolver.resolve(&refs, &idx).unwrap().is_empty());
+    }
+
+    #[test]
     fn same_slug_in_two_applications_never_crosses() {
         let idx = Idx(vec![comp(
             &format!("{APP2}authorization:contribution-rights#"),
@@ -298,9 +365,10 @@ mod tests {
             assert!(probes.contains_key(&apexlang_ref::format("region", "main", &scope)));
             assert!(probes.contains_key(&apexlang_ref::format(ANY_KIND, "main", &scope)));
         }
+        assert!(probes.contains_key(&apexlang_ref::container(n.symbol.as_str())));
         assert_eq!(
             probes.len(),
-            4,
+            5,
             "the node's own id is not a scope of itself"
         );
     }
