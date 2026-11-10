@@ -1,0 +1,3 @@
+SHIPPGM  CSECT
+         CALL  TAXPGM
+         END   SHIPPGM

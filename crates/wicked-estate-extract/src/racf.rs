@@ -14,6 +14,13 @@
 //! - `PERMIT <profile> … ID(<id>) …`      → an unresolved ref id → profile, kind `Other("permits")`
 //! - `CONNECT <user> GROUP(<grp>)`        → an unresolved ref user → group, kind `Other("member_of")`
 //!
+//! A PERMIT/CONNECT whose id or user is not defined by an `ADDUSER`/`ADDGROUP` in the same file
+//! still has a source node: a BOUNDARY record under the same shared id `racf:<ID>` (kind
+//! `racf_identity` for a PERMIT id, `racf_user` for a CONNECT user) whose reason says so. An
+//! `ADDUSER`/`ADDGROUP` anywhere in the indexed sources is the definition and wins. (Until 0.33.x
+//! the ref came from an id with no node and the edge was pruned as dangling.) `ID(A B)` lists each
+//! id.
+//!
 //! Operands in `PERMIT` (`CLASS(...)`, `ID(...)`, `ACCESS(...)`) can appear in any order and are
 //! parsed by pre-compiled regex. Unknown verbs are silently skipped (lenient).
 //!
@@ -200,21 +207,36 @@ impl Extractor for RacfExtractor {
                     // that `find(raw_profile)` reliably locates the *profile* token, not the verb.
                     let after_verb = trimmed.trim_start_matches(verb).trim_start();
                     let rest = after_verb[after_verb.find(raw_profile).unwrap_or(0)..].to_string();
-                    let id = RE_ID
+                    let ids = RE_ID
                         .captures(&rest)
                         .and_then(|c| c.get(1))
-                        .map(|m| m.as_str().trim().to_string());
-                    let Some(id) = id else { continue };
-                    if id.is_empty() {
-                        continue;
+                        .map(|m| m.as_str().to_string())
+                        .unwrap_or_default();
+                    for id in ids
+                        .split(|c: char| c.is_whitespace() || c == ',')
+                        .map(strip_quotes)
+                        .filter(|id| !id.is_empty())
+                    {
+                        let from = Symbol::synthetic("racf", id.as_str()).id();
+                        nodes.push(
+                            Node::new(
+                                from.clone(),
+                                NodeKind::Other("racf_identity".to_string()),
+                                id.clone(),
+                                Language::new("racf"),
+                                loc.clone(),
+                            )
+                            .as_boundary(format!(
+                                "PERMIT ID({id}): no ADDUSER or ADDGROUP {id} is indexed"
+                            )),
+                        );
+                        refs.push(UnresolvedRef::new(
+                            from,
+                            profile.clone(),
+                            EdgeKind::Other("permits".to_string()),
+                            loc.clone(),
+                        ));
                     }
-                    let from = Symbol::synthetic("racf", id.as_str()).id();
-                    refs.push(UnresolvedRef::new(
-                        from,
-                        profile,
-                        EdgeKind::Other("permits".to_string()),
-                        loc,
-                    ));
                 }
 
                 // -------------------------------------------------------
@@ -246,6 +268,16 @@ impl Extractor for RacfExtractor {
                         continue;
                     }
                     let from = Symbol::synthetic("racf", user.as_str()).id();
+                    nodes.push(
+                        Node::new(
+                            from.clone(),
+                            NodeKind::Other("racf_user".to_string()),
+                            user.clone(),
+                            Language::new("racf"),
+                            loc.clone(),
+                        )
+                        .as_boundary(format!("CONNECT {user}: no ADDUSER {user} is indexed")),
+                    );
                     refs.push(UnresolvedRef::new(
                         from,
                         grp,
@@ -259,6 +291,7 @@ impl Extractor for RacfExtractor {
             }
         }
 
+        crate::contrib::settle(&mut nodes);
         Ok(Extraction {
             nodes,
             local_edges,
@@ -310,6 +343,44 @@ mod tests {
                 text: text.to_string(),
             })
             .expect("racf extract")
+    }
+
+    #[test]
+    fn permit_and_connect_sources_are_nodes_even_when_undefined() {
+        // Fails on main: PERMIT ID(AUDITGRP) with no ADDGROUP minted its ref from `racf:AUDITGRP`,
+        // which had no node, so the index pruned the edge.
+        let ex = extract(
+            "ADDGROUP PAYROLL\n\
+             PERMIT 'PROD.PAY.**' ID(PAYROLL AUDITGRP) ACCESS(READ)\n\
+             CONNECT GHOST GROUP(PAYROLL)\n",
+        );
+        for r in &ex.refs {
+            assert!(
+                ex.nodes.iter().any(|n| n.symbol == r.from),
+                "ref source {} has no node",
+                r.from
+            );
+        }
+        let node = |name: &str| ex.nodes.iter().find(|n| n.name == name).unwrap();
+        assert!(
+            !node("PAYROLL").is_declaration(),
+            "the ADDGROUP definition wins"
+        );
+        assert_eq!(node("PAYROLL").kind, NodeKind::Other("racf_group".into()));
+        assert!(node("AUDITGRP").is_declaration());
+        assert_eq!(
+            node("AUDITGRP").kind,
+            NodeKind::Other("racf_identity".into())
+        );
+        assert_eq!(node("GHOST").kind, NodeKind::Other("racf_user".into()));
+        assert_eq!(
+            ex.refs
+                .iter()
+                .filter(|r| r.kind == EdgeKind::Other("permits".into()))
+                .count(),
+            2,
+            "ID(A B) lists two ids"
+        );
     }
 
     // The canonical full-snippet test required by the task spec.

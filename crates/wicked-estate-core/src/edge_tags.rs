@@ -50,6 +50,16 @@ pub const SAME_PACKAGE: &str = "same-package";
 /// `source` = consumer/dependent value, `target` = producer/dependency value.
 pub const FLOWS_TO: &str = "flows_to";
 
+/// A program READS a data store: a Db2 table named in a query (`EXEC SQL SELECT … FROM T`, a cursor,
+/// a subselect) or a CICS BMS map it receives (`EXEC CICS RECEIVE MAP`). `source` = the program
+/// (dependent), `target` = the table or map (dependency).
+pub const READS: &str = "reads";
+
+/// A program WRITES a data store: the target of `INSERT INTO` / `UPDATE` / `DELETE FROM` /
+/// `MERGE INTO`, or a CICS BMS map it sends (`EXEC CICS SEND MAP`). Same direction as [`READS`],
+/// so blast radius on a table reaches its writers and its readers alike.
+pub const WRITES: &str = "writes";
+
 /// Build an [`EdgeKind::Other`] from a canonical tag constant.
 ///
 /// ```
@@ -94,6 +104,8 @@ mod tests {
             LIFECYCLE_HOOK,
             SAME_PACKAGE,
             FLOWS_TO,
+            READS,
+            WRITES,
         ];
         let set: std::collections::HashSet<_> = all.iter().collect();
         assert_eq!(set.len(), all.len(), "edge tag constants must be unique");

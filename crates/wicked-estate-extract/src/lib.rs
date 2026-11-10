@@ -54,6 +54,10 @@ pub use mq::MqExtractor;
 pub mod cics_sql;
 pub use cics_sql::CicsSqlExtractor;
 
+pub mod cobol_links;
+
+mod contrib;
+
 pub mod json_rules;
 pub use json_rules::{AwsConfigRuleExtractor, AzurePolicyExtractor};
 

@@ -26,9 +26,12 @@
 //!
 //! # IMS PSB anchoring
 //!
-//! PSBs are source files that contain one or more `PCB`/`SENSEG` macros but no `DBD` macro.  The
-//! "from" anchor for PSB-originated refs is `Symbol::synthetic("ims-psb", &file.path)` — PSB
-//! granularity is sufficient because a PSB always maps to a single COBOL/PL-I program.
+//! PSBs are source files that contain one or more `PCB`/`SENSEG` macros but no `DBD` macro.  Their
+//! refs come from an `ims_psb` NODE named by `PSBGEN PSBNAME=` (else the file stem), id
+//! `Symbol::synthetic("ims-psb", PSBNAME)`, emitted on the first PCB/SENSEG.  (Until 0.33.x the
+//! anchor was a path-keyed id that was never a node, so every `accesses`/`sensitive_to` edge was
+//! pruned as dangling.)  Binding the PSB to the program that schedules it (IMS gen `APPLCTN`, JCL
+//! `PARM='DLI,PGM,PSB'`) is not done here.
 
 use regex::Regex;
 use std::sync::LazyLock;
@@ -82,12 +85,54 @@ impl Extractor for ImsExtractor {
         // Track the most-recently-opened DBD so we can emit DBD→SEGM Contains edges.
         let mut current_dbd: Option<SymbolId> = None;
 
-        // The PSB-level anchor (lazy — created on first PCB/SENSEG in a file without a DBD).
-        let psb_anchor = || Symbol::synthetic("ims-psb", file.path.as_str()).id();
+        // The PSB node: named by PSBGEN PSBNAME= (the macro ends the PSB source, so look ahead),
+        // else the file stem; emitted on the first PCB/SENSEG.
+        let cards: Vec<&str> = file
+            .text
+            .lines()
+            .filter(|l| !l.starts_with('*') && !l.starts_with(".*"))
+            .collect();
+        let psb_name = (0..cards.len())
+            .find_map(|k| {
+                // PSBGEN's operands may continue on the next cards (`PSBGEN LANG=COBOL,` then
+                // `PSBNAME=ORDPSB`), so read the macro card and its continuation chain.
+                let toks: Vec<&str> = cards[k].split_whitespace().collect();
+                let i = toks.iter().position(|t| t.eq_ignore_ascii_case("PSBGEN"))?;
+                let mut ops = toks.get(i + 1).copied().unwrap_or("").to_string();
+                for cont in cards.iter().skip(k + 1).take(32) {
+                    if !ops.ends_with(',') {
+                        break;
+                    }
+                    ops.push_str(cont.split_whitespace().next().unwrap_or(""));
+                }
+                kw_value(&ops, "PSBNAME")
+            })
+            .unwrap_or_else(|| {
+                let base = file.path.rsplit(['/', '\\']).next().unwrap_or(&file.path);
+                base.split('.').next().unwrap_or(base).to_string()
+            })
+            .to_ascii_uppercase();
+        let psb_sym = Symbol::synthetic("ims-psb", psb_name.as_str()).id();
+        let mut psb_emitted = false;
+        let mut psb_anchor = |nodes: &mut Vec<Node>, loc: &Location| {
+            if !psb_emitted {
+                psb_emitted = true;
+                let mut node = Node::new(
+                    psb_sym.clone(),
+                    NodeKind::Other("ims_psb".to_string()),
+                    psb_name.clone(),
+                    Language::new("ims"),
+                    loc.clone(),
+                );
+                node.signature = Some("PSB".to_string());
+                nodes.push(node);
+            }
+            psb_sym.clone()
+        };
 
         for (i, raw) in file.text.lines().enumerate() {
             // `*` in column 1 is a comment line; blank lines are skipped.
-            if raw.starts_with('*') || raw.trim().is_empty() {
+            if raw.starts_with('*') || raw.starts_with(".*") || raw.trim().is_empty() {
                 continue;
             }
 
@@ -188,7 +233,7 @@ impl Extractor for ImsExtractor {
                     }
                     if let Some(dbdname) = kw_value(operands, "DBDNAME") {
                         refs.push(UnresolvedRef::new(
-                            psb_anchor(),
+                            psb_anchor(&mut nodes, &loc),
                             dbdname,
                             EdgeKind::Other("accesses".to_string()),
                             loc,
@@ -203,7 +248,7 @@ impl Extractor for ImsExtractor {
                 "SENSEG" => {
                     if let Some(seg_name) = kw_value(operands, "NAME") {
                         refs.push(UnresolvedRef::new(
-                            psb_anchor(),
+                            psb_anchor(&mut nodes, &loc),
                             seg_name,
                             EdgeKind::Other("sensitive_to".to_string()),
                             loc,
@@ -434,12 +479,45 @@ mod tests {
             .iter()
             .find(|r| r.kind == EdgeKind::Other("accesses".to_string()) && r.raw_name == "CUSTDB")
             .expect("PCB TYPE=DB must emit an accesses ref to CUSTDB");
-        // Verify the anchor is the PSB file anchor.
-        assert!(
-            acc.from.as_str().contains("ims-psb"),
-            "accesses ref must originate from the ims-psb anchor; from={}",
-            acc.from,
+        // Fails on main: the source was a path-keyed id that no extractor emitted as a node.
+        let psb = ex
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Other("ims_psb".to_string()))
+            .expect("the PSB is a node");
+        assert_eq!(acc.from, psb.symbol);
+        assert!(ex.refs.iter().all(|r| r.from == psb.symbol));
+    }
+
+    #[test]
+    fn psbgen_psbname_on_a_continuation_card() {
+        let ex = extract_psb(
+            "         PCB   TYPE=DB,DBDNAME=CUSTDB\n\
+                      PSBGEN LANG=COBOL,\n\
+                            PSBNAME=CONTPSB\n",
         );
+        assert!(
+            ex.nodes
+                .iter()
+                .any(|n| n.kind == NodeKind::Other("ims_psb".to_string()) && n.name == "CONTPSB")
+        );
+    }
+
+    #[test]
+    fn psb_node_is_named_by_psbgen_psbname() {
+        let ex = extract_psb(
+            "         PCB   TYPE=DB,DBDNAME=CUSTDB,PROCOPT=A\n\
+                      SENSEG NAME=CUSTOMER,PARENT=0\n\
+                      PSBGEN LANG=COBOL,PSBNAME=ORDPSB\n",
+        );
+        let psbs: Vec<_> = ex
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Other("ims_psb".to_string()))
+            .collect();
+        assert_eq!(psbs.len(), 1);
+        assert_eq!(psbs[0].name, "ORDPSB");
+        assert_eq!(psbs[0].symbol, Symbol::synthetic("ims-psb", "ORDPSB").id());
     }
 
     #[test]

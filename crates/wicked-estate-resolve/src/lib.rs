@@ -43,6 +43,9 @@ pub use estate::estate_edges;
 pub mod relative_import;
 pub use relative_import::RelativeImportResolver;
 
+pub mod mainframe;
+pub use mainframe::DynamicCallResolver;
+
 pub mod scip;
 pub use scip::{ScipEvidence, scip_evidence};
 
@@ -150,6 +153,16 @@ fn admissible_target(ref_kind: &EdgeKind, cand: &wicked_estate_core::Node) -> bo
     if matches!(cand_kind, NodeKind::Import) {
         return false;
     }
+    // Shared-id DATA nodes of the mainframe extractors are never the target of a name-bound call
+    // or data use: a COBOL data reference names a Field, not the copybook, table or map that
+    // happens to share its spelling (`01 CUSTOMER.` inside `CUSTOMER.cpy` is a common layout).
+    if matches!(ref_kind, EdgeKind::Calls | EdgeKind::References) {
+        if let NodeKind::Other(tag) = cand_kind {
+            if NOT_NAME_TARGET_TAGS.contains(&tag.as_str()) {
+                return false;
+            }
+        }
+    }
     if *ref_kind != EdgeKind::Calls {
         return true;
     }
@@ -170,6 +183,20 @@ fn admissible_target(ref_kind: &EdgeKind, cand: &wicked_estate_core::Node) -> bo
             | NodeKind::Fact
     )
 }
+
+/// `NodeKind::Other` tags that are data or JCL procedures, never the target of a name-bound
+/// `Calls` or `References` ref (see [`admissible_target`]). JCL `EXEC proc` links to its PROC by a
+/// shared id, so `EXEC PGM=X` can never bind a PROC named X.
+const NOT_NAME_TARGET_TAGS: &[&str] = &[
+    "jcl_proc",
+    "copybook",
+    "db2_table",
+    "cics_map",
+    "bms_map",
+    "bms_mapset",
+    "dd_binding",
+    "dataset",
+];
 
 /// Language family of the ref's source node, when both the node and a manifest family exist.
 fn from_family(index: &dyn SymbolIndex, from: &wicked_estate_core::SymbolId) -> Option<String> {
@@ -1143,6 +1170,39 @@ mod tests {
     /// target. The node is a `Variable` (a kind `Calls` deliberately keeps for `const f = () =>
     /// …`) named with the bare source identifier, so without the `value_role` guard a local named
     /// `map` becomes the unique candidate for every `map(...)` call in the repo.
+    #[test]
+    fn mainframe_data_homonyms_are_not_call_targets() {
+        // `COPY SHIPPGM` + `EXEC CICS LINK PROGRAM('SHIPPGM')`: the copybook node must not make the
+        // program name ambiguous (it did with the old `cics_program` node, and would again here).
+        let program = node_kind_lang(
+            "hlasm",
+            "SHIPPGM",
+            "asm/SHIPPGM.asm",
+            "hlasm",
+            NodeKind::Module,
+        );
+        let copybook = node_kind_lang(
+            "cobol-copybook",
+            "SHIPPGM",
+            "cpy/SHIPPGM.cpy",
+            "cobol",
+            NodeKind::Other("copybook".into()),
+        );
+        let table = node_kind_lang(
+            "db2",
+            "SHIPPGM",
+            "cbl/A.cbl",
+            "cobol",
+            NodeKind::Other("db2_table".into()),
+        );
+        let idx = VecIndex::plain(vec![program.clone(), copybook, table]);
+        let edges = NameResolver
+            .resolve(&[call_ref("ORDPGM", "SHIPPGM")], &idx)
+            .unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target, program.symbol);
+    }
+
     #[test]
     fn value_flow_slots_are_never_resolution_targets() {
         let local = node_kind_lang(

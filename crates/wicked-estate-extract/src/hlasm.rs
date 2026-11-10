@@ -8,13 +8,20 @@
 //! - `CALL routine`            → a call ref (the cross-program link — e.g. an assembler stub that
 //!   `CALL`s a COBOL program; resolves to that program's node).
 //! - `EXTRN/WXTRN name,...`    → external-symbol references (programs/data resolved at link-edit).
+//! - BMS map source (`.bms`, or BMS macros in any assembler file): `SET DFHMSD TYPE=…` → a
+//!   `bms_mapset` node `cics-mapset:SET`; `MAP DFHMDI …` → a `bms_map` node `cics-map:SET.MAP`, the
+//!   DEFINITION record of the shared id a COBOL `EXEC CICS SEND/RECEIVE MAP('MAP') MAPSET('SET')`
+//!   links to (see `cobol_links`); the mapset `Contains` its maps. `DFHMSD TYPE=FINAL` ends the set.
+//!
+//! A `CALL`/`EXTRN` before the first CSECT is attributed to the file's File node (which the index
+//! pipeline emits for every grammar-less file), never to an id that is not a node.
 //!
 //! Macros, full operand grammar, and DC/DS storage are out of scope (the section + call graph is
 //! the value). Comments: `*` in column 1, or `.*` macro comments.
 
 use wicked_estate_core::{
-    EdgeKind, Extraction, Extractor, Language, Location, Node, NodeKind, Result, SourceFile, Span,
-    Symbol, SymbolId, UnresolvedRef,
+    Edge, EdgeKind, Extraction, Extractor, Language, Location, Node, NodeKind, ResolutionTier,
+    Result, SourceFile, Span, Symbol, SymbolId, UnresolvedRef,
 };
 
 /// Extractor for HLASM assembler source. Grammar-less; parses the card format line by line.
@@ -39,13 +46,14 @@ impl Extractor for HlasmExtractor {
 
     fn extract(&self, file: &SourceFile) -> Result<Extraction> {
         let mut nodes: Vec<Node> = Vec::new();
-        let local_edges = Vec::new();
+        let mut local_edges: Vec<Edge> = Vec::new();
         let mut refs: Vec<UnresolvedRef> = Vec::new();
         let mut current_section: Option<SymbolId> = None;
+        let mut current_mapset: Option<(String, SymbolId)> = None;
 
         for (i, raw) in file.text.lines().enumerate() {
             // `*` in column 1 is a comment line; blank lines are skipped.
-            if raw.starts_with('*') || raw.trim().is_empty() {
+            if raw.starts_with('*') || raw.starts_with(".*") || raw.trim().is_empty() {
                 continue;
             }
             // A label is present iff column 1 is non-blank (the first token is the label).
@@ -104,6 +112,54 @@ impl Extractor for HlasmExtractor {
                         }
                     }
                 }
+                "DFHMSD" => {
+                    if operands.to_ascii_uppercase().contains("TYPE=FINAL") {
+                        current_mapset = None;
+                    } else if let Some(label) = label {
+                        let set = label.to_ascii_uppercase();
+                        let sym = Symbol::synthetic("cics-mapset", set.as_str()).id();
+                        let mut node = Node::new(
+                            sym.clone(),
+                            NodeKind::Other("bms_mapset".to_string()),
+                            set.clone(),
+                            Language::new("hlasm"),
+                            loc,
+                        );
+                        node.signature = Some("DFHMSD".to_string());
+                        nodes.push(node);
+                        current_mapset = Some((set, sym));
+                    }
+                }
+                "DFHMDI" => {
+                    if let Some(label) = label {
+                        let map = label.to_ascii_uppercase();
+                        let set = current_mapset
+                            .as_ref()
+                            .map_or(map.clone(), |(s, _)| s.clone());
+                        let sym = Symbol::synthetic("cics-map", format!("{set}.{map}")).id();
+                        let mut node = Node::new(
+                            sym.clone(),
+                            NodeKind::Other("bms_map".to_string()),
+                            map,
+                            Language::new("hlasm"),
+                            loc.clone(),
+                        );
+                        node.signature = Some(format!("DFHMDI (mapset {set})"));
+                        nodes.push(node);
+                        if let Some((_, set_sym)) = &current_mapset {
+                            local_edges.push(
+                                Edge::new(
+                                    set_sym.clone(),
+                                    sym,
+                                    EdgeKind::Contains,
+                                    ResolutionTier::Parsed,
+                                    "hlasm",
+                                )
+                                .with_location(loc),
+                            );
+                        }
+                    }
+                }
                 "EXTRN" | "WXTRN" => {
                     // EXTRN A,B,C → external symbols this module references (resolved at link-edit).
                     for ext in operands.split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -127,11 +183,12 @@ impl Extractor for HlasmExtractor {
     }
 }
 
-/// The reference source: the current section if one is open, else a file-level anchor.
+/// The reference source: the current section if one is open, else the file's File node (emitted
+/// for every grammar-less file by the index pipeline) — never an id that is not a node.
 fn from_or_file(current: &Option<SymbolId>, file: &SourceFile) -> SymbolId {
     current
         .clone()
-        .unwrap_or_else(|| Symbol::synthetic("hlasm", format!("{}::FILE", file.path)).id())
+        .unwrap_or_else(|| Symbol::file(&file.path).id())
 }
 
 fn line_span(line: usize) -> Span {
@@ -196,6 +253,54 @@ mod tests {
             names.contains(&"EXTA") && names.contains(&"EXTB"),
             "EXTRN names: {names:?}"
         );
+    }
+
+    #[test]
+    fn call_before_first_csect_comes_from_the_file_node() {
+        // Fails on main: the source was `synthetic("hlasm", "<path>::FILE")`, never a node, so the
+        // index pruned the edge as dangling.
+        let ex =
+            extract("         CALL  EARLY\nSTUB     CSECT\n         CALL  LATE\n         END\n");
+        let early = ex
+            .refs
+            .iter()
+            .find(|r| r.raw_name == "EARLY")
+            .expect("EARLY ref");
+        assert_eq!(early.from, Symbol::file("PROG.asm").id());
+        let stub = ex
+            .nodes
+            .iter()
+            .find(|n| n.name == "STUB")
+            .unwrap()
+            .symbol
+            .clone();
+        assert_eq!(
+            ex.refs.iter().find(|r| r.raw_name == "LATE").unwrap().from,
+            stub
+        );
+    }
+
+    #[test]
+    fn bms_mapset_and_maps_define_the_shared_cics_map_ids() {
+        let ex = extract(
+            "ORDSET   DFHMSD TYPE=&SYSPARM,MODE=INOUT,LANG=COBOL\nORDMAP   DFHMDI SIZE=(24,80)\nCUSTNO   DFHMDF POS=(1,1),LENGTH=8\n         DFHMSD TYPE=FINAL\n         END\n",
+        );
+        let map = Symbol::synthetic("cics-map", "ORDSET.ORDMAP").id();
+        let set = Symbol::synthetic("cics-mapset", "ORDSET").id();
+        let node = ex.nodes.iter().find(|n| n.symbol == map).expect("bms_map");
+        assert_eq!(node.kind, NodeKind::Other("bms_map".into()));
+        assert!(!node.is_declaration());
+        assert!(
+            ex.local_edges
+                .iter()
+                .any(|e| e.source == set && e.target == map && e.kind == EdgeKind::Contains)
+        );
+    }
+
+    #[test]
+    fn macro_comment_lines_are_not_calls() {
+        let ex = extract(".* CALL GHOST\nSTUB     CSECT\n         END\n");
+        assert!(!ex.refs.iter().any(|r| r.raw_name == "GHOST"));
     }
 
     #[test]

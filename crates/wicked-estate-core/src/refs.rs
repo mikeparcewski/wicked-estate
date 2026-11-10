@@ -11,6 +11,13 @@ use crate::node::{Location, Metadata, Node};
 use crate::symbol::SymbolId;
 use serde::{Deserialize, Serialize};
 
+/// `raw_name` prefix of a COBOL dynamic call whose program-name variable holds exactly one literal
+/// in its own source (`01 WS-PGM … VALUE 'PRICEPGM'` then `CALL WS-PGM`): the ref is
+/// `cobol-dynamic-call:PRICEPGM`. The prefix keeps the name-based resolvers from binding it at their
+/// `ImportMap` confidence. Only the dedicated dynamic-call resolver binds it, at `Heuristic`, and the
+/// prefix survives in the parked `unresolved_refs` row, so a back-fill re-binds it the same way.
+pub const COBOL_DYNAMIC_CALL_PREFIX: &str = "cobol-dynamic-call:";
+
 /// A reference captured during extraction but not yet resolved to a target symbol.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnresolvedRef {

@@ -2676,6 +2676,9 @@ enum CaptureRole<'a> {
     CallFunction,
     /// `@call.method` — a method call name.
     CallMethod,
+    /// `@reference.name` — a by-name use of a data item (COBOL `MOVE 1 TO ORD-ID`): an
+    /// `EdgeKind::References` ref, so it can bind to a `Field` (Calls refs never do).
+    ReferenceName,
     /// `@import` — the import statement node (text used as raw name if no `.source`).
     Import,
     /// `@import.source` — the path node inside an import statement.
@@ -2883,6 +2886,9 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
     }
     if cap_name == "call.method" {
         return CaptureRole::CallMethod;
+    }
+    if cap_name == "reference.name" {
+        return CaptureRole::ReferenceName;
     }
     if cap_name == "call.value" {
         return CaptureRole::CallValue;
@@ -3160,6 +3166,7 @@ impl Extractor for TreeSitterExtractor {
             let mut flow_parameter_sites: Vec<PendingFlowEndpoint> = Vec::new();
             let mut flow_return_sites: Vec<PendingFlowEndpoint> = Vec::new();
             let mut call_value_span: Option<Span> = None;
+            let mut reference_name: Option<(String, usize, Span)> = None;
             let mut call_arguments_node: Option<tree_sitter::Node> = None;
             let mut call_arg_sites: Vec<PendingFlowEndpoint> = Vec::new();
             let mut call_result_site: Option<PendingFlowEndpoint> = None;
@@ -3203,6 +3210,9 @@ impl Extractor for TreeSitterExtractor {
                     }
                     CaptureRole::CallMethod => {
                         call_method = Some((text, pos, span));
+                    }
+                    CaptureRole::ReferenceName => {
+                        reference_name = Some((text, pos, span));
                     }
                     CaptureRole::Import => {
                         import_stmt = Some((text, span));
@@ -3426,6 +3436,9 @@ impl Extractor for TreeSitterExtractor {
             } else if let Some((name, pos, span)) = call_method {
                 let site_span = call_value_span.unwrap_or(span);
                 raw_refs.push((strip_literal_quotes(&name), EdgeKind::Calls, pos, site_span));
+            }
+            if let Some((name, pos, span)) = reference_name {
+                raw_refs.push((name, EdgeKind::References, pos, span));
             }
 
             // ── Process imports ─────────────────────────────────────────────

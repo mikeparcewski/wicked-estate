@@ -28,6 +28,37 @@
   masked value's length is visible. Memory and knowledge stores are not redacted yet (estate#406).
 
 ### Fixed
+- **Mainframe links that were dropped or never made.** On a COBOL + JCL + HLASM estate four links
+  were missing. Each is now stored, starting from the real program Module, and blast radius and
+  path traverse them.
+  - `EXEC CICS LINK/XCTL PROGRAM('P')` is a `Calls` edge to program P in any language. The
+    `cics_program` boundary node is gone: it made every target name ambiguous with the real program.
+  - `EXEC SQL` stores `other:reads` / `other:writes` edges to the `db2_table` (new `edge_tags::READS`
+    / `WRITES`). The old edges came from a file anchor that was never a node, and the index pruned
+    them as dangling.
+  - `COPY C` / `EXEC SQL INCLUDE C` is an `Imports` edge to a `copybook` node, which the copybook
+    file defines and which `Contains` its fields. Field uses are `References` refs (new
+    `@reference.name` capture), so the blast radius of a copybook field reaches the programs.
+  - A dynamic `CALL VAR` whose variable holds exactly one literal (`VALUE`, `MOVE`, `SET … TO
+    ENTRY`) binds at `Heuristic` 0.5 through the new `cobol-dynamic-call` resolver. With several
+    values, a non-literal assignment (including `MOVE SPACES`) or none, the call parks as
+    `cobol-dynamic-var:<VAR>`, so it never binds by name to a same-named program, and the variable's
+    node says why (`metadata.dynamic_call`). Literal inference is scoped to the calling program.
+  - Every construct is matched on a lexical view with literal contents, comments and the
+    fixed-format sequence areas blanked, so a `COPY` or `EXEC SQL` inside a `DISPLAY` literal is
+    not a link. CTE names, `EXECUTE … USING` and derived tables are not taken as tables.
+  - Name resolution never binds a `Calls` ref to a mainframe data node (copybook, Db2 table, CICS
+    or BMS map, DD binding, dataset), so a copybook named like a program does not hide it.
+  - CICS `SEND`/`RECEIVE MAP` writes/reads a shared map id. A `.bms` source (DFHMSD/DFHMDI) defines
+    it; otherwise it is a boundary node with a reason. COBOL `SELECT … ASSIGN TO DD` uses the
+    `ddname:<PGM>.<DD>` binding that a JCL DD in a step running that program defines.
+- **The same dropped-edge class in the other mainframe extractors.** IMS PSB refs now come from an
+  `ims_psb` node (before, every `accesses`/`sensitive_to` edge was lost). A RACF `PERMIT`/`CONNECT`
+  for an id with no `ADDUSER`/`ADDGROUP` keeps its edge through a boundary node, and `ID(A B)` lists
+  each id. An HLASM `CALL` before the first CSECT comes from the File node. A JCL `PROC` is a
+  Module, so `EXEC proc` and `EXEC PROC=proc` resolve, and an unnamed concatenation `DD` adds its
+  dataset to the DD binding. Every JCL edge now carries its card's location. A guard test indexes one source per grammar-less extractor and
+  fails if anything is pruned or a documented edge kind is missing.
 - **A linked worktree of a local repository with no remote is the same repository (estate#401).**
   The same-repo guard compared roots by path when neither side had an `origin`. So wicked-core's
   D8 base index of a run's worktree (`git worktree add` of the registered checkout) was refused as

@@ -14,8 +14,13 @@
 //!   program?" / blast-radius across the estate).
 //! - `//STEP EXEC PROCNAME`      → step + a `Calls` ref to the invoked PROC.
 //!
-//! DD/DSN dataset references are intentionally out of scope here (the program call graph is the
-//! value); they are a clean follow-up on the same seam.
+//! - `//NAME PROC` (in-stream, ended by `// PEND`, or a cataloged PROC member) → a
+//!   [`NodeKind::Module`] named NAME that `Contains` its steps, so `EXEC NAME` resolves to it.
+//! - `//DD DD DSN=…` → a shared `dataset` node + a step→dataset `other:uses` edge.
+//! - `//DD DD …` in a step that runs `PGM=P` → the DEFINITION record of the shared DD binding
+//!   `ddname:P.DD` (kind `dd_binding`, step `Contains` it, it `uses` the dataset). A COBOL
+//!   `SELECT f ASSIGN TO DD` in program P links to the same id (`cobol_links`), so blast radius on
+//!   a dataset reaches the program that reads it through its DD name.
 
 use wicked_estate_core::{
     Edge, EdgeKind, Extraction, Extractor, Language, Location, Node, NodeKind, ResolutionTier,
@@ -48,7 +53,11 @@ impl Extractor for JclExtractor {
         let mut refs: Vec<UnresolvedRef> = Vec::new();
 
         let mut current_job: Option<SymbolId> = None;
+        let mut current_proc: Option<SymbolId> = None;
         let mut current_step: Option<SymbolId> = None;
+        let mut current_pgm: Option<String> = None;
+        // The DD binding the next unnamed concatenation card adds a dataset to.
+        let mut last_dd: Option<SymbolId> = None;
 
         for (i, raw) in file.text.lines().enumerate() {
             // JCL statements begin in columns 1-2 with `//`. `//*` is a comment; `//` alone is a
@@ -60,10 +69,50 @@ impl Extractor for JclExtractor {
                 continue;
             }
 
+            // An unnamed `//         DD DSN=…` card continues the previous DD (a concatenation).
+            let concat = body.starts_with([' ', '\t']);
             // Card form: NAME OPERATION OPERANDS  (whitespace-separated).
             let mut toks = body.split_whitespace();
             let Some(name) = toks.next() else { continue };
-            let Some(op) = toks.next() else { continue };
+            if concat && name == "DD" {
+                let operands = toks.next().unwrap_or("");
+                let loc = Location::new(&file.path, line_span(i));
+                if let (Some(dsn), Some(step)) = (parse_dsn(operands), &current_step) {
+                    let ds_sym = Symbol::synthetic("jcl-dataset", dsn.as_str()).id();
+                    for from in [Some(step.clone()), last_dd.clone()].into_iter().flatten() {
+                        local_edges.push(
+                            Edge::new(
+                                from,
+                                ds_sym.clone(),
+                                EdgeKind::Other("uses".to_string()),
+                                ResolutionTier::Parsed,
+                                "jcl",
+                            )
+                            .with_location(loc.clone()),
+                        );
+                    }
+                    let mut node = Node::new(
+                        ds_sym,
+                        NodeKind::Other("dataset".to_string()),
+                        dsn,
+                        Language::new("jcl"),
+                        loc,
+                    );
+                    node.signature = Some("DATASET".to_string());
+                    nodes.push(node);
+                }
+                continue;
+            }
+            let Some(op) = toks.next() else {
+                // `//         PEND` — the end of an in-stream PROC.
+                if name == "PEND" {
+                    current_proc = None;
+                    current_step = None;
+                    current_pgm = None;
+                    last_dd = None;
+                }
+                continue;
+            };
             let operands = toks.next().unwrap_or("");
             let loc = Location::new(&file.path, line_span(i));
 
@@ -80,6 +129,47 @@ impl Extractor for JclExtractor {
                     node.signature = Some("JOB".to_string());
                     nodes.push(node);
                     current_job = Some(sym);
+                    current_proc = None;
+                    current_step = None;
+                    current_pgm = None;
+                    last_dd = None;
+                }
+                "PROC" => {
+                    // The DEFINITION of the shared PROC id an `EXEC name` / `EXEC PROC=name` links
+                    // to. Not a Module: `EXEC PGM=X` names a program and must never bind (or be
+                    // made ambiguous by) a PROC that shares its name, a common naming convention.
+                    let sym = proc_symbol(name);
+                    let mut node = Node::new(
+                        sym.clone(),
+                        NodeKind::Other("jcl_proc".to_string()),
+                        name.to_string(),
+                        Language::new("jcl"),
+                        loc.clone(),
+                    );
+                    node.signature = Some("PROC".to_string());
+                    nodes.push(node);
+                    if let Some(job) = &current_job {
+                        local_edges.push(
+                            Edge::new(
+                                job.clone(),
+                                sym.clone(),
+                                EdgeKind::Contains,
+                                ResolutionTier::Parsed,
+                                "jcl",
+                            )
+                            .with_location(loc.clone()),
+                        );
+                    }
+                    current_proc = Some(sym);
+                    current_step = None;
+                    current_pgm = None;
+                    last_dd = None;
+                }
+                "PEND" => {
+                    current_proc = None;
+                    current_step = None;
+                    current_pgm = None;
+                    last_dd = None;
                 }
                 "EXEC" => {
                     let step_sym =
@@ -94,26 +184,64 @@ impl Extractor for JclExtractor {
                     node.signature = Some(format!("EXEC {operands}"));
                     nodes.push(node);
                     current_step = Some(step_sym.clone());
+                    current_pgm = operands
+                        .split(',')
+                        .next()
+                        .and_then(|f| f.trim().strip_prefix("PGM="))
+                        .map(str::trim)
+                        .filter(|p| !p.is_empty() && !p.contains(['*', '.', '&']))
+                        .map(str::to_ascii_uppercase);
 
-                    // job → step (Contains): blast-radius/containment.
-                    if let Some(job) = &current_job {
-                        local_edges.push(Edge::new(
-                            job.clone(),
-                            step_sym.clone(),
-                            EdgeKind::Contains,
-                            ResolutionTier::Parsed,
-                            "jcl",
-                        ));
+                    // job/PROC → step (Contains): blast-radius/containment.
+                    if let Some(owner) = current_proc.as_ref().or(current_job.as_ref()) {
+                        local_edges.push(
+                            Edge::new(
+                                owner.clone(),
+                                step_sym.clone(),
+                                EdgeKind::Contains,
+                                ResolutionTier::Parsed,
+                                "jcl",
+                            )
+                            .with_location(loc.clone()),
+                        );
                     }
 
-                    // step → invoked program/PROC (Calls): the cross-language link.
+                    // step → invoked program (Calls by name: the cross-language link), or → the
+                    // shared PROC id (a direct edge; the PROC source defines it, else a boundary).
                     if let Some(target) = parse_exec_target(operands) {
-                        refs.push(UnresolvedRef::new(
-                            step_sym.clone(),
-                            target,
-                            EdgeKind::Calls,
-                            loc,
-                        ));
+                        if current_pgm.is_some() || operands.starts_with("PGM=") {
+                            refs.push(UnresolvedRef::new(
+                                step_sym.clone(),
+                                target,
+                                EdgeKind::Calls,
+                                loc,
+                            ));
+                        } else {
+                            let proc_sym = proc_symbol(&target);
+                            local_edges.push(
+                                Edge::new(
+                                    step_sym.clone(),
+                                    proc_sym.clone(),
+                                    EdgeKind::Calls,
+                                    ResolutionTier::Parsed,
+                                    "jcl",
+                                )
+                                .with_location(loc.clone()),
+                            );
+                            nodes.push(
+                                Node::new(
+                                    proc_sym,
+                                    NodeKind::Other("jcl_proc".to_string()),
+                                    target.to_ascii_uppercase(),
+                                    Language::new("jcl"),
+                                    loc,
+                                )
+                                .as_boundary(format!(
+                                    "EXEC {target}: no PROC source (in-stream or cataloged) named \
+                                     {target} is indexed"
+                                )),
+                            );
+                        }
                     }
                 }
                 "DD" => {
@@ -121,16 +249,66 @@ impl Extractor for JclExtractor {
                     // (including a GDG `(+1)` or PDS `(MEMBER)` suffix) becomes a SHARED dataset
                     // node, with a step→dataset edge (source = dependent step, target = dependency
                     // dataset) so blast-radius on a dataset finds every job/step that touches it.
-                    if let Some(dsn) = parse_dsn(operands) {
-                        let ds_sym = Symbol::synthetic("jcl-dataset", dsn.as_str()).id();
+                    let dsn = parse_dsn(operands);
+                    let ds_sym = dsn
+                        .as_deref()
+                        .map(|d| Symbol::synthetic("jcl-dataset", d).id());
+                    // The DD binding of the step's program (`ddname:<PGM>.<DD>`).
+                    let dd = name.to_ascii_uppercase();
+                    last_dd = None;
+                    if let (Some(pgm), Some(step)) = (&current_pgm, &current_step) {
+                        if is_ddname(&dd) {
+                            let bind = crate::cobol_links::dd_binding_symbol(pgm, &dd);
+                            let mut node = Node::new(
+                                bind.clone(),
+                                NodeKind::Other("dd_binding".to_string()),
+                                format!("{pgm}.{dd}"),
+                                Language::new("jcl"),
+                                loc.clone(),
+                            );
+                            node.signature = Some(format!("DD {operands}"));
+                            node.metadata
+                                .insert("program".into(), serde_json::Value::String(pgm.clone()));
+                            node.metadata
+                                .insert("ddname".into(), serde_json::Value::String(dd.clone()));
+                            nodes.push(node);
+                            last_dd = Some(bind.clone());
+                            local_edges.push(
+                                Edge::new(
+                                    step.clone(),
+                                    bind.clone(),
+                                    EdgeKind::Contains,
+                                    ResolutionTier::Parsed,
+                                    "jcl",
+                                )
+                                .with_location(loc.clone()),
+                            );
+                            if let Some(ds) = &ds_sym {
+                                local_edges.push(
+                                    Edge::new(
+                                        bind,
+                                        ds.clone(),
+                                        EdgeKind::Other("uses".to_string()),
+                                        ResolutionTier::Parsed,
+                                        "jcl",
+                                    )
+                                    .with_location(loc.clone()),
+                                );
+                            }
+                        }
+                    }
+                    if let (Some(dsn), Some(ds_sym)) = (dsn, ds_sym) {
                         if let Some(from) = current_step.clone().or_else(|| current_job.clone()) {
-                            local_edges.push(Edge::new(
-                                from,
-                                ds_sym.clone(),
-                                EdgeKind::Other("uses".to_string()),
-                                ResolutionTier::Parsed,
-                                "jcl",
-                            ));
+                            local_edges.push(
+                                Edge::new(
+                                    from,
+                                    ds_sym.clone(),
+                                    EdgeKind::Other("uses".to_string()),
+                                    ResolutionTier::Parsed,
+                                    "jcl",
+                                )
+                                .with_location(loc.clone()),
+                            );
                         }
                         let mut node = Node::new(
                             ds_sym,
@@ -147,6 +325,7 @@ impl Extractor for JclExtractor {
             }
         }
 
+        crate::contrib::settle(&mut nodes);
         Ok(Extraction {
             nodes,
             local_edges,
@@ -168,12 +347,32 @@ fn line_span(line: usize) -> Span {
     }
 }
 
+/// The shared id of a JCL procedure: its in-stream or cataloged `//NAME PROC` defines it, and every
+/// `EXEC NAME` / `EXEC PROC=NAME` links to it.
+fn proc_symbol(name: &str) -> SymbolId {
+    Symbol::synthetic("jcl-proc", name.to_ascii_uppercase()).id()
+}
+
+/// A DD statement name that a program can `ASSIGN TO`: 1–8 alphanumeric/national characters
+/// (`STEP.DD` overrides and concatenation continuations are not bindings).
+fn is_ddname(dd: &str) -> bool {
+    let b = dd.as_bytes();
+    (1..=8).contains(&b.len())
+        && (b[0].is_ascii_alphabetic() || matches!(b[0], b'#' | b'$' | b'@'))
+        && b.iter()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'#' | b'$' | b'@'))
+}
+
 /// From an `EXEC` operand string, return the invoked program or PROC name.
 /// `PGM=MYCOBOL,REGION=4M` → `MYCOBOL` ; `MYPROC,PARM=…` → `MYPROC` ; `PROC=X` / keyword-only → None.
 fn parse_exec_target(operands: &str) -> Option<String> {
     let first = operands.split(',').next()?.trim();
     if let Some(pgm) = first.strip_prefix("PGM=") {
         let p = pgm.trim();
+        return (!p.is_empty()).then(|| p.to_string());
+    }
+    if let Some(p) = first.strip_prefix("PROC=") {
+        let p = p.trim();
         return (!p.is_empty()).then(|| p.to_string());
     }
     // A bare first operand with no `=` is a cataloged-procedure invocation (`EXEC MYPROC`).
@@ -281,14 +480,21 @@ mod tests {
     }
 
     #[test]
-    fn proc_invocation_emits_calls_ref() {
+    fn proc_invocation_emits_calls_edge_to_the_shared_proc_id() {
+        // A cataloged PROC that is not indexed: the step still calls its shared id, a boundary.
         let ex = extract("//J JOB\n//S EXEC MYPROC\n");
         assert!(
-            ex.refs
+            ex.local_edges
                 .iter()
-                .any(|r| r.raw_name == "MYPROC" && r.kind == EdgeKind::Calls),
-            "EXEC <proc> must emit a Calls ref to the proc"
+                .any(|e| e.target == proc_symbol("MYPROC") && e.kind == EdgeKind::Calls),
+            "EXEC <proc> must call the proc"
         );
+        let node = ex
+            .nodes
+            .iter()
+            .find(|n| n.symbol == proc_symbol("MYPROC"))
+            .expect("boundary PROC node");
+        assert!(node.is_declaration());
     }
 
     #[test]
@@ -331,6 +537,125 @@ mod tests {
                 .iter()
                 .any(|e| e.kind == EdgeKind::Other("uses".to_string())),
             "expected a step→dataset uses edge",
+        );
+    }
+
+    #[test]
+    fn instream_proc_is_a_module_that_contains_its_steps() {
+        // Fails on main: `//PAYPROC PROC` emitted nothing, so `EXEC PAYPROC` had no target.
+        let ex = extract(
+            "//PAYJOB JOB (A)\n//PAYPROC PROC\n//PSTEP EXEC PGM=STUB\n//         PEND\n//STEP2 EXEC PAYPROC\n",
+        );
+        let proc_node = ex
+            .nodes
+            .iter()
+            .find(|n| n.name == "PAYPROC" && n.kind == NodeKind::Other("jcl_proc".into()))
+            .expect("PROC node");
+        assert!(!proc_node.is_declaration(), "the in-stream PROC defines it");
+        let pstep = ex.nodes.iter().find(|n| n.name == "PSTEP").unwrap();
+        let step2 = ex.nodes.iter().find(|n| n.name == "STEP2").unwrap();
+        let contains = |from: &SymbolId, to: &SymbolId| {
+            ex.local_edges
+                .iter()
+                .any(|e| &e.source == from && &e.target == to && e.kind == EdgeKind::Contains)
+        };
+        assert!(
+            contains(&proc_node.symbol, &pstep.symbol),
+            "PROC contains its step"
+        );
+        let job = ex.nodes.iter().find(|n| n.name == "PAYJOB").unwrap();
+        assert!(
+            contains(&job.symbol, &step2.symbol),
+            "after PEND, steps belong to the job"
+        );
+        assert!(ex.local_edges.iter().any(|e| e.source == step2.symbol
+            && e.target == proc_node.symbol
+            && e.kind == EdgeKind::Calls));
+    }
+
+    #[test]
+    fn dd_in_a_pgm_step_defines_the_shared_dd_binding() {
+        let ex = extract(
+            "//J JOB\n//S1 EXEC PGM=PAYCALC\n//PAYIN DD DSN=PROD.PAY.INPUT,DISP=SHR\n//SYSOUT DD SYSOUT=*\n//S2 EXEC MYPROC\n//X DD DSN=A.B\n",
+        );
+        let bind = crate::cobol_links::dd_binding_symbol("PAYCALC", "PAYIN");
+        let node = ex
+            .nodes
+            .iter()
+            .find(|n| n.symbol == bind)
+            .expect("dd binding");
+        assert!(!node.is_declaration());
+        assert_eq!(node.name, "PAYCALC.PAYIN");
+        let ds = Symbol::synthetic("jcl-dataset", "PROD.PAY.INPUT").id();
+        assert!(ex.local_edges.iter().any(|e| e.source == bind
+            && e.target == ds
+            && e.kind == EdgeKind::Other("uses".into())));
+        assert!(
+            ex.nodes
+                .iter()
+                .any(|n| n.symbol == crate::cobol_links::dd_binding_symbol("PAYCALC", "SYSOUT"))
+        );
+        assert_eq!(
+            ex.nodes
+                .iter()
+                .filter(|n| n.kind == NodeKind::Other("dd_binding".into()))
+                .count(),
+            2,
+            "a PROC-invocation step has no program to bind"
+        );
+    }
+
+    #[test]
+    fn concatenated_dd_and_proc_keyword_and_located_edges() {
+        let ex = extract(
+            "//J JOB\n//S1 EXEC PGM=P\n//IN DD DSN=A.ONE,DISP=SHR\n//         DD DSN=A.TWO,DISP=SHR\n//S2 EXEC PROC=PAYPROC\n",
+        );
+        let bind = crate::cobol_links::dd_binding_symbol("P", "IN");
+        for dsn in ["A.ONE", "A.TWO"] {
+            let ds = Symbol::synthetic("jcl-dataset", dsn).id();
+            assert!(
+                ex.local_edges
+                    .iter()
+                    .any(|e| e.source == bind && e.target == ds),
+                "the binding uses {dsn}"
+            );
+        }
+        assert!(
+            ex.local_edges
+                .iter()
+                .any(|e| e.target == proc_symbol("PAYPROC") && e.kind == EdgeKind::Calls),
+            "EXEC PROC=PAYPROC"
+        );
+        // Every edge carries the card's location, so `remove_file` retires it with the JCL even
+        // when both endpoints are shared nodes that survive.
+        assert!(
+            ex.local_edges
+                .iter()
+                .all(|e| e.location.as_ref().is_some_and(|l| l.file == "JOB1.jcl"))
+        );
+    }
+
+    #[test]
+    fn a_proc_named_like_a_program_never_shadows_exec_pgm() {
+        // A PROC named after the program it runs is a common convention. `EXEC PGM=PAYCALC` must
+        // stay a by-name ref to the program, and no PROC node may be a Module homonym of it.
+        let ex = extract(
+            "//PAYCALC PROC\n//S EXEC PGM=PAYCALC\n//         PEND\n//J JOB\n//S1 EXEC PAYCALC\n",
+        );
+        assert!(
+            ex.nodes
+                .iter()
+                .all(|n| !(n.name == "PAYCALC" && n.kind == NodeKind::Module))
+        );
+        assert!(
+            ex.refs
+                .iter()
+                .any(|r| r.raw_name == "PAYCALC" && r.kind == EdgeKind::Calls)
+        );
+        assert!(
+            ex.local_edges
+                .iter()
+                .any(|e| e.target == proc_symbol("PAYCALC") && e.kind == EdgeKind::Calls)
         );
     }
 }

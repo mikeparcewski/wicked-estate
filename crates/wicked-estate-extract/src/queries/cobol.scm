@@ -33,11 +33,9 @@
 (data_description
   (entry_name) @code_field.name) @code_field.def
 
-; REDEFINES <item> → reference from this field to the item it overlays.
-; (Calls is the codebase's documented "references-by-name" proxy — no dedicated Refs edge kind.)
-(data_description
-  (redefines_clause (qualified_word) @call.function)) @call
-
-; OCCURS n DEPENDING ON <counter> → reference to the counter field that sizes the array.
-(data_description
-  (occurs_clause depending: (qualified_word) @call.function)) @call
+; Data references by name: every qualified data name (`MOVE 1 TO ORD-ID`, `CALL X USING ORD-REC`,
+; `REDEFINES A`, `OCCURS … DEPENDING ON CNT`, `ORD-ID OF ORD-REC` → its first WORD) becomes a
+; `References` ref, which binds to the Field it names, in this file or in a copybook. PERFORM / GO TO
+; labels are also qualified words; the COBOL text supplement (`cobol_links`) drops refs that name a
+; paragraph or section, and dedupes per (source, name).
+(qualified_word . (WORD) @reference.name)
