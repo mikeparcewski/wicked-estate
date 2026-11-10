@@ -1065,7 +1065,7 @@ impl RetrievalTool for Path {
                 "depth_bounded": false, "node_bounded": false,
                 "unresolved": unresolved,
                 "resolved": false, "query": null, "suggestions": [],
-                "suggestions_truncated": false,
+                "suggestions_truncated": false, "crossings": [],
             }),
             diagnostics: diag,
         };
@@ -1192,6 +1192,8 @@ impl RetrievalTool for Path {
             "unresolved": result.unresolved.map(|u| u.as_str()),
             "resolved": true, "query": null, "suggestions": [],
             "suggestions_truncated": false,
+            // X1 (DES-S2 §5): the route's steps from one repo into another, with evidence.
+            "crossings": wicked_estate_core::crossing::path_crossings(&result.hops),
         });
         if let Some((operand, found, truncated)) = &miss {
             suggest::mark_miss(&mut content, operand, found, *truncated);
@@ -1321,6 +1323,7 @@ impl RetrievalTool for BlastRadius {
         let mut dependent_nodes: Vec<Node> = Vec::new();
         let mut dependent_depths: HashMap<String, u32> = HashMap::new();
         let mut seen_nodes: HashSet<SymbolId> = HashSet::new();
+        let mut crossing_set = wicked_estate_core::crossing::CrossingSet::default();
         // The dependency evidence behind the answer, deduped across walks (two same-named
         // starts can share a caller) — the CLI's `blast_radius_by_name` rule, so both surfaces
         // state one confidence for one answer.
@@ -1371,6 +1374,8 @@ impl RetrievalTool for BlastRadius {
                     }
                 }
             }
+            // X1: crossings per walk (the union below keeps nodes only).
+            crossing_set.add_walk(&sub);
             subgraph.absorb_truncation(&sub);
             for n in sub.nodes {
                 if seen_nodes.insert(n.symbol.clone()) {
@@ -1416,6 +1421,11 @@ impl RetrievalTool for BlastRadius {
             ));
         }
 
+        // X1 (DES-S2 §5): crossings, shallowest first and capped (`crossings_total` counts all),
+        // decided BEFORE the rows are budgeted so the R4 bound counts them: the list sits in the
+        // envelope and each row carries its own `via_crossing`.
+        let (crossings, crossings_total, via) =
+            crossing_set.finish(wicked_estate_core::crossing::CROSSINGS_CAP);
         let mut dependents: Vec<Value> = dependent_nodes
             .iter()
             .map(|n| {
@@ -1423,7 +1433,7 @@ impl RetrievalTool for BlastRadius {
                     .get(n.symbol.as_str())
                     .copied()
                     .unwrap_or(0);
-                json!({
+                let mut row = json!({
                     "symbol": n.symbol.as_str(),
                     "name": n.name,
                     "kind": kind_json(&n.kind),
@@ -1431,9 +1441,17 @@ impl RetrievalTool for BlastRadius {
                     "line": n.location.span.start_line,
                     "line_1based": line_1based(n),
                     "depth": depth,
-                })
+                });
+                if let Some(c) = via.get(n.symbol.as_str()) {
+                    row["via_crossing"] = json!(c);
+                    if !crossings.iter().any(|x| &x.id == c) {
+                        row["via_crossing_omitted"] = json!(true);
+                    }
+                }
+                row
             })
             .collect();
+        let crossings_json = json!(crossings);
         // (depth, symbol): nearest first, and one order in every process, so pages join (#279).
         dependents.sort_by(|a, b| {
             (a["depth"].as_u64(), a["symbol"].as_str())
@@ -1503,6 +1521,7 @@ impl RetrievalTool for BlastRadius {
         let envelope_overhead = 640
             + DIAGNOSTICS_RESERVE
             + diag_len
+            + crossings_json.to_string().len()
             + serde_json::to_string(&summary)
                 .map(|s| s.len())
                 .unwrap_or(0)
@@ -1570,6 +1589,11 @@ impl RetrievalTool for BlastRadius {
                 "confidence": conf_json,
                 "summary": summary,
         });
+        // X1 (DES-S2 §5): the cross-repo crossings the walk traversed, with their evidence, and
+        // for each dependent the crossing it was reached through. Empty in a single-repo graph.
+        content["crossings_truncated"] = json!(crossings_total > crossings.len());
+        content["crossings_total"] = json!(crossings_total);
+        content["crossings"] = crossings_json;
         if let Some((found, truncated)) = &miss_suggestions {
             suggest::mark_miss(&mut content, &id_str, found, *truncated);
         }
@@ -4530,6 +4554,7 @@ mod tests {
             // (#358) `query`/`resolved`/`suggestions`/`suggestions_truncated`: the name-miss keys,
             // on every reply so a parser never meets a key set it has not seen.
             vec![
+                "crossings".to_string(),
                 "depth_bounded".to_string(),
                 "found".to_string(),
                 "hops".to_string(),
@@ -5102,6 +5127,66 @@ mod tests {
         store.upsert_edges(&edges).unwrap();
         store.commit_batch().unwrap();
         store
+    }
+
+    /// X1 review K1: the MCP answer carries the crossing a walk traversed and names it on the
+    /// dependent reached through it (the union of walks used to keep only nodes, so this was
+    /// always empty).
+    #[test]
+    fn blast_radius_mcp_reports_crossings_and_via_crossing() {
+        let mut store = MemStore::new();
+        store.begin_batch().unwrap();
+        store
+            .upsert_nodes(&[
+                make_node(
+                    "crew/index.d.ts",
+                    "index.d.ts",
+                    NodeKind::File,
+                    "crew/index.d.ts",
+                    0,
+                ),
+                make_node("studio/a.ts", "a.ts", NodeKind::File, "studio/a.ts", 0),
+                make_node("studio/b.ts", "b.ts", NodeKind::File, "studio/b.ts", 0),
+            ])
+            .unwrap();
+        let mut link = Edge::new(
+            SymbolId("studio/a.ts".into()),
+            SymbolId("crew/index.d.ts".into()),
+            EdgeKind::Imports,
+            ResolutionTier::ImportMap,
+            wicked_estate_core::crossing::LINK_RESOLVED_BY,
+        );
+        link.metadata
+            .insert("link.consumer_label".into(), "studio".into());
+        link.metadata
+            .insert("link.provider_label".into(), "crew".into());
+        link.metadata
+            .insert("link.identity".into(), "registry-source".into());
+        let plain = Edge::new(
+            SymbolId("studio/b.ts".into()),
+            SymbolId("studio/a.ts".into()),
+            EdgeKind::Imports,
+            ResolutionTier::Parsed,
+            "test-fixture",
+        );
+        store.upsert_edges(&[link, plain]).unwrap();
+        store.commit_batch().unwrap();
+        let r = BlastRadius
+            .invoke(&store, &json!({"symbol": "crew/index.d.ts"}))
+            .unwrap();
+        let cs = r.content["crossings"].as_array().unwrap();
+        assert_eq!(cs.len(), 1, "{}", r.content);
+        assert_eq!(cs[0]["evidence"]["identity"], json!("registry-source"));
+        assert_eq!(r.content["crossings_total"], json!(1));
+        let id = cs[0]["id"].clone();
+        let rows = r.content["dependents"].as_array().unwrap();
+        for f in ["studio/a.ts", "studio/b.ts"] {
+            let row = rows
+                .iter()
+                .find(|x| x["id"] == json!(f) || x["symbol"] == json!(f))
+                .unwrap_or_else(|| panic!("{f} missing: {}", r.content));
+            assert_eq!(row["via_crossing"], id, "{f}: {row}");
+        }
     }
 
     #[test]

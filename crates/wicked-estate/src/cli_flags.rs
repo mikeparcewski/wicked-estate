@@ -382,6 +382,19 @@ pub const COMMANDS: &[Command] = &[
         spec: owns(&[], &[DB]),
     },
     Command {
+        name: "link",
+        spec: owns(
+            &[],
+            &[
+                DB,
+                str_flag("project"),
+                Flag::new("labels", Ty::List),
+                JSON,
+                switch("status"),
+            ],
+        ),
+    },
+    Command {
         name: "watch",
         spec: ruled(
             &[opt("path")],

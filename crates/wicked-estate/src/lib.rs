@@ -83,7 +83,9 @@ macro_rules! eprintln {
 
 pub mod confined;
 pub mod freshness;
+pub mod link;
 pub mod repo_scope;
+pub mod writer_lock;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1149,6 +1151,26 @@ pub fn index_path_as(
     root: &Path,
     repo: Option<&str>,
 ) -> Result<GraphStats> {
+    let stats = index_path_inner(store, root, repo)?;
+    // X1 (DES-S2 §6): publish the label's new generation only after a complete index. The
+    // `indexing` marker set at the start stays on a failed run, so readers say `incomplete` and
+    // the linker refuses the label.
+    link::record_dep_artifacts(store, root, repo);
+    let graph_gen_v = store
+        .meta_get_key(&repo_scope::meta_key(repo, "indexing"))
+        .filter(|g| !g.is_empty());
+    if let Some(graph_gen_v) = graph_gen_v {
+        store.meta_set_key(&repo_scope::meta_key(repo, "graph_gen"), &graph_gen_v);
+    }
+    store.meta_set_key(&repo_scope::meta_key(repo, "indexing"), "");
+    Ok(stats)
+}
+
+fn index_path_inner(
+    store: &mut dyn GraphStoreMutExt,
+    root: &Path,
+    repo: Option<&str>,
+) -> Result<GraphStats> {
     let t = std::time::Instant::now();
 
     if let Some(label) = repo {
@@ -1208,6 +1230,18 @@ pub fn index_path_as(
     // #405: a store written before secret redaction is cleaned before this run writes anything;
     // a fresh store records the policy epoch so readers serve it.
     ensure_redacted(store)?;
+
+    // X1 (DES-S2 §6): mark the label as mid-index with its next generation before the first
+    // write; `index_path_as` publishes it as `graph_gen` and clears the marker on success.
+    let next_gen = store
+        .meta_get_key(&repo_scope::meta_key(repo, "graph_gen"))
+        .and_then(|g| g.parse::<u64>().ok())
+        .unwrap_or(0)
+        + 1;
+    store.meta_set_key(
+        &repo_scope::meta_key(repo, "indexing"),
+        &next_gen.to_string(),
+    );
 
     // W11.3: bump the graph version so any prior cache entries become stale.
     store.version_bump();
@@ -2345,6 +2379,14 @@ pub struct BlastRadius {
     /// reached. Structural `Contains`/`Defines` are excluded, so a File row admitted only by
     /// containment adds no evidence. See `blast_radius_by_name`.
     pub confidence: EdgeConfidence,
+    /// X1 (DES-S2 §5): the cross-repo crossings the walk traversed (link-owned edges between two
+    /// member repos), each with the link's evidence; at most
+    /// [`CROSSINGS_CAP`](wicked_estate_core::crossing::CROSSINGS_CAP), shallowest first.
+    pub crossings: Vec<wicked_estate_core::crossing::Crossing>,
+    /// Every crossing the walk traversed (more than `crossings` lists when capped).
+    pub crossings_total: usize,
+    /// Dependent symbol id -> the id of the crossing on its predecessor chain.
+    pub via_crossing: std::collections::BTreeMap<String, String>,
 }
 
 /// Confidence summary over a set of edges: `{min, avg, edge_count}`, the MCP `BlastRadius`
@@ -2401,6 +2443,7 @@ impl BlastRadius {
 /// ORed across every matching symbol's traversal and handed to the caller (wicked-estate#190).
 pub fn blast_radius_by_name(store: &dyn GraphRead, name: &str, depth: u32) -> Result<BlastRadius> {
     let mut out = BlastRadius::default();
+    let mut crossing_set = wicked_estate_core::crossing::CrossingSet::default();
     let mut seen = std::collections::HashSet::new();
     // Eligible edges, deduped across walks: two same-named symbols can share a caller.
     let mut evidence: HashMap<(SymbolId, SymbolId, wicked_estate_core::EdgeKind), f32> =
@@ -2450,7 +2493,12 @@ pub fn blast_radius_by_name(store: &dyn GraphRead, name: &str, depth: u32) -> Re
                 out.dependents.push(n.clone());
             }
         }
+        crossing_set.add_walk(&sub);
     }
+    let (crossings, total, via) = crossing_set.finish(wicked_estate_core::crossing::CROSSINGS_CAP);
+    out.crossings = crossings;
+    out.crossings_total = total;
+    out.via_crossing = via;
     out.confidence = EdgeConfidence::from_confidences(evidence.into_values());
     Ok(out)
 }

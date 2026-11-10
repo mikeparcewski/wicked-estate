@@ -714,8 +714,22 @@ fn walk(
     } else {
         map
     };
-    if node.child_count() == 0 || children.is_empty() {
+    if node.child_count() == 0 {
         leaf(node, src, fmt, doc, path, map, None, w);
+        return;
+    }
+    if children.is_empty() {
+        // An empty container (`{}`, `[]`) holds no value: its children are only delimiters, and
+        // masking them broke the document (`"": {}` became `"": RE`, so a JSON manifest or
+        // lockfile no longer parsed). Judged on the node's whole text, not its visible children:
+        // a grammar's content token can be hidden (a Dockerfile exec-form `"x"` shows only its
+        // quotes), and that is a value.
+        let delimiters_only = node_text(node, src)
+            .chars()
+            .all(|c| c.is_whitespace() || "{}[]()\"'".contains(c));
+        if !delimiters_only {
+            leaf(node, src, fmt, doc, path, map, None, w);
+        }
         return;
     }
     for ch in children {
@@ -1935,6 +1949,26 @@ mod tests {
         let lock = r#"{"packages":{"node_modules/ky":{"version":"1.2.3","resolved":"https://registry.npmjs.org/ky/-/ky-1.2.3.tgz","integrity":"sha512-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/AbCdEfGhIjKlMnOpQrStUvWxYz0123456789=="}}}"#;
         let out = same_len("package-lock.json", lock);
         assert_eq!(out, lock, "lockfile identities and integrity kept");
+        // Empty containers in untrusted positions keep the document parseable (X1 found a
+        // lockfile root entry `"": {}` stored as `"": RE`).
+        for (path, text) in [
+            (
+                "package-lock.json",
+                r#"{"lockfileVersion":3,"packages":{"":{},"node_modules/a":{"version":"1.0.0"}}}"#,
+            ),
+            (
+                "package.json",
+                r#"{"name":"x","keywords":[],"scripts":{},"config":{}}"#,
+            ),
+            ("app.json", r#"{"a":{},"b":[],"c":{"d":{}}}"#),
+            ("c.yaml", "a: {}\nb: []\n"),
+        ] {
+            let out = same_len(path, text);
+            assert_eq!(out, text, "{path}");
+        }
+        // X1: pnpm workspace member patterns are identities the linker reads.
+        let pnpm = "packages:\n  - 'packages/*'\n  - apps/**\n";
+        assert_eq!(same_len("pnpm-workspace.yaml", pnpm), pnpm);
         let cargo = "[package]\nname = \"a\"\nversion = \"0.1.0\"\nrepository = \"https://github.com/o/a\"\n[lib]\nname = \"a_lib\"\npath = \"src/x.rs\"\n[dependencies]\nb = { path = \"../b\", package = \"real-b\" }\n[package.metadata.secretstuff]\nv = \"hiddenPLANTED\"\n";
         let out = same_len("Cargo.toml", cargo);
         for kept in [

@@ -112,6 +112,14 @@ fn print_line(line: &str) -> anyhow::Result<()> {
     }
 }
 
+/// X1 (DES-S2 §4): take the estate writer lock for `db` before a write command opens it.
+fn lock_writer(
+    db: &str,
+    cmd: &str,
+) -> anyhow::Result<Option<wicked_estate::writer_lock::WriterLock>> {
+    wicked_estate::writer_lock::acquire(db, cmd).map_err(to_any)
+}
+
 fn require_existing_graph(db: &str, cmd: &str) -> anyhow::Result<()> {
     if let wicked_estate_store::StoreBackend::Sqlite { path } =
         wicked_estate_store::StoreBackend::parse(db)
@@ -895,6 +903,7 @@ fn main() -> Result<()> {
                 );
             }
             ensure_db_dir(&db)?;
+            let _writer = lock_writer(&db, "index")?;
             let as_repo = args.str("repo");
             // --force: invalidate the stored digests so index_path treats every file as changed —
             // but only THIS repo's, or forcing one repo would silently make every other repo in a
@@ -965,6 +974,7 @@ fn main() -> Result<()> {
             let root_str = args.operand(0).unwrap_or(".");
             let root = Path::new(root_str);
             ensure_db_dir(&db)?;
+            let _writer = lock_writer(&db, "scip")?;
             let as_repo = args.str("repo");
             // SCIP paths are repo-relative; a labelled graph's nodes are not. Correlating the two
             // without knowing which repo this index belongs to matches nothing and reports "0
@@ -1065,6 +1075,7 @@ fn main() -> Result<()> {
             // schema creation/migration, and an invalid envelope must write nothing.
             envelope.validate().map_err(to_any)?;
             let as_repo = args.str("repo");
+            let _writer = lock_writer(&db, "evidence")?;
             let mut store = open_store_ext(&db).map_err(to_any)?;
             // #405: a store written before secret redaction is cleaned before this write.
             wicked_estate::ensure_redacted(&mut *store).map_err(to_any)?;
@@ -1135,6 +1146,7 @@ fn main() -> Result<()> {
             let json = std::fs::read_to_string(file_path)
                 .with_context(|| format!("cannot read tfstate file '{file_path}'"))?;
             ensure_db_dir(&db)?;
+            let _writer = lock_writer(&db, "tfstate")?;
             let mut store = open_store_ext(&db).map_err(to_any)?;
             // #405: a store written before secret redaction is cleaned before this write.
             wicked_estate::ensure_redacted(&mut *store).map_err(to_any)?;
@@ -1165,6 +1177,7 @@ fn main() -> Result<()> {
                 ),
             };
             ensure_db_dir(&sqlite_path)?;
+            let _writer = lock_writer(&sqlite_path, "import-telemetry")?;
             let mut store = SqliteStore::open(&sqlite_path).map_err(to_any)?;
             // #405: a store written before secret redaction is cleaned before this write.
             wicked_estate::ensure_redacted(&mut store).map_err(to_any)?;
@@ -1383,7 +1396,18 @@ fn main() -> Result<()> {
             // reads this via execCapped, where an oversized payload is TRUNCATED mid-document
             // and JSON.parse throws. 25K chars (the R4 budget) with an ADDITIVE
             // `truncated_dependents` count — crew reads only `dependents`/`unresolved`.
-            let (mut kept, _) = cap_blast_radius_rows(name, unresolved, &br, depth);
+            // X1 (DES-S2 §5, §6): the state of every project link in this store — generation,
+            // staleness and a per-member coverage summary (`link --status` lists the packages).
+            // Built first so the row budget counts it (crew's capped read must stay parseable).
+            let links: Vec<wicked_estate::link::LinkStatus> =
+                wicked_estate::link::projects(store.as_ref())
+                    .iter()
+                    .filter_map(|p| wicked_estate::link::status(store.as_ref(), p))
+                    .map(wicked_estate::link::LinkStatus::compact)
+                    .collect();
+            let links_json = serde_json::json!(links);
+            let links_len = links_json.to_string().len() + 10;
+            let (mut kept, _) = cap_blast_radius_rows(name, unresolved, &br, depth, links_len);
             if kept == 0 && !deps.is_empty() {
                 // Progress: a page always carries at least one remaining row, whole, never cut.
                 kept = 1;
@@ -1403,6 +1427,7 @@ fn main() -> Result<()> {
             out["next_cursor"] = serde_json::json!(next_cursor);
             out["page"] = serde_json::json!({ "from": from, "count": kept, "total": total });
             out["resolved"] = serde_json::json!(miss.is_none());
+            out["link"] = links_json;
             if let Some((found, truncated)) = &miss {
                 wicked_estate_retrieve::suggest::mark_miss(&mut out, name, found, *truncated);
             }
@@ -1454,6 +1479,46 @@ fn main() -> Result<()> {
                         "  …and {dropped} more (one reply is bounded at 25K chars): \
                          --cursor {next}"
                     ))?;
+                }
+            }
+            // X1: name the cross-repo crossings, with their evidence, in text mode too.
+            if !json_out {
+                for c in &br.crossings {
+                    let ev = |k: &str| {
+                        c.evidence
+                            .get(k)
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?")
+                            .to_string()
+                    };
+                    print_line(&format!(
+                        "crossing: {} -> {} via package {} ({}, identity {}){}",
+                        c.from.repo,
+                        c.to.repo,
+                        ev("package"),
+                        ev("ecosystem"),
+                        ev("identity"),
+                        if c.evidence.get("skew").and_then(|v| v.as_bool()) == Some(true) {
+                            ", version skew"
+                        } else {
+                            ""
+                        }
+                    ))?;
+                }
+                for st in &links {
+                    if st.stale {
+                        print_line(&format!(
+                            "LINK-STALE: project {} link generation {} predates changes in {} — run `wicked-estate link --project {}`",
+                            st.project,
+                            st.generation,
+                            if st.stale_labels.is_empty() {
+                                "its members".to_string()
+                            } else {
+                                st.stale_labels.join(", ")
+                            },
+                            st.project
+                        ))?;
+                    }
                 }
             }
             // Honest coverage — never let the absence of dependents read as "safe to change".
@@ -1605,6 +1670,12 @@ fn main() -> Result<()> {
                 db = spec.clone();
             }
             require_existing_graph(&db, "supports")?;
+            // `retract` writes; `owners` / `edge` only read.
+            let _writer = if matches!(args.mode, SupportsMode::Retract { .. }) {
+                lock_writer(&db, "supports retract")?
+            } else {
+                None
+            };
             let mut store = open_store_ext(&db).map_err(to_any)?;
             let t_cmd_start = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -2204,6 +2275,15 @@ fn main() -> Result<()> {
         //
         // Prints, per repo, the matching symbols and a combined cross-repo blast-radius.
         "cross-graph" => {
+            // X1: deprecated, kept working. It federates separate databases by NAME; a project
+            // database linked by `wicked-estate link` answers cross-repo questions from package
+            // identity instead. It stays until the governed read fences (wicked-core) and garden's
+            // fence test drop it.
+            eprintln!(
+                "DEPRECATED: `cross-graph` matches names across separate databases. For cross-repo \
+                 dependents, index the repos into one project db (`index --repo <label>`), run \
+                 `wicked-estate link --project <id>`, and use `blast-radius` (it reports crossings)."
+            );
             let name = args.required(0);
             // Every `--db`, and every item of `--dbs`, in argv order; the row requires one.
             let db_paths: Vec<String> = args
@@ -2323,6 +2403,7 @@ fn main() -> Result<()> {
                 anyhow::bail!("compact does not apply to an in-memory store");
             }
             ensure_db_dir(&db)?;
+            let _writer = lock_writer(&db, "compact")?;
             let mut store = SqliteStore::open(&db).map_err(to_any)?;
             // #405: a store written before secret redaction is cleaned before this write.
             wicked_estate::ensure_redacted(&mut store).map_err(to_any)?;
@@ -2334,6 +2415,86 @@ fn main() -> Result<()> {
             println!("  orphan content rows pruned:{}", stats.orphan_content);
             println!("WAL checkpointed and VACUUM complete.");
         }
+        // X1: link — the project linker (DES-S2 §3). File-level cross-repo `imports` links from
+        // package identity, as one support owner replaced whole, under the writer lock.
+        //
+        // Usage:
+        //   wicked-estate link --project <id> [--labels a,b,c] [--json] [--db <file>]
+        //   wicked-estate link --project <id> --status [--json] [--db <file>]
+        "link" => {
+            require_existing_graph(&db, "link")?;
+            let Some(project) = args.str("project") else {
+                anyhow::bail!("link needs --project <id> (the project whose members are linked)");
+            };
+            if args.switch("status") {
+                let store = open_store_ext(&db).map_err(to_any)?;
+                let st = wicked_estate::link::status(store.as_ref(), project);
+                match (st, args.switch("json")) {
+                    (Some(st), true) => println!("{}", serde_json::to_string_pretty(&st)?),
+                    (Some(st), false) => {
+                        let stale = if st.stale {
+                            format!(", STALE ({})", st.stale_labels.join(", "))
+                        } else {
+                            String::new()
+                        };
+                        println!("link({project}): generation {}{stale}", st.generation);
+                        if let Some(e) = &st.last_error {
+                            println!("  last error: {e}");
+                        }
+                    }
+                    (None, true) => println!("null"),
+                    (None, false) => println!("link({project}): never linked"),
+                }
+                return Ok(());
+            }
+            let _writer = lock_writer(&db, "link")?;
+            let mut store = open_store_ext(&db).map_err(to_any)?;
+            let labels: Vec<String> = match args.list("labels") {
+                Some(l) => l.to_vec(),
+                None => wicked_estate::repo_scope::labels(store.as_ref()),
+            };
+            for l in &labels {
+                wicked_estate::repo_scope::validate_label(l).map_err(to_any)?;
+            }
+            let report = wicked_estate::link::link_project(store.as_mut(), project, &labels)
+                .map_err(to_any)?;
+            if args.switch("json") {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "link({project}): generation {}{} — {} link(s) over {} member(s)",
+                    report.generation,
+                    if report.replayed {
+                        " (unchanged, replayed)"
+                    } else {
+                        ""
+                    },
+                    report.links,
+                    report.members.len()
+                );
+                for (id, n) in &report.links_by_identity {
+                    println!("  links by {id}: {n}");
+                }
+                for (r, n) in &report.boundaries_by_reason {
+                    println!("  possible (not linked), {r}: {n}");
+                }
+                for p in &report.possible {
+                    println!(
+                        "    {} imports {} ({}): {}",
+                        p.consumer,
+                        p.package,
+                        p.reason,
+                        p.why.join("; ")
+                    );
+                }
+                if !report.incomplete.is_empty() {
+                    println!(
+                        "  INCOMPLETE (mid-index or last index failed; not linked): {}",
+                        report.incomplete.join(", ")
+                    );
+                }
+            }
+        }
         // #405: redact-store — clean a store written before secret redaction, now, instead of on
         // the next `index`. Idempotent: a store already at the current policy is left as it is.
         //
@@ -2344,6 +2505,7 @@ fn main() -> Result<()> {
                 anyhow::bail!("redact-store does not apply to an in-memory store");
             }
             require_existing_graph(&db, "redact-store")?;
+            let _writer = lock_writer(&db, "redact-store")?;
             let mut store = open_store_ext(&db).map_err(to_any)?;
             use wicked_estate::RedactionOutcome as O;
             let epoch = wicked_estate_core::redact::REDACTION_EPOCH;
@@ -2412,8 +2574,12 @@ fn main() -> Result<()> {
             };
 
             let as_repo = args.str("repo");
-            let stats = wicked_estate::index_path_as(store.as_mut(), watch_path, as_repo)
-                .map_err(to_any)?;
+            // Each index pass takes the writer lock and releases it before waiting for events,
+            // so `link` and other writers interleave between passes, never within one.
+            let stats = {
+                let _writer = lock_writer(&db, "watch")?;
+                wicked_estate::index_path_as(store.as_mut(), watch_path, as_repo).map_err(to_any)?
+            };
             println!(
                 "watch: initial index of {path_str} → {} nodes, {} edges, {} files",
                 stats.node_count, stats.edge_count, stats.file_count
@@ -2444,6 +2610,14 @@ fn main() -> Result<()> {
                             watch_coalesce::emits_for_batch(events.iter().map(|ev| &ev.kind));
                         let raw_event_count = events.len();
                         for _ in 0..emits {
+                            // A busy lock delays this pass; it never drops it (the batch may be
+                            // the last change for a long time). Each attempt waits its budget.
+                            let _writer = loop {
+                                match lock_writer(&db, "watch") {
+                                    Ok(w) => break w,
+                                    Err(e) => eprintln!("watch: re-index waiting: {e}"),
+                                }
+                            };
                             match wicked_estate::index_path_as(store.as_mut(), watch_path, as_repo)
                             {
                                 Ok(s) => {
@@ -2836,6 +3010,7 @@ fn main() -> Result<()> {
             let extraction_method = args.str("extraction-method");
             let last_verified = args.i64("last-verified").unwrap_or(0);
             ensure_db_dir(&db)?;
+            let _writer = lock_writer(&db, "annotate")?;
             let mut store = SqliteStore::open(&db).map_err(to_any)?;
             // #405: a store written before secret redaction is cleaned before this write.
             wicked_estate::ensure_redacted(&mut store).map_err(to_any)?;
@@ -4024,6 +4199,9 @@ fn main() -> Result<()> {
             println!(
                 "  wicked-estate redact-store         [--db <file>]  # clean a store written before secret redaction (#405)"
             );
+            println!(
+                "  wicked-estate link --project <id> [--labels a,b] [--json] [--status] [--db <file>]  # cross-repo package links"
+            );
             println!("  wicked-estate watch <path>         [--db ...] [--repo <name>] [--history]");
             println!(
                 "    Initial full index then reactive re-index on file changes (Ctrl-C to stop)."
@@ -4273,6 +4451,13 @@ fn blast_radius_row(
         // (#191) Hops from the target along the walk that admitted the row — `1` is a direct
         // dependent. The MCP `BlastRadius` tool has always returned it; the CLI row now does too.
         "depth": br.depths.get(n.symbol.as_str()).copied().unwrap_or(0),
+        // X1: the crossing (another repo, through a package link) this dependent was reached by;
+        // `via_crossing_omitted` when that crossing is past the listed cap.
+        "via_crossing": br.via_crossing.get(n.symbol.as_str()),
+        "via_crossing_omitted": br
+            .via_crossing
+            .get(n.symbol.as_str())
+            .is_some_and(|id| !br.crossings.iter().any(|c| &c.id == id)),
     })
 }
 
@@ -4289,6 +4474,7 @@ fn cap_blast_radius_rows(
     unresolved: usize,
     br: &wicked_estate::BlastRadius,
     depth: u32,
+    extra: usize,
 ) -> (usize, usize) {
     let deps = &br.dependents;
     // `dropped` at its widest (every row) so its digits are never under-counted.
@@ -4298,7 +4484,10 @@ fn cap_blast_radius_rows(
     // #279: the paging keys (`next_cursor`, `page`) ride every page; reserve their room. #351:
     // so does the `freshness` block the transport adds after this cap.
     let row_budget = (BLAST_RADIUS_CHAR_BUDGET + 2).saturating_sub(
-        envelope_len + BLAST_RADIUS_PAGING_RESERVE + wicked_estate_retrieve::TRANSPORT_RESERVE,
+        envelope_len
+            + BLAST_RADIUS_PAGING_RESERVE
+            + wicked_estate_retrieve::TRANSPORT_RESERVE
+            + extra,
     );
     let fits = |k: usize| -> bool {
         let rows: Vec<serde_json::Value> =
@@ -4358,6 +4547,12 @@ fn blast_radius_json(
             "avg": br.confidence.avg,
             "edge_count": br.confidence.edge_count,
         },
+        // X1 (DES-S2 §5): the cross-repo crossings the walk traversed, with their evidence
+        // (shallowest first, capped; `crossings_total` counts all). Empty in a single-repo graph
+        // and for co-located repos with no link.
+        "crossings": br.crossings,
+        "crossings_total": br.crossings_total,
+        "crossings_truncated": br.crossings_total > br.crossings.len(),
     })
 }
 
@@ -4389,7 +4584,7 @@ mod blast_radius_json_tests {
         // `BlastRadius` is #[non_exhaustive] and this is the bin crate: build it field by field.
         let mut br = wicked_estate::BlastRadius::default();
         br.dependents = deps.clone();
-        let (kept, dropped) = cap_blast_radius_rows("core_fn", 3, &br, 12);
+        let (kept, dropped) = cap_blast_radius_rows("core_fn", 3, &br, 12, 0);
         assert!(dropped > 0, "2000 wide rows must exceed the budget");
         assert_eq!(kept + dropped, deps.len());
         let out = blast_radius_json("core_fn", &deps[..kept], dropped, 3, &br, 12);
@@ -4413,7 +4608,7 @@ mod blast_radius_json_tests {
         let deps: Vec<Node> = (0..3).map(wide_node).collect();
         let mut br = wicked_estate::BlastRadius::default();
         br.dependents = deps.clone();
-        let (kept, dropped) = cap_blast_radius_rows("f", 0, &br, 12);
+        let (kept, dropped) = cap_blast_radius_rows("f", 0, &br, 12, 0);
         assert_eq!((kept, dropped), (3, 0));
         let out = blast_radius_json("f", &deps, 0, 0, &wicked_estate::BlastRadius::default(), 12);
         assert_eq!(out["dependents"].as_array().unwrap().len(), 3);
@@ -4446,7 +4641,7 @@ mod blast_radius_json_tests {
         let wide: Vec<Node> = (0..2000).map(wide_node).collect();
         let mut complete = wicked_estate::BlastRadius::default();
         complete.dependents = wide.clone();
-        let (kept, dropped) = cap_blast_radius_rows("f", 0, &complete, 12);
+        let (kept, dropped) = cap_blast_radius_rows("f", 0, &complete, 12, 0);
         assert!(dropped > 0);
         let out = blast_radius_json("f", &wide[..kept], dropped, 0, &complete, 12);
         assert_eq!(out["truncated_dependents"], serde_json::json!(dropped));
@@ -4493,7 +4688,7 @@ mod blast_radius_json_tests {
         br.confidence.edge_count = usize::MAX;
         br.depth_horizon_reached = true;
         br.node_cap_reached = true;
-        let (kept, dropped) = cap_blast_radius_rows(&name, usize::MAX, &br, u32::MAX);
+        let (kept, dropped) = cap_blast_radius_rows(&name, usize::MAX, &br, u32::MAX, 0);
         assert!(kept > 0 && dropped > 0);
         let out = blast_radius_json(
             &name,
@@ -4605,6 +4800,8 @@ fn path_json(from: &str, to: &str, r: &wicked_estate_core::PathResult) -> serde_
         "depth_bounded": r.depth_bounded,
         "node_bounded": r.node_bounded,
         "unresolved": r.unresolved.map(|u| u.as_str()),
+        // X1 (DES-S2 §5): the route's steps from one repo into another, with evidence.
+        "crossings": wicked_estate_core::crossing::path_crossings(&r.hops),
     })
 }
 

@@ -35,6 +35,7 @@ macro_rules! eprintln {
     }};
 }
 
+pub mod link;
 pub mod lsp;
 
 pub mod estate;

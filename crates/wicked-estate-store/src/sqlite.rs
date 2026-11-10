@@ -2209,6 +2209,26 @@ impl SqliteStore {
     /// quoted) — one kind-scoped SQL pass, relative-spec check in Rust (the quote variants make
     /// a SQL prefix predicate noisy for no gain). Backs the trait method of the same name on
     /// `GraphStoreMutExt` (the indexer's back-fill candidate fetch, wicked-estate#141).
+    /// Every parked `imports` reference under `file_prefix`: `(file, raw_name)`. The project
+    /// linker's input (X1); backs the `GraphStoreMutExt` method of the same name.
+    pub fn parked_import_refs(&self, file_prefix: &str) -> Result<Vec<(String, String)>> {
+        let kind_json = serde_json::to_string(&EdgeKind::Imports)?;
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT file, raw_name FROM unresolved_refs \
+                 WHERE kind=?1 AND substr(file, 1, ?3) = ?2 ORDER BY file, raw_name",
+            )
+            .map_err(st)?;
+        let rows = stmt
+            .query_map(
+                params![kind_json, file_prefix, file_prefix.len() as i64],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .map_err(st)?;
+        rows.collect::<std::result::Result<_, _>>().map_err(st)
+    }
+
     pub fn parked_relative_import_refs(&self) -> Result<Vec<UnresolvedRef>> {
         use wicked_estate_core::{Location, Span};
         // Same on-disk encoding upsert_unresolved_refs writes (serde JSON string, quotes kept).
@@ -4037,61 +4057,16 @@ impl GraphRead for SqliteStore {
     }
 
     fn traverse(&self, start: &SymbolId, spec: &TraversalSpec) -> Result<Subgraph> {
-        // `Both` ORs the two directions' horizon flags: a cut in EITHER direction makes the
-        // merged subgraph incomplete.
-        let (depths, depth_horizon) = match spec.direction {
-            Direction::Both => {
-                let (mut a, h1) = self.cte_reach(start, Direction::Dependents, spec)?;
-                let (b, h2) = self.cte_reach(start, Direction::Dependencies, spec)?;
-                for (k, v) in b {
-                    a.entry(k).and_modify(|e| *e = (*e).min(v)).or_insert(v);
-                }
-                (a, h1 || h2)
-            }
-            d => self.cte_reach(start, d, spec)?,
-        };
-        // #225: each leg fetches `max_nodes + 1` rows (fencepost), so exactly `max_nodes` reachable
-        // nodes is a complete walk and only a surplus row means the cap cut it.
-        let (depths, node_cap) = cap_by_depth(depths, spec.max_nodes);
-
-        let mut nodes = Vec::new();
-        if let Some(n) = self.get_node(start)? {
-            nodes.push(n);
+        // One read snapshot for the whole walk (reachability, then its nodes and edges): a
+        // writer committing between those statements (an index then a relink) would otherwise
+        // pair old reachability with new rows. Only outside a caller's own batch.
+        if self.conn.is_autocommit() {
+            self.conn.execute_batch("BEGIN DEFERRED").map_err(st)?;
+            let r = self.traverse_inner(start, spec);
+            let _ = self.conn.execute_batch("COMMIT");
+            return r;
         }
-        for id in depths.keys() {
-            if let Some(n) = self.get_node(&SymbolId(id.clone()))? {
-                nodes.push(n);
-            }
-        }
-
-        // Induced edges: neighbors of start + reached nodes in the traversal direction.
-        let mut edges = Vec::new();
-        let mut seen = HashSet::new();
-        let mut anchors: Vec<SymbolId> = vec![start.clone()];
-        anchors.extend(depths.keys().map(|k| SymbolId(k.clone())));
-        for a in &anchors {
-            for e in self.neighbors(a, spec.direction)? {
-                // The walk's own admission rule (#361): an edge of a kind the spec did not ask
-                // for, or below its confidence floor, is not part of the answer even when both
-                // ends were reached over admitted edges.
-                if !spec.admits(&e) {
-                    continue;
-                }
-                if seen.insert(e.dedup_key()) {
-                    edges.push(e);
-                }
-            }
-        }
-
-        Ok(self.serve_subgraph(
-            Subgraph {
-                nodes,
-                edges,
-                depths,
-                ..Default::default()
-            }
-            .with_caps(node_cap, depth_horizon),
-        ))
+        self.traverse_inner(start, spec)
     }
 
     fn traverse_multi(&self, starts: &[SymbolId], spec: &TraversalSpec) -> Result<Subgraph> {
@@ -4994,6 +4969,67 @@ impl SqliteStore {
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests — W5.2 vector storage (SqliteStore)
 // ─────────────────────────────────────────────────────────────────────────────
+
+impl SqliteStore {
+    /// The walk itself; [`GraphRead::traverse`] runs it inside one read snapshot.
+    fn traverse_inner(&self, start: &SymbolId, spec: &TraversalSpec) -> Result<Subgraph> {
+        // `Both` ORs the two directions' horizon flags: a cut in EITHER direction makes the
+        // merged subgraph incomplete.
+        let (depths, depth_horizon) = match spec.direction {
+            Direction::Both => {
+                let (mut a, h1) = self.cte_reach(start, Direction::Dependents, spec)?;
+                let (b, h2) = self.cte_reach(start, Direction::Dependencies, spec)?;
+                for (k, v) in b {
+                    a.entry(k).and_modify(|e| *e = (*e).min(v)).or_insert(v);
+                }
+                (a, h1 || h2)
+            }
+            d => self.cte_reach(start, d, spec)?,
+        };
+        // #225: each leg fetches `max_nodes + 1` rows (fencepost), so exactly `max_nodes` reachable
+        // nodes is a complete walk and only a surplus row means the cap cut it.
+        let (depths, node_cap) = cap_by_depth(depths, spec.max_nodes);
+
+        let mut nodes = Vec::new();
+        if let Some(n) = self.get_node(start)? {
+            nodes.push(n);
+        }
+        for id in depths.keys() {
+            if let Some(n) = self.get_node(&SymbolId(id.clone()))? {
+                nodes.push(n);
+            }
+        }
+
+        // Induced edges: neighbors of start + reached nodes in the traversal direction.
+        let mut edges = Vec::new();
+        let mut seen = HashSet::new();
+        let mut anchors: Vec<SymbolId> = vec![start.clone()];
+        anchors.extend(depths.keys().map(|k| SymbolId(k.clone())));
+        for a in &anchors {
+            for e in self.neighbors(a, spec.direction)? {
+                // The walk's own admission rule (#361): an edge of a kind the spec did not ask
+                // for, or below its confidence floor, is not part of the answer even when both
+                // ends were reached over admitted edges.
+                if !spec.admits(&e) {
+                    continue;
+                }
+                if seen.insert(e.dedup_key()) {
+                    edges.push(e);
+                }
+            }
+        }
+
+        Ok(self.serve_subgraph(
+            Subgraph {
+                nodes,
+                edges,
+                depths,
+                ..Default::default()
+            }
+            .with_caps(node_cap, depth_horizon),
+        ))
+    }
+}
 
 #[cfg(test)]
 mod tests {

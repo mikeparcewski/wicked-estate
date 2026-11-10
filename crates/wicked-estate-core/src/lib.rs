@@ -14,6 +14,7 @@
 pub mod annotation;
 pub mod change;
 pub mod conformance;
+pub mod crossing;
 pub mod edge;
 pub mod edge_tags;
 pub mod error;

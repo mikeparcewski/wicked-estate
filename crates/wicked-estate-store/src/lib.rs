@@ -20,6 +20,7 @@ macro_rules! eprintln {
 }
 
 pub mod sqlite;
+pub mod writer_lock;
 pub use sqlite::{
     AccessRecord, CompactStats, RedactionReport, SearchMissRecord, SqliteStore, TelemetryImport,
     WalCheckpointStats,
@@ -1493,6 +1494,12 @@ pub trait GraphStoreMutExt: GraphStore {
     fn meta_set_key(&mut self, key: &str, value: &str);
     /// Read a meta key. Returns `None` when absent.
     fn meta_get_key(&self, key: &str) -> Option<String>;
+    /// [`meta_set_key`](Self::meta_set_key) that reports a failed write, for callers that publish
+    /// a record inside a batch and must roll back when it does not land (the project linker).
+    fn meta_put(&mut self, key: &str, value: &str) -> wicked_estate_core::Result<()> {
+        self.meta_set_key(key, value);
+        Ok(())
+    }
     /// Write a versioned cache entry (stale at next `version_bump`).
     fn cache_put_key(&mut self, key: &str, value: &str);
     /// Read a versioned cache entry. Returns `None` when absent or stale.
@@ -1570,6 +1577,27 @@ pub trait GraphStoreMutExt: GraphStore {
     /// reconstructs them (persisted site columns; no hints, cols/end_line zero).
     fn parked_relative_import_refs(&self) -> wicked_estate_core::Result<Vec<UnresolvedRef>>;
 
+    /// Every parked `imports` reference whose site file starts with `file_prefix` (a label's
+    /// `<label>/` prefix, or "" for all): `(file, written specifier)` pairs, the project linker's
+    /// input (slice X1). A backend that cannot list them refuses, so the linker never publishes
+    /// an empty generation for a populated project.
+    fn parked_import_refs(
+        &self,
+        _file_prefix: &str,
+    ) -> wicked_estate_core::Result<Vec<(String, String)>> {
+        Err(wicked_estate_core::Error::Invalid(
+            "this store backend cannot list parked imports; the project linker needs it".into(),
+        ))
+    }
+
+    /// Discard the open batch. A backend that cannot roll back says so; callers that need
+    /// all-or-nothing (the project linker) then refuse to commit a partial write.
+    fn rollback_batch(&mut self) -> wicked_estate_core::Result<()> {
+        Err(wicked_estate_core::Error::Invalid(
+            "this store backend cannot roll back a batch".into(),
+        ))
+    }
+
     /// Delete `unresolved_refs` rows by persisted SITE identity — `(from, raw_name, kind, file,
     /// line, start_byte, end_byte)`, exactly the columns `upsert_unresolved_refs` writes. Used by
     /// the back-fill pass to retire a parked row in the same batch that writes its resolved edge,
@@ -1639,6 +1667,9 @@ impl GraphStoreMutExt for SqliteStore {
     fn meta_set_key(&mut self, key: &str, value: &str) {
         let _ = self.meta_set(key, value);
     }
+    fn meta_put(&mut self, key: &str, value: &str) -> wicked_estate_core::Result<()> {
+        self.meta_set(key, value)
+    }
     fn meta_get_key(&self, key: &str) -> Option<String> {
         self.meta_get(key).ok().flatten()
     }
@@ -1664,6 +1695,15 @@ impl GraphStoreMutExt for SqliteStore {
         self.incremental_vacuum()
     }
 
+    fn parked_import_refs(
+        &self,
+        file_prefix: &str,
+    ) -> wicked_estate_core::Result<Vec<(String, String)>> {
+        SqliteStore::parked_import_refs(self, file_prefix)
+    }
+    fn rollback_batch(&mut self) -> wicked_estate_core::Result<()> {
+        SqliteStore::rollback_batch(self)
+    }
     fn parked_relative_import_refs(&self) -> wicked_estate_core::Result<Vec<UnresolvedRef>> {
         self.parked_relative_import_refs()
     }
@@ -1716,6 +1756,18 @@ impl GraphStoreMutExt for MemStore {
             .iter()
             .filter(|r| r.kind == EdgeKind::Imports && is_relative_import_spec(&r.raw_name))
             .cloned()
+            .collect())
+    }
+
+    fn parked_import_refs(
+        &self,
+        file_prefix: &str,
+    ) -> wicked_estate_core::Result<Vec<(String, String)>> {
+        Ok(self
+            .unresolved
+            .iter()
+            .filter(|r| r.kind == EdgeKind::Imports && r.location.file.starts_with(file_prefix))
+            .map(|r| (r.location.file.clone(), r.raw_name.clone()))
             .collect())
     }
 

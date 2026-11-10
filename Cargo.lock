@@ -10119,6 +10119,7 @@ dependencies = [
  "notify-debouncer-full",
  "rayon",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
