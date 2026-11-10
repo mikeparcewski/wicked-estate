@@ -126,6 +126,24 @@ fn fixture_slice_resolves_references_inside_their_own_application() {
         "no reference of the breadcrumb region binds the region itself"
     );
 
+    // The export metadata version sits on each application node (#316).
+    for app in [
+        "apexlang . . . example-1/app#",
+        "apexlang . . . example-2/app#",
+    ] {
+        let node = store
+            .get_node(&wicked_estate_core::SymbolId(app.into()))
+            .unwrap()
+            .expect("application node");
+        assert_eq!(
+            node.metadata
+                .get("apexlang_mmd_version")
+                .and_then(|v| v.as_str()),
+            Some("26.1.0+3102"),
+            "{app}"
+        );
+    }
+
     // Both applications declare `authorization contribution-rights`; each page binds its own.
     let ex2 = "apexlang . . . example-2/app#";
     for app in [ex1, ex2] {
@@ -322,6 +340,14 @@ fn resolution_report(
                 .unwrap();
             assert!(store.file_digest(&rel).unwrap().is_some(), "{rel} indexed");
             for r in ex.refs {
+                // Refs of the embedded code itself (a JavaScript call in a fenced block) belong
+                // to that language's resolvers; this report accounts for APEXlang's own refs.
+                if r.hints.contains_key("embedded_region") {
+                    *classes
+                        .entry("embedded code (other resolvers)".into())
+                        .or_default() += 1;
+                    continue;
+                }
                 total += 1;
                 sites.insert(
                     (rel.clone(), r.location.span.start_byte),
@@ -337,7 +363,10 @@ fn resolution_report(
                     ),
                 );
                 let theme = text[r.location.span.start_byte as usize..].starts_with("@/");
+                let bind = r.hints.contains_key("apexlang_bind_variable");
                 let class = match apexlang_ref::parse(&r.raw_name) {
+                    Some(p) if bind && p.kind.starts_with('~') => "bind variable (text scan)",
+                    Some(_) if bind => "bind variable (parsed region)",
                     None => {
                         assert!(apexlang_ref::parse_container(&r.raw_name).is_some());
                         "holder (contains)"
@@ -486,7 +515,11 @@ fn full_pinned_corpus_resolution() {
         fs::write(out, unresolved.join("\n") + "\n").unwrap();
     }
     assert_eq!(
-        classes.values().sum::<usize>(),
+        classes
+            .iter()
+            .filter(|(k, _)| !k.starts_with("embedded code"))
+            .map(|(_, v)| v)
+            .sum::<usize>(),
         total,
         "every reference is accounted for"
     );

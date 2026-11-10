@@ -35,6 +35,10 @@ pub const SCHEME: &str = "apexlang";
 pub const KIND_METADATA_KEY: &str = "apexlang_kind";
 /// Metadata key saying how a node's key was formed: `declared`, `properties` or `positional`.
 pub const IDENTITY_METADATA_KEY: &str = "apexlang_identity";
+/// Application-node metadata: the export's meta-metadata version (`26.2.0+3479`, or `unknown`).
+pub const MMD_VERSION_KEY: &str = "apexlang_mmd_version";
+/// Application-node metadata: `false` when the version is unknown or its major is not supported.
+pub const MMD_SUPPORTED_KEY: &str = "apexlang_mmd_supported";
 
 const DATA_TOML: &str = include_str!("../apexlang.toml");
 
@@ -56,6 +60,36 @@ pub struct ApexlangData {
     identity: Identity,
     #[serde(rename = "ref", default)]
     refs: Vec<RefRule>,
+    bind_variable: BindVariable,
+    export_metadata: ExportMetadata,
+}
+
+/// Page-item bind variables inside embedded regions (#315).
+#[derive(Debug, Clone, Deserialize)]
+struct BindVariable {
+    pattern: String,
+    target: String,
+    tags: Vec<String>,
+    text_scan: TextScan,
+    #[serde(skip)]
+    regex: Option<regex::Regex>,
+}
+
+/// Delimiters a text scan of an unparsed region skips.
+#[derive(Debug, Clone, Deserialize)]
+struct TextScan {
+    quote: String,
+    line_comment: String,
+    block_comment: [String; 2],
+}
+
+/// Where the export metadata version lives (#316).
+#[derive(Debug, Clone, Deserialize)]
+struct ExportMetadata {
+    host_file: String,
+    file: String,
+    version_key: String,
+    supported_majors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -91,7 +125,24 @@ struct RefRule {
 impl ApexlangData {
     /// Parse a data table (the built-in one is `apexlang.toml`).
     pub fn parse(toml_src: &str) -> Result<Self> {
-        toml::from_str(toml_src).map_err(|e| Error::Extraction(format!("apexlang.toml: {e}")))
+        let mut data: Self = toml::from_str(toml_src)
+            .map_err(|e| Error::Extraction(format!("apexlang.toml: {e}")))?;
+        let re = regex::Regex::new(&data.bind_variable.pattern)
+            .map_err(|e| Error::Extraction(format!("apexlang.toml bind_variable.pattern: {e}")))?;
+        if re
+            .capture_names()
+            .flatten()
+            .filter(|n| *n == "item" || *n == "page")
+            .count()
+            != 2
+        {
+            return Err(Error::Extraction(
+                "apexlang.toml bind_variable.pattern needs the named groups `item` and `page`"
+                    .into(),
+            ));
+        }
+        data.bind_variable.regex = Some(re);
+        Ok(data)
     }
 
     /// The table compiled into the binary.
@@ -454,6 +505,7 @@ fn extract_with(
     let names = query.capture_names();
     let mut comp_nodes: Vec<tree_sitter::Node> = Vec::new();
     let mut ref_nodes: Vec<tree_sitter::Node> = Vec::new();
+    let mut fence_nodes: Vec<tree_sitter::Node> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), src);
     while let Some(m) = matches.next() {
@@ -461,6 +513,7 @@ fn extract_with(
             match names[c.index as usize] {
                 "apexlang.component" => comp_nodes.push(c.node),
                 "apexlang.reference" => ref_nodes.push(c.node),
+                "apexlang.fence" => fence_nodes.push(c.node),
                 _ => {}
             }
         }
@@ -469,6 +522,8 @@ fn extract_with(
     comp_nodes.dedup_by_key(|n| n.id());
     ref_nodes.sort_by_key(|n| n.start_byte());
     ref_nodes.dedup_by_key(|n| n.id());
+    fence_nodes.sort_by_key(|n| n.start_byte());
+    fence_nodes.dedup_by_key(|n| n.id());
 
     // ── Mint identities top-down ─────────────────────────────────────────────────────────
     let index_of: HashMap<usize, usize> = comp_nodes
@@ -694,6 +749,64 @@ fn extract_with(
         refs.push(r);
     }
 
+    // ── Embedded code (#314) and page-item bind variables (#315) ───────────────────────────
+    // Every fenced block is a region of its owning component, keyed by the owner's path inside
+    // the application plus the property that holds it (stable, unique, no offsets).
+    let mut regions = Vec::with_capacity(fence_nodes.len());
+    let mut region_owner = Vec::with_capacity(fence_nodes.len());
+    for fence in fence_nodes {
+        let Some((property, owner_node)) = reference_site(fence, src) else {
+            continue;
+        };
+        let Some(&owner) = index_of.get(&owner_node.id()) else {
+            continue;
+        };
+        let owner_sym = comps[owner].symbol.as_str();
+        let owner_path = owner_sym
+            .strip_prefix(app_symbol.as_str())
+            .unwrap_or(owner_sym)
+            .replace('#', "/");
+        let tag = fence
+            .child_by_field_name("language")
+            .map(|t| text(t, src).to_string());
+        let span = match fence.child_by_field_name("body") {
+            Some(body) => span_of(body),
+            // An empty block: a zero-width region at the closing fence.
+            None => {
+                let mut s = span_of(fence);
+                s.start_byte = s.end_byte.saturating_sub(3);
+                s.end_byte = s.start_byte;
+                s.start_line = s.end_line;
+                s.start_col = s.end_col.saturating_sub(3);
+                s.end_col = s.start_col;
+                s
+            }
+        };
+        regions.push(crate::embedded::EmbeddedRegion {
+            owner: comps[owner].symbol.clone(),
+            key: format!("{owner_path}{property}"),
+            tag,
+            span,
+        });
+        region_owner.push(owner);
+    }
+    let embedded =
+        crate::embedded::extract_regions(file, &regions, crate::embedded::EmbedTable::builtin());
+    for ((region, outcome), &owner) in regions.iter().zip(&embedded.regions).zip(&region_owner) {
+        bind_variable_refs(
+            file,
+            region,
+            outcome,
+            &comps[owner].symbol,
+            &app_symbol,
+            &data.bind_variable,
+            &mut refs,
+        );
+    }
+    nodes.extend(embedded.extraction.nodes);
+    local_edges.extend(embedded.extraction.local_edges);
+    refs.extend(embedded.extraction.refs);
+
     nodes.insert(
         0,
         Node::new(
@@ -709,6 +822,208 @@ fn extract_with(
         local_edges,
         refs,
     })
+}
+
+/// Page-item bind variables (`:P4_NAME`) of one embedded region, as refs from the region's owner
+/// to page item `P4_NAME` of page 4. A parsed region skips its string literals and comments and
+/// yields typed refs; an unparsed one is a text scan (quotes and comments skipped by the data's
+/// delimiters) and yields heuristic refs (target kind prefixed with
+/// [`apexlang_ref::HEURISTIC`]).
+fn bind_variable_refs(
+    file: &SourceFile,
+    region: &crate::embedded::EmbeddedRegion,
+    outcome: &crate::embedded::RegionOutcome,
+    owner: &SymbolId,
+    app_symbol: &SymbolId,
+    bind: &BindVariable,
+    out: &mut Vec<UnresolvedRef>,
+) {
+    let Some(re) = bind.regex.as_ref() else {
+        return;
+    };
+    let tag = region.tag.as_deref().unwrap_or("").to_ascii_lowercase();
+    if !bind.tags.contains(&tag) {
+        return;
+    }
+    let base = region.span.start_byte as usize;
+    let Some(body) = file.text.get(base..region.span.end_byte as usize) else {
+        return;
+    };
+    let parsed = outcome.language.is_some();
+    let skipped: Vec<(usize, usize)> = if parsed {
+        outcome
+            .literals
+            .iter()
+            .map(|&(s, e)| (s - base, e - base))
+            .collect()
+    } else {
+        text_scan_skips(body, &bind.text_scan)
+    };
+    let kind = if parsed {
+        bind.target.clone()
+    } else {
+        format!("{}{}", apexlang_ref::HEURISTIC, bind.target)
+    };
+    for caps in re.captures_iter(body) {
+        let (Some(whole), Some(item), Some(page)) =
+            (caps.get(0), caps.name("item"), caps.name("page"))
+        else {
+            continue;
+        };
+        if skipped
+            .iter()
+            .any(|&(s, e)| s <= whole.start() && whole.start() < e)
+        {
+            continue;
+        }
+        let page_key = page.as_str().trim_start_matches('0');
+        let page_key = if page_key.is_empty() { "0" } else { page_key };
+        let scope = format!(
+            "{}{}#",
+            app_symbol.as_str(),
+            element("page", &[page_key.to_string()], 1)
+        );
+        let mut r = UnresolvedRef::new(
+            owner.clone(),
+            apexlang_ref::format(&kind, &item.as_str().to_ascii_uppercase(), &scope),
+            EdgeKind::References,
+            Location::new(
+                &file.path,
+                sub_span(&file.text, region.span, whole.start(), whole.end()),
+            ),
+        );
+        r.hints
+            .insert("apexlang_bind_variable".into(), whole.as_str().into());
+        out.push(r);
+    }
+}
+
+/// Body byte ranges a text scan skips: quoted strings (a doubled quote stays inside) and line and
+/// block comments, using the data's delimiters.
+fn text_scan_skips(body: &str, scan: &TextScan) -> Vec<(usize, usize)> {
+    let b = body.as_bytes();
+    let (q, lc) = (scan.quote.as_bytes(), scan.line_comment.as_bytes());
+    let (bo, bc) = (
+        scan.block_comment[0].as_bytes(),
+        scan.block_comment[1].as_bytes(),
+    );
+    let at = |i: usize, pat: &[u8]| !pat.is_empty() && b[i..].starts_with(pat);
+    let find = |from: usize, pat: &[u8]| -> usize {
+        (from..b.len())
+            .find(|&j| b[j..].starts_with(pat))
+            .map_or(b.len(), |j| j + pat.len())
+    };
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let end = if at(i, q) {
+            // A quote doubled inside a string is part of it.
+            let mut j = i + q.len();
+            loop {
+                let k = find(j, q);
+                if k < b.len() && b[k..].starts_with(q) {
+                    j = k + q.len();
+                } else {
+                    break k;
+                }
+            }
+        } else if at(i, lc) {
+            (i..b.len()).find(|&j| b[j] == b'\n').unwrap_or(b.len())
+        } else if at(i, bo) {
+            find(i + bo.len(), bc)
+        } else {
+            i += 1;
+            continue;
+        };
+        out.push((i, end));
+        i = end.max(i + 1);
+    }
+    out
+}
+
+/// The host span of body bytes `[start, end)` of a region.
+fn sub_span(text: &str, region: Span, start: usize, end: usize) -> Span {
+    let base = region.start_byte as usize;
+    let pos = |off: usize| -> (u32, u32) {
+        let before = &text[base..base + off];
+        let lines = before.matches('\n').count() as u32;
+        let col = match before.rfind('\n') {
+            Some(nl) => (before.len() - nl - 1) as u32,
+            None => region.start_col + before.len() as u32,
+        };
+        (region.start_line + lines, col)
+    };
+    let (sl, sc) = pos(start);
+    let (el, ec) = pos(end);
+    Span {
+        start_byte: (base + start) as u32,
+        end_byte: (base + end) as u32,
+        start_line: sl,
+        start_col: sc,
+        end_line: el,
+        end_col: ec,
+    }
+}
+
+/// The repo-relative export-metadata file for an `application.apx` (#316), `None` for any other
+/// file. The indexer reads it (the `.apex` directory is never walked) and hands it to
+/// [`apply_export_metadata`].
+pub fn export_metadata_path(rel_path: &str) -> Option<String> {
+    let meta = &ApexlangData::builtin().export_metadata;
+    let norm = rel_path.replace('\\', "/");
+    let (dir, name) = match norm.rsplit_once('/') {
+        Some((d, n)) => (Some(d), n),
+        None => (None, norm.as_str()),
+    };
+    (name == meta.host_file).then(|| match dir {
+        Some(d) => format!("{d}/{}", meta.file),
+        None => meta.file.clone(),
+    })
+}
+
+/// Store the export metadata version on the application node of an `application.apx`
+/// extraction (#316). `sidecar` is the metadata file's bytes, `None` when it is missing or
+/// unreadable (the version is then `unknown`). A major version the data does not list prints a
+/// loud marker and flags the node; extraction is never failed.
+pub fn apply_export_metadata(extraction: &mut Extraction, host_path: &str, sidecar: Option<&[u8]>) {
+    let meta = &ApexlangData::builtin().export_metadata;
+    let version = sidecar
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+        .and_then(|v| {
+            v.get(&meta.version_key)
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        });
+    let Some(app) = extraction
+        .nodes
+        .iter_mut()
+        .find(|n| n.metadata.get(KIND_METADATA_KEY).and_then(|v| v.as_str()) == Some("app"))
+    else {
+        return;
+    };
+    match version {
+        Some(v) => {
+            let major = v.split(['.', '+']).next().unwrap_or("");
+            let supported = meta.supported_majors.iter().any(|m| m == major);
+            app.metadata
+                .insert(MMD_VERSION_KEY.into(), v.clone().into());
+            app.metadata
+                .insert(MMD_SUPPORTED_KEY.into(), supported.into());
+            if !supported {
+                eprintln!(
+                    "APEXLANG-UNSUPPORTED-VERSION: {host_path}: {} {v} (supported majors: {}); \
+                     extracted anyway, the application node is flagged",
+                    meta.version_key,
+                    meta.supported_majors.join(", ")
+                );
+            }
+        }
+        None => {
+            app.metadata
+                .insert(MMD_VERSION_KEY.into(), "unknown".into());
+            app.metadata.insert(MMD_SUPPORTED_KEY.into(), false.into());
+        }
+    }
 }
 
 /// The symbol a reference's target must sit under, per the rule's `scope`; `None` when the scope
