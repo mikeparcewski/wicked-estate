@@ -56,7 +56,10 @@ const RESOLVED_BY: &str = "cobol-text";
 pub const COBOL_DYNAMIC_VAR_PREFIX: &str = "cobol-dynamic-var:";
 
 static RE_SOURCE_FREE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?im)>>\s*SOURCE\s+(?:FORMAT\s+)?(?:IS\s+)?FREE\b").expect("RE_SOURCE_FREE")
+    // The directive starts its line (after an optional sequence area); one inside a comment or a
+    // literal does not switch the format.
+    Regex::new(r"(?im)^[0-9 ]{0,7}>>\s*SOURCE\s+(?:FORMAT\s+)?(?:IS\s+)?FREE\b")
+        .expect("RE_SOURCE_FREE")
 });
 static RE_EXEC_CICS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)\bEXEC\s+CICS\s+(.*?)\bEND-EXEC").expect("RE_EXEC_CICS"));
@@ -89,6 +92,16 @@ static RE_COPY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)(?:^|[\s.])COPY\s+(?:'([^']+)'|"([^"]+)"|([A-Za-z0-9#$@][A-Za-z0-9#$@-]*))"#)
         .expect("RE_COPY")
 });
+/// COPY … REPLACING / REPLACE pseudo-text `==…==`: replacement text, not source.
+static RE_PSEUDO_TEXT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)==.*?==").expect("RE_PSEUDO_TEXT"));
+/// `FROM FINAL|NEW|OLD TABLE (INSERT INTO T …)`: a data-change table reference writes T.
+static RE_SQL_DATA_CHANGE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(?:FINAL|NEW|OLD)\s+TABLE\s*\(\s*(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO)\s+([A-Za-z_][A-Za-z0-9_$#@.]*)",
+    )
+    .expect("RE_SQL_DATA_CHANGE")
+});
 static RE_PROGRAM_ID: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bPROGRAM-ID\b").expect("RE_PROGRAM_ID"));
 static RE_PROCEDURE_DIVISION: LazyLock<Regex> =
@@ -109,7 +122,9 @@ static RE_VALUE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("RE_VALUE")
 });
 static RE_MOVE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?is)\bMOVE\s+(?:'([^']*)'|"([^"]*)"|(\S+))\s+TO\s+"#).expect("RE_MOVE")
+    // Group 1 is the whole sending operand (any expression: `ALL 'X'`, `FUNCTION TRIM(A)`,
+    // `CORRESPONDING A`); only a lone literal records a value, anything else invalidates.
+    Regex::new(r"(?is)\bMOVE\s+([^.]*?)\s+TO\s+").expect("RE_MOVE")
 });
 static RE_SET_ENTRY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -234,6 +249,9 @@ pub fn supplement(file: &SourceFile, ex: &mut Extraction) {
     let (clean, code) = lexical_views(&file.text, free);
     let code_no_exec = RE_EXEC_ANY
         .replace_all(&code, |c: &regex::Captures| blank(&c[0]))
+        .into_owned();
+    let code_no_exec = RE_PSEUDO_TEXT
+        .replace_all(&code_no_exec, |c: &regex::Captures| blank(&c[0]))
         .into_owned();
     let lines = LineIndex::new(&code);
     let mut anchors = Anchors::of(file, ex, &code);
@@ -465,7 +483,8 @@ impl Anchors {
         }
     }
 
-    /// The innermost program whose span holds `byte`, else the first program, else none.
+    /// The innermost program whose span holds `byte`; none outside every program (the construct
+    /// then starts from the copybook or File node).
     fn prog(&self, byte: usize) -> Prog {
         self.modules
             .iter()
@@ -473,11 +492,6 @@ impl Anchors {
             .filter(|(_, (_, _, s, e))| *s <= byte && byte < *e)
             .min_by_key(|(_, (_, _, s, e))| e - s)
             .map(|(i, _)| i)
-            .or(if self.modules.is_empty() {
-                None
-            } else {
-                Some(0)
-            })
     }
 
     /// The source node for a construct at `byte`, and its PROGRAM-ID when it is a program.
@@ -492,7 +506,7 @@ impl Anchors {
 /// A copybook's member name: the file stem, uppercased (`cpy/ordrec.cpy` → `ORDREC`).
 fn copybook_name(path: &str) -> String {
     let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    let stem = base.split('.').next().unwrap_or(base);
+    let stem = base.rsplit_once('.').map_or(base, |(s, _)| s);
     stem.to_ascii_uppercase()
 }
 
@@ -573,10 +587,21 @@ impl Literals {
         for c in RE_MOVE.captures_iter(code) {
             let whole = c.get(0).unwrap();
             let line = line_of(whole.start());
-            let (src, what) = match (c.get(1).or_else(|| c.get(2)), c.get(3)) {
-                (Some(l), _) => (Some(literal_at(clean, l)), format!("MOVE (line {line})")),
-                (None, Some(tok)) => (None, format!("MOVE {} (line {line})", tok.as_str())),
-                (None, None) => continue,
+            let op = c.get(1).unwrap();
+            let lead = op.as_str().len() - op.as_str().trim_start().len();
+            let t = op.as_str().trim();
+            let quoted = |q: char| t.len() >= 2 && t.starts_with(q) && t.ends_with(q);
+            let lone_literal =
+                (quoted('\'') || quoted('"')) && !t[1..t.len() - 1].contains(['\'', '"']);
+            let (src, what) = if lone_literal {
+                // `code` masks the contents; read them from `clean` at the same offsets.
+                let start = op.start() + lead + 1;
+                let q = &t[..1];
+                let inner = clean[start..start + t.len() - 2].replace(&q.repeat(2), q);
+                (Some(inner), format!("MOVE (line {line})"))
+            } else {
+                let shown = clean[op.start()..op.end()].trim().to_string();
+                (None, format!("MOVE {shown} (line {line})"))
             };
             for target in move_targets(&code[whole.end()..]) {
                 lit.add(target, src.clone(), what.clone());
@@ -779,7 +804,9 @@ impl Pass<'_> {
     /// The `Calls` ref name for a dynamic program-name variable in `prog`.
     fn dynamic_ref_name(&mut self, prog: Prog, var: &str) -> String {
         match self.decide(prog, var) {
-            Decision::Resolved { value, .. } => format!("{COBOL_DYNAMIC_CALL_PREFIX}{value}"),
+            Decision::Resolved { value, .. } => {
+                format!("{COBOL_DYNAMIC_CALL_PREFIX}{}", value.to_ascii_uppercase())
+            }
             Decision::Unresolved { .. } => {
                 format!("{COBOL_DYNAMIC_VAR_PREFIX}{}", var.to_ascii_uppercase())
             }
@@ -805,7 +832,7 @@ impl Pass<'_> {
                 "LINK" | "XCTL" => {
                     if let Some(op) = opts.get("PROGRAM").cloned() {
                         let raw = if op.literal {
-                            op.value.trim().to_string()
+                            op.value.trim().to_ascii_uppercase()
                         } else {
                             self.dynamic_ref_name(prog, &op.value)
                         };
@@ -959,6 +986,11 @@ impl Pass<'_> {
             }
             .map(|t| t.split(['(', ',']).next().unwrap_or("").to_string())
             .filter(|t| is_table_name(t));
+            // Host variables (`:WS-FROM`) are COBOL names with hyphens: mask them so a keyword
+            // inside one is not a clause.
+            let body = RE_SQL_HOSTVAR
+                .replace_all(&body, |c: &regex::Captures| blank(&c[0]))
+                .into_owned();
             let ctx = paren_context(&body);
             let ctes: HashSet<String> = RE_SQL_CTE
                 .captures_iter(&body)
@@ -968,6 +1000,12 @@ impl Pass<'_> {
             let mut tables: Vec<(String, &str)> = Vec::new();
             if let Some(t) = &write_target {
                 tables.push((t.clone(), edge_tags::WRITES));
+            }
+            for m in RE_SQL_DATA_CHANGE.captures_iter(&body) {
+                let t = m[1].to_ascii_uppercase();
+                if is_table_name(&t) {
+                    tables.push((t, edge_tags::WRITES));
+                }
             }
             let mut heads: Vec<regex::Match> = RE_SQL_FROM.find_iter(&body).collect();
             if statement == "MERGE" {
@@ -1287,10 +1325,17 @@ fn paren_context(body: &str) -> Vec<Option<usize>> {
 fn statement_level_or_subselect(body: &str, ctx: &[Option<usize>], at: usize) -> bool {
     match ctx.get(at).copied().flatten() {
         None => true,
-        Some(open) => body[open + 1..]
-            .trim_start()
-            .get(..6)
-            .is_some_and(|w| w.eq_ignore_ascii_case("SELECT")),
+        Some(open) => {
+            let before = body[..open].trim_end().to_ascii_uppercase();
+            body[open + 1..]
+                .trim_start()
+                .get(..6)
+                .is_some_and(|w| w.eq_ignore_ascii_case("SELECT"))
+                // A parenthesised joined table: `FROM (T1 JOIN T2 ON …)`.
+                || before.ends_with("FROM")
+                || before.ends_with("JOIN")
+                || before.ends_with(',')
+        }
     }
 }
 
@@ -1310,6 +1355,15 @@ fn table_list(rest: &str) -> Vec<String> {
     loop {
         i = skip_ws(i);
         if i < bytes.len() && bytes[i] == b'(' {
+            // A derived table `(SELECT …)` is skipped (its FROM is matched on its own); a joined
+            // table group `(T1 JOIN T2 …)` contributes its leading table list.
+            let inner = rest[i + 1..].trim_start();
+            if !inner
+                .get(..6)
+                .is_some_and(|w| w.eq_ignore_ascii_case("SELECT"))
+            {
+                out.extend(table_list(inner));
+            }
             let mut depth = 0usize;
             while i < bytes.len() {
                 match bytes[i] {
@@ -1698,9 +1752,62 @@ mod tests {
             "the grammar splits the two programs: {:?}",
             names(&ex)
         );
+        let pairs: BTreeSet<(String, String)> = ex
+            .refs
+            .iter()
+            .filter(|r| r.kind == EdgeKind::Calls)
+            .map(|r| {
+                let from = ex.nodes.iter().find(|n| n.symbol == r.from).unwrap();
+                (from.name.clone(), r.raw_name.clone())
+            })
+            .collect();
+        assert!(
+            pairs.contains(&("A".into(), "cobol-dynamic-call:AAA".into())),
+            "{pairs:?}"
+        );
+        assert!(
+            pairs.contains(&("B".into(), "cobol-dynamic-call:BBB".into())),
+            "{pairs:?}"
+        );
+        assert!(
+            !pairs.contains(&("A".into(), "cobol-dynamic-call:BBB".into())),
+            "{pairs:?}"
+        );
+    }
+
+    #[test]
+    fn review_round_two_lexical_and_sql_cases() {
+        let ex = run(
+            "cbl/P.cbl",
+            &program(
+                "       01 WS-PGM PIC X(8) VALUE 'PRICEPGM'.\n",
+                "      * >>SOURCE FORMAT FREE\n           MOVE ALL 'X' TO WS-PGM.\n           CALL WS-PGM.\n           COPY REAL REPLACING == COPY GHOST. == BY == X ==.\n           EXEC SQL SELECT :WS-FROM MYCOL FROM REALT END-EXEC.\n           EXEC SQL SELECT * FROM (T1 INNER JOIN T2 ON T1.ID = T2.ID)\n                END-EXEC.\n           EXEC SQL SELECT ID INTO :WS-ID FROM FINAL TABLE\n                (INSERT INTO ORDERS(QTY) VALUES(:WS-QTY)) END-EXEC.\n",
+            ),
+        );
         let c = calls(&ex);
-        assert!(c.contains(&"cobol-dynamic-call:AAA".to_string()), "{c:?}");
-        assert!(c.contains(&"cobol-dynamic-call:BBB".to_string()), "{c:?}");
+        assert!(
+            c.contains(&"cobol-dynamic-var:WS-PGM".to_string()),
+            "MOVE ALL 'X' changes WS-PGM: {c:?}"
+        );
+        let targets: BTreeSet<(String, String)> = ex
+            .local_edges
+            .iter()
+            .filter_map(|e| {
+                ex.nodes
+                    .iter()
+                    .find(|n| n.symbol == e.target)
+                    .map(|n| (n.name.clone(), format!("{:?}", e.kind)))
+            })
+            .collect();
+        let names: BTreeSet<&str> = targets.iter().map(|(n, _)| n.as_str()).collect();
+        for want in ["REAL", "REALT", "T1", "T2", "ORDERS"] {
+            assert!(names.contains(want), "{want}: {targets:?}");
+        }
+        for bogus in ["GHOST", "MYCOL", "FINAL"] {
+            assert!(!names.contains(bogus), "{bogus}: {targets:?}");
+        }
+        let w = format!("{:?}", edge_tags::other(edge_tags::WRITES));
+        assert!(targets.contains(&("ORDERS".to_string(), w)), "{targets:?}");
     }
 
     #[test]

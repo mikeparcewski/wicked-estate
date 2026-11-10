@@ -53,7 +53,7 @@ impl Extractor for HlasmExtractor {
 
         for (i, raw) in file.text.lines().enumerate() {
             // `*` in column 1 is a comment line; blank lines are skipped.
-            if raw.starts_with('*') || raw.trim().is_empty() {
+            if raw.starts_with('*') || raw.starts_with(".*") || raw.trim().is_empty() {
                 continue;
             }
             // A label is present iff column 1 is non-blank (the first token is the label).
@@ -295,6 +295,12 @@ mod tests {
                 .iter()
                 .any(|e| e.source == set && e.target == map && e.kind == EdgeKind::Contains)
         );
+    }
+
+    #[test]
+    fn macro_comment_lines_are_not_calls() {
+        let ex = extract(".* CALL GHOST\nSTUB     CSECT\n         END\n");
+        assert!(!ex.refs.iter().any(|r| r.raw_name == "GHOST"));
     }
 
     #[test]

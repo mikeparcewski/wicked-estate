@@ -153,16 +153,18 @@ fn admissible_target(ref_kind: &EdgeKind, cand: &wicked_estate_core::Node) -> bo
     if matches!(cand_kind, NodeKind::Import) {
         return false;
     }
+    // Shared-id DATA nodes of the mainframe extractors are never the target of a name-bound call
+    // or data use: a COBOL data reference names a Field, not the copybook, table or map that
+    // happens to share its spelling (`01 CUSTOMER.` inside `CUSTOMER.cpy` is a common layout).
+    if matches!(ref_kind, EdgeKind::Calls | EdgeKind::References) {
+        if let NodeKind::Other(tag) = cand_kind {
+            if NOT_NAME_TARGET_TAGS.contains(&tag.as_str()) {
+                return false;
+            }
+        }
+    }
     if *ref_kind != EdgeKind::Calls {
         return true;
-    }
-    // Shared-id DATA nodes of the mainframe extractors (a copybook, a Db2 table, a CICS/BMS map,
-    // a JCL DD binding or dataset) are never call targets. Admitting them made a copybook or a
-    // table named like a program ambiguous with that program, so a CICS LINK / static CALL parked.
-    if let NodeKind::Other(tag) = cand_kind {
-        if NOT_CALL_TARGET_TAGS.contains(&tag.as_str()) {
-            return false;
-        }
     }
     !matches!(
         cand_kind,
@@ -182,9 +184,11 @@ fn admissible_target(ref_kind: &EdgeKind, cand: &wicked_estate_core::Node) -> bo
     )
 }
 
-/// `NodeKind::Other` tags that are data, never the target of a `Calls` ref (see
-/// [`admissible_target`]).
-const NOT_CALL_TARGET_TAGS: &[&str] = &[
+/// `NodeKind::Other` tags that are data or JCL procedures, never the target of a name-bound
+/// `Calls` or `References` ref (see [`admissible_target`]). JCL `EXEC proc` links to its PROC by a
+/// shared id, so `EXEC PGM=X` can never bind a PROC named X.
+const NOT_NAME_TARGET_TAGS: &[&str] = &[
+    "jcl_proc",
     "copybook",
     "db2_table",
     "cics_map",

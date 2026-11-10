@@ -87,15 +87,19 @@ impl Extractor for ImsExtractor {
 
         // The PSB node: named by PSBGEN PSBNAME= (the macro ends the PSB source, so look ahead),
         // else the file stem; emitted on the first PCB/SENSEG.
-        let cards: Vec<&str> = file.text.lines().filter(|l| !l.starts_with('*')).collect();
+        let cards: Vec<&str> = file
+            .text
+            .lines()
+            .filter(|l| !l.starts_with('*') && !l.starts_with(".*"))
+            .collect();
         let psb_name = (0..cards.len())
             .find_map(|k| {
                 // PSBGEN's operands may continue on the next cards (`PSBGEN LANG=COBOL,` then
-                // `PSBNAME=ORDPSB`), so read the macro card and up to three continuations.
+                // `PSBNAME=ORDPSB`), so read the macro card and its continuation chain.
                 let toks: Vec<&str> = cards[k].split_whitespace().collect();
                 let i = toks.iter().position(|t| t.eq_ignore_ascii_case("PSBGEN"))?;
                 let mut ops = toks.get(i + 1).copied().unwrap_or("").to_string();
-                for cont in cards.iter().skip(k + 1).take(3) {
+                for cont in cards.iter().skip(k + 1).take(32) {
                     if !ops.ends_with(',') {
                         break;
                     }
@@ -128,7 +132,7 @@ impl Extractor for ImsExtractor {
 
         for (i, raw) in file.text.lines().enumerate() {
             // `*` in column 1 is a comment line; blank lines are skipped.
-            if raw.starts_with('*') || raw.trim().is_empty() {
+            if raw.starts_with('*') || raw.starts_with(".*") || raw.trim().is_empty() {
                 continue;
             }
 

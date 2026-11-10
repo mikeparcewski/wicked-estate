@@ -135,11 +135,13 @@ impl Extractor for JclExtractor {
                     last_dd = None;
                 }
                 "PROC" => {
-                    let sym =
-                        Symbol::synthetic("jcl", format!("{}::PROC::{}", file.path, name)).id();
+                    // The DEFINITION of the shared PROC id an `EXEC name` / `EXEC PROC=name` links
+                    // to. Not a Module: `EXEC PGM=X` names a program and must never bind (or be
+                    // made ambiguous by) a PROC that shares its name, a common naming convention.
+                    let sym = proc_symbol(name);
                     let mut node = Node::new(
                         sym.clone(),
-                        NodeKind::Module,
+                        NodeKind::Other("jcl_proc".to_string()),
                         name.to_string(),
                         Language::new("jcl"),
                         loc.clone(),
@@ -204,14 +206,42 @@ impl Extractor for JclExtractor {
                         );
                     }
 
-                    // step → invoked program/PROC (Calls): the cross-language link.
+                    // step → invoked program (Calls by name: the cross-language link), or → the
+                    // shared PROC id (a direct edge; the PROC source defines it, else a boundary).
                     if let Some(target) = parse_exec_target(operands) {
-                        refs.push(UnresolvedRef::new(
-                            step_sym.clone(),
-                            target,
-                            EdgeKind::Calls,
-                            loc,
-                        ));
+                        if current_pgm.is_some() || operands.starts_with("PGM=") {
+                            refs.push(UnresolvedRef::new(
+                                step_sym.clone(),
+                                target,
+                                EdgeKind::Calls,
+                                loc,
+                            ));
+                        } else {
+                            let proc_sym = proc_symbol(&target);
+                            local_edges.push(
+                                Edge::new(
+                                    step_sym.clone(),
+                                    proc_sym.clone(),
+                                    EdgeKind::Calls,
+                                    ResolutionTier::Parsed,
+                                    "jcl",
+                                )
+                                .with_location(loc.clone()),
+                            );
+                            nodes.push(
+                                Node::new(
+                                    proc_sym,
+                                    NodeKind::Other("jcl_proc".to_string()),
+                                    target.to_ascii_uppercase(),
+                                    Language::new("jcl"),
+                                    loc,
+                                )
+                                .as_boundary(format!(
+                                    "EXEC {target}: no PROC source (in-stream or cataloged) named \
+                                     {target} is indexed"
+                                )),
+                            );
+                        }
                     }
                 }
                 "DD" => {
@@ -295,6 +325,7 @@ impl Extractor for JclExtractor {
             }
         }
 
+        crate::contrib::settle(&mut nodes);
         Ok(Extraction {
             nodes,
             local_edges,
@@ -314,6 +345,12 @@ fn line_span(line: usize) -> Span {
         end_line: l,
         end_col: 0,
     }
+}
+
+/// The shared id of a JCL procedure: its in-stream or cataloged `//NAME PROC` defines it, and every
+/// `EXEC NAME` / `EXEC PROC=NAME` links to it.
+fn proc_symbol(name: &str) -> SymbolId {
+    Symbol::synthetic("jcl-proc", name.to_ascii_uppercase()).id()
 }
 
 /// A DD statement name that a program can `ASSIGN TO`: 1–8 alphanumeric/national characters
@@ -443,14 +480,21 @@ mod tests {
     }
 
     #[test]
-    fn proc_invocation_emits_calls_ref() {
+    fn proc_invocation_emits_calls_edge_to_the_shared_proc_id() {
+        // A cataloged PROC that is not indexed: the step still calls its shared id, a boundary.
         let ex = extract("//J JOB\n//S EXEC MYPROC\n");
         assert!(
-            ex.refs
+            ex.local_edges
                 .iter()
-                .any(|r| r.raw_name == "MYPROC" && r.kind == EdgeKind::Calls),
-            "EXEC <proc> must emit a Calls ref to the proc"
+                .any(|e| e.target == proc_symbol("MYPROC") && e.kind == EdgeKind::Calls),
+            "EXEC <proc> must call the proc"
         );
+        let node = ex
+            .nodes
+            .iter()
+            .find(|n| n.symbol == proc_symbol("MYPROC"))
+            .expect("boundary PROC node");
+        assert!(node.is_declaration());
     }
 
     #[test]
@@ -505,8 +549,9 @@ mod tests {
         let proc_node = ex
             .nodes
             .iter()
-            .find(|n| n.name == "PAYPROC" && n.kind == NodeKind::Module)
-            .expect("PROC module");
+            .find(|n| n.name == "PAYPROC" && n.kind == NodeKind::Other("jcl_proc".into()))
+            .expect("PROC node");
+        assert!(!proc_node.is_declaration(), "the in-stream PROC defines it");
         let pstep = ex.nodes.iter().find(|n| n.name == "PSTEP").unwrap();
         let step2 = ex.nodes.iter().find(|n| n.name == "STEP2").unwrap();
         let contains = |from: &SymbolId, to: &SymbolId| {
@@ -523,11 +568,9 @@ mod tests {
             contains(&job.symbol, &step2.symbol),
             "after PEND, steps belong to the job"
         );
-        assert!(
-            ex.refs
-                .iter()
-                .any(|r| r.from == step2.symbol && r.raw_name == "PAYPROC")
-        );
+        assert!(ex.local_edges.iter().any(|e| e.source == step2.symbol
+            && e.target == proc_node.symbol
+            && e.kind == EdgeKind::Calls));
     }
 
     #[test]
@@ -578,7 +621,9 @@ mod tests {
             );
         }
         assert!(
-            ex.refs.iter().any(|r| r.raw_name == "PAYPROC"),
+            ex.local_edges
+                .iter()
+                .any(|e| e.target == proc_symbol("PAYPROC") && e.kind == EdgeKind::Calls),
             "EXEC PROC=PAYPROC"
         );
         // Every edge carries the card's location, so `remove_file` retires it with the JCL even
@@ -587,6 +632,30 @@ mod tests {
             ex.local_edges
                 .iter()
                 .all(|e| e.location.as_ref().is_some_and(|l| l.file == "JOB1.jcl"))
+        );
+    }
+
+    #[test]
+    fn a_proc_named_like_a_program_never_shadows_exec_pgm() {
+        // A PROC named after the program it runs is a common convention. `EXEC PGM=PAYCALC` must
+        // stay a by-name ref to the program, and no PROC node may be a Module homonym of it.
+        let ex = extract(
+            "//PAYCALC PROC\n//S EXEC PGM=PAYCALC\n//         PEND\n//J JOB\n//S1 EXEC PAYCALC\n",
+        );
+        assert!(
+            ex.nodes
+                .iter()
+                .all(|n| !(n.name == "PAYCALC" && n.kind == NodeKind::Module))
+        );
+        assert!(
+            ex.refs
+                .iter()
+                .any(|r| r.raw_name == "PAYCALC" && r.kind == EdgeKind::Calls)
+        );
+        assert!(
+            ex.local_edges
+                .iter()
+                .any(|e| e.target == proc_symbol("PAYCALC") && e.kind == EdgeKind::Calls)
         );
     }
 }

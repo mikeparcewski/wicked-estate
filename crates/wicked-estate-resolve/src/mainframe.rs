@@ -7,7 +7,7 @@
 //! [`COBOL_DYNAMIC_CALL_PREFIX`](wicked_estate_core::refs::COBOL_DYNAMIC_CALL_PREFIX)`PRICEPGM`.
 //!
 //! [`DynamicCallResolver`] binds those refs, and only those, to the UNIQUE program (a
-//! [`NodeKind::Module`] of any language — COBOL, HLASM, a JCL PROC) with that name, at
+//! [`NodeKind::Module`] of a program language — COBOL, HLASM, PL/I, C, C++) with that name, at
 //! [`ResolutionTier::Heuristic`]: the value is inferred from the program's text, not proven at run
 //! time (an `ACCEPT`, a `READ … INTO`, a `CALL … USING` by reference, or a copybook can still change
 //! it). The edge says so in `metadata.heuristic`. No name-based resolver can see the prefixed name,
@@ -18,6 +18,9 @@ use wicked_estate_core::refs::COBOL_DYNAMIC_CALL_PREFIX;
 use wicked_estate_core::{
     Edge, NodeKind, ResolutionTier, Resolver, Result, SymbolIndex, UnresolvedRef,
 };
+
+/// Languages whose Modules are load-module programs a COBOL dynamic `CALL` can reach.
+const PROGRAM_LANGUAGES: &[&str] = &["cobol", "hlasm", "pli", "c", "cpp"];
 
 /// Binds `cobol-dynamic-call:<NAME>` refs to the unique program named `<NAME>`. See the module docs.
 #[derive(Debug, Default, Clone, Copy)]
@@ -38,12 +41,14 @@ impl Resolver for DynamicCallResolver {
             let Some(name) = r.raw_name.strip_prefix(COBOL_DYNAMIC_CALL_PREFIX) else {
                 continue;
             };
-            // A program is a Module of a language that compiles to a load module. A JCL JOB or
-            // PROC is a Module too, but nothing CALLs it.
+            // A program is a Module of a language that compiles to a load module. A JCL JOB, a
+            // Markdown heading or a Clojure namespace is a Module too, but nothing CALLs it.
             let candidates: Vec<_> = index
                 .by_name(name)
                 .into_iter()
-                .filter(|n| n.kind == NodeKind::Module && n.language.as_str() != "jcl")
+                .filter(|n| {
+                    n.kind == NodeKind::Module && PROGRAM_LANGUAGES.contains(&n.language.as_str())
+                })
                 .filter(wicked_estate_core::is_structural_symbol)
                 .collect();
             // Uniqueness first, self second: two programs of that name are ambiguous even when one
