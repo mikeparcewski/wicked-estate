@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.35.1] — 2026-11-11
+
+Patch: an indexed APEXlang `application.apx` no longer always reads as stale (#429).
+
+**Upgrade note (0.35.0 -> 0.35.1).** Install 0.35.1 on every path the daemon resolves, then restart.
+The first `index` of each repo re-reads every file, because the binary version changed. No store
+migration is needed.
+
 ### Fixed
 - **An indexed APEXlang `application.apx` no longer always reads as `stale: modified`.** 0.35.0
   folds the application's `.apex/apexlang.json` into its stored digest (#316). The freshness check
