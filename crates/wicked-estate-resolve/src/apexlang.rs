@@ -412,6 +412,13 @@ mod tests {
         }
         assert!(probes.contains_key(&apexlang_ref::container(n.symbol.as_str())));
         assert!(probes.contains_key(&apexlang_ref::format("~region", "main", APP1)));
+        // A bindable component is also probed as a bind-variable target.
+        let mut item = comp(&format!("{APP1}page:2#pageItem:P2_X#"), "pageItem", "P2_X");
+        item.metadata.insert(BINDABLE_KEY.into(), true.into());
+        let item_probes = backfill_probes(&item);
+        for k in [BINDABLE.to_string(), format!("{HEURISTIC}{BINDABLE}")] {
+            assert!(item_probes.contains(&apexlang_ref::format(&k, "P2_X", APP1)));
+        }
         assert_eq!(
             probes.len(),
             7,

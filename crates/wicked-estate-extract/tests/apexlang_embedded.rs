@@ -153,7 +153,6 @@ fn tag_mapping_is_data_and_failures_are_markers() {
         key: "k".into(),
         tag: Some(tag.into()),
         span,
-        want_literals: false,
     };
     let builtin = EmbedTable::builtin();
     assert_eq!(
@@ -344,12 +343,19 @@ fn fixture_slice_bind_variables_are_all_emitted_at_their_sites() {
 /// bind right after each is still found.
 #[test]
 fn text_scan_skips_alternative_quotes_and_quoted_identifiers() {
-    let src = "process p (\n    source {\n        plsqlCode:\n            ```plsql\n            x := q'[can't :P7_FAKE]';\n            :P7_REAL := 1;\n            y := Q'{:P7_FAKE2}';\n            select \":P7_FAKE3\" into :P7_REAL2 from dual;\n            ```\n    }\n)\n";
+    let src = "process p (\n    source {\n        plsqlCode:\n            ```plsql\n            x := q'[can't :P7_FAKE]';\n            :P7_REAL := 1;\n            y := Q'{:P7_FAKE2}';\n            select \":P7_FAKE3\" into :P7_REAL2 from dual;\n            z := nq'[can't :P7_FAKE4]';\n            :P7_REAL3 := 2;\n            ```\n    }\n)\n";
     let got: Vec<String> = bind_refs(&extract("app/pages/p00007-x.apx", src))
         .into_iter()
         .map(|(_, slug, _)| slug)
         .collect();
-    assert_eq!(got, vec!["P7_REAL", "P7_REAL2"]);
+    assert_eq!(got, vec!["P7_REAL", "P7_REAL2", "P7_REAL3"]);
+    // The same in a block the SQL grammar parses (it has no q-quote literal of its own).
+    let sql = "region r (\n    source {\n        sqlQuery:\n            ```sql\n            select q'[can't :P7_FAKE]' from dual\n            where id = :P7_REAL\n            ```\n    }\n)\n";
+    let got = bind_refs(&extract("app/pages/p00007-x.apx", sql));
+    assert_eq!(
+        got,
+        vec![("@bindable".into(), "P7_REAL".into(), ":P7_REAL".into())]
+    );
 }
 
 /// Two owners with the same key, and a repeated key, still mint distinct regions and distinct
@@ -373,7 +379,6 @@ fn region_identity_is_unique_per_host() {
         key: key.into(),
         tag: Some("javascript".into()),
         span: s,
-        want_literals: false,
     };
     let out = extract_regions(
         &host,
@@ -425,22 +430,28 @@ fn a_skipped_block_is_not_reported_as_parsed() {
 /// Secrets inside an embedded block are masked with that language's rules before extraction.
 #[test]
 fn embedded_secrets_are_redacted_like_their_language() {
-    let src = "region r (\n    js:\n        ```javascript-browser\n        const password = \"hunter2\";\n        ```\n)\n";
-    let masked = wicked_estate_extract::redact::redact_source("app/pages/p00001-x.apx", src);
+    use wicked_estate_extract::redact::redact_source;
+    let src = "region r (\n    js:\n        ```javascript-browser\n        const password = \"hunter2\";\n        ```\n    plsql:\n        ```plsql\n        l_password := 'hunter3';\n        apex_util.set_password(p_password => :P1_PWD);\n        ```\n    other:\n        ```\n        secret = 'hunter4'\n        ```\n)\n";
+    let masked = redact_source("app/pages/p00001-x.apx", src);
     assert_eq!(masked.len(), src.len());
-    assert!(!masked.contains("hunter2"), "{masked}");
+    for s in ["hunter2", "hunter3", "hunter4"] {
+        assert!(!masked.contains(s), "{s} leaked: {masked}");
+    }
+    assert!(
+        masked.contains(":P1_PWD"),
+        "a bind variable is code, not a secret"
+    );
+    // One pass of masks, so redaction is idempotent.
+    assert_eq!(redact_source("app/pages/p00001-x.apx", &masked), masked);
     let ex = extract("app/pages/p00001-x.apx", &masked);
-    assert!(ex.nodes.iter().all(|n| {
-        n.signature
-            .as_deref()
-            .is_none_or(|s| !s.contains("hunter2"))
-    }));
+    assert!(
+        ex.nodes
+            .iter()
+            .all(|n| { n.signature.as_deref().is_none_or(|s| !s.contains("hunter")) })
+    );
     // The host's own references are untouched.
     let page = "page 1 (\n    security {\n        authorizationScheme: @admin\n    }\n)\n";
-    assert_eq!(
-        wicked_estate_extract::redact::redact_source("app/pages/p00001-x.apx", page),
-        page
-    );
+    assert_eq!(redact_source("app/pages/p00001-x.apx", page), page);
 }
 
 #[test]

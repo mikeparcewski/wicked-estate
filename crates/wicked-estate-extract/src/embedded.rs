@@ -46,10 +46,6 @@ pub const REASON_KEY: &str = "embedded_reason";
 pub struct EmbedTable {
     #[serde(default)]
     tags: HashMap<String, String>,
-    /// Node kinds whose text is a string literal or a comment, per language: a scan for names
-    /// inside a parsed region skips them.
-    #[serde(default)]
-    literal_kinds: HashMap<String, Vec<String>>,
 }
 
 impl EmbedTable {
@@ -84,9 +80,6 @@ pub struct EmbeddedRegion {
     pub tag: Option<String>,
     /// The body's span in the host file (may be empty).
     pub span: Span,
-    /// Collect the region's string-literal and comment ranges ([`RegionOutcome::literals`]); only
-    /// a host that scans the region afterwards (bind variables) pays the extra parse.
-    pub want_literals: bool,
 }
 
 /// What happened to one region.
@@ -96,8 +89,6 @@ pub struct RegionOutcome {
     pub symbol: SymbolId,
     /// The built-in language the region was extracted with, when it was.
     pub language: Option<String>,
-    /// Host byte ranges of string literals and comments inside a parsed region.
-    pub literals: Vec<(usize, usize)>,
 }
 
 /// The extraction contributed by a host's embedded regions, plus one outcome per region (in input
@@ -140,18 +131,10 @@ pub fn extract_regions(
             (Some(t), None) => Some(format!("no built-in grammar for tag `{t}`")),
             _ => None,
         };
-        let mut literals = Vec::new();
         let mut region_language = host.language.clone();
         if let Some(lang) = mapped {
             match extract_body(host, region, &symbol, &module, lang, body) {
                 Ok(ex) => {
-                    if region.want_literals {
-                        let base = region.span.start_byte as usize;
-                        literals = literal_ranges(lang, body, table)
-                            .into_iter()
-                            .map(|(s, e)| (base + s, base + e))
-                            .collect();
-                    }
                     // A parsed region speaks its embedded language, so code at its top level
                     // (owned by the marker) passes the resolvers' family guard.
                     region_language = Language::new(lang);
@@ -198,7 +181,6 @@ pub fn extract_regions(
         out.regions.push(RegionOutcome {
             symbol,
             language: parsed,
-            literals,
         });
     }
     out
@@ -280,14 +262,21 @@ fn embedded_extractor(lang: &str) -> Option<(Arc<TreeSitterExtractor>, String)> 
         .entry(lang.to_string())
         .or_insert_with(|| {
             let extractor = TreeSitterExtractor::for_language(lang)?;
-            let ext = crate::registry()
-                .into_iter()
-                .find(|l| l.name == lang)
-                .and_then(|l| l.ext.first().cloned())
-                .unwrap_or_else(|| "txt".to_string());
+            let ext = language_ext(lang).unwrap_or("txt").to_string();
             Some((Arc::new(extractor), ext))
         })
         .clone()
+}
+
+/// A built-in language's first file extension, from the manifest read once per process.
+pub(crate) fn language_ext(lang: &str) -> Option<&'static str> {
+    static EXT: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
+        crate::registry()
+            .into_iter()
+            .filter_map(|l| l.ext.first().cloned().map(|e| (l.name, e)))
+            .collect()
+    });
+    EXT.get(lang).map(String::as_str)
 }
 
 /// Percent-encode a region key (injective; the result holds no `/`).
@@ -307,32 +296,4 @@ fn shift(s: Span, base: Span) -> Span {
         end_line: s.end_line + base.start_line,
         end_col: col(s.end_line, s.end_col),
     }
-}
-
-/// Byte ranges (body coordinates) of the nodes the table lists as literals or comments for `lang`.
-fn literal_ranges(lang: &str, body: &str, table: &EmbedTable) -> Vec<(usize, usize)> {
-    let Some(kinds) = table.literal_kinds.get(lang) else {
-        return Vec::new();
-    };
-    let Some(language) = crate::treesitter::builtin_language(lang) else {
-        return Vec::new();
-    };
-    let mut parser = tree_sitter::Parser::new();
-    if parser.set_language(&language).is_err() {
-        return Vec::new();
-    }
-    let Some(tree) = parser.parse(body, None) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    let mut cursor = tree.walk();
-    let mut stack = vec![tree.root_node()];
-    while let Some(n) = stack.pop() {
-        if kinds.iter().any(|k| k == n.kind()) {
-            out.push((n.start_byte(), n.end_byte()));
-            continue;
-        }
-        stack.extend(n.children(&mut cursor));
-    }
-    out
 }

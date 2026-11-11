@@ -1,5 +1,5 @@
-# Embedded-code table (estate#314). Rules as data: src/embedded.rs reads it; a new mapping or a
-# new literal kind needs no Rust change.
+# Embedded-code table (estate#314). Rules as data: src/embedded.rs reads it; a new mapping needs
+# no Rust change.
 
 # Language tag as written in a host file (case-insensitive) -> built-in language (a LANG_TABLE
 # name). A tag that is not listed has no built-in grammar: its region becomes an unparsed marker,
@@ -18,12 +18,3 @@ json = "json"
 yaml = "yaml"
 markdown = "markdown"
 md = "markdown"
-
-# Node kinds, per built-in language, whose text is a string literal or a comment. A name scan
-# inside a parsed region (APEXlang bind variables, #315) skips these ranges.
-[literal_kinds]
-sql = ["literal", "comment", "marginalia"]
-javascript = ["string", "template_string", "comment", "regex"]
-typescript = ["string", "template_string", "comment", "regex"]
-html = ["comment", "attribute_value", "quoted_attribute_value"]
-css = ["comment", "string_value"]

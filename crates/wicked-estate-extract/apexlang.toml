@@ -777,9 +777,10 @@ scope = "app"
 # (item names are unique in an application; the page number in a name is a convention, and a copied
 # page keeps its items' names). `pattern` must have the named group `item`. It is case-insensitive
 # and names are upper-cased, because unquoted Oracle identifiers are. Only regions with one of `tags` are
-# scanned. A region parsed with a grammar skips string literals and comments (embedded.toml
-# `literal_kinds`). An unparsed region (no PL/SQL grammar is built in) is scanned as text,
-# skipping the `text_scan` quote and comment delimiters, and its refs are heuristic.
+# scanned. Strings, quoted identifiers and comments are skipped in every block by the Oracle-aware
+# `text_scan` delimiters (the built-in SQL grammar has no `q'[...]'` literal, so its literal nodes
+# cannot be trusted to cover one). Refs from a block the SQL grammar parsed are typed; refs from an
+# unparsed block (no PL/SQL grammar is built in) are heuristic.
 [bind_variable]
 pattern = '(?i):(?P<item>P[0-9]+_[A-Za-z0-9_$#]+)'
 # Kinds a bind variable can name: page items and faceted-search facets (a facet is an item too).
@@ -791,7 +792,7 @@ quote = "'"
 line_comment = "--"
 block_comment = ["/*", "*/"]
 identifier_quote = '"'
-alternative_quote_prefix = "q"
+alternative_quote_prefixes = ["nq", "q"]
 alternative_quote_pairs = [["[", "]"], ["(", ")"], ["{", "}"], ["<", ">"]]
 
 # ── Export metadata version (#316) ───────────────────────────────────────────────────────────────

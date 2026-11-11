@@ -84,9 +84,9 @@ struct TextScan {
     block_comment: [String; 2],
     /// Quoted identifiers (`"..."`), never bind variables.
     identifier_quote: String,
-    /// Alternative quoting `q'[...]'`: the prefix letters (case-insensitive) and the bracket
-    /// pairs; any other delimiter closes with itself.
-    alternative_quote_prefix: String,
+    /// Alternative quoting `q'[...]'` / `nq'[...]'`: the prefixes (case-insensitive, longest
+    /// first) and the bracket pairs; any other delimiter closes with itself.
+    alternative_quote_prefixes: Vec<String>,
     alternative_quote_pairs: Vec<[String; 2]>,
 }
 
@@ -786,15 +786,11 @@ fn extract_with(
                 s
             }
         };
-        let want_literals = tag
-            .as_deref()
-            .is_some_and(|t| data.bind_variable.tags.contains(&t.to_ascii_lowercase()));
         regions.push(crate::embedded::EmbeddedRegion {
             owner: comps[owner].symbol.clone(),
             key: format!("{owner_path}{property}"),
             tag,
             span,
-            want_literals,
         });
         region_owner.push(owner);
     }
@@ -857,16 +853,11 @@ fn bind_variable_refs(
     let Some(body) = file.text.get(base..region.span.end_byte as usize) else {
         return;
     };
+    // Strings, quoted identifiers and comments are skipped by an Oracle-aware lexical scan in
+    // every block, parsed or not: the built-in SQL grammar knows no `q'[...]'` literal, so its
+    // literal nodes cannot be trusted to cover one.
     let parsed = outcome.language.is_some();
-    let skipped: Vec<(usize, usize)> = if parsed {
-        outcome
-            .literals
-            .iter()
-            .map(|&(s, e)| (s - base, e - base))
-            .collect()
-    } else {
-        text_scan_skips(body, &bind.text_scan)
-    };
+    let skipped = text_scan_skips(body, &bind.text_scan);
     let kind = if parsed {
         apexlang_ref::BINDABLE.to_string()
     } else {
@@ -942,18 +933,22 @@ fn text_scan_skips(body: &str, scan: &TextScan) -> Vec<(usize, usize)> {
             .map_or(b.len(), |j| j + pat.len())
     };
     let alt_quote = |i: usize| -> Option<usize> {
-        // `q'X ... X'`: prefix letter, the quote, a delimiter, then the closing delimiter + quote.
-        let prefix = scan.alternative_quote_prefix.as_bytes();
-        if prefix.is_empty()
-            || b.len() - i <= prefix.len() + q.len()
-            || !b[i..i + prefix.len()].eq_ignore_ascii_case(prefix)
-            || (i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_'))
-            || !b[i + prefix.len()..].starts_with(q)
-        {
+        // `q'X ... X'`: a prefix, the quote, a delimiter, then the closing delimiter + quote.
+        if i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_') {
             return None;
         }
+        let prefix = scan
+            .alternative_quote_prefixes
+            .iter()
+            .map(String::as_bytes)
+            .find(|p| {
+                !p.is_empty()
+                    && b.len() - i > p.len() + q.len()
+                    && b[i..i + p.len()].eq_ignore_ascii_case(p)
+                    && b[i + p.len()..].starts_with(q)
+            })?;
         let d = i + prefix.len() + q.len();
-        let open = std::str::from_utf8(&b[d..]).ok()?.chars().next()?;
+        let open = body.get(d..)?.chars().next()?;
         let close = scan
             .alternative_quote_pairs
             .iter()
