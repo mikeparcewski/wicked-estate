@@ -153,6 +153,7 @@ fn tag_mapping_is_data_and_failures_are_markers() {
         key: "k".into(),
         tag: Some(tag.into()),
         span,
+        want_literals: false,
     };
     let builtin = EmbedTable::builtin();
     assert_eq!(
@@ -235,10 +236,10 @@ fn bind_variables_link_to_page_items_with_honest_confidence() {
     assert_eq!(
         got,
         vec![
-            ("~pageItem".into(), "P7_NAME".into(), ":P7_NAME".into()),
-            ("~pageItem".into(), "P0_GLOBAL".into(), ":p0_global".into()),
+            ("~@bindable".into(), "P7_NAME".into(), ":P7_NAME".into()),
+            ("~@bindable".into(), "P0_GLOBAL".into(), ":p0_global".into()),
             (
-                "pageItem".into(),
+                "@bindable".into(),
                 "P7_CUSTOMER_ID".into(),
                 ":P7_CUSTOMER_ID".into()
             ),
@@ -250,10 +251,11 @@ fn bind_variables_link_to_page_items_with_honest_confidence() {
         .filter(|r| r.hints.contains_key("apexlang_bind_variable"))
         .map(|r| apexlang_ref::parse(&r.raw_name).unwrap().scope)
         .collect();
-    assert_eq!(scopes[0], "apexlang . . . app/app#page:7#");
-    assert_eq!(
-        scopes[1], "apexlang . . . app/app#page:0#",
-        "the page comes from the name"
+    // Item names are unique in an application (a copied page keeps `P3_X` on page 503), so the
+    // scope is the application, not the page the name suggests.
+    assert!(
+        scopes.iter().all(|s| s == "apexlang . . . app/app#"),
+        "{scopes:?}"
     );
     // Exact site.
     let r = ex
@@ -283,12 +285,12 @@ fn bind_variables_link_to_page_items_with_honest_confidence() {
 #[test]
 fn bind_variable_pattern_is_data() {
     let toml = include_str!("../apexlang.toml").replace(
-        "pattern = '(?i):(?P<item>P(?P<page>[0-9]+)_[A-Za-z0-9_$#]+)'",
-        "pattern = '&(?P<item>P(?P<page>[0-9]+)_[A-Za-z0-9_$#]+)\\.'",
+        "pattern = '(?i):(?P<item>P[0-9]+_[A-Za-z0-9_$#]+)'",
+        "pattern = '&(?P<item>P[0-9]+_[A-Za-z0-9_$#]+)\\.'",
     );
     assert!(
-        ApexlangData::parse(&toml.replace("(?P<page>", "(")).is_err(),
-        "named groups checked"
+        ApexlangData::parse(&toml.replace("(?P<item>", "(")).is_err(),
+        "the `item` group is checked"
     );
     let ex = ApexlangExtractor::with_data(ApexlangData::parse(&toml).unwrap());
     let src = "region r (\n    html:\n        ```sql\n        select '&P3_X.' from dual where :P3_Y = 1\n        ```\n)\n";
@@ -302,23 +304,143 @@ fn bind_variable_pattern_is_data() {
     assert_eq!(got[0].1, "P3_X");
 }
 
-/// Every bind variable of the fixture slice becomes a ref at its exact site.
+/// Every bind variable of a fixture page becomes a ref at its exact site, and nothing else does.
 #[test]
 fn fixture_slice_bind_variables_are_all_emitted_at_their_sites() {
     let path = format!("{FIXTURES}/example-1/pages/p09999-login.apx");
     let text = std::fs::read_to_string(&path).unwrap();
     let ex = extract("example-1/pages/p09999-login.apx", &text);
-    let binds: Vec<_> = ex
+    let mut got: Vec<(u32, String)> = ex
         .refs
         .iter()
         .filter(|r| r.hints.contains_key("apexlang_bind_variable"))
+        .map(|r| {
+            let s = r.location.span;
+            (
+                s.start_line + 1,
+                text[s.start_byte as usize..s.end_byte as usize].to_string(),
+            )
+        })
         .collect();
-    assert!(!binds.is_empty());
-    for r in binds {
-        let s = r.location.span;
-        let site = &text[s.start_byte as usize..s.end_byte as usize];
-        assert!(site.to_ascii_uppercase().starts_with(":P9999_"), "{site}");
-    }
+    got.sort();
+    // Independently listed from the file (`grep -no ':P[0-9]*_[A-Z_]*'`): three PL/SQL blocks.
+    let want: Vec<(u32, String)> = [
+        (173, ":P9999_USERNAME"),
+        (174, ":P9999_REMEMBER"),
+        (174, ":P9999_USERNAME"),
+        (193, ":P9999_USERNAME"),
+        (194, ":P9999_PASSWORD"),
+        (195, ":P9999_PERSISTENT_AUTH"),
+        (213, ":P9999_USERNAME"),
+        (214, ":P9999_REMEMBER"),
+    ]
+    .iter()
+    .map(|(l, s)| (*l, s.to_string()))
+    .collect();
+    assert_eq!(got, want);
+}
+
+/// Oracle alternative quoting and quoted identifiers hide `:P..` from the text scan, and a real
+/// bind right after each is still found.
+#[test]
+fn text_scan_skips_alternative_quotes_and_quoted_identifiers() {
+    let src = "process p (\n    source {\n        plsqlCode:\n            ```plsql\n            x := q'[can't :P7_FAKE]';\n            :P7_REAL := 1;\n            y := Q'{:P7_FAKE2}';\n            select \":P7_FAKE3\" into :P7_REAL2 from dual;\n            ```\n    }\n)\n";
+    let got: Vec<String> = bind_refs(&extract("app/pages/p00007-x.apx", src))
+        .into_iter()
+        .map(|(_, slug, _)| slug)
+        .collect();
+    assert_eq!(got, vec!["P7_REAL", "P7_REAL2"]);
+}
+
+/// Two owners with the same key, and a repeated key, still mint distinct regions and distinct
+/// embedded symbols.
+#[test]
+fn region_identity_is_unique_per_host() {
+    let host = sf(
+        "h.apx",
+        "x\nfunction f() {}\ny\nfunction f() {}\nz\nfunction f() {}\n",
+    );
+    let span = |line: u32, start: u32| Span {
+        start_byte: start,
+        end_byte: start + 16,
+        start_line: line,
+        start_col: 0,
+        end_line: line + 1,
+        end_col: 0,
+    };
+    let region = |owner: &str, key: &str, s: Span| EmbeddedRegion {
+        owner: SymbolId(owner.into()),
+        key: key.into(),
+        tag: Some("javascript".into()),
+        span: s,
+        want_literals: false,
+    };
+    let out = extract_regions(
+        &host,
+        &[
+            region("a", "script", span(1, 2)),
+            region("b", "script", span(3, 20)),
+            region("c", "a.b", span(5, 38)),
+        ],
+        EmbedTable::builtin(),
+    );
+    let markers: std::collections::BTreeSet<_> =
+        out.regions.iter().map(|r| r.symbol.clone()).collect();
+    assert_eq!(markers.len(), 3);
+    let fns: std::collections::BTreeSet<_> = out
+        .extraction
+        .nodes
+        .iter()
+        .filter(|n| n.name == "f")
+        .map(|n| n.symbol.clone())
+        .collect();
+    assert_eq!(fns.len(), 3, "{fns:?}");
+    // Top-level code is owned by a marker that speaks the embedded language.
+    let js_marker = out
+        .extraction
+        .nodes
+        .iter()
+        .find(|n| n.symbol == out.regions[0].symbol)
+        .unwrap();
+    assert_eq!(js_marker.language.as_str(), "javascript");
+}
+
+/// A block the minified/huge guard skips is an unparsed marker with the reason, not "parsed".
+#[test]
+fn a_skipped_block_is_not_reported_as_parsed() {
+    let long = format!("var a = '{}';", "x".repeat(60_000));
+    let src =
+        format!("region r (\n    js:\n        ```javascript-browser\n{long}\n        ```\n)\n");
+    let ex = extract("app/pages/p00001-x.apx", &src);
+    let marker = regions_of(&ex)[0];
+    assert_eq!(marker.metadata.get(PARSED_KEY), Some(&false.into()));
+    assert!(
+        marker.metadata[REASON_KEY]
+            .as_str()
+            .unwrap()
+            .contains("minified")
+    );
+}
+
+/// Secrets inside an embedded block are masked with that language's rules before extraction.
+#[test]
+fn embedded_secrets_are_redacted_like_their_language() {
+    let src = "region r (\n    js:\n        ```javascript-browser\n        const password = \"hunter2\";\n        ```\n)\n";
+    let masked = wicked_estate_extract::redact::redact_source("app/pages/p00001-x.apx", src);
+    assert_eq!(masked.len(), src.len());
+    assert!(!masked.contains("hunter2"), "{masked}");
+    let ex = extract("app/pages/p00001-x.apx", &masked);
+    assert!(ex.nodes.iter().all(|n| {
+        n.signature
+            .as_deref()
+            .is_none_or(|s| !s.contains("hunter2"))
+    }));
+    // The host's own references are untouched.
+    let page = "page 1 (\n    security {\n        authorizationScheme: @admin\n    }\n)\n";
+    assert_eq!(
+        wicked_estate_extract::redact::redact_source("app/pages/p00001-x.apx", page),
+        page
+    );
 }
 
 #[test]
@@ -355,4 +477,26 @@ fn export_metadata_version_is_stored_on_the_application_node() {
     // Missing or unreadable: unknown, never a failure.
     assert_eq!(version(None), ("unknown".into(), false));
     assert_eq!(version(Some(b"not json")), ("unknown".into(), false));
+}
+
+/// Facets are bindable like page items; an item's own SQL naming itself is not a reference.
+#[test]
+fn facets_are_bindable_and_self_references_are_skipped() {
+    let src = "page 158 (\n    region kb (\n        facet P158_KB_COLUMN_ID (\n        )\n    )\n    pageItem P158_X (\n        lov {\n            sqlQuery:\n                ```sql\n                select d, r from t where r = :P158_X or c = :P158_KB_COLUMN_ID\n                ```\n        }\n    )\n)\n";
+    let ex = extract("app/pages/p00158-kanban.apx", src);
+    let facet = ex
+        .nodes
+        .iter()
+        .find(|n| n.name == "P158_KB_COLUMN_ID")
+        .unwrap();
+    assert_eq!(
+        facet.metadata.get(apexlang_ref::BINDABLE_KEY),
+        Some(&true.into())
+    );
+    let got: Vec<String> = bind_refs(&ex).into_iter().map(|(_, s, _)| s).collect();
+    assert_eq!(
+        got,
+        vec!["P158_KB_COLUMN_ID"],
+        "the item's own name is skipped"
+    );
 }

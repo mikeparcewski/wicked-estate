@@ -68,7 +68,8 @@ pub struct ApexlangData {
 #[derive(Debug, Clone, Deserialize)]
 struct BindVariable {
     pattern: String,
-    target: String,
+    /// Component kinds a bind variable can name (marked `apexlang_bindable`).
+    targets: Vec<String>,
     tags: Vec<String>,
     text_scan: TextScan,
     #[serde(skip)]
@@ -81,6 +82,12 @@ struct TextScan {
     quote: String,
     line_comment: String,
     block_comment: [String; 2],
+    /// Quoted identifiers (`"..."`), never bind variables.
+    identifier_quote: String,
+    /// Alternative quoting `q'[...]'`: the prefix letters (case-insensitive) and the bracket
+    /// pairs; any other delimiter closes with itself.
+    alternative_quote_prefix: String,
+    alternative_quote_pairs: Vec<[String; 2]>,
 }
 
 /// Where the export metadata version lives (#316).
@@ -129,16 +136,9 @@ impl ApexlangData {
             .map_err(|e| Error::Extraction(format!("apexlang.toml: {e}")))?;
         let re = regex::Regex::new(&data.bind_variable.pattern)
             .map_err(|e| Error::Extraction(format!("apexlang.toml bind_variable.pattern: {e}")))?;
-        if re
-            .capture_names()
-            .flatten()
-            .filter(|n| *n == "item" || *n == "page")
-            .count()
-            != 2
-        {
+        if re.capture_names().flatten().all(|n| n != "item") {
             return Err(Error::Extraction(
-                "apexlang.toml bind_variable.pattern needs the named groups `item` and `page`"
-                    .into(),
+                "apexlang.toml bind_variable.pattern needs the named group `item`".into(),
             ));
         }
         data.bind_variable.regex = Some(re);
@@ -662,6 +662,10 @@ fn extract_with(
             .insert(KIND_METADATA_KEY.into(), kind.clone().into());
         node.metadata
             .insert(IDENTITY_METADATA_KEY.into(), identity.into());
+        if data.bind_variable.targets.contains(&kind) {
+            node.metadata
+                .insert(apexlang_ref::BINDABLE_KEY.into(), true.into());
+        }
         if let Some(label) = props.get("name") {
             node.metadata
                 .insert("apexlang_label".into(), label.clone().into());
@@ -782,11 +786,15 @@ fn extract_with(
                 s
             }
         };
+        let want_literals = tag
+            .as_deref()
+            .is_some_and(|t| data.bind_variable.tags.contains(&t.to_ascii_lowercase()));
         regions.push(crate::embedded::EmbeddedRegion {
             owner: comps[owner].symbol.clone(),
             key: format!("{owner_path}{property}"),
             tag,
             span,
+            want_literals,
         });
         region_owner.push(owner);
     }
@@ -825,7 +833,7 @@ fn extract_with(
 }
 
 /// Page-item bind variables (`:P4_NAME`) of one embedded region, as refs from the region's owner
-/// to page item `P4_NAME` of page 4. A parsed region skips its string literals and comments and
+/// to page item `P4_NAME` of the application. A parsed region skips its string literals and comments and
 /// yields typed refs; an unparsed one is a text scan (quotes and comments skipped by the data's
 /// delimiters) and yields heuristic refs (target kind prefixed with
 /// [`apexlang_ref::HEURISTIC`]).
@@ -860,36 +868,52 @@ fn bind_variable_refs(
         text_scan_skips(body, &bind.text_scan)
     };
     let kind = if parsed {
-        bind.target.clone()
+        apexlang_ref::BINDABLE.to_string()
     } else {
-        format!("{}{}", apexlang_ref::HEURISTIC, bind.target)
+        format!("{}{}", apexlang_ref::HEURISTIC, apexlang_ref::BINDABLE)
     };
+    // An item's own SQL naming the item itself (`... or id = :P1_X` in P1_X's LOV) is not a
+    // dependency of anything.
+    let owner_key = owner
+        .as_str()
+        .rsplit('#')
+        .nth(1)
+        .and_then(|d| d.split_once(':'));
+    // Matches and skipped ranges are both in order: one forward pass over each (no quadratic
+    // rescans on a long block), and one line index for every match's position.
+    let mut skipped = skipped;
+    skipped.sort_unstable();
+    let mut next_skip = 0;
+    let lines = LineIndex::new(body);
     for caps in re.captures_iter(body) {
-        let (Some(whole), Some(item), Some(page)) =
-            (caps.get(0), caps.name("item"), caps.name("page"))
-        else {
+        let (Some(whole), Some(item)) = (caps.get(0), caps.name("item")) else {
             continue;
         };
+        while next_skip < skipped.len() && skipped[next_skip].1 <= whole.start() {
+            next_skip += 1;
+        }
         if skipped
-            .iter()
-            .any(|&(s, e)| s <= whole.start() && whole.start() < e)
+            .get(next_skip)
+            .is_some_and(|&(s, e)| s <= whole.start() && whole.start() < e)
         {
             continue;
         }
-        let page_key = page.as_str().trim_start_matches('0');
-        let page_key = if page_key.is_empty() { "0" } else { page_key };
-        let scope = format!(
-            "{}{}#",
-            app_symbol.as_str(),
-            element("page", &[page_key.to_string()], 1)
-        );
+        let name = item.as_str().to_ascii_uppercase();
+        if owner_key.is_some_and(|(k, id)| {
+            bind.targets.iter().any(|t| apexlang_ref::encode(t) == k)
+                && apexlang_ref::decode(id).as_deref() == Some(name.as_str())
+        }) {
+            continue;
+        }
+        // Page item names are unique in an application, and the page number in the name is only a
+        // convention (a copied page keeps `P3_X` on page 503), so the scope is the application.
         let mut r = UnresolvedRef::new(
             owner.clone(),
-            apexlang_ref::format(&kind, &item.as_str().to_ascii_uppercase(), &scope),
+            apexlang_ref::format(&kind, &name, app_symbol.as_str()),
             EdgeKind::References,
             Location::new(
                 &file.path,
-                sub_span(&file.text, region.span, whole.start(), whole.end()),
+                lines.span(region.span, whole.start(), whole.end()),
             ),
         );
         r.hints
@@ -898,39 +922,70 @@ fn bind_variable_refs(
     }
 }
 
-/// Body byte ranges a text scan skips: quoted strings (a doubled quote stays inside) and line and
-/// block comments, using the data's delimiters.
+/// Body byte ranges a text scan skips, in order: quoted strings (a doubled quote stays inside),
+/// alternative-quoted strings (`q'[...]'`), quoted identifiers, and line and block comments, using
+/// the data's delimiters.
 fn text_scan_skips(body: &str, scan: &TextScan) -> Vec<(usize, usize)> {
     let b = body.as_bytes();
-    let (q, lc) = (scan.quote.as_bytes(), scan.line_comment.as_bytes());
+    let q = scan.quote.as_bytes();
+    let iq = scan.identifier_quote.as_bytes();
+    let lc = scan.line_comment.as_bytes();
     let (bo, bc) = (
         scan.block_comment[0].as_bytes(),
         scan.block_comment[1].as_bytes(),
     );
     let at = |i: usize, pat: &[u8]| !pat.is_empty() && b[i..].starts_with(pat);
-    let find = |from: usize, pat: &[u8]| -> usize {
+    // Index just past the next `pat` at or after `from`, or the end.
+    let past = |from: usize, pat: &[u8]| -> usize {
         (from..b.len())
             .find(|&j| b[j..].starts_with(pat))
             .map_or(b.len(), |j| j + pat.len())
     };
+    let alt_quote = |i: usize| -> Option<usize> {
+        // `q'X ... X'`: prefix letter, the quote, a delimiter, then the closing delimiter + quote.
+        let prefix = scan.alternative_quote_prefix.as_bytes();
+        if prefix.is_empty()
+            || b.len() - i <= prefix.len() + q.len()
+            || !b[i..i + prefix.len()].eq_ignore_ascii_case(prefix)
+            || (i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_'))
+            || !b[i + prefix.len()..].starts_with(q)
+        {
+            return None;
+        }
+        let d = i + prefix.len() + q.len();
+        let open = std::str::from_utf8(&b[d..]).ok()?.chars().next()?;
+        let close = scan
+            .alternative_quote_pairs
+            .iter()
+            .find(|[o, _]| o.starts_with(open))
+            .and_then(|[_, c]| c.chars().next())
+            .unwrap_or(open);
+        let mut closing = close.to_string().into_bytes();
+        closing.extend_from_slice(q);
+        Some(past(d + open.len_utf8(), &closing))
+    };
     let mut out = Vec::new();
     let mut i = 0;
     while i < b.len() {
-        let end = if at(i, q) {
+        let end = if let Some(end) = alt_quote(i) {
+            end
+        } else if at(i, q) {
             // A quote doubled inside a string is part of it.
             let mut j = i + q.len();
             loop {
-                let k = find(j, q);
+                let k = past(j, q);
                 if k < b.len() && b[k..].starts_with(q) {
                     j = k + q.len();
                 } else {
                     break k;
                 }
             }
+        } else if at(i, iq) {
+            past(i + iq.len(), iq)
         } else if at(i, lc) {
             (i..b.len()).find(|&j| b[j] == b'\n').unwrap_or(b.len())
         } else if at(i, bo) {
-            find(i + bo.len(), bc)
+            past(i + bo.len(), bc)
         } else {
             i += 1;
             continue;
@@ -941,27 +996,42 @@ fn text_scan_skips(body: &str, scan: &TextScan) -> Vec<(usize, usize)> {
     out
 }
 
-/// The host span of body bytes `[start, end)` of a region.
-fn sub_span(text: &str, region: Span, start: usize, end: usize) -> Span {
-    let base = region.start_byte as usize;
-    let pos = |off: usize| -> (u32, u32) {
-        let before = &text[base..base + off];
-        let lines = before.matches('\n').count() as u32;
-        let col = match before.rfind('\n') {
-            Some(nl) => (before.len() - nl - 1) as u32,
-            None => region.start_col + before.len() as u32,
+/// Line starts of a region body, for host spans of body offsets in O(log lines).
+struct LineIndex {
+    starts: Vec<usize>,
+}
+
+impl LineIndex {
+    fn new(body: &str) -> Self {
+        let mut starts = vec![0];
+        starts.extend(body.match_indices('\n').map(|(i, _)| i + 1));
+        Self { starts }
+    }
+
+    fn pos(&self, region: Span, off: usize) -> (u32, u32) {
+        let line = self.starts.partition_point(|&s| s <= off) - 1;
+        let col = off - self.starts[line];
+        let col = if line == 0 {
+            region.start_col as usize + col
+        } else {
+            col
         };
-        (region.start_line + lines, col)
-    };
-    let (sl, sc) = pos(start);
-    let (el, ec) = pos(end);
-    Span {
-        start_byte: (base + start) as u32,
-        end_byte: (base + end) as u32,
-        start_line: sl,
-        start_col: sc,
-        end_line: el,
-        end_col: ec,
+        (region.start_line + line as u32, col as u32)
+    }
+
+    /// The host span of body bytes `[start, end)`.
+    fn span(&self, region: Span, start: usize, end: usize) -> Span {
+        let base = region.start_byte;
+        let (sl, sc) = self.pos(region, start);
+        let (el, ec) = self.pos(region, end);
+        Span {
+            start_byte: base + start as u32,
+            end_byte: base + end as u32,
+            start_line: sl,
+            start_col: sc,
+            end_line: el,
+            end_col: ec,
+        }
     }
 }
 

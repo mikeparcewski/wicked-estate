@@ -626,6 +626,7 @@ fn full_pinned_corpus_parses_cleanly_and_mints_distinct_ids() {
     let mut refs = 0usize;
     // (#314) every fenced block becomes a region marker: tag -> (parsed, unparsed).
     let mut regions: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+    let mut region_ids: std::collections::HashSet<String> = Default::default();
     for f in &files {
         let text = std::fs::read_to_string(f).unwrap();
         let path = rel(&root, f);
@@ -649,6 +650,9 @@ fn full_pinned_corpus_parses_cleanly_and_mints_distinct_ids() {
             ));
         }
         for m in markers {
+            if !region_ids.insert(m.symbol.0.clone()) {
+                failures.push(format!("{path}: region {} minted twice", m.symbol));
+            }
             let tag = m.name.clone();
             let e = regions.entry(tag).or_default();
             if m.metadata.get("embedded_parsed") == Some(&true.into()) {

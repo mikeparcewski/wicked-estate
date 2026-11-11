@@ -3,7 +3,8 @@
 
 # Language tag as written in a host file (case-insensitive) -> built-in language (a LANG_TABLE
 # name). A tag that is not listed has no built-in grammar: its region becomes an unparsed marker,
-# never a guess. `plsql` is deliberately absent (no PL/SQL grammar is built in).
+# never a guess. `plsql` is deliberately absent (no PL/SQL grammar is built in), and so is `xml`
+# (HTML is not XML: CDATA and processing instructions would parse as markup).
 [tags]
 sql = "sql"
 html = "html"
@@ -14,7 +15,6 @@ js = "javascript"
 typescript = "typescript"
 ts = "typescript"
 json = "json"
-xml = "html"
 yaml = "yaml"
 markdown = "markdown"
 md = "markdown"

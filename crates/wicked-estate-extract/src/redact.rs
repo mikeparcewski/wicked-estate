@@ -42,6 +42,19 @@ struct Rules {
     format: Vec<Format>,
     #[serde(default)]
     trust: Vec<Trust>,
+    #[serde(default)]
+    embedded_host: Vec<EmbeddedHost>,
+}
+
+/// A grammar whose files embed code in other languages (APEXlang fenced blocks): each block's
+/// body is redacted with the rules of the language its tag names (`embedded.toml`), so a secret
+/// in embedded JavaScript is masked like one in a `.js` file.
+#[derive(Deserialize)]
+struct EmbeddedHost {
+    grammar: String,
+    block: String,
+    tag_field: String,
+    body_field: String,
 }
 
 #[derive(Deserialize)]
@@ -343,7 +356,58 @@ pub fn redact_source(path: &str, text: &str) -> String {
         // every `name=value` / `name: value` whose name C4 denies (`PASSWORD=...` in JCL).
         kv_deny_masks(text, &mut masks);
     }
-    apply(text, &masks)
+    let host = crate::treesitter::builtin_owner_of_ext(&ext)
+        .and_then(|g| COMPILED.rules.embedded_host.iter().find(|h| h.grammar == g));
+    let Some(host) = host else {
+        return apply(text, &masks);
+    };
+    let masked = apply(text, &masks);
+    embedded_masks(path, text, masked, host)
+}
+
+/// Redact every embedded block body of a host file with its own language's rules and merge the
+/// result into the host's masked text, byte for byte (a byte stays masked if either pass masked
+/// it). Same length, same line breaks.
+fn embedded_masks(path: &str, text: &str, masked: String, host: &EmbeddedHost) -> String {
+    let Some(tree) = parse(text, &host.grammar) else {
+        return masked;
+    };
+    let mut out = masked.into_bytes();
+    let orig = text.as_bytes();
+    let mut cursor = tree.walk();
+    let mut stack = vec![tree.root_node()];
+    let mut n_block = 0usize;
+    while let Some(n) = stack.pop() {
+        if n.kind() != host.block {
+            stack.extend(n.children(&mut cursor));
+            continue;
+        }
+        let Some(body) = n.child_by_field_name(&host.body_field) else {
+            continue;
+        };
+        let tag = n
+            .child_by_field_name(&host.tag_field)
+            .and_then(|t| t.utf8_text(orig).ok());
+        let Some(lang) = crate::embedded::EmbedTable::builtin().language_for(tag) else {
+            continue;
+        };
+        let Some(ext) = crate::registry()
+            .into_iter()
+            .find(|l| l.name == lang)
+            .and_then(|l| l.ext.first().cloned())
+        else {
+            continue;
+        };
+        n_block += 1;
+        let (s, e) = (body.start_byte(), body.end_byte());
+        let sub = redact_source(&format!("{path}.embedded-{n_block}.{ext}"), &text[s..e]);
+        for (i, b) in sub.bytes().enumerate() {
+            if b != orig[s + i] {
+                out[s + i] = b;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| mask_all(text))
 }
 
 static KV: LazyLock<Regex> = LazyLock::new(|| {

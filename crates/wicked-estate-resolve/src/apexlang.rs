@@ -17,7 +17,9 @@
 //! input is in the persisted `raw_name`, so a stored ref re-resolves to the same edge without
 //! re-extraction.
 
-use wicked_estate_core::refs::apexlang_ref::{self, ANY_KIND, HEURISTIC, NO_BIND};
+use wicked_estate_core::refs::apexlang_ref::{
+    self, ANY_KIND, BINDABLE, BINDABLE_KEY, HEURISTIC, NO_BIND,
+};
 use wicked_estate_core::{Edge, ResolutionTier, Resolver, Result, SymbolIndex, UnresolvedRef};
 
 /// Language name of APEXlang nodes (`wicked-estate-extract`'s `apexlang::LANGUAGE`).
@@ -85,8 +87,14 @@ impl Resolver for ApexlangRefResolver {
                     s.len() > parsed.scope.len() && s.starts_with(&parsed.scope)
                 })
                 .filter(|n| {
-                    !typed
-                        || n.metadata.get(KIND_KEY).and_then(|v| v.as_str()) == Some(kind.as_str())
+                    if !typed {
+                        return true;
+                    }
+                    if kind == BINDABLE {
+                        return n.metadata.get(BINDABLE_KEY).and_then(|v| v.as_bool())
+                            == Some(true);
+                    }
+                    n.metadata.get(KIND_KEY).and_then(|v| v.as_str()) == Some(kind.as_str())
                 })
                 .collect();
             let [only] = candidates.as_slice() else {
@@ -109,6 +117,7 @@ impl Resolver for ApexlangRefResolver {
             )
             .with_location(r.location.clone());
             let via = match (typed, scanned) {
+                (true, false) if kind == BINDABLE => "bind-variable",
                 (true, false) => "kind-table",
                 (true, true) => "text-scan",
                 (false, _) => "unique-slug",
@@ -147,8 +156,14 @@ pub fn backfill_probes(node: &wicked_estate_core::Node) -> Vec<String> {
     // Components parked waiting for this node as their holder.
     out.push(apexlang_ref::container(sym));
     for scope in scopes {
-        for k in [kind, ANY_KIND] {
+        let scanned = format!("{HEURISTIC}{kind}");
+        for k in [kind, ANY_KIND, scanned.as_str()] {
             out.push(apexlang_ref::format(k, &node.name, scope));
+        }
+        if node.metadata.get(BINDABLE_KEY).and_then(|v| v.as_bool()) == Some(true) {
+            for k in [BINDABLE.to_string(), format!("{HEURISTIC}{BINDABLE}")] {
+                out.push(apexlang_ref::format(&k, &node.name, scope));
+            }
         }
     }
     out
@@ -266,15 +281,17 @@ mod tests {
     #[test]
     fn text_scanned_kinds_bind_at_heuristic_tier() {
         let page = format!("{APP1}page:9#");
-        let idx = Idx(vec![comp(
-            &format!("{page}pageItem:P9_X#"),
-            "pageItem",
-            "P9_X",
-        )]);
+        let mut item = comp(&format!("{page}pageItem:P9_X#"), "pageItem", "P9_X");
+        item.metadata.insert(BINDABLE_KEY.into(), true.into());
+        // Not bindable (a region named like an item) never competes.
+        let idx = Idx(vec![
+            item,
+            comp(&format!("{APP1}page:2#region:P9_X#"), "region", "P9_X"),
+        ]);
         let from = format!("{APP1}page:9#process:p#");
         let refs = vec![
-            reference(&from, "pageItem", "P9_X", &page),
-            reference(&from, &format!("{HEURISTIC}pageItem"), "P9_X", &page),
+            reference(&from, BINDABLE, "P9_X", APP1),
+            reference(&from, &format!("{HEURISTIC}{BINDABLE}"), "P9_X", APP1),
         ];
         let edges = ApexlangRefResolver.resolve(&refs, &idx).unwrap();
         assert_eq!(edges.len(), 2);
@@ -394,9 +411,10 @@ mod tests {
             assert!(probes.contains_key(&apexlang_ref::format(ANY_KIND, "main", &scope)));
         }
         assert!(probes.contains_key(&apexlang_ref::container(n.symbol.as_str())));
+        assert!(probes.contains_key(&apexlang_ref::format("~region", "main", APP1)));
         assert_eq!(
             probes.len(),
-            5,
+            7,
             "the node's own id is not a scope of itself"
         );
     }

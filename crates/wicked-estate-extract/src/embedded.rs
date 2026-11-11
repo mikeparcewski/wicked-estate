@@ -15,9 +15,11 @@
 //! - the embedded extractor's edges keep their own tier and confidence; their metadata names the
 //!   host file and the region.
 //!
-//! Identity: a region is `embedded synthetic <owner>|<key>:`; the code inside it is minted by its
-//! own extractor under the virtual module `<host path>/<key>`, so it never depends on a byte
-//! offset, and two regions of one host never share an id.
+//! Identity: a region is `embedded synthetic <host path>/<encoded key>:`, and the code inside it is
+//! minted by its own extractor under that same virtual module, so nothing depends on a byte offset
+//! and two regions never share an id (a repeated key gets `~2`). Refs of top-level embedded code
+//! are owned by the region marker, whose language is the embedded one. Not handled: relative
+//! imports from embedded code (the importer is the host file, which has no import conventions).
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -75,12 +77,16 @@ impl EmbedTable {
 pub struct EmbeddedRegion {
     /// The host component that owns the region.
     pub owner: SymbolId,
-    /// Stable key, unique among the owner's regions (e.g. the property that holds it).
+    /// Stable key, unique within the host file (APEXlang: the owner's path plus the property that
+    /// holds the block). A repeated key is disambiguated with `~2`, `~3` in input order.
     pub key: String,
     /// The language tag as written (`None` when untagged).
     pub tag: Option<String>,
     /// The body's span in the host file (may be empty).
     pub span: Span,
+    /// Collect the region's string-literal and comment ranges ([`RegionOutcome::literals`]); only
+    /// a host that scans the region afterwards (bind variables) pays the extra parse.
+    pub want_literals: bool,
 }
 
 /// What happened to one region.
@@ -109,8 +115,19 @@ pub fn extract_regions(
     table: &EmbedTable,
 ) -> Embedded {
     let mut out = Embedded::default();
+    let mut seen: HashMap<&str, usize> = HashMap::new();
     for region in regions {
-        let symbol = Symbol::synthetic("embedded", format!("{}|{}", region.owner, region.key)).id();
+        // The region's identity is its virtual module, `<host path>/<encoded key>`: the host path
+        // is unique per file and the encoded key holds no `/`, so ids are injective.
+        let n = seen.entry(region.key.as_str()).or_insert(0);
+        *n += 1;
+        let key = if *n == 1 {
+            encode(&region.key)
+        } else {
+            format!("{}~{}", encode(&region.key), n)
+        };
+        let module = format!("{}/{key}", host.path);
+        let symbol = Symbol::synthetic("embedded", module.clone()).id();
         let tag = region.tag.as_deref().filter(|t| !t.is_empty());
         let mapped = table.language_for(tag);
         let body = host
@@ -124,16 +141,20 @@ pub fn extract_regions(
             _ => None,
         };
         let mut literals = Vec::new();
+        let mut region_language = host.language.clone();
         if let Some(lang) = mapped {
-            match extract_body(host, region, &symbol, lang, body) {
+            match extract_body(host, region, &symbol, &module, lang, body) {
                 Ok(ex) => {
-                    literals = literal_ranges(lang, body, table)
-                        .into_iter()
-                        .map(|(s, e)| {
-                            let base = region.span.start_byte as usize;
-                            (base + s, base + e)
-                        })
-                        .collect();
+                    if region.want_literals {
+                        let base = region.span.start_byte as usize;
+                        literals = literal_ranges(lang, body, table)
+                            .into_iter()
+                            .map(|(s, e)| (base + s, base + e))
+                            .collect();
+                    }
+                    // A parsed region speaks its embedded language, so code at its top level
+                    // (owned by the marker) passes the resolvers' family guard.
+                    region_language = Language::new(lang);
                     out.extraction.nodes.extend(ex.nodes);
                     out.extraction.local_edges.extend(ex.local_edges);
                     out.extraction.refs.extend(ex.refs);
@@ -147,7 +168,7 @@ pub fn extract_regions(
             symbol.clone(),
             NodeKind::Other(REGION_KIND.to_string()),
             tag.unwrap_or("untagged"),
-            host.language.clone(),
+            region_language,
             Location::new(&host.path, region.span),
         );
         marker
@@ -188,18 +209,20 @@ fn extract_body(
     host: &SourceFile,
     region: &EmbeddedRegion,
     marker: &SymbolId,
+    module: &str,
     lang: &str,
     body: &str,
 ) -> Result<Extraction> {
-    let extractor = embedded_extractor(lang)
+    let (extractor, ext) = embedded_extractor(lang)
         .ok_or_else(|| Error::Extraction(format!("language `{lang}` is not wired")))?;
+    // The generic extractor returns nothing for a minified or huge text; say so, never claim the
+    // block was parsed.
+    if crate::treesitter::is_minified_or_huge(body) {
+        return Err(Error::Extraction(
+            "skipped as minified or huge (the same guard as a source file)".into(),
+        ));
+    }
     // A virtual module per region: ids stay stable (no offsets) and two regions never collide.
-    let ext = crate::registry()
-        .into_iter()
-        .find(|l| l.name == lang)
-        .and_then(|l| l.ext.first().cloned())
-        .unwrap_or_else(|| "txt".to_string());
-    let module = format!("{}/{}", host.path, region.key.replace('.', "%2E"));
     let sub = extractor.extract(&SourceFile {
         path: format!("{module}.{ext}"),
         language: Language::new(lang),
@@ -247,16 +270,29 @@ fn extract_body(
     Ok(ex)
 }
 
-/// One extractor per embedded language per process: compiling a language's query is the expensive
-/// part (ADR-014), and a host can hold thousands of blocks.
-fn embedded_extractor(lang: &str) -> Option<Arc<TreeSitterExtractor>> {
-    type Cache = Mutex<HashMap<String, Option<Arc<TreeSitterExtractor>>>>;
+/// One extractor (and its file extension) per embedded language per process: compiling a
+/// language's query is the expensive part (ADR-014), and a host can hold thousands of blocks.
+fn embedded_extractor(lang: &str) -> Option<(Arc<TreeSitterExtractor>, String)> {
+    type Cache = Mutex<HashMap<String, Option<(Arc<TreeSitterExtractor>, String)>>>;
     static CACHE: LazyLock<Cache> = LazyLock::new(Default::default);
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     cache
         .entry(lang.to_string())
-        .or_insert_with(|| TreeSitterExtractor::for_language(lang).map(Arc::new))
+        .or_insert_with(|| {
+            let extractor = TreeSitterExtractor::for_language(lang)?;
+            let ext = crate::registry()
+                .into_iter()
+                .find(|l| l.name == lang)
+                .and_then(|l| l.ext.first().cloned())
+                .unwrap_or_else(|| "txt".to_string());
+            Some((Arc::new(extractor), ext))
+        })
         .clone()
+}
+
+/// Percent-encode a region key (injective; the result holds no `/`).
+pub fn encode(key: &str) -> String {
+    wicked_estate_core::refs::apexlang_ref::encode(key)
 }
 
 /// A span measured inside a region body, moved into host coordinates. Columns shift only on the
