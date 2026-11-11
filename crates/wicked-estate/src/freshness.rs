@@ -628,12 +628,45 @@ impl FreshnessProbe {
             Err(_) => return Drift::Unknown,
         };
         let stamp = FileStamp::of(&meta);
+        // A file with a sidecar (APEXlang `application.apx`, #316) is digested with it, exactly as
+        // the indexer did, and never cached: the host's stamp does not see a sidecar edit.
+        let sidecar = wicked_estate_extract::apexlang::export_metadata_sidecar(&abs);
+        // The sidecar is read as the indexer reads it: confined to the owning repo root (a
+        // symlink out of the repo counts as absent, as it did at index time). A sidecar that is
+        // there but cannot be read makes the verdict unknown, never a guess either way.
+        let meta = match &sidecar {
+            None => None,
+            Some(p) => match std::fs::metadata(p) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(_) => return Drift::Unknown,
+                Ok(_) => {
+                    // Canonical paths, as `ConfinedRoot` compares them; only a sidecar that
+                    // resolves OUTSIDE the root counts as absent, a failed resolution is unknown.
+                    let Some(root) =
+                        owning_root(graph_path, roots).and_then(|r| r.path.canonicalize().ok())
+                    else {
+                        return Drift::Unknown;
+                    };
+                    match p.canonicalize() {
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(_) => return Drift::Unknown,
+                        Ok(canon) if !canon.starts_with(&root) => None,
+                        Ok(canon) => match std::fs::read(canon) {
+                            Ok(b) => Some(b),
+                            Err(_) => return Drift::Unknown,
+                        },
+                    }
+                }
+            },
+        };
         let digest = match self.digest_cache.get(&abs) {
-            Some((st, d)) if *st == stamp => d.clone(),
+            Some((st, d)) if *st == stamp && sidecar.is_none() => d.clone(),
             _ => match std::fs::read(&abs) {
                 Ok(bytes) => {
-                    let d = crate::file_digest(&bytes);
-                    self.digest_cache.insert(abs.clone(), (stamp, d.clone()));
+                    let d = crate::source_digest(&bytes, meta.as_deref());
+                    if sidecar.is_none() {
+                        self.digest_cache.insert(abs.clone(), (stamp, d.clone()));
+                    }
                     d
                 }
                 Err(_) => return Drift::Unknown,
@@ -1040,6 +1073,69 @@ mod tests {
             "{}",
             content["freshness"]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #316: an APEXlang `application.apx` is digested with its `.apex/apexlang.json`, so an
+    /// indexed application is fresh, and editing only the sidecar makes it stale.
+    #[test]
+    fn an_application_file_is_fresh_with_its_export_metadata_and_stale_when_it_changes() {
+        let dir = std::env::temp_dir().join(format!("wicked-estate-apx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("app/.apex")).unwrap();
+        let app = b"app A (\n)\n";
+        let meta = br#"{ "mmdVersion" : "26.2.0+3479" }"#;
+        std::fs::write(dir.join("app/application.apx"), app).unwrap();
+        std::fs::write(dir.join("app/.apex/apexlang.json"), meta).unwrap();
+        let mut store = wicked_estate_store::SqliteStore::in_memory().unwrap();
+        store.meta_set_key("indexed_root", &dir.to_string_lossy());
+        wicked_estate_core::GraphWrite::set_file_digest(
+            &mut store,
+            "app/application.apx",
+            &crate::source_digest(app, Some(meta)),
+        )
+        .unwrap();
+        let mut probe = FreshnessProbe::with_store(":memory:", Some(Box::new(store)));
+        let check = |probe: &mut FreshnessProbe| {
+            let mut content = json!({"rows": [{"file": "app/application.apx"}]});
+            probe.annotate(&mut content, &mut vec![]);
+            content["rows"][0]["stale"].clone()
+        };
+        assert_eq!(check(&mut probe), Value::Null, "fresh with its sidecar");
+        std::fs::write(
+            dir.join("app/.apex/apexlang.json"),
+            br#"{ "mmdVersion" : "27.1.0+1" }"#,
+        )
+        .unwrap();
+        assert_ne!(
+            check(&mut probe),
+            Value::Null,
+            "a sidecar edit is a modification"
+        );
+        // A sidecar symlinked out of the repo is refused by the indexer, so it counts as absent.
+        #[cfg(unix)]
+        {
+            let outside = std::env::temp_dir()
+                .join(format!("wicked-estate-apx-out-{}.json", std::process::id()));
+            std::fs::write(&outside, meta).unwrap();
+            std::fs::remove_file(dir.join("app/.apex/apexlang.json")).unwrap();
+            std::os::unix::fs::symlink(&outside, dir.join("app/.apex/apexlang.json")).unwrap();
+            let mut store = wicked_estate_store::SqliteStore::in_memory().unwrap();
+            store.meta_set_key("indexed_root", &dir.to_string_lossy());
+            wicked_estate_core::GraphWrite::set_file_digest(
+                &mut store,
+                "app/application.apx",
+                &crate::source_digest(app, None),
+            )
+            .unwrap();
+            let mut probe = FreshnessProbe::with_store(":memory:", Some(Box::new(store)));
+            assert_eq!(
+                check(&mut probe),
+                Value::Null,
+                "an escaping sidecar is not read"
+            );
+            let _ = std::fs::remove_file(&outside);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

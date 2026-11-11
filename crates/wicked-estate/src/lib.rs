@@ -1085,6 +1085,21 @@ fn collect_extra_rule_files(root: &Path, rules: &ExtraEdgeExtractor) -> Vec<Path
 }
 
 /// Compute an xxh3 hex digest for a byte slice.
+/// The stored digest of a source file: its bytes, folded with its sidecar when it has one (an
+/// APEXlang `application.apx` and its `.apex/apexlang.json`, #316). The ONE definition the indexer
+/// and the freshness check share, so a file is never "modified" just because it has a sidecar.
+pub(crate) fn source_digest(bytes: &[u8], sidecar: Option<&[u8]>) -> String {
+    match sidecar {
+        Some(meta) => {
+            let mut both = bytes.to_vec();
+            both.extend_from_slice(b"\0apexlang-export-metadata\0");
+            both.extend_from_slice(meta);
+            file_digest(&both)
+        }
+        None => file_digest(bytes),
+    }
+}
+
 pub(crate) fn file_digest(bytes: &[u8]) -> String {
     format!("{:016x}", xxh3_64(bytes))
 }
@@ -1457,15 +1472,7 @@ fn index_path_inner(
             let bytes = confined_root.as_ref()?.read(&abs)?;
             let export_metadata = wicked_estate_extract::apexlang::export_metadata_path(&rel_path)
                 .map(|meta| confined_root.as_ref()?.read(&root.join(meta)));
-            let digest = match &export_metadata {
-                Some(Some(meta)) => {
-                    let mut both = bytes.clone();
-                    both.extend_from_slice(b"\0apexlang-export-metadata\0");
-                    both.extend_from_slice(meta);
-                    file_digest(&both)
-                }
-                _ => file_digest(&bytes),
-            };
+            let digest = source_digest(&bytes, export_metadata.as_ref().and_then(|m| m.as_deref()));
             Some(FileWork {
                 abs,
                 rel: repo_scope::namespaced(repo, &rel_path),
