@@ -1411,6 +1411,10 @@ fn index_path_inner(
         raw: String,
         bytes: Vec<u8>,
         digest: String,
+        /// APEXlang `application.apx` only (#316): the export-metadata file beside it, which the
+        /// walk never visits (`.apex/` is hidden). `Some(None)` = expected but missing or
+        /// unreadable. Folded into `digest`, so editing it re-extracts the application file.
+        export_metadata: Option<Option<Vec<u8>>>,
     }
 
     let supported: Vec<(PathBuf, String)> = files
@@ -1451,13 +1455,24 @@ fn index_path_inner(
         .filter_map(|(abs, rel_path)| {
             // #405: confined — a path that resolves outside the root is never read.
             let bytes = confined_root.as_ref()?.read(&abs)?;
-            let digest = file_digest(&bytes);
+            let export_metadata = wicked_estate_extract::apexlang::export_metadata_path(&rel_path)
+                .map(|meta| confined_root.as_ref()?.read(&root.join(meta)));
+            let digest = match &export_metadata {
+                Some(Some(meta)) => {
+                    let mut both = bytes.clone();
+                    both.extend_from_slice(b"\0apexlang-export-metadata\0");
+                    both.extend_from_slice(meta);
+                    file_digest(&both)
+                }
+                _ => file_digest(&bytes),
+            };
             Some(FileWork {
                 abs,
                 rel: repo_scope::namespaced(repo, &rel_path),
                 raw: rel_path,
                 bytes,
                 digest,
+                export_metadata,
             })
         })
         .collect();
@@ -1775,6 +1790,13 @@ fn index_path_inner(
                 // extra-edge rules target) — the extra pass below still runs on it.
                 base_extraction(&fw.rel, &ext, &text, &ext_map).unwrap_or_default()
             };
+            if let Some(meta) = &fw.export_metadata {
+                wicked_estate_extract::apexlang::apply_export_metadata(
+                    &mut extraction,
+                    &fw.rel,
+                    meta.as_deref(),
+                );
+            }
 
             // ── Extra-edge pass: drop-in domain rules (.wicked-estate-extractors/) ────────────
             if let Some(x) = extra_rules {

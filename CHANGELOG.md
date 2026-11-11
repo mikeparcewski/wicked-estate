@@ -28,6 +28,29 @@
     (`oracle/apexlang/`).
   - **Containment:** a top-level component links to the application, theme, plugin or supporting
     objects that hold it, through a `contains` edge (all 6,086 in the corpus resolve).
+- **Embedded code, page-item bind variables and the export version in APEXlang (#314 to #316).**
+  - **Embedded code (#314):** a generic utility (`wicked_estate_extract::embedded`) extracts code a
+    host file embeds in another language with that language's built-in grammar, and shifts every
+    location into the host file. The tag -> language mapping is data (`embedded.toml`). Every
+    APEXlang fenced block becomes an `embedded_region` node held by its component. `sql`, `html`,
+    `css` and `javascript-browser` blocks are extracted with the built-in SQL, HTML, CSS and
+    JavaScript grammars. A `plsql` block (no grammar is built in), an untagged one or one too large
+    to parse is an unparsed marker with its reason, never dropped and never guessed. A failure
+    inside a block never fails the host file. The embedded extractor's own edges keep their tier and
+    confidence and name the host file and region in their metadata. Block bodies are secret-redacted
+    with their own language's rules (unparsed ones: quoted literals assigned to secret-named
+    variables).
+  - **Bind variables (#315):** `:P<n>_<NAME>` inside a `sql` or `plsql` block becomes a reference
+    from the block's component to the page item or faceted-search facet `P<n>_<NAME>` of the
+    application (item names are unique per application; the page number is only a convention).
+    The pattern, target kinds and quote/comment delimiters are data. Strings (including Oracle
+    `q'[...]'` / `nq'[...]'`), quoted identifiers and comments are skipped. References from a
+    parsed `sql` block bind at full confidence, those from an unparsed PL/SQL block at heuristic
+    confidence (`via=text-scan`). In the pinned corpus, 5,948 of 5,971 bind variables resolve.
+  - **Export version (#316):** `.apex/apexlang.json`'s `mmdVersion` is stored on the application
+    node (`apexlang_mmd_version`). The file is folded into `application.apx`'s digest, so editing
+    it re-extracts. A major version not listed in the data prints `APEXLANG-UNSUPPORTED-VERSION:`
+    and flags the node. A missing file records `unknown`.
 
 ## [0.34.1] — 2026-11-10
 

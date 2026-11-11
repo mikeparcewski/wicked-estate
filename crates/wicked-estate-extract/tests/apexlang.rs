@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use wicked_estate_core::refs::apexlang_ref;
-use wicked_estate_core::{EdgeKind, Extraction, Extractor, Language, NodeKind, SourceFile};
+use wicked_estate_core::{EdgeKind, Extraction, Extractor, Language, SourceFile};
 use wicked_estate_extract::apexlang::{
     ApexlangData, ApexlangExtractor, IDENTITY_METADATA_KEY, KIND_METADATA_KEY, app_layout,
 };
@@ -180,7 +180,11 @@ fn crlf_line_endings_parse_and_values_stop_before_the_carriage_return() {
     let src = "page 1 (\r\n    name: Home\r\n    pageGroup: @admin\r\n)\r\n";
     assert!(parse_problems(&parse(src)).is_empty());
     let ex = extract("app/pages/p00001-home.apx", src);
-    let page = ex.nodes.iter().find(|n| n.kind != NodeKind::File).unwrap();
+    let page = ex
+        .nodes
+        .iter()
+        .find(|n| n.metadata.contains_key(KIND_METADATA_KEY))
+        .unwrap();
     assert_eq!(
         page.metadata.get("apexlang_label").and_then(|v| v.as_str()),
         Some("Home")
@@ -267,7 +271,7 @@ fn every_component_is_one_node_with_a_path_derived_id_and_a_container() {
         let comps: Vec<_> = ex
             .nodes
             .iter()
-            .filter(|n| n.kind != NodeKind::File)
+            .filter(|n| n.metadata.contains_key(KIND_METADATA_KEY))
             .collect();
         assert_eq!(comps.len(), components, "{path}: one node per component");
         let app_root = path.split('/').next().unwrap();
@@ -384,7 +388,7 @@ fn ids(ex: &Extraction) -> Vec<String> {
     let mut v: Vec<String> = ex
         .nodes
         .iter()
-        .filter(|n| n.kind != NodeKind::File)
+        .filter(|n| n.metadata.contains_key(KIND_METADATA_KEY))
         .map(|n| n.symbol.0.clone())
         .collect();
     v.sort();
@@ -620,16 +624,48 @@ fn full_pinned_corpus_parses_cleanly_and_mints_distinct_ids() {
     let mut seen: HashMap<String, String> = HashMap::new();
     let mut components = 0usize;
     let mut refs = 0usize;
+    // (#314) every fenced block becomes a region marker: tag -> (parsed, unparsed).
+    let mut regions: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+    let mut region_ids: std::collections::HashSet<String> = Default::default();
     for f in &files {
         let text = std::fs::read_to_string(f).unwrap();
         let path = rel(&root, f);
-        let problems = parse_problems(&parse(&text));
+        let tree = parse(&text);
+        let problems = parse_problems(&tree);
         if !problems.is_empty() {
             failures.push(format!("{path}: {problems:?}"));
         }
         let ex = extract(&path, &text);
         refs += ex.refs.len();
-        for n in ex.nodes.iter().filter(|n| n.kind != NodeKind::File) {
+        let markers: Vec<_> = ex
+            .nodes
+            .iter()
+            .filter(|n| n.kind == wicked_estate_core::NodeKind::Other("embedded_region".into()))
+            .collect();
+        if markers.len() != count_kind(&tree, "fenced_block") {
+            failures.push(format!(
+                "{path}: {} fenced blocks, {} region markers",
+                count_kind(&tree, "fenced_block"),
+                markers.len()
+            ));
+        }
+        for m in markers {
+            if !region_ids.insert(m.symbol.0.clone()) {
+                failures.push(format!("{path}: region {} minted twice", m.symbol));
+            }
+            let tag = m.name.clone();
+            let e = regions.entry(tag).or_default();
+            if m.metadata.get("embedded_parsed") == Some(&true.into()) {
+                e.0 += 1;
+            } else {
+                e.1 += 1;
+            }
+        }
+        for n in ex
+            .nodes
+            .iter()
+            .filter(|n| n.metadata.contains_key(KIND_METADATA_KEY))
+        {
             components += 1;
             if let Some(prev) = seen.insert(n.symbol.0.clone(), path.clone()) {
                 failures.push(format!("{} minted by {prev} and {path}", n.symbol));
@@ -641,6 +677,9 @@ fn full_pinned_corpus_parses_cleanly_and_mints_distinct_ids() {
         files.len(),
         failures.len()
     );
+    for (tag, (p, u)) in &regions {
+        eprintln!("  fenced `{tag}`: {p} parsed, {u} unparsed");
+    }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

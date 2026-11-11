@@ -126,6 +126,24 @@ fn fixture_slice_resolves_references_inside_their_own_application() {
         "no reference of the breadcrumb region binds the region itself"
     );
 
+    // The export metadata version sits on each application node (#316).
+    for app in [
+        "apexlang . . . example-1/app#",
+        "apexlang . . . example-2/app#",
+    ] {
+        let node = store
+            .get_node(&wicked_estate_core::SymbolId(app.into()))
+            .unwrap()
+            .expect("application node");
+        assert_eq!(
+            node.metadata
+                .get("apexlang_mmd_version")
+                .and_then(|v| v.as_str()),
+            Some("26.1.0+3102"),
+            "{app}"
+        );
+    }
+
     // Both applications declare `authorization contribution-rights`; each page binds its own.
     let ex2 = "apexlang . . . example-2/app#";
     for app in [ex1, ex2] {
@@ -235,6 +253,83 @@ fn stored_refs_re_resolve_to_the_same_edges_after_reopen() {
     let _ = fs::remove_dir_all(&full_dir);
 }
 
+/// Bind variables parked before their item or facet exists bind once it is indexed later, on a
+/// reopened store, to the same edges (tier and site) as one full pass.
+#[test]
+fn parked_bind_variables_bind_when_their_target_arrives() {
+    let lov = "lov owners (\n    source {\n        sqlQuery:\n            ```sql\n            select name d, id r from t where k = :P1_KIND\n            ```\n    }\n)\n";
+    let process = "appProcess load (\n    source {\n        plsqlCode:\n            ```plsql\n            :P1_KIND := 'x';\n            :P2_FACET := 1;\n            ```\n    }\n)\n";
+    let page1 = "page 1 (\n    pageItem P1_KIND (\n    )\n)\n";
+    let page2 = "page 2 (\n    region search (\n        facet P2_FACET (\n        )\n    )\n)\n";
+    let write = |root: &Path, with_pages: bool| {
+        fs::create_dir_all(root.join("app/shared-components/lovs")).unwrap();
+        fs::create_dir_all(root.join("app/pages")).unwrap();
+        fs::write(root.join("app/application.apx"), "app APP (\n)\n").unwrap();
+        fs::write(root.join("app/shared-components/lovs/owners.apx"), lov).unwrap();
+        fs::write(
+            root.join("app/shared-components/app-processes.apx"),
+            process,
+        )
+        .unwrap();
+        if with_pages {
+            fs::write(root.join("app/pages/p00001-a.apx"), page1).unwrap();
+            fs::write(root.join("app/pages/p00002-b.apx"), page2).unwrap();
+        }
+    };
+    let binds = |store: &dyn GraphRead| -> BTreeSet<(String, String, String, u32, String)> {
+        store
+            .all_edges()
+            .unwrap()
+            .into_iter()
+            .filter(|e| {
+                e.resolved_by == "apexlang-ref"
+                    && e.metadata.get("via").and_then(|v| v.as_str()) != Some("layout")
+            })
+            .map(|e| {
+                let loc = e.location.clone().unwrap();
+                (
+                    e.source.0,
+                    e.target.0,
+                    loc.file,
+                    loc.span.start_byte,
+                    format!("{:?}", e.provenance),
+                )
+            })
+            .collect()
+    };
+    let full = fresh("binds_full");
+    write(&full, true);
+    let mut want_store = SqliteStore::in_memory().unwrap();
+    wicked_estate::index_path(&mut want_store, &full).unwrap();
+    let want = binds(&want_store);
+    assert_eq!(want.len(), 3, "{want:?}");
+    assert!(
+        want.iter().any(|w| w.4 == "Parsed"),
+        "the sql bind is typed"
+    );
+    assert!(
+        want.iter().any(|w| w.4 == "Heuristic"),
+        "plsql binds are heuristic"
+    );
+
+    let dir = fresh("binds_incr");
+    let db = dir.join("graph.db");
+    let src = dir.join("src");
+    write(&src, false);
+    {
+        let mut store = SqliteStore::open(&db).unwrap();
+        wicked_estate::index_path(&mut store, &src).unwrap();
+        assert!(binds(&store).is_empty(), "no target yet: every bind parks");
+    }
+    write(&src, true);
+    let mut reopened = SqliteStore::open(&db).unwrap();
+    wicked_estate::index_path(&mut reopened, &src).unwrap();
+    // Paths are repo-relative, so both roots mint the same ids.
+    assert_eq!(binds(&reopened), want);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&full);
+}
+
 /// The indexed graph as a resolver index (by name and by id).
 struct NodeIndex {
     by_name: HashMap<String, Vec<Node>>,
@@ -322,6 +417,14 @@ fn resolution_report(
                 .unwrap();
             assert!(store.file_digest(&rel).unwrap().is_some(), "{rel} indexed");
             for r in ex.refs {
+                // Refs of the embedded code itself (a JavaScript call in a fenced block) belong
+                // to that language's resolvers; this report accounts for APEXlang's own refs.
+                if r.hints.contains_key("embedded_region") {
+                    *classes
+                        .entry("embedded code (other resolvers)".into())
+                        .or_default() += 1;
+                    continue;
+                }
                 total += 1;
                 sites.insert(
                     (rel.clone(), r.location.span.start_byte),
@@ -337,7 +440,10 @@ fn resolution_report(
                     ),
                 );
                 let theme = text[r.location.span.start_byte as usize..].starts_with("@/");
+                let bind = r.hints.contains_key("apexlang_bind_variable");
                 let class = match apexlang_ref::parse(&r.raw_name) {
+                    Some(p) if bind && p.kind.starts_with('~') => "bind variable (text scan)",
+                    Some(_) if bind => "bind variable (parsed region)",
                     None => {
                         assert!(apexlang_ref::parse_container(&r.raw_name).is_some());
                         "holder (contains)"
@@ -486,7 +592,11 @@ fn full_pinned_corpus_resolution() {
         fs::write(out, unresolved.join("\n") + "\n").unwrap();
     }
     assert_eq!(
-        classes.values().sum::<usize>(),
+        classes
+            .iter()
+            .filter(|(k, _)| !k.starts_with("embedded code"))
+            .map(|(_, v)| v)
+            .sum::<usize>(),
         total,
         "every reference is accounted for"
     );

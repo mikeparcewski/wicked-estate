@@ -39,6 +39,15 @@ pub mod apexlang_ref {
     pub const ANY_KIND: &str = "*";
     /// Target kind of a reference that must stay unresolved.
     pub const NO_BIND: &str = "-";
+    /// Prefix on a target kind found by a text scan rather than a grammar (an APEXlang bind
+    /// variable in an unparsed PL/SQL block): `~pageItem` binds like `pageItem`, at `Heuristic`.
+    pub const HEURISTIC: &str = "~";
+    /// Target kind of an APEXlang bind variable: any component the extractor marks bindable
+    /// (node metadata [`BINDABLE_KEY`] = true; page items and faceted-search facets), since the
+    /// written name does not say which kind it is.
+    pub const BINDABLE: &str = "@bindable";
+    /// Node metadata key marking a component a bind variable can name.
+    pub const BINDABLE_KEY: &str = "apexlang_bindable";
     /// `raw_name` prefix of a top-level component's link to the application or container
     /// directory that holds it: `apexlang-in:<holder SymbolId>`. Bound to a `Contains` edge from
     /// the holder once the holder exists, so a holder declared in another file never dangles.

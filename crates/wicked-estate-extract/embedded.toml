@@ -1,0 +1,20 @@
+# Embedded-code table (estate#314). Rules as data: src/embedded.rs reads it; a new mapping needs
+# no Rust change.
+
+# Language tag as written in a host file (case-insensitive) -> built-in language (a LANG_TABLE
+# name). A tag that is not listed has no built-in grammar: its region becomes an unparsed marker,
+# never a guess. `plsql` is deliberately absent (no PL/SQL grammar is built in), and so is `xml`
+# (HTML is not XML: CDATA and processing instructions would parse as markup).
+[tags]
+sql = "sql"
+html = "html"
+css = "css"
+javascript = "javascript"
+"javascript-browser" = "javascript"
+js = "javascript"
+typescript = "typescript"
+ts = "typescript"
+json = "json"
+yaml = "yaml"
+markdown = "markdown"
+md = "markdown"

@@ -42,6 +42,19 @@ struct Rules {
     format: Vec<Format>,
     #[serde(default)]
     trust: Vec<Trust>,
+    #[serde(default)]
+    embedded_host: Vec<EmbeddedHost>,
+}
+
+/// A grammar whose files embed code in other languages (APEXlang fenced blocks): each block's
+/// body is redacted with the rules of the language its tag names (`embedded.toml`), so a secret
+/// in embedded JavaScript is masked like one in a `.js` file.
+#[derive(Deserialize)]
+struct EmbeddedHost {
+    grammar: String,
+    block: String,
+    tag_field: String,
+    body_field: String,
 }
 
 #[derive(Deserialize)]
@@ -320,6 +333,12 @@ enum MaskKind {
 /// Redact `text` (the content of `path`) per the policy above. The result has exactly
 /// `text.len()` bytes and the same line breaks. Returns `text` unchanged when nothing matched.
 pub fn redact_source(path: &str, text: &str) -> String {
+    apply(text, &source_masks(path, text))
+}
+
+/// Every mask [`redact_source`] applies to `text`, before applying them (so a host's embedded
+/// blocks contribute ranges to ONE application pass: a defined precedence, idempotent).
+fn source_masks(path: &str, text: &str) -> Vec<(usize, usize, MaskKind)> {
     let mut masks: Vec<(usize, usize, MaskKind)> = core_redact::token_shape_ranges(text)
         .into_iter()
         .map(|(s, e)| (s, e, MaskKind::Text))
@@ -328,7 +347,8 @@ pub fn redact_source(path: &str, text: &str) -> String {
         .rsplit_once('.')
         .map(|(_, e)| e.to_ascii_lowercase())
         .unwrap_or_default();
-    if let Some(grammar) = crate::treesitter::builtin_owner_of_ext(&ext) {
+    let grammar = crate::treesitter::builtin_owner_of_ext(&ext);
+    if let Some(grammar) = grammar {
         let c = &*COMPILED;
         if let Some(fmt) = c.rules.format.iter().find(|f| f.grammar == grammar) {
             config_masks(path, text, grammar, fmt, &mut masks);
@@ -343,7 +363,85 @@ pub fn redact_source(path: &str, text: &str) -> String {
         // every `name=value` / `name: value` whose name C4 denies (`PASSWORD=...` in JCL).
         kv_deny_masks(text, &mut masks);
     }
-    apply(text, &masks)
+    if let Some(host) =
+        grammar.and_then(|g| COMPILED.rules.embedded_host.iter().find(|h| h.grammar == g))
+    {
+        embedded_masks(path, text, host, &mut masks);
+    }
+    masks
+}
+
+/// Masks for every embedded block body of a host file. A block whose tag names a built-in
+/// language is redacted with that language's rules; any other block (no built-in grammar, or
+/// untagged) gets the C4 check on its assignments (`password := '...'`, `pwd => '...'`), confined
+/// to the body so the host's own properties (`authorizationScheme: @admin`) are untouched.
+fn embedded_masks(
+    path: &str,
+    text: &str,
+    host: &EmbeddedHost,
+    masks: &mut Vec<(usize, usize, MaskKind)>,
+) {
+    let Some(tree) = parse(text, &host.grammar) else {
+        return;
+    };
+    let src = text.as_bytes();
+    let mut cursor = tree.walk();
+    let mut stack = vec![tree.root_node()];
+    let mut n_block = 0usize;
+    while let Some(n) = stack.pop() {
+        if n.kind() != host.block {
+            stack.extend(n.children(&mut cursor));
+            continue;
+        }
+        let Some(body) = n.child_by_field_name(&host.body_field) else {
+            continue;
+        };
+        let (s, e) = (body.start_byte(), body.end_byte());
+        let tag = n
+            .child_by_field_name(&host.tag_field)
+            .and_then(|t| t.utf8_text(src).ok());
+        let ext = crate::embedded::EmbedTable::builtin()
+            .language_for(tag)
+            .and_then(crate::embedded::language_ext);
+        let sub = match ext {
+            Some(ext) => {
+                n_block += 1;
+                source_masks(&format!("{path}.embedded-{n_block}.{ext}"), &text[s..e])
+            }
+            None => {
+                let mut m = Vec::new();
+                assignment_deny_masks(&text[s..e], &mut m);
+                m
+            }
+        };
+        masks.extend(sub.into_iter().map(|(a, b, k)| (s + a, s + b, k)));
+    }
+}
+
+/// A quoted literal assigned to a name C4 denies (`password := '...'`, `p_pwd => '...'`,
+/// `secret = "..."`), in a body no grammar reads (PL/SQL has none built in). Only literals are
+/// masked: a bare value is code (`p_password => :P1_PWD` binds an item, it holds no secret). A
+/// doubled quote stays inside a literal.
+fn assignment_deny_masks(body: &str, masks: &mut Vec<(usize, usize, MaskKind)>) {
+    static ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"([A-Za-z_][\w.$#]*)[ \t]*(?::=|=>|[:=])[ \t]*('(?:[^'\n]|'')*'|"[^"\n]*")"#)
+            .expect("assignment pattern compiles")
+    });
+    for c in ASSIGN.captures_iter(body) {
+        let (Some(k), Some(v)) = (c.get(1), c.get(2)) else {
+            continue;
+        };
+        if core_redact::deny_key(k.as_str()) {
+            let raw = v.as_str();
+            let inner = unquote(raw);
+            let off = (raw.len() - inner.len()) / 2;
+            masks.push((
+                v.start() + off,
+                v.start() + off + inner.len(),
+                MaskKind::Text,
+            ));
+        }
+    }
 }
 
 static KV: LazyLock<Regex> = LazyLock::new(|| {

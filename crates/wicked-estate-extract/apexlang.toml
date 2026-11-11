@@ -767,3 +767,41 @@ owner = "customAttribute"
 property = "dependingOn.attribute"
 target = "-"
 scope = "app"
+
+# ── Embedded code (#314) ─────────────────────────────────────────────────────────────────────────
+# Every fenced block is an embedded region of the component that owns it; its tag maps to a
+# built-in language through embedded.toml (the generic table every host shares).
+
+# ── Page-item bind variables (#315) ──────────────────────────────────────────────────────────────
+# `:P<page>_<NAME>` inside an embedded region names page item `P<page>_<NAME>` of the application
+# (item names are unique in an application; the page number in a name is a convention, and a copied
+# page keeps its items' names). `pattern` must have the named group `item`. It is case-insensitive
+# and names are upper-cased, because unquoted Oracle identifiers are. Only regions with one of `tags` are
+# scanned. Strings, quoted identifiers and comments are skipped in every block by the Oracle-aware
+# `text_scan` delimiters (the built-in SQL grammar has no `q'[...]'` literal, so its literal nodes
+# cannot be trusted to cover one). Refs from a block the SQL grammar parsed are typed; refs from an
+# unparsed block (no PL/SQL grammar is built in) are heuristic.
+[bind_variable]
+pattern = '(?i):(?P<item>P[0-9]+_[A-Za-z0-9_$#]+)'
+# Kinds a bind variable can name: page items and faceted-search facets (a facet is an item too).
+targets = ["pageItem", "facet"]
+tags = ["sql", "plsql"]
+
+[bind_variable.text_scan]
+quote = "'"
+line_comment = "--"
+block_comment = ["/*", "*/"]
+identifier_quote = '"'
+alternative_quote_prefixes = ["nq", "q"]
+alternative_quote_pairs = [["[", "]"], ["(", ")"], ["{", "}"], ["<", ">"]]
+
+# ── Export metadata version (#316) ───────────────────────────────────────────────────────────────
+# `application.apx`'s directory holds `<file>`, whose `<version_key>` is the meta-metadata version
+# the application was exported with. It is stored on the application node. A major version not in
+# `supported_majors` prints a loud `APEXLANG-UNSUPPORTED-VERSION:` marker and flags the node;
+# extraction continues. A missing or unreadable file records the version as `unknown`.
+[export_metadata]
+host_file = "application.apx"
+file = ".apex/apexlang.json"
+version_key = "mmdVersion"
+supported_majors = ["26"]
