@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Added
+- **Every inspected definition says whether it is real behaviour.** The tree-sitter extractor now
+  writes `metadata.behaviour` (`real`, `stub`, `data` or `test_support`) and, when it is not
+  `real`, `metadata.behaviour_reason` on each function, method, constructor, class and struct in
+  Python, TypeScript, TSX, JavaScript and Rust. `stub`: an empty body, only `pass`/`...`, only
+  `raise NotImplementedError("…")`, `throw new Error("not implemented")`, `todo!()`/
+  `unimplemented!("…")`, or a class of fields and stub methods (a `Protocol`). `data`: a class of
+  declared fields only (pydantic, `TypedDict`, `Enum`, dataclass), an empty class, a constructor
+  that only stores its arguments, a Rust `struct`. `test_support`: a test directory or file (now
+  also named kinds such as `integration_tests/` and helper dirs such as `test_utils/`), or a Rust
+  item under `#[cfg(test)]` or carrying `#[test]`. Every rule is a positive shape match, and
+  anything that can run code stays `real`: a computed default (`default_factory=time.monotonic`,
+  `token = issue_token()`), a call in a parameter default or a base list, an f-string, a decorator
+  or Rust attribute outside a small inert list, a literal returned as a struct. Other languages get
+  no key. wicked-core's requirements denominator reads it (core#1375, core#1235). On an AutoGPT
+  backend slice about 150 of the 1,158 units the share counted are classed non-`real`; a hand
+  census found no executable product logic among them.
+  `cargo run -p wicked-estate-extract --example behaviour_scan -- <dir>` prints the classes.
+
 ## [0.35.1] — 2026-11-11
 
 Patch: an indexed APEXlang `application.apx` no longer always reads as stale (#429).

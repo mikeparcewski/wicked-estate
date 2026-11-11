@@ -24,6 +24,8 @@ macro_rules! eprintln {
 }
 
 pub mod apexlang;
+/// Body-shape classification: real behaviour vs stub, data shape or test support (core#1375).
+pub mod behaviour;
 pub use apexlang::ApexlangExtractor;
 /// Embedded code (estate#314): another language's code inside a host file, extracted with that
 /// language's built-in grammar and mapped back into the host.
