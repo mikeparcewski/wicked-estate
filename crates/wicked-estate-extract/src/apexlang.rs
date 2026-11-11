@@ -1030,6 +1030,14 @@ impl LineIndex {
     }
 }
 
+/// The export-metadata file beside an `application.apx` (#316), for any path form (repo-relative
+/// or absolute); `None` for any other file. The indexer and the freshness check both fold it into
+/// the application file's digest.
+pub fn export_metadata_sidecar(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let meta = &ApexlangData::builtin().export_metadata;
+    (path.file_name()? == meta.host_file.as_str()).then(|| path.with_file_name("").join(&meta.file))
+}
+
 /// The repo-relative export-metadata file for an `application.apx` (#316), `None` for any other
 /// file. The indexer reads it (the `.apex` directory is never walked) and hands it to
 /// [`apply_export_metadata`].

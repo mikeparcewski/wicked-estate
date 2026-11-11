@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+- **An indexed APEXlang `application.apx` no longer always reads as `stale: modified`.** 0.35.0
+  folds the application's `.apex/apexlang.json` into its stored digest (#316). The freshness check
+  hashed the plain file, so every APEX application was flagged as modified on every read. Both
+  now use one digest. The probe reads the metadata file confined to the repo root, as the indexer
+  does, and reports the freshness as unknown, not as a guess, when a present file cannot be read.
+
 ## [0.35.0] — 2026-11-11
 
 Minor: Oracle APEXlang (`.apx`) is a built-in language (#309, steps #310 to #316). An APEX
