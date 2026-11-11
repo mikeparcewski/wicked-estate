@@ -61,6 +61,9 @@ struct EmbeddedHost {
 struct Exclude {
     names: Vec<String>,
     allow: Vec<String>,
+    /// Excluded unless the file is source code the code redactor reads (wicked-estate#433).
+    #[serde(default)]
+    unless_code: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -100,7 +103,6 @@ struct Unruled {
 #[derive(Deserialize)]
 struct DefaultDeny {
     grammars: Vec<String>,
-    #[cfg_attr(not(test), allow(dead_code))]
     prose: Vec<String>,
 }
 
@@ -229,6 +231,7 @@ struct Compiled {
     integrity: Regex,
     exclude: Vec<Regex>,
     allow: Vec<Regex>,
+    unless_code: Vec<Regex>,
 }
 
 static COMPILED: LazyLock<Compiled> = LazyLock::new(|| {
@@ -243,6 +246,12 @@ static COMPILED: LazyLock<Compiled> = LazyLock::new(|| {
         .expect("path segment allow-list compiles");
     let exclude = rules.exclude.names.iter().map(|g| glob_regex(g)).collect();
     let allow = rules.exclude.allow.iter().map(|g| glob_regex(g)).collect();
+    let unless_code = rules
+        .exclude
+        .unless_code
+        .iter()
+        .map(|g| glob_regex(g))
+        .collect();
     Compiled {
         rules,
         references,
@@ -251,6 +260,7 @@ static COMPILED: LazyLock<Compiled> = LazyLock::new(|| {
             .expect("integrity"),
         exclude,
         allow,
+        unless_code,
     }
 });
 
@@ -294,6 +304,8 @@ fn xxh3(b: &[u8]) -> u64 {
 
 /// True when `path` must never be indexed even if committed (`.env`, `.npmrc`, private keys,
 /// kubeconfigs, credential files). `.env.example` / `.env.sample` / `.env.template` are allowed.
+/// A name-prefix rule (`credentials*`, `id_*`, `kubeconfig*`) does not exclude source code
+/// (`credentials_store.py`, `id_utils.ts`; wicked-estate#433): see [`is_code_file`].
 pub fn is_excluded(path: &str) -> bool {
     let c = &*COMPILED;
     let name = file_name(path);
@@ -301,6 +313,25 @@ pub fn is_excluded(path: &str) -> bool {
         return false;
     }
     c.exclude.iter().any(|r| r.is_match(name))
+        || (c.unless_code.iter().any(|r| r.is_match(name)) && !is_code_file(name))
+}
+
+/// True when `name` is source code that [`redact_source`] redacts as code (C3 token shapes plus
+/// C4 name-bound literals): its extension has a built-in grammar with no `[[format]]` row, not in
+/// `[default_deny]` or `prose`, and not document tier. Config formats (json, yaml, toml, hcl, ini,
+/// xml, properties, dockerfile), prose, and names with no or an unknown extension are not code.
+fn is_code_file(name: &str) -> bool {
+    let Some((_, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    let Some(grammar) = crate::treesitter::builtin_owner_of_ext(&ext.to_ascii_lowercase()) else {
+        return false;
+    };
+    let r = &COMPILED.rules;
+    !r.format.iter().any(|f| f.grammar == grammar)
+        && !r.default_deny.grammars.iter().any(|g| g == grammar)
+        && !r.default_deny.prose.iter().any(|g| g == grammar)
+        && crate::by_name(grammar).is_some_and(|l| l.tier != crate::ExtractTier::Document)
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────────────────────────
@@ -1932,6 +1963,25 @@ mod tests {
             "c/credentials.json",
             "kubeconfig.yaml",
             "x.pem",
+            // wicked-estate#433: the name-prefix rules still exclude every non-code secret file.
+            "home/.ssh/id_ed25519",
+            "home/.ssh/id_ed25519.pub",
+            "ID_RSA",
+            "c/credentials",
+            "c/credentials.yaml",
+            "c/Credentials.YML",
+            "home/.cargo/credentials.toml",
+            "home/.aws/credentials.ini",
+            "infra/credentials.tfvars",
+            "infra/credentials.tf",
+            "c/credentials.xml",
+            "c/credentials.properties",
+            "c/credentials.md",
+            "c/credentials.conf",
+            "c/credentials.txt",
+            "kubeconfig",
+            "kubeconfig.yml",
+            "c/credentials.kdl",
         ] {
             assert!(is_excluded(p), "{p}");
         }
@@ -1941,6 +1991,14 @@ mod tests {
             "src/env.ts",
             "package.json",
             "docker-compose.yml",
+            // wicked-estate#433: source modules that share a secret file's name prefix are code.
+            "backend/integrations/credentials_store.py",
+            "backend/integrations/credentials_store_redis_test.py",
+            "src/id_utils.ts",
+            "src/Credentials.java",
+            "src/id_map.rs",
+            "cmd/kubeconfig_loader.go",
+            "scripts/credentials.sh",
         ] {
             assert!(!is_excluded(p), "{p}");
         }

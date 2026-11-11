@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Source files named like secret files are indexed again (#433).** The secret-file name rules
+  `credentials*`, `id_*` and `kubeconfig*` matched ordinary modules, so `credentials_store.py`,
+  `id_utils.ts` and their tests left the code graph, along with their requirement annotations.
+  These three rules now skip source code (a language the code redactor reads), whose string
+  literals are still redacted like any other code. Key files, config-format credential files
+  (`credentials.json`, `.yaml`, `.toml`, `.ini`, `.tfvars`) and extensionless names (`id_rsa`,
+  `credentials`) stay excluded. The next `index` re-admits the modules; no store migration is
+  needed. When a file that was indexed before is now excluded as a secret file, `index` prints a
+  `SECRET-EXCLUDED:` line naming it instead of removing it silently.
+
 ## [0.35.2] — 2026-11-11
 
 Patch: every inspected definition records whether it is real behaviour (#431), for wicked-core's
