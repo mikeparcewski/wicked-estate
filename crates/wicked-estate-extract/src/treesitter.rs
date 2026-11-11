@@ -3684,6 +3684,19 @@ impl Extractor for TreeSitterExtractor {
                     Location::new(&file.path, p.span),
                 );
                 node.signature = p.signature.clone();
+                // Is this unit real behaviour, or a stub, a data shape or test support? Read by
+                // wicked-core's requirements denominator (core#1375, #1235).
+                if let Some(b) = crate::behaviour::classify(
+                    &self.lang_name,
+                    &file.path,
+                    &p.kind,
+                    &tree,
+                    p.start,
+                    p.end,
+                    src,
+                ) {
+                    b.stamp(&mut node.metadata);
+                }
                 if p.decl {
                     // `.decl` capture: mark the record as a DECLARATION contribution
                     // (metadata only — the id above is identical to a `.def` capture's).
