@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.35.2] — 2026-11-11
+
+Patch: every inspected definition records whether it is real behaviour (#431), for wicked-core's
+requirements denominator (core#1375, core#1235).
+
+**Upgrade note (0.35.1 -> 0.35.2).** Install 0.35.2 on every path the daemon resolves, then restart.
+The first `index` of each repo re-reads every file, because the binary version changed; that pass
+writes `metadata.behaviour` on every Python, TypeScript, TSX, JavaScript and Rust definition. No
+store migration is needed.
+
 ### Added
 - **Every inspected definition says whether it is real behaviour.** The tree-sitter extractor now
   writes `metadata.behaviour` (`real`, `stub`, `data` or `test_support`) and, when it is not
