@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.35.0] — 2026-11-11
+
+Minor: Oracle APEXlang (`.apx`) is a built-in language (#309, steps #310 to #316). An APEX
+application's components, containment, `@references`, embedded SQL/HTML/CSS/JavaScript and page-item
+bind variables are part of the graph.
+
+**Upgrade note (0.34.1 -> 0.35.0).** Install 0.35.0 on every path the daemon resolves, then restart.
+The first `index` of each repo re-reads every file, because the binary version changed. Repos that
+hold `.apx` files gain their APEXlang graph on that pass: before 0.35.0 no release indexed `.apx`,
+so no store needs `redact-store` for this release. The full-text and store schema are unchanged.
+
 ### Added
 - **Oracle APEXlang (`.apx`) is a built-in language (#310 to #313).** An APEX application's
   components, their containment and their `@references` are now part of the graph.
