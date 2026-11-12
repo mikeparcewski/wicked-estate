@@ -143,17 +143,17 @@ Each step is one commit, green on its own (`cargo build/test/clippy -p <crate>` 
 Run on the lane debug binary against fresh DBs (§6 commands): if ANY of these holds after S1–S6, the lane is not done —
 (1) `count(Calls edges with target.kind='"import"') > 0` on studio or crew; (2) `count(Calls with source family ≠ target family) > 0` where family = `languages.toml` family (`typescript/tsx/javascript → javascript`); (3) `cargo test -p wicked-estate --test cross_language_estate` fails; (4) `tests/rules_bridge_index.rs` passes with the slice line removed; (5) `cargo test -p wicked-estate-resolve` reports any `ignored`; (6) the 20-edge removed-sample adjudication finds a removed edge that was correct AND is not in the reported regression classes (non-function `Constant`/`Variable`, `Other`); (7) **(FEAS-1)** any ADDED Calls edge (Q4b) whose target kind is on the D1 deny-list, OR whose source/target families differ, OR any member of the 20-edge added-sample adjudication that is judged wrong at its `file:line`.
 
-## 6. Measurement protocol (BEFORE = `/Users/michael.parcewski/Projects/wicked/wicked-estate/target/release/wicked-estate` 0.14.6; AFTER = `<lane>/target/debug/wicked-estate`)
+## 6. Measurement protocol (BEFORE = `~/Projects/wicked/wicked-estate/target/release/wicked-estate` 0.14.6; AFTER = `<lane>/target/debug/wicked-estate`)
 
 `M=<lane>/measure; mkdir -p $M`. Sanity: BEFORE studio must reproduce 189/1,245 non-callable name-resolver Calls targets and crew 226/724 (the review's numbers, `repro/*-before.db`); if not, the release binary is not the HEAD engine — stop and say so.
 
 ```
 # fresh DBs — never re-index an existing DB (F14 hides the delta)
 rm -f $M/studio-before.db $M/studio-after.db $M/crew-before.db $M/crew-after.db
-BEFORE index /Users/michael.parcewski/Projects/wicked/wicked-studio --db $M/studio-before.db
-AFTER  index /Users/michael.parcewski/Projects/wicked/wicked-studio --db $M/studio-after.db
-BEFORE index /Users/michael.parcewski/Projects/wicked/wicked-crew   --db $M/crew-before.db
-AFTER  index /Users/michael.parcewski/Projects/wicked/wicked-crew   --db $M/crew-after.db
+BEFORE index ~/Projects/wicked/wicked-studio --db $M/studio-before.db
+AFTER  index ~/Projects/wicked/wicked-studio --db $M/studio-after.db
+BEFORE index ~/Projects/wicked/wicked-crew   --db $M/crew-before.db
+AFTER  index ~/Projects/wicked/wicked-crew   --db $M/crew-after.db
 /usr/bin/sqlite3 $M/studio-after.db .schema   # once; kinds are JSON strings like '"calls"'
 ```
 - **Q1 (M1) Calls by resolver × target kind:** `select json_extract(e.data,'$.resolved_by') rb, tn.kind, count(*) from edges e join nodes tn on tn.symbol=e.target where e.kind='"calls"' group by 1,2 order by 1,3 desc;`
@@ -185,10 +185,10 @@ AFTER  index /Users/michael.parcewski/Projects/wicked/wicked-crew   --db $M/crew
 
 ## 9. S7 — before/after measurement results (2026-08-28, implementation complete)
 
-**Binaries.** BEFORE = `/Users/michael.parcewski/Projects/wicked/wicked-estate/target/release/wicked-estate`
+**Binaries.** BEFORE = `~/Projects/wicked/wicked-estate/target/release/wicked-estate`
 (0.14.6, HEAD engine). AFTER = the lane debug binary built from `lane/resolver-precision`
 (S1–S6 landed). Fresh DBs under `<lane>/measure/` (`studio-before/after.db`, `crew-before/after.db`),
-full-repo indexes of `/Users/michael.parcewski/Projects/wicked/wicked-studio` and `…/wicked-crew`.
+full-repo indexes of `~/Projects/wicked/wicked-studio` and `…/wicked-crew`.
 
 **Sanity gate: PASSED exactly.** BEFORE reproduces the review's numbers to the digit —
 studio 1,245 name-resolver Calls edges, non-callable targets 189 (constant 139 / import 22 /

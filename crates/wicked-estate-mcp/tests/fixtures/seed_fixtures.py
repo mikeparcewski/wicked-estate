@@ -19,7 +19,8 @@ import subprocess
 import sys
 import tempfile
 
-ESTATE = "/Users/michael.parcewski/Projects/wicked/wicked-estate"
+# Repo root, derived from this script's location (tests/fixtures -> tests -> crate -> crates -> root).
+ESTATE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", ".."))
 FIXTURES_DIR = os.path.join(ESTATE, "crates", "wicked-estate-mcp", "tests", "fixtures")
 CAPTURE_PY = os.path.join(ESTATE, "crates", "wicked-estate-mcp", "tests", "conformance", "capture.py")
 

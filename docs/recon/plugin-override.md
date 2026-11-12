@@ -374,7 +374,7 @@ Each step compiles green per-crate (`cargo build/test/clippy -p <crate>`, lane C
 
 **S8 — Measurements (brief's protocol; commands recorded verbatim in the lane report; every
 command pins `WICKED_ESTATE_PLUGINS` explicitly — BR-6).**
-- BEFORE = `/Users/michael.parcewski/Projects/wicked/wicked-estate/target/release/wicked-estate`
+- BEFORE = `~/Projects/wicked/wicked-estate/target/release/wicked-estate`
   (read-only); AFTER = lane debug binary. DBs under `<scratchpad>/ws/plugin-override/measure/`.
 - (0) **No-override parity (I6): BEFORE vs AFTER, empty plugins dir, BOTH corpora (wicked-studio
   AND wicked-crew) — node-count-by-kind must be identical**, measuring the compat claim

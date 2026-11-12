@@ -477,7 +477,7 @@ capability.rs generator text) as definitions — they become citations.
 
 ### S7 — Measurements (before/after), recorded in the PR body
 
-Protocol per the brief. BEFORE binary = `/Users/michael.parcewski/Projects/wicked/wicked-estate/target/release/wicked-estate`
+Protocol per the brief. BEFORE binary = `~/Projects/wicked/wicked-estate/target/release/wicked-estate`
 (read-only); AFTER = `<lane>/target/debug/wicked-estate` after `CARGO_TARGET_DIR=<lane>/target cargo build -p wicked-estate`.
 DBs under `<lane>/measure/` (`mkdir -p`). Commands, verbatim (`$BIN`, `$DB`, `$REPO` substituted):
 
@@ -494,7 +494,7 @@ $BIN blast-radius expect --db $DB
 (`nodes.symbol` and `edges.target` are both sids; joining `nodes` on `symbols.sym` returns 0 — the wrong join in one
 recon query. Kinds are JSON strings.)
 
-Corpora: `/Users/michael.parcewski/Projects/wicked/wicked-studio`, `/Users/michael.parcewski/Projects/wicked/wicked-crew`,
+Corpora: `~/Projects/wicked/wicked-studio`, `~/Projects/wicked/wicked-crew`,
 plus Fixture A, B1 and B2 indexed through both binaries.
 
 Expected AFTER (fresh full index): artifact query = **0** on studio and crew; Calls rows ≈ 32,219 (studio) /
