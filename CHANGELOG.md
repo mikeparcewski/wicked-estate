@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [0.35.3] — 2026-11-12
+
+Patch: source files named like secret files are indexed again (#433, PR #436).
+
+**Upgrade note (0.35.2 -> 0.35.3).** Install 0.35.3 on every path the daemon resolves, then restart.
+The first `index` of each repo re-reads every file, because the binary version changed; that pass
+re-admits modules such as `credentials_store.py` and `id_utils.ts` that the secret-file name rules had
+dropped. It does not restore the requirement annotations those modules' nodes lost when they left the
+graph (they were columns on the deleted nodes): re-run the repository's requirements map to annotate them
+again, and re-apply any reviewed requirement by hand or from a backup (wicked-core#1446 tracks keeping such
+rows). No store migration is needed.
+
+**The forced re-extraction clears node semantic fields repository-wide (not new in 0.35.3).** Every
+re-extracted file's nodes are deleted and inserted again, and the insert carries no semantic fields, so the
+`description`, `requirement` and validation fields (`requirement_validated`, `_by`, `_at`) set on any node
+(`set_semantics`) are cleared on the first `index` after a version change, as on any edited file. Annotations
+are a separate table and are kept. Before that first `index`, back up the store (or export the nodes that
+carry semantic fields) if you rely on them; afterwards re-run the requirements map and restore reviewed
+mappings from the backup (wicked-estate#438).
+
 ### Fixed
 - **Source files named like secret files are indexed again (#433).** The secret-file name rules
   `credentials*`, `id_*` and `kubeconfig*` matched ordinary modules, so `credentials_store.py`,
