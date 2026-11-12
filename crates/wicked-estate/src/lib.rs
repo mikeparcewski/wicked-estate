@@ -1904,15 +1904,6 @@ fn index_path_inner(
                     return None;
                 }
                 match doc_convert::to_markdown(&fw.raw, &bytes) {
-                    // Long lines are already wrapped and the text is capped at 1 MiB; what is left
-                    // here is an unbroken line the markdown extractor would drop.
-                    Ok(md) if is_minified_or_huge(&md) => {
-                        skip_doc(
-                            &fw.rel,
-                            "converted text has a line too long to index".into(),
-                        );
-                        return None;
-                    }
                     Ok(md) => {
                         ext = "md".to_string();
                         Some(md)
@@ -1942,8 +1933,11 @@ fn index_path_inner(
             // Skip minified or huge files before any parsing — they generate noise, not signal.
             // A file explicitly targeted by an extra-edge rule still gets the (regex-only) extra
             // pass below; only the language extraction is skipped for it.
+            // A converted document is never dropped here: its text is already capped at 1 MiB,
+            // and long prose lines or table rows are what documents are made of. When the guard
+            // trips, the document keeps its content and File node, without heading nodes.
             let minified = is_minified_or_huge(&text);
-            if minified && extra_rules.is_none() {
+            if minified && extra_rules.is_none() && converted.is_none() {
                 skipped_minified.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
@@ -1998,6 +1992,20 @@ fn index_path_inner(
                 extraction.refs.extend(ee.unresolved_refs);
             }
 
+            if converted.is_some() {
+                // A converted document always has its File node, so its content is stored even
+                // when the markdown grammar found no heading.
+                let file_symbol = Symbol::file(&fw.rel).id();
+                if !extraction.nodes.iter().any(|n| n.symbol == file_symbol) {
+                    extraction.nodes.push(Node::new(
+                        file_symbol,
+                        NodeKind::File,
+                        fw.rel.clone(),
+                        Language::new("markdown"),
+                        Location::new(&fw.rel, Span::ZERO),
+                    ));
+                }
+            }
             if extraction.nodes.is_empty()
                 && extraction.local_edges.is_empty()
                 && extraction.refs.is_empty()
@@ -4943,6 +4951,8 @@ pattern = "(?P<k>\\{)"
             ("deck.pptx", "docs/deck.pptx"),
             ("runbook.pdf", "docs/runbook.pdf"),
             ("scanned.pdf", "docs/scanned.pdf"),
+            // One 70,000-character paragraph: the minified-file guard would drop it as code.
+            ("long.docx", "docs/long.docx"),
         ] {
             std::fs::copy(format!("{fixtures}/{from}"), tmp.path().join(to)).unwrap();
         }
@@ -4956,7 +4966,12 @@ pattern = "(?P<k>\\{)"
         index_path(&mut store, tmp.path()).unwrap();
 
         let files = GraphRead::indexed_files(&store).unwrap();
-        for f in ["docs/spec.docx", "docs/deck.pptx", "docs/runbook.pdf"] {
+        for f in [
+            "docs/spec.docx",
+            "docs/deck.pptx",
+            "docs/runbook.pdf",
+            "docs/long.docx",
+        ] {
             assert!(files.contains(&f.to_string()), "{f} indexed: {files:?}");
         }
         // A scan keeps its digest (so an unchanged one is not retried) but has no content or nodes.
@@ -4980,6 +4995,15 @@ pattern = "(?P<k>\\{)"
         assert!(
             deck.contains("settle_invoice") && deck.contains("retry_budget"),
             "{deck}"
+        );
+        let long = store
+            .file_content("docs/long.docx")
+            .unwrap()
+            .expect("a long-line document keeps its content");
+        assert_eq!(
+            long.matches("longprose").count(),
+            7000,
+            "the whole paragraph is kept"
         );
         let pdf = store
             .file_content("docs/runbook.pdf")

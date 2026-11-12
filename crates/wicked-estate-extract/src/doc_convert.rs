@@ -9,25 +9,22 @@
 //! `anydoc_dependency_closure_has_no_network_client` is a tripwire on the dependency closure.
 //!
 //! Bounds, and what they do not cover: the input is capped at [`MAX_INPUT_BYTES`] before it is
-//! read ([`read_capped`]); at most [`CONCURRENT_CONVERSIONS`] documents convert at once, so a repo
-//! of documents holds a bounded number of parses in memory; anydoc bounds Office/ODF/EPUB
-//! decompression (128 MiB per archive entry, 512 MiB per archive, 2M XML nodes) and pdf-inspector
-//! bounds PDF streams per stream and per page. There is no document-wide PDF memory budget and no
-//! timer (a thread cannot be preempted), and an abort (out of memory, stack overflow) inside the
-//! parser ends the process: a hostile PDF can cost memory or time. Unwinding panics are caught and
-//! reported as a skip. Skip reasons are fixed strings; document text never reaches a reason.
+//! read ([`read_capped`]) and the converted text at [`MAX_TEXT_BYTES`]; anydoc bounds
+//! Office/ODF/EPUB decompression (128 MiB per archive entry, 512 MiB per archive, 2M XML nodes) and
+//! pdf-inspector bounds PDF streams per stream and per page. Conversions run on the caller's
+//! threads (the indexer's rayon pool), so at most one document per worker is in memory at once.
+//! There is no document-wide PDF memory budget and no timer (a thread cannot be preempted), and an
+//! abort (out of memory, stack overflow) inside the parser ends the process: a hostile PDF can cost
+//! memory or time. Unwinding panics are caught and reported as a skip. Skip reasons are fixed
+//! strings; document text never reaches a reason.
 //!
 //! [anydoc]: https://github.com/firecrawl/anydoc
 
 use std::fmt;
 use std::io::Read;
-use std::sync::{Condvar, Mutex};
 
 /// Largest document converted, in bytes (32 MiB). Bigger files are skipped, never parsed.
 pub const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
-
-/// Documents converted at once, process-wide (each waits for a slot).
-pub const CONCURRENT_CONVERSIONS: usize = 2;
 
 /// Extensions (lowercase, no dot) this converter reads: every extension anydoc names except CSV,
 /// which is already text.
@@ -101,53 +98,22 @@ pub fn read_capped(path: &std::path::Path) -> Result<Vec<u8>, Skipped> {
     Ok(bytes)
 }
 
-/// A counting gate over [`CONCURRENT_CONVERSIONS`] slots.
-static SLOTS: Mutex<usize> = Mutex::new(0);
-static SLOT_FREED: Condvar = Condvar::new();
-
-struct Slot;
-
-impl Slot {
-    fn take() -> Slot {
-        let mut busy = SLOTS.lock().unwrap_or_else(|e| e.into_inner());
-        while *busy >= CONCURRENT_CONVERSIONS {
-            busy = SLOT_FREED.wait(busy).unwrap_or_else(|e| e.into_inner());
-        }
-        *busy += 1;
-        Slot
-    }
-}
-
-impl Drop for Slot {
-    fn drop(&mut self) {
-        let mut busy = SLOTS.lock().unwrap_or_else(|e| e.into_inner());
-        *busy -= 1;
-        SLOT_FREED.notify_one();
-    }
-}
-
 /// Largest converted text kept, in bytes (1 MiB, the index's own text limit). Both callers get it.
 pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
 
-/// A converted line longer than this is wrapped at whitespace (a soft break inside a Markdown
-/// paragraph), so long prose paragraphs and table rows pass the extractors' minified-file guard.
-const WRAP_AT: usize = 400;
-
 /// Convert one document to Markdown. `path` only names the format when the bytes carry no
-/// signature (anydoc detects the format from the content first). The text is post-processed for
-/// indexing: inline-delimiter escapes are removed (`settle\_invoice` reads `settle_invoice`, so
-/// identifiers and token shapes match as in any text) and lines over [`WRAP_AT`] characters are
-/// wrapped at whitespace. It is NOT redacted here: callers redact it with the markdown rules, like
-/// any `.md` file.
+/// signature (anydoc detects the format from the content first). Inline-delimiter escapes are
+/// removed (`settle\_invoice` reads `settle_invoice`, so identifiers and token shapes match as in
+/// any text); nothing else is changed. It is NOT redacted here: callers redact it with the markdown
+/// rules, like any `.md` file.
 pub fn to_markdown(path: &str, bytes: &[u8]) -> Result<String, Skipped> {
     if bytes.len() > MAX_INPUT_BYTES {
         return Err(Skipped::TooLarge(bytes.len() as u64));
     }
     let ext = path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    // A malformed document must not take the index run down with it. Detection opens containers
+    // too, so it runs inside the unwind boundary as well.
     let converted = {
-        // Detection opens containers too, so it runs under the slot and the unwind boundary.
-        let _slot = Slot::take();
-        // A malformed document must not take the index run down with it.
         std::panic::catch_unwind(|| {
             let format =
                 anydoc::Format::from_bytes(bytes).or_else(|| anydoc::Format::from_extension(ext));
@@ -185,7 +151,7 @@ pub fn to_markdown(path: &str, bytes: &[u8]) -> Result<String, Skipped> {
             "converted text is over the 1 MiB limit",
         ));
     }
-    Ok(wrap_long_lines(&unescape_delimiters(&md)))
+    Ok(unescape_delimiters(&md))
 }
 
 /// `\_` `\*` `\~` and `` \` `` -> the bare character. Only the inline delimiters an escape can split
@@ -207,51 +173,71 @@ fn unescape_delimiters(md: &str) -> String {
     out
 }
 
-/// Wrap every line over [`WRAP_AT`] characters at the last whitespace before the limit.
-fn wrap_long_lines(md: &str) -> String {
-    let mut out = String::with_capacity(md.len() + md.len() / WRAP_AT);
-    for line in md.split_inclusive('\n') {
-        let mut rest = line;
-        while rest.chars().count() > WRAP_AT {
-            let limit = rest
-                .char_indices()
-                .nth(WRAP_AT)
-                .map_or(rest.len(), |(i, _)| i);
-            let Some(cut) = rest[..limit].rfind(char::is_whitespace) else {
-                break; // no whitespace to break at: leave the line whole
-            };
-            if cut == 0 {
-                break;
-            }
-            out.push_str(rest[..cut].trim_end());
-            out.push('\n');
-            rest = rest[cut..].trim_start_matches([' ', '\t']);
-        }
-        out.push_str(rest);
-    }
-    out
-}
-
 /// Words a chunk from [`chunk_markdown`] holds at most.
 pub const CHUNK_WORDS: usize = 800;
 
-/// The opening fence of a code block: its character and length (CommonMark: 3+ backticks or tildes).
-fn fence_open(line: &str) -> Option<(char, usize)> {
-    let t = line.trim_start();
+/// A code-fence line: its character and length (CommonMark: 3+ backticks or tildes, indented at
+/// most 3 spaces; a backtick fence's info string holds no backtick, so a one-line code span is not
+/// a fence).
+fn fence_line(line: &str) -> Option<(char, usize)> {
+    let t = line.trim_start_matches(' ');
+    if line.len() - t.len() > 3 {
+        return None;
+    }
     let c = t.chars().next().filter(|c| *c == '`' || *c == '~')?;
     let n = t.chars().take_while(|x| *x == c).count();
-    (n >= 3).then_some((c, n))
+    let rest = &t[n * c.len_utf8()..];
+    (n >= 3 && !(c == '`' && rest.contains('`'))).then_some((c, n))
 }
 
-/// Split converted Markdown into self-contained chunks for knowledge ingest: one per H1/H2 section
-/// (a heading inside a code fence is not a boundary), a section over [`CHUNK_WORDS`] words split at
-/// paragraph breaks, and a single paragraph over it split at word boundaries. Empty chunks are
-/// dropped.
+/// `line` in pieces of at most `max` words, cut at word starts so the text between words, spacing
+/// included, is kept as written.
+fn split_words(line: &str, max: usize) -> Vec<&str> {
+    let mut starts = Vec::new();
+    let mut prev_space = true;
+    for (i, ch) in line.char_indices() {
+        if !ch.is_whitespace() && prev_space {
+            starts.push(i);
+        }
+        prev_space = ch.is_whitespace();
+    }
+    let mut pieces = Vec::new();
+    let mut k = 0;
+    while k < starts.len() {
+        let from = if k == 0 { 0 } else { starts[k] };
+        let to = starts.get(k + max).copied().unwrap_or(line.len());
+        pieces.push(line[from..to].trim_end());
+        k += max;
+    }
+    pieces
+}
+
+/// Split converted Markdown into chunks for knowledge ingest: one per H1/H2 section (a `#` line
+/// inside a code fence is not a heading), each packed line by line and cut at a line boundary
+/// before it passes [`CHUNK_WORDS`] words, so every chunk is at most that long. Lines are kept as
+/// written; only a single line over the limit (a long paragraph or table row) is cut, at word
+/// starts. A cut inside a code block is not re-fenced: chunks are retrieval units, and anydoc's
+/// Office and PDF output rarely holds code. Chunks with no text are dropped.
 pub fn chunk_markdown(md: &str) -> Vec<String> {
-    let mut sections: Vec<String> = vec![String::new()];
+    let mut chunks = Vec::new();
+    let mut cur: Vec<&str> = Vec::new();
+    let mut words = 0usize;
     let mut fence: Option<(char, usize)> = None;
+    let mut emit = |cur: &mut Vec<&str>, words: &mut usize| {
+        let text = cur.join("\n");
+        let text = text.trim_start_matches('\n').trim_end();
+        if !text.trim().is_empty() {
+            chunks.push(text.to_string());
+        }
+        cur.clear();
+        *words = 0;
+    };
     for line in md.lines() {
-        match (fence, fence_open(line)) {
+        let is_fence = fence_line(line);
+        if fence.is_none() && (line.starts_with("# ") || line.starts_with("## ")) {
+            emit(&mut cur, &mut words);
+        }
+        match (fence, is_fence) {
             // A closing fence: the same character, at least as long, nothing after it.
             (Some((c, n)), Some((c2, n2)))
                 if c == c2 && n2 >= n && line.trim().chars().all(|x| x == c) =>
@@ -261,45 +247,26 @@ pub fn chunk_markdown(md: &str) -> Vec<String> {
             (None, Some(open)) => fence = Some(open),
             _ => {}
         }
-        if fence.is_none() && (line.starts_with("# ") || line.starts_with("## ")) {
-            sections.push(String::new());
+        let n = line.split_whitespace().count();
+        if words + n > CHUNK_WORDS {
+            emit(&mut cur, &mut words);
         }
-        let cur = sections.last_mut().expect("never empty");
-        cur.push_str(line);
-        cur.push('\n');
-    }
-    let mut chunks = Vec::new();
-    for section in sections {
-        let mut cur = String::new();
-        let mut words = 0;
-        let mut flush = |cur: &mut String, words: &mut usize| {
-            if !cur.trim().is_empty() {
-                chunks.push(cur.trim().to_string());
-            }
-            cur.clear();
-            *words = 0;
-        };
-        for para in section.split("\n\n") {
-            let n = para.split_whitespace().count();
-            if words > 0 && words + n > CHUNK_WORDS {
-                flush(&mut cur, &mut words);
-            }
-            if n > CHUNK_WORDS {
-                // One paragraph over the limit: split it by words.
-                let all: Vec<&str> = para.split_whitespace().collect();
-                for piece in all.chunks(CHUNK_WORDS) {
-                    cur.push_str(&piece.join(" "));
-                    words = piece.len();
-                    flush(&mut cur, &mut words);
+        if n > CHUNK_WORDS {
+            let pieces = split_words(line, CHUNK_WORDS);
+            let last = pieces.len() - 1;
+            for (i, piece) in pieces.into_iter().enumerate() {
+                cur.push(piece);
+                words = piece.split_whitespace().count();
+                if i < last {
+                    emit(&mut cur, &mut words);
                 }
-                continue;
             }
-            cur.push_str(para);
-            cur.push_str("\n\n");
-            words += n;
+            continue;
         }
-        flush(&mut cur, &mut words);
+        cur.push(line);
+        words += n;
     }
+    emit(&mut cur, &mut words);
     chunks
 }
 
@@ -376,22 +343,18 @@ mod tests {
         assert!(chunks[1].starts_with("# One") && chunks[1].contains("# not a heading"));
         assert!(chunks[2].starts_with("## Two") && chunks[2].contains("still two"));
 
+        // Paragraphs: cut at the last blank line before the limit.
         let para = "word ".repeat(500);
         let long = format!("# Big\n{para}\n\n{para}\n\n{para}\n");
         let chunks = chunk_markdown(&long);
-        assert_eq!(
-            chunks.len(),
-            3,
-            "each 500-word paragraph alone: {}",
-            chunks.len()
-        );
+        assert_eq!(chunks.len(), 3, "{}", chunks.len());
         assert!(
             chunks
                 .iter()
                 .all(|c| c.split_whitespace().count() <= CHUNK_WORDS + 2)
         );
 
-        // One paragraph over the limit splits by words, so every chunk fits a recall budget.
+        // One line over the limit splits by words, so every chunk fits a recall budget.
         let one = format!("# Huge\n\n{}\n", "word ".repeat(3001));
         let chunks = chunk_markdown(&one);
         assert!(chunks.len() >= 4, "{}", chunks.len());
@@ -401,11 +364,76 @@ mod tests {
                 .all(|c| c.split_whitespace().count() <= CHUNK_WORDS)
         );
 
+        // A paragraph over several lines: packed line by line, never past the limit.
+        let line = |w: usize| -> String { format!("{}\n", "w ".repeat(w)) };
+        let multi = format!("{}\n{}{}", line(100), line(600), line(600));
+        let chunks = chunk_markdown(&multi);
+        assert!(
+            chunks
+                .iter()
+                .all(|c| c.split_whitespace().count() <= CHUNK_WORDS),
+            "{chunks:?}"
+        );
+
         // A 3-backtick line inside a 4-backtick fence does not close it.
         let nested = "# A\n````\n```\n# still code\n```\n````\n## B\nb\n";
         let chunks = chunk_markdown(nested);
         assert_eq!(chunks.len(), 2, "{chunks:?}");
         assert!(chunks[0].contains("# still code"));
+    }
+
+    #[test]
+    fn a_long_code_block_keeps_its_lines_and_every_chunk_fits() {
+        let code: String = (0..810).map(|i| format!("    print({i})\n")).collect();
+        let md = format!("# Example\n```python\n{code}```\nafter\n");
+        let chunks = chunk_markdown(&md);
+        assert!(chunks.len() >= 2, "{}", chunks.len());
+        assert!(
+            chunks
+                .iter()
+                .all(|c| c.split_whitespace().count() <= CHUNK_WORDS)
+        );
+        let joined = chunks.join("\n");
+        for i in [0, 405, 809] {
+            assert!(
+                joined.contains(&format!("    print({i})")),
+                "line {i} kept, indented"
+            );
+        }
+        // A one-line code span and a 4-space-indented line are not fences.
+        assert_eq!(fence_line("```foo```"), None);
+        assert_eq!(fence_line("    ```"), None);
+        assert_eq!(fence_line("   ~~~~ rust"), Some(('~', 4)));
+        // A long line is cut at word starts: spacing inside each piece is kept as written.
+        let line = format!("s = \"a  b\"; {}", "w ".repeat(900));
+        let pieces = split_words(&line, CHUNK_WORDS);
+        assert_eq!(pieces.len(), 2);
+        assert!(
+            pieces[0].starts_with("s = \"a  b\";"),
+            "{}",
+            &pieces[0][..20]
+        );
+        let total: usize = pieces.iter().map(|p| p.split_whitespace().count()).sum();
+        assert_eq!(
+            total,
+            line.split_whitespace().count(),
+            "no word lost or doubled"
+        );
+    }
+
+    /// A private key inside a long Word paragraph keeps its one-line markers through conversion,
+    /// so the markdown redaction masks its body (a layout pass that re-flowed lines once broke the
+    /// marker and leaked the body).
+    #[test]
+    fn a_private_key_in_a_long_paragraph_is_masked_by_the_markdown_redaction() {
+        let md = to_markdown("handover.docx", &fixture("pem.docx")).expect("converts");
+        let begin = ["-----BEGIN", " PRIVATE KEY-----"].concat();
+        assert!(md.contains(&begin), "marker on one line: {md}");
+        let body = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo";
+        assert!(md.contains(body), "{md}");
+        let red = crate::redact::redact_source("handover.docx.md", &md);
+        assert!(!red.contains(body), "key body masked: {red}");
+        assert!(red.contains("pemcanary_body"), "prose kept: {red}");
     }
 
     #[test]
@@ -420,26 +448,6 @@ mod tests {
             r"\# not a heading"
         );
         assert_eq!(unescape_delimiters("no escapes here"), "no escapes here");
-    }
-
-    #[test]
-    fn long_prose_lines_are_wrapped_so_the_minified_guard_keeps_them() {
-        let para = "alpha beta gamma delta ".repeat(400); // ~9,200 chars, one line
-        let wrapped = wrap_long_lines(&format!("# Notes\n{para}\n"));
-        assert!(
-            wrapped.lines().all(|l| l.chars().count() <= WRAP_AT),
-            "{wrapped}"
-        );
-        assert_eq!(
-            wrapped.split_whitespace().count(),
-            format!("# Notes\n{para}").split_whitespace().count(),
-            "no word lost"
-        );
-        assert!(!crate::treesitter::is_minified_or_huge(&wrapped));
-        assert!(
-            crate::treesitter::is_minified_or_huge(&para.repeat(6)),
-            "the guard would drop it"
-        );
     }
 
     #[test]
