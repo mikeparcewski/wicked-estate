@@ -21,7 +21,7 @@ mutating `fixture_a`; red tests land in the same commit as their fix.
 
 ### F-A — 402 Calls edges bind TS/tsx/bash call sites to JSON `struct` nodes (minor)
 
-- Reproduced on `/Users/michael.parcewski/Projects/command_iq`: 374 typescript + 21 tsx
+- Reproduced on `~/Projects/<private-repo>`: 374 typescript + 21 tsx
   + 7 bash Calls edges → json nodes of kind `"struct"`, all `resolved_by=name-resolver`
   at 0.6; 395 target the JSON key `optional` in `scripts/ci/authz-public-allowlist.json`
   (every zod `.optional()` site), 7 target `pnpm`. Also reproduced on a 2-file fixture

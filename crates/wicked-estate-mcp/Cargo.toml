@@ -9,6 +9,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+# Test fixtures (fixture databases, the seeding script) are repo-only: keep them out of the published
+# crate (wicked-estate#439). The two tests that read them go too, since shipped without their fixtures
+# they would be test targets the published crate cannot pass. Both run in this repo's CI.
+exclude = ["tests/fixtures/", "tests/sc009.rs", "tests/conformance_schemas.rs"]
 
 [[bin]]
 name = "wicked-estate-mcp"

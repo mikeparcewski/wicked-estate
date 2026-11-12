@@ -479,17 +479,17 @@ note above it (recon docs are records, not specs).
 ### S4 — Measurements (BEFORE/AFTER, verbatim commands)
 Files: append a "Measurements" section to this document.
 ```
-B=/Users/michael.parcewski/Projects/wicked/wicked-estate/target/release/wicked-estate
-L=/private/tmp/claude-501/-Users-michael-parcewski-Projects-wicked/f5d30481-90ff-4c55-9faa-abdb54e1619c/scratchpad/lanes/method-identity
+B=~/Projects/wicked/wicked-estate/target/release/wicked-estate
+L=<scratchpad>/lanes/method-identity
 export CARGO_TARGET_DIR=$L/target
 cd $L/wt && cargo build -p wicked-estate
 A=$L/target/debug/wicked-estate
 M=$L/measure; mkdir -p $M
-git -C /Users/michael.parcewski/Projects/wicked/wicked-studio rev-parse HEAD   # pin
-git -C /Users/michael.parcewski/Projects/wicked/wicked-crew  rev-parse HEAD    # pin
+git -C ~/Projects/wicked/wicked-studio rev-parse HEAD   # pin
+git -C ~/Projects/wicked/wicked-crew  rev-parse HEAD    # pin
 for c in studio crew; do
-  $B index /Users/michael.parcewski/Projects/wicked/wicked-$c --db $M/$c-before.db
-  $A index /Users/michael.parcewski/Projects/wicked/wicked-$c --db $M/$c-after.db
+  $B index ~/Projects/wicked/wicked-$c --db $M/$c-before.db
+  $A index ~/Projects/wicked/wicked-$c --db $M/$c-after.db
 done
 # fixture (S0 file copied to $M/doc03proj/src/fixture.ts)
 $B index $M/doc03proj --db $M/doc03-before.db
@@ -690,7 +690,7 @@ All majors accepted; nothing rejected. Minors folded in.
 
 Implemented as commits `ec5e2bf` (S0+S1+S1b, extract crate), `f8d69fc` (S2, gate + tests),
 `63b251a` (S3, docs) on `lane/method-identity`. BEFORE =
-`/Users/michael.parcewski/Projects/wicked/wicked-estate/target/release/wicked-estate` (0.14.6
+`~/Projects/wicked/wicked-estate/target/release/wicked-estate` (0.14.6
 release, HEAD engine); AFTER = the lane worktree's debug binary. Corpora pinned:
 wicked-studio `564d6963fdfd94d47cf7f5a3d76acf8932dd1317`, wicked-crew
 `b890f41fc23c0635ce22d8185015ff3f70f4a8d8`. Fixture = the S0 file copied to

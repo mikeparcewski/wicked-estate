@@ -44,3 +44,6 @@ site/*.db.mem*
 site/*.db.knowledge*
 .product/
 node_modules/
+
+# Local wicked-vault evidence store (run artifacts; host-specific paths, never committed)
+.wicked-vault/

@@ -39,7 +39,7 @@ percentage signals incomplete resolution, not fewer callers.
 
 ### wicked-studio
 
-**Path:** `/Users/michael.parcewski/Projects/wicked/wicked-studio`  
+**Path:** `~/Projects/wicked/wicked-studio`  
 **Index time:** 1279ms  
 **Edge coverage:** 23.3%  
 **Footprint:** 16371712 bytes  (3478 bytes/node)  
@@ -108,7 +108,7 @@ percentage signals incomplete resolution, not fewer callers.
 
 ### wicked-crew
 
-**Path:** `/Users/michael.parcewski/Projects/wicked/wicked-crew`  
+**Path:** `~/Projects/wicked/wicked-crew`  
 **Index time:** 1451ms  
 **Edge coverage:** 25.8%  
 **Footprint:** 10604544 bytes  (3556 bytes/node)  

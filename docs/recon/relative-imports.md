@@ -490,7 +490,7 @@ baseline counts in §0.
 
 ## 5. Measurements (protocol; numbers filled in by the executing agent)
 
-BEFORE = `/Users/michael.parcewski/Projects/wicked/wicked-estate/target/release/wicked-estate`
+BEFORE = `~/Projects/wicked/wicked-estate/target/release/wicked-estate`
 (read-only). AFTER = `<lane>/target/debug/wicked-estate` (and `--release` for timing). DBs under
 `<lane>/measure/`. Corpora: `wicked-studio`, `wicked-crew` (full repos), `edge-corpus`,
 `edge-corpus2` (copied), `axios@v1.7.9` (bench). Every command recorded verbatim in the final
