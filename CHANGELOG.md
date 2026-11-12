@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### Added
+- **Binary documents are indexed and ingested as Markdown (anydoc).** PDF, Word (`doc`, `docx`, `docm`),
+  PowerPoint (`ppt`, `pptx`, `pps`/`ppsx`/`pptm`/`ppsm`, `pot`), Excel (`xls`, `xlsx`, `xlsm`, `xlsb`),
+  OpenDocument (`odt`, `odp`, `ods`), RTF and EPUB files are converted to GitHub-flavored Markdown in-process
+  by the [anydoc](https://github.com/firecrawl/anydoc) crate (`wicked_estate_extract::doc_convert`), the one
+  converter estate uses for them. `index` now admits these files (it dropped them before): the Markdown gets
+  the same secret redaction as any `.md`, is extracted by the markdown grammar (headings become nodes), and is
+  stored as the file's content under the document's own path, like a `.md`: the body is what `FetchContent`
+  returns and what wicked-core's corroboration reads; graph search finds the headings. `knowledge.ingest`
+  takes `path` instead of `chunks` for such a file (read confined to the server's working directory, refused
+  when it matches the secret-file rule or is not a regular file; `chunks` and `path` together, or either of
+  the wrong type, is invalid params) and chunks it at its H1/H2 headings and at 800 words, `source`
+  defaulting to the path, so the body is full-text recallable.
+  - **Local only.** The anydoc Rust crate has no OCR and no network code; a scanned or image-only PDF is
+    skipped as `needs OCR`, never uploaded. A test fails if anydoc's dependency closure gains an HTTP/TLS client.
+  - **A document that does not convert is skipped, never fatal.** `index` prints one
+    `DOC-SKIPPED: <path>: <reason>` line per document (needs OCR, encrypted, too large, malformed,
+    unsupported); `knowledge.ingest` returns the reason as a tool error. Reasons are fixed strings, never
+    document text. A document that was read but did not convert keeps its digest, so it is retried when it
+    changes or estate is upgraded; one over the size cap or unreadable is not recorded and is reported on
+    every run.
+  - **Bounds.** Documents over 32 MiB are skipped before they are read; at most two convert at once
+    process-wide; converted text over 1 MiB is skipped (both entry points); long lines are wrapped so prose
+    paragraphs and table rows pass the minified-file guard. There is no document-wide memory budget or
+    timeout inside the PDF parser: a hostile PDF under the cap can cost memory or time, and a parser abort
+    ends the process.
+  - **MSRV 1.88** (anydoc's), up from 1.85. Release binaries grow by the converter and its CMap data;
+    `NOTICE` carries the Adobe CMap and Unicode notices the embedded data requires.
+
 ## [0.35.3] — 2026-11-12
 
 Patch: source files named like secret files are indexed again (#433, PR #436).

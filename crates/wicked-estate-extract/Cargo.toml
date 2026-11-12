@@ -15,6 +15,9 @@ wicked-estate-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml = "0.8"
+# Binary documents (pdf/docx/pptx/xlsx/odt/rtf/epub) to Markdown, in-process (src/doc_convert.rs).
+# MIT; no OCR or network code in the Rust crate (its hosted OCR is only in the npm wrapper).
+anydoc = "0.2.4"
 tree-sitter = "0.25"
 # Runtime language plugins: load drop-in tree-sitter grammars from a plugins dir at runtime
 # (see src/plugin.rs). libloading is ISC-licensed and tree-sitter-language MIT — both MIT-compatible,
