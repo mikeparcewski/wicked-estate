@@ -911,6 +911,35 @@ fn collect_source_files(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The warning for previously indexed files removed from the index that the secret-file rule
+/// excludes (an older build indexed them, or the walk can no longer see them): their symbols, and
+/// every requirement annotation on those symbols, leave with them, so that is said out loud
+/// (wicked-estate#433). Classified by the rule, not by the walk, so a hidden or ignored file is
+/// reported too. `None` when no removed file matches the rule. Paths only, never content.
+fn secret_exclusion_note(deleted: &[String]) -> Option<String> {
+    let mut hit: Vec<&str> = deleted
+        .iter()
+        .filter(|p| wicked_estate_extract::redact::is_excluded(p))
+        .map(String::as_str)
+        .collect();
+    if hit.is_empty() {
+        return None;
+    }
+    hit.sort_unstable();
+    Some(format!(
+        "SECRET-EXCLUDED: {} previously indexed file(s) match the secret-file rule and were \
+         removed from the index, with their symbols and any requirement annotations on them: {}",
+        hit.len(),
+        hit.join(", ")
+    ))
+}
+
+// The notes `secret_exclusion_note` emitted on this thread, so a test sees what the sweep reported.
+#[cfg(test)]
+thread_local! {
+    static SECRET_NOTES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 fn rel(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
@@ -1521,6 +1550,13 @@ fn index_path_inner(
             let _ = store.log_change(ChangeOp::Remove, path);
         }
         store.commit_batch()?;
+        // wicked-estate#433: a file the secret rule excludes leaves with its requirement
+        // annotations; say so once the removal has landed.
+        if let Some(note) = secret_exclusion_note(&deleted) {
+            eprintln!("{note}");
+            #[cfg(test)]
+            SECRET_NOTES.with(|n| n.borrow_mut().push(note));
+        }
     }
 
     // ── Split CHANGED/NEW from UNCHANGED ────────────────────────────────────────────────────
@@ -4688,6 +4724,148 @@ pattern = "(?P<k>\\{)"
             !files.contains("doomed.rs"),
             "a source file that really was deleted is still swept — the sweep still works"
         );
+    }
+
+    /// wicked-estate#433: the secret-file name prefixes (`credentials*`, `id_*`, `kubeconfig*`)
+    /// excluded ordinary modules, so `credentials_store.py` vanished from the graph. Source code is
+    /// indexed; the secret files beside it are not. Restore `credentials*` / `id_*` to the
+    /// always-excluded `names` list and the first assert fails.
+    #[test]
+    fn secret_name_prefixes_keep_source_and_drop_secret_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let w = |rel: &str, body: &str| {
+            let p = tmp.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        w(
+            "integrations/credentials_store.py",
+            "class CredentialsStore:\n    def get(self):\n        return 1\n",
+        );
+        w(
+            "integrations/credentials_store_test.py",
+            "def test_get():\n    assert True\n",
+        );
+        w(
+            "src/id_utils.ts",
+            "export function newId(): string { return 'a'; }\n",
+        );
+        w(
+            "cmd/kubeconfig_loader.go",
+            "package cmd\n\nfunc Load() {}\n",
+        );
+        w("integrations/credentials.json", "{\"token\": \"x\"}\n");
+        w("integrations/credentials.yaml", "token: x\n");
+        w("deploy/kubeconfig.yaml", "apiVersion: v1\nkind: Config\n");
+        w("keys/id_rsa", "-----BEGIN OPENSSH PRIVATE KEY-----\n");
+        w("keys/id_ed25519", "-----BEGIN OPENSSH PRIVATE KEY-----\n");
+        w("keys/id_ed25519.pub", "ssh-ed25519 AAAA\n");
+
+        let mut store = MemStore::new();
+        index_path(&mut store, tmp.path()).unwrap();
+        let files: HashSet<String> = GraphRead::indexed_files(&store)
+            .unwrap()
+            .into_iter()
+            .collect();
+        for kept in [
+            "integrations/credentials_store.py",
+            "integrations/credentials_store_test.py",
+            "src/id_utils.ts",
+            "cmd/kubeconfig_loader.go",
+        ] {
+            assert!(
+                files.contains(kept),
+                "{kept} is source and is indexed: {files:?}"
+            );
+        }
+        for gone in [
+            "integrations/credentials.json",
+            "integrations/credentials.yaml",
+            "deploy/kubeconfig.yaml",
+            "keys/id_rsa",
+            "keys/id_ed25519",
+            "keys/id_ed25519.pub",
+        ] {
+            assert!(!files.contains(gone), "{gone} is a secret file: {files:?}");
+        }
+        let node_files: HashSet<String> = GraphRead::all_nodes(&store)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.location.file)
+            .collect();
+        assert!(
+            node_files.contains("integrations/credentials_store.py"),
+            "the module's symbols are in the graph"
+        );
+    }
+
+    /// wicked-estate#433 (b): files an older build indexed that the secret rule now excludes are
+    /// swept, and the sweep reports them by name, never silently: a visible one, a hidden one the
+    /// walk never visits, and one under a repo label. A genuinely deleted source file is not
+    /// reported as a secret exclusion. Delete the `eprintln!` block in the sweep and this fails.
+    #[test]
+    fn a_newly_secret_excluded_file_is_swept_and_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("real.rs"), "pub fn kept() {}\n").unwrap();
+        std::fs::write(tmp.path().join("gone.rs"), "pub fn gone() {}\n").unwrap();
+        std::fs::write(tmp.path().join("credentials.yaml"), "token: x\n").unwrap();
+        std::fs::write(tmp.path().join(".env"), "TOKEN=x\n").unwrap();
+        let mut store = MemStore::new();
+        index_path(&mut store, tmp.path()).unwrap();
+
+        // What an older build left: the credential files indexed, each with a symbol on it.
+        let seed = |store: &mut MemStore, file: &str| {
+            let id = Symbol::synthetic("test", format!("{file}/token")).id();
+            let node = Node::new(
+                id.clone(),
+                NodeKind::Other("key".to_string()),
+                "token".to_string(),
+                Language::new("yaml"),
+                Location::new(file.to_string(), Span::ZERO),
+            );
+            store.upsert_nodes(&[node]).unwrap();
+            store.set_file_digest(file, "old").unwrap();
+            id
+        };
+        let ids = [
+            seed(&mut store, "credentials.yaml"),
+            seed(&mut store, ".env"),
+        ];
+        std::fs::remove_file(tmp.path().join("gone.rs")).unwrap();
+        SECRET_NOTES.with(|n| n.borrow_mut().clear());
+
+        index_path(&mut store, tmp.path()).unwrap();
+        let files = GraphRead::indexed_files(&store).unwrap();
+        for f in ["credentials.yaml", ".env", "gone.rs"] {
+            assert!(!files.contains(&f.to_string()), "{f} is swept: {files:?}");
+        }
+        assert!(files.contains(&"real.rs".to_string()));
+        for id in &ids {
+            assert!(
+                store.get_node(id).unwrap().is_none(),
+                "its symbols go with it"
+            );
+        }
+        let notes = SECRET_NOTES.with(|n| n.borrow().clone());
+        assert_eq!(
+            notes,
+            vec![
+                "SECRET-EXCLUDED: 2 previously indexed file(s) match the secret-file rule and were \
+                 removed from the index, with their symbols and any requirement annotations on \
+                 them: .env, credentials.yaml"
+                    .to_string()
+            ],
+            "the sweep reports the secret files by name, and not the deleted source file"
+        );
+
+        // Under a repo label the stored path is `<label>/...`; the rule still reads the file name.
+        assert_eq!(
+            secret_exclusion_note(&["svc/keys/id_rsa".to_string(), "svc/a.rs".to_string()])
+                .as_deref()
+                .map(|n| n.ends_with(": svc/keys/id_rsa")),
+            Some(true)
+        );
+        assert!(secret_exclusion_note(&["gone.rs".to_string()]).is_none());
     }
 
     // ── Task G: incremental scenario — removed symbol leaves no dangling edge ──────────────
