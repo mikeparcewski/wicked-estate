@@ -61,9 +61,12 @@ struct EmbeddedHost {
 struct Exclude {
     names: Vec<String>,
     allow: Vec<String>,
-    /// Excluded unless the file is source code the code redactor reads (wicked-estate#433).
+    /// Excluded unless the file is source code (wicked-estate#433): see [`is_code_file`].
     #[serde(default)]
     unless_code: Vec<String>,
+    /// The source extensions `unless_code` spares (lowercase, no dot).
+    #[serde(default)]
+    code_ext: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -316,22 +319,38 @@ pub fn is_excluded(path: &str) -> bool {
         || (c.unless_code.iter().any(|r| r.is_match(name)) && !is_code_file(name))
 }
 
-/// True when `name` is source code that [`redact_source`] redacts as code (C3 token shapes plus
-/// C4 name-bound literals): its extension has a built-in grammar with no `[[format]]` row, not in
-/// `[default_deny]` or `prose`, and not document tier. Config formats (json, yaml, toml, hcl, ini,
-/// xml, properties, dockerfile), prose, and names with no or an unknown extension are not code.
+/// True when `name` is source code for the `unless_code` rule (wicked-estate#433): its final
+/// extension is in `code_ext` (languages whose code redactor is checked to mask a secret-named
+/// binding) and no inner suffix names a config, prose or key format: `credentials.service.ts` and
+/// `id_utils.d.ts` are code; `credentials.yaml.py` and `id_rsa.pem.ts` are not.
 fn is_code_file(name: &str) -> bool {
-    let Some((_, ext)) = name.rsplit_once('.') else {
+    let c = &*COMPILED;
+    let lower = name.to_ascii_lowercase();
+    let mut parts = lower.split('.');
+    parts.next(); // the stem
+    let suffixes: Vec<&str> = parts.collect();
+    let Some((ext, inner)) = suffixes.split_last() else {
         return false;
     };
-    let Some(grammar) = crate::treesitter::builtin_owner_of_ext(&ext.to_ascii_lowercase()) else {
+    c.rules.exclude.code_ext.iter().any(|e| e == ext)
+        && !inner.iter().any(|s| is_data_or_key_ext(s))
+}
+
+/// A suffix that marks the file as config, prose or key material: it has a built-in grammar that
+/// is not code (a `[[format]]` row, `[default_deny]`, prose or document tier), or a file named
+/// `x.<suffix>` is always excluded (`pem`, `key`, `env`, `p12`, ...).
+fn is_data_or_key_ext(suffix: &str) -> bool {
+    let c = &*COMPILED;
+    if c.exclude.iter().any(|r| r.is_match(&format!("x.{suffix}"))) {
+        return true;
+    }
+    let Some(grammar) = crate::treesitter::builtin_owner_of_ext(suffix) else {
         return false;
     };
-    let r = &COMPILED.rules;
-    !r.format.iter().any(|f| f.grammar == grammar)
-        && !r.default_deny.grammars.iter().any(|g| g == grammar)
-        && !r.default_deny.prose.iter().any(|g| g == grammar)
-        && crate::by_name(grammar).is_some_and(|l| l.tier != crate::ExtractTier::Document)
+    c.rules.format.iter().any(|f| f.grammar == grammar)
+        || c.rules.default_deny.grammars.iter().any(|g| g == grammar)
+        || c.rules.default_deny.prose.iter().any(|g| g == grammar)
+        || crate::by_name(grammar).is_some_and(|l| l.tier == crate::ExtractTier::Document)
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────────────────────────
@@ -1982,6 +2001,17 @@ mod tests {
             "kubeconfig",
             "kubeconfig.yml",
             "c/credentials.kdl",
+            // Not a code_ext language: their secret-named values are not all caught by the code
+            // redactor (unquoted shell assignments, Clojure `str_lit`, EDN maps).
+            "scripts/credentials.sh",
+            "c/credentials.edn",
+            "src/credentials.clj",
+            // A config or key format under a code suffix.
+            "c/credentials.yaml.py",
+            "k/ID_RSA.PEM.PY",
+            "c/credentials.env.ts",
+            "c/kubeconfig.json.js",
+            "web/Credentials.vue",
         ] {
             assert!(is_excluded(p), "{p}");
         }
@@ -1998,10 +2028,65 @@ mod tests {
             "src/Credentials.java",
             "src/id_map.rs",
             "cmd/kubeconfig_loader.go",
-            "scripts/credentials.sh",
+            "web/src/app/core/credentials.service.ts",
+            "types/id_utils.d.ts",
+            "lib/google/auth/credentials.py",
+            "ID_UTILS.TS",
         ] {
             assert!(!is_excluded(p), "{p}");
         }
+    }
+
+    /// wicked-estate#433: `code_ext` is the set of languages a `credentials*` / `id_*` /
+    /// `kubeconfig*` file is indexed in, so each one must be a code grammar this redactor reads, and
+    /// must mask a value bound to a secret name. A language added to `code_ext` without passing
+    /// this is a secret-named file indexed with its value in clear.
+    #[test]
+    fn unless_code_languages_mask_secret_bindings() {
+        let snippet = |ext: &str| -> String {
+            let v = "\"PLANTEDcredValue\"";
+            match ext {
+                "py" | "pyi" | "rb" => format!("password = {v}\n"),
+                "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" => format!("const password = {v};\n"),
+                "java" | "cs" => format!("class A {{ String password = {v}; }}\n"),
+                "kt" | "kts" | "scala" => format!("val password = {v}\n"),
+                "go" => format!("package a\n\nvar password = {v}\n"),
+                "rs" => format!("const PASSWORD: &str = {v};\n"),
+                "php" => format!("<?php\n$password = {v};\n"),
+                "swift" => format!("let password = {v}\n"),
+                "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "hh" => {
+                    format!("const char *password = {v};\n")
+                }
+                "dart" => format!("final password = {v};\n"),
+                other => panic!("code_ext `{other}` has no conformance snippet here"),
+            }
+        };
+        let c = &*COMPILED;
+        assert!(!c.rules.exclude.code_ext.is_empty());
+        let mut leaked = Vec::new();
+        for ext in &c.rules.exclude.code_ext {
+            assert_eq!(ext, &ext.to_ascii_lowercase(), "code_ext is lowercase");
+            assert!(
+                !is_data_or_key_ext(ext),
+                "code_ext `{ext}` is a config, prose or key format"
+            );
+            let grammar = crate::treesitter::builtin_owner_of_ext(ext)
+                .unwrap_or_else(|| panic!("code_ext `{ext}` has no built-in grammar"));
+            assert!(
+                !c.rules.format.iter().any(|f| f.grammar == grammar)
+                    && !c.rules.default_deny.grammars.iter().any(|g| g == grammar),
+                "code_ext `{ext}` ({grammar}) is a config grammar"
+            );
+            let path = format!("src/credentials_store.{ext}");
+            assert!(!is_excluded(&path), "{path}");
+            if same_len(&path, &snippet(ext)).contains("PLANTEDcredValue") {
+                leaked.push(ext.as_str());
+            }
+        }
+        assert!(
+            leaked.is_empty(),
+            "code_ext languages that leave a secret-named binding unmasked: {leaked:?}"
+        );
     }
 
     #[test]
