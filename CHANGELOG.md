@@ -9,7 +9,10 @@ Patch: source files named like secret files are indexed again (#433, PR #436).
 **Upgrade note (0.35.2 -> 0.35.3).** Install 0.35.3 on every path the daemon resolves, then restart.
 The first `index` of each repo re-reads every file, because the binary version changed; that pass
 re-admits modules such as `credentials_store.py` and `id_utils.ts` that the secret-file name rules had
-dropped, with their requirement annotations. No store migration is needed.
+dropped. It does not restore the requirement annotations those modules' nodes lost when they left the
+graph (they were columns on the deleted nodes): re-run the repository's requirements map to annotate them
+again, and re-apply any reviewed requirement by hand or from a backup (wicked-core#1446 tracks keeping such
+rows). No store migration is needed.
 
 ### Fixed
 - **Source files named like secret files are indexed again (#433).** The secret-file name rules
