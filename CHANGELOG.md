@@ -14,6 +14,14 @@ graph (they were columns on the deleted nodes): re-run the repository's requirem
 again, and re-apply any reviewed requirement by hand or from a backup (wicked-core#1446 tracks keeping such
 rows). No store migration is needed.
 
+**The forced re-extraction clears node semantic fields repository-wide (not new in 0.35.3).** Every
+re-extracted file's nodes are deleted and inserted again, and the insert carries no semantic fields, so the
+`description`, `requirement` and validation fields (`requirement_validated`, `_by`, `_at`) set on any node
+(`set_semantics`) are cleared on the first `index` after a version change, as on any edited file. Annotations
+are a separate table and are kept. Before that first `index`, back up the store (or export the nodes that
+carry semantic fields) if you rely on them; afterwards re-run the requirements map and restore reviewed
+mappings from the backup (wicked-estate#438).
+
 ### Fixed
 - **Source files named like secret files are indexed again (#433).** The secret-file name rules
   `credentials*`, `id_*` and `kubeconfig*` matched ordinary modules, so `credentials_store.py`,
