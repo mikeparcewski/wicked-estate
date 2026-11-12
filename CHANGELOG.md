@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.35.3] — 2026-11-12
+
+Patch: source files named like secret files are indexed again (#433, PR #436).
+
+**Upgrade note (0.35.2 -> 0.35.3).** Install 0.35.3 on every path the daemon resolves, then restart.
+The first `index` of each repo re-reads every file, because the binary version changed; that pass
+re-admits modules such as `credentials_store.py` and `id_utils.ts` that the secret-file name rules had
+dropped, with their requirement annotations. No store migration is needed.
+
 ### Fixed
 - **Source files named like secret files are indexed again (#433).** The secret-file name rules
   `credentials*`, `id_*` and `kubeconfig*` matched ordinary modules, so `credentials_store.py`,
