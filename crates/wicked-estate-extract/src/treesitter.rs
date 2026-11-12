@@ -1237,6 +1237,16 @@ pub(crate) fn builtin_query(name: &str) -> &'static str {
 
 /// The [`LANG_TABLE`] entry name owning a file extension (no dot, lowercase), if any. Drives the
 /// cross-language extension-capture rule for grammar overrides (ADR-010).
+/// Every extension the built-in grammar `name` claims (empty when there is none).
+#[cfg(test)]
+pub(crate) fn builtin_exts_of(name: &str) -> &'static [&'static str] {
+    LANG_TABLE
+        .iter()
+        .find(|e| e.name == name)
+        .map(|e| e.ext)
+        .unwrap_or(&[])
+}
+
 pub(crate) fn builtin_owner_of_ext(ext: &str) -> Option<&'static str> {
     LANG_TABLE
         .iter()

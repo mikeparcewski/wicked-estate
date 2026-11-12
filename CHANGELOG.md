@@ -7,11 +7,13 @@
   `credentials*`, `id_*` and `kubeconfig*` matched ordinary modules, so `credentials_store.py`,
   `id_utils.ts` and their tests left the code graph, along with their requirement annotations.
   These three rules now skip source code in the listed languages (`code_ext`: Python,
-  JavaScript/TypeScript, Java, Kotlin, Go, Rust, Ruby, PHP, C#, Swift, Scala, C/C++, Dart), whose string literals are still redacted like any code. A test checks that each listed
-  language masks a value bound to a secret name. Key files, config-format credential files
-  (`credentials.json`, `.yaml`, `.toml`, `.ini`, `.tfvars`), a config or key suffix under a code
-  extension (`credentials.yaml.py`), extensionless names (`id_rsa`, `credentials`) and languages
-  not listed (`credentials.sh`) stay excluded. The next `index` re-admits the modules; no store
+  JavaScript/TypeScript, Java, Kotlin, Go, Rust, Ruby, PHP, C#, Swift, Scala, Dart), whose string
+  literals are still redacted like any code. A test checks that each listed language masks the
+  usual ways a secret is written in it (a binding, a constant, a map key, PHP `define`). Key files,
+  config-format credential files (`credentials.json`, `.yaml`, `.toml`, `.ini`, `.tfvars`), a
+  config or key suffix under a code extension (`credentials.yaml.py`, `credentials.conf.py`),
+  extensionless names (`id_rsa`, `credentials`) and languages not listed (C/C++ `credentials.h`
+  headers, `credentials.sh`) stay excluded. The next `index` re-admits the modules; no store
   migration is needed. When `index` removes a previously indexed file that the secret rule
   excludes, it prints a `SECRET-EXCLUDED:` line naming it instead of removing it silently.
 
