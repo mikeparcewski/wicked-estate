@@ -101,7 +101,7 @@ use wicked_estate_core::{
 use wicked_estate_extract::{
     BlazeBrlExtractor, DrlExtractor, ExtraEdgeExtractor, HlasmExtractor, IaCExtractor,
     ImsExtractor, JclExtractor, MqExtractor, RacfExtractor, RegoRulesExtractor, SYMBOL_ID_SCHEME,
-    TfstateCollector,
+    TfstateCollector, doc_convert,
     treesitter::{ExtractorCache, is_minified_or_huge},
 };
 use wicked_estate_resolve::{
@@ -938,6 +938,8 @@ fn secret_exclusion_note(deleted: &[String]) -> Option<String> {
 #[cfg(test)]
 thread_local! {
     static SECRET_NOTES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    // The documents the converter skipped on this thread's index runs: (path, reason).
+    static DOC_SKIPS: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn rel(root: &Path, path: &Path) -> String {
@@ -1436,10 +1438,17 @@ fn index_path_inner(
     // it is actually extracted (ADR-014 "Cumulative": compiling every present extension's query
     // up front was the fixed cost of a one-file re-index).
     let ext_map = ExtractorCache::for_extensions(files.iter().map(|path| {
-        path.extension()
+        let ext = path
+            .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
-            .to_ascii_lowercase()
+            .to_ascii_lowercase();
+        // A binary document is extracted as the Markdown it converts to.
+        if doc_convert::is_doc_ext(&ext) {
+            "md".to_string()
+        } else {
+            ext
+        }
     }));
 
     // ── Classify files: UNCHANGED / CHANGED+NEW ──────────────────────────────────────────────
@@ -1453,6 +1462,7 @@ fn index_path_inner(
         /// The same path WITHOUT the label — what drop-in extra-edge rules glob against, so a
         /// rule written `src/**/*.js` keeps matching once the repo is labelled.
         raw: String,
+        /// Empty for a binary document: it is read again only when it is converted.
         bytes: Vec<u8>,
         digest: String,
         /// APEXlang `application.apx` only (#316): the export-metadata file beside it, which the
@@ -1460,6 +1470,28 @@ fn index_path_inner(
         /// unreadable. Folded into `digest`, so editing it re-extracts the application file.
         export_metadata: Option<Option<Vec<u8>>>,
     }
+
+    // Documents the converter could not read (needs OCR, encrypted, too large, ...): path + reason.
+    let doc_skips: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+    let skip_doc = |rel: &str, reason: String| {
+        if let Ok(mut v) = doc_skips.lock() {
+            v.push((rel.to_string(), reason));
+        }
+    };
+    // Report the skips collected so far (path + fixed reason; never document text). Called on
+    // every successful exit, the no-change one included.
+    let flush_doc_skips = || {
+        let mut skips = doc_skips
+            .lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default();
+        skips.sort();
+        for (rel_path, reason) in &skips {
+            eprintln!("DOC-SKIPPED: {rel_path}: {reason}");
+        }
+        #[cfg(test)]
+        DOC_SKIPS.with(|n| n.borrow_mut().extend(skips.iter().cloned()));
+    };
 
     let supported: Vec<(PathBuf, String)> = files
         .into_iter()
@@ -1480,7 +1512,18 @@ fn index_path_inner(
             // matched by a drop-in extra-edge rule are admitted too (they may have no language
             // extractor at all — e.g. a JSON catalog only the rules care about).
             let extra_match = extra.as_ref().is_some_and(|x| x.matches_path(&rel_path));
-            if ext_map.claims(&ext) || is_grammarless_ext(&ext) || extra_match {
+            // Binary documents are admitted too: they are converted to Markdown below. One over
+            // the converter's input cap is skipped here, by its size, before it is ever read.
+            let is_doc = doc_convert::is_doc_ext(&ext);
+            if is_doc {
+                let len = std::fs::metadata(&p).map_or(0, |m| m.len());
+                if len > doc_convert::MAX_INPUT_BYTES as u64 {
+                    let reason = doc_convert::Skipped::TooLarge(len).to_string();
+                    skip_doc(&repo_scope::namespaced(repo, &rel_path), reason);
+                    return None;
+                }
+            }
+            if ext_map.claims(&ext) || is_grammarless_ext(&ext) || is_doc || extra_match {
                 Some((p, rel_path))
             } else {
                 None
@@ -1498,6 +1541,28 @@ fn index_path_inner(
         .into_par_iter()
         .filter_map(|(abs, rel_path)| {
             // #405: confined — a path that resolves outside the root is never read.
+            if doc_convert::is_doc_path(&rel_path) {
+                // A binary document: read capped, digested as raw bytes (what freshness compares),
+                // and its bytes NOT held for the whole run (a repo of PDFs would sit in memory at
+                // once): it is read again when, and only if, it converts.
+                let resolved = confined_root.as_ref()?.resolve(&abs)?;
+                let bytes = match doc_convert::read_capped(&resolved) {
+                    Ok(b) => b,
+                    Err(reason) => {
+                        skip_doc(&repo_scope::namespaced(repo, &rel_path), reason.to_string());
+                        return None;
+                    }
+                };
+                let digest = source_digest(&bytes, None);
+                return Some(FileWork {
+                    abs,
+                    rel: repo_scope::namespaced(repo, &rel_path),
+                    raw: rel_path,
+                    bytes: Vec::new(),
+                    digest,
+                    export_metadata: None,
+                });
+            }
             let bytes = confined_root.as_ref()?.read(&abs)?;
             let export_metadata = wicked_estate_extract::apexlang::export_metadata_path(&rel_path)
                 .map(|meta| confined_root.as_ref()?.read(&root.join(meta)));
@@ -1663,13 +1728,15 @@ fn index_path_inner(
         // which re-parks a call that no longer resolves and retires what it no longer emits.
         if !rederive_files.is_empty() {
             // The post-edit signature, from a parse of just the changed files (pure; the write
-            // below parses them again). `None` = cannot tell (a rule-matched, minified or
-            // non-UTF-8 file): re-extract.
+            // below parses them again). `None` = cannot tell (a rule-matched, minified,
+            // non-UTF-8 or converted-document file): re-extract.
             let new_signature = (|| {
                 let mut signature = ReplaySignature::default();
                 for rel in &changed_seed {
                     let fw = work_by_rel.get(rel)?;
-                    if extra.as_ref().is_some_and(|x| x.matches_path(&fw.raw)) {
+                    if extra.as_ref().is_some_and(|x| x.matches_path(&fw.raw))
+                        || doc_convert::is_doc_path(&fw.raw)
+                    {
                         return None;
                     }
                     let text = std::str::from_utf8(&fw.bytes).ok()?;
@@ -1781,6 +1848,7 @@ fn index_path_inner(
         if !override_gate {
             store.meta_set_key(&override_key, cur_overrides);
         }
+        flush_doc_skips();
         return store.stats();
     }
 
@@ -1804,24 +1872,72 @@ fn index_path_inner(
     let extractions: Vec<(String, wicked_estate_core::Extraction, String)> = changed
         .par_iter()
         .filter_map(|fw| {
-            let ext = fw
+            let mut ext = fw
                 .abs
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
+            // A binary document (pdf, docx, pptx, ...) is converted to Markdown in-process and then
+            // handled exactly as a `.md` file: the same redaction, the markdown grammar, and the
+            // Markdown stored as the content under the document's own path. A document the
+            // converter cannot read is skipped with its reason, never fatal. The digest stays the
+            // raw bytes', so an unchanged document is neither re-converted nor retried.
+            let converted: Option<String> = if doc_convert::is_doc_ext(&ext) {
+                let bytes = confined_root
+                    .as_ref()
+                    .and_then(|c| c.resolve(&fw.abs))
+                    .ok_or(doc_convert::Skipped::Unreadable("outside the root"))
+                    .and_then(|p| doc_convert::read_capped(&p));
+                let bytes = match bytes {
+                    Ok(b) => b,
+                    Err(reason) => {
+                        skip_doc(&fw.rel, reason.to_string());
+                        return None;
+                    }
+                };
+                // The digest recorded below is the classification read's: convert only those
+                // bytes. A document that changed in between is skipped and, its new bytes no
+                // longer matching that digest, converted on the next run.
+                if source_digest(&bytes, None) != fw.digest {
+                    skip_doc(&fw.rel, "changed while indexing; converted next run".into());
+                    return None;
+                }
+                match doc_convert::to_markdown(&fw.raw, &bytes) {
+                    Ok(md) => {
+                        ext = "md".to_string();
+                        Some(md)
+                    }
+                    Err(reason) => {
+                        skip_doc(&fw.rel, reason.to_string());
+                        return None;
+                    }
+                }
+            } else {
+                None
+            };
             // #405: mask secret values BEFORE parsing, so nodes, signatures, the full-text index,
             // unresolved-ref names and the stored content all derive from masked text (same byte
             // length, so every span stays valid). The digest stays the file's own.
-            let committed = std::str::from_utf8(&fw.bytes).ok()?;
-            let text = wicked_estate_extract::redact::redact_source(&fw.raw, committed);
+            let committed = match &converted {
+                Some(md) => md.as_str(),
+                None => std::str::from_utf8(&fw.bytes).ok()?,
+            };
+            let redact_path = match converted {
+                Some(_) => std::borrow::Cow::Owned(format!("{}.md", fw.raw)),
+                None => std::borrow::Cow::Borrowed(fw.raw.as_str()),
+            };
+            let text = wicked_estate_extract::redact::redact_source(&redact_path, committed);
             let extra_rules = extra.as_ref().filter(|x| x.matches_path(&fw.raw));
 
             // Skip minified or huge files before any parsing — they generate noise, not signal.
             // A file explicitly targeted by an extra-edge rule still gets the (regex-only) extra
             // pass below; only the language extraction is skipped for it.
+            // A converted document is never dropped here: its text is already capped at 1 MiB,
+            // and long prose lines or table rows are what documents are made of. When the guard
+            // trips, the document keeps its content and File node, without heading nodes.
             let minified = is_minified_or_huge(&text);
-            if minified && extra_rules.is_none() {
+            if minified && extra_rules.is_none() && converted.is_none() {
                 skipped_minified.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
@@ -1876,6 +1992,20 @@ fn index_path_inner(
                 extraction.refs.extend(ee.unresolved_refs);
             }
 
+            if converted.is_some() {
+                // A converted document always has its File node, so its content is stored even
+                // when the markdown grammar found no heading.
+                let file_symbol = Symbol::file(&fw.rel).id();
+                if !extraction.nodes.iter().any(|n| n.symbol == file_symbol) {
+                    extraction.nodes.push(Node::new(
+                        file_symbol,
+                        NodeKind::File,
+                        fw.rel.clone(),
+                        Language::new("markdown"),
+                        Location::new(&fw.rel, Span::ZERO),
+                    ));
+                }
+            }
             if extraction.nodes.is_empty()
                 && extraction.local_edges.is_empty()
                 && extraction.refs.is_empty()
@@ -1886,6 +2016,7 @@ fn index_path_inner(
         })
         .collect();
 
+    flush_doc_skips();
     let skipped_min_count = skipped_minified.load(Ordering::Relaxed);
     if skipped_min_count > 0 {
         eprintln!("SKIPPED_MINIFIED: {skipped_min_count} file(s)");
@@ -4803,6 +4934,108 @@ pattern = "(?P<k>\\{)"
     /// swept, and the sweep reports them by name, never silently: a visible one, a hidden one the
     /// walk never visits, and one under a repo label. A genuinely deleted source file is not
     /// reported as a secret exclusion. Delete the `eprintln!` block in the sweep and this fails.
+    /// Binary documents are converted to Markdown and indexed under their own paths: stored
+    /// content, headings as nodes, the same redaction as a `.md`. A scanned PDF is skipped with
+    /// "needs OCR" (never uploaded anywhere), and a second run neither re-converts nor retries it.
+    /// Before the converter the walk dropped every one of these files.
+    #[test]
+    fn binary_documents_are_converted_indexed_and_a_scan_is_skipped_as_needs_ocr() {
+        let fixtures = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../wicked-estate-extract/tests/fixtures/docs"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("docs")).unwrap();
+        for (from, to) in [
+            ("spec.docx", "docs/spec.docx"),
+            ("deck.pptx", "docs/deck.pptx"),
+            ("runbook.pdf", "docs/runbook.pdf"),
+            ("scanned.pdf", "docs/scanned.pdf"),
+            // One 70,000-character paragraph: the minified-file guard would drop it as code.
+            ("long.docx", "docs/long.docx"),
+        ] {
+            std::fs::copy(format!("{fixtures}/{from}"), tmp.path().join(to)).unwrap();
+        }
+        // Over the input cap: skipped by its size, never read (a sparse file, so this is cheap).
+        std::fs::File::create(tmp.path().join("docs/huge.pdf"))
+            .unwrap()
+            .set_len(doc_convert::MAX_INPUT_BYTES as u64 + 1)
+            .unwrap();
+        let mut store = MemStore::new();
+        DOC_SKIPS.with(|n| n.borrow_mut().clear());
+        index_path(&mut store, tmp.path()).unwrap();
+
+        let files = GraphRead::indexed_files(&store).unwrap();
+        for f in [
+            "docs/spec.docx",
+            "docs/deck.pptx",
+            "docs/runbook.pdf",
+            "docs/long.docx",
+        ] {
+            assert!(files.contains(&f.to_string()), "{f} indexed: {files:?}");
+        }
+        // A scan keeps its digest (so an unchanged one is not retried) but has no content or nodes.
+        assert!(
+            store.file_content("docs/scanned.pdf").unwrap().is_none(),
+            "a scan has no text to index"
+        );
+        let spec = store
+            .file_content("docs/spec.docx")
+            .unwrap()
+            .expect("stored");
+        assert!(spec.contains("reconcile_ledger"), "{spec}");
+        assert!(
+            !spec.contains("AKIAABCDEFGHIJKLMNOP"),
+            "redacted like any markdown: {spec}"
+        );
+        let deck = store
+            .file_content("docs/deck.pptx")
+            .unwrap()
+            .expect("stored");
+        assert!(
+            deck.contains("settle_invoice") && deck.contains("retry_budget"),
+            "{deck}"
+        );
+        let long = store
+            .file_content("docs/long.docx")
+            .unwrap()
+            .expect("a long-line document keeps its content");
+        assert_eq!(
+            long.matches("longprose").count(),
+            7000,
+            "the whole paragraph is kept"
+        );
+        let pdf = store
+            .file_content("docs/runbook.pdf")
+            .unwrap()
+            .expect("stored");
+        assert!(pdf.contains("retry_budget"), "{pdf}");
+        // The heading is a node, so the document is findable by name like a .md.
+        let nodes = GraphRead::all_nodes(&store).unwrap();
+        assert!(!nodes.iter().any(|n| n.location.file == "docs/scanned.pdf"));
+        assert!(
+            nodes.iter().any(|n| n.location.file == "docs/spec.docx"
+                && n.name.contains("Ledger reconciliation spec")),
+            "heading node on the docx"
+        );
+
+        let skips = DOC_SKIPS.with(|n| n.borrow().clone());
+        assert_eq!(skips.len(), 2, "{skips:?}");
+        assert_eq!(skips[0].0, "docs/huge.pdf");
+        assert!(skips[0].1.starts_with("too large"), "{skips:?}");
+        assert_eq!(skips[1].0, "docs/scanned.pdf");
+        assert!(skips[1].1.starts_with("needs OCR"), "{skips:?}");
+        assert!(!files.contains(&"docs/huge.pdf".to_string()));
+
+        // Unchanged documents: no re-conversion, no retry of the scan. The oversized one is still
+        // reported, on the no-change exit too.
+        DOC_SKIPS.with(|n| n.borrow_mut().clear());
+        index_path(&mut store, tmp.path()).unwrap();
+        let skips = DOC_SKIPS.with(|n| n.borrow().clone());
+        assert_eq!(skips.len(), 1, "{skips:?}");
+        assert_eq!(skips[0].0, "docs/huge.pdf");
+    }
+
     #[test]
     fn a_newly_secret_excluded_file_is_swept_and_reported() {
         let tmp = tempfile::tempdir().unwrap();

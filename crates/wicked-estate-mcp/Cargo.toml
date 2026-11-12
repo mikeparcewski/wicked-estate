@@ -35,6 +35,7 @@ wicked-estate-core.workspace = true
 wicked-estate-store.workspace = true
 wicked-estate-retrieve = { path = "../wicked-estate-retrieve", version = "0.35.3" }
 wicked-estate = { path = "../wicked-estate", version = "0.35.3", features = ["serve"] }
+wicked-estate-extract = { path = "../wicked-estate-extract", version = "0.35.3" }
 wicked-estate-observe = { path = "../wicked-estate-observe", version = "0.35.3" }
 wicked-estate-memory = { path = "../wicked-estate-memory", version = "0.35.3" }
 wicked-estate-knowledge = { path = "../wicked-estate-knowledge", version = "0.35.3" }

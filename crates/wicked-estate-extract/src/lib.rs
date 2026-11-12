@@ -27,6 +27,8 @@ pub mod apexlang;
 /// Body-shape classification: real behaviour vs stub, data shape or test support (core#1375).
 pub mod behaviour;
 pub use apexlang::ApexlangExtractor;
+/// Binary documents (PDF, Office, OpenDocument, RTF, EPUB) to Markdown with anydoc, in-process.
+pub mod doc_convert;
 /// Embedded code (estate#314): another language's code inside a host file, extracted with that
 /// language's built-in grammar and mapped back into the host.
 pub mod embedded;

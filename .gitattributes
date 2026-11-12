@@ -2,3 +2,16 @@
 # sources with include_str!, fixtures are hashed byte-for-byte, and the index stores digests of
 # file bytes: a CRLF working tree would change every one of them on Windows only.
 * text=auto eol=lf
+# Binary documents (doc_convert fixtures): byte-exact, never normalized or diffed as text.
+*.pdf binary
+*.doc binary
+*.docx binary
+*.ppt binary
+*.pptx binary
+*.xls binary
+*.xlsx binary
+*.rtf binary
+*.epub binary
+*.odt binary
+*.odp binary
+*.ods binary

@@ -116,19 +116,81 @@ fn dispatch_ingest(id: &Value, args: &Value, knowledge: &mut dyn KnowledgeApi, n
         Some(t) => t.to_string(),
         None => return json_rpc_error(id, -32602, "title required"),
     };
-    let chunks: Vec<String> = match args.get("chunks").and_then(|v| v.as_array()) {
-        Some(a) if !a.is_empty() => a
+    // Exactly one input mode, each field its own type: a malformed field is invalid params, never
+    // silently ignored in favour of the other mode.
+    let path = match args.get("path") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(p)) => Some(p.as_str()),
+        Some(_) => return json_rpc_error(id, -32602, "path must be a string"),
+    };
+    let given_chunks = match args.get("chunks") {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(a)) => Some(a),
+        Some(_) => return json_rpc_error(id, -32602, "chunks must be an array of strings"),
+    };
+    let chunks: Vec<String> = match (path, given_chunks) {
+        (Some(_), Some(_)) => {
+            return json_rpc_error(id, -32602, "give chunks or path, not both");
+        }
+        // A binary document: estate converts it to Markdown and chunks it (doc_convert).
+        (Some(p), None) => match document_chunks(p) {
+            Ok(chunks) => chunks,
+            Err(reason) => return tool_error(id, format!("{p}: {reason}")),
+        },
+        (None, Some(a)) if !a.is_empty() => a
             .iter()
             .filter_map(|x| x.as_str().map(str::to_owned))
             .collect(),
-        _ => return json_rpc_error(id, -32602, "chunks required (non-empty)"),
+        _ => {
+            return json_rpc_error(
+                id,
+                -32602,
+                "chunks required (non-empty), or a document path",
+            );
+        }
     };
     let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("");
-    let source = args.get("source").and_then(|v| v.as_str()).unwrap_or("");
+    let source = args
+        .get("source")
+        .and_then(|v| v.as_str())
+        .or(path)
+        .unwrap_or("");
     match knowledge.ingest(&title, &chunks, scope, source, now) {
         Ok(doc_id) => mcp_result(id, json!({"doc_id": doc_id})),
         Err(e) => json_rpc_error(id, -32603, &e.to_string()),
     }
+}
+
+/// The chunks of the binary document at `path` (pdf, docx, pptx, xlsx, ...): read locally,
+/// converted to Markdown in-process, redacted with the same rules as any `.md`, split at H1/H2.
+/// The read is confined like the indexer's (wicked-estate#405): `path` must resolve, symlinks and
+/// `..` included, inside the server's working directory, so this tool reads no more of the disk
+/// than an index of that directory would. A file the secret-file rule excludes is never read.
+/// Every refusal is a fixed reason, never document text.
+fn document_chunks(path: &str) -> Result<Vec<String>, String> {
+    use wicked_estate_extract::{doc_convert, redact};
+    if !doc_convert::is_doc_path(path) {
+        return Err(
+            "not a binary document (pdf, doc/docx, ppt/pptx, xls/xlsx, odt/odp/ods, rtf, epub); \
+             send its text as chunks"
+                .into(),
+        );
+    }
+    let cwd = std::env::current_dir().map_err(|_| "no working directory".to_string())?;
+    let resolved = wicked_estate::confined::ConfinedRoot::new(&cwd)
+        .and_then(|root| root.resolve(std::path::Path::new(path)))
+        .ok_or_else(|| "not found inside the server's working directory; not read".to_string())?;
+    if redact::is_excluded(path) || redact::is_excluded(&resolved.to_string_lossy()) {
+        return Err("matches the secret-file rule; not read".into());
+    }
+    let bytes = doc_convert::read_capped(&resolved).map_err(|e| e.to_string())?;
+    let md = doc_convert::to_markdown(path, &bytes).map_err(|e| e.to_string())?;
+    let md = redact::redact_source(&format!("{path}.md"), &md);
+    let chunks = doc_convert::chunk_markdown(&md);
+    if chunks.is_empty() {
+        return Err("no text".into());
+    }
+    Ok(chunks)
 }
 
 fn dispatch_write(id: &Value, args: &Value, knowledge: &mut dyn KnowledgeApi, now: i64) -> Value {

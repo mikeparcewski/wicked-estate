@@ -689,7 +689,8 @@ impl FreshnessProbe {
 
     fn count_unindexed(&mut self, statuses: &[(Root, RootStatus)]) -> Option<usize> {
         // The extensions `index_path` admits: every `languages.toml` row (data, so a new
-        // language is covered with no code change) plus the grammar-less line extractors.
+        // language is covered with no code change), the grammar-less line extractors, and the
+        // binary documents the converter reads.
         let exts = self
             .source_exts
             .get_or_insert_with(|| {
@@ -714,7 +715,11 @@ impl FreshnessProbe {
                 let ext = Path::new(rel)
                     .extension()
                     .map(|e| e.to_string_lossy().to_ascii_lowercase());
-                if !ext.is_some_and(|e| exts.contains(&e) || crate::is_grammarless_ext(&e)) {
+                if !ext.is_some_and(|e| {
+                    exts.contains(&e)
+                        || crate::is_grammarless_ext(&e)
+                        || wicked_estate_extract::doc_convert::is_doc_ext(&e)
+                }) {
                     continue;
                 }
                 if !root.path.join(rel).is_file() {
