@@ -145,8 +145,10 @@ fn each_paragraph_using_a_data_item_has_its_own_site_after_reopen() {
     let from = |src: &SymbolId| shared.iter().filter(|s| &s.source == src).collect::<Vec<_>>();
     let (one, two) = (from(&para_one), from(&para_two));
     assert_eq!((one.len(), two.len()), (1, 1), "{shared:#?}");
-    assert_eq!(one[0].location.span.start_line, line_of("MOVE 1 TO WS-SHARED"));
-    assert_eq!(two[0].location.span.start_line, line_of("MOVE 3 TO WS-SHARED"));
+    let want_one = line_of("MOVE 1 TO WS-SHARED");
+    let want_two = line_of("MOVE 3 TO WS-SHARED");
+    assert_eq!(one[0].location.span.start_line, want_one);
+    assert_eq!(two[0].location.span.start_line, want_two);
     assert_eq!(one[0].location.file, "DEMO.cbl");
     assert_eq!(shared.len(), 2, "{shared:#?}");
 

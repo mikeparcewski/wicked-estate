@@ -70,7 +70,11 @@ impl Skipped {
             return None;
         };
         let words: Vec<&str> = msg.split_whitespace().collect();
-        let num = |w: &&str| w.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u32>().ok();
+        let num = |w: &&str| {
+            w.trim_matches(|c: char| !c.is_ascii_digit())
+                .parse::<u32>()
+                .ok()
+        };
         let after_of = words
             .iter()
             .position(|w| *w == "of")
@@ -613,7 +617,8 @@ mod tests {
             vec![vec![], vec!["A"], vec!["A", "B"], vec!["A", "D"]],
             "{located:#?}"
         );
-        assert!(located[2].text.contains("text c") && located[2].text.contains("# not a heading"));
+        let section = &located[2].text;
+        assert!(section.contains("text c") && section.contains("# not a heading"));
         let plain: Vec<String> = located.iter().map(|c| c.text.clone()).collect();
         assert_eq!(plain, chunk_markdown(md));
     }
@@ -624,7 +629,8 @@ mod tests {
         let md = format!("# Big\n\n{body}\n");
         let located = chunk_markdown_located(&md);
         assert!(located.len() >= 3, "{}", located.len());
-        assert!(located.iter().all(|c| c.heading_path == vec!["Big".to_string()]));
+        let big = vec!["Big".to_string()];
+        assert!(located.iter().all(|c| c.heading_path == big));
     }
 
     #[test]

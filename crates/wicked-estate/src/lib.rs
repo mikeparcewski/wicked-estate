@@ -2045,7 +2045,10 @@ fn index_path_inner(
 
     // ── Emit extraction counters (best-effort) ───────────────────────────────────────────────
     {
-        let total_symbols: usize = extractions.iter().map(|(_, e, _, _)| e.nodes.len()).sum();
+        let total_symbols: usize = extractions
+            .iter()
+            .map(|(_, e, _, _)| e.nodes.len())
+            .sum();
         let files_extracted = extractions.len();
         let sink = wicked_estate_observe::init_sink_from_env();
         let resource = wicked_estate_core::observability::Resource::service(

@@ -35,6 +35,8 @@ use serde_json::{Value, json};
 use wicked_estate_extract::doc_convert::{self, LocatedChunk, Skipped};
 use wicked_estate_extract::redact;
 
+const USAGE: &str = "usage: wicked-estate convert --chunks <file>";
+
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_USAGE: i32 = 2;
 pub const EXIT_NEEDS_VISION: i32 = 3;
@@ -68,7 +70,10 @@ fn sniff(bytes: &[u8]) -> Kind {
         || bytes.starts_with(b"PK\x03\x04")
         || bytes.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1])
         || bytes.starts_with(b"{\\rtf");
-    if document { Kind::Document } else { Kind::Text }
+    if document {
+        return Kind::Document;
+    }
+    Kind::Text
 }
 
 /// The page a chunk starts on, where the converter's Markdown marks pages. No format does today
@@ -96,7 +101,7 @@ fn needs_vision(pages: Option<u32>) -> Outcome {
 }
 
 fn usage(why: &str) -> Outcome {
-    eprintln!("convert: {why}\nusage: wicked-estate convert --chunks <file>");
+    eprintln!("convert: {why}\n{USAGE}");
     Outcome {
         exit: EXIT_USAGE,
         json: None,
@@ -345,7 +350,8 @@ mod tests {
             .iter()
             .map(|c| c["text"].as_str().unwrap())
             .collect();
-        assert!(all.contains("WS-INTEREST-PERIOD is 'DAILY'.") && all.contains("compound: false"));
+        assert!(all.contains("WS-INTEREST-PERIOD is 'DAILY'."));
+        assert!(all.contains("compound: false"));
     }
 
     #[test]

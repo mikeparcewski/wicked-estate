@@ -2850,19 +2850,22 @@ mod tests {
         let masked = redact_source("notes.md", src);
         for (i, (a, b)) in src.bytes().zip(masked.bytes()).enumerate() {
             if a != b {
-                assert!(ranges.iter().any(|&(s, e)| s as usize <= i && i < e as usize));
+                let hit = ranges.iter().any(|&(s, e)| (s as usize..e as usize).contains(&i));
+                assert!(hit);
             }
         }
     }
 
     #[test]
     fn has_secret_detects_credentials_not_default_deny_masking() {
-        assert!(has_secret("token ghp_abcdefghijklmnopqrstuvwxyz0123456789 here"));
+        let token = "token ghp_abcdefghijklmnopqrstuvwxyz0123456789 here";
+        assert!(has_secret(token));
         assert!(has_secret(
             "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34\n-----END RSA PRIVATE KEY-----"
         ));
         assert!(has_secret("password: hunter2\n"));
-        assert!(!has_secret("WS-INTEREST-PERIOD is 'DAILY'.\ninterest.compound: false\n"));
+        let prose = "WS-INTEREST-PERIOD is 'DAILY'.\ninterest.compound: false\n";
+        assert!(!has_secret(prose));
         assert!(!has_secret("{\"n\": 4242}"));
     }
 }
