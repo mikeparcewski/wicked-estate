@@ -150,14 +150,16 @@ fn each_paragraph_using_a_data_item_has_its_own_site_after_reopen() {
         p.start_byte <= u.start_byte && u.end_byte <= p.end_byte
     };
 
+    let only = |a: &Node, b: &Node, s: &UseSite| covers(a, s) && !covers(b, s);
+
     let shared = sites("WS-SHARED");
     assert_eq!(shared.len(), 2, "{shared:#?}");
     let want_one = line_of("MOVE 1 TO WS-SHARED");
     let want_two = line_of("MOVE 3 TO WS-SHARED");
     let lines: Vec<u32> = shared.iter().map(|s| s.location.span.start_line).collect();
     assert_eq!(lines, vec![want_one, want_two], "{shared:#?}");
-    assert!(covers(&para_one, &shared[0]) && !covers(&para_two, &shared[0]));
-    assert!(covers(&para_two, &shared[1]) && !covers(&para_one, &shared[1]));
+    assert!(only(&para_one, &para_two, &shared[0]));
+    assert!(only(&para_two, &para_one, &shared[1]));
     assert!(shared.iter().all(|s| s.location.file == "DEMO.cbl"));
 
     // Different items: each item has only the site of the paragraph that uses it.
@@ -167,14 +169,14 @@ fn each_paragraph_using_a_data_item_has_its_own_site_after_reopen() {
         only_one[0].location.span.start_line,
         line_of("MOVE 2 TO WS-ONLY-ONE")
     );
-    assert!(covers(&para_one, &only_one[0]) && !covers(&para_two, &only_one[0]));
+    assert!(only(&para_one, &para_two, &only_one[0]));
     let only_two = sites("WS-ONLY-TWO");
     assert_eq!(only_two.len(), 1, "{only_two:#?}");
     assert_eq!(
         only_two[0].location.span.start_line,
         line_of("MOVE 4 TO WS-ONLY-TWO")
     );
-    assert!(covers(&para_two, &only_two[0]) && !covers(&para_one, &only_two[0]));
+    assert!(only(&para_two, &para_one, &only_two[0]));
 
     // The stored graph is still deduplicated: one edge per (source, target, kind), so the two
     // sites of the shared item sit under ONE References edge from the program.
