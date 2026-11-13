@@ -348,6 +348,8 @@ enum Stmt {
 /// statement (card, continuations, DDs, in-stream data, comments) instead of a one-line anchor.
 struct Extents {
     line_starts: Vec<usize>,
+    /// Byte offset where each line's content ends (before its terminator).
+    line_ends: Vec<usize>,
     text_len: usize,
     bounds: Vec<(usize, Stmt)>,
 }
@@ -355,12 +357,14 @@ struct Extents {
 impl Extents {
     fn scan(text: &str) -> Self {
         let mut line_starts = Vec::new();
+        let mut line_ends = Vec::new();
         let mut bounds = Vec::new();
         let mut pos = 0;
         for (i, raw) in text.lines().enumerate() {
             line_starts.push(pos);
             // `lines()` strips `\n` or `\r\n`; advance past the real terminator.
             pos += raw.len();
+            line_ends.push(pos);
             if text[pos..].starts_with("\r\n") {
                 pos += 2;
             } else if text[pos..].starts_with('\n') {
@@ -391,6 +395,7 @@ impl Extents {
         }
         Self {
             line_starts,
+            line_ends,
             text_len: text.len(),
             bounds,
         }
@@ -418,13 +423,14 @@ impl Extents {
             .get(end_line_excl)
             .copied()
             .unwrap_or(self.text_len);
+        let last = end_line_excl - 1;
         Span {
             start_byte: self.line_starts[line] as u32,
             end_byte: end_byte as u32,
             start_line: line as u32,
             start_col: 0,
-            end_line: (end_line_excl - 1) as u32,
-            end_col: 0,
+            end_line: last as u32,
+            end_col: (self.line_ends[last] - self.line_starts[last]) as u32,
         }
     }
 }
@@ -545,6 +551,10 @@ TRAN-CAT-TYPE,1,2,ZD\n\
             let s10 = step("STEP10");
             assert_eq!((s5.start_line, s5.end_line), (2, 8));
             assert_eq!((s10.start_line, s10.end_line), (9, 15));
+            assert_eq!(
+                (s5.end_col, s10.end_col),
+                ("//         DISP=(NEW,CATLG,DELETE)".len() as u32, 2)
+            );
             assert_eq!(
                 (s5.start_byte as usize, s5.end_byte as usize),
                 (off(2), off(9))
