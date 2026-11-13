@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use wicked_estate::index_path;
-use wicked_estate_core::{EdgeKind, GraphRead, GraphWrite, Node};
+use wicked_estate_core::{EdgeKind, GraphRead, GraphWrite, Node, UseSite};
 use wicked_estate_store::{MemStore, SqliteStore};
 
 fn node_named(store: &SqliteStore, name: &str) -> Node {
@@ -143,10 +143,11 @@ fn each_paragraph_using_a_data_item_has_its_own_site_after_reopen() {
         GraphRead::use_sites(&store, &target).unwrap()
     };
     // COBOL attributes a paragraph's data references to the program, so a site's own LOCATION
-    // says which paragraph used the item: its line falls inside that paragraph's span.
-    let within = |para: &Node, line: u32| {
-        let span = para.location.span;
-        span.start_line <= line && line <= span.end_line
+    // says which paragraph used the item. Membership is decided by BYTES: a paragraph's byte span
+    // is exact (it ends where the next begins), its end line is not.
+    let covers = |para: &Node, site: &UseSite| {
+        let (p, u) = (para.location.span, site.location.span);
+        p.start_byte <= u.start_byte && u.end_byte <= p.end_byte
     };
 
     let shared = sites("WS-SHARED");
@@ -155,21 +156,25 @@ fn each_paragraph_using_a_data_item_has_its_own_site_after_reopen() {
     let want_two = line_of("MOVE 3 TO WS-SHARED");
     let lines: Vec<u32> = shared.iter().map(|s| s.location.span.start_line).collect();
     assert_eq!(lines, vec![want_one, want_two], "{shared:#?}");
-    assert!(within(&para_one, want_one) && !within(&para_two, want_one));
-    assert!(within(&para_two, want_two) && !within(&para_one, want_two));
+    assert!(covers(&para_one, &shared[0]) && !covers(&para_two, &shared[0]));
+    assert!(covers(&para_two, &shared[1]) && !covers(&para_one, &shared[1]));
     assert!(shared.iter().all(|s| s.location.file == "DEMO.cbl"));
 
     // Different items: each item has only the site of the paragraph that uses it.
     let only_one = sites("WS-ONLY-ONE");
     assert_eq!(only_one.len(), 1, "{only_one:#?}");
-    let line = only_one[0].location.span.start_line;
-    assert_eq!(line, line_of("MOVE 2 TO WS-ONLY-ONE"));
-    assert!(within(&para_one, line) && !within(&para_two, line));
+    assert_eq!(
+        only_one[0].location.span.start_line,
+        line_of("MOVE 2 TO WS-ONLY-ONE")
+    );
+    assert!(covers(&para_one, &only_one[0]) && !covers(&para_two, &only_one[0]));
     let only_two = sites("WS-ONLY-TWO");
     assert_eq!(only_two.len(), 1, "{only_two:#?}");
-    let line = only_two[0].location.span.start_line;
-    assert_eq!(line, line_of("MOVE 4 TO WS-ONLY-TWO"));
-    assert!(within(&para_two, line) && !within(&para_one, line));
+    assert_eq!(
+        only_two[0].location.span.start_line,
+        line_of("MOVE 4 TO WS-ONLY-TWO")
+    );
+    assert!(covers(&para_two, &only_two[0]) && !covers(&para_one, &only_two[0]));
 
     // The stored graph is still deduplicated: one edge per (source, target, kind), so the two
     // sites of the shared item sit under ONE References edge from the program.
