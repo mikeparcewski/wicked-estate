@@ -139,6 +139,15 @@ impl GraphRead for OverlayMemStore {
     fn file_call_refs(&self, file: &str) -> Result<Option<String>> {
         self.overlay().file_call_refs(file)
     }
+    fn file_redactions(&self, file: &str) -> Result<Option<Vec<(u32, u32)>>> {
+        self.overlay().file_redactions(file)
+    }
+    fn use_sites(
+        &self,
+        target: &wicked_estate_core::SymbolId,
+    ) -> Result<Vec<wicked_estate_core::UseSite>> {
+        self.overlay().use_sites(target)
+    }
     fn symbol_source(&self, node: &Node) -> Result<Option<String>> {
         self.overlay().symbol_source(node)
     }
@@ -213,6 +222,16 @@ impl GraphWrite for OverlayMemStore {
     }
     fn set_file_call_refs(&mut self, file: &str, refs_json: &str) -> Result<()> {
         self.home.set_file_call_refs(file, refs_json)
+    }
+    fn set_file_redactions(&mut self, file: &str, ranges: &[(u32, u32)]) -> Result<()> {
+        self.home.set_file_redactions(file, ranges)
+    }
+    fn replace_use_sites(
+        &mut self,
+        replaced_files: &[&str],
+        sites: &[wicked_estate_core::UseSite],
+    ) -> Result<()> {
+        self.home.replace_use_sites(replaced_files, sites)
     }
     fn prune_dangling_edges(&mut self) -> Result<usize> {
         self.home.prune_dangling_edges()

@@ -391,6 +391,44 @@ pub fn redact_source(path: &str, text: &str) -> String {
     apply(text, &source_masks(path, text))
 }
 
+/// [`redact_source`] plus the byte ranges it masked, as `(start, end)` offsets into the returned
+/// text (the same offsets as into `text`: masking keeps the length). Ranges are widened to char
+/// boundaries, sorted, and merged where they touch or overlap; an empty list means no mask was
+/// applied. The indexer records them beside the stored text (`GraphRead::file_redactions`).
+pub fn redact_source_ranges(path: &str, text: &str) -> (String, Vec<(u32, u32)>) {
+    let masks = source_masks(path, text);
+    let mut ranges: Vec<(u32, u32)> = masks
+        .iter()
+        .map(|&(s, e, _)| widen(text, s, e))
+        .filter(|&(s, e)| e > s)
+        .map(|(s, e)| (s as u32, e as u32))
+        .collect();
+    ranges.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(ranges.len());
+    for (s, e) in ranges {
+        match merged.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    (apply(text, &masks), merged)
+}
+
+/// True when `text` holds a detected credential: a known token shape or URL credential (a `ghp_`
+/// token, a private key block), or a value assigned to a secret-named key (`password: hunter2`).
+/// This is the detection half of the redactor only. It leaves out the default-deny value masking
+/// of config and code files (`config_masks`, `code_masks`), which masks values by default and so
+/// says nothing about whether a credential is present: prose such as `interest.compound: false`
+/// is not a detection.
+pub fn has_secret(text: &str) -> bool {
+    if !core_redact::token_shape_ranges(text).is_empty() {
+        return true;
+    }
+    let mut m = Vec::new();
+    kv_deny_masks(text, &mut m);
+    !m.is_empty()
+}
+
 /// Every mask [`redact_source`] applies to `text`, before applying them (so a host's embedded
 /// blocks contribute ranges to ONE application pass: a defined precedence, idempotent).
 fn source_masks(path: &str, text: &str) -> Vec<(usize, usize, MaskKind)> {
@@ -2793,5 +2831,38 @@ mod tests {
         assert_eq!(literal_interior("\"\"\"doc\"\"\""), (3, 6));
         assert_eq!(literal_interior("r#\"raw\"#"), (3, 6));
         assert_eq!(literal_interior("\"\""), (1, 1));
+    }
+
+    #[test]
+    fn redact_source_ranges_cover_every_masked_byte() {
+        let (out, ranges) = redact_source_ranges("app.json", "{\"n\": 4242}");
+        assert_eq!(out, "{\"n\": 1000}");
+        assert!(ranges.iter().any(|&(s, e)| s <= 6 && e >= 10), "{ranges:?}");
+        // Nothing masked: no ranges, text unchanged.
+        let (out, ranges) = redact_source_ranges("notes.md", "plain prose\n");
+        assert_eq!((out.as_str(), ranges.len()), ("plain prose\n", 0));
+        // Touching and overlapping masks merge; ranges are sorted and disjoint.
+        let src = "a ghp_abcdefghijklmnopqrstuvwxyz0123456789 b\n";
+        let (_, ranges) = redact_source_ranges("notes.md", src);
+        assert!(ranges.windows(2).all(|w| w[0].1 < w[1].0), "{ranges:?}");
+        assert!(!ranges.is_empty());
+        // Every byte that changed is inside a range.
+        let masked = redact_source("notes.md", src);
+        for (i, (a, b)) in src.bytes().zip(masked.bytes()).enumerate() {
+            if a != b {
+                assert!(ranges.iter().any(|&(s, e)| s as usize <= i && i < e as usize));
+            }
+        }
+    }
+
+    #[test]
+    fn has_secret_detects_credentials_not_default_deny_masking() {
+        assert!(has_secret("token ghp_abcdefghijklmnopqrstuvwxyz0123456789 here"));
+        assert!(has_secret(
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34\n-----END RSA PRIVATE KEY-----"
+        ));
+        assert!(has_secret("password: hunter2\n"));
+        assert!(!has_secret("WS-INTEREST-PERIOD is 'DAILY'.\ninterest.compound: false\n"));
+        assert!(!has_secret("{\"n\": 4242}"));
     }
 }

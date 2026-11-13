@@ -251,6 +251,11 @@ pub const COMMANDS: &[Command] = &[
         spec: owns(&[req("envelope.json")], &[DB, REPO, JSON, str_flag("root")]),
     },
     Command {
+        // Parses its own arguments so a usage error exits 2, as `convert` documents.
+        name: "convert",
+        spec: Spec::SelfParsed { values: &[] },
+    },
+    Command {
         name: "tfstate",
         spec: owns(&[req("file")], &[DB]),
     },

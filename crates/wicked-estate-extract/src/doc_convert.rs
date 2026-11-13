@@ -61,6 +61,25 @@ pub enum Skipped {
     Panicked,
 }
 
+impl Skipped {
+    /// The page count a [`Skipped::NeedsOcr`] reason names ("all 3 pages need OCR" is 3; "page 2
+    /// of 5 needs OCR" is 5, the document's total), or `None` for any other skip or a reason with
+    /// no number. Parsed from anydoc's message, which carries page numbers only.
+    pub fn ocr_pages(&self) -> Option<u32> {
+        let Skipped::NeedsOcr(msg) = self else {
+            return None;
+        };
+        let words: Vec<&str> = msg.split_whitespace().collect();
+        let num = |w: &&str| w.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u32>().ok();
+        let after_of = words
+            .iter()
+            .position(|w| *w == "of")
+            .and_then(|i| words.get(i + 1))
+            .and_then(num);
+        after_of.or_else(|| words.iter().find_map(num))
+    }
+}
+
 impl fmt::Display for Skipped {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -219,15 +238,51 @@ fn split_words(line: &str, max: usize) -> Vec<&str> {
 /// starts. A cut inside a code block is not re-fenced: chunks are retrieval units, and anydoc's
 /// Office and PDF output rarely holds code. Chunks with no text are dropped.
 pub fn chunk_markdown(md: &str) -> Vec<String> {
-    let mut chunks = Vec::new();
+    chunk_markdown_located(md)
+        .into_iter()
+        .map(|c| c.text)
+        .collect()
+}
+
+/// A chunk from [`chunk_markdown_located`]: its text and the headings it sits under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocatedChunk {
+    pub text: String,
+    /// The Markdown headings (any level, `#` to `######`, outside code fences) in force where the
+    /// chunk starts, outermost first; empty before the first heading.
+    pub heading_path: Vec<String>,
+}
+
+/// The text of an ATX heading line (`## Title ##` -> `(2, "Title")`); `None` for any other line.
+fn atx_heading(line: &str) -> Option<(usize, &str)> {
+    let t = line.trim_start_matches(' ');
+    if line.len() - t.len() > 3 {
+        return None;
+    }
+    let level = t.chars().take_while(|c| *c == '#').count();
+    let rest = &t[level..];
+    if !(1..=6).contains(&level) || !(rest.is_empty() || rest.starts_with([' ', '\t'])) {
+        return None;
+    }
+    Some((level, rest.trim().trim_end_matches('#').trim_end()))
+}
+
+/// [`chunk_markdown`] with the heading path of each chunk. The chunks and their text are the same.
+pub fn chunk_markdown_located(md: &str) -> Vec<LocatedChunk> {
+    let mut chunks: Vec<LocatedChunk> = Vec::new();
     let mut cur: Vec<&str> = Vec::new();
     let mut words = 0usize;
     let mut fence: Option<(char, usize)> = None;
-    let mut emit = |cur: &mut Vec<&str>, words: &mut usize| {
+    let mut path: Vec<(usize, String)> = Vec::new();
+    let mut start_path: Vec<String> = Vec::new();
+    let mut emit = |cur: &mut Vec<&str>, words: &mut usize, start_path: &[String]| {
         let text = cur.join("\n");
         let text = text.trim_start_matches('\n').trim_end();
         if !text.trim().is_empty() {
-            chunks.push(text.to_string());
+            chunks.push(LocatedChunk {
+                text: text.to_string(),
+                heading_path: start_path.to_vec(),
+            });
         }
         cur.clear();
         *words = 0;
@@ -235,7 +290,15 @@ pub fn chunk_markdown(md: &str) -> Vec<String> {
     for line in md.lines() {
         let is_fence = fence_line(line);
         if fence.is_none() && (line.starts_with("# ") || line.starts_with("## ")) {
-            emit(&mut cur, &mut words);
+            emit(&mut cur, &mut words, &start_path);
+        }
+        if fence.is_none() && is_fence.is_none() {
+            if let Some((level, title)) = atx_heading(line) {
+                while path.last().is_some_and(|(l, _)| *l >= level) {
+                    path.pop();
+                }
+                path.push((level, title.to_string()));
+            }
         }
         match (fence, is_fence) {
             // A closing fence: the same character, at least as long, nothing after it.
@@ -249,7 +312,10 @@ pub fn chunk_markdown(md: &str) -> Vec<String> {
         }
         let n = line.split_whitespace().count();
         if words + n > CHUNK_WORDS {
-            emit(&mut cur, &mut words);
+            emit(&mut cur, &mut words, &start_path);
+        }
+        if cur.is_empty() {
+            start_path = path.iter().map(|(_, t)| t.clone()).collect();
         }
         if n > CHUNK_WORDS {
             let pieces = split_words(line, CHUNK_WORDS);
@@ -258,7 +324,7 @@ pub fn chunk_markdown(md: &str) -> Vec<String> {
                 cur.push(piece);
                 words = piece.split_whitespace().count();
                 if i < last {
-                    emit(&mut cur, &mut words);
+                    emit(&mut cur, &mut words, &start_path);
                 }
             }
             continue;
@@ -266,7 +332,7 @@ pub fn chunk_markdown(md: &str) -> Vec<String> {
         cur.push(line);
         words += n;
     }
-    emit(&mut cur, &mut words);
+    emit(&mut cur, &mut words, &start_path);
     chunks
 }
 
@@ -532,5 +598,47 @@ mod tests {
             .filter(|b| seen.contains(*b))
             .collect();
         assert!(hit.is_empty(), "anydoc pulls in a network client: {hit:?}");
+    }
+
+    #[test]
+    fn located_chunks_carry_their_heading_path_and_match_the_plain_chunker() {
+        let md = "intro\n\n# A\n\ntext a\n\n## B\n\ntext b\n\n### C ###\n\ntext c\n\n```\n# not a heading\n```\n\n## D\n\ntext d\n";
+        let located = chunk_markdown_located(md);
+        let paths: Vec<Vec<&str>> = located
+            .iter()
+            .map(|c| c.heading_path.iter().map(String::as_str).collect())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![vec![], vec!["A"], vec!["A", "B"], vec!["A", "D"]],
+            "{located:#?}"
+        );
+        assert!(located[2].text.contains("text c") && located[2].text.contains("# not a heading"));
+        let plain: Vec<String> = located.iter().map(|c| c.text.clone()).collect();
+        assert_eq!(plain, chunk_markdown(md));
+    }
+
+    #[test]
+    fn an_over_long_section_keeps_its_heading_path_across_cuts() {
+        let body = vec!["word"; CHUNK_WORDS * 2 + 10].join(" ");
+        let md = format!("# Big\n\n{body}\n");
+        let located = chunk_markdown_located(&md);
+        assert!(located.len() >= 3, "{}", located.len());
+        assert!(located.iter().all(|c| c.heading_path == vec!["Big".to_string()]));
+    }
+
+    #[test]
+    fn ocr_pages_reads_the_count_from_the_reason() {
+        let pages = |m: &str| Skipped::NeedsOcr(m.to_string()).ocr_pages();
+        assert_eq!(pages("all 3 pages need OCR"), Some(3));
+        assert_eq!(pages("page 2 of 5 needs OCR"), Some(5));
+        assert_eq!(pages("needs OCR"), None);
+        assert_eq!(Skipped::Encrypted.ocr_pages(), None);
+    }
+
+    #[test]
+    fn the_scanned_fixture_names_its_page_count() {
+        let err = to_markdown("scan.pdf", &fixture("scanned.pdf")).expect_err("no text layer");
+        assert!(err.ocr_pages().is_some_and(|n| n >= 1), "{err}");
     }
 }

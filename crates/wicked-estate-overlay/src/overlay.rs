@@ -504,6 +504,17 @@ impl<H: GraphRead + Sync + ?Sized> GraphRead for OverlayReader<'_, H> {
         self.home.file_call_refs(file)
     }
 
+    // #14c file_redactions / use_sites — HOME-ONLY (the home indexer's per-file records).
+    fn file_redactions(&self, file: &str) -> Result<Option<Vec<(u32, u32)>>> {
+        self.home.file_redactions(file)
+    }
+    fn use_sites(
+        &self,
+        target: &wicked_estate_core::SymbolId,
+    ) -> Result<Vec<wicked_estate_core::UseSite>> {
+        self.home.use_sites(target)
+    }
+
     // #15 symbol_source — HOME-ONLY (home content slice).
     fn symbol_source(&self, node: &Node) -> Result<Option<String>> {
         self.home.symbol_source(node)

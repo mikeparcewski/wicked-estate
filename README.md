@@ -133,6 +133,9 @@ wicked-estate index ./my-project --db graph.db
 wicked-estate index ../wicked-ledger --db graph.db --repo ledger
 wicked-estate index ../wicked-vault  --db graph.db --repo vault
 
+# One file (Markdown, text, a PDF/Word/PowerPoint document) as JSON chunks with locations; exit 3 = needs vision, 4 = refused (secret)
+wicked-estate convert --chunks ./notes/handover.docx
+
 # Who/what depends on a symbol (blast radius = transitive dependents)
 wicked-estate blast-radius MyClass --db graph.db
 

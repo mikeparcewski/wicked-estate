@@ -685,6 +685,26 @@ fn callable_param_names(callee: &Node) -> Vec<Option<String>> {
         .collect()
 }
 
+/// One re-indexed file's output: its repo-relative path, the extraction, the stored (masked) text,
+/// and the byte ranges of that text the redactor masked.
+type FileExtraction = (String, wicked_estate_core::Extraction, String, Vec<(u32, u32)>);
+
+/// The resolver's pre-deduplication edges that carry a location, as per-site use records
+/// (`GraphWrite::replace_use_sites`).
+fn use_sites_of(site_edges: &[Edge]) -> Vec<wicked_estate_core::UseSite> {
+    site_edges
+        .iter()
+        .filter_map(|e| {
+            Some(wicked_estate_core::UseSite {
+                target: e.target.clone(),
+                source: e.source.clone(),
+                kind: e.kind.clone(),
+                location: e.location.clone()?,
+            })
+        })
+        .collect()
+}
+
 fn call_value_flow(
     site_edges: &[Edge],
     index: &InMemoryIndex,
@@ -1869,7 +1889,7 @@ fn index_path_inner(
     use std::sync::atomic::{AtomicUsize, Ordering};
     let skipped_minified = AtomicUsize::new(0);
 
-    let extractions: Vec<(String, wicked_estate_core::Extraction, String)> = changed
+    let extractions: Vec<FileExtraction> = changed
         .par_iter()
         .filter_map(|fw| {
             let mut ext = fw
@@ -1927,7 +1947,8 @@ fn index_path_inner(
                 Some(_) => std::borrow::Cow::Owned(format!("{}.md", fw.raw)),
                 None => std::borrow::Cow::Borrowed(fw.raw.as_str()),
             };
-            let text = wicked_estate_extract::redact::redact_source(&redact_path, committed);
+            let (text, redactions) =
+                wicked_estate_extract::redact::redact_source_ranges(&redact_path, committed);
             let extra_rules = extra.as_ref().filter(|x| x.matches_path(&fw.raw));
 
             // Skip minified or huge files before any parsing — they generate noise, not signal.
@@ -2012,7 +2033,7 @@ fn index_path_inner(
             {
                 return None;
             }
-            Some((fw.rel.clone(), extraction, text))
+            Some((fw.rel.clone(), extraction, text, redactions))
         })
         .collect();
 
@@ -2024,7 +2045,7 @@ fn index_path_inner(
 
     // ── Emit extraction counters (best-effort) ───────────────────────────────────────────────
     {
-        let total_symbols: usize = extractions.iter().map(|(_, e, _)| e.nodes.len()).sum();
+        let total_symbols: usize = extractions.iter().map(|(_, e, _, _)| e.nodes.len()).sum();
         let files_extracted = extractions.len();
         let sink = wicked_estate_observe::init_sink_from_env();
         let resource = wicked_estate_core::observability::Resource::service(
@@ -2095,13 +2116,16 @@ fn index_path_inner(
     let mut all_refs = Vec::new();
 
     store.begin_batch()?;
-    for (rel_path, extraction, text) in &extractions {
+    for (rel_path, extraction, text, redactions) in &extractions {
         store.upsert_nodes_skip_fts(&extraction.nodes)?;
         store.upsert_edges(&extraction.local_edges)?;
         all_refs.extend(extraction.refs.iter().cloned());
         // Store source text for the file (best-effort; log on failure, don't abort).
         if let Err(e) = store.set_file_content(rel_path, text) {
             eprintln!("warning: set_file_content({rel_path}) failed: {e}");
+        } else {
+            // After the content write, which clears the record: the ranges of THIS stored text.
+            store.set_file_redactions(rel_path, redactions)?;
         }
         // #220: record the file's value-flow call refs (`[]` records "none") so a later edit to a
         // callee re-derives this file's call-derived flows without re-parsing it.
@@ -2121,7 +2145,7 @@ fn index_path_inner(
     store.bulk_rebuild_fts_for_files(
         &extractions
             .iter()
-            .map(|(p, _, _)| p.as_str())
+            .map(|(p, _, _, _)| p.as_str())
             .collect::<Vec<_>>(),
     )?;
 
@@ -2184,6 +2208,11 @@ fn index_path_inner(
     store.upsert_edges(&call_flow_edges)?;
     store.upsert_edges(&estate)?;
     store.upsert_unresolved_refs(&resolution.unresolved)?;
+    // Per-site use edges: the resolver's pre-deduplication edges, which the stored edges above
+    // collapse to one per (source, target, kind). Replaces the sites of the files re-indexed this
+    // run (the main pass resolves only their refs). No stored edge changes.
+    let reindexed: Vec<&str> = extractions.iter().map(|(p, _, _, _)| p.as_str()).collect();
+    store.replace_use_sites(&reindexed, &use_sites_of(&resolution.site_edges))?;
     store.commit_batch()?;
 
     // ── RE-DERIVE call-derived value flow for unchanged callers (#220) ──────────────────────
@@ -2194,7 +2223,7 @@ fn index_path_inner(
     // as they are, exactly as for any unchanged dependent of an edit.
     if !rederive_refs.is_empty() {
         let mut targets = changed_symbols.clone();
-        for (_, extraction, _) in &extractions {
+        for (_, extraction, _, _) in &extractions {
             targets.extend(extraction.nodes.iter().map(|n| n.symbol.clone()));
         }
         let rederived = resolve_all_with_coverage(resolvers, &rederive_refs, &index)?;
@@ -2270,7 +2299,7 @@ fn index_path_inner(
         let mut probed: HashSet<&str> = HashSet::new();
         // Probed apart from `probed`: a field named PRICEPGM must not hide the program PRICEPGM.
         let mut probed_programs: HashSet<&str> = HashSet::new();
-        for (_, extraction, _) in &extractions {
+        for (_, extraction, _, _) in &extractions {
             for n in &extraction.nodes {
                 if n.name.is_empty() {
                     continue;
@@ -2344,6 +2373,9 @@ fn index_path_inner(
                 store.upsert_nodes(&backfill_flow_nodes)?;
                 store.upsert_edges(&backfill.edges)?;
                 store.upsert_edges(&backfill_flow_edges)?;
+                // Sites of parked refs from unchanged files that this run bound: added beside
+                // the ones recorded when those files were indexed (a recorded site is kept once).
+                store.replace_use_sites(&[], &use_sites_of(&backfill.site_edges))?;
                 store.delete_unresolved_refs(&bound)?;
                 store.commit_batch()?;
             }

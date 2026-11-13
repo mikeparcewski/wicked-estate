@@ -363,6 +363,17 @@ pub enum Direction {
     Both,
 }
 
+/// One place a dependency is used: the pre-deduplication resolver edge the index keeps beside the
+/// deduplicated stored edge (`GraphRead::use_sites`). `source` is the dependent (the paragraph,
+/// function or file that uses `target`), and `location` is the exact site.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UseSite {
+    pub target: SymbolId,
+    pub source: SymbolId,
+    pub kind: EdgeKind,
+    pub location: Location,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

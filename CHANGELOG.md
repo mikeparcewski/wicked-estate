@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Added
+- **`wicked-estate convert --chunks <file>`** prints one file as JSON chunks with locations
+  (`{status, reason?, pages?, chunks: [{text, location: {heading_path, ordinal, page?}}]}`), local only. The
+  file is sniffed by content: text (Markdown, plain text; valid UTF-8, at most 1 MiB) and binary documents
+  (the converter's 32 MiB input and 1 MiB text caps) are chunked; images (PNG, JPEG, GIF, WebP) and a PDF
+  with no text layer answer `needs_vision` with a page count (1 for an image). A detected credential (a
+  token shape, private key, URL credential or a secret-named assignment; not the config default-deny
+  masking) in the text or a heading, or a secret file name, refuses the file (`secret_detected`,
+  `secret_filename`) with no chunks and no text. Exit codes: 0 ok, 3 needs_vision, 4 refused, 2 usage/IO.
+  `page` is not set for any format yet: none of the converter's Markdown marks pages.
+- **Per-file redaction ranges.** The index records the byte ranges of a file's stored text it masked, in a new
+  additive `file_redactions` table, read through `GraphRead::file_redactions(file)`: `None` = not certified
+  (a store indexed before this, a backend that does not record them, or text written by anything but the
+  indexer), `Some([])` = nothing masked. An incremental index replaces a file's ranges.
+- **Per-site use edges.** The resolver's pre-deduplication edges are kept in a new additive `edge_sites` table
+  and read through `GraphRead::use_sites(target)`, so two paragraphs using one data item each have a site with
+  their own line. Stored edges, edge counts and corroboration are unchanged. An incremental index replaces the
+  sites of the files it re-indexes. Other backends keep the empty default.
+
 ## [0.35.4] — 2026-11-12
 
 Patch: binary documents (PDF, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB) are indexed and

@@ -431,7 +431,7 @@ knowledge is what estate read (docs, and the structure of live data sources). Ea
 
 ## 10. CLI (`wicked-estate`) ✅
 `index <path> [--db] [--repo <label>] [--history] [--embeddings] [--force]` · `scip <root>
-[--scip-file]` · `tfstate <file>` · `import-telemetry` · `drift` · `query <name>` ·
+[--scip-file]` · `convert --chunks <file>` (file → JSON chunks; exit 0 ok / 3 needs_vision / 4 refused / 2 usage) · `tfstate <file>` · `import-telemetry` · `drift` · `query <name>` ·
 `blast-radius <name>` · `rank` (alias `hotspots`) · `stats` (incl. git provenance) · `graph-view` ·
 `source <name>` · `semantic <query>` · `cross-graph <name> --db a --db b …` · `compact` ·
 `watch <path> [--history]` · `subscribe [--since <seq>]` · `semantics <symbol> [--description]

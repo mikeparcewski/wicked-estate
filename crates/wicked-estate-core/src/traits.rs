@@ -7,7 +7,7 @@
 
 use crate::annotation::Annotation;
 use crate::change::{Change, ChangeOp};
-use crate::edge::{Direction, Edge, EdgeKind, ResolutionTier};
+use crate::edge::{Direction, Edge, EdgeKind, ResolutionTier, UseSite};
 use crate::error::Result;
 use crate::history::HistoricalEdge;
 use crate::node::{Language, Node, SourceFile};
@@ -265,6 +265,27 @@ pub trait GraphRead: Send {
         let _ = file;
         Ok(None)
     }
+    /// The byte ranges of `file`'s stored text (as [`GraphRead::file_content`] returns it) that
+    /// the index masked as secret values, as `(start, end)` offsets, sorted and non-overlapping.
+    ///
+    /// `None` = NOT CERTIFIED: no record for the file. That is a store indexed before this was
+    /// recorded, a backend that does not record it (this default), or a file whose text a writer
+    /// other than the indexer replaced (`set_file_content` drops the record). `Some(vec![])`
+    /// certifies "the index masked nothing in this file". An incremental index replaces a
+    /// re-indexed file's ranges.
+    fn file_redactions(&self, file: &str) -> Result<Option<Vec<(u32, u32)>>> {
+        let _ = file;
+        Ok(None)
+    }
+    /// Every recorded use site of `target`, one per place a dependent uses it, ordered by file,
+    /// then position. Stored edges are deduplicated by `(source, target, kind)`, so two paragraphs
+    /// using one data item share no edge but each has a site here; the graph, its edge counts and
+    /// corroboration do not read these. Empty when none were recorded (a store indexed before
+    /// this, or a backend that does not record them: this default).
+    fn use_sites(&self, target: &SymbolId) -> Result<Vec<UseSite>> {
+        let _ = target;
+        Ok(Vec::new())
+    }
     /// The source slice for `node` (from its file's stored content + location span). (Wave 11.1)
     fn symbol_source(&self, node: &Node) -> Result<Option<String>>;
     /// Change-log deltas with `seq > cursor`, oldest first — for reactive subscription. A subscriber
@@ -400,6 +421,23 @@ pub trait GraphWrite {
     /// nothing, which keeps the indexer on its re-extract path for this store (#220).
     fn set_file_call_refs(&mut self, file: &str, refs_json: &str) -> Result<()> {
         let _ = (file, refs_json);
+        Ok(())
+    }
+    /// Record the masked byte ranges of `file`'s stored text, read back by
+    /// [`GraphRead::file_redactions`]. Call it AFTER [`GraphWrite::set_file_content`], which
+    /// clears the record. Replaces the file's earlier ranges; `&[]` certifies "nothing masked".
+    /// Owned by `file`: [`GraphWrite::remove_file`] deletes it. The default records nothing, so the
+    /// file reads as not certified.
+    fn set_file_redactions(&mut self, file: &str, ranges: &[(u32, u32)]) -> Result<()> {
+        let _ = (file, ranges);
+        Ok(())
+    }
+    /// Record use sites for [`GraphRead::use_sites`]. First deletes every site whose location is
+    /// in one of `replaced_files` (a re-indexed file's earlier sites), then inserts `sites` (a site
+    /// already recorded is kept once). A site with no location is not recorded. Owned by the file
+    /// of its location: [`GraphWrite::remove_file`] deletes it. The default records nothing.
+    fn replace_use_sites(&mut self, replaced_files: &[&str], sites: &[UseSite]) -> Result<()> {
+        let _ = (replaced_files, sites);
         Ok(())
     }
     /// Delete edges whose `source` or `target` is no longer a node (orphans left by incremental

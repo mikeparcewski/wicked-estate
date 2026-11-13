@@ -197,6 +197,30 @@ CREATE TABLE IF NOT EXISTS file_call_refs (
   refs TEXT NOT NULL
 );
 
+-- Masked byte ranges of a file's stored text (GraphRead::file_redactions): a JSON array of
+-- [start, end] pairs. Written by the indexer after set_file_content, which deletes the row, so a
+-- row is only ever the ranges of the text now stored. Owned by the file: remove_file deletes it.
+-- No row = not certified (an older DB, or text another writer replaced); '[]' = nothing masked.
+CREATE TABLE IF NOT EXISTS file_redactions (
+  path   TEXT PRIMARY KEY,
+  ranges TEXT NOT NULL
+);
+
+-- Per-site use edges (GraphRead::use_sites): the resolver's pre-deduplication edges, one row per
+-- place `source` uses `target`. The deduplicated `edges` table is untouched. `file` is the file
+-- of the site and owns the row (a re-index replaces it, remove_file deletes it); `line` is the
+-- site's start line and `span` its full Span as JSON.
+CREATE TABLE IF NOT EXISTS edge_sites (
+  target TEXT    NOT NULL,
+  source TEXT    NOT NULL,
+  kind   TEXT    NOT NULL,
+  file   TEXT    NOT NULL,
+  line   INTEGER NOT NULL,
+  span   TEXT    NOT NULL,
+  PRIMARY KEY (target, source, kind, file, span)
+);
+CREATE INDEX IF NOT EXISTS idx_edge_sites_file ON edge_sites(file);
+
 -- W11.2: versioned query cache (prior art versioned cache-port pattern).
 -- cache rows are keyed by (key, version); cache_get returns a value only when the stored
 -- version matches the current graph_version held in meta. bump_version increments graph_version

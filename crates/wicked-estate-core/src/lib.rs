@@ -40,7 +40,7 @@ pub use annotation::{
     is_system_derived,
 };
 pub use change::{Change, ChangeOp};
-pub use edge::{Confidence, Direction, Edge, EdgeKind, Provenance, ResolutionTier};
+pub use edge::{Confidence, Direction, Edge, EdgeKind, Provenance, ResolutionTier, UseSite};
 pub use error::{Error, Result};
 pub use flow::{
     FlowEvidence, FlowFact, FlowSemantics, field_slot_id, flow_evidence_of, flow_rule_id,

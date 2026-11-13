@@ -1961,7 +1961,8 @@ impl SqliteStore {
             // (3) derived records re-derive from masked text on the next index.
             self.conn
                 .execute_batch(
-                    "DELETE FROM cache; DELETE FROM file_call_refs; UPDATE files SET digest = '';",
+                    "DELETE FROM cache; DELETE FROM file_call_refs; DELETE FROM file_redactions; \
+                     UPDATE files SET digest = '';",
                 )
                 .map_err(st)?;
             rep.files_marked = files.len();
@@ -3593,6 +3594,12 @@ impl GraphWrite for SqliteStore {
             .execute("DELETE FROM file_call_refs WHERE path=?1", params![file])
             .map_err(st)?;
         self.conn
+            .execute("DELETE FROM file_redactions WHERE path=?1", params![file])
+            .map_err(st)?;
+        self.conn
+            .execute("DELETE FROM edge_sites WHERE file=?1", params![file])
+            .map_err(st)?;
+        self.conn
             .execute("DELETE FROM files WHERE path=?1", params![file])
             .map_err(st)?;
         // Support is producer-owned: re-project every supported edge the deletes removed.
@@ -3648,6 +3655,57 @@ impl GraphWrite for SqliteStore {
                 params![file, sha],
             )
             .map_err(st)?;
+        // Any write of the text drops the recorded mask ranges: they describe the text that was
+        // stored before. The indexer installs the new ones next (`set_file_redactions`); any other
+        // writer leaves the file "not certified" rather than carrying stale ranges.
+        self.conn
+            .execute("DELETE FROM file_redactions WHERE path=?1", params![file])
+            .map_err(st)?;
+        Ok(())
+    }
+
+    fn set_file_redactions(&mut self, file: &str, ranges: &[(u32, u32)]) -> Result<()> {
+        let json = serde_json::to_string(ranges)?;
+        self.conn
+            .execute(
+                "INSERT INTO file_redactions(path, ranges) VALUES(?1, ?2)
+                 ON CONFLICT(path) DO UPDATE SET ranges=excluded.ranges",
+                params![file, json],
+            )
+            .map_err(st)?;
+        Ok(())
+    }
+
+    fn replace_use_sites(
+        &mut self,
+        replaced_files: &[&str],
+        sites: &[wicked_estate_core::UseSite],
+    ) -> Result<()> {
+        let mut del = self
+            .conn
+            .prepare_cached("DELETE FROM edge_sites WHERE file=?1")
+            .map_err(st)?;
+        for f in replaced_files {
+            del.execute(params![f]).map_err(st)?;
+        }
+        let mut ins = self
+            .conn
+            .prepare_cached(
+                "INSERT OR IGNORE INTO edge_sites(target, source, kind, file, line, span)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .map_err(st)?;
+        for site in sites {
+            ins.execute(params![
+                site.target.0,
+                site.source.0,
+                serde_json::to_string(&site.kind)?,
+                site.location.file,
+                site.location.span.start_line,
+                serde_json::to_string(&site.location.span)?,
+            ])
+            .map_err(st)?;
+        }
         Ok(())
     }
 
@@ -4450,6 +4508,59 @@ impl GraphRead for SqliteStore {
             )
             .optional()
             .map_err(st)
+    }
+
+    fn file_redactions(&self, file: &str) -> Result<Option<Vec<(u32, u32)>>> {
+        // The ranges describe text `file_content` serves; while that is withheld there is nothing
+        // to certify.
+        if self.redaction_pending() {
+            return Ok(None);
+        }
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT ranges FROM file_redactions WHERE path=?1",
+                params![file],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(st)?;
+        json.map(|j| serde_json::from_str(&j).map_err(Error::from))
+            .transpose()
+    }
+
+    fn use_sites(&self, target: &SymbolId) -> Result<Vec<wicked_estate_core::UseSite>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT source, kind, file, span FROM edge_sites WHERE target=?1
+                 ORDER BY file, line, source, kind, span",
+            )
+            .map_err(st)?;
+        let rows = stmt
+            .query_map(params![target.0], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(st)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (source, kind, file, span) = row.map_err(st)?;
+            out.push(wicked_estate_core::UseSite {
+                target: target.clone(),
+                source: SymbolId(source),
+                kind: serde_json::from_str(&kind)?,
+                location: wicked_estate_core::Location {
+                    file,
+                    span: serde_json::from_str(&span)?,
+                },
+            });
+        }
+        Ok(out)
     }
 
     fn file_content(&self, file: &str) -> Result<Option<String>> {

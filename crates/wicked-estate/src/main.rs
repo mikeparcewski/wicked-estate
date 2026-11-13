@@ -7,6 +7,9 @@
 //!   wicked-estate scip  <root>           [--db ...] [--repo <name>] [--scip-file <path>]
 //!   wicked-estate evidence <envelope.json> [--root <dir>] [--repo <name>] [--json] [--db ...]
 //!                                     ingest one SemanticEvidence v1 envelope (ENGINE-CONTRACT §3.5)
+//!   wicked-estate convert --chunks <file>
+//!                                     one file to JSON chunks with locations; exit 0 ok, 3 needs_vision,
+//!                                     4 refused (detected secret, secret file name, bad text), 2 usage/IO
 //!   wicked-estate tfstate <file>         [--db ...]
 //!   wicked-estate import-telemetry <file.json> [--db ...]
 //!   wicked-estate drift                  [--db ...]
@@ -52,6 +55,7 @@
 //!                                     [--framework S] [--scope S] [--projects a,b] [--limit N] [--json] [--db ...]
 
 mod cli_flags;
+mod convert;
 mod cutoff;
 mod emit;
 mod scip_auto;
@@ -1140,6 +1144,15 @@ fn main() -> Result<()> {
                     serde_json::to_string(&report.skipped)?
                 ))?;
             }
+        }
+        // Local, read-only, no store: sniff one file by content and print its chunks as JSON. The
+        // exit code is the contract (`convert.rs`): 0 ok, 3 needs_vision, 4 refused, 2 usage/IO.
+        "convert" => {
+            let outcome = convert::run(rest);
+            if let Some(v) = &outcome.json {
+                println!("{v}");
+            }
+            std::process::exit(outcome.exit);
         }
         "tfstate" => {
             let file_path = args.required(0);
@@ -4130,6 +4143,9 @@ fn main() -> Result<()> {
             );
             println!(
                 "    to have been run first. Auto-runs npx scip-typescript if index.scip absent."
+            );
+            println!(
+                "  wicked-estate convert --chunks <file>  # file -> JSON chunks (exit 0 ok, 3 needs_vision, 4 refused, 2 usage/IO)"
             );
             println!(
                 "  wicked-estate tfstate <file>        [--db ...]  # index live Terraform state"

@@ -92,3 +92,17 @@ These are stated in every answer that returns stored source text (a `PRIVACY:` d
    committed: a rule is a user-declared identity extractor, so what it captures is stored as
    node names and ids (known token shapes still masked). Do not point a rule at a value you would
    not want stored.
+
+## Recorded mask ranges, and `convert --chunks`
+
+- **`GraphRead::file_redactions(file)`** returns the byte ranges of the file's stored text that the
+  index masked (`redact_source_ranges`, the same pass that masks the text). `None` means not
+  certified: no record (a store indexed before the ranges were recorded, a backend that does not
+  record them, or text written by anything but the indexer, since `set_file_content` deletes the
+  row). `Some([])` means the index masked nothing. Postgres and SurrealDB keep the `None` default.
+- **`wicked-estate convert --chunks <file>`** refuses a file on a detected credential
+  (`redact::has_secret`: token shapes, private keys, URL credentials, and a value assigned to a
+  secret-named key) in the text or a heading, or on a secret file name (`is_excluded`). It does not
+  apply the default-deny masking of config and code files, which masks by default and so is not a
+  detection. A refusal prints no chunks and no text. Exit codes: 0 ok, 3 needs_vision, 4 refused,
+  2 usage/IO.
