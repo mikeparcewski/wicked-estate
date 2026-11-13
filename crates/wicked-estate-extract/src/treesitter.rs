@@ -3090,11 +3090,7 @@ pub fn is_minified_or_huge(text: &str) -> bool {
     }
 
     // Heuristic 3 — average chars / line (guard against divide-by-zero on empty files).
-    if line_count > 0 && (total_chars / line_count) > MAX_AVG_CHARS_PER_LINE {
-        return true;
-    }
-
-    false
+    line_count > 0 && (total_chars / line_count) > MAX_AVG_CHARS_PER_LINE
 }
 
 // ── Extractor impl ────────────────────────────────────────────────────────────
