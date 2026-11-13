@@ -242,10 +242,8 @@ fn split_words(line: &str, max: usize) -> Vec<&str> {
 /// starts. A cut inside a code block is not re-fenced: chunks are retrieval units, and anydoc's
 /// Office and PDF output rarely holds code. Chunks with no text are dropped.
 pub fn chunk_markdown(md: &str) -> Vec<String> {
-    chunk_markdown_located(md)
-        .into_iter()
-        .map(|c| c.text)
-        .collect()
+    let located = chunk_markdown_located(md);
+    located.into_iter().map(|c| c.text).collect()
 }
 
 /// A chunk from [`chunk_markdown_located`]: its text and the headings it sits under.

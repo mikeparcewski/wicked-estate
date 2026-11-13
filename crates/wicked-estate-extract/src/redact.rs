@@ -424,10 +424,19 @@ pub fn has_secret(text: &str) -> bool {
     if !core_redact::token_shape_ranges(text).is_empty() {
         return true;
     }
-    // A quoted key (`{"password": "hunter2"}`) reads as a bare one with the quotes dropped.
-    let unquoted = text.replace(['"', '\''], "");
     let mut m = Vec::new();
-    kv_deny_masks(&unquoted, &mut m);
+    kv_deny_masks(text, &mut m);
+    if !m.is_empty() {
+        return true;
+    }
+    // A quoted key (`{"password": "hunter2"}`) reads as a bare one; only the quotes around the
+    // key go, so a quoted value keeps its delimiters.
+    static QUOTED_KEY: LazyLock<Regex> = LazyLock::new(|| {
+        let pattern = r#"["']([A-Za-z_][\w.\-]*)["']([ \t]*[:=])"#;
+        Regex::new(pattern).expect("quoted key compiles")
+    });
+    let keyed = QUOTED_KEY.replace_all(text, "$1$2");
+    kv_deny_masks(&keyed, &mut m);
     !m.is_empty()
 }
 
@@ -2869,6 +2878,7 @@ mod tests {
         ));
         assert!(has_secret("password: hunter2\n"));
         assert!(has_secret("{\"password\":\"hunter2\"}"));
+        assert!(has_secret("LABEL=\"\" password=\"hunter2\" run"));
         let prose = "WS-INTEREST-PERIOD is 'DAILY'.\ninterest.compound: false\n";
         assert!(!has_secret(prose));
         assert!(!has_secret("{\"n\": 4242}"));

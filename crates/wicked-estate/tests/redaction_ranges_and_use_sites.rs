@@ -38,10 +38,8 @@ fn masked_ranges_cover_the_literal_survive_reopen_and_are_replaced_on_reindex() 
         Some("{\"n\": 1000}")
     );
     // ... and the recorded range covers the literal's bytes 6..10.
-    let ranges = store
-        .file_redactions("app.json")
-        .unwrap()
-        .expect("certified");
+    let got = store.file_redactions("app.json").unwrap();
+    let ranges = got.expect("certified");
     assert!(
         ranges.iter().any(|&(s, e)| s <= 6 && e >= 10),
         "no range covers the literal: {ranges:?}"
@@ -54,10 +52,8 @@ fn masked_ranges_cover_the_literal_survive_reopen_and_are_replaced_on_reindex() 
     std::fs::write(root.join("app.json"), "{\"n\": 777}").unwrap();
     index(&db, &root);
     let store = SqliteStore::open(&db).unwrap();
-    let ranges = store
-        .file_redactions("app.json")
-        .unwrap()
-        .expect("certified");
+    let got = store.file_redactions("app.json").unwrap();
+    let ranges = got.expect("certified");
     assert!(
         ranges.iter().any(|&(s, e)| s <= 6 && e >= 9) && ranges.iter().all(|&(_, e)| e <= 9),
         "{ranges:?}"
@@ -148,13 +144,9 @@ fn each_paragraph_using_a_data_item_has_its_own_site_after_reopen() {
     };
 
     let shared = sites("WS-SHARED");
-    let from = |src: &SymbolId| {
-        shared
-            .iter()
-            .filter(|s| &s.source == src)
-            .collect::<Vec<_>>()
-    };
-    let (one, two) = (from(&para_one), from(&para_two));
+    let from = |src: SymbolId| shared.iter().filter(move |s| s.source == src);
+    let one: Vec<_> = from(para_one.clone()).collect();
+    let two: Vec<_> = from(para_two.clone()).collect();
     assert_eq!((one.len(), two.len()), (1, 1), "{shared:#?}");
     let want_one = line_of("MOVE 1 TO WS-SHARED");
     let want_two = line_of("MOVE 3 TO WS-SHARED");
@@ -206,9 +198,6 @@ fn removing_a_file_drops_its_sites_and_other_backends_have_none() {
     assert_eq!(GraphRead::use_sites(&store, &target).unwrap().len(), 2);
     store.remove_file("DEMO.cbl").unwrap();
     assert!(GraphRead::use_sites(&store, &target).unwrap().is_empty());
-    assert!(
-        GraphRead::use_sites(&MemStore::new(), &target)
-            .unwrap()
-            .is_empty()
-    );
+    let none = GraphRead::use_sites(&MemStore::new(), &target).unwrap();
+    assert!(none.is_empty());
 }

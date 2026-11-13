@@ -227,7 +227,8 @@ mod tests {
             json!(["Ledger", "Rounding"])
         );
         assert_eq!(chunks[1]["location"]["ordinal"], 1);
-        assert!(chunks[1]["text"].as_str().unwrap().contains("zero amounts"));
+        let text = chunks[1]["text"].as_str().unwrap();
+        assert!(text.contains("zero amounts"));
         assert!(chunks[0]["location"].get("page").is_none());
     }
 
