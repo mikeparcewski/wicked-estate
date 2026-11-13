@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- JCL job, PROC and step nodes span their whole statement (continuations, DDs, in-stream data, comments) instead of a zero-length anchor, so consumers can read a step's source (#448).
+
 ## [0.35.4] — 2026-11-12
 
 Patch: binary documents (PDF, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB) are indexed and
