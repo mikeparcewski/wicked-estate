@@ -189,6 +189,13 @@ fn each_paragraph_using_a_data_item_has_its_own_site_after_reopen() {
         .filter(|e| e.target == shared_id && e.kind == EdgeKind::References)
         .count();
     assert_eq!(to_shared, 1);
+    // The edge count is unchanged by recording sites. Baseline: indexing this fixture with
+    // wicked-estate 0.35.4 (base 5bf8db0) stores 9 edges, 6 contains and 3 references (the
+    // program to WS-SHARED, WS-ONLY-ONE and WS-ONLY-TWO, one each).
+    let count = |kind: EdgeKind| edges.iter().filter(|e| e.kind == kind).count();
+    assert_eq!(edges.len(), 9, "{edges:#?}");
+    assert_eq!(count(EdgeKind::Contains), 6);
+    assert_eq!(count(EdgeKind::References), 3);
     drop(store);
 
     // Re-index after an edit: the file's sites are replaced, not accumulated.
