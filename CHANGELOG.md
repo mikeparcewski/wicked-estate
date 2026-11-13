@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.35.4] — 2026-11-12
+
+Patch: binary documents (PDF, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB) are indexed and
+ingested as the Markdown the in-process anydoc converter makes of them (#441). Also carries #440 (committed host
+paths replaced with placeholders; the `wicked-estate-mcp` crate no longer ships `tests/fixtures/`, refs #439).
+
+**Upgrade note (0.35.3 -> 0.35.4).** Install 0.35.4 on every path the daemon resolves, then restart. The first
+`index` of each repo re-reads every file, because the binary version changed, and now also admits the repo's
+binary documents: expect new `DOC-SKIPPED: <path>: <reason>` lines for those that do not convert (scanned PDFs
+need OCR, encrypted or malformed files, files over 32 MiB). As in 0.35.3, that forced re-extraction clears the
+node semantic fields (`description`, `requirement`, validation) set with `set_semantics`; annotations are kept.
+Back up the store first if you rely on them, then re-run the requirements map (wicked-estate#438). No store
+migration is needed. Building from source needs Rust 1.88; release binaries grow by the converter (about
+7.8 MiB). wicked-core-ts 0.15.43 counts these documents as docs in corroboration (wicked-core#1467).
+
 ### Added
 - **Binary documents are indexed and ingested as Markdown (anydoc).** PDF, Word (`doc`, `docx`, `docm`),
   PowerPoint (`ppt`, `pptx`, `pps`/`ppsx`/`pptm`/`ppsm`, `pot`), Excel (`xls`, `xlsx`, `xlsm`, `xlsb`),
