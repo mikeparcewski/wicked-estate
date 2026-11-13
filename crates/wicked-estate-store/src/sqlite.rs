@@ -178,6 +178,12 @@ fn migrate_fts_rowids(conn: &Connection) -> Result<()> {
     }
 }
 
+/// True when `e` is SQLite's "no such table": a store written before an additive table existed,
+/// opened without the migration that creates it (`open_readonly`).
+fn is_missing_table(e: &rusqlite::Error) -> bool {
+    e.to_string().contains("no such table")
+}
+
 fn migrate_schema(conn: &Connection) -> Result<()> {
     // Snapshot the current annotations columns once; the presence check IS the version gate.
     let mut stmt = conn.prepare("PRAGMA table_info(annotations)").map_err(st)?;
@@ -4516,27 +4522,28 @@ impl GraphRead for SqliteStore {
         if self.redaction_pending() {
             return Ok(None);
         }
-        let json: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT ranges FROM file_redactions WHERE path=?1",
-                params![file],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(st)?;
+        let conn = &self.conn;
+        let sql = "SELECT ranges FROM file_redactions WHERE path=?1";
+        let row = conn.query_row(sql, params![file], |r| r.get::<_, String>(0));
+        let json = match row.optional() {
+            Ok(json) => json,
+            // A store opened read-only is not migrated: no table is "not certified".
+            Err(e) if is_missing_table(&e) => return Ok(None),
+            Err(e) => return Err(st(e)),
+        };
         json.map(|j| serde_json::from_str(&j).map_err(Error::from))
             .transpose()
     }
 
     fn use_sites(&self, target: &SymbolId) -> Result<Vec<wicked_estate_core::UseSite>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached(
-                "SELECT source, kind, file, span FROM edge_sites WHERE target=?1
-                 ORDER BY file, line, source, kind, span",
-            )
-            .map_err(st)?;
+        let sql = "SELECT source, kind, file, span FROM edge_sites WHERE target=?1
+                   ORDER BY file, line, source, kind, span";
+        let mut stmt = match self.conn.prepare_cached(sql) {
+            Ok(stmt) => stmt,
+            // A store opened read-only is not migrated: no table is "no sites recorded".
+            Err(e) if is_missing_table(&e) => return Ok(Vec::new()),
+            Err(e) => return Err(st(e)),
+        };
         let rows = stmt
             .query_map(params![target.0], |r| {
                 Ok((

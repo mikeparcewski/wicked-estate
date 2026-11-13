@@ -424,8 +424,10 @@ pub fn has_secret(text: &str) -> bool {
     if !core_redact::token_shape_ranges(text).is_empty() {
         return true;
     }
+    // A quoted key (`{"password": "hunter2"}`) reads as a bare one with the quotes dropped.
+    let unquoted = text.replace(['"', '\''], "");
     let mut m = Vec::new();
-    kv_deny_masks(text, &mut m);
+    kv_deny_masks(&unquoted, &mut m);
     !m.is_empty()
 }
 
@@ -2866,6 +2868,7 @@ mod tests {
             "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34\n-----END RSA PRIVATE KEY-----"
         ));
         assert!(has_secret("password: hunter2\n"));
+        assert!(has_secret("{\"password\":\"hunter2\"}"));
         let prose = "WS-INTEREST-PERIOD is 'DAILY'.\ninterest.compound: false\n";
         assert!(!has_secret(prose));
         assert!(!has_secret("{\"n\": 4242}"));
