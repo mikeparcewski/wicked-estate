@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use wicked_estate::index_path;
-use wicked_estate_core::{GraphRead, GraphWrite, Node, SymbolId};
+use wicked_estate_core::{EdgeKind, GraphRead, GraphWrite, Node};
 use wicked_estate_store::{MemStore, SqliteStore};
 
 fn node_named(store: &SqliteStore, name: &str) -> Node {
@@ -136,45 +136,52 @@ fn each_paragraph_using_a_data_item_has_its_own_site_after_reopen() {
 
     // Closed and reopened: the sites come from the store, not from the indexing run.
     let store = SqliteStore::open(&db).unwrap();
-    let para_one = node_named(&store, "PARA-ONE").symbol;
-    let para_two = node_named(&store, "PARA-TWO").symbol;
+    let para_one = node_named(&store, "PARA-ONE");
+    let para_two = node_named(&store, "PARA-TWO");
     let sites = |item: &str| {
         let target = node_named(&store, item).symbol;
         GraphRead::use_sites(&store, &target).unwrap()
     };
+    // COBOL attributes a paragraph's data references to the program, so a site's own LOCATION
+    // says which paragraph used the item: its line falls inside that paragraph's span.
+    let within = |para: &Node, line: u32| {
+        let span = para.location.span;
+        span.start_line <= line && line <= span.end_line
+    };
 
     let shared = sites("WS-SHARED");
-    let from = |src: SymbolId| shared.iter().filter(move |s| s.source == src);
-    let one: Vec<_> = from(para_one.clone()).collect();
-    let two: Vec<_> = from(para_two.clone()).collect();
-    assert_eq!((one.len(), two.len()), (1, 1), "{shared:#?}");
+    assert_eq!(shared.len(), 2, "{shared:#?}");
     let want_one = line_of("MOVE 1 TO WS-SHARED");
     let want_two = line_of("MOVE 3 TO WS-SHARED");
-    assert_eq!(one[0].location.span.start_line, want_one);
-    assert_eq!(two[0].location.span.start_line, want_two);
-    assert_eq!(one[0].location.file, "DEMO.cbl");
-    assert_eq!(shared.len(), 2, "{shared:#?}");
+    let lines: Vec<u32> = shared.iter().map(|s| s.location.span.start_line).collect();
+    assert_eq!(lines, vec![want_one, want_two], "{shared:#?}");
+    assert!(within(&para_one, want_one) && !within(&para_two, want_one));
+    assert!(within(&para_two, want_two) && !within(&para_one, want_two));
+    assert!(shared.iter().all(|s| s.location.file == "DEMO.cbl"));
 
-    // Different items: each paragraph's item has only that paragraph's site.
+    // Different items: each item has only the site of the paragraph that uses it.
     let only_one = sites("WS-ONLY-ONE");
     assert_eq!(only_one.len(), 1, "{only_one:#?}");
-    assert_eq!(only_one[0].source, para_one);
-    assert_eq!(
-        only_one[0].location.span.start_line,
-        line_of("MOVE 2 TO WS-ONLY-ONE")
-    );
+    let line = only_one[0].location.span.start_line;
+    assert_eq!(line, line_of("MOVE 2 TO WS-ONLY-ONE"));
+    assert!(within(&para_one, line) && !within(&para_two, line));
     let only_two = sites("WS-ONLY-TWO");
     assert_eq!(only_two.len(), 1, "{only_two:#?}");
-    assert_eq!(only_two[0].source, para_two);
+    let line = only_two[0].location.span.start_line;
+    assert_eq!(line, line_of("MOVE 4 TO WS-ONLY-TWO"));
+    assert!(within(&para_two, line) && !within(&para_one, line));
 
-    // The stored graph is still deduplicated: one edge per (source, target, kind), including the
-    // two paragraphs' edges to the shared item (one each, not one per site, and not collapsed).
+    // The stored graph is still deduplicated: one edge per (source, target, kind), so the two
+    // sites of the shared item sit under ONE References edge from the program.
     let edges = GraphRead::all_edges(&store).unwrap();
     let keys: HashSet<_> = edges.iter().map(|e| e.dedup_key()).collect();
     assert_eq!(keys.len(), edges.len(), "stored edges are unique per key");
     let shared_id = node_named(&store, "WS-SHARED").symbol;
-    let to_shared = edges.iter().filter(|e| e.target == shared_id).count();
-    assert!(to_shared >= 2, "{to_shared}");
+    let to_shared = edges
+        .iter()
+        .filter(|e| e.target == shared_id && e.kind == EdgeKind::References)
+        .count();
+    assert_eq!(to_shared, 1);
     drop(store);
 
     // Re-index after an edit: the file's sites are replaced, not accumulated.

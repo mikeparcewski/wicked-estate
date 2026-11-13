@@ -687,7 +687,12 @@ fn callable_param_names(callee: &Node) -> Vec<Option<String>> {
 
 /// One re-indexed file's output: its repo-relative path, the extraction, the stored (masked) text,
 /// and the byte ranges of that text the redactor masked.
-type FileExtraction = (String, wicked_estate_core::Extraction, String, Vec<(u32, u32)>);
+type FileExtraction = (
+    String,
+    wicked_estate_core::Extraction,
+    String,
+    Vec<(u32, u32)>,
+);
 
 /// The resolver's pre-deduplication edges that carry a location, as per-site use records
 /// (`GraphWrite::replace_use_sites`).

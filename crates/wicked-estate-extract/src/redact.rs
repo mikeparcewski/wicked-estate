@@ -437,6 +437,20 @@ pub fn has_secret(text: &str) -> bool {
     });
     let keyed = QUOTED_KEY.replace_all(text, "$1$2");
     kv_deny_masks(&keyed, &mut m);
+    if !m.is_empty() {
+        return true;
+    }
+    // An assignment inside a quoted value (`command="password=hunter2"`) is swallowed whole by
+    // the outer assignment above, so each quoted interior is checked on its own.
+    static QUOTED: LazyLock<Regex> = LazyLock::new(|| {
+        let pattern = r#""([^"\n]*)"|'([^'\n]*)'"#;
+        Regex::new(pattern).expect("quoted string compiles")
+    });
+    for c in QUOTED.captures_iter(text) {
+        if let Some(inner) = c.get(1).or_else(|| c.get(2)) {
+            kv_deny_masks(inner.as_str(), &mut m);
+        }
+    }
     !m.is_empty()
 }
 
@@ -2879,6 +2893,7 @@ mod tests {
         assert!(has_secret("password: hunter2\n"));
         assert!(has_secret("{\"password\":\"hunter2\"}"));
         assert!(has_secret("LABEL=\"\" password=\"hunter2\" run"));
+        assert!(has_secret("command=\"password=hunter2\""));
         let prose = "WS-INTEREST-PERIOD is 'DAILY'.\ninterest.compound: false\n";
         assert!(!has_secret(prose));
         assert!(!has_secret("{\"n\": 4242}"));
