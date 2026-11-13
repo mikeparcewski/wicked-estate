@@ -38,7 +38,10 @@ fn masked_ranges_cover_the_literal_survive_reopen_and_are_replaced_on_reindex() 
         Some("{\"n\": 1000}")
     );
     // ... and the recorded range covers the literal's bytes 6..10.
-    let ranges = store.file_redactions("app.json").unwrap().expect("certified");
+    let ranges = store
+        .file_redactions("app.json")
+        .unwrap()
+        .expect("certified");
     assert!(
         ranges.iter().any(|&(s, e)| s <= 6 && e >= 10),
         "no range covers the literal: {ranges:?}"
@@ -51,7 +54,10 @@ fn masked_ranges_cover_the_literal_survive_reopen_and_are_replaced_on_reindex() 
     std::fs::write(root.join("app.json"), "{\"n\": 777}").unwrap();
     index(&db, &root);
     let store = SqliteStore::open(&db).unwrap();
-    let ranges = store.file_redactions("app.json").unwrap().expect("certified");
+    let ranges = store
+        .file_redactions("app.json")
+        .unwrap()
+        .expect("certified");
     assert!(
         ranges.iter().any(|&(s, e)| s <= 6 && e >= 9) && ranges.iter().all(|&(_, e)| e <= 9),
         "{ranges:?}"
@@ -142,7 +148,12 @@ fn each_paragraph_using_a_data_item_has_its_own_site_after_reopen() {
     };
 
     let shared = sites("WS-SHARED");
-    let from = |src: &SymbolId| shared.iter().filter(|s| &s.source == src).collect::<Vec<_>>();
+    let from = |src: &SymbolId| {
+        shared
+            .iter()
+            .filter(|s| &s.source == src)
+            .collect::<Vec<_>>()
+    };
     let (one, two) = (from(&para_one), from(&para_two));
     assert_eq!((one.len(), two.len()), (1, 1), "{shared:#?}");
     let want_one = line_of("MOVE 1 TO WS-SHARED");

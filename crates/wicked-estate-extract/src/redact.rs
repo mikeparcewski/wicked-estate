@@ -2850,7 +2850,9 @@ mod tests {
         let masked = redact_source("notes.md", src);
         for (i, (a, b)) in src.bytes().zip(masked.bytes()).enumerate() {
             if a != b {
-                let hit = ranges.iter().any(|&(s, e)| (s as usize..e as usize).contains(&i));
+                let hit = ranges
+                    .iter()
+                    .any(|&(s, e)| (s as usize..e as usize).contains(&i));
                 assert!(hit);
             }
         }
