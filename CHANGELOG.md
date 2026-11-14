@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.35.5] — 2026-11-14
+
+Patch: JCL job, PROC and step nodes span their whole statement instead of a zero-length anchor, so a consumer
+(wicked-garden's domain extraction) can read a step's source (#449, fixes #448). Node and edge counts are unchanged.
+
+**Upgrade note (0.35.4 -> 0.35.5).** Install 0.35.5 on every path the daemon resolves, then restart. The first
+`index` of each repo re-reads every file because the binary version changed, so JCL nodes get their new extents.
+As in 0.35.3 and 0.35.4, that forced re-extraction clears the node semantic fields set with `set_semantics`
+(annotations are kept); back up the store first if you rely on them (wicked-estate#438). No store migration.
+
 ### Fixed
 
 - JCL job, PROC and step nodes span their whole statement (continuations, DDs, in-stream data, comments) instead of a zero-length anchor, so consumers can read a step's source (#448).
