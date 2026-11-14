@@ -5,6 +5,7 @@
 ### Fixed
 
 - JCL job, PROC and step nodes span their whole statement (continuations, DDs, in-stream data, comments) instead of a zero-length anchor, so consumers can read a step's source (#448).
+- JCL extent scanning now reads the optional name field by column (a blank column 3 means no name), tracks comma continuation, and skips in-stream data (`DD *` / `DD DATA`, honoring `DLM=`), so an unnamed `EXEC`, a `PEND` with a trailing comment, a continuation card, and `//` records embedded in `DD DATA` no longer misplace a node's boundary (#449, fixes #448).
 
 ## [0.35.4] — 2026-11-12
 

@@ -360,6 +360,15 @@ impl Extents {
         let mut line_ends = Vec::new();
         let mut bounds = Vec::new();
         let mut pos = 0;
+        // A statement whose operand field ends with a comma continues on the next `//` card; that
+        // continuation carries operands/comments only (no name, no operation), so it must never be
+        // read as a boundary.
+        let mut continued = false;
+        // In-stream data (`DD *` / `DD DATA`): every record up to the delimiter belongs to the data,
+        // not to the job stream, so no card inside it is a boundary. `(delimiter, slashes_are_data)`;
+        // `slashes_are_data` holds for `DD DATA` and whenever `DLM=` is set — then even `//` records
+        // are data (`DD *` without `DLM=` instead ends at the next `//` card).
+        let mut in_stream: Option<(String, bool)> = None;
         for (i, raw) in text.lines().enumerate() {
             line_starts.push(pos);
             // `lines()` strips `\n` or `\r\n`; advance past the real terminator.
@@ -370,27 +379,67 @@ impl Extents {
             } else if text[pos..].starts_with('\n') {
                 pos += 1;
             }
+
+            // Inside in-stream data: consume records until the delimiter (or, for `DD *` without
+            // `DLM=`, the next `//` card, which is itself a real statement to be processed below).
+            if let Some((delim, slashes_are_data)) = in_stream.clone() {
+                if raw.starts_with(delim.as_str()) {
+                    in_stream = None;
+                    continue;
+                }
+                if !slashes_are_data && raw.starts_with("//") {
+                    in_stream = None;
+                } else {
+                    continue;
+                }
+            }
+
             let Some(body) = raw.strip_prefix("//") else {
                 continue;
             };
+            // `//*` is a comment and `//` alone is null/delimiter; neither breaks a continuation.
             if body.starts_with('*') || body.trim().is_empty() {
                 continue;
             }
+
+            let was_continued = continued;
+            // The name field starts in column 3; a blank column 3 means no name, so the operation is
+            // the first token. A continuation card carries only operand/comment text.
+            let has_name = !body.starts_with([' ', '\t']);
             let mut toks = body.split_whitespace();
-            let Some(name) = toks.next() else { continue };
-            if body.starts_with([' ', '\t']) && name == "DD" {
+            let (op, operand) = if was_continued {
+                (None, toks.next())
+            } else if has_name {
+                let _name = toks.next();
+                (toks.next(), toks.next())
+            } else {
+                (toks.next(), toks.next())
+            };
+            // Does this card's operand field continue onto the next card?
+            continued = operand.is_some_and(|o| o.ends_with(','));
+            if was_continued {
                 continue;
             }
-            let kind = match toks.next() {
-                None if name == "PEND" => Some(Stmt::Pend),
+
+            if let Some(kind) = match op {
                 Some("JOB") => Some(Stmt::Job),
                 Some("PROC") => Some(Stmt::Proc),
                 Some("PEND") => Some(Stmt::Pend),
                 Some("EXEC") => Some(Stmt::Exec),
                 _ => None,
-            };
-            if let Some(k) = kind {
-                bounds.push((i, k));
+            } {
+                bounds.push((i, kind));
+            } else if op == Some("DD") {
+                // `DD *` / `DD DATA` open in-stream data; `SYSOUT=*` and the like do not.
+                if let Some(operand) = operand {
+                    let first = operand.split(',').next().unwrap_or("");
+                    if first == "*" || first == "DATA" {
+                        let dlm = parse_dlm(operand);
+                        let slashes_are_data = first == "DATA" || dlm.is_some();
+                        in_stream =
+                            Some((dlm.unwrap_or_else(|| "/*".to_string()), slashes_are_data));
+                    }
+                }
             }
         }
         Self {
@@ -509,6 +558,16 @@ fn parse_dsn(operands: &str) -> Option<String> {
     (!dsn.is_empty()).then(|| dsn.to_string())
 }
 
+/// The in-stream data delimiter from a `DD *` / `DD DATA` operand: the characters after `DLM=`
+/// (default `/*` when absent). `DATA,DLM=@@` → `@@`; surrounding quotes, if any, are stripped.
+fn parse_dlm(operand: &str) -> Option<String> {
+    operand
+        .split(',')
+        .find_map(|f| f.strip_prefix("DLM="))
+        .map(|v| v.trim_matches('\'').to_string())
+        .filter(|v| !v.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -590,6 +649,141 @@ TRAN-CAT-TYPE,1,2,ZD\n\
         assert_eq!(slice("P1"), "//P1 PROC\n//S1 EXEC PGM=A\n//   PEND\n");
         assert_eq!(slice("S1"), "//S1 EXEC PGM=A\n");
         assert_eq!(slice("P2"), "//P2 PROC\n//S3 EXEC PGM=C\n");
+    }
+
+    // The extent of a node named `n`, as the exact source slice its span covers.
+    fn slice_of<'a>(text: &'a str, x: &Extraction, n: &str) -> &'a str {
+        let s = x
+            .nodes
+            .iter()
+            .find(|nd| nd.name == n)
+            .unwrap_or_else(|| panic!("node {n}"))
+            .location
+            .span;
+        &text[s.start_byte as usize..s.end_byte as usize]
+    }
+
+    #[test]
+    fn pend_with_a_trailing_comment_still_ends_the_proc() {
+        // P2-1: the operation field (not the first token) decides the boundary, so `PEND` followed
+        // by a comment is recognised; the PROC extent includes the PEND card and stops before S2.
+        const FIX: &str =
+            "//J JOB\n//P1 PROC\n//S1 EXEC PGM=A\n//         PEND  end of proc\n//S2 EXEC PGM=B\n";
+        for eol in ["\n", "\r\n"] {
+            let text = FIX.replace('\n', eol);
+            let x = extract(&text);
+            let p1 = slice_of(&text, &x, "P1");
+            assert!(
+                p1.contains("PEND  end of proc"),
+                "PROC spans its PEND card: {p1:?}"
+            );
+            assert!(
+                !p1.contains("S2"),
+                "PROC stops before the next step: {p1:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unnamed_exec_is_a_boundary_not_absorbed_by_the_prior_step() {
+        // P2-1: a blank column 3 means no name, so `EXEC` is the operation and opens a new step.
+        // The previous step's extent must end before the unnamed EXEC card.
+        const FIX: &str = "//J JOB\n//S1 EXEC PGM=A\n//         EXEC PGM=B\n";
+        for eol in ["\n", "\r\n"] {
+            let text = FIX.replace('\n', eol);
+            let x = extract(&text);
+            let s1 = slice_of(&text, &x, "S1");
+            assert_eq!(
+                s1,
+                format!("//S1 EXEC PGM=A{eol}"),
+                "S1 ends before the unnamed EXEC"
+            );
+        }
+    }
+
+    #[test]
+    fn a_continuation_card_is_not_read_as_an_exec_boundary() {
+        // P2-1: `//S EXEC PGM=A,` continues (operand ends with a comma), so the next card is
+        // operand/comment text — the word EXEC inside a PARM value must not open a new step.
+        const FIX: &str =
+            "//J JOB\n//S EXEC PGM=A,\n//           PARM='RUN EXEC AGAIN'\n//S2 EXEC PGM=B\n";
+        for eol in ["\n", "\r\n"] {
+            let text = FIX.replace('\n', eol);
+            let x = extract(&text);
+            let s = slice_of(&text, &x, "S");
+            assert!(
+                s.contains("PARM='RUN EXEC AGAIN'"),
+                "the step spans its continuation card: {s:?}"
+            );
+            assert!(
+                !s.contains("S2"),
+                "the step stops before the next step: {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dd_data_embedded_jcl_cards_do_not_end_the_enclosing_step() {
+        // P2-2: inside `DD DATA`, records that begin with `//` are data until `/*`, so an embedded
+        // JOB/EXEC must not bound the step; its extent runs through `/*` and stops before STEP2.
+        const FIX: &str = "//J JOB\n//STEP1 EXEC PGM=X\n//SYSUT1 DD DATA\n//INNER JOB\n//RUN EXEC PGM=Z\n/*\n//STEP2 EXEC PGM=Y\n";
+        for eol in ["\n", "\r\n"] {
+            let text = FIX.replace('\n', eol);
+            let x = extract(&text);
+            let s1 = slice_of(&text, &x, "STEP1");
+            assert!(
+                s1.contains("//INNER JOB"),
+                "embedded JOB stays inside the step: {s1:?}"
+            );
+            assert!(
+                s1.contains("//RUN EXEC PGM=Z"),
+                "embedded EXEC stays inside: {s1:?}"
+            );
+            assert!(
+                s1.trim_end().ends_with("/*"),
+                "the step runs through the delimiter: {s1:?}"
+            );
+            assert!(
+                !s1.contains("STEP2"),
+                "the step stops before the next real step: {s1:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dd_data_with_dlm_ends_only_at_the_named_delimiter() {
+        // P2-2: `DLM=@@` makes `@@` the delimiter, so even `/*` is data; the step runs to the `@@`
+        // card and stops before STEP2.
+        const FIX: &str = "//J JOB\n//STEP1 EXEC PGM=X\n//SYSIN DD DATA,DLM=@@\n//INNER JOB\n/*\n@@\n//STEP2 EXEC PGM=Y\n";
+        for eol in ["\n", "\r\n"] {
+            let text = FIX.replace('\n', eol);
+            let x = extract(&text);
+            let s1 = slice_of(&text, &x, "STEP1");
+            assert!(
+                s1.contains("//INNER JOB"),
+                "embedded card is data under DLM: {s1:?}"
+            );
+            assert!(
+                s1.contains("/*"),
+                "`/*` is data, not the delimiter, under DLM: {s1:?}"
+            );
+            assert!(
+                s1.contains("@@"),
+                "the step spans through the DLM delimiter card: {s1:?}"
+            );
+            assert!(
+                !s1.contains("STEP2"),
+                "the step stops before the next real step: {s1:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_dlm_reads_the_delimiter_or_defaults() {
+        assert_eq!(parse_dlm("DATA,DLM=@@"), Some("@@".to_string()));
+        assert_eq!(parse_dlm("*,DLM='$$'"), Some("$$".to_string()));
+        assert_eq!(parse_dlm("DATA"), None);
+        assert_eq!(parse_dlm("*"), None);
     }
 
     fn extract(text: &str) -> Extraction {
