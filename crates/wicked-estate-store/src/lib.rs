@@ -818,8 +818,15 @@ impl GraphWrite for MemStore {
         symbol: &SymbolId,
         semantics: &NodeSemantics,
     ) -> Result<()> {
+        // The claim is kept as it was; description/requirement pass through the same redaction
+        // backstop `set_node_semantics` uses (#438).
         if self.nodes.contains_key(symbol) {
-            self.semantics.insert(symbol.clone(), semantics.clone());
+            let mut sem = semantics.clone();
+            sem.description = wicked_estate_core::redact::scrub_opt(sem.description.as_deref())
+                .map(|c| c.into_owned());
+            sem.requirement = wicked_estate_core::redact::scrub_opt(sem.requirement.as_deref())
+                .map(|c| c.into_owned());
+            self.semantics.insert(symbol.clone(), sem);
         }
         Ok(())
     }
@@ -1167,7 +1174,13 @@ impl GraphRead for MemStore {
     }
 
     fn node_semantics(&self, symbol: &SymbolId) -> Result<Option<NodeSemantics>> {
-        // Return None if the symbol has no recorded semantics (not the same as "absent node").
+        // Semantics belong to a live node: SqliteStore reads them through a join on `nodes`, so a
+        // symbol whose node was removed reads None. MemStore mirrors that by gating on node
+        // presence — the stored entry is left in place (the orphan-on-re-add case is a tracked
+        // follow-up, #438), it is simply not visible while no node homes the symbol.
+        if !self.nodes.contains_key(symbol) {
+            return Ok(None);
+        }
         Ok(self.semantics.get(symbol).cloned())
     }
 

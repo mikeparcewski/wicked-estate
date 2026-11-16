@@ -3767,8 +3767,12 @@ impl GraphWrite for SqliteStore {
         symbol: &SymbolId,
         semantics: &NodeSemantics,
     ) -> Result<()> {
-        // All five columns in one write, verbatim — the claim's own validator and time, not now.
-        // No-op when the symbol is not a node (the UPDATE matches no row).
+        // All five columns in one write: the claim's own validator and time kept as they were (not
+        // re-stamped), while description/requirement pass through the same redaction backstop
+        // `set_node_semantics` uses (#438). No-op when the symbol is not a node (UPDATE matches no
+        // row).
+        let description = wicked_estate_core::redact::scrub_opt(semantics.description.as_deref());
+        let requirement = wicked_estate_core::redact::scrub_opt(semantics.requirement.as_deref());
         self.conn
             .execute(
                 "UPDATE nodes SET description=?2, requirement=?3, requirement_validated=?4, \
@@ -3776,8 +3780,8 @@ impl GraphWrite for SqliteStore {
                  WHERE symbol=(SELECT sid FROM symbols WHERE sym=?1)",
                 params![
                     symbol.0,
-                    semantics.description,
-                    semantics.requirement,
+                    description.as_deref(),
+                    requirement.as_deref(),
                     semantics.requirement_validated as i64,
                     semantics.requirement_validated_by,
                     semantics.requirement_validated_at

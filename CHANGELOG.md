@@ -17,12 +17,12 @@ the node semantic fields set with `set_semantics` (wicked-estate#438); back up t
 **Upgrade note (next release).** Install it on every path the daemon resolves, then restart. The first `index` of each
 repo re-reads every file because the binary version changed, and now keeps the node semantic fields
 (`description`, `requirement`, validation, with their original validator and time) of every symbol it emits again
-(#438). A symbol that is gone loses its fields and is reported as `SEMANTICS-DROPPED: <n> symbol(s) in <file>` on
-stderr. No store migration.
+(#438). A symbol that is gone — a function removed, or a whole annotated file deleted — loses its fields and is
+reported as `SEMANTICS-DROPPED: <n> symbol(s) in <file>` on stderr. No store migration.
 
 ### Fixed
 
-- Re-extracting a file no longer clears its nodes' semantic fields (`description`, `requirement`, `requirement_validated`, `requirement_validated_by`, `requirement_validated_at`), so upgrading estate no longer wipes every mapped requirement on the first index (#438). The indexer reads a changed file's semantics before `remove_file` and writes them back verbatim, the original validator and time included, for every symbol the new extraction emits again (new `GraphRead::semantics_in_files` and `GraphWrite::restore_node_semantics`, implemented for SQLite, Postgres, SurrealDB and MemStore). A symbol that is gone loses its fields as before, and each file that lost any prints `SEMANTICS-DROPPED: <n> symbol(s) in <file>` on stderr. `node_semantics` on SQLite and Postgres now also returns a row that holds only a validator or timestamp (a retracted claim), as MemStore always did.
+- Re-extracting a file no longer clears its nodes' semantic fields (`description`, `requirement`, `requirement_validated`, `requirement_validated_by`, `requirement_validated_at`), so upgrading estate no longer wipes every mapped requirement on the first index (#438). The indexer parses first, then removes (changed AND deleted files), re-upserts and writes the saved fields back in ONE store batch, so an interrupted or failed re-index rolls the removal back instead of losing the fields for good. The claim's original validator and time are kept unchanged; `description` and `requirement` pass back through the store's redaction backstop, so a credential that reached a snapshot stays masked. A renamed file (same `SymbolId`, new path) keeps its fields; a symbol that is truly gone loses them, and each file that lost any prints `SEMANTICS-DROPPED: <n> symbol(s) in <file>` on stderr — including a deletion-only run. New `GraphRead::semantics_in_files` and `GraphWrite::restore_node_semantics`, implemented for SQLite, Postgres, SurrealDB and MemStore. `node_semantics` on SQLite and Postgres now also returns a row that holds only a validator or timestamp (a retracted claim), as MemStore always did.
 
 ## [0.35.5] — 2026-11-14
 

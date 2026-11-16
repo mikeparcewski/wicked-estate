@@ -1276,8 +1276,9 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
         )
         .expect("set_node_semantics on absent symbol must be a no-op");
 
-    // #438: snapshot → remove_file → re-upsert → restore keeps all five fields VERBATIM (the
-    // original validator and time, not a re-stamp), and `semantics_in_files` reports them by file.
+    // #438: snapshot → remove_file → re-upsert → restore keeps the claim as it was (the original
+    // validator and time, NOT a re-stamp) and the clean description/requirement, and
+    // `semantics_in_files` reports them by file.
     let keep_node = Node::new(
         sym("sem_keep"),
         NodeKind::Function,
@@ -1316,10 +1317,100 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
     assert_eq!(
         store.node_semantics(&sym("sem_keep")).expect("read back"),
         Some(saved),
-        "restore_node_semantics must write all five fields verbatim"
+        "restore_node_semantics must write all five fields, the seeded past time included"
+    );
+
+    // #438 item 4: restore passes description/requirement through the SAME store-boundary
+    // redaction backstop `set_node_semantics` uses — a credential that reached the snapshot comes
+    // back masked — while the claim's validator and time are written back UNCHANGED.
+    let redact_node = Node::new(
+        sym("sem_redact"),
+        NodeKind::Function,
+        "sem_redact",
+        Language::new("rust"),
+        Location::new("src/sem_redact.rs", Span::ZERO),
     );
     store
-        .restore_node_semantics(&sym("no_such_symbol"), &NodeSemantics::default())
+        .upsert_nodes(std::slice::from_ref(&redact_node))
+        .expect("upsert sem_redact");
+    let raw_desc = "clone https://user:supersecretpassword@git.example.com/repo.git first";
+    let leaky = NodeSemantics {
+        description: Some(raw_desc.to_string()),
+        requirement: Some("REQ-REDACT".to_string()),
+        requirement_validated: true,
+        requirement_validated_by: Some("conformance-redactor".to_string()),
+        requirement_validated_at: Some(1_000_000_001),
+    };
+    store
+        .restore_node_semantics(&sym("sem_redact"), &leaky)
+        .expect("restore sem_redact");
+    let back = store
+        .node_semantics(&sym("sem_redact"))
+        .expect("read sem_redact")
+        .expect("sem_redact has semantics");
+    assert_eq!(
+        back.description.as_deref(),
+        Some(crate::redact::scrub(raw_desc).as_ref()),
+        "restore must mask a credential in description, exactly as set_node_semantics would"
+    );
+    assert_ne!(
+        back.description.as_deref(),
+        Some(raw_desc),
+        "the raw credential must not survive the restore"
+    );
+    assert_eq!(back.requirement.as_deref(), Some("REQ-REDACT"));
+    assert!(back.requirement_validated);
+    assert_eq!(
+        back.requirement_validated_by.as_deref(),
+        Some("conformance-redactor"),
+        "restore must keep the claim's validator unchanged"
+    );
+    assert_eq!(
+        back.requirement_validated_at,
+        Some(1_000_000_001),
+        "restore must keep the claim's time unchanged, not re-stamp it"
+    );
+
+    // #438: a validation-only (retracted) claim — no description, no requirement — round-trips
+    // through restore, validator and seeded past time intact.
+    let retract_node = Node::new(
+        sym("sem_retract"),
+        NodeKind::Function,
+        "sem_retract",
+        Language::new("rust"),
+        Location::new("src/sem_retract.rs", Span::ZERO),
+    );
+    store
+        .upsert_nodes(std::slice::from_ref(&retract_node))
+        .expect("upsert sem_retract");
+    let retracted = NodeSemantics {
+        description: None,
+        requirement: None,
+        requirement_validated: false,
+        requirement_validated_by: Some("conformance-retractor".to_string()),
+        requirement_validated_at: Some(1_000_000_002),
+    };
+    store
+        .restore_node_semantics(&sym("sem_retract"), &retracted)
+        .expect("restore sem_retract");
+    assert_eq!(
+        store
+            .node_semantics(&sym("sem_retract"))
+            .expect("read sem_retract"),
+        Some(retracted),
+        "a retracted claim must round-trip through restore"
+    );
+
+    // restore on an absent symbol is a no-op even for a NON-empty record (must not create a row).
+    let orphan = NodeSemantics {
+        description: Some("orphan".to_string()),
+        requirement: Some("REQ-ABSENT".to_string()),
+        requirement_validated: true,
+        requirement_validated_by: Some("conformance-nobody".to_string()),
+        requirement_validated_at: Some(1_000_000_003),
+    };
+    store
+        .restore_node_semantics(&sym("no_such_symbol"), &orphan)
         .expect("restore on an absent symbol must be a no-op");
     assert!(
         store

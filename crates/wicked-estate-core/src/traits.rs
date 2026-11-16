@@ -443,10 +443,14 @@ pub trait GraphWrite {
         requirement: Option<&str>,
         validation: Option<&ValidationClaim>,
     ) -> Result<()>;
-    /// Write back a [`NodeSemantics`] snapshot VERBATIM — all five fields, the original
-    /// `requirement_validated_by` / `requirement_validated_at` included, nothing re-stamped. Only
-    /// the indexer's re-extraction path calls this (wicked-estate#438); a new claim goes through
-    /// [`set_node_semantics`](Self::set_node_semantics). No-op if the symbol is absent.
+    /// Write back a [`NodeSemantics`] snapshot taken before a `remove_file`. The claim is kept as
+    /// it was — the original `requirement_validated` / `requirement_validated_by` /
+    /// `requirement_validated_at`, nothing re-stamped — while `description` and `requirement` pass
+    /// through the SAME store-boundary redaction backstop
+    /// [`set_node_semantics`](Self::set_node_semantics) applies, so a credential that reached the
+    /// snapshot is still masked on the way back in. Only the indexer's re-extraction path calls
+    /// this (wicked-estate#438); a new claim goes through `set_node_semantics`. No-op if the symbol
+    /// is absent.
     fn restore_node_semantics(
         &mut self,
         symbol: &SymbolId,

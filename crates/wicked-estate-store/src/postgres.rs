@@ -1875,8 +1875,13 @@ impl GraphWrite for PostgresStore {
         symbol: &SymbolId,
         semantics: &NodeSemantics,
     ) -> Result<()> {
-        // All five columns in one statement, verbatim (the original validator and time). No-op
-        // when the symbol is not a node.
+        // All five columns in one statement: the original validator and time kept (not
+        // re-stamped), while description/requirement pass through the same redaction backstop
+        // `set_node_semantics` uses (#438). No-op when the symbol is not a node.
+        let description = wicked_estate_core::redact::scrub_opt(semantics.description.as_deref())
+            .map(|c| c.into_owned());
+        let requirement = wicked_estate_core::redact::scrub_opt(semantics.requirement.as_deref())
+            .map(|c| c.into_owned());
         let mut h = self.conn()?;
         rt_block(
             sqlx::query(
@@ -1884,8 +1889,8 @@ impl GraphWrite for PostgresStore {
                  requirement_validated_by = $5, requirement_validated_at = $6 WHERE symbol = $1",
             )
             .bind(&symbol.0)
-            .bind(&semantics.description)
-            .bind(&semantics.requirement)
+            .bind(&description)
+            .bind(&requirement)
             .bind(semantics.requirement_validated as i64)
             .bind(&semantics.requirement_validated_by)
             .bind(semantics.requirement_validated_at)

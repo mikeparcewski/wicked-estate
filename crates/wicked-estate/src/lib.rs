@@ -1213,9 +1213,12 @@ pub fn index_path_as(
 }
 
 /// Write the semantic fields saved before `remove_file` back onto the symbols the re-extraction
-/// emitted again — verbatim, the original validator and time included (wicked-estate#438). A
-/// symbol that is gone loses its fields, as a removed node always did; the per-file count of those
-/// is returned for the caller to print as `SEMANTICS-DROPPED`, so the loss is never silent.
+/// emitted again — the original validator and time kept as they were, description/requirement
+/// re-masked by the store's redaction backstop (wicked-estate#438). A symbol that is gone loses
+/// its fields, as a removed node always did; the per-file count of those is returned for the
+/// caller to print as `SEMANTICS-DROPPED`, so the loss is never silent. Called inside the write
+/// batch, after the re-extraction's upserts, so a renamed symbol (same `SymbolId`, new file) is
+/// present and restored while a truly-deleted one is absent and counted.
 fn restore_semantics(
     store: &mut dyn GraphStoreMutExt,
     saved: Vec<(String, SymbolId, NodeSemantics)>,
@@ -1626,22 +1629,12 @@ fn index_path_inner(
     for d in &deleted {
         forced_importers.remove(d); // a deleted importer is gone, not re-extracted
     }
-    if !deleted.is_empty() {
-        store.begin_batch()?;
-        for path in &deleted {
-            store.remove_file(path)?;
-            // W7.1: log the removal so subscribers see the deletion delta.
-            let _ = store.log_change(ChangeOp::Remove, path);
-        }
-        store.commit_batch()?;
-        // wicked-estate#433: a file the secret rule excludes leaves with its requirement
-        // annotations; say so once the removal has landed.
-        if let Some(note) = secret_exclusion_note(&deleted) {
-            eprintln!("{note}");
-            #[cfg(test)]
-            SECRET_NOTES.with(|n| n.borrow_mut().push(note));
-        }
-    }
+    // #438: the DELETED files are NOT removed here. Their node rows (and the semantic fields on
+    // them) must survive until the single write batch below, where they are snapshotted, then
+    // removed, then written back onto any symbol a rename re-homes — all in ONE batch that commits
+    // or rolls back atomically with the CHANGED-file re-extraction. The forced-importer discovery
+    // above already read the Imports edges it needs before anything is removed. The deleted set is
+    // left intact so `semantics_in_files` can still read it inside that batch.
 
     // ── Split CHANGED/NEW from UNCHANGED ────────────────────────────────────────────────────
     let work_by_rel: HashMap<String, FileWork> =
@@ -1854,8 +1847,10 @@ fn index_path_inner(
         }
     }
 
-    // If nothing changed, skip all phases.
-    if changed.is_empty() {
+    // If nothing changed AND nothing was deleted, skip all phases. A deletion-only run still has
+    // work to do below: it must remove the deleted files inside the write batch and report every
+    // annotated symbol it drops (#438). The early return is allowed only when BOTH are empty.
+    if changed.is_empty() && deleted.is_empty() {
         // Stamp the id scheme only when the gate did NOT fire this run: a fresh DB or an
         // already-current one gets the key; a gate-fired run that found zero source files leaves
         // the old key so the gate re-fires next time (idempotent, never falsely certified).
@@ -1871,24 +1866,10 @@ fn index_path_inner(
         return store.stats();
     }
 
-    // ── Remove stale contributions from CHANGED files ───────────────────────────────────────
-    // A changed file's old nodes/edges must be purged before we write the new extraction.
-    // #438: remove_file deletes the node rows and with them their semantic fields, and a version
-    // change marks EVERY file changed. Snapshot the fields first; they are written back below for
-    // each symbol the re-extraction emits again.
-    let saved_semantics = {
-        let rels: Vec<&str> = changed.iter().map(|fw| fw.rel.as_str()).collect();
-        store.semantics_in_files(&rels)?
-    };
-    store.begin_batch()?;
-    for fw in &changed {
-        // Only remove if the file was previously indexed (it has a stored digest or prior nodes).
-        // remove_file is idempotent when called on a file with no rows.
-        store.remove_file(&fw.rel)?;
-    }
-    store.commit_batch()?;
-
     // ── EXTRACT: parse + query only CHANGED/NEW files in parallel ───────────────────────────
+    // #438: EXTRACT runs BEFORE any destructive write. The old nodes of CHANGED and DELETED files
+    // are not removed until the single write batch below, so a parse that produces nothing (or an
+    // interrupted run) never commits a removal it cannot pair with a re-write.
     // Each element carries the rel path + extraction + source text (for content storage).
     // Minified/huge files are detected via is_minified_or_huge and skipped; we count them
     // so index_path can report how many files were silently passed over.
@@ -2121,6 +2102,28 @@ fn index_path_inner(
     let mut all_refs = Vec::new();
 
     store.begin_batch()?;
+    // #438: snapshot the semantic fields of every symbol homed in a file about to be removed —
+    // CHANGED and DELETED alike — INSIDE this batch, BEFORE either remove_file. remove_file deletes
+    // the node rows and with them those fields; a version change marks EVERY file changed. The
+    // snapshot is written back below onto whatever symbol the re-extraction (or a rename to a new
+    // file, same SymbolId) emits again. remove + upsert + restore share ONE batch, so a failure
+    // rolls the removal back and the stored fields survive (#438 item 2).
+    let saved_semantics = {
+        let mut rels: Vec<&str> = changed.iter().map(|fw| fw.rel.as_str()).collect();
+        rels.extend(deleted.iter().map(String::as_str));
+        store.semantics_in_files(&rels)?
+    };
+    // Remove the DELETED files' contributions (nodes/edges + file row) now, inside the batch.
+    for path in &deleted {
+        store.remove_file(path)?;
+        // W7.1: log the removal so subscribers see the deletion delta.
+        let _ = store.log_change(ChangeOp::Remove, path);
+    }
+    // Purge each CHANGED file's stale contributions before writing the new extraction. remove_file
+    // is idempotent when a file has no rows (never indexed before).
+    for fw in &changed {
+        store.remove_file(&fw.rel)?;
+    }
     for (rel_path, extraction, text) in &extractions {
         store.upsert_nodes_skip_fts(&extraction.nodes)?;
         store.upsert_edges(&extraction.local_edges)?;
@@ -2158,10 +2161,22 @@ fn index_path_inner(
         store.set_file_digest(&fw.rel, &fw.digest)?;
         let _ = store.log_change(ChangeOp::Upsert, &fw.rel);
     }
-    for (file, n) in restore_semantics(store, saved_semantics)? {
+    // Write the saved semantics back onto every symbol the re-extraction emitted again; count the
+    // ones that are gone per file. Still inside the batch: restore rolls back with the write.
+    let dropped = restore_semantics(store, saved_semantics)?;
+    store.commit_batch()?;
+    // Report the drops only after the batch durably committed, so the line never describes a loss
+    // a rollback undid. A deletion-only run reaches here too and reports its annotated symbols.
+    for (file, n) in dropped {
         eprintln!("SEMANTICS-DROPPED: {n} symbol(s) in {file}");
     }
-    store.commit_batch()?;
+    // wicked-estate#433: a file the secret rule excludes leaves with its requirement annotations;
+    // say so once the removal has landed.
+    if let Some(note) = secret_exclusion_note(&deleted) {
+        eprintln!("{note}");
+        #[cfg(test)]
+        SECRET_NOTES.with(|n| n.borrow_mut().push(note));
+    }
 
     // ── RESOLVE (changed files only) ─────────────────────────────────────────────────────────
     // Build the in-memory index from ALL nodes (unchanged + newly written). Resolve only the refs
@@ -5616,16 +5631,23 @@ mod semantics_survive_reindex_tests {
         hits[0].symbol.clone()
     }
 
-    /// A validation claim by someone else, made at least a clock tick before the re-index, so a
-    /// re-stamp (new time) would show. Uses only `set_node_semantics`, which exists on main.
+    /// Annotate `symbol`, then SEED a past validation time through `restore_node_semantics` (no
+    /// sleep): the clock cannot reproduce `1_000_000_000`, so a re-stamp by the re-index would
+    /// change the time and the round-trip assertion would fail. Returns the seeded snapshot.
     fn annotate_with_claim(store: &mut dyn GraphStoreMutExt, symbol: &SymbolId) -> NodeSemantics {
         let claim = ValidationClaim::new(true, "alice").unwrap();
         store
             .set_node_semantics(symbol, Some("pays"), Some("REQ-1"), Some(&claim))
             .unwrap();
-        let got = store.node_semantics(symbol).unwrap().unwrap();
+        let mut got = store.node_semantics(symbol).unwrap().unwrap();
         assert_eq!(got.requirement_validated_by.as_deref(), Some("alice"));
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        got.requirement_validated_at = Some(1_000_000_000);
+        store.restore_node_semantics(symbol, &got).unwrap();
+        assert_eq!(
+            store.node_semantics(symbol).unwrap(),
+            Some(got.clone()),
+            "the seeded past time must be stored before the re-index"
+        );
         got
     }
 
@@ -5656,9 +5678,120 @@ mod semantics_survive_reindex_tests {
         version_change_keeps_five_fields(&mut SqliteStore::in_memory().unwrap());
     }
 
+    /// A rename `a.cpp` → `a.cc` keeps the free function's SymbolId `compute`, so the five semantic
+    /// fields survive the single run that deletes a.cpp and adds a.cc (#438 item 1).
+    fn rename_keeps_five_fields_under_same_id(store: &mut dyn GraphStoreMutExt) {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.cpp"), "int compute() { return 1; }\n").unwrap();
+        index_path(store, tmp.path()).unwrap();
+        let compute = sym_of(store, "compute");
+        let claim = ValidationClaim::new(true, "alice").unwrap();
+        store
+            .set_node_semantics(&compute, Some("adds"), Some("REQ-9"), Some(&claim))
+            .unwrap();
+        let mut before = store.node_semantics(&compute).unwrap().unwrap();
+        before.requirement_validated_at = Some(1_000_000_000);
+        store.restore_node_semantics(&compute, &before).unwrap();
+
+        // Rename: same content, new extension — a.cpp is deleted and a.cc is new in ONE run.
+        std::fs::remove_file(tmp.path().join("a.cpp")).unwrap();
+        std::fs::write(tmp.path().join("a.cc"), "int compute() { return 1; }\n").unwrap();
+        index_path(store, tmp.path()).unwrap();
+
+        let renamed = sym_of(store, "compute");
+        assert_eq!(renamed, compute, "the rename must keep the same SymbolId");
+        assert_eq!(
+            store.node_semantics(&renamed).unwrap(),
+            Some(before),
+            "all five fields must survive a rename onto the same SymbolId"
+        );
+    }
+
+    #[test]
+    fn sqlite_rename_keeps_five_fields_under_same_id() {
+        rename_keeps_five_fields_under_same_id(&mut SqliteStore::in_memory().unwrap());
+    }
+
+    #[test]
+    fn mem_rename_keeps_five_fields_under_same_id() {
+        rename_keeps_five_fields_under_same_id(&mut MemStore::new());
+    }
+
     #[test]
     fn mem_version_change_keeps_node_semantics() {
         version_change_keeps_five_fields(&mut MemStore::new());
+    }
+
+    /// #438 item 2: remove + upsert + restore share ONE batch, so a write failure mid-re-index
+    /// rolls the removal back and the stored fields survive; a clean retry keeps them. The failure
+    /// is a persistent `BEFORE INSERT` trigger installed over a side connection — it fires on the
+    /// indexer's own connection during the node upsert, AFTER the batch has already removed the
+    /// file. On the pre-fix code (removal committed in its own batch before the write) the fields
+    /// are gone for good; here the uncommitted batch rolls back when the store is dropped.
+    #[test]
+    fn sqlite_write_failure_mid_reindex_rolls_back_and_retry_keeps_fields() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.rs"), "pub fn pay() {}\n").unwrap();
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("g.db");
+
+        // Phase 1: index, annotate, seed a past validation time, commit to disk.
+        let (pay_id, original);
+        {
+            let mut store = SqliteStore::open(&dbpath).unwrap();
+            index_path(&mut store, src.path()).unwrap();
+            let pay = sym_of(&store, "pay");
+            pay_id = pay.clone();
+            original = annotate_with_claim(&mut store, &pay);
+        }
+
+        // Phase 2: a version-triggered re-index whose first node INSERT is poisoned.
+        {
+            let side = rusqlite::Connection::open(&dbpath).unwrap();
+            side.execute_batch(
+                "CREATE TRIGGER we438_poison BEFORE INSERT ON nodes \
+                 BEGIN SELECT RAISE(ABORT, 'we438 injected write failure'); END;",
+            )
+            .unwrap();
+            drop(side);
+
+            let mut store = SqliteStore::open(&dbpath).unwrap();
+            store.meta_set_key("indexed_version", "0.0.0-older"); // force full re-extract
+            let err = index_path(&mut store, src.path())
+                .expect_err("the poisoned node INSERT must abort the re-index");
+            let msg = format!("{err}").to_lowercase();
+            assert!(
+                msg.contains("injected write failure") || msg.contains("abort"),
+                "{err}"
+            );
+            // `store` drops here: its open, uncommitted batch is rolled back by SQLite on close.
+        }
+        rusqlite::Connection::open(&dbpath)
+            .unwrap()
+            .execute_batch("DROP TRIGGER we438_poison;")
+            .unwrap();
+
+        // The removal rolled back: the original five fields survive the interrupted re-index.
+        {
+            let store = SqliteStore::open(&dbpath).unwrap();
+            assert_eq!(
+                store.node_semantics(&pay_id).unwrap(),
+                Some(original.clone()),
+                "an interrupted re-index must not lose the semantic fields"
+            );
+        }
+
+        // Phase 3: a clean retry keeps them.
+        {
+            let mut store = SqliteStore::open(&dbpath).unwrap();
+            store.meta_set_key("indexed_version", "0.0.0-older");
+            index_path(&mut store, src.path()).unwrap();
+            assert_eq!(
+                store.node_semantics(&pay_id).unwrap(),
+                Some(original),
+                "a successful retry keeps the restored fields"
+            );
+        }
     }
 
     fn removed_symbol_is_dropped_and_kept_one_survives(store: &mut dyn GraphStoreMutExt) {
@@ -5699,6 +5832,46 @@ mod semantics_survive_reindex_tests {
         let dropped = restore_semantics(&mut store, saved).unwrap();
         assert_eq!(dropped.get("a.rs"), Some(&1), "{dropped:?}");
         assert_eq!(dropped.get("b.rs"), Some(&1), "{dropped:?}");
+    }
+
+    /// A symbol whose file was removed reads back None BEFORE restore, and restore leaves it that
+    /// way (counted dropped) because `get_node` finds it gone — on SQLite and MemStore.
+    fn dropped_reads_none_after_remove_before_restore(store: &mut dyn GraphStoreMutExt) {
+        let node = Node::new(
+            SymbolId("a.rs::f".into()),
+            NodeKind::Function,
+            "f",
+            Language::new("rust"),
+            Location::new("a.rs", Span::ZERO),
+        );
+        store.upsert_nodes(std::slice::from_ref(&node)).unwrap();
+        let claim = ValidationClaim::new(true, "alice").unwrap();
+        store
+            .set_node_semantics(&node.symbol, Some("d"), Some("REQ-1"), Some(&claim))
+            .unwrap();
+        let snapshot = store.semantics_in_files(&["a.rs"]).unwrap();
+        assert_eq!(snapshot.len(), 1, "one annotated node in a.rs");
+        store.remove_file("a.rs").unwrap();
+        assert!(
+            store.node_semantics(&node.symbol).unwrap().is_none(),
+            "node_semantics must read None after remove_file and before restore"
+        );
+        let dropped = restore_semantics(store, snapshot).unwrap();
+        assert_eq!(dropped.get("a.rs"), Some(&1), "{dropped:?}");
+        assert!(
+            store.node_semantics(&node.symbol).unwrap().is_none(),
+            "restore must not resurrect a symbol whose file is gone"
+        );
+    }
+
+    #[test]
+    fn sqlite_dropped_reads_none_after_remove_before_restore() {
+        dropped_reads_none_after_remove_before_restore(&mut SqliteStore::in_memory().unwrap());
+    }
+
+    #[test]
+    fn mem_dropped_reads_none_after_remove_before_restore() {
+        dropped_reads_none_after_remove_before_restore(&mut MemStore::new());
     }
 
     #[test]

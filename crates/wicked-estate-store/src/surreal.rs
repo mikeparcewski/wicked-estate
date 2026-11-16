@@ -1060,9 +1060,18 @@ impl GraphWrite for SurrealStore {
         if self.get_node(symbol)?.is_none() {
             return Ok(());
         }
+        // The claim is kept as it was; description/requirement pass through the same redaction
+        // backstop `set_node_semantics` uses (#438).
+        let mut semantics = semantics.clone();
+        semantics.description =
+            wicked_estate_core::redact::scrub_opt(semantics.description.as_deref())
+                .map(|c| c.into_owned());
+        semantics.requirement =
+            wicked_estate_core::redact::scrub_opt(semantics.requirement.as_deref())
+                .map(|c| c.into_owned());
         let db = self.db.clone();
         let sym = symbol.0.clone();
-        let data = serde_json::to_string(semantics).map_err(se)?;
+        let data = serde_json::to_string(&semantics).map_err(se)?;
         let req = semantics.requirement.clone();
         self.rt.block_on(async move {
             db.query(
