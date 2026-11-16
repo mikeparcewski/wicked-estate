@@ -11,7 +11,7 @@ use crate::node::{Language, Location, Node, NodeKind, Span};
 use crate::query::{SymbolQuery, TraversalSpec};
 use crate::refs::UnresolvedRef;
 use crate::repo::RepoInfo;
-use crate::semantics::ValidationClaim;
+use crate::semantics::{NodeSemantics, ValidationClaim};
 use crate::symbol::{Descriptor, Symbol};
 use crate::traits::GraphStore;
 
@@ -1275,6 +1275,59 @@ pub fn graph_store_suite<S: GraphStore>(store: &mut S) {
             Some(&ValidationClaim::new(false, "conformance-retractor").expect("named actor")),
         )
         .expect("set_node_semantics on absent symbol must be a no-op");
+
+    // #438: snapshot → remove_file → re-upsert → restore keeps all five fields VERBATIM (the
+    // original validator and time, not a re-stamp), and `semantics_in_files` reports them by file.
+    let keep_node = Node::new(
+        sym("sem_keep"),
+        NodeKind::Function,
+        "sem_keep",
+        Language::new("rust"),
+        Location::new("src/sem_keep.rs", Span::ZERO),
+    );
+    store
+        .upsert_nodes(std::slice::from_ref(&keep_node))
+        .expect("upsert sem_keep");
+    store
+        .set_node_semantics(
+            &sym("sem_keep"),
+            Some("keeps"),
+            Some("REQ-KEEP"),
+            Some(&ValidationClaim::new(true, "conformance-validator").expect("named actor")),
+        )
+        .expect("set sem_keep semantics");
+    let snapshot = store
+        .semantics_in_files(&["src/sem_keep.rs"])
+        .expect("semantics_in_files");
+    assert_eq!(snapshot.len(), 1, "one annotated node in src/sem_keep.rs");
+    assert_eq!(snapshot[0].0, "src/sem_keep.rs");
+    assert_eq!(snapshot[0].1, sym("sem_keep"));
+    let mut saved = snapshot[0].2.clone();
+    saved.requirement_validated_at = Some(1_000_000_000); // a time the clock cannot reproduce
+    store
+        .remove_file("src/sem_keep.rs")
+        .expect("remove_file sem_keep");
+    store
+        .upsert_nodes(std::slice::from_ref(&keep_node))
+        .expect("re-upsert sem_keep");
+    store
+        .restore_node_semantics(&sym("sem_keep"), &saved)
+        .expect("restore_node_semantics");
+    assert_eq!(
+        store.node_semantics(&sym("sem_keep")).expect("read back"),
+        Some(saved),
+        "restore_node_semantics must write all five fields verbatim"
+    );
+    store
+        .restore_node_semantics(&sym("no_such_symbol"), &NodeSemantics::default())
+        .expect("restore on an absent symbol must be a no-op");
+    assert!(
+        store
+            .node_semantics(&sym("no_such_symbol"))
+            .expect("read absent")
+            .is_none(),
+        "restore must not create semantics for an absent symbol"
+    );
 
     // ── Typed annotations ─────────────────────────────────────────────────────
     // Every GraphStore must round-trip typed key/value annotations, support many per symbol,

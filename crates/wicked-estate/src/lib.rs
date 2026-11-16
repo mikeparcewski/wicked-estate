@@ -5616,21 +5616,16 @@ mod semantics_survive_reindex_tests {
         hits[0].symbol.clone()
     }
 
-    /// The semantics of `symbol` after a claim made long ago by someone else: a fixed validator
-    /// and a timestamp the clock cannot reproduce, so a re-stamp would show.
-    fn annotate_with_old_claim(
-        store: &mut dyn GraphStoreMutExt,
-        symbol: &SymbolId,
-    ) -> NodeSemantics {
+    /// A validation claim by someone else, made at least a clock tick before the re-index, so a
+    /// re-stamp (new time) would show. Uses only `set_node_semantics`, which exists on main.
+    fn annotate_with_claim(store: &mut dyn GraphStoreMutExt, symbol: &SymbolId) -> NodeSemantics {
         let claim = ValidationClaim::new(true, "alice").unwrap();
         store
             .set_node_semantics(symbol, Some("pays"), Some("REQ-1"), Some(&claim))
             .unwrap();
-        let mut sem = store.node_semantics(symbol).unwrap().unwrap();
-        sem.requirement_validated_at = Some(1_000_000_000);
-        store.restore_node_semantics(symbol, &sem).unwrap();
         let got = store.node_semantics(symbol).unwrap().unwrap();
-        assert_eq!(got.requirement_validated_at, Some(1_000_000_000));
+        assert_eq!(got.requirement_validated_by.as_deref(), Some("alice"));
+        std::thread::sleep(std::time::Duration::from_millis(1100));
         got
     }
 
@@ -5643,7 +5638,7 @@ mod semantics_survive_reindex_tests {
         .unwrap();
         index_path(store, tmp.path()).unwrap();
         let pay = sym_of(store, "pay");
-        let before = annotate_with_old_claim(store, &pay);
+        let before = annotate_with_claim(store, &pay);
 
         // An upgrade: the stored indexed_version differs, so every file is re-extracted.
         store.meta_set_key("indexed_version", "0.0.0-older");
@@ -5666,35 +5661,54 @@ mod semantics_survive_reindex_tests {
         version_change_keeps_five_fields(&mut MemStore::new());
     }
 
-    fn removed_symbol_is_dropped_and_counted(store: &mut dyn GraphStoreMutExt) {
+    fn removed_symbol_is_dropped_and_kept_one_survives(store: &mut dyn GraphStoreMutExt) {
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("a.rs");
         std::fs::write(&file, "pub fn keep() {}\npub fn gone() {}\n").unwrap();
         index_path(store, tmp.path()).unwrap();
         let (keep, gone) = (sym_of(store, "keep"), sym_of(store, "gone"));
-        let kept = annotate_with_old_claim(store, &keep);
-        annotate_with_old_claim(store, &gone);
+        let kept = annotate_with_claim(store, &keep);
+        annotate_with_claim(store, &gone);
 
         std::fs::write(&file, "pub fn keep() {}\n").unwrap();
-        let saved = store.semantics_in_files(&["a.rs"]).unwrap();
-        assert_eq!(saved.len(), 2);
         index_path(store, tmp.path()).unwrap();
 
         assert_eq!(store.node_semantics(&keep).unwrap(), Some(kept));
         assert!(store.get_node(&gone).unwrap().is_none());
-        // The re-index above printed the same count; the helper is what prints it.
-        let dropped = restore_semantics(store, saved).unwrap();
+    }
+
+    #[test]
+    fn restore_semantics_counts_symbols_that_are_gone() {
+        let mut store = MemStore::new();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "pub fn keep() {}\n").unwrap();
+        index_path(&mut store, tmp.path()).unwrap();
+        let sem = NodeSemantics {
+            requirement: Some("REQ-1".into()),
+            ..Default::default()
+        };
+        let saved = vec![
+            ("a.rs".to_string(), sym_of(&store, "keep"), sem.clone()),
+            (
+                "a.rs".to_string(),
+                SymbolId("a.rs::gone".into()),
+                sem.clone(),
+            ),
+            ("b.rs".to_string(), SymbolId("b.rs::x".into()), sem),
+        ];
+        let dropped = restore_semantics(&mut store, saved).unwrap();
         assert_eq!(dropped.get("a.rs"), Some(&1), "{dropped:?}");
+        assert_eq!(dropped.get("b.rs"), Some(&1), "{dropped:?}");
     }
 
     #[test]
-    fn sqlite_dropped_symbol_is_counted_and_kept_one_survives() {
-        removed_symbol_is_dropped_and_counted(&mut SqliteStore::in_memory().unwrap());
+    fn sqlite_dropped_symbol_loses_fields_kept_one_survives() {
+        removed_symbol_is_dropped_and_kept_one_survives(&mut SqliteStore::in_memory().unwrap());
     }
 
     #[test]
-    fn mem_dropped_symbol_is_counted_and_kept_one_survives() {
-        removed_symbol_is_dropped_and_counted(&mut MemStore::new());
+    fn mem_dropped_symbol_loses_fields_kept_one_survives() {
+        removed_symbol_is_dropped_and_kept_one_survives(&mut MemStore::new());
     }
 
     #[test]
