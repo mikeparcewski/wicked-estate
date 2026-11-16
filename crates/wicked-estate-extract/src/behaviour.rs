@@ -250,8 +250,8 @@ fn cobol(header: TsNode<'_>, src: &[u8]) -> Behaviour {
         next = n.next_sibling();
         if crate::treesitter::COBOL_HEADERS.contains(&n.kind()) {
             // A header the grammar built from a verb (`COMMIT.`, `ROLLBACK.`) is a statement it
-            // misread, in any column; a header in Area B is a statement too.
-            if n.start_position().column >= COBOL_AREA_B_COLUMN || cobol_header_is_verb(n, src) {
+            // misread, in any column. Any other header ends the span, whatever column it starts in.
+            if cobol_header_is_verb(n, src) {
                 return Behaviour::Real;
             }
             ended_by_header = true;
@@ -292,8 +292,8 @@ fn cobol(header: TsNode<'_>, src: &[u8]) -> Behaviour {
     if statements > 0 {
         // The grammar reads fixed columns and silently drops code that starts in column 1 (free
         // format, continuations): read the paragraph's own source and keep it real unless every
-        // non-comment line holds only exit-only statements.
-        if !cobol_exit_only_source_ok(header, end, src) {
+        // line of it is fixed-format shape and holds only exit-only statements.
+        if !cobol_exit_only_source_ok(header, end, ended_by_header, src) {
             return Behaviour::Real;
         }
         Behaviour::Stub("exit_only")
@@ -315,81 +315,77 @@ fn cobol_header_is_verb(header: TsNode<'_>, src: &[u8]) -> bool {
     cobol_header_name(header, src).is_some_and(|name| COBOL_VERB_HEADERS.contains(&name.as_str()))
 }
 
-/// Whether the paragraph's own source (header line through the last line, to end of that line)
-/// holds only what an exit-only paragraph may. The fixed-format column rules apply ONLY to a
-/// line whose columns 1-6 are blank or digits (the fixed-format line shape): there column 7 is
-/// the comment indicator (`*` or `/`), columns 73 and beyond are the identification area (blank
-/// or one letters-and-digits token), and columns 8-72 hold only exit-only statement words and
-/// periods. On any other line the whole line counts and must hold only the exit-only words,
-/// periods and the paragraph's own header. `*>` floating comments run to end of line on either.
-/// The scan reaches the end of the last physical line, so a statement the grammar dropped past
-/// column 72 is not cut off at the node end. Anything else means real code the grammar dropped.
-fn cobol_exit_only_source_ok(header: TsNode<'_>, end: usize, src: &[u8]) -> bool {
-    let start = header.start_byte();
-    let line_begin = src[..start.min(src.len())]
-        .iter()
-        .rposition(|&b| b == b'\n')
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    // When the paragraph node ends inside the Area A/B span of its last line (0-based column > 7,
-    // i.e. past the sequence area and indicator), extend the scan to the end of that physical
-    // line: a statement the grammar dropped past column 72 sits beyond the node's end byte, so
-    // stopping at `end` would cut it off and read the paragraph as exit-only. When the node ends
-    // in the sequence area of the following line (the next header's own columns 1-7), `end`
-    // already excludes that header's name, so extending would bleed into it — keep `end` as-is.
+/// Whether the paragraph's own source holds only what an exit-only paragraph may. The span runs
+/// from the header's line to the line before the next header's line (whatever column that header
+/// starts in), or to the end of the last physical line of the enclosing division. Every physical
+/// line of it, header line included, must have fixed-format shape (columns 1-6 blank or digits);
+/// free-format COBOL is never stubbed. On each line a column-7 `*` or `/` marks a comment and is
+/// skipped; otherwise columns 73 and beyond are blank or one letters-and-digits token
+/// (identification area), and columns 8-72 (after the header itself, on the header line), minus a
+/// `*>` floating comment, hold only exit-only words and periods. A statement the grammar dropped
+/// past column 72, or in columns 1-6, therefore means real.
+fn cobol_exit_only_source_ok(
+    header: TsNode<'_>,
+    end: usize,
+    ended_by_header: bool,
+    src: &[u8],
+) -> bool {
+    let line_start = |at: usize| {
+        src[..at.min(src.len())]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |i| i + 1)
+    };
+    let line_begin = line_start(header.start_byte());
     let end = end.min(src.len());
-    let end_line_start = src[..end]
-        .iter()
-        .rposition(|&b| b == b'\n')
-        .map_or(0, |i| i + 1);
-    let line_end = if end - end_line_start > 7 {
+    // A following header starts its own span on its own line; the last paragraph's span reaches
+    // the end of the physical line its parent ends on (a dropped statement past column 72 sits
+    // beyond the node's end byte).
+    let region_end = if ended_by_header || end == 0 || src[end - 1] == b'\n' {
+        line_start(end)
+    } else {
         src[end..]
             .iter()
             .position(|&b| b == b'\n')
             .map_or(src.len(), |i| end + i)
-    } else {
-        end
     };
-    let region = String::from_utf8_lossy(&src[line_begin..line_end]);
+    let region_end = region_end.max(line_begin);
+    let header_end_col =
+        String::from_utf8_lossy(&src[line_begin..header.end_byte().min(src.len())])
+            .chars()
+            .count();
+    let region = String::from_utf8_lossy(&src[line_begin..region_end]);
     for (idx, raw) in region.split('\n').enumerate() {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
         let chars: Vec<char> = line.chars().collect();
-        // Fixed-format line shape: columns 1-6 (indices 0-5) are blank or digits (sequence area).
-        let fixed_shape = chars
+        // Fixed-format shape: columns 1-6 are blank or digits (sequence area).
+        if !chars
             .iter()
             .take(6)
-            .all(|&c| c == ' ' || c.is_ascii_digit());
-        if fixed_shape {
-            // Comment line: indicator column 7 (0-based index 6) is `*` or `/`.
-            if matches!(line.chars().nth(6), Some('*') | Some('/')) {
-                continue;
-            }
-            // Columns 73 and beyond: blank or one letters-and-digits token (identification area).
-            if chars.len() > 72 {
-                let tail: String = chars[72..].iter().collect();
-                let tail = tail.trim();
-                if !tail.is_empty() && !tail.chars().all(|c| c.is_ascii_alphanumeric()) {
-                    return false;
-                }
-            }
+            .all(|&c| c == ' ' || c.is_ascii_digit())
+        {
+            return false;
         }
-        // A floating `*>` comment runs to end of line.
-        let line = match line.find("*>") {
-            Some(p) => &line[..p],
-            None => line,
-        };
-        let chars: Vec<char> = line.chars().collect();
-        // The header line carries the paragraph name; later lines carry only exit-only statements.
-        if idx == 0 {
+        // Comment line: indicator column 7 is `*` or `/`.
+        if matches!(chars.get(6), Some('*') | Some('/')) {
             continue;
         }
-        // Fixed-format: Area A/B is columns 8-72. Free-format: the whole line counts.
-        let area: String = if fixed_shape {
-            chars[7.min(chars.len())..72.min(chars.len())]
-                .iter()
-                .collect()
-        } else {
-            chars.iter().collect()
+        // Columns 73 and beyond: blank or one letters-and-digits token (identification area).
+        if chars.len() > 72 {
+            let tail: String = chars[72..].iter().collect();
+            let tail = tail.trim();
+            if !tail.is_empty() && !tail.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return false;
+            }
+        }
+        // Columns 8-72; on the header line, only what follows the header itself.
+        let from = if idx == 0 { header_end_col.max(7) } else { 7 };
+        let to = 72.min(chars.len());
+        let area: String = chars[from.min(to)..to].iter().collect();
+        // A floating `*>` comment runs to end of line.
+        let area = match area.find("*>") {
+            Some(p) => &area[..p],
+            None => &area,
         };
         let area_norm = area
             .trim()
@@ -399,7 +395,7 @@ fn cobol_exit_only_source_ok(header: TsNode<'_>, end: usize, src: &[u8]) -> bool
         if area_norm == "END DECLARATIVES" {
             break;
         }
-        if !cobol_area_exit_only(&area) {
+        if !cobol_area_exit_only(area) {
             return false;
         }
     }
@@ -1747,6 +1743,33 @@ mod tests {
         );
         let got = tags("src/PROG.cbl", "cobol", &code);
         is(&got, "A-PARA", "real", None);
+    }
+
+    /// Free format: a header line (columns 1-6 hold text, so it is not fixed-format shape) padded
+    /// to column 72 whose tail past column 72 holds `MOVE A TO B.`, then `EXIT.`. The paragraph
+    /// is real.
+    #[test]
+    fn cobol_free_format_padded_header_with_statement_past_column_72_is_real() {
+        let mut header = String::from("MAIN-X A-PARA.");
+        while header.len() < 72 {
+            header.push(' ');
+        }
+        header.push_str("MOVE A TO B.");
+        let code = format!(
+            "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. PROG.\n       PROCEDURE DIVISION.\n{header}\n           EXIT.\n"
+        );
+        let got = tags("src/PROG.cbl", "cobol", &code);
+        is(&got, "A-PARA", "real", None);
+    }
+
+    /// The span ends at the next header whatever column it starts in: a header in columns 9-11
+    /// leaves the preceding EXIT-only paragraph a stub.
+    #[test]
+    fn cobol_following_header_in_columns_9_to_11_ends_exit_only_span() {
+        let code = "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. PROG.\n       PROCEDURE DIVISION.\n       A-PARA.\n           EXIT.\n         B-PARA.\n           DISPLAY 'X'.\n";
+        let got = tags("src/PROG.cbl", "cobol", code);
+        is(&got, "A-PARA", "stub", Some("exit_only"));
+        is(&got, "B-PARA", "real", None);
     }
 
     /// Fixed format: a `*` comment line in column 7 beside an EXIT body is still exit-only.
