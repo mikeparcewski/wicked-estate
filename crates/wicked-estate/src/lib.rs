@@ -943,6 +943,51 @@ thread_local! {
     static DOC_SKIPS: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+// Absolute source paths whose read a test forces to fail in the work list (#471): a deterministic
+// read failure that does not depend on file permissions (root reads a mode-000 file). A global
+// set, not a thread-local, because the work list is read on rayon's threads; each test uses its
+// own tempdir path, so parallel tests do not see each other's entries.
+#[cfg(test)]
+static TEST_READ_FAILS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn test_read_fails(abs: &Path) -> bool {
+    TEST_READ_FAILS
+        .lock()
+        .map(|v| v.iter().any(|p| p == abs))
+        .unwrap_or(false)
+}
+
+/// The prefix written into the extractor version and rules-digest keys when a forced full
+/// re-extraction could not finish (a previously indexed file was skipped). No real version or
+/// digest starts with it, so the next run forces a full re-extraction whatever the binary or the
+/// rules are then, including after a rollback to the state the old markers named (#471).
+const PENDING_FULL_PREFIX: &str = "pending-full:";
+
+/// Write the extractor version and rules-digest markers at the end of an index run (#471).
+/// `certify` is false when a forced full re-extraction skipped a previously indexed file: the
+/// markers then hold a `pending-full:` sentinel rather than the old values, because keeping the
+/// old values lets a rollback to that old binary or rule set match them and skip the
+/// re-extraction, leaving output from the newer extractor or rules under the old marker.
+fn stamp_extractor_markers(
+    store: &mut dyn GraphStoreMutExt,
+    version_key: &str,
+    digest_key: &str,
+    extra_digest: &str,
+    certify: bool,
+) {
+    if certify {
+        store.meta_set_key(version_key, env!("CARGO_PKG_VERSION"));
+        store.meta_set_key(digest_key, extra_digest);
+    } else {
+        store.meta_set_key(
+            version_key,
+            &format!("{PENDING_FULL_PREFIX}{}", env!("CARGO_PKG_VERSION")),
+        );
+        store.meta_set_key(digest_key, &format!("{PENDING_FULL_PREFIX}{extra_digest}"));
+    }
+}
+
 fn rel(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
@@ -1597,6 +1642,10 @@ fn index_path_inner(
                     export_metadata: None,
                 });
             }
+            #[cfg(test)]
+            if test_read_fails(&abs) {
+                return None;
+            }
             let bytes = confined_root.as_ref()?.read(&abs)?;
             let export_metadata = wicked_estate_extract::apexlang::export_metadata_path(&rel_path)
                 .map(|meta| confined_root.as_ref()?.read(&root.join(meta)));
@@ -1617,8 +1666,9 @@ fn index_path_inner(
     // it from the work list above while it stays in `current_rel_paths`, so it is neither
     // re-extracted nor pruned. Under `force_full` (a version or rules change) the old extractor's
     // output would then sit under a freshly stamped version/rules marker and a plain retry would
-    // never re-extract it. Detect that case here, once, so the three exits below can WITHHOLD the
-    // version/rules stamp and let the next run force a full re-extraction.
+    // never re-extract it. Detect that case here, once, so the three exits below write the
+    // `pending-full:` sentinel instead of the current version/rules (`stamp_extractor_markers`)
+    // and the next run forces a full re-extraction.
     let skipped_prev_indexed = {
         let work_rels: HashSet<&str> = work.iter().map(|fw| fw.rel.as_str()).collect();
         previously_indexed
@@ -1890,12 +1940,15 @@ fn index_path_inner(
             store.meta_set_key(&override_key, cur_overrides);
         }
         // #471: certify the extractor version/rules only after successful indexing, and only when
-        // no previously indexed file was skipped under force_full (#471 fix) — else the old markers
-        // stay so the next run re-extracts the skipped file.
-        if stamp_version {
-            store.meta_set_key(&version_key, env!("CARGO_PKG_VERSION"));
-            store.meta_set_key(&digest_key, &extra_digest);
-        }
+        // no previously indexed file was skipped under force_full — else the `pending-full:`
+        // sentinel goes in, so the next run re-extracts the skipped file.
+        stamp_extractor_markers(
+            store,
+            &version_key,
+            &digest_key,
+            &extra_digest,
+            stamp_version,
+        );
         flush_doc_skips();
         return store.stats();
     }
@@ -1940,11 +1993,14 @@ fn index_path_inner(
             store.meta_set_key(&override_key, cur_overrides);
         }
         // #471: certify the extractor version/rules only after successful indexing, and only when
-        // no previously indexed file was skipped under force_full (#471 fix — see the stamp above).
-        if stamp_version {
-            store.meta_set_key(&version_key, env!("CARGO_PKG_VERSION"));
-            store.meta_set_key(&digest_key, &extra_digest);
-        }
+        // no previously indexed file was skipped under force_full (see the stamp above).
+        stamp_extractor_markers(
+            store,
+            &version_key,
+            &digest_key,
+            &extra_digest,
+            stamp_version,
+        );
         flush_doc_skips();
         return store.stats();
     }
@@ -2544,13 +2600,16 @@ fn index_path_inner(
     // The id-scheme key is written LAST — only after extraction + resolution durably completed —
     // so an interrupted migration re-fires the scheme gate instead of certifying a mixed DB.
     // The version/rules keys follow the same discipline (#471), so rollback leaves a plain
-    // retry able to force full re-extraction. They are also withheld when a previously indexed
-    // file was skipped under force_full (#471 fix), so the old extractor's output never ends up
-    // stamped current while a plain retry would skip it.
-    if stamp_version {
-        store.meta_set_key(&version_key, env!("CARGO_PKG_VERSION"));
-        store.meta_set_key(&digest_key, &extra_digest);
-    }
+    // retry able to force full re-extraction. When a previously indexed file was skipped under
+    // force_full they hold the `pending-full:` sentinel instead, so neither a plain retry nor a
+    // rollback to the old binary or rules can skip the re-extraction.
+    stamp_extractor_markers(
+        store,
+        &version_key,
+        &digest_key,
+        &extra_digest,
+        stamp_version,
+    );
     store.meta_set_key(&scheme_key, SYMBOL_ID_SCHEME);
     // The plugin-override key follows the same write-LAST rule (ADR-010): stamped only once the
     // re-extraction under the current override state durably completed.
@@ -5928,16 +5987,32 @@ mod semantics_survive_reindex_tests {
         );
     }
 
+    /// Forces the work-list read of `abs` to fail until dropped (#471): a deterministic read
+    /// failure on every platform and as any user, unlike file permissions (root reads mode 000).
+    struct ReadFailGuard(PathBuf);
+    impl ReadFailGuard {
+        fn new(abs: PathBuf) -> Self {
+            TEST_READ_FAILS.lock().unwrap().push(abs.clone());
+            ReadFailGuard(abs)
+        }
+    }
+    impl Drop for ReadFailGuard {
+        fn drop(&mut self) {
+            if let Ok(mut v) = TEST_READ_FAILS.lock() {
+                v.retain(|p| p != &self.0);
+            }
+        }
+    }
+
     /// #471 (fix): under `force_full` a previously indexed file whose READ fails during a
     /// version-change re-index is dropped from the work list but stays in `current_rel_paths`, so
     /// it is neither re-extracted nor deleted. If the version/rules markers are stamped anyway, the
     /// old extractor's output sits under the new marker and a plain retry (no metadata reset) never
-    /// re-extracts it. The fix withholds the stamp when a previously indexed file was skipped, so
-    /// the next plain retry forces a full re-extraction. Unix-only: it uses file permissions.
-    #[cfg(unix)]
+    /// re-extracts it. The fix writes the `pending-full:` sentinel instead, so the next plain retry
+    /// forces a full re-extraction. The blocked run must also keep the file's old rows and its
+    /// reviewed fields.
     #[test]
     fn sqlite_version_change_read_failure_plain_retry_reextracts() {
-        use std::os::unix::fs::PermissionsExt;
         let src = tempfile::tempdir().unwrap();
         let file = src.path().join("a.rs");
         std::fs::write(&file, "pub fn pay() {}\n").unwrap();
@@ -5947,6 +6022,8 @@ mod semantics_survive_reindex_tests {
         // One long-lived store for the blocked run and the retry — exactly what `watch` keeps.
         let mut store = SqliteStore::open(&dbpath).unwrap();
         index_path(&mut store, src.path()).unwrap();
+        let pay = sym_of(&store, "pay");
+        let fields = annotate_with_claim(&mut store, &pay);
 
         // Read the `nodes.name` column directly: `find_symbols` goes through an FTS index a raw
         // UPDATE does not refresh, so the raw column is the honest view of what extraction wrote.
@@ -5970,28 +6047,38 @@ mod semantics_survive_reindex_tests {
         // Phase 2: a version-triggered re-index during which the file cannot be read. The read
         // fails in the work list, the file stays in `current_rel_paths` (it is not deleted), and
         // the run takes the no-change exit.
-        let orig_perms = std::fs::metadata(&file).unwrap().permissions();
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
         store.meta_set_key("indexed_version", "0.0.0-older"); // force full re-extract
-        index_path(&mut store, src.path()).unwrap();
-        std::fs::set_permissions(&file, orig_perms).unwrap();
-
-        // If the read was not actually blocked (e.g. running as root), the re-index already
-        // replaced the stale name and the skip path under test was never exercised — nothing to
-        // assert. Only proceed when the read genuinely failed and the node row survived.
-        if count_name("old_pay") != 1 {
-            return;
+        {
+            let _blocked = ReadFailGuard::new(file.clone());
+            index_path(&mut store, src.path()).unwrap();
         }
+        assert_eq!(
+            count_name("old_pay"),
+            1,
+            "the blocked run must keep the skipped file's old rows, not delete them"
+        );
         assert_eq!(
             count_name("pay"),
             0,
             "the skipped file must not have been re-extracted during the blocked run"
         );
+        assert_eq!(
+            store.node_semantics(&pay).unwrap(),
+            Some(fields.clone()),
+            "the blocked run must keep the reviewed fields of the skipped file's node"
+        );
+        assert_eq!(
+            store.meta_get_key("indexed_version").as_deref(),
+            Some(&*format!(
+                "{PENDING_FULL_PREFIX}{}",
+                env!("CARGO_PKG_VERSION")
+            )),
+            "an incomplete forced run must leave the pending-full sentinel, not a current stamp"
+        );
 
         // Phase 3 (#471 fix): a plain retry, with NO metadata reset, must re-extract the skipped
-        // file. At the buggy head phase 2 stamped the version current, so this retry saw no change
-        // and left the stale `old_pay` in place. The fix withholds that stamp, so force_full
-        // re-fires and the file is re-extracted.
+        // file. Stamping the version current in phase 2 made this retry see no change and leave
+        // the stale `old_pay` in place.
         index_path(&mut store, src.path()).unwrap();
         assert_eq!(
             count_name("pay"),
@@ -6002,6 +6089,91 @@ mod semantics_survive_reindex_tests {
             count_name("old_pay"),
             0,
             "the stale output must be gone after the retry"
+        );
+        assert_eq!(
+            store.node_semantics(&pay).unwrap(),
+            Some(fields),
+            "the reviewed fields survive the re-extraction"
+        );
+        assert_eq!(
+            store.meta_get_key("indexed_version").as_deref(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "a complete run certifies the current version"
+        );
+    }
+
+    /// #471 (fix, rollback): change the extra-edge rules while a previously indexed file cannot be
+    /// read, then roll the rules back before retrying. Keeping the OLD digest on the incomplete
+    /// run let the rollback match it, so the retry skipped re-extraction and the readable file
+    /// kept a node only the rolled-back rule creates. The `pending-full:` sentinel matches no
+    /// rule set, so the retry re-extracts and the graph equals a fresh index under the same rules.
+    #[test]
+    fn sqlite_rules_change_with_skipped_file_then_rollback_retry_reextracts() {
+        fn markers(store: &SqliteStore) -> usize {
+            GraphRead::all_nodes(store)
+                .unwrap()
+                .iter()
+                .filter(|n| n.symbol.as_str().contains("reviewmarker"))
+                .count()
+        }
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.rs"), "pub fn keep() {}\n").unwrap();
+        let b = src.path().join("b.rs");
+        std::fs::write(&b, "pub fn blocked() {}\n").unwrap();
+        let mut store = SqliteStore::in_memory().unwrap();
+        index_path(&mut store, src.path()).unwrap();
+        assert_eq!(markers(&store), 0);
+
+        // Rules R1: one rule that emits a node for `keep` in a.rs.
+        let rule_dir = src.path().join(".wicked-estate-extractors");
+        std::fs::create_dir(&rule_dir).unwrap();
+        let rule = rule_dir.join("review.toml");
+        std::fs::write(
+            &rule,
+            r#"[[rule]]
+name = "reviewmarker"
+file_glob = "a.rs"
+pattern = '(?P<n>keep)'
+[rule.emit_node]
+id_template = "reviewmarker:{n}"
+label_capture = "n"
+kind = "synthetic"
+node_scheme = "reviewmarker"
+"#,
+        )
+        .unwrap();
+        {
+            let _blocked = ReadFailGuard::new(b.clone());
+            index_path(&mut store, src.path()).unwrap();
+        }
+        assert_eq!(
+            markers(&store),
+            1,
+            "the readable file is extracted under R1"
+        );
+        assert!(
+            store
+                .meta_get_key("extra_rules_digest")
+                .is_some_and(|d| d.starts_with(PENDING_FULL_PREFIX)),
+            "the incomplete forced run leaves the pending-full sentinel"
+        );
+
+        // Roll the rules back to R0 (no rules) and retry with b.rs readable again.
+        std::fs::remove_file(&rule).unwrap();
+        index_path(&mut store, src.path()).unwrap();
+
+        let mut fresh = SqliteStore::in_memory().unwrap();
+        index_path(&mut fresh, src.path()).unwrap();
+        assert_eq!(markers(&fresh), 0);
+        assert_eq!(
+            markers(&store),
+            markers(&fresh),
+            "after the rollback the retry must re-extract: the graph equals a fresh index"
+        );
+        assert_eq!(
+            store.meta_get_key("extra_rules_digest"),
+            fresh.meta_get_key("extra_rules_digest"),
+            "a complete run certifies the current rules"
         );
     }
 
