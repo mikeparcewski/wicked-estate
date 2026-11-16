@@ -937,9 +937,55 @@ fn secret_exclusion_note(deleted: &[String]) -> Option<String> {
 // The notes `secret_exclusion_note` emitted on this thread, so a test sees what the sweep reported.
 #[cfg(test)]
 thread_local! {
+    static SEMANTICS_DROPS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
     static SECRET_NOTES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
     // The documents the converter skipped on this thread's index runs: (path, reason).
     static DOC_SKIPS: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+// Absolute source paths whose read a test forces to fail in the work list (#471): a deterministic
+// read failure that does not depend on file permissions (root reads a mode-000 file). A global
+// set, not a thread-local, because the work list is read on rayon's threads; each test uses its
+// own tempdir path, so parallel tests do not see each other's entries.
+#[cfg(test)]
+static TEST_READ_FAILS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn test_read_fails(abs: &Path) -> bool {
+    TEST_READ_FAILS
+        .lock()
+        .map(|v| v.iter().any(|p| p == abs))
+        .unwrap_or(false)
+}
+
+/// The prefix written into the extractor version and rules-digest keys when a forced full
+/// re-extraction could not finish (a previously indexed file was skipped). No real version or
+/// digest starts with it, so the next run forces a full re-extraction whatever the binary or the
+/// rules are then, including after a rollback to the state the old markers named (#471).
+const PENDING_FULL_PREFIX: &str = "pending-full:";
+
+/// Write the extractor version and rules-digest markers at the end of an index run (#471).
+/// `certify` is false when a forced full re-extraction skipped a previously indexed file: the
+/// markers then hold a `pending-full:` sentinel rather than the old values, because keeping the
+/// old values lets a rollback to that old binary or rule set match them and skip the
+/// re-extraction, leaving output from the newer extractor or rules under the old marker.
+fn stamp_extractor_markers(
+    store: &mut dyn GraphStoreMutExt,
+    version_key: &str,
+    digest_key: &str,
+    extra_digest: &str,
+    certify: bool,
+) {
+    if certify {
+        store.meta_set_key(version_key, env!("CARGO_PKG_VERSION"));
+        store.meta_set_key(digest_key, extra_digest);
+    } else {
+        store.meta_set_key(
+            version_key,
+            &format!("{PENDING_FULL_PREFIX}{}", env!("CARGO_PKG_VERSION")),
+        );
+        store.meta_set_key(digest_key, &format!("{PENDING_FULL_PREFIX}{extra_digest}"));
+    }
 }
 
 fn rel(root: &Path, path: &Path) -> String {
@@ -1197,7 +1243,20 @@ pub fn index_path_as(
     root: &Path,
     repo: Option<&str>,
 ) -> Result<GraphStats> {
-    let stats = index_path_inner(store, root, repo)?;
+    let stats = match index_path_inner(store, root, repo) {
+        Ok(stats) => stats,
+        Err(e) => {
+            // #438: an error may leave the destructive write batch open — `begin_batch` is a no-op
+            // while a batch is already open (SqliteStore / PostgresStore), so a long-lived caller
+            // that keeps the store after a failed re-index (the `watch` loop) would reuse the
+            // half-written transaction on its next tick and commit the removals WITHOUT their
+            // restored semantic fields. Roll the open batch back so the next run starts clean and
+            // the stored fields survive. No-op when no batch is open; MemStore has no batch to
+            // discard (its default returns an error, deliberately ignored here).
+            let _ = store.rollback_batch();
+            return Err(e);
+        }
+    };
     // X1 (DES-S2 §6): publish the label's new generation only after a complete index. The
     // `indexing` marker set at the start stays on a failed run, so readers say `incomplete` and
     // the linker refuses the label.
@@ -1210,6 +1269,28 @@ pub fn index_path_as(
     }
     store.meta_set_key(&repo_scope::meta_key(repo, "indexing"), "");
     Ok(stats)
+}
+
+/// Write the semantic fields saved before `remove_file` back onto the symbols the re-extraction
+/// emitted again — the original validator and time kept as they were, description/requirement
+/// re-masked by the store's redaction backstop (wicked-estate#438). A symbol that is gone loses
+/// its fields, as a removed node always did; the per-file count of those is returned for the
+/// caller to print as `SEMANTICS-DROPPED`, so the loss is never silent. Called inside the write
+/// batch, after the re-extraction's upserts, so a renamed symbol (same `SymbolId`, new file) is
+/// present and restored while a truly-deleted one is absent and counted.
+fn restore_semantics(
+    store: &mut dyn GraphStoreMutExt,
+    saved: Vec<(String, SymbolId, NodeSemantics)>,
+) -> Result<std::collections::BTreeMap<String, usize>> {
+    let mut dropped: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for (file, symbol, semantics) in saved {
+        if store.get_node(&symbol)?.is_some() {
+            store.restore_node_semantics(&symbol, &semantics)?;
+        } else {
+            *dropped.entry(file).or_default() += 1;
+        }
+    }
+    Ok(dropped)
 }
 
 fn index_path_inner(
@@ -1309,7 +1390,6 @@ fn index_path_inner(
     let mut force_full = prev_version
         .as_deref()
         .is_some_and(|v| v != env!("CARGO_PKG_VERSION"));
-    store.meta_set_key(&version_key, env!("CARGO_PKG_VERSION"));
     if force_full {
         eprintln!(
             "VERSION CHANGE detected (v{prev} → v{cur}): forcing full re-extraction",
@@ -1331,7 +1411,6 @@ fn index_path_inner(
         }
         force_full = true;
     }
-    store.meta_set_key(&digest_key, &extra_digest);
 
     // Plugin-override gate (ADR-010): a parser-plugin override (query-only or armed grammar)
     // changes extraction output without touching a single source byte, so stored graphs indexed
@@ -1342,7 +1421,7 @@ fn index_path_inner(
     // descriptor line is over the registry's CACHED bytes — what extraction will actually use —
     // never a fresh disk read, so a long-lived process stays old-query/old-digest consistent.
     //
-    // Like the id-scheme gate (and deliberately UNLIKE the two gates above), the key is written
+    // Like the id-scheme and version/rules gates, the key is written
     // write-LAST: at run end and in the gate-guarded no-change early return — a crash mid-run
     // leaves the old key and the gate re-fires. Idempotent, never falsely certified.
     let override_key = repo_scope::meta_key(repo, "plugin_overrides");
@@ -1563,6 +1642,10 @@ fn index_path_inner(
                     export_metadata: None,
                 });
             }
+            #[cfg(test)]
+            if test_read_fails(&abs) {
+                return None;
+            }
             let bytes = confined_root.as_ref()?.read(&abs)?;
             let export_metadata = wicked_estate_extract::apexlang::export_metadata_path(&rel_path)
                 .map(|meta| confined_root.as_ref()?.read(&root.join(meta)));
@@ -1577,6 +1660,22 @@ fn index_path_inner(
             })
         })
         .collect();
+
+    // #471 (fix): a previously indexed file can leave `work` without being deleted. A read
+    // failure (a normal file) or a converter skip (a binary doc whose `read_capped` fails) drops
+    // it from the work list above while it stays in `current_rel_paths`, so it is neither
+    // re-extracted nor pruned. Under `force_full` (a version or rules change) the old extractor's
+    // output would then sit under a freshly stamped version/rules marker and a plain retry would
+    // never re-extract it. Detect that case here, once, so the three exits below write the
+    // `pending-full:` sentinel instead of the current version/rules (`stamp_extractor_markers`)
+    // and the next run forces a full re-extraction.
+    let skipped_prev_indexed = {
+        let work_rels: HashSet<&str> = work.iter().map(|fw| fw.rel.as_str()).collect();
+        previously_indexed
+            .iter()
+            .any(|p| current_rel_paths.contains(p) && !work_rels.contains(p.as_str()))
+    };
+    let stamp_version = !force_full || !skipped_prev_indexed;
 
     // ── Remove DELETED files ─────────────────────────────────────────────────────────────────
     let deleted: Vec<String> = previously_indexed
@@ -1607,22 +1706,12 @@ fn index_path_inner(
     for d in &deleted {
         forced_importers.remove(d); // a deleted importer is gone, not re-extracted
     }
-    if !deleted.is_empty() {
-        store.begin_batch()?;
-        for path in &deleted {
-            store.remove_file(path)?;
-            // W7.1: log the removal so subscribers see the deletion delta.
-            let _ = store.log_change(ChangeOp::Remove, path);
-        }
-        store.commit_batch()?;
-        // wicked-estate#433: a file the secret rule excludes leaves with its requirement
-        // annotations; say so once the removal has landed.
-        if let Some(note) = secret_exclusion_note(&deleted) {
-            eprintln!("{note}");
-            #[cfg(test)]
-            SECRET_NOTES.with(|n| n.borrow_mut().push(note));
-        }
-    }
+    // #438: the DELETED files are NOT removed here. Their node rows (and the semantic fields on
+    // them) must survive until the single write batch below, where they are snapshotted, then
+    // removed, then written back onto any symbol a rename re-homes — all in ONE batch that commits
+    // or rolls back atomically with the CHANGED-file re-extraction. The forced-importer discovery
+    // above already read the Imports edges it needs before anything is removed. The deleted set is
+    // left intact so `semantics_in_files` can still read it inside that batch.
 
     // ── Split CHANGED/NEW from UNCHANGED ────────────────────────────────────────────────────
     let work_by_rel: HashMap<String, FileWork> =
@@ -1835,8 +1924,10 @@ fn index_path_inner(
         }
     }
 
-    // If nothing changed, skip all phases.
-    if changed.is_empty() {
+    // If nothing changed AND nothing was deleted, skip all phases. A deletion-only run still has
+    // work to do below: it must remove the deleted files inside the write batch and report every
+    // annotated symbol it drops (#438). The early return is allowed only when BOTH are empty.
+    if changed.is_empty() && deleted.is_empty() {
         // Stamp the id scheme only when the gate did NOT fire this run: a fresh DB or an
         // already-current one gets the key; a gate-fired run that found zero source files leaves
         // the old key so the gate re-fires next time (idempotent, never falsely certified).
@@ -1848,21 +1939,76 @@ fn index_path_inner(
         if !override_gate {
             store.meta_set_key(&override_key, cur_overrides);
         }
+        // #471: certify the extractor version/rules only after successful indexing, and only when
+        // no previously indexed file was skipped under force_full — else the `pending-full:`
+        // sentinel goes in, so the next run re-extracts the skipped file.
+        stamp_extractor_markers(
+            store,
+            &version_key,
+            &digest_key,
+            &extra_digest,
+            stamp_version,
+        );
         flush_doc_skips();
         return store.stats();
     }
 
-    // ── Remove stale contributions from CHANGED files ───────────────────────────────────────
-    // A changed file's old nodes/edges must be purged before we write the new extraction.
-    store.begin_batch()?;
-    for fw in &changed {
-        // Only remove if the file was previously indexed (it has a stored digest or prior nodes).
-        // remove_file is idempotent when called on a file with no rows.
-        store.remove_file(&fw.rel)?;
+    // Deletion-only run: files were deleted but nothing changed, so there is nothing to parse,
+    // resolve or re-link. Remove the deleted files and write their symbols' semantics back onto
+    // whatever still homes each id (nothing here — the symbols are gone), reporting the drops, all
+    // in ONE batch (#438 item 1). This path deliberately does NOT run RESOLVE or the dangling-edge
+    // prune: a deletion-only run leaves any file-less dangling edge (e.g. a RACF `protects` join)
+    // for the next changed run, exactly as before this fix — pinned by mainframe_links'
+    // `shared_ids_fall_back_to_the_boundary_when_the_definition_is_removed`.
+    if changed.is_empty() {
+        store.begin_batch()?;
+        let saved_semantics = {
+            let rels: Vec<&str> = deleted.iter().map(String::as_str).collect();
+            store.semantics_in_files(&rels)?
+        };
+        for path in &deleted {
+            store.remove_file(path)?;
+            let _ = store.log_change(ChangeOp::Remove, path);
+        }
+        let dropped = restore_semantics(store, saved_semantics)?;
+        store.commit_batch()?;
+        for (file, n) in dropped {
+            eprintln!("SEMANTICS-DROPPED: {n} symbol(s) in {file}");
+            #[cfg(test)]
+            SEMANTICS_DROPS.with(|notes| {
+                notes
+                    .borrow_mut()
+                    .push(format!("SEMANTICS-DROPPED: {n} symbol(s) in {file}"))
+            });
+        }
+        if let Some(note) = secret_exclusion_note(&deleted) {
+            eprintln!("{note}");
+            #[cfg(test)]
+            SECRET_NOTES.with(|n| n.borrow_mut().push(note));
+        }
+        if !scheme_gate {
+            store.meta_set_key(&scheme_key, SYMBOL_ID_SCHEME);
+        }
+        if !override_gate {
+            store.meta_set_key(&override_key, cur_overrides);
+        }
+        // #471: certify the extractor version/rules only after successful indexing, and only when
+        // no previously indexed file was skipped under force_full (see the stamp above).
+        stamp_extractor_markers(
+            store,
+            &version_key,
+            &digest_key,
+            &extra_digest,
+            stamp_version,
+        );
+        flush_doc_skips();
+        return store.stats();
     }
-    store.commit_batch()?;
 
     // ── EXTRACT: parse + query only CHANGED/NEW files in parallel ───────────────────────────
+    // #438: EXTRACT runs BEFORE any destructive write. The old nodes of CHANGED and DELETED files
+    // are not removed until the single write batch below, so a parse that produces nothing (or an
+    // interrupted run) never commits a removal it cannot pair with a re-write.
     // Each element carries the rel path + extraction + source text (for content storage).
     // Minified/huge files are detected via is_minified_or_huge and skipped; we count them
     // so index_path can report how many files were silently passed over.
@@ -2095,6 +2241,28 @@ fn index_path_inner(
     let mut all_refs = Vec::new();
 
     store.begin_batch()?;
+    // #438: snapshot the semantic fields of every symbol homed in a file about to be removed —
+    // CHANGED and DELETED alike — INSIDE this batch, BEFORE either remove_file. remove_file deletes
+    // the node rows and with them those fields; a version change marks EVERY file changed. The
+    // snapshot is written back below onto whatever symbol the re-extraction (or a rename to a new
+    // file, same SymbolId) emits again. remove + upsert + restore share ONE batch, so a failure
+    // rolls the removal back and the stored fields survive (#438 item 2).
+    let saved_semantics = {
+        let mut rels: Vec<&str> = changed.iter().map(|fw| fw.rel.as_str()).collect();
+        rels.extend(deleted.iter().map(String::as_str));
+        store.semantics_in_files(&rels)?
+    };
+    // Remove the DELETED files' contributions (nodes/edges + file row) now, inside the batch.
+    for path in &deleted {
+        store.remove_file(path)?;
+        // W7.1: log the removal so subscribers see the deletion delta.
+        let _ = store.log_change(ChangeOp::Remove, path);
+    }
+    // Purge each CHANGED file's stale contributions before writing the new extraction. remove_file
+    // is idempotent when a file has no rows (never indexed before).
+    for fw in &changed {
+        store.remove_file(&fw.rel)?;
+    }
     for (rel_path, extraction, text) in &extractions {
         store.upsert_nodes_skip_fts(&extraction.nodes)?;
         store.upsert_edges(&extraction.local_edges)?;
@@ -2132,8 +2300,6 @@ fn index_path_inner(
         store.set_file_digest(&fw.rel, &fw.digest)?;
         let _ = store.log_change(ChangeOp::Upsert, &fw.rel);
     }
-    store.commit_batch()?;
-
     // ── RESOLVE (changed files only) ─────────────────────────────────────────────────────────
     // Build the in-memory index from ALL nodes (unchanged + newly written). Resolve only the refs
     // that came from the changed files. The resolved edges are written to the store.
@@ -2178,13 +2344,33 @@ fn index_path_inner(
     // Unresolved refs come from the same attribution as the edges — the one definition in
     // docs/ENGINE-CONTRACT.md §2.1 (a ref is unresolved iff no resolver emitted an edge
     // attributed to it, per site).
-    store.begin_batch()?;
+    // Continue the extraction batch through resolution: call-derived ids must exist before
+    // restoring their saved fields (#470). Errors still roll back at index_path_as.
     store.upsert_nodes(&call_flow_nodes)?;
     store.upsert_edges(&resolution.edges)?;
     store.upsert_edges(&call_flow_edges)?;
     store.upsert_edges(&estate)?;
     store.upsert_unresolved_refs(&resolution.unresolved)?;
+    let dropped = restore_semantics(store, saved_semantics)?;
     store.commit_batch()?;
+    // Report the drops only after the batch durably committed, so the line never describes a loss
+    // a rollback undid.
+    for (file, n) in dropped {
+        eprintln!("SEMANTICS-DROPPED: {n} symbol(s) in {file}");
+        #[cfg(test)]
+        SEMANTICS_DROPS.with(|notes| {
+            notes
+                .borrow_mut()
+                .push(format!("SEMANTICS-DROPPED: {n} symbol(s) in {file}"))
+        });
+    }
+    // wicked-estate#433: a file the secret rule excludes leaves with its requirement annotations;
+    // say so once the removal has landed.
+    if let Some(note) = secret_exclusion_note(&deleted) {
+        eprintln!("{note}");
+        #[cfg(test)]
+        SECRET_NOTES.with(|n| n.borrow_mut().push(note));
+    }
 
     // ── RE-DERIVE call-derived value flow for unchanged callers (#220) ──────────────────────
     // The callees were just re-extracted (their parameter/return endpoints exist again); the
@@ -2413,7 +2599,17 @@ fn index_path_inner(
 
     // The id-scheme key is written LAST — only after extraction + resolution durably completed —
     // so an interrupted migration re-fires the scheme gate instead of certifying a mixed DB.
-    // (See the gate above for why this deliberately differs from the version/rules gates.)
+    // The version/rules keys follow the same discipline (#471), so rollback leaves a plain
+    // retry able to force full re-extraction. When a previously indexed file was skipped under
+    // force_full they hold the `pending-full:` sentinel instead, so neither a plain retry nor a
+    // rollback to the old binary or rules can skip the re-extraction.
+    stamp_extractor_markers(
+        store,
+        &version_key,
+        &digest_key,
+        &extra_digest,
+        stamp_version,
+    );
     store.meta_set_key(&scheme_key, SYMBOL_ID_SCHEME);
     // The plugin-override key follows the same write-LAST rule (ADR-010): stamped only once the
     // re-extraction under the current override state durably completed.
@@ -5567,5 +5763,533 @@ mod blast_radius_confidence_tests {
         assert_eq!(br.confidence.edge_count, 1, "{:?}", br.confidence);
         assert_eq!(br.confidence.min, Some(tags));
         assert_eq!(br.confidence.avg, Some(tags));
+    }
+}
+
+#[cfg(test)]
+mod semantics_survive_reindex_tests {
+    use super::*;
+    use wicked_estate_core::{GraphRead, GraphWrite, NodeSemantics, ValidationClaim};
+    use wicked_estate_store::{GraphStoreMutExt, MemStore, SqliteStore};
+
+    fn sym_of(store: &dyn GraphStoreMutExt, name: &str) -> SymbolId {
+        let hits = store
+            .find_symbols(&wicked_estate_core::SymbolQuery {
+                exact_name: Some(name.to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(hits.len(), 1, "expected one `{name}`");
+        hits[0].symbol.clone()
+    }
+
+    /// Annotate `symbol`, then SEED a past validation time through `restore_node_semantics` (no
+    /// sleep): the clock cannot reproduce `1_000_000_000`, so a re-stamp by the re-index would
+    /// change the time and the round-trip assertion would fail. Returns the seeded snapshot.
+    fn annotate_with_claim(store: &mut dyn GraphStoreMutExt, symbol: &SymbolId) -> NodeSemantics {
+        let claim = ValidationClaim::new(true, "alice").unwrap();
+        store
+            .set_node_semantics(symbol, Some("pays"), Some("REQ-1"), Some(&claim))
+            .unwrap();
+        let mut got = store.node_semantics(symbol).unwrap().unwrap();
+        assert_eq!(got.requirement_validated_by.as_deref(), Some("alice"));
+        got.requirement_validated_at = Some(1_000_000_000);
+        store.restore_node_semantics(symbol, &got).unwrap();
+        assert_eq!(
+            store.node_semantics(symbol).unwrap(),
+            Some(got.clone()),
+            "the seeded past time must be stored before the re-index"
+        );
+        got
+    }
+
+    fn version_change_keeps_five_fields(store: &mut dyn GraphStoreMutExt) {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("a.rs"),
+            "pub fn pay() {}\npub fn refund() {}\n",
+        )
+        .unwrap();
+        index_path(store, tmp.path()).unwrap();
+        let pay = sym_of(store, "pay");
+        let before = annotate_with_claim(store, &pay);
+
+        // An upgrade: the stored indexed_version differs, so every file is re-extracted.
+        store.meta_set_key("indexed_version", "0.0.0-older");
+        index_path(store, tmp.path()).unwrap();
+
+        assert_eq!(
+            store.node_semantics(&sym_of(store, "pay")).unwrap(),
+            Some(before),
+            "all five fields, validator and time included, must survive the forced re-extract"
+        );
+    }
+
+    #[test]
+    fn sqlite_version_change_keeps_node_semantics() {
+        version_change_keeps_five_fields(&mut SqliteStore::in_memory().unwrap());
+    }
+
+    /// #470: this argument slot is created by call resolution, after extraction writes its nodes.
+    #[test]
+    fn sqlite_version_change_keeps_call_derived_node_semantics() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(
+            src.path().join("a.ts"),
+            "function identity(value: string) { return value; }\n\
+             function consume() { identity(externalInput); }\n",
+        )
+        .unwrap();
+        let mut store = SqliteStore::in_memory().unwrap();
+        index_path(&mut store, src.path()).unwrap();
+        let slot = GraphRead::all_nodes(&store)
+            .unwrap()
+            .into_iter()
+            .find(|n| {
+                n.symbol
+                    .as_str()
+                    .ends_with("consume().:local:externalInput:")
+            })
+            .expect("resolution must create the external argument slot")
+            .symbol;
+        let before = annotate_with_claim(&mut store, &slot);
+        SEMANTICS_DROPS.with(|notes| notes.borrow_mut().clear());
+
+        store.meta_set_key("indexed_version", "0.0.0-older");
+        index_path(&mut store, src.path()).unwrap();
+
+        assert_eq!(store.node_semantics(&slot).unwrap(), Some(before));
+        SEMANTICS_DROPS.with(|notes| assert!(notes.borrow().is_empty(), "{:?}", notes.borrow()));
+    }
+
+    /// A rename `a.cpp` → `a.cc` keeps the free function's SymbolId `compute`, so the five semantic
+    /// fields survive the single run that deletes a.cpp and adds a.cc (#438 item 1).
+    fn rename_keeps_five_fields_under_same_id(store: &mut dyn GraphStoreMutExt) {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.cpp"), "int compute() { return 1; }\n").unwrap();
+        index_path(store, tmp.path()).unwrap();
+        let compute = sym_of(store, "compute");
+        let claim = ValidationClaim::new(true, "alice").unwrap();
+        store
+            .set_node_semantics(&compute, Some("adds"), Some("REQ-9"), Some(&claim))
+            .unwrap();
+        let mut before = store.node_semantics(&compute).unwrap().unwrap();
+        before.requirement_validated_at = Some(1_000_000_000);
+        store.restore_node_semantics(&compute, &before).unwrap();
+
+        // Rename: same content, new extension — a.cpp is deleted and a.cc is new in ONE run.
+        std::fs::remove_file(tmp.path().join("a.cpp")).unwrap();
+        std::fs::write(tmp.path().join("a.cc"), "int compute() { return 1; }\n").unwrap();
+        index_path(store, tmp.path()).unwrap();
+
+        let renamed = sym_of(store, "compute");
+        assert_eq!(renamed, compute, "the rename must keep the same SymbolId");
+        assert_eq!(
+            store.node_semantics(&renamed).unwrap(),
+            Some(before),
+            "all five fields must survive a rename onto the same SymbolId"
+        );
+    }
+
+    #[test]
+    fn sqlite_rename_keeps_five_fields_under_same_id() {
+        rename_keeps_five_fields_under_same_id(&mut SqliteStore::in_memory().unwrap());
+    }
+
+    #[test]
+    fn mem_rename_keeps_five_fields_under_same_id() {
+        rename_keeps_five_fields_under_same_id(&mut MemStore::new());
+    }
+
+    #[test]
+    fn mem_version_change_keeps_node_semantics() {
+        version_change_keeps_five_fields(&mut MemStore::new());
+    }
+
+    /// #438 item 2: remove + upsert + restore share ONE batch, and a write failure mid-re-index
+    /// rolls the removal back so the stored fields survive; a retry on the SAME store (no drop,
+    /// no reconnect — as the `watch` loop keeps it) keeps them. The failure is a persistent
+    /// `BEFORE INSERT` trigger installed over a side connection — it fires on the indexer's own
+    /// connection during the node upsert, AFTER the batch has already removed the file. The fix
+    /// rolls the open batch back on error at the `index_path_as` boundary; without it the next
+    /// index on the same store would reuse the half-written transaction and commit the removal
+    /// without the fields. On the pre-fix code the fields are gone for good.
+    #[test]
+    fn sqlite_version_write_failure_plain_retry_reextracts_and_keeps_fields() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.rs"), "pub fn pay() {}\n").unwrap();
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("g.db");
+
+        // Phase 1: index, annotate, seed a past validation time, commit to disk.
+        let (pay_id, original);
+        {
+            let mut store = SqliteStore::open(&dbpath).unwrap();
+            index_path(&mut store, src.path()).unwrap();
+            let pay = sym_of(&store, "pay");
+            pay_id = pay.clone();
+            original = annotate_with_claim(&mut store, &pay);
+        }
+
+        // One long-lived store for BOTH the failed run and the retry — exactly what `watch` does.
+        let mut store = SqliteStore::open(&dbpath).unwrap();
+
+        // Simulate an older extractor's output without changing the source or its digest.
+        // Only a full re-extraction can replace this stale name with `pay`.
+        rusqlite::Connection::open(&dbpath)
+            .unwrap()
+            .execute("UPDATE nodes SET name = 'old_pay' WHERE name = 'pay'", [])
+            .unwrap();
+
+        // Phase 2: a version-triggered re-index whose first node INSERT is poisoned.
+        {
+            let side = rusqlite::Connection::open(&dbpath).unwrap();
+            side.execute_batch(
+                "CREATE TRIGGER we438_poison BEFORE INSERT ON nodes \
+                 BEGIN SELECT RAISE(ABORT, 'we438 injected write failure'); END;",
+            )
+            .unwrap();
+            drop(side);
+
+            store.meta_set_key("indexed_version", "0.0.0-older"); // force full re-extract
+            let err = index_path(&mut store, src.path())
+                .expect_err("the poisoned node INSERT must abort the re-index");
+            let msg = format!("{err}").to_lowercase();
+            assert!(
+                msg.contains("injected write failure") || msg.contains("abort"),
+                "{err}"
+            );
+        }
+        // The batch was rolled back at the index_path_as boundary, so `store`'s connection holds
+        // no open transaction and the original five fields survive — read on the SAME store.
+        assert_eq!(
+            store.node_semantics(&pay_id).unwrap(),
+            Some(original.clone()),
+            "an interrupted re-index must not lose the semantic fields"
+        );
+        // Remove the poison; `store`'s connection is idle (no open batch), so the DDL is free.
+        rusqlite::Connection::open(&dbpath)
+            .unwrap()
+            .execute_batch("DROP TRIGGER we438_poison;")
+            .unwrap();
+
+        // Phase 3 (#471): plain retry, with no metadata reset, must re-extract the old output.
+        index_path(&mut store, src.path()).unwrap();
+        assert_eq!(sym_of(&store, "pay"), pay_id);
+        assert_eq!(
+            store.meta_get_key("indexed_version").as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(
+            store.node_semantics(&pay_id).unwrap(),
+            Some(original),
+            "a retry on the same store keeps the restored fields"
+        );
+    }
+
+    /// Forces the work-list read of `abs` to fail until dropped (#471): a deterministic read
+    /// failure on every platform and as any user, unlike file permissions (root reads mode 000).
+    struct ReadFailGuard(PathBuf);
+    impl ReadFailGuard {
+        fn new(abs: PathBuf) -> Self {
+            TEST_READ_FAILS.lock().unwrap().push(abs.clone());
+            ReadFailGuard(abs)
+        }
+    }
+    impl Drop for ReadFailGuard {
+        fn drop(&mut self) {
+            if let Ok(mut v) = TEST_READ_FAILS.lock() {
+                v.retain(|p| p != &self.0);
+            }
+        }
+    }
+
+    /// #471 (fix): under `force_full` a previously indexed file whose READ fails during a
+    /// version-change re-index is dropped from the work list but stays in `current_rel_paths`, so
+    /// it is neither re-extracted nor deleted. If the version/rules markers are stamped anyway, the
+    /// old extractor's output sits under the new marker and a plain retry (no metadata reset) never
+    /// re-extracts it. The fix writes the `pending-full:` sentinel instead, so the next plain retry
+    /// forces a full re-extraction. The blocked run must also keep the file's old rows and its
+    /// reviewed fields.
+    #[test]
+    fn sqlite_version_change_read_failure_plain_retry_reextracts() {
+        let src = tempfile::tempdir().unwrap();
+        let file = src.path().join("a.rs");
+        std::fs::write(&file, "pub fn pay() {}\n").unwrap();
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("g.db");
+
+        // One long-lived store for the blocked run and the retry — exactly what `watch` keeps.
+        let mut store = SqliteStore::open(&dbpath).unwrap();
+        index_path(&mut store, src.path()).unwrap();
+        let pay = sym_of(&store, "pay");
+        let fields = annotate_with_claim(&mut store, &pay);
+
+        // Read the `nodes.name` column directly: `find_symbols` goes through an FTS index a raw
+        // UPDATE does not refresh, so the raw column is the honest view of what extraction wrote.
+        let count_name = |name: &str| -> i64 {
+            rusqlite::Connection::open(&dbpath)
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM nodes WHERE name = ?1", [name], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(count_name("pay"), 1);
+
+        // Simulate an older extractor's output without changing the source or its digest. Only a
+        // full re-extraction can replace this stale name with `pay`.
+        rusqlite::Connection::open(&dbpath)
+            .unwrap()
+            .execute("UPDATE nodes SET name = 'old_pay' WHERE name = 'pay'", [])
+            .unwrap();
+
+        // Phase 2: a version-triggered re-index during which the file cannot be read. The read
+        // fails in the work list, the file stays in `current_rel_paths` (it is not deleted), and
+        // the run takes the no-change exit.
+        store.meta_set_key("indexed_version", "0.0.0-older"); // force full re-extract
+        {
+            let _blocked = ReadFailGuard::new(file.clone());
+            index_path(&mut store, src.path()).unwrap();
+        }
+        assert_eq!(
+            count_name("old_pay"),
+            1,
+            "the blocked run must keep the skipped file's old rows, not delete them"
+        );
+        assert_eq!(
+            count_name("pay"),
+            0,
+            "the skipped file must not have been re-extracted during the blocked run"
+        );
+        assert_eq!(
+            store.node_semantics(&pay).unwrap(),
+            Some(fields.clone()),
+            "the blocked run must keep the reviewed fields of the skipped file's node"
+        );
+        assert_eq!(
+            store.meta_get_key("indexed_version").as_deref(),
+            Some(&*format!(
+                "{PENDING_FULL_PREFIX}{}",
+                env!("CARGO_PKG_VERSION")
+            )),
+            "an incomplete forced run must leave the pending-full sentinel, not a current stamp"
+        );
+
+        // Phase 3 (#471 fix): a plain retry, with NO metadata reset, must re-extract the skipped
+        // file. Stamping the version current in phase 2 made this retry see no change and leave
+        // the stale `old_pay` in place.
+        index_path(&mut store, src.path()).unwrap();
+        assert_eq!(
+            count_name("pay"),
+            1,
+            "a plain retry must re-extract the file skipped by the read failure"
+        );
+        assert_eq!(
+            count_name("old_pay"),
+            0,
+            "the stale output must be gone after the retry"
+        );
+        assert_eq!(
+            store.node_semantics(&pay).unwrap(),
+            Some(fields),
+            "the reviewed fields survive the re-extraction"
+        );
+        assert_eq!(
+            store.meta_get_key("indexed_version").as_deref(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "a complete run certifies the current version"
+        );
+    }
+
+    /// #471 (fix, rollback): change the extra-edge rules while a previously indexed file cannot be
+    /// read, then roll the rules back before retrying. Keeping the OLD digest on the incomplete
+    /// run let the rollback match it, so the retry skipped re-extraction and the readable file
+    /// kept a node only the rolled-back rule creates. The `pending-full:` sentinel matches no
+    /// rule set, so the retry re-extracts and the graph equals a fresh index under the same rules.
+    #[test]
+    fn sqlite_rules_change_with_skipped_file_then_rollback_retry_reextracts() {
+        fn markers(store: &SqliteStore) -> usize {
+            GraphRead::all_nodes(store)
+                .unwrap()
+                .iter()
+                .filter(|n| n.symbol.as_str().contains("reviewmarker"))
+                .count()
+        }
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.rs"), "pub fn keep() {}\n").unwrap();
+        let b = src.path().join("b.rs");
+        std::fs::write(&b, "pub fn blocked() {}\n").unwrap();
+        let mut store = SqliteStore::in_memory().unwrap();
+        index_path(&mut store, src.path()).unwrap();
+        assert_eq!(markers(&store), 0);
+
+        // Rules R1: one rule that emits a node for `keep` in a.rs.
+        let rule_dir = src.path().join(".wicked-estate-extractors");
+        std::fs::create_dir(&rule_dir).unwrap();
+        let rule = rule_dir.join("review.toml");
+        std::fs::write(
+            &rule,
+            r#"[[rule]]
+name = "reviewmarker"
+file_glob = "a.rs"
+pattern = '(?P<n>keep)'
+[rule.emit_node]
+id_template = "reviewmarker:{n}"
+label_capture = "n"
+kind = "synthetic"
+node_scheme = "reviewmarker"
+"#,
+        )
+        .unwrap();
+        {
+            let _blocked = ReadFailGuard::new(b.clone());
+            index_path(&mut store, src.path()).unwrap();
+        }
+        assert_eq!(
+            markers(&store),
+            1,
+            "the readable file is extracted under R1"
+        );
+        assert!(
+            store
+                .meta_get_key("extra_rules_digest")
+                .is_some_and(|d| d.starts_with(PENDING_FULL_PREFIX)),
+            "the incomplete forced run leaves the pending-full sentinel"
+        );
+
+        // Roll the rules back to R0 (no rules) and retry with b.rs readable again.
+        std::fs::remove_file(&rule).unwrap();
+        index_path(&mut store, src.path()).unwrap();
+
+        let mut fresh = SqliteStore::in_memory().unwrap();
+        index_path(&mut fresh, src.path()).unwrap();
+        assert_eq!(markers(&fresh), 0);
+        assert_eq!(
+            markers(&store),
+            markers(&fresh),
+            "after the rollback the retry must re-extract: the graph equals a fresh index"
+        );
+        assert_eq!(
+            store.meta_get_key("extra_rules_digest"),
+            fresh.meta_get_key("extra_rules_digest"),
+            "a complete run certifies the current rules"
+        );
+    }
+
+    fn removed_symbol_is_dropped_and_kept_one_survives(store: &mut dyn GraphStoreMutExt) {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("a.rs");
+        std::fs::write(&file, "pub fn keep() {}\npub fn gone() {}\n").unwrap();
+        index_path(store, tmp.path()).unwrap();
+        let (keep, gone) = (sym_of(store, "keep"), sym_of(store, "gone"));
+        let kept = annotate_with_claim(store, &keep);
+        annotate_with_claim(store, &gone);
+
+        SEMANTICS_DROPS.with(|notes| notes.borrow_mut().clear());
+        std::fs::write(&file, "pub fn keep() {}\n").unwrap();
+        index_path(store, tmp.path()).unwrap();
+        SEMANTICS_DROPS.with(|notes| {
+            assert_eq!(
+                &*notes.borrow(),
+                &["SEMANTICS-DROPPED: 1 symbol(s) in a.rs"]
+            );
+        });
+
+        assert_eq!(store.node_semantics(&keep).unwrap(), Some(kept));
+        assert!(store.get_node(&gone).unwrap().is_none());
+    }
+
+    #[test]
+    fn restore_semantics_counts_symbols_that_are_gone() {
+        let mut store = MemStore::new();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "pub fn keep() {}\n").unwrap();
+        index_path(&mut store, tmp.path()).unwrap();
+        let sem = NodeSemantics {
+            requirement: Some("REQ-1".into()),
+            ..Default::default()
+        };
+        let saved = vec![
+            ("a.rs".to_string(), sym_of(&store, "keep"), sem.clone()),
+            (
+                "a.rs".to_string(),
+                SymbolId("a.rs::gone".into()),
+                sem.clone(),
+            ),
+            ("b.rs".to_string(), SymbolId("b.rs::x".into()), sem),
+        ];
+        let dropped = restore_semantics(&mut store, saved).unwrap();
+        assert_eq!(dropped.get("a.rs"), Some(&1), "{dropped:?}");
+        assert_eq!(dropped.get("b.rs"), Some(&1), "{dropped:?}");
+    }
+
+    /// A symbol whose file was removed reads back None BEFORE restore, and restore leaves it that
+    /// way (counted dropped) because `get_node` finds it gone — on SQLite and MemStore.
+    fn dropped_reads_none_after_remove_before_restore(store: &mut dyn GraphStoreMutExt) {
+        let node = Node::new(
+            SymbolId("a.rs::f".into()),
+            NodeKind::Function,
+            "f",
+            Language::new("rust"),
+            Location::new("a.rs", Span::ZERO),
+        );
+        store.upsert_nodes(std::slice::from_ref(&node)).unwrap();
+        let claim = ValidationClaim::new(true, "alice").unwrap();
+        store
+            .set_node_semantics(&node.symbol, Some("d"), Some("REQ-1"), Some(&claim))
+            .unwrap();
+        let snapshot = store.semantics_in_files(&["a.rs"]).unwrap();
+        assert_eq!(snapshot.len(), 1, "one annotated node in a.rs");
+        store.remove_file("a.rs").unwrap();
+        assert!(
+            store.node_semantics(&node.symbol).unwrap().is_none(),
+            "node_semantics must read None after remove_file and before restore"
+        );
+        let dropped = restore_semantics(store, snapshot).unwrap();
+        assert_eq!(dropped.get("a.rs"), Some(&1), "{dropped:?}");
+        assert!(
+            store.node_semantics(&node.symbol).unwrap().is_none(),
+            "restore must not resurrect a symbol whose file is gone"
+        );
+    }
+
+    #[test]
+    fn sqlite_dropped_reads_none_after_remove_before_restore() {
+        dropped_reads_none_after_remove_before_restore(&mut SqliteStore::in_memory().unwrap());
+    }
+
+    #[test]
+    fn mem_dropped_reads_none_after_remove_before_restore() {
+        dropped_reads_none_after_remove_before_restore(&mut MemStore::new());
+    }
+
+    #[test]
+    fn sqlite_dropped_symbol_loses_fields_kept_one_survives() {
+        removed_symbol_is_dropped_and_kept_one_survives(&mut SqliteStore::in_memory().unwrap());
+    }
+
+    #[test]
+    fn mem_dropped_symbol_loses_fields_kept_one_survives() {
+        removed_symbol_is_dropped_and_kept_one_survives(&mut MemStore::new());
+    }
+
+    #[test]
+    fn validation_only_claim_reads_back() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "pub fn pay() {}\n").unwrap();
+        index_path(&mut store, tmp.path()).unwrap();
+        let pay = sym_of(&store, "pay");
+        let retracted = ValidationClaim::new(false, "bob").unwrap();
+        store
+            .set_node_semantics(&pay, None, None, Some(&retracted))
+            .unwrap();
+        let got = store
+            .node_semantics(&pay)
+            .unwrap()
+            .expect("a retracted claim is still a claim");
+        assert_eq!(got.requirement_validated_by.as_deref(), Some("bob"));
+        assert!(!got.requirement_validated);
     }
 }

@@ -230,6 +230,13 @@ impl GraphWrite for OverlayMemStore {
         self.home
             .set_node_semantics(symbol, description, requirement, validation)
     }
+    fn restore_node_semantics(
+        &mut self,
+        symbol: &SymbolId,
+        semantics: &NodeSemantics,
+    ) -> Result<()> {
+        self.home.restore_node_semantics(symbol, semantics)
+    }
     fn annotate(&mut self, symbol: &SymbolId, annotation: Annotation) -> Result<()> {
         self.home.annotate(symbol, annotation)
     }

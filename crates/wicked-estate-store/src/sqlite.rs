@@ -3762,6 +3762,35 @@ impl GraphWrite for SqliteStore {
         Ok(())
     }
 
+    fn restore_node_semantics(
+        &mut self,
+        symbol: &SymbolId,
+        semantics: &NodeSemantics,
+    ) -> Result<()> {
+        // All five columns in one write: the claim's own validator and time kept as they were (not
+        // re-stamped), while description/requirement pass through the same redaction backstop
+        // `set_node_semantics` uses (#438). No-op when the symbol is not a node (UPDATE matches no
+        // row).
+        let description = wicked_estate_core::redact::scrub_opt(semantics.description.as_deref());
+        let requirement = wicked_estate_core::redact::scrub_opt(semantics.requirement.as_deref());
+        self.conn
+            .execute(
+                "UPDATE nodes SET description=?2, requirement=?3, requirement_validated=?4, \
+                 requirement_validated_by=?5, requirement_validated_at=?6 \
+                 WHERE symbol=(SELECT sid FROM symbols WHERE sym=?1)",
+                params![
+                    symbol.0,
+                    description.as_deref(),
+                    requirement.as_deref(),
+                    semantics.requirement_validated as i64,
+                    semantics.requirement_validated_by,
+                    semantics.requirement_validated_at
+                ],
+            )
+            .map_err(st)?;
+        Ok(())
+    }
+
     fn annotate(&mut self, symbol: &SymbolId, mut annotation: Annotation) -> Result<()> {
         wicked_estate_core::redact::scrub_annotation(&mut annotation);
         // Look up the sid WITHOUT interning: an un-interned symbol is not a node → no-op.
@@ -4538,7 +4567,9 @@ impl GraphRead for SqliteStore {
                  WHERE symbol=?1 \
                    AND (description IS NOT NULL \
                         OR requirement IS NOT NULL \
-                        OR requirement_validated != 0)",
+                        OR requirement_validated != 0 \
+                        OR requirement_validated_by IS NOT NULL \
+                        OR requirement_validated_at IS NOT NULL)",
                 params![sid],
                 |r| {
                     Ok((
@@ -4564,6 +4595,44 @@ impl GraphRead for SqliteStore {
                 requirement_validated_at: at,
             })),
         }
+    }
+
+    fn semantics_in_files(&self, files: &[&str]) -> Result<Vec<(String, SymbolId, NodeSemantics)>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT s.sym, n.description, n.requirement, n.requirement_validated, \
+                        n.requirement_validated_by, n.requirement_validated_at \
+                 FROM nodes n JOIN symbols s ON s.sid = n.symbol \
+                 WHERE n.file = ?1 \
+                   AND (n.description IS NOT NULL OR n.requirement IS NOT NULL \
+                        OR n.requirement_validated != 0 \
+                        OR n.requirement_validated_by IS NOT NULL \
+                        OR n.requirement_validated_at IS NOT NULL)",
+            )
+            .map_err(st)?;
+        let mut out = Vec::new();
+        for file in files {
+            let rows = stmt
+                .query_map(params![file], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        NodeSemantics {
+                            description: r.get(1)?,
+                            requirement: r.get(2)?,
+                            requirement_validated: r.get::<_, i64>(3)? != 0,
+                            requirement_validated_by: r.get(4)?,
+                            requirement_validated_at: r.get(5)?,
+                        },
+                    ))
+                })
+                .map_err(st)?;
+            for row in rows {
+                let (sym, sem) = row.map_err(st)?;
+                out.push(((*file).to_string(), SymbolId(sym), sem));
+            }
+        }
+        Ok(out)
     }
 
     fn find_by_requirement(&self, requirement: &str) -> Result<Vec<Node>> {

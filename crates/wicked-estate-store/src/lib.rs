@@ -813,6 +813,24 @@ impl GraphWrite for MemStore {
         Ok(())
     }
 
+    fn restore_node_semantics(
+        &mut self,
+        symbol: &SymbolId,
+        semantics: &NodeSemantics,
+    ) -> Result<()> {
+        // The claim is kept as it was; description/requirement pass through the same redaction
+        // backstop `set_node_semantics` uses (#438).
+        if self.nodes.contains_key(symbol) {
+            let mut sem = semantics.clone();
+            sem.description = wicked_estate_core::redact::scrub_opt(sem.description.as_deref())
+                .map(|c| c.into_owned());
+            sem.requirement = wicked_estate_core::redact::scrub_opt(sem.requirement.as_deref())
+                .map(|c| c.into_owned());
+            self.semantics.insert(symbol.clone(), sem);
+        }
+        Ok(())
+    }
+
     fn annotate(&mut self, symbol: &SymbolId, mut annotation: Annotation) -> Result<()> {
         wicked_estate_core::redact::scrub_annotation(&mut annotation);
         // No-op if the symbol is not a node (mirrors the SQLite sid-lookup no-op).
@@ -1156,7 +1174,13 @@ impl GraphRead for MemStore {
     }
 
     fn node_semantics(&self, symbol: &SymbolId) -> Result<Option<NodeSemantics>> {
-        // Return None if the symbol has no recorded semantics (not the same as "absent node").
+        // Semantics belong to a live node: SqliteStore reads them through a join on `nodes`, so a
+        // symbol whose node was removed reads None. MemStore mirrors that by gating on node
+        // presence — the stored entry is left in place (the orphan-on-re-add case is a tracked
+        // follow-up, #438), it is simply not visible while no node homes the symbol.
+        if !self.nodes.contains_key(symbol) {
+            return Ok(None);
+        }
         Ok(self.semantics.get(symbol).cloned())
     }
 
@@ -1838,6 +1862,10 @@ impl GraphStoreMutExt for PostgresStore {
     /// PostgresStore uses column-level trigram index — no separate FTS table to rebuild.
     fn bulk_rebuild_fts_for_files(&mut self, _files: &[&str]) -> wicked_estate_core::Result<()> {
         Ok(())
+    }
+
+    fn rollback_batch(&mut self) -> wicked_estate_core::Result<()> {
+        PostgresStore::rollback_batch(self)
     }
 
     fn parked_relative_import_refs(&self) -> wicked_estate_core::Result<Vec<UnresolvedRef>> {

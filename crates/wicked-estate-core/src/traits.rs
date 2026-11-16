@@ -273,6 +273,22 @@ pub trait GraphRead: Send {
     /// Semantic annotations for `symbol` (description / matched requirement / validated), if any.
     /// Powers requirement↔functionality linking alongside the structural graph. (Semantic linking)
     fn node_semantics(&self, symbol: &SymbolId) -> Result<Option<NodeSemantics>>;
+    /// The semantics of every node homed in one of `files`, as `(file, symbol, semantics)` — only
+    /// nodes that carry some. The indexer reads this BEFORE `remove_file` so a re-extraction can
+    /// write the fields back (wicked-estate#438). The default scans `all_nodes`; stores whose node
+    /// rows hold the semantic columns override it with one query.
+    fn semantics_in_files(&self, files: &[&str]) -> Result<Vec<(String, SymbolId, NodeSemantics)>> {
+        let wanted: std::collections::HashSet<&str> = files.iter().copied().collect();
+        let mut out = Vec::new();
+        for n in self.all_nodes()? {
+            if wanted.contains(n.location.file.as_str()) {
+                if let Some(s) = self.node_semantics(&n.symbol)? {
+                    out.push((n.location.file.clone(), n.symbol.clone(), s));
+                }
+            }
+        }
+        Ok(out)
+    }
     /// All symbols annotated with `requirement` — answers "which functionality satisfies R?".
     fn find_by_requirement(&self, requirement: &str) -> Result<Vec<Node>>;
     /// All typed key/value annotations on `symbol`, oldest first (by `ts`). An entity may carry
@@ -426,6 +442,19 @@ pub trait GraphWrite {
         description: Option<&str>,
         requirement: Option<&str>,
         validation: Option<&ValidationClaim>,
+    ) -> Result<()>;
+    /// Write back a [`NodeSemantics`] snapshot taken before a `remove_file`. The claim is kept as
+    /// it was — the original `requirement_validated` / `requirement_validated_by` /
+    /// `requirement_validated_at`, nothing re-stamped — while `description` and `requirement` pass
+    /// through the SAME store-boundary redaction backstop
+    /// [`set_node_semantics`](Self::set_node_semantics) applies, so a credential that reached the
+    /// snapshot is still masked on the way back in. Only the indexer's re-extraction path calls
+    /// this (wicked-estate#438); a new claim goes through `set_node_semantics`. No-op if the symbol
+    /// is absent.
+    fn restore_node_semantics(
+        &mut self,
+        symbol: &SymbolId,
+        semantics: &NodeSemantics,
     ) -> Result<()>;
     /// Attach a typed annotation to `symbol`. A bare INSERT, NOT an upsert — so the same symbol can
     /// carry MANY annotations (same or different `type`/`key`). No-op if the symbol is absent (not

@@ -1203,6 +1203,23 @@ async fn pg_replace_edge_supports(
 
 // ── GraphWrite ────────────────────────────────────────────────────────────────
 
+impl PostgresStore {
+    /// Discard the open batch transaction (the inverse of `commit_batch`): take the `begin_batch`
+    /// transaction and roll it back, so a caller that hit an error leaves no half-written batch
+    /// open on the connection (wicked-estate#438). No-op when no batch is open.
+    pub fn rollback_batch(&mut self) -> Result<()> {
+        let tx = self
+            .batch
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(tx) = tx {
+            rt_block(tx.rollback()).map_err(st)?;
+        }
+        Ok(())
+    }
+}
+
 impl GraphWrite for PostgresStore {
     fn begin_batch(&mut self) -> Result<()> {
         // Locked decision #8: the graph batch is ONE real transaction at READ COMMITTED, so
@@ -1867,6 +1884,36 @@ impl GraphWrite for PostgresStore {
             )
             .map_err(st)?;
         }
+        Ok(())
+    }
+
+    fn restore_node_semantics(
+        &mut self,
+        symbol: &SymbolId,
+        semantics: &NodeSemantics,
+    ) -> Result<()> {
+        // All five columns in one statement: the original validator and time kept (not
+        // re-stamped), while description/requirement pass through the same redaction backstop
+        // `set_node_semantics` uses (#438). No-op when the symbol is not a node.
+        let description = wicked_estate_core::redact::scrub_opt(semantics.description.as_deref())
+            .map(|c| c.into_owned());
+        let requirement = wicked_estate_core::redact::scrub_opt(semantics.requirement.as_deref())
+            .map(|c| c.into_owned());
+        let mut h = self.conn()?;
+        rt_block(
+            sqlx::query(
+                "UPDATE nodes SET description = $2, requirement = $3, requirement_validated = $4, \
+                 requirement_validated_by = $5, requirement_validated_at = $6 WHERE symbol = $1",
+            )
+            .bind(&symbol.0)
+            .bind(&description)
+            .bind(&requirement)
+            .bind(semantics.requirement_validated as i64)
+            .bind(&semantics.requirement_validated_by)
+            .bind(semantics.requirement_validated_at)
+            .execute(h.as_conn()),
+        )
+        .map_err(st)?;
         Ok(())
     }
 
@@ -2620,7 +2667,9 @@ impl GraphRead for PostgresStore {
                  WHERE symbol = $1 \
                    AND (description IS NOT NULL \
                         OR requirement IS NOT NULL \
-                        OR requirement_validated != 0)",
+                        OR requirement_validated != 0 \
+                        OR requirement_validated_by IS NOT NULL \
+                        OR requirement_validated_at IS NOT NULL)",
             )
             .bind(&symbol.0)
             .fetch_optional(h.as_conn())
@@ -2645,6 +2694,43 @@ impl GraphRead for PostgresStore {
                     }))
                 }
             }
+        })
+        .map_err(st)
+    }
+
+    fn semantics_in_files(&self, files: &[&str]) -> Result<Vec<(String, SymbolId, NodeSemantics)>> {
+        let mut h = self.conn()?;
+        let files: Vec<String> = files.iter().map(|f| (*f).to_string()).collect();
+        rt_block(async {
+            let rows = sqlx::query(
+                "SELECT file, symbol, description, requirement, requirement_validated, \
+                        requirement_validated_by, requirement_validated_at \
+                 FROM nodes \
+                 WHERE file = ANY($1) \
+                   AND (description IS NOT NULL OR requirement IS NOT NULL \
+                        OR requirement_validated != 0 \
+                        OR requirement_validated_by IS NOT NULL \
+                        OR requirement_validated_at IS NOT NULL)",
+            )
+            .bind(&files)
+            .fetch_all(h.as_conn())
+            .await?;
+            let mut out = Vec::new();
+            for r in rows {
+                let validated: i64 = r.try_get("requirement_validated")?;
+                out.push((
+                    r.try_get::<String, _>("file")?,
+                    SymbolId(r.try_get::<String, _>("symbol")?),
+                    NodeSemantics {
+                        description: r.try_get("description")?,
+                        requirement: r.try_get("requirement")?,
+                        requirement_validated: validated != 0,
+                        requirement_validated_by: r.try_get("requirement_validated_by")?,
+                        requirement_validated_at: r.try_get("requirement_validated_at")?,
+                    },
+                ));
+            }
+            Ok::<_, sqlx::Error>(out)
         })
         .map_err(st)
     }
