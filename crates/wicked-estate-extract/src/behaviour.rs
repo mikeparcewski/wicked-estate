@@ -1336,7 +1336,6 @@ mod tests {
             "    PERFORM 2200-INLINE.",
             "    PERFORM 2300-STOP.",
             "    PERFORM 2400-COPY.",
-            "    PERFORM 2500-ERROR.",
             "    STOP RUN.",
             "1000-EXIT-DOT.",
             "    EXIT.",
@@ -1368,8 +1367,6 @@ mod tests {
             "    EXIT.",
             "9999-LAST-EXIT.",
             "    EXIT.",
-            "2500-ERROR.",
-            "    ENTRY 'X' USING Y.",
         ]);
         for n in [
             "1000-EXIT-DOT",
@@ -1389,10 +1386,28 @@ mod tests {
             "2200-INLINE",
             "2300-STOP",
             "2400-COPY",
-            "2500-ERROR",
         ] {
             expect(&got, n, "real", None);
         }
+    }
+
+    /// A statement the grammar cannot parse (ERROR node) keeps its paragraph real, even beside an
+    /// EXIT. The grammar's error recovery swallows every header after it, so this paragraph is
+    /// last in its own fixture.
+    #[test]
+    fn cobol_error_node_keeps_paragraph_real() {
+        let got = cobol_tags(&[
+            "IDENTIFICATION DIVISION.",
+            "PROGRAM-ID. PROG.",
+            "PROCEDURE DIVISION.",
+            "A-PARA.",
+            "    EXIT.",
+            "B-ERR.",
+            "    EXIT.",
+            "    ENTRY 'X' USING Y.",
+        ]);
+        expect(&got, "A-PARA", "stub", Some("exit_only"));
+        expect(&got, "B-ERR", "real", None);
     }
 
     #[test]
