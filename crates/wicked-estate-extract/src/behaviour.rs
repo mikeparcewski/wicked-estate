@@ -12,7 +12,8 @@
 //! here is a POSITIVE match on a known parse shape. Anything not recognised is `real`, and a
 //! language or kind this module does not inspect gets no key at all (read as real).
 //!
-//! Inspected: callables and classes/structs in Python, TypeScript, TSX, JavaScript and Rust.
+//! Inspected: callables and classes/structs in Python, TypeScript, TSX, JavaScript and Rust, and COBOL
+//! paragraphs and sections (a body of only EXIT, CONTINUE or GOBACK is a stub).
 
 use std::sync::LazyLock;
 
@@ -123,6 +124,7 @@ pub fn classify(
         "python" => Family::Python,
         "typescript" | "tsx" | "javascript" => Family::Ts,
         "rust" => Family::Rust,
+        "cobol" => Family::Cobol,
         _ => return None,
     };
     if !inspected_kind(kind) {
@@ -145,6 +147,7 @@ pub fn classify(
             "class",
         ],
         Family::Rust => &["function_item", "struct_item"],
+        Family::Cobol => crate::treesitter::COBOL_HEADERS,
     };
     let Some(node) = anchor(tree, start, end, def_kinds) else {
         return Some(Behaviour::Real);
@@ -153,6 +156,7 @@ pub fn classify(
         Family::Python => python(node, src),
         Family::Ts => ts(node, src),
         Family::Rust => rust(node, src),
+        Family::Cobol => cobol(node),
     })
 }
 
@@ -160,6 +164,43 @@ enum Family {
     Python,
     Ts,
     Rust,
+    Cobol,
+}
+
+// ── COBOL ───────────────────────────────────────────────────────────────────
+
+/// A paragraph or section whose body is only EXIT / CONTINUE / GOBACK statements (and their
+/// periods and comments) carries no business rule. The body is the header's following siblings up
+/// to the next header (the same boundary as the span fixup). Empty bodies, any other statement and
+/// any ERROR / MISSING node stay real.
+fn cobol(header: TsNode<'_>) -> Behaviour {
+    let Some(end) = crate::treesitter::cobol_paragraph_end(header) else {
+        return Behaviour::Real;
+    };
+    let mut statements = 0usize;
+    let mut next = header.next_sibling();
+    while let Some(n) = next {
+        if n.start_byte() >= end {
+            break;
+        }
+        next = n.next_sibling();
+        if !n.is_named() {
+            continue;
+        }
+        if n.has_error() || n.is_missing() {
+            return Behaviour::Real;
+        }
+        match n.kind() {
+            "period" | "comment" => {}
+            "exit_statement" | "continue_statement" | "goback_statement" => statements += 1,
+            _ => return Behaviour::Real,
+        }
+    }
+    if statements > 0 {
+        Behaviour::Stub("exit_only")
+    } else {
+        Behaviour::Real
+    }
 }
 
 /// The def's syntax node: the innermost node spanning exactly `start..end` whose kind is one of
@@ -1231,6 +1272,159 @@ mod tests {
                 Some((key, b, r))
             })
             .collect()
+    }
+
+    /// Fixed-format COBOL: `lines` get sequence numbers in columns 1-6 and 73-80; a line starting
+    /// with `*` is a comment line (indicator column 7).
+    fn fixed(lines: &[&str]) -> String {
+        let mut out = String::new();
+        for (i, l) in lines.iter().enumerate() {
+            let body = if let Some(c) = l.strip_prefix('*') {
+                format!("      *{c}")
+            } else {
+                format!("       {l}")
+            };
+            out.push_str(&format!(
+                "{:06}{:<66}{:08}\n",
+                (i + 1) * 10,
+                body[6..].to_string(),
+                (i + 1) * 10
+            ));
+        }
+        out
+    }
+
+    fn cobol_tags(lines: &[&str]) -> std::collections::BTreeMap<String, (String, Option<String>)> {
+        tags("src/PROG.cbl", "cobol", &fixed(lines))
+            .into_iter()
+            .map(|(k, b, r)| (k.rsplit('#').next().unwrap_or(&k).to_string(), (b, r)))
+            .collect()
+    }
+
+    fn expect(
+        got: &std::collections::BTreeMap<String, (String, Option<String>)>,
+        name: &str,
+        class: &str,
+        reason: Option<&str>,
+    ) {
+        let (b, r) = got
+            .get(name)
+            .unwrap_or_else(|| panic!("no node {name}: {got:?}"));
+        assert_eq!(b, class, "{name}: {got:?}");
+        assert_eq!(r.as_deref(), reason, "{name}");
+    }
+
+    #[test]
+    fn cobol_exit_only_paragraphs_are_stubs_and_the_rest_real() {
+        let got = cobol_tags(&[
+            "IDENTIFICATION DIVISION.",
+            "PROGRAM-ID. PROG.",
+            "DATA DIVISION.",
+            "WORKING-STORAGE SECTION.",
+            "01 WS-A PIC X(10).",
+            "PROCEDURE DIVISION.",
+            "0000-MAIN.",
+            "    MOVE 'A' TO WS-A.",
+            "    PERFORM 1000-EXIT-DOT.",
+            "    PERFORM 1100-SPLIT-EXIT.",
+            "    PERFORM 1200-CONT.",
+            "    PERFORM 1300-GOBACK.",
+            "    PERFORM 1400-EXIT-PROG.",
+            "    PERFORM 1500-EXIT-PARA.",
+            "    PERFORM 2000-MOVE-EXIT.",
+            "    PERFORM 2100-PERFORM-ONLY.",
+            "    PERFORM 2200-INLINE.",
+            "    PERFORM 2300-STOP.",
+            "    PERFORM 2400-COPY.",
+            "    PERFORM 2500-ERROR.",
+            "    STOP RUN.",
+            "1000-EXIT-DOT.",
+            "    EXIT.",
+            "1100-SPLIT-EXIT.",
+            "*   nothing to do here",
+            "    EXIT",
+            "    .",
+            "1200-CONT.",
+            "    CONTINUE.",
+            "1300-GOBACK.",
+            "    GOBACK.",
+            "1400-EXIT-PROG.",
+            "    EXIT PROGRAM.",
+            "1500-EXIT-PARA.",
+            "    EXIT PARAGRAPH.",
+            "2000-MOVE-EXIT.",
+            "    MOVE 'B' TO WS-A.",
+            "    EXIT.",
+            "2100-PERFORM-ONLY.",
+            "    PERFORM 1000-EXIT-DOT.",
+            "2200-INLINE.",
+            "    PERFORM UNTIL WS-A = 'X'",
+            "        CONTINUE",
+            "    END-PERFORM.",
+            "2300-STOP.",
+            "    STOP RUN.",
+            "2400-COPY.",
+            "    COPY CPYBOOK.",
+            "    EXIT.",
+            "9999-LAST-EXIT.",
+            "    EXIT.",
+            "2500-ERROR.",
+            "    ENTRY 'X' USING Y.",
+        ]);
+        for n in [
+            "1000-EXIT-DOT",
+            "1100-SPLIT-EXIT",
+            "1200-CONT",
+            "1300-GOBACK",
+            "1400-EXIT-PROG",
+            "1500-EXIT-PARA",
+            "9999-LAST-EXIT",
+        ] {
+            expect(&got, n, "stub", Some("exit_only"));
+        }
+        for n in [
+            "0000-MAIN",
+            "2000-MOVE-EXIT",
+            "2100-PERFORM-ONLY",
+            "2200-INLINE",
+            "2300-STOP",
+            "2400-COPY",
+            "2500-ERROR",
+        ] {
+            expect(&got, n, "real", None);
+        }
+    }
+
+    #[test]
+    fn cobol_section_bodies() {
+        let got = cobol_tags(&[
+            "IDENTIFICATION DIVISION.",
+            "PROGRAM-ID. PROG.",
+            "PROCEDURE DIVISION.",
+            "A-SEC SECTION.",
+            "    EXIT.",
+            "A-PARA.",
+            "    DISPLAY 'X'.",
+            "B-SEC SECTION.",
+            "B-PARA.",
+            "    DISPLAY 'Y'.",
+            "C-SEC SECTION.",
+            "C-PARA.",
+            "    EXIT.",
+            "D-PARA.",
+            "    PERFORM UNTIL WS-A = 'X'",
+            "        EXIT PERFORM",
+            "    END-PERFORM.",
+            "E-PARA.",
+            "    EXIT PERFORM CYCLE.",
+        ]);
+        expect(&got, "A-SEC", "stub", Some("exit_only"));
+        expect(&got, "A-PARA", "real", None);
+        expect(&got, "B-SEC", "real", None);
+        expect(&got, "B-PARA", "real", None);
+        expect(&got, "C-PARA", "stub", Some("exit_only"));
+        expect(&got, "D-PARA", "real", None);
+        expect(&got, "E-PARA", "real", None);
     }
 
     fn tag_of(all: &[(String, String, Option<String>)], name: &str) -> (String, Option<String>) {

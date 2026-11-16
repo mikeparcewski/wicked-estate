@@ -1498,41 +1498,44 @@ impl ExtractorCache {
 /// parent). This fixup is applied after the query-based extraction so `source` returns the
 /// full paragraph body, not just the label line.
 fn cobol_paragraph_end_map(tree: &tree_sitter::Tree) -> std::collections::HashMap<usize, usize> {
-    const PROC_PARENTS: &[&str] = &["procedure_division", "procedure_declaratives"];
-    const HEADERS: &[&str] = &["paragraph_header", "section_header"];
-
     let mut map = std::collections::HashMap::new();
-    let cursor = tree.root_node().walk();
-
-    // Walk the full tree looking for procedure_division / procedure_declaratives nodes.
+    // procedure_division may be nested under program_definition etc., so walk the whole tree.
     let mut stack: Vec<tree_sitter::Node> = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
-        if PROC_PARENTS.contains(&node.kind()) {
-            // Iterate children in order, extending the previous header's span.
-            let child_count = node.child_count();
-            let mut prev_header_start: Option<usize> = None;
-            for i in 0..child_count {
-                let child = node.child(i).unwrap();
-                if HEADERS.contains(&child.kind()) {
-                    if let Some(prev_start) = prev_header_start {
-                        // End the previous header just before this one starts.
-                        map.insert(prev_start, child.start_byte());
-                    }
-                    prev_header_start = Some(child.start_byte());
-                }
-            }
-            // Last header runs to end of the parent node.
-            if let Some(prev_start) = prev_header_start {
-                map.insert(prev_start, node.end_byte());
+        if COBOL_HEADERS.contains(&node.kind()) {
+            if let Some(end) = cobol_paragraph_end(node) {
+                map.insert(node.start_byte(), end);
             }
         }
-        // Push children for DFS (procedure_division may be nested under program_definition etc.)
         for i in 0..node.child_count() {
             stack.push(node.child(i).unwrap());
         }
     }
-    drop(cursor); // suppress unused-variable warning
     map
+}
+
+/// Parents whose children are the flat COBOL paragraph/section headers and statements.
+const COBOL_PROC_PARENTS: &[&str] = &["procedure_division", "procedure_declaratives"];
+/// The node kinds that start a COBOL paragraph or section.
+pub(crate) const COBOL_HEADERS: &[&str] = &["paragraph_header", "section_header"];
+
+/// End byte of the COBOL paragraph/section a header starts: the next header's start in the same
+/// `procedure_division` / `procedure_declaratives`, else the end of that parent. `None` when the
+/// header's parent is neither. The single boundary rule shared by the span fixup and the
+/// behaviour classifier.
+pub(crate) fn cobol_paragraph_end(header: tree_sitter::Node) -> Option<usize> {
+    let parent = header.parent()?;
+    if !COBOL_PROC_PARENTS.contains(&parent.kind()) {
+        return None;
+    }
+    let mut next = header.next_sibling();
+    while let Some(sib) = next {
+        if COBOL_HEADERS.contains(&sib.kind()) {
+            return Some(sib.start_byte());
+        }
+        next = sib.next_sibling();
+    }
+    Some(parent.end_byte())
 }
 
 fn ts_span(n: tree_sitter::Node) -> Span {

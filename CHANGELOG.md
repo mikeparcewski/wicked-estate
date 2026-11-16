@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+**Upgrade note.** The version change forces each repo's next `index` to re-extract every file, so the new
+`behaviour` tag on COBOL paragraphs and sections appears then. As in 0.35.3 to 0.35.5, that re-extraction clears
+the node semantic fields set with `set_semantics` (wicked-estate#438); back up the store first if you rely on them.
+
+### Fixed
+
+- COBOL paragraphs and sections whose body is only `EXIT`, `CONTINUE` or `GOBACK` are tagged `behaviour=stub` / `exit_only`, so they leave the requirements-coverage denominator instead of holding a COBOL repository below the 80% minimum (#456).
+
 ## [0.35.5] — 2026-11-14
 
 Patch: JCL job, PROC and step nodes span their whole statement instead of a zero-length anchor, so a consumer
