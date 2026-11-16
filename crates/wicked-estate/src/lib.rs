@@ -1612,6 +1612,21 @@ fn index_path_inner(
         })
         .collect();
 
+    // #471 (fix): a previously indexed file can leave `work` without being deleted. A read
+    // failure (a normal file) or a converter skip (a binary doc whose `read_capped` fails) drops
+    // it from the work list above while it stays in `current_rel_paths`, so it is neither
+    // re-extracted nor pruned. Under `force_full` (a version or rules change) the old extractor's
+    // output would then sit under a freshly stamped version/rules marker and a plain retry would
+    // never re-extract it. Detect that case here, once, so the three exits below can WITHHOLD the
+    // version/rules stamp and let the next run force a full re-extraction.
+    let skipped_prev_indexed = {
+        let work_rels: HashSet<&str> = work.iter().map(|fw| fw.rel.as_str()).collect();
+        previously_indexed
+            .iter()
+            .any(|p| current_rel_paths.contains(p) && !work_rels.contains(p.as_str()))
+    };
+    let stamp_version = !force_full || !skipped_prev_indexed;
+
     // ── Remove DELETED files ─────────────────────────────────────────────────────────────────
     let deleted: Vec<String> = previously_indexed
         .iter()
@@ -1874,9 +1889,13 @@ fn index_path_inner(
         if !override_gate {
             store.meta_set_key(&override_key, cur_overrides);
         }
-        // #471: certify the extractor version/rules only after successful indexing.
-        store.meta_set_key(&version_key, env!("CARGO_PKG_VERSION"));
-        store.meta_set_key(&digest_key, &extra_digest);
+        // #471: certify the extractor version/rules only after successful indexing, and only when
+        // no previously indexed file was skipped under force_full (#471 fix) — else the old markers
+        // stay so the next run re-extracts the skipped file.
+        if stamp_version {
+            store.meta_set_key(&version_key, env!("CARGO_PKG_VERSION"));
+            store.meta_set_key(&digest_key, &extra_digest);
+        }
         flush_doc_skips();
         return store.stats();
     }
@@ -1920,9 +1939,12 @@ fn index_path_inner(
         if !override_gate {
             store.meta_set_key(&override_key, cur_overrides);
         }
-        // #471: certify the extractor version/rules only after successful indexing.
-        store.meta_set_key(&version_key, env!("CARGO_PKG_VERSION"));
-        store.meta_set_key(&digest_key, &extra_digest);
+        // #471: certify the extractor version/rules only after successful indexing, and only when
+        // no previously indexed file was skipped under force_full (#471 fix — see the stamp above).
+        if stamp_version {
+            store.meta_set_key(&version_key, env!("CARGO_PKG_VERSION"));
+            store.meta_set_key(&digest_key, &extra_digest);
+        }
         flush_doc_skips();
         return store.stats();
     }
@@ -2522,9 +2544,13 @@ fn index_path_inner(
     // The id-scheme key is written LAST — only after extraction + resolution durably completed —
     // so an interrupted migration re-fires the scheme gate instead of certifying a mixed DB.
     // The version/rules keys follow the same discipline (#471), so rollback leaves a plain
-    // retry able to force full re-extraction.
-    store.meta_set_key(&version_key, env!("CARGO_PKG_VERSION"));
-    store.meta_set_key(&digest_key, &extra_digest);
+    // retry able to force full re-extraction. They are also withheld when a previously indexed
+    // file was skipped under force_full (#471 fix), so the old extractor's output never ends up
+    // stamped current while a plain retry would skip it.
+    if stamp_version {
+        store.meta_set_key(&version_key, env!("CARGO_PKG_VERSION"));
+        store.meta_set_key(&digest_key, &extra_digest);
+    }
     store.meta_set_key(&scheme_key, SYMBOL_ID_SCHEME);
     // The plugin-override key follows the same write-LAST rule (ADR-010): stamped only once the
     // re-extraction under the current override state durably completed.
@@ -5899,6 +5925,83 @@ mod semantics_survive_reindex_tests {
             store.node_semantics(&pay_id).unwrap(),
             Some(original),
             "a retry on the same store keeps the restored fields"
+        );
+    }
+
+    /// #471 (fix): under `force_full` a previously indexed file whose READ fails during a
+    /// version-change re-index is dropped from the work list but stays in `current_rel_paths`, so
+    /// it is neither re-extracted nor deleted. If the version/rules markers are stamped anyway, the
+    /// old extractor's output sits under the new marker and a plain retry (no metadata reset) never
+    /// re-extracts it. The fix withholds the stamp when a previously indexed file was skipped, so
+    /// the next plain retry forces a full re-extraction. Unix-only: it uses file permissions.
+    #[cfg(unix)]
+    #[test]
+    fn sqlite_version_change_read_failure_plain_retry_reextracts() {
+        use std::os::unix::fs::PermissionsExt;
+        let src = tempfile::tempdir().unwrap();
+        let file = src.path().join("a.rs");
+        std::fs::write(&file, "pub fn pay() {}\n").unwrap();
+        let dbdir = tempfile::tempdir().unwrap();
+        let dbpath = dbdir.path().join("g.db");
+
+        // One long-lived store for the blocked run and the retry — exactly what `watch` keeps.
+        let mut store = SqliteStore::open(&dbpath).unwrap();
+        index_path(&mut store, src.path()).unwrap();
+
+        // Read the `nodes.name` column directly: `find_symbols` goes through an FTS index a raw
+        // UPDATE does not refresh, so the raw column is the honest view of what extraction wrote.
+        let count_name = |name: &str| -> i64 {
+            rusqlite::Connection::open(&dbpath)
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM nodes WHERE name = ?1", [name], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(count_name("pay"), 1);
+
+        // Simulate an older extractor's output without changing the source or its digest. Only a
+        // full re-extraction can replace this stale name with `pay`.
+        rusqlite::Connection::open(&dbpath)
+            .unwrap()
+            .execute("UPDATE nodes SET name = 'old_pay' WHERE name = 'pay'", [])
+            .unwrap();
+
+        // Phase 2: a version-triggered re-index during which the file cannot be read. The read
+        // fails in the work list, the file stays in `current_rel_paths` (it is not deleted), and
+        // the run takes the no-change exit.
+        let orig_perms = std::fs::metadata(&file).unwrap().permissions();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        store.meta_set_key("indexed_version", "0.0.0-older"); // force full re-extract
+        index_path(&mut store, src.path()).unwrap();
+        std::fs::set_permissions(&file, orig_perms).unwrap();
+
+        // If the read was not actually blocked (e.g. running as root), the re-index already
+        // replaced the stale name and the skip path under test was never exercised — nothing to
+        // assert. Only proceed when the read genuinely failed and the node row survived.
+        if count_name("old_pay") != 1 {
+            return;
+        }
+        assert_eq!(
+            count_name("pay"),
+            0,
+            "the skipped file must not have been re-extracted during the blocked run"
+        );
+
+        // Phase 3 (#471 fix): a plain retry, with NO metadata reset, must re-extract the skipped
+        // file. At the buggy head phase 2 stamped the version current, so this retry saw no change
+        // and left the stale `old_pay` in place. The fix withholds that stamp, so force_full
+        // re-fires and the file is re-extracted.
+        index_path(&mut store, src.path()).unwrap();
+        assert_eq!(
+            count_name("pay"),
+            1,
+            "a plain retry must re-extract the file skipped by the read failure"
+        );
+        assert_eq!(
+            count_name("old_pay"),
+            0,
+            "the stale output must be gone after the retry"
         );
     }
 
