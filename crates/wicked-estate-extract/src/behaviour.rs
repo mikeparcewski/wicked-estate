@@ -1730,6 +1730,25 @@ mod tests {
         is(&got, "A-PARA", "real", None);
     }
 
+    /// Free format proper: `EXIT.` starting in column 1 (columns 1-6 not blank/digits), padded
+    /// past column 72 and followed by a real statement, must be real — never a false stub. The
+    /// grammar reads columns 1-6 as the sequence area, so it finds no statement to bound and the
+    /// paragraph is kept real before the exit-only scan is even reached (regression guard for the
+    /// column-1 case the fixed-shaped `..._statement_past_column_72` test does not cover).
+    #[test]
+    fn cobol_free_format_column_1_exit_statement_past_column_72_keeps_paragraph_real() {
+        let mut last = String::from("EXIT.");
+        while last.len() < 72 {
+            last.push(' ');
+        }
+        last.push_str("MOVE A TO B.");
+        let code = format!(
+            "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. PROG.\n       PROCEDURE DIVISION.\n       A-PARA.\n{last}\n"
+        );
+        let got = tags("src/PROG.cbl", "cobol", &code);
+        is(&got, "A-PARA", "real", None);
+    }
+
     /// Fixed format: a `*` comment line in column 7 beside an EXIT body is still exit-only.
     #[test]
     fn cobol_fixed_format_comment_in_column_7_stays_stub() {
