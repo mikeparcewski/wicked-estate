@@ -1203,6 +1203,23 @@ async fn pg_replace_edge_supports(
 
 // ── GraphWrite ────────────────────────────────────────────────────────────────
 
+impl PostgresStore {
+    /// Discard the open batch transaction (the inverse of `commit_batch`): take the `begin_batch`
+    /// transaction and roll it back, so a caller that hit an error leaves no half-written batch
+    /// open on the connection (wicked-estate#438). No-op when no batch is open.
+    pub fn rollback_batch(&mut self) -> Result<()> {
+        let tx = self
+            .batch
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(tx) = tx {
+            rt_block(tx.rollback()).map_err(st)?;
+        }
+        Ok(())
+    }
+}
+
 impl GraphWrite for PostgresStore {
     fn begin_batch(&mut self) -> Result<()> {
         // Locked decision #8: the graph batch is ONE real transaction at READ COMMITTED, so

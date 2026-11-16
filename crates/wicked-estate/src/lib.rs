@@ -1197,7 +1197,20 @@ pub fn index_path_as(
     root: &Path,
     repo: Option<&str>,
 ) -> Result<GraphStats> {
-    let stats = index_path_inner(store, root, repo)?;
+    let stats = match index_path_inner(store, root, repo) {
+        Ok(stats) => stats,
+        Err(e) => {
+            // #438: an error may leave the destructive write batch open — `begin_batch` is a no-op
+            // while a batch is already open (SqliteStore / PostgresStore), so a long-lived caller
+            // that keeps the store after a failed re-index (the `watch` loop) would reuse the
+            // half-written transaction on its next tick and commit the removals WITHOUT their
+            // restored semantic fields. Roll the open batch back so the next run starts clean and
+            // the stored fields survive. No-op when no batch is open; MemStore has no batch to
+            // discard (its default returns an error, deliberately ignored here).
+            let _ = store.rollback_batch();
+            return Err(e);
+        }
+    };
     // X1 (DES-S2 §6): publish the label's new generation only after a complete index. The
     // `indexing` marker set at the start stays on a failed run, so readers say `incomplete` and
     // the linker refuses the label.
@@ -5759,12 +5772,14 @@ mod semantics_survive_reindex_tests {
         version_change_keeps_five_fields(&mut MemStore::new());
     }
 
-    /// #438 item 2: remove + upsert + restore share ONE batch, so a write failure mid-re-index
-    /// rolls the removal back and the stored fields survive; a clean retry keeps them. The failure
-    /// is a persistent `BEFORE INSERT` trigger installed over a side connection — it fires on the
-    /// indexer's own connection during the node upsert, AFTER the batch has already removed the
-    /// file. On the pre-fix code (removal committed in its own batch before the write) the fields
-    /// are gone for good; here the uncommitted batch rolls back when the store is dropped.
+    /// #438 item 2: remove + upsert + restore share ONE batch, and a write failure mid-re-index
+    /// rolls the removal back so the stored fields survive; a retry on the SAME store (no drop,
+    /// no reconnect — as the `watch` loop keeps it) keeps them. The failure is a persistent
+    /// `BEFORE INSERT` trigger installed over a side connection — it fires on the indexer's own
+    /// connection during the node upsert, AFTER the batch has already removed the file. The fix
+    /// rolls the open batch back on error at the `index_path_as` boundary; without it the next
+    /// index on the same store would reuse the half-written transaction and commit the removal
+    /// without the fields. On the pre-fix code the fields are gone for good.
     #[test]
     fn sqlite_write_failure_mid_reindex_rolls_back_and_retry_keeps_fields() {
         let src = tempfile::tempdir().unwrap();
@@ -5782,6 +5797,9 @@ mod semantics_survive_reindex_tests {
             original = annotate_with_claim(&mut store, &pay);
         }
 
+        // One long-lived store for BOTH the failed run and the retry — exactly what `watch` does.
+        let mut store = SqliteStore::open(&dbpath).unwrap();
+
         // Phase 2: a version-triggered re-index whose first node INSERT is poisoned.
         {
             let side = rusqlite::Connection::open(&dbpath).unwrap();
@@ -5792,7 +5810,6 @@ mod semantics_survive_reindex_tests {
             .unwrap();
             drop(side);
 
-            let mut store = SqliteStore::open(&dbpath).unwrap();
             store.meta_set_key("indexed_version", "0.0.0-older"); // force full re-extract
             let err = index_path(&mut store, src.path())
                 .expect_err("the poisoned node INSERT must abort the re-index");
@@ -5801,34 +5818,28 @@ mod semantics_survive_reindex_tests {
                 msg.contains("injected write failure") || msg.contains("abort"),
                 "{err}"
             );
-            // `store` drops here: its open, uncommitted batch is rolled back by SQLite on close.
         }
+        // The batch was rolled back at the index_path_as boundary, so `store`'s connection holds
+        // no open transaction and the original five fields survive — read on the SAME store.
+        assert_eq!(
+            store.node_semantics(&pay_id).unwrap(),
+            Some(original.clone()),
+            "an interrupted re-index must not lose the semantic fields"
+        );
+        // Remove the poison; `store`'s connection is idle (no open batch), so the DDL is free.
         rusqlite::Connection::open(&dbpath)
             .unwrap()
             .execute_batch("DROP TRIGGER we438_poison;")
             .unwrap();
 
-        // The removal rolled back: the original five fields survive the interrupted re-index.
-        {
-            let store = SqliteStore::open(&dbpath).unwrap();
-            assert_eq!(
-                store.node_semantics(&pay_id).unwrap(),
-                Some(original.clone()),
-                "an interrupted re-index must not lose the semantic fields"
-            );
-        }
-
-        // Phase 3: a clean retry keeps them.
-        {
-            let mut store = SqliteStore::open(&dbpath).unwrap();
-            store.meta_set_key("indexed_version", "0.0.0-older");
-            index_path(&mut store, src.path()).unwrap();
-            assert_eq!(
-                store.node_semantics(&pay_id).unwrap(),
-                Some(original),
-                "a successful retry keeps the restored fields"
-            );
-        }
+        // Phase 3: a retry on the SAME store (no drop, no reconnect) keeps them.
+        store.meta_set_key("indexed_version", "0.0.0-older");
+        index_path(&mut store, src.path()).unwrap();
+        assert_eq!(
+            store.node_semantics(&pay_id).unwrap(),
+            Some(original),
+            "a retry on the same store keeps the restored fields"
+        );
     }
 
     fn removed_symbol_is_dropped_and_kept_one_survives(store: &mut dyn GraphStoreMutExt) {

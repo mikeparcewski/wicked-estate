@@ -1864,6 +1864,10 @@ impl GraphStoreMutExt for PostgresStore {
         Ok(())
     }
 
+    fn rollback_batch(&mut self) -> wicked_estate_core::Result<()> {
+        PostgresStore::rollback_batch(self)
+    }
+
     fn parked_relative_import_refs(&self) -> wicked_estate_core::Result<Vec<UnresolvedRef>> {
         self.parked_relative_import_refs()
     }
