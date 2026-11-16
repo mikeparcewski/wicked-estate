@@ -156,7 +156,7 @@ pub fn classify(
         Family::Python => python(node, src),
         Family::Ts => ts(node, src),
         Family::Rust => rust(node, src),
-        Family::Cobol => cobol(node),
+        Family::Cobol => cobol(node, src),
     })
 }
 
@@ -169,26 +169,57 @@ enum Family {
 
 // ── COBOL ───────────────────────────────────────────────────────────────────
 
+/// A free-format source directive: `>>SOURCE FORMAT FREE`, `>>SOURCE FREE` or
+/// `$SET SOURCEFORMAT"FREE"`. The grammar reads fixed columns, so it drops free-format code that
+/// starts in column 1; no paragraph of such a file can be told to be a stub.
+static COBOL_FREE_FORMAT: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r#"(?i)>>\s*source\s+(format\s+(is\s+)?)?free\b|\$set\s+sourceformat\s*[("']?\s*free\b"#,
+    )
+    .expect("free-format pattern compiles")
+});
+
+/// 0-based column where Area B starts (after 6 sequence columns, the indicator column and
+/// Area A, columns 8-11). A paragraph or section header starting there or later is a statement
+/// the grammar misread as a header.
+const COBOL_AREA_B_COLUMN: usize = 11;
+
 /// A paragraph or section whose body is only EXIT / CONTINUE / GOBACK statements (and their
 /// periods and comments) carries no business rule. The body is the header's following siblings up
-/// to the next header (the same boundary as the span fixup). Empty bodies, any other statement and
-/// any ERROR / MISSING node stay real.
-fn cobol(header: TsNode<'_>) -> Behaviour {
+/// to the next header (the same boundary as the span fixup). Empty bodies, any other statement,
+/// any ERROR / MISSING node (named or not, zero-width included), a header in Area B, an error
+/// after the division and a free-format source all stay real.
+fn cobol(header: TsNode<'_>, src: &[u8]) -> Behaviour {
     let Some(end) = crate::treesitter::cobol_paragraph_end(header) else {
         return Behaviour::Real;
     };
+    if COBOL_FREE_FORMAT.is_match(&String::from_utf8_lossy(src)) {
+        return Behaviour::Real;
+    }
+    if header.start_position().column >= COBOL_AREA_B_COLUMN {
+        return Behaviour::Real;
+    }
     let mut statements = 0usize;
+    let mut ended_by_header = false;
     let mut next = header.next_sibling();
     while let Some(n) = next {
-        if n.start_byte() >= end {
+        next = n.next_sibling();
+        if crate::treesitter::COBOL_HEADERS.contains(&n.kind()) {
+            if n.start_position().column >= COBOL_AREA_B_COLUMN {
+                return Behaviour::Real;
+            }
+            ended_by_header = true;
             break;
         }
-        next = n.next_sibling();
+        if n.start_byte() > end {
+            break;
+        }
+        // Every child, named or not, zero-width at the parent's end included.
+        if n.is_error() || n.is_missing() || n.has_error() {
+            return Behaviour::Real;
+        }
         if !n.is_named() {
             continue;
-        }
-        if n.has_error() || n.is_missing() {
-            return Behaviour::Real;
         }
         match n.kind() {
             "period" | "comment" => {}
@@ -196,11 +227,52 @@ fn cobol(header: TsNode<'_>) -> Behaviour {
             _ => return Behaviour::Real,
         }
     }
+    if !ended_by_header && error_after_division(header, end) {
+        return Behaviour::Real;
+    }
     if statements > 0 {
         Behaviour::Stub("exit_only")
     } else {
         Behaviour::Real
     }
+}
+
+/// Whether an ERROR or MISSING node lies at or after `division_end` in the file, before the next
+/// `program_definition`: error recovery closes the division early and parks the rest of the
+/// paragraph's statements there.
+fn error_after_division(header: TsNode<'_>, division_end: usize) -> bool {
+    let mut root = header;
+    while let Some(p) = root.parent() {
+        root = p;
+    }
+    let mut stop = usize::MAX;
+    let mut errors = Vec::new();
+    let mut cursor = root.walk();
+    let mut seen = 0usize;
+    'walk: loop {
+        let n = cursor.node();
+        seen += 1;
+        if seen > WALK_BUDGET * 64 {
+            return true;
+        }
+        if n.end_byte() >= division_end {
+            if n.kind() == "program_definition" && n.start_byte() >= division_end {
+                stop = stop.min(n.start_byte());
+            }
+            if (n.is_error() || n.is_missing()) && n.start_byte() >= division_end {
+                errors.push(n.start_byte());
+            }
+            if cursor.goto_first_child() {
+                continue;
+            }
+        }
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                break 'walk;
+            }
+        }
+    }
+    errors.into_iter().any(|e| e < stop)
 }
 
 /// The def's syntax node: the innermost node spanning exactly `start..end` whose kind is one of
@@ -1408,6 +1480,84 @@ mod tests {
         ]);
         expect(&got, "A-PARA", "stub", Some("exit_only"));
         expect(&got, "B-ERR", "real", None);
+    }
+
+    /// Free format: the grammar reads a column-1 `CALL X.` as a sequence area and drops it, so
+    /// the directive keeps every paragraph of the file real.
+    #[test]
+    fn cobol_free_format_directive_keeps_paragraphs_real() {
+        for directive in [
+            ">>SOURCE FORMAT FREE",
+            ">>source free",
+            "$SET SOURCEFORMAT\"FREE\"",
+        ] {
+            let code = format!(
+                "{directive}\n       IDENTIFICATION DIVISION.\n       PROGRAM-ID. PROG.\n       PROCEDURE DIVISION.\n       A-PARA.\nCALL X.\n           EXIT.\n"
+            );
+            let got = tags("src/PROG.cbl", "cobol", &code);
+            is(&got, "A-PARA", "real", None);
+        }
+    }
+
+    /// `COMMIT.` / `ROLLBACK.` in Area B between EXITs are statements the grammar misreads as
+    /// paragraph headers: every unit they touch stays real.
+    #[test]
+    fn cobol_area_b_headers_keep_paragraphs_real() {
+        let got = cobol_tags(&[
+            "IDENTIFICATION DIVISION.",
+            "PROGRAM-ID. PROG.",
+            "PROCEDURE DIVISION.",
+            "A-PARA.",
+            "    EXIT.",
+            "    COMMIT.",
+            "    EXIT.",
+            "    ROLLBACK.",
+            "    EXIT.",
+        ]);
+        for n in ["A-PARA", "COMMIT", "ROLLBACK"] {
+            if got.contains_key(n) {
+                expect(&got, n, "real", None);
+            }
+        }
+        expect(&got, "A-PARA", "real", None);
+    }
+
+    /// A trailing incomplete MOVE makes the grammar close the division early and park an ERROR
+    /// after it: the last paragraph stays real.
+    #[test]
+    fn cobol_trailing_error_keeps_last_paragraph_real() {
+        let got = cobol_tags(&[
+            "IDENTIFICATION DIVISION.",
+            "PROGRAM-ID. PROG.",
+            "PROCEDURE DIVISION.",
+            "A-PARA.",
+            "    EXIT.",
+            "B-PARA.",
+            "    EXIT.",
+            "    MOVE",
+        ]);
+        expect(&got, "B-PARA", "real", None);
+    }
+
+    /// `END DECLARATIVES` without its period gets an unnamed zero-width MISSING at the end of the
+    /// declaratives: the paragraph before it stays real.
+    #[test]
+    fn cobol_missing_period_after_end_declaratives_keeps_paragraph_real() {
+        let got = cobol_tags(&[
+            "IDENTIFICATION DIVISION.",
+            "PROGRAM-ID. PROG.",
+            "PROCEDURE DIVISION.",
+            "DECLARATIVES.",
+            "D-SEC SECTION.",
+            "    USE AFTER STANDARD ERROR PROCEDURE ON F.",
+            "D-PARA.",
+            "    EXIT.",
+            "END DECLARATIVES",
+            "M-SEC SECTION.",
+            "M-PARA.",
+            "    DISPLAY 'X'.",
+        ]);
+        expect(&got, "D-PARA", "real", None);
     }
 
     #[test]

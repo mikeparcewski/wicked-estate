@@ -9,6 +9,7 @@ the node semantic fields set with `set_semantics` (wicked-estate#438); back up t
 ### Fixed
 
 - COBOL paragraphs and sections whose body is only `EXIT`, `CONTINUE` or `GOBACK` are tagged `behaviour=stub` / `exit_only`, so they leave the requirements-coverage denominator instead of holding a COBOL repository below the 80% minimum (#456).
+- The COBOL `exit_only` stub rule keeps a paragraph real in four cases that could inflate coverage: a free-format source (`>>SOURCE FORMAT FREE`, `>>SOURCE FREE`, `$SET SOURCEFORMAT"FREE"`), a header that starts in Area B (a statement such as `COMMIT.` read as a header), an ERROR or MISSING node after the division's end, and an unnamed or zero-width MISSING node such as the period after `END DECLARATIVES` (#456).
 
 ## [0.35.5] — 2026-11-14
 
