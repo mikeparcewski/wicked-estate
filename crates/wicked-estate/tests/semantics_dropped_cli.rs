@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! #438: a re-index keeps the semantic fields of every symbol it emits again, and says so on
 //! stderr (`SEMANTICS-DROPPED`) for the ones it cannot keep.
 
