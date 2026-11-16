@@ -937,6 +937,7 @@ fn secret_exclusion_note(deleted: &[String]) -> Option<String> {
 // The notes `secret_exclusion_note` emitted on this thread, so a test sees what the sweep reported.
 #[cfg(test)]
 thread_local! {
+    static SEMANTICS_DROPS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
     static SECRET_NOTES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
     // The documents the converter skipped on this thread's index runs: (path, reason).
     static DOC_SKIPS: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -1344,7 +1345,6 @@ fn index_path_inner(
     let mut force_full = prev_version
         .as_deref()
         .is_some_and(|v| v != env!("CARGO_PKG_VERSION"));
-    store.meta_set_key(&version_key, env!("CARGO_PKG_VERSION"));
     if force_full {
         eprintln!(
             "VERSION CHANGE detected (v{prev} → v{cur}): forcing full re-extraction",
@@ -1366,7 +1366,6 @@ fn index_path_inner(
         }
         force_full = true;
     }
-    store.meta_set_key(&digest_key, &extra_digest);
 
     // Plugin-override gate (ADR-010): a parser-plugin override (query-only or armed grammar)
     // changes extraction output without touching a single source byte, so stored graphs indexed
@@ -1377,7 +1376,7 @@ fn index_path_inner(
     // descriptor line is over the registry's CACHED bytes — what extraction will actually use —
     // never a fresh disk read, so a long-lived process stays old-query/old-digest consistent.
     //
-    // Like the id-scheme gate (and deliberately UNLIKE the two gates above), the key is written
+    // Like the id-scheme and version/rules gates, the key is written
     // write-LAST: at run end and in the gate-guarded no-change early return — a crash mid-run
     // leaves the old key and the gate re-fires. Idempotent, never falsely certified.
     let override_key = repo_scope::meta_key(repo, "plugin_overrides");
@@ -1875,6 +1874,9 @@ fn index_path_inner(
         if !override_gate {
             store.meta_set_key(&override_key, cur_overrides);
         }
+        // #471: certify the extractor version/rules only after successful indexing.
+        store.meta_set_key(&version_key, env!("CARGO_PKG_VERSION"));
+        store.meta_set_key(&digest_key, &extra_digest);
         flush_doc_skips();
         return store.stats();
     }
@@ -1900,6 +1902,12 @@ fn index_path_inner(
         store.commit_batch()?;
         for (file, n) in dropped {
             eprintln!("SEMANTICS-DROPPED: {n} symbol(s) in {file}");
+            #[cfg(test)]
+            SEMANTICS_DROPS.with(|notes| {
+                notes
+                    .borrow_mut()
+                    .push(format!("SEMANTICS-DROPPED: {n} symbol(s) in {file}"))
+            });
         }
         if let Some(note) = secret_exclusion_note(&deleted) {
             eprintln!("{note}");
@@ -1912,6 +1920,9 @@ fn index_path_inner(
         if !override_gate {
             store.meta_set_key(&override_key, cur_overrides);
         }
+        // #471: certify the extractor version/rules only after successful indexing.
+        store.meta_set_key(&version_key, env!("CARGO_PKG_VERSION"));
+        store.meta_set_key(&digest_key, &extra_digest);
         flush_doc_skips();
         return store.stats();
     }
@@ -2211,23 +2222,6 @@ fn index_path_inner(
         store.set_file_digest(&fw.rel, &fw.digest)?;
         let _ = store.log_change(ChangeOp::Upsert, &fw.rel);
     }
-    // Write the saved semantics back onto every symbol the re-extraction emitted again; count the
-    // ones that are gone per file. Still inside the batch: restore rolls back with the write.
-    let dropped = restore_semantics(store, saved_semantics)?;
-    store.commit_batch()?;
-    // Report the drops only after the batch durably committed, so the line never describes a loss
-    // a rollback undid. A deletion-only run reaches here too and reports its annotated symbols.
-    for (file, n) in dropped {
-        eprintln!("SEMANTICS-DROPPED: {n} symbol(s) in {file}");
-    }
-    // wicked-estate#433: a file the secret rule excludes leaves with its requirement annotations;
-    // say so once the removal has landed.
-    if let Some(note) = secret_exclusion_note(&deleted) {
-        eprintln!("{note}");
-        #[cfg(test)]
-        SECRET_NOTES.with(|n| n.borrow_mut().push(note));
-    }
-
     // ── RESOLVE (changed files only) ─────────────────────────────────────────────────────────
     // Build the in-memory index from ALL nodes (unchanged + newly written). Resolve only the refs
     // that came from the changed files. The resolved edges are written to the store.
@@ -2272,13 +2266,33 @@ fn index_path_inner(
     // Unresolved refs come from the same attribution as the edges — the one definition in
     // docs/ENGINE-CONTRACT.md §2.1 (a ref is unresolved iff no resolver emitted an edge
     // attributed to it, per site).
-    store.begin_batch()?;
+    // Continue the extraction batch through resolution: call-derived ids must exist before
+    // restoring their saved fields (#470). Errors still roll back at index_path_as.
     store.upsert_nodes(&call_flow_nodes)?;
     store.upsert_edges(&resolution.edges)?;
     store.upsert_edges(&call_flow_edges)?;
     store.upsert_edges(&estate)?;
     store.upsert_unresolved_refs(&resolution.unresolved)?;
+    let dropped = restore_semantics(store, saved_semantics)?;
     store.commit_batch()?;
+    // Report the drops only after the batch durably committed, so the line never describes a loss
+    // a rollback undid.
+    for (file, n) in dropped {
+        eprintln!("SEMANTICS-DROPPED: {n} symbol(s) in {file}");
+        #[cfg(test)]
+        SEMANTICS_DROPS.with(|notes| {
+            notes
+                .borrow_mut()
+                .push(format!("SEMANTICS-DROPPED: {n} symbol(s) in {file}"))
+        });
+    }
+    // wicked-estate#433: a file the secret rule excludes leaves with its requirement annotations;
+    // say so once the removal has landed.
+    if let Some(note) = secret_exclusion_note(&deleted) {
+        eprintln!("{note}");
+        #[cfg(test)]
+        SECRET_NOTES.with(|n| n.borrow_mut().push(note));
+    }
 
     // ── RE-DERIVE call-derived value flow for unchanged callers (#220) ──────────────────────
     // The callees were just re-extracted (their parameter/return endpoints exist again); the
@@ -2507,7 +2521,10 @@ fn index_path_inner(
 
     // The id-scheme key is written LAST — only after extraction + resolution durably completed —
     // so an interrupted migration re-fires the scheme gate instead of certifying a mixed DB.
-    // (See the gate above for why this deliberately differs from the version/rules gates.)
+    // The version/rules keys follow the same discipline (#471), so rollback leaves a plain
+    // retry able to force full re-extraction.
+    store.meta_set_key(&version_key, env!("CARGO_PKG_VERSION"));
+    store.meta_set_key(&digest_key, &extra_digest);
     store.meta_set_key(&scheme_key, SYMBOL_ID_SCHEME);
     // The plugin-override key follows the same write-LAST rule (ADR-010): stamped only once the
     // re-extraction under the current override state durably completed.
@@ -5728,6 +5745,38 @@ mod semantics_survive_reindex_tests {
         version_change_keeps_five_fields(&mut SqliteStore::in_memory().unwrap());
     }
 
+    /// #470: this argument slot is created by call resolution, after extraction writes its nodes.
+    #[test]
+    fn sqlite_version_change_keeps_call_derived_node_semantics() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(
+            src.path().join("a.ts"),
+            "function identity(value: string) { return value; }\n\
+             function consume() { identity(externalInput); }\n",
+        )
+        .unwrap();
+        let mut store = SqliteStore::in_memory().unwrap();
+        index_path(&mut store, src.path()).unwrap();
+        let slot = GraphRead::all_nodes(&store)
+            .unwrap()
+            .into_iter()
+            .find(|n| {
+                n.symbol
+                    .as_str()
+                    .ends_with("consume().:local:externalInput:")
+            })
+            .expect("resolution must create the external argument slot")
+            .symbol;
+        let before = annotate_with_claim(&mut store, &slot);
+        SEMANTICS_DROPS.with(|notes| notes.borrow_mut().clear());
+
+        store.meta_set_key("indexed_version", "0.0.0-older");
+        index_path(&mut store, src.path()).unwrap();
+
+        assert_eq!(store.node_semantics(&slot).unwrap(), Some(before));
+        SEMANTICS_DROPS.with(|notes| assert!(notes.borrow().is_empty(), "{:?}", notes.borrow()));
+    }
+
     /// A rename `a.cpp` → `a.cc` keeps the free function's SymbolId `compute`, so the five semantic
     /// fields survive the single run that deletes a.cpp and adds a.cc (#438 item 1).
     fn rename_keeps_five_fields_under_same_id(store: &mut dyn GraphStoreMutExt) {
@@ -5781,7 +5830,7 @@ mod semantics_survive_reindex_tests {
     /// index on the same store would reuse the half-written transaction and commit the removal
     /// without the fields. On the pre-fix code the fields are gone for good.
     #[test]
-    fn sqlite_write_failure_mid_reindex_rolls_back_and_retry_keeps_fields() {
+    fn sqlite_version_write_failure_plain_retry_reextracts_and_keeps_fields() {
         let src = tempfile::tempdir().unwrap();
         std::fs::write(src.path().join("a.rs"), "pub fn pay() {}\n").unwrap();
         let dbdir = tempfile::tempdir().unwrap();
@@ -5799,6 +5848,13 @@ mod semantics_survive_reindex_tests {
 
         // One long-lived store for BOTH the failed run and the retry — exactly what `watch` does.
         let mut store = SqliteStore::open(&dbpath).unwrap();
+
+        // Simulate an older extractor's output without changing the source or its digest.
+        // Only a full re-extraction can replace this stale name with `pay`.
+        rusqlite::Connection::open(&dbpath)
+            .unwrap()
+            .execute("UPDATE nodes SET name = 'old_pay' WHERE name = 'pay'", [])
+            .unwrap();
 
         // Phase 2: a version-triggered re-index whose first node INSERT is poisoned.
         {
@@ -5832,9 +5888,13 @@ mod semantics_survive_reindex_tests {
             .execute_batch("DROP TRIGGER we438_poison;")
             .unwrap();
 
-        // Phase 3: a retry on the SAME store (no drop, no reconnect) keeps them.
-        store.meta_set_key("indexed_version", "0.0.0-older");
+        // Phase 3 (#471): plain retry, with no metadata reset, must re-extract the old output.
         index_path(&mut store, src.path()).unwrap();
+        assert_eq!(sym_of(&store, "pay"), pay_id);
+        assert_eq!(
+            store.meta_get_key("indexed_version").as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
         assert_eq!(
             store.node_semantics(&pay_id).unwrap(),
             Some(original),
@@ -5851,8 +5911,15 @@ mod semantics_survive_reindex_tests {
         let kept = annotate_with_claim(store, &keep);
         annotate_with_claim(store, &gone);
 
+        SEMANTICS_DROPS.with(|notes| notes.borrow_mut().clear());
         std::fs::write(&file, "pub fn keep() {}\n").unwrap();
         index_path(store, tmp.path()).unwrap();
+        SEMANTICS_DROPS.with(|notes| {
+            assert_eq!(
+                &*notes.borrow(),
+                &["SEMANTICS-DROPPED: 1 symbol(s) in a.rs"]
+            );
+        });
 
         assert_eq!(store.node_semantics(&keep).unwrap(), Some(kept));
         assert!(store.get_node(&gone).unwrap().is_none());
