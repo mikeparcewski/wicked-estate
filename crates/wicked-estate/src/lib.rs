@@ -1866,6 +1866,43 @@ fn index_path_inner(
         return store.stats();
     }
 
+    // Deletion-only run: files were deleted but nothing changed, so there is nothing to parse,
+    // resolve or re-link. Remove the deleted files and write their symbols' semantics back onto
+    // whatever still homes each id (nothing here — the symbols are gone), reporting the drops, all
+    // in ONE batch (#438 item 1). This path deliberately does NOT run RESOLVE or the dangling-edge
+    // prune: a deletion-only run leaves any file-less dangling edge (e.g. a RACF `protects` join)
+    // for the next changed run, exactly as before this fix — pinned by mainframe_links'
+    // `shared_ids_fall_back_to_the_boundary_when_the_definition_is_removed`.
+    if changed.is_empty() {
+        store.begin_batch()?;
+        let saved_semantics = {
+            let rels: Vec<&str> = deleted.iter().map(String::as_str).collect();
+            store.semantics_in_files(&rels)?
+        };
+        for path in &deleted {
+            store.remove_file(path)?;
+            let _ = store.log_change(ChangeOp::Remove, path);
+        }
+        let dropped = restore_semantics(store, saved_semantics)?;
+        store.commit_batch()?;
+        for (file, n) in dropped {
+            eprintln!("SEMANTICS-DROPPED: {n} symbol(s) in {file}");
+        }
+        if let Some(note) = secret_exclusion_note(&deleted) {
+            eprintln!("{note}");
+            #[cfg(test)]
+            SECRET_NOTES.with(|n| n.borrow_mut().push(note));
+        }
+        if !scheme_gate {
+            store.meta_set_key(&scheme_key, SYMBOL_ID_SCHEME);
+        }
+        if !override_gate {
+            store.meta_set_key(&override_key, cur_overrides);
+        }
+        flush_doc_skips();
+        return store.stats();
+    }
+
     // ── EXTRACT: parse + query only CHANGED/NEW files in parallel ───────────────────────────
     // #438: EXTRACT runs BEFORE any destructive write. The old nodes of CHANGED and DELETED files
     // are not removed until the single write batch below, so a parse that produces nothing (or an
