@@ -350,6 +350,26 @@ fn cobol_exit_only_source_ok(
             .map_or(src.len(), |i| end + i)
     };
     let region_end = region_end.max(line_begin);
+    // When the span ends at the next header, that header's own line is dropped from the scan. A
+    // free-format statement the grammar misread as a header (e.g. `CALL   SUBPROG.` in column 1,
+    // where it drops `CALL` and reads `SUBPROG.` as a header) leaves real text in the boundary
+    // line's sequence area; a genuine fixed-format following header has blank or digit columns 1-6
+    // there. Require blank-or-digit columns 1-6 on the boundary line, else keep the paragraph real.
+    if ended_by_header {
+        let boundary = line_start(end);
+        let boundary_end = src[boundary..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(src.len(), |i| boundary + i);
+        let prefix = String::from_utf8_lossy(&src[boundary..boundary_end]);
+        if !prefix
+            .chars()
+            .take(6)
+            .all(|c| c == ' ' || c.is_ascii_digit())
+        {
+            return false;
+        }
+    }
     let header_end_col =
         String::from_utf8_lossy(&src[line_begin..header.end_byte().min(src.len())])
             .chars()
@@ -1760,6 +1780,35 @@ mod tests {
         );
         let got = tags("src/PROG.cbl", "cobol", &code);
         is(&got, "A-PARA", "real", None);
+    }
+
+    /// Codex shape: free format, `A-PARA.` then `EXIT.`, then `CALL   SUBPROG.` starting in
+    /// column 1. The grammar drops the column-1 `CALL` and reads `SUBPROG.` as the next header, so
+    /// A-PARA's span ends on that line; its columns 1-6 hold `CALL  ` (not blank/digits), so the
+    /// dropped statement keeps A-PARA real instead of a false exit-only stub.
+    #[test]
+    fn cobol_free_format_call_header_boundary_keeps_paragraph_real() {
+        let code = "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. PROG.\n       PROCEDURE DIVISION.\n       A-PARA.\n           EXIT.\nCALL   SUBPROG.\n";
+        let got = tags("src/PROG.cbl", "cobol", code);
+        is(&got, "A-PARA", "real", None);
+    }
+
+    /// A fixed-format following header (columns 1-6 blank or digits on its line) still ends the
+    /// preceding EXIT-only paragraph's span and lets it be an exit_only stub — the boundary-line
+    /// prefix guard only rejects a boundary line whose columns 1-6 hold real text.
+    #[test]
+    fn cobol_fixed_format_following_header_keeps_preceding_paragraph_stub() {
+        let got = cobol_tags(&[
+            "IDENTIFICATION DIVISION.",
+            "PROGRAM-ID. PROG.",
+            "PROCEDURE DIVISION.",
+            "A-PARA.",
+            "    EXIT.",
+            "B-PARA.",
+            "    DISPLAY 'X'.",
+        ]);
+        expect(&got, "A-PARA", "stub", Some("exit_only"));
+        expect(&got, "B-PARA", "real", None);
     }
 
     /// The span ends at the next header whatever column it starts in: a header in columns 9-11
