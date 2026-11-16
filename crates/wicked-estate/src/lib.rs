@@ -1212,6 +1212,25 @@ pub fn index_path_as(
     Ok(stats)
 }
 
+/// Write the semantic fields saved before `remove_file` back onto the symbols the re-extraction
+/// emitted again — verbatim, the original validator and time included (wicked-estate#438). A
+/// symbol that is gone loses its fields, as a removed node always did; the per-file count of those
+/// is returned for the caller to print as `SEMANTICS-DROPPED`, so the loss is never silent.
+fn restore_semantics(
+    store: &mut dyn GraphStoreMutExt,
+    saved: Vec<(String, SymbolId, NodeSemantics)>,
+) -> Result<std::collections::BTreeMap<String, usize>> {
+    let mut dropped: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for (file, symbol, semantics) in saved {
+        if store.get_node(&symbol)?.is_some() {
+            store.restore_node_semantics(&symbol, &semantics)?;
+        } else {
+            *dropped.entry(file).or_default() += 1;
+        }
+    }
+    Ok(dropped)
+}
+
 fn index_path_inner(
     store: &mut dyn GraphStoreMutExt,
     root: &Path,
@@ -1854,6 +1873,13 @@ fn index_path_inner(
 
     // ── Remove stale contributions from CHANGED files ───────────────────────────────────────
     // A changed file's old nodes/edges must be purged before we write the new extraction.
+    // #438: remove_file deletes the node rows and with them their semantic fields, and a version
+    // change marks EVERY file changed. Snapshot the fields first; they are written back below for
+    // each symbol the re-extraction emits again.
+    let saved_semantics = {
+        let rels: Vec<&str> = changed.iter().map(|fw| fw.rel.as_str()).collect();
+        store.semantics_in_files(&rels)?
+    };
     store.begin_batch()?;
     for fw in &changed {
         // Only remove if the file was previously indexed (it has a stored digest or prior nodes).
@@ -2131,6 +2157,9 @@ fn index_path_inner(
     for fw in &changed {
         store.set_file_digest(&fw.rel, &fw.digest)?;
         let _ = store.log_change(ChangeOp::Upsert, &fw.rel);
+    }
+    for (file, n) in restore_semantics(store, saved_semantics)? {
+        eprintln!("SEMANTICS-DROPPED: {n} symbol(s) in {file}");
     }
     store.commit_batch()?;
 
@@ -5567,5 +5596,123 @@ mod blast_radius_confidence_tests {
         assert_eq!(br.confidence.edge_count, 1, "{:?}", br.confidence);
         assert_eq!(br.confidence.min, Some(tags));
         assert_eq!(br.confidence.avg, Some(tags));
+    }
+}
+
+#[cfg(test)]
+mod semantics_survive_reindex_tests {
+    use super::*;
+    use wicked_estate_core::{GraphRead, GraphWrite, NodeSemantics, ValidationClaim};
+    use wicked_estate_store::{GraphStoreMutExt, MemStore, SqliteStore};
+
+    fn sym_of(store: &dyn GraphStoreMutExt, name: &str) -> SymbolId {
+        let hits = store
+            .find_symbols(&wicked_estate_core::SymbolQuery {
+                exact_name: Some(name.to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(hits.len(), 1, "expected one `{name}`");
+        hits[0].symbol.clone()
+    }
+
+    /// The semantics of `symbol` after a claim made long ago by someone else: a fixed validator
+    /// and a timestamp the clock cannot reproduce, so a re-stamp would show.
+    fn annotate_with_old_claim(
+        store: &mut dyn GraphStoreMutExt,
+        symbol: &SymbolId,
+    ) -> NodeSemantics {
+        let claim = ValidationClaim::new(true, "alice").unwrap();
+        store
+            .set_node_semantics(symbol, Some("pays"), Some("REQ-1"), Some(&claim))
+            .unwrap();
+        let mut sem = store.node_semantics(symbol).unwrap().unwrap();
+        sem.requirement_validated_at = Some(1_000_000_000);
+        store.restore_node_semantics(symbol, &sem).unwrap();
+        let got = store.node_semantics(symbol).unwrap().unwrap();
+        assert_eq!(got.requirement_validated_at, Some(1_000_000_000));
+        got
+    }
+
+    fn version_change_keeps_five_fields(store: &mut dyn GraphStoreMutExt) {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("a.rs"),
+            "pub fn pay() {}\npub fn refund() {}\n",
+        )
+        .unwrap();
+        index_path(store, tmp.path()).unwrap();
+        let pay = sym_of(store, "pay");
+        let before = annotate_with_old_claim(store, &pay);
+
+        // An upgrade: the stored indexed_version differs, so every file is re-extracted.
+        store.meta_set_key("indexed_version", "0.0.0-older");
+        index_path(store, tmp.path()).unwrap();
+
+        assert_eq!(
+            store.node_semantics(&sym_of(store, "pay")).unwrap(),
+            Some(before),
+            "all five fields, validator and time included, must survive the forced re-extract"
+        );
+    }
+
+    #[test]
+    fn sqlite_version_change_keeps_node_semantics() {
+        version_change_keeps_five_fields(&mut SqliteStore::in_memory().unwrap());
+    }
+
+    #[test]
+    fn mem_version_change_keeps_node_semantics() {
+        version_change_keeps_five_fields(&mut MemStore::new());
+    }
+
+    fn removed_symbol_is_dropped_and_counted(store: &mut dyn GraphStoreMutExt) {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("a.rs");
+        std::fs::write(&file, "pub fn keep() {}\npub fn gone() {}\n").unwrap();
+        index_path(store, tmp.path()).unwrap();
+        let (keep, gone) = (sym_of(store, "keep"), sym_of(store, "gone"));
+        let kept = annotate_with_old_claim(store, &keep);
+        annotate_with_old_claim(store, &gone);
+
+        std::fs::write(&file, "pub fn keep() {}\n").unwrap();
+        let saved = store.semantics_in_files(&["a.rs"]).unwrap();
+        assert_eq!(saved.len(), 2);
+        index_path(store, tmp.path()).unwrap();
+
+        assert_eq!(store.node_semantics(&keep).unwrap(), Some(kept));
+        assert!(store.get_node(&gone).unwrap().is_none());
+        // The re-index above printed the same count; the helper is what prints it.
+        let dropped = restore_semantics(store, saved).unwrap();
+        assert_eq!(dropped.get("a.rs"), Some(&1), "{dropped:?}");
+    }
+
+    #[test]
+    fn sqlite_dropped_symbol_is_counted_and_kept_one_survives() {
+        removed_symbol_is_dropped_and_counted(&mut SqliteStore::in_memory().unwrap());
+    }
+
+    #[test]
+    fn mem_dropped_symbol_is_counted_and_kept_one_survives() {
+        removed_symbol_is_dropped_and_counted(&mut MemStore::new());
+    }
+
+    #[test]
+    fn validation_only_claim_reads_back() {
+        let mut store = SqliteStore::in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "pub fn pay() {}\n").unwrap();
+        index_path(&mut store, tmp.path()).unwrap();
+        let pay = sym_of(&store, "pay");
+        let retracted = ValidationClaim::new(false, "bob").unwrap();
+        store
+            .set_node_semantics(&pay, None, None, Some(&retracted))
+            .unwrap();
+        let got = store
+            .node_semantics(&pay)
+            .unwrap()
+            .expect("a retracted claim is still a claim");
+        assert_eq!(got.requirement_validated_by.as_deref(), Some("bob"));
+        assert!(!got.requirement_validated);
     }
 }

@@ -1052,6 +1052,34 @@ impl GraphWrite for SurrealStore {
         })
     }
 
+    fn restore_node_semantics(
+        &mut self,
+        symbol: &SymbolId,
+        semantics: &NodeSemantics,
+    ) -> Result<()> {
+        if self.get_node(symbol)?.is_none() {
+            return Ok(());
+        }
+        let db = self.db.clone();
+        let sym = symbol.0.clone();
+        let data = serde_json::to_string(semantics).map_err(se)?;
+        let req = semantics.requirement.clone();
+        self.rt.block_on(async move {
+            db.query(
+                "LET $ex = (SELECT id FROM semantics WHERE symbol=$sym LIMIT 1);
+                 IF array::len($ex) = 0 { INSERT INTO semantics { symbol: $sym, requirement: $req, data: $data } } ELSE { UPDATE semantics SET requirement=$req, data=$data WHERE symbol=$sym };",
+            )
+            .bind(("sym", sym))
+            .bind(("req", req))
+            .bind(("data", data))
+            .await
+            .map_err(se)?
+            .check()
+            .map_err(se)?;
+            Ok::<_, Error>(())
+        })
+    }
+
     fn annotate(&mut self, symbol: &SymbolId, mut annotation: Annotation) -> Result<()> {
         // No-op if the symbol is not a node (mirrors the SQLite sid-lookup no-op).
         if self.get_node(symbol)?.is_none() {

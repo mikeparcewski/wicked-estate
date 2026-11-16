@@ -813,6 +813,17 @@ impl GraphWrite for MemStore {
         Ok(())
     }
 
+    fn restore_node_semantics(
+        &mut self,
+        symbol: &SymbolId,
+        semantics: &NodeSemantics,
+    ) -> Result<()> {
+        if self.nodes.contains_key(symbol) {
+            self.semantics.insert(symbol.clone(), semantics.clone());
+        }
+        Ok(())
+    }
+
     fn annotate(&mut self, symbol: &SymbolId, mut annotation: Annotation) -> Result<()> {
         wicked_estate_core::redact::scrub_annotation(&mut annotation);
         // No-op if the symbol is not a node (mirrors the SQLite sid-lookup no-op).

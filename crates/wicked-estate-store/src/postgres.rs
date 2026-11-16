@@ -1870,6 +1870,31 @@ impl GraphWrite for PostgresStore {
         Ok(())
     }
 
+    fn restore_node_semantics(
+        &mut self,
+        symbol: &SymbolId,
+        semantics: &NodeSemantics,
+    ) -> Result<()> {
+        // All five columns in one statement, verbatim (the original validator and time). No-op
+        // when the symbol is not a node.
+        let mut h = self.conn()?;
+        rt_block(
+            sqlx::query(
+                "UPDATE nodes SET description = $2, requirement = $3, requirement_validated = $4, \
+                 requirement_validated_by = $5, requirement_validated_at = $6 WHERE symbol = $1",
+            )
+            .bind(&symbol.0)
+            .bind(&semantics.description)
+            .bind(&semantics.requirement)
+            .bind(semantics.requirement_validated as i64)
+            .bind(&semantics.requirement_validated_by)
+            .bind(semantics.requirement_validated_at)
+            .execute(h.as_conn()),
+        )
+        .map_err(st)?;
+        Ok(())
+    }
+
     fn annotate(&mut self, symbol: &SymbolId, mut annotation: Annotation) -> Result<()> {
         wicked_estate_core::redact::scrub_annotation(&mut annotation);
         let mut h = self.conn()?;
@@ -2620,7 +2645,9 @@ impl GraphRead for PostgresStore {
                  WHERE symbol = $1 \
                    AND (description IS NOT NULL \
                         OR requirement IS NOT NULL \
-                        OR requirement_validated != 0)",
+                        OR requirement_validated != 0 \
+                        OR requirement_validated_by IS NOT NULL \
+                        OR requirement_validated_at IS NOT NULL)",
             )
             .bind(&symbol.0)
             .fetch_optional(h.as_conn())
@@ -2645,6 +2672,43 @@ impl GraphRead for PostgresStore {
                     }))
                 }
             }
+        })
+        .map_err(st)
+    }
+
+    fn semantics_in_files(&self, files: &[&str]) -> Result<Vec<(String, SymbolId, NodeSemantics)>> {
+        let mut h = self.conn()?;
+        let files: Vec<String> = files.iter().map(|f| (*f).to_string()).collect();
+        rt_block(async {
+            let rows = sqlx::query(
+                "SELECT file, symbol, description, requirement, requirement_validated, \
+                        requirement_validated_by, requirement_validated_at \
+                 FROM nodes \
+                 WHERE file = ANY($1) \
+                   AND (description IS NOT NULL OR requirement IS NOT NULL \
+                        OR requirement_validated != 0 \
+                        OR requirement_validated_by IS NOT NULL \
+                        OR requirement_validated_at IS NOT NULL)",
+            )
+            .bind(&files)
+            .fetch_all(h.as_conn())
+            .await?;
+            let mut out = Vec::new();
+            for r in rows {
+                let validated: i64 = r.try_get("requirement_validated")?;
+                out.push((
+                    r.try_get::<String, _>("file")?,
+                    SymbolId(r.try_get::<String, _>("symbol")?),
+                    NodeSemantics {
+                        description: r.try_get("description")?,
+                        requirement: r.try_get("requirement")?,
+                        requirement_validated: validated != 0,
+                        requirement_validated_by: r.try_get("requirement_validated_by")?,
+                        requirement_validated_at: r.try_get("requirement_validated_at")?,
+                    },
+                ));
+            }
+            Ok::<_, sqlx::Error>(out)
         })
         .map_err(st)
     }
