@@ -169,34 +169,78 @@ enum Family {
 
 // ── COBOL ───────────────────────────────────────────────────────────────────
 
-/// A free-format source directive: `>>SOURCE FORMAT FREE`, `>>SOURCE FREE` or
-/// `$SET SOURCEFORMAT"FREE"`. The grammar reads fixed columns, so it drops free-format code that
-/// starts in column 1; no paragraph of such a file can be told to be a stub.
-static COBOL_FREE_FORMAT: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(
-        r#"(?i)>>\s*source\s+(format\s+(is\s+)?)?free\b|\$set\s+sourceformat\s*[("']?\s*free\b"#,
-    )
-    .expect("free-format pattern compiles")
-});
-
 /// 0-based column where Area B starts (after 6 sequence columns, the indicator column and
 /// Area A, columns 8-11). A paragraph or section header starting there or later is a statement
 /// the grammar misread as a header.
 const COBOL_AREA_B_COLUMN: usize = 11;
 
+/// COBOL verbs and reserved words that are never a real paragraph or section name: a header the
+/// grammar built from one of these is a statement it misread as a header (Micro Focus does not
+/// enforce Area A/B, so this holds in any column). Matched against the header's whole name token.
+const COBOL_VERB_HEADERS: &[&str] = &[
+    "COMMIT",
+    "ROLLBACK",
+    "EXIT",
+    "CONTINUE",
+    "GOBACK",
+    "STOP",
+    "MOVE",
+    "PERFORM",
+    "CALL",
+    "DISPLAY",
+    "READ",
+    "WRITE",
+    "REWRITE",
+    "DELETE",
+    "OPEN",
+    "CLOSE",
+    "START",
+    "RETURN",
+    "RELEASE",
+    "ACCEPT",
+    "COMPUTE",
+    "ADD",
+    "SUBTRACT",
+    "MULTIPLY",
+    "DIVIDE",
+    "SET",
+    "INITIALIZE",
+    "INSPECT",
+    "STRING",
+    "UNSTRING",
+    "SEARCH",
+    "SORT",
+    "MERGE",
+    "EVALUATE",
+    "IF",
+    "GO",
+    "ALTER",
+    "CANCEL",
+];
+
+/// The words an exit-only paragraph's body may carry in Area A/B (columns 8-72), besides periods
+/// and the header line itself: the `EXIT` / `EXIT PARAGRAPH` / `EXIT SECTION` / `EXIT PROGRAM`,
+/// `CONTINUE` and `GOBACK` phrases.
+const COBOL_EXIT_WORDS: &[&str] = &[
+    "EXIT",
+    "PARAGRAPH",
+    "SECTION",
+    "PROGRAM",
+    "CONTINUE",
+    "GOBACK",
+];
+
 /// A paragraph or section whose body is only EXIT / CONTINUE / GOBACK statements (and their
 /// periods and comments) carries no business rule. The body is the header's following siblings up
 /// to the next header (the same boundary as the span fixup). Empty bodies, any other statement,
-/// any ERROR / MISSING node (named or not, zero-width included), a header in Area B, an error
-/// after the division and a free-format source all stay real.
+/// any ERROR / MISSING node (named or not, zero-width included), a header in Area B or named by a
+/// verb, an error after the division, and any paragraph whose own source carries code the
+/// fixed-column grammar dropped (free format, column-1 continuations) all stay real.
 fn cobol(header: TsNode<'_>, src: &[u8]) -> Behaviour {
     let Some(end) = crate::treesitter::cobol_paragraph_end(header) else {
         return Behaviour::Real;
     };
-    if COBOL_FREE_FORMAT.is_match(&String::from_utf8_lossy(src)) {
-        return Behaviour::Real;
-    }
-    if header.start_position().column >= COBOL_AREA_B_COLUMN {
+    if header.start_position().column >= COBOL_AREA_B_COLUMN || cobol_header_is_verb(header, src) {
         return Behaviour::Real;
     }
     let mut statements = 0usize;
@@ -205,7 +249,9 @@ fn cobol(header: TsNode<'_>, src: &[u8]) -> Behaviour {
     while let Some(n) = next {
         next = n.next_sibling();
         if crate::treesitter::COBOL_HEADERS.contains(&n.kind()) {
-            if n.start_position().column >= COBOL_AREA_B_COLUMN {
+            // A header the grammar built from a verb (`COMMIT.`, `ROLLBACK.`) is a statement it
+            // misread, in any column; a header in Area B is a statement too.
+            if n.start_position().column >= COBOL_AREA_B_COLUMN || cobol_header_is_verb(n, src) {
                 return Behaviour::Real;
             }
             ended_by_header = true;
@@ -227,24 +273,138 @@ fn cobol(header: TsNode<'_>, src: &[u8]) -> Behaviour {
             _ => return Behaviour::Real,
         }
     }
-    if !ended_by_header && error_after_division(header, end) {
+    // A declaratives paragraph's errors are only those inside its own `procedure_declaratives`
+    // (a MISSING period on `END DECLARATIVES`, say); an ERROR or MISSING in the main procedure
+    // code that follows a valid `END DECLARATIVES.` does not make it real.
+    let scan_root = header
+        .parent()
+        .filter(|p| p.kind() == "procedure_declaratives")
+        .unwrap_or_else(|| {
+            let mut root = header;
+            while let Some(p) = root.parent() {
+                root = p;
+            }
+            root
+        });
+    if !ended_by_header && error_after_division(scan_root, end) {
         return Behaviour::Real;
     }
     if statements > 0 {
+        // The grammar reads fixed columns and silently drops code that starts in column 1 (free
+        // format, continuations): read the paragraph's own source and keep it real unless every
+        // non-comment line holds only exit-only statements.
+        if !cobol_exit_only_source_ok(header, end, src) {
+            return Behaviour::Real;
+        }
         Behaviour::Stub("exit_only")
     } else {
         Behaviour::Real
     }
 }
 
-/// Whether an ERROR or MISSING node lies at or after `division_end` in the file, before the next
-/// `program_definition`: error recovery closes the division early and parks the rest of the
-/// paragraph's statements there.
-fn error_after_division(header: TsNode<'_>, division_end: usize) -> bool {
-    let mut root = header;
-    while let Some(p) = root.parent() {
-        root = p;
+/// The uppercased name of a paragraph or section header (`name` field), if any.
+fn cobol_header_name(header: TsNode<'_>, src: &[u8]) -> Option<String> {
+    header
+        .child_by_field_name("name")
+        .map(|n| text(n, src).to_ascii_uppercase())
+}
+
+/// Whether a header's whole name is a COBOL verb or reserved word — a statement the grammar
+/// misread as a header, in any column.
+fn cobol_header_is_verb(header: TsNode<'_>, src: &[u8]) -> bool {
+    cobol_header_name(header, src).is_some_and(|name| COBOL_VERB_HEADERS.contains(&name.as_str()))
+}
+
+/// Whether the paragraph's own fixed-format source (header line to the line before `end`) holds
+/// only what an exit-only paragraph may. Comment lines (`*` or `/` in column 7, `*>` floating
+/// comments) are skipped. On every other line: columns 1-6 are blank or digits, columns 73 and
+/// beyond are blank or one letters-and-digits token, and columns 8-72 hold only the exit-only
+/// statement words and periods (plus the header on its own line, and a valid `END DECLARATIVES`
+/// terminator, which closes the scan). Anything else means real code the grammar dropped.
+fn cobol_exit_only_source_ok(header: TsNode<'_>, end: usize, src: &[u8]) -> bool {
+    let start = header.start_byte();
+    let line_begin = src[..start.min(src.len())]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let region = String::from_utf8_lossy(&src[line_begin..end.min(src.len())]);
+    for (idx, raw) in region.split('\n').enumerate() {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        // Comment line: indicator column 7 (0-based index 6) is `*` or `/`.
+        if matches!(line.chars().nth(6), Some('*') | Some('/')) {
+            continue;
+        }
+        // A floating `*>` comment runs to end of line.
+        let line = match line.find("*>") {
+            Some(p) => &line[..p],
+            None => line,
+        };
+        let chars: Vec<char> = line.chars().collect();
+        // Columns 1-6: blank or digits (the sequence-number area).
+        if chars
+            .iter()
+            .take(6)
+            .any(|&c| c != ' ' && !c.is_ascii_digit())
+        {
+            return false;
+        }
+        // Columns 73 and beyond: blank or one token of letters and digits (identification area).
+        if chars.len() > 72 {
+            let tail: String = chars[72..].iter().collect();
+            let tail = tail.trim();
+            if !tail.is_empty() && !tail.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return false;
+            }
+        }
+        // Columns 8-72: Area A/B. The header line carries the paragraph name; later lines carry
+        // only exit-only statements.
+        if idx == 0 {
+            continue;
+        }
+        let area: String = chars[7.min(chars.len())..72.min(chars.len())]
+            .iter()
+            .collect();
+        let area_norm = area
+            .trim()
+            .trim_end_matches('.')
+            .trim()
+            .to_ascii_uppercase();
+        if area_norm == "END DECLARATIVES" {
+            break;
+        }
+        if !cobol_area_exit_only(&area) {
+            return false;
+        }
     }
+    true
+}
+
+/// Whether an Area A/B fragment holds only exit-only statement words, spaces and periods.
+fn cobol_area_exit_only(area: &str) -> bool {
+    let mut word = String::new();
+    for c in area.chars() {
+        if c.is_ascii_alphabetic() {
+            word.push(c.to_ascii_uppercase());
+        } else if c == ' ' || c == '.' {
+            if !word.is_empty() {
+                if !COBOL_EXIT_WORDS.contains(&word.as_str()) {
+                    return false;
+                }
+                word.clear();
+            }
+        } else {
+            return false;
+        }
+    }
+    word.is_empty() || COBOL_EXIT_WORDS.contains(&word.as_str())
+}
+
+/// Whether an ERROR or MISSING node lies at or after `division_end` within `scan_root`, before
+/// the next `program_definition`: error recovery closes the division early and parks the rest of
+/// the paragraph's statements there.
+fn error_after_division(scan_root: TsNode<'_>, division_end: usize) -> bool {
+    let root = scan_root;
     let mut stop = usize::MAX;
     let mut errors = Vec::new();
     let mut cursor = root.walk();
@@ -1497,6 +1657,86 @@ mod tests {
             let got = tags("src/PROG.cbl", "cobol", &code);
             is(&got, "A-PARA", "real", None);
         }
+    }
+
+    /// Source-text guard: a `>>SOURCE IS FREE` directive the file-level regex never matched still
+    /// leaves a paragraph real, because the grammar drops the column-1 `CALL X.` and its own
+    /// source shows real code the fixed columns hid.
+    #[test]
+    fn cobol_free_format_is_directive_keeps_paragraph_real() {
+        let code = "       >>SOURCE IS FREE\n       IDENTIFICATION DIVISION.\n       PROGRAM-ID. PROG.\n       PROCEDURE DIVISION.\n       A-PARA.\nCALL X.\n           EXIT.\n";
+        let got = tags("src/PROG.cbl", "cobol", code);
+        is(&got, "A-PARA", "real", None);
+    }
+
+    /// Source-text guard: free-format code with no directive at all, whose column-1 `CALL X.` the
+    /// grammar drops, stays real on its source alone.
+    #[test]
+    fn cobol_free_format_no_directive_keeps_paragraph_real() {
+        let code = "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. PROG.\n       PROCEDURE DIVISION.\n       A-PARA.\nCALL X.\n           EXIT.\n";
+        let got = tags("src/PROG.cbl", "cobol", code);
+        is(&got, "A-PARA", "real", None);
+    }
+
+    /// Source-text guard: a directive text inside a `*` comment or a `DISPLAY` literal no longer
+    /// turns classification off for the whole file — the genuinely exit-only paragraph beside it
+    /// is still a stub.
+    #[test]
+    fn cobol_directive_in_comment_or_literal_still_classifies() {
+        let got = cobol_tags(&[
+            "IDENTIFICATION DIVISION.",
+            "PROGRAM-ID. PROG.",
+            "PROCEDURE DIVISION.",
+            "A-PARA.",
+            "*>>SOURCE FORMAT FREE",
+            "    DISPLAY '>>SOURCE FORMAT FREE'.",
+            "B-PARA.",
+            "    EXIT.",
+        ]);
+        expect(&got, "A-PARA", "real", None);
+        expect(&got, "B-PARA", "stub", Some("exit_only"));
+    }
+
+    /// `COMMIT.` / `ROLLBACK.` in column 8 (Area A, not Area B) between EXITs are statements the
+    /// grammar misreads as paragraph headers: the verb-name guard keeps every unit real.
+    #[test]
+    fn cobol_verb_named_headers_in_area_a_keep_paragraphs_real() {
+        let got = cobol_tags(&[
+            "IDENTIFICATION DIVISION.",
+            "PROGRAM-ID. PROG.",
+            "PROCEDURE DIVISION.",
+            "A-PARA.",
+            "    EXIT.",
+            "COMMIT.",
+            "    EXIT.",
+            "ROLLBACK.",
+            "    EXIT.",
+        ]);
+        for n in ["A-PARA", "COMMIT", "ROLLBACK"] {
+            expect(&got, n, "real", None);
+        }
+    }
+
+    /// Declaratives boundary: `error_after_division` stops at a valid `END DECLARATIVES.`, so an
+    /// ERROR parked by a later incomplete `MOVE` in the main procedure does not make the
+    /// declaratives paragraph real.
+    #[test]
+    fn cobol_valid_end_declaratives_keeps_declaratives_paragraph_stub() {
+        let got = cobol_tags(&[
+            "IDENTIFICATION DIVISION.",
+            "PROGRAM-ID. PROG.",
+            "PROCEDURE DIVISION.",
+            "DECLARATIVES.",
+            "D-SEC SECTION.",
+            "    USE AFTER STANDARD ERROR PROCEDURE ON F.",
+            "D-PARA.",
+            "    EXIT.",
+            "END DECLARATIVES.",
+            "M-SEC SECTION.",
+            "M-PARA.",
+            "    MOVE",
+        ]);
+        expect(&got, "D-PARA", "stub", Some("exit_only"));
     }
 
     /// `COMMIT.` / `ROLLBACK.` in Area B between EXITs are statements the grammar misreads as
