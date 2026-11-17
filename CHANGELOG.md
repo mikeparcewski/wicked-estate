@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A React component that is only rendered as JSX has dependents again (#481). `BlastRadius SourceSheet` on a
+  TSX repository answered 0 dependents while `SourcesPage` rendered `<SourceSheet …/>`: the TSX and JavaScript
+  queries captured `call_expression` and `new_expression` only. A JSX element whose name starts with a capital
+  letter (React's rule for a component; `<div>` stays an intrinsic tag) is now a `Calls` reference from the
+  component that renders it, resolved through the import map like `SourceSheet()` would be. `<Ns.Widget/>` refers to
+  `Widget`, and a closing tag adds no second edge. Not covered: a component passed as a value
+  (`component={SourceSheet}`), and an import with no use. The first `index` after the upgrade re-extracts each
+  TSX/JS/JSX file, which adds the new edges.
+
 ## [0.35.6] — 2026-11-16
 
 Patch: COBOL paragraphs and sections whose body is only `EXIT`, `CONTINUE` or `GOBACK` are stubs and leave the
