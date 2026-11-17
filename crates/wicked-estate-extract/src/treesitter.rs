@@ -5052,25 +5052,33 @@ import React from 'react';
     }
 
     /// estate#481: rendering a component is a Calls ref from the rendering component, so blast radius
-    /// follows JSX. Lowercase (intrinsic) tags are not refs; a closing tag adds no second ref.
+    /// follows JSX. Lowercase (intrinsic) tags are not refs; a closing tag adds no second ref; `_`/`$`
+    /// names are components; `<Ns.Widget/>` is not a leaf-name ref (it would bind to another `Widget`).
     #[test]
     fn jsx_elements_are_calls_from_the_rendering_component() {
         let code = r#"
 import { SourceSheet } from './SourceSheet.js';
 import * as Ns from './ns.js';
 export function SourcesPage() {
-  return <section><SourceSheet open={true} /><Panel title="x">hi</Panel><Ns.Widget /><div /></section>;
+  return <section><SourceSheet open={true} /><Panel title="x">hi</Panel><Ns.Widget /><_Row /><$Cell /><div /></section>;
 }
 export const Arrow = () => <Panel />;
 function div() { return 1; }
 "#;
-        for (lang, path) in [("tsx", "src/SourcesPage.tsx"), ("javascript", "src/SourcesPage.jsx")] {
+        for (lang, path) in [
+            ("tsx", "src/SourcesPage.tsx"),
+            ("javascript", "src/SourcesPage.jsx"),
+        ] {
             let ex = TreeSitterExtractor::for_language(lang)
                 .unwrap()
                 .extract(&sf(path, lang, code))
                 .unwrap();
             let name_of = |id: &wicked_estate_core::SymbolId| {
-                ex.nodes.iter().find(|n| &n.symbol == id).map(|n| n.name.clone()).unwrap_or_default()
+                ex.nodes
+                    .iter()
+                    .find(|n| &n.symbol == id)
+                    .map(|n| n.name.clone())
+                    .unwrap_or_default()
             };
             let mut calls: Vec<(String, String)> = ex
                 .refs
@@ -5083,11 +5091,12 @@ function div() { return 1; }
                 calls,
                 vec![
                     ("Arrow".to_string(), "Panel".to_string()),
+                    ("SourcesPage".to_string(), "$Cell".to_string()),
                     ("SourcesPage".to_string(), "Panel".to_string()),
                     ("SourcesPage".to_string(), "SourceSheet".to_string()),
-                    ("SourcesPage".to_string(), "Widget".to_string()),
+                    ("SourcesPage".to_string(), "_Row".to_string()),
                 ],
-                "{lang}: one Calls ref per component element, none for <div>/<section> or a closing tag"
+                "{lang}: one Calls ref per component element, none for <div>/<section>, a closing tag or <Ns.Widget>"
             );
         }
     }

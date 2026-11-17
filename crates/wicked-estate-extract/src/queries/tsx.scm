@@ -478,28 +478,17 @@
 ) @call.value
 
 ; JSX: rendering a component is calling it (estate#481). `<SourceSheet …/>` / `<Panel>…</Panel>` is a Calls ref from
-; the enclosing component, resolved like `SourceSheet()`. A lowercase tag is an intrinsic element (`<div>`), never a
-; component (React's own rule), so it is gated out. No @call.value: an element has no `arguments` node, so it opens no
-; value-flow call fact. Closing tags are not captured (one edge per element).
+; the enclosing component, resolved like `SourceSheet()`. A tag starting with a lowercase letter is an intrinsic element
+; (`<div>`), never a component (the JSX compilers' rule), so only `A-Z`, `_` and `$` starts are captured. No
+; @call.value: an element has no `arguments` node, so it opens no value-flow call fact. Closing tags are not captured
+; (one edge per element). `<Ns.Widget/>` is not captured: its leaf name alone would bind to any imported `Widget`, not
+; the one `Ns` names (estate#481 follow-up: receiver-aware binding).
 (jsx_self_closing_element
   name: (identifier) @call.function
-  (#match? @call.function "^[A-Z]")
+  (#match? @call.function "^[A-Z_$]")
 )
 
 (jsx_opening_element
   name: (identifier) @call.function
-  (#match? @call.function "^[A-Z]")
-)
-
-; `<Ns.Widget …/>` — the member name, like `a.b()`.
-(jsx_self_closing_element
-  name: (member_expression
-    property: (property_identifier) @call.method
-  )
-)
-
-(jsx_opening_element
-  name: (member_expression
-    property: (property_identifier) @call.method
-  )
+  (#match? @call.function "^[A-Z_$]")
 )
