@@ -2,12 +2,27 @@
 
 ## [Unreleased]
 
-**Upgrade note (next release).** Install it on every path the daemon resolves, then restart. The first `index` of each
-repo re-reads every file because the binary version changed, so the new `behaviour` tag on COBOL paragraphs and
-sections appears then, and that re-extraction now keeps the node semantic fields (`description`, `requirement`,
-validation, with their original validator and time) of every symbol it emits again (#438). A symbol that is gone — a
+## [0.35.6] — 2026-11-16
+
+Patch: COBOL paragraphs and sections whose body is only `EXIT`, `CONTINUE` or `GOBACK` are stubs and leave the
+requirements-coverage denominator (#464, fixes #456), and re-extraction keeps reviewed requirement fields across a
+version change (#459, fixes #438, #470, #471).
+
+**Upgrade note (0.35.5 -> 0.35.6).** Install 0.35.6 on every path the daemon resolves, then restart. The first
+`index` of each repo re-reads every file because the binary version changed. Unlike 0.35.3 to 0.35.5, that
+re-extraction now keeps the node semantic fields (`description`, `requirement`, validation, with their original
+validator and time) of every symbol it emits again, so no backup is needed for them (#438). A symbol that is gone — a
 function removed, or a whole annotated file deleted — loses its fields and is reported as
-`SEMANTICS-DROPPED: <n> symbol(s) in <file>` on stderr. No store migration.
+`SEMANTICS-DROPPED: <n> symbol(s) in <file>` on stderr. On a COBOL repository the same re-extraction tags
+EXIT/CONTINUE/GOBACK-only paragraphs `behaviour=stub` / `exit_only`, so they leave the coverage denominator and the
+coverage percentage rises (CardDemo: 823 -> 673 behaviour-bearing nodes, real requirements unchanged). No store
+migration.
+
+**Known limits (tracked).** In free-format COBOL a statement word starting in column 73 or later is read as
+identification text, so its paragraph can still be stubbed (#475). A file that stays unreadable after an upgrade
+forces a full re-extract on every run (#476). A kill between the graph commit and the marker write, followed by a
+rules or binary rollback, can keep stale output (#477). On Postgres, a concurrent writer that changes a validation
+claim during a re-index can be overwritten by the restore (#463).
 
 ### Fixed
 
