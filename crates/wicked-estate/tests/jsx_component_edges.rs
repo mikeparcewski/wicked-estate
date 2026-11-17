@@ -3,7 +3,7 @@
 //! `SourceSheet` answered 0 dependents (wicked-studio's SourceSheet / SourcesPage).
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use wicked_estate_store::SqliteStore;
 
 fn fresh_dir(tag: &str) -> PathBuf {
@@ -13,7 +13,7 @@ fn fresh_dir(tag: &str) -> PathBuf {
     d
 }
 
-fn dependents(dir: &PathBuf, name: &str) -> Vec<String> {
+fn dependents(dir: &Path, name: &str) -> Vec<String> {
     let mut store = SqliteStore::in_memory().unwrap();
     wicked_estate::index_path(&mut store, dir).unwrap();
     let br = wicked_estate::blast_radius_by_name(&store, name, 12).unwrap();
