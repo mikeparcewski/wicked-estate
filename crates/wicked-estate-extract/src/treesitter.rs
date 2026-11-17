@@ -5060,7 +5060,7 @@ import React from 'react';
 import { SourceSheet } from './SourceSheet.js';
 import * as Ns from './ns.js';
 export function SourcesPage() {
-  return <section><SourceSheet open={true} /><Panel title="x">hi</Panel><Ns.Widget /><_Row /><$Cell /><div /></section>;
+  return <section><SourceSheet open={true} /><Panel title="x">hi</Panel><Ns.Widget /><_Row /><$Cell /><École /><A-b /><_x-y /><div /></section>;
 }
 export const Arrow = () => <Panel />;
 function div() { return 1; }
@@ -5095,8 +5095,9 @@ function div() { return 1; }
                     ("SourcesPage".to_string(), "Panel".to_string()),
                     ("SourcesPage".to_string(), "SourceSheet".to_string()),
                     ("SourcesPage".to_string(), "_Row".to_string()),
+                    ("SourcesPage".to_string(), "École".to_string()),
                 ],
-                "{lang}: one Calls ref per component element, none for <div>/<section>, a closing tag or <Ns.Widget>"
+                "{lang}: one Calls ref per component element, none for <div>/<section>, a hyphenated name, a closing tag or <Ns.Widget>"
             );
         }
     }

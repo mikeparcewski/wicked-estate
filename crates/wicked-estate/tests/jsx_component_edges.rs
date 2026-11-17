@@ -113,7 +113,7 @@ fn a_member_element_does_not_bind_to_another_modules_same_named_export() {
     .unwrap();
     fs::write(
         dir.join("src/Page.tsx"),
-        "import * as Ns from './ns.js';\nimport { Widget } from './other.js';\nexport function Page() { return <Ns.Widget />; }\nexport const keep = Widget;\n",
+        "import * as Ns from './ns';\nimport { Widget } from './other';\nexport function Page() { return <Ns.Widget />; }\nexport const keep = Widget;\n",
     )
     .unwrap();
     let deps = dependents(&dir, "Widget");

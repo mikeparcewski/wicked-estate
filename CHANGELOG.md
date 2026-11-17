@@ -6,9 +6,9 @@
 
 - A React component that is only rendered as JSX has dependents again (#481). `BlastRadius SourceSheet` on a
   TSX repository answered 0 dependents while `SourcesPage` rendered `<SourceSheet …/>`: the TSX and JavaScript
-  queries captured `call_expression` and `new_expression` only. A JSX element whose name does not start with a
-  lowercase letter (the JSX compilers' rule: `<div>` is an intrinsic tag; `<Panel>`, `<_Row>`, `<$Cell>` are
-  components) is now a `Calls` reference from the component that renders it, resolved through the import map like
+  queries captured `call_expression` and `new_expression` only. A JSX element whose name neither starts with an ASCII
+  lowercase letter nor contains a hyphen (the JSX compilers' rule: `<div>` and `<my-el>` are intrinsic tags; `<Panel>`,
+  `<_Row>`, `<$Cell>`, `<École>` are components) is now a `Calls` reference from the component that renders it, resolved through the import map like
   `SourceSheet()` would be. A closing tag adds no second edge. Not covered: `<Ns.Widget/>` (its leaf name alone
   would bind to any imported `Widget`, so it waits for receiver-aware binding), a component passed as a value
   (`component={SourceSheet}`), and an import with no use. The first `index` after the upgrade re-extracts each
