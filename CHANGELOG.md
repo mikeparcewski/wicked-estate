@@ -61,6 +61,12 @@
   back-fill (which sees no hints) cannot re-bind it to a new homonym. Calls and JSX elements alike. Not changed: an
   aliased import (`import { Actual as Card }`) resolves exactly as before (#486's alias half stays open), Python,
   and Svelte/Vue script blocks. The first `index` after the upgrade re-extracts each file.
+- A local `var` or `let` callee is read through its writes (#498): `var Card = () => null; Card = null; Card()` (or a
+  destructuring `[Card] = …`) no longer binds the replaced arrow, while a write that may not run (`if (on) Card = null`,
+  a loop body) keeps the arrow possible. Calls from a nested function, `const` and function declarations are
+  unchanged. A destructuring write takes effect at its own element, so a later default in the same pattern reads the
+  new value and its right-hand side the old one (#501). Long lists of identical declarations are shared, not copied
+  per call (#501).
 - Local-binding detection follows two more JS scoping rules (#492). A `var` in a nested block that redeclares a
   parameter is that parameter, so a call sees the last assignment before it: `function Parent(Card) { { var Card = () =>
   null } return Card() }` binds Parent to that arrow again (#488 had dropped the edge); a call before it, or after a
