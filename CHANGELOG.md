@@ -12,9 +12,9 @@
   `SourceSheet()` would be, through the same binding and import resolution (a parity test pins `<Card/>` to
   `Card()`). A closing tag adds no second edge. Not covered: `<Ns.Widget/>` (its leaf name alone
   would bind to any imported `Widget`, so it waits for receiver-aware binding), a component passed as a value
-  (`component={SourceSheet}`), and an import with no use. Inherited from call resolution: an element rendered
-  through an aliased import (`import { Actual as Card }`) or a prop-supplied component can bind to an unrelated
-  global `Card`, exactly as `Card()` does today (#486). The first `index` after the upgrade re-extracts each
+  (`component={SourceSheet}`), and an import with no use. An element rendered through an aliased import binds
+  exactly as the same call does, which can be an unrelated global `Card` (#486, alias half still open); a
+  prop-supplied component no longer does (see the #486 entry below). The first `index` after the upgrade re-extracts each
   TSX/JS/JSX file, which adds the new edges.
 - **The TypeScript LSP tier works on TypeScript 7, and on a workspace without its own `typescript`** (#484). TypeScript
   7 ships no `tsserver.js`, so `typescript-language-server` refused to start (`initialize` -32603, "Could not find a
@@ -45,6 +45,16 @@
     empty graph. A `file:` URI graph is refused too: SQLite would open it itself. Whoever owns the graph migrates it on its next write (`index`, or any write-mode open).
   - **Unchanged:** a write-mode server, a missing graph (served empty, as before; a graph behind a directory the
     server cannot search still reads as missing) and other schemes.
+- A call through a local binding no longer binds an unrelated global of the same name (#486, local-binding half).
+  In JS/TS, `function Holder({ Card }) { return <Card/>; }` made Holder a dependent of any unique `Card` elsewhere.
+  A callee bound by a parameter, a destructured prop (`{ Card }`, `{ c: Card }`, `{ Card = X }`), a local
+  `const`/`let`/`var` (hoisted `var` and `for (var … of …)` included), a catch or loop binding, or a named
+  function/class expression's own name is now parked as `local-binding:Card` and binds nothing. When the binding IS a
+  definition of the same file (a nested `function Card() {}`, a local `const Card = () => …`, captured by a nested
+  function too) the call binds exactly that definition. The identity travels in the ref's name, so an incremental
+  back-fill (which sees no hints) cannot re-bind it to a new homonym. Calls and JSX elements alike. Not changed: an
+  aliased import (`import { Actual as Card }`) resolves exactly as before (#486's alias half stays open), Python,
+  and Svelte/Vue script blocks. The first `index` after the upgrade re-extracts each file.
 
 ## [0.35.6] — 2026-11-16
 

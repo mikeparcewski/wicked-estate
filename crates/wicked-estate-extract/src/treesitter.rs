@@ -27,6 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
+use wicked_estate_core::refs::LOCAL_BINDING_PREFIX;
 use wicked_estate_core::{
     Descriptor, Edge, EdgeKind, Error, Extraction, Extractor, FlowEvidence, FlowFact,
     FlowSemantics, Language, Location, Node, NodeKind, ResolutionTier, Result, SourceFile, Span,
@@ -2002,6 +2003,281 @@ fn strip_def_name(raw: &str) -> String {
 
 // ── Import-map extraction helpers ────────────────────────────────────────────
 
+/// The JS/TS node kinds that open a function scope (their parameters and `var`s live there).
+const JS_FUNCTION_KINDS: &[&str] = &[
+    "function_declaration",
+    "function_expression",
+    "arrow_function",
+    "method_definition",
+    "generator_function",
+    "generator_function_declaration",
+];
+
+/// Nodes a hoisted-`var` scan never enters: another function's or a class's own `var` scope.
+fn js_var_boundary(kind: &str) -> bool {
+    JS_FUNCTION_KINDS.contains(&kind)
+        || matches!(
+            kind,
+            "class" | "class_declaration" | "abstract_class_declaration" | "class_static_block"
+        )
+}
+
+/// Every name a binding pattern binds (a parameter list, a destructuring, a declarator name):
+/// a pair's value, a default's left side, a rest's target — never a property key, a default value
+/// or a type annotation (wicked-estate#486).
+fn js_pattern_names(node: tree_sitter::Node, src: &[u8], out: &mut Vec<String>) {
+    match node.kind() {
+        "identifier" | "shorthand_property_identifier_pattern" => {
+            if let Ok(t) = node.utf8_text(src) {
+                out.push(t.to_string());
+            }
+        }
+        "pair_pattern" => {
+            if let Some(v) = node.child_by_field_name("value") {
+                js_pattern_names(v, src, out);
+            }
+        }
+        "assignment_pattern" | "object_assignment_pattern" => {
+            if let Some(l) = node.child_by_field_name("left") {
+                js_pattern_names(l, src, out);
+            }
+        }
+        "required_parameter" | "optional_parameter" => {
+            if let Some(p) = node.child_by_field_name("pattern") {
+                js_pattern_names(p, src, out);
+            }
+        }
+        "formal_parameters" | "object_pattern" | "array_pattern" | "rest_pattern" => {
+            let mut walk = node.walk();
+            for child in node.named_children(&mut walk) {
+                js_pattern_names(child, src, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn js_pattern_binds(node: tree_sitter::Node, name: &str, src: &[u8]) -> bool {
+    let mut names = Vec::new();
+    js_pattern_names(node, src, &mut names);
+    names.iter().any(|n| n == name)
+}
+
+/// The declarations one statement makes: (bound name, the declaring node's start byte). The node
+/// is a `variable_declarator` or a function/class declaration — exactly a definition's anchor when
+/// the declaration is one (`const Card = () => …`, `function Card() {}`), so the caller can join
+/// the binding to its definition by start byte. `var_only` keeps only `var` declarators.
+fn js_statement_decls(stmt: tree_sitter::Node, src: &[u8], var_only: bool) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    match stmt.kind() {
+        "variable_declaration" | "lexical_declaration" => {
+            if var_only && stmt.kind() != "variable_declaration" {
+                return out;
+            }
+            let mut walk = stmt.walk();
+            for d in stmt.named_children(&mut walk) {
+                if d.kind() != "variable_declarator" {
+                    continue;
+                }
+                if let Some(p) = d.child_by_field_name("name") {
+                    let mut names = Vec::new();
+                    js_pattern_names(p, src, &mut names);
+                    out.extend(names.into_iter().map(|n| (n, d.start_byte())));
+                }
+            }
+        }
+        // `for (var x of xs)`: a hoisted `var` too, with no declarator node.
+        "for_in_statement" if var_only => {
+            let is_var = stmt
+                .child_by_field_name("kind")
+                .is_some_and(|k| k.kind() == "var");
+            if let Some(left) = stmt.child_by_field_name("left").filter(|_| is_var) {
+                let mut names = Vec::new();
+                js_pattern_names(left, src, &mut names);
+                out.extend(names.into_iter().map(|n| (n, left.start_byte())));
+            }
+        }
+        "function_declaration"
+        | "generator_function_declaration"
+        | "class_declaration"
+        | "abstract_class_declaration"
+            if !var_only =>
+        {
+            if let Some(t) = stmt
+                .child_by_field_name("name")
+                .and_then(|id| id.utf8_text(src).ok())
+            {
+                out.push((t.to_string(), stmt.start_byte()));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// The bindings a block-like scope makes: its statements' declarations, every case's statements
+/// for a switch body (cases share one scope), or its own catch/loop binding (a `for (const x of …)`,
+/// never a bare `for (x of …)` assignment). Pattern bindings carry the pattern's start byte, which
+/// no definition anchors.
+fn js_scope_decls(scope: tree_sitter::Node, src: &[u8]) -> Vec<(String, usize)> {
+    let pattern = |p: tree_sitter::Node| {
+        let mut names = Vec::new();
+        js_pattern_names(p, src, &mut names);
+        names
+            .into_iter()
+            .map(|n| (n, p.start_byte()))
+            .collect::<Vec<_>>()
+    };
+    match scope.kind() {
+        "catch_clause" => scope
+            .child_by_field_name("parameter")
+            .map(pattern)
+            .unwrap_or_default(),
+        "for_in_statement" => scope
+            .child_by_field_name("left")
+            .filter(|_| scope.child_by_field_name("kind").is_some())
+            .map(pattern)
+            .unwrap_or_default(),
+        "for_statement" => scope
+            .child_by_field_name("initializer")
+            .map(|init| js_statement_decls(init, src, false))
+            .unwrap_or_default(),
+        "switch_body" => {
+            let mut out = Vec::new();
+            let mut walk = scope.walk();
+            for case in scope.named_children(&mut walk) {
+                let mut walk = case.walk();
+                for stmt in case.named_children(&mut walk) {
+                    out.extend(js_statement_decls(stmt, src, false));
+                }
+            }
+            out
+        }
+        _ => {
+            let mut out = Vec::new();
+            let mut walk = scope.walk();
+            for stmt in scope.named_children(&mut walk) {
+                out.extend(js_statement_decls(stmt, src, false));
+            }
+            out
+        }
+    }
+}
+
+/// Every `var` declaration in a function body, outside nested functions, classes and static
+/// blocks: `var` is function-scoped, so `if (c) { var x = … }` binds `x` for the whole body.
+fn js_hoisted_vars(body: tree_sitter::Node, src: &[u8]) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        out.extend(js_statement_decls(n, src, true));
+        let mut walk = n.walk();
+        stack.extend(
+            n.named_children(&mut walk)
+                .filter(|c| !js_var_boundary(c.kind())),
+        );
+    }
+    out
+}
+
+/// Every name a `var` declaration in the file binds (over-inclusive). A prefilter, so the
+/// hoisted-`var` body scan of [`js_local_binding`] runs only for a name some `var` declares —
+/// never in most TS files.
+fn js_var_names(root: tree_sitter::Node, src: &[u8]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        names.extend(js_statement_decls(n, src, true).into_iter().map(|(n, _)| n));
+        let mut walk = n.walk();
+        stack.extend(n.named_children(&mut walk));
+    }
+    names
+}
+
+/// Per-file memo of each scope node's bindings, keyed by the node id: every call site asks its
+/// enclosing scopes, so each scope is read once rather than once per call.
+type JsScopeMemo = HashMap<usize, Vec<(String, usize)>>;
+
+/// Whether the callee `name` at `node` is bound LOCALLY (wicked-estate#486), and by what: by an
+/// enclosing function's parameters or own name, by a declaration in an enclosing block (a hoisted
+/// `var` included), up to the module. `Some(starts)` = local; `starts` are the declaring nodes of
+/// the innermost scope that binds it, which the caller joins to a definition by its anchor start
+/// (a nested `function Card() {}`, a local `const Card = () => …`); empty = a value binding (a
+/// parameter, a prop). `None` = a module-level binding (an import, a top-level declaration) or an
+/// unbound name: the call keeps ordinary name resolution.
+fn js_local_binding(
+    node: tree_sitter::Node,
+    name: &str,
+    src: &[u8],
+    var_names: &HashSet<String>,
+    memo: &mut JsScopeMemo,
+) -> Option<Vec<usize>> {
+    let pos = node.start_byte();
+    let mut current = node.parent();
+    while let Some(n) = current {
+        let kind = n.kind();
+        if kind == "program" {
+            return None;
+        }
+        if JS_FUNCTION_KINDS.contains(&kind) {
+            for field in ["parameters", "parameter"] {
+                if let Some(p) = n.child_by_field_name(field) {
+                    if js_pattern_binds(p, name, src) {
+                        return Some(Vec::new());
+                    }
+                }
+            }
+            // A named function expression binds its own name inside itself.
+            if matches!(kind, "function_expression" | "generator_function")
+                && n.child_by_field_name("name")
+                    .is_some_and(|id| id.utf8_text(src).is_ok_and(|t| t == name))
+            {
+                return Some(Vec::new());
+            }
+            // A body `var` is not visible to a default parameter: only a call in the body sees it.
+            if let Some(body) = n
+                .child_by_field_name("body")
+                .filter(|b| var_names.contains(name) && b.start_byte() <= pos && pos < b.end_byte())
+            {
+                let starts: Vec<usize> = js_hoisted_vars(body, src)
+                    .into_iter()
+                    .filter(|(n, _)| n == name)
+                    .map(|(_, at)| at)
+                    .collect();
+                if !starts.is_empty() {
+                    return Some(starts);
+                }
+            }
+        } else if kind == "class"
+            && n.child_by_field_name("name")
+                .is_some_and(|id| id.utf8_text(src).is_ok_and(|t| t == name))
+        {
+            // A named class expression binds its own name inside its body.
+            return Some(Vec::new());
+        } else if matches!(
+            kind,
+            "statement_block"
+                | "for_statement"
+                | "for_in_statement"
+                | "catch_clause"
+                | "switch_body"
+                | "class_static_block"
+        ) {
+            let decls = memo.entry(n.id()).or_insert_with(|| js_scope_decls(n, src));
+            let starts: Vec<usize> = decls
+                .iter()
+                .filter(|(n, _)| n == name)
+                .map(|(_, at)| *at)
+                .collect();
+            if !starts.is_empty() {
+                return Some(starts);
+            }
+        }
+        current = n.parent();
+    }
+    None
+}
+
 /// Extract a name→module map from a single import match given the full statement text and the
 /// already-stripped module source string. Best-effort; returns an empty map on parse failure.
 ///
@@ -3177,6 +3453,17 @@ impl Extractor for TreeSitterExtractor {
         let mut file_import_map: HashMap<String, String> = HashMap::new();
         // Module sources that could not be parsed into name→source pairs (best-effort fallback).
         let mut file_import_sources: Vec<String> = Vec::new();
+        // Call sites whose callee is a local binding (param, destructured prop, local declaration),
+        // keyed by the ref's site span -> the declaring nodes' start bytes (wicked-estate#486).
+        // JS/TS/TSX only.
+        let mut local_bound_calls: HashMap<Span, Vec<usize>> = HashMap::new();
+        let js_family = matches!(self.lang_name.as_str(), "javascript" | "typescript" | "tsx");
+        let mut js_scopes: JsScopeMemo = HashMap::new();
+        let js_vars: HashSet<String> = if js_family {
+            js_var_names(tree.root_node(), src)
+        } else {
+            HashSet::new()
+        };
 
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(query, tree.root_node(), src);
@@ -3194,6 +3481,7 @@ impl Extractor for TreeSitterExtractor {
             let mut def_owner: Option<(&str, String)> = None; // (kind, owner type name)
 
             let mut call_fn: Option<(String, usize, Span)> = None; // (name, pos, span)
+            let mut call_fn_node: Option<tree_sitter::Node> = None;
             let mut call_method: Option<(String, usize, Span)> = None;
 
             let mut import_stmt: Option<(String, Span)> = None; // (raw_text, span)
@@ -3264,6 +3552,7 @@ impl Extractor for TreeSitterExtractor {
                     }
                     CaptureRole::CallFunction => {
                         call_fn = Some((text, pos, span));
+                        call_fn_node = Some(c.node);
                     }
                     CaptureRole::CallMethod => {
                         call_method = Some((text, pos, span));
@@ -3489,6 +3778,13 @@ impl Extractor for TreeSitterExtractor {
             // to the program named SUB; identifier calls are unaffected (no quotes to strip).
             if let Some((name, pos, span)) = call_fn {
                 let site_span = call_value_span.unwrap_or(span);
+                if js_family {
+                    if let Some(binding) = call_fn_node
+                        .and_then(|n| js_local_binding(n, &name, src, &js_vars, &mut js_scopes))
+                    {
+                        local_bound_calls.insert(site_span, binding);
+                    }
+                }
                 raw_refs.push((strip_literal_quotes(&name), EdgeKind::Calls, pos, site_span));
             } else if let Some((name, pos, span)) = call_method {
                 let site_span = call_value_span.unwrap_or(span);
@@ -4033,6 +4329,27 @@ impl Extractor for TreeSitterExtractor {
                 file_symbol.clone()
             } else {
                 enclosing(&defs, pos).unwrap_or_else(|| file_symbol.clone())
+            };
+            // A local binding's identity travels in the ref's NAME, because a parked ref keeps no
+            // hints and a back-fill re-resolves it by name alone (wicked-estate#486): it becomes
+            // `local-binding:<name>[:<symbol>]` (the definition it binds in this file, if any), so
+            // the name resolvers never bind it to a same-named global.
+            let local_binding = if ek == EdgeKind::Calls {
+                local_bound_calls.get(&span)
+            } else {
+                None
+            };
+            let name = if let Some(starts) = local_binding {
+                // The definition the binding IS: anchored exactly at a declaring node.
+                let bound = starts
+                    .iter()
+                    .find_map(|at| defs.iter().find(|d| d.name == name && d.start == *at));
+                match bound {
+                    Some(d) => format!("{LOCAL_BINDING_PREFIX}{name}:{}", d.symbol.as_str()),
+                    None => format!("{LOCAL_BINDING_PREFIX}{name}"),
+                }
+            } else {
+                name
             };
             let mut r = UnresolvedRef::new(from, name, ek.clone(), Location::new(&file.path, span));
             // Attach import hints to Calls refs so the ImportMapResolver can use them.
@@ -6292,6 +6609,105 @@ class Panel extends React.Component {
     // ── Import-map hint tests ─────────────────────────────────────────────────
 
     /// TypeScript: named imports produce hints["imports"] mapping each local name to its module.
+    /// estate#486 descope: an aliased import keeps today's naming (the local name), JS/TS and
+    /// Python alike; only local bindings are renamed.
+    #[test]
+    fn an_aliased_call_keeps_its_local_name() {
+        let code = "import { Actual as Card } from './a';\nfunction main() { Card(); }\n";
+        let ex = TreeSitterExtractor::for_language("typescript")
+            .unwrap()
+            .extract(&sf("src/main.ts", "typescript", code))
+            .unwrap();
+        let card = ex
+            .refs
+            .iter()
+            .find(|r| r.kind == EdgeKind::Calls && r.raw_name == "Card")
+            .expect("Card() keeps its local name");
+        assert!(!card.hints.contains_key("import_local"));
+    }
+
+    /// estate#486: a callee bound by a parameter, destructured prop or local declaration is named
+    /// `local-binding:<name>` (`:<symbol>` when it binds a definition of the file); an imported or
+    /// module-level callee, a property KEY and a bare `for (x of …)` assignment are not.
+    #[test]
+    fn locally_bound_callees_are_named_local_bindings_for_calls_and_jsx() {
+        let code = r#"
+import { Imported } from './a';
+function Top() { return null; }
+export function P1(Card) { return Card(); }
+export function P2({ Card }) { return <Card />; }
+export function P3({ x: Card }) { return Card(); }
+export function P4({ Card = Top }) { return <Card />; }
+export const P5 = Card => Card();
+export function P6() { const Card = Top; return <Card />; }
+export function P7() { try { return 1; } catch (Card) { return Card(); } }
+export function P8(xs) { for (const Card of xs) { Card(); } }
+export function P9(s) { if (s) { var Card = s; } return Card(); }
+export function PA(n) { switch (n) { case 0: const Card = Top; case 1: return <Card />; } }
+export function PB() { const f = function Card() { return Card(); }; return f; }
+export function PC(Card, u = () => { function Card() { return 1; } }) { return Card(); }
+export function PD(xs) { for (var Card of xs) {} return <Card />; }
+export function N1() { return Imported(); }
+export function N2() { return <Top />; }
+export function N3({ Imported: c }) { return Imported(); }
+export function N4() { { const Top = 1; } return Top(); }
+export function N5() { for (Top of [Top]) { Top(); } }
+export function N6(value = Top()) { var Top; return value; }
+export function N7() { abstract class L { static { var Top; } } return Top(); }
+export function D1() { function Card() { return null; } return Card(); }
+export function D2() { const Card = () => null; function Inner() { return <Card />; } return Inner(); }
+export function D3() { var Card; function Card() { return null; } return Card(); }
+"#;
+        let ex = TreeSitterExtractor::for_language("tsx")
+            .unwrap()
+            .extract(&sf("src/p.tsx", "tsx", code))
+            .unwrap();
+        let names = |from: &str| -> Vec<String> {
+            ex.refs
+                .iter()
+                .filter(|r| r.kind == EdgeKind::Calls && r.from.as_str().contains(from))
+                .map(|r| r.raw_name.clone())
+                .collect()
+        };
+        for p in [
+            "/P1(", "/P2(", "/P3(", "/P4(", "/P5(", "/P6(", "/P7(", "/P8(", "/P9(", "/PA(", "/PB(",
+            "/PC(", "/PD(",
+        ] {
+            let got = names(p);
+            assert!(
+                got.iter().any(|n| n == "local-binding:Card"),
+                "{p}: the callee is a local value binding: {got:?}"
+            );
+        }
+        for n in ["/N1(", "/N2(", "/N3(", "/N4(", "/N5(", "/N6(", "/N7("] {
+            let got = names(n);
+            assert!(
+                !got.is_empty() && got.iter().all(|g| !g.starts_with("local-binding:")),
+                "{n}: the callee is a module binding: {got:?}"
+            );
+        }
+        // A local definition: the ref carries the nested definition's symbol.
+        let card_defs: Vec<&str> = ex
+            .nodes
+            .iter()
+            .filter(|n| n.name == "Card")
+            .map(|n| n.symbol.as_str())
+            .collect();
+        for (caller, label) in [
+            ("/D1(", "nested function"),
+            ("/Inner(", "captured const arrow"),
+            ("/D3(", "a var sharing the function's binding"),
+        ] {
+            let got = names(caller);
+            assert!(
+                got.iter().any(|g| g
+                    .strip_prefix("local-binding:Card:")
+                    .is_some_and(|sym| card_defs.contains(&sym))),
+                "{label}: {got:?} vs defs {card_defs:?}"
+            );
+        }
+    }
+
     #[test]
     fn ts_import_hints_named_imports_attached_to_call_refs() {
         let code = r#"

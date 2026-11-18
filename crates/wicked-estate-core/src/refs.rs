@@ -18,6 +18,15 @@ use serde::{Deserialize, Serialize};
 /// prefix survives in the parked `unresolved_refs` row, so a back-fill re-binds it the same way.
 pub const COBOL_DYNAMIC_CALL_PREFIX: &str = "cobol-dynamic-call:";
 
+/// `raw_name` prefix of a JS/TS call whose callee is a LOCAL binding — a parameter, a destructured
+/// prop, a local declaration (wicked-estate#486): `local-binding:<name>`, or
+/// `local-binding:<name>:<symbol>` when the binding is a definition in the same file (a nested
+/// `function Card() {}`, a local `const Card = () => …`). The prefix keeps the name-based resolvers
+/// from binding a same-named global; only the scoped resolver binds the `<symbol>` form, exactly
+/// to that symbol. Like the COBOL prefix it survives in the parked `unresolved_refs` row, so a
+/// back-fill never re-binds a local by its bare name.
+pub const LOCAL_BINDING_PREFIX: &str = "local-binding:";
+
 /// The persisted form of an APEXlang `@reference` (estate#313).
 ///
 /// `SqliteStore` keeps a parked ref's `raw_name`, `kind` and site, never its hints, so everything
