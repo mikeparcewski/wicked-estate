@@ -433,7 +433,7 @@ fn nested_before_kept() {
     assert_one("nested_before_kept", &g, "ViaJsx", "src/caller/InnerJsx().");
 }
 
-/// The fastest of three extractions of `text`.
+/// The faster of two extractions of `text`.
 fn extract_time(text: &str) -> Duration {
     let ex = TreeSitterExtractor::for_language("tsx").unwrap();
     let file = SourceFile {
@@ -441,7 +441,7 @@ fn extract_time(text: &str) -> Duration {
         language: Language::new("tsx"),
         text: text.into(),
     };
-    (0..3)
+    (0..2)
         .map(|_| {
             let t = Instant::now();
             ex.extract(&file).unwrap();
@@ -459,7 +459,9 @@ fn write_lookup_size() {
     if BUILD == Build::Main {
         return;
     }
-    let n = 10_000;
+    // At 10k the old per-call scan measured 1.9x on a CI runner (1.60 s vs 0.83 s); its extra
+    // cost grows with n squared, the shared cost with n, so 30k puts it well past 2x.
+    let n = 30_000;
     let body = "Card = null; Card();\n".repeat(n);
     let file = |param: &str| {
         format!("export function P({param}: any) {{ {{ var Card = () => null; }}\n{body}}}\n")
