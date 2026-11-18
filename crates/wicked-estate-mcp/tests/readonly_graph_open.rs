@@ -334,3 +334,75 @@ fn a_file_uri_graph_is_refused_by_a_read_only_server_and_never_written() {
         assert!(!tmp.path().join(side_file).exists(), "{side_file} created");
     }
 }
+
+/// wicked-estate#491: refusing an older WAL graph (the fixture as an older build left it, no
+/// sidecars) creates no `-wal` or `-shm` beside it: the currency check reads the database file
+/// alone through an `immutable` connection before SQLite's WAL machinery touches the directory.
+#[cfg(unix)]
+#[test]
+fn refusing_an_older_wal_graph_creates_no_file_beside_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let side = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("estate.db");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/estate_v0120.db"),
+        &db,
+    )
+    .unwrap();
+    let head = std::fs::read(&db).unwrap();
+    assert_eq!(head[18], 2, "the fixture is a WAL graph");
+    let before = head;
+
+    let mut mcp = McpChild::spawn(&db, side.path(), &["--readonly"]);
+    let resp = mcp.request(
+        "tools/call",
+        json!({ "name": "SearchEntity", "arguments": { "name": "anything" } }),
+    );
+    mcp.finish();
+
+    let err = resp["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("an older WAL graph must be refused: {resp}"));
+    assert!(err.contains("refused"), "{err}");
+    assert!(
+        std::fs::read(&db).unwrap() == before,
+        "the graph was written"
+    );
+    for side_file in ["estate.db-wal", "estate.db-shm", "estate.db-journal"] {
+        assert!(!tmp.path().join(side_file).exists(), "{side_file} created");
+    }
+}
+
+/// wicked-estate#491: a graph the server cannot reach (its directory may not be searched) is
+/// refused with the reason, never served as an empty graph that answers "nothing found".
+#[cfg(unix)]
+#[test]
+fn a_graph_behind_an_unsearchable_directory_is_refused_not_served_empty() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let side = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("locked");
+    std::fs::create_dir(&dir).unwrap();
+    let db = dir.join("estate.db");
+    seed(&db, "delete");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // A process that can search it anyway (root) cannot test this.
+    let searchable = std::fs::metadata(&db).is_ok();
+
+    let mut mcp = McpChild::spawn(&db, side.path(), &["--readonly"]);
+    let resp = mcp.request(
+        "tools/call",
+        json!({ "name": "SearchEntity", "arguments": { "name": "alpha" } }),
+    );
+    mcp.finish();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if searchable {
+        eprintln!("skipped: this process can search a 0000 directory");
+        return;
+    }
+
+    let err = resp["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("an unreachable graph must be refused, not empty: {resp}"));
+    assert!(err.contains("refused"), "{err}");
+}

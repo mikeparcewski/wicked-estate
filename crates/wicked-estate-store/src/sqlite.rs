@@ -218,6 +218,99 @@ fn schema_objects_present(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// The read-only currency check behind [`SqliteStore::open_readonly_current`]. Its error names
+/// what is missing: a schema object, or the columns this build's schema has that the graph lacks.
+fn check_current(conn: &Connection) -> Result<()> {
+    schema_objects_present(conn)
+        .and_then(|()| migrate_schema(conn))
+        .and_then(|()| migrate_fts_rowids(conn))
+        .map_err(|e| {
+            let missing = missing_columns(conn);
+            if missing.is_empty() {
+                wicked_estate_core::Error::Invalid(format!(
+                    "the graph's schema predates this build and needs a writer's migration ({e})"
+                ))
+            } else {
+                wicked_estate_core::Error::Invalid(format!(
+                    "the graph has no column {}: its schema predates this build",
+                    missing.join(", ")
+                ))
+            }
+        })
+}
+
+/// The `table.column` pairs a fresh graph of this build has that `conn`'s graph lacks, for tables
+/// both have. Only names a refusal the migration check already made (wicked-estate#491).
+fn missing_columns(conn: &Connection) -> Vec<String> {
+    let columns = |c: &Connection, table: &str| -> BTreeSet<String> {
+        let Ok(mut s) = c.prepare(&format!("PRAGMA table_info(\"{table}\")")) else {
+            return BTreeSet::new();
+        };
+        s.query_map([], |r| r.get::<_, String>(1))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    };
+    let Ok(fresh) = SqliteStore::in_memory() else {
+        return Vec::new();
+    };
+    let tables: Vec<String> = fresh
+        .conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        .and_then(|mut s| {
+            s.query_map([], |r| r.get::<_, String>(0))
+                .map(|rows| rows.flatten().collect())
+        })
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for t in tables {
+        let have = columns(conn, &t);
+        if have.is_empty() {
+            continue; // A missing table is named by schema_objects_present.
+        }
+        for c in columns(&fresh.conn, &t).difference(&have) {
+            out.push(format!("{t}.{c}"));
+        }
+    }
+    out
+}
+
+/// Whether the database file's header says WAL (file format bytes 18-19 are 2).
+#[cfg(unix)]
+fn is_wal_format(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 20];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok()
+        && head[18] == 2
+}
+
+#[cfg(unix)]
+fn wal_sibling(path: &std::path::Path) -> std::path::PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push("-wal");
+    std::path::PathBuf::from(s)
+}
+
+/// `file:<path>?immutable=1` for an absolute Unix path, its bytes percent-encoded (RFC 3986
+/// unreserved characters and `/` kept), so any byte, a backslash or invalid UTF-8 included, names
+/// the same file. A canonical path starts with exactly one `/`, so it is never read as a URI
+/// authority.
+#[cfg(unix)]
+fn immutable_uri(path: &std::path::Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut out = String::from("file:");
+    for &b in path.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out.push_str("?immutable=1");
+    out
+}
+
 fn migrate_schema(conn: &Connection) -> Result<()> {
     // Snapshot the current annotations columns once; the presence check IS the version gate.
     let mut stmt = conn.prepare("PRAGMA table_info(annotations)").map_err(st)?;
@@ -1100,19 +1193,71 @@ impl SqliteStore {
     /// migrations add, so a graph written by an older build answers wrongly or not at all through a
     /// connection that cannot migrate it. The check runs those same migrations on the read-only
     /// connection: each one reads before it writes, so on a current graph they write nothing and
-    /// succeed, and on a stale one the first write they attempt fails, which is the answer. The
-    /// caller then opens the graph the way it did before (a writer open migrates it).
+    /// succeed, and on a stale one the first write they attempt fails, which is the answer. A
+    /// refused graph is never opened any other way: its owner migrates it on its next write.
+    ///
+    /// On Unix, a WAL graph with no `-wal` file beside it is checked first through an `immutable`
+    /// connection, which reads the database file alone and creates nothing, so refusing it leaves
+    /// no `-wal` or `-shm` behind (wicked-estate#491). The checks use the resolved path, where
+    /// SQLite keeps the sidecars. One that passes is then opened as above, where SQLite may create
+    /// them to serve it. If a `-wal` appeared meanwhile (a writer), the decision is the ordinary
+    /// open's.
     pub fn open_readonly_current(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let path = path.as_ref();
+        #[cfg(unix)]
+        if let Ok(real) = std::fs::canonicalize(path) {
+            if is_wal_format(&real) && !wal_sibling(&real).exists() {
+                let conn = Connection::open_with_flags(
+                    immutable_uri(&real),
+                    OpenFlags::SQLITE_OPEN_READ_ONLY
+                        | OpenFlags::SQLITE_OPEN_URI
+                        | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )
+                .map_err(st)?;
+                if let Err(e) = check_current(&conn) {
+                    if !wal_sibling(&real).exists() {
+                        return Err(e);
+                    }
+                }
+            }
+        }
         let store = Self::open_readonly(path)?;
-        schema_objects_present(&store.conn)
-            .and_then(|()| migrate_schema(&store.conn))
-            .and_then(|()| migrate_fts_rowids(&store.conn))
-            .map_err(|e| {
-                wicked_estate_core::Error::Invalid(format!(
-                    "the graph's schema predates this build and needs a writer's migration ({e})"
-                ))
-            })?;
+        check_current(&store.conn)?;
         Ok(store)
+    }
+
+    /// Leave an on-disk graph in rollback-journal (DELETE) mode: checkpoint its WAL into the
+    /// database, then switch the journal mode (wicked-crew#1497). A reader that may not write the
+    /// graph's directory cannot open a WAL graph (it needs a `-shm` it cannot create), so the owner
+    /// calls this after its last write. Any later writer open switches it back to WAL. Waits up to
+    /// 15 s for other connections; an error if the mode did not change.
+    pub fn leave_in_delete_journal(path: impl AsRef<std::path::Path>) -> Result<()> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(st)?;
+        conn.busy_timeout(std::time::Duration::from_secs(15))
+            .map_err(st)?;
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .map_err(st)?;
+        // Stepped to its end, so a failed commit of the header change is an error here (query_row
+        // would drop it), then read back: the mode a fresh statement reports is the mode that landed.
+        {
+            let mut stmt = conn.prepare("PRAGMA journal_mode=DELETE").map_err(st)?;
+            let mut rows = stmt.query([]).map_err(st)?;
+            while rows.next().map_err(st)?.is_some() {}
+        }
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .map_err(st)?;
+        if mode.eq_ignore_ascii_case("delete") {
+            Ok(())
+        } else {
+            Err(wicked_estate_core::Error::Invalid(format!(
+                "the journal mode stayed {mode} (another connection holds the graph)"
+            )))
+        }
     }
 
     /// Open an in-memory store (tests, ephemeral use).
@@ -7496,6 +7641,41 @@ mod tests {
         );
     }
 
+    /// wicked-estate#491 (codex): the immutable pre-check looks for the `-wal` beside the RESOLVED
+    /// graph. Reached through a symlink, a graph whose file is stale but whose committed migration
+    /// is still in the target's `-wal` (a writer has it open) is current, and is served.
+    #[cfg(unix)]
+    #[test]
+    fn a_current_graph_reached_through_a_link_is_not_refused_by_the_immutable_precheck() {
+        let dir = unique_test_dir("ro-alias");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.db");
+        drop(SqliteStore::open(&real).unwrap());
+        Connection::open(&real)
+            .unwrap()
+            .execute_batch("DROP TABLE search_misses;")
+            .unwrap();
+        // A second connection stays open, so the writer's migration stays in real.db-wal.
+        let holder = Connection::open(&real).unwrap();
+        holder
+            .execute_batch("PRAGMA wal_autocheckpoint=0;")
+            .unwrap();
+        let _: i64 = holder
+            .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
+            .unwrap();
+        drop(SqliteStore::open(&real).unwrap());
+        let wal = dir.join("real.db-wal");
+        assert!(wal.exists(), "the migration is still in the WAL");
+        let alias = dir.join("alias.db");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        assert!(
+            SqliteStore::open_readonly_current(&alias).is_ok(),
+            "a current graph must not be refused through its link"
+        );
+        drop(holder);
+    }
+
     /// wicked-crew#1497: a graph this build wrote (empty or not) passes the read-only currency
     /// check without a byte written; one missing a schema object or column is refused, untouched.
     #[test]
@@ -7534,7 +7714,12 @@ mod tests {
         let err = SqliteStore::open_readonly_current(&stale)
             .err()
             .expect("stale column refused");
-        assert!(err.to_string().contains("predates this build"), "{err}");
+        // The refusal names the missing column (wicked-estate#491).
+        assert!(
+            err.to_string().contains("annotations.last_verified")
+                && err.to_string().contains("predates this build"),
+            "{err}"
+        );
         assert!(std::fs::read(&stale).unwrap() == before);
         let no_table = dir.join("no-table.db");
         std::fs::copy(&full, &no_table).unwrap();
