@@ -64,7 +64,9 @@
 - Local-binding detection follows two more JS scoping rules (#492). A `var` in a nested block that redeclares a
   parameter is that parameter, so a call sees the last assignment before it: `function Parent(Card) { { var Card = () =>
   null } return Card() }` binds Parent to that arrow again (#488 had dropped the edge); a call before it, or after a
-  reassignment, binds nothing. A class static block is a `var` scope of its own, read the same way, so
+  plain reassignment, binds nothing, and so does a call whose last write before it is a destructuring pattern
+  (`[Card] = …`, `({ Card } = …)`, `for ([Card] of …)`; #497). A call finds the write it sees by binary search, so
+  looking up writes no longer grows with every call. A class static block is a `var` scope of its own, read the same way, so
   `static { if (on) { var Card = make() } Card() }` no longer binds a global `Card`. Calls and JSX alike.
 
 ## [0.35.6] — 2026-11-16

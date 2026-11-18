@@ -3,26 +3,49 @@
 //! value it sees; a class static block is a `var` scope of its own. Each case runs for calls and
 //! JSX against an unrelated global `Card` in `other.tsx`, and asserts the exact targets.
 //!
-//! Same input, three builds. [`BUILD`] names the build this copy asserts; the two baselines are
-//! this file with only that line changed, run by CI on throwaway branches of those commits:
-//! | case            | before #488 (`Pre488`) | main after #488 (`Main`) | this change (`Head`) |
-//! |-----------------|------------------------|--------------------------|----------------------|
-//! | param_var       | local arrow            | none (the bug)           | local arrow          |
-//! | param_var_after | local arrow            | none                     | none                 |
-//! | var_function    | local fn               | local fn                 | local fn             |
-//! | static_arrow    | none (a tie)           | none (a tie)             | each class's arrow   |
-//! | static_value    | other.tsx              | other.tsx                | none (parked)        |
-//! | reassigned      | local arrow            | none                     | none                 |
-//! | nested_replaced | local arrow            | none                     | none                 |
-//! | catch_assigned  | local arrow            | none                     | none                 |
-//! | static_before   | none (a tie)           | none (a tie)             | none (parked)        |
+//! Same input, four builds. [`BUILD`] names the build this copy asserts; the baselines are this
+//! file with only that line changed, pushed for the PR on throwaway branches of those commits,
+//! where estate's ordinary CI runs them (nothing here automates that):
+//! | case             | before #488 (`Pre488`) | after #488 (`Main`) | after #493 (`Main493`) | this change (`Head`) |
+//! |------------------|------------------------|---------------------|------------------------|----------------------|
+//! | param_var        | local arrow            | none (the bug)      | local arrow            | local arrow          |
+//! | param_var_after  | local arrow            | none                | none                   | none                 |
+//! | var_function     | local fn               | local fn            | local fn               | local fn             |
+//! | static_arrow     | none (a tie)           | none (a tie)        | each class's arrow     | each class's arrow   |
+//! | static_value     | other.tsx              | other.tsx           | none (parked)          | none (parked)        |
+//! | reassigned       | local arrow            | none                | none                   | none                 |
+//! | nested_replaced  | local arrow            | none                | none                   | none                 |
+//! | catch_assigned   | local arrow            | none                | none                   | none                 |
+//! | static_before    | none (a tie)           | none (a tie)        | none (parked)          | none (parked)        |
+//! | array_destructed | local arrow            | none                | stale arrow (#497)     | none                 |
+//! | object_destructed| local arrow            | none                | stale arrow (#497)     | none                 |
+//! | for_destructed   | local arrow            | none                | none                   | none                 |
+//! | nonnull_destructed| local arrow           | none                | stale arrow (#497)     | none                 |
+//! | destructed_after | local arrow            | none                | local arrow            | local arrow          |
+//! | destructed_overwritten | local arrow      | none                | local arrow            | local arrow          |
+//! | destructed_shadowed | local arrow         | none                | local arrow            | local arrow          |
+//! | logical_kept     | local arrow            | none                | local arrow            | local arrow          |
+//! | destructed_rhs   | local arrow            | none                | local arrow            | local arrow          |
+//! | update_written   | local arrow            | none                | stale arrow            | none                 |
+//! | as_written       | local arrow            | none                | stale arrow            | none                 |
+//! | nested_before_kept | local arrow          | none                | none                   | none                 |
+//!
+//! `write_lookup_size` (#497): on `Head` the bound file costs under twice the unbound one; on
+//! `Main493` (the per-call scan) over twice, which shows the test catches it. Not timed on
+//! `Main`, whose unbound path rescans the body per call (#493 memoised it).
 
 #[allow(dead_code)]
 #[derive(PartialEq)]
 enum Build {
     Pre488,
     Main,
+    Main493,
     Head,
+}
+
+/// Builds with #492's scoping (#493 and this change).
+fn scoped() -> bool {
+    matches!(BUILD, Build::Main493 | Build::Head)
 }
 
 const BUILD: Build = Build::Head;
@@ -30,7 +53,9 @@ const BUILD: Build = Build::Head;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use wicked_estate_core::{EdgeKind, GraphRead};
+use std::time::{Duration, Instant};
+use wicked_estate_core::{EdgeKind, Extractor, GraphRead, Language, SourceFile};
+use wicked_estate_extract::TreeSitterExtractor;
 use wicked_estate_store::SqliteStore;
 
 fn fresh_dir(tag: &str) -> PathBuf {
@@ -169,7 +194,7 @@ fn static_arrow() {
     );
     for c in CALLERS {
         match BUILD {
-            Build::Head => assert_one("static_arrow", &g, c, &format!("src/caller/{c}#Card().")),
+            _ if scoped() => assert_one("static_arrow", &g, c, &format!("src/caller/{c}#Card().")),
             _ => assert_none("static_arrow", &g, c),
         }
     }
@@ -188,11 +213,11 @@ fn static_value() {
     );
     for c in CALLERS {
         match BUILD {
-            Build::Head => assert_none("static_value", &g, c),
+            _ if scoped() => assert_none("static_value", &g, c),
             _ => assert_one("static_value", &g, c, "src/other/Card()."),
         }
     }
-    if BUILD == Build::Head {
+    if scoped() {
         assert_eq!(
             g.parked_local, 2,
             "static_value: both calls park as local bindings"
@@ -260,10 +285,218 @@ fn static_before() {
     for c in CALLERS {
         assert_none("static_before", &g, c);
     }
-    if BUILD == Build::Head {
+    if scoped() {
         assert_eq!(
             g.parked_local, 2,
             "static_before: both calls park as local bindings"
         );
     }
+}
+
+/// A destructuring write after the `var` arrow: which value it stores is not tracked, so the
+/// binding is unknown and the call parks, as after #488 (#497).
+fn destructed(tag: &str, write: &str) {
+    let g = index(
+        tag,
+        &format!(
+            "declare const next: any;\n\
+             export function ViaCall(Card: any) {{ {{ var Card = () => null; }} {write}; return Card(); }}\n\
+             export function ViaJsx(Card: any) {{ {{ var Card = () => null; }} {write}; return <Card />; }}\n"
+        ),
+        &CALLERS,
+    );
+    for c in CALLERS {
+        // `for ([Card] of …)` already masked the arrow on #493; the assignment forms did not.
+        let stale = BUILD == Build::Main493 && !tag.starts_with("for_");
+        if BUILD == Build::Pre488 || stale {
+            assert_one(tag, &g, c, "src/caller/Card().");
+        } else {
+            assert_none(tag, &g, c);
+        }
+    }
+}
+
+#[test]
+fn array_destructed() {
+    destructed("array_destructed", "[Card] = next");
+}
+
+#[test]
+fn object_destructed() {
+    destructed("object_destructed", "({ Card } = next)");
+}
+
+#[test]
+fn nonnull_destructed() {
+    destructed("nonnull_destructed", "[Card!] = next");
+}
+
+/// A param redeclared by a block `var` arrow, with `READ` the use: the call reaches the arrow on
+/// every build but #488's, which dropped every parameter call.
+fn keeps_arrow(tag: &str, body: &str) {
+    let g = index(
+        tag,
+        &format!(
+            "export function ViaCall(Card: any) {{ {} }}\n\
+             export function ViaJsx(Card: any) {{ {} }}\n",
+            body.replace("READ", "Card()"),
+            body.replace("READ", "<Card />"),
+        ),
+        &CALLERS,
+    );
+    for c in CALLERS {
+        match BUILD {
+            Build::Main => assert_none(tag, &g, c),
+            _ => assert_one(tag, &g, c, "src/caller/Card()."),
+        }
+    }
+}
+
+/// A destructuring write after the call does not change what the call saw.
+#[test]
+fn destructed_after() {
+    keeps_arrow(
+        "destructed_after",
+        "{ var Card = () => null; } const r = READ; [Card] = [null]; return r;",
+    );
+}
+
+/// The `var` arrow overwrites an earlier destructuring write.
+#[test]
+fn destructed_overwritten() {
+    keeps_arrow(
+        "destructed_overwritten",
+        "[Card] = [null]; { var Card = () => null; } return READ;",
+    );
+}
+
+/// A destructuring write to a block's own `let Card` is that binding's.
+#[test]
+fn destructed_shadowed() {
+    keeps_arrow(
+        "destructed_shadowed",
+        "{ var Card = () => null; } { let Card: any; [Card] = [null]; } return READ;",
+    );
+}
+
+/// `||=` keeps a callable value.
+#[test]
+fn logical_kept() {
+    keeps_arrow(
+        "logical_kept",
+        "{ var Card = () => null; } (Card) ||= null; return READ;",
+    );
+}
+
+#[test]
+fn for_destructed() {
+    destructed("for_destructed", "for ([Card] of next) {}");
+}
+
+/// A plain write the use precedes: `Card++` and `(Card as any) = …` replace the arrow.
+#[test]
+fn update_written() {
+    destructed("update_written", "Card++");
+}
+
+#[test]
+fn as_written() {
+    destructed("as_written", "(Card as any) = null");
+}
+
+/// A destructuring write takes effect after its right-hand side, which still reads the arrow.
+#[test]
+fn destructed_rhs() {
+    keeps_arrow(
+        "destructed_rhs",
+        "{ var Card = () => null; } [Card] = [READ]; return null;",
+    );
+}
+
+/// A nested function called before the arrow exists never sees it: `||=` is one more write it
+/// cannot order, as on #493.
+#[test]
+fn nested_before_kept() {
+    let g = index(
+        "nested_before_kept",
+        "export function ViaCall(Card: any) { function InnerCall() { return Card(); } const r = InnerCall(); { var Card = () => null; } Card ||= null; return r; }\n\
+         export function ViaJsx(Card: any) { function InnerJsx() { return <Card />; } const r = InnerJsx(); { var Card = () => null; } Card ||= null; return r; }\n",
+        &["ViaCall", "ViaJsx", "InnerCall", "InnerJsx"],
+    );
+    assert_dropped_since_488("nested_before_kept", &g, &["InnerCall", "InnerJsx"]);
+    assert_one(
+        "nested_before_kept",
+        &g,
+        "ViaCall",
+        "src/caller/InnerCall().",
+    );
+    assert_one("nested_before_kept", &g, "ViaJsx", "src/caller/InnerJsx().");
+}
+
+/// The faster of two extractions of `text`.
+fn extract_time(text: &str) -> Duration {
+    let ex = TreeSitterExtractor::for_language("tsx").unwrap();
+    let file = SourceFile {
+        path: "src/big.tsx".into(),
+        language: Language::new("tsx"),
+        text: text.into(),
+    };
+    (0..2)
+        .map(|_| {
+            let t = Instant::now();
+            ex.extract(&file).unwrap();
+            t.elapsed()
+        })
+        .min()
+        .unwrap()
+}
+
+/// #497: a call reads its scope's writes once per file and binary-searches them, so a file of N
+/// writes and N calls to a redeclared parameter costs what the same file costs when the name is
+/// not a parameter (main's path). A per-call copy and scan of every write is quadratic in N.
+#[test]
+fn write_lookup_size() {
+    if BUILD == Build::Main {
+        return;
+    }
+    // At 10k the old per-call scan measured 1.9x on a CI runner (1.60 s vs 0.83 s); its extra
+    // cost grows with n squared, the shared cost with n, so 30k puts it well past 2x.
+    let n = 30_000;
+    let body = "Card = null; Card();\n".repeat(n);
+    let file = |param: &str| {
+        format!("export function P({param}: any) {{ {{ var Card = () => null; }}\n{body}}}\n")
+    };
+    let bound = extract_time(&file("Card"));
+    let unbound = extract_time(&file("Other"));
+    eprintln!("write_lookup_size: bound {bound:?}, unbound {unbound:?}");
+    if BUILD == Build::Main493 {
+        assert!(
+            bound > unbound * 2,
+            "the per-call scan: {bound:?} vs {unbound:?}"
+        );
+    } else {
+        assert!(
+            bound < unbound * 2,
+            "the bound file must cost what the unbound one does: {bound:?} vs {unbound:?}"
+        );
+    }
+}
+
+/// #497: a block of N `let`s around a write costs one pass, not N copies of N names.
+#[test]
+fn lexical_shadow_size() {
+    let n = 10_000;
+    let lets: String = (0..n).map(|i| format!("let z{i}: any;\n")).collect();
+    let file = |param: &str| {
+        format!(
+            "export function P({param}: any) {{ {{ var Card = () => null; }}\n{{\n{lets}Card = null;\nCard();\n}} }}\n"
+        )
+    };
+    let bound = extract_time(&file("Card"));
+    let unbound = extract_time(&file("Other"));
+    eprintln!("lexical_shadow_size: bound {bound:?}, unbound {unbound:?}");
+    assert!(
+        bound < unbound * 2,
+        "the bound file must cost what the unbound one does: {bound:?} vs {unbound:?}"
+    );
 }
