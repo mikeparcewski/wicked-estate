@@ -275,6 +275,7 @@ fn missing_columns(conn: &Connection) -> Vec<String> {
 }
 
 /// Whether the database file's header says WAL (file format bytes 18-19 are 2).
+#[cfg(unix)]
 fn is_wal_format(path: &std::path::Path) -> bool {
     use std::io::Read;
     let mut head = [0u8; 20];
@@ -284,24 +285,23 @@ fn is_wal_format(path: &std::path::Path) -> bool {
         && head[18] == 2
 }
 
+#[cfg(unix)]
 fn wal_sibling(path: &std::path::Path) -> std::path::PathBuf {
     let mut s = path.as_os_str().to_os_string();
     s.push("-wal");
     std::path::PathBuf::from(s)
 }
 
-/// `file:<path>?immutable=1`, the path percent-encoded (RFC 3986 unreserved characters and `/`
-/// kept; Windows separators turned to `/`, a drive path given a leading `/`).
+/// `file:<path>?immutable=1` for an absolute Unix path, its bytes percent-encoded (RFC 3986
+/// unreserved characters and `/` kept), so any byte, a backslash or invalid UTF-8 included, names
+/// the same file. A canonical path starts with exactly one `/`, so it is never read as a URI
+/// authority.
+#[cfg(unix)]
 fn immutable_uri(path: &std::path::Path) -> String {
-    let raw = path.to_string_lossy().replace('\\', "/");
-    let raw = if raw.as_bytes().get(1) == Some(&b':') {
-        format!("/{raw}")
-    } else {
-        raw
-    };
+    use std::os::unix::ffi::OsStrExt;
     let mut out = String::from("file:");
-    for b in raw.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/' | b':') {
+    for &b in path.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/') {
             out.push(b as char);
         } else {
             out.push_str(&format!("%{b:02X}"));
@@ -1196,21 +1196,30 @@ impl SqliteStore {
     /// succeed, and on a stale one the first write they attempt fails, which is the answer. A
     /// refused graph is never opened any other way: its owner migrates it on its next write.
     ///
-    /// A WAL graph with no `-wal` file beside it is checked first through an `immutable` connection,
-    /// which reads the database file alone and creates nothing, so refusing it leaves no `-wal` or
-    /// `-shm` behind (wicked-estate#491). One that passes is then opened as above, where SQLite may
-    /// create them to serve it.
+    /// On Unix, a WAL graph with no `-wal` file beside it is checked first through an `immutable`
+    /// connection, which reads the database file alone and creates nothing, so refusing it leaves
+    /// no `-wal` or `-shm` behind (wicked-estate#491). The checks use the resolved path, where
+    /// SQLite keeps the sidecars. One that passes is then opened as above, where SQLite may create
+    /// them to serve it. If a `-wal` appeared meanwhile (a writer), the decision is the ordinary
+    /// open's.
     pub fn open_readonly_current(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let path = path.as_ref();
-        if is_wal_format(path) && !wal_sibling(path).exists() {
-            let conn = Connection::open_with_flags(
-                immutable_uri(path),
-                OpenFlags::SQLITE_OPEN_READ_ONLY
-                    | OpenFlags::SQLITE_OPEN_URI
-                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .map_err(st)?;
-            check_current(&conn)?;
+        #[cfg(unix)]
+        if let Ok(real) = std::fs::canonicalize(path) {
+            if is_wal_format(&real) && !wal_sibling(&real).exists() {
+                let conn = Connection::open_with_flags(
+                    immutable_uri(&real),
+                    OpenFlags::SQLITE_OPEN_READ_ONLY
+                        | OpenFlags::SQLITE_OPEN_URI
+                        | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )
+                .map_err(st)?;
+                if let Err(e) = check_current(&conn) {
+                    if !wal_sibling(&real).exists() {
+                        return Err(e);
+                    }
+                }
+            }
         }
         let store = Self::open_readonly(path)?;
         check_current(&store.conn)?;
@@ -7596,6 +7605,44 @@ mod tests {
             SqliteStore::open_readonly(&path).is_err(),
             "open_readonly on a non-existent file must error"
         );
+    }
+
+    /// wicked-estate#491 (codex): the immutable pre-check looks for the `-wal` beside the RESOLVED
+    /// graph. Reached through a symlink, a graph whose file is stale but whose committed migration
+    /// is still in the target's `-wal` (a writer has it open) is current, and is served.
+    #[cfg(unix)]
+    #[test]
+    fn a_current_graph_reached_through_a_link_is_not_refused_by_the_immutable_precheck() {
+        let dir = unique_test_dir("ro-alias");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.db");
+        drop(SqliteStore::open(&real).unwrap());
+        Connection::open(&real)
+            .unwrap()
+            .execute_batch(
+                "DROP INDEX IF EXISTS idx_annotations_last_verified; \
+                 ALTER TABLE annotations DROP COLUMN last_verified;",
+            )
+            .unwrap();
+        // A second connection stays open, so the writer's migration stays in real.db-wal.
+        let holder = Connection::open(&real).unwrap();
+        holder
+            .execute_batch("PRAGMA wal_autocheckpoint=0;")
+            .unwrap();
+        let _: i64 = holder
+            .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
+            .unwrap();
+        drop(SqliteStore::open(&real).unwrap());
+        let wal = dir.join("real.db-wal");
+        assert!(wal.exists(), "the migration is still in the WAL");
+        let alias = dir.join("alias.db");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        assert!(
+            SqliteStore::open_readonly_current(&alias).is_ok(),
+            "a current graph must not be refused through its link"
+        );
+        drop(holder);
     }
 
     /// wicked-crew#1497: a graph this build wrote (empty or not) passes the read-only currency

@@ -338,6 +338,7 @@ fn a_file_uri_graph_is_refused_by_a_read_only_server_and_never_written() {
 /// wicked-estate#491: refusing an older WAL graph (the fixture as an older build left it, no
 /// sidecars) creates no `-wal` or `-shm` beside it: the currency check reads the database file
 /// alone through an `immutable` connection before SQLite's WAL machinery touches the directory.
+#[cfg(unix)]
 #[test]
 fn refusing_an_older_wal_graph_creates_no_file_beside_it() {
     let tmp = tempfile::tempdir().unwrap();

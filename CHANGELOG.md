@@ -43,7 +43,7 @@
     (SQLite would open it itself). Every graph tool, and `knowledge.neighbors` (it checks code links against the
     graph), answers with the reason, and the `initialize` instructions and `tools/list` `_meta`
     (`wicked-estate/graph`) carry it. The tools stay listed (`SemanticSearch` included), and no call answers from an
-    empty graph. Refusing an older WAL graph creates no file beside it (wicked-estate#491). Whoever owns the graph
+    empty graph. On Unix, refusing an older WAL graph that has no `-wal` beside it creates no file (wicked-estate#491). Whoever owns the graph
     migrates it on its next write (`index`, or any write-mode open).
   - **Unchanged:** a write-mode server, a missing graph (served empty, as before; only a graph confirmed absent is,
     wicked-estate#491) and other schemes.
