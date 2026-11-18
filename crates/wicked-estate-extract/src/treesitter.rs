@@ -3895,33 +3895,26 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
     CaptureRole::Other
 }
 
-// ── Minified / huge-file guard ────────────────────────────────────────────────
+// ── Minified-file guard ────────────────────────────────────────────────
 
-/// Return `true` when a source file is pathologically large or minified so that
+/// Return `true` when a source file looks minified or machine-generated, so that
 /// tree-sitter extraction would hang or bloat the graph with useless tokens.
 ///
-/// Three independent heuristics — **any one** triggers the guard:
+/// Two independent signals — **either** triggers the guard. File size is never a signal
+/// (#478: a 1.7 MB hand-written Rust file was dropped, taking its callers out of every blast
+/// radius); a big file made of ordinary short lines is source.
 ///
-/// | Heuristic | Threshold | Rationale |
-/// |-----------|-----------|-----------|
-/// | Total size | > 1 MiB (1,048,576 bytes) | Even well-formatted files rarely exceed this; anything larger is almost certainly generated or vendored. |
+/// | Signal | Threshold | Rationale |
+/// |--------|-----------|-----------|
 /// | Longest line | > 50,000 chars | A single line this wide is a minified bundle, transpiler output, or inline base64 data; no hand-written source reaches this. |
-/// | Average chars/line | > 2,000 | A dense average — e.g. a 6 MB file with 1,000 newlines — indicates heavily generated or concatenated content even when no single line is enormous. |
+/// | Average chars/line | > 2,000 | A dense average — e.g. a 6 MB file with 1,000 newlines — indicates minified or concatenated content even when no single line is enormous. |
 ///
-/// The function is `O(n)` in the file length (one pass) and returns immediately on
-/// the size heuristic so it never even scans the content of truly enormous files.
+/// The function is `O(n)` in the file length (one pass).
 ///
 /// Called at the top of every `extract` implementation; callers that do want to
 /// index such files must strip / split the content before calling `extract`.
-pub fn is_minified_or_huge(text: &str) -> bool {
-    // Heuristic 1 — total byte size > 1 MiB.
-    // Check bytes, not chars, to stay O(1) on the fast path.
-    const MAX_BYTES: usize = 1_048_576; // 1 MiB
-    if text.len() > MAX_BYTES {
-        return true;
-    }
-
-    // Heuristics 2 & 3 — scan lines once.
+pub fn is_minified(text: &str) -> bool {
+    // Scan lines once.
     const MAX_LINE_CHARS: usize = 50_000; // minified / generated single-line threshold
     const MAX_AVG_CHARS_PER_LINE: usize = 2_000; // dense average threshold
 
@@ -3930,7 +3923,7 @@ pub fn is_minified_or_huge(text: &str) -> bool {
 
     for line in text.lines() {
         let len = line.chars().count();
-        // Heuristic 2 — longest line.
+        // Longest line.
         if len > MAX_LINE_CHARS {
             return true;
         }
@@ -3938,7 +3931,7 @@ pub fn is_minified_or_huge(text: &str) -> bool {
         line_count += 1;
     }
 
-    // Heuristic 3 — average chars / line (guard against divide-by-zero on empty files).
+    // Average chars / line (guard against divide-by-zero on empty files).
     line_count > 0 && (total_chars / line_count) > MAX_AVG_CHARS_PER_LINE
 }
 
@@ -3950,10 +3943,10 @@ impl Extractor for TreeSitterExtractor {
     }
 
     fn extract(&self, file: &SourceFile) -> Result<Extraction> {
-        // Guard: skip minified / huge files immediately — tree-sitter would either
+        // Guard: skip minified files immediately — tree-sitter would either
         // hang on a 5 MB minified bundle or produce a meaningless torrent of tokens.
         // The pipeline-level SKIPPED_MINIFIED: observability marker is wired in wicked-estate.
-        if is_minified_or_huge(&file.text) {
+        if is_minified(&file.text) {
             return Ok(Extraction {
                 nodes: Vec::new(),
                 local_edges: Vec::new(),
@@ -5619,8 +5612,8 @@ impl Extractor for IaCExtractor {
     }
 
     fn extract(&self, file: &SourceFile) -> Result<Extraction> {
-        // Guard: skip minified / huge IaC files for the same reason as TreeSitterExtractor.
-        if is_minified_or_huge(&file.text) {
+        // Guard: skip minified IaC files for the same reason as TreeSitterExtractor.
+        if is_minified(&file.text) {
             return Ok(Extraction {
                 nodes: Vec::new(),
                 local_edges: Vec::new(),
@@ -7510,37 +7503,34 @@ const helper = (s: string) => s.trim();
         );
     }
 
-    // ── is_minified_or_huge unit tests ────────────────────────────────────────
+    // ── is_minified unit tests ────────────────────────────────────────
 
     /// A normal multi-line Rust file is not flagged.
     #[test]
     fn minified_guard_normal_file_is_false() {
         let code = "fn hello() -> &'static str {\n    \"world\"\n}\nfn main() {\n    println!(\"{}\", hello());\n}\n";
-        assert!(
-            !is_minified_or_huge(code),
-            "normal source must not be flagged"
-        );
+        assert!(!is_minified(code), "normal source must not be flagged");
     }
 
     /// An empty file is not flagged (edge case: 0 lines).
     #[test]
     fn minified_guard_empty_file_is_false() {
-        assert!(!is_minified_or_huge(""), "empty file must not be flagged");
+        assert!(!is_minified(""), "empty file must not be flagged");
     }
 
-    /// A single line of exactly 50,000 chars IS flagged by heuristic 3 (average
+    /// A single line of exactly 50,000 chars IS flagged by the average signal (average
     /// chars/line = 50_000 >> 2_000), even though it sits exactly at the per-line
-    /// boundary. This confirms the three heuristics are independent AND-OR guards:
-    /// heuristic 2 requires strictly > 50_000; heuristic 3 fires because the dense
+    /// boundary. This confirms the two signals are independent:
+    /// the longest-line signal requires strictly > 50_000; the average signal fires because the dense
     /// average overwhelmingly exceeds its own threshold.
     #[test]
     fn minified_guard_exactly_at_line_threshold_still_flagged_by_avg() {
-        // One line of exactly 50_000 chars. Heuristic 2 does NOT fire (not > 50_000).
-        // Heuristic 3 DOES fire: avg = 50_000 / 1 = 50_000 > 2_000.
+        // One line of exactly 50_000 chars. The longest-line signal does NOT fire (not > 50_000).
+        // The average signal DOES fire: avg = 50_000 / 1 = 50_000 > 2_000.
         let line = "x".repeat(50_000);
         assert!(
-            is_minified_or_huge(&line),
-            "a single 50k-char line is flagged by heuristic 3 (avg chars/line = 50k)"
+            is_minified(&line),
+            "a single 50k-char line is flagged by the average signal (avg chars/line = 50k)"
         );
     }
 
@@ -7555,7 +7545,7 @@ const helper = (s: string) => s.trim();
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            !is_minified_or_huge(&text),
+            !is_minified(&text),
             "40 lines of 1_999 chars each must not be flagged"
         );
     }
@@ -7565,36 +7555,39 @@ const helper = (s: string) => s.trim();
     fn minified_guard_one_over_line_threshold_is_true() {
         let line = "x".repeat(50_001);
         assert!(
-            is_minified_or_huge(&line),
+            is_minified(&line),
             "a line of 50_001 chars must be flagged as minified"
         );
     }
 
-    /// A file that exceeds 1 MiB is flagged even if every line is short.
+    /// #478: size alone never flags a file. 40,000 short lines (~1.7 MB) is hand-written source.
     #[test]
-    fn minified_guard_huge_file_over_1mib_is_true() {
-        // 1_048_577 bytes of 'a' characters (no newlines, but the size check triggers first).
-        let huge = "a".repeat(1_048_577);
-        assert!(is_minified_or_huge(&huge), "file > 1 MiB must be flagged");
+    fn minified_guard_large_file_of_short_lines_is_false() {
+        let text = "fn f() { let value = compute(1, 2); }\n".repeat(45_000);
+        assert!(text.len() > 1_048_576);
+        assert!(
+            !is_minified(&text),
+            "a file over 1 MiB made of short lines must not be flagged"
+        );
     }
 
     /// A file with a very high average chars/line (dense generated output) is flagged.
     #[test]
     fn minified_guard_high_average_chars_per_line_is_true() {
         // Build a file: 100 lines each of 3_000 chars → average = 3_000 > 2_000.
-        // Total = 300_000 bytes < 1 MiB, and each line < 50_000. Only heuristic 3 fires.
+        // Each line < 50_000. Only the average signal fires.
         let long_line = "x".repeat(3_000);
         let text = (0..100)
             .map(|_| long_line.as_str())
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            is_minified_or_huge(&text),
+            is_minified(&text),
             "average chars/line > 2_000 must be flagged (dense generated file)"
         );
     }
 
-    /// A fixture of one ~60k-char line: is_minified_or_huge returns true AND
+    /// A fixture of one ~60k-char line: is_minified returns true AND
     /// TreeSitterExtractor::extract returns an empty Extraction (no parse performed).
     #[test]
     fn minified_fixture_extract_returns_empty() {
@@ -7604,8 +7597,8 @@ const helper = (s: string) => s.trim();
 
         // The guard must fire.
         assert!(
-            is_minified_or_huge(&text),
-            "minified.js fixture must be flagged by is_minified_or_huge"
+            is_minified(&text),
+            "minified.js fixture must be flagged by is_minified"
         );
 
         // Extract must return an empty Extraction without error.

@@ -199,7 +199,7 @@ fn extract_body(
         .ok_or_else(|| Error::Extraction(format!("language `{lang}` is not wired")))?;
     // The generic extractor returns nothing for a minified or huge text; say so, never claim the
     // block was parsed.
-    if crate::treesitter::is_minified_or_huge(body) {
+    if crate::treesitter::is_minified(body) {
         return Err(Error::Extraction(
             "skipped as minified or huge (the same guard as a source file)".into(),
         ));

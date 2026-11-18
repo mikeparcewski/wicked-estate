@@ -102,7 +102,7 @@ use wicked_estate_extract::{
     BlazeBrlExtractor, DrlExtractor, ExtraEdgeExtractor, HlasmExtractor, IaCExtractor,
     ImsExtractor, JclExtractor, MqExtractor, RacfExtractor, RegoRulesExtractor, SYMBOL_ID_SCHEME,
     TfstateCollector, doc_convert,
-    treesitter::{ExtractorCache, is_minified_or_huge},
+    treesitter::{ExtractorCache, is_minified},
 };
 use wicked_estate_resolve::{
     ApexlangRefResolver, DynamicCallResolver, ImportMapResolver, InfraResolver, NameResolver,
@@ -1829,7 +1829,7 @@ fn index_path_inner(
                         return None;
                     }
                     let text = std::str::from_utf8(&fw.bytes).ok()?;
-                    if is_minified_or_huge(text) {
+                    if is_minified(text) {
                         return None;
                     }
                     // #405: the replay signature must come from the same masked text the write
@@ -2010,10 +2010,9 @@ fn index_path_inner(
     // are not removed until the single write batch below, so a parse that produces nothing (or an
     // interrupted run) never commits a removal it cannot pair with a re-write.
     // Each element carries the rel path + extraction + source text (for content storage).
-    // Minified/huge files are detected via is_minified_or_huge and skipped; we count them
-    // so index_path can report how many files were silently passed over.
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let skipped_minified = AtomicUsize::new(0);
+    // Minified files are detected via is_minified and skipped; we record each path so the
+    // index output names every file passed over (#478).
+    let skipped_minified: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
     let extractions: Vec<(String, wicked_estate_core::Extraction, String)> = changed
         .par_iter()
@@ -2082,9 +2081,12 @@ fn index_path_inner(
             // A converted document is never dropped here: its text is already capped at 1 MiB,
             // and long prose lines or table rows are what documents are made of. When the guard
             // trips, the document keeps its content and File node, without heading nodes.
-            let minified = is_minified_or_huge(&text);
+            let minified = is_minified(&text);
             if minified && extra_rules.is_none() && converted.is_none() {
-                skipped_minified.fetch_add(1, Ordering::Relaxed);
+                skipped_minified
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(fw.rel.to_string());
                 return None;
             }
 
@@ -2163,9 +2165,15 @@ fn index_path_inner(
         .collect();
 
     flush_doc_skips();
-    let skipped_min_count = skipped_minified.load(Ordering::Relaxed);
-    if skipped_min_count > 0 {
-        eprintln!("SKIPPED_MINIFIED: {skipped_min_count} file(s)");
+    let mut skipped_min = skipped_minified
+        .into_inner()
+        .unwrap_or_else(|e| e.into_inner());
+    skipped_min.sort();
+    if !skipped_min.is_empty() {
+        eprintln!("SKIPPED_MINIFIED: {} file(s)", skipped_min.len());
+        for path in &skipped_min {
+            eprintln!("SKIPPED_MINIFIED: {path}");
+        }
     }
 
     // ── Emit extraction counters (best-effort) ───────────────────────────────────────────────
@@ -4658,20 +4666,14 @@ mod tests {
     // ── Task A: SKIPPED_MINIFIED notice ──────────────────────────────────────
 
     #[test]
-    fn is_minified_or_huge_detects_long_lines() {
+    fn is_minified_detects_long_lines() {
         // Verify the public API matches expectations used in index_path.
         let normal = "fn foo() {}\nfn bar() {}\n";
-        assert!(
-            !is_minified_or_huge(normal),
-            "normal code must not be flagged"
-        );
+        assert!(!is_minified(normal), "normal code must not be flagged");
 
         // A >50,000-char single line is considered minified/huge.
         let long_line: String = "a".repeat(50_001);
-        assert!(
-            is_minified_or_huge(&long_line),
-            ">50000-char line must be flagged"
-        );
+        assert!(is_minified(&long_line), ">50000-char line must be flagged");
     }
 
     // ── W12 federation helpers ────────────────────────────────────────────────
