@@ -7,7 +7,8 @@
 //!
 //! **No usable TypeScript**: the test prints `[lsp_live] SKIP: <why>` and returns, naming every
 //! place the resolver looked. With `WICKED_LSP_LIVE_REQUIRED=1` (estate CI's gate job) that is a
-//! failure instead, so CI can never pass by skipping the live tier.
+//! failure instead, so CI can never pass by skipping the live tier. `WICKED_LSP_LIVE_EXPECT`
+//! (`native` | `tsserver`) asserts which of the two paths was taken.
 
 use std::{fs, thread, time::Duration};
 
@@ -21,6 +22,21 @@ fn typescript_launch_or_skip(root: &str) -> Option<Launch> {
     match ServerRegistry::standard().launch_for("typescript", root) {
         Ok(launch) => {
             println!("[lsp_live] server: {} {:?}", launch.binary, launch.args);
+            // CI says which path each step must take, so a step cannot pass on the other one.
+            match std::env::var("WICKED_LSP_LIVE_EXPECT").as_deref() {
+                Ok("native") => assert!(
+                    launch.init_options.is_null() && launch.args == ["--lsp", "--stdio"],
+                    "[lsp_live] expected TypeScript 7's own `tsc --lsp`, got {launch:?}"
+                ),
+                Ok("tsserver") => assert!(
+                    launch.init_options["tsserver"]["path"].is_string(),
+                    "[lsp_live] expected typescript-language-server with tsserver.path, got {launch:?}"
+                ),
+                Ok(other) => panic!(
+                    "[lsp_live] WICKED_LSP_LIVE_EXPECT must be native or tsserver, got {other:?}"
+                ),
+                Err(_) => {}
+            }
             Some(launch)
         }
         Err(e) => {
