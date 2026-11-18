@@ -4,11 +4,35 @@
 
 ### Fixed
 
+- **Refusing an older graph whose `-wal` holds frames and that has no `-shm` leaves the directory unchanged
+  (wicked-estate#506).** The read-only currency check used to hand that layout to SQLite's ordinary read-only open,
+  which created a `-shm` before refusing.
+  - **The change:** a private copy of the database and its `-wal` is now checked in a fresh `0700` temp directory,
+    owned by the reader, so SQLite's sidecars are created there. The originals are only read, as plain files. The
+    directory is removed on every return; one left by a killed process is removed by a later check once it is ten
+    minutes old.
+  - **What counts as a refusal:** only evidence that the schema predates the build, meaning a table, index or column
+    it lacks. A copy that cannot be made or opened is not a refusal, whether for lack of temp space, a temp
+    directory that is the graph's own, or a size over 1 GiB as sampled. In those cases the ordinary open decides.
+  - **Unchanged:** an absent or empty `-wal` still gets the immutable check.
+  - **Stamps:** a refusal by either first check stands only when the database, its `-wal` and its `-shm` look the
+    same after the check as before it. "The same" means the sizes, the modification times, and whether the `-shm`
+    is there.
+
+  **Known limits.**
+  - Unix only. Elsewhere, and on every ordinary-open path (a framed `-wal` beside an existing `-shm`, a copy that
+    could not be made or checked, a first check the stamps do not confirm), SQLite may create the sidecars, or
+    reset an existing `-shm` no one holds, before refusing an older graph.
+  - A reader of a served graph updates its read-mark in the `-shm`. That is ordinary SQLite reader coordination.
+  - A writer that changes the graph while leaving every stamp as it was is not seen by the first check. The worst
+    case is a spurious refusal, never a wrong read: no first check serves answers, and a refused graph is migrated on
+    its owner's next write.
+
 - **A `--readonly` server refusing an older WAL graph with an empty `-wal` and no `-shm` creates no `-shm`
   (wicked-estate#500).** An empty `-wal` holds no frames, so the graph is checked through the immutable connection,
   as one with no `-wal` already was, and refusing it leaves nothing behind. A `-wal` that holds frames still goes to
-  SQLite's own read-only open, because only SQLite can read it. A current graph in that layout is served; refusing an
-  older one there can still create a `-shm`. The read-only open after the check now uses the same resolved path as the
+  SQLite's own read-only open, because only SQLite can read it. A current graph in that layout is served (refusing an
+  older one there creates no `-shm` when its private copy can be checked: see the #506 entry). The read-only open after the check now uses the same resolved path as the
   check. The doc on `leave_in_delete_journal` now says that a read-only reader can read a WAL graph while its `-wal`
   and `-shm` exist, and that SQLite normally removes both on the last clean close.
 
