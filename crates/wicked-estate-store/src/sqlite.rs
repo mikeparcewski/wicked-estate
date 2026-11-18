@@ -355,6 +355,7 @@ impl Drop for RemoveOnDrop {
 /// graph's own evidence that a writer's migration is pending, with no missing object or column to
 /// name (for example only the FTS rowid marker, wicked-estate#508). Every other error stays
 /// undecided: a lock, an I/O failure or a corrupt copy says nothing about the schema.
+#[cfg(unix)]
 fn wanted_a_write(e: &Error) -> bool {
     e.to_string()
         .contains("attempt to write a readonly database")

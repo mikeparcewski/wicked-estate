@@ -29,7 +29,8 @@
     by a later check once it is ten minutes old. Only a directory holding the marker is removed, and only of the
     files the check writes; any other directory or file is left alone.
   - **What counts as a refusal:** only evidence that the schema predates the build, meaning a table, index or column
-    it lacks. A copy that cannot be made or opened is not a refusal, whether for lack of temp space, a temp
+    it lacks, or a migration that wants to write (the check ends on SQLite's "attempt to write a readonly database",
+    wicked-estate#508). A copy that cannot be made or opened is not a refusal, whether for lack of temp space, a temp
     directory that is the graph's own, or a size over 1 GiB as sampled. In those cases the ordinary open decides.
   - **Unchanged:** an absent or empty `-wal` still gets the immutable check.
   - **Stamps:** a refusal by either first check stands only when the database, its `-wal` and its `-shm` look the
