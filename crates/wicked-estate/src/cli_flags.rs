@@ -192,6 +192,8 @@ const BY_NAME_OR_SYMBOL: Rule = Rule::OperandOr {
 
 const DB: Flag = str_flag("db");
 const JSON: Flag = switch("json");
+/// `stats --journal delete` (wicked-crew#1497): leave the graph in rollback-journal mode.
+const JOURNAL: Flag = str_flag("journal");
 const REPO: Flag = Flag::new("repo", Ty::Label).inline();
 const AS: Flag = Flag::new("as", Ty::Label).inline().alias_of("repo");
 const HISTORY: Flag = switch("history");
@@ -315,7 +317,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "stats",
-        spec: owns(&[], &[DB, JSON]),
+        spec: owns(&[], &[DB, JSON, JOURNAL]),
     },
     Command {
         name: "graph-view",

@@ -45,6 +45,10 @@
     (`wicked-estate/graph`) carry it. The tools stay listed (`SemanticSearch` included), and no call answers from an
     empty graph. On Unix, refusing an older WAL graph that has no `-wal` beside it creates no file (wicked-estate#491). Whoever owns the graph
     migrates it on its next write (`index`, or any write-mode open).
+  - **`wicked-estate stats --db <graph> --journal delete`** is how the owner delivers that: the writer open migrates
+    the graph, then estate's own SQLite checkpoints it and leaves it in DELETE journal mode (any later writer open
+    switches it back to WAL). It fails if another connection keeps the mode from changing. Nothing but estate's own
+    binary needs to open the graph (wicked-estate#491).
   - **Unchanged:** a write-mode server, a missing graph (served empty, as before; only a graph confirmed absent is,
     wicked-estate#491) and other schemes.
 - A call through a local binding no longer binds an unrelated global of the same name (#486, local-binding half).

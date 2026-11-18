@@ -1226,6 +1226,33 @@ impl SqliteStore {
         Ok(store)
     }
 
+    /// Leave an on-disk graph in rollback-journal (DELETE) mode: checkpoint its WAL into the
+    /// database, then switch the journal mode (wicked-crew#1497). A reader that may not write the
+    /// graph's directory cannot open a WAL graph (it needs a `-shm` it cannot create), so the owner
+    /// calls this after its last write. Any later writer open switches it back to WAL. Waits up to
+    /// 15 s for other connections; an error if the mode did not change.
+    pub fn leave_in_delete_journal(path: impl AsRef<std::path::Path>) -> Result<()> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(st)?;
+        conn.busy_timeout(std::time::Duration::from_secs(15))
+            .map_err(st)?;
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .map_err(st)?;
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0))
+            .map_err(st)?;
+        if mode.eq_ignore_ascii_case("delete") {
+            Ok(())
+        } else {
+            Err(wicked_estate_core::Error::Invalid(format!(
+                "the journal mode stayed {mode} (another connection holds the graph)"
+            )))
+        }
+    }
+
     /// Open an in-memory store (tests, ephemeral use).
     /// history_enabled defaults to false (opt-in, same as on-disk stores).
     pub fn in_memory() -> Result<Self> {

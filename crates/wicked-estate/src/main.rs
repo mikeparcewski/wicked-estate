@@ -1710,6 +1710,28 @@ fn main() -> Result<()> {
         }
         "stats" => {
             let json_out = args.switch("json");
+            // wicked-crew#1497: `--journal delete` leaves the graph in rollback-journal mode after
+            // this writer open (which migrates it), so a reader that may not write its directory
+            // (`wicked-estate-mcp --readonly`) can open it. Only estate's own SQLite touches it.
+            let journal = args.str("journal");
+            if let Some(j) = journal {
+                if j != "delete" {
+                    anyhow::bail!("stats --journal takes `delete`, not `{j}`");
+                }
+            }
+            let leave_delete = |db: &str| -> Result<()> {
+                if journal.is_none() {
+                    return Ok(());
+                }
+                let wicked_estate_store::StoreBackend::Sqlite { path } =
+                    wicked_estate_store::StoreBackend::parse(db)
+                else {
+                    anyhow::bail!("stats --journal applies to a SQLite graph only");
+                };
+                SqliteStore::leave_in_delete_journal(&path)
+                    .map_err(to_any)
+                    .with_context(|| format!("could not leave {path} in DELETE journal mode"))
+            };
             // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
             // open that would otherwise create an empty one.
             require_existing_graph(&db, "stats")?;
@@ -1726,7 +1748,8 @@ fn main() -> Result<()> {
                     "{}",
                     serde_json::to_string_pretty(&stats_json(store.as_ref(), &db, &s))?
                 );
-                return Ok(());
+                drop(store);
+                return leave_delete(&db);
             }
             let db_mb = s.db_size_bytes as f64 / 1_048_576.0;
             println!(
@@ -1781,6 +1804,8 @@ fn main() -> Result<()> {
                 }
                 println!();
             }
+            drop(store);
+            leave_delete(&db)?;
         }
         // Graph view for UI consumption — top-N code symbols by PageRank + inter-symbol edges.
         //
@@ -4172,7 +4197,7 @@ fn main() -> Result<()> {
                 println!("  {}", line.trim_start_matches("usage: "));
             }
             println!(
-                "  wicked-estate stats                 [--db ...]  # includes git provenance if indexed"
+                "  wicked-estate stats                 [--db ...] [--journal delete]  # includes git provenance if indexed; --journal delete leaves the graph in rollback-journal mode"
             );
             println!(
                 "  wicked-estate source [<name>]       [--db ...]  # print source slice(s) for symbol"
