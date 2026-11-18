@@ -45,11 +45,30 @@ jobs:
       # resolve all of it (APEXLANG_CORPUS_REQUIRED turns a missing corpus into a failure).
       - name: fetch the pinned APEXlang corpus
         run: python3 scripts/apexlang-corpus.py fetch "$RUNNER_TEMP/apexlang-corpus"
+      # estate#484: the live TypeScript LSP tier (lsp_live) runs against TypeScript 7, which current
+      # workspaces get: TypeScript 7 serves LSP itself (`tsc --lsp`). WICKED_LSP_LIVE_REQUIRED turns
+      # the test's "no usable TypeScript" skip into a failure, so this job cannot pass by skipping it.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: install TypeScript 7 (live LSP tier)
+        run: npm install -g --no-audit --no-fund typescript@7.0.2
       - name: test (workspace + conformance + bench)
         env:
           APEXLANG_CORPUS_DIR: ${{ runner.temp }}/apexlang-corpus
           APEXLANG_CORPUS_REQUIRED: "1"
+          WICKED_LSP_LIVE_REQUIRED: "1"
+          WICKED_LSP_LIVE_EXPECT: native
         run: cargo test --workspace
+      # estate#484: the TypeScript 5-6 path live: typescript-language-server, told where tsserver.js is.
+      # Replaces the global TypeScript with 5.x, then reruns only lsp_live (already built).
+      - name: live LSP tier on TypeScript 5 (typescript-language-server + tsserver.path)
+        env:
+          WICKED_LSP_LIVE_REQUIRED: "1"
+          WICKED_LSP_LIVE_EXPECT: tsserver
+        run: |
+          npm install -g --no-audit --no-fund typescript@5.9.3 typescript-language-server@6.0.2
+          cargo test -p wicked-estate-resolve --test lsp_live -- --nocapture
 
   # ── #360: the same gate on macOS and Windows, plus the install smoke test of release binaries.
   #    Grammar plugins load .so/.dylib/.dll, SQLite and 11 grammars are compiled from C, several
