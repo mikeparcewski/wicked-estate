@@ -38,7 +38,8 @@
 //! The TypeScript family (`typescript`, `tsx`, `javascript`, `jsx`) on the default registry row
 //! is not launched blindly: [`ServerRegistry::launch_for`] calls [`resolve_typescript_launch`],
 //! the one place that decides. It looks for a TypeScript install in the workspace
-//! (the nearest `node_modules/typescript` or Yarn SDK, from the root up), then beside the
+//! (the nearest `node_modules/typescript` or editor SDK — `.vscode/pnpify`, `.yarn/sdks`,
+//! `.pnpm/sdks`, typescript-language-server's own list — from the root up), then beside the
 //! `typescript-language-server` on `PATH`, then in the global npm root (`npm root -g`, bounded),
 //! and the first usable one wins:
 //!
@@ -48,7 +49,7 @@
 //!   `typescript-language-server` is needed.
 //! - **TypeScript 5-6**: `typescript-language-server --stdio`, told where `tsserver.js` is
 //!   (`initializationOptions.tsserver.path`), so a workspace without its own `typescript` works.
-//!   A Yarn SDK counts for 5-6; one for TypeScript 7 (PnP) is passed over with a reason.
+//!   An editor SDK counts for 5-6; one for TypeScript 7 (PnP) is passed over with a reason.
 //!
 //! Nothing usable is `server not available: no usable TypeScript install ...`, naming each place
 //! looked at and why it was passed over. Live-tested on `.ts` and `.tsx` (definition, hover,
@@ -577,8 +578,23 @@ fn server_not_available(language: &str) -> Error {
 const TSLS_BINARY: &str = "typescript-language-server";
 /// The languages whose default row goes through [`resolve_typescript_launch`].
 const TS_FAMILY: [&str; 4] = ["typescript", "tsx", "javascript", "jsx"];
-/// The place label of a workspace's Yarn SDK candidate.
-const YARN_SDK: &str = "the workspace (Yarn SDK)";
+/// Where a workspace keeps its TypeScript, relative to the root and each ancestor: exactly
+/// typescript-language-server 6.0.2's `MODULE_FOLDERS` (versionProvider), in its order, labelled
+/// for the "nothing usable" error. Every row but the first is an editor SDK (a wrapper package).
+const WORKSPACE_TS_DIRS: [(&str, &str); 4] = [
+    ("the workspace", "node_modules/typescript"),
+    (
+        "the workspace (.vscode/pnpify SDK)",
+        ".vscode/pnpify/typescript",
+    ),
+    ("the workspace (Yarn SDK)", ".yarn/sdks/typescript"),
+    ("the workspace (pnpm SDK)", ".pnpm/sdks/typescript"),
+];
+
+/// Is this candidate an editor SDK (any workspace row but `node_modules/typescript`)?
+fn is_sdk(place: &str) -> bool {
+    WORKSPACE_TS_DIRS[1..].iter().any(|(p, _)| *p == place)
+}
 /// How long `npm root -g` may take before the global candidate is passed over.
 const NPM_ROOT_BUDGET: Duration = Duration::from_secs(5);
 
@@ -707,10 +723,10 @@ fn typescript_launch_at(c: &TsCandidate, tools: &TsTools) -> std::result::Result
         ));
     };
     let at = format!("{} ({}): TypeScript {version}", c.place, c.dir.display());
-    if major >= 7 && c.place == YARN_SDK {
+    if major >= 7 && is_sdk(&c.place) {
         // The SDK is a PnP wrapper; its native executable is resolved through Yarn's PnP API.
         return Err(format!(
-            "{at}: a Yarn SDK for TypeScript 7 is not supported (it resolves through PnP)"
+            "{at}: an editor SDK for TypeScript 7 is not supported (it resolves through PnP)"
         ));
     }
     if major >= 7 {
@@ -757,9 +773,9 @@ fn choose_typescript(
     Err(reasons)
 }
 
-/// The workspace's own TypeScript: `node_modules/typescript` and the Yarn SDK
-/// (`.yarn/sdks/typescript`) under the root and each ancestor, nearest first: the installs node
-/// and typescript-language-server would find, including one hoisted to a monorepo root.
+/// The workspace's own TypeScript: each [`WORKSPACE_TS_DIRS`] row under the root and each
+/// ancestor, nearest first (rows in typescript-language-server's order): the installs it would
+/// find itself, including one hoisted to a monorepo root.
 fn workspace_candidates(root_dir: &str) -> Vec<TsCandidate> {
     // Absolute, so the walk reaches a monorepo root above a relative root and the launch paths
     // do not depend on the server's working directory.
@@ -768,10 +784,12 @@ fn workspace_candidates(root_dir: &str) -> Vec<TsCandidate> {
     let found: Vec<TsCandidate> = root
         .ancestors()
         .flat_map(|a| {
-            [
-                ("the workspace", a.join("node_modules").join("typescript")),
-                (YARN_SDK, a.join(".yarn").join("sdks").join("typescript")),
-            ]
+            WORKSPACE_TS_DIRS.iter().map(move |(place, rel)| {
+                (
+                    *place,
+                    rel.split('/').fold(a.to_path_buf(), |d, c| d.join(c)),
+                )
+            })
         })
         .filter(|(_, d)| d.is_dir())
         .map(|(place, dir)| TsCandidate {
@@ -951,7 +969,7 @@ fn no_typescript(reasons: &[String]) -> String {
 }
 
 /// Which TypeScript serves `root_dir`, and how to speak LSP to it: the workspace's own install
-/// (nearest `node_modules/typescript` or Yarn SDK, root then ancestors), then beside the
+/// (nearest `node_modules/typescript` or editor SDK, root then ancestors), then beside the
 /// `typescript-language-server` on `PATH`, then the global npm root; the first usable install
 /// wins (see the module docs). Nothing usable is `server not available: ...`.
 pub fn resolve_typescript_launch(root_dir: &str) -> Result<Launch> {
@@ -1912,9 +1930,10 @@ mod tests {
     fn a_yarn_sdk_for_typescript_7_is_refused_with_a_reason() {
         let tmp = tempfile::tempdir().unwrap();
         let ts = fake_ts(tmp.path(), "7.0.2");
-        let why = choose_typescript(&[cand(YARN_SDK, ts)], &tools(true)).unwrap_err();
+        let why =
+            choose_typescript(&[cand("the workspace (Yarn SDK)", ts)], &tools(true)).unwrap_err();
         assert!(
-            why[0].contains("a Yarn SDK for TypeScript 7 is not supported"),
+            why[0].contains("an editor SDK for TypeScript 7 is not supported"),
             "{why:?}"
         );
     }
@@ -2158,6 +2177,37 @@ mod tests {
             tier.ts_launch.is_none(),
             "a failed start must not keep its launch cached"
         );
+    }
+
+    /// One fake TypeScript 5 per workspace layout typescript-language-server 6.0.2 knows
+    /// (`MODULE_FOLDERS`): each resolves to tsls with that layout's `tsserver.js`.
+    #[test]
+    fn every_tsls_workspace_layout_resolves_to_its_tsserver() {
+        for (place, rel) in WORKSPACE_TS_DIRS {
+            let root = tempfile::tempdir().unwrap();
+            let ts = rel
+                .split('/')
+                .fold(root.path().to_path_buf(), |d, c| d.join(c));
+            std::fs::create_dir_all(ts.join("lib")).unwrap();
+            std::fs::write(
+                ts.join("package.json"),
+                r#"{"name":"typescript","version":"5.9.3"}"#,
+            )
+            .unwrap();
+            std::fs::write(ts.join("lib").join("tsserver.js"), "// tsserver\n").unwrap();
+            let c = workspace_candidates(root.path().to_str().unwrap());
+            assert_eq!(
+                (c[0].place.as_str(), &c[0].dir),
+                (place, &ts),
+                "{rel}: {c:?}"
+            );
+            let l = choose_typescript(&c, &tools(true)).unwrap();
+            assert_eq!(
+                l.init_options["tsserver"]["path"],
+                ts.join("lib").join("tsserver.js").to_str().unwrap(),
+                "{rel}"
+            );
+        }
     }
 
     #[test]
