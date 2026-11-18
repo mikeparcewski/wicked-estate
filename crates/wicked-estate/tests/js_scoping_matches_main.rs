@@ -12,6 +12,10 @@
 //! | var_function    | local fn               | local fn                 | local fn             |
 //! | static_arrow    | none (a tie)           | none (a tie)             | each class's arrow   |
 //! | static_value    | other.tsx              | other.tsx                | none (parked)        |
+//! | reassigned      | local arrow            | none                     | none                 |
+//! | nested_replaced | local arrow            | none                     | none                 |
+//! | catch_assigned  | local arrow            | none                     | none                 |
+//! | static_before   | none (a tie)           | none (a tie)             | none (parked)        |
 
 #[allow(dead_code)]
 #[derive(PartialEq)]
@@ -89,13 +93,10 @@ fn index(tag: &str, caller: &str, callers: &[&str]) -> Graph {
     }
 }
 
-/// Exactly one target, in `file`, whose symbol ends with `suffix`.
-fn assert_one(tag: &str, g: &Graph, caller: &str, file: &str, suffix: &str) {
-    let to = &g.calls[caller];
-    assert!(
-        to.len() == 1 && to[0].contains(file) && to[0].ends_with(suffix),
-        "{tag}: {caller} -> {to:?}, want one {file} target ending {suffix}"
-    );
+/// Exactly one target: the symbol `ts-tsx . . . <path>`.
+fn assert_one(tag: &str, g: &Graph, caller: &str, path: &str) {
+    let want = format!("ts-tsx . . . {path}");
+    assert_eq!(g.calls[caller], vec![want], "{tag}: {caller}");
 }
 
 fn assert_none(tag: &str, g: &Graph, caller: &str) {
@@ -120,7 +121,7 @@ fn param_var() {
     for c in CALLERS {
         match BUILD {
             Build::Main => assert_none("param_var", &g, c),
-            _ => assert_one("param_var", &g, c, "src/caller", "/Card()."),
+            _ => assert_one("param_var", &g, c, "src/caller/Card()."),
         }
     }
 }
@@ -136,7 +137,7 @@ fn param_var_after() {
     );
     for c in CALLERS {
         match BUILD {
-            Build::Pre488 => assert_one("param_var_after", &g, c, "src/caller", "/Card()."),
+            Build::Pre488 => assert_one("param_var_after", &g, c, "src/caller/Card()."),
             _ => assert_none("param_var_after", &g, c),
         }
     }
@@ -152,7 +153,7 @@ fn var_function() {
         &CALLERS,
     );
     for c in CALLERS {
-        assert_one("var_function", &g, c, "src/caller", "/Card().");
+        assert_one("var_function", &g, c, "src/caller/Card().");
     }
 }
 
@@ -168,13 +169,7 @@ fn static_arrow() {
     );
     for c in CALLERS {
         match BUILD {
-            Build::Head => assert_one(
-                "static_arrow",
-                &g,
-                c,
-                "src/caller",
-                &format!("/{c}#Card()."),
-            ),
+            Build::Head => assert_one("static_arrow", &g, c, &format!("src/caller/{c}#Card().")),
             _ => assert_none("static_arrow", &g, c),
         }
     }
@@ -194,13 +189,81 @@ fn static_value() {
     for c in CALLERS {
         match BUILD {
             Build::Head => assert_none("static_value", &g, c),
-            _ => assert_one("static_value", &g, c, "src/other", "/Card()."),
+            _ => assert_one("static_value", &g, c, "src/other/Card()."),
         }
     }
     if BUILD == Build::Head {
         assert_eq!(
             g.parked_local, 2,
             "static_value: both calls park as local bindings"
+        );
+    }
+}
+
+/// Pre-#488 bound by name; #488 dropped every parameter call; this change sees the assignment.
+fn assert_dropped_since_488(tag: &str, g: &Graph, callers: &[&str]) {
+    for c in callers {
+        match BUILD {
+            Build::Pre488 => assert_one(tag, g, c, "src/caller/Card()."),
+            _ => assert_none(tag, g, c),
+        }
+    }
+}
+
+/// A plain reassignment after the `var` arrow: the call sees `null`, not the arrow.
+#[test]
+fn reassigned() {
+    let g = index(
+        "reassigned",
+        "export function ViaCall(Card: any) { { var Card = () => null; } Card = null; return Card(); }\n\
+         export function ViaJsx(Card: any) { { var Card = () => null; } Card = null; return <Card />; }\n",
+        &CALLERS,
+    );
+    assert_dropped_since_488("reassigned", &g, &CALLERS);
+}
+
+/// A nested function runs at an unknown time: with two assignments it binds neither.
+#[test]
+fn nested_replaced() {
+    let g = index(
+        "nested_replaced",
+        "export function ViaCall(Card: any) { { var Card = () => null; } function InnerCall() { return Card(); } { var Card = null; } return InnerCall(); }\n\
+         export function ViaJsx(Card: any) { { var Card = () => null; } function InnerJsx() { return <Card />; } { var Card = null; } return InnerJsx(); }\n",
+        &["ViaCall", "ViaJsx", "InnerCall", "InnerJsx"],
+    );
+    assert_dropped_since_488("nested_replaced", &g, &["InnerCall", "InnerJsx"]);
+    assert_one("nested_replaced", &g, "ViaCall", "src/caller/InnerCall().");
+    assert_one("nested_replaced", &g, "ViaJsx", "src/caller/InnerJsx().");
+}
+
+/// A `var` initializer inside `catch (Card)` assigns the catch binding, not the parameter.
+#[test]
+fn catch_assigned() {
+    let g = index(
+        "catch_assigned",
+        "export function ViaCall(Card: any) { try { throw null; } catch (Card) { var Card = () => null; } return Card(); }\n\
+         export function ViaJsx(Card: any) { try { throw null; } catch (Card) { var Card = () => null; } return <Card />; }\n",
+        &CALLERS,
+    );
+    assert_dropped_since_488("catch_assigned", &g, &CALLERS);
+}
+
+/// A static block's call before its `var` arrow is assigned sees `undefined`.
+#[test]
+fn static_before() {
+    let g = index(
+        "static_before",
+        "export class ViaCall { static { Card(); { var Card = () => null; } } }\n\
+         export class ViaJsx { static { void (<Card />); { var Card = () => null; } } }\n",
+        &CALLERS,
+    );
+    for c in CALLERS {
+        assert_none("static_before", &g, c);
+    }
+    if BUILD == Build::Head {
+        assert_eq!(
+            g.parked_local, 2,
+            "static_before: both calls park as local bindings"
         );
     }
 }

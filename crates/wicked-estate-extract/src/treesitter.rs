@@ -2194,13 +2194,23 @@ fn js_var_names(root: tree_sitter::Node, src: &[u8]) -> HashSet<String> {
     names
 }
 
-/// The `var` ASSIGNMENTS of a function body: a `var` declarator with an initializer, or a
-/// `for (var x of …)` binding, outside nested functions, classes and static blocks
-/// (wicked-estate#492). An uninitialized `var x;` assigns nothing.
+/// The ASSIGNMENTS of a function body or static block (wicked-estate#492): an initialized `var`
+/// declarator, a `for (var x of …)` or bare `for (x of …)` binding, a plain or compound
+/// `x = …` assignment; each anchored at its node's start, outside nested functions, classes and
+/// static blocks. Inside `catch (x)`, an assignment to `x` is the catch binding's, so it is left
+/// out. An uninitialized `var x;` assigns nothing.
 fn js_var_assignments(body: tree_sitter::Node, src: &[u8]) -> Vec<(String, usize)> {
     let mut out = Vec::new();
-    let mut stack = vec![body];
-    while let Some(n) = stack.pop() {
+    let mut push = |names: Vec<String>, at: usize, shadow: &[String]| {
+        out.extend(
+            names
+                .into_iter()
+                .filter(|n| !shadow.contains(n))
+                .map(|n| (n, at)),
+        );
+    };
+    let mut stack: Vec<(tree_sitter::Node, Vec<String>)> = vec![(body, Vec::new())];
+    while let Some((n, mut shadow)) = stack.pop() {
         match n.kind() {
             "variable_declaration" => {
                 let mut walk = n.walk();
@@ -2212,20 +2222,62 @@ fn js_var_assignments(body: tree_sitter::Node, src: &[u8]) -> Vec<(String, usize
                     if let Some(p) = d.child_by_field_name("name") {
                         let mut names = Vec::new();
                         js_pattern_names(p, src, &mut names);
-                        out.extend(names.into_iter().map(|name| (name, d.start_byte())));
+                        push(names, d.start_byte(), &shadow);
                     }
                 }
             }
-            "for_in_statement" => out.extend(js_statement_decls(n, src, true)),
+            "for_in_statement" => {
+                let kind = n.child_by_field_name("kind").map(|k| k.kind());
+                if let Some(left) = n
+                    .child_by_field_name("left")
+                    .filter(|_| matches!(kind, None | Some("var")))
+                {
+                    let mut names = Vec::new();
+                    js_pattern_names(left, src, &mut names);
+                    push(names, left.start_byte(), &shadow);
+                }
+            }
+            "assignment_expression" | "augmented_assignment_expression" => {
+                if let Some(left) = n
+                    .child_by_field_name("left")
+                    .filter(|l| l.kind() == "identifier")
+                    .and_then(|l| l.utf8_text(src).ok())
+                {
+                    push(vec![left.to_string()], n.start_byte(), &shadow);
+                }
+            }
+            "catch_clause" => {
+                if let Some(p) = n.child_by_field_name("parameter") {
+                    js_pattern_names(p, src, &mut shadow);
+                }
+            }
             _ => {}
         }
         let mut walk = n.walk();
-        stack.extend(
-            n.named_children(&mut walk)
-                .filter(|c| !js_var_boundary(c.kind())),
-        );
+        for c in n.named_children(&mut walk) {
+            if !js_var_boundary(c.kind()) {
+                stack.push((c, shadow.clone()));
+            }
+        }
     }
     out
+}
+
+/// The assignment a call at `pos` sees among `all` (wicked-estate#492): in the call's own
+/// function or static block, the last one before it (none = the binding's incoming value); from a
+/// nested function, which runs at an unknown time, the only one, or none when there are several.
+fn js_assignment_seen(all: Vec<usize>, pos: usize, crossed: bool) -> Vec<usize> {
+    if !crossed {
+        all.into_iter()
+            .filter(|at| *at < pos)
+            .max()
+            .into_iter()
+            .collect()
+    } else if all.len() == 1 {
+        all
+    } else {
+        Vec::new()
+    }
 }
 
 /// What a scope node contributes, memoised per file by (node id, which): every call site asks its
@@ -2240,7 +2292,7 @@ enum JsScopeRead {
     Assigned,
 }
 
-type JsScopeMemo = HashMap<(usize, JsScopeRead), Vec<(String, usize)>>;
+type JsScopeMemo = HashMap<(usize, JsScopeRead), HashMap<String, Vec<usize>>>;
 
 /// The declaring starts for `name` that scope `n` contributes, read once per file.
 fn js_scope_starts(
@@ -2251,15 +2303,21 @@ fn js_scope_starts(
     src: &[u8],
 ) -> Vec<usize> {
     memo.entry((n.id(), read))
-        .or_insert_with(|| match read {
-            JsScopeRead::Block => js_scope_decls(n, src),
-            JsScopeRead::Hoisted => js_hoisted_vars(n, src),
-            JsScopeRead::Assigned => js_var_assignments(n, src),
+        .or_insert_with(|| {
+            let decls = match read {
+                JsScopeRead::Block => js_scope_decls(n, src),
+                JsScopeRead::Hoisted => js_hoisted_vars(n, src),
+                JsScopeRead::Assigned => js_var_assignments(n, src),
+            };
+            let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
+            for (name, at) in decls {
+                by_name.entry(name).or_default().push(at);
+            }
+            by_name
         })
-        .iter()
-        .filter(|(n, _)| n == name)
-        .map(|(_, at)| *at)
-        .collect()
+        .get(name)
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Whether the callee `name` at `node` is bound LOCALLY (wicked-estate#486), and by what: by an
@@ -2298,22 +2356,13 @@ fn js_local_binding(
                     .is_some_and(|p| js_pattern_binds(p, name, src))
             });
             if param {
-                // A `var` redeclaring a parameter IS the parameter (#492): the value a call sees
-                // is the last `var` assignment before it in the same invocation, or any of them
-                // from a nested function; none = the supplied value.
-                let mut starts = match body.filter(|_| var_names.contains(name)) {
+                // A `var` redeclaring a parameter IS the parameter (#492): the call sees an
+                // assignment by [`js_assignment_seen`]; none = the supplied value.
+                let all = match body.filter(|_| var_names.contains(name)) {
                     Some(b) => js_scope_starts(memo, b, JsScopeRead::Assigned, name, src),
                     None => Vec::new(),
                 };
-                if !crossed {
-                    starts = starts
-                        .into_iter()
-                        .filter(|at| *at < pos)
-                        .max()
-                        .into_iter()
-                        .collect();
-                }
-                return Some(starts);
+                return Some(js_assignment_seen(all, pos, crossed));
             }
             // A named function expression binds its own name inside itself.
             if matches!(kind, "function_expression" | "generator_function")
@@ -2330,12 +2379,13 @@ fn js_local_binding(
             }
             crossed = true;
         } else if kind == "class_static_block" {
-            // A static block is a `var` scope of its own (#492).
-            if var_names.contains(name) {
-                let starts = js_scope_starts(memo, n, JsScopeRead::Hoisted, name, src);
-                if !starts.is_empty() {
-                    return Some(starts);
-                }
+            // A static block is a `var` scope of its own (#492); the call sees an assignment as a
+            // parameter's call does.
+            if var_names.contains(name)
+                && !js_scope_starts(memo, n, JsScopeRead::Hoisted, name, src).is_empty()
+            {
+                let all = js_scope_starts(memo, n, JsScopeRead::Assigned, name, src);
+                return Some(js_assignment_seen(all, pos, crossed));
             }
             crossed = true;
         } else if kind == "class"
