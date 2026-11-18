@@ -3,7 +3,8 @@
 //! value it sees; a class static block is a `var` scope of its own. Each case runs for calls and
 //! JSX against an unrelated global `Card` in `other.tsx`, and asserts the exact targets.
 //!
-//! Same input, four builds. [`BUILD`] names the build this copy asserts; the baselines are this
+//! Same input, five builds (`Main499` = after #499, the build #498/#501 change; the #498/#501
+//! cases at the end assert `Pre488`, `Main499` and `Head` only, and return early on the others). [`BUILD`] names the build this copy asserts; the baselines are this
 //! file with only that line changed, pushed for the PR on throwaway branches of those commits,
 //! where estate's ordinary CI runs them (nothing here automates that):
 //! | case             | before #488 (`Pre488`) | after #488 (`Main`) | after #493 (`Main493`) | this change (`Head`) |
@@ -40,12 +41,14 @@ enum Build {
     Pre488,
     Main,
     Main493,
+    /// After #499 (#497), the build #498/#501 change.
+    Main499,
     Head,
 }
 
 /// Builds with #492's scoping (#493 and this change).
 fn scoped() -> bool {
-    matches!(BUILD, Build::Main493 | Build::Head)
+    matches!(BUILD, Build::Main493 | Build::Main499 | Build::Head)
 }
 
 const BUILD: Build = Build::Head;
@@ -68,6 +71,8 @@ fn fresh_dir(tag: &str) -> PathBuf {
 struct Graph {
     /// Per caller: the sorted target symbol ids of its Calls edges.
     calls: HashMap<String, Vec<String>>,
+    /// Every Calls edge's target, one entry per edge.
+    targets: Vec<String>,
     parked_local: usize,
 }
 
@@ -108,12 +113,18 @@ fn index(tag: &str, caller: &str, callers: &[&str]) -> Graph {
             (caller.to_string(), to)
         })
         .collect();
+    let targets = all
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Calls)
+        .map(|e| e.target.as_str().to_string())
+        .collect();
     let parked_local = store
         .unresolved_refs_for_name("local-binding:Card")
         .unwrap()
         .len();
     Graph {
         calls,
+        targets,
         parked_local,
     }
 }
@@ -308,7 +319,10 @@ fn destructed(tag: &str, write: &str) {
     for c in CALLERS {
         // `for ([Card] of …)` already masked the arrow on #493; the assignment forms did not.
         let stale = BUILD == Build::Main493 && !tag.starts_with("for_");
-        if BUILD == Build::Pre488 || stale {
+        // Since #498 a loop's write is conditional (the loop may not run): the arrow stays a
+        // possible value, as before #488.
+        let may = BUILD == Build::Head && tag.starts_with("for_");
+        if BUILD == Build::Pre488 || stale || may {
             assert_one(tag, &g, c, "src/caller/Card().");
         } else {
             assert_none(tag, &g, c);
@@ -499,4 +513,283 @@ fn lexical_shadow_size() {
         bound < unbound * 2,
         "the bound file must cost what the unbound one does: {bound:?} vs {unbound:?}"
     );
+}
+
+// ── #498: a var/let binding in the call's own function is read through its writes ──────────
+// ── #501: a pattern's write takes effect at its element; a right-hand side does not see it ──
+
+/// Index `body` (with `READ` the use) as two callers `ViaCall` / `ViaJsx` taking `params`, and
+/// assert one edge to the local arrow when `edge`, none otherwise. Runs on `Pre488`, `Main499`
+/// and `Head` only.
+fn case(tag: &str, params: &str, body: &str, edge: [bool; 3]) {
+    let want = match BUILD {
+        Build::Pre488 => edge[0],
+        Build::Main499 => edge[1],
+        Build::Head => edge[2],
+        Build::Main | Build::Main493 => return,
+    };
+    let g = index(
+        tag,
+        &format!(
+            "declare const on: boolean;\n\
+             declare const next: any;\n\
+             export function ViaCall({params}) {{ {} }}\n\
+             export function ViaJsx({params}) {{ {} }}\n",
+            body.replace("READ", "Card()"),
+            body.replace("READ", "<Card />"),
+        ),
+        &CALLERS,
+    );
+    for c in CALLERS {
+        if want {
+            assert_one(tag, &g, c, "src/caller/Card().");
+        } else {
+            assert_none(tag, &g, c);
+        }
+    }
+}
+
+#[test]
+fn body_var_destructed() {
+    let body = "var Card = () => null; [Card] = [null]; return READ;";
+    case("body_var_destructed", "", body, [true, true, false]);
+}
+
+#[test]
+fn body_var_reassigned() {
+    let body = "var Card = () => null; Card = null; return READ;";
+    case("body_var_reassigned", "", body, [true, true, false]);
+}
+
+#[test]
+fn body_let_reassigned() {
+    let body = "let Card = () => null; Card = null; return READ;";
+    case("body_let_reassigned", "", body, [true, true, false]);
+}
+
+#[test]
+fn hoisted_var_reassigned() {
+    let body = "if (on) { var Card = () => null; } Card = null; return READ;";
+    case("hoisted_var_reassigned", "", body, [true, true, false]);
+}
+
+/// A conditional write leaves the arrow a possible value: the edge stays.
+#[test]
+fn body_var_conditional() {
+    let body = "var Card = () => null; if (on) Card = null; return READ;";
+    case("body_var_conditional", "", body, [true, true, true]);
+}
+
+/// A write in a loop body may not run: the edge stays.
+#[test]
+fn body_var_loop_written() {
+    let body = "var Card = () => null; for (const x of [1]) { Card = null; } return READ;";
+    case("body_var_loop_written", "", body, [true, true, true]);
+}
+
+/// The same rule for a redeclared parameter: a conditional write keeps the arrow possible.
+#[test]
+fn param_conditional() {
+    let body = "{ var Card = () => null; } if (on) Card = null; return READ;";
+    case("param_conditional", "Card: any", body, [true, false, true]);
+}
+
+/// #501: a default after `Card` in the same pattern reads the element just assigned.
+#[test]
+fn pattern_default_after() {
+    let body = "{ var Card = () => null; } let x: any; [Card, x = READ] = next; return x;";
+    case(
+        "pattern_default_after",
+        "Card: any",
+        body,
+        [true, true, false],
+    );
+}
+
+/// A default before `Card` in the pattern still reads the arrow.
+#[test]
+fn pattern_default_before() {
+    let body = "{ var Card = () => null; } let x: any; [x = READ, Card] = next; return x;";
+    case(
+        "pattern_default_before",
+        "Card: any",
+        body,
+        [true, true, true],
+    );
+}
+
+/// The iterable is evaluated before its loop binding: it reads the arrow.
+#[test]
+fn for_iterable_read() {
+    let body = "{ var Card = () => null; } for ([Card] of [READ]) {} return null;";
+    case("for_iterable_read", "Card: any", body, [true, true, true]);
+}
+
+/// #501's case: in a static block, a for-of pattern default reads the element just assigned.
+#[test]
+fn static_for_default() {
+    let tag = "static_for_default";
+    let stale = match BUILD {
+        Build::Pre488 => false,
+        Build::Main499 => true,
+        Build::Head => false,
+        Build::Main | Build::Main493 => return,
+    };
+    let g = index(
+        tag,
+        "declare const next: any;\n\
+         export class ViaCall { static { { var Card = () => null; } let x: any; for ([Card, x = Card()] of next) {} } }\n\
+         export class ViaJsx { static { { var Card = () => null; } let x: any; for ([Card, x = <Card />] of next) {} } }\n",
+        &CALLERS,
+    );
+    for c in CALLERS {
+        if stale {
+            assert_one(tag, &g, c, &format!("src/caller/{c}#Card()."));
+        } else {
+            assert_none(tag, &g, c);
+        }
+    }
+}
+
+/// #501: N nested functions calling a name hoisted N times share one declaration list and one
+/// join, so the file costs what it costs when the name is unbound. Head only: before, each call
+/// copied and joined the whole list.
+#[test]
+fn shared_declarations_size() {
+    if BUILD != Build::Head {
+        return;
+    }
+    let n = 3_000;
+    let file = |var: &str| {
+        let vars: String = (0..n).map(|_| format!("var {var};\n")).collect();
+        let fns: String = (0..n)
+            .map(|i| format!("function f{i}() {{ return Card(); }}\n"))
+            .collect();
+        format!("export function P() {{ {{\n{vars}}}\n{fns}}}\n")
+    };
+    let bound = extract_time(&file("Card"));
+    let unbound = extract_time(&file("Other"));
+    eprintln!("shared_declarations_size: bound {bound:?}, unbound {unbound:?}");
+    assert!(
+        bound < unbound * 2,
+        "the bound file must cost what the unbound one does: {bound:?} vs {unbound:?}"
+    );
+}
+
+/// Guaranteed writes in other syntactic forms replace the arrow too.
+#[test]
+fn paren_write() {
+    let body = "{ var Card = () => null; } (Card = null); return READ;";
+    case("paren_write", "Card: any", body, [true, false, false]);
+}
+
+#[test]
+fn sequence_write() {
+    let body = "{ var Card = () => null; } Card = null, 0; return READ;";
+    case("sequence_write", "Card: any", body, [true, false, false]);
+}
+
+#[test]
+fn for_init_write() {
+    let body = "{ var Card = () => null; } for (Card = null; false; ) {} return READ;";
+    case("for_init_write", "Card: any", body, [true, false, false]);
+}
+
+/// A `let` in a nested block: its own writes decide its value.
+#[test]
+fn nested_let_reassigned() {
+    let body = "{ let Card = () => null; Card = null; return READ; }";
+    case("nested_let_reassigned", "", body, [true, true, false]);
+}
+
+/// Past 32 writes the lookup stops ordering: every known write stays possible.
+#[test]
+fn many_conditional_writes() {
+    let body = format!(
+        "let Card = () => null; {} return READ;",
+        "if (on) Card = null; ".repeat(33)
+    );
+    case("many_conditional_writes", "", &body, [true, true, true]);
+}
+
+/// A class field initializer runs at construction, after the `let` arrow exists: the edge stays
+/// on every build.
+#[test]
+fn class_field_reads_later() {
+    let tag = "class_field_reads_later";
+    if matches!(BUILD, Build::Main | Build::Main493) {
+        return;
+    }
+    let g = index(
+        tag,
+        "export function ViaCall() { class CCall { value = Card(); } let Card = () => null; return new CCall(); }\n\
+         export function ViaJsx() { class CJsx { value = <Card />; } let Card = () => null; return new CJsx(); }\n",
+        &CALLERS,
+    );
+    let to_card = g
+        .targets
+        .iter()
+        .filter(|t| t.as_str() == "ts-tsx . . . src/caller/Card().")
+        .count();
+    assert_eq!(to_card, 2, "{tag}: {:?}", g.targets);
+}
+
+/// `x = c ? x : y` may keep the arrow: the edge stays.
+#[test]
+fn self_kept() {
+    let body = "let Card = () => null; Card = on ? Card : null; return READ;";
+    case("self_kept", "", body, [true, true, true]);
+}
+
+/// A write in a declaration's initializer always runs.
+#[test]
+fn declarator_value_write() {
+    let body = "{ var Card = () => null; } const ignored = (Card = null); return READ;";
+    case(
+        "declarator_value_write",
+        "Card: any",
+        body,
+        [true, false, false],
+    );
+}
+
+/// Edges to the local arrow from classes `C<n>` reading `READ` in `body`, counted over the
+/// whole file; `want` per build (Pre488, Main499, Head).
+fn class_case(tag: &str, body: &str, want: [usize; 3]) {
+    let want = match BUILD {
+        Build::Pre488 => want[0],
+        Build::Main499 => want[1],
+        Build::Head => want[2],
+        Build::Main | Build::Main493 => return,
+    };
+    let g = index(
+        tag,
+        &format!(
+            "export function ViaCall(Card: any) {{ {} }}\n\
+             export function ViaJsx(Card: any) {{ {} }}\n",
+            body.replace("READ", "Card()").replace("CLS", "CCall"),
+            body.replace("READ", "<Card />").replace("CLS", "CJsx"),
+        ),
+        &CALLERS,
+    );
+    let to_card = g
+        .targets
+        .iter()
+        .filter(|t| t.as_str() == "ts-tsx . . . src/caller/Card().")
+        .count();
+    assert_eq!(to_card, want, "{tag}: {:?}", g.targets);
+}
+
+/// A static field initializer runs where its class stands: after the arrow, it reads it.
+#[test]
+fn static_field_after() {
+    let body = "Card = null; { var Card = () => null; } class CLS { static value = READ; }";
+    class_case("static_field_after", body, [2, 2, 2]);
+}
+
+/// ... and before the arrow, it reads the supplied parameter.
+#[test]
+fn static_field_before() {
+    let body = "class CLS { static value = READ; } { var Card = () => null; }";
+    class_case("static_field_before", body, [2, 0, 0]);
 }

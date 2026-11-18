@@ -61,11 +61,19 @@
   back-fill (which sees no hints) cannot re-bind it to a new homonym. Calls and JSX elements alike. Not changed: an
   aliased import (`import { Actual as Card }`) resolves exactly as before (#486's alias half stays open), Python,
   and Svelte/Vue script blocks. The first `index` after the upgrade re-extracts each file.
+- A local `var` or `let` callee is read through its writes (#498): `var Card = () => null; Card = null; Card()` (or a
+  destructuring `[Card] = …`) no longer binds the replaced arrow. A write that may not run (`if (on) Card = null`, a
+  loop body, a `for (… of …)` binding, a `try`/`finally` block) keeps the arrow possible, and so does every write once
+  more than 32 precede the call. Calls from a nested function or a class body, `const`, and function declarations are
+  unchanged. A destructuring write takes effect at its own element, so a later default in the same pattern reads the
+  new value and its right-hand side the old one (#501); a nested pattern under an outer default is not ordered that
+  finely yet. Long lists of identical declarations are shared, not copied per call (#501).
 - Local-binding detection follows two more JS scoping rules (#492). A `var` in a nested block that redeclares a
   parameter is that parameter, so a call sees the last assignment before it: `function Parent(Card) { { var Card = () =>
   null } return Card() }` binds Parent to that arrow again (#488 had dropped the edge); a call before it, or after a
   plain reassignment, binds nothing, and so does a call whose last write before it is a destructuring pattern
-  (`[Card] = …`, `({ Card } = …)`, `for ([Card] of …)`; #497). A call finds the write it sees by binary search, so
+  (`[Card] = …`, `({ Card } = …)`; #497; a `for ([Card] of …)` binding may not run, so since #498 it keeps the
+  arrow possible). A call finds the write it sees by binary search, so
   looking up writes no longer grows with every call. A class static block is a `var` scope of its own, read the same way, so
   `static { if (on) { var Card = make() } Card() }` no longer binds a global `Card`. Calls and JSX alike.
 
