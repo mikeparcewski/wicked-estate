@@ -1241,8 +1241,15 @@ impl SqliteStore {
             .map_err(st)?;
         conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
             .map_err(st)?;
+        // Stepped to its end, so a failed commit of the header change is an error here (query_row
+        // would drop it), then read back: the mode a fresh statement reports is the mode that landed.
+        {
+            let mut stmt = conn.prepare("PRAGMA journal_mode=DELETE").map_err(st)?;
+            let mut rows = stmt.query([]).map_err(st)?;
+            while rows.next().map_err(st)?.is_some() {}
+        }
         let mode: String = conn
-            .query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0))
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .map_err(st)?;
         if mode.eq_ignore_ascii_case("delete") {
             Ok(())
