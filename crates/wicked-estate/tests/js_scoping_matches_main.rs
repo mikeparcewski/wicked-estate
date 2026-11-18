@@ -733,3 +733,63 @@ fn class_field_reads_later() {
         .count();
     assert_eq!(to_card, 2, "{tag}: {:?}", g.targets);
 }
+
+/// `x = c ? x : y` may keep the arrow: the edge stays.
+#[test]
+fn self_kept() {
+    let body = "let Card = () => null; Card = on ? Card : null; return READ;";
+    case("self_kept", "", body, [true, true, true]);
+}
+
+/// A write in a declaration's initializer always runs.
+#[test]
+fn declarator_value_write() {
+    let body = "{ var Card = () => null; } const ignored = (Card = null); return READ;";
+    case(
+        "declarator_value_write",
+        "Card: any",
+        body,
+        [true, false, false],
+    );
+}
+
+/// Edges to the local arrow from classes `C<n>` reading `READ` in `body`, counted over the
+/// whole file; `want` per build (Pre488, Main499, Head).
+fn class_case(tag: &str, body: &str, want: [usize; 3]) {
+    let want = match BUILD {
+        Build::Pre488 => want[0],
+        Build::Main499 => want[1],
+        Build::Head => want[2],
+        Build::Main | Build::Main493 => return,
+    };
+    let g = index(
+        tag,
+        &format!(
+            "export function ViaCall(Card: any) {{ {} }}\n\
+             export function ViaJsx(Card: any) {{ {} }}\n",
+            body.replace("READ", "Card()").replace("CLS", "CCall"),
+            body.replace("READ", "<Card />").replace("CLS", "CJsx"),
+        ),
+        &CALLERS,
+    );
+    let to_card = g
+        .targets
+        .iter()
+        .filter(|t| t.as_str() == "ts-tsx . . . src/caller/Card().")
+        .count();
+    assert_eq!(to_card, want, "{tag}: {:?}", g.targets);
+}
+
+/// A static field initializer runs where its class stands: after the arrow, it reads it.
+#[test]
+fn static_field_after() {
+    let body = "Card = null; { var Card = () => null; } class CLS { static value = READ; }";
+    class_case("static_field_after", body, [2, 2, 2]);
+}
+
+/// ... and before the arrow, it reads the supplied parameter.
+#[test]
+fn static_field_before() {
+    let body = "class CLS { static value = READ; } { var Card = () => null; }";
+    class_case("static_field_before", body, [2, 0, 0]);
+}

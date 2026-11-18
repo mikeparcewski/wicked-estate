@@ -2386,12 +2386,15 @@ fn js_var_writes(body: tree_sitter::Node, src: &[u8]) -> HashMap<String, JsWrite
         let target = js_write_target(target);
         let known = target.kind() == "identifier";
         let blind = from.map(|f| (f.start_byte(), f.end_byte()));
+        let from_reads = |name: &str| from.is_some_and(|f| js_reads_name(f, name, src));
         let mut names = Vec::new();
         js_write_pattern_names(target, src, None, &mut names);
         for (name, visible) in names {
             if js_shadowed(shadow, &name) {
                 continue;
             }
+            // `x = c ? x : y` may keep the old value: it cuts nothing off (#498).
+            let covers = covers.filter(|_| keep || !from_reads(&name));
             let w = out.entry(name).or_default();
             if keep {
                 w.keeps += 1;
@@ -2506,8 +2509,26 @@ fn js_var_writes(body: tree_sitter::Node, src: &[u8]) -> HashMap<String, JsWrite
     out
 }
 
+/// Whether `n` reads `name` outside nested functions and classes (a value `x = c ? x : y` may
+/// keep, wicked-estate#498).
+fn js_reads_name(n: tree_sitter::Node, name: &str, src: &[u8]) -> bool {
+    let mut stack = vec![n];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "identifier" && n.utf8_text(src).is_ok_and(|t| t == name) {
+            return true;
+        }
+        let mut walk = n.walk();
+        stack.extend(
+            n.named_children(&mut walk)
+                .filter(|c| !js_var_boundary(c.kind())),
+        );
+    }
+    false
+}
+
 /// The statement `expr` always runs with (through `( … )` and `a, b`): an expression statement,
-/// or a `for` loop's initializer; none when it may not run (`c && (x = …)`, a condition).
+/// a declaration whose initializer it is, or a `for` loop's initializer; none when it may not run
+/// (`c && (x = …)`, a condition).
 fn js_statement_of(expr: tree_sitter::Node) -> Option<tree_sitter::Node> {
     let mut child = expr;
     let mut up = expr.parent()?;
@@ -2520,6 +2541,13 @@ fn js_statement_of(expr: tree_sitter::Node) -> Option<tree_sitter::Node> {
     }
     match up.kind() {
         "expression_statement" => Some(up),
+        "variable_declarator"
+            if up
+                .child_by_field_name("value")
+                .is_some_and(|v| v.id() == child.id()) =>
+        {
+            up.parent()
+        }
         // A loop initializer: [`js_straight_block`] places it where its loop stands.
         "for_statement"
             if up
@@ -2588,10 +2616,13 @@ enum JsScopeRead {
     Hoisted,
 }
 
+/// A scope's declaring starts, by name, each list shared by every call that binds to it.
+type JsDeclsByName = HashMap<String, std::rc::Rc<[usize]>>;
+
 #[derive(Default)]
 struct JsScopeMemo {
     /// Shared, not copied, by every call that binds to them (wicked-estate#501).
-    decls: HashMap<(usize, JsScopeRead), HashMap<String, std::rc::Rc<[usize]>>>,
+    decls: HashMap<(usize, JsScopeRead), JsDeclsByName>,
     /// A function body's or static block's writes ([`js_var_writes`]), by scope node id.
     writes: HashMap<usize, HashMap<String, JsWrites>>,
 }
@@ -2779,12 +2810,16 @@ fn js_local_binding(
         {
             // A named class expression binds its own name inside its body.
             return Some(Rc::from([]));
-        } else if matches!(
-            kind,
-            "class" | "class_declaration" | "abstract_class_declaration"
-        ) {
-            // A class body runs later (an instance field at construction, a method when called):
-            // source order says nothing about which write it sees (#498).
+        } else if matches!(kind, "public_field_definition" | "field_definition")
+            && n.child_by_field_name("value")
+                .is_some_and(|v| v.start_byte() <= pos && pos < v.end_byte())
+            && !{
+                let mut walk = n.walk();
+                n.children(&mut walk).any(|c| c.kind() == "static")
+            }
+        {
+            // An instance field's initializer runs at construction, later than its source
+            // position: source order says nothing about which write it sees (#498).
             crossed = true;
         } else if matches!(
             kind,
