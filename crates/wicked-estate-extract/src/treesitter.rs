@@ -2063,17 +2063,28 @@ fn js_pattern_binds(node: tree_sitter::Node, name: &str, src: &[u8]) -> bool {
     names.iter().any(|n| n == name)
 }
 
+/// Which declarations a scope collects: a block's own LEXICAL bindings (`let`, `const`, a function or
+/// class declaration), or a function's (or static block's) hoisted `var`s (wicked-estate#492).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JsDecl {
+    Lexical,
+    Var,
+}
+
 /// The declarations one statement makes: (bound name, the declaring node's start byte). The node
 /// is a `variable_declarator` or a function/class declaration — exactly a definition's anchor when
 /// the declaration is one (`const Card = () => …`, `function Card() {}`), so the caller can join
-/// the binding to its definition by start byte. `var_only` keeps only `var` declarators.
-fn js_statement_decls(stmt: tree_sitter::Node, src: &[u8], var_only: bool) -> Vec<(String, usize)> {
+/// the binding to its definition by start byte. `var` is never a block's binding: it belongs to
+/// the enclosing function or static block ([`JsDecl::Var`]).
+fn js_statement_decls(stmt: tree_sitter::Node, src: &[u8], mode: JsDecl) -> Vec<(String, usize)> {
     let mut out = Vec::new();
+    let wanted = match stmt.kind() {
+        "variable_declaration" => mode == JsDecl::Var,
+        "lexical_declaration" => mode == JsDecl::Lexical,
+        _ => false,
+    };
     match stmt.kind() {
-        "variable_declaration" | "lexical_declaration" => {
-            if var_only && stmt.kind() != "variable_declaration" {
-                return out;
-            }
+        "variable_declaration" | "lexical_declaration" if wanted => {
             let mut walk = stmt.walk();
             for d in stmt.named_children(&mut walk) {
                 if d.kind() != "variable_declarator" {
@@ -2087,7 +2098,7 @@ fn js_statement_decls(stmt: tree_sitter::Node, src: &[u8], var_only: bool) -> Ve
             }
         }
         // `for (var x of xs)`: a hoisted `var` too, with no declarator node.
-        "for_in_statement" if var_only => {
+        "for_in_statement" if mode == JsDecl::Var => {
             let is_var = stmt
                 .child_by_field_name("kind")
                 .is_some_and(|k| k.kind() == "var");
@@ -2101,7 +2112,7 @@ fn js_statement_decls(stmt: tree_sitter::Node, src: &[u8], var_only: bool) -> Ve
         | "generator_function_declaration"
         | "class_declaration"
         | "abstract_class_declaration"
-            if !var_only =>
+            if mode == JsDecl::Lexical =>
         {
             if let Some(t) = stmt
                 .child_by_field_name("name")
@@ -2115,10 +2126,11 @@ fn js_statement_decls(stmt: tree_sitter::Node, src: &[u8], var_only: bool) -> Ve
     out
 }
 
-/// The bindings a block-like scope makes: its statements' declarations, every case's statements
-/// for a switch body (cases share one scope), or its own catch/loop binding (a `for (const x of …)`,
-/// never a bare `for (x of …)` assignment). Pattern bindings carry the pattern's start byte, which
-/// no definition anchors.
+/// The LEXICAL bindings a block-like scope makes: its statements' `let`/`const`/function/class
+/// declarations, every case's statements for a switch body (cases share one scope), or its own
+/// catch binding or `let`/`const` loop binding (never a `var` loop binding, which is the
+/// function's, nor a bare `for (x of …)` assignment). Pattern bindings carry the pattern's start
+/// byte, which no definition anchors.
 fn js_scope_decls(scope: tree_sitter::Node, src: &[u8]) -> Vec<(String, usize)> {
     let pattern = |p: tree_sitter::Node| {
         let mut names = Vec::new();
@@ -2135,12 +2147,16 @@ fn js_scope_decls(scope: tree_sitter::Node, src: &[u8]) -> Vec<(String, usize)> 
             .unwrap_or_default(),
         "for_in_statement" => scope
             .child_by_field_name("left")
-            .filter(|_| scope.child_by_field_name("kind").is_some())
+            .filter(|_| {
+                scope
+                    .child_by_field_name("kind")
+                    .is_some_and(|k| matches!(k.kind(), "let" | "const"))
+            })
             .map(pattern)
             .unwrap_or_default(),
         "for_statement" => scope
             .child_by_field_name("initializer")
-            .map(|init| js_statement_decls(init, src, false))
+            .map(|init| js_statement_decls(init, src, JsDecl::Lexical))
             .unwrap_or_default(),
         "switch_body" => {
             let mut out = Vec::new();
@@ -2148,7 +2164,7 @@ fn js_scope_decls(scope: tree_sitter::Node, src: &[u8]) -> Vec<(String, usize)> 
             for case in scope.named_children(&mut walk) {
                 let mut walk = case.walk();
                 for stmt in case.named_children(&mut walk) {
-                    out.extend(js_statement_decls(stmt, src, false));
+                    out.extend(js_statement_decls(stmt, src, JsDecl::Lexical));
                 }
             }
             out
@@ -2157,20 +2173,21 @@ fn js_scope_decls(scope: tree_sitter::Node, src: &[u8]) -> Vec<(String, usize)> 
             let mut out = Vec::new();
             let mut walk = scope.walk();
             for stmt in scope.named_children(&mut walk) {
-                out.extend(js_statement_decls(stmt, src, false));
+                out.extend(js_statement_decls(stmt, src, JsDecl::Lexical));
             }
             out
         }
     }
 }
 
-/// Every `var` declaration in a function body, outside nested functions, classes and static
-/// blocks: `var` is function-scoped, so `if (c) { var x = … }` binds `x` for the whole body.
+/// Every `var` declaration in a function body or static block, outside nested functions, classes
+/// and static blocks: `var` is function-scoped, so `if (c) { var x = … }` binds `x` for the whole
+/// body.
 fn js_hoisted_vars(body: tree_sitter::Node, src: &[u8]) -> Vec<(String, usize)> {
     let mut out = Vec::new();
     let mut stack = vec![body];
     while let Some(n) = stack.pop() {
-        out.extend(js_statement_decls(n, src, true));
+        out.extend(js_statement_decls(n, src, JsDecl::Var));
         let mut walk = n.walk();
         stack.extend(
             n.named_children(&mut walk)
@@ -2187,7 +2204,11 @@ fn js_var_names(root: tree_sitter::Node, src: &[u8]) -> HashSet<String> {
     let mut names = HashSet::new();
     let mut stack = vec![root];
     while let Some(n) = stack.pop() {
-        names.extend(js_statement_decls(n, src, true).into_iter().map(|(n, _)| n));
+        names.extend(
+            js_statement_decls(n, src, JsDecl::Var)
+                .into_iter()
+                .map(|(n, _)| n),
+        );
         let mut walk = n.walk();
         stack.extend(n.named_children(&mut walk));
     }
@@ -2198,13 +2219,18 @@ fn js_var_names(root: tree_sitter::Node, src: &[u8]) -> HashSet<String> {
 /// enclosing scopes, so each scope is read once rather than once per call.
 type JsScopeMemo = HashMap<usize, Vec<(String, usize)>>;
 
-/// Whether the callee `name` at `node` is bound LOCALLY (wicked-estate#486), and by what: by an
-/// enclosing function's parameters or own name, by a declaration in an enclosing block (a hoisted
-/// `var` included), up to the module. `Some(starts)` = local; `starts` are the declaring nodes of
-/// the innermost scope that binds it, which the caller joins to a definition by its anchor start
-/// (a nested `function Card() {}`, a local `const Card = () => …`); empty = a value binding (a
-/// parameter, a prop). `None` = a module-level binding (an import, a top-level declaration) or an
-/// unbound name: the call keeps ordinary name resolution.
+/// Whether the callee `name` at `node` is bound LOCALLY (wicked-estate#486, #492), and by what,
+/// in JS's own scoping order from the call outwards:
+/// - a block (`{}`, a loop, a catch, a switch body) binds its LEXICAL declarations only;
+/// - a function binds its parameters and every hoisted `var` of its body as ONE binding (a `var`
+///   redeclaring a parameter is the parameter), then its own name if it is a named expression;
+/// - a class static block is a `var` scope of its own;
+/// - the module binds nothing local.
+/// `Some(starts)` = local; `starts` are the declaring nodes of that binding, which the caller joins
+/// to a definition by its anchor start (a nested `function Card() {}`, a local
+/// `const Card = () => …`, a `var Card = () => …` redeclaring a parameter); empty = a value binding
+/// (a parameter, a prop). `None` = a module-level binding (an import, a top-level declaration) or
+/// an unbound name: the call keeps ordinary name resolution.
 fn js_local_binding(
     node: tree_sitter::Node,
     name: &str,
@@ -2213,6 +2239,16 @@ fn js_local_binding(
     memo: &mut JsScopeMemo,
 ) -> Option<Vec<usize>> {
     let pos = node.start_byte();
+    let hoisted = |scope: tree_sitter::Node| -> Vec<usize> {
+        if !var_names.contains(name) {
+            return Vec::new();
+        }
+        js_hoisted_vars(scope, src)
+            .into_iter()
+            .filter(|(n, _)| n == name)
+            .map(|(_, at)| at)
+            .collect()
+    };
     let mut current = node.parent();
     while let Some(n) = current {
         let kind = n.kind();
@@ -2220,12 +2256,18 @@ fn js_local_binding(
             return None;
         }
         if JS_FUNCTION_KINDS.contains(&kind) {
-            for field in ["parameters", "parameter"] {
-                if let Some(p) = n.child_by_field_name(field) {
-                    if js_pattern_binds(p, name, src) {
-                        return Some(Vec::new());
-                    }
-                }
+            let param = ["parameters", "parameter"].iter().any(|field| {
+                n.child_by_field_name(field)
+                    .is_some_and(|p| js_pattern_binds(p, name, src))
+            });
+            // A body `var` is not visible to a default parameter: only a call in the body sees it.
+            let vars = n
+                .child_by_field_name("body")
+                .filter(|b| b.start_byte() <= pos && pos < b.end_byte())
+                .map(hoisted)
+                .unwrap_or_default();
+            if param || !vars.is_empty() {
+                return Some(vars);
             }
             // A named function expression binds its own name inside itself.
             if matches!(kind, "function_expression" | "generator_function")
@@ -2234,19 +2276,10 @@ fn js_local_binding(
             {
                 return Some(Vec::new());
             }
-            // A body `var` is not visible to a default parameter: only a call in the body sees it.
-            if let Some(body) = n
-                .child_by_field_name("body")
-                .filter(|b| var_names.contains(name) && b.start_byte() <= pos && pos < b.end_byte())
-            {
-                let starts: Vec<usize> = js_hoisted_vars(body, src)
-                    .into_iter()
-                    .filter(|(n, _)| n == name)
-                    .map(|(_, at)| at)
-                    .collect();
-                if !starts.is_empty() {
-                    return Some(starts);
-                }
+        } else if kind == "class_static_block" {
+            let vars = hoisted(n);
+            if !vars.is_empty() {
+                return Some(vars);
             }
         } else if kind == "class"
             && n.child_by_field_name("name")
@@ -2261,7 +2294,6 @@ fn js_local_binding(
                 | "for_in_statement"
                 | "catch_clause"
                 | "switch_body"
-                | "class_static_block"
         ) {
             let decls = memo.entry(n.id()).or_insert_with(|| js_scope_decls(n, src));
             let starts: Vec<usize> = decls
@@ -6657,6 +6689,11 @@ export function N7() { abstract class L { static { var Top; } } return Top(); }
 export function D1() { function Card() { return null; } return Card(); }
 export function D2() { const Card = () => null; function Inner() { return <Card />; } return Inner(); }
 export function D3() { var Card; function Card() { return null; } return Card(); }
+export function D4(Card) { { var Card = () => null; } return Card(); }
+export function D5() { { var Card; } function Card() { return null; } return <Card />; }
+export class PE { static { if (Top) { var Card = Top; } Card(); } }
+export class N8 { static { var Card = Top; } }
+export function N9() { return Card(); }
 "#;
         let ex = TreeSitterExtractor::for_language("tsx")
             .unwrap()
@@ -6679,7 +6716,15 @@ export function D3() { var Card; function Card() { return null; } return Card();
                 "{p}: the callee is a local value binding: {got:?}"
             );
         }
-        for n in ["/N1(", "/N2(", "/N3(", "/N4(", "/N5(", "/N6(", "/N7("] {
+        // A class static block is a `var` scope of its own (#492).
+        let got = names("/PE");
+        assert!(
+            got.iter().any(|n| n == "local-binding:Card"),
+            "a static-block var is local to the block: {got:?}"
+        );
+        for n in [
+            "/N1(", "/N2(", "/N3(", "/N4(", "/N5(", "/N6(", "/N7(", "/N9(",
+        ] {
             let got = names(n);
             assert!(
                 !got.is_empty() && got.iter().all(|g| !g.starts_with("local-binding:")),
@@ -6697,6 +6742,11 @@ export function D3() { var Card; function Card() { return null; } return Card();
             ("/D1(", "nested function"),
             ("/Inner(", "captured const arrow"),
             ("/D3(", "a var sharing the function's binding"),
+            ("/D4(", "a block var redeclaring the parameter (#492)"),
+            (
+                "/D5(",
+                "a block var sharing a body function's binding (#492)",
+            ),
         ] {
             let got = names(caller);
             assert!(
