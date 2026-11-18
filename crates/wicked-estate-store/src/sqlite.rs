@@ -1196,31 +1196,43 @@ impl SqliteStore {
     /// succeed, and on a stale one the first write they attempt fails, which is the answer. A
     /// refused graph is never opened any other way: its owner migrates it on its next write.
     ///
-    /// On Unix, a WAL graph with no `-wal` file beside it is checked first through an `immutable`
-    /// connection, which reads the database file alone and creates nothing, so refusing it leaves
-    /// no `-wal` or `-shm` behind (wicked-estate#491). The checks use the resolved path, where
-    /// SQLite keeps the sidecars. One that passes is then opened as above, where SQLite may create
-    /// them to serve it. If a `-wal` appeared meanwhile (a writer), the decision is the ordinary
-    /// open's.
+    /// On Unix, a WAL graph whose `-wal` is absent or empty (no frames: the database file is the
+    /// whole graph) is checked first through an `immutable` connection, which reads the database
+    /// file alone and creates nothing, so refusing it leaves no `-wal` or `-shm` behind
+    /// (wicked-estate#491, #500). The checks, and the open that follows, use the resolved path,
+    /// where SQLite keeps the sidecars. One that passes is then opened as above, where SQLite may
+    /// create them to serve it. A `-wal` with frames goes straight to that open: only SQLite can
+    /// read it. If a `-wal` appeared during the immutable check (a writer), the decision is the
+    /// ordinary open's.
     pub fn open_readonly_current(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let path = path.as_ref();
         #[cfg(unix)]
-        if let Ok(real) = std::fs::canonicalize(path) {
-            if is_wal_format(&real) && !wal_sibling(&real).exists() {
+        let resolved = std::fs::canonicalize(path).ok();
+        #[cfg(unix)]
+        if let Some(real) = resolved.as_deref() {
+            let no_frames = |p: &std::path::Path| {
+                std::fs::metadata(wal_sibling(p))
+                    .ok()
+                    .is_none_or(|m| m.len() == 0)
+            };
+            if is_wal_format(real) && no_frames(real) {
+                let wal_before = wal_sibling(real).exists();
                 let conn = Connection::open_with_flags(
-                    immutable_uri(&real),
+                    immutable_uri(real),
                     OpenFlags::SQLITE_OPEN_READ_ONLY
                         | OpenFlags::SQLITE_OPEN_URI
                         | OpenFlags::SQLITE_OPEN_NO_MUTEX,
                 )
                 .map_err(st)?;
                 if let Err(e) = check_current(&conn) {
-                    if !wal_sibling(&real).exists() {
+                    if wal_sibling(real).exists() == wal_before && no_frames(real) {
                         return Err(e);
                     }
                 }
             }
         }
+        #[cfg(unix)]
+        let path = resolved.as_deref().unwrap_or(path);
         let store = Self::open_readonly(path)?;
         check_current(&store.conn)?;
         Ok(store)
@@ -1228,8 +1240,10 @@ impl SqliteStore {
 
     /// Leave an on-disk graph in rollback-journal (DELETE) mode: checkpoint its WAL into the
     /// database, then switch the journal mode (wicked-crew#1497). A reader that may not write the
-    /// graph's directory cannot open a WAL graph (it needs a `-shm` it cannot create), so the owner
-    /// calls this after its last write. Any later writer open switches it back to WAL. Waits up to
+    /// graph's directory can read a WAL graph only while its `-wal` and `-shm` exist, and SQLite
+    /// normally removes both when the last connection closes cleanly; with no `-shm` it would have
+    /// to create one, which it cannot there. A DELETE graph needs neither, so the owner calls this
+    /// after its last write. Any later writer open switches it back to WAL. Waits up to
     /// 15 s for other connections; an error if the mode did not change.
     pub fn leave_in_delete_journal(path: impl AsRef<std::path::Path>) -> Result<()> {
         let conn = Connection::open_with_flags(
@@ -7674,6 +7688,55 @@ mod tests {
             "a current graph must not be refused through its link"
         );
         drop(holder);
+    }
+
+    /// #500: an older WAL graph with an EMPTY `-wal` and no `-shm` is refused through the
+    /// immutable check, and no `-shm` appears. Fails on main: that layout went to the ordinary
+    /// open, which created the `-shm`. A CURRENT graph whose `-wal` holds frames and has no `-shm`
+    /// (copied without its disposable index) is still served, its WAL commit read.
+    #[cfg(unix)]
+    #[test]
+    fn an_older_graph_with_an_empty_wal_and_no_shm_is_refused_without_creating_one() {
+        let dir = unique_test_dir("ro-wal-no-shm");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("g.db");
+        drop(SqliteStore::open(&db).unwrap());
+        Connection::open(&db)
+            .unwrap()
+            .execute_batch("DROP TABLE search_misses;")
+            .unwrap();
+        assert_eq!(std::fs::read(&db).unwrap()[18], 2, "a WAL graph");
+        let (wal, shm) = (dir.join("g.db-wal"), dir.join("g.db-shm"));
+        assert!(!wal.exists() && !shm.exists());
+        std::fs::write(&wal, b"").unwrap();
+        let err = SqliteStore::open_readonly_current(&db)
+            .err()
+            .expect("an older graph is refused");
+        assert!(err.to_string().contains("search_misses"), "{err}");
+        assert!(!shm.exists(), "refusing it created a -shm");
+
+        // A current graph with frames in its -wal and no -shm: copy one whose last commit is
+        // still in its WAL. It is served, and the commit in the WAL is what it reads.
+        let src = dir.join("src.db");
+        drop(SqliteStore::open(&src).unwrap());
+        let holder = Connection::open(&src).unwrap();
+        holder
+            .execute_batch("PRAGMA wal_autocheckpoint=0; PRAGMA user_version=7;")
+            .unwrap();
+        let copy = dir.join("copy.db");
+        std::fs::copy(&src, &copy).unwrap();
+        std::fs::copy(dir.join("src.db-wal"), dir.join("copy.db-wal")).unwrap();
+        drop(holder);
+        assert!(std::fs::metadata(dir.join("copy.db-wal")).unwrap().len() > 0);
+        let store = SqliteStore::open_readonly_current(&copy).expect("a current graph is served");
+        let v: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 7, "the WAL commit is read");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// wicked-crew#1497: a graph this build wrote (empty or not) passes the read-only currency
