@@ -13,6 +13,9 @@ use crate::SqliteStore;
 
 struct SqliteManager {
     path: PathBuf,
+    /// Open each connection with [`SqliteStore::open_readonly`]: no WAL pragma, no schema DDL, no
+    /// byte written, so the pool serves a graph in a directory the process cannot write.
+    read_only: bool,
 }
 
 impl Manager for SqliteManager {
@@ -20,7 +23,11 @@ impl Manager for SqliteManager {
     type Error = wicked_estate_core::Error;
 
     async fn create(&self) -> std::result::Result<SqliteStore, wicked_estate_core::Error> {
-        SqliteStore::open_file(&self.path)
+        if self.read_only {
+            SqliteStore::open_readonly(&self.path)
+        } else {
+            SqliteStore::open_file(&self.path)
+        }
     }
 
     async fn recycle(
@@ -39,8 +46,22 @@ pub struct SqlitePool(Pool<SqliteManager>);
 
 /// Open a `SqlitePool` pointing at `path` with up to `max_size` concurrent connections.
 pub fn open_sqlite_pool(path: &str, max_size: usize) -> Result<SqlitePool> {
+    build_pool(path, max_size, false)
+}
+
+/// [`open_sqlite_pool`] for a reader: every connection is `SQLITE_OPEN_READONLY`
+/// ([`SqliteStore::open_readonly`]). A read-only MCP server (`--readonly`) serves through this, so
+/// a graph handed to it in a read-only directory answers instead of failing on the WAL pragma or
+/// schema DDL a writer open runs (wicked-crew#1497). Writes through such a pool fail; the response
+/// cache's `cache_put` is best-effort, so a read-only pool simply never caches.
+pub fn open_sqlite_pool_readonly(path: &str, max_size: usize) -> Result<SqlitePool> {
+    build_pool(path, max_size, true)
+}
+
+fn build_pool(path: &str, max_size: usize, read_only: bool) -> Result<SqlitePool> {
     let manager = SqliteManager {
         path: PathBuf::from(path),
+        read_only,
     };
     Pool::builder(manager)
         .max_size(max_size)

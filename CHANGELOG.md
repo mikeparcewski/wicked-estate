@@ -28,6 +28,23 @@
 - **CI runs the live LSP test instead of skip-passing it** (#484). The gate job installs TypeScript 7 and sets
   `WICKED_LSP_LIVE_REQUIRED=1`, which makes `lsp_live`'s skip a failure; a second step reruns `lsp_live` on TypeScript
   5.9 with `typescript-language-server` 6.0.2. `WICKED_LSP_LIVE_EXPECT` makes each step assert which path it took. Before this, CI had neither tool, so the test always skipped and passed.
+- A `--readonly` MCP server opens its graph read-only (`SQLITE_OPEN_READONLY`) for every handle: the
+  connection pool, the freshness probe, the embedder check, semantic search and the sync store. Before, it ran a
+  writer's open: that switched a DELETE-journal graph to WAL, and in a directory it could not write, every open
+  failed and the server answered "no readable graph" for a graph that was there. A launcher can now hand a worker a
+  graph it can read but not change (wicked-crew#1497).
+  - **What the launcher must deliver:** a graph last written by this build (so it needs no migration), in DELETE
+    journal mode with no hot journal beside it. A WAL graph also answers read-only, but SQLite may create its
+    `-wal` and `-shm` beside it (never writing the database file), and in a directory nobody can write a WAL graph
+    is not readable.
+  - **A graph it cannot serve read-only is refused, never written.** Either its schema is older than this build's
+    (its readers need the writer's migrations), or SQLite cannot open it read-only (a hot journal, or a WAL graph
+    whose `-shm` cannot be created). Every graph tool, and `knowledge.neighbors` (it checks code links against the graph), answers with
+    the reason; the `initialize` instructions and
+    `tools/list` `_meta` (`wicked-estate/graph`) carry it. The tools stay listed (`SemanticSearch` included), and no call answers from an
+    empty graph. A `file:` URI graph is refused too: SQLite would open it itself. Whoever owns the graph migrates it on its next write (`index`, or any write-mode open).
+  - **Unchanged:** a write-mode server, a missing graph (served empty, as before; a graph behind a directory the
+    server cannot search still reads as missing) and other schemes.
 
 ## [0.35.6] — 2026-11-16
 

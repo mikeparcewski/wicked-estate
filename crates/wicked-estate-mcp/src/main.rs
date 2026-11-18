@@ -132,6 +132,54 @@ fn ensure_store_dir(spec: &str) -> std::io::Result<()> {
 
 /// `scheme:` = two or more scheme chars before the colon (`sqlite:`, `postgres://`), so a
 /// Windows drive letter (`C:\…`) is still a path.
+/// wicked-crew#1497: how a `--readonly` server opens its graph.
+enum ReadonlyGraph {
+    /// Not a read-only server, or not an on-disk SQLite graph: opened as before.
+    AsBefore,
+    /// Served `SQLITE_OPEN_READONLY` from this path; the store is the checked handle itself, used
+    /// for the sync dispatch (no second open that could fail into an empty stand-in).
+    Serve(String, SqliteStore),
+    /// Not served: every graph tool is refused with this reason, and the graph is never touched.
+    Refuse(String),
+}
+
+/// wicked-crew#1497: a `--readonly` server opens EVERY on-disk SQLite graph read-only, and never
+/// writes one. A graph it cannot serve that way (its schema is older than this build's, or it
+/// cannot be opened read-only: a hot journal, a WAL graph whose `-shm` cannot be created) is
+/// refused with the reason; whoever owns the graph migrates it on its next write. The path comes
+/// from the store factory's own parser (`sqlite://<path>` or a bare path), so every handle opens
+/// the same file. `:memory:` (the stand-in for a missing store) and other schemes open as before.
+fn readonly_graph(read_only: bool, spec: &str) -> ReadonlyGraph {
+    if !read_only {
+        return ReadonlyGraph::AsBefore;
+    }
+    // SQLite opens a `file:` URI itself, so the writer opens would reach the graph (codex r2 #5).
+    if spec.starts_with("file:") {
+        return ReadonlyGraph::Refuse(format!(
+            "a read-only server does not open a `file:` URI graph ('{spec}'); pass its path. \
+             Nothing was opened"
+        ));
+    }
+    if is_scheme_spec(spec) && !spec.starts_with("sqlite://") {
+        return ReadonlyGraph::AsBefore;
+    }
+    let wicked_estate_store::StoreBackend::Sqlite { path } =
+        wicked_estate_store::StoreBackend::parse(spec)
+    else {
+        return ReadonlyGraph::AsBefore;
+    };
+    if path == ":memory:" {
+        return ReadonlyGraph::AsBefore;
+    }
+    match SqliteStore::open_readonly_current(&path) {
+        Ok(store) => ReadonlyGraph::Serve(path, store),
+        Err(e) => ReadonlyGraph::Refuse(format!(
+            "the graph at '{path}' is not served read-only ({e}); a writer must re-index or \
+             migrate it (it is migrated on its owner's next write). Nothing was written"
+        )),
+    }
+}
+
 fn is_scheme_spec(spec: &str) -> bool {
     spec.split_once(':').is_some_and(|(head, _)| {
         head.len() > 1
@@ -251,10 +299,26 @@ async fn main() -> Result<()> {
     // DES-GROUNDING-001 §3.0: read-only mode — advertise + dispatch only read/query tools.
     let read_only = resolve_read_only();
     let db_path = read_only_store(resolve_db_path()?, read_only, "graph");
+    // wicked-crew#1497: a refused graph is never opened; the server serves an empty stand-in that
+    // every graph tool refuses to answer from (`ServerStatus::graph_unavailable`).
+    // The collision guard checks the configured graph, refused or not (codex r2 #6).
+    let graph_spec = db_path.clone();
+    let (graph_ro, graph_refused, db_path, ro_sync) = match readonly_graph(read_only, &db_path) {
+        ReadonlyGraph::AsBefore => (None, None, db_path, None),
+        ReadonlyGraph::Serve(path, store) => (Some(path), None, db_path, Some(store)),
+        ReadonlyGraph::Refuse(reason) => {
+            eprintln!("[wicked-estate] read-only: {reason}");
+            (None, Some(reason), ":memory:".to_string(), None)
+        }
+    };
 
     // 2. Open async connection pool instead of a single connection.
-    let store = wicked_estate::open_async_store(&db_path)
-        .with_context(|| format!("failed to open async store at '{db_path}'"))?;
+    let store = if let Some(path) = graph_ro.as_deref() {
+        wicked_estate::open_async_store_readonly(path)
+    } else {
+        wicked_estate::open_async_store(&db_path)
+    }
+    .with_context(|| format!("failed to open async store at '{db_path}'"))?;
 
     let otel_sink = wicked_estate_observe::init_sink_from_env();
     let otel_resource = wicked_estate_core::observability::Resource::service(
@@ -269,12 +333,22 @@ async fn main() -> Result<()> {
     // (#351) Freshness is measured per call, after the response cache, by one probe that owns
     // its own store handle (the dispatch path holds only `&dyn GraphRead`). Best-effort: a probe
     // with no readable graph states "unknown".
-    let mut freshness = wicked_estate::freshness::FreshnessProbe::open(&db_path);
+    let mut freshness = if let Some(path) = graph_ro.as_deref() {
+        wicked_estate::freshness::FreshnessProbe::open_readonly(path)
+    } else {
+        wicked_estate::freshness::FreshnessProbe::open(&db_path)
+    };
 
     // Dim-guard (DoD-A6a): read the store's recorded embedder identity + dim, and compute the
     // runtime embedder's. SemanticSearch is advertised/dispatched only when they match.
     let (embedder_meta_id, embedder_meta_dim) = if db_path != ":memory:" {
-        wicked_estate_store::open_store_ext(&db_path)
+        let meta_store = if let Some(path) = graph_ro.as_deref() {
+            SqliteStore::open_readonly(path)
+                .map(|s| Box::new(s) as Box<dyn wicked_estate_store::GraphStoreMutExt>)
+        } else {
+            wicked_estate_store::open_store_ext(&db_path)
+        };
+        meta_store
             .ok()
             .map(|s| {
                 (
@@ -299,7 +373,12 @@ async fn main() -> Result<()> {
 
     let semantic: Option<std::sync::Arc<wicked_estate_retrieve::SemanticSearch>> =
         if db_path != ":memory:" {
-            SqliteStore::open(&db_path).ok().map(|vec_store| {
+            let vec_store = if let Some(path) = graph_ro.as_deref() {
+                SqliteStore::open_readonly(path)
+            } else {
+                SqliteStore::open(&db_path)
+            };
+            vec_store.ok().map(|vec_store| {
                 std::sync::Arc::new(wicked_estate_mcp::live_semantic_search(vec_store))
             })
         } else {
@@ -315,6 +394,9 @@ async fn main() -> Result<()> {
     };
     // What the dispatch reports about this server's own health (estate#375).
     let mut status = ServerStatus::default();
+    if let Some(reason) = &graph_refused {
+        status = status.with_graph_unavailable(reason.clone());
+    }
 
     // 3b. Open domain stores (fail-soft: if any fails, all domains = None).
     let home = wicked_home();
@@ -337,7 +419,7 @@ async fn main() -> Result<()> {
     // DES-001 §8.4: guard against two engines sharing the same file (data corruption).
     {
         let paths: [(&str, &str); 4] = [
-            ("estate", &db_path),
+            ("estate", &graph_spec),
             ("memory", &memory_path),
             ("knowledge", &knowledge_path),
             ("xedge", &xedge_path),
@@ -399,6 +481,9 @@ async fn main() -> Result<()> {
             eprintln!("[wicked-estate] WARN: memory and knowledge tools disabled (domains=None)");
             // Loud on the wire as well as stderr: an agent never reads the server's stderr.
             status = ServerStatus::domains_unavailable(e.to_string());
+            if let Some(reason) = &graph_refused {
+                status = status.with_graph_unavailable(reason.clone());
+            }
             None
         }
     };
@@ -424,8 +509,13 @@ async fn main() -> Result<()> {
     }
 
     // 3c. Sync SqliteStore for the unified dispatch (estate read path for epoch lookups).
-    let mut sync_store = SqliteStore::open(&db_path)
-        .unwrap_or_else(|_| SqliteStore::in_memory().expect("in-memory fallback"));
+    // A read-only server dispatches from the handle its currency check opened (codex r2 #3).
+    let sync_open = match ro_sync {
+        Some(checked) => Ok(checked),
+        None => SqliteStore::open(&db_path),
+    };
+    let mut sync_store =
+        sync_open.unwrap_or_else(|_| SqliteStore::in_memory().expect("in-memory fallback"));
 
     // (#358) Name misses are logged to `search_misses` under this server's session id (one stdio
     // process = one MCP session). Best-effort: a failed write never touches the response, and a

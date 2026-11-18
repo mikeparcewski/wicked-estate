@@ -178,6 +178,46 @@ fn migrate_fts_rowids(conn: &Connection) -> Result<()> {
     }
 }
 
+/// Every table, index and trigger [`SCHEMA`] creates is in the database (a pure read). A writer
+/// open creates a missing one with `CREATE … IF NOT EXISTS`; a read-only connection cannot, so
+/// [`SqliteStore::open_readonly_current`] refuses a graph that lacks one (wicked-crew#1497).
+fn schema_objects_present(conn: &Connection) -> Result<()> {
+    let mut have = conn
+        .prepare("SELECT 1 FROM sqlite_master WHERE name = ?1")
+        .map_err(st)?;
+    // The statements only: `--` comments may quote a CREATE of their own.
+    let sql: Vec<&str> = SCHEMA
+        .lines()
+        .map(|l| l.split("--").next().unwrap_or(""))
+        .collect();
+    let words: Vec<&str> = sql.iter().flat_map(|l| l.split_whitespace()).collect();
+    for (i, w) in words.iter().enumerate() {
+        if *w != "CREATE" {
+            continue;
+        }
+        let rest = &words[i + 1..];
+        let name = match rest {
+            [
+                "TABLE" | "INDEX" | "TRIGGER",
+                "IF",
+                "NOT",
+                "EXISTS",
+                name,
+                ..,
+            ] => name,
+            ["VIRTUAL", "TABLE", "IF", "NOT", "EXISTS", name, ..] => name,
+            _ => continue,
+        };
+        let name = name.split('(').next().unwrap_or(name);
+        if !have.exists(params![name]).map_err(st)? {
+            return Err(wicked_estate_core::Error::Invalid(format!(
+                "the graph has no {name}: its schema predates this build"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn migrate_schema(conn: &Connection) -> Result<()> {
     // Snapshot the current annotations columns once; the presence check IS the version gate.
     let mut stmt = conn.prepare("PRAGMA table_info(annotations)").map_err(st)?;
@@ -368,10 +408,15 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
         // Empty PRAGMA = table absent (a legacy fixture that never ran SCHEMA) — skip; the real
         // open path always creates both tables first.
         if !nfcols.is_empty() && nodes_present {
+            // Only when there is something to seed: a graph with no nodes has nothing to backfill,
+            // and skipping the (empty) INSERT keeps this check a pure read on a current graph, so
+            // `open_readonly_current` can run it on a read-only connection (wicked-crew#1497).
             let nf_empty: bool = conn
-                .query_row("SELECT NOT EXISTS(SELECT 1 FROM node_files)", [], |r| {
-                    r.get::<_, bool>(0)
-                })
+                .query_row(
+                    "SELECT NOT EXISTS(SELECT 1 FROM node_files) AND EXISTS(SELECT 1 FROM nodes)",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )
                 .map_err(st)?;
             if nf_empty {
                 conn.execute_batch(
@@ -1048,6 +1093,26 @@ impl SqliteStore {
             history_enabled,
             guard: std::cell::Cell::new(None),
         })
+    }
+
+    /// [`Self::open_readonly`] for a graph whose schema is CURRENT, refused otherwise
+    /// (wicked-crew#1497). Readers select columns and rely on FTS state that [`Self::open`]'s
+    /// migrations add, so a graph written by an older build answers wrongly or not at all through a
+    /// connection that cannot migrate it. The check runs those same migrations on the read-only
+    /// connection: each one reads before it writes, so on a current graph they write nothing and
+    /// succeed, and on a stale one the first write they attempt fails, which is the answer. The
+    /// caller then opens the graph the way it did before (a writer open migrates it).
+    pub fn open_readonly_current(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let store = Self::open_readonly(path)?;
+        schema_objects_present(&store.conn)
+            .and_then(|()| migrate_schema(&store.conn))
+            .and_then(|()| migrate_fts_rowids(&store.conn))
+            .map_err(|e| {
+                wicked_estate_core::Error::Invalid(format!(
+                    "the graph's schema predates this build and needs a writer's migration ({e})"
+                ))
+            })?;
+        Ok(store)
     }
 
     /// Open an in-memory store (tests, ephemeral use).
@@ -7429,6 +7494,58 @@ mod tests {
             SqliteStore::open_readonly(&path).is_err(),
             "open_readonly on a non-existent file must error"
         );
+    }
+
+    /// wicked-crew#1497: a graph this build wrote (empty or not) passes the read-only currency
+    /// check without a byte written; one missing a schema object or column is refused, untouched.
+    #[test]
+    fn open_readonly_current_accepts_a_current_graph_and_refuses_a_stale_one() {
+        use wicked_estate_core::{GraphWrite, Language, Location, Span};
+        let dir = unique_test_dir("ro-current");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let empty = dir.join("empty.db");
+        drop(SqliteStore::open(&empty).unwrap());
+        let full = dir.join("full.db");
+        {
+            let mut s = SqliteStore::open(&full).unwrap();
+            s.upsert_nodes(&[Node::new(
+                SymbolId("sym_cur".to_string()),
+                NodeKind::Function,
+                "cur_fn",
+                Language::new("rust"),
+                Location::new("src/lib.rs", Span::ZERO),
+            )])
+            .unwrap();
+        }
+        for db in [&empty, &full] {
+            let before = std::fs::read(db).unwrap();
+            assert!(SqliteStore::open_readonly_current(db).is_ok(), "{db:?}");
+            assert!(std::fs::read(db).unwrap() == before, "{db:?} was written");
+        }
+        // A missing column (an older build's annotations table) and a missing table.
+        let stale = dir.join("stale.db");
+        std::fs::copy(&full, &stale).unwrap();
+        {
+            let c = Connection::open(&stale).unwrap();
+            c.execute_batch("DROP INDEX IF EXISTS idx_annotations_last_verified; ALTER TABLE annotations DROP COLUMN last_verified;").unwrap();
+        }
+        let before = std::fs::read(&stale).unwrap();
+        let err = SqliteStore::open_readonly_current(&stale)
+            .err()
+            .expect("stale column refused");
+        assert!(err.to_string().contains("predates this build"), "{err}");
+        assert!(std::fs::read(&stale).unwrap() == before);
+        let no_table = dir.join("no-table.db");
+        std::fs::copy(&full, &no_table).unwrap();
+        Connection::open(&no_table)
+            .unwrap()
+            .execute_batch("DROP TABLE search_misses;")
+            .unwrap();
+        let err = SqliteStore::open_readonly_current(&no_table)
+            .err()
+            .expect("missing table refused");
+        assert!(err.to_string().contains("search_misses"), "{err}");
     }
 
     // ── Brain-consolidation signal destinations ──────────────────────────────────────────────────

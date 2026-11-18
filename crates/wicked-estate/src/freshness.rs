@@ -369,6 +369,20 @@ impl FreshnessProbe {
         Self::with_store(db, store)
     }
 
+    /// [`Self::open`] for a read-only server over an on-disk SQLite path (already parsed: no
+    /// scheme): the probe's handle is opened `SQLITE_OPEN_READONLY`, so measuring freshness never
+    /// writes the graph (wicked-crew#1497).
+    pub fn open_readonly(db: &str) -> Self {
+        let store = if db == ":memory:" {
+            None
+        } else {
+            wicked_estate_store::SqliteStore::open_readonly(db)
+                .ok()
+                .map(|s| Box::new(s) as Box<dyn GraphStoreMutExt>)
+        };
+        Self::with_store(db, store)
+    }
+
     /// A probe over an already-open handle (the CLI bridge reuses its own).
     pub fn with_store(db: &str, store: Option<Box<dyn GraphStoreMutExt>>) -> Self {
         Self {

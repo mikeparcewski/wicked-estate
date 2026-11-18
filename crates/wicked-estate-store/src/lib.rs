@@ -38,7 +38,7 @@ pub use surreal::SurrealStore;
 #[cfg(feature = "pool")]
 pub mod pool;
 #[cfg(feature = "pool")]
-pub use pool::{SqlitePool, open_sqlite_pool};
+pub use pool::{SqlitePool, open_sqlite_pool, open_sqlite_pool_readonly};
 
 // Postgres backend — compiled ONLY with --features postgres.
 #[cfg(feature = "postgres")]

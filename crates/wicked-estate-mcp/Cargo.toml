@@ -50,3 +50,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io
 [dev-dependencies]
 wicked-estate-store = { workspace = true }
 tempfile = "3"
+# Sets a seeded graph's journal mode in tests/readonly_graph_open.rs (same version and features
+# as wicked-estate-store's, so no second SQLite build).
+rusqlite = { version = "0.32", features = ["bundled"] }
