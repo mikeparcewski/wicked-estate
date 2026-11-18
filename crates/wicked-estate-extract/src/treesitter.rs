@@ -2194,14 +2194,13 @@ fn js_var_names(root: tree_sitter::Node, src: &[u8]) -> HashSet<String> {
     names
 }
 
-/// The writes to one name in one function body or static block (wicked-estate#492, #497).
+/// The writes to one name in one function body or static block (wicked-estate#492, #497): each
+/// write's start and whether its value is KNOWN, in source order. A write through a destructuring
+/// pattern (`[x] = …`, `({ x } = …)`, `var [x] = …`, `for ([x] of …)`) is not: which element it
+/// stores is not tracked.
 #[derive(Default)]
 struct JsWrites {
-    /// Each plain write's start, in source order.
-    at: Vec<usize>,
-    /// Whether any write is a destructuring pattern (`[x] = …`, `({ x } = …)`, `var [x] = …`,
-    /// `for ([x] of …)`): which value it stores is not tracked, so the binding is unknown.
-    unknown: bool,
+    events: Vec<(usize, bool)>,
 }
 
 /// Strip `(x)` and TypeScript's `x!` from a write target.
@@ -2215,37 +2214,106 @@ fn js_write_target(mut n: tree_sitter::Node) -> tree_sitter::Node {
     n
 }
 
+/// The names a destructuring write target assigns, through `(x)` and `x!` at any depth.
+fn js_write_pattern_names(n: tree_sitter::Node, src: &[u8], out: &mut Vec<String>) {
+    let n = js_write_target(n);
+    match n.kind() {
+        "identifier" | "shorthand_property_identifier_pattern" => {
+            if let Ok(t) = n.utf8_text(src) {
+                out.push(t.to_string());
+            }
+        }
+        "pair_pattern" => {
+            if let Some(v) = n.child_by_field_name("value") {
+                js_write_pattern_names(v, src, out);
+            }
+        }
+        "assignment_pattern" | "object_assignment_pattern" => {
+            if let Some(l) = n.child_by_field_name("left") {
+                js_write_pattern_names(l, src, out);
+            }
+        }
+        "object_pattern" | "array_pattern" | "rest_pattern" => {
+            let mut walk = n.walk();
+            for c in n.named_children(&mut walk) {
+                js_write_pattern_names(c, src, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The names a nested block-like scope binds lexically (`let`, `const`, a function or class
+/// declaration, a `let`/`const` loop binding): a write to one of them inside the scope is that
+/// binding's, not the enclosing function's.
+fn js_block_lexical_names(n: tree_sitter::Node, src: &[u8]) -> Vec<String> {
+    let lexical = |stmt: tree_sitter::Node| -> Vec<String> {
+        if stmt.kind() == "variable_declaration" {
+            return Vec::new();
+        }
+        js_statement_decls(stmt, src, false)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    };
+    let mut out = Vec::new();
+    match n.kind() {
+        "statement_block" => {
+            let mut walk = n.walk();
+            for c in n.named_children(&mut walk) {
+                out.extend(lexical(c));
+            }
+        }
+        "switch_body" => {
+            let mut walk = n.walk();
+            for case in n.named_children(&mut walk) {
+                let mut walk = case.walk();
+                for c in case.named_children(&mut walk) {
+                    out.extend(lexical(c));
+                }
+            }
+        }
+        "for_statement" => {
+            if let Some(init) = n.child_by_field_name("initializer") {
+                out.extend(lexical(init));
+            }
+        }
+        "for_in_statement" => {
+            let is_lexical = n
+                .child_by_field_name("kind")
+                .is_some_and(|k| matches!(k.kind(), "let" | "const"));
+            if let Some(left) = n.child_by_field_name("left").filter(|_| is_lexical) {
+                js_pattern_names(left, src, &mut out);
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 /// The WRITES of a function body or static block, by name (wicked-estate#492, #497), outside
-/// nested functions, classes and static blocks. A plain write is an initialized `var x = …`, a
+/// nested functions, classes and static blocks. A known write is an initialized `var x = …`, a
 /// `for (var x of …)` or bare `for (x of …)` binding, or an `x = …` / `x += …` assignment,
-/// anchored at its node's start. A write through a destructuring pattern marks the name
-/// [`JsWrites::unknown`]. Inside `catch (x)`, a write to `x` is the catch binding's, so it is left
-/// out. An uninitialized `var x;` writes nothing.
+/// anchored at its node's start; `x ||= …` and `x ??= …` keep a callable value, so they are not
+/// writes here. A destructuring write is an unknown one. A write inside a nested scope that binds
+/// the name itself (`catch (x)`, a block's `let x`) is that binding's, so it is left out. An
+/// uninitialized `var x;` writes nothing.
 fn js_var_writes(body: tree_sitter::Node, src: &[u8]) -> HashMap<String, JsWrites> {
     let mut out: HashMap<String, JsWrites> = HashMap::new();
-    // A write to `target` at `at`: plain when the target is an identifier, else a pattern.
     let mut write = |target: tree_sitter::Node, at: usize, shadow: &[String]| {
         let target = js_write_target(target);
-        let plain = target.kind() == "identifier";
+        let known = target.kind() == "identifier";
         let mut names = Vec::new();
-        if plain {
-            if let Ok(t) = target.utf8_text(src) {
-                names.push(t.to_string());
-            }
-        } else {
-            js_pattern_names(target, src, &mut names);
-        }
+        js_write_pattern_names(target, src, &mut names);
         for name in names.into_iter().filter(|n| !shadow.contains(n)) {
-            let w = out.entry(name).or_default();
-            if plain {
-                w.at.push(at);
-            } else {
-                w.unknown = true;
-            }
+            out.entry(name).or_default().events.push((at, known));
         }
     };
     let mut stack: Vec<(tree_sitter::Node, Vec<String>)> = vec![(body, Vec::new())];
     while let Some((n, mut shadow)) = stack.pop() {
+        if n.id() != body.id() {
+            shadow.extend(js_block_lexical_names(n, src));
+        }
         match n.kind() {
             "variable_declaration" => {
                 let mut walk = n.walk();
@@ -2269,7 +2337,10 @@ fn js_var_writes(body: tree_sitter::Node, src: &[u8]) -> HashMap<String, JsWrite
                 }
             }
             "assignment_expression" | "augmented_assignment_expression" => {
-                if let Some(left) = n.child_by_field_name("left") {
+                let keeps = n
+                    .child_by_field_name("operator")
+                    .is_some_and(|op| matches!(op.kind(), "||=" | "??="));
+                if let Some(left) = n.child_by_field_name("left").filter(|_| !keeps) {
                     write(left, n.start_byte(), &shadow);
                 }
             }
@@ -2288,28 +2359,32 @@ fn js_var_writes(body: tree_sitter::Node, src: &[u8]) -> HashMap<String, JsWrite
         }
     }
     for w in out.values_mut() {
-        w.at.sort_unstable();
+        w.events.sort_unstable();
     }
     out
 }
 
-/// The write a call at `pos` sees (wicked-estate#492, #497): none when any write is a
-/// destructuring pattern (the call parks, as before #492); in the call's own function or static
-/// block, the last plain write before it (none = the binding's incoming value), found by binary
-/// search; from a nested function, which runs at an unknown time, the only one, or none when
-/// there are several.
+/// The write a call at `pos` sees (wicked-estate#492, #497). In the call's own function or static
+/// block: the last write before it, found by binary search; none = the binding's incoming value,
+/// and an unknown write = an unknown value. From a nested function, which runs at an unknown
+/// time: the only write when it is known, else none.
 fn js_assignment_seen(writes: Option<&JsWrites>, pos: usize, crossed: bool) -> Vec<usize> {
-    let Some(w) = writes.filter(|w| !w.unknown) else {
+    let Some(events) = writes.map(|w| w.events.as_slice()) else {
         return Vec::new();
     };
-    if !crossed {
-        let before = w.at.partition_point(|at| *at < pos);
-        before.checked_sub(1).map(|i| w.at[i]).into_iter().collect()
-    } else if w.at.len() == 1 {
-        w.at.clone()
+    let seen = if crossed {
+        match events {
+            [only] => Some(*only),
+            _ => None,
+        }
     } else {
-        Vec::new()
-    }
+        let before = events.partition_point(|(at, _)| *at < pos);
+        before.checked_sub(1).map(|i| events[i])
+    };
+    seen.filter(|(_, known)| *known)
+        .map(|(at, _)| at)
+        .into_iter()
+        .collect()
 }
 
 /// What a scope node contributes, memoised per file by (node id, which): every call site asks its

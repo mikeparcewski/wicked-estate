@@ -19,6 +19,11 @@
 //! | array_destructed | local arrow            | none                | stale arrow (#497)     | none                 |
 //! | object_destructed| local arrow            | none                | stale arrow (#497)     | none                 |
 //! | for_destructed   | local arrow            | none                | none                   | none                 |
+//! | nonnull_destructed| local arrow           | none                | stale arrow (#497)     | none                 |
+//! | destructed_after | local arrow            | none                | local arrow            | local arrow          |
+//! | destructed_overwritten | local arrow      | none                | local arrow            | local arrow          |
+//! | destructed_shadowed | local arrow         | none                | local arrow            | local arrow          |
+//! | logical_kept     | local arrow            | none                | local arrow            | local arrow          |
 //!
 //! `write_lookup_size` (#497): on `Head` the bound file costs under twice the unbound one; on
 //! `Main493` (the per-call scan) over twice, which shows the test catches it. Not timed on
@@ -314,6 +319,68 @@ fn array_destructed() {
 #[test]
 fn object_destructed() {
     destructed("object_destructed", "({ Card } = next)");
+}
+
+#[test]
+fn nonnull_destructed() {
+    destructed("nonnull_destructed", "[Card!] = next");
+}
+
+/// A param redeclared by a block `var` arrow, with `READ` the use: the call reaches the arrow on
+/// every build but #488's, which dropped every parameter call.
+fn keeps_arrow(tag: &str, body: &str) {
+    let g = index(
+        tag,
+        &format!(
+            "export function ViaCall(Card: any) {{ {} }}\n\
+             export function ViaJsx(Card: any) {{ {} }}\n",
+            body.replace("READ", "Card()"),
+            body.replace("READ", "<Card />"),
+        ),
+        &CALLERS,
+    );
+    for c in CALLERS {
+        match BUILD {
+            Build::Main => assert_none(tag, &g, c),
+            _ => assert_one(tag, &g, c, "src/caller/Card()."),
+        }
+    }
+}
+
+/// A destructuring write after the call does not change what the call saw.
+#[test]
+fn destructed_after() {
+    keeps_arrow(
+        "destructed_after",
+        "{ var Card = () => null; } const r = READ; [Card] = [null]; return r;",
+    );
+}
+
+/// The `var` arrow overwrites an earlier destructuring write.
+#[test]
+fn destructed_overwritten() {
+    keeps_arrow(
+        "destructed_overwritten",
+        "[Card] = [null]; { var Card = () => null; } return READ;",
+    );
+}
+
+/// A destructuring write to a block's own `let Card` is that binding's.
+#[test]
+fn destructed_shadowed() {
+    keeps_arrow(
+        "destructed_shadowed",
+        "{ var Card = () => null; } { let Card: any; [Card] = [null]; } return READ;",
+    );
+}
+
+/// `||=` keeps a callable value.
+#[test]
+fn logical_kept() {
+    keeps_arrow(
+        "logical_kept",
+        "{ var Card = () => null; } (Card) ||= null; return READ;",
+    );
 }
 
 #[test]
