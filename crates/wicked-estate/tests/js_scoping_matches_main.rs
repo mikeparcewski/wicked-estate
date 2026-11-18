@@ -4,7 +4,8 @@
 //! JSX against an unrelated global `Card` in `other.tsx`, and asserts the exact targets.
 //!
 //! Same input, four builds. [`BUILD`] names the build this copy asserts; the baselines are this
-//! file with only that line changed, run by CI on throwaway branches of those commits:
+//! file with only that line changed, pushed for the PR on throwaway branches of those commits,
+//! where estate's ordinary CI runs them (nothing here automates that):
 //! | case             | before #488 (`Pre488`) | after #488 (`Main`) | after #493 (`Main493`) | this change (`Head`) |
 //! |------------------|------------------------|---------------------|------------------------|----------------------|
 //! | param_var        | local arrow            | none (the bug)      | local arrow            | local arrow          |
@@ -24,6 +25,10 @@
 //! | destructed_overwritten | local arrow      | none                | local arrow            | local arrow          |
 //! | destructed_shadowed | local arrow         | none                | local arrow            | local arrow          |
 //! | logical_kept     | local arrow            | none                | local arrow            | local arrow          |
+//! | destructed_rhs   | local arrow            | none                | local arrow            | local arrow          |
+//! | update_written   | local arrow            | none                | stale arrow            | none                 |
+//! | as_written       | local arrow            | none                | stale arrow            | none                 |
+//! | nested_before_kept | local arrow          | none                | none                   | none                 |
 //!
 //! `write_lookup_size` (#497): on `Head` the bound file costs under twice the unbound one; on
 //! `Main493` (the per-call scan) over twice, which shows the test catches it. Not timed on
@@ -388,6 +393,46 @@ fn for_destructed() {
     destructed("for_destructed", "for ([Card] of next) {}");
 }
 
+/// A plain write the use precedes: `Card++` and `(Card as any) = …` replace the arrow.
+#[test]
+fn update_written() {
+    destructed("update_written", "Card++");
+}
+
+#[test]
+fn as_written() {
+    destructed("as_written", "(Card as any) = null");
+}
+
+/// A destructuring write takes effect after its right-hand side, which still reads the arrow.
+#[test]
+fn destructed_rhs() {
+    keeps_arrow(
+        "destructed_rhs",
+        "{ var Card = () => null; } [Card] = [READ]; return null;",
+    );
+}
+
+/// A nested function called before the arrow exists never sees it: `||=` is one more write it
+/// cannot order, as on #493.
+#[test]
+fn nested_before_kept() {
+    let g = index(
+        "nested_before_kept",
+        "export function ViaCall(Card: any) { function InnerCall() { return Card(); } const r = InnerCall(); { var Card = () => null; } Card ||= null; return r; }\n\
+         export function ViaJsx(Card: any) { function InnerJsx() { return <Card />; } const r = InnerJsx(); { var Card = () => null; } Card ||= null; return r; }\n",
+        &["ViaCall", "ViaJsx", "InnerCall", "InnerJsx"],
+    );
+    assert_dropped_since_488("nested_before_kept", &g, &["InnerCall", "InnerJsx"]);
+    assert_one(
+        "nested_before_kept",
+        &g,
+        "ViaCall",
+        "src/caller/InnerCall().",
+    );
+    assert_one("nested_before_kept", &g, "ViaJsx", "src/caller/InnerJsx().");
+}
+
 /// The fastest of three extractions of `text`.
 fn extract_time(text: &str) -> Duration {
     let ex = TreeSitterExtractor::for_language("tsx").unwrap();
@@ -433,4 +478,23 @@ fn write_lookup_size() {
             "the bound file must cost what the unbound one does: {bound:?} vs {unbound:?}"
         );
     }
+}
+
+/// #497: a block of N `let`s around a write costs one pass, not N copies of N names.
+#[test]
+fn lexical_shadow_size() {
+    let n = 10_000;
+    let lets: String = (0..n).map(|i| format!("let z{i}: any;\n")).collect();
+    let file = |param: &str| {
+        format!(
+            "export function P({param}: any) {{ {{ var Card = () => null; }}\n{{\n{lets}Card = null;\nCard();\n}} }}\n"
+        )
+    };
+    let bound = extract_time(&file("Card"));
+    let unbound = extract_time(&file("Other"));
+    eprintln!("lexical_shadow_size: bound {bound:?}, unbound {unbound:?}");
+    assert!(
+        bound < unbound * 2,
+        "the bound file must cost what the unbound one does: {bound:?} vs {unbound:?}"
+    );
 }
