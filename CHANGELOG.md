@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **A `--readonly` server refusing an older WAL graph with an empty `-wal` and no `-shm` creates no `-shm`
+  (wicked-estate#500).** An empty `-wal` holds no frames, so the graph is checked through the immutable connection,
+  as one with no `-wal` already was, and refusing it leaves nothing behind. A `-wal` that holds frames still goes to
+  SQLite's own read-only open, because only SQLite can read it. A current graph in that layout is served; refusing an
+  older one there can still create a `-shm`. The read-only open after the check now uses the same resolved path as the
+  check. The doc on `leave_in_delete_journal` now says that a read-only reader can read a WAL graph while its `-wal`
+  and `-shm` exist, and that SQLite normally removes both on the last clean close.
+
 - A React component that is only rendered as JSX has dependents again (#481). `BlastRadius SourceSheet` on a
   TSX repository answered 0 dependents while `SourcesPage` rendered `<SourceSheet …/>`: the TSX and JavaScript
   queries captured `call_expression` and `new_expression` only. A JSX element whose name neither starts with an ASCII
