@@ -1,27 +1,38 @@
 //! Live LSP round-trip test — W3.3.
 //!
-//! Probes `typescript-language-server` (or skips if absent from PATH).  Spins up the server
-//! against a tiny in-test TypeScript fixture, fires `definition`, `hover`, and `references`,
-//! and asserts the responses are structurally correct.
+//! Launches whatever TypeScript server the registry resolves for the fixture
+//! (`ServerRegistry::launch_for`: TypeScript 7's own `tsc --lsp`, or typescript-language-server
+//! with `tsserver.path` for 5-6, #484) against a tiny in-test TypeScript fixture, fires
+//! `definition`, `hover`, and `references`, and asserts the responses are structurally correct.
 //!
-//! **Graceful degradation**: the test probes `which typescript-language-server` before doing
-//! anything.  If the binary is absent it prints a skip notice and returns immediately — it does
-//! NOT `#[ignore]`, does NOT `panic!`, and does NOT call `assert!`.  The live path IS exercised
-//! here where the server is installed.
+//! **No usable TypeScript**: the test prints `[lsp_live] SKIP: <why>` and returns, naming every
+//! place the resolver looked. With `WICKED_LSP_LIVE_REQUIRED=1` (estate CI's gate job) that is a
+//! failure instead, so CI can never pass by skipping the live tier.
 
-use std::{fs, process::Command, thread, time::Duration};
+use std::{fs, thread, time::Duration};
 
-use wicked_estate_resolve::lsp::{Location, LspClient, LspTier, ServerRegistry, path_to_file_uri};
+use wicked_estate_resolve::lsp::{
+    DEFAULT_TIMEOUT, Launch, Location, LspClient, LspTier, ServerRegistry, path_to_file_uri,
+};
 
-// ── helper: check binary presence without the registry ───────────────────────
+// ── helper: the resolved TypeScript launch, or a visible skip (a failure when required) ──
 
-fn binary_on_path(bin: &str) -> bool {
-    let result = if cfg!(windows) {
-        Command::new("where").arg(bin).output()
-    } else {
-        Command::new("which").arg(bin).output()
-    };
-    result.map(|o| o.status.success()).unwrap_or(false)
+fn typescript_launch_or_skip(root: &str) -> Option<Launch> {
+    match ServerRegistry::standard().launch_for("typescript", root) {
+        Ok(launch) => {
+            println!("[lsp_live] server: {} {:?}", launch.binary, launch.args);
+            Some(launch)
+        }
+        Err(e) => {
+            if std::env::var("WICKED_LSP_LIVE_REQUIRED").as_deref() == Ok("1") {
+                panic!(
+                    "[lsp_live] WICKED_LSP_LIVE_REQUIRED=1 but no TypeScript LSP server is usable: {e}"
+                );
+            }
+            println!("[lsp_live] SKIP: {e}");
+            None
+        }
+    }
 }
 
 // ── fixture ───────────────────────────────────────────────────────────────────
@@ -74,15 +85,6 @@ fn write_ts_fixture(dir: &std::path::Path) {
 
 #[test]
 fn typescript_definition_and_hover_roundtrip() {
-    // ── skip if server absent ─────────────────────────────────────────────────
-    if !binary_on_path("typescript-language-server") {
-        println!(
-            "[lsp_live] SKIP: typescript-language-server not found on PATH; \
-             live LSP round-trip not exercised"
-        );
-        return;
-    }
-
     // ── set up tmp workspace ──────────────────────────────────────────────────
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
@@ -90,14 +92,18 @@ fn typescript_definition_and_hover_roundtrip() {
 
     let root_str = root.to_str().expect("non-UTF8 tempdir path");
 
-    // ── spawn the server ──────────────────────────────────────────────────────
-    let reg = ServerRegistry::standard();
-    let (bin, args) = reg
-        .command_for("typescript")
-        .expect("typescript-language-server registered + on PATH (we checked above)");
-
-    let mut client = LspClient::spawn(&bin, &args, root_str)
-        .expect("LspClient::spawn must not fail when server is present");
+    // ── spawn the resolved server (or skip visibly) ───────────────────────────
+    let Some(launch) = typescript_launch_or_skip(root_str) else {
+        return;
+    };
+    let mut client = LspClient::spawn_with_options(
+        &launch.binary,
+        &launch.args,
+        root_str,
+        DEFAULT_TIMEOUT,
+        launch.init_options,
+    )
+    .expect("LspClient must start against the resolved TypeScript server");
 
     // ── open documents so the server can answer queries ───────────────────────
     // LSP requires `textDocument/didOpen` before any position-based query.
@@ -181,7 +187,7 @@ fn typescript_definition_and_hover_roundtrip() {
         refs[0].start_line
     );
 
-    println!("[lsp_live] PASS — typescript-language-server round-trip complete");
+    println!("[lsp_live] PASS — TypeScript LSP round-trip complete");
 }
 
 // ── LspTier round-trip (phase-0 of W3.6, ADR-009) ─────────────────────────────
@@ -255,18 +261,13 @@ fn retry_definition(
 
 #[test]
 fn lsp_tier_definition_roundtrip_including_tsx() {
-    if !binary_on_path("typescript-language-server") {
-        println!(
-            "[lsp_live] SKIP: typescript-language-server not found on PATH; \
-             LspTier round-trip not exercised"
-        );
-        return;
-    }
-
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
     write_tsx_fixture(root);
     let root_str = root.to_str().expect("non-UTF8 tempdir path");
+    if typescript_launch_or_skip(root_str).is_none() {
+        return;
+    }
 
     let mut tier = LspTier::new(root_str);
     let main_uri = path_to_file_uri(root.join("src/main.ts").to_str().unwrap());

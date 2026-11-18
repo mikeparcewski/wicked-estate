@@ -16,6 +16,17 @@
   through an aliased import (`import { Actual as Card }`) or a prop-supplied component can bind to an unrelated
   global `Card`, exactly as `Card()` does today (#486). The first `index` after the upgrade re-extracts each
   TSX/JS/JSX file, which adds the new edges.
+- **The TypeScript LSP tier works on TypeScript 7, and on a workspace without its own `typescript`** (#484). TypeScript
+  7 ships no `tsserver.js`, so `typescript-language-server` refused to start (`initialize` -32603, "Could not find a
+  valid TypeScript installation") and definition, references and hover for `.ts/.tsx/.js/.jsx` were unavailable.
+  The tier now resolves the TypeScript that serves the workspace, from `<root>/node_modules/typescript`, then beside
+  `typescript-language-server`, then the global npm root, and speaks to it the right way: TypeScript 7+ through its
+  own `tsc --lsp --stdio` (no `typescript-language-server` needed), TypeScript 5-6 through `typescript-language-server`
+  with `initializationOptions.tsserver.path`. When nothing is usable, the error names each place it looked and why.
+  New: `ServerRegistry::launch_for`, `resolve_typescript_launch`, `Launch`, `LspClient::spawn_with_options`.
+- **CI runs the live LSP test instead of skip-passing it** (#484). The gate job installs TypeScript 7 and sets
+  `WICKED_LSP_LIVE_REQUIRED=1`, which makes `lsp_live`'s skip a failure; a second step reruns `lsp_live` on TypeScript
+  5.9 with `typescript-language-server` 6.0.2. Before this, CI had neither tool, so the test always skipped and passed.
 
 ## [0.35.6] — 2026-11-16
 
