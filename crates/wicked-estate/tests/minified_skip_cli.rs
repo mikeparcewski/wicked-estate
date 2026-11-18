@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! #478: a file is skipped as minified only on minification signals, never on size, and every
 //! skipped file is named in the index output.
 //!
