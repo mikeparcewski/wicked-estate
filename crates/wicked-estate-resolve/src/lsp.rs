@@ -46,8 +46,9 @@
 //!   executable (`@typescript/typescript-<platform>-<arch>/lib/tsc`) runs as `tsc --lsp --stdio`,
 //!   launched directly so a timeout kills the server itself. Neither node nor
 //!   `typescript-language-server` is needed.
-//! - **TypeScript 5-6**: `typescript-language-server --stdio` (with node), told where `tsserver.js`
-//!   is (`initializationOptions.tsserver.path`), so a workspace without its own `typescript` works.
+//! - **TypeScript 5-6**: `typescript-language-server --stdio`, told where `tsserver.js` is
+//!   (`initializationOptions.tsserver.path`), so a workspace without its own `typescript` works.
+//!   A Yarn SDK counts for 5-6; one for TypeScript 7 (PnP) is passed over with a reason.
 //!
 //! Nothing usable is `server not available: no usable TypeScript install ...`, naming each place
 //! looked at and why it was passed over. Live-tested on `.ts` and `.tsx` (definition, hover,
@@ -576,6 +577,8 @@ fn server_not_available(language: &str) -> Error {
 const TSLS_BINARY: &str = "typescript-language-server";
 /// The languages whose default row goes through [`resolve_typescript_launch`].
 const TS_FAMILY: [&str; 4] = ["typescript", "tsx", "javascript", "jsx"];
+/// The place label of a workspace's Yarn SDK candidate.
+const YARN_SDK: &str = "the workspace (Yarn SDK)";
 /// How long `npm root -g` may take before the global candidate is passed over.
 const NPM_ROOT_BUDGET: Duration = Duration::from_secs(5);
 
@@ -595,10 +598,11 @@ struct TsCandidate {
     dir: PathBuf,
 }
 
-/// The tools on `PATH` a TypeScript 5-6 install needs (TypeScript 7 needs neither).
+/// The tool on `PATH` a TypeScript 5-6 install needs (TypeScript 7 needs none). Node is not
+/// checked separately: the server's launcher may carry its own interpreter (a Nix wrapper), and a
+/// launcher that cannot start fails at startup like any other server.
 #[derive(Debug, Clone, Default)]
 struct TsTools {
-    node: Option<PathBuf>,
     tsls: Option<PathBuf>,
 }
 
@@ -613,8 +617,8 @@ fn utf8(p: &Path, at: &str, what: &str) -> std::result::Result<String, String> {
 /// The real path (symlinks resolved), without Windows' `\\?\` verbatim prefix.
 fn real_path(p: &Path) -> PathBuf {
     let real = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let s = real.to_string_lossy();
-    match s.strip_prefix(r"\\?\") {
+    // Only a valid-UTF-8 path is rewritten; any other is kept as is (and refused later, by `utf8`).
+    match real.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
         Some(rest) if cfg!(windows) && !rest.starts_with("UNC") => PathBuf::from(rest),
         _ => real,
     }
@@ -647,15 +651,24 @@ fn package_version(dir: &Path) -> Option<(u64, String)> {
 /// TypeScript 7's platform package name, as its own launcher derives it
 /// (`typescript-<platform>-<arch>` in node's spelling).
 fn ts_native_package() -> String {
-    let os = match std::env::consts::OS {
+    ts_native_package_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// Rust's `(OS, ARCH)` in node's `process.platform` / `process.arch` spelling.
+fn ts_native_package_for(os: &str, arch: &str) -> String {
+    let os = match os {
         "macos" => "darwin",
         "windows" => "win32",
+        "solaris" | "illumos" => "sunos",
         other => other,
     };
-    let arch = match std::env::consts::ARCH {
+    let arch = match arch {
         "aarch64" => "arm64",
         "x86_64" => "x64",
         "x86" => "ia32",
+        "powerpc64" => "ppc64",
+        "powerpc" => "ppc",
+        "loongarch64" => "loong64",
         other => other,
     };
     format!("typescript-{os}-{arch}")
@@ -663,12 +676,16 @@ fn ts_native_package() -> String {
 
 /// TypeScript 7's native executable for this platform, found the way node resolves the
 /// `@typescript/<platform package>` its launcher needs: `node_modules` under the install, then
-/// under each ancestor (a hoisted copy).
+/// under each ancestor (a hoisted copy), of both its path and its real path.
 fn ts_native_exe(ts_dir: &Path) -> Option<PathBuf> {
     let exe = if cfg!(windows) { "tsc.exe" } else { "tsc" };
     let pkg = ts_native_package();
+    // Node resolves from the real path: under pnpm, `node_modules/typescript` is a symlink into
+    // `.pnpm/typescript@x/node_modules/typescript`, and the native package sits beside that target.
+    let real = real_path(ts_dir);
     ts_dir
         .ancestors()
+        .chain(real.ancestors())
         .filter(|a| a.file_name().is_none_or(|n| n != "node_modules"))
         .map(|a| {
             a.join("node_modules")
@@ -690,6 +707,12 @@ fn typescript_launch_at(c: &TsCandidate, tools: &TsTools) -> std::result::Result
         ));
     };
     let at = format!("{} ({}): TypeScript {version}", c.place, c.dir.display());
+    if major >= 7 && c.place == YARN_SDK {
+        // The SDK is a PnP wrapper; its native executable is resolved through Yarn's PnP API.
+        return Err(format!(
+            "{at}: a Yarn SDK for TypeScript 7 is not supported (it resolves through PnP)"
+        ));
+    }
     if major >= 7 {
         // TypeScript 7 serves LSP itself. Its native executable is launched directly, not through
         // the node wrapper, so a timeout kills the server itself and no orphan is left behind.
@@ -712,9 +735,6 @@ fn typescript_launch_at(c: &TsCandidate, tools: &TsTools) -> std::result::Result
     let Some(tsls) = &tools.tsls else {
         return Err(format!("{at} needs {TSLS_BINARY} on PATH"));
     };
-    if tools.node.is_none() {
-        return Err(format!("{at} needs node on PATH (for {TSLS_BINARY})"));
-    }
     Ok(Launch {
         binary: utf8(tsls, &at, TSLS_BINARY)?,
         args: vec!["--stdio".into()],
@@ -741,16 +761,16 @@ fn choose_typescript(
 /// (`.yarn/sdks/typescript`) under the root and each ancestor, nearest first: the installs node
 /// and typescript-language-server would find, including one hoisted to a monorepo root.
 fn workspace_candidates(root_dir: &str) -> Vec<TsCandidate> {
-    let root = Path::new(root_dir);
+    // Absolute, so the walk reaches a monorepo root above a relative root and the launch paths
+    // do not depend on the server's working directory.
+    let root = std::path::absolute(root_dir).unwrap_or_else(|_| PathBuf::from(root_dir));
+    let root = root.as_path();
     let found: Vec<TsCandidate> = root
         .ancestors()
         .flat_map(|a| {
             [
                 ("the workspace", a.join("node_modules").join("typescript")),
-                (
-                    "the workspace (Yarn SDK)",
-                    a.join(".yarn").join("sdks").join("typescript"),
-                ),
+                (YARN_SDK, a.join(".yarn").join("sdks").join("typescript")),
             ]
         })
         .filter(|(_, d)| d.is_dir())
@@ -792,6 +812,14 @@ fn beside_server(tsls: &Path) -> Vec<TsCandidate> {
                 .map(|d| d.join("node_modules").join("typescript"))
                 .unwrap_or_default(),
         ],
+    };
+    // Only the places that exist; when none does, the last (the sibling) names where it looked.
+    let fallback = dirs.last().cloned().unwrap_or_default();
+    let existing: Vec<PathBuf> = dirs.into_iter().filter(|d| d.is_dir()).collect();
+    let dirs = if existing.is_empty() {
+        vec![fallback]
+    } else {
+        existing
     };
     dirs.into_iter()
         .map(|dir| TsCandidate {
@@ -835,13 +863,32 @@ fn locate_in(
 
 /// `bin` on this process's `PATH` (with `PATHEXT` on Windows).
 fn locate_on_path(bin: &str) -> Option<PathBuf> {
-    let exts: Vec<String> = std::env::var("PATHEXT")
-        .unwrap_or_else(|_| ".EXE;.CMD;.BAT".into())
+    locate_in(
+        bin,
+        &std::env::var_os("PATH")?,
+        &path_exts(std::env::var("PATHEXT").ok().as_deref()),
+        cfg!(windows),
+    )
+}
+
+/// `PATHEXT`'s entries, each with its leading dot; unset or empty is `.EXE;.CMD;.BAT`.
+fn path_exts(pathext: Option<&str>) -> Vec<String> {
+    let exts: Vec<String> = pathext
+        .unwrap_or_default()
         .split(';')
         .filter(|e| !e.is_empty())
-        .map(str::to_string)
+        .map(|e| {
+            if e.starts_with('.') {
+                e.to_string()
+            } else {
+                format!(".{e}")
+            }
+        })
         .collect();
-    locate_in(bin, &std::env::var_os("PATH")?, &exts, cfg!(windows))
+    if exts.is_empty() {
+        return [".EXE", ".CMD", ".BAT"].map(str::to_string).to_vec();
+    }
+    exts
 }
 
 /// The global npm root (`npm root -g`), bounded by [`NPM_ROOT_BUDGET`]: a wedged npm (a version
@@ -856,25 +903,38 @@ fn global_npm_root() -> std::result::Result<PathBuf, String> {
         .spawn()
         .map_err(|e| format!("`npm root -g` did not start: {e}"))?;
     let deadline = Instant::now() + NPM_ROOT_BUDGET;
-    loop {
+    let timed_out = || {
+        format!(
+            "`npm root -g` gave no answer within {}s",
+            NPM_ROOT_BUDGET.as_secs()
+        )
+    };
+    // Its output is read on a thread, under the same deadline: a descendant that keeps the pipe
+    // open after npm exits cannot hold resolution past the budget.
+    let mut stdout = child.stdout.take().expect("stdout piped");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!(
-                    "`npm root -g` gave no answer within {}s",
-                    NPM_ROOT_BUDGET.as_secs()
-                ));
+                return Err(timed_out());
             }
         }
-    }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| format!("`npm root -g`: {e}"))?;
-    let root = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    if out.status.success() && root.is_dir() {
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let out = rx.recv_timeout(remaining).map_err(|_| timed_out())?;
+    let text = std::str::from_utf8(&out)
+        .map_err(|_| "`npm root -g` printed a path that is not valid UTF-8".to_string())?;
+    let root = PathBuf::from(text.trim());
+    if status.success() && root.is_dir() {
         Ok(root)
     } else {
         Err("`npm root -g` failed".into())
@@ -885,7 +945,7 @@ fn no_typescript(reasons: &[String]) -> String {
     format!(
         "server not available: no usable TypeScript install for the TypeScript LSP tier — looked at: {}. \
          Install `typescript` in the workspace or globally (TypeScript 7+ serves LSP itself; \
-         5-6 also need {TSLS_BINARY} and node on PATH)",
+         5-6 also need {TSLS_BINARY} on PATH)",
         reasons.join("; ")
     )
 }
@@ -896,7 +956,6 @@ fn no_typescript(reasons: &[String]) -> String {
 /// wins (see the module docs). Nothing usable is `server not available: ...`.
 pub fn resolve_typescript_launch(root_dir: &str) -> Result<Launch> {
     let tools = TsTools {
-        node: locate_on_path("node"),
         tsls: locate_on_path(TSLS_BINARY),
     };
     let mut candidates = workspace_candidates(root_dir);
@@ -914,7 +973,13 @@ pub fn resolve_typescript_launch(root_dir: &str) -> Result<Launch> {
         Ok(dir)
             if candidates
                 .iter()
-                .any(|c| real_path(&c.dir) == real_path(&dir)) => {}
+                .any(|c| real_path(&c.dir) == real_path(&dir)) =>
+        {
+            reasons.push(format!(
+                "the global npm root ({}): the same install as above",
+                dir.display()
+            ));
+        }
         Ok(dir) => {
             let global = TsCandidate {
                 place: "the global npm root".into(),
@@ -1751,9 +1816,8 @@ mod tests {
         }
     }
 
-    fn tools(node: bool, tsls: bool) -> TsTools {
+    fn tools(tsls: bool) -> TsTools {
         TsTools {
-            node: node.then(|| PathBuf::from("/x/node")),
             tsls: tsls.then(|| PathBuf::from("/x/typescript-language-server")),
         }
     }
@@ -1762,8 +1826,7 @@ mod tests {
     fn typescript_7_runs_its_native_executable_directly_without_node() {
         let tmp = tempfile::tempdir().unwrap();
         let ts = fake_ts(tmp.path(), "7.0.2");
-        let l =
-            choose_typescript(&[cand("the workspace", ts.clone())], &tools(false, false)).unwrap();
+        let l = choose_typescript(&[cand("the workspace", ts.clone())], &tools(false)).unwrap();
         assert_eq!(l.binary, native_exe_in(&ts).to_str().unwrap());
         assert_eq!(l.args, vec!["--lsp".to_string(), "--stdio".to_string()]);
         assert_eq!(l.init_options, Value::Null, "TS 7 needs no tsserver.path");
@@ -1777,7 +1840,7 @@ mod tests {
         // <tmp>/node_modules/@typescript/<pkg>/lib/tsc, beside <tmp>/node_modules/typescript.
         let hoisted = native_exe_in(tmp.path());
         write_exe(&hoisted, "#!/bin/sh\n");
-        let l = choose_typescript(&[cand("the workspace", ts)], &tools(false, false)).unwrap();
+        let l = choose_typescript(&[cand("the workspace", ts)], &tools(false)).unwrap();
         assert_eq!(l.binary, hoisted.to_str().unwrap());
     }
 
@@ -1792,12 +1855,11 @@ mod tests {
                 cand("the workspace", broken.clone()),
                 cand("the global npm root", good.clone()),
             ],
-            &tools(false, false),
+            &tools(false),
         )
         .unwrap();
         assert_eq!(l.binary, native_exe_in(&good).to_str().unwrap());
-        let why =
-            choose_typescript(&[cand("the workspace", broken)], &tools(true, true)).unwrap_err();
+        let why = choose_typescript(&[cand("the workspace", broken)], &tools(true)).unwrap_err();
         assert!(
             why[0].contains("has no native executable for this platform"),
             "{why:?}"
@@ -1808,8 +1870,7 @@ mod tests {
     fn typescript_5_goes_through_tsls_with_its_tsserver_path() {
         let tmp = tempfile::tempdir().unwrap();
         let ts = fake_ts(tmp.path(), "5.9.3");
-        let l =
-            choose_typescript(&[cand("the workspace", ts.clone())], &tools(true, true)).unwrap();
+        let l = choose_typescript(&[cand("the workspace", ts.clone())], &tools(true)).unwrap();
         assert_eq!(l.binary, "/x/typescript-language-server");
         assert_eq!(l.args, vec!["--stdio".to_string()]);
         assert_eq!(
@@ -1819,16 +1880,84 @@ mod tests {
     }
 
     #[test]
-    fn typescript_5_needs_both_tsls_and_node() {
+    fn typescript_5_needs_tsls_but_not_node_on_path() {
+        // A wrapper may carry its own interpreter (Nix), so node on PATH is not required.
         let tmp = tempfile::tempdir().unwrap();
         let ts = fake_ts(tmp.path(), "5.9.3");
-        let no_tsls = choose_typescript(&[cand("w", ts.clone())], &tools(true, false)).unwrap_err();
+        let no_tsls = choose_typescript(&[cand("w", ts.clone())], &tools(false)).unwrap_err();
         assert!(
             no_tsls[0].ends_with("needs typescript-language-server on PATH"),
             "{no_tsls:?}"
         );
-        let no_node = choose_typescript(&[cand("w", ts)], &tools(false, true)).unwrap_err();
-        assert!(no_node[0].contains("needs node on PATH"), "{no_node:?}");
+        assert!(choose_typescript(&[cand("w", ts)], &tools(true)).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn typescript_7_under_pnpm_finds_the_native_package_beside_its_real_path() {
+        // <root>/node_modules/typescript -> .pnpm/typescript@7.0.2/node_modules/typescript,
+        // native package at .pnpm/typescript@7.0.2/node_modules/@typescript/<pkg>.
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("node_modules/.pnpm/typescript@7.0.2");
+        let real_ts = fake_ts_with(&store, "7.0.2", false);
+        let native = native_exe_in(&store);
+        write_exe(&native, "#!/bin/sh\n");
+        let link = root.path().join("node_modules").join("typescript");
+        std::os::unix::fs::symlink(&real_ts, &link).unwrap();
+        let l = choose_typescript(&[cand("the workspace", link)], &tools(false)).unwrap();
+        assert_eq!(PathBuf::from(&l.binary), real_path(&native));
+    }
+
+    #[test]
+    fn a_yarn_sdk_for_typescript_7_is_refused_with_a_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ts = fake_ts(tmp.path(), "7.0.2");
+        let why = choose_typescript(&[cand(YARN_SDK, ts)], &tools(true)).unwrap_err();
+        assert!(
+            why[0].contains("a Yarn SDK for TypeScript 7 is not supported"),
+            "{why:?}"
+        );
+    }
+
+    #[test]
+    fn a_relative_root_walks_up_to_a_monorepo_root() {
+        let rel = Path::new("crates/wicked-estate-resolve");
+        let c = workspace_candidates(rel.to_str().unwrap());
+        assert!(c.iter().all(|c| c.dir.is_absolute()), "{c:?}");
+    }
+
+    #[test]
+    fn platform_names_follow_node_s_spelling() {
+        assert_eq!(
+            ts_native_package_for("macos", "aarch64"),
+            "typescript-darwin-arm64"
+        );
+        assert_eq!(
+            ts_native_package_for("windows", "x86_64"),
+            "typescript-win32-x64"
+        );
+        assert_eq!(
+            ts_native_package_for("linux", "powerpc64"),
+            "typescript-linux-ppc64"
+        );
+        assert_eq!(
+            ts_native_package_for("linux", "loongarch64"),
+            "typescript-linux-loong64"
+        );
+        assert_eq!(
+            ts_native_package_for("solaris", "x86_64"),
+            "typescript-sunos-x64"
+        );
+    }
+
+    #[test]
+    fn pathext_entries_get_their_dot_and_empty_falls_back() {
+        assert_eq!(path_exts(Some("")), vec![".EXE", ".CMD", ".BAT"]);
+        assert_eq!(path_exts(None), vec![".EXE", ".CMD", ".BAT"]);
+        assert_eq!(
+            path_exts(Some(".COM;EXE;;.cmd")),
+            vec![".COM", ".EXE", ".cmd"]
+        );
     }
 
     #[test]
@@ -1842,7 +1971,7 @@ mod tests {
                 cand("the workspace", ws_ts.clone()),
                 cand("the global npm root", g_ts),
             ],
-            &tools(true, true),
+            &tools(true),
         )
         .unwrap();
         assert_eq!(
@@ -1902,7 +2031,7 @@ mod tests {
                 cand("beside typescript-language-server", ts5),
                 cand("the global npm root", ts7),
             ],
-            &tools(false, false),
+            &tools(false),
         )
         .unwrap_err();
         assert_eq!(reasons.len(), 3, "{reasons:?}");
@@ -1935,7 +2064,7 @@ mod tests {
         let b = tempfile::tempdir().unwrap();
         let ts5 = fake_ts(b.path(), "5.9.3");
         std::fs::remove_file(ts5.join("lib").join("tsserver.js")).unwrap();
-        let reasons = choose_typescript(&[cand("g", ts5)], &tools(true, true)).unwrap_err();
+        let reasons = choose_typescript(&[cand("g", ts5)], &tools(true)).unwrap_err();
         assert!(
             reasons[0].ends_with("has no lib/tsserver.js"),
             "{reasons:?}"
@@ -1956,14 +2085,10 @@ mod tests {
         std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&cli, &bin).unwrap();
         let got: Vec<PathBuf> = beside_server(&bin).into_iter().map(|c| c.dir).collect();
-        let pkg = real_path(&prefix.join("lib/node_modules/typescript-language-server"));
         assert_eq!(
             got,
-            vec![
-                pkg.join("node_modules").join("typescript"),
-                real_path(&sibling)
-            ],
-            "its own dependency, then its sibling, and nothing above the prefix"
+            vec![real_path(&sibling)],
+            "its sibling (its own dependency does not exist), and nothing above the prefix"
         );
     }
 
