@@ -308,6 +308,36 @@ const PRIVATE_CHECK_MAX_BYTES: u64 = 1 << 30;
 #[cfg(unix)]
 const PRIVATE_CHECK_PREFIX: &str = "wicked-estate-rocheck-";
 
+/// The marker `check_private_copy` writes first into each directory it creates; only a directory
+/// holding it is ever removed, and only of the files the check writes there.
+#[cfg(unix)]
+const PRIVATE_CHECK_MARKER: &str = ".wicked-estate-rocheck";
+
+/// The files a private check directory may hold: its marker, the copy and SQLite's sidecars.
+#[cfg(unix)]
+const PRIVATE_CHECK_FILES: [&str; 5] = [
+    PRIVATE_CHECK_MARKER,
+    "g.db",
+    "g.db-wal",
+    "g.db-shm",
+    "g.db-journal",
+];
+
+/// Remove a private check directory: only one that is a real directory (not a link) holding the
+/// marker, only the files the check writes, then the directory itself if that left it empty.
+/// Anything else in it, and any directory without the marker, is left alone (wicked-estate#507).
+#[cfg(unix)]
+fn remove_private_check(dir: &std::path::Path) {
+    let is_dir = std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_dir());
+    if !is_dir || !dir.join(PRIVATE_CHECK_MARKER).is_file() {
+        return;
+    }
+    for name in PRIVATE_CHECK_FILES.iter().rev() {
+        let _ = std::fs::remove_file(dir.join(name));
+    }
+    let _ = std::fs::remove_dir(dir);
+}
+
 /// Removes a private check directory when dropped, on every return and on unwinding.
 #[cfg(unix)]
 struct RemoveOnDrop(std::path::PathBuf);
@@ -315,7 +345,7 @@ struct RemoveOnDrop(std::path::PathBuf);
 #[cfg(unix)]
 impl Drop for RemoveOnDrop {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        remove_private_check(&self.0);
     }
 }
 
@@ -344,6 +374,11 @@ fn check_private_copy(real: &std::path::Path) -> Option<Result<()>> {
         std::process::id()
     ));
     std::fs::DirBuilder::new().mode(0o700).create(&dir).ok()?;
+    // The marker first: without it no sweep or guard ever removes the directory.
+    if std::fs::write(dir.join(PRIVATE_CHECK_MARKER), b"").is_err() {
+        let _ = std::fs::remove_dir(&dir);
+        return None;
+    }
     let guard = RemoveOnDrop(dir);
     let db = guard.0.join("g.db");
     for (from, to) in [
@@ -396,7 +431,7 @@ fn sweep_private_checks(tmp: &std::path::Path) {
             .and_then(|t| t.elapsed().ok())
             .is_some_and(|age| age > old);
         if stale {
-            let _ = std::fs::remove_dir_all(entry.path());
+            remove_private_check(&entry.path());
         }
     }
 }
@@ -7868,6 +7903,48 @@ mod tests {
         assert_eq!(v, 7, "the WAL commit is read");
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// wicked-estate#507 (merge check): the sweep of stale private check directories removes only
+    /// a directory holding estate's marker, and only the files a check writes; an unrelated
+    /// directory with the same prefix, and a stray file in a marked one, are left alone.
+    #[cfg(unix)]
+    #[test]
+    fn the_private_check_sweep_removes_only_marked_directories_and_their_known_files() {
+        let tmp = unique_test_dir("rocheck-sweep");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let age = |d: &std::path::Path| {
+            std::fs::File::open(d)
+                .unwrap()
+                .set_modified(hour_ago)
+                .unwrap();
+        };
+        let unrelated = tmp.join(format!("{PRIVATE_CHECK_PREFIX}unrelated"));
+        std::fs::create_dir_all(&unrelated).unwrap();
+        std::fs::write(unrelated.join("keep.txt"), b"keep").unwrap();
+        age(&unrelated);
+        let marked = tmp.join(format!("{PRIVATE_CHECK_PREFIX}1-1"));
+        std::fs::create_dir_all(&marked).unwrap();
+        std::fs::write(marked.join(PRIVATE_CHECK_MARKER), b"").unwrap();
+        std::fs::write(marked.join("g.db"), b"copy").unwrap();
+        age(&marked);
+        let stray = tmp.join(format!("{PRIVATE_CHECK_PREFIX}2-2"));
+        std::fs::create_dir_all(&stray).unwrap();
+        std::fs::write(stray.join(PRIVATE_CHECK_MARKER), b"").unwrap();
+        std::fs::write(stray.join("g.db"), b"copy").unwrap();
+        std::fs::write(stray.join("other.txt"), b"not ours").unwrap();
+        age(&stray);
+        sweep_private_checks(&tmp);
+        assert_eq!(std::fs::read(unrelated.join("keep.txt")).unwrap(), b"keep");
+        assert!(!marked.exists(), "a stale marked directory is removed");
+        assert!(
+            stray.join("other.txt").exists(),
+            "a file the check did not write is kept"
+        );
+        assert!(!stray.join("g.db").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// wicked-estate#506: an older graph whose last commit is still in its `-wal` (frames) and
