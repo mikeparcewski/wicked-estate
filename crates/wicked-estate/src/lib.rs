@@ -3646,6 +3646,15 @@ pub fn open_async_store(spec: &str) -> crate::Result<wicked_estate_store::Sqlite
     wicked_estate_store::open_sqlite_pool(path, 8)
 }
 
+/// [`open_async_store`] for a read-only server over an on-disk SQLite `path` (already parsed: no
+/// scheme): every pooled connection is opened `SQLITE_OPEN_READONLY`, so the graph file is never
+/// written (no WAL switch, no schema DDL) and a graph in a directory this process cannot write still
+/// answers (wicked-crew#1497).
+#[cfg(feature = "serve")]
+pub fn open_async_store_readonly(path: &str) -> crate::Result<wicked_estate_store::SqlitePool> {
+    wicked_estate_store::open_sqlite_pool_readonly(path, 8)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────

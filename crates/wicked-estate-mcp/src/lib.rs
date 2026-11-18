@@ -767,6 +767,11 @@ pub struct ServerStatus {
     /// never a silent gap in `tools/list`: this reason rides the `initialize` `instructions`,
     /// the `tools/list` `_meta`, and every refused domain call.
     pub domains_unavailable: Option<String>,
+    /// Why the code-graph tools are refused, when a `--readonly` server would not serve its graph
+    /// (wicked-crew#1497): a schema older than this build's, or a graph it cannot open read-only.
+    /// The tools stay advertised; every call is refused with this reason, and the `initialize`
+    /// `instructions` and the `tools/list` `_meta` carry it. `None` = the graph is served.
+    pub graph_unavailable: Option<String>,
 }
 
 impl ServerStatus {
@@ -774,8 +779,23 @@ impl ServerStatus {
     pub fn domains_unavailable(reason: impl Into<String>) -> Self {
         Self {
             domains_unavailable: Some(reason.into()),
+            ..Self::default()
         }
     }
+
+    /// This status with the code-graph tools refused for `reason` (wicked-crew#1497).
+    pub fn with_graph_unavailable(mut self, reason: impl Into<String>) -> Self {
+        self.graph_unavailable = Some(reason.into());
+        self
+    }
+}
+
+/// The graph-unavailable notice an agent reads in `initialize` and `tools/list`.
+fn graph_unavailable_notice(reason: &str) -> String {
+    format!(
+        "wicked-estate: the code-graph tools are REFUSED on this server: {reason}. Every graph \
+         call answers with this reason, never an empty result."
+    )
 }
 
 /// The refusal a domain tool answers when its domain is not served: the reason the store did not
@@ -1005,6 +1025,31 @@ pub fn handle_request_unified_status(
                     ),
                 );
             }
+            // wicked-crew#1497: a graph the server would not serve is refused with its reason,
+            // never answered from an empty stand-in (an empty answer reads as "no such code").
+            if let Some(reason) = &status.graph_unavailable {
+                if matches!(
+                    tool,
+                    "SearchEntity"
+                        | "RetrieveEntity"
+                        | "TraverseGraph"
+                        | "Path"
+                        | "BlastRadius"
+                        | "FetchContent"
+                        | "ContextBundle"
+                        | "RulesInventory"
+                        | "rules.recall"
+                        | "RankHotspots"
+                        | "Communities"
+                        | "Lineage"
+                        | "SemanticSearch"
+                        // Reads the graph to drop stale code links (`epoch_ok`): from the empty
+                        // stand-in it would keep them (codex r2 #1).
+                        | "knowledge.neighbors"
+                ) {
+                    return err_response(&id, -32603, &format!("tool '{tool}' refused: {reason}"));
+                }
+            }
             match tool {
                 "SearchEntity" | "RetrieveEntity" | "TraverseGraph" | "Path" | "BlastRadius"
                 | "FetchContent" | "ContextBundle" | "RulesInventory" | "rules.recall"
@@ -1222,8 +1267,21 @@ fn handle_initialize_unified(id: &Value, status: &ServerStatus) -> Value {
             "serverInfo": { "name": "wicked-estate", "version": SERVER_VERSION }
         }
     });
-    if let Some(reason) = &status.domains_unavailable {
-        resp["result"]["instructions"] = json!(domains_unavailable_notice(reason));
+    let notices: Vec<String> = [
+        status
+            .graph_unavailable
+            .as_deref()
+            .map(graph_unavailable_notice),
+        status
+            .domains_unavailable
+            .as_deref()
+            .map(domains_unavailable_notice),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !notices.is_empty() {
+        resp["result"]["instructions"] = json!(notices.join("\n\n"));
     }
     resp
 }
@@ -1247,7 +1305,9 @@ fn tools_list_unified(
         })
         .collect();
 
-    if semantic_advert(ctx).is_ok() {
+    // A refused graph is never opened, so its embedder metadata is unknown: the tool stays listed
+    // and its call names the refusal (HIDE, codex r2 #7).
+    if status.graph_unavailable.is_some() || semantic_advert(ctx).is_ok() {
         tools.push(json!({
             "name":        "SemanticSearch",
             "description": "Semantic vector search over code symbols.",
@@ -1274,15 +1334,20 @@ fn tools_list_unified(
     }
 
     let mut result = json!({"tools": tools});
+    if let Some(reason) = &status.graph_unavailable {
+        result["_meta"]["wicked-estate/graph"] = json!({
+            "available": false,
+            "reason": reason,
+            "notice": graph_unavailable_notice(reason),
+        });
+    }
     if !domains_available {
         if let Some(reason) = &status.domains_unavailable {
-            result["_meta"] = json!({
-                "wicked-estate/domains": {
-                    "available": false,
-                    "disabled": ["memory", "knowledge", "proposal"],
-                    "reason": reason,
-                    "notice": domains_unavailable_notice(reason),
-                }
+            result["_meta"]["wicked-estate/domains"] = json!({
+                "available": false,
+                "disabled": ["memory", "knowledge", "proposal"],
+                "reason": reason,
+                "notice": domains_unavailable_notice(reason),
             });
         }
     }
