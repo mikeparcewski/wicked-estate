@@ -149,3 +149,48 @@ fn underscore_and_dollar_components_are_components() {
         "$Cell rendered by Table: {cell:?}"
     );
 }
+
+/// Rendering `<Card/>` resolves exactly like calling `Card()`: the same binding and import resolution, so a JSX
+/// element is never worse than a call. An aliased import and a prop-supplied component are the cases that matter
+/// (wicked-estate#486 tracks calls through them binding to an unrelated global `Card`; when that is fixed, both sides
+/// move together and this stays green).
+#[test]
+fn a_jsx_element_resolves_exactly_like_a_call_of_the_same_name() {
+    let cases = [
+        (
+            "alias",
+            "import { Actual as Card } from './a';\nexport function ViaJsx() { return <Card />; }\n",
+            "import { Actual as Card } from './a';\nexport function ViaCall() { return Card(); }\n",
+        ),
+        (
+            "prop",
+            "export function ViaJsx({ Card }: { Card: () => null }) { return <Card />; }\n",
+            "export function ViaCall({ Card }: { Card: () => null }) { return Card(); }\n",
+        ),
+    ];
+    for (tag, jsx, call) in cases {
+        let dir = fresh_dir(&format!("parity_{tag}"));
+        fs::write(
+            dir.join("src/a.tsx"),
+            "export function Actual() { return null; }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("src/other.tsx"),
+            "export function Card() { return null; }\n",
+        )
+        .unwrap();
+        fs::write(dir.join("src/jsx.tsx"), jsx).unwrap();
+        fs::write(dir.join("src/call.tsx"), call).unwrap();
+        let card = dependents(&dir, "Card");
+        let actual = dependents(&dir, "Actual");
+        let _ = fs::remove_dir_all(&dir);
+        for (target, deps) in [("Card", &card), ("Actual", &actual)] {
+            assert_eq!(
+                deps.iter().any(|n| n == "ViaJsx"),
+                deps.iter().any(|n| n == "ViaCall"),
+                "{tag}: <Card/> and Card() must resolve alike against {target}: {deps:?}"
+            );
+        }
+    }
+}

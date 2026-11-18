@@ -9,9 +9,12 @@
   queries captured `call_expression` and `new_expression` only. A JSX element whose name neither starts with an ASCII
   lowercase letter nor contains a hyphen (the JSX compilers' rule: `<div>` and `<my-el>` are intrinsic tags; `<Panel>`,
   `<_Row>`, `<$Cell>`, `<École>` are components) is now a `Calls` reference from the component that renders it, resolved through the import map like
-  `SourceSheet()` would be. A closing tag adds no second edge. Not covered: `<Ns.Widget/>` (its leaf name alone
+  `SourceSheet()` would be, through the same binding and import resolution (a parity test pins `<Card/>` to
+  `Card()`). A closing tag adds no second edge. Not covered: `<Ns.Widget/>` (its leaf name alone
   would bind to any imported `Widget`, so it waits for receiver-aware binding), a component passed as a value
-  (`component={SourceSheet}`), and an import with no use. The first `index` after the upgrade re-extracts each
+  (`component={SourceSheet}`), and an import with no use. Inherited from call resolution: an element rendered
+  through an aliased import (`import { Actual as Card }`) or a prop-supplied component can bind to an unrelated
+  global `Card`, exactly as `Card()` does today (#486). The first `index` after the upgrade re-extracts each
   TSX/JS/JSX file, which adds the new edges.
 
 ## [0.35.6] — 2026-11-16
