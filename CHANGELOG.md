@@ -55,6 +55,11 @@
   back-fill (which sees no hints) cannot re-bind it to a new homonym. Calls and JSX elements alike. Not changed: an
   aliased import (`import { Actual as Card }`) resolves exactly as before (#486's alias half stays open), Python,
   and Svelte/Vue script blocks. The first `index` after the upgrade re-extracts each file.
+- Local-binding detection follows two more JS scoping rules (#492). A `var` in a nested block that redeclares a
+  parameter is that parameter, so a call sees the last assignment before it: `function Parent(Card) { { var Card = () =>
+  null } return Card() }` binds Parent to that arrow again (#488 had dropped the edge); a call before it, or after a
+  reassignment, binds nothing. A class static block is a `var` scope of its own, read the same way, so
+  `static { if (on) { var Card = make() } Card() }` no longer binds a global `Card`. Calls and JSX alike.
 
 ## [0.35.6] — 2026-11-16
 

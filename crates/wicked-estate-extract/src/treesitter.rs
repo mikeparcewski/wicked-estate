@@ -2194,13 +2194,136 @@ fn js_var_names(root: tree_sitter::Node, src: &[u8]) -> HashSet<String> {
     names
 }
 
-/// Per-file memo of each scope node's bindings, keyed by the node id: every call site asks its
+/// The ASSIGNMENTS of a function body or static block (wicked-estate#492): an initialized `var`
+/// declarator, a `for (var x of …)` or bare `for (x of …)` binding, a plain or compound
+/// `x = …` assignment; each anchored at its node's start, outside nested functions, classes and
+/// static blocks. Inside `catch (x)`, an assignment to `x` is the catch binding's, so it is left
+/// out. An uninitialized `var x;` assigns nothing.
+fn js_var_assignments(body: tree_sitter::Node, src: &[u8]) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    let mut push = |names: Vec<String>, at: usize, shadow: &[String]| {
+        out.extend(
+            names
+                .into_iter()
+                .filter(|n| !shadow.contains(n))
+                .map(|n| (n, at)),
+        );
+    };
+    let mut stack: Vec<(tree_sitter::Node, Vec<String>)> = vec![(body, Vec::new())];
+    while let Some((n, mut shadow)) = stack.pop() {
+        match n.kind() {
+            "variable_declaration" => {
+                let mut walk = n.walk();
+                for d in n.named_children(&mut walk) {
+                    if d.kind() != "variable_declarator" || d.child_by_field_name("value").is_none()
+                    {
+                        continue;
+                    }
+                    if let Some(p) = d.child_by_field_name("name") {
+                        let mut names = Vec::new();
+                        js_pattern_names(p, src, &mut names);
+                        push(names, d.start_byte(), &shadow);
+                    }
+                }
+            }
+            "for_in_statement" => {
+                let kind = n.child_by_field_name("kind").map(|k| k.kind());
+                if let Some(left) = n
+                    .child_by_field_name("left")
+                    .filter(|_| matches!(kind, None | Some("var")))
+                {
+                    let mut names = Vec::new();
+                    js_pattern_names(left, src, &mut names);
+                    push(names, left.start_byte(), &shadow);
+                }
+            }
+            "assignment_expression" | "augmented_assignment_expression" => {
+                if let Some(left) = n
+                    .child_by_field_name("left")
+                    .filter(|l| l.kind() == "identifier")
+                    .and_then(|l| l.utf8_text(src).ok())
+                {
+                    push(vec![left.to_string()], n.start_byte(), &shadow);
+                }
+            }
+            "catch_clause" => {
+                if let Some(p) = n.child_by_field_name("parameter") {
+                    js_pattern_names(p, src, &mut shadow);
+                }
+            }
+            _ => {}
+        }
+        let mut walk = n.walk();
+        for c in n.named_children(&mut walk) {
+            if !js_var_boundary(c.kind()) {
+                stack.push((c, shadow.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// The assignment a call at `pos` sees among `all` (wicked-estate#492): in the call's own
+/// function or static block, the last one before it (none = the binding's incoming value); from a
+/// nested function, which runs at an unknown time, the only one, or none when there are several.
+fn js_assignment_seen(all: Vec<usize>, pos: usize, crossed: bool) -> Vec<usize> {
+    if !crossed {
+        all.into_iter()
+            .filter(|at| *at < pos)
+            .max()
+            .into_iter()
+            .collect()
+    } else if all.len() == 1 {
+        all
+    } else {
+        Vec::new()
+    }
+}
+
+/// What a scope node contributes, memoised per file by (node id, which): every call site asks its
 /// enclosing scopes, so each scope is read once rather than once per call.
-type JsScopeMemo = HashMap<usize, Vec<(String, usize)>>;
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum JsScopeRead {
+    /// A block's own declarations ([`js_scope_decls`]).
+    Block,
+    /// A function body's or static block's hoisted `var`s ([`js_hoisted_vars`]).
+    Hoisted,
+    /// A function body's `var` assignments ([`js_var_assignments`]).
+    Assigned,
+}
+
+type JsScopeMemo = HashMap<(usize, JsScopeRead), HashMap<String, Vec<usize>>>;
+
+/// The declaring starts for `name` that scope `n` contributes, read once per file.
+fn js_scope_starts(
+    memo: &mut JsScopeMemo,
+    n: tree_sitter::Node,
+    read: JsScopeRead,
+    name: &str,
+    src: &[u8],
+) -> Vec<usize> {
+    memo.entry((n.id(), read))
+        .or_insert_with(|| {
+            let decls = match read {
+                JsScopeRead::Block => js_scope_decls(n, src),
+                JsScopeRead::Hoisted => js_hoisted_vars(n, src),
+                JsScopeRead::Assigned => js_var_assignments(n, src),
+            };
+            let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
+            for (name, at) in decls {
+                by_name.entry(name).or_default().push(at);
+            }
+            by_name
+        })
+        .get(name)
+        .cloned()
+        .unwrap_or_default()
+}
 
 /// Whether the callee `name` at `node` is bound LOCALLY (wicked-estate#486), and by what: by an
 /// enclosing function's parameters or own name, by a declaration in an enclosing block (a hoisted
-/// `var` included), up to the module. `Some(starts)` = local; `starts` are the declaring nodes of
+/// `var` included; a `var` redeclaring a parameter is that parameter, #492), by a class static
+/// block's own `var`s, up to the module. `Some(starts)` = local; `starts` are the declaring nodes of
 /// the innermost scope that binds it, which the caller joins to a definition by its anchor start
 /// (a nested `function Card() {}`, a local `const Card = () => …`); empty = a value binding (a
 /// parameter, a prop). `None` = a module-level binding (an import, a top-level declaration) or an
@@ -2213,6 +2336,9 @@ fn js_local_binding(
     memo: &mut JsScopeMemo,
 ) -> Option<Vec<usize>> {
     let pos = node.start_byte();
+    // Whether the walk has left the call's own function (or static block): from there on, source
+    // order says nothing about which assignment a call sees.
+    let mut crossed = false;
     let mut current = node.parent();
     while let Some(n) = current {
         let kind = n.kind();
@@ -2220,12 +2346,23 @@ fn js_local_binding(
             return None;
         }
         if JS_FUNCTION_KINDS.contains(&kind) {
-            for field in ["parameters", "parameter"] {
-                if let Some(p) = n.child_by_field_name(field) {
-                    if js_pattern_binds(p, name, src) {
-                        return Some(Vec::new());
-                    }
-                }
+            // Body `var`s are visible only to a call in a block body: not to a default parameter,
+            // and an expression body has no `var`s of its own (it may be a nested function).
+            let body = n.child_by_field_name("body").filter(|b| {
+                b.kind() == "statement_block" && b.start_byte() <= pos && pos < b.end_byte()
+            });
+            let param = ["parameters", "parameter"].iter().any(|field| {
+                n.child_by_field_name(field)
+                    .is_some_and(|p| js_pattern_binds(p, name, src))
+            });
+            if param {
+                // A `var` redeclaring a parameter IS the parameter (#492): the call sees an
+                // assignment by [`js_assignment_seen`]; none = the supplied value.
+                let all = match body.filter(|_| var_names.contains(name)) {
+                    Some(b) => js_scope_starts(memo, b, JsScopeRead::Assigned, name, src),
+                    None => Vec::new(),
+                };
+                return Some(js_assignment_seen(all, pos, crossed));
             }
             // A named function expression binds its own name inside itself.
             if matches!(kind, "function_expression" | "generator_function")
@@ -2234,20 +2371,23 @@ fn js_local_binding(
             {
                 return Some(Vec::new());
             }
-            // A body `var` is not visible to a default parameter: only a call in the body sees it.
-            if let Some(body) = n
-                .child_by_field_name("body")
-                .filter(|b| var_names.contains(name) && b.start_byte() <= pos && pos < b.end_byte())
-            {
-                let starts: Vec<usize> = js_hoisted_vars(body, src)
-                    .into_iter()
-                    .filter(|(n, _)| n == name)
-                    .map(|(_, at)| at)
-                    .collect();
+            if let Some(b) = body.filter(|_| var_names.contains(name)) {
+                let starts = js_scope_starts(memo, b, JsScopeRead::Hoisted, name, src);
                 if !starts.is_empty() {
                     return Some(starts);
                 }
             }
+            crossed = true;
+        } else if kind == "class_static_block" {
+            // A static block is a `var` scope of its own (#492); the call sees an assignment as a
+            // parameter's call does.
+            if var_names.contains(name)
+                && !js_scope_starts(memo, n, JsScopeRead::Hoisted, name, src).is_empty()
+            {
+                let all = js_scope_starts(memo, n, JsScopeRead::Assigned, name, src);
+                return Some(js_assignment_seen(all, pos, crossed));
+            }
+            crossed = true;
         } else if kind == "class"
             && n.child_by_field_name("name")
                 .is_some_and(|id| id.utf8_text(src).is_ok_and(|t| t == name))
@@ -2261,14 +2401,8 @@ fn js_local_binding(
                 | "for_in_statement"
                 | "catch_clause"
                 | "switch_body"
-                | "class_static_block"
         ) {
-            let decls = memo.entry(n.id()).or_insert_with(|| js_scope_decls(n, src));
-            let starts: Vec<usize> = decls
-                .iter()
-                .filter(|(n, _)| n == name)
-                .map(|(_, at)| *at)
-                .collect();
+            let starts = js_scope_starts(memo, n, JsScopeRead::Block, name, src);
             if !starts.is_empty() {
                 return Some(starts);
             }
@@ -6657,6 +6791,11 @@ export function N7() { abstract class L { static { var Top; } } return Top(); }
 export function D1() { function Card() { return null; } return Card(); }
 export function D2() { const Card = () => null; function Inner() { return <Card />; } return Inner(); }
 export function D3() { var Card; function Card() { return null; } return Card(); }
+export function D4(Card) { { var Card = () => null; } return Card(); }
+export function D5() { { var Card; } function Card() { return null; } return <Card />; }
+export class PE { static { if (Top) { var Card = Top; } Card(); } }
+export class N8 { static { var Card = Top; } }
+export function N9() { return Card(); }
 "#;
         let ex = TreeSitterExtractor::for_language("tsx")
             .unwrap()
@@ -6679,7 +6818,15 @@ export function D3() { var Card; function Card() { return null; } return Card();
                 "{p}: the callee is a local value binding: {got:?}"
             );
         }
-        for n in ["/N1(", "/N2(", "/N3(", "/N4(", "/N5(", "/N6(", "/N7("] {
+        // A class static block is a `var` scope of its own (#492).
+        let got = names("/PE");
+        assert!(
+            got.iter().any(|n| n == "local-binding:Card"),
+            "a static-block var is local to the block: {got:?}"
+        );
+        for n in [
+            "/N1(", "/N2(", "/N3(", "/N4(", "/N5(", "/N6(", "/N7(", "/N9(",
+        ] {
             let got = names(n);
             assert!(
                 !got.is_empty() && got.iter().all(|g| !g.starts_with("local-binding:")),
@@ -6697,6 +6844,11 @@ export function D3() { var Card; function Card() { return null; } return Card();
             ("/D1(", "nested function"),
             ("/Inner(", "captured const arrow"),
             ("/D3(", "a var sharing the function's binding"),
+            ("/D4(", "a block var redeclaring the parameter (#492)"),
+            (
+                "/D5(",
+                "a block var sharing a body function's binding (#492)",
+            ),
         ] {
             let got = names(caller);
             assert!(
