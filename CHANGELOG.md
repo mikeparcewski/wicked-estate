@@ -4,6 +4,22 @@
 
 ### Fixed
 
+- **A graph lacking only the FTS rowid migration marker is refused on the private copy too (wicked-estate#508).**
+  The copy's check refused only on a missing table, index or column, so a graph whose sole difference was the unset
+  FTS marker fell through to the ordinary open, which created a `-shm` before refusing. A failed check that ends on
+  SQLite's own "attempt to write a readonly database" is now evidence too: the check only reads unless a writer's
+  migration is pending, and the copy is a plain private file, so that error means a migration is pending. Any other
+  failure (a lock, an I/O error, a corrupt copy) is still undecided.
+
+  **Known limit, accepted.** When no private copy can be made or checked (no temp space, a temp directory that is the
+  graph's own, a copy SQLite cannot open, or a graph over 1 GiB), the ordinary read-only open still runs and can
+  create a `-shm` before refusing an older graph. SQLite offers no way to decide currency without it: with frames
+  in the `-wal` the schema lives partly in the `-wal`, an `immutable` open ignores the `-wal` (on a graph whose
+  tables were all created in the `-wal` it sees no table at all, so it would refuse a current graph), and a plain
+  read-only open of such a graph needs a `-shm` (`nolock=1` fails with "unable to open database file"; both
+  observed on SQLite 3.54.1). Refusing instead would turn away current graphs whenever temp space is short or the
+  graph is large, a worse outcome than a leftover `-shm`, which is disposable and SQLite recreates it.
+
 - **Refusing an older graph whose `-wal` holds frames and that has no `-shm` leaves the directory unchanged when
   its private copy can be checked (wicked-estate#506).** The read-only currency check used to hand that layout to SQLite's ordinary read-only open,
   which created a `-shm` before refusing.
@@ -21,9 +37,10 @@
     is there.
 
   **Known limits.**
-  - When the private check cannot decide, the ordinary open can still create a `-shm` before refusing (tracked in
-    wicked-estate#508). That covers temp storage that is unavailable, and a copy whose check fails without a
-    missing object or column, such as one lacking only the FTS rowid migration marker.
+  - When the private check cannot be made, the ordinary open can still create a `-shm` before refusing: temp
+    storage that is unavailable, a temp directory that is the graph's own, a copy SQLite cannot open, or a graph
+    over 1 GiB (accepted; see the #508 entry for why). A copy whose only difference is the FTS rowid migration
+    marker is now refused on the copy (wicked-estate#508).
   - Unix only. Elsewhere, and on every ordinary-open path (a framed `-wal` beside an existing `-shm`, a copy that
     could not be made or checked, a first check the stamps do not confirm), SQLite may create the sidecars, or
     reset an existing `-shm` no one holds, before refusing an older graph.

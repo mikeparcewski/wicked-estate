@@ -349,11 +349,22 @@ impl Drop for RemoveOnDrop {
     }
 }
 
+/// Whether a failed currency check ended on SQLite's refusal of a write on a read-only
+/// connection (`SQLITE_READONLY`, "attempt to write a readonly database"). The check only reads
+/// unless a migration has work to do, so on a connection to a plain private copy that error is the
+/// graph's own evidence that a writer's migration is pending, with no missing object or column to
+/// name (for example only the FTS rowid marker, wicked-estate#508). Every other error stays
+/// undecided: a lock, an I/O failure or a corrupt copy says nothing about the schema.
+fn wanted_a_write(e: &Error) -> bool {
+    e.to_string()
+        .contains("attempt to write a readonly database")
+}
+
 /// The currency check of a WAL graph whose `-wal` holds frames and that has no `-shm`, run on a
 /// private copy of the database and its `-wal` in a fresh `0700` temp directory, so SQLite's
 /// sidecars are created there and never beside the graph (wicked-estate#506). The originals are
 /// only read, as plain files. `Some(Err)` only on evidence that the graph's schema predates this
-/// build (an object or a column it lacks); anything else that goes wrong with the copy (no temp
+/// build (an object or a column it lacks, or a migration that wants to write); anything else that goes wrong with the copy (no temp
 /// space, a temp directory that is the graph's own, a copy SQLite cannot open) is `None`, and the
 /// ordinary open decides. A directory a killed process left behind is removed by the next check
 /// once it is ten minutes old.
@@ -398,7 +409,8 @@ fn check_private_copy(real: &std::path::Path) -> Option<Result<()>> {
         Ok(()) => Some(Ok(())),
         Err(e)
             if matches!(schema_objects_present(&conn), Err(Error::Invalid(_)))
-                || !missing_columns(&conn).is_empty() =>
+                || !missing_columns(&conn).is_empty()
+                || wanted_a_write(&e) =>
         {
             Some(Err(e))
         }
@@ -1354,7 +1366,10 @@ impl SqliteStore {
     /// private copy that could not be made or checked, a first check that passed, and a first
     /// refusal the stamps do not confirm. That open can create the sidecars, or reset an existing
     /// `-shm` no one holds, before it refuses an older graph, and a reader of a served graph
-    /// updates its read-mark in the `-shm` (ordinary SQLite reader coordination). The checks and
+    /// updates its read-mark in the `-shm` (ordinary SQLite reader coordination). Known limit
+    /// (wicked-estate#508): when no private copy can be made or checked, the ordinary open runs
+    /// and can create a `-shm` before refusing, because SQLite cannot read a framed `-wal` without
+    /// one (`immutable` ignores the `-wal`; `nolock` cannot open it). The checks and
     /// the open use the resolved path, where SQLite keeps the sidecars.
     pub fn open_readonly_current(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -7989,6 +8004,57 @@ mod tests {
             .err()
             .expect("an older graph is refused");
         assert!(err.to_string().contains("search_misses"), "{err}");
+        assert!(!old.join("g.db-shm").exists(), "refusing it created a -shm");
+        assert!(listing(&old) == before, "refusing it changed the directory");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// wicked-estate#508: an older graph whose ONLY difference is the unset FTS rowid migration
+    /// marker (no object or column missing) and whose commit is still in its `-wal` with no
+    /// `-shm` is refused on the private copy, and the refusal leaves the directory unchanged.
+    /// Fails on #507's head: the copy's check had no evidence to name, so the ordinary open ran
+    /// and created the `-shm` before refusing.
+    #[cfg(unix)]
+    #[test]
+    fn a_graph_lacking_only_the_fts_marker_is_refused_leaving_the_directory_unchanged() {
+        let dir = unique_test_dir("ro-framed-wal-fts-marker");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.db");
+        drop(SqliteStore::open(&src).unwrap());
+        let holder = Connection::open(&src).unwrap();
+        holder
+            .execute_batch(&format!(
+                "PRAGMA wal_autocheckpoint=0; DELETE FROM meta WHERE k='{FTS_ROWID_KEY}';"
+            ))
+            .unwrap();
+        let old = dir.join("old");
+        std::fs::create_dir_all(&old).unwrap();
+        let db = old.join("g.db");
+        std::fs::copy(&src, &db).unwrap();
+        std::fs::copy(dir.join("src.db-wal"), old.join("g.db-wal")).unwrap();
+        drop(holder);
+        assert!(std::fs::metadata(old.join("g.db-wal")).unwrap().len() > 0);
+        let listing = |d: &std::path::Path| {
+            let mut v: Vec<(String, Vec<u8>)> = std::fs::read_dir(d)
+                .unwrap()
+                .map(|e| {
+                    let e = e.unwrap();
+                    (
+                        e.file_name().to_string_lossy().into_owned(),
+                        std::fs::read(e.path()).unwrap(),
+                    )
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        let before = listing(&old);
+        assert_eq!(before.len(), 2, "the database and its -wal only");
+        let err = SqliteStore::open_readonly_current(&db)
+            .err()
+            .expect("a graph awaiting the FTS migration is refused");
+        assert!(err.to_string().contains("predates this build"), "{err}");
         assert!(!old.join("g.db-shm").exists(), "refusing it created a -shm");
         assert!(listing(&old) == before, "refusing it changed the directory");
         let _ = std::fs::remove_dir_all(&dir);
