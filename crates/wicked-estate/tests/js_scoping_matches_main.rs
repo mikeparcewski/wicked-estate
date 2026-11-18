@@ -71,6 +71,8 @@ fn fresh_dir(tag: &str) -> PathBuf {
 struct Graph {
     /// Per caller: the sorted target symbol ids of its Calls edges.
     calls: HashMap<String, Vec<String>>,
+    /// Every Calls edge's target, one entry per edge.
+    targets: Vec<String>,
     parked_local: usize,
 }
 
@@ -111,12 +113,18 @@ fn index(tag: &str, caller: &str, callers: &[&str]) -> Graph {
             (caller.to_string(), to)
         })
         .collect();
+    let targets = all
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Calls)
+        .map(|e| e.target.as_str().to_string())
+        .collect();
     let parked_local = store
         .unresolved_refs_for_name("local-binding:Card")
         .unwrap()
         .len();
     Graph {
         calls,
+        targets,
         parked_local,
     }
 }
@@ -666,4 +674,62 @@ fn shared_declarations_size() {
         bound < unbound * 2,
         "the bound file must cost what the unbound one does: {bound:?} vs {unbound:?}"
     );
+}
+
+/// Guaranteed writes in other syntactic forms replace the arrow too.
+#[test]
+fn paren_write() {
+    let body = "{ var Card = () => null; } (Card = null); return READ;";
+    case("paren_write", "Card: any", body, [true, false, false]);
+}
+
+#[test]
+fn sequence_write() {
+    let body = "{ var Card = () => null; } Card = null, 0; return READ;";
+    case("sequence_write", "Card: any", body, [true, false, false]);
+}
+
+#[test]
+fn for_init_write() {
+    let body = "{ var Card = () => null; } for (Card = null; false; ) {} return READ;";
+    case("for_init_write", "Card: any", body, [true, false, false]);
+}
+
+/// A `let` in a nested block: its own writes decide its value.
+#[test]
+fn nested_let_reassigned() {
+    let body = "{ let Card = () => null; Card = null; return READ; }";
+    case("nested_let_reassigned", "", body, [true, true, false]);
+}
+
+/// Past 32 writes the lookup stops ordering: every known write stays possible.
+#[test]
+fn many_conditional_writes() {
+    let body = format!(
+        "let Card = () => null; {} return READ;",
+        "if (on) Card = null; ".repeat(33)
+    );
+    case("many_conditional_writes", "", &body, [true, true, true]);
+}
+
+/// A class field initializer runs at construction, after the `let` arrow exists: the edge stays
+/// on every build.
+#[test]
+fn class_field_reads_later() {
+    let tag = "class_field_reads_later";
+    if matches!(BUILD, Build::Main | Build::Main493) {
+        return;
+    }
+    let g = index(
+        tag,
+        "export function ViaCall() { class CCall { value = Card(); } let Card = () => null; return new CCall(); }\n\
+         export function ViaJsx() { class CJsx { value = <Card />; } let Card = () => null; return new CJsx(); }\n",
+        &CALLERS,
+    );
+    let to_card = g
+        .targets
+        .iter()
+        .filter(|t| t.as_str() == "ts-tsx . . . src/caller/Card().")
+        .count();
+    assert_eq!(to_card, 2, "{tag}: {:?}", g.targets);
 }

@@ -2221,11 +2221,24 @@ struct JsWrites {
     /// `x ||= …` / `x ??= …`: kept out of `events`, as each keeps a callable value; counted for a
     /// call from a nested function, which cannot know whether one ran first.
     keeps: usize,
+    /// Every known write's anchor: the values a call may see when the lookup stops early.
+    known: Option<std::rc::Rc<[usize]>>,
 }
 
 /// The outermost plain block `stmt` runs in unconditionally: its parent block, widened through
 /// plain `{}` blocks nested directly in another block (wicked-estate#498).
 fn js_straight_block(stmt: tree_sitter::Node) -> Option<usize> {
+    // A loop initializer runs once, where its loop statement stands.
+    let stmt = match stmt.parent() {
+        Some(f)
+            if f.kind() == "for_statement"
+                && f.child_by_field_name("initializer")
+                    .is_some_and(|i| i.id() == stmt.id()) =>
+        {
+            f
+        }
+        _ => stmt,
+    };
     let mut block = stmt.parent().filter(|b| b.kind() == "statement_block")?;
     while let Some(up) = block.parent().filter(|p| p.kind() == "statement_block") {
         block = up;
@@ -2482,17 +2495,44 @@ fn js_var_writes(body: tree_sitter::Node, src: &[u8]) -> HashMap<String, JsWrite
     }
     for w in out.values_mut() {
         w.events.sort_unstable_by_key(|e| e.visible);
+        w.known = Some(
+            w.events
+                .iter()
+                .filter(|e| e.known)
+                .map(|e| e.anchor)
+                .collect(),
+        );
     }
     out
 }
 
-/// The expression statement `expr` is the whole of, if any: only then does it run unconditionally
-/// with its statement.
+/// The statement `expr` always runs with (through `( … )` and `a, b`): an expression statement,
+/// or a `for` loop's initializer; none when it may not run (`c && (x = …)`, a condition).
 fn js_statement_of(expr: tree_sitter::Node) -> Option<tree_sitter::Node> {
-    expr.parent().filter(|p| p.kind() == "expression_statement")
+    let mut child = expr;
+    let mut up = expr.parent()?;
+    while matches!(
+        up.kind(),
+        "parenthesized_expression" | "sequence_expression"
+    ) {
+        child = up;
+        up = up.parent()?;
+    }
+    match up.kind() {
+        "expression_statement" => Some(up),
+        // A loop initializer: [`js_straight_block`] places it where its loop stands.
+        "for_statement"
+            if up
+                .child_by_field_name("initializer")
+                .is_some_and(|i| i.id() == child.id()) =>
+        {
+            Some(child)
+        }
+        _ => None,
+    }
 }
 
-/// At most this many writes are read back from a call: past it, the call keeps what it found.
+/// At most this many writes are read back from a call: past it, every known write stays possible.
 const JS_MAY_WRITES: usize = 32;
 
 /// The values a call at `pos` may see, as write anchors (wicked-estate#492, #497, #498, #501);
@@ -2508,25 +2548,26 @@ fn js_assignment_seen(
     pos: usize,
     crossed: bool,
     ancestors: &[usize],
-) -> Vec<usize> {
+) -> std::rc::Rc<[usize]> {
     let Some(w) = writes else {
-        return Vec::new();
+        return std::rc::Rc::from([]);
     };
     if crossed {
         return match w.events.as_slice() {
-            [only] if w.keeps == 0 && only.known => vec![only.anchor],
-            _ => Vec::new(),
+            [only] if w.keeps == 0 && only.known => std::rc::Rc::from([only.anchor]),
+            _ => std::rc::Rc::from([]),
         };
     }
     let before = w.events.partition_point(|e| e.visible <= pos);
     let mut out = Vec::new();
-    let unseen = |e: &&JsWrite| e.blind.is_some_and(|(a, b)| a <= pos && pos < b);
-    for e in w.events[..before]
-        .iter()
-        .rev()
-        .filter(|e| !unseen(e))
-        .take(JS_MAY_WRITES)
-    {
+    for (read, e) in w.events[..before].iter().rev().enumerate() {
+        if read == JS_MAY_WRITES {
+            // Too many writes to order: every known write stays possible.
+            return w.known.clone().unwrap_or_else(|| std::rc::Rc::from([]));
+        }
+        if e.blind.is_some_and(|(a, b)| a <= pos && pos < b) {
+            continue;
+        }
         if e.known {
             out.push(e.anchor);
         }
@@ -2534,7 +2575,7 @@ fn js_assignment_seen(
             break;
         }
     }
-    out
+    out.into()
 }
 
 /// What a scope node contributes, memoised per file by (node id, which): every call site asks its
@@ -2592,7 +2633,7 @@ fn js_scope_write_seen(
     src: &[u8],
     call: tree_sitter::Node,
     crossed: bool,
-) -> Vec<usize> {
+) -> std::rc::Rc<[usize]> {
     let writes = memo
         .writes
         .entry(n.id())
@@ -2601,9 +2642,6 @@ fn js_scope_write_seen(
     let mut up = call.parent();
     while let Some(a) = up {
         ancestors.push(a.id());
-        if a.id() == n.id() {
-            break;
-        }
         up = a.parent();
     }
     js_assignment_seen(writes.get(name), call.start_byte(), crossed, &ancestors)
@@ -2678,7 +2716,7 @@ fn js_local_binding(
     src: &[u8],
     var_names: &HashSet<String>,
     memo: &mut JsScopeMemo,
-) -> Option<Rc<[usize]>> {
+) -> Option<std::rc::Rc<[usize]>> {
     use std::rc::Rc;
     let pos = node.start_byte();
     // Whether the walk has left the call's own function (or static block): from there on, source
@@ -2704,7 +2742,7 @@ fn js_local_binding(
                 // A `var` redeclaring a parameter IS the parameter (#492): the call sees an
                 // assignment by [`js_assignment_seen`]; none = the supplied value.
                 return Some(match body.filter(|_| var_names.contains(name)) {
-                    Some(b) => js_scope_write_seen(memo, b, name, src, node, crossed).into(),
+                    Some(b) => js_scope_write_seen(memo, b, name, src, node, crossed),
                     None => Rc::from([]),
                 });
             }
@@ -2720,7 +2758,7 @@ fn js_local_binding(
                     // A hoisted `var`: its writes decide the value (#498), but from a nested
                     // function every declaration stays a candidate, as before.
                     if !crossed {
-                        return Some(js_scope_write_seen(memo, b, name, src, node, false).into());
+                        return Some(js_scope_write_seen(memo, b, name, src, node, false));
                     }
                     return Some(starts);
                 }
@@ -2732,7 +2770,7 @@ fn js_local_binding(
             if var_names.contains(name)
                 && js_scope_starts(memo, n, JsScopeRead::Hoisted, name, src).is_some()
             {
-                return Some(js_scope_write_seen(memo, n, name, src, node, crossed).into());
+                return Some(js_scope_write_seen(memo, n, name, src, node, crossed));
             }
             crossed = true;
         } else if kind == "class"
@@ -2741,6 +2779,13 @@ fn js_local_binding(
         {
             // A named class expression binds its own name inside its body.
             return Some(Rc::from([]));
+        } else if matches!(
+            kind,
+            "class" | "class_declaration" | "abstract_class_declaration"
+        ) {
+            // A class body runs later (an instance field at construction, a method when called):
+            // source order says nothing about which write it sees (#498).
+            crossed = true;
         } else if matches!(
             kind,
             "statement_block"
@@ -2752,9 +2797,13 @@ fn js_local_binding(
             if let Some(starts) = js_scope_starts(memo, n, JsScopeRead::Block, name, src) {
                 // A `var` or `let` binding in the call's own function: its writes decide the
                 // value (#498). Otherwise every declaration stays a candidate, as before.
-                let scope = js_mutable_scope(n, &starts).filter(|_| !crossed);
+                let scope = if crossed {
+                    None
+                } else {
+                    js_mutable_scope(n, &starts)
+                };
                 if let Some(scope) = scope {
-                    return Some(js_scope_write_seen(memo, scope, name, src, node, false).into());
+                    return Some(js_scope_write_seen(memo, scope, name, src, node, false));
                 }
                 return Some(starts);
             }
