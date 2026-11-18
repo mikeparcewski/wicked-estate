@@ -113,9 +113,28 @@ impl Resolver for NameResolver {
 /// `apexlang-ref:` / `apexlang-in:`). The name tiers skip them outright: an encoded name is not a
 /// written name, and a quoted APEXlang id can spell anything, so "no node is named that" is not
 /// isolation.
+///
+/// A `local-binding:` ref (wicked-estate#486) is skipped too: a local's name is not a global
+/// name. `ScopedNameResolver` binds its `<symbol>` form through [`bind_local`] before this check.
 fn routed_elsewhere(r: &UnresolvedRef) -> bool {
+    use wicked_estate_core::refs::LOCAL_BINDING_PREFIX;
     use wicked_estate_core::refs::apexlang_ref::{CONTAINER_PREFIX, PREFIX};
-    r.raw_name.starts_with(PREFIX) || r.raw_name.starts_with(CONTAINER_PREFIX)
+    r.raw_name.starts_with(PREFIX)
+        || r.raw_name.starts_with(CONTAINER_PREFIX)
+        || r.raw_name.starts_with(LOCAL_BINDING_PREFIX)
+}
+
+/// The target of a `local-binding:<name>:<symbol>` ref: exactly that symbol, the definition the
+/// local binding names in the calling file (wicked-estate#486). `None` for any other ref, for the
+/// symbol-less form (a parameter, a prop: never bound), for a self-reference and for an
+/// inadmissible target.
+fn bind_local(r: &UnresolvedRef, index: &dyn SymbolIndex) -> Option<wicked_estate_core::Node> {
+    let rest = r
+        .raw_name
+        .strip_prefix(wicked_estate_core::refs::LOCAL_BINDING_PREFIX)?;
+    let (_, symbol) = rest.split_once(':')?;
+    let target = index.get(&wicked_estate_core::SymbolId(symbol.to_string()))?;
+    (target.symbol != r.from && admissible_target(&r.kind, &target)).then_some(target)
 }
 
 /// Parent directory of a file path, or `""` when the path has no separator (a root-level file).
@@ -297,6 +316,26 @@ impl Resolver for ScopedNameResolver {
         let mut out = Vec::new();
 
         for r in refs {
+            // A local binding that names a definition of the calling file binds exactly that
+            // definition, at the same-file confidence (#486).
+            if let Some(target) = bind_local(r, index) {
+                let mut edge = Edge::new(
+                    r.from.clone(),
+                    target.symbol.clone(),
+                    r.kind.clone(),
+                    self.tier(),
+                    self.id(),
+                )
+                .with_location(r.location.clone());
+                edge.confidence =
+                    wicked_estate_core::Confidence::new(ScopeTier::SameFile.confidence());
+                edge.metadata.insert(
+                    "scope".to_string(),
+                    serde_json::Value::String("local-binding".to_string()),
+                );
+                out.push(edge);
+                continue;
+            }
             if routed_elsewhere(r) {
                 continue;
             }
