@@ -34,17 +34,19 @@
   failed and the server answered "no readable graph" for a graph that was there. A launcher can now hand a worker a
   graph it can read but not change (wicked-crew#1497).
   - **What the launcher must deliver:** a graph last written by this build (so it needs no migration), in DELETE
-    journal mode with no hot journal beside it. A WAL graph also answers read-only, but SQLite may create its
-    `-wal` and `-shm` beside it (never writing the database file), and in a directory nobody can write a WAL graph
-    is not readable.
-  - **A graph it cannot serve read-only is refused, never written.** Either its schema is older than this build's
-    (its readers need the writer's migrations), or SQLite cannot open it read-only (a hot journal, or a WAL graph
-    whose `-shm` cannot be created). Every graph tool, and `knowledge.neighbors` (it checks code links against the graph), answers with
-    the reason; the `initialize` instructions and
-    `tools/list` `_meta` (`wicked-estate/graph`) carry it. The tools stay listed (`SemanticSearch` included), and no call answers from an
-    empty graph. A `file:` URI graph is refused too: SQLite would open it itself. Whoever owns the graph migrates it on its next write (`index`, or any write-mode open).
-  - **Unchanged:** a write-mode server, a missing graph (served empty, as before; a graph behind a directory the
-    server cannot search still reads as missing) and other schemes.
+    journal mode with no hot journal beside it. A WAL graph answers read-only too when its `-wal` and `-shm` can be
+    read, or created beside it; SQLite creates them to serve it (never writing the database file). A WAL graph with
+    no sidecars in a directory nobody can write is not readable.
+  - **A graph it cannot serve read-only is refused, never written.** Three cases: its schema is older than this
+    build's (the reason names the missing table, index or column), SQLite cannot open it read-only (a hot journal, a
+    WAL graph whose `-shm` cannot be created, or a directory the server may not search), or it is a `file:` URI
+    (SQLite would open it itself). Every graph tool, and `knowledge.neighbors` (it checks code links against the
+    graph), answers with the reason, and the `initialize` instructions and `tools/list` `_meta`
+    (`wicked-estate/graph`) carry it. The tools stay listed (`SemanticSearch` included), and no call answers from an
+    empty graph. Refusing an older WAL graph creates no file beside it (wicked-estate#491). Whoever owns the graph
+    migrates it on its next write (`index`, or any write-mode open).
+  - **Unchanged:** a write-mode server, a missing graph (served empty, as before; only a graph confirmed absent is,
+    wicked-estate#491) and other schemes.
 - A call through a local binding no longer binds an unrelated global of the same name (#486, local-binding half).
   In JS/TS, `function Holder({ Card }) { return <Card/>; }` made Holder a dependent of any unique `Card` elsewhere.
   A callee bound by a parameter, a destructured prop (`{ Card }`, `{ c: Card }`, `{ Card = X }`), a local

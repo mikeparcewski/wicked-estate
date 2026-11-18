@@ -85,11 +85,15 @@ fn resolve_read_only() -> bool {
 /// has nothing to serve: it is opened as an empty in-memory store, and the disk is left untouched.
 /// Write mode is unchanged (it still creates its stores), and only a plain filesystem path is
 /// judged: a `scheme:` spec is left to the opener exactly as before.
+///
+/// Only a store CONFIRMED absent is served empty: one whose existence cannot be checked (a parent
+/// directory the server may not search) is opened as named, and its opener's failure is reported,
+/// never an empty store that answers "nothing found" (wicked-estate#491).
 fn read_only_store(spec: String, read_only: bool, store: &str) -> String {
     if !read_only
         || spec == ":memory:"
         || is_scheme_spec(&spec)
-        || std::path::Path::new(&spec).exists()
+        || !matches!(std::path::Path::new(&spec).try_exists(), Ok(false))
     {
         return spec;
     }
@@ -174,8 +178,9 @@ fn readonly_graph(read_only: bool, spec: &str) -> ReadonlyGraph {
     match SqliteStore::open_readonly_current(&path) {
         Ok(store) => ReadonlyGraph::Serve(path, store),
         Err(e) => ReadonlyGraph::Refuse(format!(
-            "the graph at '{path}' is not served read-only ({e}); a writer must re-index or \
-             migrate it (it is migrated on its owner's next write). Nothing was written"
+            "the graph at '{path}' is not served read-only ({e}). If its schema is older, a \
+             writer must re-index or migrate it (its owner does on its next write). Nothing was \
+             written"
         )),
     }
 }
