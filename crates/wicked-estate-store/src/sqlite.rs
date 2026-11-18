@@ -7654,10 +7654,7 @@ mod tests {
         drop(SqliteStore::open(&real).unwrap());
         Connection::open(&real)
             .unwrap()
-            .execute_batch(
-                "DROP INDEX IF EXISTS idx_annotations_last_verified; \
-                 ALTER TABLE annotations DROP COLUMN last_verified;",
-            )
+            .execute_batch("DROP TABLE search_misses;")
             .unwrap();
         // A second connection stays open, so the writer's migration stays in real.db-wal.
         let holder = Connection::open(&real).unwrap();
