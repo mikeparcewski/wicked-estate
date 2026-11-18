@@ -476,3 +476,20 @@
     property: (property_identifier) @call.method
   )
 ) @call.value
+
+; JSX: rendering a component is calling it (estate#481). `<SourceSheet …/>` / `<Panel>…</Panel>` is a Calls ref from
+; the enclosing component, resolved like `SourceSheet()`. A tag starting with an ASCII lowercase letter or containing a
+; hyphen is an intrinsic element (`<div>`, `<my-el>`, `<A-b>`), never a component (the JSX compilers' own rule:
+; TypeScript `isIntrinsicJsxName`, Babel `isCompatTag`), so those are not captured; `_Row`, `$Cell`, `École` are. No
+; @call.value: an element has no `arguments` node, so it opens no value-flow call fact. Closing tags are not captured
+; (one edge per element). `<Ns.Widget/>` is not captured: its leaf name alone would bind to any imported `Widget`, not
+; the one `Ns` names (estate#481 follow-up: receiver-aware binding).
+(jsx_self_closing_element
+  name: (identifier) @call.function
+  (#not-match? @call.function "^[a-z]|-")
+)
+
+(jsx_opening_element
+  name: (identifier) @call.function
+  (#not-match? @call.function "^[a-z]|-")
+)
