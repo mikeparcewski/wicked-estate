@@ -13,12 +13,14 @@
 
   **Known limit, accepted.** When no private copy can be made or checked (no temp space, a temp directory that is the
   graph's own, a copy SQLite cannot open, or a graph over 1 GiB), the ordinary read-only open still runs and can
-  create a `-shm` before refusing an older graph. SQLite offers no way to decide currency without it: with frames
-  in the `-wal` the schema lives partly in the `-wal`, an `immutable` open ignores the `-wal` (on a graph whose
-  tables were all created in the `-wal` it sees no table at all, so it would refuse a current graph), and a plain
-  read-only open of such a graph needs a `-shm` (`nolock=1` fails with "unable to open database file"; both
-  observed on SQLite 3.54.1). Refusing instead would turn away current graphs whenever temp space is short or the
-  graph is large, a worse outcome than a leftover `-shm`, which is disposable and SQLite recreates it.
+  create a `-shm` before refusing an older graph. The ways to read a framed `-wal` without creating a `-shm` on the
+  original are not safe for a reader that must not disturb the graph: an `immutable` open ignores the `-wal` (on a
+  graph whose tables were all created in the `-wal` it sees no table at all, so it would refuse a current graph); a
+  plain read-only open creates the `-shm`, and `nolock=1` fails with "unable to open database file" (both observed
+  on SQLite 3.54.1); and the exclusive-locking and no-lock VFS modes, which keep the wal-index in memory, need
+  write access to the graph and an exclusive lock, so they contend with a live writer (the #506 design review found
+  that race, W16, and dropped that approach). Refusing instead would turn away current graphs whenever temp space is
+  short or the graph is large, a worse outcome than a leftover `-shm`, which is disposable and which SQLite recreates.
 
 - **Refusing an older graph whose `-wal` holds frames and that has no `-shm` leaves the directory unchanged when
   its private copy can be checked (wicked-estate#506).** The read-only currency check used to hand that layout to SQLite's ordinary read-only open,
