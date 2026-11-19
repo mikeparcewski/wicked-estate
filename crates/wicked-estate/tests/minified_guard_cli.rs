@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! #478: a large hand-written file is indexed (size is never a minification signal), and a real
 //! minified file is skipped and named in the index output.
 
