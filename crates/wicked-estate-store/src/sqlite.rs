@@ -1370,8 +1370,9 @@ impl SqliteStore {
     /// updates its read-mark in the `-shm` (ordinary SQLite reader coordination). Known limit
     /// (wicked-estate#508): when no private copy can be made or checked, the ordinary open runs
     /// and can create a `-shm` before refusing: a plain read-only open cannot read a framed `-wal`
-    /// without one (`immutable` ignores the `-wal`; `nolock` cannot open it), and the modes that
-    /// keep the wal-index in memory need write access and an exclusive lock on the graph. The checks and
+    /// without one (`immutable` ignores the `-wal`; `nolock` cannot open it), and the no-lock VFS
+    /// (`unix-none`) that keeps the wal-index in memory takes no locks, so it can read a torn state
+    /// under a live writer (https://www.sqlite.org/vfs.html). The checks and
     /// the open use the resolved path, where SQLite keeps the sidecars.
     pub fn open_readonly_current(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let path = path.as_ref();

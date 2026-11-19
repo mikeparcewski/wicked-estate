@@ -17,9 +17,11 @@
   original are not safe for a reader that must not disturb the graph: an `immutable` open ignores the `-wal` (on a
   graph whose tables were all created in the `-wal` it sees no table at all, so it would refuse a current graph); a
   plain read-only open creates the `-shm`, and `nolock=1` fails with "unable to open database file" (both observed
-  on SQLite 3.54.1); and the exclusive-locking and no-lock VFS modes, which keep the wal-index in memory, need
-  write access to the graph and an exclusive lock, so they contend with a live writer (the #506 design review found
-  that race, W16, and dropped that approach). Refusing instead would turn away current graphs whenever temp space is
+  on SQLite 3.54.1); and the no-lock VFS (`vfs=unix-none`, with `locking_mode=EXCLUSIVE` so the wal-index stays in
+  memory) can read a framed `-wal` without creating a `-shm`, even on read-only files, but by design it takes no
+  locks (SQLite's VFS documentation, https://www.sqlite.org/vfs.html), so it can read a torn state under a live
+  writer: it bypasses that writer's lock (the #506 design review found that race, W16, and dropped the approach).
+  Refusing instead would turn away current graphs whenever temp space is
   short or the graph is large, a worse outcome than a leftover `-shm`, which is disposable and which SQLite recreates.
 
 - **Refusing an older graph whose `-wal` holds frames and that has no `-shm` leaves the directory unchanged when
