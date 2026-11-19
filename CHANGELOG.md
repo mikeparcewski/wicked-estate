@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`blast-radius --id <symbol-id>` (wicked-estate#451).** Returns the same JSON as the name form for exactly one
+  symbol, instead of the union of every symbol sharing a name. The name form is unchanged.
+
 ### Fixed
 
 - **Refusing an older graph whose `-wal` holds frames and that has no `-shm` leaves the directory unchanged when
