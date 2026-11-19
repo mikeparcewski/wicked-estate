@@ -3897,31 +3897,23 @@ fn classify_capture(cap_name: &str) -> CaptureRole<'_> {
 
 // ── Minified / huge-file guard ────────────────────────────────────────────────
 
-/// Return `true` when a source file is pathologically large or minified so that
-/// tree-sitter extraction would hang or bloat the graph with useless tokens.
+/// Return `true` when a source file is minified so that tree-sitter extraction
+/// would hang or bloat the graph with useless tokens.
 ///
-/// Three independent heuristics — **any one** triggers the guard:
+/// Two independent line-shape heuristics — **either** triggers the guard. File size alone never
+/// does (#478): a large hand-written file has many short lines and must be indexed.
 ///
 /// | Heuristic | Threshold | Rationale |
 /// |-----------|-----------|-----------|
-/// | Total size | > 1 MiB (1,048,576 bytes) | Even well-formatted files rarely exceed this; anything larger is almost certainly generated or vendored. |
 /// | Longest line | > 50,000 chars | A single line this wide is a minified bundle, transpiler output, or inline base64 data; no hand-written source reaches this. |
 /// | Average chars/line | > 2,000 | A dense average — e.g. a 6 MB file with 1,000 newlines — indicates heavily generated or concatenated content even when no single line is enormous. |
 ///
-/// The function is `O(n)` in the file length (one pass) and returns immediately on
-/// the size heuristic so it never even scans the content of truly enormous files.
+/// The function is `O(n)` in the file length (one pass).
 ///
 /// Called at the top of every `extract` implementation; callers that do want to
 /// index such files must strip / split the content before calling `extract`.
 pub fn is_minified_or_huge(text: &str) -> bool {
-    // Heuristic 1 — total byte size > 1 MiB.
-    // Check bytes, not chars, to stay O(1) on the fast path.
-    const MAX_BYTES: usize = 1_048_576; // 1 MiB
-    if text.len() > MAX_BYTES {
-        return true;
-    }
-
-    // Heuristics 2 & 3 — scan lines once.
+    // Scan lines once.
     const MAX_LINE_CHARS: usize = 50_000; // minified / generated single-line threshold
     const MAX_AVG_CHARS_PER_LINE: usize = 2_000; // dense average threshold
 
@@ -3930,7 +3922,7 @@ pub fn is_minified_or_huge(text: &str) -> bool {
 
     for line in text.lines() {
         let len = line.chars().count();
-        // Heuristic 2 — longest line.
+        // Heuristic 1 — longest line.
         if len > MAX_LINE_CHARS {
             return true;
         }
@@ -3938,7 +3930,7 @@ pub fn is_minified_or_huge(text: &str) -> bool {
         line_count += 1;
     }
 
-    // Heuristic 3 — average chars / line (guard against divide-by-zero on empty files).
+    // Heuristic 2 — average chars / line (guard against divide-by-zero on empty files).
     line_count > 0 && (total_chars / line_count) > MAX_AVG_CHARS_PER_LINE
 }
 
@@ -7570,12 +7562,15 @@ const helper = (s: string) => s.trim();
         );
     }
 
-    /// A file that exceeds 1 MiB is flagged even if every line is short.
+    /// Size alone is never a minification signal (#478): a >1 MiB file of short lines is source.
     #[test]
-    fn minified_guard_huge_file_over_1mib_is_true() {
-        // 1_048_577 bytes of 'a' characters (no newlines, but the size check triggers first).
-        let huge = "a".repeat(1_048_577);
-        assert!(is_minified_or_huge(&huge), "file > 1 MiB must be flagged");
+    fn minified_guard_large_short_line_file_is_false() {
+        let text = "fn f() { let x = 1; }\n".repeat(60_000); // ~1.3 MiB, 22 chars/line
+        assert!(text.len() > 1_048_576);
+        assert!(
+            !is_minified_or_huge(&text),
+            "a large file of short lines must not be flagged"
+        );
     }
 
     /// A file with a very high average chars/line (dense generated output) is flagged.
