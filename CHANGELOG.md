@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Refusing an older graph whose `-wal` holds frames and that has no `-shm` leaves the directory unchanged when
+  its private copy can be checked (wicked-estate#506).** The read-only currency check used to hand that layout to SQLite's ordinary read-only open,
+  which created a `-shm` before refusing.
+  - **The change:** a private copy of the database and its `-wal` is now checked in a fresh `0700` temp directory,
+    owned by the reader, so SQLite's sidecars are created there. The originals are only read, as plain files. The
+    directory gets a marker file first. It is removed on every return, and one left by a killed process is removed
+    by a later check once it is ten minutes old. Only a directory holding the marker is removed, and only of the
+    files the check writes; any other directory or file is left alone.
+  - **What counts as a refusal:** only evidence that the schema predates the build, meaning a table, index or column
+    it lacks. A copy that cannot be made or opened is not a refusal, whether for lack of temp space, a temp
+    directory that is the graph's own, or a size over 1 GiB as sampled. In those cases the ordinary open decides.
+  - **Unchanged:** an absent or empty `-wal` still gets the immutable check.
+  - **Stamps:** a refusal by either first check stands only when the database, its `-wal` and its `-shm` look the
+    same after the check as before it. "The same" means the sizes, the modification times, and whether the `-shm`
+    is there.
+
+  **Known limits.**
+  - When the private check cannot decide, the ordinary open can still create a `-shm` before refusing (tracked in
+    wicked-estate#508). That covers temp storage that is unavailable, and a copy whose check fails without a
+    missing object or column, such as one lacking only the FTS rowid migration marker.
+  - Unix only. Elsewhere, and on every ordinary-open path (a framed `-wal` beside an existing `-shm`, a copy that
+    could not be made or checked, a first check the stamps do not confirm), SQLite may create the sidecars, or
+    reset an existing `-shm` no one holds, before refusing an older graph.
+  - A reader of a served graph updates its read-mark in the `-shm`. That is ordinary SQLite reader coordination.
+  - A writer that changes the graph while leaving every stamp as it was is not seen by the first check. The worst
+    case is a spurious refusal, never a wrong read: no first check serves answers, and a refused graph is migrated on
+    its owner's next write.
+
 ## [0.35.7] — 2026-11-19
 
 Patch: BlastRadius follows JSX (a component rendered only as `<Widget/>` has dependents, #481); a local binding (parameter,

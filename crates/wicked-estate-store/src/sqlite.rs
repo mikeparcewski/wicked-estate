@@ -292,6 +292,150 @@ fn wal_sibling(path: &std::path::Path) -> std::path::PathBuf {
     std::path::PathBuf::from(s)
 }
 
+#[cfg(unix)]
+fn shm_sibling(path: &std::path::Path) -> std::path::PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push("-shm");
+    std::path::PathBuf::from(s)
+}
+
+/// The largest graph (database plus `-wal`, as sampled before the check) `check_private_copy`
+/// copies; a larger one with a framed `-wal` goes to the ordinary read-only open.
+#[cfg(unix)]
+const PRIVATE_CHECK_MAX_BYTES: u64 = 1 << 30;
+
+/// The name prefix of `check_private_copy`'s temp directories.
+#[cfg(unix)]
+const PRIVATE_CHECK_PREFIX: &str = "wicked-estate-rocheck-";
+
+/// The marker `check_private_copy` writes first into each directory it creates; only a directory
+/// holding it is ever removed, and only of the files the check writes there.
+#[cfg(unix)]
+const PRIVATE_CHECK_MARKER: &str = ".wicked-estate-rocheck";
+
+/// The files a private check directory may hold: its marker, the copy and SQLite's sidecars.
+#[cfg(unix)]
+const PRIVATE_CHECK_FILES: [&str; 5] = [
+    PRIVATE_CHECK_MARKER,
+    "g.db",
+    "g.db-wal",
+    "g.db-shm",
+    "g.db-journal",
+];
+
+/// Remove a private check directory: only one that is a real directory (not a link) holding the
+/// marker, only the files the check writes, then the directory itself if that left it empty.
+/// Anything else in it, and any directory without the marker, is left alone (wicked-estate#507).
+#[cfg(unix)]
+fn remove_private_check(dir: &std::path::Path) {
+    let is_dir = std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_dir());
+    if !is_dir || !dir.join(PRIVATE_CHECK_MARKER).is_file() {
+        return;
+    }
+    for name in PRIVATE_CHECK_FILES.iter().rev() {
+        let _ = std::fs::remove_file(dir.join(name));
+    }
+    let _ = std::fs::remove_dir(dir);
+}
+
+/// Removes a private check directory when dropped, on every return and on unwinding.
+#[cfg(unix)]
+struct RemoveOnDrop(std::path::PathBuf);
+
+#[cfg(unix)]
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        remove_private_check(&self.0);
+    }
+}
+
+/// The currency check of a WAL graph whose `-wal` holds frames and that has no `-shm`, run on a
+/// private copy of the database and its `-wal` in a fresh `0700` temp directory, so SQLite's
+/// sidecars are created there and never beside the graph (wicked-estate#506). The originals are
+/// only read, as plain files. `Some(Err)` only on evidence that the graph's schema predates this
+/// build (an object or a column it lacks); anything else that goes wrong with the copy (no temp
+/// space, a temp directory that is the graph's own, a copy SQLite cannot open) is `None`, and the
+/// ordinary open decides. A directory a killed process left behind is removed by the next check
+/// once it is ten minutes old.
+#[cfg(unix)]
+fn check_private_copy(real: &std::path::Path) -> Option<Result<()>> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let tmp = std::env::temp_dir();
+    let tmp_real = std::fs::canonicalize(&tmp).ok()?;
+    if real.parent() == Some(tmp_real.as_path()) {
+        return None;
+    }
+    sweep_private_checks(&tmp);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let dir = tmp.join(format!(
+        "{PRIVATE_CHECK_PREFIX}{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::DirBuilder::new().mode(0o700).create(&dir).ok()?;
+    // The marker first: without it no sweep or guard ever removes the directory.
+    if std::fs::write(dir.join(PRIVATE_CHECK_MARKER), b"").is_err() {
+        let _ = std::fs::remove_dir(&dir);
+        return None;
+    }
+    let guard = RemoveOnDrop(dir);
+    let db = guard.0.join("g.db");
+    for (from, to) in [
+        (real.to_path_buf(), db.clone()),
+        (wal_sibling(real), wal_sibling(&db)),
+    ] {
+        std::fs::copy(&from, &to).ok()?;
+        // The copy is the reader's own: readable and writable by it whatever the original's mode.
+        std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o600)).ok()?;
+    }
+    let conn = Connection::open_with_flags(
+        &db,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let out = match check_current(&conn) {
+        Ok(()) => Some(Ok(())),
+        Err(e)
+            if matches!(schema_objects_present(&conn), Err(Error::Invalid(_)))
+                || !missing_columns(&conn).is_empty() =>
+        {
+            Some(Err(e))
+        }
+        Err(_) => None,
+    };
+    drop(conn);
+    drop(guard);
+    out
+}
+
+/// Remove `check_private_copy` directories in `tmp` older than ten minutes (a killed process's).
+#[cfg(unix)]
+fn sweep_private_checks(tmp: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(tmp) else {
+        return;
+    };
+    let old = std::time::Duration::from_secs(600);
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(PRIVATE_CHECK_PREFIX)
+        {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > old);
+        if stale {
+            remove_private_check(&entry.path());
+        }
+    }
+}
+
 /// `file:<path>?immutable=1` for an absolute Unix path, its bytes percent-encoded (RFC 3986
 /// unreserved characters and `/` kept), so any byte, a backslash or invalid UTF-8 included, names
 /// the same file. A canonical path starts with exactly one `/`, so it is never read as a URI
@@ -1196,38 +1340,60 @@ impl SqliteStore {
     /// succeed, and on a stale one the first write they attempt fails, which is the answer. A
     /// refused graph is never opened any other way: its owner migrates it on its next write.
     ///
-    /// On Unix, a WAL graph whose `-wal` is absent or empty (no frames: the database file is the
-    /// whole graph) is checked first through an `immutable` connection, which reads the database
-    /// file alone and creates nothing, so refusing it leaves no `-wal` or `-shm` behind
-    /// (wicked-estate#491, #500). The checks, and the open that follows, use the resolved path,
-    /// where SQLite keeps the sidecars. One that passes is then opened as above, where SQLite may
-    /// create them to serve it. A `-wal` with frames goes straight to that open: only SQLite can
-    /// read it. If a `-wal` appeared during the immutable check (a writer), the decision is the
-    /// ordinary open's.
+    /// On Unix, a WAL graph is first checked in a way that leaves nothing beside it
+    /// (wicked-estate#491, #500, #506):
+    /// - a `-wal` that is absent or empty holds no frames: an `immutable` connection reads the
+    ///   database file alone and creates nothing;
+    /// - a `-wal` with frames and no `-shm`, up to `PRIVATE_CHECK_MAX_BYTES` (1 GiB, as sampled):
+    ///   a private copy of the database and its `-wal` is checked in a temp directory
+    ///   (`check_private_copy`); the originals are only read.
+    ///
+    /// A refusal by that first check stands only when the database and its sidecars look the same
+    /// (sizes, modification times, the `-shm` there or not) after it as before it. Everything else
+    /// goes to the ordinary open: a framed `-wal` beside an existing `-shm`, a larger graph, a
+    /// private copy that could not be made or checked, a first check that passed, and a first
+    /// refusal the stamps do not confirm. That open can create the sidecars, or reset an existing
+    /// `-shm` no one holds, before it refuses an older graph, and a reader of a served graph
+    /// updates its read-mark in the `-shm` (ordinary SQLite reader coordination). The checks and
+    /// the open use the resolved path, where SQLite keeps the sidecars.
     pub fn open_readonly_current(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let path = path.as_ref();
         #[cfg(unix)]
         let resolved = std::fs::canonicalize(path).ok();
         #[cfg(unix)]
         if let Some(real) = resolved.as_deref() {
-            let no_frames = |p: &std::path::Path| {
-                std::fs::metadata(wal_sibling(p))
+            let (wal, shm) = (wal_sibling(real), shm_sibling(real));
+            let stamp = |p: &std::path::Path| {
+                std::fs::metadata(p)
                     .ok()
-                    .is_none_or(|m| m.len() == 0)
+                    .map(|m| (m.len(), m.modified().ok()))
             };
-            if is_wal_format(real) && no_frames(real) {
-                let wal_before = wal_sibling(real).exists();
-                let conn = Connection::open_with_flags(
-                    immutable_uri(real),
-                    OpenFlags::SQLITE_OPEN_READ_ONLY
-                        | OpenFlags::SQLITE_OPEN_URI
-                        | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-                )
-                .map_err(st)?;
-                if let Err(e) = check_current(&conn) {
-                    if wal_sibling(real).exists() == wal_before && no_frames(real) {
-                        return Err(e);
-                    }
+            let state = || (stamp(real), stamp(wal.as_path()), shm.exists());
+            let before = state();
+            let db_len = before.0.map_or(0, |(len, _)| len);
+            let wal_len = before.1.map_or(0, |(len, _)| len);
+            let checked = if !is_wal_format(real) {
+                None
+            } else if wal_len == 0 {
+                let immutable = || -> Result<()> {
+                    let conn = Connection::open_with_flags(
+                        immutable_uri(real),
+                        OpenFlags::SQLITE_OPEN_READ_ONLY
+                            | OpenFlags::SQLITE_OPEN_URI
+                            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                    )
+                    .map_err(st)?;
+                    check_current(&conn)
+                };
+                Some(immutable())
+            } else if !before.2 && db_len.saturating_add(wal_len) <= PRIVATE_CHECK_MAX_BYTES {
+                check_private_copy(real)
+            } else {
+                None
+            };
+            if let Some(Err(e)) = checked {
+                if state() == before {
+                    return Err(e);
                 }
             }
         }
@@ -7736,6 +7902,95 @@ mod tests {
             .unwrap();
         assert_eq!(v, 7, "the WAL commit is read");
         drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// wicked-estate#507 (merge check): the sweep of stale private check directories removes only
+    /// a directory holding estate's marker, and only the files a check writes; an unrelated
+    /// directory with the same prefix, and a stray file in a marked one, are left alone.
+    #[cfg(unix)]
+    #[test]
+    fn the_private_check_sweep_removes_only_marked_directories_and_their_known_files() {
+        let tmp = unique_test_dir("rocheck-sweep");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let age = |d: &std::path::Path| {
+            std::fs::File::open(d)
+                .unwrap()
+                .set_modified(hour_ago)
+                .unwrap();
+        };
+        let unrelated = tmp.join(format!("{PRIVATE_CHECK_PREFIX}unrelated"));
+        std::fs::create_dir_all(&unrelated).unwrap();
+        std::fs::write(unrelated.join("keep.txt"), b"keep").unwrap();
+        age(&unrelated);
+        let marked = tmp.join(format!("{PRIVATE_CHECK_PREFIX}1-1"));
+        std::fs::create_dir_all(&marked).unwrap();
+        std::fs::write(marked.join(PRIVATE_CHECK_MARKER), b"").unwrap();
+        std::fs::write(marked.join("g.db"), b"copy").unwrap();
+        age(&marked);
+        let stray = tmp.join(format!("{PRIVATE_CHECK_PREFIX}2-2"));
+        std::fs::create_dir_all(&stray).unwrap();
+        std::fs::write(stray.join(PRIVATE_CHECK_MARKER), b"").unwrap();
+        std::fs::write(stray.join("g.db"), b"copy").unwrap();
+        std::fs::write(stray.join("other.txt"), b"not ours").unwrap();
+        age(&stray);
+        sweep_private_checks(&tmp);
+        assert_eq!(std::fs::read(unrelated.join("keep.txt")).unwrap(), b"keep");
+        assert!(!marked.exists(), "a stale marked directory is removed");
+        assert!(
+            stray.join("other.txt").exists(),
+            "a file the check did not write is kept"
+        );
+        assert!(!stray.join("g.db").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// wicked-estate#506: an older graph whose last commit is still in its `-wal` (frames) and
+    /// that has no `-shm` is refused, and the refusal leaves the directory exactly as it was: no
+    /// `-shm` created, the database and its `-wal` byte for byte the same.
+    #[cfg(unix)]
+    #[test]
+    fn an_older_graph_with_a_framed_wal_and_no_shm_is_refused_leaving_the_directory_unchanged() {
+        let dir = unique_test_dir("ro-framed-wal-no-shm");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.db");
+        drop(SqliteStore::open(&src).unwrap());
+        let holder = Connection::open(&src).unwrap();
+        holder
+            .execute_batch("PRAGMA wal_autocheckpoint=0; DROP TABLE search_misses;")
+            .unwrap();
+        let old = dir.join("old");
+        std::fs::create_dir_all(&old).unwrap();
+        let db = old.join("g.db");
+        std::fs::copy(&src, &db).unwrap();
+        std::fs::copy(dir.join("src.db-wal"), old.join("g.db-wal")).unwrap();
+        drop(holder);
+        let listing = |d: &std::path::Path| {
+            let mut v: Vec<(String, Vec<u8>)> = std::fs::read_dir(d)
+                .unwrap()
+                .map(|e| {
+                    let e = e.unwrap();
+                    (
+                        e.file_name().to_string_lossy().into_owned(),
+                        std::fs::read(e.path()).unwrap(),
+                    )
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        let before = listing(&old);
+        assert_eq!(before.len(), 2, "the database and its -wal only");
+        assert!(std::fs::metadata(old.join("g.db-wal")).unwrap().len() > 0);
+        let err = SqliteStore::open_readonly_current(&db)
+            .err()
+            .expect("an older graph is refused");
+        assert!(err.to_string().contains("search_misses"), "{err}");
+        assert!(!old.join("g.db-shm").exists(), "refusing it created a -shm");
+        assert!(listing(&old) == before, "refusing it changed the directory");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
