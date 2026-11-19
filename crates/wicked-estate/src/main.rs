@@ -11,7 +11,7 @@
 //!   wicked-estate import-telemetry <file.json> [--db ...]
 //!   wicked-estate drift                  [--db ...]
 //!   wicked-estate query <name>           [--db ...]
-//!   wicked-estate blast-radius <name>    [--depth N] [--cursor C] [--json] [--db ...]
+//!   wicked-estate blast-radius <name> | --id <symbol-id>    [--depth N] [--cursor C] [--json] [--db ...]
 //!   wicked-estate supports owners        [--json] [--db ...]
 //!   wicked-estate supports edge --source <ID> --target <ID> --kind <KIND> [--json] [--db ...]
 //!   wicked-estate supports retract --producer <P> --snapshot <S> [--json] [--db ...]
@@ -1331,7 +1331,9 @@ fn main() -> Result<()> {
             // cyclic graph (the recursive walk grows with depth), so it is refused, not clamped.
             let depth: u32 = args.u32("depth").unwrap_or(12);
             let max_depth = wicked_estate_retrieve::BLAST_DEPTH_CEILING;
-            let name = args.required(0);
+            // `--id <symbol-id>` (#451): ONE symbol, not the union of every symbol with a name.
+            let by_id = args.str("id");
+            let name = by_id.unwrap_or_else(|| args.required(0));
             // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
             // open that would otherwise create an empty one.
             require_existing_graph(&db, "blast-radius")?;
@@ -1345,15 +1347,30 @@ fn main() -> Result<()> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos() as u64;
-            let mut br =
-                wicked_estate::blast_radius_by_name(&*store, name, depth).map_err(to_any)?;
-            let unresolved = store.unresolved_refs_for_name(name).map_err(to_any)?.len();
+            let target = match by_id {
+                Some(id) => wicked_estate::symbol_by_id(&*store, id).map_err(to_any)?,
+                None => None,
+            };
+            let mut br = match by_id {
+                Some(id) => wicked_estate::blast_radius_by_id(&*store, id, depth),
+                None => wicked_estate::blast_radius_by_name(&*store, name, depth),
+            }
+            .map_err(to_any)?;
+            // Unresolved refs are recorded by callee NAME, so an id answer reports its symbol's
+            // name's count: a floor on its own, never fewer than the truth.
+            let unresolved = store
+                .unresolved_refs_for_name(target.as_ref().map_or(name, |n| n.name.as_str()))
+                .map_err(to_any)?
+                .len();
             // (#358) A name that resolves to no symbol is a MISS, not a leaf: "no dependents"
             // for a symbol the graph does not hold reads as "safe to change".
-            let miss = if wicked_estate::search(&*store, name)
-                .map_err(to_any)?
-                .is_empty()
-            {
+            let found_any = match by_id {
+                Some(_) => target.is_some(),
+                None => !wicked_estate::search(&*store, name)
+                    .map_err(to_any)?
+                    .is_empty(),
+            };
+            let miss = if !found_any {
                 Some(name_miss(&mut *store, name))
             } else {
                 None
@@ -4170,7 +4187,7 @@ fn main() -> Result<()> {
                 "    --json emits `resolve --json`'s rows [{{symbol_id,name,kind,file,line}}] (#199)"
             );
             println!(
-                "  wicked-estate blast-radius <name>   [--depth N] [--cursor C] [--json] [--db ...]"
+                "  wicked-estate blast-radius <name|--id ID> [--depth N] [--cursor C] [--json] [--db ...]"
             );
             println!("  wicked-estate path <from> <to>      [--max-depth N] [--json] [--db ...]");
             println!(

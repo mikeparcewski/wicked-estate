@@ -270,11 +270,13 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "blast-radius",
-        spec: owns(
+        spec: ruled(
             &[req("name")],
             &[
                 DB,
                 JSON,
+                // #451: one exact SymbolId instead of the name's union.
+                str_flag("id"),
                 Flag::new(
                     "depth",
                     Ty::UInt {
@@ -286,6 +288,10 @@ pub const COMMANDS: &[Command] = &[
                 // #279: a previous page's `next_cursor`, for the next dependents.
                 Flag::new("cursor", Ty::Str).inline(),
             ],
+            &[Rule::OperandOr {
+                flags: &["id"],
+                exclusive: true,
+            }],
         ),
     },
     Command {

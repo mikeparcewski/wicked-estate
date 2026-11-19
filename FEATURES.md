@@ -84,7 +84,7 @@ grammar-less mainframe extractors**.
 - Emits a `File` node per source file + `Contains` edges to its definitions.
 - **Quote-stripping at the shared seam** — string-literal call targets (e.g. COBOL `CALL 'SUB'`) are
   de-quoted so they resolve cross-file/cross-language.
-- Skips minified / oversized files.
+- Skips minified files, classified by line shape (a very long line or a high average line length), never by size alone; `index` names each skipped file.
 - Wired grammar families: official `tree-sitter-*` crates + the **arborium** ABI-15 grammar family
   (uniform `language()` API), on the tree-sitter 0.25 runtime (ABI 13–15).
 - Notable recently-wired: `swift` (ABI-15, un-deferred after the 0.25 bump), `solidity`, `d`,

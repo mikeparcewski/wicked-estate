@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`blast-radius --id <symbol-id>` (wicked-estate#451).** Returns the same JSON as the name form for exactly one
+  symbol, instead of the union of every symbol sharing a name. The name form is unchanged.
+
 ### Fixed
 
 - **A graph lacking only the FTS rowid migration marker is refused on the private copy too (wicked-estate#508).**
@@ -54,11 +59,35 @@
     case is a spurious refusal, never a wrong read: no first check serves answers, and a refused graph is migrated on
     its owner's next write.
 
+- **A large hand-written source file is no longer skipped as minified, and skipped files are named
+  (wicked-estate#478).** `is_minified_or_huge` flagged any file over 1 MiB, so a 1.7 MiB hand-written Rust file
+  never reached the graph and blast radius silently missed its callers. Size alone no longer classifies a file;
+  only the line-shape signals do (a line over 50,000 characters, or an average over 2,000 characters per line).
+  `index` now prints `SKIPPED_MINIFIED: <path>` for each skipped file after the count line.
+
+## [0.35.7] — 2026-11-19
+
+Patch: BlastRadius follows JSX (a component rendered only as `<Widget/>` has dependents, #481); a local binding (parameter,
+destructured prop, local const/let/var, catch or loop binding) never binds an unrelated global of the same name (#486, #492,
+#497, #498, #501); the TypeScript language-server tier speaks to the TypeScript the workspace has, TS 7 included, and the
+error names every place it looked (#484); a `--readonly` MCP server opens its graph read-only and refuses, with a reason, a
+graph it cannot serve (wicked-crew#1497, #487), with read-only open limits and `wicked-estate stats --db <graph> --journal
+delete` to prepare a graph for read-only seats (#491); and refusing an older graph with an empty `-wal` and no `-shm` creates
+no `-shm` (#500).
+**Upgrade note (0.35.6 -> 0.35.7).** Install 0.35.7 on every path the daemon resolves, then restart. The first `index` of each
+repo re-reads every TSX, JS and JSX file because the binary version changed and JSX elements now add edges. As in 0.35.3 to
+0.35.6, that forced re-extraction clears the node semantic fields set with `set_semantics` (annotations are kept); back up the
+store first if you rely on them (wicked-estate#438). No store migration. Known limits: `<Ns.Widget/>`, components passed as
+values and aliased imports (#486, alias half) are not covered; a WAL graph with frames and no `-shm` can still create a `-shm`
+while being refused (#506).
+
+### Fixed
+
 - **A `--readonly` server refusing an older WAL graph with an empty `-wal` and no `-shm` creates no `-shm`
   (wicked-estate#500).** An empty `-wal` holds no frames, so the graph is checked through the immutable connection,
   as one with no `-wal` already was, and refusing it leaves nothing behind. A `-wal` that holds frames still goes to
-  SQLite's own read-only open, because only SQLite can read it. A current graph in that layout is served (refusing an
-  older one there creates no `-shm` when its private copy can be checked: see the #506 entry). The read-only open after the check now uses the same resolved path as the
+  SQLite's own read-only open, because only SQLite can read it. A current graph in that layout is served; refusing an
+  older one there can still create a `-shm`. The read-only open after the check now uses the same resolved path as the
   check. The doc on `leave_in_delete_journal` now says that a read-only reader can read a WAL graph while its `-wal`
   and `-shm` exist, and that SQLite normally removes both on the last clean close.
 

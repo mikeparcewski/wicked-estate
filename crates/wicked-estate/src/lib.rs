@@ -2010,10 +2010,9 @@ fn index_path_inner(
     // are not removed until the single write batch below, so a parse that produces nothing (or an
     // interrupted run) never commits a removal it cannot pair with a re-write.
     // Each element carries the rel path + extraction + source text (for content storage).
-    // Minified/huge files are detected via is_minified_or_huge and skipped; we count them
-    // so index_path can report how many files were silently passed over.
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let skipped_minified = AtomicUsize::new(0);
+    // Minified files are detected via is_minified_or_huge and skipped; each skipped path is kept
+    // so index_path can name every file it passed over (#478).
+    let skipped_minified: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
     let extractions: Vec<(String, wicked_estate_core::Extraction, String)> = changed
         .par_iter()
@@ -2084,7 +2083,10 @@ fn index_path_inner(
             // trips, the document keeps its content and File node, without heading nodes.
             let minified = is_minified_or_huge(&text);
             if minified && extra_rules.is_none() && converted.is_none() {
-                skipped_minified.fetch_add(1, Ordering::Relaxed);
+                skipped_minified
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(fw.rel.clone());
                 return None;
             }
 
@@ -2163,9 +2165,15 @@ fn index_path_inner(
         .collect();
 
     flush_doc_skips();
-    let skipped_min_count = skipped_minified.load(Ordering::Relaxed);
-    if skipped_min_count > 0 {
-        eprintln!("SKIPPED_MINIFIED: {skipped_min_count} file(s)");
+    let mut skipped_min = skipped_minified
+        .into_inner()
+        .unwrap_or_else(|e| e.into_inner());
+    skipped_min.sort();
+    if !skipped_min.is_empty() {
+        eprintln!("SKIPPED_MINIFIED: {} file(s)", skipped_min.len());
+        for path in &skipped_min {
+            eprintln!("SKIPPED_MINIFIED: {path}");
+        }
     }
 
     // ── Emit extraction counters (best-effort) ───────────────────────────────────────────────
@@ -2844,13 +2852,31 @@ impl BlastRadius {
 /// Returns a [`BlastRadius`], not a bare `Vec<Node>`: the store's incompleteness flags are
 /// ORed across every matching symbol's traversal and handed to the caller (wicked-estate#190).
 pub fn blast_radius_by_name(store: &dyn GraphRead, name: &str, depth: u32) -> Result<BlastRadius> {
+    blast_radius_from(store, search(store, name)?, depth)
+}
+
+/// The structural symbol with exactly this [`SymbolId`], or `None` (unknown id, or a synthetic
+/// value slot — the same exclusion [`search`] applies to names; wicked-estate#451).
+pub fn symbol_by_id(store: &dyn GraphRead, id: &str) -> Result<Option<Node>> {
+    Ok(store
+        .get_node(&SymbolId(id.to_string()))?
+        .filter(is_structural_symbol))
+}
+
+/// [`blast_radius_by_name`] for ONE symbol, addressed by exact [`SymbolId`]: same shape, but a
+/// name shared by several symbols no longer unions their dependents (wicked-estate#451).
+pub fn blast_radius_by_id(store: &dyn GraphRead, id: &str, depth: u32) -> Result<BlastRadius> {
+    blast_radius_from(store, symbol_by_id(store, id)?.into_iter().collect(), depth)
+}
+
+fn blast_radius_from(store: &dyn GraphRead, starts: Vec<Node>, depth: u32) -> Result<BlastRadius> {
     let mut out = BlastRadius::default();
     let mut crossing_set = wicked_estate_core::crossing::CrossingSet::default();
     let mut seen = std::collections::HashSet::new();
     // Eligible edges, deduped across walks: two same-named symbols can share a caller.
     let mut evidence: HashMap<(SymbolId, SymbolId, wicked_estate_core::EdgeKind), f32> =
         HashMap::new();
-    for sym in search(store, name)? {
+    for sym in starts {
         let spec = TraversalSpec::blast_radius(depth);
         let mut sub = store.traverse(&sym.symbol, &spec)?;
         // Judge the horizon on the projected rows, not the raw walk: past the horizon an
