@@ -9,6 +9,52 @@
 
 ### Fixed
 
+- **Refusing an older graph whose `-wal` holds frames and that has no `-shm` leaves the directory unchanged when
+  its private copy can be checked (wicked-estate#506).** The read-only currency check used to hand that layout to SQLite's ordinary read-only open,
+  which created a `-shm` before refusing.
+  - **The change:** a private copy of the database and its `-wal` is now checked in a fresh `0700` temp directory,
+    owned by the reader, so SQLite's sidecars are created there. The originals are only read, as plain files. The
+    directory gets a marker file first. It is removed on every return, and one left by a killed process is removed
+    by a later check once it is ten minutes old. Only a directory holding the marker is removed, and only of the
+    files the check writes; any other directory or file is left alone.
+  - **What counts as a refusal:** only evidence that the schema predates the build, meaning a table, index or column
+    it lacks. A copy that cannot be made or opened is not a refusal, whether for lack of temp space, a temp
+    directory that is the graph's own, or a size over 1 GiB as sampled. In those cases the ordinary open decides.
+  - **Unchanged:** an absent or empty `-wal` still gets the immutable check.
+  - **Stamps:** a refusal by either first check stands only when the database, its `-wal` and its `-shm` look the
+    same after the check as before it. "The same" means the sizes, the modification times, and whether the `-shm`
+    is there.
+
+  **Known limits.**
+  - When the private check cannot decide, the ordinary open can still create a `-shm` before refusing (tracked in
+    wicked-estate#508). That covers temp storage that is unavailable, and a copy whose check fails without a
+    missing object or column, such as one lacking only the FTS rowid migration marker.
+  - Unix only. Elsewhere, and on every ordinary-open path (a framed `-wal` beside an existing `-shm`, a copy that
+    could not be made or checked, a first check the stamps do not confirm), SQLite may create the sidecars, or
+    reset an existing `-shm` no one holds, before refusing an older graph.
+  - A reader of a served graph updates its read-mark in the `-shm`. That is ordinary SQLite reader coordination.
+  - A writer that changes the graph while leaving every stamp as it was is not seen by the first check. The worst
+    case is a spurious refusal, never a wrong read: no first check serves answers, and a refused graph is migrated on
+    its owner's next write.
+
+## [0.35.7] — 2026-11-19
+
+Patch: BlastRadius follows JSX (a component rendered only as `<Widget/>` has dependents, #481); a local binding (parameter,
+destructured prop, local const/let/var, catch or loop binding) never binds an unrelated global of the same name (#486, #492,
+#497, #498, #501); the TypeScript language-server tier speaks to the TypeScript the workspace has, TS 7 included, and the
+error names every place it looked (#484); a `--readonly` MCP server opens its graph read-only and refuses, with a reason, a
+graph it cannot serve (wicked-crew#1497, #487), with read-only open limits and `wicked-estate stats --db <graph> --journal
+delete` to prepare a graph for read-only seats (#491); and refusing an older graph with an empty `-wal` and no `-shm` creates
+no `-shm` (#500).
+**Upgrade note (0.35.6 -> 0.35.7).** Install 0.35.7 on every path the daemon resolves, then restart. The first `index` of each
+repo re-reads every TSX, JS and JSX file because the binary version changed and JSX elements now add edges. As in 0.35.3 to
+0.35.6, that forced re-extraction clears the node semantic fields set with `set_semantics` (annotations are kept); back up the
+store first if you rely on them (wicked-estate#438). No store migration. Known limits: `<Ns.Widget/>`, components passed as
+values and aliased imports (#486, alias half) are not covered; a WAL graph with frames and no `-shm` can still create a `-shm`
+while being refused (#506).
+
+### Fixed
+
 - **A `--readonly` server refusing an older WAL graph with an empty `-wal` and no `-shm` creates no `-shm`
   (wicked-estate#500).** An empty `-wal` holds no frames, so the graph is checked through the immutable connection,
   as one with no `-wal` already was, and refusing it leaves nothing behind. A `-wal` that holds frames still goes to
