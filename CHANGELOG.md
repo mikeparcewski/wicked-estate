@@ -9,6 +9,26 @@
 
 ### Fixed
 
+- **A graph lacking only the FTS rowid migration marker is refused on the private copy too (wicked-estate#508).**
+  The copy's check refused only on a missing table, index or column, so a graph whose sole difference was the unset
+  FTS marker fell through to the ordinary open, which created a `-shm` before refusing. A failed check that ends on
+  SQLite's own "attempt to write a readonly database" is now evidence too: the check only reads unless a writer's
+  migration is pending, and the copy is a plain private file, so that error means a migration is pending. Any other
+  failure (a lock, an I/O error, a corrupt copy) is still undecided.
+
+  **Known limit, accepted.** When no private copy can be made or checked (no temp space, a temp directory that is the
+  graph's own, a copy SQLite cannot open, or a graph over 1 GiB), the ordinary read-only open still runs and can
+  create a `-shm` before refusing an older graph. The ways to read a framed `-wal` without creating a `-shm` on the
+  original are not safe for a reader that must not disturb the graph: an `immutable` open ignores the `-wal` (on a
+  graph whose tables were all created in the `-wal` it sees no table at all, so it would refuse a current graph); a
+  plain read-only open creates the `-shm`, and `nolock=1` fails with "unable to open database file" (both observed
+  on SQLite 3.54.1); and the no-lock VFS (`vfs=unix-none`, with `locking_mode=EXCLUSIVE` so the wal-index stays in
+  memory) can read a framed `-wal` without creating a `-shm`, even on read-only files, but by design it takes no
+  locks (SQLite's VFS documentation, https://www.sqlite.org/vfs.html), so it can read a torn state under a live
+  writer: it bypasses that writer's lock (the #506 design review found that race, W16, and dropped the approach).
+  Refusing instead would turn away current graphs whenever temp space is
+  short or the graph is large, a worse outcome than a leftover `-shm`, which is disposable and which SQLite recreates.
+
 - **Refusing an older graph whose `-wal` holds frames and that has no `-shm` leaves the directory unchanged when
   its private copy can be checked (wicked-estate#506).** The read-only currency check used to hand that layout to SQLite's ordinary read-only open,
   which created a `-shm` before refusing.
@@ -18,7 +38,8 @@
     by a later check once it is ten minutes old. Only a directory holding the marker is removed, and only of the
     files the check writes; any other directory or file is left alone.
   - **What counts as a refusal:** only evidence that the schema predates the build, meaning a table, index or column
-    it lacks. A copy that cannot be made or opened is not a refusal, whether for lack of temp space, a temp
+    it lacks, or a migration that wants to write (the check ends on SQLite's "attempt to write a readonly database",
+    wicked-estate#508). A copy that cannot be made or opened is not a refusal, whether for lack of temp space, a temp
     directory that is the graph's own, or a size over 1 GiB as sampled. In those cases the ordinary open decides.
   - **Unchanged:** an absent or empty `-wal` still gets the immutable check.
   - **Stamps:** a refusal by either first check stands only when the database, its `-wal` and its `-shm` look the
@@ -26,9 +47,10 @@
     is there.
 
   **Known limits.**
-  - When the private check cannot decide, the ordinary open can still create a `-shm` before refusing (tracked in
-    wicked-estate#508). That covers temp storage that is unavailable, and a copy whose check fails without a
-    missing object or column, such as one lacking only the FTS rowid migration marker.
+  - When the private check cannot be made, the ordinary open can still create a `-shm` before refusing: temp
+    storage that is unavailable, a temp directory that is the graph's own, a copy SQLite cannot open, or a graph
+    over 1 GiB (accepted; see the #508 entry for why). A copy whose only difference is the FTS rowid migration
+    marker is now refused on the copy (wicked-estate#508).
   - Unix only. Elsewhere, and on every ordinary-open path (a framed `-wal` beside an existing `-shm`, a copy that
     could not be made or checked, a first check the stamps do not confirm), SQLite may create the sidecars, or
     reset an existing `-shm` no one holds, before refusing an older graph.
