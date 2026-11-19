@@ -37,6 +37,12 @@
     case is a spurious refusal, never a wrong read: no first check serves answers, and a refused graph is migrated on
     its owner's next write.
 
+- **A large hand-written source file is no longer skipped as minified, and skipped files are named
+  (wicked-estate#478).** `is_minified_or_huge` flagged any file over 1 MiB, so a 1.7 MiB hand-written Rust file
+  never reached the graph and blast radius silently missed its callers. Size alone no longer classifies a file;
+  only the line-shape signals do (a line over 50,000 characters, or an average over 2,000 characters per line).
+  `index` now prints `SKIPPED_MINIFIED: <path>` for each skipped file after the count line.
+
 ## [0.35.7] — 2026-11-19
 
 Patch: BlastRadius follows JSX (a component rendered only as `<Widget/>` has dependents, #481); a local binding (parameter,
@@ -55,11 +61,6 @@ while being refused (#506).
 
 ### Fixed
 
-- **A large hand-written source file is no longer skipped as minified, and skipped files are named
-  (wicked-estate#478).** `is_minified_or_huge` flagged any file over 1 MiB, so a 1.7 MiB hand-written Rust file
-  never reached the graph and blast radius silently missed its callers. Size alone no longer classifies a file;
-  only the line-shape signals do (a line over 50,000 characters, or an average over 2,000 characters per line).
-  `index` now prints `SKIPPED_MINIFIED: <path>` for each skipped file after the count line.
 - **A `--readonly` server refusing an older WAL graph with an empty `-wal` and no `-shm` creates no `-shm`
   (wicked-estate#500).** An empty `-wal` holds no frames, so the graph is checked through the immutable connection,
   as one with no `-wal` already was, and refusing it leaves nothing behind. A `-wal` that holds frames still goes to
