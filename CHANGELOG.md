@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.35.7] — 2026-11-19
+
+Patch: BlastRadius follows JSX (a component rendered only as `<Widget/>` has dependents, #481); a local binding (parameter,
+destructured prop, local const/let/var, catch or loop binding) never binds an unrelated global of the same name (#486, #492,
+#497, #498, #501); the TypeScript language-server tier speaks to the TypeScript the workspace has, TS 7 included, and the
+error names every place it looked (#484); a `--readonly` MCP server opens its graph read-only and refuses, with a reason, a
+graph it cannot serve (wicked-crew#1497, #487), with read-only open limits and `wicked-estate stats --db <graph> --journal
+delete` to prepare a graph for read-only seats (#491); and refusing an older graph with an empty `-wal` and no `-shm` creates
+no `-shm` (#500).
+**Upgrade note (0.35.6 -> 0.35.7).** Install 0.35.7 on every path the daemon resolves, then restart. The first `index` of each
+repo re-reads every TSX, JS and JSX file because the binary version changed and JSX elements now add edges. As in 0.35.3 to
+0.35.6, that forced re-extraction clears the node semantic fields set with `set_semantics` (annotations are kept); back up the
+store first if you rely on them (wicked-estate#438). No store migration. Known limits: `<Ns.Widget/>`, components passed as
+values and aliased imports (#486, alias half) are not covered; a WAL graph with frames and no `-shm` can still create a `-shm`
+while being refused (#506).
+
 ### Fixed
 
 - **Refusing an older graph whose `-wal` holds frames and that has no `-shm` leaves the directory unchanged when
