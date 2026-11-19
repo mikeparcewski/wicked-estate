@@ -2010,10 +2010,9 @@ fn index_path_inner(
     // are not removed until the single write batch below, so a parse that produces nothing (or an
     // interrupted run) never commits a removal it cannot pair with a re-write.
     // Each element carries the rel path + extraction + source text (for content storage).
-    // Minified/huge files are detected via is_minified_or_huge and skipped; we count them
-    // so index_path can report how many files were silently passed over.
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let skipped_minified = AtomicUsize::new(0);
+    // Minified files are detected via is_minified_or_huge and skipped; each skipped path is kept
+    // so index_path can name every file it passed over (#478).
+    let skipped_minified: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
     let extractions: Vec<(String, wicked_estate_core::Extraction, String)> = changed
         .par_iter()
@@ -2084,7 +2083,10 @@ fn index_path_inner(
             // trips, the document keeps its content and File node, without heading nodes.
             let minified = is_minified_or_huge(&text);
             if minified && extra_rules.is_none() && converted.is_none() {
-                skipped_minified.fetch_add(1, Ordering::Relaxed);
+                skipped_minified
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(fw.rel.clone());
                 return None;
             }
 
@@ -2163,9 +2165,15 @@ fn index_path_inner(
         .collect();
 
     flush_doc_skips();
-    let skipped_min_count = skipped_minified.load(Ordering::Relaxed);
-    if skipped_min_count > 0 {
-        eprintln!("SKIPPED_MINIFIED: {skipped_min_count} file(s)");
+    let mut skipped_min = skipped_minified
+        .into_inner()
+        .unwrap_or_else(|e| e.into_inner());
+    skipped_min.sort();
+    if !skipped_min.is_empty() {
+        eprintln!("SKIPPED_MINIFIED: {} file(s)", skipped_min.len());
+        for path in &skipped_min {
+            eprintln!("SKIPPED_MINIFIED: {path}");
+        }
     }
 
     // ── Emit extraction counters (best-effort) ───────────────────────────────────────────────
