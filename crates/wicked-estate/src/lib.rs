@@ -2852,13 +2852,31 @@ impl BlastRadius {
 /// Returns a [`BlastRadius`], not a bare `Vec<Node>`: the store's incompleteness flags are
 /// ORed across every matching symbol's traversal and handed to the caller (wicked-estate#190).
 pub fn blast_radius_by_name(store: &dyn GraphRead, name: &str, depth: u32) -> Result<BlastRadius> {
+    blast_radius_from(store, search(store, name)?, depth)
+}
+
+/// The structural symbol with exactly this [`SymbolId`], or `None` (unknown id, or a synthetic
+/// value slot — the same exclusion [`search`] applies to names; wicked-estate#451).
+pub fn symbol_by_id(store: &dyn GraphRead, id: &str) -> Result<Option<Node>> {
+    Ok(store
+        .get_node(&SymbolId(id.to_string()))?
+        .filter(is_structural_symbol))
+}
+
+/// [`blast_radius_by_name`] for ONE symbol, addressed by exact [`SymbolId`]: same shape, but a
+/// name shared by several symbols no longer unions their dependents (wicked-estate#451).
+pub fn blast_radius_by_id(store: &dyn GraphRead, id: &str, depth: u32) -> Result<BlastRadius> {
+    blast_radius_from(store, symbol_by_id(store, id)?.into_iter().collect(), depth)
+}
+
+fn blast_radius_from(store: &dyn GraphRead, starts: Vec<Node>, depth: u32) -> Result<BlastRadius> {
     let mut out = BlastRadius::default();
     let mut crossing_set = wicked_estate_core::crossing::CrossingSet::default();
     let mut seen = std::collections::HashSet::new();
     // Eligible edges, deduped across walks: two same-named symbols can share a caller.
     let mut evidence: HashMap<(SymbolId, SymbolId, wicked_estate_core::EdgeKind), f32> =
         HashMap::new();
-    for sym in search(store, name)? {
+    for sym in starts {
         let spec = TraversalSpec::blast_radius(depth);
         let mut sub = store.traverse(&sym.symbol, &spec)?;
         // Judge the horizon on the projected rows, not the raw walk: past the horizon an
