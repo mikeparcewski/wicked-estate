@@ -64,7 +64,9 @@ use notify::RecursiveMode;
 use notify_debouncer_full::new_debouncer;
 use std::path::Path;
 use std::time::Duration;
-use wicked_estate_store::{GraphStoreMutExt, SqliteStore, open_store, open_store_ext};
+use wicked_estate_store::{
+    GraphStoreMutExt, SqliteStore, open_store, open_store_ext, open_store_read,
+};
 
 fn to_any(e: wicked_estate_core::Error) -> anyhow::Error {
     anyhow::anyhow!(e.to_string())
@@ -1271,7 +1273,7 @@ fn main() -> Result<()> {
             // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
             // open that would otherwise create an empty one.
             require_existing_graph(&db, "query")?;
-            let mut store = open_store_ext(&db).map_err(to_any)?;
+            let mut store = open_store_read(&db).map_err(to_any)?;
             maybe_print_staleness(store.as_ref(), &db);
             maybe_warn_version_mismatch(store.as_ref(), &db);
             let t_cmd_start = std::time::SystemTime::now()
@@ -1337,7 +1339,7 @@ fn main() -> Result<()> {
             // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
             // open that would otherwise create an empty one.
             require_existing_graph(&db, "blast-radius")?;
-            let mut store = open_store_ext(&db).map_err(to_any)?;
+            let mut store = open_store_read(&db).map_err(to_any)?;
             // Machine output must be exactly one JSON document — notices would corrupt it.
             if !json_out {
                 maybe_print_staleness(store.as_ref(), &db);
@@ -1606,7 +1608,7 @@ fn main() -> Result<()> {
             // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
             // open that would otherwise create an empty one.
             require_existing_graph(&db, "path")?;
-            let mut store = open_store_ext(&db).map_err(to_any)?;
+            let mut store = open_store_read(&db).map_err(to_any)?;
             // Machine output must be exactly one JSON document — notices would corrupt it.
             if !json_out {
                 maybe_print_staleness(store.as_ref(), &db);
@@ -1752,7 +1754,12 @@ fn main() -> Result<()> {
             // (#246) Fail closed on a missing graph — after the arm's own usage checks, before the
             // open that would otherwise create an empty one.
             require_existing_graph(&db, "stats")?;
-            let store = open_store_ext(&db).map_err(to_any)?;
+            let store = if journal.is_some() {
+                open_store_ext(&db)
+            } else {
+                open_store_read(&db)
+            }
+            .map_err(to_any)?;
             // Machine output is exactly one JSON document (#198): the freshness notice lives
             // INSIDE it (`staleness`), never as a line beside it.
             if !json_out {

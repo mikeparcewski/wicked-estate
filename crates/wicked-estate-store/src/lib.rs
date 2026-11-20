@@ -1831,6 +1831,28 @@ pub fn open_store_ext(spec: &str) -> wicked_estate_core::Result<Box<dyn GraphSto
     }
 }
 
+/// Open a store for reading, falling back to a current read-only SQLite graph if needed.
+/// In-memory stores and other backends use [`open_store_ext`] unchanged.
+pub fn open_store_read(spec: &str) -> wicked_estate_core::Result<Box<dyn GraphStoreMutExt>> {
+    match StoreBackend::parse(spec) {
+        StoreBackend::Sqlite { path } if path != ":memory:" => {
+            let store = match SqliteStore::open(&path) {
+                Ok(store) => store,
+                Err(write_error) => {
+                    SqliteStore::open_readonly_current(&path).map_err(|read_error| {
+                        Error::Storage(format!(
+                            "could not open {path} read-write: {write_error}; \
+                             read-only: {read_error}"
+                        ))
+                    })?
+                }
+            };
+            Ok(Box::new(store))
+        }
+        _ => open_store_ext(spec),
+    }
+}
+
 #[cfg(feature = "postgres")]
 impl GraphStoreMutExt for PostgresStore {
     fn version_bump(&mut self) {
