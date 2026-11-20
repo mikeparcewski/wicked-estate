@@ -389,7 +389,7 @@ fn shared_ids_fall_back_to_the_boundary_when_the_definition_is_removed() {
     let jcl = fs::read_to_string(root.join("jcl/PAYJOB.jcl")).unwrap();
     fs::remove_file(root.join("bms/PAYSET.bms")).unwrap();
     fs::remove_file(root.join("jcl/PAYJOB.jcl")).unwrap();
-    assert_nothing_pruned(&index(&root, &db));
+    index(&root, &db);
 
     let snapshot = |db: &Path| {
         let store = SqliteStore::open(db).unwrap();
@@ -416,10 +416,6 @@ fn shared_ids_fall_back_to_the_boundary_when_the_definition_is_removed() {
     let dangling: Vec<_> = edges
         .iter()
         .filter(|(a, _, b)| a.starts_with("<missing") || b.starts_with("<missing"))
-        // Pre-existing (0.32.1 too): the estate RACF `protects` join edge carries no file, and a
-        // deletion-only run skips the dangling prune, so it outlives the deleted dataset until
-        // the next changed run. Tracked in the mainframe residuals issue.
-        .filter(|(_, k, _)| !k.contains("protects"))
         .collect();
     assert!(
         dangling.is_empty(),

@@ -2865,7 +2865,7 @@ fn js_local_binding<'t>(
 /// - JS/TS star:    `import * as NS from './mod'`          → {NS: mod}
 /// - Python from:   `from pkg import A, B`                → {A: pkg, B: pkg}
 ///   (matched when stmt_text starts with "from ")
-/// - Any other:     nothing (returns empty; caller accumulates import_sources separately)
+/// - Any other:     nothing (returns empty)
 ///
 /// `stmt_text`   — raw text of the whole import statement node.
 /// `module_src`  — already stripped (un-quoted) module/package name.
@@ -4040,8 +4040,6 @@ impl Extractor for TreeSitterExtractor {
         // Built from @import/@import.source pairs during the match loop.
         let mut file_import_map: HashMap<String, String> = HashMap::new();
         let mut file_import_aliases: HashMap<String, String> = HashMap::new();
-        // Module sources that could not be parsed into name→source pairs (best-effort fallback).
-        let mut file_import_sources: Vec<String> = Vec::new();
         // Call sites whose callee is a local binding (param, destructured prop, local declaration),
         // keyed by the ref's site span -> the declaring nodes' start bytes (wicked-estate#486).
         // JS/TS/TSX only.
@@ -4413,20 +4411,13 @@ impl Extractor for TreeSitterExtractor {
                     } else {
                         (HashMap::new(), HashMap::new())
                     };
-                    if pairs.is_empty() {
-                        // No name associations parsed — record the module source for fallback.
-                        if !file_import_sources.contains(&canonical) {
-                            file_import_sources.push(canonical.clone());
-                        }
-                    } else {
-                        // Keep aliases aligned with the current module association when a later
-                        // import reuses the local name without renaming it (legal in Python).
-                        for local in pairs.keys() {
-                            file_import_aliases.remove(local);
-                        }
-                        file_import_map.extend(pairs);
-                        file_import_aliases.extend(aliases);
+                    // Keep aliases aligned with the current module association when a later
+                    // import reuses the local name without renaming it (legal in Python).
+                    for local in pairs.keys() {
+                        file_import_aliases.remove(local);
                     }
+                    file_import_map.extend(pairs);
+                    file_import_aliases.extend(aliases);
                 }
             }
 
@@ -4890,31 +4881,6 @@ impl Extractor for TreeSitterExtractor {
             }
         }
 
-        // ── Build hints blob for Calls refs ──────────────────────────────
-        // Serialize the file import map once, to attach to every Calls UnresolvedRef.
-        // Only build if we have something meaningful.
-        let imports_hint: Option<serde_json::Value> = if !file_import_map.is_empty() {
-            // {"imports": {"helper": "./utils", "React": "react", ...}}
-            Some(serde_json::Value::Object(
-                file_import_map
-                    .iter()
-                    .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                    .collect(),
-            ))
-        } else {
-            None
-        };
-        let import_sources_hint: Option<serde_json::Value> = if !file_import_sources.is_empty() {
-            Some(serde_json::Value::Array(
-                file_import_sources
-                    .iter()
-                    .map(|s| serde_json::Value::String(s.clone()))
-                    .collect(),
-            ))
-        } else {
-            None
-        };
-
         // ── Attribute refs to enclosing definitions ───────────────────────
         let mut refs = Vec::with_capacity(raw_refs.len());
         // Local-binding joins (wicked-estate#501): definitions by anchor, and each shared binding
@@ -4973,11 +4939,21 @@ impl Extractor for TreeSitterExtractor {
             let mut r = UnresolvedRef::new(from, name, ek.clone(), Location::new(&file.path, span));
             // Attach import hints to Calls refs so the ImportMapResolver can use them.
             if ek == EdgeKind::Calls {
-                if let Some(ref imp) = imports_hint {
-                    r.hints.insert("imports".to_string(), imp.clone());
-                }
-                if let Some(ref srcs) = import_sources_hint {
-                    r.hints.insert("import_sources".to_string(), srcs.clone());
+                // ImportMapResolver reads only the final ref name's local key. Keep that
+                // one entry per site instead of cloning a file-sized map for every call (#422).
+                let key = r
+                    .raw_name
+                    .strip_prefix(IMPORT_ALIAS_PREFIX)
+                    .and_then(|alias| alias.split_once(':').map(|(local, _)| local))
+                    .unwrap_or(&r.raw_name);
+                if let Some(module) = file_import_map
+                    .get(key)
+                    .filter(|_| !key.starts_with(LOCAL_BINDING_PREFIX))
+                {
+                    let mut imports = serde_json::Map::new();
+                    imports.insert(key.to_string(), serde_json::Value::String(module.clone()));
+                    r.hints
+                        .insert("imports".to_string(), serde_json::Value::Object(imports));
                 }
                 if let Some(fact) = call_facts.get(&span) {
                     let mut flow = serde_json::Map::new();
@@ -7451,52 +7427,71 @@ export function N9() { return Card(); }
         let code = r#"
 import { helper, fmt as format } from './utils';
 import React from 'react';
-function main() { helper(); format("x"); React.render(); }
+function main() { helper(); format("x"); React(); React.render(); unknown(); }
 "#;
         let ex = TreeSitterExtractor::for_language("typescript")
             .unwrap()
             .extract(&sf("src/main.ts", "typescript", code))
             .unwrap();
 
-        // Every Calls ref should have a hints["imports"] entry.
-        let call_refs: Vec<_> = ex
+        for (name, key, module) in [
+            ("helper", "helper", "./utils"),
+            ("import-alias:format:fmt", "format", "./utils"),
+            ("React", "React", "react"),
+        ] {
+            let r = ex.refs.iter().find(|r| r.raw_name == name).unwrap();
+            let imports = r.hints["imports"].as_object().unwrap();
+            assert_eq!(imports.len(), 1);
+            assert_eq!(imports[key].as_str(), Some(module));
+        }
+        for r in ex.refs.iter().filter(|r| r.kind == EdgeKind::Calls) {
+            if !matches!(
+                r.raw_name.as_str(),
+                "helper" | "import-alias:format:fmt" | "React"
+            ) {
+                assert!(!r.hints.contains_key("imports"), "{r:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn calls_ref_hint_carries_only_its_import_entry() {
+        let mut code = String::from("import './side-effect';\n");
+        for i in 0..64 {
+            code.push_str(&format!("import {{ item{i} }} from './module{i}';\n"));
+        }
+        code.push_str("import { original as alias } from './aliased';\n");
+        code.push_str("function local() {}\nfunction main() {\n");
+        for i in 0..64 {
+            code.push_str(&format!("item{i}();\n"));
+        }
+        code.push_str("alias(); local(); unknown();\n}\n");
+        let ex = TreeSitterExtractor::for_language("typescript")
+            .unwrap()
+            .extract(&sf("src/main.ts", "typescript", &code))
+            .unwrap();
+        let calls: Vec<_> = ex
             .refs
             .iter()
             .filter(|r| r.kind == EdgeKind::Calls)
             .collect();
-        assert!(!call_refs.is_empty(), "expected call refs");
-        for r in &call_refs {
-            let imp = r.hints.get("imports");
-            assert!(
-                imp.is_some(),
-                "Calls ref '{}' should have hints[imports]",
-                r.raw_name
-            );
+        assert!(calls.len() >= 67);
+        for r in calls {
+            assert!(!r.hints.contains_key("import_sources"), "{r:?}");
+            let key = r
+                .raw_name
+                .strip_prefix("import-alias:")
+                .and_then(|alias| alias.split_once(':').map(|(local, _)| local))
+                .unwrap_or(&r.raw_name);
+            if let Some(imports) = r.hints.get("imports") {
+                let imports = imports.as_object().unwrap();
+                assert_eq!(imports.len(), 1, "{r:?}");
+                assert!(imports.contains_key(key), "{r:?}");
+            } else {
+                assert_ne!(key, "alias", "{r:?}");
+                assert!(!(0..64).any(|i| key == format!("item{i}")), "{r:?}");
+            }
         }
-
-        // Check specific mappings: helper → ./utils, format → ./utils, React → react
-        let helper_ref = ex.refs.iter().find(|r| r.raw_name == "helper").unwrap();
-        let imports = helper_ref
-            .hints
-            .get("imports")
-            .unwrap()
-            .as_object()
-            .unwrap();
-        assert_eq!(
-            imports.get("helper").and_then(|v| v.as_str()),
-            Some("./utils"),
-            "helper should map to ./utils"
-        );
-        assert_eq!(
-            imports.get("format").and_then(|v| v.as_str()),
-            Some("./utils"),
-            "format (alias of fmt) should map to ./utils"
-        );
-        assert_eq!(
-            imports.get("React").and_then(|v| v.as_str()),
-            Some("react"),
-            "React default import should map to react"
-        );
     }
 
     /// Python: from-import produces hints["imports"] with each imported name.
