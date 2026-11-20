@@ -784,7 +784,8 @@ static LANG_TABLE: &[LangEntry] = &[
     },
     LangEntry {
         name: "cobol",
-        ext: &["cob", "cbl", "cobol", "cpy"],
+        // DCLGEN output is a COBOL copybook (EXEC SQL DECLARE ... TABLE + 01 levels).
+        ext: &["cob", "cbl", "cobol", "cpy", "dcl"],
         make_language: lang_cobol,
         query_src: COBOL_QUERY,
     },
