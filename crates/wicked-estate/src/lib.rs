@@ -6427,16 +6427,14 @@ mod semantics_survive_reindex_tests {
         let dbpath = dbdir.path().join("graph.db");
         let mut store = SqliteStore::open(&dbpath).unwrap();
         index_path(&mut store, src.path()).unwrap();
-        let symbol = sym_of(&store, "kept_elsewhere");
-        let fields = annotate_with_claim(&mut store, &symbol);
-        // The symbol vanishes from file0 and every file changes, so file0's chunk commits the
-        // removal and nothing re-creates the symbol in this run.
-        std::fs::write(
-            src.path().join("file0.rs"),
-            "pub fn pay0() { let _x = 0; }\n",
-        )
-        .unwrap();
-        for i in 1..4 {
+        let saved: Vec<_> = (0..4)
+            .map(|i| {
+                let symbol = sym_of(&store, &format!("extra{i}"));
+                let fields = annotate_with_claim(&mut store, &symbol);
+                (symbol, fields)
+            })
+            .collect();
+        for i in 0..4 {
             std::fs::write(
                 src.path().join(format!("file{i}.rs")),
                 format!("pub fn pay{i}() {{ let _x = {i}; }}\n"),
@@ -6465,10 +6463,11 @@ mod semantics_survive_reindex_tests {
         });
         index_path(&mut store, src.path()).expect_err("chunk two must fail");
         drop(reset);
-        assert!(
-            store.get_node(&symbol).unwrap().is_none(),
-            "chunk one removed it"
-        );
+        let gone = saved
+            .iter()
+            .filter(|(s, _)| store.get_node(s).unwrap().is_none())
+            .count();
+        assert_eq!(gone, 1, "chunk one removed its file's annotated symbol");
 
         let side = rusqlite::Connection::open(&dbpath).unwrap();
         side.execute_batch("DROP TRIGGER we515_poison2;").unwrap();
@@ -6476,12 +6475,13 @@ mod semantics_survive_reindex_tests {
         // A fresh store handle stands for the restarted process.
         drop(store);
         let mut store = SqliteStore::open(&dbpath).unwrap();
-        std::fs::write(src.path().join("file0.rs"), both).unwrap();
+        for i in 0..4 {
+            std::fs::write(src.path().join(format!("file{i}.rs")), full(i)).unwrap();
+        }
         index_path(&mut store, src.path()).unwrap();
-        assert_eq!(
-            store.node_semantics(&symbol).unwrap().as_ref(),
-            Some(&fields)
-        );
+        for (symbol, fields) in &saved {
+            assert_eq!(store.node_semantics(symbol).unwrap().as_ref(), Some(fields));
+        }
         SEMANTICS_DROPS.with(|notes| assert!(notes.borrow().is_empty()));
         assert_eq!(
             store
