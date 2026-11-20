@@ -2055,6 +2055,42 @@ mod tests {
         );
     }
 
+    /// #475: a Micro Focus free-format directive keeps columns 73-80 available to COPY.
+    #[test]
+    fn cobol_475_micro_focus_free_format_keeps_identification_columns_as_code() {
+        for directive in [
+            "$SET SOURCEFORMAT\"FREE\"",
+            "$SET SOURCEFORMAT(FREE)",
+            "$SET SOURCEFORMAT 'FREE'",
+        ] {
+            let body = format!("{:72}COPY C.\n", "");
+            let text = format!("{directive}\n{}", program("", &body));
+            let ex = run("cbl/P.cbl", &text);
+            assert!(edge_to(&ex, &EdgeKind::Imports, &copybook_symbol("C")).is_some());
+        }
+    }
+
+    /// #465 / #473: lexical views cut identification labels only on the existing card shape.
+    #[test]
+    fn cobol_465_lexical_views_identification_area_unchanged() {
+        for label in ["PROG.CBL", "CBACT-01", "V1.2"] {
+            let src = format!("{:<72}{label}\n", "           EXIT.");
+            let (clean, code) = lexical_views(&src, false);
+            assert_eq!(clean.len(), src.len());
+            assert_eq!(code.len(), src.len());
+            assert!(clean[72..].trim().is_empty(), "{clean:?}");
+            assert!(code[72..].trim().is_empty(), "{code:?}");
+        }
+        for src in [
+            format!("{:<72}MOVE A TO B.\n", "           EXIT."),
+            format!("{:<71}.V1.2\n", "           EXIT"),
+        ] {
+            let (clean, code) = lexical_views(&src, false);
+            assert_eq!(&clean[72..], &src[72..]);
+            assert_eq!(&code[72..], &src[72..]);
+        }
+    }
+
     #[test]
     fn lexical_views_keep_offsets_and_mask_literal_contents() {
         let src = "000100 MOVE 'A*>B' TO X. *> note\n      * comment line\n       DISPLAY \"IT\"\"S\" 'é'.\n";

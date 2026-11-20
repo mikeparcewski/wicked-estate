@@ -1701,6 +1701,138 @@ mod tests {
         }
     }
 
+    /// #475 / #473.2a: free directives keep COMMIT and ROLLBACK past column 72 real.
+    #[test]
+    fn cobol_475_free_directive_statement_word_past_column_72_keeps_paragraph_real() {
+        for directive in [">>SOURCE FORMAT FREE", "$SET SOURCEFORMAT\"FREE\""] {
+            for word in ["COMMIT", "ROLLBACK"] {
+                let statement = format!("{:<72}{word}", "           CONTINUE");
+                let code = format!(
+                    "{directive}\n       IDENTIFICATION DIVISION.\n       PROGRAM-ID. PROG.\n       PROCEDURE DIVISION.\n       A-PARA.\n{statement}\n           .\n       B-PARA.\n           EXIT.\n"
+                );
+                let got = tags("src/PROG.cbl", "cobol", &code);
+                is(&got, "A-PARA", "real", None);
+            }
+        }
+    }
+
+    /// #473.2b: debug and continuation indicators cannot certify an exit-only paragraph.
+    #[test]
+    fn cobol_473_non_blank_column_7_keeps_paragraph_real() {
+        for indicator in ['D', '-'] {
+            let code = format!(
+                "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. PROG.\n       PROCEDURE DIVISION.\n       A-PARA.\n           EXIT.\n      {indicator}    CONTINUE.\n"
+            );
+            let got = tags("src/PROG.cbl", "cobol", &code);
+            is(&got, "A-PARA", "real", None);
+        }
+    }
+
+    /// #473.3: dropped statements after the last paragraph's EXIT keep that paragraph real.
+    #[test]
+    fn cobol_473_dropped_line_after_last_paragraph_keeps_it_real() {
+        for dropped in [
+            "MOVE '*' TO WS-X.".to_string(),
+            format!("{:72}MOVE A TO B.", ""),
+        ] {
+            let code = format!(
+                "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. PROG.\n       PROCEDURE DIVISION.\n       A-PARA.\n           EXIT.\n{dropped}\n"
+            );
+            let got = tags("src/PROG.cbl", "cobol", &code);
+            is(&got, "A-PARA", "real", None);
+        }
+    }
+
+    /// #473.5: a floating comment extending beyond column 80 does not add behaviour.
+    #[test]
+    fn cobol_473_floating_comment_past_column_72_stays_stub() {
+        let comment = "comment text ".repeat(8);
+        let code = format!(
+            "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. PROG.\n       PROCEDURE DIVISION.\n       A-PARA.\n           EXIT. *> {comment}\n"
+        );
+        let got = tags("src/PROG.cbl", "cobol", &code);
+        is(&got, "A-PARA", "stub", Some("exit_only"));
+    }
+
+    /// #465.1 / #473.6: punctuation in a card's identification label is not executable code.
+    #[test]
+    fn cobol_465_identification_labels_in_columns_73_to_80_stay_stub() {
+        for label in ["PROG.CBL", "CBACT-01", "V1.2"] {
+            let code = fixed(&[
+                "IDENTIFICATION DIVISION.",
+                "PROGRAM-ID. PROG.",
+                "PROCEDURE DIVISION.",
+                "A-PARA.",
+                "    EXIT.",
+            ])
+            .lines()
+            .map(|line| format!("{}{label}\n", &line[..72]))
+            .collect::<String>();
+            let got = tags("src/PROG.cbl", "cobol", &code);
+            is(&got, "A-PARA", "stub", Some("exit_only"));
+        }
+    }
+
+    /// #473.1: code past column 72 on a column-1 header line keeps every node real.
+    #[test]
+    fn cobol_473_header_line_statement_past_column_72_keeps_all_nodes_real() {
+        let header = format!("{:72}MOVE A TO B.", "AAAAAAA-PARA.");
+        let code = format!(
+            "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. PROG.\n       PROCEDURE DIVISION.\n{header}\n           EXIT.\n"
+        );
+        let got = tags("src/PROG.cbl", "cobol", &code);
+        assert!(!got.is_empty(), "{got:?}");
+        assert!(got.iter().all(|(_, class, _)| class != "stub"), "{got:?}");
+    }
+
+    /// #473.1: a statement in columns 1-6 before a header keeps every node real.
+    #[test]
+    fn cobol_473_statement_in_sequence_area_keeps_all_nodes_real() {
+        let code = "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. PROG.\n       PROCEDURE DIVISION.\nCALL X A-PARA.\n           EXIT.\n";
+        let got = tags("src/PROG.cbl", "cobol", code);
+        assert!(!got.is_empty(), "{got:?}");
+        assert!(got.iter().all(|(_, class, _)| class != "stub"), "{got:?}");
+    }
+
+    /// #465.1: alphabetic sequence labels stay real because fixed format is uncertain.
+    #[test]
+    fn cobol_465_letters_in_sequence_area_stay_real() {
+        let code = fixed(&[
+            "IDENTIFICATION DIVISION.",
+            "PROGRAM-ID. PROG.",
+            "PROCEDURE DIVISION.",
+            "A-PARA.",
+            "    EXIT.",
+        ])
+        .lines()
+        .map(|line| format!("ABCDEF{}\n", &line[6..]))
+        .collect::<String>();
+        let got = tags("src/PROG.cbl", "cobol", &code);
+        is(&got, "A-PARA", "real", None);
+    }
+
+    /// #473.2a: statement text beyond column 80 cannot be a card identification area.
+    #[test]
+    fn cobol_473_tail_past_column_80_keeps_paragraph_real() {
+        let statement = format!("{:<72}MOVE A TO B.", "           EXIT.");
+        let code = format!(
+            "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. PROG.\n       PROCEDURE DIVISION.\n       A-PARA.\n{statement}\n"
+        );
+        let got = tags("src/PROG.cbl", "cobol", &code);
+        is(&got, "A-PARA", "real", None);
+    }
+
+    /// #473.2a: a non-blank column 72 before a tail cannot certify an exit-only card.
+    #[test]
+    fn cobol_473_tail_with_non_blank_column_72_keeps_paragraph_real() {
+        let statement = format!("{:<71}.V1.2", "           EXIT");
+        let code = format!(
+            "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. PROG.\n       PROCEDURE DIVISION.\n       A-PARA.\n{statement}\n"
+        );
+        let got = tags("src/PROG.cbl", "cobol", &code);
+        is(&got, "A-PARA", "real", None);
+    }
+
     /// Source-text guard: a `>>SOURCE IS FREE` directive the file-level regex never matched still
     /// leaves a paragraph real, because the grammar drops the column-1 `CALL X.` and its own
     /// source shows real code the fixed columns hid.
