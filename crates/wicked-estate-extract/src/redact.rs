@@ -46,15 +46,18 @@ struct Rules {
     embedded_host: Vec<EmbeddedHost>,
 }
 
-/// A grammar whose files embed code in other languages (APEXlang fenced blocks): each block's
+/// A grammar whose files embed code in other languages (fenced blocks or script elements): each
 /// body is redacted with the rules of the language its tag names (`embedded.toml`), so a secret
 /// in embedded JavaScript is masked like one in a `.js` file.
 #[derive(Deserialize)]
 struct EmbeddedHost {
     grammar: String,
     block: String,
-    tag_field: String,
-    body_field: String,
+    tag_field: Option<String>,
+    body_field: Option<String>,
+    body_kind: Option<String>,
+    lang_attr: Option<String>,
+    default_lang: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -99,6 +102,13 @@ struct CodeRules {
     fragment_kind_substrings: Vec<String>,
     number_kind_substrings: Vec<String>,
     comment_kind_substrings: Vec<String>,
+    skip_kind_substrings: Vec<String>,
+    stop_kind_substrings: Vec<String>,
+    stop_never_substrings: Vec<String>,
+    name_kind_substrings: Vec<String>,
+    pass_through_kinds: Vec<String>,
+    binary_kind_substrings: Vec<String>,
+    binding_operators: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -427,9 +437,9 @@ fn source_masks(path: &str, text: &str) -> Vec<(usize, usize, MaskKind)> {
 }
 
 /// Masks for every embedded block body of a host file. A block whose tag names a built-in
-/// language is redacted with that language's rules; any other block (no built-in grammar, or
-/// untagged) gets the C4 check on its assignments (`password := '...'`, `pwd => '...'`), confined
-/// to the body so the host's own properties (`authorizationScheme: @admin`) are untouched.
+/// language is redacted with that language's rules. A host can supply a default language for an
+/// untagged block; any remaining unmapped block gets the C4 check on its assignments (`password
+/// := '...'`, `pwd => '...'`), confined to the body so the host's own properties stay untouched.
 fn embedded_masks(
     path: &str,
     text: &str,
@@ -448,13 +458,41 @@ fn embedded_masks(
             stack.extend(n.children(&mut cursor));
             continue;
         }
-        let Some(body) = n.child_by_field_name(&host.body_field) else {
+        let body = host
+            .body_field
+            .as_deref()
+            .and_then(|f| n.child_by_field_name(f))
+            .or_else(|| {
+                let kind = host.body_kind.as_deref()?;
+                let mut c = n.walk();
+                n.named_children(&mut c).find(|c| c.kind() == kind)
+            });
+        let Some(body) = body else {
             continue;
         };
         let (s, e) = (body.start_byte(), body.end_byte());
-        let tag = n
-            .child_by_field_name(&host.tag_field)
-            .and_then(|t| t.utf8_text(src).ok());
+        let tag = host
+            .tag_field
+            .as_deref()
+            .and_then(|f| n.child_by_field_name(f))
+            .and_then(|t| t.utf8_text(src).ok())
+            .or_else(|| {
+                let attr = host.lang_attr.as_deref()?;
+                let mut c = n.walk();
+                let start = n.named_children(&mut c).find(|c| c.kind() == "start_tag")?;
+                let mut c = start.walk();
+                for a in start
+                    .named_children(&mut c)
+                    .filter(|a| a.kind() == "attribute")
+                {
+                    let name = a.named_child(0)?;
+                    if node_text(name, src).eq_ignore_ascii_case(attr) {
+                        return Some(a.named_child(1).map_or("", |v| unquote(node_text(v, src))));
+                    }
+                }
+                None
+            })
+            .or(host.default_lang.as_deref());
         let ext = crate::embedded::EmbedTable::builtin()
             .language_for(tag)
             .and_then(crate::embedded::language_ext);
@@ -1597,68 +1635,99 @@ fn code_prefilter(text: &str) -> bool {
             .any(|m| DENY_HINT.is_match(m.as_str()) && core_redact::deny_key(m.as_str()))
 }
 
-static LEFT_NAME: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?:["']([A-Za-z_][\w.\-]*)["']|([A-Za-z_$][\w$]*))\s*\]?\s*(?:===?|!==?|:=|=>|\?\?=|\|\|=|\?\?|\|\||=|:|,|\(|\bor\b)\s*$"#,
-    )
-    .expect("left-name compiles")
-});
-/// The leading `name:` of a typed binding segment (after an optional declaration keyword).
-static SEGMENT_NAME: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^\s*(?:(?:export|declare|const|let|var|val|final|static|readonly|pub(?:\([^)]*\))?|public|private|protected|internal|abstract|override|mut)\s+)*([A-Za-z_]\w*)\s*:[^:]")
-        .expect("segment name compiles")
-});
-
-/// The name of a typed binding whose `=` ends `left` (`const TOKEN: &str = `, `password:
-/// Optional[Optional[str]] = `, `{ label: t, password: value = `). Scans back from the `=` with
-/// bracket depth over `()[]{}<>`, stopping at a top-level `,` / `;` or an unbalanced opener, so a
-/// type of any nesting stays inside its binding and a destructuring comma ends it; the binding is
-/// the last line-anchored `name:` in that segment.
-fn typed_binding_name(left: &str) -> Option<&str> {
-    let t = left.trim_end();
-    let eq = t.strip_suffix('=')?;
-    if eq.ends_with(['=', '!', ':', '+', '-', '*', '/', '|', '&', '?']) {
-        // `==`, `!=`, `:=`, `+=`, ... are not declarations. (`<` / `>` are allowed: a generic
-        // type closes with `>`, and a comparison has no `name:` binding to find.)
-        return None;
-    }
-    let bytes = eq.as_bytes();
-    let mut depth = 0i32;
-    let mut start = 0;
-    let mut i = bytes.len();
-    while i > 0 {
-        i -= 1;
-        match bytes[i] {
-            b')' | b']' | b'}' => depth += 1,
-            b'>' if i == 0 || !matches!(bytes[i - 1], b'-' | b'=') => depth += 1,
-            b'(' | b'[' | b'{' | b'<' => {
-                if depth == 0 {
-                    start = i + 1;
-                    break;
+/// Recover a literal's binding from the tree, without a source-text window. A previous named
+/// sibling supplies the name; transparent patterns may additionally supply an enclosing key.
+fn binding_name<'a>(
+    literal: tree_sitter::Node,
+    src: &'a [u8],
+    rules: &CodeRules,
+) -> Option<&'a str> {
+    let mut child = literal;
+    for _ in 0..16 {
+        let parent = child.parent()?;
+        if kind_contains(parent.kind(), &rules.stop_kind_substrings)
+            && !kind_contains(parent.kind(), &rules.stop_never_substrings)
+        {
+            return None;
+        }
+        if kind_contains(parent.kind(), &rules.binary_kind_substrings) {
+            let mut c = parent.walk();
+            if !parent.children(&mut c).take(256).any(|n| {
+                rules
+                    .binding_operators
+                    .iter()
+                    .any(|op| op == node_text(n, src))
+            }) {
+                // Other operators contribute no operand name, but their result can still be
+                // bound to a secret name (`password = "abc" + "def"`).
+                child = parent;
+                continue;
+            }
+        }
+        let mut previous = child.prev_named_sibling();
+        // Bound sibling traversal as well as ancestry and name-subtree traversal.
+        for _ in 0..256 {
+            match previous {
+                Some(s) if kind_contains(s.kind(), &rules.skip_kind_substrings) => {
+                    previous = s.prev_named_sibling();
                 }
-                depth -= 1;
+                _ => break,
             }
-            b',' | b';' if depth == 0 => {
-                start = i + 1;
-                break;
+        }
+        if let Some(sibling) = previous {
+            if kind_contains(sibling.kind(), &rules.skip_kind_substrings) {
+                return None;
             }
-            _ => {}
+            let name = binding_leaf(sibling, src, rules);
+            if name.is_some_and(core_redact::deny_key)
+                || !rules.pass_through_kinds.iter().any(|k| k == parent.kind())
+            {
+                return name;
+            }
+        }
+        child = parent;
+    }
+    None
+}
+
+fn kind_contains(kind: &str, substrings: &[String]) -> bool {
+    substrings.iter().any(|s| kind.contains(s.as_str()))
+}
+
+/// The last identifier, key or string outside comment/type subtrees. Visit rightmost children
+/// first so a member access supplies its property and a quoted key supplies its unquoted text.
+fn binding_leaf<'a>(node: tree_sitter::Node, src: &'a [u8], rules: &CodeRules) -> Option<&'a str> {
+    let mut stack = vec![(node, 0)];
+    for _ in 0..256 {
+        let (n, depth) = stack.pop()?;
+        if kind_contains(n.kind(), &rules.skip_kind_substrings) {
+            continue;
+        }
+        if kind_contains(n.kind(), &rules.string_kind_substrings) {
+            let text = node_text(n, src);
+            let (s, e) = literal_interior(text);
+            return Some(&text[s..e]);
+        }
+        if n.named_child_count() == 0 {
+            if kind_contains(n.kind(), &rules.name_kind_substrings) {
+                return Some(unquote(node_text(n, src)));
+            }
+        } else {
+            if depth >= 16 {
+                return None;
+            }
+            let mut c = n.walk();
+            // A bounded stack: exceeding the budget leaves this name unresolved.
+            for child in n.named_children(&mut c) {
+                if stack.len() >= 256 {
+                    return None;
+                }
+                stack.push((child, depth + 1));
+            }
         }
     }
-    // The LAST line-anchored `name:` in the segment: a type annotation may continue on the next
-    // line (`const password:\n  string =`), and earlier lines (`from typing import ...`) are not
-    // the binding.
-    SEGMENT_NAME
-        .captures_iter(&eq[start..])
-        .last()
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str())
+    None
 }
-/// `name type = "..."` (Bicep `param adminPassword string = '...'`).
-static LEFT_NAME_TYPE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b([A-Za-z_]\w*)\s+[A-Za-z_][\w.<>\[\]]*\s*=\s*$")
-        .expect("name-type decl compiles")
-});
 
 fn code_masks(
     text: &str,
@@ -1683,19 +1752,6 @@ fn code_masks(
             .iter()
             .any(|s| k.contains(s.as_str()))
     };
-    // Comment spans from the tree (never a regex over raw text: `//` in a URL or a string is not
-    // a comment), so a comment between a binding and its literal can be blanked out of the C4
-    // left context.
-    let mut comments: Vec<(usize, usize)> = Vec::new();
-    let mut stack = vec![tree.root_node()];
-    while let Some(n) = stack.pop() {
-        if is_comment(n.kind()) {
-            comments.push((n.start_byte(), n.end_byte()));
-            continue;
-        }
-        let mut c = n.walk();
-        stack.extend(n.children(&mut c));
-    }
     let mut stack = vec![tree.root_node()];
     while let Some(n) = stack.pop() {
         let k = n.kind();
@@ -1703,7 +1759,7 @@ fn code_masks(
             continue; // comments: token shapes only (already applied to the whole text)
         }
         if n.is_named() && is_string(k) {
-            literal(n, text, src, rules, deny_all, &comments, masks);
+            literal(n, text, src, rules, deny_all, masks);
             continue; // the outermost string node decides; never its fragments again
         }
         // Default-deny grammars (KDL, RON): numeric values are values too.
@@ -1729,7 +1785,6 @@ fn literal(
     src: &[u8],
     rules: &CodeRules,
     deny_all: bool,
-    comments: &[(usize, usize)],
     masks: &mut Vec<(usize, usize, MaskKind)>,
 ) {
     // Module specifiers are identities (`import x from "pkg"`, `require("pkg")`, `#include`).
@@ -1778,43 +1833,8 @@ fn literal(
         whole(masks);
         return;
     }
-    // C4-context: the literal is bound to a denied name. The window may span lines
-    // (`const password =\n  "..."`).
-    let left_from = n.start_byte().saturating_sub(200);
-    let (left_from, _) = widen(text, left_from, left_from);
-    // Comments between the binding and the literal (`const password = /* prod */ "..."`) do not
-    // break the binding.
-    // Each comment span collapses to ONE space (not same-length blanks, which would push a typed
-    // binding past the declaration patterns' length limits).
-    let mut left_bytes: Vec<u8> = Vec::with_capacity(n.start_byte() - left_from);
-    let mut pos = left_from;
-    let mut spans: Vec<(usize, usize)> = comments
-        .iter()
-        .map(|&(cs, ce)| (cs.max(left_from), ce.min(n.start_byte())))
-        .filter(|(s, e)| s < e)
-        .collect();
-    spans.sort_unstable();
-    for (cs, ce) in spans {
-        if cs < pos {
-            continue;
-        }
-        left_bytes.extend_from_slice(&text.as_bytes()[pos..cs]);
-        left_bytes.push(b' ');
-        pos = ce;
-    }
-    left_bytes.extend_from_slice(&text.as_bytes()[pos..n.start_byte()]);
-    let left_owned = String::from_utf8_lossy(&left_bytes);
-    let left = left_owned.as_ref();
-    let named = LEFT_NAME
-        .captures(left)
-        .and_then(|c| c.get(1).or_else(|| c.get(2)))
-        .is_some_and(|m| core_redact::deny_key(m.as_str()))
-        || typed_binding_name(left).is_some_and(core_redact::deny_key)
-        || LEFT_NAME_TYPE
-            .captures(left)
-            .and_then(|c| c.get(1))
-            .is_some_and(|m| core_redact::deny_key(m.as_str()));
-    if named {
+    // C4: names come from sibling subtrees, skipping comments and type annotations.
+    if binding_name(n, src, rules).is_some_and(core_redact::deny_key) {
         whole(masks);
         return;
     }
@@ -2016,7 +2036,6 @@ mod tests {
             "k/ID_RSA.PEM.PY",
             "c/credentials.env.ts",
             "c/kubeconfig.json.js",
-            "web/Credentials.vue",
             "firmware/credentials.h",
             "firmware/credentials.cpp",
             "c/credentials.conf.py",
@@ -2048,6 +2067,9 @@ mod tests {
             "src/credentials_store.cts",
             "scripts/credentials_store.sc",
             "src/credentials.repository.ts",
+            // wicked-estate#435: Vue/Svelte script blocks are redacted as code
+            "web/Credentials.vue",
+            "web/credentials.svelte",
         ] {
             assert!(!is_excluded(p), "{p}");
         }
@@ -2110,6 +2132,12 @@ mod tests {
                 ],
                 "swift" => &["let password = V\n", "let apiKey = V\n"],
                 "dart" => &["final password = V;\n", "const apiKey = V;\n"],
+                "vue" | "svelte" => &[
+                    "<script>const password = V;</script>\n",
+                    "<script>const DB_PASSWORD = V;</script>\n",
+                    "<script>const cfg = { apiKey: V };</script>\n",
+                    "<script setup lang=\"ts\">const password: string = V;</script>\n",
+                ],
                 other => panic!("code_ext `{other}` has no conformance snippet here"),
             };
             forms.iter().map(|f| js(f)).collect()
@@ -2342,6 +2370,163 @@ mod tests {
         assert_eq!(j, "{\"n\": 1000}");
         let d = same_len("x.dockerfile", "FROM node:20\nRUN echo hi\n");
         assert!(d.contains("FROM node:20"), "{d}");
+    }
+
+    #[test]
+    fn script_blocks_mask_secret_bindings() {
+        for path in ["src/Login.vue", "src/Login.svelte", "src/login.html"] {
+            for opening in ["<script>", "<script setup lang=\"ts\">"] {
+                let declaration = if opening.contains("lang") {
+                    "const password: string = \"PLANTEDcredValue\";"
+                } else {
+                    "const password = \"PLANTEDcredValue\";"
+                };
+                let src = format!(
+                    "<template><p>password = rosebud7</p></template>\n\
+                     {opening}\n{declaration}\n</script>\n"
+                );
+                let out = same_len(path, &src);
+                assert!(!out.contains("PLANTEDcredValue"), "{path}: {out}");
+                assert!(out.contains("<p>password = rosebud7</p>"), "{path}: {out}");
+            }
+        }
+    }
+
+    #[test]
+    fn code_binding_survives_long_type_annotation() {
+        let annotation = format!("{}string{}", "Readonly<".repeat(30), ">".repeat(30));
+        assert!(annotation.len() > 200);
+        let src = format!("const password: {annotation} = \"PLANTEDcredValue\";\n");
+        let out = same_len("src/login.ts", &src);
+        assert!(!out.contains("PLANTEDcredValue"), "{out}");
+        assert!(out.contains(&annotation), "{out}");
+    }
+
+    #[test]
+    fn code_binding_survives_long_block_comment() {
+        let comment = format!("/* {} */", "local development fixture ".repeat(12));
+        assert!(comment.len() > 200);
+        let src = format!("const password = {comment} \"PLANTEDcredValue\";\n");
+        let out = same_len("src/login.js", &src);
+        assert!(!out.contains("PLANTEDcredValue"), "{out}");
+        assert!(out.contains(&comment), "{out}");
+    }
+
+    #[test]
+    fn code_bindings_respect_operators_and_boundaries() {
+        for op in ["||", "??", "==", "===", "!=", "!=="] {
+            let src = format!("const value = settings.password {op} \"rosebud7\";\n");
+            let out = same_len("src/login.js", &src);
+            assert!(!out.contains("rosebud7"), "{op}: {out}");
+        }
+        for src in [
+            "const value = settings.password + \"rosebud7\";\n",
+            "const value = settings.password && \"rosebud7\";\n",
+            "const password = () => \"rosebud7\";\n",
+            "const password = settings.value;\n\"rosebud7\";\n",
+            "const password = settings.value;\nconst title = \"rosebud7\";\n",
+        ] {
+            let out = same_len("src/login.js", src);
+            assert!(out.contains("rosebud7"), "{out}");
+        }
+        let out = same_len("src/login.py", "value = settings.password or 'rosebud7'\n");
+        assert!(!out.contains("rosebud7"), "{out}");
+    }
+
+    #[test]
+    fn code_binary_operands_inherit_enclosing_binding() {
+        for (path, src, expected) in [
+            (
+                "src/login.js",
+                "const password = \"abc\" + \"def\";\n",
+                "const password = \"RED\" + \"RED\";\n",
+            ),
+            (
+                "src/login.py",
+                "password = \"abc\" + \"def\"\n",
+                "password = \"RED\" + \"RED\"\n",
+            ),
+        ] {
+            assert_eq!(same_len(path, src), expected, "{path}");
+        }
+    }
+
+    #[test]
+    fn code_call_arguments_bind_through_callee() {
+        for (path, prefix, call, log) in [
+            (
+                "src/login.js",
+                "",
+                "setPassword(\"rosebud7\");",
+                "log(\"rosebud7\");",
+            ),
+            (
+                "src/login.js",
+                "",
+                "client.setPassword(\"rosebud7\");",
+                "log(\"rosebud7\");",
+            ),
+            (
+                "src/login.py",
+                "",
+                "set_password(\"rosebud7\")",
+                "log(\"rosebud7\")",
+            ),
+            (
+                "src/login.py",
+                "",
+                "client.set_password(\"rosebud7\")",
+                "log(\"rosebud7\")",
+            ),
+            (
+                "src/login.php",
+                "<?php\n",
+                "setPassword('rosebud7');",
+                "log('rosebud7');",
+            ),
+            (
+                "src/login.php",
+                "<?php\n",
+                "$client->setPassword('rosebud7');",
+                "log('rosebud7');",
+            ),
+        ] {
+            // The denied callee also activates the code prefilter for the innocent log call.
+            let src = format!("{prefix}{call}\n{log}\n");
+            let expected = format!("{prefix}{}\n{log}\n", call.replace("rosebud7", "REDACTED"));
+            assert_eq!(same_len(path, &src), expected, "{path}: {call}");
+        }
+    }
+
+    #[test]
+    fn code_destructuring_default_keeps_its_own_binding() {
+        for comment in [
+            "/* ... */".to_owned(),
+            format!("/* {} */", "display title ".repeat(30)),
+        ] {
+            let src = format!(
+                "const {{ password: supplied, title {comment} = \"Welcome\" }} = options;\n"
+            );
+            assert_eq!(same_len("src/login.js", &src), src);
+        }
+    }
+
+    #[test]
+    fn script_languages_and_offsets() {
+        for path in ["src/Login.vue", "src/Login.svelte", "src/login.html"] {
+            let src = "<p>rosebud7</p>\n\
+                       <script lang='ts'>const password: string = 'PLANTEDcredValue';</script>\n\
+                       <script lang=ts>const apiKey: string = 'PLANTEDcredValue';</script>\n\
+                       <script lang='plsql'>password := 'PLANTEDcredValue';</script>\n\
+                       <script>const title = 'hunter2brown';</script>\n";
+            let out = same_len(path, src);
+            assert!(!out.contains("PLANTEDcredValue"), "{path}: {out}");
+            assert!(out.contains("<p>rosebud7</p>"), "{path}: {out}");
+            assert!(
+                out.contains("const title = 'hunter2brown'"),
+                "{path}: {out}"
+            );
+        }
     }
 
     #[test]
