@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.35.8] — 2026-11-20
+
+Patch release on main 190e5b99, carrying 11 PRs since 0.35.7: #507, #509, #510, #512, #514, #517, #518, #521, #524, #525, #526.
+
 ### Added
 
 - **`blast-radius --id <symbol-id>` (wicked-estate#451).** Returns the same JSON as the name form for exactly one
@@ -70,6 +74,33 @@
   never reached the graph and blast radius silently missed its callers. Size alone no longer classifies a file;
   only the line-shape signals do (a line over 50,000 characters, or an average over 2,000 characters per line).
   `index` now prints `SKIPPED_MINIFIED: <path>` for each skipped file after the count line.
+
+### Merged since the last release (from each pull request's changelog entry)
+
+- **memory.recall no longer ranks rows on function-word overlap (estate#516).** Legacy "Session goal" working rows stop outranking topical memories, and queries with no content-word match return nothing from the keyword arm.
+
+- Fixed: indexing no longer holds the SQLite write lock for the whole extraction (#515, regression from #514); other writers such as `annotate` proceed between chunks. An index run is now one short transaction per chunk plus a final one.
+
+- fix(cli): `query`, `rank`, `blast-radius`, `traverse`, `path`, `lineage` and `stats` read a graph the process cannot write by falling back to a read-only open, instead of failing with "attempt to write a readonly database" (#519).
+
+- **Repeated same-name JavaScript declarations no longer multiply call lookup work (wicked-estate#505).**
+  The mutable scope of a local binding is computed once per scope and name, including when there is no mutable
+  scope. A block with thousands of `var Card;` declarations and `Card()` calls no longer scans every declaration
+  for every call. Reference targets and parked refs are unchanged.
+
+- **Class-body calls follow initializer timing (wicked-estate#502; correction to the #498 note).**
+  A static-field call after a local `var` or `let` callee is reassigned inside a function,
+  as in `let Card = () => null; Card = null; class C { static value = Card(); }`, changes from binding the old
+  arrow to a parked `local-binding:Card` ref. This applies to calls and JSX (`static value = <Card />`) alike.
+  Instance-field initializers run at construction, so their calls still use the nested-function lookup.
+
+- **Calls through named import aliases resolve inside their imported module (wicked-estate#486).**
+  JS/TS calls and JSX using `import { Actual as Card } from './a'`, and Python calls using
+  `from a import actual as card`, bind the imported original instead of an unrelated global with
+  the alias's local name. Export-side aliases keep their in-module target, JS/TS local bindings still
+  shadow imports, and unresolved aliases stay parked during back-fill when module hints are absent.
+
+- freshness: a retrieval answer given while an index run is in progress (or after one was interrupted) now carries `freshness.indexing` and an `INDEXING:` note, so a partial graph is no longer silent (#522).
 
 ## [0.35.7] — 2026-11-19
 
