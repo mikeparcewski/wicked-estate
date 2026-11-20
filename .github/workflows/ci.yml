@@ -30,6 +30,8 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: publish workflow guardrails
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
       - name: fmt --check
         run: cargo fmt --all -- --check
       - name: build (0 warnings, all targets)

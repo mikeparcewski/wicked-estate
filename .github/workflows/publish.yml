@@ -87,6 +87,61 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: bash scripts/publish.sh
 
+  registry:
+    name: wait until crates.io serves every package
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: check out the dispatched TAG (recovery path)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/tags/${{ inputs.ref }}
+      - name: check out the pushed tag (normal path)
+        if: github.event_name != 'workflow_dispatch'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - name: wait until crates.io serves every package (up to 15 min)
+        shell: bash
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          crates="$(bash scripts/publish.sh --list)"
+          [ -n "$crates" ] || { echo "::error::publish.sh --list returned no crates"; exit 1; }
+          started="$(date +%s)"
+          deadline=$(( started + 15 * 60 ))
+          check_deadline() {
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::crates.io still does not serve every package at $VERSION after 15 minutes. Publish succeeded; re-run failed jobs, or dispatch the tag. publish.sh skips published crates."
+              exit 1
+            fi
+          }
+          while :; do
+            missing=""
+            for crate in $crates; do
+              check_deadline
+              # Every estate crate name has at least four characters.
+              url="https://index.crates.io/${crate:0:2}/${crate:2:2}/$crate"
+              if index="$(curl -fsS --max-time 30 "$url")" \
+                 && jq -e -s --arg version "$VERSION" \
+                   'any(.[]; .vers == $version and .yanked == false)' <<< "$index" >/dev/null; then
+                continue
+              fi
+              missing="$missing $crate"
+            done
+            check_deadline
+            if [ -z "$missing" ]; then
+              echo "all packages resolve at $VERSION after $(( $(date +%s) - started ))s"
+              break
+            fi
+            echo "not yet:$missing; next check in 30s"
+            sleep 30
+          done
+
   # Prebuilt archives for five targets (wicked-estate#360), built from the same tag in PARALLEL with
   # the crates publish — they need nothing from crates.io, and the publish can run for hours. Each
   # leg smoke-tests its archive on its own OS (and Linux in clean distro containers) before it may
@@ -100,23 +155,15 @@ jobs:
       ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref_name }}
       version: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref_name }}
 
-  # Cut the GitHub Release once crates.io publish SUCCEEDS. This is the step estate lacked: the
-  # crates were published every release, but nothing created a GitHub Release, so the Releases page
-  # drifted (it sat at v0.14.1 while crates.io shipped through v0.16.6). `needs: publish` means a
-  # release is advertised only for a version that actually published — never a tag whose publish
-  # failed. Idempotent: an existing release (e.g. a hand-backfilled one) is updated in place, so a
-  # re-run / dispatch never errors on "already exists".
-  #
-  # #360: it also needs EVERY binaries leg, attaches the five archives plus SHA256SUMS, and attests
-  # each archive's build provenance. A missing archive fails this job, so no release is created
-  # or edited with a partial asset set. Uploads use --clobber, so a workflow_dispatch re-run for an
-  # existing tag fills in whatever is missing, idempotently.
+  # Draft only after crates.io serves every package and all five archives are ready (#482).
+  # The operator/coord publishes it and sets Latest after JOURNEY CERTIFIED.
+  # Existing releases keep their state and notes; recovery still replaces assets (#360).
   github-release:
-    name: create GitHub release
-    needs: [publish, binaries]
+    name: draft GitHub release (published after certification)
+    needs: [registry, binaries]
     runs-on: ubuntu-latest
     permissions:
-      contents: write # create/update the GitHub Release against the pushed tag
+      contents: write # draft the tag's Release and upload assets
       id-token: write # sign the build-provenance attestations
       attestations: write
     steps:
@@ -137,7 +184,7 @@ jobs:
           fi
       # Same event-gated checkout as the publish job (a dispatch resolves the TAG input; a push
       # uses the pushed tag). An empty dispatch input already fails the publish job above, and
-      # `needs: publish` gates this one on it, so this job never runs against a bad ref.
+      # `needs: registry` gates this one on it, so this job never runs against a bad ref.
       - name: check out the dispatched TAG (recovery path)
         if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -162,38 +209,37 @@ jobs:
           done
           ls wicked-estate-*-x86_64-pc-windows-msvc.zip >/dev/null \
             || { echo "::error::missing archive for x86_64-pc-windows-msvc"; exit 1; }
-          [ "$(ls wicked-estate-* | wc -l)" -eq 5 ] || { echo "::error::expected exactly 5 archives"; ls; exit 1; }
+          archives=(wicked-estate-*)
+          [ "${#archives[@]}" -eq 5 ] || { echo "::error::expected exactly 5 archives"; ls; exit 1; }
           sha256sum wicked-estate-* > SHA256SUMS
           cat SHA256SUMS
       - name: attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: 'dist/wicked-estate-*'
-      - name: create or update the GitHub Release from CHANGELOG
+      - name: draft the GitHub Release and attach the assets
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref_name }}
         run: |
           set -euo pipefail
-          TAG="${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref_name }}"
-          # Notes = this version's CHANGELOG section. Distinguish "no section" (exit 1 → generic
-          # note) from a real script failure (exit 2 → missing/unreadable CHANGELOG, usage bug),
-          # which must FAIL the release rather than silently ship a generic note.
-          set +e
-          python3 scripts/changelog-section.py "$TAG" > /tmp/relnotes.md
-          code=$?
-          set -e
-          if [ "$code" -eq 1 ]; then
-            printf 'Release %s\n' "$TAG" > /tmp/relnotes.md
-          elif [ "$code" -ne 0 ]; then
-            echo "::error::changelog-section.py failed (exit $code) — refusing to publish a release with fallback notes"
-            exit "$code"
-          fi
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --notes-file /tmp/relnotes.md
-            echo "updated existing GitHub Release $TAG"
+            echo "GitHub Release $TAG already exists (draft or published); state and notes left alone"
           else
-            gh release create "$TAG" --title "$TAG" --notes-file /tmp/relnotes.md --verify-tag
-            echo "created GitHub Release $TAG"
+            # Exit 1 means no CHANGELOG section; other failures must stop the job.
+            set +e
+            python3 scripts/changelog-section.py "$TAG" > /tmp/relnotes.md
+            code=$?
+            set -e
+            if [ "$code" -eq 1 ]; then
+              printf 'Release %s\n' "$TAG" > /tmp/relnotes.md
+            elif [ "$code" -ne 0 ]; then
+              echo "::error::changelog-section.py failed (exit $code); refusing to draft with fallback notes"
+              exit "$code"
+            fi
+            gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes-file /tmp/relnotes.md
+            echo "created draft GitHub Release $TAG"
           fi
           gh release upload "$TAG" dist/wicked-estate-* dist/SHA256SUMS --clobber
-          echo "attached $(ls dist/wicked-estate-* | wc -l) archives + SHA256SUMS to $TAG"
+          archives=(dist/wicked-estate-*)
+          echo "attached ${#archives[@]} archives + SHA256SUMS to $TAG"

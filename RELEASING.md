@@ -133,9 +133,26 @@ A `v*` tag also produces prebuilt binaries (wicked-estate#360). `publish.yml` ca
   states. A leg that fails uploads nothing.
 - **The Linux archives** are smoke-tested again inside clean `rockylinux:8`, `rockylinux:9` and
   `debian:12` containers with no Rust toolchain (the `clean-linux` job).
-- **`github-release`** needs `publish` *and* every binaries leg. It fails unless all five
+- **`registry`** runs after `publish`. It uses `scripts/publish.sh --list` to get every
+  publishable crate in dependency order, then polls crates.io's sparse index every 30 seconds
+  for the tag's version with `yanked == false`. It fails after 15 minutes if any crate is
+  still unavailable. Re-run failed jobs or dispatch the tag; `publish.sh` skips published crates.
+- **`github-release`** needs `registry` *and* every binaries leg. It fails unless all five
   archives are present, writes `SHA256SUMS`, records a build-provenance attestation per archive,
-  and uploads everything with `--clobber`.
+  and creates a **draft** Release with notes from CHANGELOG. An existing Release, draft or
+  published, keeps its state and notes. Assets are always uploaded with `--clobber`.
+
+**After JOURNEY CERTIFIED**, the operator/coord publishes the draft and sets Latest through
+the local, hook-guarded `gh` path:
+
+```sh
+gh release edit <tag> --repo mikeparcewski/wicked-estate --draft=false --latest
+```
+
+CI never publishes the draft or sets Latest. Between the tag push and this command,
+`releases/latest` keeps serving the previous certified release to `wicked-installer`.
+The new draft carries all five archives and `SHA256SUMS`; its assets are not public until
+the draft is published.
 
 **Recovery.** A `workflow_dispatch` of `publish.yml` with an existing tag rebuilds the binaries
 and re-uploads any missing asset idempotently. `publish.sh` skips crates already on crates.io,
@@ -145,6 +162,7 @@ refuses a dispatch started on `main`. A crates-only recovery from `main` still w
 one tag are serialized (`concurrency`, never cancelled), so overlapping dispatches cannot mix
 archives and `SHA256SUMS`. Each leg smoke-tests the archive extracted into a fresh directory,
 which is exactly what ships.
+Recovery after publication still replaces assets with `--clobber` (the existing #360 behavior).
 
 **Dry run.** A pull request that changes `binaries.yml`, `publish.yml` or the packaging scripts
 runs the whole `binaries.yml` matrix, including the clean-container smoke, without releasing
