@@ -881,11 +881,22 @@ impl GraphWrite for SurrealStore {
                  DELETE file_content WHERE path=$file;",
             )
             .bind(("file", file.clone()))
-            .bind(("syms", file_symbols))
+            .bind(("syms", file_symbols.clone()))
             .await
             .map_err(se)?
             .check()
             .map_err(se)?;
+            // Delete semantics only for symbols whose nodes were removed.
+            for sym in file_symbols {
+                if get_node_async(&db, &sym).await?.is_none() {
+                    db.query("DELETE semantics WHERE symbol=$sym")
+                        .bind(("sym", sym))
+                        .await
+                        .map_err(se)?
+                        .check()
+                        .map_err(se)?;
+                }
+            }
             // Support is producer-owned: re-project every supported edge the deletes removed.
             sr_support_post_delete(&db, deleted, retired).await?;
             Ok::<_, Error>(())
@@ -1071,20 +1082,29 @@ impl GraphWrite for SurrealStore {
                 .map(|c| c.into_owned());
         let db = self.db.clone();
         let sym = symbol.0.clone();
-        let data = serde_json::to_string(&semantics).map_err(se)?;
-        let req = semantics.requirement.clone();
         self.rt.block_on(async move {
-            db.query(
-                "LET $ex = (SELECT id FROM semantics WHERE symbol=$sym LIMIT 1);
-                 IF array::len($ex) = 0 { INSERT INTO semantics { symbol: $sym, requirement: $req, data: $data } } ELSE { UPDATE semantics SET requirement=$req, data=$data WHERE symbol=$sym };",
-            )
-            .bind(("sym", sym))
-            .bind(("req", req))
-            .bind(("data", data))
-            .await
-            .map_err(se)?
-            .check()
-            .map_err(se)?;
+            if semantics == NodeSemantics::default() {
+                db.query("DELETE semantics WHERE symbol=$sym")
+                    .bind(("sym", sym))
+                    .await
+                    .map_err(se)?
+                    .check()
+                    .map_err(se)?;
+            } else {
+                let data = serde_json::to_string(&semantics).map_err(se)?;
+                let req = semantics.requirement;
+                db.query(
+                    "LET $ex = (SELECT id FROM semantics WHERE symbol=$sym LIMIT 1);
+                     IF array::len($ex) = 0 { INSERT INTO semantics { symbol: $sym, requirement: $req, data: $data } } ELSE { UPDATE semantics SET requirement=$req, data=$data WHERE symbol=$sym };",
+                )
+                .bind(("sym", sym))
+                .bind(("req", req))
+                .bind(("data", data))
+                .await
+                .map_err(se)?
+                .check()
+                .map_err(se)?;
+            }
             Ok::<_, Error>(())
         })
     }

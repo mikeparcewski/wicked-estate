@@ -400,6 +400,8 @@ pub trait GraphWrite {
     /// so the contribution mechanism usually re-homes it first; this edge-based keep covers
     /// nodes written outside file extraction.) Pinned by the conformance kit's shared-Import cases.
     ///
+    /// A deleted node's semantics are removed with it; a kept node retains its semantics.
+    ///
     /// Support facts (TS-S2A) are producer-owned and are never deleted here: a supported edge this
     /// call removes is re-projected from its surviving support, and a supported key's base
     /// contribution is retired by exactly the predicate applied to edges. See [`crate::support`].
@@ -450,7 +452,8 @@ pub trait GraphWrite {
     /// [`set_node_semantics`](Self::set_node_semantics) applies, so a credential that reached the
     /// snapshot is still masked on the way back in. Only the indexer's re-extraction path calls
     /// this (wicked-estate#438); a new claim goes through `set_node_semantics`. No-op if the symbol
-    /// is absent.
+    /// is absent. An empty record (`NodeSemantics::default()`) stores nothing and clears any
+    /// existing semantics for the node.
     fn restore_node_semantics(
         &mut self,
         symbol: &SymbolId,
