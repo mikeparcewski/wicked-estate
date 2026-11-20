@@ -9,6 +9,12 @@
 
 ### Fixed
 
+- **Full indexing bounds extraction memory (wicked-estate#422).** Changed files are extracted and
+  written in chunks of at most 16 MiB of source bytes or 512 files (an oversized file runs alone),
+  releasing each chunk's extractions and redacted text before parsing the next. Removal, extraction,
+  graph writes and semantic-field restoration stay in one transaction. Source bytes and references
+  needed for resolution still remain resident.
+
 - **A graph lacking only the FTS rowid migration marker is refused on the private copy too (wicked-estate#508).**
   The copy's check refused only on a missing table, index or column, so a graph whose sole difference was the unset
   FTS marker fell through to the ordinary open, which created a `-shm` before refusing. A failed check that ends on
