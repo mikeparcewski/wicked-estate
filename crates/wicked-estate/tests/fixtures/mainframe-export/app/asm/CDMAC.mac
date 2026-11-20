@@ -1,0 +1,4 @@
+         MACRO
+&L       CDMAC &P
+&L       L     1,&P
+         MEND

@@ -113,14 +113,16 @@ use wicked_estate_store::GraphStoreMutExt;
 use wicked_estate_store::SqliteStore;
 use xxhash_rust::xxh3::xxh3_64;
 
-/// Extensions handled by the grammar-less line extractors (JCL job streams, HLASM assembler), whose
-/// dispatch lives in `index_path`'s per-file closure rather than the tree-sitter `ext_map`.
+/// Extensions handled by the grammar-less line extractors (JCL job streams and cataloged PROCs,
+/// HLASM assembler), whose dispatch lives in `index_path` rather than the tree-sitter `ext_map`.
 pub(crate) fn is_grammarless_ext(ext: &str) -> bool {
     matches!(
         ext,
         "jcl"
             | "job"
             | "cntl"
+            | "prc"
+            | "proc"
             | "hlasm"
             | "asm"
             | "mlc"
@@ -134,13 +136,41 @@ pub(crate) fn is_grammarless_ext(ext: &str) -> bool {
     ) || is_xml_rules_ext(ext)
 }
 
+/// VB5/VB6 controls start with a VERSION header; mainframe control cards do not.
+fn is_vb6_source(bytes: &[u8]) -> bool {
+    let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
+    bytes
+        .split(|&b| b == b'\n')
+        .find(|line| !line.iter().all(u8::is_ascii_whitespace))
+        .is_some_and(|line| {
+            line.get(..8)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"VERSION "))
+        })
+}
+
+const NOT_INDEXED_SECRET: &str = "matches the secret-file rule; never indexed";
+const NOT_INDEXED_READ: &str = "could not be read inside the repository root";
+const NOT_INDEXED_CTL: &str =
+    "mainframe control card (not VB6): no extractor yet (wicked-estate#447)";
+
+fn not_indexed_reason(ext: &str) -> &'static str {
+    match ext {
+        "ddl" | "db2" => "Db2 DDL: no DDL extractor yet (wicked-estate#447)",
+        "csd" => "CICS CSD resource definitions: no extractor yet (wicked-estate#447)",
+        "mac" => "HLASM macro library member: no macro extractor yet (wicked-estate#447)",
+        "ca7" | "controlm" => "scheduler definition: no extractor yet (wicked-estate#447)",
+        "ctl" => NOT_INDEXED_CTL,
+        _ => "no extractor for this file type",
+    }
+}
+
 /// Dispatch a grammar-less (non-tree-sitter) extractor by file extension — the mainframe estate
 /// languages (JCL, HLASM, RACF security, IMS DBD/PSB, MQ MQSC) plus the heuristic rules-engine
 /// formats (Drools DRL, FICO Blaze `.brl`) and, behind the `xml-rules` feature, the XML rules
 /// formats (Camunda DMN, Progress Corticon). Returns `None` for everything else.
 fn grammarless_extractor(ext: &str) -> Option<Box<dyn Extractor>> {
     match ext {
-        "jcl" | "job" | "cntl" => Some(Box::new(JclExtractor::new())),
+        "jcl" | "job" | "cntl" | "prc" | "proc" => Some(Box::new(JclExtractor::new())),
         "hlasm" | "asm" | "mlc" | "bms" => Some(Box::new(HlasmExtractor::new())),
         "racf" => Some(Box::new(RacfExtractor::new())),
         "dbd" | "psb" => Some(Box::new(ImsExtractor::new())),
@@ -277,7 +307,7 @@ fn base_extraction(
     // compiler directive): program → program / map / table / copybook / DD-binding links, field
     // uses, dynamic CALL literals. Every link starts from this extraction's program Module (or
     // copybook) node — see `cobol_links`.
-    if matches!(ext, "cbl" | "cob" | "cobol" | "cpy") {
+    if matches!(ext, "cbl" | "cob" | "cobol" | "cpy" | "dcl") {
         wicked_estate_extract::cobol_links::supplement(&sf, &mut extraction);
     }
     // Rego: supplement the tree-sitter code parse (rules-as-functions) with the W15 rules
@@ -948,6 +978,9 @@ thread_local! {
     static TEST_INDEX_STAMP_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
     // The documents the converter skipped on this thread's index runs: (path, reason).
     static DOC_SKIPS: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+    // Walked files not admitted or newly unreadable on this thread's index runs: (path, reason).
+    static NOT_INDEXED: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
     // The files reported as retaining old extractor output on this thread: (path, reason).
     static UNREADABLE_FILES: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -1674,28 +1707,9 @@ fn index_path_inner(
             v.push((rel.to_string(), reason));
         }
     };
-    // Report the skips collected so far (path + fixed reason; never document text). Called on
-    // every successful exit, the no-change one included.
-    let flush_doc_skips = |unreadable: &[(String, String)]| {
-        let mut skips = doc_skips
-            .lock()
-            .map(|mut v| std::mem::take(&mut *v))
-            .unwrap_or_default();
-        skips.sort();
-        for (rel_path, reason) in &skips {
-            eprintln!("DOC-SKIPPED: {rel_path}: {reason}");
-        }
-        #[cfg(test)]
-        DOC_SKIPS.with(|n| n.borrow_mut().extend(skips.iter().cloned()));
-        for (rel_path, reason) in unreadable {
-            eprintln!(
-                "UNREADABLE: {rel_path}: {reason} (old extractor output kept; retried each run)"
-            );
-        }
-        #[cfg(test)]
-        UNREADABLE_FILES.with(|n| n.borrow_mut().extend(unreadable.iter().cloned()));
-    };
-
+    let walked = files.len();
+    let confined_root = confined::ConfinedRoot::new(root);
+    let mut not_indexed = Vec::new();
     let supported: Vec<(PathBuf, String)> = files
         .into_iter()
         .filter_map(|p| {
@@ -1708,6 +1722,26 @@ fn index_path_inner(
             // #405: credential files (`.env`, private keys, kubeconfigs, `credentials*`, ...) are
             // never indexed, even when committed.
             if wicked_estate_extract::redact::is_excluded(&rel_path) {
+                not_indexed.push((
+                    repo_scope::namespaced(repo, &rel_path),
+                    ext,
+                    NOT_INDEXED_SECRET,
+                ));
+                return None;
+            }
+            // #447: .ctl also names mainframe control cards. Only a VB6 header admits it;
+            // unreadable files still reach the existing read-failure handling below.
+            if ext == "ctl"
+                && confined_root
+                    .as_ref()
+                    .and_then(|c| c.read(&p))
+                    .is_some_and(|bytes| !is_vb6_source(&bytes))
+            {
+                not_indexed.push((
+                    repo_scope::namespaced(repo, &rel_path),
+                    ext,
+                    NOT_INDEXED_CTL,
+                ));
                 return None;
             }
             // Admit tree-sitter languages AND the grammar-less line extractors (JCL / HLASM), whose
@@ -1729,17 +1763,91 @@ fn index_path_inner(
             if ext_map.claims(&ext) || is_grammarless_ext(&ext) || is_doc || extra_match {
                 Some((p, rel_path))
             } else {
+                let reason = not_indexed_reason(&ext);
+                not_indexed.push((repo_scope::namespaced(repo, &rel_path), ext, reason));
                 None
             }
         })
         .collect();
+
+    // The filter above is sequential; reads below add new unreadable files from rayon workers.
+    let not_indexed = std::sync::Mutex::new(not_indexed);
+    let skip_new_unreadable = |rel_path: &str| {
+        let path = repo_scope::namespaced(repo, rel_path);
+        if !previously_indexed.contains(&path) {
+            let ext = Path::new(rel_path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if let Ok(mut entries) = not_indexed.lock() {
+                entries.push((path, ext, NOT_INDEXED_READ));
+            }
+        }
+    };
+    // Report fixed reasons and paths only, on every successful exit, including no-change runs.
+    let flush_doc_skips = |unreadable: &[(String, String)]| {
+        let mut skips = doc_skips
+            .lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default();
+        skips.sort();
+        for (rel_path, reason) in &skips {
+            eprintln!("DOC-SKIPPED: {rel_path}: {reason}");
+        }
+        #[cfg(test)]
+        DOC_SKIPS.with(|n| n.borrow_mut().extend(skips.iter().cloned()));
+        for (rel_path, reason) in unreadable {
+            eprintln!(
+                "UNREADABLE: {rel_path}: {reason} (old extractor output kept; retried each run)"
+            );
+        }
+        #[cfg(test)]
+        UNREADABLE_FILES.with(|n| n.borrow_mut().extend(unreadable.iter().cloned()));
+
+        let entries = not_indexed
+            .lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default();
+        if entries.is_empty() {
+            return;
+        }
+        #[cfg(test)]
+        NOT_INDEXED.with(|n| {
+            n.borrow_mut().extend(
+                entries
+                    .iter()
+                    .map(|(path, _, reason)| (path.clone(), (*reason).to_string())),
+            );
+        });
+        let total = entries.len();
+        let mut groups: std::collections::BTreeMap<(String, &str), Vec<String>> =
+            std::collections::BTreeMap::new();
+        for (path, ext, reason) in entries {
+            groups.entry((ext, reason)).or_default().push(path);
+        }
+        for ((ext, reason), mut paths) in groups {
+            paths.sort();
+            let count = paths.len();
+            paths.truncate(3);
+            let label = if ext.is_empty() {
+                "(no extension)".to_string()
+            } else {
+                format!(".{ext}")
+            };
+            eprintln!(
+                "NOT-INDEXED: {label}: {count} file(s): {reason} (e.g. {})",
+                paths.join(", ")
+            );
+        }
+        eprintln!("NOT-INDEXED: {total} of {walked} walked file(s) not indexed");
+    };
 
     let current_rel_paths: HashSet<String> = supported
         .iter()
         .map(|(_, r)| repo_scope::namespaced(repo, r))
         .collect();
 
-    let confined_root = confined::ConfinedRoot::new(root);
     let work: Vec<FileWork> = supported
         .into_par_iter()
         .filter_map(|(abs, rel_path)| {
@@ -1748,7 +1856,10 @@ fn index_path_inner(
                 // A binary document: read capped, digested as raw bytes (what freshness compares),
                 // and its bytes NOT held for the whole run (a repo of PDFs would sit in memory at
                 // once): it is read again when, and only if, it converts.
-                let resolved = confined_root.as_ref()?.resolve(&abs)?;
+                let Some(resolved) = confined_root.as_ref().and_then(|c| c.resolve(&abs)) else {
+                    skip_new_unreadable(&rel_path);
+                    return None;
+                };
                 let bytes = match doc_convert::read_capped(&resolved) {
                     Ok(b) => b,
                     Err(reason) => {
@@ -1768,9 +1879,13 @@ fn index_path_inner(
             }
             #[cfg(test)]
             if test_read_fails(&abs) {
+                skip_new_unreadable(&rel_path);
                 return None;
             }
-            let bytes = confined_root.as_ref()?.read(&abs)?;
+            let Some(bytes) = confined_root.as_ref().and_then(|c| c.read(&abs)) else {
+                skip_new_unreadable(&rel_path);
+                return None;
+            };
             let export_metadata = wicked_estate_extract::apexlang::export_metadata_path(&rel_path)
                 .map(|meta| confined_root.as_ref()?.read(&root.join(meta)));
             let digest = source_digest(&bytes, export_metadata.as_ref().and_then(|m| m.as_deref()));
@@ -3842,6 +3957,174 @@ mod tests {
     use super::*;
     use wicked_estate_core::{GraphWrite, Language, Location, Node, NodeKind, Span, SymbolId};
     use wicked_estate_store::{GraphStoreMutExt, MemStore};
+
+    #[test]
+    fn vb6_source_requires_a_version_header_on_the_first_nonblank_line() {
+        // Red on main: the content discriminator does not exist; .ctl is extension-only.
+        for bytes in [
+            &b"VERSION 5.00\r\nBegin VB.UserControl Gauge\r\n"[..],
+            &b"\xef\xbb\xbfVERSION 5.00\n"[..],
+            &b"\r\n \t\r\nVERSION 5.00\r\n"[..],
+            &b"version 5.00\n"[..],
+            &b"\xef\xbb\xbf\r\n\t\r\nversion 5.00\r\n"[..],
+        ] {
+            assert!(is_vb6_source(bytes), "{bytes:?}");
+        }
+        for bytes in [
+            &b"   REPRO INFILE(TRANFILE) OUTFILE(TRANVSAM)\n"[..],
+            &b""[..],
+            &b" \t\r\n"[..],
+            &b"//STEP05 EXEC PGM=IDCAMS\n"[..],
+            &b"REPRO\nVERSION 5.00\n"[..],
+            &b"VERSIONED 5.00\n"[..],
+            &b" VERSION 5.00\n"[..],
+        ] {
+            assert!(!is_vb6_source(bytes), "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn not_indexed_reasons_describe_export_formats() {
+        // Red on main: no reason helper or NOT-INDEXED reporting exists.
+        for (ext, reason) in [
+            ("ddl", "Db2 DDL: no DDL extractor yet (wicked-estate#447)"),
+            ("db2", "Db2 DDL: no DDL extractor yet (wicked-estate#447)"),
+            (
+                "csd",
+                "CICS CSD resource definitions: no extractor yet (wicked-estate#447)",
+            ),
+            (
+                "mac",
+                "HLASM macro library member: no macro extractor yet (wicked-estate#447)",
+            ),
+            (
+                "ca7",
+                "scheduler definition: no extractor yet (wicked-estate#447)",
+            ),
+            (
+                "controlm",
+                "scheduler definition: no extractor yet (wicked-estate#447)",
+            ),
+            (
+                "ctl",
+                "mainframe control card (not VB6): no extractor yet (wicked-estate#447)",
+            ),
+            ("unknown", "no extractor for this file type"),
+            ("", "no extractor for this file type"),
+        ] {
+            assert_eq!(not_indexed_reason(ext), reason, ".{ext}");
+        }
+    }
+
+    #[test]
+    fn not_indexed_records_namespaced_control_cards_secrets_and_unknown_files() {
+        // Red on main: these exclusions are silent (and the control card is admitted as VB6).
+        let tmp = tempfile::tempdir().unwrap();
+        for (file, text) in [
+            ("REPROCT.ctl", "   REPRO INFILE(A) OUTFILE(B)\n"),
+            ("credentials.yaml", "token: synthetic\n"),
+            ("member.unknown", "synthetic export\n"),
+            ("LICENSE", "synthetic license\n"),
+        ] {
+            std::fs::write(tmp.path().join(file), text).unwrap();
+        }
+        assert!(wicked_estate_extract::redact::is_excluded(
+            "credentials.yaml"
+        ));
+        let mut store = MemStore::new();
+        for _ in 0..2 {
+            NOT_INDEXED.with(|notes| notes.borrow_mut().clear());
+            index_path_as(&mut store, tmp.path(), Some("export")).unwrap();
+            let mut notes = NOT_INDEXED.with(|notes| notes.borrow().clone());
+            notes.sort();
+            assert_eq!(
+                notes,
+                vec![
+                    (
+                        "export/LICENSE".to_string(),
+                        "no extractor for this file type".to_string(),
+                    ),
+                    (
+                        "export/REPROCT.ctl".to_string(),
+                        "mainframe control card (not VB6): no extractor yet (wicked-estate#447)"
+                            .to_string(),
+                    ),
+                    (
+                        "export/credentials.yaml".to_string(),
+                        "matches the secret-file rule; never indexed".to_string(),
+                    ),
+                    (
+                        "export/member.unknown".to_string(),
+                        "no extractor for this file type".to_string(),
+                    ),
+                ]
+            );
+        }
+        assert!(GraphRead::indexed_files(&store).unwrap().is_empty());
+    }
+
+    #[test]
+    fn new_unreadable_files_are_reported_without_duplicating_old_output_notes() {
+        // Red on main: the work-list read failure silently drops a new supported file.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("old.rs"), "pub fn old() {}\n").unwrap();
+        let mut store = MemStore::new();
+        index_path_as(&mut store, tmp.path(), Some("export")).unwrap();
+        std::fs::write(tmp.path().join("new.rs"), "pub fn new() {}\n").unwrap();
+        // Force the existing UNREADABLE retry branch for the previously indexed path.
+        store.meta_set_key(
+            &repo_scope::meta_key(Some("export"), "indexed_version"),
+            "0.0.0-older",
+        );
+        let _old =
+            crate::semantics_survive_reindex_tests::ReadFailGuard::new(tmp.path().join("old.rs"));
+        let _new =
+            crate::semantics_survive_reindex_tests::ReadFailGuard::new(tmp.path().join("new.rs"));
+        NOT_INDEXED.with(|notes| notes.borrow_mut().clear());
+        UNREADABLE_FILES.with(|notes| notes.borrow_mut().clear());
+        index_path_as(&mut store, tmp.path(), Some("export")).unwrap();
+        NOT_INDEXED.with(|notes| {
+            assert_eq!(
+                &*notes.borrow(),
+                &[(
+                    "export/new.rs".to_string(),
+                    "could not be read inside the repository root".to_string(),
+                )]
+            );
+        });
+        UNREADABLE_FILES.with(|notes| {
+            assert_eq!(
+                &*notes.borrow(),
+                &[("export/old.rs".to_string(), "read failed".to_string())]
+            );
+        });
+    }
+
+    #[test]
+    fn a_previously_indexed_mainframe_control_card_is_swept() {
+        // Red on main: extension-only admission keeps the old VB6 digest and File node.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("REPROCT.ctl"),
+            "   REPRO INFILE(A) OUTFILE(B)\n",
+        )
+        .unwrap();
+        let mut store = MemStore::new();
+        ensure_redacted(&mut store).unwrap();
+        store.set_file_digest("REPROCT.ctl", "old").unwrap();
+        store
+            .upsert_nodes(&[Node::new(
+                Symbol::file("REPROCT.ctl").id(),
+                NodeKind::File,
+                "REPROCT.ctl".to_string(),
+                Language::new("vb6"),
+                Location::new("REPROCT.ctl", Span::ZERO),
+            )])
+            .unwrap();
+        index_path(&mut store, tmp.path()).unwrap();
+        assert!(GraphRead::indexed_files(&store).unwrap().is_empty());
+        assert!(GraphRead::all_nodes(&store).unwrap().is_empty());
+    }
 
     // #422: keep chunk overrides on the indexing thread, isolated from concurrent tests.
     fn index_with_chunk_limits(
@@ -6670,9 +6953,9 @@ mod semantics_survive_reindex_tests {
 
     /// Forces the work-list read of `abs` to fail until dropped (#471): a deterministic read
     /// failure on every platform and as any user, unlike file permissions (root reads mode 000).
-    struct ReadFailGuard(PathBuf);
+    pub(super) struct ReadFailGuard(PathBuf);
     impl ReadFailGuard {
-        fn new(abs: PathBuf) -> Self {
+        pub(super) fn new(abs: PathBuf) -> Self {
             TEST_READ_FAILS.lock().unwrap().push(abs.clone());
             ReadFailGuard(abs)
         }
