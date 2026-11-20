@@ -2163,31 +2163,21 @@ fn index_path_inner(
     // call-derived ids (#470), and are counted as dropped only after the final batch commits.
     let mut all_refs = Vec::new();
 
-    // #438: snapshot the semantic fields of every symbol homed in a file about to be removed —
-    // CHANGED and DELETED alike — before any remove_file. Keep future chunks' entries separate
-    // until their old contributions have been removed; otherwise an early restore onto a symbol
-    // still in its old file would be lost when that file's chunk runs.
-    let saved_semantics = {
-        let mut rels: Vec<&str> = changed.iter().map(|fw| fw.rel.as_str()).collect();
-        rels.extend(deleted.iter().map(String::as_str));
-        store.semantics_in_files(&rels)?
-    };
-    let mut saved_semantics_by_file: HashMap<String, Vec<_>> = HashMap::new();
-    for entry in saved_semantics {
-        saved_semantics_by_file
-            .entry(entry.0.clone())
-            .or_default()
-            .push(entry);
-    }
+    // #438/#463: snapshot semantics inside the batch that removes and restores the rows. Each
+    // batch enqueues only its own files' entries; future chunks' entries stay out of pending
+    // until their old contributions are removed, so an early restore onto a symbol still in a
+    // later chunk's file cannot lose that file's semantics when its chunk runs.
     // Deleted files get their own short batch, committed before extraction begins.
     if !deleted.is_empty() {
+        let rels: Vec<&str> = deleted.iter().map(String::as_str).collect();
         store.begin_batch()?;
+        let snapshot = store.semantics_in_files(&rels)?;
         for path in &deleted {
             store.remove_file(path)?;
-            pending_semantics.extend(saved_semantics_by_file.remove(path).unwrap_or_default());
             // W7.1: log the removal so subscribers see the deletion delta.
             let _ = store.log_change(ChangeOp::Remove, path);
         }
+        pending_semantics.extend(snapshot);
         pending_semantics_save(store, &other_pending_semantics, &pending_semantics)?;
         store.commit_batch()?;
     }
@@ -2362,12 +2352,14 @@ fn index_path_inner(
         #[cfg(test)]
         TEST_MAX_EXTRACTIONS.with(|v| v.set(v.get().max(extractions.len())));
 
+        let rels: Vec<&str> = chunk.iter().map(|fw| fw.rel.as_str()).collect();
         store.begin_batch()?;
+        let snapshot = store.semantics_in_files(&rels)?;
         // Remove only this chunk's old contributions, after extraction has finished.
         for fw in chunk {
             store.remove_file(&fw.rel)?;
-            pending_semantics.extend(saved_semantics_by_file.remove(&fw.rel).unwrap_or_default());
         }
+        pending_semantics.extend(snapshot);
         for (rel_path, extraction, text) in extractions {
             store.upsert_nodes_skip_fts(&extraction.nodes)?;
             store.upsert_edges(&extraction.local_edges)?;

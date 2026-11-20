@@ -895,6 +895,25 @@ async fn pg_support_lock(c: &mut sqlx::PgConnection, exclusive: bool) -> Result<
     Ok(())
 }
 
+/// Re-index snapshots take this SHARED until their batch ends; semantic writers take it
+/// EXCLUSIVE through their update. Indexers acquire semantics before the shared support lock
+/// in `remove_file`; semantic writers never take the support lock, so there is no lock cycle.
+const SEMANTICS_LOCK_KEY: i64 = 0x5345_4D41; // "SEMA"
+
+async fn pg_semantics_lock(c: &mut sqlx::PgConnection, exclusive: bool) -> Result<()> {
+    let sql = if exclusive {
+        "SELECT pg_advisory_xact_lock($1)"
+    } else {
+        "SELECT pg_advisory_xact_lock_shared($1)"
+    };
+    sqlx::query(sql)
+        .bind(SEMANTICS_LOCK_KEY)
+        .execute(c)
+        .await
+        .map_err(st)?;
+    Ok(())
+}
+
 /// The kept-aside base contribution: parsed, and its stored JSON text so a restore writes back
 /// the exact bytes.
 async fn pg_edge_base_of(
@@ -1830,61 +1849,83 @@ impl GraphWrite for PostgresStore {
             return Ok(());
         }
         let mut h = self.conn()?;
-        // Check the symbol exists (no intern for Postgres — directly query nodes).
-        let exists: bool = rt_block(async {
-            let row: Option<sqlx::postgres::PgRow> =
-                sqlx::query("SELECT 1 AS exists_flag FROM nodes WHERE symbol = $1")
+        let in_batch = matches!(&h, ConnHandle::Tx(_));
+        rt_block(async {
+            // A real transaction outside a batch, a SAVEPOINT inside one, like support
+            // replacement. The lock covers the exists-check and every partial update (#463).
+            use sqlx::Connection;
+            let mut tx = h.as_conn().begin().await.map_err(st)?;
+            let result = async {
+                if !in_batch {
+                    // Each statement must see a fresh snapshot after the lock wait, even on a
+                    // server whose default isolation is REPEATABLE READ or SERIALIZABLE.
+                    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(st)?;
+                }
+                pg_semantics_lock(&mut tx, true).await?;
+                let exists = sqlx::query("SELECT 1 AS exists_flag FROM nodes WHERE symbol = $1")
                     .bind(&symbol.0)
-                    .fetch_optional(h.as_conn())
-                    .await?;
-            Ok::<bool, sqlx::Error>(row.is_some())
-        })
-        .map_err(st)?;
-        if !exists {
-            return Ok(());
-        }
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(st)?
+                    .is_some();
+                if !exists {
+                    return Ok(());
+                }
 
-        if let Some(d) = description {
-            rt_block(
-                sqlx::query("UPDATE nodes SET description = $2 WHERE symbol = $1")
+                if let Some(d) = description {
+                    sqlx::query("UPDATE nodes SET description = $2 WHERE symbol = $1")
+                        .bind(&symbol.0)
+                        .bind(d)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(st)?;
+                }
+                if let Some(r) = requirement {
+                    sqlx::query("UPDATE nodes SET requirement = $2 WHERE symbol = $1")
+                        .bind(&symbol.0)
+                        .bind(r)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(st)?;
+                }
+                if let Some(claim) = validation {
+                    // Flag, author and timestamp move in ONE statement. Splitting them would allow
+                    // a validated row with no author — the unattributable state `ValidationClaim`
+                    // exists to make unrepresentable (mirrors SqliteStore).
+                    let flag: i64 = claim.validated as i64;
+                    let now: i64 = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    sqlx::query(
+                        "UPDATE nodes SET requirement_validated = $2, \
+                         requirement_validated_by = $3, requirement_validated_at = $4 \
+                         WHERE symbol = $1",
+                    )
                     .bind(&symbol.0)
-                    .bind(d)
-                    .execute(h.as_conn()),
-            )
-            .map_err(st)?;
-        }
-        if let Some(r) = requirement {
-            rt_block(
-                sqlx::query("UPDATE nodes SET requirement = $2 WHERE symbol = $1")
-                    .bind(&symbol.0)
-                    .bind(r)
-                    .execute(h.as_conn()),
-            )
-            .map_err(st)?;
-        }
-        if let Some(claim) = validation {
-            // Flag, author and timestamp move in ONE statement. Splitting them would allow a
-            // validated row with no author — the unattributable state `ValidationClaim` exists to
-            // make unrepresentable (mirrors SqliteStore).
-            let flag: i64 = claim.validated as i64;
-            let now: i64 = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            rt_block(
-                sqlx::query(
-                    "UPDATE nodes SET requirement_validated = $2, requirement_validated_by = $3, \
-                     requirement_validated_at = $4 WHERE symbol = $1",
-                )
-                .bind(&symbol.0)
-                .bind(flag)
-                .bind(&claim.by)
-                .bind(now)
-                .execute(h.as_conn()),
-            )
-            .map_err(st)?;
-        }
-        Ok(())
+                    .bind(flag)
+                    .bind(&claim.by)
+                    .bind(now)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(st)?;
+                }
+                Ok::<(), Error>(())
+            }
+            .await;
+            match result {
+                Ok(()) => tx.commit().await.map_err(st),
+                Err(e) => match tx.rollback().await {
+                    Ok(()) => Err(e),
+                    Err(rollback) => Err(Error::Storage(format!(
+                        "{e}; rolling the semantic update back also failed ({rollback})"
+                    ))),
+                },
+            }
+        })
     }
 
     fn restore_node_semantics(
@@ -2700,6 +2741,9 @@ impl GraphRead for PostgresStore {
 
     fn semantics_in_files(&self, files: &[&str]) -> Result<Vec<(String, SymbolId, NodeSemantics)>> {
         let mut h = self.conn()?;
+        if matches!(&h, ConnHandle::Tx(_)) {
+            rt_block(pg_semantics_lock(h.as_conn(), false))?;
+        }
         let files: Vec<String> = files.iter().map(|f| (*f).to_string()).collect();
         rt_block(async {
             let rows = sqlx::query(
