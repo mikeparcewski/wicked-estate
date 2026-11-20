@@ -577,8 +577,9 @@ impl KnowledgeEngine {
                 serde_json::to_value(&proposal.facets)?,
             );
         }
+        let node = wicked_estate_core::redact::redact_text_node(&node).unwrap_or(node);
         Ok(ApprovalPlan {
-            embed_text: kn.content.clone(),
+            embed_text: wicked_estate_core::redact::redact_free_text(&kn.content).into_owned(),
             node,
             edges,
             deps,
@@ -605,9 +606,11 @@ impl KnowledgeEngine {
         // The flip: node and vector together.
         let vec = self.embed(&plan.embed_text);
         self.store.begin_batch()?;
+        let redacted = wicked_estate_core::redact::redact_text_node(&plan.node);
+        let node = redacted.as_ref().unwrap_or(&plan.node);
         let written = self
             .store
-            .upsert_nodes(std::slice::from_ref(&plan.node))
+            .upsert_nodes(std::slice::from_ref(node))
             .and_then(|_| self.store.set_embedding(&plan.node.symbol, &vec));
         match written.and_then(|_| self.store.commit_batch()) {
             Ok(()) => Ok(()),
@@ -642,7 +645,12 @@ impl KnowledgeEngine {
         m.insert("proposal_id".into(), proposal.id.clone().into());
         m.insert("owner".into(), plan.node.symbol.0.clone().into());
         m.insert("node".into(), serde_json::to_string(&plan.node)?.into());
-        m.insert("embed_text".into(), plan.embed_text.clone().into());
+        m.insert(
+            "embed_text".into(),
+            wicked_estate_core::redact::redact_free_text(&plan.embed_text)
+                .into_owned()
+                .into(),
+        );
         m.insert(
             "edges".into(),
             Value::Array(plan.edges.iter().map(edge_to_json).collect()),
@@ -652,6 +660,7 @@ impl KnowledgeEngine {
         // a fresh retry that overwrote the journal in between.
         let attempt = uuid::Uuid::now_v7().to_string();
         m.insert("attempt".into(), attempt.clone().into());
+        let journal = wicked_estate_core::redact::redact_text_node(&journal).unwrap_or(journal);
         self.store.upsert_nodes(std::slice::from_ref(&journal))?;
         self.attempts.insert(proposal.id.clone(), attempt);
         // 2-3. Edges (hidden: their owner is not live yet), then the node.
@@ -776,6 +785,8 @@ impl KnowledgeEngine {
             })?
             .iter()
             .filter_map(|n| {
+                let redacted = wicked_estate_core::redact::redact_text_node(n);
+                let n = redacted.as_ref().unwrap_or(n);
                 let m = &n.metadata;
                 Some(ApplyJournal {
                     proposal_id: m.get("proposal_id").and_then(Value::as_str)?.to_string(),
@@ -949,7 +960,10 @@ impl KnowledgeEngine {
                     Ok(other) => other.to_string(),
                     Err(_) => String::new(),
                 }),
-                label: n.name.chars().take(LABEL_CHARS).collect(),
+                label: wicked_estate_core::redact::redact_free_text(&n.name)
+                    .chars()
+                    .take(LABEL_CHARS)
+                    .collect(),
                 scope: n.scope.as_path(),
                 deps,
                 untrusted: false,

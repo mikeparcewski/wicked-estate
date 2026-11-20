@@ -1057,6 +1057,8 @@ pub enum RedactionOutcome {
     Fresh,
     /// Text written before the policy was cleaned in place.
     Migrated(wicked_estate_store::RedactionReport),
+    /// Memory/knowledge text written before the free-text policy was cleaned in place.
+    TextMigrated(wicked_estate_store::RedactionReport),
     /// Already migrated; the leftover physical cleanup (WAL truncate + VACUUM) was retried.
     /// `true` when it completed.
     CleanupRetried(bool),
@@ -1064,17 +1066,45 @@ pub enum RedactionOutcome {
 
 /// Make `store` safe to serve under the current secret-redaction policy (wicked-estate#405).
 ///
+/// Non-code stores with nodes and an old or absent text epoch are explicitly cleaned using the
+/// free-text policy (#406). Engine opens only warn; their hydration paths always mask text.
 /// A code graph (any indexed file, or a recorded `indexed_root`) whose `redaction_epoch` is older
 /// than this build's is migrated in place ([`GraphStoreMutExt::migrate_redaction`]); a fresh store
 /// only records the epoch; a migrated store whose physical cleanup did not complete gets it
 /// retried. A backend with no migration is an ERROR, never reported as clean. Progress goes to
 /// stderr as counts, never values.
 pub fn ensure_redacted(store: &mut dyn GraphStoreMutExt) -> Result<RedactionOutcome> {
-    use wicked_estate_core::redact::{REDACTION_EPOCH, REDACTION_EPOCH_KEY};
+    use wicked_estate_core::redact::{
+        REDACTION_EPOCH, REDACTION_EPOCH_KEY, TEXT_REDACTION_EPOCH, TEXT_REDACTION_EPOCH_KEY,
+    };
+    let code_graph =
+        store.meta_get_key("indexed_root").is_some() || !store.indexed_files()?.is_empty();
+    let text_current = store
+        .meta_get_key(TEXT_REDACTION_EPOCH_KEY)
+        .and_then(|v| v.parse::<u32>().ok())
+        .is_some_and(|e| e >= TEXT_REDACTION_EPOCH);
+    if !code_graph && !text_current {
+        if store.stats()?.node_count > 0 {
+            let Some(rep) = store.migrate_text_redaction()? else {
+                return Err(wicked_estate_core::Error::Invalid(
+                    "this store backend cannot clean text written before secret redaction \
+                     (#406); re-create the store to clean it"
+                        .into(),
+                ));
+            };
+            eprintln!(
+                "REDACTION: cleaned a text store (#406): {} node rows and {} other rows \
+                 rewritten; WAL truncated: {}",
+                rep.nodes_rewritten, rep.rows_scrubbed, rep.wal_truncated,
+            );
+            return Ok(RedactionOutcome::TextMigrated(rep));
+        }
+        store.meta_put(TEXT_REDACTION_EPOCH_KEY, &TEXT_REDACTION_EPOCH.to_string())?;
+    }
     let epoch = store
         .meta_get_key(REDACTION_EPOCH_KEY)
         .and_then(|v| v.parse::<u32>().ok());
-    if epoch.is_some_and(|e| e >= REDACTION_EPOCH) {
+    if epoch.is_some_and(|e| e >= REDACTION_EPOCH) || (!code_graph && text_current) {
         if store.redaction_cleanup_pending() {
             let done = store.finish_redaction_cleanup()?;
             if !done {
@@ -1088,8 +1118,6 @@ pub fn ensure_redacted(store: &mut dyn GraphStoreMutExt) -> Result<RedactionOutc
         return Ok(RedactionOutcome::Current);
     }
     let digest = wicked_estate_extract::redact::rules_digest();
-    let code_graph =
-        store.meta_get_key("indexed_root").is_some() || !store.indexed_files()?.is_empty();
     if !code_graph {
         store.meta_set_key(REDACTION_EPOCH_KEY, &REDACTION_EPOCH.to_string());
         store.meta_set_key("redaction_rules", &digest);

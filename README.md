@@ -293,8 +293,10 @@ Per the project's "every done needs a still-not-done" rule:
 - **Secret redaction** ([docs/secret-redaction.md](./docs/secret-redaction.md)): committed config
   values are default-deny and code literals are masked where a secret is detected. Not detected: a
   secret under an innocent name in code, or one placed inside a hostname or repository owner. A
-  masked value's length is visible. Memory and knowledge stores are not redacted yet (#406).
-  Stores written before 0.33.0 are cleaned on their next `index` or by `wicked-estate redact-store`.
+  masked value's length is visible. Memory and knowledge text masks token shapes and secret-named
+  assignments on capture and read (#406); secrets under innocent names in prose are not detected.
+  Clean existing memory/knowledge stores with `wicked-estate redact-store --db <path>`.
+  Code stores written before 0.33.0 are cleaned on their next `index` or by `redact-store`.
 
 ## Docs
 

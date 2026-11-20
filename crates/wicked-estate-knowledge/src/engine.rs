@@ -145,11 +145,13 @@ impl KNode {
         m.insert(meta_keys::SCOPE.into(), self.scope.clone().into());
         m.insert(meta_keys::SOURCE.into(), self.source.clone().into());
         m.insert(meta_keys::CREATED_AT.into(), self.created_at.into());
-        node
+        wicked_estate_core::redact::redact_text_node(&node).unwrap_or(node)
     }
 
     /// Reconstruct from an estate `Node` written by [`KNode::to_node`]. `None` if not a knowledge node.
     pub fn from_node(node: &Node) -> Option<KNode> {
+        let redacted = wicked_estate_core::redact::redact_text_node(node);
+        let node = redacted.as_ref().unwrap_or(node);
         let NodeKind::Other(k) = &node.kind else {
             return None;
         };
@@ -300,7 +302,20 @@ impl KnowledgeEngine {
 
     /// Open a durable engine at `path` — knowledge's OWN file (NOT the code/memory db).
     pub fn open(path: &str) -> Result<Self> {
-        Ok(Self::with_store(SqliteStore::open(path)?))
+        let store = SqliteStore::open(path)?;
+        use wicked_estate_core::redact::{TEXT_REDACTION_EPOCH, TEXT_REDACTION_EPOCH_KEY};
+        let epoch = store
+            .meta_get(TEXT_REDACTION_EPOCH_KEY)?
+            .and_then(|v| v.parse::<u32>().ok());
+        if !epoch.is_some_and(|e| e >= TEXT_REDACTION_EPOCH) && store.stats()?.node_count > 0 {
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "REDACTION-PENDING: {path} holds text written before redaction; run \
+                 `wicked-estate redact-store --db {path}`"
+            );
+        }
+        Ok(Self::with_store(store))
     }
 
     fn with_store(store: SqliteStore) -> Self {
@@ -359,7 +374,8 @@ impl KnowledgeEngine {
 
     /// The engine's embedding of `text` (the vector `write` stores).
     pub(crate) fn embed(&self, text: &str) -> Vec<f32> {
-        self.embedder.embed(text)
+        self.embedder
+            .embed(&wicked_estate_core::redact::redact_free_text(text))
     }
 
     /// Write ONE knowledge node carrying `deps` and the untrusted flag (DES-KNOWLEDGE-DATA-001
@@ -373,8 +389,9 @@ impl KnowledgeEngine {
         let sym = k.symbol();
         let mut node = k.to_node();
         crate::plane::stamp(&mut node, deps, untrusted);
+        let node = wicked_estate_core::redact::redact_text_node(&node).unwrap_or(node);
         self.store.upsert_nodes(&[node])?;
-        let vec = self.embedder.embed(&k.content);
+        let vec = self.embed(&k.content);
         self.store.set_embedding(&sym, &vec)?;
         Ok(sym)
     }
@@ -384,7 +401,7 @@ impl KnowledgeEngine {
     pub fn write(&mut self, k: &KNode) -> Result<SymbolId> {
         let sym = k.symbol();
         self.store.upsert_nodes(&[k.to_node()])?;
-        let vec = self.embedder.embed(&k.content);
+        let vec = self.embed(&k.content);
         self.store.set_embedding(&sym, &vec)?;
         Ok(sym)
     }
@@ -415,7 +432,10 @@ impl KnowledgeEngine {
 
     /// Fetch a node by id.
     pub fn node(&self, id: &SymbolId) -> Result<Option<Node>> {
-        self.store.get_node(id)
+        Ok(self
+            .store
+            .get_node(id)?
+            .map(|node| wicked_estate_core::redact::redact_text_node(&node).unwrap_or(node)))
     }
 
     /// Count knowledge nodes (optionally of one class, optionally within a scope subtree).
@@ -834,6 +854,76 @@ fn dangling_err(which: &str, id: &SymbolId) -> wicked_estate_core::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durable_write_and_ingest_redact_database_wal_and_recall() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("knowledge.db");
+        {
+            let mut eng = KnowledgeEngine::open(path.to_str().unwrap()).unwrap();
+            let text = "redaction fixture DB_PASSWORD=hunter2-example AKIAIOSFODNN7EXAMPLE";
+            eng.write(&KNode::new(
+                KClass::Concept,
+                text,
+                "wiki:test",
+                "test.md",
+                1,
+            ))
+            .unwrap();
+            eng.ingest(
+                "redaction fixture",
+                &[text.into()],
+                "wiki:test",
+                "test.md",
+                1,
+            )
+            .unwrap();
+            let hits = eng.recall("redaction fixture", 2000, None, 2).unwrap();
+            assert!(!hits.is_empty());
+            for hit in hits {
+                assert!(!hit.content.contains("hunter2-example"));
+                assert!(!hit.content.contains("AKIAIOSFODNN7EXAMPLE"));
+            }
+            assert_text_files_clean(&path);
+        }
+        assert_text_files_clean(&path);
+    }
+
+    fn assert_text_files_clean(path: &std::path::Path) {
+        for path in [
+            path.to_path_buf(),
+            std::path::PathBuf::from(format!("{}-wal", path.display())),
+        ] {
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => panic!("read fixture: {e}"),
+            };
+            for value in ["hunter2-example", "AKIAIOSFODNN7EXAMPLE"] {
+                assert!(!bytes.windows(value.len()).any(|w| w == value.as_bytes()));
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_knowledge_reads_mask_content_and_source() {
+        let mut node = KNode::new(KClass::Chunk, "safe", "wiki:test", "test.md", 1).to_node();
+        node.name = "DB_PASSWORD=hunter2-example".into();
+        node.metadata
+            .insert(meta_keys::CONTENT.into(), node.name.clone().into());
+        node.metadata
+            .insert(meta_keys::SOURCE.into(), "token=hunter2-example".into());
+        let served = KNode::from_node(&node).unwrap();
+        assert!(!served.content.contains("hunter2-example"));
+        assert!(!served.source.contains("hunter2-example"));
+        node.metadata.remove(meta_keys::CONTENT);
+        assert!(
+            !KNode::from_node(&node)
+                .unwrap()
+                .content
+                .contains("hunter2-example")
+        );
+    }
 
     #[test]
     fn ingest_then_recall_round_trips() {

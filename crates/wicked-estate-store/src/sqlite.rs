@@ -72,16 +72,19 @@ pub struct TelemetryImport {
 /// current redaction policy: record the policy epoch so it is never served as pending (#405).
 /// A store an older build wrote has file rows and is left for the migration.
 fn stamp_fresh_redaction_epoch(conn: &Connection) -> Result<()> {
-    conn.execute(
-        "INSERT OR IGNORE INTO meta(k, v) \
-         SELECT ?1, ?2 WHERE NOT EXISTS (SELECT 1 FROM files) \
-           AND NOT EXISTS (SELECT 1 FROM content) AND NOT EXISTS (SELECT 1 FROM nodes)",
-        params![
-            wicked_estate_core::redact::REDACTION_EPOCH_KEY,
-            wicked_estate_core::redact::REDACTION_EPOCH.to_string()
-        ],
-    )
-    .map_err(st)?;
+    use wicked_estate_core::redact as r;
+    for (key, epoch) in [
+        (r::REDACTION_EPOCH_KEY, r::REDACTION_EPOCH),
+        (r::TEXT_REDACTION_EPOCH_KEY, r::TEXT_REDACTION_EPOCH),
+    ] {
+        conn.execute(
+            "INSERT OR IGNORE INTO meta(k, v) \
+             SELECT ?1, ?2 WHERE NOT EXISTS (SELECT 1 FROM files) \
+               AND NOT EXISTS (SELECT 1 FROM content) AND NOT EXISTS (SELECT 1 FROM nodes)",
+            params![key, epoch.to_string()],
+        )
+        .map_err(st)?;
+    }
     Ok(())
 }
 
@@ -2335,37 +2338,7 @@ impl SqliteStore {
             // (2) token-shape scrub over every other free-text column, identity strings included
             // (`symbols.sym`, `nodes.name`): the scrub is deterministic, so every copy of an id
             // (the symbols row, serialized ids in node/edge JSON, embeddings) masks identically.
-            for (table, col) in [
-                ("symbols", "sym"),
-                ("nodes", "name"),
-                ("embeddings", "symbol"),
-                ("nodes", "requirement_validated_by"),
-                ("annotations", "type"),
-                ("annotations", "source_type"),
-                ("annotations", "extraction_method"),
-                ("search_misses", "session_id"),
-                ("access_log", "session_id"),
-                ("nodes", "data"),
-                ("nodes", "description"),
-                ("nodes", "requirement"),
-                ("node_files", "data"),
-                ("edges", "data"),
-                ("edge_base", "data"),
-                ("edge_supports", "data"),
-                ("edge_supports", "fact_id"),
-                ("edge_history", "edge_json"),
-                ("unresolved_refs", "raw_name"),
-                ("annotations", "key"),
-                ("annotations", "value"),
-                ("annotations", "provenance"),
-                ("annotations", "author"),
-                ("search_misses", "query"),
-                ("access_log", "item_id"),
-                ("changes", "target"),
-                ("meta", "v"),
-            ] {
-                rep.rows_scrubbed += self.scrub_column(table, col, &r::scrub)?;
-            }
+            rep.rows_scrubbed += self.scrub_redaction_columns()?;
             // (3) derived records re-derive from masked text on the next index.
             self.conn
                 .execute_batch(
@@ -2392,6 +2365,110 @@ impl SqliteStore {
         self.reset_redaction_guard();
         rep.wal_truncated = self.finish_redaction_cleanup()?;
         Ok(rep)
+    }
+
+    /// Explicitly clean memory/knowledge text in one transaction, then remove old DB/WAL pages.
+    /// Callers select this migration only for stores without a code graph.
+    pub fn migrate_text_redaction(&mut self) -> Result<RedactionReport> {
+        use wicked_estate_core::redact as r;
+        if self.in_batch {
+            return Err(Error::Invalid(
+                "migrate_text_redaction inside an open batch".into(),
+            ));
+        }
+        let mut rep = RedactionReport::default();
+        self.conn.execute_batch("BEGIN IMMEDIATE").map_err(st)?;
+        let result = (|| -> Result<()> {
+            for (table, key) in [("nodes", "symbol"), ("node_files", "rowid")] {
+                let rows: Vec<(i64, String)> = {
+                    let mut q = self
+                        .conn
+                        .prepare(&format!("SELECT {key}, data FROM {table}"))
+                        .map_err(st)?;
+                    q.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                        .map_err(st)?
+                        .collect::<std::result::Result<_, _>>()
+                        .map_err(st)?
+                };
+                for (id, data) in rows {
+                    let node: Node = serde_json::from_str(&data)?;
+                    let Some(redacted) = r::redact_text_node(&node) else {
+                        continue;
+                    };
+                    let data = serde_json::to_string(&redacted)?;
+                    if table == "nodes" {
+                        self.conn
+                            .execute(
+                                "UPDATE nodes SET name=?2, data=?3 WHERE symbol=?1",
+                                params![id, redacted.name, data],
+                            )
+                            .map_err(st)?;
+                    } else {
+                        self.conn
+                            .execute(
+                                "UPDATE node_files SET data=?2 WHERE rowid=?1",
+                                params![id, data],
+                            )
+                            .map_err(st)?;
+                    }
+                    rep.nodes_rewritten += 1;
+                }
+            }
+            rep.rows_scrubbed += self.scrub_redaction_columns()?;
+            rebuild_fts_all(&self.conn)?;
+            self.meta_set(
+                r::TEXT_REDACTION_EPOCH_KEY,
+                &r::TEXT_REDACTION_EPOCH.to_string(),
+            )?;
+            self.meta_set(REDACTION_CLEANUP_KEY, "1")?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self.conn.execute_batch("COMMIT").map_err(st)?,
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        }
+        rep.wal_truncated = self.finish_redaction_cleanup()?;
+        Ok(rep)
+    }
+
+    /// The token-shape backstop over all persisted text columns, shared by both migrations.
+    fn scrub_redaction_columns(&mut self) -> Result<usize> {
+        let mut rows_scrubbed = 0;
+        for (table, col) in [
+            ("symbols", "sym"),
+            ("nodes", "name"),
+            ("embeddings", "symbol"),
+            ("nodes", "requirement_validated_by"),
+            ("annotations", "type"),
+            ("annotations", "source_type"),
+            ("annotations", "extraction_method"),
+            ("search_misses", "session_id"),
+            ("access_log", "session_id"),
+            ("nodes", "data"),
+            ("nodes", "description"),
+            ("nodes", "requirement"),
+            ("node_files", "data"),
+            ("edges", "data"),
+            ("edge_base", "data"),
+            ("edge_supports", "data"),
+            ("edge_supports", "fact_id"),
+            ("edge_history", "edge_json"),
+            ("unresolved_refs", "raw_name"),
+            ("annotations", "key"),
+            ("annotations", "value"),
+            ("annotations", "provenance"),
+            ("annotations", "author"),
+            ("search_misses", "query"),
+            ("access_log", "item_id"),
+            ("changes", "target"),
+            ("meta", "v"),
+        ] {
+            rows_scrubbed += self.scrub_column(table, col, &wicked_estate_core::redact::scrub)?;
+        }
+        Ok(rows_scrubbed)
     }
 
     /// The physical half of a redaction migration: fold the WAL into the main file, rebuild the

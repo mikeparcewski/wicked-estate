@@ -155,7 +155,11 @@ impl Proposal {
         // Payload as a JSON STRING (an opaque, type-specific blob — not a queryable graph field).
         m.insert(
             meta_keys::PAYLOAD.into(),
-            Value::String(self.payload.to_string()),
+            Value::String({
+                let mut payload = self.payload.clone();
+                wicked_estate_core::redact::redact_free_json(&mut payload);
+                payload.to_string()
+            }),
         );
         if !self.facets.is_empty() {
             if let Ok(v) = serde_json::to_value(&self.facets) {
@@ -169,7 +173,7 @@ impl Proposal {
         }
         m.insert(meta_keys::STATE.into(), self.state.as_str().into());
         m.insert(meta_keys::CREATED_AT.into(), self.created_at.into());
-        node
+        wicked_estate_core::redact::redact_text_node(&node).unwrap_or(node)
     }
 
     /// Reconstruct a `Proposal` from an estate `Node` written by [`Proposal::to_node`].
@@ -180,6 +184,8 @@ impl Proposal {
     /// PRESENT-but-invalid facets/provenance blob also fails closed (`None`) rather than silently
     /// dropping the constraint.
     pub fn from_node(node: &Node) -> Option<Proposal> {
+        let redacted = wicked_estate_core::redact::redact_text_node(node);
+        let node = redacted.as_ref().unwrap_or(node);
         match &node.kind {
             NodeKind::Other(k) if k == PROPOSAL_NODE_KIND => {}
             _ => return None,
@@ -191,7 +197,8 @@ impl Proposal {
             return None; // fail-closed on a corrupt kind_type
         }
         // Payload: a JSON string that must re-parse to a JSON value.
-        let payload: Value = serde_json::from_str(m.get(meta_keys::PAYLOAD)?.as_str()?).ok()?;
+        let mut payload: Value = serde_json::from_str(m.get(meta_keys::PAYLOAD)?.as_str()?).ok()?;
+        wicked_estate_core::redact::redact_free_json(&mut payload);
         let state = ProposalState::parse(m.get(meta_keys::STATE)?.as_str()?)?;
         let created_at = m.get(meta_keys::CREATED_AT)?.as_i64()?;
 
@@ -253,6 +260,36 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn proposal_redacts_payload_before_serializing_and_on_legacy_reads() {
+        let payload = serde_json::json!({
+            "content": "password: \"hunter2-example\"",
+            "nested": ["AKIAIOSFODNN7EXAMPLE", "DB_PASSWORD=hunter2-example"],
+        });
+        let proposal = Proposal::new(
+            "memory",
+            payload.clone(),
+            Facets::default(),
+            BTreeMap::new(),
+            1,
+        )
+        .unwrap();
+        let mut node = proposal.to_node();
+        let stored = node.metadata[meta_keys::PAYLOAD].as_str().unwrap();
+        assert!(!stored.contains("hunter2-example"));
+        assert!(!stored.contains("AKIAIOSFODNN7EXAMPLE"));
+        let decoded: Value = serde_json::from_str(stored).unwrap();
+        assert!(decoded.get("content").is_some());
+        node.metadata
+            .insert(meta_keys::PAYLOAD.into(), payload.to_string().into());
+        let served = Proposal::from_node(&node).unwrap().payload.to_string();
+        assert!(!served.contains("hunter2-example"));
+        assert!(!served.contains("AKIAIOSFODNN7EXAMPLE"));
+        node.metadata
+            .insert(meta_keys::PAYLOAD.into(), r#"{"token": 123}"#.into());
+        assert_eq!(Proposal::from_node(&node).unwrap().payload["token"], 123);
     }
 
     #[test]

@@ -2576,6 +2576,19 @@ fn main() -> Result<()> {
                     );
                     println!("Re-index each repo to re-derive signatures from the masked text.");
                 }
+                O::TextMigrated(rep) => {
+                    println!("redact-store({db}):");
+                    println!("  node rows rewritten:      {}", rep.nodes_rewritten);
+                    println!("  other rows rewritten:     {}", rep.rows_scrubbed);
+                    println!(
+                        "  WAL truncated:            {}",
+                        if rep.wal_truncated {
+                            "yes"
+                        } else {
+                            "no (a reader is attached; re-run when idle)"
+                        }
+                    );
+                }
                 O::CleanupRetried(true) => println!(
                     "redact-store({db}): finished the cleanup of an earlier migration (WAL truncated, VACUUM done)"
                 ),
