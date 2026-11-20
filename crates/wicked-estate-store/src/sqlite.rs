@@ -4171,6 +4171,10 @@ impl GraphWrite for SqliteStore {
         Ok(())
     }
 
+    fn can_restore_node_semantics(&self) -> bool {
+        true
+    }
+
     fn restore_node_semantics(
         &mut self,
         symbol: &SymbolId,
@@ -5032,7 +5036,11 @@ impl GraphRead for SqliteStore {
             )
             .map_err(st)?;
         let mut out = Vec::new();
+        let mut seen: HashSet<&str> = HashSet::new();
         for file in files {
+            if !seen.insert(*file) {
+                continue;
+            }
             let rows = stmt
                 .query_map(params![file], |r| {
                     Ok((

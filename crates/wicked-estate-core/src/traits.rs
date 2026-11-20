@@ -449,6 +449,13 @@ pub trait GraphWrite {
         requirement: Option<&str>,
         validation: Option<&ValidationClaim>,
     ) -> Result<()>;
+    /// True only when [`restore_node_semantics`](Self::restore_node_semantics) restores all five
+    /// semantic fields as supplied, subject to the store-boundary redaction backstop. The default
+    /// is `false`: the indexer reports unsupported restoration and lost fields instead of calling
+    /// restore on such a store.
+    fn can_restore_node_semantics(&self) -> bool {
+        false
+    }
     /// Write back a [`NodeSemantics`] snapshot taken before a `remove_file`. The claim is kept as
     /// it was — the original `requirement_validated` / `requirement_validated_by` /
     /// `requirement_validated_at`, nothing re-stamped — while `description` and `requirement` pass
@@ -458,11 +465,20 @@ pub trait GraphWrite {
     /// this (wicked-estate#438); a new claim goes through `set_node_semantics`. No-op if the symbol
     /// is absent. An empty record (`NodeSemantics::default()`) stores nothing and clears any
     /// existing semantics for the node.
+    ///
+    /// The default returns [`Error::Invalid`](crate::Error::Invalid) and writes nothing. Stores
+    /// implementing restoration must also return `true` from
+    /// [`can_restore_node_semantics`](Self::can_restore_node_semantics); when it is `false`, the
+    /// indexer reports unsupported restoration and lost fields instead of calling this method.
     fn restore_node_semantics(
         &mut self,
-        symbol: &SymbolId,
-        semantics: &NodeSemantics,
-    ) -> Result<()>;
+        _symbol: &SymbolId,
+        _semantics: &NodeSemantics,
+    ) -> Result<()> {
+        Err(crate::Error::Invalid(
+            "this store cannot restore semantic fields".into(),
+        ))
+    }
     /// Attach a typed annotation to `symbol`. A bare INSERT, NOT an upsert — so the same symbol can
     /// carry MANY annotations (same or different `type`/`key`). No-op if the symbol is absent (not
     /// indexed). The store stamps `ts` when `annotation.ts == 0`. Stable `SymbolId` keying (ADR-002):
@@ -552,4 +568,117 @@ pub trait RetrievalTool: Send + Sync {
     fn description(&self) -> &str;
     fn invoke(&self, store: &dyn GraphRead, request: &serde_json::Value)
     -> Result<RetrievalResult>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct MinimalWriter {
+        semantic_writes: usize,
+    }
+
+    impl GraphWrite for MinimalWriter {
+        fn begin_batch(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn commit_batch(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn upsert_nodes(&mut self, _nodes: &[Node]) -> Result<()> {
+            Ok(())
+        }
+
+        fn upsert_edges(&mut self, _edges: &[Edge]) -> Result<()> {
+            Ok(())
+        }
+
+        fn upsert_unresolved_refs(&mut self, _refs: &[UnresolvedRef]) -> Result<()> {
+            Ok(())
+        }
+
+        fn remove_file(&mut self, _file: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_file_digest(&mut self, _file: &str, _digest: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_repo_info(&mut self, _info: &RepoInfo) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_file_content(&mut self, _file: &str, _text: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn prune_dangling_edges(&mut self) -> Result<usize> {
+            Ok(0)
+        }
+
+        fn log_change(&mut self, _op: ChangeOp, _target: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_node_semantics(
+            &mut self,
+            _symbol: &SymbolId,
+            _description: Option<&str>,
+            _requirement: Option<&str>,
+            _validation: Option<&ValidationClaim>,
+        ) -> Result<()> {
+            self.semantic_writes += 1;
+            Ok(())
+        }
+
+        fn annotate(&mut self, _symbol: &SymbolId, _annotation: Annotation) -> Result<()> {
+            Ok(())
+        }
+
+        fn delete_annotations(
+            &mut self,
+            _symbol: &SymbolId,
+            _ty: Option<&str>,
+            _key: &str,
+        ) -> Result<usize> {
+            Ok(0)
+        }
+
+        fn replace_edge_supports(
+            &mut self,
+            _owner: &SupportOwner,
+            _generation: u64,
+            _facts: &[SupportFact],
+        ) -> Result<SupportReplacement> {
+            Err(crate::Error::Invalid("unused test operation".into()))
+        }
+    }
+
+    /// #460: a downstream writer can omit restoration and gets an error without fallback writes.
+    #[test]
+    fn graph_write_defaults_reject_semantic_restore_without_writes() {
+        let mut writer = MinimalWriter::default();
+        let symbol = SymbolId("external:pay".into());
+        let semantics = NodeSemantics {
+            description: Some("pays".into()),
+            requirement: Some("REQ-460".into()),
+            requirement_validated: true,
+            requirement_validated_by: Some("alice".into()),
+            requirement_validated_at: Some(1_000_000_000),
+        };
+
+        assert!(!writer.can_restore_node_semantics());
+        assert!(matches!(
+            writer.restore_node_semantics(&symbol, &semantics),
+            Err(crate::Error::Invalid(_))
+        ));
+        assert_eq!(
+            writer.semantic_writes, 0,
+            "no partial-update fallback writes"
+        );
+    }
 }

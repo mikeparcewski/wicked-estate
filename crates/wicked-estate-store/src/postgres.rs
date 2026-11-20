@@ -1928,6 +1928,10 @@ impl GraphWrite for PostgresStore {
         })
     }
 
+    fn can_restore_node_semantics(&self) -> bool {
+        true
+    }
+
     fn restore_node_semantics(
         &mut self,
         symbol: &SymbolId,

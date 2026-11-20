@@ -621,6 +621,124 @@ fn postgres_semantic_write_waits_for_reindex_restore() {
     assert_eq!(claim.requirement_validated_by.as_deref(), Some("bob"));
 }
 
+/// #472: trait rollback preserves five semantic fields after a failed remove-and-reinsert batch.
+#[test]
+fn postgres_failed_reextract_batch_rolls_back_semantics_and_retries() {
+    use sqlx::postgres::PgPoolOptions;
+    use wicked_estate_core::ValidationClaim;
+
+    let url = match std::env::var("TEST_POSTGRES_URL") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("postgres_conformance: TEST_POSTGRES_URL not set — skipping");
+            return;
+        }
+    };
+    let _guard = PG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lease = PgTestLease::acquire(&url);
+    drop_all_tables(&url);
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio");
+    let pool = rt
+        .block_on(PgPoolOptions::new().max_connections(1).connect(&url))
+        .expect("connect for poison trigger");
+    let raw = |sql: &str| {
+        rt.block_on(sqlx::raw_sql(sql).execute(&pool))
+            .expect("poison trigger SQL");
+    };
+    let mut store = wicked_estate_store::PostgresStore::open(&url).expect("open postgres store");
+    let node = node("pay", "a.rs");
+    store
+        .upsert_nodes(std::slice::from_ref(&node))
+        .expect("seed node");
+    store
+        .set_node_semantics(
+            &node.symbol,
+            Some("pays"),
+            Some("REQ-472"),
+            Some(&ValidationClaim::new(true, "alice").expect("named actor")),
+        )
+        .expect("seed semantic fields");
+    let mut before = store
+        .node_semantics(&node.symbol)
+        .expect("read seeded semantics")
+        .expect("seeded semantics");
+    before.requirement_validated_at = Some(1_000_000_000);
+    store
+        .restore_node_semantics(&node.symbol, &before)
+        .expect("seed past validation time");
+
+    raw(
+        "CREATE OR REPLACE FUNCTION we472_poison() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN RAISE EXCEPTION 'we472 poisoned node insert'; END; $$; \
+         CREATE TRIGGER we472_poison BEFORE INSERT ON nodes \
+         FOR EACH ROW EXECUTE FUNCTION we472_poison();",
+    );
+    // Keep cleanup ahead of the assertions even if the rollback expectation panics. Dropping the
+    // store first releases any transaction locks before the side pool drops the trigger.
+    let failed_batch = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        store.begin_batch().expect("begin failed batch");
+        let snapshot = store
+            .semantics_in_files(&["a.rs"])
+            .expect("snapshot before removal");
+        store.remove_file("a.rs").expect("remove old contribution");
+        let insert = store.upsert_nodes(std::slice::from_ref(&node));
+        wicked_estate_store::GraphStoreMutExt::rollback_batch(&mut store)
+            .expect("roll back failed re-extraction through the trait override");
+        let restored = store.node_semantics(&node.symbol);
+        (snapshot, insert, restored)
+    }));
+    if let Err(panic) = failed_batch {
+        drop(store);
+        raw("DROP TRIGGER IF EXISTS we472_poison ON nodes; \
+             DROP FUNCTION IF EXISTS we472_poison();");
+        std::panic::resume_unwind(panic);
+    }
+    raw("DROP TRIGGER IF EXISTS we472_poison ON nodes; \
+         DROP FUNCTION IF EXISTS we472_poison();");
+    let (snapshot, insert, restored) = failed_batch.expect("failed batch completed");
+    assert_eq!(
+        snapshot,
+        vec![("a.rs".into(), node.symbol.clone(), before.clone())]
+    );
+    let error = insert.expect_err("the trigger must fail the node insert");
+    assert!(
+        error.to_string().contains("we472 poisoned node insert"),
+        "{error}"
+    );
+    assert_eq!(
+        restored.expect("read semantics on the same store immediately after rollback"),
+        Some(before.clone()),
+        "rollback must discard the removal and preserve all five semantic fields"
+    );
+
+    store.begin_batch().expect("begin retry batch");
+    let snapshot = store
+        .semantics_in_files(&["a.rs"])
+        .expect("snapshot retry semantics");
+    store
+        .remove_file("a.rs")
+        .expect("remove retry contribution");
+    store
+        .upsert_nodes(std::slice::from_ref(&node))
+        .expect("retry node insert without poison");
+    for (_, symbol, semantics) in snapshot {
+        store
+            .restore_node_semantics(&symbol, &semantics)
+            .expect("restore retry semantics");
+    }
+    store.commit_batch().expect("commit retry");
+    assert_eq!(
+        store
+            .node_semantics(&node.symbol)
+            .expect("read retry semantics"),
+        Some(before),
+        "retry must retain the original validator and seeded past time"
+    );
+}
+
 /// #405: the secret backstop on a live Postgres — the same shared suite every backend runs.
 #[test]
 fn postgres_store_satisfies_secret_backstop_contract() {
